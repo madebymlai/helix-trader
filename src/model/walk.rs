@@ -15,8 +15,9 @@
 //! the trains before it published. Never retrained, a backtest whose
 //! sides or meta then have no model in use at its start is refused: it
 //! would trade nothing (`Schedule::ensure_trades`). Each build and train
-//! is a child process in a backtest (one Nautilus node per process),
-//! handed in by the caller; a train finds the days it reads from there
+//! is handed in by the caller, the binary's in its own process, one after
+//! another before the run, each dataset run a Nautilus node disposed
+//! before the next; a train finds the days it reads from there
 //! built, and a later train whose window reaches before them replays the
 //! days missing itself (`Dataset::settled`), as any train does. A model in
 //! the store is reused, so a second backtest of the same span builds and

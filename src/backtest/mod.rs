@@ -1,6 +1,8 @@
 //! Backtests a strategy over the catalog, costs included.
 //!
-//! Build step 2: one run per process, through a Nautilus `BacktestNode`.
+//! Build step 2: each run through a Nautilus `BacktestNode` of its own,
+//! disposed at its end; a process runs them one after another, never two
+//! at once.
 //! Generic over the strategy: any Nautilus strategy runs, none is named here.
 
 mod costs;

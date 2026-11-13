@@ -10,8 +10,8 @@
 //! published straight to the store, a baseline (`common::dataset`), trades
 //! from its valid-from: every decision a long on its time-only target,
 //! closed 30 minutes later. The binary's `backtest` builds its dataset and retrains
-//! on the schedule first, in child processes of its own, a retrain
-//! keeping the model no failure.
+//! on the schedule first, in its own process, a retrain keeping the model
+//! no failure.
 
 use std::{
     ffi::OsStr,
@@ -297,9 +297,9 @@ fn backtest(
 }
 
 /// A backtest from midnight of the 23rd to noon of the 24th builds its
-/// dataset, in a child process of the binary, from the first window,
-/// 02:00 of the 21st, to the end of the 24th plus the target's limit, then
-/// retrains at midnight of each, in children too: without an edge, each
+/// dataset, in its own process, from the first window, 02:00 of the 21st,
+/// to the end of the 24th plus the target's limit, then retrains at
+/// midnight of each, there too, a node after another: without an edge, each
 /// keeps the current model, there being none, and the backtest goes on,
 /// each reason printed with its figures, to a run with no model: no
 /// period is scored, by a model or by a baseline, which is a model's.
@@ -338,11 +338,11 @@ fn a_retrain_keeping_the_model_does_not_fail_the_binarys_backtest() {
 }
 
 /// With a model in the store at each retrain time of the span, published
-/// straight once the dataset is built, a backtest starts no child: it
-/// builds and retrains nothing, and its report is followed by the scores
+/// straight once the dataset is built, a backtest builds and retrains
+/// nothing, and its report is followed by the scores
 /// of both periods, each of its model.
 #[test]
-fn the_binarys_backtest_on_a_store_holding_each_retrains_model_starts_no_child() {
+fn the_binarys_backtest_on_a_store_holding_each_retrains_model_builds_and_trains_nothing() {
     let catalog = walk(
         ic::at("00:00:00") - SignedDuration::from_hours(3),
         t() + SignedDuration::from_hours(51),

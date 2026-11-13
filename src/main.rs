@@ -1,9 +1,11 @@
 //! Command line: one subcommand per process (fill-catalog, backtest, live,
-//! train, dataset), since Nautilus allows one node per process. Every
-//! subcommand takes the strategy name and its TOML config: the instruments
-//! and the warmup come from the config's data requirements. A strategy
-//! trading on a model runs through `model::ModelStrategy`, each subcommand
-//! generic over it.
+//! train). Nautilus runs no two nodes of a process at once, so a live
+//! node's retrain is a process of its own; a backtest runs its nodes one
+//! after another, each disposed before the next. Every subcommand takes
+//! the strategy name and its TOML config: the instruments and the warmup
+//! come from the config's data requirements. A strategy trading on a
+//! model runs through `model::ModelStrategy`, each subcommand generic
+//! over it.
 
 use std::{
     ffi::OsString,
@@ -25,7 +27,7 @@ use helix_trader::{
     model::{
         ModelStrategy, dataset,
         handle::{Mode, SettledRows},
-        launcher::{Launcher, RetrainActor, Retrained},
+        launcher::{Launcher, RetrainActor},
         targets::TargetRow,
         train::Trained,
     },
@@ -36,7 +38,7 @@ use helix_trader::{
     },
     venues::{self, HistoryVenueArgs, LiveVenueArgs},
 };
-use jiff::{Timestamp, civil::Date};
+use jiff::Timestamp;
 use nautilus_common::logging::{
     bridge::init_tracing, init_logging, logger::LoggerConfig, writer::FileWriterConfig,
 };
@@ -68,13 +70,6 @@ enum Command {
     /// model published or in use, or fails with why a current one was
     /// kept.
     Train(Box<TrainArgs>),
-    /// Builds the strategy's dataset over the days from --start to --end,
-    /// those it lacks, by a dataset run of the strategy over the catalog
-    /// to the last day's end plus its target's limit. Internal: the
-    /// backtest of a strategy trading on a model spawns it, so `--help`
-    /// does not list it.
-    #[command(hide = true)]
-    Dataset(Box<DatasetArgs>),
 }
 
 /// The arguments of a subcommand working on a window of the catalog.
@@ -145,23 +140,6 @@ struct BacktestArgs {
 }
 
 #[derive(Debug, Args)]
-struct DatasetArgs {
-    /// The strategy, the catalog, and the span whose days are built.
-    #[command(flatten)]
-    run: RunArgs,
-    /// The costs of the dataset run, whose targets are net of them.
-    #[command(flatten)]
-    commission: CommissionArgs,
-    /// Starting balance of the dataset run's account, large enough that
-    /// no target is denied, for example "10000000 USD".
-    #[arg(long, value_parser = parse_money)]
-    balance: Money,
-    /// The dataset run's leverage, as a backtest's.
-    #[arg(long, default_value = "1")]
-    leverage: Decimal,
-}
-
-#[derive(Debug, Args)]
 struct TrainArgs {
     /// The strategy whose model is trained.
     strategy: Strategy,
@@ -188,6 +166,21 @@ struct TrainArgs {
     /// The dataset run's leverage, as a backtest's.
     #[arg(long, default_value = "1")]
     leverage: Decimal,
+}
+
+impl BacktestArgs {
+    /// The venue of the dataset runs of the backtest of a strategy trading
+    /// on a model: its commission and leverage, and its dataset balance.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the backtest has no dataset balance.
+    fn dataset_venue(&self) -> anyhow::Result<dataset::DatasetVenue> {
+        let balance = self
+            .dataset_balance
+            .context("a backtest of a strategy trading on a model needs --dataset-balance")?;
+        Ok(self.commission.venue(balance, self.leverage))
+    }
 }
 
 /// The commission of a run: exactly one of the flags.
@@ -235,7 +228,7 @@ impl CommissionArgs {
 }
 
 /// The flag of `commission` and its value normalized
-/// (`Commission::normalized`), as `dataset` and `train` take them.
+/// (`Commission::normalized`), as `train` takes them.
 fn commission_args(commission: &Commission) -> [String; 2] {
     let flag = match commission {
         Commission::PerOrder(_) => "--commission",
@@ -477,7 +470,6 @@ async fn main() -> anyhow::Result<()> {
         Command::Backtest(args) => run_backtest(*args),
         Command::Live(args) => run_live(*args).await,
         Command::Train(args) => run_train(*args),
-        Command::Dataset(args) => run_dataset(*args),
     }
 }
 
@@ -510,14 +502,15 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
 /// catalog and prints the results to stdout. A strategy trading on a
 /// model is first trained on its schedule (`model::walk`): its dataset
 /// built over the span and its models trained at each train time the
-/// store lacks one, each by a child process of this binary (`dataset`,
-/// `train`), on the backtest's catalog, store and costs and the dataset
-/// balance; the out-of-sample scores of its models follow the results.
+/// store lacks one, in this process, on the backtest's catalog, store
+/// and costs and the dataset balance; the out-of-sample scores of its
+/// models follow the results.
 fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     // The node installs Nautilus' logger from its engine config: pass the
     // NAUTILUS_LOG config through, rather than install a logger here.
     let logging = logger_config(std::env::var("NAUTILUS_LOG"))?;
+    let dataset_logging = logging.clone();
     // Each simulated venue keeps positions as the real one does.
     let backtest = |requirements: DataRequirements| Backtest {
         catalog: args.run.catalog.clone(),
@@ -537,36 +530,72 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
             let outcome = backtest(config.data_requirements()).run(EmaCross::new(config)?)?;
             print!("{}", backtest::report(&outcome));
         }
-        Strategy::ModelEma => backtest_on_models::<ModelEma>(&args, backtest)?,
+        Strategy::ModelEma => backtest_on_models::<ModelEma>(&args, dataset_logging, backtest)?,
         #[cfg(gold_scalp)]
-        Strategy::GoldScalp => backtest_on_models::<GoldScalp>(&args, backtest)?,
+        Strategy::GoldScalp => backtest_on_models::<GoldScalp>(&args, dataset_logging, backtest)?,
         #[cfg(gold_scalp_v2)]
-        Strategy::GoldScalpV2 => backtest_on_models::<GoldScalpV2>(&args, backtest)?,
+        Strategy::GoldScalpV2 => {
+            backtest_on_models::<GoldScalpV2>(&args, dataset_logging, backtest)?
+        }
     }
     Ok(())
 }
 
 /// The backtest of `args` of the model strategy `S`, its `Backtest` of
-/// its data requirements `backtest`: retrained on its schedule by the
-/// backtest's children first (`Children`), then run, its results printed
-/// and the out-of-sample scores of its models after them.
+/// its data requirements `backtest`: retrained on its schedule first
+/// (`WalkForward::prepare`), then run, its results printed and the
+/// out-of-sample scores of its models after them. The dataset build, each
+/// train and the run are one after another in this process, a train as the
+/// `train` subcommand's (`Training::train_at`), each Nautilus node, a
+/// dataset run's (`DatasetRun`, logging as `logging` says) or the
+/// backtest's, disposed before the next starts, which Nautilus supports.
+/// The days built are printed, and each train's outcome: on standard
+/// output when it kept no model, on standard error, with its time, when
+/// it kept a current one, which does not stop the backtest.
 fn backtest_on_models<S: ModelStrategy>(
     args: &BacktestArgs,
+    logging: LoggerConfig,
     backtest: impl FnOnce(DataRequirements) -> Backtest,
 ) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     let config = load_config::<S::Params>(&args.run.config)?;
-    let children = Children::of_backtest(args)?;
-    let walk = S::walk_forward(&config, &args.run.catalog, &args.models, &children.venue)?;
+    let venue = args.dataset_venue()?;
+    let (catalog, models) = (&args.run.catalog, &args.models);
+    let walk = S::walk_forward(&config, catalog, models, &venue)?;
+    let dataset = S::dataset(&config, catalog, &venue)?;
+    let training = S::training(&config, catalog, models, &venue)?;
+    let run = DatasetRun {
+        catalog: catalog.clone(),
+        commission: venue.commission,
+        balance: venue.balance,
+        leverage: venue.leverage,
+        logging,
+    };
+    let replay = |from, to| run.replay::<S>(&config, from, to);
     walk.prepare(
         start,
         end,
-        |from, to| children.dataset(from, to),
-        |at| children.train(at),
+        |from, to| {
+            let (first, last) = dataset::days(from, to);
+            let built = dataset.build(first, last, replay)?;
+            if let (Some(from), Some(to)) = (built.first(), built.last()) {
+                println!("built {} days of the dataset, {from} to {to}", built.len());
+            }
+            Ok(())
+        },
+        |at| {
+            let trained = training.train_at(at, replay);
+            if trained.succeeded() {
+                println!("{trained}");
+            } else {
+                eprintln!("the retrain at {at}: {trained}");
+            }
+            Ok(())
+        },
     )?;
     let mode = Mode::Backtest {
-        models: args.models.clone(),
-        venue: children.venue.clone(),
+        models: models.clone(),
+        venue,
     };
     let outcome = backtest(config.data_requirements()).run(S::new(config, mode)?)?;
     print!("{}", backtest::report(&outcome));
@@ -574,46 +603,23 @@ fn backtest_on_models<S: ModelStrategy>(
     Ok(())
 }
 
-/// The child processes of a strategy trading on a model, a Nautilus node
-/// each, this binary's `dataset` and `train` on the strategy, config,
-/// catalog, store and dataset venue of the process starting them: a
-/// backtest's, which builds its dataset and trains before its run, each
-/// child inheriting its output and environment so that its logs and its
-/// outcome show as they come; and a live node's, which retrains
-/// (`Launcher::process`). Either's `train` is the one command line
-/// (`train_args`), so a backtest and a live node hand a train the same
-/// flags. A train that kept the current model, which `train` reports by
-/// failing, is a kept retrain.
+/// The child processes of a live node whose strategy trades on a model:
+/// its retrains, this binary's `train` on the node's strategy, config,
+/// catalog and store, at the retrains' costs and the node's leverage
+/// (`Launcher::process`). A live node is the one node of its process
+/// while it runs, and a train replays the dataset days it lacks through a
+/// node of its own, so each retrain is a process.
 struct Children {
     strategy: Strategy,
     config: PathBuf,
     catalog: PathBuf,
     models: PathBuf,
-    /// The venue of the dataset runs: a backtest's commission and
-    /// leverage and its dataset balance, or a live node's retrain costs
-    /// and leverage.
+    /// The venue of the retrains' dataset runs: the retrain costs and the
+    /// node's leverage.
     venue: dataset::DatasetVenue,
 }
 
 impl Children {
-    /// The children of the backtest of `args`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the backtest has no dataset balance.
-    fn of_backtest(args: &BacktestArgs) -> anyhow::Result<Self> {
-        let balance = args
-            .dataset_balance
-            .context("a backtest of a strategy trading on a model needs --dataset-balance")?;
-        Ok(Self {
-            strategy: args.run.strategy,
-            config: args.run.config.clone(),
-            catalog: args.run.catalog.clone(),
-            models: args.models.clone(),
-            venue: args.commission.venue(balance, args.leverage),
-        })
-    }
-
     /// The children of the live node of `args`: its retrains, at their
     /// costs and the node's leverage.
     ///
@@ -631,70 +637,15 @@ impl Children {
         })
     }
 
-    /// Builds the dataset over the days of `[from, to)` it lacks.
-    fn dataset(&self, from: Timestamp, to: Timestamp) -> anyhow::Result<()> {
-        self.run(
-            "dataset",
-            &span_args(from, to).each_ref().map(String::as_str),
-        )
-    }
-
-    /// Trains the models at `at`: published or in use, or a current one
-    /// kept, its reason printed to standard error; either way no error.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if this binary cannot be found.
-    fn train(&self, at: Timestamp) -> anyhow::Result<()> {
-        let binary = std::env::current_exe().context("finding this binary")?;
-        match Launcher::process(binary, self.train_args())
-            .launch(at)
-            .wait()
-        {
-            Retrained::Succeeded => {}
-            Retrained::Kept(why) => {
-                eprintln!("the retrain at {at}: {why}");
-            }
-        }
-        Ok(())
-    }
-
-    /// Runs `subcommand` with `args` and waits for it.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if it cannot start, or does not succeed.
-    fn run(&self, subcommand: &str, args: &[&str]) -> anyhow::Result<()> {
-        let binary = std::env::current_exe().context("finding this binary")?;
-        let status = std::process::Command::new(binary)
-            .args(self.args(subcommand))
-            .args(args)
-            .status()
-            .with_context(|| format!("starting {subcommand} {}", args.join(" ")))?;
-        ensure!(
-            status.success(),
-            "{subcommand} {} failed: {status}",
-            args.join(" ")
-        );
-        Ok(())
-    }
-
     /// The arguments of `train` but its `--at`, which the launcher gives:
-    /// those of `args`, and the store it publishes in.
+    /// the strategy, config, catalog and store, and the dataset runs'
+    /// commission, balance and leverage.
     fn train_args(&self) -> Vec<OsString> {
-        let mut args = self.args("train");
-        args.extend(["--models".into(), self.models.clone().into_os_string()]);
-        args
-    }
-
-    /// The arguments of `subcommand` on the strategy, config, catalog, and
-    /// the dataset runs' commission, balance and leverage.
-    fn args(&self, subcommand: &str) -> Vec<OsString> {
         let strategy = self
             .strategy
             .to_possible_value()
             .expect("every strategy has a name");
-        let mut args: Vec<OsString> = vec![subcommand.into(), strategy.get_name().into()];
+        let mut args: Vec<OsString> = vec!["train".into(), strategy.get_name().into()];
         args.extend([
             "--config".into(),
             self.config.clone().into_os_string(),
@@ -711,19 +662,9 @@ impl Children {
             ]
             .map(OsString::from),
         );
+        args.extend(["--models".into(), self.models.clone().into_os_string()]);
         args
     }
-}
-
-/// The window flags of `dataset` over `[from, to)`, as `Children::dataset`
-/// hands them.
-fn span_args(from: Timestamp, to: Timestamp) -> [String; 4] {
-    [
-        "--start".to_string(),
-        from.to_string(),
-        "--end".to_string(),
-        to.to_string(),
-    ]
 }
 
 /// Builds the strategy from its config and runs it live until Ctrl-C. A
@@ -782,7 +723,7 @@ async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyho
 /// The dataset runs of a process: the strategy over the catalog in
 /// `Mode::Dataset`, on hedging venues (`model::targets`), with the
 /// commission, balance and leverage given, the commission the venues' and
-/// the targets'; the one node of the process.
+/// the targets'; each replay a node of its own, disposed at its end.
 struct DatasetRun {
     catalog: PathBuf,
     commission: Commission,
@@ -826,8 +767,7 @@ impl DatasetRun {
 /// Prints the outcome of a train that kept no model, each model published
 /// or its current one in use; one that kept a current model, refused,
 /// failed or a meta waiting, is an error, its reason: the command fails,
-/// so that the live node or the backtest that started it knows why
-/// (`model::launcher`).
+/// so that the live node that started it knows why (`model::launcher`).
 ///
 /// # Errors
 ///
@@ -867,51 +807,6 @@ fn train<S: ModelStrategy>(args: &TrainArgs, run: &DatasetRun) -> anyhow::Result
     let venue = args.commission.venue(args.balance, args.leverage);
     let training = S::training(&config, &args.catalog, &args.models, &venue)?;
     Ok(training.train_at(args.at, |start, end| run.replay::<S>(&config, start, end)))
-}
-
-/// Builds the strategy's dataset over the days from `--start` to the day
-/// before `--end` (`dataset::days`), those it lacks, by one dataset run
-/// (`DatasetRun`) to the last one's end plus the target's limit, and
-/// prints the days built.
-fn run_dataset(args: DatasetArgs) -> anyhow::Result<()> {
-    let (start, end) = args.run.window()?;
-    let run = DatasetRun {
-        catalog: args.run.catalog.clone(),
-        commission: args.commission.commission(),
-        balance: args.balance,
-        leverage: args.leverage,
-        logging: logger_config(std::env::var("NAUTILUS_LOG"))?,
-    };
-    let (first, last) = dataset::days(start, end);
-    let built = match args.run.strategy {
-        Strategy::Ema => bail!("the EMA strategy trades on no model"),
-        Strategy::ModelEma => build_dataset::<ModelEma>(&args, &run, first, last)?,
-        #[cfg(gold_scalp)]
-        Strategy::GoldScalp => build_dataset::<GoldScalp>(&args, &run, first, last)?,
-        #[cfg(gold_scalp_v2)]
-        Strategy::GoldScalpV2 => build_dataset::<GoldScalpV2>(&args, &run, first, last)?,
-    };
-    match (built.first(), built.last()) {
-        (Some(from), Some(to)) => {
-            println!("built {} days of the dataset, {from} to {to}", built.len())
-        }
-        _ => println!("the dataset holds every day from {first} to {last}"),
-    }
-    Ok(())
-}
-
-/// Builds the days `first` to `last` the dataset of the model strategy `S`
-/// of `args` lacks, by `run`; the days built.
-fn build_dataset<S: ModelStrategy>(
-    args: &DatasetArgs,
-    run: &DatasetRun,
-    first: Date,
-    last: Date,
-) -> anyhow::Result<Vec<Date>> {
-    let config = load_config::<S::Params>(&args.run.config)?;
-    let venue = args.commission.venue(args.balance, args.leverage);
-    S::dataset(&config, &args.run.catalog, &venue)?
-        .build(first, last, |from, to| run.replay::<S>(&config, from, to))
 }
 
 #[cfg(test)]
@@ -1436,38 +1331,6 @@ mod tests {
         }
     }
 
-    /// A backtest's train is a `train` on the backtest's strategy, config,
-    /// catalog and store, at its commission and leverage and its dataset
-    /// balance: the venue of its dataset runs.
-    #[test]
-    fn a_backtests_train_parses_as_train_on_its_files_store_and_dataset_costs() {
-        let mut argv = backtest_required();
-        argv[0] = "model_ema";
-        argv[2] = "model_ema.toml";
-        argv.extend(["--catalog", "/data/catalog", "--models", "/data/models"]);
-        argv.extend(["--dataset-balance", "10000000 EUR"]);
-
-        let children = Children::of_backtest(&parse_backtest(&argv).unwrap()).unwrap();
-        let train = started_train(&children);
-
-        assert_eq!(train.strategy, Strategy::ModelEma);
-        assert_eq!(train.config, PathBuf::from("model_ema.toml"));
-        assert_eq!(train.catalog, PathBuf::from("/data/catalog"));
-        assert_eq!(train.models, PathBuf::from("/data/models"));
-        assert_eq!(
-            train.commission.venue(train.balance, train.leverage),
-            dataset::DatasetVenue {
-                commission: Commission::PerOrder(Money::from("3 EUR")),
-                balance: Money::from("10000000 EUR"),
-                leverage: Decimal::from(1),
-            }
-        );
-        assert_eq!(
-            children.venue,
-            train.commission.venue(train.balance, train.leverage)
-        );
-    }
-
     #[test]
     fn live_retraining_without_its_costs_is_refused_naming_them() {
         for missing in [3, 5] {
@@ -1553,68 +1416,9 @@ mod tests {
         assert!(err.to_string().contains("no model"), "{err}");
     }
 
+    /// A live node's retrain is handed its commission normalized.
     #[test]
-    fn help_lists_the_commands_but_not_the_internal_dataset() {
-        let help = <Cli as clap::CommandFactory>::command()
-            .render_help()
-            .to_string();
-        let listed = |name: &str| {
-            help.lines()
-                .any(|line| line.split_whitespace().next() == Some(name))
-        };
-
-        assert!(listed("train"), "{help}");
-        assert!(!listed("dataset"), "{help}");
-    }
-
-    fn parse_dataset(args: &[&str]) -> Result<DatasetArgs, clap::Error> {
-        parse_command("dataset", args).map(|command| match command {
-            Command::Dataset(args) => *args,
-            command => panic!("{command:?}"),
-        })
-    }
-
-    /// The arguments a dataset build requires.
-    const DATASET: [&str; 11] = [
-        "model_ema",
-        "--config",
-        "model_ema.toml",
-        "--start",
-        "2026-10-20",
-        "--end",
-        "2026-10-23",
-        "--commission-rate",
-        "0.00003",
-        "--balance",
-        "10000000 USD",
-    ];
-
-    #[test]
-    fn parses_a_dataset_build_over_a_span_with_its_costs() {
-        let args = parse_dataset(&DATASET).unwrap();
-        assert_eq!(args.run.strategy, Strategy::ModelEma);
-        assert_eq!(
-            args.run.window().unwrap(),
-            (
-                "2026-10-20T00:00:00Z".parse::<Timestamp>().unwrap(),
-                "2026-10-23T00:00:00Z".parse::<Timestamp>().unwrap()
-            )
-        );
-        assert_eq!(args.run.catalog, PathBuf::from("catalog"));
-        assert_eq!(args.balance, Money::from("10000000 USD"));
-        assert_eq!(args.leverage, Decimal::ONE);
-    }
-
-    #[test]
-    fn the_ema_strategy_has_no_dataset_to_build() {
-        let mut argv = DATASET.to_vec();
-        argv[0] = "ema";
-        let err = run_dataset(parse_dataset(&argv).unwrap()).unwrap_err();
-        assert!(err.to_string().contains("no model"), "{err}");
-    }
-
-    #[test]
-    fn a_backtest_hands_its_children_the_commission_normalized() {
+    fn a_commission_is_handed_to_a_train_normalized() {
         for (given, handed) in [
             (["--commission", "3.00 EUR"], ["--commission", "3 EUR"]),
             (
@@ -1632,7 +1436,7 @@ mod tests {
     }
 
     /// The commission keys the dataset and its models: two spellings of
-    /// one commission are one key, handed on to the children as such.
+    /// one commission are one key, handed on to a train as such.
     #[test]
     fn two_spellings_of_a_commission_are_one_key() {
         for (one, other) in [
@@ -1683,91 +1487,15 @@ mod tests {
 
     #[test]
     fn a_backtest_of_a_model_strategy_needs_a_dataset_balance() {
-        let err = Children::of_backtest(&parse_backtest(&backtest_required()).unwrap())
-            .err()
-            .unwrap();
+        let err = parse_backtest(&backtest_required())
+            .unwrap()
+            .dataset_venue()
+            .unwrap_err();
         assert!(err.to_string().contains("--dataset-balance"), "{err}");
         let mut argv = backtest_required();
         argv.extend(["--dataset-balance", "10000000 EUR"]);
-        let children = Children::of_backtest(&parse_backtest(&argv).unwrap()).unwrap();
-        assert_eq!(children.venue.balance, Money::from("10000000 EUR"));
-    }
-
-    #[test]
-    fn a_backtest_hands_its_children_its_strategy_and_config() {
-        let mut argv = backtest_required();
-        argv[0] = "model_ema";
-        argv[2] = "model_ema.toml";
-        argv.extend(["--catalog", "/data/catalog"]);
-        argv.extend(["--dataset-balance", "10000000 EUR"]);
-        let children = Children::of_backtest(&parse_backtest(&argv).unwrap()).unwrap();
-
-        assert_eq!(
-            children.args("dataset"),
-            [
-                "dataset",
-                "model_ema",
-                "--config",
-                "model_ema.toml",
-                "--catalog",
-                "/data/catalog",
-                "--commission",
-                "3 EUR",
-                "--balance",
-                "10000000.00 EUR",
-                "--leverage",
-                "1",
-            ]
-            .map(std::ffi::OsString::from)
-        );
-    }
-
-    /// The command lines a backtest hands its children parse as the
-    /// subcommands they run, into what the backtest was given: a flag
-    /// renamed in the children or in a subcommand alone fails here. The
-    /// train's `--at` is the launcher's (`Launcher::process`), given here
-    /// as it gives it.
-    #[test]
-    fn the_children_command_lines_parse_as_their_subcommands() {
-        let mut argv = backtest_required();
-        argv[0] = "model_ema";
-        argv[2] = "model_ema.toml";
-        argv.extend(["--catalog", "/data/catalog", "--models", "/data/models"]);
-        argv.extend(["--dataset-balance", "10000000 EUR", "--leverage", "2"]);
-        let children = Children::of_backtest(&parse_backtest(&argv).unwrap()).unwrap();
-        let parsed = |args: Vec<std::ffi::OsString>| {
-            let argv = std::iter::once("helix-trader".into()).chain(args);
-            Cli::try_parse_from(argv).unwrap().command
-        };
-        let from: Timestamp = "2026-10-20T00:00:00Z".parse().unwrap();
-        let to: Timestamp = "2026-10-23T00:00:00Z".parse().unwrap();
-
-        let mut train = children.train_args();
-        train.extend(["--at".into(), to.to_string().into()]);
-        let Command::Train(train) = parsed(train) else {
-            panic!("not a train");
-        };
-        assert_eq!(train.strategy, children.strategy);
-        assert_eq!(train.config, children.config);
-        assert_eq!(train.catalog, children.catalog);
-        assert_eq!(train.models, children.models);
-        assert_eq!(train.at, to);
-        assert_eq!(train.commission.commission(), children.venue.commission);
-        assert_eq!(train.balance, children.venue.balance);
-        assert_eq!(train.leverage, children.venue.leverage);
-
-        let mut dataset = children.args("dataset");
-        dataset.extend(span_args(from, to).map(std::ffi::OsString::from));
-        let Command::Dataset(dataset) = parsed(dataset) else {
-            panic!("not a dataset");
-        };
-        assert_eq!(dataset.run.strategy, children.strategy);
-        assert_eq!(dataset.run.config, children.config);
-        assert_eq!(dataset.run.catalog, children.catalog);
-        assert_eq!((dataset.run.start, dataset.run.end), (from, to));
-        assert_eq!(dataset.commission.commission(), children.venue.commission);
-        assert_eq!(dataset.balance, children.venue.balance);
-        assert_eq!(dataset.leverage, children.venue.leverage);
+        let venue = parse_backtest(&argv).unwrap().dataset_venue().unwrap();
+        assert_eq!(venue.balance, Money::from("10000000 EUR"));
     }
 
     /// Every subcommand takes the strategy first, by its command-line
@@ -1781,7 +1509,6 @@ mod tests {
             ("backtest", &backtest[..]),
             ("live", &live[..]),
             ("train", &TRAIN[..]),
-            ("dataset", &DATASET[..]),
         ] {
             for name in ["ema", "model_ema"] {
                 let named = [&[name][..], &argv[1..]].concat();
