@@ -67,8 +67,10 @@ target = { bracket = { take_profit = { atr = 2.0 }, stop = { atr = 1.0 }, atr = 
 retrain = "168h"
 window = "720h"
 holdout = "120h"
-# Both sides traded, each from an expected net P&L of 0.5 USD a trade.
-margins = { long = 0.5, short = 0.5 }
+# Both sides traded, each from an expected net 0.03R a trade, R the money
+# its stop risks: 3% of that, about 0.45 USD on an ounce with gold's hourly
+# ATR near 15 USD. A margin is in R, written with its suffix.
+margins = { long = "0.03R", short = "0.03R" }
 # The sides' models are published together if the trades picked between them
 # earn at least 1 USD a trade over at least 30 trades of the holdout.
 min_pnl = 1.0

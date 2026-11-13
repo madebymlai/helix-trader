@@ -87,6 +87,7 @@ use super::{
     schedule::{Models, Retrain},
     targets::{PerSide, Side, TargetConfig},
 };
+use crate::strategy::r::R;
 
 /// The extension of a model's file.
 const EXTENSION: &str = "json";
@@ -128,7 +129,7 @@ pub struct ModelSet {
 #[derive(Debug, Clone)]
 pub struct SideLevel {
     side: Side,
-    margin: f64,
+    margin: R,
     models: CheckedStore,
 }
 
@@ -519,10 +520,10 @@ impl SideLevel {
         self.side
     }
 
-    /// The expected net P&L from which the side is traded
+    /// The expected net R from which the side is traded
     /// (`ModelConfig::margins`).
     #[must_use]
-    pub const fn margin(&self) -> f64 {
+    pub const fn margin(&self) -> R {
         self.margin
     }
 
@@ -810,21 +811,27 @@ fn retrain_setting(retrain: Retrain) -> String {
     }
 }
 
-/// The margins `margins` as the keys of the stores hold them.
+/// The margins `margins` as the keys of the stores hold them, each in R,
+/// `long 0.5R short none`, so that a store keyed by margins of another
+/// unit, money, is another store.
 fn margins_text(margins: Margins) -> String {
-    let Margins { long, short } = margins;
-    format!("long {long:?} short {short:?}")
+    let margin = |margin: Option<R>| margin.map_or_else(|| "none".to_string(), |r| r.to_string());
+    format!(
+        "long {} short {}",
+        margin(margins.long),
+        margin(margins.short)
+    )
 }
 
 /// The training settings of `meta`: its learner, window, holdout, and
-/// the margin deciding the trades its holdout is judged on, and the
+/// the margin deciding the trades its holdout is judged on, in R, and the
 /// minimums of its holdout.
 fn meta_settings(meta: &MetaConfig) -> anyhow::Result<Fingerprint> {
     Ok(Fingerprint::default()
         .with(serde_json::to_string(&meta.learner)?.as_bytes())
         .with(&meta.window.as_nanos().to_le_bytes())
         .with(&meta.holdout.as_nanos().to_le_bytes())
-        .with(&meta.margin.to_le_bytes())
+        .with(meta.margin.to_string().as_bytes())
         .with(&meta.min_pnl.to_le_bytes())
         .with(&meta.min_trades.to_le_bytes()))
 }
@@ -1012,8 +1019,8 @@ mod tests {
             .window(SignedDuration::from_hours(48))
             .holdout(SignedDuration::from_hours(12))
             .margins(Margins {
-                long: Some(0.5),
-                short: Some(0.5),
+                long: Some(R::new(0.5)),
+                short: Some(R::new(0.5)),
             })
             .min_pnl(1.0)
             .min_trades(30)
@@ -1279,8 +1286,8 @@ mod tests {
             },
             ModelConfig {
                 margins: Margins {
-                    long: Some(0.75),
-                    short: Some(0.5),
+                    long: Some(R::new(0.75)),
+                    short: Some(R::new(0.5)),
                 },
                 ..config()
             },
@@ -1318,7 +1325,8 @@ mod tests {
     /// The directory of a fixed strategy's long store under a models root,
     /// as a literal: its id, its dataset's fingerprint, its training
     /// settings with the store `VERSION`, its side, and the margins of both
-    /// sides. A change that rekeyed every store, leaving the models
+    /// sides in R, `long 0.5R short 0.5R`, so that no model published under
+    /// a margin of another unit is listed. A change that rekeyed every store, leaving the models
     /// published to it behind, fails here. A deliberate rekey, a bump of
     /// `VERSION` or of `dataset::VERSION`, or a new input to the dataset's
     /// fingerprint or to the training settings, updates the literal here; a
@@ -1334,7 +1342,25 @@ mod tests {
                 "models/STORE-001/\
                  1e922efd486f7b35b5cc3913a1865df50fca063b86a89b7f83015690cf754cf6/\
                  d8e8d5b98ec4b087d60cd5be6b5df0d0e42ee19eed327697daebb41eb9cd7b93/\
-                 long/71377877de7137be466c5b846b99bcf0d3c1c6675cde6be211646fce844e2dd4"
+                 long/7172a4d37d514662d105b99d75e9f7b1fc21aac68322ca53912d5254d40403c5"
+            )
+        );
+    }
+
+    /// The directory of the fixed strategy's meta store (`meta_config`), as
+    /// a literal: under its sides' training settings, the meta's own, its
+    /// margin in R, `0.55R`, among them, and the sides' margins in R.
+    #[test]
+    fn a_fixed_strategys_meta_store_keeps_its_directory() {
+        let store = meta_store(Path::new("models"), &config(), &meta_config());
+
+        assert_eq!(
+            store.directory,
+            Path::new(
+                "models/STORE-001/\
+                 1e922efd486f7b35b5cc3913a1865df50fca063b86a89b7f83015690cf754cf6/\
+                 d8e8d5b98ec4b087d60cd5be6b5df0d0e42ee19eed327697daebb41eb9cd7b93/\
+                 meta/2f55dec2a165e98be9c15fdbe104b42461c6cdd0aa12db48680cff4e5a9e6a9b"
             )
         );
     }
@@ -1356,10 +1382,10 @@ mod tests {
         };
 
         for (side, other) in [
-            (Side::Long, margins(Some(0.5), Some(0.75))),
-            (Side::Long, margins(Some(0.5), None)),
-            (Side::Short, margins(Some(0.75), Some(0.5))),
-            (Side::Short, margins(None, Some(0.5))),
+            (Side::Long, margins(Some(R::new(0.5)), Some(R::new(0.75)))),
+            (Side::Long, margins(Some(R::new(0.5)), None)),
+            (Side::Short, margins(Some(R::new(0.75)), Some(R::new(0.5)))),
+            (Side::Short, margins(None, Some(R::new(0.5)))),
         ] {
             assert!(
                 side_store(dir.path(), &other, &venue(), side)
@@ -1401,21 +1427,21 @@ mod tests {
                 .learner(LearnerConfig::Fake {})
                 .build()
         };
-        meta_store(dir.path(), &config(), &meta(0.55, 1.0))
+        meta_store(dir.path(), &config(), &meta(R::new(0.55), 1.0))
             .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
             .unwrap();
         let long_only = ModelConfig {
             margins: Margins {
-                long: Some(0.5),
+                long: Some(R::new(0.5)),
                 short: None,
             },
             ..config()
         };
 
         for (config, meta) in [
-            (config(), meta(0.55, 2.0)),
-            (config(), meta(0.6, 1.0)),
-            (long_only, meta(0.55, 1.0)),
+            (config(), meta(R::new(0.55), 2.0)),
+            (config(), meta(R::new(0.6), 1.0)),
+            (long_only, meta(R::new(0.55), 1.0)),
         ] {
             assert!(
                 meta_store(dir.path(), &config, &meta)
@@ -1428,12 +1454,12 @@ mod tests {
     }
 
     /// A meta model taking the trades of the side picked from an expected
-    /// net P&L of 0.55 USD.
+    /// net R of 0.55.
     fn meta_config() -> MetaConfig {
         MetaConfig::builder()
             .window(SignedDuration::from_hours(48))
             .holdout(SignedDuration::from_hours(12))
-            .margin(0.55)
+            .margin(R::new(0.55))
             .min_pnl(1.0)
             .min_trades(20)
             .learner(LearnerConfig::Fake {})

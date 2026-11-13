@@ -94,7 +94,7 @@ mod tests {
         retrain = "24h"
         window = "48h"
         holdout = "12h"
-        margins = { long = 0.5, short = 0.5 }
+        margins = { long = "0.5R", short = "0.5R" }
         min_pnl = 0.5
         min_trades = 30
         learner = { kind = "baseline" }
