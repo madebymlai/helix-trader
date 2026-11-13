@@ -625,6 +625,55 @@ async fn an_unanswered_order_stays_in_flight_until_a_query_finds_its_outcome() {
     node.client.disconnect().await.unwrap();
 }
 
+/// The broker holds PROBE-1, the captured filled market order moved to
+/// US500, a symbol the run did not load: the lookup cannot report it, and
+/// says so rather than answer that the broker holds no such order.
+#[tokio::test]
+async fn a_lookup_of_an_order_on_a_symbol_the_run_did_not_load_fails() {
+    let mut held = execution(EXECUTION_MARKET_FILLED).order.unwrap();
+    held.trade_data.symbol_id = US500_SYMBOL_ID;
+    let mut node = Node::start(move |request| match request.payload_type {
+        t if t == ProtoOaOrderListReq::TYPE => vec![reply(
+            request,
+            &ProtoOaOrderListRes {
+                ctid_trader_account_id: ACCOUNT_ID,
+                order: vec![held.clone()],
+                has_more: false,
+                ..Default::default()
+            },
+        )],
+        t if t == ProtoOaOrderDetailsReq::TYPE => vec![reply(
+            request,
+            &ProtoOaOrderDetailsRes {
+                ctid_trader_account_id: ACCOUNT_ID,
+                order: held.clone(),
+                ..Default::default()
+            },
+        )],
+        _ => vec![],
+    })
+    .await;
+    node.add(&[&market("PROBE-1", OrderSide::Buy, 1)]);
+
+    let lookup = node
+        .client
+        .generate_order_status_report(&GenerateOrderStatusReport::new(
+            UUID4::new(),
+            node.client.now(),
+            Some(InstrumentId::from(XAUUSD)),
+            Some(ClientOrderId::from("PROBE-1")),
+            None,
+            None,
+            None,
+        ))
+        .await;
+
+    assert!(lookup.is_err(), "{lookup:?}");
+    let details: Vec<ProtoOaOrderDetailsReq> = node.requests();
+    assert_eq!(details[0].order_id, 1_031_776_265);
+    node.client.disconnect().await.unwrap();
+}
+
 /// A market entry protected by a stop loss and a take profit.
 fn bracket(entry: &str, stop_loss: &str, take_profit: &str) -> [OrderAny; 3] {
     let market = order(OrderType::Market, entry, OrderSide::Buy, 1);
