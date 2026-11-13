@@ -1325,7 +1325,8 @@ impl ExecutionClient for CTraderExecutionClient {
     /// its venue order id or among the orders the broker updated since the
     /// cached order was created, from its details. `None` once the broker
     /// answered it holds no such order; an error if it holds it on a symbol
-    /// the run did not load, which is no answer of absence.
+    /// the run did not load, or if an order not open has no client order id
+    /// to look for, neither an answer of absence.
     async fn generate_order_status_report(
         &self,
         cmd: &GenerateOrderStatusReport,
@@ -1340,9 +1341,9 @@ impl ExecutionClient for CTraderExecutionClient {
         if found.is_some() {
             return Ok(found);
         }
-        let Some(id) = cmd.client_order_id else {
-            return Ok(None);
-        };
+        let id = cmd
+            .client_order_id
+            .context("no client order id: no window to look for an order not open in")?;
         let since = self
             .cached_order(&id)
             .map(|o| o.ts_init())

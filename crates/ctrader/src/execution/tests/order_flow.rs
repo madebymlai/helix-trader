@@ -674,6 +674,30 @@ async fn a_lookup_of_an_order_on_a_symbol_the_run_did_not_load_fails() {
     node.client.disconnect().await.unwrap();
 }
 
+/// A lookup naming no client order id, its order not open: the client has
+/// no window to look for it in, so it fails rather than answer that the
+/// broker holds no such order.
+#[tokio::test]
+async fn a_lookup_of_an_order_without_its_client_order_id_fails() {
+    let mut node = Node::start(|_| vec![]).await;
+
+    let lookup = node
+        .client
+        .generate_order_status_report(&GenerateOrderStatusReport::new(
+            UUID4::new(),
+            node.client.now(),
+            Some(InstrumentId::from(XAUUSD)),
+            None,
+            Some(VenueOrderId::from("1031776265")),
+            None,
+            None,
+        ))
+        .await;
+
+    assert!(lookup.is_err(), "{lookup:?}");
+    node.client.disconnect().await.unwrap();
+}
+
 /// A market entry protected by a stop loss and a take profit.
 fn bracket(entry: &str, stop_loss: &str, take_profit: &str) -> [OrderAny; 3] {
     let market = order(OrderType::Market, entry, OrderSide::Buy, 1);
