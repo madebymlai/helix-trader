@@ -40,6 +40,7 @@ use nautilus_core::UnixNanos;
 use serde::{Deserialize, Serialize};
 
 use super::{dataset::DatasetRow, deciding::SideRow, score::ExpectedScore, targets::Side};
+use crate::strategy::r::R;
 
 /// The multiple of the commission the stressed earnings are at.
 pub const STRESS: f64 = 1.5;
@@ -126,18 +127,18 @@ pub enum Refusal {
 }
 
 /// A meta model's decision rule: the trade of the side picked taken when the
-/// net P&L the meta expects of it, its calibrated expected R times the
-/// trade's unit, in the target's P&L currency, is at least the margin
-/// (`takes`, `MetaConfig::margin`), in a decision as in a holdout.
+/// net R the meta expects of it, its calibrated expected R, is at least the
+/// margin, in R (`takes`, `MetaConfig::margin`), in a decision as in a
+/// holdout.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct MetaMargin(pub f64);
+pub struct MetaMargin(pub R);
 
 impl MetaMargin {
-    /// Whether a meta model expecting `expected_pnl` of the trade takes it:
-    /// at or above the margin, so NaN does not.
+    /// Whether a meta model expecting `expected_r` of the trade takes it: at
+    /// or above the margin, so NaN does not.
     #[must_use]
-    pub fn takes(self, expected_pnl: f64) -> bool {
-        expected_pnl >= self.0
+    pub fn takes(self, expected_r: f64) -> bool {
+        self.0.reached_by(expected_r)
     }
 }
 
@@ -319,12 +320,12 @@ mod tests {
         }
     }
 
-    /// A margin of 0.25 USD, and one below nought, which a trade expected to
+    /// A margin of 0.25R, and one below nought, which a trade expected to
     /// lose a little clears.
     #[test]
-    fn a_meta_margin_takes_an_expected_pnl_at_or_above_it_and_not_nan() {
-        let margin = MetaMargin(0.25);
-        let below_nought = MetaMargin(-0.5);
+    fn a_meta_margin_takes_an_expected_r_at_or_above_it_and_not_nan() {
+        let margin = MetaMargin(R::new(0.25));
+        let below_nought = MetaMargin(R::new(-0.5));
 
         assert!(margin.takes(0.25));
         assert!(margin.takes(0.26));

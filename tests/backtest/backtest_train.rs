@@ -28,7 +28,7 @@ use helix_trader::{
         targets::Side,
         train::{Kept, Outcome, Trained, Training},
     },
-    strategy::{Declared, IndicatorArgs},
+    strategy::{Declared, IndicatorArgs, r::R},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_indicators::indicator::Indicator;
@@ -142,8 +142,8 @@ fn config(min_pnl: f64) -> ModelConfig {
         .window(SignedDuration::from_hours(70))
         .holdout(SignedDuration::from_hours(12))
         .margins(Margins {
-            long: Some(0.0),
-            short: Some(0.0),
+            long: Some(R::new(0.0)),
+            short: Some(R::new(0.0)),
         })
         .min_pnl(min_pnl)
         .min_trades(5)

@@ -1285,7 +1285,7 @@ mod tests {
                 learner::LearnerConfig,
                 targets::{BracketSpec, Distance, Target},
             },
-            strategy::AtrArgs,
+            strategy::{AtrArgs, r::R},
         };
 
         /// A strategy trading on a model: one instrument, no fields of its
@@ -1328,7 +1328,7 @@ mod tests {
             retrain = "24h"
             window = "48h"
             holdout = "12h"
-            margins = { long = 0.5, short = 0.5 }
+            margins = { long = "0.5R", short = "0.5R" }
             min_pnl = 0.5
             min_trades = 30
             learner = { kind = "baseline" }
@@ -1665,7 +1665,10 @@ mod tests {
         #[test]
         fn reports_every_violation_of_the_model_under_its_field() {
             let toml = TOML
-                .replace("margins = { long = 0.5, short = 0.5 }", "margins = {}")
+                .replace(
+                    r#"margins = { long = "0.5R", short = "0.5R" }"#,
+                    "margins = {}",
+                )
                 .replace("min_trades = 30", "min_trades = 0")
                 .replace(r#"limit = "30m""#, r#"limit = "1h""#);
 
@@ -1690,16 +1693,16 @@ mod tests {
         }
 
         /// The meta model's violations are reported under `[model.meta]`'s
-        /// fields: its margin is not a number, and it requires no trade on
-        /// its holdout.
+        /// fields: its holdout and the calibration as long leave no fitted
+        /// row in its window, and it requires no trade on its holdout.
         #[test]
         fn reports_the_meta_models_violations_under_its_fields() {
             let toml = with_meta(
                 r#"
                 [model.meta]
                 window = "48h"
-                holdout = "12h"
-                margin = nan
+                holdout = "24h"
+                margin = "0.25R"
                 min_pnl = 0.5
                 min_trades = 0
                 learner = { kind = "baseline" }
@@ -1709,7 +1712,7 @@ mod tests {
             let mut fields = error_fields(&toml);
             fields.sort();
 
-            assert_eq!(fields, ["model.meta.margin", "model.meta.min_trades"]);
+            assert_eq!(fields, ["model.meta.holdout", "model.meta.min_trades"]);
         }
 
         /// A meta model is a `[model.meta]` table, and no more: a meta of
@@ -1722,7 +1725,7 @@ mod tests {
                 [model.meta]
                 window = "48h"
                 holdout = "12h"
-                margin = 0.25
+                margin = "0.25R"
                 min_pnl = 0.5
                 min_trades = 30
                 learner = { kind = "baseline" }
@@ -1730,9 +1733,9 @@ mod tests {
             );
 
             let config = load(&toml).unwrap();
-            assert_eq!(config.model().meta.unwrap().margin, 0.25);
+            assert_eq!(config.model().meta.unwrap().margin, R::new(0.25));
 
-            let nested = format!("{toml}\n[model.meta.meta]\nmargin = 0.5\n");
+            let nested = format!("{toml}\n[model.meta.meta]\nmargin = \"0.5R\"\n");
             let err = shape_error(&nested);
             assert!(err.contains("unknown field `meta`"), "{err}");
         }

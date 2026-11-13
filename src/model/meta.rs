@@ -2,9 +2,9 @@
 //! model decides whether to take it, the trade of the target's size.
 //!
 //! The side picked is the one the decision picks (`deciding`) among the
-//! side models of a `ModelConfig` with a meta section, on the expected net
-//! P&L of each side, its calibrated expected R of the pair times its unit
-//! (`store::Pair::expect`, `payoff::pick`). The meta model decides only
+//! side models of a `ModelConfig` with a meta section, on the expected R of
+//! each side, its calibrated expected R of the pair (`store::Pair::expect`,
+//! `payoff::pick`). The meta model decides only
 //! when a side is picked, on the decision's features, the strategy's
 //! without either side's payoff features, with the side picked and the
 //! decision's calibrated level and side call after them (`PICKED_FEATURES`),
@@ -13,9 +13,9 @@
 //! over its unit, read from its row as the side models read their trades
 //! (`dataset::DatasetRow`): a dataset row opens a long and a short at every
 //! decision, so the row has the trade of either side, and the meta's rows
-//! need no replay of their own. It takes the trade when the net P&L it
-//! expects of it, its calibrated expected R times the side's unit, clears
-//! its margin, in money (`holdout::MetaMargin`).
+//! need no replay of their own. It takes the trade when the net R it
+//! expects of it, its calibrated expected R, clears its margin, in R
+//! (`holdout::MetaMargin`).
 //!
 //! The sides' rows are their dataset's, each decided by the pair of the
 //! sides in use at it through the code a strategy decides through

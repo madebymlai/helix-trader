@@ -19,16 +19,15 @@
 //!   features as the target sets them, which a dataset row of the decision
 //!   holds alike (`deciding::SideRow`), the pair calibrating both
 //!   predictions together into the decision's level and side call and each
-//!   side's expected R (`calibration::Ksplit`), and each side's expected
-//!   net P&L that R times the unit the decision sets
-//!   (`targets::TargetSetter`, `payoff`): with exits the worth of the stop
-//!   it sets from the decision's price and the target's ATR, which the
-//!   handle runs, and on a time-only target the worth of a stop as far as
-//!   that ATR. It returns the `Decision` of the side clearing its margin,
-//!   the larger of two (`payoff::pick`), as plain data: the side, the
-//!   target's size, the expected net P&L and the level and side call behind
-//!   it, and the target as the decision sets it on that side, its reference
-//!   price, take profit, stop and time limit. The handle sends no order and
+//!   side's expected R (`calibration::Ksplit`), on the target the decision
+//!   sets (`targets::TargetSetter`): with exits from the decision's price
+//!   and the target's ATR, which the handle runs, and on a time-only target
+//!   that ATR alone. It returns the `Decision` of the side whose expected R
+//!   clears its margin, in R, the larger of two (`payoff::pick`), as plain
+//!   data: the side, the target's size, the expected R and the level and
+//!   side call behind it, and the target as the decision sets it on that
+//!   side, its reference price, take profit, stop and time limit. The
+//!   handle sends no order and
 //!   handles no
 //!   trade's time: the strategy trades the decision, as given
 //!   (`Decision::trade`, sent through `strategy::orders` as a dataset run
@@ -47,10 +46,9 @@
 //!
 //! With a meta model (`model::meta`), the trade of the side picked is
 //! taken only if the meta model in use, on the row with that side and the
-//! decision's level and side call, expects of it a net P&L, its calibrated
-//! expected R times the side's unit, of at least its margin
-//! (`MetaConfig::margin`), the trade of the target's size; no meta model
-//! valid yet is no trade.
+//! decision's level and side call, expects of it a net R, its calibrated
+//! expected R, of at least its margin (`MetaConfig::margin`), the trade of
+//! the target's size; no meta model valid yet is no trade.
 //!
 //! The decision itself is `deciding::DecidingModels`'s; the handle is what
 //! talks to the strategy. A model is swapped in only inside `decide`, before
@@ -196,7 +194,7 @@ pub enum Mode {
 pub type SettledRows = Rc<RefCell<Vec<TargetRow>>>;
 
 /// A decision to trade, as plain data: the side the models pick, of the
-/// target's size and instrument, its expected net P&L and the calibrated
+/// target's size and instrument, its expected net R and the calibrated
 /// level and side call it is of, the meta's expected R if a meta took it,
 /// and the target its models learned as the decision sets it on that side,
 /// the prices a dataset run sets there. The handle sends nothing: a strategy
@@ -209,18 +207,16 @@ pub struct Decision {
     pub side: OrderSide,
     /// The target's size.
     pub quantity: Quantity,
-    /// The net P&L the pair expects of the side's trade, in the instrument's
-    /// P&L currency, on the target's size: its calibrated expected R, `E'`,
-    /// times the decision's unit.
-    pub expected_pnl: f64,
+    /// The net R the pair expects of the side's trade: its calibrated
+    /// expected R, `E'`, which the side's margin is held to.
+    pub expected_r: f64,
     /// The decision's calibrated level, `C'`, in R.
     pub level: f64,
     /// The decision's calibrated side call, `D'`, in R: nought of a
     /// one-sided strategy.
     pub side_call: f64,
     /// The meta model's calibrated expected R of the trade, if a meta took
-    /// it: its expected net P&L, which the meta's margin is held to, is that
-    /// times the decision's unit.
+    /// it, which the meta's margin is held to.
     pub meta_expected_r: Option<f64>,
     /// The price the target is set from (`targets::TargetSetter`): the mid
     /// of the instrument's last quote, else its last trade, else its last
@@ -633,7 +629,7 @@ impl Deciding {
             instrument_id: self.instrument_id,
             side: taken.side.order_side(),
             quantity: self.quantity,
-            expected_pnl: taken.expected_pnl,
+            expected_r: taken.expected_r,
             level: taken.expected.level,
             side_call: taken.expected.side_call,
             meta_expected_r: taken.meta_expected_r,
@@ -693,7 +689,7 @@ mod tests {
         targets::{BracketSpec, BracketWidth, DEFAULT_ATR, Distance, Side, Target, TargetConfig},
     };
     use crate::strategy::{
-        AtrArgs, DataRequirements, Declared, EmaArgs, IndicatorsConfig, TickSeries,
+        AtrArgs, DataRequirements, Declared, EmaArgs, IndicatorsConfig, TickSeries, r::R,
     };
     use rust_decimal::Decimal;
 
@@ -1018,9 +1014,9 @@ mod tests {
         ModelHandle::new(&blueprint_of(&features, config, requirements()), mode).unwrap()
     }
 
-    /// A long expecting 0.1R, 0.1 USD on a unit of 1 USD, clearing its
-    /// margin of nought; the short is not traded. The decision carries its
-    /// level and, of one side, no side call.
+    /// A long expecting 0.1R, clearing its margin of nought; the short is
+    /// not traded. The decision carries its expected R, its level and, of
+    /// one side, no side call.
     #[test]
     fn a_side_expected_to_clear_its_margin_trades_the_targets_size() {
         let models = tempfile::tempdir().unwrap();
@@ -1034,7 +1030,7 @@ mod tests {
                 instrument_id: InstrumentId::from(AUD),
                 side: OrderSide::Buy,
                 quantity: Quantity::from(1000),
-                expected_pnl: 0.1,
+                expected_r: 0.1,
                 level: 0.1,
                 side_call: 0.0,
                 meta_expected_r: None,
@@ -1046,7 +1042,7 @@ mod tests {
     }
 
     /// `config` learning a bracket a take profit 20 bps and a stop `stop`
-    /// bps from the decision's price, trading the long from 0.30 USD.
+    /// bps from the decision's price, trading the long from 0.3R.
     fn bracket_config(stop: i64) -> ModelConfig {
         let mut config = config();
         config.target.spec = Target {
@@ -1059,7 +1055,7 @@ mod tests {
             atr: None,
         };
         config.margins = Margins {
-            long: Some(0.3),
+            long: Some(R::new(0.3)),
             short: None,
         };
         config
@@ -1068,8 +1064,7 @@ mod tests {
     /// Worked by hand. From the mid of 0.70000, the long's take profit 20
     /// bps above, 0.00140, and its stop 10 bps below, 0.00070: the
     /// prices a dataset run's long sets there, closed 2 hours later. The
-    /// stop is worth 0.70 USD on 1000 AUD/USD, so the long's 0.5R expects
-    /// 0.35 USD.
+    /// long expects 0.5R.
     #[test]
     fn a_bracket_trade_is_on_the_exits_and_the_limit_its_decision_sets() {
         let models = tempfile::tempdir().unwrap();
@@ -1096,24 +1091,46 @@ mod tests {
         );
         assert_eq!(decision.reference, Price::from("0.70000"));
         assert!(
-            (decision.expected_pnl - 0.35).abs() < 1e-9,
+            (decision.expected_r - 0.5).abs() < 1e-9,
             "{}",
-            decision.expected_pnl
+            decision.expected_r
         );
     }
 
-    /// Worked by hand. Both sides traded from 0.30 USD: the long of 0.1R
-    /// expects 0.07 USD on a stop worth 0.70 USD, and the short of 0.5R
-    /// expects 0.35 USD. From the mid of 0.70000, the short's take profit is
-    /// 0.00140 below and its stop 0.00070 above.
+    /// Worked by hand: the long of 0.5R clears a margin of 0.4R on a stop
+    /// worth 0.70 USD, where it expects 0.35 USD: the margin is in R, not in
+    /// money.
+    #[test]
+    fn a_side_clears_its_margin_in_r_whatever_its_stop_is_worth() {
+        let models = tempfile::tempdir().unwrap();
+        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+        let config = ModelConfig {
+            margins: Margins {
+                long: Some(R::new(0.4)),
+                short: None,
+            },
+            ..bracket_config(10)
+        };
+        let handle = sides_handle(&probe, models.path(), &config, (Some(10), None));
+        handle.start(&mut probe).unwrap();
+
+        let decision = handle.decide(&mut probe).unwrap();
+
+        assert_eq!(decision.map(|decision| decision.side), Some(OrderSide::Buy));
+    }
+
+    /// Worked by hand. Both sides traded from 0.3R: the long of 0.1R falls
+    /// short of it, and the short of 0.5R clears it. From the mid of
+    /// 0.70000, the short's take profit is 0.00140 below and its stop
+    /// 0.00070 above.
     #[test]
     fn a_short_trade_is_on_the_exits_its_decision_sets_on_the_short() {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
         let config = ModelConfig {
             margins: Margins {
-                long: Some(0.3),
-                short: Some(0.3),
+                long: Some(R::new(0.3)),
+                short: Some(R::new(0.3)),
             },
             ..bracket_config(10)
         };
@@ -1176,9 +1193,8 @@ mod tests {
         (probe, clock)
     }
 
-    /// The long of -0.3R expects a loss whatever its stop is worth, and a stop
-    /// worth half a cent makes it a loss in money: it does not clear a margin
-    /// of nought.
+    /// The long of -0.3R expects a loss whatever its stop is worth, half a
+    /// cent here: it does not clear a margin of nought.
     #[test]
     fn a_side_expected_to_lose_on_a_half_tick_stop_does_not_clear_a_margin_of_nought() {
         let models = tempfile::tempdir().unwrap();
@@ -1188,9 +1204,8 @@ mod tests {
         assert_eq!(handle.decide(&mut probe).unwrap(), None);
     }
 
-    /// Worked by hand. The short of 0.3R expects 0.0015 USD on a stop worth
-    /// 0.005 USD, and the long of -0.3R a loss, so the short trades from a
-    /// margin of nought, its stop on the ask.
+    /// Worked by hand. The short expects 0.3R and the long -0.3R, a loss, so
+    /// the short trades from a margin of nought, its stop on the ask.
     #[test]
     fn a_side_expected_to_gain_on_a_half_tick_stop_trades_its_stop_in_the_market() {
         let models = tempfile::tempdir().unwrap();
@@ -1212,18 +1227,16 @@ mod tests {
             })
         );
         assert!(
-            (decision.expected_pnl - 0.0015).abs() < 1e-12,
+            (decision.expected_r - 0.3).abs() < 1e-12,
             "{}",
-            decision.expected_pnl
+            decision.expected_r
         );
     }
 
-    /// Worked by hand. `config`'s target is a limit alone, its unit the
-    /// worth of its ATR of one hourly bar: a bar from 0.69900 to 0.70100
-    /// ranges 0.00200, worth 2 USD on 1000 AUD/USD, so the long of 0.1R
-    /// expects 0.2 USD. Its trade is a market entry closed an hour later, no
-    /// exit set from the mid of
-    /// 0.70000, what `Trade::send_as` sends without them.
+    /// Worked by hand. `config`'s target is a limit alone, its ATR of one
+    /// hourly bar warm on a bar from 0.69900 to 0.70100, and the long expects
+    /// 0.1R. Its trade is a market entry closed an hour later, no exit set
+    /// from the mid of 0.70000, what `Trade::send_as` sends without them.
     #[test]
     fn a_time_only_trade_has_no_exits_and_closes_at_its_limit() {
         let models = tempfile::tempdir().unwrap();
@@ -1251,9 +1264,9 @@ mod tests {
         );
         assert_eq!(decision.reference, Price::from("0.70000"));
         assert!(
-            (decision.expected_pnl - 0.2).abs() < 1e-12,
+            (decision.expected_r - 0.1).abs() < 1e-12,
             "{}",
-            decision.expected_pnl
+            decision.expected_r
         );
     }
 
@@ -1980,9 +1993,9 @@ mod tests {
         .unwrap()
     }
 
-    /// The meta predicting an R of 0.3 expects 0.25R, `0.1 + 0.5 E`, 0.25
-    /// USD on the unit of 1 USD, at or above its margin of 0.15: the
-    /// decision carries the meta's expected R beside the side's.
+    /// The meta predicting an R of 0.3 expects 0.25R, `0.1 + 0.5 E`, at or
+    /// above its margin of 0.15R: the decision carries the meta's expected R
+    /// beside the side's.
     #[test]
     fn a_meta_model_from_its_margin_takes_the_trade_of_the_side_picked() {
         let models = tempfile::tempdir().unwrap();
@@ -1997,7 +2010,7 @@ mod tests {
                 side: OrderSide::Buy,
                 quantity: Quantity::from(1000),
                 // The side's model's, its long of 0.1R.
-                expected_pnl: 0.1,
+                expected_r: 0.1,
                 level: 0.1,
                 side_call: 0.0,
                 meta_expected_r: Some(0.25),

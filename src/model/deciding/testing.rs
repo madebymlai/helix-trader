@@ -33,7 +33,7 @@ use crate::{
         },
         targets::{DEFAULT_ATR, Side, Target, TargetConfig},
     },
-    strategy::{AtrArgs, DataRequirements, TickSeries},
+    strategy::{AtrArgs, DataRequirements, TickSeries, r::R},
 };
 
 /// The holdout of the models of the tests, as a train publishes it: a
@@ -156,7 +156,7 @@ pub fn config() -> ModelConfig {
         .window(SignedDuration::from_hours(48))
         .holdout(SignedDuration::from_hours(12))
         .margins(Margins {
-            long: Some(0.0),
+            long: Some(R::new(0.0)),
             short: None,
         })
         .min_pnl(0.0)
@@ -169,19 +169,19 @@ pub fn config() -> ModelConfig {
 pub fn both_sides() -> ModelConfig {
     ModelConfig {
         margins: Margins {
-            long: Some(0.0),
-            short: Some(0.0),
+            long: Some(R::new(0.0)),
+            short: Some(R::new(0.0)),
         },
         ..config()
     }
 }
 
-/// The meta model taking a trade from an expected net P&L of 0.15 USD.
+/// The meta model taking a trade from an expected net R of 0.15.
 pub fn meta() -> MetaConfig {
     MetaConfig {
         window: SignedDuration::from_hours(48),
         holdout: SignedDuration::from_hours(12),
-        margin: 0.15,
+        margin: R::new(0.15),
         min_pnl: 0.0,
         min_trades: 1,
         learner: LearnerConfig::Baseline {},
