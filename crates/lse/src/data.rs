@@ -4,15 +4,17 @@
 //! product's key (see `LseInstrument`): an `LSEDGE` series' trades, its
 //! tick slices, and bars, LSE's candles 1 second to 4 hours wide, each
 //! stamped at its close, by its symbol, with the LSE key; a `GLBX`
-//! contract's trades and quotes, CME Globex's Level 1, by the number of its
-//! listing, looked up once in LSE's catalogue (see `http::listing`), with
-//! the CME key. An `LSEDGE` series' quotes are asked too, and LSE refuses
-//! them, serving a derived market's past as timeframes alone. Exports are
-//! asked a UTC day an export, one download at a time on each key, an
-//! export LSE refuses as too wide asked again in halves (see
-//! `http::export`). It serves the rows of LSE's reference collections as
-//! custom data (`LseRow`) too, its source and symbol named in the metadata
-//! of the request's data type, each row stamped when its values are known,
+//! contract's trades and quotes, CME Globex's Level 1, its book depth, ten
+//! levels a side, Level 2, and its book deltas, Level 3, by the number of
+//! its listing, looked up once in LSE's catalogue (see `http::listing`),
+//! with the CME key. An `LSEDGE` series' quotes are asked too, and LSE
+//! refuses them, serving a derived market's past as timeframes alone.
+//! Exports are asked a UTC day an export, a book or orders a UTC hour, one
+//! download at a time on each key, an export LSE refuses as too wide asked
+//! again in halves (see `http::export`). It serves the rows of LSE's
+//! reference collections as custom data (`LseRow`) too, its source and
+//! symbol named in the metadata of the request's data type, each row
+//! stamped when its values are known,
 //! with the LSE key; its definitions request fails, LSE publishing none. Live, it streams the quotes of the instruments its
 //! config names, on their sockets (see `streams`). Every other request and
 //! subscription is left to Nautilus' defaults: a request fails as
@@ -45,7 +47,8 @@ use nautilus_common::{
     messages::{
         DataEvent, DataResponse,
         data::{
-            BarsResponse, CustomDataResponse, DataResponseEnvelope, QuotesResponse, RequestBars,
+            BarsResponse, BookDeltasResponse, BookDepthResponse, CustomDataResponse,
+            DataResponseEnvelope, QuotesResponse, RequestBars, RequestBookDeltas, RequestBookDepth,
             RequestCustomData, RequestInstrument, RequestQuotes, RequestTrades, SubscribeQuotes,
             TradesResponse, UnsubscribeQuotes,
         },
@@ -58,7 +61,7 @@ use nautilus_core::{
 };
 use nautilus_live::task::TaskGroup;
 use nautilus_model::{
-    data::{CustomData, CustomDataTrait},
+    data::{CustomData, CustomDataTrait, DEPTH10_LEN},
     identifiers::{ClientId, InstrumentId, Venue},
     instruments::Instrument,
 };
@@ -75,7 +78,9 @@ use crate::{
         client::LseHttpClient,
         export::{fetch, loaded, midnight},
         listing::CmeListings,
-        parse::{parse_candles, parse_quotes, parse_rows, parse_trade_slice},
+        parse::{
+            parse_book, parse_candles, parse_orders, parse_quotes, parse_rows, parse_trade_slice,
+        },
         query::{CandleWidth, ExportQuery, ReferenceQuery, Rows},
     },
     types::{LseRow, SOURCE, SYMBOL},
@@ -561,6 +566,85 @@ impl DataClient for LseDataClient {
         Ok(())
     }
 
+    /// Answers with the depth snapshots over `[start, end]` (end: now if
+    /// none), the newest `limit` if one is given (see `answer_rows`), ten
+    /// levels a side: a `GLBX` contract's book, CME Globex's Level 2, each
+    /// row of it the book after its event, the last of each time ending
+    /// the event (`http::parse::parse_book`), asked a UTC hour an export. A
+    /// depth other than ten, the levels of LSE's book, fails naming it
+    /// before LSE is asked, as Nautilus' Databento client serves MBP-10's
+    /// alone. LSE refuses a key whose plan does not sell Level 2
+    /// (`level-required`) and an `LSEDGE` series'.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request is of more than one instrument.
+    fn request_book_depth(&self, request: RequestBookDepth) -> anyhow::Result<()> {
+        let id = request.single_instrument_id()?;
+        if let Some(depth) = request.depth.filter(|depth| depth.get() != DEPTH10_LEN) {
+            self.fail(
+                request.request_id,
+                format!("{id}: LSE's book holds ten levels a side, not a depth of {depth}"),
+            );
+            return Ok(());
+        }
+        let client_id = request.client_id.unwrap_or(self.client_id);
+        let (request_id, params) = (request.request_id, request.params);
+        let (start, end) = (
+            datetime_to_unix_nanos(request.start),
+            datetime_to_unix_nanos(request.end),
+        );
+        self.answer_rows(
+            request_id,
+            id,
+            (request.start, request.end),
+            request.limit,
+            |_| Rows::Book,
+            parse_book,
+            move |depths, ts_init| {
+                DataResponse::BookDepth(BookDepthResponse::new(
+                    request_id, client_id, id, depths, start, end, ts_init, params,
+                ))
+            },
+        );
+        Ok(())
+    }
+
+    /// Answers with the book deltas over `[start, end]` (end: now if none),
+    /// the newest `limit` if one is given (see `answer_rows`): a `GLBX`
+    /// contract's orders, CME Globex's Level 3, each order added, changed or
+    /// removed a delta, the last of each time ending the event
+    /// (`http::parse::parse_orders`), asked a UTC hour an export. LSE
+    /// refuses a key whose plan does not sell Level 3 (`level-required`)
+    /// and an `LSEDGE` series'.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request is of more than one instrument.
+    fn request_book_deltas(&self, request: RequestBookDeltas) -> anyhow::Result<()> {
+        let id = request.single_instrument_id()?;
+        let client_id = request.client_id.unwrap_or(self.client_id);
+        let (request_id, params) = (request.request_id, request.params);
+        let (start, end) = (
+            datetime_to_unix_nanos(request.start),
+            datetime_to_unix_nanos(request.end),
+        );
+        self.answer_rows(
+            request_id,
+            id,
+            (request.start, request.end),
+            request.limit,
+            |_| Rows::Orders,
+            parse_orders,
+            move |deltas, ts_init| {
+                DataResponse::BookDeltas(BookDeltasResponse::new(
+                    request_id, client_id, id, deltas, start, end, ts_init, params,
+                ))
+            },
+        );
+        Ok(())
+    }
+
     /// Answers with the rows of the reference collection and the symbol
     /// the request's data type names (`LseRow::data_type`: `source` and
     /// `symbol` in its metadata) known over `[start, end]` (end: now if
@@ -794,10 +878,12 @@ mod tests {
     use nautilus_core::{Params, UUID4, UnixNanos, string::secret::SecretString};
     use nautilus_model::{
         data::{BarType, CustomData, CustomDataTrait, Data, DataType, HasTsInit, QuoteTick},
+        enums::BookAction,
         identifiers::{InstrumentId, Symbol},
         instruments::{IndexInstrument, InstrumentAny},
         types::{Currency, Price, Quantity},
     };
+    use rstest::rstest;
     use serde_json::{Value, json};
     use tokio::sync::mpsc;
 
@@ -806,13 +892,14 @@ mod tests {
         LseDataClientFactory, LseRow,
         testing::{
             API_KEY, CME_API_KEY, DATA_UNAVAILABLE, DATA_UNAVAILABLE_QUOTES,
-            DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING, GCZ26, GCZ26_QUOTES, GCZ26_TRADES,
-            GOLD_FUTURES, GOLD_FUTURES_4H, GOLD_SPOT_MINUTES, GOLD_TRADES, HISTORY_LIMIT, MockLse,
-            MockLseSocket, PAIRS_GCZ6, PLAN_REQUIRED, REFERENCE_CATALOGUE,
-            REFERENCE_DATA_UNAVAILABLE, Reply, SYMBOL_UNKNOWN, US10Y_BOND_YIELDS,
-            WS_AUTHENTICATED_DATA, WS_AUTHENTICATED_LONDON, WS_AUTHENTICATED_TSX, WS_TICKS_DATA,
-            WS_TICKS_LONDON, WS_TICKS_TSX, data_ws_answer, gcz26, gold_futures, gold_spot,
-            socket_answer,
+            DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING, EXPORT_TOO_WIDE, GCZ26, GCZ26_BOOK,
+            GCZ26_ORDERS, GCZ26_QUOTES, GCZ26_TRADES, GOLD_FUTURES, GOLD_FUTURES_4H,
+            GOLD_SPOT_MINUTES, GOLD_TRADES, HISTORY_LIMIT, LEVEL_REQUIRED_BOOK,
+            LEVEL_REQUIRED_ORDERS, MockLse, MockLseSocket, PAIRS_GCZ6, PLAN_REQUIRED,
+            REFERENCE_CATALOGUE, REFERENCE_DATA_UNAVAILABLE, Reply, SYMBOL_UNKNOWN,
+            US10Y_BOND_YIELDS, WS_AUTHENTICATED_DATA, WS_AUTHENTICATED_LONDON,
+            WS_AUTHENTICATED_TSX, WS_TICKS_DATA, WS_TICKS_LONDON, WS_TICKS_TSX, data_ws_answer,
+            gcz26, gold_futures, gold_spot, socket_answer,
         },
     };
 
@@ -2326,6 +2413,252 @@ mod tests {
             err.contains("LSE_API_KEY") && err.contains("LSE_CME_API_KEY"),
             "{err}"
         );
+    }
+
+    /// The book depth of GCZ6 of 2026 over `[from, to]`, `depth` levels a
+    /// side, as the data engine asks for a window, naming no client.
+    fn book_depth(depth: Option<usize>, from: &str, to: &str) -> RequestBookDepth {
+        RequestBookDepth::new(
+            InstrumentId::from(GCZ26),
+            Some(at(from)),
+            Some(at(to)),
+            None,
+            depth.map(|depth| std::num::NonZeroUsize::new(depth).unwrap()),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+        )
+    }
+
+    /// The book deltas of GCZ6 of 2026 over `[from, to]`, as the data engine
+    /// asks for a window, naming no client.
+    fn book_deltas(from: &str, to: &str) -> RequestBookDeltas {
+        RequestBookDeltas::new(
+            InstrumentId::from(GCZ26),
+            Some(at(from)),
+            Some(at(to)),
+            None,
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+        )
+    }
+
+    /// A book or orders request of GCZ6 over `[from, to]`.
+    #[derive(Debug, Clone, Copy)]
+    enum Level {
+        Book,
+        Orders,
+    }
+
+    impl Level {
+        /// Asks `client` for the level's rows of GCZ6 over `[from, to]`.
+        fn request(self, client: &dyn DataClient, from: &str, to: &str) {
+            match self {
+                Self::Book => client
+                    .request_book_depth(book_depth(Some(10), from, to))
+                    .unwrap(),
+                Self::Orders => client.request_book_deltas(book_deltas(from, to)).unwrap(),
+            }
+        }
+
+        /// The rows `envelope` answers, of the level's kind.
+        fn rows_of(self, envelope: &DataResponseEnvelope) -> usize {
+            match (self, envelope.response()) {
+                (Self::Book, Some(DataResponse::BookDepth(response))) => response.data.len(),
+                (Self::Orders, Some(DataResponse::BookDeltas(response))) => response.data.len(),
+                (_, other) => panic!("not a response of the {self:?}: {other:?}"),
+            }
+        }
+    }
+
+    /// The captured second of GCZ6's trades and quotes: its book, as LSE's
+    /// docs record it (`test_data/README.md`), four rows, each a snapshot of
+    /// ten levels a side, looked up and asked by its listing, CME Globex's
+    /// Level 2, with the CME key.
+    #[tokio::test]
+    async fn a_cme_contract_s_book_is_its_depth_snapshots_asked_by_its_listing_with_the_cme_key() {
+        let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6), Reply::file(GCZ26_BOOK)]);
+        let (client, mut events) = defining_gcz26(&lse).await;
+        let request = book_depth(
+            Some(10),
+            "2026-11-12T14:30:00Z",
+            "2026-11-12T14:30:00.999999999Z",
+        );
+        let id = request.request_id;
+
+        client.request_book_depth(request).unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        assert_eq!(envelope.failure_reason(), None);
+        let Some(DataResponse::BookDepth(response)) = envelope.response() else {
+            panic!("not a book depth response: {:?}", envelope.response());
+        };
+        assert_eq!(response.correlation_id, id);
+        assert_eq!(response.client_id, ClientId::from("LSE"));
+        assert_eq!(response.instrument_id, InstrumentId::from(GCZ26));
+        assert_eq!(response.data.len(), 4);
+        let first = &response.data[0];
+        assert_eq!((first.bids.len(), first.asks.len()), (10, 10));
+        assert_eq!(
+            (first.bids[0].price, first.asks[0].price),
+            (Price::from("3908.10"), Price::from("3908.30"))
+        );
+        assert_eq!(
+            asked(&lse),
+            [
+                call("/v3/pairs", "GCZ6", None, CME_API_KEY),
+                call("/v3/export", "4000000002", Some("book"), CME_API_KEY),
+            ]
+        );
+    }
+
+    /// GCZ6's orders over the captured second, as LSE's docs record them:
+    /// five orders, one of no action, CME Globex's Level 3.
+    #[tokio::test]
+    async fn a_cme_contract_s_orders_are_its_book_deltas_asked_by_its_listing_with_the_cme_key() {
+        let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6), Reply::file(GCZ26_ORDERS)]);
+        let (client, mut events) = defining_gcz26(&lse).await;
+        let request = book_deltas("2026-11-12T14:30:00Z", "2026-11-12T14:30:00.999999999Z");
+        let id = request.request_id;
+
+        client.request_book_deltas(request).unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        assert_eq!(envelope.failure_reason(), None);
+        let Some(DataResponse::BookDeltas(response)) = envelope.response() else {
+            panic!("not a book deltas response: {:?}", envelope.response());
+        };
+        assert_eq!(response.correlation_id, id);
+        assert_eq!(response.client_id, ClientId::from("LSE"));
+        let actions: Vec<_> = response.data.iter().map(|delta| delta.action).collect();
+        assert_eq!(
+            actions,
+            [
+                BookAction::Add,
+                BookAction::Add,
+                BookAction::Update,
+                BookAction::Delete
+            ]
+        );
+        assert_eq!(
+            asked(&lse)[1],
+            call("/v3/export", "4000000002", Some("orders"), CME_API_KEY)
+        );
+    }
+
+    /// LSE's refusals of GCZ6's book and orders to the CME Group Lite+ key,
+    /// captured with it: it holds Level 1 alone.
+    #[rstest]
+    #[case::book(
+        Level::Book,
+        LEVEL_REQUIRED_BOOK,
+        "Level 2 book needs CME Group Standard or above"
+    )]
+    #[case::orders(
+        Level::Orders,
+        LEVEL_REQUIRED_ORDERS,
+        "Level 3 orders needs CME Group Standard or above"
+    )]
+    #[tokio::test]
+    async fn lse_s_level_refusal_of_the_cme_key_is_the_request_s_failure_with_its_required_plan(
+        #[case] level: Level,
+        #[case] refusal: &str,
+        #[case] message: &str,
+    ) {
+        let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6), Reply::refusal(403, refusal)]);
+        let (client, mut events) = defining_gcz26(&lse).await;
+
+        level.request(
+            &*client,
+            "2026-11-12T14:30:00Z",
+            "2026-11-12T14:30:00.999999999Z",
+        );
+
+        let envelope = next_envelope(&mut events).await;
+        let reason = envelope.failure_reason().expect("a failure");
+        for part in [
+            "403",
+            "level-required",
+            message,
+            "required plan: CME Group Standard",
+        ] {
+            assert!(reason.contains(part), "{part}: {reason}");
+        }
+        assert!(envelope.response().is_none());
+    }
+
+    /// Two seconds of GCZ6, which LSE refuses as too wide: asked again a
+    /// second at a time, each half's rows answered.
+    #[rstest]
+    #[case::book(Level::Book, GCZ26_BOOK, 4)]
+    #[case::orders(Level::Orders, GCZ26_ORDERS, 4)]
+    #[tokio::test]
+    async fn a_book_or_orders_window_lse_refuses_as_too_wide_is_asked_again_in_halves(
+        #[case] level: Level,
+        #[case] file: &[u8],
+        #[case] rows_a_file: usize,
+    ) {
+        let lse = MockLse::start(vec![
+            Reply::json(PAIRS_GCZ6),
+            Reply::refusal(413, EXPORT_TOO_WIDE),
+            Reply::file(file),
+            Reply::file(file),
+        ]);
+        let (client, mut events) = defining_gcz26(&lse).await;
+
+        level.request(
+            &*client,
+            "2026-11-12T14:30:00Z",
+            "2026-11-12T14:30:01.999999999Z",
+        );
+
+        let envelope = next_envelope(&mut events).await;
+        assert_eq!(envelope.failure_reason(), None);
+        assert_eq!(level.rows_of(&envelope), 2 * rows_a_file);
+        let windows: Vec<_> = lse
+            .calls()
+            .iter()
+            .filter(|call| call.path == "/v3/export")
+            .map(|call| {
+                (
+                    call.param("from").unwrap().to_string(),
+                    call.param("to").unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            windows,
+            [
+                ("2026-11-12T14:30:00Z", "2026-11-12T14:30:02Z"),
+                ("2026-11-12T14:30:00Z", "2026-11-12T14:30:01Z"),
+                ("2026-11-12T14:30:01Z", "2026-11-12T14:30:02Z"),
+            ]
+            .map(|(from, to)| (from.to_string(), to.to_string()))
+        );
+    }
+
+    /// LSE's book holds ten levels a side, as Nautilus' Databento client
+    /// serves MBP-10's alone.
+    #[tokio::test]
+    async fn a_book_depth_other_than_lse_s_ten_levels_fails_naming_it_unasked() {
+        let lse = MockLse::start(vec![]);
+        let (client, mut events) = defining_gcz26(&lse).await;
+
+        client
+            .request_book_depth(book_depth(
+                Some(5),
+                "2026-11-12T14:30:00Z",
+                "2026-11-12T14:30:00.999999999Z",
+            ))
+            .unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        let reason = envelope.failure_reason().expect("a failure");
+        assert!(reason.contains("depth of 5"), "{reason}");
+        assert!(lse.calls().is_empty(), "{:?}", lse.calls());
     }
 
     /// LSE serves a derived market's past as timeframes alone: it is asked,

@@ -113,6 +113,17 @@ pub const GCZ26_PAIR_ID: u64 = 4_000_000_002;
 /// that pair id to the CME key: 38 trades and 636 quotes.
 pub const GCZ26_TRADES: &[u8] = include_bytes!("../test_data/export_gcz6_trades.parquet");
 pub const GCZ26_QUOTES: &[u8] = include_bytes!("../test_data/export_gcz6_quotes.parquet");
+/// A book and an orders export of GCZ6 of 2026 over the same second, as
+/// LSE's docs record the two files, built, not captured: the keys hold no
+/// Level 2 or 3 (`test_data/README.md`). Four rows of the book, ten levels
+/// a side but the last, of eight asks; five orders, one of no action.
+pub const GCZ26_BOOK: &[u8] = include_bytes!("../test_data/export_gcz6_book.parquet");
+pub const GCZ26_ORDERS: &[u8] = include_bytes!("../test_data/export_gcz6_orders.parquet");
+/// LSE's refusals of GCZ6's book and orders to the CME Group Lite+ key,
+/// which holds Level 1 alone, captured with that key.
+pub const LEVEL_REQUIRED_BOOK: &str = include_str!("../test_data/refusal_level_required_book.json");
+pub const LEVEL_REQUIRED_ORDERS: &str =
+    include_str!("../test_data/refusal_level_required_orders.json");
 
 /// The CME contract of `GCZ26_TRADES`.
 pub const GCZ26: &str = "GCZ26.GLBX";
