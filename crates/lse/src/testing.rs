@@ -24,12 +24,21 @@ use sha2::{Digest, Sha256};
 /// `[2026-10-21T10:00:00Z, 2026-10-21T10:00:01Z)`, as LSE exported it:
 /// six trades.
 pub const GOLD_TRADES: &[u8] = include_bytes!("../test_data/export_gold_futures_tick.parquet");
+/// LSE's catalogue of its reference collections (`/v3/reference`).
+pub const REFERENCE_CATALOGUE: &str = include_str!("../test_data/reference_catalogue.json");
+/// The rows of the US 10-year yield (`US10Y`) in LSE's daily bond yields
+/// (`bond_yields`) from 9 to 12 November 2026, as LSE exported them: three
+/// rows, of the 9th, 10th and 12th.
+pub const US10Y_BOND_YIELDS: &[u8] =
+    include_bytes!("../test_data/reference_bond_yields_us10y.parquet");
 /// LSE's refusals, captured with the free key, but the two quotas, which
 /// are LSE's documented answers (`test_data/README.md`).
 pub const SYMBOL_UNKNOWN: &str = include_str!("../test_data/refusal_symbol_unknown.json");
 pub const PLAN_REQUIRED: &str = include_str!("../test_data/refusal_plan_required.json");
 pub const DATA_UNAVAILABLE: &str = include_str!("../test_data/refusal_data_unavailable.json");
 pub const DATE_NOT_TRADING: &str = include_str!("../test_data/refusal_date_not_trading.json");
+pub const REFERENCE_DATA_UNAVAILABLE: &str =
+    include_str!("../test_data/refusal_reference_data_unavailable.json");
 pub const CALLS_EXHAUSTED: &str = include_str!("../test_data/refusal_calls_exhausted.json");
 pub const ROWS_EXHAUSTED: &str = include_str!("../test_data/refusal_rows_exhausted.json");
 
@@ -91,6 +100,17 @@ impl Reply {
         }
     }
 
+    /// A JSON answer of the catalogue, as LSE sends one: 200.
+    #[must_use]
+    pub fn json(body: &str) -> Self {
+        Self {
+            status: 200,
+            headers: vec![("Content-Type".into(), "application/json".into())],
+            body: body.as_bytes().to_vec(),
+            delay: Duration::ZERO,
+        }
+    }
+
     /// A file whose SHA-256 is another's, as a download cut short would be.
     #[must_use]
     pub fn cut_file(bytes: &[u8]) -> Self {
@@ -129,7 +149,7 @@ impl Reply {
 /// A call the peer received.
 #[derive(Debug, Clone)]
 pub struct Call {
-    /// The path, `/v3/export`.
+    /// The path, `/v3/export`, `/v3/reference`, `/v3/reference/export`.
     pub path: String,
     /// The query's parameters, decoded, in order.
     pub query: Vec<(String, String)>,

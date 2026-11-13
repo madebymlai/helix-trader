@@ -46,6 +46,7 @@ fn gold_trades() -> DataRequirements {
             data: NautilusDataType::TradeTick,
             instrument_id: InstrumentId::from(GOLD_FUTURES),
         }],
+        custom: vec![],
         warmup: SignedDuration::ZERO,
     }
 }

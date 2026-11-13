@@ -24,6 +24,13 @@ pub(crate) enum LseHttpError {
     /// its body.
     #[error("LSE answered {status}, not as its docs say: {body}")]
     Unexpected { status: u16, body: String },
+    /// An answer whose body is not what LSE's docs say it holds: what it
+    /// should have been and why it is not.
+    #[error("LSE's {what} is not as its docs say: {source}")]
+    Malformed {
+        what: &'static str,
+        source: serde_json::Error,
+    },
     /// A file whose SHA-256 is not the one LSE named: cut short.
     #[error("the file LSE sent, {len} bytes, is not the one its SHA-256 names")]
     Checksum { len: usize },
@@ -47,7 +54,7 @@ impl LseHttpError {
             Self::Refusal {
                 status, refusal, ..
             } => (*status == 429 && !refusal.is_quota()) || *status == 503,
-            Self::Unexpected { .. } | Self::Retry(_) => false,
+            Self::Unexpected { .. } | Self::Malformed { .. } | Self::Retry(_) => false,
         }
     }
 

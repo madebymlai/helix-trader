@@ -215,6 +215,7 @@ mod tests {
                     instrument_id: InstrumentId::from(id),
                 })
                 .collect(),
+            custom: vec![],
             warmup: SignedDuration::ZERO,
         }
     }

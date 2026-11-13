@@ -35,6 +35,7 @@ fn backtest(catalog: &TempDir) -> Backtest {
         catalog: catalog.path().to_path_buf(),
         bar_types: vec![BarType::from(BARS)],
         ticks: vec![],
+        custom: vec![],
         start: tuesday("23:00:00"),
         end: wednesday("01:00:00"),
         commission: Commission::Rate(Decimal::ZERO),
