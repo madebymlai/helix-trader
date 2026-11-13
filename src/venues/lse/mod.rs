@@ -4,15 +4,18 @@
 //! instruments, London Strategic Edge's own derived series, each an index
 //! instrument named after its LSE market (`GOLD-FUTURES.LSEDGE`: GOLD in
 //! `futures`), trades, from LSE's tick slices, and bars, from its candles,
-//! each stamped at its close; and of `GLBX` contracts, CME Globex's Levels 1
+//! each stamped at its close; of `GLBX` contracts, CME Globex's Levels 1
 //! to 3 under the ids Databento gives them (`GCZ26.GLBX`), trades, quotes,
-//! book depths and book deltas.
-//! Live, the client streams the quotes of `LSEDGE` instruments on the live
-//! node, routed their venue (`live_clients`). Each contract's definition is
-//! its row's definitions source's: `LSEDGE`'s the catalog's alone, written
-//! there by hand, LSE publishing none, the data engine answering a
-//! definition request from the catalog before asking the client; `GLBX`'s
-//! Databento's, asked of Nautilus' Databento client. The client converts
+//! book depths and book deltas; and of `OPRA` contracts, US options under
+//! the ids Databento gives them, their OSI symbols
+//! (`AAPL  261120C00355000.OPRA`), trades and bars, as an `LSEDGE`
+//! series'. Live, the client streams the quotes of `LSEDGE` instruments on
+//! the live node, routed their venue (`live_clients`). Each contract's
+//! definition is its row's definitions source's: `LSEDGE`'s the catalog's
+//! alone, written there by hand, LSE publishing none, the data engine
+//! answering a definition request from the catalog before asking the
+//! client; `GLBX`'s and `OPRA`'s Databento's, asked of Nautilus' Databento
+//! client. The client converts
 //! LSE's prices at the definition's precision. LSE's reference series, the
 //! rows of its reference collections, are custom data of no instrument
 //! (`lse::LseRow`), filled by the same client with no definition. See
@@ -140,19 +143,20 @@ mod tests {
     use ::lse::{
         LseRow,
         testing::{
-            AAPL_TRADES, ALLOWANCE_EXHAUSTED, API_KEY, BTCUSDT_TRADES, CME_API_KEY,
-            DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING, EUR_USD_MINUTES, GCZ26, GCZ26_BOOK,
-            GCZ26_ORDERS, GCZ26_QUOTES, GCZ26_TRADES, GOLD_FUTURES, GOLD_SPOT, GOLD_SPOT_MINUTES,
-            GOLD_TRADES, MockLse, PAIRS_GCZ6, PLAN_REQUIRED, REFERENCE_CATALOGUE,
-            REFERENCE_DATA_UNAVAILABLE, ROWS_EXHAUSTED, RY_TRADES, Reply, SPX_MINUTES,
-            SYMBOL_UNKNOWN, US10Y_BOND_YIELDS, VOD_TRADES, gold_futures, gold_spot,
+            AAPL_CALL, AAPL_CALL_MINUTES, AAPL_CALL_TRADES, AAPL_TRADES, ALLOWANCE_EXHAUSTED,
+            API_KEY, BTCUSDT_TRADES, CME_API_KEY, DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING,
+            EUR_USD_MINUTES, GCZ26, GCZ26_BOOK, GCZ26_ORDERS, GCZ26_QUOTES, GCZ26_TRADES,
+            GOLD_FUTURES, GOLD_SPOT, GOLD_SPOT_MINUTES, GOLD_TRADES, MockLse, PAIRS_GCZ6,
+            PLAN_REQUIRED, REFERENCE_CATALOGUE, REFERENCE_DATA_UNAVAILABLE, ROWS_EXHAUSTED,
+            RY_TRADES, Reply, SPX_MINUTES, SYMBOL_UNKNOWN, US10Y_BOND_YIELDS, VOD_TRADES,
+            gold_futures, gold_spot,
         },
     };
     use jiff::Timestamp;
     use nautilus_core::{UnixNanos, string::secret::SecretString};
     use nautilus_model::{
         data::{Bar, BarType, Data, DataType, NautilusDataType, TradeTick},
-        enums::{AggressorSide, RecordFlag},
+        enums::{AggressorSide, OptionKind, RecordFlag},
         identifiers::{InstrumentId, Symbol, TradeId},
         instruments::{IndexInstrument, InstrumentAny},
         types::{Currency, Price, Quantity},
@@ -1165,5 +1169,150 @@ mod tests {
             asked_of_lse,
             [None, Some("book".to_string()), Some("orders".to_string())]
         );
+    }
+
+    /// AAPL's 355 call of 20 November 2026 over the captured minutes: its
+    /// definition is Databento's, of `OPRA.PILLAR`, asked of Databento's
+    /// client, which the mock Databento peer answers with Databento's record
+    /// of the contract, and its trades and 1-minute bars LSE's, asked of
+    /// LSE's client by the contract's OSI symbol with the LSE key, which
+    /// opens LSE's US options. The captured minute of trades stands for the
+    /// window's, and the four candles of 14:30 to 14:33 for the bars
+    /// closing over it, LSE having none of 14:34.
+    #[test]
+    fn an_opra_fill_takes_its_definition_from_databento_and_its_trades_and_bars_from_lse() {
+        let dir = tempfile::tempdir().unwrap();
+        let lse = MockLse::start(vec![
+            Reply::file(AAPL_CALL_TRADES),
+            Reply::file(AAPL_CALL_MINUTES),
+        ]);
+        let databento = MockDatabento::start();
+        let bar_type = format!("{AAPL_CALL}-1-MINUTE-LAST-EXTERNAL");
+        let minutes = (november("12T14:30:00"), november("12T14:34:00"));
+        let requirements = DataRequirements {
+            bar_types: vec![BarType::from(bar_type.as_str())],
+            ticks: vec![TickSeries {
+                data: NautilusDataType::TradeTick,
+                instrument_id: InstrumentId::from(AAPL_CALL),
+            }],
+            custom: vec![],
+            warmup: SignedDuration::ZERO,
+        };
+
+        fill_from(
+            dir.path(),
+            &lse,
+            Some(&databento),
+            &requirements,
+            vec![],
+            minutes,
+        )
+        .unwrap();
+
+        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let [InstrumentAny::OptionContract(definition)] = &catalog
+            .instruments(Some(&[AAPL_CALL.to_string()]), None, None)
+            .unwrap()[..]
+        else {
+            panic!("not one option contract");
+        };
+        // 16:00 New York, the close of the day it expires.
+        assert_eq!(
+            (
+                definition.raw_symbol.as_str(),
+                definition.underlying.as_str(),
+                definition.option_kind,
+                definition.strike_price,
+                Timestamp::from(definition.expiration_ns),
+                definition.price_increment,
+            ),
+            (
+                "AAPL  261120C00355000",
+                "AAPL",
+                OptionKind::Call,
+                Price::from("355.00"),
+                november("20T21:00:00"),
+                Price::from("0.01"),
+            )
+        );
+        let trades = catalog
+            .trade_ticks(Some(vec![AAPL_CALL.to_string()]), None, None)
+            .unwrap();
+        assert_eq!(trades.len(), 23);
+        assert_eq!(
+            (trades[0].ts_event, trades[0].price, trades[0].size),
+            (
+                UnixNanos::from(november("12T14:30:00.816861166")),
+                Price::from("6.70"),
+                Quantity::from(1)
+            )
+        );
+        let bars = catalog.bars(Some(vec![bar_type]), None, None).unwrap();
+        let closes: Vec<_> = bars.iter().map(|bar| (bar.ts_event, bar.close)).collect();
+        assert_eq!(
+            closes,
+            [
+                ("14:31:00", "6.22"),
+                ("14:32:00", "6.57"),
+                ("14:33:00", "6.15"),
+                ("14:34:00", "6.40"),
+            ]
+            .map(|(time, close)| (
+                UnixNanos::from(november(&format!("12T{time}"))),
+                Price::from(close)
+            ))
+        );
+        let asked_of_databento: Vec<_> = databento
+            .calls()
+            .iter()
+            .map(|call| {
+                (
+                    call.path.clone(),
+                    call.param("dataset").map(ToString::to_string),
+                    call.param("symbols").map(ToString::to_string),
+                )
+            })
+            .collect();
+        assert_eq!(
+            asked_of_databento,
+            [
+                (
+                    "/v0/metadata.get_dataset_range".to_string(),
+                    Some("OPRA.PILLAR".to_string()),
+                    None
+                ),
+                (
+                    "/v0/timeseries.get_range".to_string(),
+                    Some("OPRA.PILLAR".to_string()),
+                    Some("AAPL  261120C00355000".to_string())
+                ),
+            ]
+        );
+        let mut asked_of_lse: Vec<_> = lse
+            .calls()
+            .iter()
+            .map(|call| {
+                [
+                    call.path.as_str(),
+                    call.param("market").unwrap_or_default(),
+                    call.param("symbol").unwrap_or_default(),
+                    call.param("timeframe").unwrap_or_default(),
+                    call.api_key.as_deref().unwrap_or_default(),
+                ]
+                .map(ToString::to_string)
+            })
+            .collect();
+        asked_of_lse.sort();
+        let export = |timeframe: &str| {
+            [
+                "/v3/export",
+                "us_options",
+                "AAPL  261120C00355000",
+                timeframe,
+                API_KEY,
+            ]
+            .map(ToString::to_string)
+        };
+        assert_eq!(asked_of_lse, [export("1m"), export("tick")]);
     }
 }

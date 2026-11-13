@@ -1,12 +1,12 @@
-//! Databento definitions of `GLBX` instruments (CME Globex, `GLBX.MDP3`),
-//! filled through the node (see `catalog::NodeFill`) by Nautilus' Databento
-//! data client (`DatabentoDataClient`), whose answers the data engine
-//! writes back to the catalog, each contract under its own id; their
-//! history is LSE's (see `lse`). What stays here is what Nautilus' client
-//! does not do: the dataset's end, checked before the node starts. See
-//! `README.md`.
+//! Databento definitions of `GLBX` instruments (CME Globex, `GLBX.MDP3`)
+//! and `OPRA` ones (US options, `OPRA.PILLAR`), filled through the node
+//! (see `catalog::NodeFill`) by Nautilus' Databento data client
+//! (`DatabentoDataClient`), whose answers the data engine writes back to
+//! the catalog, each contract under its own id; their history is LSE's
+//! (see `lse`). What stays here is what Nautilus' client does not do: each
+//! dataset's end, checked before the node starts. See `README.md`.
 
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use anyhow::{Context, ensure};
 use jiff::Timestamp;
@@ -16,6 +16,7 @@ use nautilus_databento::{
     data::DatabentoDataClientConfig,
     factories::DatabentoDataClientFactory,
     historical::{DatabentoHistoricalClient, DatasetRange},
+    loader::DatabentoDataLoader,
 };
 
 use super::{DefinitionsSource, Row};
@@ -32,14 +33,15 @@ const PUBLISHERS: &str = concat!(
     "/src/venues/databento/publishers.json"
 );
 
-/// The Databento dataset of `GLBX` instruments.
-const DATASET: &str = "GLBX.MDP3";
-
-/// Databento's historical API, for the definitions of `GLBX` instruments.
+/// Databento's historical API, for the definitions of `GLBX` and `OPRA`
+/// instruments.
 #[derive(Debug)]
 pub struct DatabentoHistory {
-    /// Nautilus' historical client, for the dataset's end.
+    /// Nautilus' historical client, for each dataset's end.
     metadata: DatabentoHistoricalClient,
+    /// Nautilus' map of venues to datasets, the one its data client asks a
+    /// venue's instruments of.
+    datasets: DatabentoDataLoader,
     /// The config of Nautilus' data client, the node's.
     config: DatabentoDataClientConfig,
 }
@@ -61,6 +63,7 @@ impl DatabentoHistory {
         .context("building Databento's client")?;
         Ok(Self {
             metadata,
+            datasets: datasets()?,
             config: config(api_key),
         })
     }
@@ -78,36 +81,50 @@ impl DatabentoHistory {
         )?;
         let mut config = config(api_key);
         config.historical_base_url = Some(base_url.to_owned());
-        Ok(Self { metadata, config })
+        Ok(Self {
+            metadata,
+            datasets: datasets()?,
+            config,
+        })
     }
 
     /// Checks `requests` (see `catalog::missing`), definitions of `GLBX`
-    /// instruments, against the dataset's end, before any is asked for.
+    /// and `OPRA` instruments, against the end of the dataset of each one's
+    /// venue, the one Nautilus' client asks (`GLBX.MDP3`, `OPRA.PILLAR`),
+    /// before any is asked for.
     ///
     /// # Errors
     ///
     /// Returns an error if a request is not a definition of an instrument
     /// Databento defines in its row of the routing table (before any
-    /// request), if one ends at or past the data Databento has (a request
-    /// over it would fail), or if the metadata request fails.
+    /// request), if one ends at or past the data its dataset has (a
+    /// request over it would fail), or if a metadata request fails.
     pub async fn check(&self, requests: &[FillRequest]) -> anyhow::Result<()> {
+        // The latest end asked of each dataset.
+        let mut ends: BTreeMap<String, Timestamp> = BTreeMap::new();
         for request in requests {
+            let venue = request.instrument_id.venue;
             ensure!(
                 request.data == FillData::Instrument
-                    && Row::of(request.instrument_id.venue).definitions
-                        == DefinitionsSource::Databento,
-                "Databento gives the definitions of GLBX instruments here, not {request}"
+                    && Row::of(venue).definitions == DefinitionsSource::Databento,
+                "Databento gives the definitions of GLBX and OPRA instruments here, not {request}"
             );
+            let dataset = self
+                .datasets
+                .get_dataset_for_venue(&venue)
+                .with_context(|| format!("Databento has no dataset of {venue}"))?;
+            let end = ends.entry(dataset.to_string()).or_insert(request.to);
+            *end = (*end).max(request.to);
         }
-        let Some(end) = requests.iter().map(|request| request.to).max() else {
-            return Ok(());
-        };
-        let available = self
-            .metadata
-            .get_dataset_range(DATASET)
-            .await
-            .with_context(|| format!("requesting the range of {DATASET}"))?;
-        ensure_available(end, end_of(&available)?)
+        for (dataset, end) in ends {
+            let available = self
+                .metadata
+                .get_dataset_range(&dataset)
+                .await
+                .with_context(|| format!("requesting the range of {dataset}"))?;
+            ensure_available(&dataset, end, end_of(&dataset, &available)?)?;
+        }
+        Ok(())
     }
 
     /// The node's data client: Nautilus' Databento client, on no venue, so
@@ -129,21 +146,34 @@ fn config(api_key: &str) -> DatabentoDataClientConfig {
     DatabentoDataClientConfig::new(api_key, PathBuf::from(PUBLISHERS), false, true)
 }
 
-/// The exclusive end of `range`, which Nautilus' client gives as the
-/// `Display` of Databento's `time::OffsetDateTime`, such as
-/// `2023-07-20 0:00:00.12 +00:00:00`: the hour unpadded, the fraction to
-/// its last nonzero digit, at least one, and the offset to the second.
-fn end_of(range: &DatasetRange) -> anyhow::Result<Timestamp> {
-    Timestamp::strptime("%Y-%m-%d %H:%M:%S%.f %::z", &range.end)
-        .with_context(|| format!("reading the end of {DATASET}, {}", range.end))
+/// Nautilus' map of venues to the datasets its data client asks their
+/// instruments of, from the publishers' map: `OPRA` to `OPRA.PILLAR`, the
+/// venue of its consolidated publisher, and `GLBX` to `GLBX.MDP3`, among
+/// the defaults Nautilus adds.
+///
+/// # Errors
+///
+/// Returns an error if the map of publishers is unreadable.
+fn datasets() -> anyhow::Result<DatabentoDataLoader> {
+    DatabentoDataLoader::new(Some(PathBuf::from(PUBLISHERS)))
+        .context("reading Databento's publishers")
 }
 
-/// Refuses an `end` Databento has no data up to yet: a request over it
-/// would fail.
-fn ensure_available(end: Timestamp, available_end: Timestamp) -> anyhow::Result<()> {
+/// The exclusive end of `range`, `dataset`'s, which Nautilus' client gives
+/// as the `Display` of Databento's `time::OffsetDateTime`, such as
+/// `2023-07-20 0:00:00.12 +00:00:00`: the hour unpadded, the fraction to
+/// its last nonzero digit, at least one, and the offset to the second.
+fn end_of(dataset: &str, range: &DatasetRange) -> anyhow::Result<Timestamp> {
+    Timestamp::strptime("%Y-%m-%d %H:%M:%S%.f %::z", &range.end)
+        .with_context(|| format!("reading the end of {dataset}, {}", range.end))
+}
+
+/// Refuses an `end` Databento has no data of `dataset` up to yet: a
+/// request over it would fail.
+fn ensure_available(dataset: &str, end: Timestamp, available_end: Timestamp) -> anyhow::Result<()> {
     ensure!(
         end < available_end,
-        "{DATASET} has data up to {available_end} only, not up to {end}"
+        "{dataset} has data up to {available_end} only, not up to {end}"
     );
     Ok(())
 }
@@ -180,8 +210,10 @@ mod tests {
     fn an_end_databento_has_no_data_up_to_is_refused() {
         let monday = ts("2026-10-26T00:00:00Z");
         let before = monday - SignedDuration::from_nanos(1);
-        assert!(ensure_available(before, monday).is_ok());
-        let err = ensure_available(monday, monday).unwrap_err().to_string();
+        assert!(ensure_available("GLBX.MDP3", before, monday).is_ok());
+        let err = ensure_available("GLBX.MDP3", monday, monday)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("2026-10-26"), "{err}");
     }
 
@@ -206,7 +238,7 @@ mod tests {
                 start: String::new(),
                 end: end.to_string(),
             };
-            assert_eq!(end_of(&range).unwrap(), ts(instant), "{end}");
+            assert_eq!(end_of("GLBX.MDP3", &range).unwrap(), ts(instant), "{end}");
         }
     }
 

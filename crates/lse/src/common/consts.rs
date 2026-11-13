@@ -32,6 +32,15 @@ pub(crate) const CME_LITE_CALLS_PER_MINUTE: NonZeroU32 = NonZeroU32::new(200).ex
 /// LSE's name of CME Globex, its market's folder.
 pub(crate) const CME_MARKET: &str = "cme";
 
+/// LSE's name of US options, its market's folder: every listed US option
+/// contract, as OPRA reports it.
+pub(crate) const US_OPTIONS_MARKET: &str = "us_options";
+
+/// The venue of US option contracts, OPRA, as Databento names the
+/// consolidated feed's listings (`OPRA.PILLAR`, publisher `OPRA`) and
+/// Nautilus' IB adapter maps them.
+pub(crate) static OPRA_VENUE: LazyLock<Venue> = LazyLock::new(|| Venue::new("OPRA"));
+
 /// An LSE socket of the protocol four of them share (LSE's WebSocket
 /// documentation, "The sockets"), each carrying its markets: those a
 /// derived market's series streams on. The fourth, chicago-ws, carries

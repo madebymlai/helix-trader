@@ -1,6 +1,6 @@
 # Interactive Brokers
 
-IB serves every venue without a row of its own in the [routing table](../mod.rs), definitions, history and live data, and is its broker; it also serves GLBX's live data and trades its instruments, whose definitions are [Databento](../databento/README.md)'s and history [LSE](../lse/README.md)'s. See [catalog](../../catalog/README.md) for shared fill semantics and [live](../../live/README.md) for node startup, routing, Redis and recovery.
+IB serves every venue without a row of its own in the [routing table](../mod.rs), definitions, history and live data, and is its broker; it also serves GLBX's and OPRA's live data and trades their instruments, whose definitions are [Databento](../databento/README.md)'s and history [LSE](../lse/README.md)'s. See [catalog](../../catalog/README.md) for shared fill semantics and [live](../../live/README.md) for node startup, routing, Redis and recovery.
 
 ## History
 
@@ -28,7 +28,7 @@ The paper and live containers use ports 4002 and 4001 respectively and remain ru
 
 ## Trading and warmup
 
-IB is netting. Its execution adapter denies reduce-only and post-only orders, so a trade on an instrument IB trades, GLBX's included, sends its bracket's exits neither reduce-only nor post-only and its time close not reduce-only, in a backtest as live (`strategy::orders`).
+IB is netting. Its execution adapter denies reduce-only and post-only orders, so a trade on an instrument IB trades, GLBX's and OPRA's included, sends its bracket's exits neither reduce-only nor post-only and its time close not reduce-only, in a backtest as live (`strategy::orders`).
 
 **Such exits lose the reduce-only guarantee**, as Nautilus' IB guide warns: IB cancels no exit when another order closes the position, so an exit filling after that opens a position the other way, which no trade's exits or time close end. The time close cancels the trade's exits and closes its position without waiting for the cancels, so an exit filling before its cancel lands leaves such a position, opened by the close or the exit, whichever fills second. On the netting account a trade's time close, or an entry on the other side, also closes the other trades in the position, whose exits stay working: the EMA crossover, whose trades overlap, meets this; a model strategy's trades do not overlap.
 
