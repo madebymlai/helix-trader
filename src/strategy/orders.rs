@@ -554,17 +554,19 @@ where
 
 /// Checks that `instrument` is linear: Nautilus' fixed-risk sizer
 /// (`calculate_fixed_risk_position_size`) reads a trade's P&L as a
-/// multiple of a distance in price, which an inverse instrument's is not.
+/// multiple of a distance in price, which an inverse instrument's is not,
+/// nor are the worths of distances on it (`worth`), a model target's unit
+/// and payoff among them.
 ///
 /// # Errors
 ///
 /// Returns an error if it is inverse.
-fn ensure_linear(instrument: &InstrumentAny) -> anyhow::Result<()> {
+pub(crate) fn ensure_linear(instrument: &InstrumentAny) -> anyhow::Result<()> {
     ensure!(
         !instrument.is_inverse(),
-        "{} is inverse: a trade on it cannot be sized at a stake, Nautilus' fixed-risk sizer \
-         reading its P&L as a multiple of a distance in price, which an inverse instrument's \
-         is not",
+        "{} is inverse: a trade on it can neither be sized at a stake nor have its R in money, \
+         a model target's unit, worked out, Nautilus' fixed-risk sizer reading its P&L as a \
+         multiple of a distance in price, which an inverse instrument's is not",
         instrument.id()
     );
     Ok(())
