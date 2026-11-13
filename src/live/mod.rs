@@ -1,9 +1,10 @@
 //! Runs the strategy on a Nautilus live node.
 //!
 //! Build step 3: paper, then live. One node per process. The clients are
-//! those of the instruments' live brokers, several if the instruments span
-//! several, which the venues module sets up (`venues::live_clients`). Each
-//! broker's data client serves the warmup of its instruments up to now.
+//! those of the instruments' live data sources, each the broker of its
+//! instruments too, several if the instruments span several, which the
+//! venues module sets up (`venues::live_clients`). Each source's data
+//! client serves the warmup of its instruments up to now.
 //! The node registers the catalog fill-catalog fills and backtests read:
 //! the warmup comes from it first, from the venues for what it lacks, and
 //! the answers of the clients that certify them are written back to it

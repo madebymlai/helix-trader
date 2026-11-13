@@ -116,7 +116,7 @@ impl IbClients {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::venues::{LiveBroker, tests::created_oms_type};
+    use crate::venues::{Broker, tests::created_oms_type};
 
     fn gateway() -> IbGateway {
         IbGateway {
@@ -142,7 +142,7 @@ mod tests {
 
         let created = created_oms_type(clients.into_node_clients());
 
-        assert_eq!(created, LiveBroker::Ib.oms_type());
+        assert_eq!(created, Broker::Ib.oms_type());
     }
 
     #[test]

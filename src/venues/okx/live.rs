@@ -338,7 +338,7 @@ mod tests {
     use nautilus_okx::OKXInstrumentType;
 
     use super::*;
-    use crate::venues::{LiveBroker, tests::created_oms_type};
+    use crate::venues::{Broker, tests::created_oms_type};
 
     fn xperp() -> InstrumentId {
         InstrumentId::from("BTC-USD_UM_XPERP-310328.OKX")
@@ -363,7 +363,7 @@ mod tests {
 
             let created = created_oms_type(clients.into_node_clients());
 
-            assert_eq!(created, LiveBroker::Okx.oms_type(), "{ids:?}");
+            assert_eq!(created, Broker::Okx.oms_type(), "{ids:?}");
         }
     }
 

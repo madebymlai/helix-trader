@@ -1,15 +1,18 @@
 //! The venues: each one's history, live clients and command-line settings
-//! in a module of its own, and the routing table, which says which history
-//! source fills an instrument's series (`HistorySource`) and which broker
-//! trades it live (`LiveBroker`), both by its venue. Everything else asks
-//! here and names no venue: fill-catalog for its fill (`fill_history`), the
-//! live runner for its node's clients (`live_clients`), a backtest for how a
-//! venue keeps positions (`oms_type`, its broker's answer), a trade whether
-//! its orders may be reduce-only and post-only
-//! (`takes_reduce_only_and_post_only`, its broker's answer); venue code checks
-//! its own instruments against the table. The settings each command takes of
-//! the venues are composed here, `LiveVenueArgs` for live and
-//! `HistoryVenueArgs` for fill-catalog, which the commands flatten.
+//! in a module of its own, and the routing table, a row per venue (`Row`)
+//! saying, each on its own, where its instruments' definitions
+//! (`DefinitionsSource`), history (`HistorySource`) and live data
+//! (`LiveDataSource`) come from, and which broker trades them (`Broker`), if
+//! one does. Everything else asks here and names no venue, each caller the
+//! row's part it needs: fill-catalog for its fill (`fill_history`: the
+//! definitions and history), the live runner for its node's clients
+//! (`live_clients`: the live data), a backtest for how a venue keeps
+//! positions (`oms_type`, its broker's answer), a trade whether its orders
+//! may be reduce-only and post-only (`takes_reduce_only_and_post_only`, its
+//! broker's answer); venue code checks its own instruments against the
+//! table. The settings each command takes of the venues are composed here,
+//! `LiveVenueArgs` for live and `HistoryVenueArgs` for fill-catalog, which
+//! the commands flatten.
 //!
 //! The cTrader brokers are one kind (`CTraderBroker`), which both dispatches
 //! loop over: each one's module names its venue and account, and its row of
@@ -100,7 +103,21 @@ fn ctrader_brokers_present(
         .collect()
 }
 
-/// The source of an instrument's history in the catalog.
+/// The source of a venue's instrument definitions in the catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DefinitionsSource {
+    /// OKX's public API, written into the catalog before the node starts
+    /// (`OkxHistory::write_definitions`).
+    Okx,
+    /// A cTrader broker's symbols.
+    CTrader(CTraderBroker),
+    /// Databento's `GLBX.MDP3` dataset.
+    Databento,
+    /// Interactive Brokers' contract details.
+    Ib,
+}
+
+/// The source of a venue's history in the catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HistorySource {
     /// OKX's public API, through Nautilus' OKX data client.
@@ -113,33 +130,30 @@ pub(crate) enum HistorySource {
     Ib,
 }
 
-/// The broker of an instrument on the live node: its data and execution
-/// clients.
+/// The source of a venue's live data on the live node: a data client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LiveBroker {
-    /// OKX's clients.
+pub(crate) enum LiveDataSource {
+    /// OKX's data client.
     Okx,
-    /// A cTrader broker's clients, on a hedging account.
+    /// A cTrader broker's data client.
     CTrader(CTraderBroker),
-    /// Interactive Brokers' clients, on the gateway.
+    /// Interactive Brokers' data client, on the gateway.
     Ib,
 }
 
-impl HistorySource {
-    /// The history source of `id`: its venue's row (see `row`).
-    #[must_use]
-    pub(crate) fn of(id: InstrumentId) -> Self {
-        row(id.venue).0
-    }
+/// The broker trading a venue's instruments: its execution client on the
+/// live node, whose account a backtest simulates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Broker {
+    /// OKX's execution client.
+    Okx,
+    /// A cTrader broker's execution client, on a hedging account.
+    CTrader(CTraderBroker),
+    /// Interactive Brokers' execution client, on the gateway.
+    Ib,
 }
 
-impl LiveBroker {
-    /// The live broker of `id`: its venue's row (see `row`).
-    #[must_use]
-    pub(crate) fn of(id: InstrumentId) -> Self {
-        row(id.venue).1
-    }
-
+impl Broker {
     /// How the broker's accounts keep positions. Nautilus answers this only
     /// on an execution client it has built, so this is a copy of its answer,
     /// each broker's pinned by a test creating that client through its
@@ -172,42 +186,81 @@ impl LiveBroker {
     }
 }
 
-/// The routing table's row of `venue`: its history source and its live
-/// broker. A venue of `CTRADER_BROKERS` has both from its broker. GLBX, CME
-/// Globex as Databento names it, has its history from Databento and its live
-/// broker in IB, Databento having no live clients here; every venue without
-/// a row of its own is IB's, history and live.
-fn row(venue: Venue) -> (HistorySource, LiveBroker) {
-    if venue == *OKX_VENUE {
-        (HistorySource::Okx, LiveBroker::Okx)
-    } else if let Some(&broker) = CTRADER_BROKERS
-        .iter()
-        .find(|broker| venue.as_str() == broker.venue)
-    {
-        (HistorySource::CTrader(broker), LiveBroker::CTrader(broker))
-    } else if venue == Venue::GLBX() {
-        (HistorySource::Databento, LiveBroker::Ib)
-    } else {
-        (HistorySource::Ib, LiveBroker::Ib)
+/// A venue's row of the routing table: where its instruments' definitions,
+/// history and live data come from, each on its own, and the broker
+/// trading them, if one does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Row {
+    definitions: DefinitionsSource,
+    history: HistorySource,
+    live_data: LiveDataSource,
+    broker: Option<Broker>,
+}
+
+impl Row {
+    /// The row of `venue`. A venue of `CTRADER_BROKERS` takes everything
+    /// from its broker, and OKX from OKX. GLBX, CME Globex as Databento
+    /// names it, takes its definitions and history from Databento and its
+    /// live data and orders from IB, Databento having no live clients
+    /// here; every venue without a row of its own takes everything from IB.
+    fn of(venue: Venue) -> Self {
+        if venue == *OKX_VENUE {
+            Self {
+                definitions: DefinitionsSource::Okx,
+                history: HistorySource::Okx,
+                live_data: LiveDataSource::Okx,
+                broker: Some(Broker::Okx),
+            }
+        } else if let Some(&broker) = CTRADER_BROKERS
+            .iter()
+            .find(|broker| venue.as_str() == broker.venue)
+        {
+            Self {
+                definitions: DefinitionsSource::CTrader(broker),
+                history: HistorySource::CTrader(broker),
+                live_data: LiveDataSource::CTrader(broker),
+                broker: Some(Broker::CTrader(broker)),
+            }
+        } else if venue == Venue::GLBX() {
+            Self {
+                definitions: DefinitionsSource::Databento,
+                history: HistorySource::Databento,
+                live_data: LiveDataSource::Ib,
+                broker: Some(Broker::Ib),
+            }
+        } else {
+            Self {
+                definitions: DefinitionsSource::Ib,
+                history: HistorySource::Ib,
+                live_data: LiveDataSource::Ib,
+                broker: Some(Broker::Ib),
+            }
+        }
     }
 }
 
-/// How the accounts of `venue` keep positions: as those of its live broker
-/// do (`LiveBroker::oms_type`), so every venue without a row of its own as
-/// IB's. A backtest's normal run simulates each venue so, as Nautilus' docs
-/// ask of a backtest venue.
+/// How the accounts of `venue` keep positions: as those of its broker do
+/// (`Broker::oms_type`), so every venue without a row of its own as IB's;
+/// a venue no broker trades as Nautilus' venue default
+/// (`OmsType::Unspecified`). A backtest's normal run simulates each venue
+/// so, as Nautilus' docs ask of a backtest venue.
 #[must_use]
 pub fn oms_type(venue: Venue) -> OmsType {
-    row(venue).1.oms_type()
+    Row::of(venue)
+        .broker
+        .map_or(OmsType::Unspecified, Broker::oms_type)
 }
 
-/// Whether the live broker of `venue` takes reduce-only and post-only
-/// orders (`LiveBroker::takes_reduce_only_and_post_only`), so every venue
-/// without a row of its own as IB. A trade asks it in a backtest as live,
-/// so that a backtest sends the orders live sends.
+/// Whether the broker of `venue` takes reduce-only and post-only orders
+/// (`Broker::takes_reduce_only_and_post_only`), so every venue without a
+/// row of its own as IB; a venue no broker trades takes none. A trade asks
+/// it in a backtest as live, so that a backtest sends the orders live
+/// sends.
 #[must_use]
 pub fn takes_reduce_only_and_post_only(venue: Venue) -> bool {
-    row(venue).1.takes_reduce_only_and_post_only()
+    Row::of(venue)
+        .broker
+        .is_some_and(Broker::takes_reduce_only_and_post_only)
 }
 
 /// The venues' settings of a live node, the live command's flags, each
@@ -228,9 +281,7 @@ pub struct HistoryVenueArgs {
 }
 
 /// The data client of a cTrader broker for a fill through the node (see
-/// `NodeFill::add`), on `connection`, loading `instrument_ids`. It names its
-/// venue, so Nautilus routes the broker's requests to it without a route of
-/// ours.
+/// `NodeFill::add`), on `connection`, loading `instrument_ids`.
 #[must_use]
 fn ctrader_node_client(
     connection: CTraderConnection,
@@ -240,7 +291,6 @@ fn ctrader_node_client(
     NodeClient {
         factory: Box::new(CTraderDataClientFactory::new(&config)),
         config: Box::new(config),
-        routing: RoutingConfig::default(),
     }
 }
 
@@ -278,7 +328,16 @@ fn add_ctrader_fill(
 fn of_source(slices: &[SeriesSlice], source: HistorySource) -> Vec<SeriesSlice> {
     slices
         .iter()
-        .filter(|slice| HistorySource::of(slice.slice.instrument_id) == source)
+        .filter(|slice| Row::of(slice.slice.instrument_id.venue).history == source)
+        .cloned()
+        .collect()
+}
+
+/// Those of `slices` whose contract `source` defines.
+fn of_definitions_source(slices: &[SeriesSlice], source: DefinitionsSource) -> Vec<SeriesSlice> {
+    slices
+        .iter()
+        .filter(|slice| Row::of(slice.slice.instrument_id.venue).definitions == source)
         .cloned()
         .collect()
 }
@@ -287,16 +346,20 @@ fn of_source(slices: &[SeriesSlice], source: HistorySource) -> Vec<SeriesSlice> 
 /// `requirements` reads over `[start, end]`, those its bars are built from
 /// and its ticks (see `DataRequirements::catalog_series`), each on a contract
 /// over its slice (`DataRequirements::slices`), every history source
-/// (`HistorySource`) given its slices. Databento's, the cTrader brokers' and
-/// OKX's fill through a Nautilus node (see `catalog::NodeFill`), by Databento's
-/// data client for GLBX instruments (the series declared, checked against the
-/// dataset's end before the node starts), each cTrader broker's for its own
+/// (`Row::of`, `HistorySource`) given its slices. Databento's, the cTrader
+/// brokers' and OKX's fill through a Nautilus node (see `catalog::NodeFill`),
+/// each request naming the client that answers it: Databento's data client
+/// for GLBX instruments (the series declared, checked against the dataset's
+/// end before the node starts), each cTrader broker's for its own
 /// (`add_ctrader_fill`) and OKX's for OKX instruments (their series and
-/// funding, their definitions written before the node starts). Then IB,
-/// connected only if it has instruments, on the client id of `venues`, fills
-/// the others, without a node until its client answers with response
-/// envelopes. The cTrader brokers and IB refuse a series they do not serve. A
-/// source with nothing missing reads no credential, IB's connection aside.
+/// funding). Then IB, connected only if it has instruments, on the client id
+/// of `venues`, fills the others, without a node until its client answers
+/// with response envelopes. Databento, the cTrader brokers and IB ask the
+/// definition of each contract they fill the series of, each row giving
+/// both to one source; OKX writes the definitions it gives
+/// (`DefinitionsSource`) before the node starts. The cTrader brokers and IB
+/// refuse a series they do not serve. A source with nothing missing reads no
+/// credential, IB's connection aside.
 ///
 /// # Errors
 ///
@@ -316,7 +379,7 @@ pub async fn fill_history(
     let (mut okx_ids, mut databento_ids, mut ctrader_ids, mut ib_ids) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for id in requirements.instrument_ids() {
-        match HistorySource::of(id) {
+        match Row::of(id.venue).history {
             HistorySource::Okx => okx_ids.push(id),
             HistorySource::Databento => databento_ids.push(id),
             HistorySource::CTrader(broker) => ctrader_ids.push((broker, id)),
@@ -347,11 +410,14 @@ pub async fn fill_history(
             &of_source(&slices, HistorySource::CTrader(broker)),
         )?;
     }
+    let okx_definitions = of_definitions_source(&slices, DefinitionsSource::Okx);
+    if !okx_definitions.is_empty() {
+        OkxHistory::default()
+            .write_definitions(&mut catalog, &okx_definitions)
+            .await?;
+    }
     if !okx_ids.is_empty() {
         let slices = of_source(&slices, HistorySource::Okx);
-        OkxHistory::default()
-            .write_definitions(&mut catalog, &slices)
-            .await?;
         let requests = okx::requests(&catalog, &slices)?;
         if !requests.is_empty() {
             node.add(okx::node_client(&okx_ids)?, &requests, okx::period);
@@ -409,11 +475,14 @@ fn ctrader_read(
 }
 
 /// The live node's clients of `instrument_ids`, those of each one's live
-/// broker (`LiveBroker`), for the instruments `requirements` reads: OKX's,
-/// each cTrader broker's (`ctrader_brokers_present`), then IB's. The cTrader
-/// brokers' bar types are checked and their environments and credential read
-/// before anything connects; OKX's clients are set up at `leverage`, the
-/// run's, IB's trading the IB account of `venues` with its client id.
+/// data source (`Row::of`, `LiveDataSource`), for the instruments
+/// `requirements` reads: OKX's, each cTrader broker's
+/// (`ctrader_brokers_present`), then IB's, each a data client with the
+/// execution client of the same adapter on its connection, every row taking
+/// its live data from its broker (`Broker`). The cTrader brokers' bar types
+/// are checked and their environments and credential read before anything
+/// connects; OKX's clients are set up at `leverage`, the run's, IB's trading
+/// the IB account of `venues` with its client id.
 ///
 /// # Errors
 ///
@@ -433,10 +502,10 @@ pub(crate) async fn live_clients(
 ) -> anyhow::Result<Vec<Clients>> {
     let (mut okx_ids, mut ctrader_ids, mut ib_ids) = (Vec::new(), Vec::new(), Vec::new());
     for &id in instrument_ids {
-        match LiveBroker::of(id) {
-            LiveBroker::Okx => okx_ids.push(id),
-            LiveBroker::CTrader(broker) => ctrader_ids.push((broker, id)),
-            LiveBroker::Ib => ib_ids.push(id),
+        match Row::of(id.venue).live_data {
+            LiveDataSource::Okx => okx_ids.push(id),
+            LiveDataSource::CTrader(broker) => ctrader_ids.push((broker, id)),
+            LiveDataSource::Ib => ib_ids.push(id),
         }
     }
     // Read before anything connects.
@@ -763,11 +832,7 @@ mod tests {
 
             let created = created_oms_type(ctrader_clients(demo_connection(broker), vec![id]));
 
-            assert_eq!(
-                created,
-                LiveBroker::CTrader(broker).oms_type(),
-                "{broker:?}"
-            );
+            assert_eq!(created, Broker::CTrader(broker).oms_type(), "{broker:?}");
         }
     }
 
@@ -1167,37 +1232,50 @@ mod tests {
         }
     }
 
+    /// GLBX takes its definitions and history from Databento and its live
+    /// data and orders from IB; OKX and each cTrader broker take all four
+    /// from themselves, and every other venue from IB.
     #[test]
     fn each_instrument_routes_to_the_row_of_its_venue() {
-        use HistorySource as H;
-        use LiveBroker as L;
-        for (id, history, live) in [
-            ("BTC-USDT-SWAP.OKX", H::Okx, L::Okx),
-            (
-                "XAUUSD.ICMARKETS",
-                H::CTrader(ic::BROKER),
-                L::CTrader(ic::BROKER),
-            ),
-            (
-                "XAUUSD.PEPPERSTONE",
-                H::CTrader(pepperstone::BROKER),
-                L::CTrader(pepperstone::BROKER),
-            ),
-            ("GCZ26.GLBX", H::Databento, L::Ib),
-            ("GC.GLBX", H::Databento, L::Ib),
-            ("GC.v.0.GLBX", H::Databento, L::Ib),
-            ("SXR8.IBIS", H::Ib, L::Ib),
-            ("ESZ26.CME", H::Ib, L::Ib),
-            ("GCZ26.XCEC", H::Ib, L::Ib),
-            ("EUR/USD.IDEALPRO", H::Ib, L::Ib),
-            ("BTC-USDT-SWAP.BINANCE", H::Ib, L::Ib),
+        let okx = Row {
+            definitions: DefinitionsSource::Okx,
+            history: HistorySource::Okx,
+            live_data: LiveDataSource::Okx,
+            broker: Some(Broker::Okx),
+        };
+        let ctrader = |broker| Row {
+            definitions: DefinitionsSource::CTrader(broker),
+            history: HistorySource::CTrader(broker),
+            live_data: LiveDataSource::CTrader(broker),
+            broker: Some(Broker::CTrader(broker)),
+        };
+        let glbx = Row {
+            definitions: DefinitionsSource::Databento,
+            history: HistorySource::Databento,
+            live_data: LiveDataSource::Ib,
+            broker: Some(Broker::Ib),
+        };
+        let ib = Row {
+            definitions: DefinitionsSource::Ib,
+            history: HistorySource::Ib,
+            live_data: LiveDataSource::Ib,
+            broker: Some(Broker::Ib),
+        };
+        for (id, row) in [
+            ("BTC-USDT-SWAP.OKX", okx),
+            ("XAUUSD.ICMARKETS", ctrader(ic::BROKER)),
+            ("XAUUSD.PEPPERSTONE", ctrader(pepperstone::BROKER)),
+            ("GCZ26.GLBX", glbx),
+            ("GC.GLBX", glbx),
+            ("GC.v.0.GLBX", glbx),
+            ("SXR8.IBIS", ib),
+            ("ESZ26.CME", ib),
+            ("GCZ26.XCEC", ib),
+            ("EUR/USD.IDEALPRO", ib),
+            ("BTC-USDT-SWAP.BINANCE", ib),
         ] {
             let id = InstrumentId::from(id);
-            assert_eq!(
-                (HistorySource::of(id), LiveBroker::of(id)),
-                (history, live),
-                "{id}"
-            );
+            assert_eq!(Row::of(id.venue), row, "{id}");
         }
     }
 }

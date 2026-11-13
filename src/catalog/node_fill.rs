@@ -9,17 +9,19 @@
 //! files among them, each asked once and closed by its write-back. A
 //! `NodeFill` gathers each source's data client with its requests and the
 //! source's period, and `run` builds a live node with those clients and the
-//! catalog, and an actor asking for one request at a time with
-//! `update_catalog`, each series by Nautilus' time-range pipeline
-//! (`time_range_generator`): the data engine asks for a window of the period
-//! at a time, serves what the catalog holds, asks the client for the rest and
-//! writes each answer back over its window. The actor waits for Nautilus'
-//! answer to each request (`on_data_response`) with no deadline of its own,
-//! as Nautilus' requests have none: each client the fill asks answers every
-//! request, a failed one with the failure in its response envelope, and one
-//! that never answered would hold the run until it is interrupted. The actor
-//! records the first failure (a failed request, a failure envelope) and stops
-//! the node; `run` returns it. See `README.md`, "Fill paths".
+//! catalog, and an actor asking for one request at a time, naming the client
+//! it was added with, which the data engine sends it to before any venue
+//! route (`DataEngine::get_client`), with `update_catalog`, each series by
+//! Nautilus' time-range pipeline (`time_range_generator`): the data engine
+//! asks for a window of the period at a time, serves what the catalog holds,
+//! asks the client for the rest and writes each answer back over its window.
+//! The actor waits for Nautilus' answer to each request (`on_data_response`)
+//! with no deadline of its own, as Nautilus' requests have none: each client
+//! the fill asks answers every request, a failed one with the failure in its
+//! response envelope, and one that never answered would hold the run until
+//! it is interrupted. The actor records the first failure (a failed request,
+//! a failure envelope) and stops the node; `run` returns it. See
+//! `README.md`, "Fill paths".
 
 use std::{cell::RefCell, collections::VecDeque, fmt, path::Path, rc::Rc};
 
@@ -33,13 +35,10 @@ use nautilus_common::{
     nautilus_actor,
 };
 use nautilus_core::{Params, UUID4, UnixNanos};
-use nautilus_live::{
-    builder::LiveNodeBuilder,
-    config::{LiveNodeConfig, RoutingConfig},
-};
+use nautilus_live::{builder::LiveNodeBuilder, config::LiveNodeConfig};
 use nautilus_model::{
     data::{BarType, NautilusDataType},
-    identifiers::{InstrumentId, TraderId},
+    identifiers::{ClientId, InstrumentId, TraderId},
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use serde_json::json;
@@ -209,13 +208,12 @@ fn at(ns: u64) -> Timestamp {
     Timestamp::from(UnixNanos::from(ns))
 }
 
-/// A source's data client for the node: its factory and config, and the
-/// venues Nautilus routes its requests to it by (none for a client naming
-/// its venue, as a cTrader broker's).
+/// A source's data client for the node: its factory and config. It takes
+/// no venue route: each request names the client it asks (see
+/// `NodeFill::add`), so two sources of one venue share a node.
 pub struct NodeClient {
     pub factory: Box<dyn DataClientFactory>,
     pub config: Box<dyn ClientConfig>,
-    pub routing: RoutingConfig,
 }
 
 /// The data clients of a fill through the node, and the requests asked of
@@ -226,11 +224,13 @@ pub struct NodeFill {
     requests: Vec<Asked>,
 }
 
-/// A request of the fill, and the period of the windows the data engine asks
-/// it in; a definition has none, being asked whole.
+/// A request of the fill, the client it names, and the period of the
+/// windows the data engine asks it in; a definition has none, being asked
+/// whole.
 #[derive(Debug, Clone, Copy)]
 struct Asked {
     request: FillRequest,
+    client: ClientId,
     period: Option<SignedDuration>,
 }
 
@@ -243,7 +243,10 @@ impl NodeFill {
 
     /// Adds `requests` (see `missing`), asked of `client`, each series in
     /// windows of `period(data)`: the most of it one answer holds, and one
-    /// write-back covers. A definition is asked whole. No request leaves the
+    /// write-back covers. A definition is asked whole. Each request names
+    /// the client by the name the node registers it under, its factory's,
+    /// which Nautilus' factories give the client they create, so the data
+    /// engine sends it there whatever its venue. No request leaves the
     /// client out of the node, so it never connects.
     pub fn add(
         &mut self,
@@ -254,9 +257,11 @@ impl NodeFill {
         if requests.is_empty() {
             return;
         }
+        let id = ClientId::new(client.factory.name());
         self.clients.push(client);
         self.requests.extend(requests.iter().map(|&request| Asked {
             request,
+            client: id,
             period: match request.data {
                 FillData::Instrument => None,
                 data => Some(period(data)),
@@ -308,12 +313,7 @@ impl NodeFill {
             .with_name("FILL")
             .with_delay_post_stop_secs(0);
         for client in clients {
-            builder = builder.add_data_client_with_routing(
-                None,
-                client.factory,
-                client.config,
-                client.routing,
-            )?;
+            builder = builder.add_data_client(None, client.factory, client.config)?;
         }
         let mut node = builder.build()?;
         let outcome = Rc::new(RefCell::new(Outcome::default()));
@@ -378,7 +378,7 @@ impl FillActor {
             return;
         };
         let request = asked.request;
-        log::info!("Asking for {request}");
+        log::info!("Asking {} for {request}", asked.client);
         self.rows = 0;
         match self.issue(asked) {
             Ok(id) => self.pending = Some((id, request)),
@@ -386,41 +386,47 @@ impl FillActor {
         }
     }
 
-    /// Sends `asked` to the data engine, with `update_catalog`, a series in
-    /// windows of its period.
+    /// Sends `asked` to the data engine, naming its client, with
+    /// `update_catalog`, a series in windows of its period.
     fn issue(&mut self, asked: Asked) -> anyhow::Result<UUID4> {
-        let request = asked.request;
-        let FillRequest {
-            data,
-            instrument_id,
-            from,
-            to,
-        } = request;
+        let Asked {
+            request:
+                FillRequest {
+                    data,
+                    instrument_id,
+                    from,
+                    to,
+                },
+            client,
+            period,
+        } = asked;
         let mut params = vec![("update_catalog".to_string(), json!(true))];
-        if let Some(period) = asked.period {
+        if let Some(period) = period {
             params.extend(time_range::params(from, to, period));
         }
         let params = Some(Params::new(params.into_iter().collect()));
-        let (from, to) = (Some(from), Some(to));
+        let (from, to, client) = (Some(from), Some(to), Some(client));
         match data {
-            FillData::Instrument => self.request_instrument(instrument_id, from, to, None, params),
-            FillData::Quotes => self.request_quotes(instrument_id, from, to, None, None, params),
-            FillData::Trades => self.request_trades(instrument_id, from, to, None, None, params),
+            FillData::Instrument => {
+                self.request_instrument(instrument_id, from, to, client, params)
+            }
+            FillData::Quotes => self.request_quotes(instrument_id, from, to, None, client, params),
+            FillData::Trades => self.request_trades(instrument_id, from, to, None, client, params),
             FillData::Depth => self.request_book_depth(
                 instrument_id,
                 from,
                 to,
                 None,
                 std::num::NonZeroUsize::new(DEPTH),
-                None,
+                client,
                 params,
             ),
             FillData::Deltas => {
-                self.request_book_deltas(instrument_id, from, to, None, None, params)
+                self.request_book_deltas(instrument_id, from, to, None, client, params)
             }
-            FillData::Bars(bar_type) => self.request_bars(bar_type, from, to, None, None, params),
+            FillData::Bars(bar_type) => self.request_bars(bar_type, from, to, None, client, params),
             FillData::Funding => {
-                self.request_funding_rates(instrument_id, from, to, None, None, params)
+                self.request_funding_rates(instrument_id, from, to, None, client, params)
             }
         }
     }
