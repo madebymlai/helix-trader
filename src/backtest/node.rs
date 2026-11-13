@@ -214,14 +214,17 @@ fn is_custom(series: &SeriesSlice) -> bool {
 /// type's identifier, over the run's window, both ends included: the data
 /// the node cannot load (see `run_config`). Nautilus decodes each type by
 /// its name, so each must be registered with Nautilus before the run
-/// (`nautilus_serialization::ensure_custom_data_registered`) by the code
-/// declaring its series, as the tests do: the run registers none.
+/// (`nautilus_serialization::ensure_custom_data_registered`): the run
+/// registers those the venues' sources serve, LSE's rows
+/// (`venues::register_custom_data`), and the code declaring another type's
+/// series registers it, as the tests do.
 ///
 /// # Errors
 ///
 /// Returns an error if the series cannot be worked out, or if the catalog
 /// cannot be read or a stored type is not registered, naming the series.
 pub(super) fn custom_data(backtest: &Backtest) -> anyhow::Result<Vec<Data>> {
+    venues::register_custom_data();
     let mut catalog = ParquetDataCatalog::new(&backtest.catalog, None, None, None, None);
     let mut data = Vec::new();
     for data_type in &backtest.custom {
