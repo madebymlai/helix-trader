@@ -160,8 +160,8 @@ where
 
 /// How often Nautilus purges the cache of closed orders, closed positions
 /// and account events older than `PURGE_AFTER_MINS`, a week; never an open
-/// order or position. Memory only: Nautilus' Rust node refuses
-/// `purge_from_database`, so Redis keeps them.
+/// order or position. Memory only: `purge_from_database` stays at
+/// Nautilus' default, off, so Redis keeps them.
 const PURGE_INTERVAL_MINS: u32 = 60;
 const PURGE_AFTER_MINS: u32 = 7 * 24 * 60;
 
