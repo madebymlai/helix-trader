@@ -22,7 +22,7 @@ use nautilus_model::{
 use nautilus_network::http::Url;
 use sha2::{Digest, Sha256};
 
-pub use self::socket::{MockLseSocket, SocketAction, data_ws_answer};
+pub use self::socket::{MockLseSocket, SocketAction, data_ws_answer, socket_answer};
 
 mod socket;
 
@@ -51,6 +51,21 @@ pub const GOLD_SPOT_MINUTES: &[u8] =
 /// `[2026-10-21T00:00:00Z, 2026-10-21T12:00:00Z)`, as LSE exported them:
 /// three candles, stamped at their open.
 pub const GOLD_FUTURES_4H: &[u8] = include_bytes!("../test_data/export_gold_futures_4h.parquet");
+/// A series of each other derived market, as LSE exported it on 13
+/// November 2026 (`test_data/README.md`): the trade slices of `AAPL` in
+/// `us_stocks` over `[2026-11-12T15:00:00Z, 15:00:01Z)`, 54 trades, of
+/// `VOD` in `uk_stocks` over `[10:00:00Z, 10:01:00Z)`, 9 trades, of `RY`
+/// in `ca_stocks` over `[15:00:00Z, 15:01:00Z)`, 23 trades, and of
+/// `BTCUSDT` in `crypto` over `[10:00:00Z, 10:00:01Z)`, 36 trades; and
+/// the 1-minute candles of `EUR_USD` in `forex` over `[10:00Z, 10:05Z)`
+/// and of `SPX` in `indices` over `[15:00Z, 15:05Z)`, five each, stamped
+/// at their open, of no volume.
+pub const AAPL_TRADES: &[u8] = include_bytes!("../test_data/export_aapl_us_stocks_tick.parquet");
+pub const VOD_TRADES: &[u8] = include_bytes!("../test_data/export_vod_uk_stocks_tick.parquet");
+pub const RY_TRADES: &[u8] = include_bytes!("../test_data/export_ry_ca_stocks_tick.parquet");
+pub const BTCUSDT_TRADES: &[u8] = include_bytes!("../test_data/export_btcusdt_crypto_tick.parquet");
+pub const EUR_USD_MINUTES: &[u8] = include_bytes!("../test_data/export_eur_usd_forex_1m.parquet");
+pub const SPX_MINUTES: &[u8] = include_bytes!("../test_data/export_spx_indices_1m.parquet");
 /// LSE's refusals, captured with the free key, but the calls a minute and
 /// the quotas, which are LSE's documented answers, and the export too wide,
 /// captured with the CME key (`test_data/README.md`).
@@ -134,6 +149,22 @@ pub const WS_LIMIT_REACHED: &str = include_str!("../test_data/ws_error_limit_rea
 pub const WS_TOO_MANY_CONNECTIONS: &str =
     include_str!("../test_data/ws_error_too_many_connections.json");
 pub const WS_INVALID_KEY: &str = include_str!("../test_data/ws_error_invalid_key.json");
+
+/// LSE's sockets' frames, captured with the free key from 22:09 to 22:16
+/// UTC on 13 November 2026 (`test_data/README.md`): each socket's
+/// authenticated frame, its list trimmed, and the first tick, LSE's last,
+/// after the subscription of a series of each market the tests stream
+/// there. data-ws's list is trimmed to `GOLD.F`, `AAPL`, `BRK.B`,
+/// `EUR/USD`, `XAU/USD`, `SPX.IDX` and `BTC/USD`, which it lists and of
+/// which it sent only a tick of 8 November, crypto streaming on london-ws
+/// since; london-ws's to its UK stocks and crypto; tsx-ws's to its
+/// Canadian stocks, `NVDA.TO` alone, although it streamed `RY.TO` too.
+pub const WS_AUTHENTICATED_DATA: &str = include_str!("../test_data/ws_authenticated_data.json");
+pub const WS_TICKS_DATA: &str = include_str!("../test_data/ws_ticks_data.jsonl");
+pub const WS_AUTHENTICATED_LONDON: &str = include_str!("../test_data/ws_authenticated_london.json");
+pub const WS_TICKS_LONDON: &str = include_str!("../test_data/ws_ticks_london.jsonl");
+pub const WS_AUTHENTICATED_TSX: &str = include_str!("../test_data/ws_authenticated_tsx.json");
+pub const WS_TICKS_TSX: &str = include_str!("../test_data/ws_ticks_tsx.jsonl");
 
 /// The export id LSE sends with a file (`x-export-id`), the one it gave
 /// `GOLD_TRADES`; the peer sends it with every file.
