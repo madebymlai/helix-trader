@@ -25,6 +25,7 @@ mod backtest_ema_entries;
 mod backtest_ema_exits;
 mod backtest_ema_overlap;
 mod backtest_ema_time_exit;
+mod backtest_failed_run;
 mod backtest_features;
 mod backtest_golden_rows;
 mod backtest_ic_hedging;
