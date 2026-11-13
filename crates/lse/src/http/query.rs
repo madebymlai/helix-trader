@@ -44,9 +44,10 @@ impl Serialize for Timeframe {
 /// A width of LSE's candles, as the bar specification of Nautilus' it is:
 /// LSE's `1s` is `1-SECOND-LAST`, its `4h` `4-HOUR-LAST`, below a day, the
 /// widths whose candles LSE stamps on a grid from 1970. LSE's daily, weekly
-/// and monthly candles follow exchange sessions instead, each stamped at
-/// its first traded minute and folded from the sessions inside the dates
-/// asked, so none is one.
+/// and monthly candles are none: LSE stamps each at its session's first
+/// traded minute and gives no close, and builds them from its minute bars,
+/// so a bar of those widths is declared from a shorter LSE candle, which
+/// Nautilus aggregates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CandleWidth(BarSpecification);
 
@@ -57,7 +58,8 @@ impl CandleWidth {
     /// # Errors
     ///
     /// Returns an error naming `bar_type` if its bars are not those of
-    /// LSE's candles.
+    /// LSE's candles; for daily, weekly and monthly bars, saying why and
+    /// that the bar is declared from a shorter LSE candle instead.
     pub(crate) fn of(bar_type: BarType) -> anyhow::Result<Self> {
         let spec = bar_type.spec();
         ensure!(
@@ -73,9 +75,10 @@ impl CandleWidth {
             BarAggregation::Day | BarAggregation::Week | BarAggregation::Month
         ) {
             bail!(
-                "{bar_type}: LSE's daily, weekly and monthly candles follow exchange sessions, \
-                 each stamped at its first traded minute, so their close is not known; \
-                 LSE's candles are served from 1-SECOND to 4-HOUR"
+                "{bar_type}: LSE stamps its daily, weekly and monthly candles at their \
+                 session's first traded minute and gives no close, and builds them from its \
+                 minute bars; declare the bar from a shorter LSE candle (1-MINUTE or 4-HOUR \
+                 EXTERNAL) instead, which Nautilus aggregates"
             );
         }
         ensure!(
