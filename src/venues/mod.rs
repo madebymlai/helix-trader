@@ -132,7 +132,8 @@ pub(crate) enum DefinitionsSource {
     Okx,
     /// A cTrader broker's symbols.
     CTrader(CTraderBroker),
-    /// Databento's `GLBX.MDP3` dataset.
+    /// Databento's datasets: `GLBX.MDP3` of `GLBX`'s, `OPRA.PILLAR` of
+    /// `OPRA`'s.
     Databento,
     /// Interactive Brokers' contract details.
     Ib,
@@ -264,7 +265,10 @@ impl Row {
     /// from its broker, and OKX from OKX. GLBX, CME Globex as Databento
     /// names it, takes its definitions from Databento, LSE publishing
     /// none, its history and live data from LSE's CME Globex, and its
-    /// orders from IB. LSEDGE,
+    /// orders from IB; OPRA, US options as Databento names them, its
+    /// definitions from Databento, its history from LSE's US options, and
+    /// its live data and orders from IB, the adapter streaming no options
+    /// yet. LSEDGE,
     /// LSE's own series, takes its definitions from the catalog alone, its
     /// history and live data from LSE, and has no broker: LSE trades
     /// nothing. Every venue without a row of its own takes everything from
@@ -281,6 +285,7 @@ impl Row {
             //                    definitions   history       live data  broker
             "OKX"    => Self::new(D::Okx,       H::Okx,       L::Okx,    Some(B::Okx)),
             "GLBX"   => Self::new(D::Databento, H::Lse,       L::Lse,    Some(B::Ib)),
+            "OPRA"   => Self::new(D::Databento, H::Lse,       L::Ib,     Some(B::Ib)),
             "LSEDGE" => Self::new(D::Catalog,   H::Lse,       L::Lse,    None),
             _        => Self::new(D::Ib,        H::Ib,        L::Ib,     Some(B::Ib)),
         }
@@ -470,16 +475,17 @@ fn of_definitions_source(slices: &[SeriesSlice], source: DefinitionsSource) -> V
 /// through a Nautilus node (see `catalog::NodeFill`), each request naming
 /// the client that answers it: each cTrader broker's data client for its
 /// own instruments (`add_ctrader_fill`), OKX's for OKX instruments (their
-/// series and funding) and LSE's for LSEDGE and GLBX instruments and LSE's
-/// rows (`lse::add_fill`). Then IB, connected only if it has instruments,
-/// on the client id of `venues`, fills the others, without a node until
-/// its client answers with response envelopes. Each contract's definition
-/// comes from its row's definitions source (`DefinitionsSource`): the
-/// cTrader brokers and IB ask the definition of each contract they fill
-/// the series of; OKX writes the definitions it gives before the node
-/// starts; GLBX's are asked of Databento's data client in LSE's fill, after
-/// a check against the dataset's end; LSEDGE's are the catalog's alone,
-/// which the data engine answers LSE's client's definition requests from.
+/// series and funding) and LSE's for LSEDGE, GLBX and OPRA instruments and
+/// LSE's rows (`lse::add_fill`). Then IB, connected only if it has
+/// instruments, on the client id of `venues`, fills the others, without a
+/// node until its client answers with response envelopes. Each contract's
+/// definition comes from its row's definitions source
+/// (`DefinitionsSource`): the cTrader brokers and IB ask the definition of
+/// each contract they fill the series of; OKX writes the definitions it
+/// gives before the node starts; GLBX's and OPRA's are asked of
+/// Databento's data client in LSE's fill, after a check against the end of
+/// each one's dataset; LSEDGE's are the catalog's alone, which the data
+/// engine answers LSE's client's definition requests from.
 /// The cTrader brokers, LSE and IB refuse a series they do not serve. A
 /// source with nothing missing reads no credential, IB's connection aside.
 ///
@@ -1476,10 +1482,11 @@ mod tests {
     }
 
     /// GLBX takes its definitions from Databento, its history and live data
-    /// from LSE and its orders from IB; OKX and each cTrader broker take all
-    /// four from themselves; LSEDGE its definitions from the catalog and its
-    /// history and live data from LSE, with no broker; and every other
-    /// venue all four from IB.
+    /// from LSE and its orders from IB; OPRA its definitions from Databento,
+    /// its history from LSE and its live data and orders from IB; OKX and
+    /// each cTrader broker take all four from themselves; LSEDGE its
+    /// definitions from the catalog and its history and live data from LSE,
+    /// with no broker; and every other venue all four from IB.
     #[test]
     fn each_instrument_routes_to_the_row_of_its_venue() {
         let okx = Row {
@@ -1494,11 +1501,17 @@ mod tests {
             live_data: LiveDataSource::CTrader(broker),
             broker: Some(Broker::CTrader(broker)),
         };
+        // An exchange's listings, under the ids Databento gives them: CME
+        // Globex's streamed from LSE, US options' from IB.
         let glbx = Row {
             definitions: DefinitionsSource::Databento,
             history: HistorySource::Lse,
             live_data: LiveDataSource::Lse,
             broker: Some(Broker::Ib),
+        };
+        let opra = Row {
+            live_data: LiveDataSource::Ib,
+            ..glbx
         };
         let ib = Row {
             definitions: DefinitionsSource::Ib,
@@ -1521,6 +1534,7 @@ mod tests {
             ("GCZ26.GLBX", glbx),
             ("GC.GLBX", glbx),
             ("GC.v.0.GLBX", glbx),
+            ("AAPL  261120C00355000.OPRA", opra),
             ("SXR8.IBIS", ib),
             ("ESZ26.CME", ib),
             ("GCZ26.XCEC", ib),
@@ -1534,13 +1548,14 @@ mod tests {
 
     /// GLBX's data from LSE's client and its orders through IB's, which
     /// loads its contracts; LSEDGE's data from LSE's alone; every other
-    /// venue's from its broker's.
+    /// venue's, OPRA's among them, from its broker's.
     #[test]
     fn each_instrument_goes_to_the_clients_of_its_live_data_and_of_its_broker() {
         let routes = LiveRoutes::of(&[
             InstrumentId::from("GCZ26.GLBX"),
             InstrumentId::from("GOLD-FUTURES.LSEDGE"),
             InstrumentId::from("SXR8.IBIS"),
+            InstrumentId::from("AAPL  261120C00355000.OPRA"),
             InstrumentId::from("BTC-USDT-SWAP.OKX"),
             InstrumentId::from("XAUUSD.ICMARKETS"),
         ]);
@@ -1556,7 +1571,8 @@ mod tests {
                 ],
                 ib: vec![
                     InstrumentId::from("GCZ26.GLBX"),
-                    InstrumentId::from("SXR8.IBIS")
+                    InstrumentId::from("SXR8.IBIS"),
+                    InstrumentId::from("AAPL  261120C00355000.OPRA")
                 ],
             }
         );
@@ -1672,6 +1688,7 @@ mod tests {
             ("XAUUSD.ICMARKETS", "ICMARKETS"),
             ("XAUUSD.PEPPERSTONE", "PEPPERSTONE"),
             ("GCZ26.GLBX", "IB"),
+            ("AAPL  261120C00355000.OPRA", "IB"),
             ("SXR8.IBIS", "IB"),
             ("GOLD-FUTURES.LSEDGE", "LSE"),
         ] {

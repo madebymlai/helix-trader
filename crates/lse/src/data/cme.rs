@@ -44,11 +44,7 @@ use nautilus_model::{
 };
 
 use crate::{
-    common::{
-        consts::{CME_STREAM_URL, LSE_CME_API_KEY},
-        credential::LseCredential,
-        symbol::CmeContract,
-    },
+    common::{consts::LSE_CME_API_KEY, credential::LseCredential, symbol::CmeContract},
     http::{client::LseHttpClient, listing::CmeListings},
     websocket::cme::client::{CmeStreamClient, CmeWsMessage},
 };
@@ -98,8 +94,8 @@ pub(super) struct CmeStreams {
     /// The CME key and LSE's API on it; none if the client has no CME key.
     access: Option<CmeAccess>,
     listings: Arc<CmeListings>,
-    /// The stream's address, if not LSE's own.
-    url: Option<String>,
+    /// The stream's address.
+    url: String,
     /// The contracts the config streams, which `open` subscribes.
     streamed: Vec<CmeContract>,
     client: Option<CmeStreamClient>,
@@ -114,8 +110,8 @@ pub(super) struct CmeStreams {
 }
 
 impl CmeStreams {
-    /// The streams of `streamed`, on `access`, the CME key, looking each
-    /// contract up in `listings`; none open.
+    /// The streams of `streamed` at `url`, on `access`, the CME key, looking
+    /// each contract up in `listings`; none open.
     ///
     /// # Errors
     ///
@@ -125,7 +121,7 @@ impl CmeStreams {
         streamed: Vec<CmeContract>,
         access: Option<CmeAccess>,
         listings: Arc<CmeListings>,
-        url: Option<String>,
+        url: String,
         data_sender: EventSender<DataEvent>,
         clock: &'static AtomicTime,
     ) -> anyhow::Result<Self> {
@@ -188,8 +184,8 @@ impl CmeStreams {
             symbols.push(listing.symbol);
         }
         let (out_tx, out) = tokio::sync::mpsc::unbounded_channel();
-        let url = self.url.as_deref().unwrap_or(CME_STREAM_URL);
-        let client = CmeStreamClient::connect(url, &access.credential, &symbols, out_tx).await?;
+        let client =
+            CmeStreamClient::connect(&self.url, &access.credential, &symbols, out_tx).await?;
         self.client = Some(client);
         if let Err(e) = self.spawn_records(out) {
             self.close().await?;

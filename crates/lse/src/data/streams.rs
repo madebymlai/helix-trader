@@ -70,10 +70,11 @@ pub(super) struct LseStreams {
     /// The LSE key, which the sockets take; none if no instrument is
     /// streamed.
     credential: Option<LseCredential>,
-    /// The address of every socket, if not LSE's own.
-    url: Option<String>,
     /// Each instrument streamed, with its socket and its symbol there.
     streamed: Vec<(InstrumentId, LseSocket, String)>,
+    /// The sockets of the instruments streamed, in the order first named,
+    /// each with its address.
+    urls: Vec<(LseSocket, String)>,
     sockets: AHashMap<LseSocket, LseWebSocketClient>,
     quoted: QuotedBySymbol,
     /// The tasks turning each socket's ticks into quotes.
@@ -115,13 +116,16 @@ impl LseStreams {
                     streamed.push((id, socket, symbol));
                 }
                 LseInstrument::Cme(contract) => contracts.push(contract),
+                LseInstrument::Opra(_) => {
+                    bail!("streaming {id}: LSE's US option contracts stream nowhere here yet")
+                }
             }
         }
         let cme = CmeStreams::new(
             contracts,
             cme,
             listings,
-            config.base_url_ws_cme.clone(),
+            config.cme_stream_url().to_owned(),
             data_sender.clone(),
             clock,
         )?;
@@ -135,10 +139,16 @@ impl LseStreams {
                     .join(", ")
             );
         }
+        let mut urls: Vec<(LseSocket, String)> = Vec::new();
+        for &(_, socket, _) in &streamed {
+            if !urls.iter().any(|(of, _)| *of == socket) {
+                urls.push((socket, config.ws_url(socket).to_owned()));
+            }
+        }
         Ok(Self {
             credential,
-            url: config.base_url_ws.clone(),
             streamed,
+            urls,
             sockets: AHashMap::new(),
             quoted: Arc::default(),
             tasks: TaskGroup::new(),
@@ -167,14 +177,8 @@ impl LseStreams {
                 .start_generation()
                 .map_err(|e| anyhow::anyhow!("reopening the LSE tick tasks: {e}"))?;
         }
-        let mut sockets: Vec<LseSocket> = Vec::new();
-        for (_, socket, _) in &self.streamed {
-            if !sockets.contains(socket) {
-                sockets.push(*socket);
-            }
-        }
-        for socket in sockets {
-            if let Err(e) = self.open_socket(socket).await {
+        for (socket, url) in self.urls.clone() {
+            if let Err(e) = self.open_socket(socket, &url).await {
                 self.close().await?;
                 return Err(e);
             }
@@ -186,10 +190,9 @@ impl LseStreams {
         Ok(())
     }
 
-    async fn open_socket(&mut self, socket: LseSocket) -> anyhow::Result<()> {
+    async fn open_socket(&mut self, socket: LseSocket, url: &str) -> anyhow::Result<()> {
         let name = socket.name();
         let (out_tx, out) = tokio::sync::mpsc::unbounded_channel();
-        let url = self.url.as_deref().unwrap_or(socket.url());
         let credential = self
             .credential
             .as_ref()

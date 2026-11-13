@@ -14,7 +14,8 @@ use super::consts::{LSE_API_KEY, LSE_CME_API_KEY};
 /// is asked with its product's key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum LseProduct {
-    /// LSE's own markets, the derived ones: the LSE key, `LSE_API_KEY`.
+    /// LSE's own markets, the derived ones and US options, an included
+    /// market: the LSE key, `LSE_API_KEY`.
     Global,
     /// CME Globex (`cme`): a CME Group plan's key, `LSE_CME_API_KEY`.
     Cme,

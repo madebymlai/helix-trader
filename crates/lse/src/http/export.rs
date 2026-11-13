@@ -1,6 +1,7 @@
 //! An export over any span, as LSE serves exports: asked a UTC day an
-//! export, an export LSE refuses as too wide asked again in halves, and the
-//! span LSE has not loaded yet told apart from one it holds no row of.
+//! export, a book or orders a UTC hour (`ExportQuery::longest_span`), an
+//! export LSE refuses as too wide asked again in halves, and the span LSE
+//! has not loaded yet told apart from one it holds no row of.
 //!
 //! LSE stores a UTC day after it ends, the morning after (LSE's API docs,
 //! "The newest date": the trades, quotes and candles of a day are loaded
@@ -10,7 +11,7 @@
 //! traded in them)", `test_data/`). So the current UTC day is not loaded,
 //! whatever LSE answers; the day before is once LSE answers rows of it;
 //! and an earlier day LSE holds no row of had none. A day's export that
-//! takes the next day's first instant (see `utc_days`) reaches into that
+//! takes the next day's first instant (see `pieces`) reaches into that
 //! day too, LSE answering no rows of it apart. The data client holds a
 //! reference collection's dates to the same rule (`loaded`): LSE stores
 //! them the morning after too (its catalogue, read on 13 November 2026:
@@ -40,11 +41,13 @@ pub(crate) struct Exported {
     pub(crate) unloaded_from: Option<Timestamp>,
 }
 
-/// The files of the export `query`, asked a UTC day an export, one at a
-/// time; each day LSE refuses as too wide (`export-too-wide`) is asked
-/// again in halves, and each half while LSE refuses it, down to a second.
-/// With them, where the span LSE has not loaded as of `now` starts, if
-/// `query` reaches into it (see the module's doc).
+/// The files of the export `query`, asked a UTC day an export, or an hour
+/// of a book or orders (`ExportQuery::longest_span`), one at a time; each
+/// export LSE refuses as too wide (`export-too-wide`) is asked again in
+/// halves, and each half while LSE refuses it, down to a second. With them,
+/// where the span LSE has not loaded as of `now` starts, if `query` reaches
+/// into it (see the module's doc), a day's rows being those of any of its
+/// exports.
 ///
 /// # Errors
 ///
@@ -58,8 +61,11 @@ pub(crate) async fn fetch(
 ) -> anyhow::Result<Exported> {
     let mut files = Vec::new();
     let mut unloaded_from = None;
-    for day in utc_days(query) {
-        let day_files = fetch_halving(http, day.clone()).await?;
+    for day in pieces(query, DAY) {
+        let mut day_files = Vec::new();
+        for export in pieces(&day, day.longest_span()) {
+            day_files.extend(fetch_halving(http, export).await?);
+        }
         let (from, to) = day.window();
         let last = to - INSTANT;
         if unloaded_from.is_none() {
@@ -104,27 +110,28 @@ async fn fetch_halving(
     Ok(files)
 }
 
-/// `query` as the UTC days its span crosses, each over its part of the
-/// span, in time order. A span ending an instant past a midnight, as a
-/// closed window of the data engine's ending at that midnight is asked
-/// (`[start, end]` as `[start, end + 1 ns)`, as Nautilus' Databento client
-/// asks one), has that instant asked in the day before's export, LSE
-/// serving exports across midnight, rather than in an export of its own.
-fn utc_days(query: &ExportQuery) -> Vec<ExportQuery> {
+/// `query` as the spans of `unit` from 1970 its span crosses, UTC days or
+/// hours, each over its part of the span, in time order. A span ending an
+/// instant past the end of one, as a closed window of the data engine's
+/// ending at a midnight is asked (`[start, end]` as `[start, end + 1 ns)`,
+/// as Nautilus' Databento client asks one), has that instant asked in the
+/// one before's export, LSE serving exports across midnight, rather than
+/// in an export of its own.
+fn pieces(query: &ExportQuery, unit: SignedDuration) -> Vec<ExportQuery> {
     let (start, end) = query.window();
-    let mut days = Vec::new();
+    let mut pieces = Vec::new();
     let mut from = start;
     while from < end {
-        let next = midnight(from) + DAY;
+        let next = floor(from, unit) + unit;
         let to = if end.duration_since(next) <= INSTANT {
             end
         } else {
             next
         };
-        days.push(query.over(from, to));
+        pieces.push(query.over(from, to));
         from = to;
     }
-    days
+    pieces
 }
 
 /// Whether LSE has loaded the UTC day of `time` as of `now`, given whether
@@ -140,8 +147,14 @@ pub(crate) fn loaded(time: Timestamp, rows: bool, now: Timestamp) -> bool {
 
 /// The start of the UTC day of `time`.
 pub(crate) fn midnight(time: Timestamp) -> Timestamp {
-    Timestamp::from_second(time.as_second().div_euclid(86_400) * 86_400)
-        .expect("a midnight of a timestamp is one")
+    floor(time, DAY)
+}
+
+/// The start of the span of `unit` from 1970 that `time` falls in.
+fn floor(time: Timestamp, unit: SignedDuration) -> Timestamp {
+    let (nanos, unit) = (time.as_nanosecond(), unit.as_nanos());
+    Timestamp::from_nanosecond(nanos - nanos.rem_euclid(unit))
+        .expect("the start of a span at or before a timestamp is one")
 }
 
 #[cfg(test)]
@@ -149,6 +162,7 @@ mod tests {
     use std::num::NonZeroU32;
 
     use nautilus_core::string::secret::SecretString;
+    use rstest::rstest;
 
     use super::*;
     use crate::{
@@ -159,7 +173,7 @@ mod tests {
         http::{client::LseHttpClient, query::Rows},
         testing::{
             API_KEY, DATA_UNAVAILABLE, DATA_UNAVAILABLE_TODAY, EXPORT_ID, EXPORT_TOO_WIDE,
-            GOLD_TRADES, MockLse, Reply,
+            GCZ26_PAIR_ID, GOLD_TRADES, MockLse, Reply,
         },
     };
 
@@ -379,6 +393,83 @@ mod tests {
         let exported = fetch(&client(&lse), &query, at(ON_THE_22ND)).await.unwrap();
 
         assert!(exported.files.is_empty());
+        assert_eq!(exported.unloaded_from, Some(at("2026-10-21T10:00:00Z")));
+    }
+
+    /// GCZ6's `rows` over `[from, to)`, by its listing.
+    fn gcz6(rows: Rows, from: &str, to: &str) -> ExportQuery {
+        ExportQuery::listing("cme", GCZ26_PAIR_ID, rows, at(from), at(to))
+    }
+
+    /// LSE's docs ask for an hour or less of a busy contract's book or
+    /// orders at a time ("The market: cme").
+    #[rstest]
+    #[case::book(Rows::Book)]
+    #[case::orders(Rows::Orders)]
+    #[tokio::test]
+    async fn a_book_or_orders_export_is_asked_a_utc_hour_at_a_time(#[case] rows: Rows) {
+        let lse = MockLse::start(vec![Reply::file(GOLD_TRADES); 3]);
+        let query = gcz6(rows, "2026-10-21T10:30:00Z", "2026-10-21T12:15:00Z");
+
+        let exported = fetch(&client(&lse), &query, at(LONG_AFTER)).await.unwrap();
+
+        assert_eq!(
+            asked(&lse),
+            [
+                span("2026-10-21T10:30:00Z", "2026-10-21T11:00:00Z"),
+                span("2026-10-21T11:00:00Z", "2026-10-21T12:00:00Z"),
+                span("2026-10-21T12:00:00Z", "2026-10-21T12:15:00Z"),
+            ]
+        );
+        assert_eq!(exported.files.len(), 3);
+    }
+
+    /// A closed window ending at an hour, `[start, end]` asked as `[start,
+    /// end + 1 ns)`: the hour's instant is asked in the hour before's
+    /// export.
+    #[tokio::test]
+    async fn a_book_span_ending_an_instant_past_an_hour_is_one_export_through_it() {
+        let lse = MockLse::start(vec![Reply::file(GOLD_TRADES)]);
+        let query = gcz6(
+            Rows::Book,
+            "2026-10-21T10:00:00Z",
+            "2026-10-21T11:00:00.000000001Z",
+        );
+
+        fetch(&client(&lse), &query, at(LONG_AFTER)).await.unwrap();
+
+        assert_eq!(
+            asked(&lse),
+            [span(
+                "2026-10-21T10:00:00Z",
+                "2026-10-21T11:00:00.000000001Z"
+            )]
+        );
+    }
+
+    /// The day before is loaded once LSE answers rows of it, in any of its
+    /// hours: the first hour asked holds none, the second some.
+    #[tokio::test]
+    async fn the_day_before_is_loaded_once_lse_answers_rows_of_any_hour_of_it() {
+        let lse = MockLse::start(vec![
+            Reply::refusal(404, DATA_UNAVAILABLE),
+            Reply::file(GOLD_TRADES),
+        ]);
+        let query = gcz6(Rows::Book, "2026-10-21T10:00:00Z", "2026-10-21T12:00:00Z");
+
+        let exported = fetch(&client(&lse), &query, at(ON_THE_22ND)).await.unwrap();
+
+        assert_eq!(lse.calls().len(), 2);
+        assert_eq!(exported.unloaded_from, None);
+    }
+
+    #[tokio::test]
+    async fn the_day_before_is_not_loaded_while_lse_answers_no_rows_of_any_hour_of_it() {
+        let lse = MockLse::start(vec![Reply::refusal(404, DATA_UNAVAILABLE); 2]);
+        let query = gcz6(Rows::Orders, "2026-10-21T10:00:00Z", "2026-10-21T12:00:00Z");
+
+        let exported = fetch(&client(&lse), &query, at(ON_THE_22ND)).await.unwrap();
+
         assert_eq!(exported.unloaded_from, Some(at("2026-10-21T10:00:00Z")));
     }
 

@@ -13,7 +13,10 @@ use nautilus_model::{
 };
 use serde::{Serialize, Serializer, ser::SerializeMap};
 
-use crate::common::symbol::LseSymbol;
+use crate::common::{
+    consts::US_OPTIONS_MARKET,
+    symbol::{LseSymbol, OpraContract},
+};
 
 /// The candle widths LSE serves below a day, by unit: its letter, and the
 /// steps of it LSE serves (LSE's docs, "The selection", `timeframe`).
@@ -26,18 +29,27 @@ const CANDLE_WIDTHS: [(BarAggregation, char, &[usize]); 3] = [
 /// What an export's rows are, and the parameter that selects them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rows {
-    /// The tick slice of a derived market, its trades, `time, price, size,
-    /// kind` (`timeframe=tick`).
+    /// The tick slice of a derived market or of US options, `time, price,
+    /// size, kind` (`timeframe=tick`): its trades, or an index's values, of
+    /// no size.
     TradeSlice,
     /// Candles, `time, open, high, low, close, volume, trades`, each
     /// stamped at its open (`timeframe=5m`, LSE's name of the width).
     Candles(CandleWidth),
-    /// The trades of an exchange market, `time, price, size, kind`
-    /// (`data=trades`).
+    /// The trades of a paid exchange market, CME Globex or Nasdaq
+    /// TotalView, `time, price, size, kind` (`data=trades`), which US
+    /// options, an included market, serve as their tick slice alone.
     Trades,
     /// The quotes of an exchange market, `time, bid_price, ask_price,
     /// bid_size, ask_size` (`data=quotes`).
     Quotes,
+    /// The Level 2 book of an exchange market, `time, sequence, action,
+    /// side, price, size, depth` and ten bid and ten ask levels of price,
+    /// size and orders (`data=book`).
+    Book,
+    /// The Level 3 orders of an exchange market, `time, action, side,
+    /// order_id, price, size` (`data=orders`).
+    Orders,
 }
 
 /// The one parameter selecting the rows, flattened into the query.
@@ -49,6 +61,8 @@ impl Serialize for Rows {
             Self::Candles(width) => map.serialize_entry("timeframe", &width.to_string())?,
             Self::Trades => map.serialize_entry("data", "trades")?,
             Self::Quotes => map.serialize_entry("data", "quotes")?,
+            Self::Book => map.serialize_entry("data", "book")?,
+            Self::Orders => map.serialize_entry("data", "orders")?,
         }
         map.end()
     }
@@ -61,6 +75,8 @@ impl fmt::Display for Rows {
             Self::Candles(width) => write!(f, "{width} candles"),
             Self::Trades => f.write_str("trades"),
             Self::Quotes => f.write_str("quotes"),
+            Self::Book => f.write_str("book"),
+            Self::Orders => f.write_str("orders"),
         }
     }
 }
@@ -221,6 +237,24 @@ impl ExportQuery {
         Self::series(series, Rows::Candles(width), from, to)
     }
 
+    /// The `rows` of the US option `contract` over `[from, to)`, as
+    /// Parquet: of LSE's `us_options`, by its OSI symbol, which names one
+    /// contract.
+    pub(crate) fn option(
+        contract: &OpraContract,
+        rows: Rows,
+        from: Timestamp,
+        to: Timestamp,
+    ) -> Self {
+        Self::new(
+            US_OPTIONS_MARKET,
+            Selection::Symbol(contract.osi().to_owned()),
+            rows,
+            from,
+            to,
+        )
+    }
+
     /// The `rows` of LSE's listing `pair_id` in `market` over `[from,
     /// to)`, as Parquet.
     pub(crate) fn listing(
@@ -254,6 +288,18 @@ impl ExportQuery {
     /// The span the export selects, `[from, to)`.
     pub(crate) fn window(&self) -> (Timestamp, Timestamp) {
         (self.from, self.to)
+    }
+
+    /// The longest span one export of the query's rows is asked over, from
+    /// a multiple of it from 1970: a UTC hour of a book or of orders, as
+    /// LSE's docs ask of a busy contract ("The market: cme": ESZ6's book of
+    /// the minute from 14:30 on 5 November 2026 held 99,104 rows, 33 MB as
+    /// CSV, and of that whole day 10.8 GB), a UTC day of every other.
+    pub(crate) fn longest_span(&self) -> SignedDuration {
+        match self.rows {
+            Rows::Book | Rows::Orders => SignedDuration::from_hours(1),
+            _ => SignedDuration::from_hours(24),
+        }
     }
 
     /// The export's selection over `[from, to)`.

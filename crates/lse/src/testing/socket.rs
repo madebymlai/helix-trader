@@ -166,32 +166,49 @@ impl MockLseSocket {
     }
 }
 
-/// What LSE's data-ws answers the free key, from its captures: the key
-/// with its futures (`WS_AUTHENTICATED_FUTURES`, 16 subscriptions a
-/// connection), a subscription with its acknowledgement then, for
-/// `GOLD.F`, its three ticks captured, an unsubscription with its
-/// acknowledgement, a ping with a pong.
+/// What LSE's data-ws answers the free key, from its first captures: the
+/// key with its futures (`WS_AUTHENTICATED_FUTURES`, 16 subscriptions a
+/// connection), and `GOLD.F`'s subscription with its three ticks captured
+/// (see `socket_answer`).
 ///
 /// # Panics
 ///
 /// Panics on a frame data-ws has no answer for here.
 #[must_use]
 pub fn data_ws_answer(frame: &Value) -> Vec<SocketAction> {
+    socket_answer(WS_AUTHENTICATED_FUTURES, WS_TICKS_GOLD, frame)
+}
+
+/// What an LSE socket answers the free key, from its captures: the key
+/// with `authenticated`, its authenticated frame; a subscription with its
+/// acknowledgement, then the ticks of its symbol among `ticks`, one a
+/// line; an unsubscription with its acknowledgement; a ping with a pong.
+///
+/// # Panics
+///
+/// Panics on a frame the socket has no answer for here, or on a line of
+/// `ticks` that is no tick.
+#[must_use]
+pub fn socket_answer(authenticated: &str, ticks: &str, frame: &Value) -> Vec<SocketAction> {
     let send = |text: &str| SocketAction::Send(text.trim().to_string());
+    let symbol = frame["symbol"].as_str().unwrap_or_default();
     match frame["action"].as_str() {
-        Some("auth") => vec![send(WS_AUTHENTICATED_FUTURES)],
-        Some("subscribe") if frame["symbol"] == "GOLD.F" => [WS_SUBSCRIBED_GOLD]
-            .into_iter()
-            .chain(WS_TICKS_GOLD.lines())
-            .map(send)
-            .collect(),
-        Some("subscribe") => vec![send(
-            &WS_SUBSCRIBED_GOLD.replace("GOLD.F", frame["symbol"].as_str().unwrap_or_default()),
-        )],
-        Some("unsubscribe") => vec![send(
-            &WS_UNSUBSCRIBED_GOLD.replace("GOLD.F", frame["symbol"].as_str().unwrap_or_default()),
-        )],
+        Some("auth") => vec![send(authenticated)],
+        Some("subscribe") => {
+            let mut answer = vec![send(&WS_SUBSCRIBED_GOLD.replace("GOLD.F", symbol))];
+            answer.extend(
+                ticks
+                    .lines()
+                    .filter(|line| {
+                        let tick: Value = serde_json::from_str(line).expect("a tick a line");
+                        tick["symbol"] == symbol
+                    })
+                    .map(send),
+            );
+            answer
+        }
+        Some("unsubscribe") => vec![send(&WS_UNSUBSCRIBED_GOLD.replace("GOLD.F", symbol))],
         Some("ping") => vec![send(WS_PONG)],
-        _ => panic!("data-ws has no answer here for {frame}"),
+        _ => panic!("the socket has no answer here for {frame}"),
     }
 }

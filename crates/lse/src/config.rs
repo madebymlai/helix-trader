@@ -7,7 +7,10 @@ use nautilus_core::string::secret::SecretString;
 use nautilus_model::identifiers::InstrumentId;
 
 use crate::common::{
-    consts::{CME_LITE_CALLS_PER_MINUTE, FREE_CALLS_PER_MINUTE, LSE_HTTP_BASE_URL},
+    consts::{
+        CME_LITE_CALLS_PER_MINUTE, CME_STREAM_URL, FREE_CALLS_PER_MINUTE, LSE_HTTP_BASE_URL,
+        LseSocket,
+    },
     credential::LseProduct,
 };
 
@@ -24,9 +27,13 @@ pub struct LseDataClientConfig {
     pub cme_api_key: Option<SecretString>,
     /// LSE's REST API; LSE's own if none.
     pub base_url_http: Option<String>,
-    /// The address of every LSE socket; LSE's own of each if none.
-    pub base_url_ws: Option<String>,
-    /// The address of LSE's CME Globex stream; LSE's own if none.
+    /// LSE's data-ws; LSE's own if none.
+    pub base_url_ws_data: Option<String>,
+    /// LSE's london-ws; LSE's own if none.
+    pub base_url_ws_london: Option<String>,
+    /// LSE's tsx-ws; LSE's own if none.
+    pub base_url_ws_tsx: Option<String>,
+    /// LSE's CME Globex stream; LSE's own if none.
     pub base_url_ws_cme: Option<String>,
     /// The calls a minute the client keeps within on the LSE key: the free
     /// plan's, the fewest of any plan, unless the key's plan allows more
@@ -40,10 +47,10 @@ pub struct LseDataClientConfig {
     pub cme_calls_per_minute: NonZeroU32,
     /// The instruments the client streams, on a live node: `connect` opens
     /// the socket each one's market streams on, authenticates the key, and
-    /// fails unless the socket lists each and allows them all on its one
-    /// connection; for `GLBX` contracts, LSE's CME stream, with the CME
-    /// key, subscribing them all, and fails with LSE's refusal of the
-    /// subscription. None on a fill's node, which opens no socket.
+    /// fails unless each socket lists its instruments and allows them all
+    /// on its one connection; for `GLBX` contracts, LSE's CME stream, with
+    /// the CME key, subscribing them all, and fails with LSE's refusal of
+    /// the subscription. None on a fill's node, which opens no socket.
     #[builder(default)]
     pub stream_ids: Vec<InstrumentId>,
 }
@@ -59,6 +66,22 @@ impl LseDataClientConfig {
     #[must_use]
     pub fn http_base_url(&self) -> &str {
         self.base_url_http.as_deref().unwrap_or(LSE_HTTP_BASE_URL)
+    }
+
+    /// The address the client connects to `socket` at: the override, or
+    /// LSE's own.
+    pub(crate) fn ws_url(&self, socket: LseSocket) -> &str {
+        let url = match socket {
+            LseSocket::Data => &self.base_url_ws_data,
+            LseSocket::London => &self.base_url_ws_london,
+            LseSocket::Tsx => &self.base_url_ws_tsx,
+        };
+        url.as_deref().unwrap_or(socket.url())
+    }
+
+    /// The address of LSE's CME Globex stream: the override, or LSE's own.
+    pub(crate) fn cme_stream_url(&self) -> &str {
+        self.base_url_ws_cme.as_deref().unwrap_or(CME_STREAM_URL)
     }
 
     /// The key of `product` the config gives, if it gives one.
@@ -99,6 +122,48 @@ mod tests {
             "https://download.londonstrategicedge.com"
         );
         assert_eq!(mock.http_base_url(), "http://127.0.0.1:9");
+    }
+
+    /// LSE's addresses, as its socket documentation gives them ("The
+    /// sockets").
+    #[test]
+    fn each_socket_is_lse_s_own_unless_told_otherwise() {
+        let mock = LseDataClientConfig::builder()
+            .base_url_ws_london("ws://127.0.0.1:9".to_string())
+            .build();
+        let own = LseDataClientConfig::default();
+
+        assert_eq!(
+            [LseSocket::Data, LseSocket::London, LseSocket::Tsx].map(|socket| own.ws_url(socket)),
+            [
+                "wss://data-ws.londonstrategicedge.com",
+                "wss://london-ws.londonstrategicedge.com",
+                "wss://tsx-ws.londonstrategicedge.com",
+            ]
+        );
+        assert_eq!(
+            [LseSocket::Data, LseSocket::London, LseSocket::Tsx].map(|socket| mock.ws_url(socket)),
+            [
+                "wss://data-ws.londonstrategicedge.com",
+                "ws://127.0.0.1:9",
+                "wss://tsx-ws.londonstrategicedge.com",
+            ]
+        );
+    }
+
+    /// LSE's address, as its socket documentation gives it ("The CME Group
+    /// stream").
+    #[test]
+    fn the_cme_stream_is_lse_s_own_unless_told_otherwise() {
+        let mock = LseDataClientConfig::builder()
+            .base_url_ws_cme("ws://127.0.0.1:9/v1/stream".to_string())
+            .build();
+
+        assert_eq!(
+            LseDataClientConfig::default().cme_stream_url(),
+            "wss://cme.londonstrategicedge.com/v1/stream"
+        );
+        assert_eq!(mock.cme_stream_url(), "ws://127.0.0.1:9/v1/stream");
     }
 
     #[test]

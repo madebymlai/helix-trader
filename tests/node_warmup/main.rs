@@ -1420,7 +1420,7 @@ fn an_lsedge_definition_the_cache_lacks_comes_from_the_catalog_before_lse_stream
             lse::testing::API_KEY,
         ))
         .base_url_http(history.url().to_string())
-        .base_url_ws(socket.url().to_string())
+        .base_url_ws_data(socket.url().to_string())
         .stream_ids(vec![gold])
         .build();
     let streamed = Rc::new(RefCell::new(None));

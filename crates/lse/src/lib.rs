@@ -8,8 +8,8 @@
 //! are (`docs/developer_guide/adapters.md`): `common` (the venue, the
 //! sockets and the variables of the keys, the keys by the product each
 //! opens, and the symbol boundary between an instrument id and what LSE is
-//! asked for, a derived market's symbol, its name on a socket, or a CME
-//! contract's listing), `http` (the HTTP client, its typed queries, an
+//! asked for, a derived market's symbol, its name on a socket, a CME
+//! contract's listing, or a US option's OSI symbol), `http` (the HTTP client, its typed queries, an
 //! export over any span, the listings of CME contracts, LSE's answers and
 //! refusals and the parsing of an export's Parquet file), `websocket` (the
 //! frames of LSE's sockets, the client of one, and the parsing of a tick;

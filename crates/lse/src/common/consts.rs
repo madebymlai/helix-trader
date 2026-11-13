@@ -36,13 +36,29 @@ pub(crate) const CME_MARKET: &str = "cme";
 /// plan's key (LSE's WebSocket documentation, "The CME Group stream").
 pub(crate) const CME_STREAM_URL: &str = "wss://cme.londonstrategicedge.com/v1/stream";
 
+/// LSE's name of US options, its market's folder: every listed US option
+/// contract, as OPRA reports it.
+pub(crate) const US_OPTIONS_MARKET: &str = "us_options";
+
+/// The venue of US option contracts, OPRA, as Databento names the
+/// consolidated feed's listings (`OPRA.PILLAR`, publisher `OPRA`) and
+/// Nautilus' IB adapter maps them.
+pub(crate) static OPRA_VENUE: LazyLock<Venue> = LazyLock::new(|| Venue::new("OPRA"));
+
 /// An LSE socket of the protocol four of them share (LSE's WebSocket
-/// documentation, "The sockets"), each carrying its markets.
+/// documentation, "The sockets"), each carrying its markets: those a
+/// derived market's series streams on. The fourth, chicago-ws, carries
+/// futures and forex, which data-ws carries whole, sending the same ticks
+/// (captured on 13 November 2026), so no series streams there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum LseSocket {
     /// data-ws: US stocks and ETFs, US option contracts, forex,
-    /// commodities, futures and US bond yields.
+    /// commodities, futures, indices and US bond yields.
     Data,
+    /// london-ws: UK stocks, and crypto since 8 November 2026.
+    London,
+    /// tsx-ws: Canadian stocks.
+    Tsx,
 }
 
 impl LseSocket {
@@ -50,6 +66,8 @@ impl LseSocket {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Data => "data-ws",
+            Self::London => "london-ws",
+            Self::Tsx => "tsx-ws",
         }
     }
 
@@ -57,6 +75,8 @@ impl LseSocket {
     pub(crate) fn url(self) -> &'static str {
         match self {
             Self::Data => "wss://data-ws.londonstrategicedge.com",
+            Self::London => "wss://london-ws.londonstrategicedge.com",
+            Self::Tsx => "wss://tsx-ws.londonstrategicedge.com",
         }
     }
 }

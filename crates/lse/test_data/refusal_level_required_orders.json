@@ -1,0 +1,1 @@
+{"code":"level-required","level":"L3","message":"Level 3 orders needs CME Group Standard or above","required_plan":{"market":"cme","name":"CME Group Standard","subscribe_url":"/data?tab=subscriptions","tier":"standard"}}
