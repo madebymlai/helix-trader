@@ -36,6 +36,11 @@ pub(crate) const CME_MARKET: &str = "cme";
 /// contract, as OPRA reports it.
 pub(crate) const US_OPTIONS_MARKET: &str = "us_options";
 
+/// The source an `LseRow` data type names LSE's options chain by
+/// (`/v3/options/chain`): the listed contracts of an underlying as they
+/// stand, the call taking no dates, so it has no history.
+pub(crate) const OPTIONS_CHAIN: &str = "options_chain";
+
 /// The venue of US option contracts, OPRA, as Databento names the
 /// consolidated feed's listings (`OPRA.PILLAR`, publisher `OPRA`) and
 /// Nautilus' IB adapter maps them.

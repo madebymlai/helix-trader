@@ -1,22 +1,31 @@
-//! The data client's live data: the sockets of the instruments it streams
-//! and their quotes.
+//! The data client's live data: the sockets of the instruments it streams,
+//! the quotes of `LSEDGE` series and the trades of `OPRA` contracts.
 //!
-//! `open` connects to the socket each instrument's market streams on (see
-//! `LseSymbol::stream`), one connection a socket whatever the key allows,
-//! and fails, naming them, unless the socket lists every instrument's
-//! symbol to the key and allows them all on that connection, as LSE stated
-//! when it authenticated the key (`max_subscriptions`): LSE accepts a
-//! subscription to a symbol it does not list and sends nothing, and
-//! refuses one beyond its limit (`LIMIT_REACHED`) only once asked, after
-//! the node started. A quotes subscription reads the instrument's
-//! precision from the cache, then subscribes its symbol; each tick of it
-//! becomes a quote (see `parse_quote`). LSE's refusal of a subscription is
-//! logged as an error, a reconnect's gap as a warning.
+//! `open` connects to the socket each instrument streams on (see
+//! `LseSymbol::stream` and `OpraContract::stream`), one connection a socket
+//! whatever the key allows, and fails, naming them, unless the socket lists
+//! every series' symbol to the key and allows all its subscriptions on that
+//! connection, as LSE stated when it authenticated the key
+//! (`max_subscriptions`): LSE accepts a subscription to a symbol it does not
+//! list and sends nothing, and refuses one beyond its limit
+//! (`LIMIT_REACHED`) only once asked, after the node started. An option
+//! contract streams on data-ws in its underlying's chain, every listed
+//! contract of the underlying in one subscription, which LSE refuses for an
+//! underlying with no listed options (`INVALID_UNDERLYING`); a socket lists
+//! no contract. A quotes subscription reads the series' precision from the
+//! cache, then subscribes its symbol; each tick of it becomes a quote (see
+//! `parse_quote`). A trades subscription reads the contract's precision
+//! from the cache, then subscribes its underlying's chain if no other
+//! contract of it is subscribed; each tick of a contract subscribed becomes
+//! a trade (see `parse_trade`), the chain's others are dropped, and the
+//! chain ends with its last contract's subscription. LSE's refusal of a
+//! subscription is logged as an error, a reconnect's gap as a warning.
 
 use std::sync::Arc;
 
 use ahash::AHashMap;
 use anyhow::{Context, bail};
+use jiff::{Timestamp, tz::TimeZone};
 use nautilus_common::{
     cache::CacheView,
     live::{dst::time::Duration, sender::EventSender},
@@ -28,14 +37,15 @@ use nautilus_model::{data::Data, identifiers::InstrumentId, instruments::Instrum
 
 use crate::{
     common::{
-        consts::{LSE_API_KEY, LseSocket},
+        consts::{LSE_API_KEY, LseSocket, OPRA_VENUE},
         credential::LseCredential,
-        symbol::LseSymbol,
+        symbol::{LseInstrument, OpraContract},
     },
     config::LseDataClientConfig,
+    http::parse::TradeIds,
     websocket::{
         client::{KEEPALIVE_SECS, LseWebSocketClient, LseWsMessage},
-        parse::parse_quote,
+        parse::{parse_quote, parse_trade},
     },
 };
 
@@ -43,18 +53,22 @@ use crate::{
 const TASK_GRACE: Duration = Duration::from_secs(1);
 const TASK_FORCE: Duration = Duration::from_secs(2);
 
-/// An instrument whose quotes are subscribed: its id and precisions.
+/// An instrument whose ticks are subscribed: its id and precisions.
 #[derive(Debug, Clone, Copy)]
-struct Quoted {
+struct Subscribed {
     instrument_id: InstrumentId,
     price_precision: u8,
     size_precision: u8,
 }
 
-/// The instruments whose quotes are subscribed, by their socket and their
+/// The series whose quotes are subscribed, by their socket and their
 /// symbol there in capitals: read on each tick, written on each
 /// subscription.
-type QuotedBySymbol = Arc<AtomicMap<(LseSocket, String), Quoted>>;
+type QuotedBySymbol = Arc<AtomicMap<(LseSocket, String), Subscribed>>;
+
+/// The option contracts whose trades are subscribed, by their name on
+/// data-ws in capitals: read on each tick, written on each subscription.
+type TradedByName = Arc<AtomicMap<String, Subscribed>>;
 
 /// The sockets of the instruments the client streams.
 #[derive(Debug)]
@@ -62,56 +76,77 @@ pub(super) struct LseStreams {
     /// The LSE key, which the sockets take; none if no instrument is
     /// streamed.
     credential: Option<LseCredential>,
-    /// Each instrument streamed, with its socket and its symbol there.
+    /// Each series streamed, with its socket and its symbol there.
     streamed: Vec<(InstrumentId, LseSocket, String)>,
+    /// Each option contract streamed, on data-ws in its underlying's chain.
+    options: Vec<(InstrumentId, OpraContract)>,
     /// The sockets of the instruments streamed, in the order first named,
     /// each with its address.
     urls: Vec<(LseSocket, String)>,
     sockets: AHashMap<LseSocket, LseWebSocketClient>,
     quoted: QuotedBySymbol,
-    /// The tasks turning each socket's ticks into quotes.
+    traded: TradedByName,
+    /// How many contracts of each underlying's chain, by its root, have
+    /// their trades subscribed: the chain is subscribed while any has.
+    chains: AHashMap<String, usize>,
+    /// The tasks turning each socket's ticks into quotes and trades.
     tasks: TaskGroup,
     data_sender: EventSender<DataEvent>,
     clock: &'static AtomicTime,
 }
 
 impl LseStreams {
-    /// The streams of the instruments `config` streams, on the key of
-    /// `credential`, the LSE key; none open.
+    /// The streams of the instruments `config` streams, `LSEDGE` series
+    /// and `OPRA` contracts, on the key of `credential`, the LSE key; none
+    /// open.
     ///
     /// # Errors
     ///
-    /// Returns an error naming it if an instrument is not an `LSEDGE`
-    /// series, or is one of a market streamed on no socket here, and
-    /// naming `LSE_API_KEY` if an instrument is streamed with no LSE key.
+    /// Returns an error naming it if an instrument is neither an `LSEDGE`
+    /// series nor an `OPRA` contract, or is a series of a market streamed on
+    /// no socket here, and naming `LSE_API_KEY` if an instrument is
+    /// streamed with no LSE key.
     pub(super) fn new(
         config: &LseDataClientConfig,
         credential: Option<LseCredential>,
         data_sender: EventSender<DataEvent>,
         clock: &'static AtomicTime,
     ) -> anyhow::Result<Self> {
-        let streamed: Vec<(InstrumentId, LseSocket, String)> = config
-            .stream_ids
-            .iter()
-            .map(|&id| {
-                let (socket, symbol) = LseSymbol::from_instrument_id(id)?
-                    .stream()
-                    .with_context(|| format!("streaming {id}"))?;
-                Ok((id, socket, symbol))
-            })
-            .collect::<anyhow::Result<_>>()?;
-        if credential.is_none() && !streamed.is_empty() {
+        let year = Timestamp::from(clock.get_time_ns())
+            .to_zoned(TimeZone::UTC)
+            .year();
+        let (mut streamed, mut options) = (Vec::new(), Vec::new());
+        for &id in &config.stream_ids {
+            match LseInstrument::from_instrument_id(id, year)? {
+                LseInstrument::Series(series) => {
+                    let (socket, symbol) =
+                        series.stream().with_context(|| format!("streaming {id}"))?;
+                    streamed.push((id, socket, symbol));
+                }
+                LseInstrument::Opra(contract) => options.push((id, contract)),
+                LseInstrument::Cme(_) => {
+                    bail!("streaming {id}: LSE's CME Globex contracts stream nowhere here yet")
+                }
+            }
+        }
+        if credential.is_none() && !(streamed.is_empty() && options.is_empty()) {
             bail!(
                 "streaming {} needs the LSE key: set {LSE_API_KEY}, or give the config's",
                 streamed
                     .iter()
-                    .map(|(id, ..)| id.to_string())
+                    .map(|(id, ..)| id)
+                    .chain(options.iter().map(|(id, _)| id))
+                    .map(ToString::to_string)
                     .collect::<Vec<_>>()
                     .join(", ")
             );
         }
+        let sockets = streamed
+            .iter()
+            .map(|&(_, socket, _)| socket)
+            .chain(options.iter().map(|(_, contract)| contract.stream().0));
         let mut urls: Vec<(LseSocket, String)> = Vec::new();
-        for &(_, socket, _) in &streamed {
+        for socket in sockets {
             if !urls.iter().any(|(of, _)| *of == socket) {
                 urls.push((socket, config.ws_url(socket).to_owned()));
             }
@@ -119,9 +154,12 @@ impl LseStreams {
         Ok(Self {
             credential,
             streamed,
+            options,
             urls,
             sockets: AHashMap::new(),
             quoted: Arc::default(),
+            traded: Arc::default(),
+            chains: AHashMap::new(),
             tasks: TaskGroup::new(),
             data_sender,
             clock,
@@ -129,15 +167,16 @@ impl LseStreams {
     }
 
     /// Connects to the socket of each instrument streamed and checks the
-    /// socket lists them all to the key and allows them on one connection;
-    /// starts turning their ticks into quotes. Nothing to do if none is
-    /// streamed.
+    /// socket lists every series to the key and allows the subscriptions of
+    /// them all on one connection, a symbol each series and a chain each
+    /// underlying of the contracts; starts turning their ticks into quotes
+    /// and trades. Nothing to do if none is streamed.
     ///
     /// # Errors
     ///
     /// Returns an error if a connection fails or LSE refuses the key (see
-    /// `LseWebSocketClient::connect`), naming the instruments a socket does
-    /// not list, or naming the limit if the instruments of a socket exceed
+    /// `LseWebSocketClient::connect`), naming the series a socket does not
+    /// list, or naming the limit if the subscriptions of a socket exceed
     /// it; then no socket is left open.
     pub(super) async fn open(&mut self) -> anyhow::Result<()> {
         if !self.tasks.is_open() {
@@ -169,6 +208,15 @@ impl LseStreams {
             .iter()
             .filter(|(_, of, _)| *of == socket)
             .collect();
+        let mut chains: Vec<&str> = self
+            .options
+            .iter()
+            .filter(|(_, contract)| contract.stream().0 == socket)
+            .map(|(_, contract)| contract.root())
+            .collect();
+        chains.sort_unstable();
+        chains.dedup();
+        let subscriptions = streamed.len() + chains.len();
         let unlisted: Vec<String> = streamed
             .iter()
             .filter(|(_, _, symbol)| !client.lists(symbol))
@@ -181,12 +229,15 @@ impl LseStreams {
                 unlisted.join(", ")
             ))
         } else if let Some(max) = client.max_subscriptions()
-            && streamed.len() > max
+            && subscriptions > max
         {
             Err(anyhow::anyhow!(
                 "LSE's {name} allows {max} symbols on a connection of the key \
-                 (max_subscriptions), and one connection streams them all: {} are streamed",
-                streamed.len()
+                 (max_subscriptions), an underlying's chain of options taking one, and one \
+                 connection streams them all: {subscriptions} are streamed, {} symbols and {} \
+                 chains",
+                streamed.len(),
+                chains.len()
             ))
         } else {
             Ok(())
@@ -196,23 +247,26 @@ impl LseStreams {
             return Err(e);
         }
         self.sockets.insert(socket, client);
-        self.spawn_quotes(socket, out)
+        self.spawn_ticks(socket, out)
     }
 
-    /// Turns the ticks `out` passes on into quotes of the instruments
-    /// subscribed, and logs refusals and gaps.
-    fn spawn_quotes(
+    /// Turns the ticks `out` passes on into quotes of the series and trades
+    /// of the option contracts subscribed, and logs refusals and gaps.
+    fn spawn_ticks(
         &self,
         socket: LseSocket,
         mut out: tokio::sync::mpsc::UnboundedReceiver<LseWsMessage>,
     ) -> anyhow::Result<()> {
         let name = socket.name();
         let quoted = Arc::clone(&self.quoted);
+        let traded = Arc::clone(&self.traded);
         let sender = self.data_sender.clone();
         let clock = self.clock;
         let cancelled = self.tasks.cancellation_token();
         self.tasks
             .spawn(async move {
+                // The ids of each contract's trades, in the order they come.
+                let mut trade_ids: AHashMap<InstrumentId, TradeIds> = AHashMap::new();
                 loop {
                     let message = tokio::select! {
                         biased;
@@ -224,19 +278,34 @@ impl LseStreams {
                     };
                     match message {
                         LseWsMessage::Tick(tick) => {
-                            let key = (socket, tick.symbol.to_ascii_uppercase());
-                            let Some(of) = quoted.get_cloned(&key) else {
-                                // Of a subscription just ended.
-                                continue;
-                            };
-                            match parse_quote(
-                                &tick,
-                                of.instrument_id,
-                                of.price_precision,
-                                of.size_precision,
-                                clock.get_time_ns(),
-                            ) {
-                                Ok(quote) => send(&sender, DataEvent::Data(Data::Quote(quote))),
+                            let symbol = tick.symbol.to_ascii_uppercase();
+                            let (of, parsed) =
+                                if let Some(of) = quoted.get_cloned(&(socket, symbol.clone())) {
+                                    let quote = parse_quote(
+                                        &tick,
+                                        of.instrument_id,
+                                        of.price_precision,
+                                        of.size_precision,
+                                        clock.get_time_ns(),
+                                    );
+                                    (of, quote.map(Data::Quote))
+                                } else if let Some(of) = traded.get_cloned(&symbol) {
+                                    let trade = parse_trade(
+                                        &tick,
+                                        of.instrument_id,
+                                        of.price_precision,
+                                        of.size_precision,
+                                        trade_ids.entry(of.instrument_id).or_default(),
+                                        clock.get_time_ns(),
+                                    );
+                                    (of, trade.map(Data::Trade))
+                                } else {
+                                    // Of a subscription just ended, or of a
+                                    // contract of a chain not subscribed.
+                                    continue;
+                                };
+                            match parsed {
+                                Ok(data) => send(&sender, DataEvent::Data(data)),
                                 Err(e) => log::warn!(
                                     "a tick of {} from LSE's {name} skipped: {e:#}",
                                     of.instrument_id
@@ -246,6 +315,13 @@ impl LseStreams {
                         LseWsMessage::Refused { symbol, refusal } => log::error!(
                             "LSE's {name} refused the subscription of {symbol}: {refusal}; \
                              no quotes of it stream"
+                        ),
+                        LseWsMessage::OptionsRefused {
+                            underlying,
+                            refusal,
+                        } => log::error!(
+                            "LSE's {name} refused the chain of {underlying}: {refusal}; no \
+                             trades of its contracts stream"
                         ),
                         LseWsMessage::Reconnected { last, at } => log::warn!(
                             "LSE's {name} reconnected and resubscribed: nothing came from {} \
@@ -273,25 +349,8 @@ impl LseStreams {
         cache: &CacheView,
     ) -> anyhow::Result<()> {
         let (socket, symbol) = self.streamed_as(id)?;
-        let client = self
-            .sockets
-            .get(&socket)
-            .with_context(|| format!("LSE's {} is not connected", socket.name()))?;
-        let quoted = {
-            let cache = cache.borrow();
-            let instrument = cache.instrument(&id).with_context(|| {
-                format!(
-                    "{id} is not in the cache: LSE publishes no definitions, and its prices are \
-                     read at the definition's precision, so it must come from elsewhere, a \
-                     catalog"
-                )
-            })?;
-            Quoted {
-                instrument_id: id,
-                price_precision: instrument.price_precision(),
-                size_precision: instrument.size_precision(),
-            }
-        };
+        let client = self.socket(socket)?;
+        let quoted = defined(id, cache)?;
         self.quoted
             .insert((socket, symbol.to_ascii_uppercase()), quoted);
         client.subscribe(symbol)
@@ -306,10 +365,69 @@ impl LseStreams {
     pub(super) fn unsubscribe_quotes(&self, id: InstrumentId) -> anyhow::Result<()> {
         let (socket, symbol) = self.streamed_as(id)?;
         self.quoted.remove(&(socket, symbol.to_ascii_uppercase()));
-        self.sockets
-            .get(&socket)
-            .with_context(|| format!("LSE's {} is not connected", socket.name()))?
-            .unsubscribe(symbol)
+        self.socket(socket)?.unsubscribe(symbol)
+    }
+
+    /// Subscribes to the trades of `id`, an `OPRA` contract, at the
+    /// precision of its definition in `cache`, subscribing its underlying's
+    /// chain unless a contract of it is subscribed already; nothing to do
+    /// if its trades are.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming it if it is no `OPRA` contract, LSE's
+    /// sockets streaming a series' ticks as quotes, if the client does not
+    /// stream it, if its socket is not open, or if `cache` has no definition
+    /// of it.
+    pub(super) fn subscribe_trades(
+        &mut self,
+        id: InstrumentId,
+        cache: &CacheView,
+    ) -> anyhow::Result<()> {
+        let contract = self.contract(id)?;
+        let (socket, name) = contract.stream();
+        let root = contract.root().to_owned();
+        self.socket(socket)?;
+        if self.traded.contains_key(&name) {
+            return Ok(());
+        }
+        let traded = defined(id, cache)?;
+        self.traded.insert(name, traded);
+        let subscribed = self.chains.entry(root.clone()).or_default();
+        *subscribed += 1;
+        if *subscribed == 1 {
+            self.socket(socket)?.subscribe_options(&root)?;
+        }
+        Ok(())
+    }
+
+    /// Ends the trades of `id`, an `OPRA` contract, and its underlying's
+    /// chain with the trades of its last contract subscribed; nothing to do
+    /// if its trades are not subscribed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming it if it is no `OPRA` contract, if the client
+    /// does not stream it, or if its socket is not open.
+    pub(super) fn unsubscribe_trades(&mut self, id: InstrumentId) -> anyhow::Result<()> {
+        let contract = self.contract(id)?;
+        let (socket, name) = contract.stream();
+        let root = contract.root().to_owned();
+        self.socket(socket)?;
+        if !self.traded.contains_key(&name) {
+            return Ok(());
+        }
+        self.traded.remove(&name);
+        let subscribed = self
+            .chains
+            .get_mut(&root)
+            .expect("a contract subscribed counts in its chain");
+        *subscribed -= 1;
+        if *subscribed == 0 {
+            self.chains.remove(&root);
+            self.socket(socket)?.unsubscribe_options(&root)?;
+        }
+        Ok(())
     }
 
     /// The socket of `id` and its symbol there.
@@ -321,6 +439,31 @@ impl LseStreams {
                  stream_ids), whose sockets it opens"
             ),
         }
+    }
+
+    /// The contract `id` is, an `OPRA` contract the client streams.
+    fn contract(&self, id: InstrumentId) -> anyhow::Result<&OpraContract> {
+        if id.venue != *OPRA_VENUE {
+            bail!(
+                "LSE streams no trades of {id}: its sockets' ticks of a series are quotes (a \
+                 futures tick's price is its bid); it streams the trades of US option \
+                 contracts, under OPRA"
+            );
+        }
+        match self.options.iter().find(|(of, _)| *of == id) {
+            Some((_, contract)) => Ok(contract),
+            None => bail!(
+                "{id} is not among the instruments the LSE client streams (its config's \
+                 stream_ids), whose sockets it opens"
+            ),
+        }
+    }
+
+    /// The client of `socket`, connected.
+    fn socket(&self, socket: LseSocket) -> anyhow::Result<&LseWebSocketClient> {
+        self.sockets
+            .get(&socket)
+            .with_context(|| format!("LSE's {} is not connected", socket.name()))
     }
 
     /// Begins the shutdown of the tick tasks; `close` finishes it.
@@ -340,8 +483,31 @@ impl LseStreams {
             client.disconnect().await;
         }
         self.quoted.rcu(|quoted| quoted.clear());
+        self.traded.rcu(|traded| traded.clear());
+        self.chains.clear();
         stopped.map_err(|e| anyhow::anyhow!("stopping the LSE tick tasks: {e}"))
     }
+}
+
+/// `id` with the precisions of its definition in `cache`.
+///
+/// # Errors
+///
+/// Returns an error naming it if `cache` has no definition of it: LSE
+/// publishes none, and its prices are read at the definition's precision.
+fn defined(id: InstrumentId, cache: &CacheView) -> anyhow::Result<Subscribed> {
+    let cache = cache.borrow();
+    let instrument = cache.instrument(&id).with_context(|| {
+        format!(
+            "{id} is not in the cache: LSE publishes no definitions, and its prices are read at \
+             the definition's precision, so it must come from elsewhere, a catalog"
+        )
+    })?;
+    Ok(Subscribed {
+        instrument_id: id,
+        price_precision: instrument.price_precision(),
+        size_precision: instrument.size_precision(),
+    })
 }
 
 /// Sends `event` to the node; a closed channel means the node is stopping.

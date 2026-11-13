@@ -9,17 +9,18 @@
 //! book depths and book deltas; and of `OPRA` contracts, US options under
 //! the ids Databento gives them, their OSI symbols
 //! (`AAPL  261120C00355000.OPRA`), trades and bars, as an `LSEDGE`
-//! series'. Live, the client streams the quotes of `LSEDGE` instruments on
-//! the live node, routed their venue (`live_clients`). Each contract's
-//! definition is its row's definitions source's: `LSEDGE`'s the catalog's
-//! alone, written there by hand, LSE publishing none, the data engine
-//! answering a definition request from the catalog before asking the
+//! series'. Live, the client streams the quotes of `LSEDGE` instruments and
+//! the trades of `OPRA` contracts, through one subscription of each
+//! underlying's chain, on the live node, routed their venues
+//! (`live_clients`), IB's execution client taking `OPRA`'s orders. Each
+//! contract's definition is its row's definitions source's: `LSEDGE`'s the
+//! catalog's alone, written there by hand, LSE publishing none, the data
+//! engine answering a definition request from the catalog before asking the
 //! client; `GLBX`'s and `OPRA`'s Databento's, asked of Nautilus' Databento
-//! client. The client converts
-//! LSE's prices at the definition's precision. LSE's reference series, the
-//! rows of its reference collections, are custom data of no instrument
-//! (`lse::LseRow`), filled by the same client with no definition. See
-//! `README.md`.
+//! client. The client converts LSE's prices at the definition's precision.
+//! LSE's reference series, the rows of its reference collections, are
+//! custom data of no instrument (`lse::LseRow`), filled by the same client
+//! with no definition. See `README.md`.
 
 use ::lse::{LseDataClientConfig, LseDataClientFactory};
 use jiff::{SignedDuration, Timestamp};
@@ -101,12 +102,12 @@ fn node_client(config: LseDataClientConfig) -> NodeClient {
     }
 }
 
-/// The live node's clients of `instrument_ids`, `LSEDGE` instruments: the
-/// LSE adapter's data client streaming them, its key read when the node
-/// creates it, and no execution client, LSE trading nothing. The client is
-/// on no venue, so it takes the route of theirs (`RoutingConfig::venues`)
-/// and not the default, which IB keeps for the venues without a client of
-/// their own.
+/// The live node's clients of `instrument_ids`, `LSEDGE` series and `OPRA`
+/// contracts: the LSE adapter's data client streaming them, its key read
+/// when the node creates it, and no execution client, LSE trading nothing,
+/// `OPRA`'s orders going to IB's. The client is on no venue, so it takes
+/// the route of theirs (`RoutingConfig::venues`) and not the default, which
+/// IB keeps for the venues without a client of their own.
 pub(super) fn live_clients(instrument_ids: &[InstrumentId]) -> Clients {
     clients(
         LseDataClientConfig::builder()

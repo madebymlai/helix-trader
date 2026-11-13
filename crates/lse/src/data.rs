@@ -20,8 +20,11 @@
 //! collections as custom data (`LseRow`) too, its source and symbol named
 //! in the metadata of the request's data type, each row stamped when its
 //! values are known, with the LSE key; its definitions request fails, LSE
-//! publishing none. Live, it streams the quotes of the instruments its
-//! config names, on their sockets (see `streams`). Every other request and
+//! publishing none; a request of LSE's options chain fails, LSE serving it
+//! as it stands alone. Live, it streams the quotes of the `LSEDGE` series
+//! its config names, on their sockets, and the trades of its `OPRA`
+//! contracts, through one subscription of each underlying's chain on
+//! data-ws (see `streams`). Every other request and
 //! subscription is left to Nautilus' defaults: a request fails as
 //! unsupported, a subscription is logged as not implemented. A request is
 //! answered from a task, in one completed response envelope, the data
@@ -55,7 +58,7 @@ use nautilus_common::{
             BarsResponse, BookDeltasResponse, BookDepthResponse, CustomDataResponse,
             DataResponseEnvelope, QuotesResponse, RequestBars, RequestBookDeltas, RequestBookDepth,
             RequestCustomData, RequestInstrument, RequestQuotes, RequestTrades, SubscribeQuotes,
-            TradesResponse, UnsubscribeQuotes,
+            SubscribeTrades, TradesResponse, UnsubscribeQuotes, UnsubscribeTrades,
         },
     },
 };
@@ -74,7 +77,7 @@ use nautilus_model::{
 use self::streams::LseStreams;
 use crate::{
     common::{
-        consts::CME_MARKET,
+        consts::{CME_MARKET, OPTIONS_CHAIN},
         credential::{LseCredential, LseProduct},
         symbol::LseInstrument,
     },
@@ -490,6 +493,35 @@ impl DataClient for LseDataClient {
         })
     }
 
+    /// Streams the trades of each instrument, an `OPRA` contract of those
+    /// it streams, at the precision of its definition in the cache, with
+    /// no aggressor side, through one subscription of its underlying's
+    /// chain, every listed contract of the underlying (see `LseStreams`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming an instrument that is no `OPRA` contract,
+    /// LSE's sockets streaming a series' ticks as quotes, that it does not
+    /// stream, or that the cache does not define.
+    fn subscribe_trades(&mut self, cmd: SubscribeTrades) -> anyhow::Result<()> {
+        execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
+            self.streams.subscribe_trades(id, &self.cache)
+        })
+    }
+
+    /// Ends the trades of each instrument, and its underlying's chain with
+    /// its last contract's.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming an instrument that is no `OPRA` contract or
+    /// that it does not stream.
+    fn unsubscribe_trades(&mut self, cmd: &UnsubscribeTrades) -> anyhow::Result<()> {
+        execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
+            self.streams.unsubscribe_trades(id)
+        })
+    }
+
     /// Fails naming the instruments, in the response envelope: LSE
     /// publishes no definitions. The data engine asks the client only for
     /// one its catalogs lack (`DataEngine::dispatch_instrument_request`).
@@ -681,9 +713,12 @@ impl DataClient for LseDataClient {
     /// rule). LSE is asked its catalogue, for the collection's time column
     /// and so its key, then the collection's export over the UTC dates of
     /// the rows known in the window. A failure, the data type not
-    /// `LseRow`'s or naming no source or symbol, the source no collection
-    /// LSE lists, or LSE's refusal of a call, is the envelope's, with no
-    /// rows: LSE's refusal carries its code, message and required plan.
+    /// `LseRow`'s or naming no source or symbol, the source LSE's options
+    /// chain (`options_chain`), which LSE serves as it stands alone, with
+    /// no history, the source no collection LSE lists, or LSE's refusal of
+    /// a call, is the envelope's, with no rows: those before LSE's
+    /// catalogue are refused unasked, and LSE's refusal carries its code,
+    /// message and required plan.
     fn request_data(&self, request: RequestCustomData) -> anyhow::Result<()> {
         let data_type = request.data_type.clone();
         let checked = (|| {
@@ -702,11 +737,18 @@ impl DataClient for LseDataClient {
                     .map(str::to_owned)
                     .with_context(|| format!("{data_type:?} names no {key} in its metadata"))
             };
+            let source = named(SOURCE)?;
+            if source == OPTIONS_CHAIN {
+                bail!(
+                    "LSE serves no history of its {OPTIONS_CHAIN}: /v3/options/chain answers \
+                     the chain as it stands, a current snapshot, and takes no dates"
+                );
+            }
             let start = request
                 .start
                 .with_context(|| format!("a request of {data_type} needs a start"))?;
             let http = self.http(LseProduct::Global)?;
-            Ok::<_, anyhow::Error>((named(SOURCE)?, named(SYMBOL)?, start, http))
+            Ok::<_, anyhow::Error>((source, named(SYMBOL)?, start, http))
         })();
         let (source, symbol, start, http) = match checked {
             Ok(checked) => checked,
@@ -931,15 +973,15 @@ mod tests {
     use crate::{
         LseDataClientFactory, LseRow,
         testing::{
-            AAPL_CALL, AAPL_CALL_MINUTES, AAPL_CALL_TRADES, API_KEY, CME_API_KEY, DATA_UNAVAILABLE,
-            DATA_UNAVAILABLE_QUOTES, DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING, EXPORT_TOO_WIDE,
-            GCZ26, GCZ26_BOOK, GCZ26_ORDERS, GCZ26_QUOTES, GCZ26_TRADES, GOLD_FUTURES,
-            GOLD_FUTURES_4H, GOLD_SPOT_MINUTES, GOLD_TRADES, HISTORY_LIMIT, LEVEL_REQUIRED_BOOK,
-            LEVEL_REQUIRED_ORDERS, MockLse, MockLseSocket, PAIRS_GCZ6, PLAN_REQUIRED,
-            REFERENCE_CATALOGUE, REFERENCE_DATA_UNAVAILABLE, Reply, SPX_TICKS, SYMBOL_UNKNOWN,
-            US10Y_BOND_YIELDS, WS_AUTHENTICATED_DATA, WS_AUTHENTICATED_LONDON,
+            AAPL_CALL, AAPL_CALL_MINUTES, AAPL_CALL_TRADES, AAPL_PUT_2027, API_KEY, CME_API_KEY,
+            DATA_UNAVAILABLE, DATA_UNAVAILABLE_QUOTES, DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING,
+            EXPORT_TOO_WIDE, GCZ26, GCZ26_BOOK, GCZ26_ORDERS, GCZ26_QUOTES, GCZ26_TRADES,
+            GOLD_FUTURES, GOLD_FUTURES_4H, GOLD_SPOT_MINUTES, GOLD_TRADES, HISTORY_LIMIT,
+            LEVEL_REQUIRED_BOOK, LEVEL_REQUIRED_ORDERS, MockLse, MockLseSocket, PAIRS_GCZ6,
+            PLAN_REQUIRED, REFERENCE_CATALOGUE, REFERENCE_DATA_UNAVAILABLE, Reply, SPX_TICKS,
+            SYMBOL_UNKNOWN, US10Y_BOND_YIELDS, WS_AUTHENTICATED_DATA, WS_AUTHENTICATED_LONDON,
             WS_AUTHENTICATED_TSX, WS_TICKS_DATA, WS_TICKS_LONDON, WS_TICKS_TSX, aapl_call,
-            data_ws_answer, gcz26, gold_futures, gold_spot, socket_answer,
+            aapl_put_2027, data_ws_answer, gcz26, gold_futures, gold_spot, socket_answer,
         },
     };
 
@@ -1153,6 +1195,235 @@ mod tests {
         let err = format!("{:#}", connected.unwrap_err());
         assert!(err.contains("allows 16 symbols"), "{err}");
         assert!(err.contains("17 are streamed"), "{err}");
+        assert_eq!(sent(&socket), Vec::<Value>::new());
+    }
+
+    /// The trades of `ids`, as the data engine asks the client for them.
+    fn trades_subscribed(ids: &[&str]) -> SubscribeTrades {
+        SubscribeTrades::new(
+            ids.iter()
+                .map(|&id| InstrumentId::from(id))
+                .collect::<Vec<_>>(),
+            Some(ClientId::from("LSE")),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        )
+    }
+
+    /// The end of the trades of `id`, as the data engine asks it.
+    fn trades_ended(id: &str) -> UnsubscribeTrades {
+        UnsubscribeTrades::new(
+            InstrumentId::from(id),
+            Some(ClientId::from("LSE")),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        )
+    }
+
+    /// The client the factory creates on `socket`, data-ws, streaming
+    /// `streamed`, its cache holding the definitions of `AAPL_CALL` and
+    /// `AAPL_PUT_2027`, connected, and the node's data events.
+    async fn streaming_options(
+        socket: &MockLseSocket,
+        streamed: &[&str],
+    ) -> (Box<dyn DataClient>, anyhow::Result<()>, Events) {
+        let config = LseDataClientConfig::builder()
+            .api_key(SecretString::from(API_KEY))
+            .base_url_ws_data(socket.url().to_string())
+            .stream_ids(streamed.iter().map(|&id| InstrumentId::from(id)).collect())
+            .build();
+        connecting(&config, vec![aapl_call(), aapl_put_2027()]).await
+    }
+
+    /// LSE's documentation's chain of AAPL streams five trades: two of the
+    /// 355 call, one each of the 360 calls of 13 and 18 November, which no
+    /// one subscribed, and one of the 325 put of September 2027. Both
+    /// contracts subscribed, the chain is asked once, and the trades of the
+    /// two come in order, the others' dropped.
+    #[tokio::test]
+    async fn subscribed_option_contracts_receive_their_trades_from_one_chain_of_their_underlying() {
+        let socket = MockLseSocket::start(|_, frame| data_ws_answer(frame));
+        let (mut client, connected, mut events) =
+            streaming_options(&socket, &[AAPL_CALL, AAPL_PUT_2027]).await;
+        connected.unwrap();
+
+        client
+            .subscribe_trades(trades_subscribed(&[AAPL_CALL, AAPL_PUT_2027]))
+            .unwrap();
+
+        let mut trades = Vec::new();
+        for _ in 0..3 {
+            let event = next_event(&mut events).await;
+            let DataEvent::Data(Data::Trade(trade)) = event else {
+                panic!("not a trade: {event:?}")
+            };
+            trades.push(trade);
+        }
+        let at = |time: &str| UnixNanos::from(at(&format!("2026-11-12T14:30:00.{time}Z")));
+        assert_eq!(
+            trades
+                .iter()
+                .map(|t| (
+                    t.instrument_id,
+                    t.price,
+                    t.size,
+                    t.aggressor_side,
+                    t.ts_event
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    InstrumentId::from(AAPL_CALL),
+                    Price::from("6.70"),
+                    Quantity::from(1),
+                    AggressorSide::NoAggressor,
+                    at("816861166")
+                ),
+                (
+                    InstrumentId::from(AAPL_CALL),
+                    Price::from("6.75"),
+                    Quantity::from(2),
+                    AggressorSide::NoAggressor,
+                    at("820596224")
+                ),
+                (
+                    InstrumentId::from(AAPL_PUT_2027),
+                    Price::from("19.10"),
+                    Quantity::from(2),
+                    AggressorSide::NoAggressor,
+                    at("998442462")
+                ),
+            ]
+        );
+        assert_eq!(
+            sent(&socket),
+            [json!({"action": "subscribe_options", "underlying": "AAPL"})]
+        );
+    }
+
+    /// The chain stays while a contract of it is subscribed.
+    #[tokio::test]
+    async fn an_underlying_s_chain_ends_with_the_trades_of_its_last_contract_subscribed() {
+        let socket = MockLseSocket::start(|_, frame| data_ws_answer(frame));
+        let (mut client, connected, _) =
+            streaming_options(&socket, &[AAPL_CALL, AAPL_PUT_2027]).await;
+        connected.unwrap();
+        client
+            .subscribe_trades(trades_subscribed(&[AAPL_CALL, AAPL_PUT_2027]))
+            .unwrap();
+
+        client.unsubscribe_trades(&trades_ended(AAPL_CALL)).unwrap();
+        client
+            .unsubscribe_trades(&trades_ended(AAPL_PUT_2027))
+            .unwrap();
+
+        socket.wait_until(|received| received.len() == 3).await;
+        assert_eq!(
+            sent(&socket),
+            [
+                json!({"action": "subscribe_options", "underlying": "AAPL"}),
+                json!({"action": "unsubscribe_options", "underlying": "AAPL"}),
+            ]
+        );
+    }
+
+    /// A chain takes one of the 16 subscriptions data-ws allows the free
+    /// key a connection, however many of its contracts are streamed, and
+    /// the socket's list holds no contract to check them against: 15
+    /// futures and two contracts of AAPL connect, 16 futures and one
+    /// contract do not.
+    #[tokio::test]
+    async fn an_underlying_s_chain_takes_one_subscription_of_its_connection() {
+        let futures = |n: usize| -> Vec<String> {
+            LISTED_FUTURES[..n]
+                .iter()
+                .map(|symbol| format!("{symbol}-FUTURES.LSEDGE"))
+                .collect()
+        };
+        for (n, contracts, connects) in [
+            (15, &[AAPL_CALL, AAPL_PUT_2027][..], true),
+            (16, &[AAPL_CALL][..], false),
+        ] {
+            let socket = MockLseSocket::start(|_, frame| data_ws_answer(frame));
+            let futures = futures(n);
+            let ids: Vec<&str> = futures
+                .iter()
+                .map(String::as_str)
+                .chain(contracts.iter().copied())
+                .collect();
+
+            let (_, connected, _) = streaming_options(&socket, &ids).await;
+
+            assert_eq!(connected.is_ok(), connects, "{n} futures: {connected:?}");
+            if let Err(e) = connected {
+                let err = format!("{e:#}");
+                assert!(err.contains("allows 16"), "{err}");
+                assert!(err.contains("17"), "{err}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn trades_of_an_option_contract_the_cache_does_not_define_fail_naming_it_unasked() {
+        let socket = MockLseSocket::start(|_, frame| data_ws_answer(frame));
+        let config = LseDataClientConfig::builder()
+            .api_key(SecretString::from(API_KEY))
+            .base_url_ws_data(socket.url().to_string())
+            .stream_ids(vec![InstrumentId::from(AAPL_CALL)])
+            .build();
+        let (mut client, connected, _) = connecting(&config, vec![]).await;
+        connected.unwrap();
+
+        let err = client
+            .subscribe_trades(trades_subscribed(&[AAPL_CALL]))
+            .unwrap_err();
+
+        let err = format!("{err:#}");
+        assert!(
+            err.contains(&format!("{AAPL_CALL} is not in the cache")),
+            "{err}"
+        );
+        assert_eq!(sent(&socket), Vec::<Value>::new());
+    }
+
+    #[tokio::test]
+    async fn trades_of_an_option_contract_the_client_does_not_stream_fail_naming_it() {
+        let socket = MockLseSocket::start(|_, frame| data_ws_answer(frame));
+        let (mut client, connected, _) = streaming_options(&socket, &[AAPL_CALL]).await;
+        connected.unwrap();
+
+        let err = client
+            .subscribe_trades(trades_subscribed(&[AAPL_PUT_2027]))
+            .unwrap_err();
+
+        let err = format!("{err:#}");
+        assert!(
+            err.contains(&format!("{AAPL_PUT_2027} is not among")),
+            "{err}"
+        );
+        assert_eq!(sent(&socket), Vec::<Value>::new());
+    }
+
+    /// LSE's sockets stream a series' ticks as quotes: its price is no
+    /// trade's (a futures tick's is its bid).
+    #[tokio::test]
+    async fn trades_of_an_lsedge_series_are_refused_naming_it() {
+        let socket = MockLseSocket::start(|_, frame| data_ws_answer(frame));
+        let (mut client, connected, _) = streaming(&socket, &[GOLD_FUTURES], true).await;
+        connected.unwrap();
+
+        let err = client
+            .subscribe_trades(trades_subscribed(&[GOLD_FUTURES]))
+            .unwrap_err();
+
+        let err = format!("{err:#}");
+        assert!(err.contains(GOLD_FUTURES), "{err}");
         assert_eq!(sent(&socket), Vec::<Value>::new());
     }
 
@@ -1880,6 +2151,28 @@ mod tests {
         let reason = envelope.failure_reason().expect("a failure");
         assert!(reason.contains("no_such_collection"), "{reason}");
         assert_eq!(lse.calls().len(), 1);
+    }
+
+    /// LSE's `/v3/options/chain` takes no dates: it answers the chain as it
+    /// stands, so no window of it can be asked.
+    #[tokio::test]
+    async fn an_options_chain_s_history_is_refused_by_name_unasked_lse_serving_it_now_alone() {
+        let lse = MockLse::start(vec![]);
+        let (client, mut events) = connected(&lse, false).await;
+
+        client
+            .request_data(rows_of(
+                LseRow::data_type("options_chain", "AAPL"),
+                "2026-11-09T00:00:00Z",
+                "2026-11-12T23:59:59.999999999Z",
+            ))
+            .unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        let reason = envelope.failure_reason().expect("a failure");
+        assert!(reason.contains("options_chain"), "{reason}");
+        assert!(reason.contains("snapshot"), "{reason}");
+        assert!(lse.calls().is_empty(), "{:?}", lse.calls());
     }
 
     /// Neither is asked of LSE.
