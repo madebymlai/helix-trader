@@ -58,11 +58,12 @@ use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::{DataActor, DataActorNative},
     cache::CacheApi,
+    component::ComponentAccessError,
     timer::TimeEvent,
 };
 use nautilus_model::{
     enums::{OrderSide, OrderStatus},
-    identifiers::{ClientOrderId, InstrumentId},
+    identifiers::{AccountId, ClientOrderId, InstrumentId, Venue},
     instruments::{Instrument, InstrumentAny},
     orders::{Order, OrderAny},
     position::Position,
@@ -222,8 +223,9 @@ impl Trade {
     ///
     /// Its quantity is Nautilus' fixed-risk size
     /// (`calculate_fixed_risk_position_size`): the stake's fraction of the
-    /// equity of the instrument's venue (`Portfolio::equity`) in the
-    /// instrument's P&L currency, over what its stop is worth on one unit,
+    /// equity (`Portfolio::equity`) in the instrument's P&L currency of the
+    /// account its orders are checked against (`routed_account`), over what
+    /// its stop is worth on one unit,
     /// rounded down to the instrument's size increment, at most its
     /// maximum quantity, no commission counted. The stop it is sized at is
     /// one R from its reference price, against it, on the instrument's
@@ -232,9 +234,15 @@ impl Trade {
     /// one R. Its entry is tagged with its R in money and the stake's
     /// multiple (`entry_risk`).
     ///
-    /// It sends nothing, and logs why, if the account holds no equity in
-    /// the P&L currency (equity is not converted), or if its size rounds
-    /// down to none. Nautilus' risk engine judges what it sends: a
+    /// The equity is the account's balance and the open P&L of its
+    /// positions on the instrument's venue: positions the account holds on
+    /// its broker's other venues are left out, as are those of other
+    /// processes, which this cache does not hold anyway, one process
+    /// running one strategy.
+    ///
+    /// It sends nothing, and logs why, if the account cannot be read, holds
+    /// no equity in the P&L currency (equity is not converted), or if its
+    /// size rounds down to none. Nautilus' risk engine judges what it sends: a
     /// quantity below the instrument's minimum, or a margin beyond the
     /// free balance, is denied.
     ///
@@ -268,17 +276,29 @@ impl Trade {
         S: Strategy + StrategyNative + DataActor + DataActorNative,
     {
         let instrument_id = self.instrument_id;
+        let venue = instrument_id.venue;
         let instrument = linear(strategy, instrument_id)?;
         let currency = instrument.cost_currency();
-        let held = strategy.portfolio().equity(&instrument_id.venue, None);
+        let account = match routed_account(strategy, venue) {
+            Ok(account) => account,
+            Err(e) => {
+                log::error!(
+                    "not sending the {} of {instrument_id} at a stake of {stake}: its account \
+                     cannot be read: {e}",
+                    self.side
+                );
+                return Ok(());
+            }
+        };
+        let held = strategy.portfolio().equity(&venue, account.as_ref());
         let Some(&equity) = held.get(&currency) else {
             let held: Vec<String> = held.values().map(ToString::to_string).collect();
             log::error!(
-                "not sending the {} of {instrument_id} at a stake of {stake}: the account of {} \
+                "not sending the {} of {instrument_id} at a stake of {stake}: the account {} \
                  holds no equity in {currency}, the currency of its P&L, but [{}], which is not \
                  converted",
                 self.side,
-                instrument_id.venue,
+                account.map_or_else(|| format!("of {venue}"), |account| account.to_string()),
                 held.join(", ")
             );
             return Ok(());
@@ -497,6 +517,32 @@ impl<Size> Trade<Size> {
             None => Ok(()),
         }
     }
+}
+
+/// The account an order on `venue` is checked against, as Nautilus' risk
+/// engine selects it (`docs/concepts/execution/index.md`, "Account
+/// selection", rules 4 and 5): the account the cache registers for the
+/// execution client the live node routes the venue to
+/// (`venues::exec_client_id`), or, with none registered for it, none here,
+/// the account issued under `venue` (`Portfolio::equity` without one), as
+/// in a backtest, whose simulated venue is the instrument's own. IB's
+/// account is issued under IB, not under the exchanges its instruments
+/// name. Read from the native cache (`try_cache_ref`): the strategy's cache
+/// facade holds no client's account.
+///
+/// # Errors
+///
+/// Returns Nautilus' error if the cache cannot be read: mutably borrowed
+/// or not registered.
+fn routed_account<S>(strategy: &S, venue: Venue) -> Result<Option<AccountId>, ComponentAccessError>
+where
+    S: DataActorNative,
+{
+    let client = venues::exec_client_id(venue);
+    Ok(strategy
+        .try_cache_ref()?
+        .account_id_for_client(&client)
+        .copied())
 }
 
 /// The instrument `instrument_id` from `strategy`'s cache.
