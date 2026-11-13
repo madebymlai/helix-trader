@@ -3034,6 +3034,7 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 name = "lse"
 version = "0.1.0"
 dependencies = [
+ "ahash",
  "anyhow",
  "arrow",
  "async-trait",
@@ -3059,6 +3060,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tungstenite",
 ]
 
 [[package]]

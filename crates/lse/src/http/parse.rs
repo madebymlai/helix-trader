@@ -287,7 +287,7 @@ fn time(times: &TimestampNanosecondArray, row: usize) -> anyhow::Result<u64> {
 
 /// `value`, a double, as the decimal it is written as at its shortest,
 /// which must have at most `precision` decimals.
-fn decimal(value: f64, precision: u8, what: &str) -> anyhow::Result<Decimal> {
+pub(crate) fn decimal(value: f64, precision: u8, what: &str) -> anyhow::Result<Decimal> {
     ensure!(value.is_finite(), "a {what} of {value}");
     let decimal = Decimal::from_str(&value.to_string())
         .with_context(|| format!("a {what} of {value}"))?

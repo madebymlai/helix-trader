@@ -5,7 +5,9 @@
 //! which broker trades them (`Broker`), if one does. Everything else asks here
 //! and names no venue, each caller the row's part it needs: fill-catalog for
 //! its fill (`fill_history`: the definitions and history), the live runner for
-//! its node's clients (`live_clients`: the live data), a backtest for how a
+//! its node's clients (`live_clients`: the live data), a live warmup for the
+//! client it asks a definition of (`live_definitions_client`: the broker, or
+//! the live data), a backtest for how a
 //! venue keeps positions (`oms_type`, its broker's answer) and whether it has
 //! money (`has_broker`: a venue no broker trades has none), a trade whether its
 //! orders may be reduce-only and post-only (`takes_reduce_only_and_post_only`,
@@ -36,7 +38,7 @@ pub mod pepperstone;
 
 use std::path::Path;
 
-use ::lse::{LseDataClientConfig, LseRow};
+use ::lse::{LseDataClientConfig, LseDataClientFactory, LseRow};
 use anyhow::{Context, bail, ensure};
 use clap::Args;
 use ctrader::{
@@ -44,12 +46,15 @@ use ctrader::{
     CTraderExecutionClientConfig, CTraderExecutionClientFactory,
 };
 use jiff::Timestamp;
+use nautilus_common::factories::DataClientFactory;
+use nautilus_interactive_brokers::factories::InteractiveBrokersDataClientFactory;
 use nautilus_live::config::RoutingConfig;
 use nautilus_model::{
     data::{CustomDataTrait, DataType, NautilusDataType},
     enums::OmsType,
-    identifiers::{InstrumentId, Venue},
+    identifiers::{ClientId, InstrumentId, Venue},
 };
+use nautilus_okx::factories::OKXDataClientFactory;
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use rust_decimal::Decimal;
 
@@ -154,7 +159,7 @@ pub(crate) enum LiveDataSource {
     Okx,
     /// A cTrader broker's data client.
     CTrader(CTraderBroker),
-    /// The LSE adapter's data client, which streams nothing yet.
+    /// The LSE adapter's data client, streaming LSE's quotes.
     Lse,
     /// Interactive Brokers' data client, on the gateway.
     Ib,
@@ -201,6 +206,30 @@ impl Broker {
         match self {
             Self::CTrader(_) | Self::Okx => true,
             Self::Ib => false,
+        }
+    }
+
+    /// The broker's data client on the live node, by the name the node
+    /// registers it under, its factory's: OKX's and IB's adapters name
+    /// theirs, the cTrader adapter names each broker's after its venue.
+    fn data_client(self) -> ClientId {
+        match self {
+            Self::Okx => ClientId::new(OKXDataClientFactory::new().name()),
+            Self::CTrader(broker) => ClientId::new(broker.venue),
+            Self::Ib => ClientId::new(InteractiveBrokersDataClientFactory::new().name()),
+        }
+    }
+}
+
+impl LiveDataSource {
+    /// The source's data client on the live node, by the name the node
+    /// registers it under, its factory's.
+    fn client(self) -> ClientId {
+        match self {
+            Self::Okx => Broker::Okx.data_client(),
+            Self::CTrader(broker) => Broker::CTrader(broker).data_client(),
+            Self::Lse => ClientId::new(LseDataClientFactory::new().name()),
+            Self::Ib => Broker::Ib.data_client(),
         }
     }
 }
@@ -325,6 +354,17 @@ pub fn oms_type(venue: Venue) -> OmsType {
 #[must_use]
 pub fn has_broker(venue: Venue) -> bool {
     Row::of(venue).broker.is_some()
+}
+
+/// The data client a live node asks the definition of an instrument of
+/// `venue` of: its broker's, if a broker trades it, its live data
+/// source's otherwise, LSEDGE's LSE, which publishes none (see
+/// `strategy::warmup`). The node's catalog answers first either way.
+#[must_use]
+pub fn live_definitions_client(venue: Venue) -> ClientId {
+    let row = Row::of(venue);
+    row.broker
+        .map_or_else(|| row.live_data.client(), Broker::data_client)
 }
 
 /// Whether the broker of `venue` takes reduce-only and post-only orders
@@ -575,11 +615,14 @@ fn ctrader_read(
 /// The live node's clients of `instrument_ids`, those of each one's live
 /// data source (`Row::of`, `LiveDataSource`), for the instruments
 /// `requirements` reads: OKX's, each cTrader broker's
-/// (`ctrader_brokers_present`), then IB's, each a data client with the
-/// execution client of the same adapter on its connection, each of those
-/// rows taking its live data from its broker (`Broker`). LSE's client
-/// streams nothing yet, so LSEDGE instruments and custom data of no
-/// instrument, LSE's rows, are refused before anything connects. The cTrader brokers' bar types are checked and their
+/// (`ctrader_brokers_present`), LSE's, then IB's. OKX's, the cTrader
+/// brokers' and IB's are each a data client with the execution client of
+/// the same adapter on its connection, each of those rows taking its live
+/// data from its broker (`Broker`); LSE's is a data client alone, routed
+/// LSEDGE, which no broker trades (see `lse::live_clients`), its key read
+/// when the node creates it. No source streams custom data of no
+/// instrument, LSE's rows, so a run reading any is refused before anything
+/// connects. The cTrader brokers' bar types are checked and their
 /// environments and credential read before anything connects; OKX's
 /// clients are set up at `leverage`, the run's, IB's trading the IB account
 /// of `venues` with its client id.
@@ -587,12 +630,12 @@ fn ctrader_read(
 /// # Errors
 ///
 /// Returns an error naming them if `requirements` reads custom data of no
-/// instrument or instruments are LSEDGE's, if a cTrader
-/// broker's bar type is not built from quotes or its environment or
-/// credential is missing (see `ctrader_read`, checked before anything
-/// connects), if OKX's clients cannot be set up or the OKX account does not
-/// suit the run (see `okx::clients`), if cTrader is unreachable or a
-/// broker's account is not hedging or not the credential's (see
+/// instrument, if a cTrader broker's bar type is not built from quotes or
+/// its environment or credential is missing (see `ctrader_read`, checked
+/// before anything connects), if OKX's clients cannot be set up or the OKX
+/// account does not suit the run (see `okx::clients`), if cTrader is
+/// unreachable or a broker's account is not hedging or not the
+/// credential's (see
 /// `CTraderConnection::check_account`), if the strategy trades IB
 /// instruments and no account is given, or if IB's clients cannot be set up
 /// (see `ib::clients`).
@@ -622,15 +665,6 @@ pub(crate) async fn live_clients(
             .collect::<Vec<_>>()
             .join(", ")
     );
-    ensure!(
-        lse_ids.is_empty(),
-        "the LSE adapter streams no live data yet: {}",
-        lse_ids
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
     // Read before anything connects.
     let ctrader = ctrader_brokers_present(&ctrader_ids)
         .into_iter()
@@ -644,6 +678,9 @@ pub(crate) async fn live_clients(
     for (connection, ids) in ctrader {
         connection.check_account().await?;
         clients.push(ctrader_clients(connection, ids));
+    }
+    if !lse_ids.is_empty() {
+        clients.push(lse::live_clients(&lse_ids));
     }
     if !ib_ids.is_empty() {
         let account = venues.ib.account.as_ref().context(
@@ -1475,27 +1512,70 @@ mod tests {
         assert_eq!(Row::of(*LSEDGE_VENUE).history, HistorySource::Lse);
     }
 
-    /// The live run is refused before anything connects, OKX's clients
-    /// among them, which would fail on its missing environment.
+    /// LSE's data client alone, on the route of LSEDGE, the default left to
+    /// IB; its key is read when the node creates it, so nothing is read or
+    /// connected here.
     #[tokio::test]
-    async fn a_run_reading_lsedge_instruments_is_refused_naming_them_before_anything_connects() {
+    async fn a_run_reading_lsedge_instruments_streams_them_from_lse_routed_lsedge_with_no_broker() {
         let requirements = ticks(&[
-            (NautilusDataType::QuoteTick, "BTC-USDT-SWAP.OKX"),
-            (NautilusDataType::TradeTick, "GOLD-FUTURES.LSEDGE"),
+            (NautilusDataType::QuoteTick, "GOLD-FUTURES.LSEDGE"),
+            (NautilusDataType::QuoteTick, "US10Y-FUTURES.LSEDGE"),
         ]);
 
-        let Err(err) = live_clients(
+        let clients = live_clients(
             &requirements,
             &requirements.instrument_ids(),
             &live_args(),
             Decimal::ONE,
         )
         .await
-        else {
-            panic!("set up clients for LSEDGE instruments");
-        };
+        .unwrap();
+        let [clients] =
+            <[Clients; 1]>::try_from(clients).unwrap_or_else(|all| panic!("{} clients", all.len()));
 
-        assert!(err.to_string().contains("GOLD-FUTURES.LSEDGE"), "{err:#}");
+        assert_eq!(clients.data_factory.name(), "LSE");
+        assert!(clients.exec.is_none());
+        assert_eq!(
+            (clients.routing.default, clients.routing.venues),
+            (false, Some(vec!["LSEDGE".to_string()]))
+        );
+        let config = clients
+            .data_config
+            .as_any()
+            .downcast_ref::<LseDataClientConfig>()
+            .unwrap();
+        assert_eq!(
+            config.stream_ids,
+            [
+                InstrumentId::from("GOLD-FUTURES.LSEDGE"),
+                InstrumentId::from("US10Y-FUTURES.LSEDGE"),
+            ]
+        );
+    }
+
+    /// The broker's data client where a broker trades the venue, GLBX's
+    /// IB among them; LSEDGE's LSE, which streams it. Each by the name its
+    /// factory gives the client, which the node registers it under.
+    #[test]
+    fn a_definition_is_asked_of_the_venue_s_broker_or_else_of_its_live_data_client() {
+        for (id, client) in [
+            ("BTC-USDT-SWAP.OKX", "OKX"),
+            ("XAUUSD.ICMARKETS", "ICMARKETS"),
+            ("XAUUSD.PEPPERSTONE", "PEPPERSTONE"),
+            ("GCZ26.GLBX", "IB"),
+            ("SXR8.IBIS", "IB"),
+            ("GOLD-FUTURES.LSEDGE", "LSE"),
+        ] {
+            let id = InstrumentId::from(id);
+
+            assert_eq!(
+                live_definitions_client(id.venue),
+                ClientId::from(client),
+                "{id}"
+            );
+        }
+        let lse = lse::live_clients(&[InstrumentId::from("GOLD-FUTURES.LSEDGE")]);
+        assert_eq!(lse.data_factory.name(), "LSE");
     }
 
     /// LSE streams none yet: refused before anything connects, OKX's

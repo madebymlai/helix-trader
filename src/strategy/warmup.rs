@@ -52,6 +52,21 @@
 //! (`Warmup::on_data_response`). A response's data is that window's alone,
 //! and the request's completion carries none.
 //!
+//! First, a live start asks the definition of each instrument it warms up
+//! that the cache lacks (`request_instrument`), naming the client the
+//! venue's row names (`venues::live_definitions_client`): its broker's,
+//! else its live data source's. The data engine answers it from a catalog
+//! before asking that client (`dispatch_instrument_request` in
+//! `data/src/engine/streaming.rs`) and caches it as it takes the request;
+//! it takes an actor's commands in the order sent, through one queue
+//! (`DataEngine.queue_execute`), so the definition is in the cache before
+//! it takes the warmup's requests and the roller's subscriptions, sent
+//! after it: LSE's client, which publishes no definitions and reads LSE's
+//! prices at the definition's precision, finds it there. Definitions the
+//! broker clients cached when they connected are not asked, so a catalog's
+//! older copy does not replace them; custom data, read from the catalog
+//! alone, needs none.
+//!
 //! The requests form one request group (`DataActor::request_group`):
 //! Nautilus calls `on_data_response` with the group once every request is
 //! answered, and with the first failure if one failed (a page of the venue
@@ -165,14 +180,14 @@ use nautilus_model::{
         OrderBookDepth, QuoteTick, TradeTick,
     },
     enums::RecordFlag,
-    identifiers::{ClientId, Venue},
+    identifiers::{ClientId, InstrumentId, Venue},
 };
 use serde_json::{Value, json};
 
 use crate::{
     rolls::{ContinuousBars, DELTAS_BOOK_TYPE, front},
     strategy::{DataRequirements, Source, TickSeries, bar_sources},
-    time_range,
+    time_range, venues,
 };
 
 mod hold;
@@ -653,7 +668,16 @@ where
     let (continuous_bars, others): (Vec<BarType>, Vec<BarType>) = bar_types
         .iter()
         .partition(|bar_type| continuous.params(bar_type.instrument_id()).is_some());
+    let sources = requests(&others, ticks, now);
     let mut requested = Vec::new();
+    // First, so that the data engine, which takes an actor's commands in
+    // the order sent, caches each definition the catalog answers before it
+    // handles any request or subscription of the instrument.
+    for instrument_id in undefined(actor, &sources) {
+        let client = venues::live_definitions_client(instrument_id.venue);
+        let id = actor.request_instrument(instrument_id, None, None, Some(client), None)?;
+        requested.push((id, vec![]));
+    }
     for bar_type in &continuous_bars {
         let params = continuous.params(bar_type.instrument_id());
         let id = actor.request_bars(
@@ -670,7 +694,7 @@ where
         // Read once the group ended (see `continuous_bars`).
         requested.push((id, vec![]));
     }
-    for (source, built) in requests(&others, ticks, now) {
+    for (source, built) in sources {
         let params = Some(request_params(built.iter(), windows.clone()));
         let id = match source {
             Source::Bars(source) => {
@@ -790,6 +814,31 @@ fn subscribe_from<A>(
     for venue_bar_types in by_venue.into_values() {
         actor.subscribe_bars(venue_bar_types, None, Some(subscription_params(now, [])));
     }
+}
+
+/// The instruments of `sources` whose definitions the cache of `actor`
+/// lacks, each once, in order: those the series of a data client are of,
+/// custom data, from the catalog alone, aside.
+fn undefined<A>(actor: &A, sources: &[(Source, Vec<BarType>)]) -> Vec<InstrumentId>
+where
+    A: DataActor + DataActorNative,
+{
+    let cache = actor.cache();
+    let mut undefined: Vec<InstrumentId> = Vec::new();
+    for (source, _) in sources {
+        let instrument_id = match source {
+            Source::Bars(bar_type) => bar_type.instrument_id(),
+            Source::Ticks(TickSeries {
+                data: NautilusDataType::Custom { .. },
+                ..
+            }) => continue,
+            Source::Ticks(tick) => tick.instrument_id,
+        };
+        if !undefined.contains(&instrument_id) && cache.instrument(&instrument_id).is_none() {
+            undefined.push(instrument_id);
+        }
+    }
+    undefined
 }
 
 /// The warmup requests of `bar_types`, internal bar types on no root, and
@@ -1116,7 +1165,8 @@ mod tests {
         (probe, sent)
     }
 
-    /// The requests of `commands`, in order: each its series, its id and its
+    /// The data requests of `commands`, in order, the definitions asked
+    /// aside (see `definitions_asked`): each its series, its id and its
     /// params.
     fn sent_requests(
         commands: &TypedIntoMessageSavingHandler<DataCommand>,
@@ -1134,6 +1184,7 @@ mod tests {
             .get_messages()
             .into_iter()
             .filter_map(|command| match command {
+                DataCommand::Request(RequestCommand::Instrument(_)) => None,
                 DataCommand::Request(request) => Some(request),
                 _ => None,
             })
@@ -1167,6 +1218,28 @@ mod tests {
                 (source, id, params)
             })
             .collect()
+    }
+
+    /// The definitions `commands` ask, each its instrument and the client
+    /// it names, and how many data requests come before it.
+    fn definitions_asked(
+        commands: &TypedIntoMessageSavingHandler<DataCommand>,
+    ) -> Vec<(InstrumentId, Option<ClientId>, usize)> {
+        let mut data_requests = 0;
+        let mut asked = Vec::new();
+        for command in commands.get_messages() {
+            match command {
+                DataCommand::Request(RequestCommand::Instrument(request)) => {
+                    let [instrument_id] = request.instrument_ids.as_slice() else {
+                        panic!("one instrument")
+                    };
+                    asked.push((*instrument_id, request.client_id, data_requests));
+                }
+                DataCommand::Request(_) => data_requests += 1,
+                _ => {}
+            }
+        }
+        asked
     }
 
     /// The requests of `commands`, in order: each its series and the bar
@@ -1337,6 +1410,69 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    /// A definition of `id`, as a broker's client puts one in the cache.
+    fn defined(id: &str) -> nautilus_model::instruments::InstrumentAny {
+        let mut contract = nautilus_model::instruments::stubs::futures_contract_es(None, None);
+        contract.id = InstrumentId::from(id);
+        nautilus_model::instruments::InstrumentAny::FuturesContract(contract)
+    }
+
+    /// LSE's gold futures quotes, SXR8's trades and IC's gold quotes, which
+    /// build the strategy's bars; IC's client put its gold in the cache.
+    /// Each instrument the cache lacks is asked once, of the client its
+    /// venue's row names (`venues::live_definitions_client`), before any of
+    /// its series is: LSE's for LSEDGE, which has no broker, IB's for IBIS.
+    #[test]
+    fn a_live_warmup_asks_the_definitions_the_cache_lacks_before_any_series() {
+        let warmup =
+            Warmup::live(&reading(&["XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL"])).reading(vec![
+                tick(NautilusDataType::QuoteTick, "GOLD-FUTURES.LSEDGE"),
+                tick(NautilusDataType::TradeTick, "SXR8.IBIS"),
+                tick(NautilusDataType::OrderBookDepth, "SXR8.IBIS"),
+            ]);
+        let (mut probe, commands) = registered();
+        probe
+            .cache_rc()
+            .borrow_mut()
+            .add_instrument(defined("XAUUSD.ICMARKETS"))
+            .unwrap();
+
+        warmup.start(&mut probe).unwrap();
+
+        assert_eq!(
+            definitions_asked(&commands),
+            [
+                (
+                    InstrumentId::from("GOLD-FUTURES.LSEDGE"),
+                    Some(ClientId::from("LSE")),
+                    0
+                ),
+                (
+                    InstrumentId::from("SXR8.IBIS"),
+                    Some(ClientId::from("IB")),
+                    0
+                ),
+            ]
+        );
+        assert_eq!(sent_requests(&commands).len(), 4);
+    }
+
+    /// The catalog alone answers custom data, and needs no definition.
+    #[test]
+    fn a_live_warmup_asks_no_definition_for_custom_data() {
+        let warmup = Warmup::live(&reading(&[])).reading(vec![tick(
+            NautilusDataType::Custom {
+                type_name: "Imbalance".to_string(),
+            },
+            "GCZ26.GLBX",
+        )]);
+        let (mut probe, commands) = registered();
+
+        warmup.start(&mut probe).unwrap();
+
+        assert_eq!(definitions_asked(&commands), []);
     }
 
     /// What a warmup hands books to, recording them.
