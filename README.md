@@ -28,7 +28,9 @@ Check the config and venue requirements when changing instruments. Before runnin
 cargo test
 ```
 
-`cargo test` runs the harness and the integration tests that run a strategy, such as the golden rows. Lint with `cargo clippy --all-targets --all-features`.
+`cargo test` runs the harness and the integration tests that run a strategy, such as the golden rows. After changing a strategy, also run its unit tests: `cargo test --features strategy-tests --lib strategy::<name>::`.
+
+Lint with `cargo clippy --all-targets --all-features`; `--all-features` is for clippy only.
 
 Real-venue live tests are gated by `NAUTILUS_IB_RUN=1`, `NAUTILUS_OKX_RUN=1`, or `NAUTILUS_CTRADER_RUN=ic` or `pepperstone`. Run one live module per process, for example `NAUTILUS_CTRADER_RUN=ic cargo test --test live ctrader_demo:: -- --nocapture`. Read the relevant [live](src/live/README.md) and venue documentation first: tests can place orders or rotate tokens.
 
