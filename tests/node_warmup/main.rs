@@ -1506,3 +1506,230 @@ fn an_lsedge_definition_the_cache_lacks_comes_from_the_catalog_before_lse_stream
         .expect("LSE serves no quotes of the past");
     assert!(failure.contains("data-unavailable"), "{failure}");
 }
+
+/// What `GlbxStreaming` saw of ESZ26 on the node.
+#[derive(Debug, Default)]
+struct GlbxSeen {
+    quotes: Vec<QuoteTick>,
+    trades: Vec<TradeTick>,
+}
+
+/// Starts a warmup and its roller of ESZ26's quotes and trades, as a model
+/// handle does, ESZ26's definition in the cache as its broker's client puts
+/// it there; lets the mock CME stream send its live records once the first
+/// quote came, and stops the node on the first trade.
+#[derive(Debug)]
+struct GlbxStreaming {
+    core: DataActorCore,
+    warmup: Rc<Warmup>,
+    roller: Roller,
+    stream: Rc<lse::testing::MockCmeStream>,
+    seen: Rc<RefCell<GlbxSeen>>,
+}
+
+nautilus_actor!(GlbxStreaming);
+
+impl DataActor for GlbxStreaming {
+    fn on_start(&mut self) -> anyhow::Result<()> {
+        self.cache_rc()
+            .borrow_mut()
+            .add_instrument(lse::testing::esz26())?;
+        Rc::clone(&self.warmup).start(self)?;
+        self.roller.clone().start(self)
+    }
+
+    fn on_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
+        self.seen.borrow_mut().quotes.push(*quote);
+        self.stream.release();
+        Ok(())
+    }
+
+    fn on_trade(&mut self, trade: &TradeTick) -> anyhow::Result<()> {
+        self.seen.borrow_mut().trades.push(*trade);
+        self.shutdown_system(Some("LSE's first trade came".to_string()));
+        Ok(())
+    }
+
+    fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
+        // The warmup's outcome is not under test here.
+        let _ = Rc::clone(&self.warmup).on_data_response(self, response);
+        Ok(())
+    }
+}
+
+/// A live start reading ESZ26's quotes and trades, `GLBX`, as the live node
+/// routes them: LSE's client routed GLBX, against the mock LSE peer and the
+/// mock CME stream replaying LSE's documented ESZ6, beside another client
+/// on no venue, as IB's is. The roller's subscriptions reach LSE's client,
+/// which streams the contract's opening best bid and offer, then its
+/// records: LSE's quotes and trade, not the other client's. The warmup's
+/// two days of the contract's history are asked of LSE too, which answers
+/// that it holds none (`404 data-unavailable`); the other client is asked
+/// nothing. The other client is not made the default route, as the live
+/// node makes IB's: Nautilus' node builder makes the first client on no
+/// venue it registers the default, in no set order, and then refuses
+/// another made the default ("default client already registered").
+#[test]
+fn glbx_data_comes_from_lse_s_cme_stream_routed_glbx_beside_another_client() {
+    let dir = tempfile::tempdir().unwrap();
+    let stream = Rc::new(lse::testing::MockCmeStream::start(|_, _| {
+        lse::testing::held(
+            lse::testing::dbn_frames(lse::testing::CME_ESZ6_DOCUMENTED),
+            4,
+        )
+    }));
+    let not_loaded = lse::testing::Reply::refusal(404, lse::testing::DATA_UNAVAILABLE_TODAY);
+    let history = lse::testing::MockLse::start(
+        std::iter::once(lse::testing::Reply::json(lse::testing::PAIRS_ESZ6))
+            .chain(std::iter::repeat_n(not_loaded, 16))
+            .collect(),
+    );
+    let es = InstrumentId::from(lse::testing::ESZ26);
+    let ticks: Vec<TickSeries> = [NautilusDataType::QuoteTick, NautilusDataType::TradeTick]
+        .into_iter()
+        .map(|data| TickSeries {
+            data,
+            instrument_id: es,
+        })
+        .collect();
+    let requirements = DataRequirements {
+        bar_types: vec![],
+        ticks: ticks.clone(),
+        custom: vec![],
+        warmup: SignedDuration::from_hours(48),
+    };
+    let warmup = Rc::new(Warmup::live(&requirements).reading(ticks.clone()));
+    let config = LiveNodeConfig {
+        environment: Environment::Live,
+        trader_id: TraderId::from("WARMUP-001"),
+        load_state: false,
+        save_state: false,
+        catalogs: vec![DataCatalogConfig::new(
+            dir.path().to_str().unwrap().to_string(),
+            None,
+            None,
+        )],
+        cache: Some(warmup.cache_config().unwrap()),
+        data_engine: warmup::live_data_engine_config(&requirements.bar_types),
+        ..Default::default()
+    };
+    let lse = lse::LseDataClientConfig::builder()
+        .cme_calls_per_minute(std::num::NonZeroU32::new(6000).unwrap())
+        .cme_api_key(nautilus_core::string::secret::SecretString::from(
+            lse::testing::CME_API_KEY,
+        ))
+        .base_url_http(history.url().to_string())
+        .base_url_ws_cme(stream.url().to_string())
+        .stream_ids(vec![es])
+        .build();
+    let other = FakeVenue::new(Answer::Envelope);
+    let seen = Rc::new(RefCell::new(GlbxSeen::default()));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut node = LiveNodeBuilder::from_config(config)
+            .unwrap()
+            .with_name("WARMUP")
+            .with_delay_post_stop_secs(0)
+            .add_data_client_with_routing(
+                None,
+                Box::new(FakeFactory(Rc::clone(&other))),
+                Box::new(FakeConfig),
+                RoutingConfig {
+                    default: false,
+                    venues: None,
+                },
+            )
+            .unwrap()
+            .add_data_client_with_routing(
+                None,
+                Box::new(lse::LseDataClientFactory::new()),
+                Box::new(lse),
+                RoutingConfig {
+                    default: false,
+                    venues: Some(vec!["GLBX".to_string()]),
+                },
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        node.add_actor(GlbxStreaming {
+            core: DataActorCore::new(DataActorConfig::default()),
+            warmup,
+            roller: Roller::live(ticks),
+            stream: Rc::clone(&stream),
+            seen: Rc::clone(&seen),
+        })
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(60), node.run())
+            .await
+            .expect("LSE's trade comes within a minute")
+            .unwrap();
+        node.dispose();
+    });
+
+    let seen = seen.borrow();
+    let quotes: Vec<_> = seen
+        .quotes
+        .iter()
+        .map(|quote| {
+            (
+                quote.bid_price,
+                quote.bid_size,
+                quote.ask_price,
+                quote.ask_size,
+            )
+        })
+        .collect();
+    let level = |bid: &str, bid_size: u64, ask: &str, ask_size: u64| {
+        (
+            Price::from(bid),
+            Quantity::from(bid_size),
+            Price::from(ask),
+            Quantity::from(ask_size),
+        )
+    };
+    assert_eq!(
+        quotes,
+        [
+            level("7569.75", 2, "7570.00", 11),
+            level("7569.50", 18, "7570.00", 12),
+            level("7569.50", 18, "7570.00", 12),
+        ]
+    );
+    let trade = seen.trades[0];
+    assert_eq!(
+        (trade.price, trade.size, trade.aggressor_side),
+        (
+            Price::from("7570.00"),
+            Quantity::from(1),
+            AggressorSide::NoAggressor
+        )
+    );
+    let exported: Vec<_> = history
+        .calls()
+        .iter()
+        .filter(|call| call.path == "/v3/export")
+        .map(|call| {
+            (
+                call.param("pair_id").map(ToString::to_string),
+                call.param("data").map(ToString::to_string),
+            )
+        })
+        .collect();
+    for data in ["quotes", "trades"] {
+        assert!(
+            exported.contains(&(Some("4000000001".to_string()), Some(data.to_string()))),
+            "the warmup's {data} of ESZ26 not asked of LSE: {exported:?}"
+        );
+    }
+    let other = other.borrow();
+    assert!(
+        other.asked.is_empty() && other.live.is_empty(),
+        "the other client was asked of GLBX: {:?} {:?}",
+        other.asked,
+        other.live
+    );
+}

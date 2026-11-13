@@ -13,8 +13,11 @@
 //! `http::export`). It serves the rows of LSE's reference collections as
 //! custom data (`LseRow`) too, its source and symbol named in the metadata
 //! of the request's data type, each row stamped when its values are known,
-//! with the LSE key; its definitions request fails, LSE publishing none. Live, it streams the quotes of the instruments its
-//! config names, on their sockets (see `streams`). Every other request and
+//! with the LSE key; its definitions request fails, LSE publishing none.
+//! Live, it streams the quotes of the `LSEDGE` instruments its config
+//! names, on their sockets, and the quotes and trades of its `GLBX`
+//! contracts, CME Globex's Level 1, on LSE's CME stream with the CME key
+//! (see `streams` and `cme`). Every other request and
 //! subscription is left to Nautilus' defaults: a request fails as
 //! unsupported, a subscription is logged as not implemented. A request is
 //! answered from a task, in one completed response envelope, the data
@@ -28,6 +31,7 @@
 //! for catalog write-back"), as Nautilus' OKX client answers a window it
 //! cannot confirm, so that a fill asks for it again; the span is logged.
 
+mod cme;
 #[cfg(test)]
 mod data_tester;
 mod streams;
@@ -47,7 +51,7 @@ use nautilus_common::{
         data::{
             BarsResponse, CustomDataResponse, DataResponseEnvelope, QuotesResponse, RequestBars,
             RequestCustomData, RequestInstrument, RequestQuotes, RequestTrades, SubscribeQuotes,
-            TradesResponse, UnsubscribeQuotes,
+            SubscribeTrades, TradesResponse, UnsubscribeQuotes, UnsubscribeTrades,
         },
     },
 };
@@ -63,7 +67,7 @@ use nautilus_model::{
     instruments::Instrument,
 };
 
-use self::streams::LseStreams;
+use self::{cme::CmeAccess, streams::LseStreams};
 use crate::{
     common::{
         consts::CME_MARKET,
@@ -154,16 +158,23 @@ impl LseDataClient {
         LseRow::register();
         let data_sender = get_data_event_sender();
         let clock = get_atomic_clock_realtime();
+        let listings = Arc::<CmeListings>::default();
+        let cme = credentials
+            .remove(&LseProduct::Cme)
+            .zip(http.get(&LseProduct::Cme).cloned())
+            .map(|(credential, http)| CmeAccess { credential, http });
         let streams = LseStreams::new(
             config,
             credentials.remove(&LseProduct::Global),
+            cme,
+            Arc::clone(&listings),
             data_sender.clone(),
             clock,
         )?;
         Ok(Self {
             client_id,
             http,
-            listings: Arc::default(),
+            listings,
             cache,
             tasks: TaskGroup::new(),
             streams,
@@ -450,8 +461,9 @@ impl DataClient for LseDataClient {
     }
 
     /// Streams the quotes of each instrument, of those it streams, at the
-    /// precision of its definition in the cache: bid and ask, with no
-    /// sizes (see `LseStreams`).
+    /// precision of its definition in the cache: an `LSEDGE` series' bid
+    /// and ask with no sizes, a `GLBX` contract's best bid and offer with
+    /// LSE's sizes, opening with its latest (see `LseStreams`).
     ///
     /// # Errors
     ///
@@ -471,6 +483,32 @@ impl DataClient for LseDataClient {
     fn unsubscribe_quotes(&mut self, cmd: &UnsubscribeQuotes) -> anyhow::Result<()> {
         execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
             self.streams.unsubscribe_quotes(id)
+        })
+    }
+
+    /// Streams the trades of each instrument, a `GLBX` contract, at the
+    /// precision of its definition in the cache, with no aggressor side
+    /// (see `LseStreams`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming an instrument that is not a `GLBX` contract,
+    /// LSE's sockets streaming quotes alone, or that the cache does not
+    /// define.
+    fn subscribe_trades(&mut self, cmd: SubscribeTrades) -> anyhow::Result<()> {
+        execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
+            self.streams.subscribe_trades(id, &self.cache)
+        })
+    }
+
+    /// Ends the trades of each instrument.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming an instrument not subscribed.
+    fn unsubscribe_trades(&mut self, cmd: &UnsubscribeTrades) -> anyhow::Result<()> {
+        execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
+            self.streams.unsubscribe_trades(id)
         })
     }
 
@@ -1062,6 +1100,7 @@ mod tests {
             cme_api_key: Some(SecretString::from(CME_API_KEY)),
             base_url_http: Some(lse.url().to_string()),
             base_url_ws: None,
+            base_url_ws_cme: None,
             calls_per_minute: NonZeroU32::new(6000).unwrap(),
             cme_calls_per_minute: NonZeroU32::new(6000).unwrap(),
             stream_ids: vec![],

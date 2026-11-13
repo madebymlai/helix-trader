@@ -9,9 +9,11 @@
 //! (gold spot's fails with LSE's refusal, a commodity, of which LSE stores
 //! no trades); TC-D41, historical bars, gold spot's 1-minute candles; and,
 //! by a second tester, TC-D20, gold futures' quotes, which the client
-//! streams on data-ws, and TC-D70, their subscription ended on stop. The
-//! adapter streams no other kind, so every other subscription case is
-//! skipped.
+//! streams on data-ws, and TC-D70, their subscription ended on stop; and,
+//! by a third, TC-D20 and TC-D30, GCZ26.GLBX's quotes and trades, which the
+//! client streams on LSE's CME stream (its opening quote alone while CME is
+//! closed), and TC-D70. The adapter streams no other kind, so every other
+//! subscription case is skipped.
 //!
 //! LSE publishes no definitions: the tester writes the crate's test
 //! definitions into a temporary catalog the node reads, the two series' as
@@ -79,7 +81,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Box::new(factory),
             Box::new(
                 LseDataClientConfig::builder()
-                    .stream_ids(vec![InstrumentId::from(GOLD_FUTURES)])
+                    .stream_ids(vec![
+                        InstrumentId::from(GOLD_FUTURES),
+                        InstrumentId::from(GCZ26),
+                    ])
                     .build(),
             ),
         )?
@@ -110,14 +115,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .can_unsubscribe(true)
         .build()?;
 
+    let cme_config = DataTesterConfig::builder()
+        .base(tester("DATA-TESTER-CME"))
+        .client_id(client_id)
+        .instrument_ids(vec![InstrumentId::from(GCZ26)])
+        .subscribe_quotes(true)
+        .subscribe_trades(true)
+        .can_unsubscribe(true)
+        .build()?;
     node.add_actor(DataTester::new(tester_config))?;
     node.add_actor(DataTester::new(quotes_config))?;
+    node.add_actor(DataTester::new(cme_config))?;
     node.run().await?;
 
     Ok(())
 }
 
-/// The config of the tester `actor_id`, one of the node's two.
+/// The config of the tester `actor_id`, one of the node's three.
 fn tester(actor_id: &str) -> DataActorConfig {
     DataActorConfig {
         actor_id: Some(ActorId::from(actor_id)),

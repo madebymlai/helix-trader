@@ -26,6 +26,8 @@ pub struct LseDataClientConfig {
     pub base_url_http: Option<String>,
     /// The address of every LSE socket; LSE's own of each if none.
     pub base_url_ws: Option<String>,
+    /// The address of LSE's CME Globex stream; LSE's own if none.
+    pub base_url_ws_cme: Option<String>,
     /// The calls a minute the client keeps within on the LSE key: the free
     /// plan's, the fewest of any plan, unless the key's plan allows more
     /// (LSE's `/v3/usage`, `calls_per_minute`).
@@ -39,7 +41,9 @@ pub struct LseDataClientConfig {
     /// The instruments the client streams, on a live node: `connect` opens
     /// the socket each one's market streams on, authenticates the key, and
     /// fails unless the socket lists each and allows them all on its one
-    /// connection. None on a fill's node, which opens no socket.
+    /// connection; for `GLBX` contracts, LSE's CME stream, with the CME
+    /// key, subscribing them all, and fails with LSE's refusal of the
+    /// subscription. None on a fill's node, which opens no socket.
     #[builder(default)]
     pub stream_ids: Vec<InstrumentId>,
 }

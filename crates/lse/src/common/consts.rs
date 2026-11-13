@@ -32,6 +32,10 @@ pub(crate) const CME_LITE_CALLS_PER_MINUTE: NonZeroU32 = NonZeroU32::new(200).ex
 /// LSE's name of CME Globex, its market's folder.
 pub(crate) const CME_MARKET: &str = "cme";
 
+/// LSE's CME Globex stream, a socket of its own protocol for a CME Group
+/// plan's key (LSE's WebSocket documentation, "The CME Group stream").
+pub(crate) const CME_STREAM_URL: &str = "wss://cme.londonstrategicedge.com/v1/stream";
+
 /// An LSE socket of the protocol four of them share (LSE's WebSocket
 /// documentation, "The sockets"), each carrying its markets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -12,7 +12,8 @@
 //! contract's listing), `http` (the HTTP client, its typed queries, an
 //! export over any span, the listings of CME contracts, LSE's answers and
 //! refusals and the parsing of an export's Parquet file), `websocket` (the
-//! frames of LSE's sockets, the client of one, and the parsing of a tick),
+//! frames of LSE's sockets, the client of one, and the parsing of a tick;
+//! and LSE's CME Globex stream, its messages and its client),
 //! `config` (the data client's config), `data` (the data client),
 //! `factories`, and `types`, the custom data type of LSE's rows that are
 //! not prices (`LseRow`).

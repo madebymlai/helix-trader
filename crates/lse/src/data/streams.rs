@@ -1,5 +1,6 @@
-//! The data client's live data: the sockets of the instruments it streams
-//! and their quotes.
+//! The data client's live data: the sockets of the `LSEDGE` instruments it
+//! streams and their quotes, and LSE's CME stream of the `GLBX` contracts it
+//! streams (see `cme`).
 //!
 //! `open` connects to the socket each instrument's market streams on (see
 //! `LseSymbol::stream`), one connection a socket whatever the key allows,
@@ -17,6 +18,7 @@ use std::sync::Arc;
 
 use ahash::AHashMap;
 use anyhow::{Context, bail};
+use jiff::{Timestamp, tz::TimeZone};
 use nautilus_common::{
     cache::CacheView,
     live::{dst::time::Duration, sender::EventSender},
@@ -24,15 +26,21 @@ use nautilus_common::{
 };
 use nautilus_core::{collections::AtomicMap, time::AtomicTime};
 use nautilus_live::task::TaskGroup;
-use nautilus_model::{data::Data, identifiers::InstrumentId, instruments::Instrument};
+use nautilus_model::{
+    data::Data,
+    identifiers::{InstrumentId, Venue},
+    instruments::Instrument,
+};
 
+use super::cme::{CmeAccess, CmeKind, CmeStreams};
 use crate::{
     common::{
         consts::{LSE_API_KEY, LseSocket},
         credential::LseCredential,
-        symbol::LseSymbol,
+        symbol::LseInstrument,
     },
     config::LseDataClientConfig,
+    http::listing::CmeListings,
     websocket::{
         client::{KEEPALIVE_SECS, LseWebSocketClient, LseWsMessage},
         parse::parse_quote,
@@ -70,35 +78,53 @@ pub(super) struct LseStreams {
     quoted: QuotedBySymbol,
     /// The tasks turning each socket's ticks into quotes.
     tasks: TaskGroup,
+    /// The `GLBX` contracts, on LSE's CME stream.
+    cme: CmeStreams,
     data_sender: EventSender<DataEvent>,
     clock: &'static AtomicTime,
 }
 
 impl LseStreams {
-    /// The streams of the instruments `config` streams, on the key of
-    /// `credential`, the LSE key; none open.
+    /// The streams of the instruments `config` streams: `LSEDGE` series on
+    /// the key of `credential`, the LSE key, and `GLBX` contracts on `cme`,
+    /// the CME key, looked up in `listings`; none open.
     ///
     /// # Errors
     ///
-    /// Returns an error naming it if an instrument is not an `LSEDGE`
-    /// series, or is one of a market streamed on no socket here, and
-    /// naming `LSE_API_KEY` if an instrument is streamed with no LSE key.
+    /// Returns an error naming it if an instrument is neither an `LSEDGE`
+    /// series nor a `GLBX` contract, or is a series of a market streamed on
+    /// no socket here, and naming the variable of the key if an instrument
+    /// is streamed with no key of its product.
     pub(super) fn new(
         config: &LseDataClientConfig,
         credential: Option<LseCredential>,
+        cme: Option<CmeAccess>,
+        listings: Arc<CmeListings>,
         data_sender: EventSender<DataEvent>,
         clock: &'static AtomicTime,
     ) -> anyhow::Result<Self> {
-        let streamed = config
-            .stream_ids
-            .iter()
-            .map(|&id| {
-                let (socket, symbol) = LseSymbol::from_instrument_id(id)?
-                    .stream()
-                    .with_context(|| format!("streaming {id}"))?;
-                Ok((id, socket, symbol))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
+        let year = Timestamp::from(clock.get_time_ns())
+            .to_zoned(TimeZone::UTC)
+            .year();
+        let (mut streamed, mut contracts) = (Vec::new(), Vec::new());
+        for &id in &config.stream_ids {
+            match LseInstrument::from_instrument_id(id, year)? {
+                LseInstrument::Series(series) => {
+                    let (socket, symbol) =
+                        series.stream().with_context(|| format!("streaming {id}"))?;
+                    streamed.push((id, socket, symbol));
+                }
+                LseInstrument::Cme(contract) => contracts.push(contract),
+            }
+        }
+        let cme = CmeStreams::new(
+            contracts,
+            cme,
+            listings,
+            config.base_url_ws_cme.clone(),
+            data_sender.clone(),
+            clock,
+        )?;
         if credential.is_none() && !streamed.is_empty() {
             bail!(
                 "streaming {} needs the LSE key: set {LSE_API_KEY}, or give the config's",
@@ -116,6 +142,7 @@ impl LseStreams {
             sockets: AHashMap::new(),
             quoted: Arc::default(),
             tasks: TaskGroup::new(),
+            cme,
             data_sender,
             clock,
         })
@@ -123,15 +150,16 @@ impl LseStreams {
 
     /// Connects to the socket of each instrument streamed and checks the
     /// socket lists them all to the key and allows them on one connection;
-    /// starts turning their ticks into quotes. Nothing to do if none is
-    /// streamed.
+    /// starts turning their ticks into quotes. Then opens the CME stream of
+    /// the contracts streamed (see `CmeStreams::open`). Nothing to do if
+    /// none is streamed.
     ///
     /// # Errors
     ///
     /// Returns an error if a connection fails or LSE refuses the key (see
     /// `LseWebSocketClient::connect`), naming the instruments a socket does
     /// not list, or naming the limit if the instruments of a socket exceed
-    /// it; then no socket is left open.
+    /// it, or as `CmeStreams::open`; then no socket is left open.
     pub(super) async fn open(&mut self) -> anyhow::Result<()> {
         if !self.tasks.is_open() {
             self.close().await?;
@@ -150,6 +178,10 @@ impl LseStreams {
                 self.close().await?;
                 return Err(e);
             }
+        }
+        if let Err(e) = self.cme.open().await {
+            self.close().await?;
+            return Err(e);
         }
         Ok(())
     }
@@ -259,7 +291,8 @@ impl LseStreams {
     }
 
     /// Subscribes to the quotes of `id`, at the precision of its definition
-    /// in `cache`.
+    /// in `cache`: a `GLBX` contract's on the CME stream (see
+    /// `CmeStreams::subscribe`), an `LSEDGE` series' on its socket.
     ///
     /// # Errors
     ///
@@ -272,6 +305,9 @@ impl LseStreams {
         id: InstrumentId,
         cache: &CacheView,
     ) -> anyhow::Result<()> {
+        if id.venue == Venue::GLBX() {
+            return self.cme.subscribe(id, CmeKind::Quotes, cache);
+        }
         let (socket, symbol) = self.streamed_as(id)?;
         let client = self
             .sockets
@@ -304,12 +340,42 @@ impl LseStreams {
     /// Returns an error naming it if the client does not stream it, or if
     /// its socket is not open.
     pub(super) fn unsubscribe_quotes(&self, id: InstrumentId) -> anyhow::Result<()> {
+        if id.venue == Venue::GLBX() {
+            return self.cme.unsubscribe(id, CmeKind::Quotes);
+        }
         let (socket, symbol) = self.streamed_as(id)?;
         self.quoted.remove(&(socket, symbol.to_ascii_uppercase()));
         self.sockets
             .get(&socket)
             .with_context(|| format!("LSE's {} is not connected", socket.name()))?
             .unsubscribe(symbol)
+    }
+
+    /// Subscribes to the trades of `id`, a `GLBX` contract, at the
+    /// precision of its definition in `cache` (see `CmeStreams::subscribe`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming it if it is not a `GLBX` contract, LSE's
+    /// sockets streaming quotes alone, or as `CmeStreams::subscribe`.
+    pub(super) fn subscribe_trades(
+        &self,
+        id: InstrumentId,
+        cache: &CacheView,
+    ) -> anyhow::Result<()> {
+        ensure_cme_trades(id)?;
+        self.cme.subscribe(id, CmeKind::Trades, cache)
+    }
+
+    /// Ends the trades of `id`, a `GLBX` contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming it if it is not a `GLBX` contract or is not
+    /// subscribed.
+    pub(super) fn unsubscribe_trades(&self, id: InstrumentId) -> anyhow::Result<()> {
+        ensure_cme_trades(id)?;
+        self.cme.unsubscribe(id, CmeKind::Trades)
     }
 
     /// The socket of `id` and its symbol there.
@@ -323,25 +389,43 @@ impl LseStreams {
         }
     }
 
-    /// Begins the shutdown of the tick tasks; `close` finishes it.
+    /// Begins the shutdown of the tick and record tasks; `close` finishes
+    /// it.
     pub(super) fn begin_shutdown(&self) {
         self.tasks.begin_shutdown();
+        self.cme.begin_shutdown();
     }
 
-    /// Stops the tick tasks and disconnects every socket.
+    /// Stops the tick and record tasks and disconnects every socket and
+    /// the CME stream.
     ///
     /// # Errors
     ///
-    /// Returns an error if the tick tasks do not stop.
+    /// Returns an error if the tasks do not stop.
     pub(super) async fn close(&mut self) -> anyhow::Result<()> {
         self.tasks.begin_shutdown();
-        let stopped = self.tasks.finish_shutdown(TASK_GRACE, TASK_FORCE).await;
+        let (stopped, cme) = tokio::join!(
+            self.tasks.finish_shutdown(TASK_GRACE, TASK_FORCE),
+            self.cme.close()
+        );
         for (_, client) in self.sockets.drain() {
             client.disconnect().await;
         }
         self.quoted.rcu(|quoted| quoted.clear());
-        stopped.map_err(|e| anyhow::anyhow!("stopping the LSE tick tasks: {e}"))
+        stopped.map_err(|e| anyhow::anyhow!("stopping the LSE tick tasks: {e}"))?;
+        cme
     }
+}
+
+/// Checks `id` is a `GLBX` contract, whose trades LSE's CME stream carries.
+fn ensure_cme_trades(id: InstrumentId) -> anyhow::Result<()> {
+    if id.venue != Venue::GLBX() {
+        bail!(
+            "LSE streams no trades of {id}: its sockets' ticks are quotes; LSE's CME stream \
+             carries the trades of GLBX contracts"
+        );
+    }
+    Ok(())
 }
 
 /// Sends `event` to the node; a closed channel means the node is stopping.

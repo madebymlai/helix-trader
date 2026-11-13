@@ -6,8 +6,9 @@
 //! `futures`), trades, from LSE's tick slices, and bars, from its candles,
 //! each stamped at its close; and of `GLBX` contracts, CME Globex's Level 1
 //! under the ids Databento gives them (`GCZ26.GLBX`), trades and quotes.
-//! Live, the client streams the quotes of `LSEDGE` instruments on the live
-//! node, routed their venue (`live_clients`). Each contract's definition is
+//! Live, the client streams the quotes of `LSEDGE` instruments and the
+//! Level 1 of `GLBX` contracts, quotes and trades, on the live node, routed
+//! their venues (`live_clients`). Each contract's definition is
 //! its row's definitions source's: `LSEDGE`'s the catalog's alone, written
 //! there by hand, LSE publishing none, the data engine answering a
 //! definition request from the catalog before asking the client; `GLBX`'s
@@ -97,12 +98,13 @@ fn node_client(config: LseDataClientConfig) -> NodeClient {
     }
 }
 
-/// The live node's clients of `instrument_ids`, `LSEDGE` instruments: the
-/// LSE adapter's data client streaming them, its key read when the node
-/// creates it, and no execution client, LSE trading nothing. The client is
-/// on no venue, so it takes the route of theirs (`RoutingConfig::venues`)
-/// and not the default, which IB keeps for the venues without a client of
-/// their own.
+/// The live node's clients of `instrument_ids`, `LSEDGE` instruments and
+/// `GLBX` contracts: the LSE adapter's data client streaming them, its keys
+/// read when the node creates it, the LSE key for `LSEDGE` and the CME key
+/// for `GLBX`, and no execution client, LSE trading nothing; GLBX's orders
+/// go to IB's. The client is on no venue, so it takes the routes of theirs
+/// (`RoutingConfig::venues`) and not the default, which IB keeps for the
+/// venues without a client of their own.
 pub(super) fn live_clients(instrument_ids: &[InstrumentId]) -> Clients {
     clients(
         LseDataClientConfig::builder()
