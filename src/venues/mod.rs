@@ -10,9 +10,10 @@
 //! money (`has_broker`: a venue no broker trades has none), a trade whether its
 //! orders may be reduce-only and post-only (`takes_reduce_only_and_post_only`,
 //! its broker's answer); venue code checks its own instruments against the
-//! table. The settings each command takes of the venues are composed here,
-//! `LiveVenueArgs` for live and `HistoryVenueArgs` for fill-catalog, which the
-//! commands flatten.
+//! table. Custom data of no instrument has no venue and no row: its type
+//! names its source, LSE's rows LSE (`fill_history`). The settings each
+//! command takes of the venues are composed here, `LiveVenueArgs` for live
+//! and `HistoryVenueArgs` for fill-catalog, which the commands flatten.
 //!
 //! The cTrader brokers are one kind (`CTraderBroker`), which both dispatches
 //! loop over: each one's module names its venue and account, and its row of
@@ -35,7 +36,7 @@ pub mod pepperstone;
 
 use std::path::Path;
 
-use ::lse::LseDataClientConfig;
+use ::lse::{LseDataClientConfig, LseRow};
 use anyhow::{Context, ensure};
 use clap::Args;
 use ctrader::{
@@ -45,7 +46,7 @@ use ctrader::{
 use jiff::Timestamp;
 use nautilus_live::config::RoutingConfig;
 use nautilus_model::{
-    data::NautilusDataType,
+    data::{CustomDataTrait, NautilusDataType},
     enums::OmsType,
     identifiers::{InstrumentId, Venue},
 };
@@ -371,13 +372,16 @@ fn of_definitions_source(slices: &[SeriesSlice], source: DefinitionsSource) -> V
 /// `requirements` reads over `[start, end]`, those its bars are built from
 /// and its ticks (see `DataRequirements::catalog_series`), each on a contract
 /// over its slice (`DataRequirements::slices`), every history source
-/// (`Row::of`, `HistorySource`) given its slices. Databento's, the cTrader
-/// brokers', OKX's and LSE's fill through a Nautilus node (see
-/// `catalog::NodeFill`), each request naming the client that answers it:
-/// Databento's data client for GLBX instruments (the series declared,
-/// checked against the dataset's end before the node starts), each cTrader
-/// broker's for its own (`add_ctrader_fill`), OKX's for OKX instruments
-/// (their series and funding) and LSE's for LSEDGE instruments
+/// (`Row::of`, `HistorySource`) given its slices, and its custom data of no
+/// instrument (`DataRequirements::custom`), which has no venue, from the
+/// source its type names: LSE's rows (`lse::LseRow`) from LSE, the only
+/// such type a source serves. Databento's, the cTrader brokers', OKX's and
+/// LSE's fill through a Nautilus node (see `catalog::NodeFill`), each
+/// request naming the client that answers it: Databento's data client for
+/// GLBX instruments (the series declared, checked against the dataset's end
+/// before the node starts), each cTrader broker's for its own
+/// (`add_ctrader_fill`), OKX's for OKX instruments (their series and
+/// funding) and LSE's for LSEDGE instruments and LSE's rows
 /// (`lse::add_fill`). Then IB, connected only if it has instruments, on the
 /// client id of `venues`, fills the others, without a node until its client
 /// answers with response envelopes. Databento, the cTrader brokers and IB
@@ -390,12 +394,13 @@ fn of_definitions_source(slices: &[SeriesSlice], source: DefinitionsSource) -> V
 ///
 /// # Errors
 ///
-/// Returns an error if the catalog cannot be read, if `DATABENTO_API_KEY` is
-/// missing while Databento has something to fill, or as
-/// `DatabentoHistory::new`, `DatabentoHistory::check`, `add_ctrader_fill`,
-/// `OkxHistory::write_definitions`, `lse::add_fill`, `NodeFill::run`
-/// (`LSE_API_KEY` missing while LSE has something to fill among them),
-/// `IbHistory::connect` and `IbHistory::fill`.
+/// Returns an error if custom data of no instrument is of a type no source
+/// fills, before anything connects, if the catalog cannot be read, if
+/// `DATABENTO_API_KEY` is missing while Databento has something to fill, or
+/// as `DatabentoHistory::new`, `DatabentoHistory::check`,
+/// `add_ctrader_fill`, `OkxHistory::write_definitions`, `lse::add_fill`,
+/// `NodeFill::run` (`LSE_API_KEY` missing while LSE has something to fill
+/// among them), `IbHistory::connect` and `IbHistory::fill`.
 pub async fn fill_history(
     requirements: &DataRequirements,
     start: Timestamp,
@@ -403,6 +408,15 @@ pub async fn fill_history(
     venues: &HistoryVenueArgs,
     catalog_dir: &Path,
 ) -> anyhow::Result<()> {
+    // Custom data of no instrument has no venue: its type names its
+    // source, and LSE alone serves any, its rows.
+    for data_type in &requirements.custom {
+        ensure!(
+            data_type.type_name() == LseRow::type_name_static(),
+            "no source fills the custom data {data_type} of no instrument: LSE fills its {}",
+            LseRow::type_name_static()
+        );
+    }
     let mut catalog = ParquetDataCatalog::new(catalog_dir, None, None, None, None);
     let (mut okx_ids, mut databento_ids, mut ctrader_ids, mut lse_ids, mut ib_ids) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -452,11 +466,14 @@ pub async fn fill_history(
             node.add(okx::node_client(&okx_ids)?, &requests, okx::period);
         }
     }
-    if !lse_ids.is_empty() {
+    if !lse_ids.is_empty() || !requirements.custom.is_empty() {
         lse::add_fill(
             &mut node,
             &catalog,
             &of_source(&slices, HistorySource::Lse),
+            &requirements.custom,
+            start,
+            end,
             LseDataClientConfig::default(),
         )?;
     }
@@ -598,7 +615,7 @@ mod tests {
         live::runner::{replace_data_event_sender, replace_exec_event_sender},
     };
     use nautilus_model::{
-        data::{BarType, FundingRateUpdate, QuoteTick, TradeTick},
+        data::{BarType, DataType, FundingRateUpdate, QuoteTick, TradeTick},
         enums::AggressorSide,
         identifiers::{AccountId, ClientId, TradeId, TraderId},
         instruments::{InstrumentAny, stubs::crypto_perpetual_ethusdt},
@@ -652,6 +669,7 @@ mod tests {
         DataRequirements {
             bar_types: bars.iter().map(|bars| BarType::from(*bars)).collect(),
             ticks: vec![],
+            custom: vec![],
             warmup: SignedDuration::ZERO,
         }
     }
@@ -837,6 +855,7 @@ mod tests {
         let requirements = DataRequirements {
             bar_types: vec![],
             ticks: vec![],
+            custom: vec![],
             warmup: SignedDuration::ZERO,
         };
         let Err(err) = live_clients(
@@ -921,6 +940,7 @@ mod tests {
                     instrument_id: InstrumentId::from(*id),
                 })
                 .collect(),
+            custom: vec![],
             warmup: SignedDuration::ZERO,
         }
     }
@@ -1061,6 +1081,37 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("not UTF-8"), "{err:#}");
+    }
+
+    /// Before anything connects: an IB instrument beside it would connect
+    /// IB, which would refuse the end.
+    #[tokio::test]
+    async fn custom_data_of_no_instrument_that_is_not_lse_s_rows_fails_the_fill_naming_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let requirements = DataRequirements {
+            custom: vec![DataType::new(
+                "Imbalance",
+                None,
+                Some("GC.v.0.GLBX".to_string()),
+            )],
+            ..ticks(&[(NautilusDataType::TradeTick, "SXR8.IBIS")])
+        };
+
+        let err = fill_history(
+            &requirements,
+            at(FILL_START),
+            at(FILL_END),
+            &history_args(),
+            dir.path(),
+        )
+        .await
+        .unwrap_err();
+
+        let err = err.to_string();
+        assert!(
+            err.contains("Imbalance") && err.contains("no instrument"),
+            "{err}"
+        );
     }
 
     /// Named Pepperstone first, IC is asked first. Refused before any

@@ -515,6 +515,7 @@ mod tests {
                 ))
                 .unwrap(),
             ],
+            custom: vec![],
             warmup: SignedDuration::ZERO,
         }
     }
@@ -939,6 +940,7 @@ mod tests {
                     .unwrap()
                 })
                 .collect(),
+            custom: vec![],
             warmup: SignedDuration::from_hours(14),
         }
     }

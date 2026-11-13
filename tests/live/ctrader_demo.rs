@@ -97,6 +97,7 @@ pub(crate) async fn fill_quotes_through_node(
             data: NautilusDataType::QuoteTick,
             instrument_id,
         }],
+        custom: vec![],
         warmup: jiff::SignedDuration::ZERO,
     };
     let matches = HistoryVenueArgs::augment_args(Command::new("fill-catalog"))

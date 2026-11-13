@@ -124,10 +124,11 @@
 //! Custom data the features read (a raw feature's, a root's on its
 //! contract's data type) is requested in the same group over the same
 //! window with `request_data`, naming the client `CATALOG`, which no node
-//! registers: no data client serves custom data, and Nautilus answers the
-//! request from the catalog alone. Nautilus routes custom data to no
-//! indicator either, so the warmup hands the response's points to its
-//! custom data indicators (`CustomDataIndicator`), oldest first.
+//! registers: no data client serves an instrument's custom data, and
+//! Nautilus answers the request from the catalog alone. Nautilus routes
+//! custom data to no indicator either, so the warmup hands the response's
+//! points to its custom data indicators (`CustomDataIndicator`), oldest
+//! first.
 //!
 //! A strategy holds a `Warmup`, which runs these calls, and delegates its
 //! hooks to it; a model strategy's `ModelHandle` builds and owns it, and
@@ -186,9 +187,9 @@ use hold::{Hold, Tick};
 const WINDOW: SignedDuration = SignedDuration::from_hours(23);
 
 /// The data client a warmup's request of custom data names: no data client
-/// serves custom data, and Nautilus' data engine answers a request naming
-/// no registered client from its catalogs alone, planning no client leg
-/// for what they lack (`dispatch_date_range_request` in
+/// serves an instrument's custom data, and Nautilus' data engine answers a
+/// request naming no registered client from its catalogs alone, planning
+/// no client leg for what they lack (`dispatch_date_range_request` in
 /// `data/src/engine/streaming.rs`: `if !has_client {
 /// missing_intervals.clear(); }`), and an empty response where they hold
 /// nothing. A live node registers its catalog (`live::node`); with none,
@@ -1256,6 +1257,7 @@ mod tests {
         DataRequirements {
             bar_types: bar_types.iter().map(|&b| BarType::from(b)).collect(),
             ticks: vec![],
+            custom: vec![],
             warmup: DAY,
         }
     }
@@ -1949,10 +1951,10 @@ mod tests {
         pub ts_init: UnixNanos,
     }
 
-    /// No data client serves custom data: Nautilus' data engine, with a
-    /// catalog and no data client, answers a request of it naming
-    /// `CATALOG` from the catalog alone, with the points in its window,
-    /// and fails none of it.
+    /// No data client serves an instrument's custom data: Nautilus' data
+    /// engine, with a catalog and no data client, answers a request of it
+    /// naming `CATALOG` from the catalog alone, with the points in its
+    /// window, and fails none of it.
     #[test]
     fn a_custom_data_request_naming_the_catalog_is_answered_from_the_catalog_alone() {
         MessageBus::new(TraderId::from("TRADER-001"), UUID4::new(), None, None)

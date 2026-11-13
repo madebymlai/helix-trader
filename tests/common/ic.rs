@@ -150,6 +150,7 @@ pub fn backtest(catalog: &TempDir) -> Backtest {
         start: at("09:00:00"),
         end: at("12:00:00"),
         ticks: vec![],
+        custom: vec![],
         commission: Commission::Rate(Decimal::new(3, 5)),
         balance: Money::from("2000000 USD"),
         leverage: Decimal::ONE,

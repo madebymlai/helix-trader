@@ -167,6 +167,7 @@ fn a_decision_on_hour_bars_reads_the_bar_closing_on_its_grid() {
     let requirements = DataRequirements {
         bar_types: vec![hour_bars],
         ticks: vec![],
+        custom: vec![],
         warmup: SignedDuration::ZERO,
     };
     let config = ModelConfig {

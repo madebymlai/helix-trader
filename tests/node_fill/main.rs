@@ -495,6 +495,7 @@ fn reading(data: NautilusDataType) -> DataRequirements {
             data,
             instrument_id: InstrumentId::from(GCZ26),
         }],
+        custom: vec![],
         warmup: SignedDuration::ZERO,
     }
 }

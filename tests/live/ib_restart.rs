@@ -105,6 +105,7 @@ async fn phase() {
             format!("{INSTRUMENT}-1-MINUTE-MID-INTERNAL").as_str(),
         )],
         ticks: vec![],
+        custom: vec![],
         warmup: SignedDuration::from_mins(10),
     };
     // An empty catalog of its own: the venue answers the whole warmup.
