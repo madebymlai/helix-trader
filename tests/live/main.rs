@@ -41,6 +41,7 @@ mod ib_restart;
 mod ib_warmup_days;
 mod lse_history;
 mod lse_markets;
+mod lse_option_trades;
 mod lse_quotes;
 mod okx_demo;
 mod streaming;

@@ -1,10 +1,12 @@
 //! The data client on a Nautilus node, driven by Nautilus' `DataTester` as
 //! Nautilus' data testing specification runs an adapter
 //! (`docs/developer_guide/spec_data_testing.md`), for the data it streams,
-//! quotes, against the mock LSE socket replaying LSE's captured frames: the
-//! definition loaded from the node's catalog (TC-D01, LSE publishing none,
-//! from the catalog alone), quotes flowing after start (TC-D20) and their
-//! subscription ended on stop (TC-D70). TC-D21, historical quotes, is
+//! a series' quotes and an option contract's trades, against the mock LSE
+//! socket replaying LSE's captured frames and, for the option, the frames
+//! LSE's documentation gives: the definition loaded from the node's catalog
+//! (TC-D01, LSE publishing none, from the catalog alone), quotes and trades
+//! flowing after start (TC-D20, TC-D30) and their subscription ended on
+//! stop (TC-D70). TC-D21, historical quotes, is
 //! skipped here: LSE has no quotes of a derived market's past, and a CME
 //! contract's run against LSE in `examples/node_data_tester.rs`. A CME
 //! contract's history of book deltas and depth, which `DataTester` does not
@@ -16,15 +18,18 @@ use std::{cell::RefCell, num::NonZeroUsize, rc::Rc, time::Duration};
 use nautilus_common::{
     actor::{DataActor, DataActorConfig, DataActorCore},
     enums::Environment,
-    msgbus::{self, TypedHandler, switchboard::get_quotes_topic},
+    msgbus::{
+        self, TypedHandler,
+        switchboard::{get_quotes_topic, get_trades_topic},
+    },
     nautilus_actor,
     testing::wait_until_async,
 };
 use nautilus_core::{UnixNanos, string::secret::SecretString};
 use nautilus_live::{builder::LiveNodeBuilder, config::LiveNodeConfig};
 use nautilus_model::{
-    data::{OrderBookDelta, OrderBookDepth, QuoteTick},
-    enums::RecordFlag,
+    data::{OrderBookDelta, OrderBookDepth, QuoteTick, TradeTick},
+    enums::{AggressorSide, RecordFlag},
     identifiers::{ClientId, InstrumentId, TraderId},
     types::{Price, Quantity},
 };
@@ -37,8 +42,8 @@ use serde_json::json;
 use crate::{
     LseDataClientConfig, LseDataClientFactory,
     testing::{
-        API_KEY, CME_API_KEY, GCZ26, GCZ26_BOOK, GCZ26_ORDERS, GOLD_FUTURES, MockLse,
-        MockLseSocket, PAIRS_GCZ6, Reply, data_ws_answer, gcz26, gold_futures,
+        AAPL_CALL, API_KEY, CME_API_KEY, GCZ26, GCZ26_BOOK, GCZ26_ORDERS, GOLD_FUTURES, MockLse,
+        MockLseSocket, PAIRS_GCZ6, Reply, aapl_call, data_ws_answer, gcz26, gold_futures,
     },
 };
 
@@ -148,6 +153,115 @@ async fn the_data_tester_receives_lse_s_quotes_and_ends_their_subscription_on_st
         [
             json!({"action": "subscribe", "symbol": "GOLD.F"}),
             json!({"action": "unsubscribe", "symbol": "GOLD.F"}),
+        ]
+    );
+}
+
+/// The trades of AAPL's 355 call of 20 November 2026 from its underlying's
+/// chain, as LSE's documentation gives the chain's frames, its definition in
+/// the node's catalog, until one reaches the message bus; then the node
+/// stops.
+#[tokio::test]
+async fn the_data_tester_receives_an_option_s_trades_from_its_chain_and_ends_it_on_stop() {
+    let socket = MockLseSocket::start(|_, frame| data_ws_answer(frame));
+    let dir = tempfile::tempdir().unwrap();
+    ParquetDataCatalog::new(dir.path(), None, None, None, None)
+        .write_instruments(vec![aapl_call()])
+        .unwrap();
+    let call = InstrumentId::from(AAPL_CALL);
+    let config = LiveNodeConfig {
+        environment: Environment::Live,
+        trader_id: TraderId::from("TESTER-001"),
+        load_state: false,
+        save_state: false,
+        catalogs: vec![DataCatalogConfig::new(
+            dir.path().to_str().unwrap().to_string(),
+            None,
+            None,
+        )],
+        ..Default::default()
+    };
+    let lse = LseDataClientConfig::builder()
+        .api_key(SecretString::from(API_KEY))
+        .base_url_ws_data(socket.url().to_string())
+        .stream_ids(vec![call])
+        .build();
+    let mut node = LiveNodeBuilder::from_config(config)
+        .unwrap()
+        .with_name("LSE-TESTER")
+        .with_delay_post_stop_secs(1)
+        .add_data_client(None, Box::new(LseDataClientFactory::new()), Box::new(lse))
+        .unwrap()
+        .build()
+        .unwrap();
+    let tester = DataTesterConfig::builder()
+        .client_id(ClientId::from("LSE"))
+        .instrument_ids(vec![call])
+        .request_instruments(true)
+        .subscribe_trades(true)
+        .can_unsubscribe(true)
+        .build()
+        .unwrap();
+    node.add_actor(DataTester::new(tester)).unwrap();
+    let trades: Rc<RefCell<Vec<TradeTick>>> = Rc::default();
+    let seen = Rc::clone(&trades);
+    msgbus::subscribe_trades(
+        get_trades_topic(call).into(),
+        TypedHandler::from(move |trade: &TradeTick| seen.borrow_mut().push(*trade)),
+        None,
+    );
+    let handle = node.handle();
+    let stopped = async {
+        wait_until_async(
+            || {
+                let any = !trades.borrow().is_empty();
+                async move { any }
+            },
+            Duration::from_secs(30),
+        )
+        .await;
+        handle.stop();
+    };
+
+    let (ran, ()) = tokio::time::timeout(Duration::from_secs(60), async {
+        tokio::join!(node.run(), stopped)
+    })
+    .await
+    .expect("the node stops within a minute");
+    ran.unwrap();
+    node.dispose();
+
+    let at: UnixNanos = "2026-11-12T14:30:00.816861166Z"
+        .parse::<jiff::Timestamp>()
+        .unwrap()
+        .into();
+    let first = trades.borrow()[0];
+    assert_eq!(
+        (
+            first.price,
+            first.size,
+            first.aggressor_side,
+            first.ts_event
+        ),
+        (
+            Price::from("6.70"),
+            Quantity::from(1),
+            AggressorSide::NoAggressor,
+            at
+        )
+    );
+    let sent: Vec<_> = socket
+        .wait_until(|received| received.len() == 3)
+        .await
+        .into_iter()
+        .map(|(_, frame)| frame)
+        .filter(|frame| frame["action"] != "auth")
+        .collect();
+    assert_eq!(
+        sent,
+        [
+            json!({"action": "subscribe_options", "underlying": "AAPL"}),
+            json!({"action": "unsubscribe_options", "underlying": "AAPL"}),
         ]
     );
 }
