@@ -6,6 +6,8 @@
 pub mod backtest;
 pub mod catalog;
 pub mod live;
+#[cfg(test)]
+mod log_capture;
 pub mod model;
 pub mod rolls;
 pub mod strategy;

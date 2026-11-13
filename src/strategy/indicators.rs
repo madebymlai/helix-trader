@@ -361,6 +361,7 @@ mod tests {
 
         [trade]
         instruments = [{ instrument_id = "ESM24.CME", trade_size = "1" }]
+        risk = "0.5%"
     "#;
 
     fn load(toml: &str) -> anyhow::Result<StandardConfig<Trend>> {

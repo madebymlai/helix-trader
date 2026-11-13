@@ -338,7 +338,10 @@ mod tests {
     use nautilus_okx::OKXInstrumentType;
 
     use super::*;
-    use crate::venues::{LiveBroker, tests::created_oms_type};
+    use crate::venues::{
+        LiveBroker, exec_client_id,
+        tests::{created, created_oms_type},
+    };
 
     fn xperp() -> InstrumentId {
         InstrumentId::from("BTC-USD_UM_XPERP-310328.OKX")
@@ -365,6 +368,20 @@ mod tests {
 
             assert_eq!(created, LiveBroker::Okx.oms_type(), "{ids:?}");
         }
+    }
+
+    /// Against the adapter's client: the node registers it under the id the
+    /// routing table gives OKX. Credentials made up, as above.
+    #[test]
+    fn the_execution_client_is_registered_under_the_brokers_client_id() {
+        let mut clients = configs(&[swap()], OKXEnvironment::Demo).unwrap();
+        clients.exec.api_key = Some("key".into());
+        clients.exec.api_secret = Some("secret".into());
+        clients.exec.api_passphrase = Some("passphrase".into());
+
+        let client = created(clients.into_node_clients());
+
+        assert_eq!(client.client_id(), exec_client_id(swap().venue));
     }
 
     #[test]

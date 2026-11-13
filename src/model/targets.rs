@@ -158,7 +158,7 @@ use crate::{
     backtest::Commission,
     strategy::{
         AtrArgs, DataRequirements, IndicatorArgs, TradedInstrument,
-        orders::{self, Bracket, Exits, OrderIds, Trade},
+        orders::{self, Bracket, Exits, OrderIds, Trade, worth},
         warmup::{self, Warmup},
     },
 };
@@ -414,7 +414,7 @@ pub struct SideTarget {
 /// target is set from where there is no quote, with no spread; `c(p)` is
 /// what a fill of the target's size at `p` costs (`Commission::cost`), and
 /// each price difference is worth its distance on the target's size
-/// (`worth`). For a long of take profit `up` and stop `down`:
+/// (`orders::worth`). For a long of take profit `up` and stop `down`:
 ///
 /// - `TakeProfit`, the take profit's R: (up − ask − c(ask) − c(up)) / unit;
 /// - `StopLoss`, the stop's nominal loss, before any overshoot:
@@ -1245,7 +1245,7 @@ impl Debug for TargetSetter {
 }
 
 /// What a stop `distance` in price away is worth on `quantity` of
-/// `instrument`, made in its sizes (`made`), as money (`worth`).
+/// `instrument`, made in its sizes (`made`), as money (`orders::worth`).
 ///
 /// # Errors
 ///
@@ -1274,37 +1274,9 @@ fn made(instrument: &InstrumentAny, quantity: Quantity) -> anyhow::Result<Quanti
         .map_err(|e| anyhow::anyhow!("ordering {size} of {}: {e}", instrument.id()))
 }
 
-/// What a `distance` in price is worth on `quantity` of linear `instrument`,
-/// in its sizes, in its P&L currency: exactly quantity times multiplier times
-/// distance, not rounded to the currency's precision, the money made as
-/// Nautilus' `Position` makes its P&L. Nautilus' notional value of the
-/// distance is rounded to that precision, and it has no call on an instrument
-/// returning one unrounded, so this one product is ours, written as it writes
-/// it.
-///
-/// # Errors
-///
-/// Returns an error if the worth overflows.
-fn worth(
-    instrument: &InstrumentAny,
-    quantity: Quantity,
-    distance: Decimal,
-) -> anyhow::Result<Decimal> {
-    quantity
-        .as_decimal()
-        .checked_mul(instrument.multiplier().as_decimal())
-        .and_then(|value| value.checked_mul(distance))
-        .with_context(|| {
-            format!(
-                "the worth of {distance} on {quantity} of {} overflows",
-                instrument.id()
-            )
-        })
-}
-
 /// Checks that a target's unit and payoff on `instrument` have a worth
-/// (`worth`): an inverse instrument's P&L is no multiple of a distance, as
-/// Nautilus' notional value on one divides by its price.
+/// (`orders::worth`): an inverse instrument's P&L is no multiple of a
+/// distance, as Nautilus' notional value on one divides by its price.
 ///
 /// # Errors
 ///
@@ -1539,15 +1511,15 @@ impl Targets {
     {
         for side in Side::BOTH {
             let target = targets.of(side);
-            let trade = Trade {
-                instrument_id: self.config.instrument_id,
-                side: side.order_side(),
-                quantity: self.config.quantity,
-                exits: Exits {
+            let trade = Trade::fixed(
+                self.config.instrument_id,
+                side.order_side(),
+                self.config.quantity,
+                Exits {
                     bracket: target.bracket,
                     time_limit: Some(target.time_limit),
                 },
-            };
+            );
             trade.send_as(strategy, DecisionSide { decision, side }.order_ids())?;
         }
         Ok(())

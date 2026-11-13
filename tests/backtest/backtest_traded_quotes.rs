@@ -61,6 +61,7 @@ fn config(data: &str) -> StandardConfig<Reader> {
 
         [trade]
         instruments = [{{ instrument_id = "{gold}", trade_size = "1" }}]
+        risk = "0.5%"
         "#,
         gold = ic::INSTRUMENT_ID,
     ))
