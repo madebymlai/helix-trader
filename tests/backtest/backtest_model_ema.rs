@@ -377,7 +377,10 @@ fn the_binarys_backtest_on_a_store_holding_each_retrains_model_builds_and_trains
 }
 
 /// The binary's `subcommand` of the strategy of `config` on `catalog`, its
-/// store under `models`, with `args`; it fails: its stdout and stderr.
+/// store under `models`, with `args`, run in the directory holding `config`
+/// with no environment, so that neither the shell nor a `.env` above the
+/// crate's root gives it a venue's credential; it fails: its stdout and
+/// stderr.
 fn refused(
     subcommand: &str,
     config: &Path,
@@ -386,6 +389,8 @@ fn refused(
     args: &[String],
 ) -> (String, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_helix-trader"))
+        .env_clear()
+        .current_dir(config.parent().unwrap())
         .args([subcommand, "model_ema", "--config"])
         .arg(config)
         .arg("--catalog")
@@ -449,4 +454,38 @@ fn a_dataset_balance_in_another_currency_than_the_pnl_is_refused_before_any_buil
         );
         assert!(!stdout.contains("BacktestEngine"), "{subcommand}: {stdout}");
     }
+}
+
+/// A live node whose retrains' dataset balance is in EUR, where IC's
+/// gold's P&L is in USD: the decisions' payoff features would be sized on
+/// it unconverted, so the start refuses it before any node is built, its
+/// staging untouched, naming the dataset balance and both currencies.
+#[test]
+fn a_live_retrain_balance_in_another_currency_than_the_pnl_is_refused_before_any_node() {
+    let catalog = walk(ic::at("00:00:00"), ic::at("06:00:00"));
+    let dir = tempfile::tempdir().unwrap();
+    let (config, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
+    let staging = dir.path().join("staging");
+    std::fs::write(&config, CONFIG).unwrap();
+    let live: Vec<String> = [
+        "--retrain-commission-rate",
+        "0.00003",
+        "--retrain-balance",
+        "10000000 EUR",
+        "--staging",
+    ]
+    .map(String::from)
+    .into_iter()
+    .chain([staging.display().to_string()])
+    .collect();
+
+    let (_, stderr) = refused("live", &config, catalog.path(), &models, &live);
+
+    assert!(
+        ["dataset balance", "EUR", "USD", ic::INSTRUMENT_ID]
+            .iter()
+            .all(|named| stderr.contains(named)),
+        "{stderr}"
+    );
+    assert!(!staging.exists());
 }

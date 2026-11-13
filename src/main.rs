@@ -728,11 +728,23 @@ impl<'a> Visitor for Running<'a> {
 /// Runs the model strategy `S` of `args` on `live` until Ctrl-C, on the
 /// models of the store its dataset costs key, beside the actor of its
 /// retrains if it is retrained (`RetrainActor`), each retrain in a child
-/// process (`Children::of_live`) on the node's catalog.
+/// process (`Children::of_live`) on the node's catalog. Refuses first,
+/// before any node is built, a retrain balance in another currency than a
+/// traded instrument's P&L (`backtest::refuse_balance`), as `backtest`
+/// and `train` refuse their dataset balance.
 async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyhow::Result<()> {
     let config = load_config::<S::Params>(&args.config)?;
     let program = std::env::current_exe().context("finding this binary to retrain")?;
     let children = Children::of_live(args)?;
+    backtest::refuse_balance(
+        &args.catalog,
+        children.venue.balance,
+        &config.trade.instrument_ids(),
+    )
+    .context(
+        "the retrains' dataset balance (--retrain-balance), which a model's targets and the \
+         decisions' payoff features are sized at",
+    )?;
     let requirements = config.data_requirements();
     let retraining = RetrainActor::new(
         config.strategy_id(),
