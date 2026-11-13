@@ -1329,7 +1329,7 @@ mod tests {
             window = "48h"
             holdout = "12h"
             margins = { long = "0.5R", short = "0.5R" }
-            min_pnl = 0.5
+            min_pnl = "0.5R"
             min_trades = 30
             learner = { kind = "baseline" }
         "#;
@@ -1703,7 +1703,7 @@ mod tests {
                 window = "48h"
                 holdout = "24h"
                 margin = "0.25R"
-                min_pnl = 0.5
+                min_pnl = "0.5R"
                 min_trades = 0
                 learner = { kind = "baseline" }
                 "#,
@@ -1726,7 +1726,7 @@ mod tests {
                 window = "48h"
                 holdout = "12h"
                 margin = "0.25R"
-                min_pnl = 0.5
+                min_pnl = "0.5R"
                 min_trades = 30
                 learner = { kind = "baseline" }
                 "#,

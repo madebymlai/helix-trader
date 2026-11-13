@@ -855,7 +855,7 @@ mod tests {
             score::ExpectedScore,
             train::{Kept, Outcome},
         },
-        strategy::ema::EmaParams,
+        strategy::{ema::EmaParams, r::R},
     };
     use jiff::SignedDuration;
 
@@ -1222,7 +1222,7 @@ mod tests {
         let kept = Outcome::Kept(Kept::Refused {
             why: Refusal::MinPnl {
                 pnl: 0.48,
-                min_pnl: 0.55,
+                min_pnl: R::new(0.55),
             },
             holdout: holdout.clone(),
         });

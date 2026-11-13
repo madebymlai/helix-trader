@@ -425,7 +425,7 @@ mod tests {
             score::ExpectedScore,
             train::{Kept, Outcome},
         },
-        strategy::TickSeries,
+        strategy::{TickSeries, r::R},
     };
 
     fn at(time: &str) -> Timestamp {
@@ -503,14 +503,14 @@ mod tests {
     fn a_failing_child_is_kept_with_the_error_it_printed_last() {
         let launcher = shell(
             "echo 'ERROR a log line of the replay' >&2; \
-             echo 'Error: kept the current model: holdout net P&L per trade taken 0.48 below the minimum 0.55' >&2; \
+             echo 'Error: kept the current model: holdout net P&L per trade taken 0.480000R below the minimum 0.55R' >&2; \
              exit 1",
         );
 
         assert_eq!(
             launcher.launch(at("2026-10-22T00:00:00Z")).wait(),
             Retrained::Kept(
-                "kept the current model: holdout net P&L per trade taken 0.48 below the minimum 0.55".to_string()
+                "kept the current model: holdout net P&L per trade taken 0.480000R below the minimum 0.55R".to_string()
             )
         );
     }
@@ -623,7 +623,7 @@ mod tests {
             Outcome::Kept(Kept::Refused {
                 why: Refusal::MinPnl {
                     pnl: 0.25,
-                    min_pnl: 0.5,
+                    min_pnl: R::new(0.5),
                 },
                 holdout: Box::new(holdout()),
             })
@@ -999,7 +999,7 @@ mod tests {
         let mut refused = daily_on(
             dir.path(),
             shell(
-                "echo 'Error: kept the current model: holdout net P&L per trade taken 0.48 below the minimum 0.55' >&2; \
+                "echo 'Error: kept the current model: holdout net P&L per trade taken 0.480000R below the minimum 0.55R' >&2; \
                  exit 1",
             ),
         );
@@ -1014,7 +1014,7 @@ mod tests {
         let outcomes = [
             "INFO the retrain at 2026-10-22T00:00:00Z succeeded, its models published or in use",
             "ERROR the retrain at 2026-10-22T00:00:00Z: kept the current model: holdout net P&L \
-             per trade taken 0.48 below the minimum 0.55",
+             per trade taken 0.480000R below the minimum 0.55R",
         ];
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
