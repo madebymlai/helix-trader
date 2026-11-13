@@ -1,22 +1,28 @@
-//! An export's Parquet file into Nautilus data: trades, quotes and bars at
-//! the instrument's precision, LSE sending prices and sizes as doubles, each
-//! converted once here through its shortest decimal form, which must fit
-//! the precision; and the rows of a reference collection as `LseRow`s.
+//! An export's Parquet file into Nautilus data: trades, quotes, book depth
+//! snapshots, book deltas and bars at the instrument's precision, LSE
+//! sending prices and sizes as doubles, each converted once here through
+//! its shortest decimal form, which must fit the precision; and the rows of
+//! a reference collection as `LseRow`s.
 
 use std::{collections::HashMap, str::FromStr};
 
 use anyhow::{Context, bail, ensure};
 use arrow::{
-    array::{Array, AsArray, Float64Array, RecordBatch, StringArray, TimestampNanosecondArray},
-    compute::cast,
-    datatypes::{DataType, TimeUnit, TimestampNanosecondType},
+    array::{
+        Array, ArrayRef, AsArray, Float64Array, RecordBatch, StringArray, TimestampNanosecondArray,
+    },
+    compute::{CastOptions, cast, cast_with_options},
+    datatypes::{DataType, TimeUnit, TimestampNanosecondType, UInt32Type, UInt64Type},
     json::{WriterBuilder, writer::JsonArray},
 };
 use bytes::Bytes;
 use nautilus_core::UnixNanos;
 use nautilus_model::{
-    data::{Bar, BarType, QuoteTick, TradeTick},
-    enums::AggressorSide,
+    data::{
+        Bar, BarType, BookOrder, DEPTH10_LEN, NULL_ORDER, OrderBookDelta, OrderBookDepth,
+        QuoteTick, TradeTick,
+    },
+    enums::{AggressorSide, BookAction, OrderSide, RecordFlag},
     identifiers::{InstrumentId, TradeId},
     types::{Price, Quantity},
 };
@@ -155,6 +161,258 @@ pub(crate) fn parse_quotes(
         log::debug!("{one_sided} quotes of {instrument_id} with an empty side: no quote of them");
     }
     Ok(quotes)
+}
+
+/// The depth snapshots of a book export (`time, sequence, action, side,
+/// price, size, depth`, then ten bid and ten ask levels of price, size and
+/// orders, the best first): each row is the book after its event, a
+/// snapshot of its ten levels a side at the row's time, both `ts_event` and
+/// `ts_init`, as history is, and its sequence, as Nautilus' Databento
+/// decoder makes one of an MBP-10 record (`decode_mbp10_msg`), which keeps
+/// none of the event's own action, side, price, size or depth either. A
+/// level with no price is empty, and is no level of the snapshot, as an
+/// empty side of a quote gives no quote. The last row of each time ends its
+/// event (see `end_events`).
+///
+/// # Errors
+///
+/// Returns an error if the file holds no book, if a level with a price has
+/// no size or orders, or if a price or a size has more decimals than
+/// `price_precision` or `size_precision`, the instrument's.
+pub(crate) fn parse_book(
+    file: Bytes,
+    instrument_id: InstrumentId,
+    price_precision: u8,
+    size_precision: u8,
+) -> anyhow::Result<Vec<OrderBookDepth>> {
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .context("reading LSE's Parquet file")?
+        .build()?;
+    let mut depths = Vec::new();
+    for batch in reader {
+        let batch = batch.context("reading LSE's Parquet file")?;
+        let times = times(&batch)?;
+        let sequences = cast_column(&batch, "sequence", &DataType::UInt64)?;
+        ensure!(
+            sequences.null_count() == 0,
+            "the column sequence of LSE's file has empty rows"
+        );
+        let sequences = sequences.as_primitive::<UInt64Type>();
+        let bids = BookSide::of(&batch, OrderSide::Buy)?;
+        let asks = BookSide::of(&batch, OrderSide::Sell)?;
+        for row in 0..batch.num_rows() {
+            let time = UnixNanos::from(time(&times, row)?);
+            let (bid_orders, bid_counts) = bids.levels(row, price_precision, size_precision)?;
+            let (ask_orders, ask_counts) = asks.levels(row, price_precision, size_precision)?;
+            depths.push(OrderBookDepth::new_checked(
+                instrument_id,
+                bid_orders,
+                ask_orders,
+                bid_counts,
+                ask_counts,
+                0,
+                sequences.value(row),
+                time,
+                time,
+            )?);
+        }
+    }
+    end_events(
+        &mut depths,
+        |depth| depth.ts_event,
+        |depth| &mut depth.flags,
+    );
+    Ok(depths)
+}
+
+/// The book deltas of an orders export (`time, action, side, order_id,
+/// price, size`), each stamped at its time, both `ts_event` and `ts_init`,
+/// as history is, with no sequence, LSE giving none, as Nautilus' Tardis
+/// loader leaves one it is not given. LSE's Level 3 actions, as its CME
+/// stream's documentation gives them ("The record"): A, an order added, M,
+/// changed, and C, removed, each a delta of the order, by its id, side
+/// (B the bid, A the ask, N neither), price and size, as Nautilus'
+/// Databento decoder maps an MBO record's (`decode_mbo_msg`,
+/// `parse_book_action`); N, none of these, changes no order and gives no
+/// delta, as Nautilus' decoder gives none. The last delta of each time ends
+/// its event (see `end_events`).
+///
+/// # Errors
+///
+/// Returns an error if the file holds no orders, if an action or a side is
+/// none LSE gives, naming it: a cleared book (R), which LSE gives at Level 2
+/// alone, among them, LSE's docs not saying whether its orders open a day
+/// with a book; if an order has no price; or if a price or a size has more
+/// decimals than `price_precision` or `size_precision`, the instrument's.
+pub(crate) fn parse_orders(
+    file: Bytes,
+    instrument_id: InstrumentId,
+    price_precision: u8,
+    size_precision: u8,
+) -> anyhow::Result<Vec<OrderBookDelta>> {
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .context("reading LSE's Parquet file")?
+        .build()?;
+    let mut deltas = Vec::new();
+    for batch in reader {
+        let batch = batch.context("reading LSE's Parquet file")?;
+        let times = times(&batch)?;
+        let actions = cast_column(&batch, "action", &DataType::Utf8)?;
+        let sides = cast_column(&batch, "side", &DataType::Utf8)?;
+        let order_ids = cast_column(&batch, "order_id", &DataType::UInt64)?;
+        let (actions, sides) = (actions.as_string::<i32>(), sides.as_string::<i32>());
+        let order_ids = order_ids.as_primitive::<UInt64Type>();
+        let prices = nullable_column::<Float64Array>(&batch, "price")?;
+        let sizes = column::<Float64Array>(&batch, "size")?;
+        for row in 0..batch.num_rows() {
+            let action = match actions.value(row) {
+                "A" => BookAction::Add,
+                "M" => BookAction::Update,
+                "C" => BookAction::Delete,
+                "N" => continue,
+                other => {
+                    bail!("an order of action {other:?}, none of LSE's at Level 3: A, M, C and N")
+                }
+            };
+            let side = match sides.value(row) {
+                "B" => Some(OrderSide::Buy),
+                "A" => Some(OrderSide::Sell),
+                "N" => None,
+                other => bail!("an order of side {other:?}, none of LSE's: B, A and N"),
+            };
+            ensure!(
+                !order_ids.is_null(row) && !prices.is_null(row),
+                "an order of action {} with no id or price",
+                actions.value(row)
+            );
+            let time = UnixNanos::from(time(&times, row)?);
+            let order = BookOrder::new(
+                side,
+                Price::from_decimal_dp(
+                    decimal(prices.value(row), price_precision, "price")?,
+                    price_precision,
+                )?,
+                Quantity::from_decimal_dp(
+                    decimal(sizes.value(row), size_precision, "size")?,
+                    size_precision,
+                )?,
+                order_ids.value(row),
+            );
+            deltas.push(OrderBookDelta::new_checked(
+                instrument_id,
+                action,
+                order,
+                0,
+                0,
+                time,
+                time,
+            )?);
+        }
+    }
+    end_events(
+        &mut deltas,
+        |delta| delta.ts_event,
+        |delta| &mut delta.flags,
+    );
+    Ok(deltas)
+}
+
+/// The ten levels of one side of a book export: of each, the columns of
+/// its price, size and orders, `bid_price_0`, `bid_size_0` and
+/// `bid_orders_0` for the best bid to `ask_orders_9` for the tenth ask, as
+/// LSE's Databank reads a book's levels.
+struct BookSide {
+    side: OrderSide,
+    prices: Vec<Float64Array>,
+    sizes: Vec<Float64Array>,
+    orders: Vec<ArrayRef>,
+}
+
+impl BookSide {
+    /// The levels of `side` in `batch`.
+    fn of(batch: &RecordBatch, side: OrderSide) -> anyhow::Result<Self> {
+        let name = match side {
+            OrderSide::Buy => "bid",
+            _ => "ask",
+        };
+        let mut levels = Self {
+            side,
+            prices: Vec::with_capacity(DEPTH10_LEN),
+            sizes: Vec::with_capacity(DEPTH10_LEN),
+            orders: Vec::with_capacity(DEPTH10_LEN),
+        };
+        for level in 0..DEPTH10_LEN {
+            levels.prices.push(
+                nullable_column::<Float64Array>(batch, &format!("{name}_price_{level}"))?.clone(),
+            );
+            levels.sizes.push(
+                nullable_column::<Float64Array>(batch, &format!("{name}_size_{level}"))?.clone(),
+            );
+            levels.orders.push(cast_column(
+                batch,
+                &format!("{name}_orders_{level}"),
+                &DataType::UInt32,
+            )?);
+        }
+        Ok(levels)
+    }
+
+    /// The orders and order counts of the levels of `row`, an empty level
+    /// a null order and no orders, as Nautilus' Databento decoder leaves
+    /// one (`decode_mbp10_msg`).
+    fn levels(
+        &self,
+        row: usize,
+        price_precision: u8,
+        size_precision: u8,
+    ) -> anyhow::Result<([BookOrder; DEPTH10_LEN], [u32; DEPTH10_LEN])> {
+        let mut orders = [NULL_ORDER; DEPTH10_LEN];
+        let mut counts = [0; DEPTH10_LEN];
+        for level in 0..DEPTH10_LEN {
+            let (prices, sizes) = (&self.prices[level], &self.sizes[level]);
+            let count = self.orders[level].as_primitive::<UInt32Type>();
+            if prices.is_null(row) {
+                continue;
+            }
+            ensure!(
+                !sizes.is_null(row) && !count.is_null(row),
+                "a {} level {level} of LSE's book with a price and no size or orders",
+                self.side
+            );
+            let price = decimal(prices.value(row), price_precision, "price")?;
+            let size = decimal(sizes.value(row), size_precision, "size")?;
+            orders[level] = BookOrder::new(
+                self.side,
+                Price::from_decimal_dp(price, price_precision)?,
+                Quantity::from_decimal_dp(size, size_precision)?,
+                0,
+            );
+            counts[level] = count.value(row);
+        }
+        Ok((orders, counts))
+    }
+}
+
+/// Flags the last of each run of `records` at one time `F_LAST`, ending an
+/// event: LSE's exports carry no event boundary (the flags of the records
+/// its CME history is, which its docs say mark the last of an exchange
+/// message), and the records of one exchange event share its time.
+/// Nautilus' Tardis loader frames the rows of one timestamp so (`csv::load`,
+/// `load_deltas`). The last record ends one too: a file never cuts a time,
+/// LSE's exports being split between times.
+fn end_events<T>(
+    records: &mut [T],
+    time: impl Fn(&T) -> UnixNanos,
+    flags: impl Fn(&mut T) -> &mut u8,
+) {
+    for index in 0..records.len() {
+        let ends = records
+            .get(index + 1)
+            .is_none_or(|next| time(next) != time(&records[index]));
+        if ends {
+            *flags(&mut records[index]) |= RecordFlag::F_LAST as u8;
+        }
+    }
 }
 
 /// The bars of a file of candles (`time, open, high, low, close, volume,
@@ -320,6 +578,25 @@ fn column<'a, A: Array + 'static>(batch: &'a RecordBatch, name: &str) -> anyhow:
     Ok(column)
 }
 
+/// The column `name` of `batch` as `to`, whatever type LSE gives it, a
+/// value that does not convert failing: for the columns of the book and the
+/// orders whose type LSE's docs do not give, its counts and numbers.
+fn cast_column(batch: &RecordBatch, name: &str, to: &DataType) -> anyhow::Result<ArrayRef> {
+    let column = batch
+        .column_by_name(name)
+        .with_context(|| format!("no column {name} in LSE's file"))?;
+    let options = CastOptions {
+        safe: false,
+        ..CastOptions::default()
+    };
+    cast_with_options(column, to, &options).with_context(|| {
+        format!(
+            "the column {name} of LSE's file is {}, not {to}",
+            column.data_type()
+        )
+    })
+}
+
 /// The column `name` of `batch`, LSE's type `A` checked, empty rows and all.
 fn nullable_column<'a, A: Array + 'static>(
     batch: &'a RecordBatch,
@@ -420,8 +697,8 @@ mod tests {
     use jiff::SignedDuration;
 
     use crate::testing::{
-        GCZ26_QUOTES, GCZ26_TRADES, GOLD_FUTURES_4H, GOLD_SPOT_MINUTES, GOLD_TRADES,
-        US10Y_BOND_YIELDS, US10Y_BOND_YIELDS_FOUR_HOURS,
+        GCZ26_BOOK, GCZ26_ORDERS, GCZ26_QUOTES, GCZ26_TRADES, GOLD_FUTURES_4H, GOLD_SPOT_MINUTES,
+        GOLD_TRADES, US10Y_BOND_YIELDS, US10Y_BOND_YIELDS_FOUR_HOURS,
     };
 
     fn gold() -> InstrumentId {
@@ -806,6 +1083,274 @@ mod tests {
         );
         let ids: HashSet<_> = trades.iter().map(|t| t.trade_id).collect();
         assert_eq!(ids.len(), 38);
+    }
+
+    /// A level of a book: its price, size and orders.
+    type Level = (Price, Quantity, u32);
+
+    /// The levels of a side of a depth snapshot.
+    fn levels(orders: &[BookOrder], counts: &[u32]) -> Vec<Level> {
+        orders
+            .iter()
+            .zip(counts)
+            .map(|(order, &count)| (order.price, order.size, count))
+            .collect()
+    }
+
+    /// The ten levels a side of the book's first row (`test_data/README.md`):
+    /// bids from 3908.10 down, asks from 3908.30 up, a tenth apart.
+    fn first_book_levels() -> (Vec<Level>, Vec<Level>) {
+        let level =
+            |price: &str, size: u64, count: u32| (Price::from(price), Quantity::from(size), count);
+        (
+            vec![
+                level("3908.10", 2, 1),
+                level("3908.00", 5, 3),
+                level("3907.90", 3, 2),
+                level("3907.80", 4, 2),
+                level("3907.70", 6, 4),
+                level("3907.60", 1, 1),
+                level("3907.50", 7, 5),
+                level("3907.40", 2, 1),
+                level("3907.30", 3, 2),
+                level("3907.20", 8, 6),
+            ],
+            vec![
+                level("3908.30", 9, 4),
+                level("3908.40", 4, 2),
+                level("3908.50", 6, 3),
+                level("3908.60", 2, 1),
+                level("3908.70", 5, 3),
+                level("3908.80", 3, 2),
+                level("3908.90", 8, 5),
+                level("3909.00", 1, 1),
+                level("3909.10", 4, 2),
+                level("3909.20", 7, 4),
+            ],
+        )
+    }
+
+    /// Each row of the book is the book after its event, ten levels a side,
+    /// a snapshot at the row's time and sequence, as Nautilus' Databento
+    /// decoder makes one of an MBP-10 record (`decode_mbp10_msg`).
+    #[test]
+    fn a_book_export_is_a_depth_snapshot_a_row_at_the_instrument_s_precision() {
+        let depths = parse_book(Bytes::from_static(GCZ26_BOOK), gcz26(), 2, 0).unwrap();
+
+        assert_eq!(depths.len(), 4);
+        let first = &depths[0];
+        assert_eq!(first.instrument_id, gcz26());
+        assert_eq!(
+            (first.ts_event, first.ts_init, first.sequence),
+            (
+                on_the_12th(1_794_493_800_000_184_205),
+                on_the_12th(1_794_493_800_000_184_205),
+                1001
+            )
+        );
+        let (bids, asks) = first_book_levels();
+        assert_eq!(levels(&first.bids, &first.bid_counts), bids);
+        assert_eq!(levels(&first.asks, &first.ask_counts), asks);
+        assert!(
+            first
+                .bids
+                .iter()
+                .all(|order| order.side == Some(OrderSide::Buy))
+        );
+        assert!(
+            first
+                .asks
+                .iter()
+                .all(|order| order.side == Some(OrderSide::Sell))
+        );
+        assert_eq!(first.bids[0].price.precision, 2);
+        let sequences: Vec<u64> = depths.iter().map(|depth| depth.sequence).collect();
+        assert_eq!(sequences, [1001, 1002, 1003, 1180]);
+    }
+
+    /// The last row's book holds eight asks: its two last ask levels have
+    /// no price.
+    #[test]
+    fn an_empty_level_of_the_book_is_no_level_of_the_snapshot() {
+        let depths = parse_book(Bytes::from_static(GCZ26_BOOK), gcz26(), 2, 0).unwrap();
+
+        let last = &depths[3];
+        assert_eq!(last.bids.len(), 10);
+        assert_eq!(last.asks.len(), 8);
+        assert_eq!(last.ask_counts.len(), 8);
+        assert_eq!(last.asks[7].price, Price::from("3909.00"));
+    }
+
+    /// LSE gives no event boundary: the rows of one time are one event, its
+    /// last row ending it (`F_LAST`), as Nautilus' Tardis loader frames
+    /// rows of one timestamp. The second and third rows share a time.
+    #[test]
+    fn the_last_row_of_each_time_of_the_book_ends_its_event() {
+        let depths = parse_book(Bytes::from_static(GCZ26_BOOK), gcz26(), 2, 0).unwrap();
+
+        let flags: Vec<u8> = depths.iter().map(|depth| depth.flags).collect();
+        let last = RecordFlag::F_LAST as u8;
+        assert_eq!(flags, [last, 0, last, last]);
+    }
+
+    #[test]
+    fn a_book_price_finer_than_the_instrument_s_precision_is_refused() {
+        let err = parse_book(Bytes::from_static(GCZ26_BOOK), gcz26(), 0, 0).unwrap_err();
+
+        let err = err.to_string();
+        assert!(
+            err.contains("3908.") && err.contains("precision, 0"),
+            "{err}"
+        );
+    }
+
+    /// LSE's Level 3 actions (its CME stream's documentation, "The record"):
+    /// A an order added, M changed, C removed, each a delta of the order,
+    /// by its id, side, price and size, at the row's time; N, none of these,
+    /// gives none, as Nautilus' Databento decoder gives none of an MBO
+    /// record of no action (`decode_mbo_msg`). Its last row is N: the delta
+    /// before it, of the same time, ends the event.
+    #[test]
+    fn an_orders_export_is_the_deltas_of_its_orders() {
+        let deltas = parse_orders(Bytes::from_static(GCZ26_ORDERS), gcz26(), 2, 0).unwrap();
+
+        let rows: Vec<_> = deltas
+            .iter()
+            .map(|d| {
+                (
+                    d.action,
+                    d.order.side,
+                    d.order.order_id,
+                    d.order.price,
+                    d.order.size,
+                    d.flags,
+                    d.ts_event,
+                )
+            })
+            .collect();
+        let last = RecordFlag::F_LAST as u8;
+        let row = |action, side, id, price, size, flags, time| {
+            (
+                action,
+                Some(side),
+                id,
+                Price::from(price),
+                Quantity::from(size),
+                flags,
+                on_the_12th(time),
+            )
+        };
+        assert_eq!(
+            rows,
+            [
+                row(
+                    BookAction::Add,
+                    OrderSide::Buy,
+                    6_411_893_001,
+                    "3908.10",
+                    1,
+                    0,
+                    1_794_493_800_000_184_205
+                ),
+                row(
+                    BookAction::Add,
+                    OrderSide::Sell,
+                    6_411_893_002,
+                    "3908.30",
+                    2,
+                    last,
+                    1_794_493_800_000_184_205
+                ),
+                row(
+                    BookAction::Update,
+                    OrderSide::Buy,
+                    6_411_893_001,
+                    "3908.10",
+                    3,
+                    last,
+                    1_794_493_800_001_418_191
+                ),
+                row(
+                    BookAction::Delete,
+                    OrderSide::Sell,
+                    6_411_893_002,
+                    "3908.30",
+                    2,
+                    last,
+                    1_794_493_800_027_098_067
+                ),
+            ]
+        );
+        assert!(
+            deltas
+                .iter()
+                .all(|d| d.instrument_id == gcz26() && d.ts_init == d.ts_event)
+        );
+    }
+
+    /// An orders file with one row of `action`, built here.
+    fn orders_of(action: &str) -> Bytes {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "time",
+                DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("action", DataType::Utf8, false),
+            Field::new("side", DataType::Utf8, false),
+            Field::new("order_id", DataType::Utf8, false),
+            Field::new("price", DataType::Float64, true),
+            Field::new("size", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(TimestampNanosecondArray::from(vec![1]).with_timezone("UTC")),
+                Arc::new(StringArray::from(vec![action])),
+                Arc::new(StringArray::from(vec!["B"])),
+                Arc::new(StringArray::from(vec!["6411893001"])),
+                Arc::new(Float64Array::from(vec![Some(3908.1)])),
+                Arc::new(Float64Array::from(vec![1.0])),
+            ],
+        )
+        .unwrap();
+        let mut file = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        Bytes::from(file)
+    }
+
+    /// LSE's docs give R, a cleared book, at Level 2 alone, and a trade (T)
+    /// at Level 1: whether LSE's orders open a day with a book is read from
+    /// the first capture, so an action they do not give fails, naming it.
+    #[rstest]
+    #[case::cleared("R")]
+    #[case::traded("T")]
+    #[case::a_word("add")]
+    fn an_order_action_lse_does_not_give_at_level_3_is_refused_naming_it(#[case] action: &str) {
+        let err = parse_orders(orders_of(action), gcz26(), 2, 0).unwrap_err();
+
+        assert!(err.to_string().contains(&format!("{action:?}")), "{err:#}");
+    }
+
+    #[test]
+    fn an_order_price_finer_than_the_instrument_s_precision_is_refused() {
+        let err = parse_orders(Bytes::from_static(GCZ26_ORDERS), gcz26(), 0, 0).unwrap_err();
+
+        let err = err.to_string();
+        assert!(
+            err.contains("3908.1") && err.contains("precision, 0"),
+            "{err}"
+        );
+    }
+
+    /// A malformed input: a file of quotes, LSE's, read as a book.
+    #[test]
+    fn a_file_of_no_book_is_refused_naming_the_column_it_lacks() {
+        let err = parse_book(Bytes::from_static(GCZ26_QUOTES), gcz26(), 2, 0).unwrap_err();
+
+        assert!(err.to_string().contains("no column sequence"), "{err:#}");
     }
 
     /// A quote with an empty side, which LSE's schema allows (its prices
