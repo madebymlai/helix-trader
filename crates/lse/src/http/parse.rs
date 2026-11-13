@@ -24,6 +24,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use rust_decimal::Decimal;
 use serde_json::{Map, Value};
 
+use super::models::RowKey;
 use crate::types::LseRow;
 
 /// The kind of every row of a tick slice: a trade.
@@ -219,30 +220,33 @@ pub(crate) fn parse_candles(
 }
 
 /// The rows of a reference export of `symbol` in LSE's collection
-/// `source`, each stamped at its value of `time_column`, the column LSE
-/// names its time, both `ts_event` and `ts_init`: a date at its start in
-/// UTC, a time as it is. Every other column but `symbol` is a field of the
-/// row, as LSE sent it, in JSON (Arrow's): numbers, strings, `null`, and
-/// dates and times in ISO 8601.
+/// `source`, each stamped when its values are known, both `ts_event` and
+/// `ts_init`: its value of `time_column`, the column LSE names its time,
+/// and the span of `key`, the collection's (`RowKey::span`), a date at its
+/// end in UTC, an interval at its close. Every other column but `symbol` is
+/// a field of the row, as LSE sent it, in JSON (Arrow's): numbers, strings,
+/// `null`, and dates and times in ISO 8601.
 ///
 /// # Errors
 ///
 /// Returns an error if the file is not Parquet, or if its time column is
-/// missing, holds an empty row or a time before 1970, or is not a date or
-/// a time.
+/// missing, holds an empty row or a time before 1970, or is not of `key`:
+/// dates for a collection keyed by date, times for one of intervals.
 pub(crate) fn parse_rows(
     file: Bytes,
     source: &str,
     symbol: &str,
     time_column: &str,
+    key: RowKey,
 ) -> anyhow::Result<Vec<LseRow>> {
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)
         .context("reading LSE's Parquet file")?
         .build()?;
+    let span = u64::try_from(key.span().as_nanos()).expect("a positive span");
     let mut rows = Vec::new();
     for batch in reader {
         let batch = batch.context("reading LSE's Parquet file")?;
-        let times = row_times(&batch, time_column)?;
+        let times = row_times(&batch, time_column, key)?;
         let mut writer = WriterBuilder::new()
             .with_explicit_nulls(true)
             .build::<_, JsonArray>(Vec::new());
@@ -253,12 +257,17 @@ pub(crate) fn parse_rows(
         for (mut fields, time) in objects.into_iter().zip(times) {
             fields.remove(time_column);
             fields.remove("symbol");
+            let known = UnixNanos::from(
+                time.as_u64()
+                    .checked_add(span)
+                    .context("a row known past 2554")?,
+            );
             rows.push(LseRow::new(
                 source.to_owned(),
                 symbol.to_owned(),
                 fields,
-                time,
-                time,
+                known,
+                known,
             ));
         }
     }
@@ -266,14 +275,26 @@ pub(crate) fn parse_rows(
 }
 
 /// The times of the rows of `batch`, its column `time_column`'s, in UTC:
-/// a date at its start, a time as it is.
-fn row_times(batch: &RecordBatch, time_column: &str) -> anyhow::Result<Vec<UnixNanos>> {
+/// a date at its start, a time as it is, the column's type checked
+/// against `key`.
+fn row_times(
+    batch: &RecordBatch,
+    time_column: &str,
+    key: RowKey,
+) -> anyhow::Result<Vec<UnixNanos>> {
     let column = batch
         .column_by_name(time_column)
         .with_context(|| format!("no time column {time_column} in LSE's file"))?;
-    match column.data_type() {
-        DataType::Date32 | DataType::Date64 | DataType::Timestamp(_, _) => {}
-        other => bail!("the time column {time_column} of LSE's file is {other}"),
+    match (key, column.data_type()) {
+        (RowKey::Date, DataType::Date32 | DataType::Date64)
+        | (RowKey::Open(_), DataType::Timestamp(_, _)) => {}
+        (key, other) => bail!(
+            "the time column {time_column} of LSE's file is {other}, not the {} its collection keys its rows by",
+            match key {
+                RowKey::Date => "dates",
+                RowKey::Open(_) => "times",
+            }
+        ),
     }
     let nanos = cast(
         column,
@@ -341,7 +362,7 @@ fn time(times: &TimestampNanosecondArray, row: usize) -> anyhow::Result<u64> {
 
 /// `value`, a double, as the decimal it is written as at its shortest,
 /// which must have at most `precision` decimals.
-fn decimal(value: f64, precision: u8, what: &str) -> anyhow::Result<Decimal> {
+pub(crate) fn decimal(value: f64, precision: u8, what: &str) -> anyhow::Result<Decimal> {
     ensure!(value.is_finite(), "a {what} of {value}");
     let decimal = Decimal::from_str(&value.to_string())
         .with_context(|| format!("a {what} of {value}"))?
@@ -396,9 +417,11 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use jiff::SignedDuration;
+
     use crate::testing::{
         GCZ26_QUOTES, GCZ26_TRADES, GOLD_FUTURES_4H, GOLD_SPOT_MINUTES, GOLD_TRADES,
-        US10Y_BOND_YIELDS,
+        US10Y_BOND_YIELDS, US10Y_BOND_YIELDS_FOUR_HOURS,
     };
 
     fn gold() -> InstrumentId {
@@ -480,21 +503,27 @@ mod tests {
             "bond_yields",
             "US10Y",
             "date",
+            RowKey::Date,
         )
         .unwrap()
     }
 
     fn day(date: &str) -> UnixNanos {
+        nov(&format!("{date}T00:00:00"))
+    }
+
+    fn nov(time: &str) -> UnixNanos {
         UnixNanos::from(
-            format!("{date}T00:00:00Z")
+            format!("2026-11-{time}Z")
                 .parse::<jiff::Timestamp>()
                 .unwrap(),
         )
     }
 
-    /// A date is its day's start, in UTC, LSE's time.
+    /// The day's close is known when the day ends: the 9th's row at the
+    /// 10th's 00:00 UTC, and the 12th's at the 13th's.
     #[rstest]
-    fn a_reference_export_is_its_rows_each_at_the_time_of_its_time_column() {
+    fn a_row_of_a_date_is_stamped_at_the_date_s_end() {
         let rows: Vec<_> = us10y_rows()
             .into_iter()
             .map(|row| {
@@ -508,27 +537,75 @@ mod tests {
             })
             .collect();
 
-        let row = |date, close: f64| {
+        let row = |stamped, close: f64| {
             (
-                day(date),
-                day(date),
+                day(stamped),
+                day(stamped),
                 "bond_yields".to_string(),
                 "US10Y".to_string(),
                 serde_json::json!(close),
             )
         };
+        assert_eq!(rows, [row("10", 4.884), row("11", 5.0), row("13", 5.133)]);
+    }
+
+    /// The 4-hour rows of the 10th, which LSE stamps at their open, 00:00
+    /// to 20:00: each stamped at its close, 04:00 to the 11th's 00:00, as
+    /// pyarrow reads LSE's file.
+    #[rstest]
+    fn a_row_of_an_interval_is_stamped_at_its_close() {
+        let rows: Vec<_> = parse_rows(
+            Bytes::from_static(US10Y_BOND_YIELDS_FOUR_HOURS),
+            "bond_yields_four_hour",
+            "US10Y",
+            "ts",
+            RowKey::Open(SignedDuration::from_hours(4)),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| (row.ts_event, row.ts_init, row.fields["close"].clone()))
+        .collect();
+
+        let row =
+            |close_at: &str, close: f64| (nov(close_at), nov(close_at), serde_json::json!(close));
         assert_eq!(
             rows,
             [
-                row("2026-11-09", 4.884),
-                row("2026-11-10", 5.0),
-                row("2026-11-12", 5.133),
+                row("10T04:00:00", 4.868),
+                row("10T08:00:00", 4.868),
+                row("10T12:00:00", 4.892),
+                row("10T16:00:00", 4.988),
+                row("10T20:00:00", 4.983),
+                row("11T00:00:00", 5.0),
             ]
         );
     }
 
-    /// As pyarrow reads them: LSE's row id, the yield's country, maturity
-    /// and currency, its day's open, high, low and close, and when LSE
+    /// Its stamp would not be when its values are known.
+    #[rstest]
+    #[case::dates_as_intervals(
+        US10Y_BOND_YIELDS,
+        "date",
+        RowKey::Open(SignedDuration::from_hours(4))
+    )]
+    #[case::times_as_dates(US10Y_BOND_YIELDS_FOUR_HOURS, "ts", RowKey::Date)]
+    fn a_time_column_not_of_the_key_of_its_collection_is_refused_naming_it(
+        #[case] file: &'static [u8],
+        #[case] time_column: &str,
+        #[case] key: RowKey,
+    ) {
+        let err = parse_rows(
+            Bytes::from_static(file),
+            "bond_yields",
+            "US10Y",
+            time_column,
+            key,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains(time_column), "{err:#}");
+    }
+
     /// fetched it, a time in UTC.
     #[rstest]
     fn a_row_s_fields_are_its_other_columns_as_lse_sent_them() {
@@ -569,6 +646,7 @@ mod tests {
             "bond_yields",
             "US10Y",
             "ts",
+            RowKey::Date,
         )
         .unwrap_err();
 

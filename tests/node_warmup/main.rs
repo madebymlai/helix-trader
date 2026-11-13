@@ -64,7 +64,7 @@ use nautilus_model::{
     },
     enums::{AggressorSide, BookAction, BookType, OrderSide, RecordFlag},
     identifiers::{ClientId, InstrumentId, TradeId, TraderId, Venue},
-    instruments::{InstrumentAny, stubs::futures_contract_es},
+    instruments::{Instrument, InstrumentAny, stubs::futures_contract_es},
     orderbook::OrderBook,
     types::{Money, Price, Quantity},
 };
@@ -1297,4 +1297,212 @@ fn deltas_a_catalog_answers_in_windows_build_the_days_book_across_their_snapshot
     let (books, _) = warm_deltas(dir.path());
 
     assert_the_days_book(&books);
+}
+
+/// What `Streaming` saw when LSE's first quote of its gold series came: the
+/// quote, the definitions in the cache then, and why the warmup failed, if
+/// it did.
+#[derive(Debug, Clone)]
+struct Streamed {
+    quote: QuoteTick,
+    gold: Option<InstrumentAny>,
+    gcz26: Option<InstrumentAny>,
+}
+
+/// Starts a warmup and its roller as a model handle does, GCZ26's
+/// definition in the cache as its broker's client puts it there; stops the
+/// node on LSE's first quote of its gold series.
+#[derive(Debug)]
+struct Streaming {
+    core: DataActorCore,
+    warmup: Rc<Warmup>,
+    roller: Roller,
+    streamed: Rc<RefCell<Option<Streamed>>>,
+    failure: Rc<RefCell<Option<String>>>,
+}
+
+nautilus_actor!(Streaming);
+
+impl DataActor for Streaming {
+    fn on_start(&mut self) -> anyhow::Result<()> {
+        self.cache_rc().borrow_mut().add_instrument(gcz26())?;
+        Rc::clone(&self.warmup).start(self)?;
+        self.roller.clone().start(self)
+    }
+
+    fn on_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
+        let gold = InstrumentId::from(lse::testing::GOLD_FUTURES);
+        if quote.instrument_id != gold || self.streamed.borrow().is_some() {
+            return Ok(());
+        }
+        let streamed = {
+            let cache = self.cache();
+            Streamed {
+                quote: *quote,
+                gold: cache.instrument(&gold),
+                gcz26: cache.instrument(&InstrumentId::from(GCZ26)),
+            }
+        };
+        *self.streamed.borrow_mut() = Some(streamed);
+        self.shutdown_system(Some("LSE's first quote came".to_string()));
+        Ok(())
+    }
+
+    fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
+        if let Err(e) = Rc::clone(&self.warmup).on_data_response(self, response) {
+            *self.failure.borrow_mut() = Some(format!("{e:#}"));
+        }
+        Ok(())
+    }
+}
+
+/// A live start reading LSE's gold futures quotes and GCZ26's, on a node
+/// whose catalog holds the gold series' definition, written by hand as LSE
+/// publishes none, and an older GCZ26 than the broker's: the LSE client,
+/// against the mock LSE socket and routed LSEDGE as the live node routes
+/// it, beside a venue's routed GLBX. The warmup asks the gold series'
+/// definition, which the catalog answers and the data engine caches before
+/// the roller's subscription reaches the LSE client: that reads the
+/// definition's precision, and LSE's quote streams at it, bid and ask with
+/// no sizes. GCZ26's, which the cache holds, is not asked, so the broker's
+/// stays. LSE serves no quotes of the gold series' past: LSE's mock peer
+/// refuses them as LSE does (`400 data-unavailable`), and the warmup ends
+/// with what the venue served and LSE's refusal.
+#[test]
+fn an_lsedge_definition_the_cache_lacks_comes_from_the_catalog_before_lse_streams_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let older = {
+        let InstrumentAny::FuturesContract(mut contract) = gcz26() else {
+            unreachable!("a futures contract")
+        };
+        contract.ts_init = UnixNanos::from(1);
+        InstrumentAny::FuturesContract(contract)
+    };
+    ParquetDataCatalog::new(dir.path(), None, None, None, None)
+        .write_instruments(vec![lse::testing::gold_futures(), older])
+        .unwrap();
+    let socket = lse::testing::MockLseSocket::start(|_, frame| lse::testing::data_ws_answer(frame));
+    let history = lse::testing::MockLse::start(vec![lse::testing::Reply::refusal(
+        400,
+        lse::testing::DATA_UNAVAILABLE_QUOTES,
+    )]);
+    let gold = InstrumentId::from(lse::testing::GOLD_FUTURES);
+    let ticks = vec![
+        TickSeries {
+            data: NautilusDataType::QuoteTick,
+            instrument_id: gold,
+        },
+        of_gcz26(NautilusDataType::QuoteTick),
+    ];
+    let requirements = DataRequirements {
+        bar_types: vec![],
+        ticks: ticks.clone(),
+        custom: vec![],
+        warmup: SignedDuration::from_hours(1),
+    };
+    let warmup = Rc::new(Warmup::live(&requirements).reading(ticks.clone()));
+    let config = LiveNodeConfig {
+        environment: Environment::Live,
+        trader_id: TraderId::from("WARMUP-001"),
+        load_state: false,
+        save_state: false,
+        catalogs: vec![DataCatalogConfig::new(
+            dir.path().to_str().unwrap().to_string(),
+            None,
+            None,
+        )],
+        cache: Some(warmup.cache_config().unwrap()),
+        data_engine: warmup::live_data_engine_config(&requirements.bar_types),
+        ..Default::default()
+    };
+    let lse = lse::LseDataClientConfig::builder()
+        .api_key(nautilus_core::string::secret::SecretString::from(
+            lse::testing::API_KEY,
+        ))
+        .base_url_http(history.url().to_string())
+        .base_url_ws(socket.url().to_string())
+        .stream_ids(vec![gold])
+        .build();
+    let streamed = Rc::new(RefCell::new(None));
+    let failure = Rc::new(RefCell::new(None));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut node = LiveNodeBuilder::from_config(config)
+            .unwrap()
+            .with_name("WARMUP")
+            .with_delay_post_stop_secs(0)
+            .add_data_client_with_routing(
+                None,
+                Box::new(FakeFactory(FakeVenue::new(Answer::Envelope))),
+                Box::new(FakeConfig),
+                RoutingConfig {
+                    default: false,
+                    venues: Some(vec!["GLBX".to_string()]),
+                },
+            )
+            .unwrap()
+            .add_data_client_with_routing(
+                None,
+                Box::new(lse::LseDataClientFactory::new()),
+                Box::new(lse),
+                RoutingConfig {
+                    default: false,
+                    venues: Some(vec!["LSEDGE".to_string()]),
+                },
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        node.add_actor(Streaming {
+            core: DataActorCore::new(DataActorConfig::default()),
+            warmup,
+            roller: Roller::live(ticks),
+            streamed: Rc::clone(&streamed),
+            failure: Rc::clone(&failure),
+        })
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(60), node.run())
+            .await
+            .expect("LSE's quote comes within a minute")
+            .unwrap();
+        node.dispose();
+    });
+
+    let streamed = streamed
+        .borrow()
+        .clone()
+        .expect("a quote of the gold series");
+    assert_eq!(
+        streamed.gold.map(|gold| gold.id()),
+        Some(gold),
+        "the gold series' definition in the cache"
+    );
+    assert_eq!(
+        streamed.gcz26.map(|gcz26| gcz26.ts_init()),
+        Some(gcz26().ts_init()),
+        "the broker's GCZ26"
+    );
+    let quote = streamed.quote;
+    assert_eq!(
+        (
+            quote.bid_price,
+            quote.ask_price,
+            quote.bid_size,
+            quote.ask_size
+        ),
+        (
+            Price::from("3888.0"),
+            Price::from("3888.2"),
+            Quantity::from(0),
+            Quantity::from(0)
+        )
+    );
+    let failure = failure
+        .borrow()
+        .clone()
+        .expect("LSE serves no quotes of the past");
+    assert!(failure.contains("data-unavailable"), "{failure}");
 }

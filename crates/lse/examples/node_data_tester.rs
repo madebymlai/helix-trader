@@ -7,8 +7,11 @@
 //! series' fail with LSE's refusal, LSE serving their past as timeframes
 //! alone); TC-D31, historical trades, of gold futures and of GCZ26.GLBX
 //! (gold spot's fails with LSE's refusal, a commodity, of which LSE stores
-//! no trades); and TC-D41, historical bars, gold spot's 1-minute candles.
-//! The adapter streams nothing yet, so every subscription case is skipped.
+//! no trades); TC-D41, historical bars, gold spot's 1-minute candles; and,
+//! by a second tester, TC-D20, gold futures' quotes, which the client
+//! streams on data-ws, and TC-D70, their subscription ended on stop. The
+//! adapter streams no other kind, so every other subscription case is
+//! skipped.
 //!
 //! LSE publishes no definitions: the tester writes the crate's test
 //! definitions into a temporary catalog the node reads, the two series' as
@@ -27,11 +30,11 @@ use lse::{
     LseDataClientConfig, LseDataClientFactory,
     testing::{GCZ26, GOLD_FUTURES, GOLD_SPOT, gcz26, gold_futures, gold_spot},
 };
-use nautilus_common::{enums::Environment, factories::DataClientFactory};
+use nautilus_common::{actor::DataActorConfig, enums::Environment, factories::DataClientFactory};
 use nautilus_live::{builder::LiveNodeBuilder, config::LiveNodeConfig};
 use nautilus_model::{
     data::BarType,
-    identifiers::{ClientId, InstrumentId, TraderId},
+    identifiers::{ActorId, ClientId, InstrumentId, TraderId},
 };
 use nautilus_persistence::{
     backend::parquet::catalog::ParquetDataCatalog, config::DataCatalogConfig,
@@ -74,11 +77,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .add_data_client(
             None,
             Box::new(factory),
-            Box::new(LseDataClientConfig::default()),
+            Box::new(
+                LseDataClientConfig::builder()
+                    .stream_ids(vec![InstrumentId::from(GOLD_FUTURES)])
+                    .build(),
+            ),
         )?
         .build()?;
 
     let tester_config = DataTesterConfig::builder()
+        .base(tester("DATA-TESTER-HISTORY"))
         .client_id(client_id)
         .instrument_ids(vec![
             InstrumentId::from(GOLD_FUTURES),
@@ -94,8 +102,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .request_end(REQUEST_END.parse()?)
         .build()?;
 
+    let quotes_config = DataTesterConfig::builder()
+        .base(tester("DATA-TESTER-QUOTES"))
+        .client_id(client_id)
+        .instrument_ids(vec![InstrumentId::from(GOLD_FUTURES)])
+        .subscribe_quotes(true)
+        .can_unsubscribe(true)
+        .build()?;
+
     node.add_actor(DataTester::new(tester_config))?;
+    node.add_actor(DataTester::new(quotes_config))?;
     node.run().await?;
 
     Ok(())
+}
+
+/// The config of the tester `actor_id`, one of the node's two.
+fn tester(actor_id: &str) -> DataActorConfig {
+    DataActorConfig {
+        actor_id: Some(ActorId::from(actor_id)),
+        ..Default::default()
+    }
 }

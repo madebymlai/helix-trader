@@ -5,15 +5,17 @@
 //! required plan. See `README.md`.
 //!
 //! Nautilus has no LSE adapter; this one is laid out as Nautilus' adapters
-//! are (`docs/developer_guide/adapters.md`): `common` (the venue and the
-//! variables of the keys, the keys by the product each opens, and the
-//! symbol boundary between an instrument id and what LSE is asked for, a
-//! derived market's symbol or a CME contract's listing), `http` (the HTTP
-//! client, its typed queries, an export over any span, the listings of CME
-//! contracts, LSE's answers and refusals and the parsing of an export's
-//! Parquet file), `config` (the data client's config), `data` (the data
-//! client), `factories`, and `types`, the custom data type of LSE's rows
-//! that are not prices (`LseRow`).
+//! are (`docs/developer_guide/adapters.md`): `common` (the venue, the
+//! sockets and the variables of the keys, the keys by the product each
+//! opens, and the symbol boundary between an instrument id and what LSE is
+//! asked for, a derived market's symbol, its name on a socket, or a CME
+//! contract's listing), `http` (the HTTP client, its typed queries, an
+//! export over any span, the listings of CME contracts, LSE's answers and
+//! refusals and the parsing of an export's Parquet file), `websocket` (the
+//! frames of LSE's sockets, the client of one, and the parsing of a tick),
+//! `config` (the data client's config), `data` (the data client),
+//! `factories`, and `types`, the custom data type of LSE's rows that are
+//! not prices (`LseRow`).
 
 pub use self::{
     common::{
@@ -33,3 +35,4 @@ mod http;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 mod types;
+mod websocket;

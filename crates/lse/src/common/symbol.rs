@@ -1,7 +1,8 @@
 //! The symbol boundary: an instrument id and what it stands for at LSE
 //! (`LseInstrument`), converted both ways here only: an `LSEDGE` id and the
-//! LSE market and symbol of a derived series (`LseSymbol`), and a `GLBX` id
-//! and the CME contract LSE lists (`CmeContract`).
+//! LSE market and symbol of a derived series (`LseSymbol`), with the socket
+//! the series streams on and its name there, and a `GLBX` id and the CME
+//! contract LSE lists (`CmeContract`).
 //!
 //! A derived market's series is one instrument under `LSEDGE`, its LSE
 //! market the suffix of its symbol, as Bybit's product suffix (Nautilus'
@@ -25,7 +26,7 @@ use nautilus_model::identifiers::{
 };
 
 use super::{
-    consts::{EXCHANGE_MARKETS, LSEDGE_VENUE},
+    consts::{EXCHANGE_MARKETS, LSEDGE_VENUE, LseSocket},
     credential::LseProduct,
 };
 use crate::http::models::LsePair;
@@ -111,6 +112,21 @@ impl LseSymbol {
     #[must_use]
     pub fn symbol(&self) -> &str {
         &self.symbol
+    }
+
+    /// The socket the series streams on, and its name there: a futures
+    /// series on data-ws, as its symbol suffixed `.F` (`GOLD.F`), as LSE's
+    /// socket documentation spells it ("Symbols on each socket").
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming the market if its series stream on no
+    /// socket here yet: every market but futures.
+    pub(crate) fn stream(&self) -> anyhow::Result<(LseSocket, String)> {
+        match self.market.as_str() {
+            "futures" => Ok((LseSocket::Data, format!("{}.F", self.symbol))),
+            market => bail!("the series of LSE's {market} stream on no LSE socket here yet"),
+        }
     }
 }
 
@@ -383,6 +399,31 @@ mod tests {
         let err = of("GOLD-FUTURES.GLBX").unwrap_err().to_string();
 
         assert!(err.contains("GOLD-FUTURES.GLBX"), "{err}");
+    }
+
+    /// As LSE's socket documentation spells them, and as data-ws lists
+    /// them once authenticated (`test_data/ws_authenticated_futures.json`).
+    #[rstest]
+    #[case("GOLD-FUTURES.LSEDGE", "GOLD.F")]
+    #[case("US10Y-FUTURES.LSEDGE", "US10Y.F")]
+    fn a_futures_series_streams_on_data_ws_under_its_symbol_suffixed_f(
+        #[case] id: &str,
+        #[case] name: &str,
+    ) {
+        let (socket, streamed) = of(id).unwrap().stream().unwrap();
+
+        assert_eq!((socket.name(), streamed.as_str()), ("data-ws", name));
+    }
+
+    #[rstest]
+    fn a_series_of_a_market_streamed_nowhere_yet_is_refused_naming_its_market() {
+        let err = of("AAPL-US_STOCKS.LSEDGE")
+            .unwrap()
+            .stream()
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("us_stocks"), "{err}");
     }
 
     /// Their listings take Databento's ids.

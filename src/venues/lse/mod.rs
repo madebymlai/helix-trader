@@ -1,11 +1,13 @@
-//! LSE history, filled through the node (see `catalog::NodeFill`) by the LSE
-//! adapter's data client (`lse`), whose answers the data engine writes back
-//! to the catalog: of `LSEDGE` instruments, London Strategic Edge's own
-//! derived series, each an index instrument named after its LSE market
-//! (`GOLD-FUTURES.LSEDGE`: GOLD in `futures`), trades, from LSE's tick
-//! slices, and bars, from its candles, each stamped at its close; and of
-//! `GLBX` contracts, CME Globex's Level 1 under the ids Databento gives
-//! them (`GCZ26.GLBX`), trades and quotes. Each contract's definition is
+//! LSE history and live data, from the LSE adapter's data client (`lse`).
+//! History is filled through the node (see `catalog::NodeFill`), the data
+//! engine writing the client's answers back to the catalog: of `LSEDGE`
+//! instruments, London Strategic Edge's own derived series, each an index
+//! instrument named after its LSE market (`GOLD-FUTURES.LSEDGE`: GOLD in
+//! `futures`), trades, from LSE's tick slices, and bars, from its candles,
+//! each stamped at its close; and of `GLBX` contracts, CME Globex's Level 1
+//! under the ids Databento gives them (`GCZ26.GLBX`), trades and quotes.
+//! Live, the client streams the quotes of `LSEDGE` instruments on the live
+//! node, routed their venue (`live_clients`). Each contract's definition is
 //! its row's definitions source's: `LSEDGE`'s the catalog's alone, written
 //! there by hand, LSE publishing none, the data engine answering a
 //! definition request from the catalog before asking the client; `GLBX`'s
@@ -17,12 +19,14 @@
 
 use ::lse::{LseDataClientConfig, LseDataClientFactory};
 use jiff::{SignedDuration, Timestamp};
-use nautilus_model::data::DataType;
+use nautilus_live::config::RoutingConfig;
+use nautilus_model::{data::DataType, identifiers::InstrumentId};
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 
 use super::{DefinitionsSource, Row, databento::DatabentoHistory};
 use crate::{
     catalog::{FillData, NodeClient, NodeFill, missing, missing_custom},
+    live::node::Clients,
     strategy::SeriesSlice,
 };
 
@@ -93,6 +97,41 @@ fn node_client(config: LseDataClientConfig) -> NodeClient {
     }
 }
 
+/// The live node's clients of `instrument_ids`, `LSEDGE` instruments: the
+/// LSE adapter's data client streaming them, its key read when the node
+/// creates it, and no execution client, LSE trading nothing. The client is
+/// on no venue, so it takes the route of theirs (`RoutingConfig::venues`)
+/// and not the default, which IB keeps for the venues without a client of
+/// their own.
+pub(super) fn live_clients(instrument_ids: &[InstrumentId]) -> Clients {
+    clients(
+        LseDataClientConfig::builder()
+            .stream_ids(instrument_ids.to_vec())
+            .build(),
+    )
+}
+
+/// The live node's clients on `config`, routed the venues of the
+/// instruments it streams.
+fn clients(config: LseDataClientConfig) -> Clients {
+    let mut venues: Vec<String> = Vec::new();
+    for id in &config.stream_ids {
+        let venue = id.venue.to_string();
+        if !venues.contains(&venue) {
+            venues.push(venue);
+        }
+    }
+    Clients {
+        data_factory: Box::new(LseDataClientFactory::new()),
+        data_config: Box::new(config),
+        exec: None,
+        routing: RoutingConfig {
+            default: false,
+            venues: Some(venues),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::HashSet, path::Path};
@@ -102,8 +141,9 @@ mod tests {
         testing::{
             ALLOWANCE_EXHAUSTED, API_KEY, CME_API_KEY, DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING,
             GCZ26, GCZ26_QUOTES, GCZ26_TRADES, GOLD_FUTURES, GOLD_SPOT, GOLD_SPOT_MINUTES,
-            GOLD_TRADES, MockLse, PAIRS_GCZ6, PLAN_REQUIRED, REFERENCE_CATALOGUE, ROWS_EXHAUSTED,
-            Reply, SYMBOL_UNKNOWN, US10Y_BOND_YIELDS, gold_futures, gold_spot,
+            GOLD_TRADES, MockLse, PAIRS_GCZ6, PLAN_REQUIRED, REFERENCE_CATALOGUE,
+            REFERENCE_DATA_UNAVAILABLE, ROWS_EXHAUSTED, Reply, SYMBOL_UNKNOWN, US10Y_BOND_YIELDS,
+            gold_futures, gold_spot,
         },
     };
     use jiff::Timestamp;
@@ -407,23 +447,28 @@ mod tests {
         LseRow::data_type("bond_yields", "US10Y")
     }
 
-    /// fill-catalog's fill of `us10y()` over the captured days, the 9th to
-    /// the 12th of November, into the catalog in `dir`, from `lse`.
+    /// fill-catalog's fill of `us10y()` over the rows of the captured
+    /// days, the 9th to the 12th of November, known from the 10th's 00:00
+    /// to the 13th's, into the catalog in `dir`, from `lse`.
     fn fill_bond_yields(dir: &Path, lse: &MockLse) -> anyhow::Result<()> {
+        fill_bond_yields_over(dir, lse, november("10T00:00:00"), november("13T00:00:00"))
+    }
+
+    /// fill-catalog's fill of `us10y()` over `[from, to]` into the catalog
+    /// in `dir`, from `lse`.
+    fn fill_bond_yields_over(
+        dir: &Path,
+        lse: &MockLse,
+        from: Timestamp,
+        to: Timestamp,
+    ) -> anyhow::Result<()> {
         let requirements = DataRequirements {
             bar_types: vec![],
             ticks: vec![],
             custom: vec![us10y()],
             warmup: SignedDuration::ZERO,
         };
-        fill_requirements(
-            dir,
-            lse,
-            &requirements,
-            vec![],
-            november("09T00:00:00"),
-            november("12T23:59:59.999999999"),
-        )
+        fill_requirements(dir, lse, &requirements, vec![], from, to)
     }
 
     fn november(time: &str) -> Timestamp {
@@ -431,7 +476,8 @@ mod tests {
     }
 
     /// The captured rows, as pyarrow reads LSE's file: the 9th's, the
-    /// 10th's and the 12th's, read back as Nautilus decodes custom data.
+    /// 10th's and the 12th's, read back as Nautilus decodes custom data,
+    /// each stamped at its date's end.
     #[test]
     fn the_bond_yields_lse_exports_are_written_back_as_custom_data_of_their_series() {
         let dir = tempfile::tempdir().unwrap();
@@ -468,7 +514,7 @@ mod tests {
                 serde_json::json!(close),
             )
         };
-        assert_eq!(rows, [row("09", 4.884), row("10", 5.0), row("12", 5.133)]);
+        assert_eq!(rows, [row("10", 4.884), row("11", 5.0), row("13", 5.133)]);
     }
 
     /// The window is stored whole, the days without a row too: a second
@@ -485,6 +531,44 @@ mod tests {
         fill_bond_yields(dir.path(), &lse).unwrap();
 
         assert_eq!(lse.calls().len(), 2, "{:?}", lse.calls());
+    }
+
+    /// The captured rows stored, known until the 13th's 00:00, then a
+    /// window until now, whose last date, the day before's, is LSE's the
+    /// morning after it (`lse`'s data client), and of which LSE holds no
+    /// row yet. The fill ends without recording the window beside the
+    /// stored rows, as an empty answer would be, so that the next run asks
+    /// for it again.
+    #[test]
+    fn a_window_of_bond_yields_reaching_into_a_day_lse_has_not_loaded_is_asked_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let stored = MockLse::start(vec![
+            Reply::json(REFERENCE_CATALOGUE),
+            Reply::file(US10Y_BOND_YIELDS),
+        ]);
+        fill_bond_yields(dir.path(), &stored).unwrap();
+        let now = Timestamp::now();
+        let not_loaded = || {
+            MockLse::start(vec![
+                Reply::json(REFERENCE_CATALOGUE),
+                Reply::refusal(404, REFERENCE_DATA_UNAVAILABLE),
+            ])
+        };
+        let first = not_loaded();
+        fill_bond_yields_over(dir.path(), &first, november("10T00:00:00"), now).unwrap();
+
+        let again = not_loaded();
+        fill_bond_yields_over(dir.path(), &again, november("10T00:00:00"), now).unwrap();
+
+        let froms = [&first, &again].map(|lse| {
+            lse.calls()
+                .last()
+                .and_then(|call| call.param("from").map(String::from))
+        });
+        assert_eq!(
+            froms,
+            [Some("2026-11-12"), Some("2026-11-12")].map(|from| from.map(String::from))
+        );
     }
 
     #[test]

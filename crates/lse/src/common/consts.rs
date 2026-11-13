@@ -32,6 +32,31 @@ pub(crate) const CME_LITE_CALLS_PER_MINUTE: NonZeroU32 = NonZeroU32::new(200).ex
 /// LSE's name of CME Globex, its market's folder.
 pub(crate) const CME_MARKET: &str = "cme";
 
+/// An LSE socket of the protocol four of them share (LSE's WebSocket
+/// documentation, "The sockets"), each carrying its markets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum LseSocket {
+    /// data-ws: US stocks and ETFs, US option contracts, forex,
+    /// commodities, futures and US bond yields.
+    Data,
+}
+
+impl LseSocket {
+    /// LSE's name of the socket.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Data => "data-ws",
+        }
+    }
+
+    /// The socket's address.
+    pub(crate) fn url(self) -> &'static str {
+        match self {
+            Self::Data => "wss://data-ws.londonstrategicedge.com",
+        }
+    }
+}
+
 /// LSE's exchange markets: real listings, which take the ids Databento
 /// gives them, not `LSEDGE` ones. `opra` is a second name for
 /// `us_options`. Every other market is derived.

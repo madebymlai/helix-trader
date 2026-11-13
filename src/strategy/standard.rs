@@ -3,7 +3,7 @@ use std::{fmt, marker::PhantomData, str::FromStr};
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::config::{ConfigError, ConfigErrorCollector, ConfigResult};
 use nautilus_model::{
-    data::{BarSpecification, BarType, NautilusDataType},
+    data::{BarSpecification, BarType, DataType, NautilusDataType},
     enums::{AggregationSource, BarAggregation, PriceType},
     identifiers::{InstrumentId, StrategyId},
     types::Quantity,
@@ -20,6 +20,7 @@ use super::{
 use crate::{
     model::config::{ModelConfig, ModelSection},
     rolls::Transition,
+    venues,
 };
 
 /// The config every strategy's TOML has: the standard tables, in Nautilus'
@@ -243,7 +244,7 @@ impl<P: Part> StandardConfig<P> {
         DataRequirements {
             bar_types: self.data.bar_types().collect(),
             ticks,
-            custom: vec![],
+            custom: self.data.custom.clone(),
             warmup: self.data.warmup,
         }
     }
@@ -257,6 +258,17 @@ pub struct DataConfig {
     /// strategy's part answers it reads (`Part::reads`), each once, and no
     /// other.
     pub series: Vec<Series>,
+    /// The custom data of no instrument read, each once, an LSE reference
+    /// series among them (`DataRequirements::custom`): each a Nautilus data
+    /// type by its type and metadata, `{ data = "Custom:LseRow", metadata =
+    /// { source = "bond_yields", symbol = "US10Y" } }` in a TOML config,
+    /// keyed as its source keys it (`venues::custom_data_type`), which
+    /// refuses a type no source serves. Fetched by fill-catalog and replayed
+    /// in a backtest, to the strategy subscribing to its data type; a live
+    /// run reading any is refused. No part answers it reads one, and none
+    /// is required: none by default.
+    #[serde(default, deserialize_with = "custom_data")]
+    pub custom: Vec<DataType>,
     /// How far back the warmup history a live node requests at start
     /// starts; a backtest requests none, its strategy warming on the
     /// replay.
@@ -265,6 +277,34 @@ pub struct DataConfig {
     /// a market open around the clock, every bar counts.
     #[serde(default)]
     pub session: Option<Session>,
+}
+
+/// The keys of custom data of no instrument as the TOML has them: its
+/// Nautilus data type, `Custom:<type name>`, and its metadata.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CustomFields {
+    data: String,
+    metadata: serde_json::Map<String, serde_json::Value>,
+}
+
+/// The custom data of no instrument read, each a Nautilus data type keyed
+/// as its source keys it (`venues::custom_data_type`).
+fn custom_data<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<DataType>, D::Error> {
+    Vec::<CustomFields>::deserialize(deserializer)?
+        .into_iter()
+        .map(|CustomFields { data, metadata }| {
+            let NautilusDataType::Custom { type_name } =
+                NautilusDataType::from_str(&data).map_err(de::Error::custom)?
+            else {
+                return Err(de::Error::custom(format!(
+                    "{data} is not custom data: Custom:<type name>"
+                )));
+            };
+            venues::custom_data_type(&type_name, &metadata)
+                .map_err(|e| de::Error::custom(format!("{e:#}")))
+        })
+        .collect()
 }
 
 impl DataConfig {
@@ -305,7 +345,8 @@ impl DataConfig {
     }
 
     /// Pushes the violations of `[data]`: no series; a series listed
-    /// again, under each listing after its first, naming it; a bars series
+    /// again, under each listing after its first, naming it; custom data
+    /// listed again, under `data.custom[i]` likewise; a bars series
     /// not aggregated on time (the session needs the bar's span), built
     /// from ticks but priced MARK (Nautilus builds bars from quotes or
     /// trades alone), on a venue other than the first bars', built from
@@ -329,6 +370,14 @@ impl DataConfig {
                 format!("data.series[{i}]"),
                 Some(series.to_string()),
             ));
+        }
+        for (i, data_type) in self.custom.iter().enumerate() {
+            if self.custom[..i].contains(data_type) {
+                errors.push(ConfigError::duplicate(
+                    format!("data.custom[{i}]"),
+                    Some(data_type.to_string()),
+                ));
+            }
         }
         let venue = self
             .bar_types()
@@ -1151,6 +1200,75 @@ mod tests {
             };
             assert!(value.contains("TradeTick of ESH24.CME"), "{value}");
         }
+    }
+
+    /// `TOML` with `custom`, the TOML of `[data] custom`, after its warmup.
+    fn with_custom(custom: &str) -> String {
+        TOML.replace(
+            "warmup = \"720h\"",
+            &format!("warmup = \"720h\"\n        custom = {custom}"),
+        )
+    }
+
+    const US10Y: &str =
+        r#"{ data = "Custom:LseRow", metadata = { source = "bond_yields", symbol = "US10Y" } }"#;
+
+    /// LSE's daily 10-year US yield, keyed as LSE's rows are, read by no
+    /// part: the config declares it, beside the series its part reads.
+    #[test]
+    fn custom_data_of_no_instrument_loads_as_a_data_type_of_the_requirements() {
+        let config = load(&with_custom(&format!("[{US10Y}]"))).unwrap();
+
+        assert_eq!(
+            config.data_requirements().custom,
+            [lse::LseRow::data_type("bond_yields", "US10Y")]
+        );
+    }
+
+    #[test]
+    fn a_config_with_no_custom_data_reads_none() {
+        assert_eq!(load(TOML).unwrap().data_requirements().custom, []);
+    }
+
+    /// No source fills it.
+    #[test]
+    fn custom_data_of_no_instrument_of_a_type_no_source_serves_is_refused_naming_it() {
+        let toml = with_custom(
+            r#"[{ data = "Custom:Imbalance", metadata = { source = "bond_yields", symbol = "US10Y" } }]"#,
+        );
+
+        let err = shape_error(&toml);
+
+        assert!(
+            err.contains("Imbalance") && err.contains("no source"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn lse_s_rows_naming_no_symbol_are_refused_naming_it() {
+        let toml =
+            with_custom(r#"[{ data = "Custom:LseRow", metadata = { source = "bond_yields" } }]"#);
+
+        let err = shape_error(&toml);
+
+        assert!(err.contains("symbol"), "{err}");
+    }
+
+    #[test]
+    fn custom_data_listed_again_is_refused_under_its_later_listing_naming_it() {
+        let err = load(&with_custom(&format!("[{US10Y}, {US10Y}]"))).unwrap_err();
+
+        assert_eq!(fields_of(&err), ["data.custom[1]"]);
+        let [
+            ConfigError::Duplicate {
+                value: Some(value), ..
+            },
+        ] = &errors_of(&err)[..]
+        else {
+            panic!("not a duplicate naming the data: {err:?}");
+        };
+        assert!(value.contains("US10Y-BOND_YIELDS"), "{value}");
     }
 
     #[test]

@@ -9,9 +9,12 @@ publish = false
 # The mock LSE peer and its captured payloads (`testing`), for a caller's
 # tests of its own fill through the adapter, as the cTrader crate exposes
 # its hooks.
-test-support = []
+test-support = ["dep:tungstenite"]
 
 [dependencies]
+# The maps and sets of the sockets' state, as Nautilus' adapter guide asks
+# ("Adapter-owned state").
+ahash = "0.8"
 anyhow.workspace = true
 # The columns of an export's Parquet file, and a row's fields as JSON, its
 # times in their named zone, LSE's UTC (chrono-tz).
@@ -41,10 +44,13 @@ sha2.workspace = true
 thiserror = "2"
 # The lock of the one download at a time.
 tokio = { workspace = true, features = ["sync"] }
+# The mock LSE socket of `testing`.
+tungstenite = { version = "0.30", optional = true }
 
 [dev-dependencies]
 # The data tester's: the key from `.env`, the node's catalog (registered
-# through nautilus-live's `streaming`) and Nautilus' `DataTester`.
+# through nautilus-live's `streaming`) and Nautilus' `DataTester`, which
+# the tests drive the data client with on a node too.
 dotenvy = "0.15"
 nautilus-live = { workspace = true, features = ["streaming"] }
 nautilus-model = { workspace = true, features = ["test-support"] }
@@ -55,6 +61,8 @@ nautilus-testkit.workspace = true
 rstest = { version = "0.28.0", default-features = false }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+# The mock LSE socket of the crate's tests.
+tungstenite = "0.30"
 
 # Nautilus' data tester on LSE (see the README, "Data testing"), on the
 # crate's test definitions.

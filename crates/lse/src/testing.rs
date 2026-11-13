@@ -1,8 +1,9 @@
-//! A mock LSE peer for the tests, the adapter's and its callers': an HTTP
+//! Mock LSE peers for the tests, the adapter's and its callers': an HTTP
 //! server on 127.0.0.1 answering each call with the next reply of a
-//! script, replaying payloads captured from LSE (`test_data/`, see its
-//! `README.md`), and recording each call it receives. Built for the
-//! crate's tests and, with the `test-support` feature, for a caller's.
+//! script, and a socket (`MockLseSocket`) answering each frame as a script
+//! says, both replaying payloads captured from LSE (`test_data/`, see its
+//! `README.md`) and recording what they receive. Built for the crate's
+//! tests and, with the `test-support` feature, for a caller's.
 
 use std::{
     io::{BufRead, BufReader, Write},
@@ -21,6 +22,10 @@ use nautilus_model::{
 use nautilus_network::http::Url;
 use sha2::{Digest, Sha256};
 
+pub use self::socket::{MockLseSocket, SocketAction, data_ws_answer};
+
+mod socket;
+
 /// The trade slice of LSE's gold futures series (`GOLD` in `futures`) over
 /// `[2026-10-21T10:00:00Z, 2026-10-21T10:00:01Z)`, as LSE exported it:
 /// six trades.
@@ -32,6 +37,11 @@ pub const REFERENCE_CATALOGUE: &str = include_str!("../test_data/reference_catal
 /// rows, of the 9th, 10th and 12th.
 pub const US10Y_BOND_YIELDS: &[u8] =
     include_bytes!("../test_data/reference_bond_yields_us10y.parquet");
+/// The 4-hour rows of `US10Y` in LSE's `bond_yields_four_hour` of 10
+/// November 2026, as LSE exported them: six rows, stamped at their open,
+/// 00:00 to 20:00.
+pub const US10Y_BOND_YIELDS_FOUR_HOURS: &[u8] =
+    include_bytes!("../test_data/reference_bond_yields_four_hour_us10y.parquet");
 /// The 1-minute candles of LSE's gold spot series (`XAU/USD` in
 /// `commodities`) over `[2026-10-21T10:00:00Z, 2026-10-21T10:05:00Z)`, as LSE
 /// exported them: five candles, stamped at their open, of no volume.
@@ -94,6 +104,25 @@ pub const GCZ26: &str = "GCZ26.GLBX";
 
 /// The CME key the tests give the adapter, which the peer records.
 pub const CME_API_KEY: &str = "lse-cme-test-key-0123456789";
+
+/// LSE's data-ws frames, captured with the free key on 13 November 2026
+/// (`test_data/README.md`): its welcome; its authenticated frame, trimmed
+/// to the futures it lists; the subscription and unsubscription of
+/// `GOLD.F`, the gold futures series, and its first three ticks; the
+/// answer to a ping; and its refusals of a 17th symbol on the free key's
+/// 16, of a second connection on the key's one, and of a key it does not
+/// know.
+pub const WS_WELCOME: &str = include_str!("../test_data/ws_welcome.json");
+pub const WS_AUTHENTICATED_FUTURES: &str =
+    include_str!("../test_data/ws_authenticated_futures.json");
+pub const WS_SUBSCRIBED_GOLD: &str = include_str!("../test_data/ws_subscribed_gold.json");
+pub const WS_UNSUBSCRIBED_GOLD: &str = include_str!("../test_data/ws_unsubscribed_gold.json");
+pub const WS_TICKS_GOLD: &str = include_str!("../test_data/ws_ticks_gold.jsonl");
+pub const WS_PONG: &str = include_str!("../test_data/ws_pong.json");
+pub const WS_LIMIT_REACHED: &str = include_str!("../test_data/ws_error_limit_reached.json");
+pub const WS_TOO_MANY_CONNECTIONS: &str =
+    include_str!("../test_data/ws_error_too_many_connections.json");
+pub const WS_INVALID_KEY: &str = include_str!("../test_data/ws_error_invalid_key.json");
 
 /// The export id LSE sends with a file (`x-export-id`), the one it gave
 /// `GOLD_TRADES`; the peer sends it with every file.
