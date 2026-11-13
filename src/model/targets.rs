@@ -986,8 +986,8 @@ impl Debug for BracketWidth {
 /// What sets the target of a decision on each side, of a dataset run and of
 /// a trading strategy alike: its exits, if it has them, from the decision's
 /// price (`EntryQuote`) and the target's ATR, on the instrument's ticks, the
-/// worth of the unit an expected P&L is weighed by and a row's trades are
-/// read over, and the side's payoff features (`PayoffFeature`). It holds the
+/// worth of the unit a row's trades are read over, and the side's payoff
+/// features (`PayoffFeature`). It holds the
 /// run's commission, what a fill of the target costs (`Commission::cost`),
 /// the one its dataset runs' fills are charged.
 pub struct TargetSetter {

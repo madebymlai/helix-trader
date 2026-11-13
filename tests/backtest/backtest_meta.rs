@@ -25,17 +25,20 @@ use crate::common::{
     },
     ic,
 };
-use helix_trader::model::{
-    config::{Margins, MetaConfig, ModelConfig},
-    dataset,
-    features::FeatureSet,
-    handle::Decision,
-    holdout::Earnings,
-    learner::LearnerConfig,
-    schedule::Retrain,
-    store::{ModelSet, ModelStore},
-    targets::Side,
-    train::{Kept, Outcome, Trained},
+use helix_trader::{
+    model::{
+        config::{Margins, MetaConfig, ModelConfig},
+        dataset,
+        features::FeatureSet,
+        handle::Decision,
+        holdout::Earnings,
+        learner::LearnerConfig,
+        schedule::Retrain,
+        store::{ModelSet, ModelStore},
+        targets::Side,
+        train::{Kept, Outcome, Trained},
+    },
+    strategy::r::R,
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
@@ -54,7 +57,7 @@ fn meta() -> MetaConfig {
     MetaConfig::builder()
         .window(SignedDuration::from_hours(46))
         .holdout(SignedDuration::from_hours(6))
-        .margin(f64::MIN)
+        .margin(R::new(f64::MIN))
         .min_pnl(0.0)
         .min_trades(1)
         .learner(LearnerConfig::Fake {})
@@ -67,7 +70,7 @@ fn long_only() -> ModelConfig {
     ModelConfig {
         retrain: Retrain::Every(SignedDuration::from_hours(24)),
         margins: Margins {
-            long: Some(f64::MIN),
+            long: Some(R::new(f64::MIN)),
             short: None,
         },
         meta: Some(meta()),

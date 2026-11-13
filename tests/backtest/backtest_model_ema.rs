@@ -68,7 +68,7 @@ const CONFIG: &str = r#"
     retrain = "24h"
     window = "46h"
     holdout = "12h"
-    margins = { long = -1e9 }
+    margins = { long = "-1e9R" }
     min_pnl = 0.0
     min_trades = 1
     learner = { kind = "fake" }

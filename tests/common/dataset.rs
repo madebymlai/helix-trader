@@ -29,7 +29,9 @@ use helix_trader::{
         store::{ModelCalibration, ModelManifest, PairCalibration, Probe, StoredModel},
         targets::{BracketSpec, Distance, Side, Target, TargetConfig, TargetRow},
     },
-    strategy::{DataRequirements, Declared, IndicatorArgs, IndicatorsConfig, TickSeries, orders},
+    strategy::{
+        DataRequirements, Declared, IndicatorArgs, IndicatorsConfig, TickSeries, orders, r::R,
+    },
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
@@ -184,8 +186,8 @@ pub fn config() -> ModelConfig {
         .window(SignedDuration::from_hours(46))
         .holdout(SignedDuration::from_hours(12))
         .margins(Margins {
-            long: Some(0.0),
-            short: Some(0.0),
+            long: Some(R::new(0.0)),
+            short: Some(R::new(0.0)),
         })
         .min_pnl(0.0)
         .min_trades(1)

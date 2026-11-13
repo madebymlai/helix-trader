@@ -725,7 +725,7 @@ mod tests {
             learner::LearnerConfig,
             targets::{BracketSpec, Distance, Exit, Outcome, Outcomes, Target},
         },
-        strategy::{Declared, EmaArgs, IndicatorsConfig},
+        strategy::{Declared, EmaArgs, IndicatorsConfig, r::R},
     };
 
     const GOLD: &str = "XAUUSD.ICMARKETS";
@@ -819,8 +819,8 @@ mod tests {
             .window(SignedDuration::from_hours(24))
             .holdout(SignedDuration::from_hours(6))
             .margins(Margins {
-                long: Some(0.0),
-                short: Some(0.0),
+                long: Some(R::new(0.0)),
+                short: Some(R::new(0.0)),
             })
             .min_pnl(0.0)
             .min_trades(1)

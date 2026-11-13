@@ -241,7 +241,7 @@ impl WalkForward {
                     Ok(Judged {
                         expected,
                         baseline: model.baseline(),
-                        taken: margin.takes(expected * example.unit),
+                        taken: margin.takes(expected),
                     })
                 },
             )?);
@@ -444,7 +444,7 @@ mod tests {
                 TargetRow,
             },
         },
-        strategy::DataRequirements,
+        strategy::{DataRequirements, r::R},
     };
 
     const GOLD: &str = "XAUUSD.ICMARKETS";
@@ -477,8 +477,8 @@ mod tests {
             .window(SignedDuration::from_hours(24))
             .holdout(SignedDuration::from_hours(6))
             .margins(Margins {
-                long: Some(0.0),
-                short: Some(0.0),
+                long: Some(R::new(0.0)),
+                short: Some(R::new(0.0)),
             })
             .min_pnl(0.0)
             .min_trades(1)
@@ -824,10 +824,10 @@ mod tests {
     }
 
     /// The scores over the 7th and the 8th of a walk in `dir` trading `side`
-    /// alone, from an expected 0.5 USD, a train publishing its model at each
+    /// alone, from an expected 0.5R, a train publishing its model at each
     /// retrain time.
     fn one_sided_scores(dir: &Path, side: Side) -> Scores {
-        let margin = |traded| (traded == side).then_some(0.5);
+        let margin = |traded| (traded == side).then_some(R::new(0.5));
         let config = ModelConfig {
             margins: Margins {
                 long: margin(Side::Long),
@@ -1099,12 +1099,12 @@ mod tests {
         row
     }
 
-    /// The models of both sides alike, expecting the same in R, which each
-    /// row's units then make money: stops worth 2 and 4 USD. At 04:00 the
-    /// short's is worth more and it is picked, its trade a loss; at 08:00 the
-    /// long's, its trade a win. On equal units they would tie.
+    /// The models of both sides alike, expecting the same R, tie on every
+    /// row whatever their stops are worth: at 04:00 the short's is worth
+    /// twice the long's, at 08:00 the long's twice the short's, and neither
+    /// side is picked on either row.
     #[test]
-    fn a_row_is_picked_on_each_sides_own_unit() {
+    fn sides_expecting_the_same_r_tie_whatever_their_units() {
         let dir = tempfile::tempdir().unwrap();
         let config = with_exits();
         let walk = walk_of(dir.path(), config.clone());
@@ -1123,8 +1123,8 @@ mod tests {
 
         let scores = walk.scores(seventh, eighth).unwrap();
 
-        trades_are(scores.long.unwrap().earnings.taken, 1, 1.0);
-        trades_are(scores.short.unwrap().earnings.taken, 1, -1.0);
+        assert_eq!(scores.long.unwrap().earnings.taken.count, 0);
+        assert_eq!(scores.short.unwrap().earnings.taken.count, 0);
     }
 
     /// A fake meta model valid from `valid_from`, of `fingerprint`, on the
@@ -1171,17 +1171,14 @@ mod tests {
 
     /// Worked by hand: `rows` with every unit 2 USD, the sides picking as on
     /// units of 1 USD, and the meta expecting the same R of each trade,
-    /// `0.1 + 0.5p`, its net P&L twice that: 1, 0.5, 0.8, 1.1 and 0.4 USD.
-    /// Its margin of 0.6 USD takes the trades at 0.8, 0.6 and 0.9, 1/3 per
-    /// trade, as one of 0.3 USD does on units of 1 USD, though it expects
-    /// less than 0.6R of each.
+    /// `0.1 + 0.5p`: 0.5, 0.25, 0.4, 0.55 and 0.2, twice that in USD. Its
+    /// margin of 0.3R takes the trades at 0.8, 0.6 and 0.9, 1/3 per trade,
+    /// as on units of 1 USD, not those at 0.3 and 0.2, though they expect
+    /// 0.5 and 0.4 USD.
     #[test]
-    fn the_metas_margin_weighs_its_expected_r_by_the_unit_of_the_side_picked() {
+    fn the_metas_margin_is_in_r_whatever_the_unit_of_the_side_picked() {
         let dir = tempfile::tempdir().unwrap();
-        let mut config = with_meta();
-        if let Some(meta) = config.meta.as_mut() {
-            meta.margin = 0.6;
-        }
+        let config = with_meta();
         let at_two: Vec<TargetRow> = rows()
             .into_iter()
             .map(|mut row| {
@@ -1461,7 +1458,7 @@ Meta model scores, out of sample, over the span
             MetaConfig::builder()
                 .window(SignedDuration::from_hours(48))
                 .holdout(SignedDuration::from_hours(6))
-                .margin(0.3)
+                .margin(R::new(0.3))
                 .min_pnl(0.0)
                 .min_trades(1)
                 .learner(LearnerConfig::Fake {})

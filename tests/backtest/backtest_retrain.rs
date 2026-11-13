@@ -20,14 +20,17 @@ use crate::common::{
     dataset::{baseline_of, blueprint, config, missing, replay_on, trade_on, venue, walk},
     ic,
 };
-use helix_trader::model::{
-    config::{Margins, ModelConfig},
-    dataset,
-    features::FeatureSet,
-    schedule::Retrain,
-    store::ModelStore,
-    targets::Side,
-    walk::WalkForward,
+use helix_trader::{
+    model::{
+        config::{Margins, ModelConfig},
+        dataset,
+        features::FeatureSet,
+        schedule::Retrain,
+        store::ModelStore,
+        targets::Side,
+        walk::WalkForward,
+    },
+    strategy::r::R,
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
@@ -43,7 +46,7 @@ fn config_daily() -> ModelConfig {
     ModelConfig {
         retrain: Retrain::Every(SignedDuration::from_hours(24)),
         margins: Margins {
-            long: Some(f64::MIN),
+            long: Some(R::new(f64::MIN)),
             short: None,
         },
         ..config()
