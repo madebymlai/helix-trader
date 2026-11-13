@@ -42,6 +42,13 @@ pub(crate) enum Rows {
     /// The quotes of an exchange market, `time, bid_price, ask_price,
     /// bid_size, ask_size` (`data=quotes`).
     Quotes,
+    /// The Level 2 book of an exchange market, `time, sequence, action,
+    /// side, price, size, depth` and ten bid and ten ask levels of price,
+    /// size and orders (`data=book`).
+    Book,
+    /// The Level 3 orders of an exchange market, `time, action, side,
+    /// order_id, price, size` (`data=orders`).
+    Orders,
 }
 
 /// The one parameter selecting the rows, flattened into the query.
@@ -53,6 +60,8 @@ impl Serialize for Rows {
             Self::Candles(width) => map.serialize_entry("timeframe", &width.to_string())?,
             Self::Trades => map.serialize_entry("data", "trades")?,
             Self::Quotes => map.serialize_entry("data", "quotes")?,
+            Self::Book => map.serialize_entry("data", "book")?,
+            Self::Orders => map.serialize_entry("data", "orders")?,
         }
         map.end()
     }
@@ -65,6 +74,8 @@ impl fmt::Display for Rows {
             Self::Candles(width) => write!(f, "{width} candles"),
             Self::Trades => f.write_str("trades"),
             Self::Quotes => f.write_str("quotes"),
+            Self::Book => f.write_str("book"),
+            Self::Orders => f.write_str("orders"),
         }
     }
 }
@@ -276,6 +287,18 @@ impl ExportQuery {
     /// The span the export selects, `[from, to)`.
     pub(crate) fn window(&self) -> (Timestamp, Timestamp) {
         (self.from, self.to)
+    }
+
+    /// The longest span one export of the query's rows is asked over, from
+    /// a multiple of it from 1970: a UTC hour of a book or of orders, as
+    /// LSE's docs ask of a busy contract ("The market: cme": ESZ6's book of
+    /// the minute from 14:30 on 5 November 2026 held 99,104 rows, 33 MB as
+    /// CSV, and of that whole day 10.8 GB), a UTC day of every other.
+    pub(crate) fn longest_span(&self) -> SignedDuration {
+        match self.rows {
+            Rows::Book | Rows::Orders => SignedDuration::from_hours(1),
+            _ => SignedDuration::from_hours(24),
+        }
     }
 
     /// The export's selection over `[from, to)`.

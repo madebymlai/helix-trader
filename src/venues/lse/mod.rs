@@ -4,17 +4,18 @@
 //! instruments, London Strategic Edge's own derived series, each an index
 //! instrument named after its LSE market (`GOLD-FUTURES.LSEDGE`: GOLD in
 //! `futures`), trades, from LSE's tick slices, and bars, from its candles,
-//! each stamped at its close; of `GLBX` contracts, CME Globex's Level 1
-//! under the ids Databento gives them (`GCZ26.GLBX`), trades and quotes;
-//! and of `OPRA` contracts, US options under the ids Databento gives them,
-//! their OSI symbols (`AAPL  261120C00355000.OPRA`), trades and bars, as
-//! an `LSEDGE` series'. Live, the client streams the quotes of `LSEDGE`
-//! instruments on the live node, routed their venue (`live_clients`). Each
-//! contract's definition is its row's definitions source's: `LSEDGE`'s the
-//! catalog's alone, written there by hand, LSE publishing none, the data
-//! engine answering a definition request from the catalog before asking
-//! the client; `GLBX`'s and `OPRA`'s Databento's, asked of Nautilus'
-//! Databento client. The client converts
+//! each stamped at its close; of `GLBX` contracts, CME Globex's Levels 1
+//! to 3 under the ids Databento gives them (`GCZ26.GLBX`), trades, quotes,
+//! book depths and book deltas; and of `OPRA` contracts, US options under
+//! the ids Databento gives them, their OSI symbols
+//! (`AAPL  261120C00355000.OPRA`), trades and bars, as an `LSEDGE`
+//! series'. Live, the client streams the quotes of `LSEDGE` instruments on
+//! the live node, routed their venue (`live_clients`). Each contract's
+//! definition is its row's definitions source's: `LSEDGE`'s the catalog's
+//! alone, written there by hand, LSE publishing none, the data engine
+//! answering a definition request from the catalog before asking the
+//! client; `GLBX`'s and `OPRA`'s Databento's, asked of Nautilus' Databento
+//! client. The client converts
 //! LSE's prices at the definition's precision. LSE's reference series, the
 //! rows of its reference collections, are custom data of no instrument
 //! (`lse::LseRow`), filled by the same client with no definition. See
@@ -144,17 +145,18 @@ mod tests {
         testing::{
             AAPL_CALL, AAPL_CALL_MINUTES, AAPL_CALL_TRADES, AAPL_TRADES, ALLOWANCE_EXHAUSTED,
             API_KEY, BTCUSDT_TRADES, CME_API_KEY, DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING,
-            EUR_USD_MINUTES, GCZ26, GCZ26_QUOTES, GCZ26_TRADES, GOLD_FUTURES, GOLD_SPOT,
-            GOLD_SPOT_MINUTES, GOLD_TRADES, MockLse, PAIRS_GCZ6, PLAN_REQUIRED,
-            REFERENCE_CATALOGUE, REFERENCE_DATA_UNAVAILABLE, ROWS_EXHAUSTED, RY_TRADES, Reply,
-            SPX_MINUTES, SYMBOL_UNKNOWN, US10Y_BOND_YIELDS, VOD_TRADES, gold_futures, gold_spot,
+            EUR_USD_MINUTES, GCZ26, GCZ26_BOOK, GCZ26_ORDERS, GCZ26_QUOTES, GCZ26_TRADES,
+            GOLD_FUTURES, GOLD_SPOT, GOLD_SPOT_MINUTES, GOLD_TRADES, MockLse, PAIRS_GCZ6,
+            PLAN_REQUIRED, REFERENCE_CATALOGUE, REFERENCE_DATA_UNAVAILABLE, ROWS_EXHAUSTED,
+            RY_TRADES, Reply, SPX_MINUTES, SYMBOL_UNKNOWN, US10Y_BOND_YIELDS, VOD_TRADES,
+            gold_futures, gold_spot,
         },
     };
     use jiff::Timestamp;
     use nautilus_core::{UnixNanos, string::secret::SecretString};
     use nautilus_model::{
         data::{Bar, BarType, Data, DataType, NautilusDataType, TradeTick},
-        enums::{AggressorSide, OptionKind},
+        enums::{AggressorSide, OptionKind, RecordFlag},
         identifiers::{InstrumentId, Symbol, TradeId},
         instruments::{IndexInstrument, InstrumentAny},
         types::{Currency, Price, Quantity},
@@ -1099,6 +1101,73 @@ mod tests {
                 call("/v3/export", "4000000002", Some("trades")),
                 call("/v3/export", "4000000002", Some("quotes")),
             ]
+        );
+    }
+
+    /// GCZ6 of 2026's book depths and deltas over the captured second, as
+    /// LSE's docs record its book and orders (the adapter's `test_data/`):
+    /// asked of LSE's client by client id, its definition of Databento's,
+    /// and written back to the catalog, each delta event ending `F_LAST`.
+    #[test]
+    fn a_glbx_fill_takes_its_book_depths_and_deltas_from_lse() {
+        let dir = tempfile::tempdir().unwrap();
+        let lse = MockLse::start(vec![
+            Reply::json(PAIRS_GCZ6),
+            Reply::file(GCZ26_BOOK),
+            Reply::file(GCZ26_ORDERS),
+        ]);
+        let databento = MockDatabento::start();
+        let second: (Timestamp, Timestamp) = (
+            "2026-11-12T14:30:00Z".parse().unwrap(),
+            "2026-11-12T14:30:00.999999999Z".parse().unwrap(),
+        );
+        let requirements = DataRequirements {
+            bar_types: vec![],
+            ticks: [
+                NautilusDataType::OrderBookDepth,
+                NautilusDataType::OrderBookDelta,
+            ]
+            .map(|data| TickSeries {
+                data,
+                instrument_id: InstrumentId::from(GCZ26),
+            })
+            .to_vec(),
+            custom: vec![],
+            warmup: SignedDuration::ZERO,
+        };
+
+        fill_from(
+            dir.path(),
+            &lse,
+            Some(&databento),
+            &requirements,
+            vec![],
+            second,
+        )
+        .unwrap();
+
+        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let depths = catalog
+            .order_book_depths(Some(vec![GCZ26.to_string()]), None, None)
+            .unwrap();
+        assert_eq!(depths.len(), 4);
+        assert_eq!(
+            (depths[0].bids[0].price, depths[0].asks[0].price),
+            (Price::from("3908.10"), Price::from("3908.30"))
+        );
+        let deltas = catalog
+            .order_book_deltas(Some(vec![GCZ26.to_string()]), None, None)
+            .unwrap();
+        assert_eq!(deltas.len(), 4);
+        assert!(RecordFlag::F_LAST.matches(deltas[3].flags));
+        let asked_of_lse: Vec<_> = lse
+            .calls()
+            .iter()
+            .map(|call| call.param("data").map(ToString::to_string))
+            .collect();
+        assert_eq!(
+            asked_of_lse,
+            [None, Some("book".to_string()), Some("orders".to_string())]
         );
     }
 
