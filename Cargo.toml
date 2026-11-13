@@ -48,6 +48,8 @@ nautilus-persistence = { git = "https://github.com/nautechsystems/nautilus_trade
 nautilus-portfolio = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8b184c8af85068d788b591e10cb900fa2aba2cf2" }
 nautilus-risk = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8b184c8af85068d788b591e10cb900fa2aba2cf2" }
 nautilus-serialization = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8b184c8af85068d788b591e10cb900fa2aba2cf2" }
+# Its testers alone: its datasets pull in a TLS stack the tests do not use.
+nautilus-testkit = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8b184c8af85068d788b591e10cb900fa2aba2cf2", default-features = false }
 nautilus-trading = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8b184c8af85068d788b591e10cb900fa2aba2cf2" }
 rust_decimal = "1"
 serde = { version = "1", features = ["derive"] }

@@ -1,13 +1,19 @@
-//! The data client: Nautilus' `DataClient` on LSE's REST API.
+//! The data client: Nautilus' `DataClient` on LSE's REST API and sockets.
 //!
 //! It serves trades, the tick slices of LSE's derived markets, asked a UTC
 //! day an export, one download at a time; its definitions request answers
-//! none, LSE publishing none. Every other request and every subscription is
-//! left to Nautilus' defaults: a request fails as unsupported, a
-//! subscription is logged as not implemented. A request is answered from a
-//! task, in one completed response envelope, the data engine writing it
-//! back to the catalog if asked (`update_catalog`); a failure is the
-//! envelope's, LSE's refusal with its code, message and required plan.
+//! none, LSE publishing none. Live, it streams the quotes of the
+//! instruments its config names, on their sockets (see `streams`). Every
+//! other request and subscription is left to Nautilus' defaults: a request
+//! fails as unsupported, a subscription is logged as not implemented. A
+//! request is answered from a task, in one completed response envelope,
+//! the data engine writing it back to the catalog if asked
+//! (`update_catalog`); a failure is the envelope's, LSE's refusal with its
+//! code, message and required plan.
+
+#[cfg(test)]
+mod data_tester;
+mod streams;
 
 use std::{future::Future, sync::Arc};
 
@@ -16,11 +22,14 @@ use async_trait::async_trait;
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     cache::CacheView,
-    clients::DataClient,
+    clients::{DataClient, execute_instrument_subscriptions},
     live::{dst::time::Duration, runner::get_data_event_sender, sender::EventSender},
     messages::{
         DataEvent, DataResponse,
-        data::{DataResponseEnvelope, RequestInstrument, RequestTrades, TradesResponse},
+        data::{
+            DataResponseEnvelope, RequestInstrument, RequestTrades, SubscribeQuotes,
+            TradesResponse, UnsubscribeQuotes,
+        },
     },
 };
 use nautilus_core::{
@@ -34,6 +43,7 @@ use nautilus_model::{
     instruments::Instrument,
 };
 
+use self::streams::LseStreams;
 use crate::{
     common::{credential::LseCredential, symbol::LseSymbol},
     config::LseDataClientConfig,
@@ -47,8 +57,9 @@ const TASK_FORCE: Duration = Duration::from_secs(2);
 /// A UTC day: LSE's exports are asked a day at a time.
 const DAY: SignedDuration = SignedDuration::from_hours(24);
 
-/// The data client: LSE's history on one key, on no venue, so asked by
-/// the requests naming it or by the venue routes its node gives it.
+/// The data client: LSE's history and live data on one key, on no venue,
+/// so asked by the requests naming it or by the venue routes its node
+/// gives it.
 #[derive(Debug)]
 pub(crate) struct LseDataClient {
     client_id: ClientId,
@@ -56,19 +67,22 @@ pub(crate) struct LseDataClient {
     /// The instruments, whose precisions LSE's prices are converted at.
     cache: CacheView,
     tasks: TaskGroup,
+    streams: LseStreams,
     data_sender: EventSender<DataEvent>,
     clock: &'static AtomicTime,
     connected: bool,
 }
 
 impl LseDataClient {
-    /// The client `client_id` on the key and API of `config`, the key given
-    /// or read from `LSE_API_KEY`; not connected.
+    /// The client `client_id` on the key, API and sockets of `config`, the
+    /// key given or read from `LSE_API_KEY`, streaming the instruments it
+    /// names; not connected.
     ///
     /// # Errors
     ///
-    /// Returns an error if no key is given or in `LSE_API_KEY`, or if the
-    /// HTTP client cannot be built.
+    /// Returns an error if no key is given or in `LSE_API_KEY`, if the HTTP
+    /// client cannot be built, or if an instrument streamed is not an
+    /// `LSEDGE` series streamed on a socket (see `LseStreams::new`).
     ///
     /// # Panics
     ///
@@ -86,13 +100,17 @@ impl LseDataClient {
             &credential,
             config.calls_per_minute,
         )?;
+        let data_sender = get_data_event_sender();
+        let clock = get_atomic_clock_realtime();
+        let streams = LseStreams::new(config, credential, data_sender.clone(), clock)?;
         Ok(Self {
             client_id,
             http: Arc::new(http),
             cache,
             tasks: TaskGroup::new(),
-            data_sender: get_data_event_sender(),
-            clock: get_atomic_clock_realtime(),
+            streams,
+            data_sender,
+            clock,
             connected: false,
         })
     }
@@ -142,10 +160,13 @@ impl LseDataClient {
 
     async fn teardown(&mut self) -> anyhow::Result<()> {
         self.tasks.begin_shutdown();
-        self.tasks
-            .finish_shutdown(TASK_GRACE, TASK_FORCE)
-            .await
-            .map_err(|e| anyhow::anyhow!("stopping the {} request tasks: {e}", self.client_id))
+        let (requests, streams) = tokio::join!(
+            self.tasks.finish_shutdown(TASK_GRACE, TASK_FORCE),
+            self.streams.close(),
+        );
+        requests
+            .map_err(|e| anyhow::anyhow!("stopping the {} request tasks: {e}", self.client_id))?;
+        streams
     }
 }
 
@@ -165,11 +186,12 @@ impl DataClient for LseDataClient {
         Ok(())
     }
 
-    /// Begins the shutdown of the request tasks; `disconnect`, or the next
-    /// `connect`, finishes it.
+    /// Begins the shutdown of the request and tick tasks; `disconnect`, or
+    /// the next `connect`, finishes it.
     fn stop(&mut self) -> anyhow::Result<()> {
         log::debug!("Stopping {}", self.client_id);
         self.tasks.begin_shutdown();
+        self.streams.begin_shutdown();
         Ok(())
     }
 
@@ -190,8 +212,15 @@ impl DataClient for LseDataClient {
         !self.is_connected()
     }
 
-    /// Nothing to open: every call is a request of its own. Reopens the
-    /// request tasks a stop closed.
+    /// Opens the sockets of the instruments it streams, none if it streams
+    /// none: every other call is a request of its own. Reopens the request
+    /// tasks a stop closed. A failure is logged too, as the node logs none
+    /// of its reason.
+    ///
+    /// # Errors
+    ///
+    /// As `LseStreams::open`: a connection failing, LSE refusing the key,
+    /// a symbol a socket does not list or more of them than it allows.
     async fn connect(&mut self) -> anyhow::Result<()> {
         if self.is_connected() {
             return Ok(());
@@ -201,6 +230,10 @@ impl DataClient for LseDataClient {
             self.tasks.start_generation().map_err(|e| {
                 anyhow::anyhow!("reopening the {} request tasks: {e}", self.client_id)
             })?;
+        }
+        if let Err(e) = self.streams.open().await {
+            log::error!("{} not connected: {e:#}", self.client_id);
+            return Err(e);
         }
         self.connected = true;
         log::info!("Connected {}", self.client_id);
@@ -212,6 +245,31 @@ impl DataClient for LseDataClient {
         let finished = self.teardown().await;
         log::info!("Disconnected {}", self.client_id);
         finished
+    }
+
+    /// Streams the quotes of each instrument, of those it streams, at the
+    /// precision of its definition in the cache: bid and ask, with no
+    /// sizes (see `LseStreams`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming an instrument it does not stream or the
+    /// cache does not define.
+    fn subscribe_quotes(&mut self, cmd: SubscribeQuotes) -> anyhow::Result<()> {
+        execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
+            self.streams.subscribe_quotes(id, &self.cache)
+        })
+    }
+
+    /// Ends the quotes of each instrument.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming an instrument it does not stream.
+    fn unsubscribe_quotes(&mut self, cmd: &UnsubscribeQuotes) -> anyhow::Result<()> {
+        execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
+            self.streams.unsubscribe_quotes(id)
+        })
     }
 
     /// Answers with no definition, in one completed response envelope: LSE
@@ -351,12 +409,18 @@ mod tests {
     use nautilus_model::identifiers::InstrumentId;
     use tokio::sync::mpsc;
 
+    use nautilus_model::{
+        data::{Data, QuoteTick},
+        types::{Price, Quantity},
+    };
+    use serde_json::{Value, json};
+
     use super::*;
     use crate::{
         LseDataClientFactory,
         testing::{
-            API_KEY, DATE_NOT_TRADING, GOLD_FUTURES, GOLD_TRADES, MockLse, PLAN_REQUIRED, Reply,
-            SYMBOL_UNKNOWN, gold_futures,
+            API_KEY, DATE_NOT_TRADING, GOLD_FUTURES, GOLD_TRADES, MockLse, MockLseSocket,
+            PLAN_REQUIRED, Reply, SYMBOL_UNKNOWN, data_ws_answer, gold_futures,
         },
     };
 
@@ -389,6 +453,215 @@ mod tests {
             .unwrap();
         client.connect().await.unwrap();
         (client, events)
+    }
+
+    /// The client the factory creates on `socket`, streaming `streamed`,
+    /// its cache holding `GOLD_FUTURES`'s definition if `defined`, and the
+    /// node's data events, once it connected or failed to.
+    async fn streaming(
+        socket: &MockLseSocket,
+        streamed: &[&str],
+        defined: bool,
+    ) -> (Box<dyn DataClient>, anyhow::Result<()>, Events) {
+        let (tx, events) = mpsc::unbounded_channel();
+        replace_data_event_sender(tx);
+        let mut cache = Cache::default();
+        if defined {
+            cache.add_instrument(gold_futures()).unwrap();
+        }
+        let config = LseDataClientConfig::builder()
+            .api_key(SecretString::from(API_KEY))
+            .base_url_ws(socket.url().to_string())
+            .stream_ids(streamed.iter().map(|&id| InstrumentId::from(id)).collect())
+            .build();
+        let factory = LseDataClientFactory::new();
+        let clock: Rc<RefCell<dyn Clock>> = Rc::new(RefCell::new(VirtualClock::new()));
+        let mut client = factory
+            .create(
+                factory.name(),
+                &config,
+                Rc::new(RefCell::new(cache)).into(),
+                clock,
+            )
+            .unwrap();
+        let connected = client.connect().await;
+        (client, connected, events)
+    }
+
+    /// The quotes of `ids`, as the data engine asks the client for them.
+    fn quotes_of(ids: &[&str]) -> SubscribeQuotes {
+        SubscribeQuotes::new(
+            ids.iter()
+                .map(|&id| InstrumentId::from(id))
+                .collect::<Vec<_>>(),
+            Some(ClientId::from("LSE")),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        )
+    }
+
+    /// The frames `socket` received, keys aside.
+    fn sent(socket: &MockLseSocket) -> Vec<Value> {
+        socket
+            .received()
+            .into_iter()
+            .map(|(_, frame)| frame)
+            .filter(|frame| frame["action"] != "auth")
+            .collect()
+    }
+
+    /// The futures data-ws lists, in its order.
+    const LISTED_FUTURES: [&str; 17] = [
+        "AUDUSD",
+        "BRENT",
+        "CADUSD",
+        "CHFUSD",
+        "COPPER",
+        "CORN",
+        "CRUDEOIL",
+        "DOW",
+        "EURUSD",
+        "GASOLINE",
+        "GBPUSD",
+        "GOLD",
+        "HEATINGOIL",
+        "JPYUSD",
+        "LEANHOGS",
+        "LIVECATTLE",
+        "SILVER",
+    ];
+
+    /// The first tick captured, GOLD.F's at 16:44:55.499567 on 13 November
+    /// 2026: bid 3888.0, ask 3888.2.
+    #[tokio::test]
+    async fn a_subscribed_lsedge_instrument_receives_lse_s_quotes_of_bid_and_ask_with_no_sizes() {
+        let socket = MockLseSocket::start(|_, frame| data_ws_answer(frame));
+        let (mut client, connected, mut events) = streaming(&socket, &[GOLD_FUTURES], true).await;
+        connected.unwrap();
+
+        client.subscribe_quotes(quotes_of(&[GOLD_FUTURES])).unwrap();
+
+        let event = tokio::time::timeout(Duration::from_secs(10), events.recv())
+            .await
+            .expect("no data event within 10 s")
+            .unwrap();
+        let DataEvent::Data(Data::Quote(quote)) = event else {
+            panic!("not a quote: {event:?}")
+        };
+        let at: UnixNanos = "2026-11-13T16:44:55.499567Z"
+            .parse::<Timestamp>()
+            .unwrap()
+            .into();
+        assert_eq!(
+            quote,
+            QuoteTick::new(
+                InstrumentId::from(GOLD_FUTURES),
+                Price::from("3888.0"),
+                Price::from("3888.2"),
+                Quantity::from(0),
+                Quantity::from(0),
+                at,
+                quote.ts_init,
+            )
+        );
+        assert_eq!(
+            sent(&socket),
+            [json!({"action": "subscribe", "symbol": "GOLD.F"})]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unsubscription_of_quotes_goes_to_lse() {
+        let socket = MockLseSocket::start(|_, frame| data_ws_answer(frame));
+        let (mut client, connected, _) = streaming(&socket, &[GOLD_FUTURES], true).await;
+        connected.unwrap();
+        client.subscribe_quotes(quotes_of(&[GOLD_FUTURES])).unwrap();
+        let unsubscribe = UnsubscribeQuotes::new(
+            InstrumentId::from(GOLD_FUTURES),
+            Some(ClientId::from("LSE")),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        );
+
+        client.unsubscribe_quotes(&unsubscribe).unwrap();
+
+        socket.wait_until(|received| received.len() == 3).await;
+        assert_eq!(
+            sent(&socket)[1],
+            json!({"action": "unsubscribe", "symbol": "GOLD.F"})
+        );
+    }
+
+    /// LSE would accept its subscription and send nothing.
+    #[tokio::test]
+    async fn a_symbol_its_socket_does_not_list_fails_the_connect_naming_it_before_subscribing() {
+        let socket = MockLseSocket::start(|_, frame| data_ws_answer(frame));
+
+        let (client, connected, _) =
+            streaming(&socket, &[GOLD_FUTURES, "NOSUCH-FUTURES.LSEDGE"], true).await;
+
+        let err = format!("{:#}", connected.unwrap_err());
+        assert!(err.contains("NOSUCH-FUTURES.LSEDGE (NOSUCH.F)"), "{err}");
+        assert!(!err.contains(GOLD_FUTURES), "{err}");
+        assert!(client.is_disconnected());
+        assert_eq!(sent(&socket), Vec::<Value>::new());
+    }
+
+    /// data-ws allows the free key 16 symbols on its one connection.
+    #[tokio::test]
+    async fn more_instruments_than_a_connection_allows_fail_the_connect_naming_lse_s_limit() {
+        let socket = MockLseSocket::start(|_, frame| data_ws_answer(frame));
+        let ids: Vec<String> = LISTED_FUTURES
+            .iter()
+            .map(|symbol| format!("{symbol}-FUTURES.LSEDGE"))
+            .collect();
+        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+
+        let (_, connected, _) = streaming(&socket, &ids, true).await;
+
+        let err = format!("{:#}", connected.unwrap_err());
+        assert!(err.contains("allows 16 symbols"), "{err}");
+        assert!(err.contains("17 are streamed"), "{err}");
+        assert_eq!(sent(&socket), Vec::<Value>::new());
+    }
+
+    #[tokio::test]
+    async fn quotes_of_an_instrument_the_cache_does_not_define_fail_naming_it_unasked() {
+        let socket = MockLseSocket::start(|_, frame| data_ws_answer(frame));
+        let (mut client, connected, _) = streaming(&socket, &[GOLD_FUTURES], false).await;
+        connected.unwrap();
+
+        let err = client
+            .subscribe_quotes(quotes_of(&[GOLD_FUTURES]))
+            .unwrap_err();
+
+        let err = format!("{err:#}");
+        assert!(
+            err.contains(&format!("{GOLD_FUTURES} is not in the cache")),
+            "{err}"
+        );
+        assert_eq!(sent(&socket), Vec::<Value>::new());
+    }
+
+    #[tokio::test]
+    async fn quotes_of_an_instrument_the_client_does_not_stream_fail_naming_it() {
+        let socket = MockLseSocket::start(|_, frame| data_ws_answer(frame));
+        let (mut client, connected, _) = streaming(&socket, &[GOLD_FUTURES], true).await;
+        connected.unwrap();
+
+        let err = client
+            .subscribe_quotes(quotes_of(&["SILVER-FUTURES.LSEDGE"]))
+            .unwrap_err();
+
+        let err = format!("{err:#}");
+        assert!(err.contains("SILVER-FUTURES.LSEDGE is not among"), "{err}");
+        assert_eq!(sent(&socket), Vec::<Value>::new());
     }
 
     /// The next event, a completed response envelope.

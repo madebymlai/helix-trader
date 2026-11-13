@@ -2207,6 +2207,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cd417de3d1d015fc3bfd2b1ea46dfc7bab72ef86f1cc7cc9c78e728b34a6d1fd"
 
 [[package]]
+name = "futures-timer"
+version = "3.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af43fadb8a98512d547e37b4e92e0ced13e205c061b87b4623eff01d918d6968"
+
+[[package]]
 name = "futures-util"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3034,6 +3040,7 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 name = "lse"
 version = "0.1.0"
 dependencies = [
+ "ahash",
  "anyhow",
  "arrow",
  "async-trait",
@@ -3046,13 +3053,18 @@ dependencies = [
  "nautilus-live",
  "nautilus-model",
  "nautilus-network",
+ "nautilus-persistence",
+ "nautilus-testkit",
  "parquet",
+ "rstest",
  "rust_decimal",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tungstenite",
 ]
 
 [[package]]
@@ -3663,6 +3675,30 @@ dependencies = [
  "serde",
  "serde_json",
  "sysinfo 0.40.1",
+ "ustr",
+]
+
+[[package]]
+name = "nautilus-testkit"
+version = "0.68.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8b184c8af85068d788b591e10cb900fa2aba2cf2#8b184c8af85068d788b591e10cb900fa2aba2cf2"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "async-trait",
+ "bon",
+ "bytes",
+ "indexmap",
+ "jiff",
+ "log",
+ "nautilus-common",
+ "nautilus-core",
+ "nautilus-model",
+ "nautilus-trading",
+ "parking_lot 0.13.0",
+ "rust_decimal",
+ "serde",
+ "tokio",
  "ustr",
 ]
 
@@ -4606,6 +4642,8 @@ version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b376e512f30a7686a8dbc6aeaace99b3ade1c26c1c63473473a817ade226dafc"
 dependencies = [
+ "futures-timer",
+ "futures-util",
  "rstest_macros",
 ]
 
@@ -4617,6 +4655,7 @@ checksum = "88512dbfb5b73a0dfa38aef7bc73b5657035fce477b923faf12d332dd83051ea"
 dependencies = [
  "cfg-if",
  "glob",
+ "proc-macro-crate",
  "proc-macro2",
  "quote",
  "regex",

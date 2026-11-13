@@ -5,12 +5,14 @@
 //! required plan. See `README.md`.
 //!
 //! Nautilus has no LSE adapter; this one is laid out as Nautilus' adapters
-//! are (`docs/developer_guide/adapters.md`): `common` (the venue and the
-//! variable of the key, the key, and the symbol boundary between LSE's
-//! market and symbol and an instrument id), `http` (the HTTP client, its
-//! typed export query, LSE's refusals and the parsing of an export's
-//! Parquet file), `config` (the data client's config), `data` (the data
-//! client) and `factories`.
+//! are (`docs/developer_guide/adapters.md`): `common` (the venue, the
+//! sockets and the variable of the key, the key, and the symbol boundary
+//! between LSE's market and symbol and an instrument id, and its name on
+//! a socket), `http` (the HTTP client, its typed export query, LSE's
+//! refusals and the parsing of an export's Parquet file), `websocket` (the
+//! frames of LSE's sockets, the client of one, and the parsing of a tick),
+//! `config` (the data client's config), `data` (the data client) and
+//! `factories`.
 
 pub use self::{
     common::{
@@ -28,3 +30,4 @@ mod factories;
 mod http;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
+mod websocket;

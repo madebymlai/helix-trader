@@ -1,19 +1,24 @@
-//! LSE history of `LSEDGE` instruments, London Strategic Edge's own
-//! derived series, each an index instrument named after its LSE market
-//! (`GOLD-FUTURES.LSEDGE`: GOLD in `futures`), filled through the node (see
-//! `catalog::NodeFill`) by the LSE adapter's data client (`lse`), whose
-//! answers the data engine writes back to the catalog: trades, from LSE's
-//! tick slices. Their definitions are the catalog's alone, written there by
-//! hand: LSE publishes none, the data engine answers a definition request
-//! from the catalog before asking the client, and the client converts
-//! LSE's prices at the definition's precision. See `README.md`.
+//! LSE history and live data of `LSEDGE` instruments, London Strategic
+//! Edge's own derived series, each an index instrument named after its LSE
+//! market (`GOLD-FUTURES.LSEDGE`: GOLD in `futures`), both from the LSE
+//! adapter's data client (`lse`). History is filled through the node (see
+//! `catalog::NodeFill`), the data engine writing the client's answers back
+//! to the catalog: trades, from LSE's tick slices. Live, the client streams
+//! their quotes on the live node, routed their venue (`live_clients`).
+//! Their definitions are the catalog's alone, written there by hand: LSE
+//! publishes none, the data engine answers a definition request from the
+//! catalog before asking the client, and the client converts LSE's prices
+//! at the definition's precision. See `README.md`.
 
 use ::lse::{LseDataClientConfig, LseDataClientFactory};
 use jiff::SignedDuration;
+use nautilus_live::config::RoutingConfig;
+use nautilus_model::identifiers::InstrumentId;
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 
 use crate::{
     catalog::{FillData, NodeClient, NodeFill, missing},
+    live::node::Clients,
     strategy::SeriesSlice,
 };
 
@@ -57,6 +62,41 @@ fn node_client(config: LseDataClientConfig) -> NodeClient {
     NodeClient {
         factory: Box::new(LseDataClientFactory::new()),
         config: Box::new(config),
+    }
+}
+
+/// The live node's clients of `instrument_ids`, `LSEDGE` instruments: the
+/// LSE adapter's data client streaming them, its key read when the node
+/// creates it, and no execution client, LSE trading nothing. The client is
+/// on no venue, so it takes the route of theirs (`RoutingConfig::venues`)
+/// and not the default, which IB keeps for the venues without a client of
+/// their own.
+pub(super) fn live_clients(instrument_ids: &[InstrumentId]) -> Clients {
+    clients(
+        LseDataClientConfig::builder()
+            .stream_ids(instrument_ids.to_vec())
+            .build(),
+    )
+}
+
+/// The live node's clients on `config`, routed the venues of the
+/// instruments it streams.
+fn clients(config: LseDataClientConfig) -> Clients {
+    let mut venues: Vec<String> = Vec::new();
+    for id in &config.stream_ids {
+        let venue = id.venue.to_string();
+        if !venues.contains(&venue) {
+            venues.push(venue);
+        }
+    }
+    Clients {
+        data_factory: Box::new(LseDataClientFactory::new()),
+        data_config: Box::new(config),
+        exec: None,
+        routing: RoutingConfig {
+            default: false,
+            venues: Some(venues),
+        },
     }
 }
 

@@ -1,4 +1,4 @@
-# LSE history
+# LSE
 
 `fill-catalog` fills the history of `LSEDGE` instruments, London Strategic Edge's own derived series, through the [node fill](../../catalog/README.md), each request naming the client of the [LSE adapter](../../../crates/lse/README.md). Their row of the [routing table](../mod.rs) takes definitions from the catalog alone, history and live data from LSE, and no broker: LSE trades nothing. Set `LSE_API_KEY` in the environment or `.env`; it is read only when something is missing. The declared series can be trades, LSE's tick slices; any other request fails as unsupported.
 
@@ -6,12 +6,18 @@ An instrument is LSE's symbol, a hyphen and its LSE market in capitals: GOLD in 
 
 Requests are split into day-long windows from the request start, as Databento's; the adapter asks LSE a UTC day an export within each, one download at a time, within the calls a minute of the free plan unless configured otherwise. LSE's refusal, such as `symbol-unknown` for a symbol it does not list or `plan-required`, fails the fill with its code, message and required plan; a quota (`rows-exhausted`, the free plan's 12.5 million rows a day) stops it, and the next run asks for what is still missing. See the [adapter's exports](../../../crates/lse/README.md#exports) for retries, checksums and conversion, and [shared fill semantics](../../catalog/README.md) for coverage and resume.
 
-A live run reading `LSEDGE` instruments is refused at startup: the adapter streams no live data yet. A backtest simulates `LSEDGE` as a venue no broker trades: it starts with no money and keeps positions as Nautilus' venue default (see [backtest venues](../../backtest/README.md#leverage-and-venues)).
+A live run streams the quotes of the `LSEDGE` instruments it reads from LSE's sockets, bid and ask with no sizes (see the [adapter's live quotes](../../../crates/lse/README.md#live-quotes)), through LSE's data client alone, routed `LSEDGE`: no execution client, LSE trading nothing, and IB keeps the default route. Set `LSE_API_KEY`; the node reads it when it creates the client, and the client connects to the socket of each instrument's market at the node's start, failing it, as Nautilus fails a node whose client does not connect, if LSE refuses the key or a second connection, if the socket does not list an instrument, or if they are more than one connection of the key may stream (16 on the free key). The definitions come from the catalog through the warmup, which asks each one the cache lacks of LSE's client before anything else; the data engine answers it from the catalog, as a fill's, and the client reads it before it subscribes. LSE has no history of a derived market's quotes, so the warmup of an `LSEDGE` quote series ends incomplete, logging LSE's client's refusal, and the series' features warm on the live quotes. A backtest simulates `LSEDGE` as a venue no broker trades: it starts with no money and keeps positions as Nautilus' venue default (see [backtest venues](../../backtest/README.md#leverage-and-venues)).
 
 ## Tests
 
-Offline tests of the fill through the node against the adapter's mock LSE peer are in `src/venues/lse`, and a backtest reading a filled `LSEDGE` series beside IC's trade in `tests/backtest/backtest_read_only_venue.rs`; the adapter's own are in [the crate](../../../crates/lse/README.md#tests). The gated test `tests/live/lse_history.rs` fills one day of gold and 10-year Treasury futures trades from LSE into a temporary catalog, with the key of the environment or `.env`; it runs only with `NAUTILUS_LSE_RUN=1` set in the shell and counts against the key's rows a day:
+Offline tests of the fill through the node against the adapter's mock LSE peer are in `src/venues/lse`, the live clients' routing in `src/venues/mod.rs`, a live warmup serving an `LSEDGE` definition from the catalog before LSE's client streams the series, against the adapter's mock socket, in `tests/node_warmup`, and a backtest reading a filled `LSEDGE` series beside IC's trade in `tests/backtest/backtest_read_only_venue.rs`; the adapter's own are in [the crate](../../../crates/lse/README.md#tests). The gated test `tests/live/lse_history.rs` fills one day of gold and 10-year Treasury futures trades from LSE into a temporary catalog, with the key of the environment or `.env`; it runs only with `NAUTILUS_LSE_RUN=1` set in the shell and counts against the key's rows a day:
 
 ```sh
 NAUTILUS_LSE_RUN=1 cargo test --test live lse_history:: -- --nocapture
+```
+
+The gated test `tests/live/lse_quotes.rs` streams the gold futures quotes from LSE for a minute through LSE's client on a node, the definition in a temporary catalog; data-ws allows the key one connection, so no live run may hold it meanwhile:
+
+```sh
+NAUTILUS_LSE_RUN=1 cargo test --test live lse_quotes:: -- --nocapture
 ```

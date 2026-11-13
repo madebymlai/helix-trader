@@ -4,11 +4,13 @@ use std::{any::Any, num::NonZeroU32};
 
 use nautilus_common::factories::ClientConfig;
 use nautilus_core::string::secret::SecretString;
+use nautilus_model::identifiers::InstrumentId;
 
 use crate::common::consts::{FREE_CALLS_PER_MINUTE, LSE_HTTP_BASE_URL};
 
-/// The config of the data client: the key, where LSE is, and the calls a
-/// minute of the key's plan. Its `Debug` shows no key.
+/// The config of the data client: the key, where LSE is, the calls a
+/// minute of the key's plan, and the instruments it streams. Its `Debug`
+/// shows no key.
 #[derive(Debug, Clone, bon::Builder)]
 pub struct LseDataClientConfig {
     /// The LSE key; the one in `LSE_API_KEY` if none, read when the client
@@ -21,6 +23,14 @@ pub struct LseDataClientConfig {
     /// `/v3/usage`, `calls_per_minute`).
     #[builder(default = FREE_CALLS_PER_MINUTE)]
     pub calls_per_minute: NonZeroU32,
+    /// The instruments the client streams, on a live node: `connect` opens
+    /// the socket each one's market streams on, authenticates the key, and
+    /// fails unless the socket lists each and allows them all on its one
+    /// connection. None on a fill's node, which opens no socket.
+    #[builder(default)]
+    pub stream_ids: Vec<InstrumentId>,
+    /// The address of every LSE socket; LSE's own of each if none.
+    pub base_url_ws: Option<String>,
 }
 
 impl Default for LseDataClientConfig {
