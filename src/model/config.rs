@@ -439,7 +439,7 @@ fn validate_minimums(minimums: Minimums, section: &str, errors: &mut ConfigError
 
 #[cfg(test)]
 mod tests {
-    use nautilus_model::{data::BarType, identifiers::InstrumentId, types::Quantity};
+    use nautilus_model::{data::BarType, identifiers::InstrumentId};
     use rust_decimal::Decimal;
 
     use super::*;
@@ -491,11 +491,10 @@ mod tests {
         }
     }
 
-    /// What every test's strategy trades: an ounce of gold.
+    /// What every test's strategy trades: gold.
     fn gold() -> TradedInstrument {
         TradedInstrument {
             instrument_id: InstrumentId::from(GOLD),
-            trade_size: Quantity::from(1),
         }
     }
 

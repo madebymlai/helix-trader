@@ -6,7 +6,6 @@ use nautilus_model::{
     data::{BarSpecification, BarType, NautilusDataType},
     enums::{AggregationSource, BarAggregation, PriceType},
     identifiers::{InstrumentId, StrategyId},
-    types::Quantity,
 };
 use nautilus_trading::strategy::StrategyConfig;
 use serde::{
@@ -116,12 +115,11 @@ impl<P: Part> StandardConfig<P> {
     /// `DataConfig`), of `[indicators]` (those the strategy declares, each
     /// table parsed and built by its declaration; see `IndicatorsConfig`),
     /// of `[trade]` (as many instruments as the strategy trades, none a
-    /// futures root, each `trade_size` positive, `risk` a proper fraction;
-    /// see `TradeConfig`), of a strategy trading on a model (see
-    /// `validate_model`), of the series read (see `validate_series`) and
-    /// of the strategy's own (`Part::validate`): Nautilus' `ConfigError` of
-    /// each, with its field, as one `ConfigError::Multiple` if there are
-    /// several.
+    /// futures root, `risk` a proper fraction; see `TradeConfig`), of a
+    /// strategy trading on a model (see `validate_model`), of the series
+    /// read (see `validate_series`) and of the strategy's own
+    /// (`Part::validate`): Nautilus' `ConfigError` of each, with its field,
+    /// as one `ConfigError::Multiple` if there are several.
     pub fn validate(&self) -> ConfigResult<()> {
         let mut errors = ConfigErrorCollector::new();
         self.data.validate(&mut errors);
@@ -522,13 +520,12 @@ pub struct CompositeSource {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TradeConfig {
-    /// The instruments traded, each with its size: as many as the
-    /// strategy trades (`Part::INSTRUMENTS`). No trade reads the size:
-    /// every trade is sized from `risk`, a model's targets at the
-    /// reference stake.
+    /// The instruments traded, each by its id alone: as many as the
+    /// strategy trades (`Part::INSTRUMENTS`).
     pub instruments: Vec<TradedInstrument>,
     /// The fraction of equity a trade risks at the config's stake
-    /// (`StandardConfig::stake`), `"0.5%"`.
+    /// (`StandardConfig::stake`), `"0.5%"`: every trade is sized from it,
+    /// whatever its instrument, a model's targets at the reference stake.
     pub risk: Risk,
 }
 
@@ -545,8 +542,8 @@ impl TradeConfig {
     /// Pushes the violations of `[trade]`, whatever the strategy: not
     /// `count` instruments listed; an instrument a futures root of the
     /// roll calendar (`rolls::Transition`), since an order goes to a
-    /// contract; a `trade_size` not positive; a `risk` not a proper
-    /// fraction of equity (`Risk::is_proper`).
+    /// contract; a `risk` not a proper fraction of equity
+    /// (`Risk::is_proper`).
     fn validate(&self, count: usize, errors: &mut ConfigErrorCollector) {
         let listed = self.instruments.len();
         errors.check(
@@ -569,13 +566,6 @@ impl TradeConfig {
                     ),
                 ));
             }
-            errors.check(
-                traded.trade_size.is_positive(),
-                ConfigError::range(
-                    format!("trade.instruments[{i}].trade_size"),
-                    "must be positive",
-                ),
-            );
         }
         errors.check(
             self.risk.is_proper(),
@@ -606,13 +596,47 @@ impl TradeConfig {
     }
 }
 
-/// An instrument traded, and a size no trade reads: every trade is sized
-/// at a stake.
+/// An instrument traded, by its id alone: no size is its own, every trade
+/// being sized at a stake of `[trade] risk`. In the TOML, a `trade_size`
+/// is refused as it is read (`TradedFields`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(from = "TradedFields")]
 pub struct TradedInstrument {
     pub instrument_id: InstrumentId,
-    pub trade_size: Quantity,
+}
+
+/// The keys of an instrument traded as the TOML has them: its id, and a
+/// `trade_size`, which no value is (`TradeSize`).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TradedFields {
+    instrument_id: InstrumentId,
+    trade_size: Option<TradeSize>,
+}
+
+impl From<TradedFields> for TradedInstrument {
+    fn from(fields: TradedFields) -> Self {
+        let TradedFields {
+            instrument_id,
+            trade_size: None,
+        } = fields;
+        Self { instrument_id }
+    }
+}
+
+/// A size of an instrument traded, which no value is: any is refused as it
+/// is read, at its value, pointing to `[trade] risk`, so an old config is
+/// migrated knowingly rather than refused as having any unknown key.
+enum TradeSize {}
+
+impl<'de> Deserialize<'de> for TradeSize {
+    fn deserialize<D: Deserializer<'de>>(_: D) -> Result<Self, D::Error> {
+        Err(de::Error::custom(
+            "an instrument traded has no `trade_size`: every trade is sized at the strategy's \
+             stake, `[trade] risk`, the fraction of equity a trade risks, such as \"0.5%\", \
+             times the multiple the strategy picks",
+        ))
+    }
 }
 
 impl<'de, P: Part> Deserialize<'de> for StandardConfig<P> {
@@ -732,8 +756,8 @@ mod tests {
 
         [trade]
         instruments = [
-            { instrument_id = "ESH24.CME", trade_size = "1" },
-            { instrument_id = "ESM24.CME", trade_size = "2" },
+            { instrument_id = "ESH24.CME" },
+            { instrument_id = "ESM24.CME" },
         ]
         risk = "0.5%"
     "#;
@@ -808,7 +832,6 @@ mod tests {
             config.trade.instruments[1],
             TradedInstrument {
                 instrument_id: InstrumentId::from("ESM24.CME"),
-                trade_size: Quantity::from(2),
             }
         );
         assert_eq!(config.own.spread, 3);
@@ -857,7 +880,11 @@ mod tests {
                 "{ data = \"trades\", instrument = 1,",
                 "instrument",
             ),
-            ("trade_size = \"2\"", "trade_size = \"2\", size = 1", "size"),
+            (
+                "{ instrument_id = \"ESM24.CME\" }",
+                "{ instrument_id = \"ESM24.CME\", size = 1 }",
+                "size",
+            ),
             ("[trade]", "[trade]\ninstrument_id = 1", "instrument_id"),
             ("spread = 3", "spread = 3\nspred = 1", "spred"),
             ("spread = 3", "spread = 3\ntrades = 1", "trades"),
@@ -888,14 +915,27 @@ mod tests {
 
     #[test]
     fn a_wrong_count_of_traded_instruments_is_refused() {
-        let toml = TOML.replace("{ instrument_id = \"ESM24.CME\", trade_size = \"2\" },", "");
+        let toml = TOML.replace("{ instrument_id = \"ESM24.CME\" },", "");
         assert_eq!(error_fields(&toml), ["trade.instruments"]);
     }
 
+    /// Every trade is sized at a stake of `[trade] risk`, whatever its
+    /// instrument: an instrument listed with a size of its own is refused
+    /// as the config is read, at that size, pointing to the risk.
     #[test]
-    fn a_non_positive_trade_size_is_refused() {
-        let toml = TOML.replace("trade_size = \"2\"", "trade_size = \"0\"");
-        assert_eq!(error_fields(&toml), ["trade.instruments[1].trade_size"]);
+    fn a_trade_size_is_refused_at_its_field_pointing_to_the_risk() {
+        let toml = TOML.replace(
+            "{ instrument_id = \"ESM24.CME\" }",
+            "{ instrument_id = \"ESM24.CME\", trade_size = \"2\" }",
+        );
+        assert_ne!(toml, TOML);
+        let err = load(&toml).unwrap_err();
+        let err = err
+            .downcast_ref::<toml::de::Error>()
+            .unwrap_or_else(|| panic!("not refused as read: {err}"));
+        let at = err.span().unwrap();
+        assert!(toml[..at.start].ends_with("trade_size = "), "{err}");
+        assert!(err.message().contains("risk"), "{err}");
     }
 
     /// `[trade] risk` is the fraction of equity a trade risks at the
@@ -940,28 +980,31 @@ mod tests {
     #[test]
     fn a_futures_root_traded_is_refused_naming_it() {
         let toml = TOML.replace(
-            "{ instrument_id = \"ESM24.CME\", trade_size",
-            "{ instrument_id = \"GC.GLBX\", trade_size",
+            "{ instrument_id = \"ESM24.CME\" }",
+            "{ instrument_id = \"GC.GLBX\" }",
         );
         let err = load(&toml).unwrap_err();
         assert_eq!(fields_of(&err), ["trade.instruments[1].instrument_id"]);
         assert!(err.to_string().contains("GC.GLBX"), "{err}");
     }
 
-    /// A root traded and a size not positive, of the same instrument, are
-    /// each reported, with the other violations.
+    /// A root traded and a risk of none of equity are each reported,
+    /// with the other violations.
     #[test]
     fn a_futures_root_traded_is_reported_with_the_other_violations() {
-        let toml = TOML.replace("\"720h\"", "\"0s\"").replace(
-            "{ instrument_id = \"ESM24.CME\", trade_size = \"2\" }",
-            "{ instrument_id = \"GC.GLBX\", trade_size = \"0\" }",
-        );
+        let toml = TOML
+            .replace("\"720h\"", "\"0s\"")
+            .replace(
+                "{ instrument_id = \"ESM24.CME\" }",
+                "{ instrument_id = \"GC.GLBX\" }",
+            )
+            .replace("\"0.5%\"", "\"0%\"");
         assert_eq!(
             error_fields(&toml),
             [
                 "data.warmup",
                 "trade.instruments[1].instrument_id",
-                "trade.instruments[1].trade_size",
+                "trade.risk",
             ]
         );
     }
@@ -1007,8 +1050,8 @@ mod tests {
 
         [trade]
         instruments = [
-            { instrument_id = "BTC-USDT-SWAP.OKX", trade_size = "1" },
-            { instrument_id = "ETH-USDT-SWAP.OKX", trade_size = "1" },
+            { instrument_id = "BTC-USDT-SWAP.OKX" },
+            { instrument_id = "ETH-USDT-SWAP.OKX" },
         ]
         risk = "0.5%"
     "#;
@@ -1070,8 +1113,8 @@ mod tests {
 
             [trade]
             instruments = [
-                {{ instrument_id = "GCQ26.GLBX", trade_size = "1" }},
-                {{ instrument_id = "GCZ26.GLBX", trade_size = "1" }},
+                {{ instrument_id = "GCQ26.GLBX" }},
+                {{ instrument_id = "GCZ26.GLBX" }},
             ]
             risk = "0.5%"
             "#
@@ -1128,17 +1171,14 @@ mod tests {
                  from = { step = 1, aggregation = \"MINUTE\", aggregation_source = \"INTERNAL\" } }]",
             )
             .replace("\"720h\"", "\"0s\"")
-            .replace(
-                "{ instrument_id = \"GCZ26.GLBX\", trade_size = \"1\" }",
-                "{ instrument_id = \"GCZ26.GLBX\", trade_size = \"0\" }",
-            );
+            .replace("\"0.5%\"", "\"0%\"");
         assert_eq!(
             error_fields(&toml),
             [
                 "data.series[0]",
                 "data.series[1]",
                 "data.warmup",
-                "trade.instruments[1].trade_size",
+                "trade.risk",
             ]
         );
     }
@@ -1256,8 +1296,8 @@ mod tests {
     #[test]
     fn a_traded_instrument_no_series_reads_loads_its_quotes_into_the_requirements() {
         let toml = TOML.replace(
-            "{ instrument_id = \"ESM24.CME\", trade_size = \"2\" }",
-            "{ instrument_id = \"ESU24.CME\", trade_size = \"2\" }",
+            "{ instrument_id = \"ESM24.CME\" }",
+            "{ instrument_id = \"ESU24.CME\" }",
         );
         let config = load(&toml).unwrap();
         assert_eq!(
@@ -1328,8 +1368,8 @@ mod tests {
         let toml = TOML
             .replace("\"720h\"", "\"0s\"")
             .replace("price_type = \"MID\"", "price_type = \"MARK\"")
-            .replace("trade_size = \"2\"", "trade_size = \"0\"")
-            .replace("{ instrument_id = \"ESH24.CME\", trade_size = \"1\" },", "")
+            .replace("\"0.5%\"", "\"0%\"")
+            .replace("{ instrument_id = \"ESH24.CME\" },", "")
             .replace("spread = 3", "spread = 0");
         assert_eq!(
             error_fields(&toml),
@@ -1337,7 +1377,7 @@ mod tests {
                 "data.series[0].bar_spec",
                 "data.warmup",
                 "trade.instruments",
-                "trade.instruments[0].trade_size",
+                "trade.risk",
                 "spread",
             ]
         );
@@ -1391,7 +1431,7 @@ mod tests {
             warmup = "1h"
 
             [trade]
-            instruments = [{ instrument_id = "XAUUSD.ICMARKETS", trade_size = "2" }]
+            instruments = [{ instrument_id = "XAUUSD.ICMARKETS" }]
             risk = "0.5%"
 
             [model]
@@ -1497,8 +1537,8 @@ mod tests {
         #[test]
         fn a_second_traded_instrument_is_refused() {
             let toml = TOML.replace(
-                r#"trade_size = "2" }]"#,
-                r#"trade_size = "2" }, { instrument_id = "EURUSD.ICMARKETS", trade_size = "1" }]"#,
+                r#""XAUUSD.ICMARKETS" }]"#,
+                r#""XAUUSD.ICMARKETS" }, { instrument_id = "EURUSD.ICMARKETS" }]"#,
             );
             assert_eq!(error_fields(&toml), ["trade.instruments"]);
         }
@@ -1569,8 +1609,8 @@ mod tests {
                     r#"{ data = "bars", instrument_id = "BTC-USDT-SWAP.OKX", bar_spec = { step = 1, aggregation = "HOUR", price_type = "LAST" }, from = { step = 1, aggregation = "MINUTE", aggregation_source = "EXTERNAL" } },"#,
                 )
                 .replace(
-                    r#"instruments = [{ instrument_id = "XAUUSD.ICMARKETS", trade_size = "2" }]"#,
-                    r#"instruments = [{ instrument_id = "BTC-USDT-SWAP.OKX", trade_size = "0.01" }]"#,
+                    r#"instruments = [{ instrument_id = "XAUUSD.ICMARKETS" }]"#,
+                    r#"instruments = [{ instrument_id = "BTC-USDT-SWAP.OKX" }]"#,
                 );
 
             let requirements = load(&toml).unwrap().data_requirements();

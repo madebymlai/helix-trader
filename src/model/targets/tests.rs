@@ -579,7 +579,6 @@ fn a_table_trades_the_instrument_and_risk_it_is_given() {
     let table = toml::from_str::<Target>("limit = \"1h\"").unwrap();
     let traded = TradedInstrument {
         instrument_id: InstrumentId::from("EURUSD.ICMARKETS"),
-        trade_size: Quantity::from(3),
     };
 
     let target = table.trading(&traded, risk());

@@ -164,7 +164,7 @@ mod tests {
             slow = { period = 2 }
 
             [trade]
-            instruments = [{ instrument_id = "ESM24.CME", trade_size = "3" }]
+            instruments = [{ instrument_id = "ESM24.CME" }]
             risk = "0.5%"
             "#,
         )

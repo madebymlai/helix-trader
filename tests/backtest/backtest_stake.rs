@@ -166,7 +166,7 @@ fn a_backtest_whose_balance_is_not_in_a_traded_instruments_pnl_currency_is_refus
             slow = {{ period = 2 }}
 
             [trade]
-            instruments = [{{ instrument_id = "{id}", trade_size = "1" }}]
+            instruments = [{{ instrument_id = "{id}" }}]
             risk = "{risk}"
             "#,
             id = common::INSTRUMENT_ID,

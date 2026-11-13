@@ -39,7 +39,7 @@ const TOML: &str = r#"
     period = 30
 
     [trade]
-    instruments = [{ instrument_id = "ESM24.CME", trade_size = "1" }]
+    instruments = [{ instrument_id = "ESM24.CME" }]
     risk = "0.5%"
 "#;
 
@@ -154,9 +154,9 @@ fn rejects_fast_period_not_below_slow() {
 #[test]
 fn rejects_two_traded_instruments() {
     let toml = TOML.replace(
-        "instruments = [{ instrument_id = \"ESM24.CME\", trade_size = \"1\" }]",
-        "instruments = [{ instrument_id = \"ESM24.CME\", trade_size = \"1\" }, \
-         { instrument_id = \"ESH24.CME\", trade_size = \"1\" }]",
+        "instruments = [{ instrument_id = \"ESM24.CME\" }]",
+        "instruments = [{ instrument_id = \"ESM24.CME\" }, \
+         { instrument_id = \"ESH24.CME\" }]",
     );
     assert_eq!(error_fields(&toml), ["trade.instruments"]);
 }
@@ -166,7 +166,7 @@ fn rejects_two_traded_instruments() {
 #[test]
 fn rejects_no_traded_instrument_alone() {
     let toml = TOML.replace(
-        "instruments = [{ instrument_id = \"ESM24.CME\", trade_size = \"1\" }]",
+        "instruments = [{ instrument_id = \"ESM24.CME\" }]",
         "instruments = []",
     );
     assert_eq!(error_fields(&toml), ["trade.instruments"]);
@@ -175,8 +175,8 @@ fn rejects_no_traded_instrument_alone() {
 #[test]
 fn rejects_a_trade_instrument_without_bars() {
     let toml = TOML.replace(
-        "{ instrument_id = \"ESM24.CME\", trade_size",
-        "{ instrument_id = \"ESU24.CME\", trade_size",
+        "{ instrument_id = \"ESM24.CME\" }",
+        "{ instrument_id = \"ESU24.CME\" }",
     );
     assert_eq!(error_fields(&toml), ["trade.instruments[0].instrument_id"]);
 }
@@ -246,8 +246,8 @@ fn rejects_ticks_of_the_trade_instrument_as_unread() {
 fn reports_a_trade_instrument_without_bars_with_the_standard_violations() {
     let toml = TOML
         .replace(
-            "{ instrument_id = \"ESM24.CME\", trade_size",
-            "{ instrument_id = \"ESU24.CME\", trade_size",
+            "{ instrument_id = \"ESM24.CME\" }",
+            "{ instrument_id = \"ESU24.CME\" }",
         )
         .replace("\"720h\"", "\"0s\"");
     let mut fields = error_fields(&toml);
@@ -363,7 +363,7 @@ const CONFIG: &str = r#"
     slow = { period = 30 }
 
     [trade]
-    instruments = [{ instrument_id = "AUD/USD.SIM", trade_size = "100000" }]
+    instruments = [{ instrument_id = "AUD/USD.SIM" }]
     risk = "0.5%"
 "#;
 
