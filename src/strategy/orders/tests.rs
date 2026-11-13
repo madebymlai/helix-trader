@@ -9,13 +9,18 @@ use nautilus_common::{
     clock::{Clock, VirtualClock},
     timer::TimeEventCallback,
 };
-use nautilus_core::UnixNanos;
+use nautilus_core::{UUID4, UnixNanos};
 use nautilus_model::{
-    enums::{OmsType, OrderStatus, OrderType},
-    events::OrderEventAny,
+    accounts::{AccountAny, MarginAccount},
+    enums::{AccountType, OmsType, OrderStatus, OrderType},
+    events::{AccountState, OrderEventAny},
     identifiers::{AccountId, PositionId, StrategyId, TradeId, TraderId, VenueOrderId},
-    instruments::{InstrumentAny, stubs::audusd_sim},
+    instruments::{
+        CryptoPerpetual, InstrumentAny,
+        stubs::{audusd_sim, btcusd_bybit},
+    },
     orders::stubs::TestOrderEventStubs,
+    types::{AccountBalance, Money},
 };
 use nautilus_portfolio::portfolio::Portfolio;
 use nautilus_trading::{
@@ -24,6 +29,7 @@ use nautilus_trading::{
 };
 
 use super::*;
+use crate::log_capture;
 
 const STRATEGY: &str = "ORDERS-001";
 /// AUD/USD at Pepperstone, whose live broker takes reduce-only and
@@ -81,14 +87,45 @@ fn registered_on(
     (probe, clock)
 }
 
-/// A cache holding AUD/USD at Pepperstone and on IDEALPRO.
+/// A cache holding AUD/USD at Pepperstone and on IDEALPRO, each venue's
+/// margin account holding 100,000 USD.
 fn cache() -> Rc<RefCell<Cache>> {
+    cache_holding("100000 USD")
+}
+
+/// A cache holding AUD/USD at Pepperstone and on IDEALPRO, each venue's
+/// margin account holding `balance`, its equity.
+fn cache_holding(balance: &str) -> Rc<RefCell<Cache>> {
     let cache = Rc::new(RefCell::new(Cache::default()));
     for id in [AUD, IB_AUD] {
         let aud = aud(InstrumentId::from(id));
-        cache.borrow_mut().add_instrument(aud).unwrap();
+        let account = AccountId::from(format!("{}-001", aud.id().venue).as_str());
+        let mut cache = cache.borrow_mut();
+        cache.add_instrument(aud).unwrap();
+        cache.add_account(margin_account(account, balance)).unwrap();
     }
     cache
+}
+
+/// The margin account `account` holding `balance`, none of it locked.
+fn margin_account(account: AccountId, balance: &str) -> AccountAny {
+    let total = Money::from(balance);
+    let state = AccountState::new(
+        account,
+        AccountType::Margin,
+        vec![AccountBalance::new(
+            total,
+            Money::new(0.0, total.currency),
+            total,
+        )],
+        vec![],
+        true,
+        UUID4::new(),
+        UnixNanos::default(),
+        UnixNanos::default(),
+        None,
+    );
+    AccountAny::Margin(MarginAccount::new(state, true))
 }
 
 /// AUD/USD as `id`, on 5 decimals and whole units.
@@ -116,14 +153,26 @@ fn ids(entry: &str) -> OrderIds {
     }
 }
 
-/// A buy of 100,000 AUD/USD.
+fn decimal(s: &str) -> Decimal {
+    s.parse().unwrap()
+}
+
+/// The stake the trades are sent at, unless a test says: 0.5% of equity,
+/// 500 USD of the accounts' 100,000.
+fn stake() -> Stake {
+    Stake::new("0.5%".parse().unwrap())
+}
+
+/// A buy of AUD/USD set from 0.70150, one R of it 0.00500, the distance
+/// to the stop of `bracket`: at `stake`, 500 USD buys 100,000 AUD/USD.
 fn buy(exits: Exits) -> Trade {
-    Trade {
-        instrument_id: InstrumentId::from(AUD),
-        side: OrderSide::Buy,
-        quantity: Quantity::from(100_000),
+    Trade::new(
+        InstrumentId::from(AUD),
+        OrderSide::Buy,
+        Price::from("0.70150"),
+        decimal("0.00500"),
         exits,
-    }
+    )
 }
 
 /// A take profit at 0.70700 and a stop loss at 0.69650, held `hours`.
@@ -219,9 +268,10 @@ fn fill_of(
     }
 }
 
-/// Sends `trade` named after `entry` from `probe` and accepts its orders.
+/// Sends `trade` named after `entry` from `probe` at `stake` and accepts
+/// its orders.
 fn sent(probe: &mut Probe, entry: &str, trade: Trade) {
-    trade.send_as(probe, ids(entry)).unwrap();
+    trade.send_as(probe, stake(), ids(entry)).unwrap();
     accept(probe, entry);
     if trade.exits.bracket.is_some() {
         accept(probe, &format!("{entry}-TP"));
@@ -280,7 +330,9 @@ fn close() -> (OrderSide, Quantity, bool, bool) {
 fn a_trade_with_both_exits_is_a_bracket_its_legs_on_them() {
     let (mut probe, _) = registered();
 
-    buy(bracket(4)).send_as(&mut probe, ids("T-1")).unwrap();
+    buy(bracket(4))
+        .send_as(&mut probe, stake(), ids("T-1"))
+        .unwrap();
 
     let cache = probe.cache();
     let order = |of: &str| cache.order(&id(of)).unwrap();
@@ -336,7 +388,7 @@ fn a_trade_on_ib_has_legs_neither_reduce_only_nor_post_only() {
         ..buy(bracket(4))
     };
 
-    trade.send_as(&mut probe, ids("T-1")).unwrap();
+    trade.send_as(&mut probe, stake(), ids("T-1")).unwrap();
 
     let cache = probe.cache();
     let flags = |of: &str| {
@@ -350,7 +402,7 @@ fn a_trade_on_ib_has_legs_neither_reduce_only_nor_post_only() {
 fn a_trade_without_exits_is_one_market_entry() {
     let (mut probe, _) = registered();
 
-    buy(held(1)).send(&mut probe).unwrap();
+    buy(held(1)).send(&mut probe, stake()).unwrap();
 
     let cache = probe.cache();
     let orders = cache.orders(None, None, None, None, None);
@@ -373,14 +425,214 @@ fn a_trade_without_exits_is_one_market_entry() {
     );
 }
 
-/// AUD/USD trades whole units: 0.4 rounds to none.
-#[test]
-fn a_quantity_rounding_to_no_size_is_refused() {
-    let (mut probe, _) = registered();
-    let trade = Trade {
-        quantity: Quantity::from("0.4"),
-        ..buy(held(1))
+/// The orders of `probe`'s cache.
+fn orders(probe: &Probe) -> Vec<OrderAny> {
+    probe.cache().orders(None, None, None, None, None)
+}
+
+/// The quantity of the one entry `probe` sent, a market order.
+fn entry_quantity(probe: &Probe) -> Quantity {
+    let orders = orders(probe);
+    let [entry] = orders.as_slice() else {
+        panic!("{orders:?}")
     };
+    entry.quantity()
+}
+
+// ------------------------------------------------------------------ size
+
+/// 0.5% of 100,000 USD is 500 USD, and one R of 0.00360 is worth 0.0036
+/// USD on one AUD/USD: 138,888.9 of it, rounded down to whole units,
+/// 138,888, which risk 499.9968 USD. Rounded to the nearest, 138,889,
+/// they would risk 500.0004 USD.
+#[test]
+fn a_trade_risks_its_stake_of_equity_over_its_one_r_rounded_down_to_its_size() {
+    let (mut probe, _) = registered();
+    let trade = Trade::new(
+        InstrumentId::from(AUD),
+        OrderSide::Buy,
+        Price::from("0.70010"),
+        decimal("0.00360"),
+        held(1),
+    );
+
+    trade.send(&mut probe, stake()).unwrap();
+
+    assert_eq!(entry_quantity(&probe), Quantity::from(138_888));
+}
+
+/// One R of 0.0043215 from 0.70000 is no whole count of ticks: the stop
+/// of a buy, at 0.6956785, is sized at the tick below, 0.69567, 0.00433
+/// away, and of a sell, at 0.7043215, at the tick above, 0.70433, so 500
+/// USD buys 115,473, which risk 499.02 USD over one R. At the nearer
+/// ticks, 0.00432 away, 115,740 would risk 500.17 USD.
+#[test]
+fn a_trade_is_sized_at_its_stop_on_the_tick_away_from_its_price() {
+    for side in [OrderSide::Buy, OrderSide::Sell] {
+        let (mut probe, _) = registered();
+        let trade = Trade::new(
+            InstrumentId::from(AUD),
+            side,
+            Price::from("0.70000"),
+            decimal("0.0043215"),
+            held(1),
+        );
+
+        trade.send(&mut probe, stake()).unwrap();
+
+        assert_eq!(entry_quantity(&probe), Quantity::from(115_473), "{side}");
+    }
+}
+
+#[test]
+fn a_trade_at_twice_the_stake_is_twice_the_size() {
+    let (mut probe, _) = registered();
+
+    let twice = stake().times(decimal("2")).unwrap();
+    buy(held(1)).send(&mut probe, twice).unwrap();
+
+    assert_eq!(entry_quantity(&probe), Quantity::from(200_000));
+}
+
+/// Its 100,000 AUD/USD are worth 500 USD over one R of 0.00500, and its
+/// stake is the config's, multiple 1: the bracket's entry carries both,
+/// beside its time limit.
+#[test]
+fn a_trades_entry_is_tagged_with_its_r_in_money_and_its_stakes_multiple() {
+    let (mut probe, _) = registered();
+
+    sent(&mut probe, "T-1", buy(bracket(4)));
+
+    let entry = probe.cache().order(&id("T-1")).unwrap();
+    assert_eq!(
+        entry_risk(&entry),
+        Some(EntryRisk {
+            r: Money::from("500 USD"),
+            multiple: Decimal::ONE,
+        })
+    );
+    assert_eq!(time_limit(&entry), Some(SignedDuration::from_hours(4)));
+}
+
+/// A market entry at twice the stake: 200,000 AUD/USD, worth 1,000 USD
+/// over one R, multiple 2.
+#[test]
+fn a_trades_entry_at_a_multiple_of_the_stake_is_tagged_with_it() {
+    let (mut probe, _) = registered();
+
+    let twice = stake().times(decimal("2")).unwrap();
+    buy(held(1)).send(&mut probe, twice).unwrap();
+
+    let orders = orders(&probe);
+    assert_eq!(
+        entry_risk(&orders[0]),
+        Some(EntryRisk {
+            r: Money::from("1000 USD"),
+            multiple: decimal("2"),
+        })
+    );
+}
+
+/// 0.5% of 0.50 USD is 0.0025 USD, half of one AUD/USD's worth over one
+/// R: its size rounds down to none, and it sends nothing, no order and no
+/// time alert, and says why.
+#[test]
+fn a_trade_whose_size_rounds_to_none_sends_nothing_and_logs_why() {
+    let name = "a_trade_whose_size_rounds_to_none_sends_nothing_and_logs_why";
+    if !log_capture::alone(module_path!(), name) {
+        return;
+    }
+    log_capture::capture(log::LevelFilter::Info);
+    let (mut probe, clock) = registered_on(&cache_holding("0.50 USD"), STRATEGY, NOW);
+
+    buy(bracket(4)).send(&mut probe, stake()).unwrap();
+
+    assert_eq!(orders(&probe), []);
+    assert_eq!(clock.borrow().timer_names(), Vec::<&str>::new());
+    let lines = log_capture::lines();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("WARN") && line.contains(AUD) && line.contains("zero")),
+        "{lines:#?}"
+    );
+}
+
+/// Pepperstone's account holds 100,000 EUR, and no USD, the currency of
+/// AUD/USD's P&L: the trade is not sized on EUR, and it sends nothing,
+/// saying so.
+#[test]
+fn a_trade_without_equity_in_its_pnl_currency_sends_nothing_and_logs_why() {
+    let name = "a_trade_without_equity_in_its_pnl_currency_sends_nothing_and_logs_why";
+    if !log_capture::alone(module_path!(), name) {
+        return;
+    }
+    log_capture::capture(log::LevelFilter::Info);
+    let (mut probe, clock) = registered_on(&cache_holding("100000 EUR"), STRATEGY, NOW);
+
+    buy(bracket(4)).send(&mut probe, stake()).unwrap();
+
+    assert_eq!(orders(&probe), []);
+    assert_eq!(clock.borrow().timer_names(), Vec::<&str>::new());
+    let lines = log_capture::lines();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("ERROR") && line.contains(AUD) && line.contains("USD")),
+        "{lines:#?}"
+    );
+}
+
+/// Nautilus' sizer is linear: an inverse instrument's P&L is no multiple
+/// of a distance in price.
+#[test]
+fn an_inverse_instrument_is_refused_naming_it() {
+    let cache = cache();
+    let btc: CryptoPerpetual = btcusd_bybit();
+    let inverse = btc.id;
+    cache
+        .borrow_mut()
+        .add_instrument(InstrumentAny::CryptoPerpetual(btc))
+        .unwrap();
+    let (probe, _) = registered_on(&cache, STRATEGY, NOW);
+
+    let err = refuse_inverse(&probe, inverse).unwrap_err();
+
+    assert!(
+        err.to_string().contains(&inverse.to_string()) && err.to_string().contains("inverse"),
+        "{err}"
+    );
+    refuse_inverse(&probe, InstrumentId::from(AUD)).unwrap();
+}
+
+/// The model path's trade of a fixed quantity sends it, untagged with a
+/// stake.
+#[test]
+fn a_trade_of_a_fixed_quantity_sends_it_untagged_with_a_stake() {
+    let (mut probe, _) = registered();
+    let trade = Trade::fixed(
+        InstrumentId::from(AUD),
+        OrderSide::Buy,
+        Quantity::from(1_000),
+        held(1),
+    );
+
+    trade.send(&mut probe).unwrap();
+
+    assert_eq!(entry_quantity(&probe), Quantity::from(1_000));
+    assert_eq!(entry_risk(&orders(&probe)[0]), None);
+}
+
+/// AUD/USD trades whole units: a fixed 0.4 rounds to none.
+#[test]
+fn a_fixed_quantity_rounding_to_no_size_is_refused() {
+    let (mut probe, _) = registered();
+    let trade = Trade::fixed(
+        InstrumentId::from(AUD),
+        OrderSide::Buy,
+        Quantity::from("0.4"),
+        held(1),
+    );
 
     let err = trade.send(&mut probe).unwrap_err();
 

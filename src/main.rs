@@ -483,7 +483,9 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
 }
 
 /// Builds the strategy from its config, runs it over the window of the
-/// catalog and prints the results to stdout. A strategy trading on a
+/// catalog and prints the results to stdout, refusing first a balance in
+/// another currency than a traded instrument's P&L
+/// (`Backtest::refuse_balance`). A strategy trading on a
 /// model is first trained on its schedule (`model::walk`): its dataset
 /// built over the span and its models trained at each train time the
 /// store lacks one, in this process, on the backtest's catalog, store
@@ -529,7 +531,9 @@ impl<B: FnOnce(DataRequirements) -> Backtest> Visitor for Backtesting<'_, B> {
 
     fn plain<S: PlainStrategy>(self) -> Self::Output {
         let config = load_config::<S::Params>(&self.args.run.config)?;
-        let outcome = (self.backtest)(config.data_requirements()).run(S::backtest(config)?)?;
+        let backtest = (self.backtest)(config.data_requirements());
+        backtest.refuse_balance(&config.trade.instrument_ids())?;
+        let outcome = backtest.run(S::backtest(config)?)?;
         print!("{}", backtest::report(&outcome));
         Ok(())
     }
@@ -557,6 +561,8 @@ fn backtest_on_models<S: ModelStrategy>(
 ) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     let config = load_config::<S::Params>(&args.run.config)?;
+    let backtest = backtest(config.data_requirements());
+    backtest.refuse_balance(&config.trade.instrument_ids())?;
     let venue = args.dataset_venue()?;
     let (catalog, models) = (&args.run.catalog, &args.models);
     let walk = S::walk_forward(&config, catalog, models, &venue)?;
@@ -595,7 +601,7 @@ fn backtest_on_models<S: ModelStrategy>(
         models: models.clone(),
         venue,
     };
-    let outcome = backtest(config.data_requirements()).run(S::new(config, mode)?)?;
+    let outcome = backtest.run(S::new(config, mode)?)?;
     print!("{}", backtest::report(&outcome));
     print!("{}", walk.scores(start, end)?);
     Ok(())
@@ -1123,6 +1129,7 @@ mod tests {
 
             [trade]
             instruments = [{ instrument_id = "ESM24.CME", trade_size = "1" }]
+            risk = "0.5%"
             "#,
         )
         .unwrap();

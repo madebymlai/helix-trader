@@ -44,8 +44,11 @@ period = 30
 
 [trade]
 # The one instrument traded, whose target the model learns, and the size
-# of each trade.
+# of each of the model's trades.
 instruments = [{ instrument_id = "XAUUSD.ICMARKETS", trade_size = "1" }]
+# The fraction of equity a trade sent at the config's stake risks over its
+# one R (see config/ema.toml); the model's trades are of trade_size.
+risk = "0.5%"
 
 # The model, of a strategy trading on one: its target trades [trade]'s
 # instrument, of its trade_size.

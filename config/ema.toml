@@ -32,6 +32,11 @@ period = 10
 period = 30
 
 [trade]
-# The one instrument traded, read on its bars above, and the size of each
-# trade.
+# The one instrument traded, read on its bars above. Its trade_size sizes
+# no trade of the crossover's, only a model strategy's.
 instruments = [{ instrument_id = "XAUUSD.ICMARKETS", trade_size = "1" }]
+# The fraction of equity each trade risks: its quantity is that much of the
+# equity of the instrument's venue, in the instrument's P&L currency, over
+# what its stop's distance, its one R, is worth on one unit, rounded down
+# to the instrument's size increment.
+risk = "0.5%"

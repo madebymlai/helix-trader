@@ -20,7 +20,7 @@ Fixed commission is charged on an order's first fill; a rate and an amount per u
 
 ## Leverage and venues
 
-Each simulated venue starts with the specified balance and uses its live position mode, which it takes from `venues::oms_type`: IC Markets and Pepperstone are hedging, other venues netting. The same balance, leverage and fee model apply to every venue in a multi-venue run.
+Each simulated venue starts with the specified balance and uses its live position mode, which it takes from `venues::oms_type`: IC Markets and Pepperstone are hedging, other venues netting. The same balance, leverage and fee model apply to every venue in a multi-venue run. A trade is sized on the equity in its instrument's P&L currency, which is not converted (see [orders](../strategy/README.md#orders-and-positions)), so a backtest whose balance is in another currency than a traded instrument's P&L is refused before it runs.
 
 The margin model applies both the instrument margin and `--leverage` (default 1). IC and Pepperstone instruments already carry the venue's margin: use 1x unless deliberately modelling a further division. OKX instruments have margin 1, so set leverage to the account's per-instrument leverage. IB instruments have zero margins and lock no margin in this simulation. Orders exceeding free initial margin can be denied, but liquidation is disabled; the simulation does not reproduce venue liquidations.
 

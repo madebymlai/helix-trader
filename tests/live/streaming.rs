@@ -601,6 +601,7 @@ const EMA_CONFIG: &str = r#"
 
     [trade]
     instruments = [{ instrument_id = "AUD/USD.SIM", trade_size = "1" }]
+    risk = "0.5%"
 "#;
 
 /// The binary's backtest of the EMA crossover (`EMA_CONFIG`) over
@@ -638,6 +639,7 @@ const MODEL_EMA_CONFIG: &str = r#"
 
     [trade]
     instruments = [{ instrument_id = "AUD/USD.SIM", trade_size = "1" }]
+    risk = "0.5%"
 
     [model]
     decision = { every = "2s" }

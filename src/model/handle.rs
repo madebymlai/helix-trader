@@ -156,7 +156,7 @@ use crate::{
     backtest::Commission,
     rolls::Roller,
     strategy::{
-        orders::{Bracket, Exits, Trade},
+        orders::{self, Bracket, Exits, Fixed, Trade},
         warmup::{self, BookIndicator, CustomDataIndicator, Warmup},
     },
 };
@@ -236,18 +236,19 @@ pub struct Decision {
 impl Decision {
     /// The trade the model learned, the one a dataset run sends at the
     /// decision on that side: a bracket with the target's exits, or a
-    /// market entry, closed at the time limit (`strategy::orders`).
+    /// market entry, closed at the time limit (`strategy::orders`), of the
+    /// target's size.
     #[must_use]
-    pub const fn trade(&self) -> Trade {
-        Trade {
-            instrument_id: self.instrument_id,
-            side: self.side,
-            quantity: self.quantity,
-            exits: Exits {
+    pub const fn trade(&self) -> Trade<Fixed> {
+        Trade::fixed(
+            self.instrument_id,
+            self.side,
+            self.quantity,
+            Exits {
                 bracket: self.bracket,
                 time_limit: Some(self.time_limit),
             },
-        }
+        )
     }
 }
 
@@ -377,8 +378,10 @@ impl ModelHandle {
         }))
     }
 
-    /// Starts the handle on `strategy`, from `on_start`: registers the
-    /// features for their bars, starts the strategy's warmup
+    /// Starts the handle on `strategy`, from `on_start`: refuses the
+    /// traded instrument if a stake cannot size a trade on it
+    /// (`orders::refuse_inverse`), registers the features for their bars,
+    /// starts the strategy's warmup
     /// (`Warmup::start`), holding the live ticks while it is pending, live
     /// requesting the history of the bars and of the features' ticks, then
     /// the roller, which subscribes the features' ticks and the traded
@@ -389,13 +392,15 @@ impl ModelHandle {
     ///
     /// # Errors
     ///
-    /// Returns an error if the warmup fails to start, Nautilus refuses a
-    /// roll alert or the cadence's timer, or, in a dataset run, the targets
-    /// refuse to start (`Targets::start`).
+    /// Returns an error if the traded instrument is inverse, the warmup
+    /// fails to start, Nautilus refuses a roll alert or the cadence's
+    /// timer, or, in a dataset run, the targets refuse to start
+    /// (`Targets::start`).
     pub fn start<S>(&self, strategy: &mut S) -> anyhow::Result<()>
     where
         S: Strategy + StrategyNative + DataActor + DataActorNative + Debug + 'static,
     {
+        orders::refuse_inverse(strategy, self.traded)?;
         // Registered first: it sets the contract each feature reads, which
         // the warmup's responses are read against.
         self.features.register(strategy);
@@ -1081,18 +1086,18 @@ mod tests {
 
         assert_eq!(
             decision.trade(),
-            Trade {
-                instrument_id: InstrumentId::from(AUD),
-                side: OrderSide::Buy,
-                quantity: Quantity::from(1000),
-                exits: Exits {
+            Trade::fixed(
+                InstrumentId::from(AUD),
+                OrderSide::Buy,
+                Quantity::from(1000),
+                Exits {
                     bracket: Some(Bracket {
                         take_profit: Price::from("0.70140"),
                         stop_loss: Price::from("0.69930"),
                     }),
                     time_limit: Some(SignedDuration::from_hours(2)),
                 },
-            }
+            )
         );
         assert_eq!(decision.reference, Price::from("0.70000"));
         assert!(
@@ -1239,15 +1244,15 @@ mod tests {
 
         assert_eq!(
             decision.trade(),
-            Trade {
-                instrument_id: InstrumentId::from(AUD),
-                side: OrderSide::Buy,
-                quantity: Quantity::from(1000),
-                exits: Exits {
+            Trade::fixed(
+                InstrumentId::from(AUD),
+                OrderSide::Buy,
+                Quantity::from(1000),
+                Exits {
                     bracket: None,
                     time_limit: Some(SignedDuration::from_hours(1)),
                 },
-            }
+            )
         );
         assert_eq!(decision.reference, Price::from("0.70000"));
         assert!(
@@ -2044,6 +2049,36 @@ mod tests {
             Mode::Dataset {
                 rows: SettledRows::default(),
                 commission: venue().commission,
+            },
+        )
+        .unwrap();
+
+        let err = handle.start(&mut probe).unwrap_err();
+
+        assert!(format!("{err:#}").contains("inverse"), "{err:#}");
+    }
+
+    /// Nautilus' sizer reads a trade's P&L as a multiple of a distance in
+    /// price, which an inverse instrument's is not: a deciding handle
+    /// trading one refuses to start, which fails the strategy's
+    /// `on_start`.
+    #[test]
+    fn a_deciding_handles_start_fails_on_an_inverse_instrument() {
+        let inverse = InstrumentAny::CryptoPerpetual(btcusd_bybit());
+        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+        probe
+            .cache_rc()
+            .borrow_mut()
+            .add_instrument(inverse.clone())
+            .unwrap();
+        let models = tempfile::tempdir().unwrap();
+        let mut config = bracket_config(10);
+        config.target.instrument_id = inverse.id();
+        let handle = ModelHandle::new(
+            &blueprint_of(&features(), &config, requirements()),
+            Mode::Backtest {
+                models: models.path().to_path_buf(),
+                venue: venue(),
             },
         )
         .unwrap();

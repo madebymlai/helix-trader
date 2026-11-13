@@ -15,7 +15,10 @@ use serde::{
 };
 
 use super::{
-    DataRequirements, Declaration, IndicatorsConfig, TickSeries, session::Session, tick_data,
+    DataRequirements, Declaration, IndicatorsConfig, TickSeries,
+    orders::{Risk, Stake},
+    session::Session,
+    tick_data,
 };
 use crate::{
     model::config::{ModelConfig, ModelSection},
@@ -113,11 +116,11 @@ impl<P: Part> StandardConfig<P> {
     /// `DataConfig`), of `[indicators]` (those the strategy declares, each
     /// table parsed and built by its declaration; see `IndicatorsConfig`),
     /// of `[trade]` (as many instruments as the strategy trades, none a
-    /// futures root, each `trade_size` positive; see `TradeConfig`), of a
-    /// strategy trading on a model (see `validate_model`), of the series
-    /// read (see `validate_series`) and of the strategy's own
-    /// (`Part::validate`): Nautilus' `ConfigError` of each, with its field,
-    /// as one `ConfigError::Multiple` if there are
+    /// futures root, each `trade_size` positive, `risk` a proper fraction;
+    /// see `TradeConfig`), of a strategy trading on a model (see
+    /// `validate_model`), of the series read (see `validate_series`) and
+    /// of the strategy's own (`Part::validate`): Nautilus' `ConfigError` of
+    /// each, with its field, as one `ConfigError::Multiple` if there are
     /// several.
     pub fn validate(&self) -> ConfigResult<()> {
         let mut errors = ConfigErrorCollector::new();
@@ -223,6 +226,13 @@ impl<P: Part> StandardConfig<P> {
             panic!("a validated config of a strategy trading on a model has it, of one instrument");
         };
         model.clone().trading(traded)
+    }
+
+    /// The config's stake: `[trade] risk`, multiple 1. A strategy stakes
+    /// a trade otherwise as a multiple of it (`Stake::times`).
+    #[must_use]
+    pub const fn stake(&self) -> Stake {
+        Stake::new(self.trade.risk)
     }
 
     /// What the strategy needs from data: the bars and the ticks of its
@@ -506,22 +516,37 @@ pub struct CompositeSource {
     pub aggregation_source: AggregationSource,
 }
 
-/// `[trade]`: what the strategy trades, and the size of each trade. The
-/// execution data of an instrument traded comes from it: its quotes,
+/// `[trade]`: what the strategy trades, and how much each trade risks.
+/// The execution data of an instrument traded comes from it: its quotes,
 /// when no series of `[data]` prices it (`quotes_unpriced_by`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TradeConfig {
     /// The instruments traded, each with its size: as many as the
-    /// strategy trades (`Part::INSTRUMENTS`).
+    /// strategy trades (`Part::INSTRUMENTS`). The size is the model
+    /// strategies' targets' alone; a trade sent at a stake is sized from
+    /// `risk`.
     pub instruments: Vec<TradedInstrument>,
+    /// The fraction of equity a trade risks at the config's stake
+    /// (`StandardConfig::stake`), `"0.5%"`.
+    pub risk: Risk,
 }
 
 impl TradeConfig {
+    /// The instruments traded.
+    #[must_use]
+    pub fn instrument_ids(&self) -> Vec<InstrumentId> {
+        self.instruments
+            .iter()
+            .map(|traded| traded.instrument_id)
+            .collect()
+    }
+
     /// Pushes the violations of `[trade]`, whatever the strategy: not
     /// `count` instruments listed; an instrument a futures root of the
     /// roll calendar (`rolls::Transition`), since an order goes to a
-    /// contract; a `trade_size` not positive.
+    /// contract; a `trade_size` not positive; a `risk` not a proper
+    /// fraction of equity (`Risk::is_proper`).
     fn validate(&self, count: usize, errors: &mut ConfigErrorCollector) {
         let listed = self.instruments.len();
         errors.check(
@@ -552,6 +577,10 @@ impl TradeConfig {
                 ),
             );
         }
+        errors.check(
+            self.risk.is_proper(),
+            ConfigError::range("trade.risk", "must be above 0% and below 100% of equity"),
+        );
     }
 
     /// The quotes of each instrument traded that no series of `data`
@@ -577,7 +606,8 @@ impl TradeConfig {
     }
 }
 
-/// An instrument traded and the size of each trade.
+/// An instrument traded and the size of each of a model strategy's
+/// trades on it.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TradedInstrument {
@@ -648,6 +678,8 @@ impl<'de, P: Part> Visitor<'de> for Keys<P> {
 
 #[cfg(test)]
 mod tests {
+    use rust_decimal::Decimal;
+
     use super::*;
 
     /// A pairs strategy: two instruments traded, its own field a `spread`
@@ -703,6 +735,7 @@ mod tests {
             { instrument_id = "ESH24.CME", trade_size = "1" },
             { instrument_id = "ESM24.CME", trade_size = "2" },
         ]
+        risk = "0.5%"
     "#;
 
     fn load(toml: &str) -> anyhow::Result<StandardConfig<Pairs>> {
@@ -865,6 +898,42 @@ mod tests {
         assert_eq!(error_fields(&toml), ["trade.instruments[1].trade_size"]);
     }
 
+    /// `[trade] risk` is the fraction of equity a trade risks at the
+    /// config's stake, multiple 1.
+    #[test]
+    fn the_configs_stake_is_its_risk_alone() {
+        let config = load(TOML).unwrap();
+        assert_eq!(config.stake(), Stake::new("0.5%".parse().unwrap()));
+        assert_eq!(config.stake().multiple(), Decimal::ONE);
+    }
+
+    #[test]
+    fn a_missing_risk_is_refused_naming_it() {
+        let toml = TOML.replace("risk = \"0.5%\"", "");
+        let err = shape_error(&toml);
+        assert!(err.contains("`risk`"), "{err}");
+    }
+
+    /// A risk of none or all of equity, or beyond, is no fraction a trade
+    /// risks.
+    #[test]
+    fn a_risk_not_above_none_and_below_all_of_equity_is_refused() {
+        for risk in ["0%", "-0.5%", "100%", "150%"] {
+            let toml = TOML.replace("\"0.5%\"", &format!("\"{risk}\""));
+            assert_eq!(error_fields(&toml), ["trade.risk"], "{risk}");
+        }
+    }
+
+    /// A bare number could be a fraction or a percentage.
+    #[test]
+    fn a_risk_not_written_as_a_percentage_is_refused_saying_so() {
+        for risk in ["0.005", "\"0.005\""] {
+            let toml = TOML.replace("\"0.5%\"", risk);
+            let err = shape_error(&toml);
+            assert!(err.contains("percentage of equity"), "{risk}: {err}");
+        }
+    }
+
     /// GC.GLBX is a root of the roll calendar: an order to it would go to
     /// no contract. Read by a series or not, it is refused as traded,
     /// under its field, naming it.
@@ -941,6 +1010,7 @@ mod tests {
             { instrument_id = "BTC-USDT-SWAP.OKX", trade_size = "1" },
             { instrument_id = "ETH-USDT-SWAP.OKX", trade_size = "1" },
         ]
+        risk = "0.5%"
     "#;
 
     #[test]
@@ -1003,6 +1073,7 @@ mod tests {
                 {{ instrument_id = "GCQ26.GLBX", trade_size = "1" }},
                 {{ instrument_id = "GCZ26.GLBX", trade_size = "1" }},
             ]
+            risk = "0.5%"
             "#
         )
     }
@@ -1321,6 +1392,7 @@ mod tests {
 
             [trade]
             instruments = [{ instrument_id = "XAUUSD.ICMARKETS", trade_size = "2" }]
+            risk = "0.5%"
 
             [model]
             decision = { every = "1h" }

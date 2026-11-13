@@ -58,6 +58,7 @@ fn x_perp_ema_cross() -> EmaCrossConfig {
 
         [trade]
         instruments = [{ instrument_id = "BTC-USD_UM_XPERP-310328.OKX", trade_size = "1" }]
+        risk = "0.5%"
         "#,
     )
     .unwrap()

@@ -165,6 +165,7 @@ mod tests {
 
             [trade]
             instruments = [{ instrument_id = "ESM24.CME", trade_size = "3" }]
+            risk = "0.5%"
             "#,
         )
         .unwrap()

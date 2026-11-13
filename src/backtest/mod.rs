@@ -11,7 +11,7 @@ mod report;
 
 use std::{collections::BTreeSet, fmt::Debug, path::PathBuf};
 
-use anyhow::Context;
+use anyhow::{Context, ensure};
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::DataActorNative, component::Component, logging::logger::LoggerConfig,
@@ -20,6 +20,7 @@ use nautilus_model::{
     data::{BarType, NautilusDataType},
     enums::{ContinuousFutureAdjustmentType, OmsType},
     identifiers::{InstrumentId, Venue},
+    instruments::Instrument,
     types::Money,
 };
 use nautilus_persistence::{
@@ -115,6 +116,45 @@ impl Backtest {
     {
         let config = node::dataset_run_config(self)?;
         node::run_dataset(config, node::custom_data(self)?, strategy)
+    }
+
+    /// Refuses the run unless its balance is in the P&L currency
+    /// (`Instrument::cost_currency`) of each instrument of `traded`, those
+    /// the strategy trades, as the catalog defines them: a trade sent at a
+    /// stake is sized on the equity in its P&L currency alone, which is not
+    /// converted (`strategy::orders::Trade::send`), so on a balance in
+    /// another it would send nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an instrument of `traded` is not in the catalog
+    /// or its P&L is in another currency than the balance.
+    pub fn refuse_balance(&self, traded: &[InstrumentId]) -> anyhow::Result<()> {
+        let catalog = ParquetDataCatalog::new(&self.catalog, None, None, None, None);
+        let ids: Vec<String> = traded.iter().map(ToString::to_string).collect();
+        let defined = catalog
+            .instruments(Some(&ids), None, None)
+            .with_context(|| format!("reading {} from the catalog", ids.join(", ")))?;
+        for &id in traded {
+            let instrument = defined
+                .iter()
+                .find(|instrument| instrument.id() == id)
+                .with_context(|| {
+                    format!(
+                        "the traded instrument {id} is not in the catalog {}",
+                        self.catalog.display()
+                    )
+                })?;
+            let pnl = instrument.cost_currency();
+            ensure!(
+                pnl == self.balance.currency,
+                "the balance {} is in {}, the P&L of {id}, which the strategy trades, in {pnl}: \
+                 a trade is sized on the equity in its P&L currency, which is not converted",
+                self.balance,
+                self.balance.currency
+            );
+        }
+        Ok(())
     }
 
     /// The continuous bars of the bar types on roots over the run,

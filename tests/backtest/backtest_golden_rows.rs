@@ -50,6 +50,7 @@ const CONFIG: &str = r#"
 
     [trade]
     instruments = [{ instrument_id = "XAUUSD.ICMARKETS", trade_size = "1" }]
+    risk = "0.5%"
 
     [model]
     decision = { every = "1h" }

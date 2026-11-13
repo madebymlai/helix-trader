@@ -2,16 +2,23 @@
 //! `strategy::warmup` as a real strategy does in a backtest, on a plain
 //! instrument or, given its continuous bars, on a root, records every bar
 //! it gets, every fill, and on stop the adjustments of its positions
-//! (funding), the orders denied and its account's margins, and can send
-//! market orders of its choosing on the first bars, close its positions by
-//! their ids on given bars, and on stop its positions. It leaves its
+//! (funding), its orders, the orders denied and its account's margins, and
+//! can send market orders of its choosing on the first bars, or trades at
+//! stakes of its choosing (`strategy::orders::Trade`), close its positions
+//! by their ids on given bars, and on stop its positions. It leaves its
 //! `oms_type` unset, so it keeps positions as the venue does. For the tests
 //! that need what the EMA crossover cannot show: the bars' open, high and
 //! low, fills of a given side and size, funding, and positions.
 
 use std::{cell::RefCell, rc::Rc};
 
-use helix_trader::{rolls::ContinuousBars, strategy::warmup};
+use helix_trader::{
+    rolls::ContinuousBars,
+    strategy::{
+        orders::{Exits, Stake, Trade},
+        warmup,
+    },
+};
 use nautilus_common::actor::DataActor;
 use nautilus_core::UnixNanos;
 use nautilus_model::{
@@ -20,6 +27,7 @@ use nautilus_model::{
     enums::OrderSide,
     events::{OrderDenied, OrderFilled, PositionAdjusted},
     identifiers::StrategyId,
+    orders::{Order, OrderAny},
     position::Position,
     types::{MarginBalance, Price, Quantity},
 };
@@ -27,6 +35,7 @@ use nautilus_trading::{
     nautilus_strategy,
     strategy::{Strategy, StrategyConfig, StrategyCore},
 };
+use rust_decimal::Decimal;
 
 /// What the recorder got, in order.
 #[derive(Debug, Default)]
@@ -39,6 +48,8 @@ pub struct Record {
     pub adjustments: Vec<PositionAdjusted>,
     /// Its positions in the cache when it stops, oldest first.
     pub positions: Vec<Position>,
+    /// Its orders in the cache when it stops, oldest first.
+    pub orders: Vec<OrderAny>,
     /// The reasons of the orders the risk engine denied.
     pub denials: Vec<String>,
     /// The margins of its venue's account when it stops, if a margin
@@ -54,6 +65,10 @@ pub struct Recorder {
     continuous: ContinuousBars,
     /// The market order sent on each of the first bars, in order.
     market: Vec<(OrderSide, Quantity)>,
+    /// The trade sent on each of the first bars, in order: its side, its
+    /// one R from the bar's close, and its stake. Without exits, a market
+    /// entry.
+    staked: Vec<(OrderSide, Decimal, Stake)>,
     /// The bars, by index, on which it closes its open positions
     /// (`close_position`), before any market order of the bar.
     close_on: Vec<usize>,
@@ -73,6 +88,7 @@ impl Recorder {
             bar_type,
             continuous: ContinuousBars::default(),
             market: vec![],
+            staked: vec![],
             close_on: vec![],
             record: Rc::clone(&record),
         };
@@ -103,6 +119,17 @@ impl Recorder {
     ) -> (Self, Rc<RefCell<Record>>) {
         let (recorder, record) = Self::new(bar_type);
         (Self { market, ..recorder }, record)
+    }
+
+    /// A recorder of `bar_type` sending on the `i`-th bar the trade of
+    /// `staked[i]`, its side, one R from the bar's close and its stake, a
+    /// market entry, and the record it fills.
+    pub fn staking(
+        bar_type: BarType,
+        staked: Vec<(OrderSide, Decimal, Stake)>,
+    ) -> (Self, Rc<RefCell<Record>>) {
+        let (recorder, record) = Self::new(bar_type);
+        (Self { staked, ..recorder }, record)
     }
 
     /// The recorder closing its open positions, each by its id
@@ -142,7 +169,10 @@ impl DataActor for Recorder {
             Some(AccountAny::Margin(account)) => account.margins.into_values().collect(),
             _ => vec![],
         };
+        let mut orders = self.cache().orders(None, None, None, None, None);
+        orders.sort_by_key(|order| order.ts_init());
         let mut record = self.record.borrow_mut();
+        record.orders = orders;
         record.margins = margins;
         record.adjustments.extend(
             positions
@@ -179,6 +209,14 @@ impl DataActor for Recorder {
                 None,
             );
             self.submit_order(order, None, None, None)?;
+        }
+        if let Some(&(side, one_r, stake)) = self.staked.get(index) {
+            let exits = Exits {
+                bracket: None,
+                time_limit: None,
+            };
+            Trade::new(bar.bar_type.instrument_id(), side, bar.close, one_r, exits)
+                .send(self, stake)?;
         }
         Ok(())
     }

@@ -245,6 +245,7 @@ mod tests {
 
         [trade]
         instruments = [{ instrument_id = "AUD/USD.SIM", trade_size = "100000" }]
+        risk = "0.5%"
 
         [model]
         decision = { every = "1h" }
@@ -507,15 +508,15 @@ mod tests {
         let models = tempfile::tempdir().unwrap();
         let sent = NOW - 20 * MINUTE;
         let (mut before, _) = started(&cache, models.path(), sent);
-        let trade = Trade {
-            instrument_id: InstrumentId::from("AUD/USD.SIM"),
-            side: OrderSide::Buy,
-            quantity: Quantity::from(100_000),
-            exits: Exits {
+        let trade = Trade::fixed(
+            InstrumentId::from("AUD/USD.SIM"),
+            OrderSide::Buy,
+            Quantity::from(100_000),
+            Exits {
                 bracket: None,
                 time_limit: Some(SignedDuration::from_mins(30)),
             },
-        };
+        );
         trade.send(&mut before).unwrap();
         let entry = cache
             .borrow()
