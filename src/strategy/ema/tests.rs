@@ -9,11 +9,11 @@ use nautilus_core::UnixNanos;
 use nautilus_model::{
     enums::OmsType,
     events::OrderEventAny,
-    identifiers::{AccountId, PositionId, TradeId, TraderId, VenueOrderId},
-    instruments::{InstrumentAny, stubs::audusd_sim},
+    identifiers::{AccountId, PositionId, Symbol, TradeId, TraderId, VenueOrderId},
+    instruments::{CurrencyPair, InstrumentAny, stubs::audusd_sim},
     orders::{Order, stubs::TestOrderEventStubs},
     position::Position,
-    types::Price,
+    types::{Currency, Price},
 };
 use nautilus_portfolio::portfolio::Portfolio;
 
@@ -462,5 +462,57 @@ fn a_restart_sets_the_time_of_its_open_trade_again() {
     assert_eq!(
         clock.next_time_ns(alert),
         Some(UnixNanos::from(NOW + 220 * MINUTE))
+    );
+}
+
+/// AUD/USD of the config priced in quarters of a tenth of a pip, 0.00025 a
+/// tick, finer prices than its ticks.
+fn aud_in_quarter_ticks() -> InstrumentAny {
+    InstrumentAny::CurrencyPair(
+        CurrencyPair::builder()
+            .instrument_id(InstrumentId::from("AUD/USD.SIM"))
+            .raw_symbol(Symbol::from("AUD/USD"))
+            .base_currency(Currency::AUD())
+            .quote_currency(Currency::USD())
+            .price_precision(5)
+            .size_precision(0)
+            .price_increment(Price::from("0.00025"))
+            .size_increment(Quantity::from(1))
+            .ts_event(UnixNanos::default())
+            .ts_init(UnixNanos::default())
+            .build()
+            .unwrap(),
+    )
+}
+
+/// A long decided on a bar closing at 0.70010: its take profit, 0.707101,
+/// and its stop, 0.6965995, are on the nearest of the instrument's ticks,
+/// not merely at its precision (0.70710, 0.69660).
+#[test]
+fn a_trade_takes_profit_and_stops_on_the_nearest_ticks() {
+    let cache = Rc::new(RefCell::new(Cache::default()));
+    cache
+        .borrow_mut()
+        .add_instrument(aud_in_quarter_ticks())
+        .unwrap();
+    let (strategy, _) = started(&cache, NOW);
+    let close = Price::from("0.70010");
+    let bar = Bar::new(
+        BarType::from("AUD/USD.SIM-1-HOUR-MID-INTERNAL"),
+        close,
+        close,
+        close,
+        close,
+        Quantity::from(1),
+        UnixNanos::from(NOW),
+        UnixNanos::from(NOW),
+    );
+
+    let trade = strategy.trade(&bar, OrderSide::Buy).unwrap();
+
+    let bracket = trade.exits.bracket.unwrap();
+    assert_eq!(
+        (bracket.take_profit, bracket.stop_loss),
+        (Price::from("0.70700"), Price::from("0.69650"))
     );
 }

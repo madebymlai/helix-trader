@@ -33,7 +33,7 @@ Demo and live can list different contracts, so select an instrument present in t
 
 OKX composite bars warm up from catalog minute candles and then REST candles; live minute candles arrive through WebSocket. The data engine writes the REST candles back to the catalog when the client reports their window complete. The adapter does not serve quote history, so quote-built bars cannot warm up from OKX.
 
-A warmup needing more than 500 pages of 100 minute candles beyond the catalog, roughly 833 hours, fails its request: the warmup is logged incomplete and keeps the candles fetched. X-Perp candle behavior has been observed on demo; X-Perp orders have not been verified there.
+A warmup needing more than 500 pages of minute candles beyond the catalog, roughly 835 hours (100 candles a page, up to 300 on a page less than two hours old), fails its request: the warmup is logged incomplete and keeps the candles fetched. X-Perp candle behavior has been observed on demo; X-Perp orders have not been verified there.
 
 ## Tests
 

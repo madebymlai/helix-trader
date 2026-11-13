@@ -343,6 +343,27 @@ impl CTraderExecutionClient {
         Ok(positions)
     }
 
+    /// A flat report of each position of `cached`, which the node's cache
+    /// holds open, that cTrader does not hold open (`held`, see
+    /// `open_volumes`), of a symbol the run loaded: the reconcile request
+    /// lists every open position.
+    fn flats(
+        session: &Session,
+        reports: &Reports<'_>,
+        cached: &[CachedOpen],
+        held: &HashMap<i64, i64>,
+    ) -> Vec<PositionStatusReport> {
+        cached
+            .iter()
+            .filter(|c| !held.contains_key(&c.position))
+            .filter_map(|gone| {
+                let symbol = session.symbols.get(&gone.instrument_id)?;
+                let instrument = session.instruments.get(symbol)?;
+                Some(reports.flat(instrument, gone.position))
+            })
+            .collect()
+    }
+
     /// The fills of the deals over `[from, to]`.
     async fn fill_reports(
         &self,
@@ -1325,7 +1346,8 @@ impl ExecutionClient for CTraderExecutionClient {
     /// its venue order id or among the orders the broker updated since the
     /// cached order was created, from its details. `None` once the broker
     /// answered it holds no such order; an error if it holds it on a symbol
-    /// the run did not load, which is no answer of absence.
+    /// the run did not load, or if an order not open has no client order id
+    /// to look for, neither an answer of absence.
     async fn generate_order_status_report(
         &self,
         cmd: &GenerateOrderStatusReport,
@@ -1340,9 +1362,9 @@ impl ExecutionClient for CTraderExecutionClient {
         if found.is_some() {
             return Ok(found);
         }
-        let Some(id) = cmd.client_order_id else {
-            return Ok(None);
-        };
+        let id = cmd
+            .client_order_id
+            .context("no client order id: no window to look for an order not open in")?;
         let since = self
             .cached_order(&id)
             .map(|o| o.ts_init())
@@ -1404,18 +1426,28 @@ impl ExecutionClient for CTraderExecutionClient {
         Ok(fills)
     }
 
-    /// One report per open cTrader position: the reconcile request lists
-    /// every open position, so an instrument without one is flat. Nautilus
-    /// reads an absent report so because
+    /// One report per open cTrader position, and a flat one per position
+    /// the node's cache held open before the reconcile request that
+    /// cTrader does not hold (see `flats`), as the mass status does. A
+    /// position of no cTrader id (see `cached_open`) has no report: Nautilus
+    /// reads its absence as flat because
     /// `ExecutionClient::provides_bulk_position_coverage` is true by
     /// default, which this client leaves as it is.
     async fn generate_position_status_reports(
         &self,
         cmd: &GeneratePositionStatusReports,
     ) -> anyhow::Result<Vec<PositionStatusReport>> {
+        let cached = self.cached_open();
         let session = self.session()?;
         let open = session.ctrader.reconcile().await?;
-        let mut positions = Self::position_reports(&self.reports(session, cmd.ts_init), &open)?;
+        let reports = self.reports(session, cmd.ts_init);
+        let mut positions = Self::position_reports(&reports, &open)?;
+        positions.extend(Self::flats(
+            session,
+            &reports,
+            &cached,
+            &open_volumes(&open.position),
+        ));
         positions.retain(|r| cmd.instrument_id.is_none_or(|id| r.instrument_id == id));
         log_receipt(
             positions.len(),
@@ -1462,15 +1494,7 @@ impl ExecutionClient for CTraderExecutionClient {
         let ordered = self.earliest_cached_order(&orders);
         let mut positions = Self::position_reports(&reports, &open)?;
         let held = open_volumes(&open.position);
-        for gone in cached.iter().filter(|c| !held.contains_key(&c.position)) {
-            let instrument = session
-                .symbols
-                .get(&gone.instrument_id)
-                .and_then(|symbol| session.instruments.get(symbol));
-            if let Some(instrument) = instrument {
-                positions.push(reports.flat(instrument, gone.position));
-            }
-        }
+        positions.extend(Self::flats(session, &reports, &cached, &held));
 
         let lookback = lookback_mins
             .map(DurationNanos::try_from_mins)
@@ -3162,6 +3186,50 @@ mod tests {
             .collect();
         ids.sort();
         assert_eq!(ids, ["101-SL", "101-TP", "102-SL"]);
+        client.disconnect().await.unwrap();
+    }
+
+    /// The node's cache holds a position open that cTrader, holding
+    /// nothing open, does not: the periodic check of every instrument, as
+    /// the engine asks it, reports it flat rather than leave it out.
+    #[tokio::test]
+    async fn the_periodic_position_check_reports_a_position_ctrader_no_longer_holds_flat() {
+        use nautilus_common::messages::execution::GeneratePositionStatusReportsBuilder;
+
+        let (mut client, cache, mut events, _, _tokens) = started(Script::default());
+        connect(&mut client, &mut events, &cache).await;
+        hold_open(&client, &cache, "59793251", ns(T0));
+
+        let positions = client
+            .generate_position_status_reports(
+                &GeneratePositionStatusReportsBuilder::default()
+                    .ts_init(client.now())
+                    .build()
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let reported: Vec<_> = positions
+            .iter()
+            .map(|r| {
+                (
+                    r.instrument_id,
+                    r.venue_position_id,
+                    r.position_side,
+                    r.quantity,
+                )
+            })
+            .collect();
+        assert_eq!(
+            reported,
+            [(
+                InstrumentId::from(XAUUSD),
+                Some(PositionId::from("59793251")),
+                PositionSide::Flat,
+                Quantity::from(0)
+            )]
+        );
         client.disconnect().await.unwrap();
     }
 }

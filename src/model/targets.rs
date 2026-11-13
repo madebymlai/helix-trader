@@ -115,7 +115,6 @@
 use std::{
     any::Any,
     cell::RefCell,
-    cmp::Ordering,
     collections::BTreeMap,
     fmt::{self, Debug, Display},
     rc::Rc,
@@ -825,8 +824,12 @@ fn exits(
     let of = |side: Side| -> anyhow::Result<Bracket> {
         let favour = side.sign();
         Ok(Bracket {
-            take_profit: nearest_tick(instrument, reference + favour * take_profit, favour)?,
-            stop_loss: nearest_tick(instrument, reference - favour * stop, -favour)?,
+            take_profit: orders::nearest_tick(
+                instrument,
+                reference + favour * take_profit,
+                favour,
+            )?,
+            stop_loss: orders::nearest_tick(instrument, reference - favour * stop, -favour)?,
         })
     };
     let exits = PerSide {
@@ -867,33 +870,6 @@ fn longest_dividing(sources: &[BarType], cadence: SignedDuration) -> Option<BarT
             _ => Some((source, length)),
         })
         .map(|(source, _)| source)
-}
-
-/// `price` on the nearer of `instrument`'s ticks around it, Nautilus' tick
-/// grid; at a tie, the one `away` (1 up, -1 down) from the decision's
-/// price, so that an exit is not nearer than its distance.
-fn nearest_tick(
-    instrument: &InstrumentAny,
-    price: Decimal,
-    away: Decimal,
-) -> anyhow::Result<Price> {
-    let id = instrument.id();
-    let value = price
-        .to_f64()
-        .with_context(|| format!("the exit {price} of {id}"))?;
-    let (Some(below), Some(above)) = (
-        instrument.next_bid_price(value, 0),
-        instrument.next_ask_price(value, 0),
-    ) else {
-        bail!("the exit {price} is outside the prices of {id}");
-    };
-    let (down, up) = (price - below.as_decimal(), above.as_decimal() - price);
-    Ok(match down.cmp(&up) {
-        Ordering::Less => below,
-        Ordering::Greater => above,
-        Ordering::Equal if away.is_sign_positive() => above,
-        Ordering::Equal => below,
-    })
 }
 
 /// The average true range of a target, registered with the strategy's

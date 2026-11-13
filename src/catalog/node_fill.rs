@@ -277,7 +277,8 @@ impl NodeFill {
     /// clients and the catalog, one request at a time, each with
     /// `update_catalog`, so the data engine writes each answer back over
     /// its window, and what was written stays if a later window fails.
-    /// Nothing asked builds no node.
+    /// Nothing asked builds no node; a node built is disposed whatever
+    /// comes of it (`concepts/architecture.md`, "Processes and threads").
     ///
     /// # Errors
     ///
@@ -317,14 +318,16 @@ impl NodeFill {
         let mut node = builder.build()?;
         let outcome = Rc::new(RefCell::new(Outcome::default()));
         let total = requests.len();
-        node.add_actor(FillActor {
+        let ran = match node.add_actor(FillActor {
             core: DataActorCore::new(DataActorConfig::default()),
             requests: requests.into(),
             pending: None,
             rows: 0,
             outcome: Rc::clone(&outcome),
-        })?;
-        let ran = node.run().await;
+        }) {
+            Ok(()) => node.run().await,
+            Err(e) => Err(e),
+        };
         node.dispose();
         ran?;
         let Outcome {

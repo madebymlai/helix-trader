@@ -467,15 +467,19 @@ mod tests {
         }
     }
 
+    /// The venue matches as Nautilus does by default, which the backtest
+    /// and model guides rely on: resting orders match on external bars,
+    /// replayed open, high, low, close, without consuming liquidity, and a
+    /// stop whose trigger is in the market is rejected.
     #[test]
-    fn orders_fill_on_quotes_only_at_the_quoted_price() {
+    fn the_venue_keeps_nautilus_default_matching() {
         let dir = tempfile::tempdir().unwrap();
         let config = run_config(&backtest(dir.path())).unwrap();
         let venue = &config.venues()[0];
         assert!(venue.bar_execution());
-        // Nautilus' default: external bars replay open, high, low, close.
         assert!(!venue.bar_adaptive_high_low_ordering());
         assert!(!venue.liquidity_consumption());
+        assert!(venue.reject_stop_orders());
     }
 
     /// The instrument of each data config, all quotes from `catalog`.
