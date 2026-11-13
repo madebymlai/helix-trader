@@ -40,6 +40,7 @@ mod backtest_max_drawdown;
 mod backtest_meta;
 mod backtest_model;
 mod backtest_model_ema;
+mod backtest_model_stake;
 mod backtest_netting_venue;
 mod backtest_okx_swap;
 mod backtest_okx_swap_funding;

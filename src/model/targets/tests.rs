@@ -31,6 +31,7 @@ use crate::{
         dataset::DatasetRow,
         deciding::testing::{self, GOLD, gold},
         features::testing::last_mid,
+        handle::SettledRows,
         holdout::Example,
     },
     strategy::TickSeries,
@@ -58,11 +59,27 @@ fn exits_of_config() -> BracketSpec {
     }
 }
 
-/// A bracket, `exits_of_config`, closed after 2 hours.
+/// The tests' reference stake: 0.3% of the dataset balance, 100,000 USD
+/// (`venue_of`), 300 USD.
+fn risk() -> Risk {
+    "0.3%".parse().unwrap()
+}
+
+/// The venue of the tests' dataset runs at `commission`: 100,000 USD.
+fn venue_of(commission: Commission) -> DatasetVenue {
+    DatasetVenue {
+        commission,
+        balance: Money::from("100000 USD"),
+        leverage: Decimal::ONE,
+    }
+}
+
+/// A bracket, `exits_of_config`, closed after 2 hours, at the tests'
+/// reference stake.
 fn config() -> TargetConfig {
     TargetConfig::builder()
         .instrument_id(InstrumentId::from(GOLD))
-        .quantity(Quantity::from(1))
+        .risk(risk())
         .spec(Target {
             bracket: Some(exits_of_config()),
             limit: SignedDuration::from_hours(2),
@@ -89,7 +106,7 @@ fn exiting(exits: BracketSpec) -> Target {
     }
 }
 
-/// The time-only target of `config`'s instrument and size, closed after
+/// The time-only target of `config`'s instrument and risk, closed after
 /// `limit`, its unit measured in Wilder's ATR of 14 bars.
 fn time_only(limit: SignedDuration) -> TargetConfig {
     of(Target::builder().limit(limit).atr(DEFAULT_ATR).build())
@@ -182,7 +199,7 @@ fn atr_bar_type(rule: DecisionRule, requirements: &DataRequirements) -> String {
 /// The refusal of the ATR of `config()` deciding on `rule`, for a
 /// strategy of `requirements`, by `validate` and by `Targets::new`.
 fn atr_refused(rule: DecisionRule, requirements: &DataRequirements) -> String {
-    assert!(Targets::new(config(), rule, requirements, commission()).is_err());
+    assert!(Targets::new(config(), rule, requirements, &venue_of(commission())).is_err());
     format!("{:#}", config().validate(rule, requirements).unwrap_err())
 }
 
@@ -483,10 +500,6 @@ fn one_exit_alone_does_not_parse() {
 #[test]
 fn sizes_distances_and_times_must_be_positive() {
     let invalid = [
-        TargetConfig {
-            quantity: Quantity::from(0),
-            ..config()
-        },
         of(in_bps(0, 10)),
         of(in_bps(10, -1)),
         of(exiting(BracketSpec {
@@ -560,19 +573,19 @@ fn a_table_naming_an_instrument_or_a_quantity_is_refused() {
     }
 }
 
-/// The table trades the instrument and size it is given.
+/// The table trades the instrument it is given at the risk it is given.
 #[test]
-fn a_table_trades_the_instrument_and_size_it_is_given() {
+fn a_table_trades_the_instrument_and_risk_it_is_given() {
     let table = toml::from_str::<Target>("limit = \"1h\"").unwrap();
     let traded = TradedInstrument {
         instrument_id: InstrumentId::from("EURUSD.ICMARKETS"),
         trade_size: Quantity::from(3),
     };
 
-    let target = table.trading(&traded);
+    let target = table.trading(&traded, risk());
 
     assert_eq!(target.instrument_id, traded.instrument_id);
-    assert_eq!(target.quantity, traded.trade_size);
+    assert_eq!(target.risk, risk());
     assert_eq!(target.settles_within(), SignedDuration::from_hours(1));
 }
 
@@ -723,7 +736,7 @@ fn the_fingerprint_changes_with_every_target_spec() {
         .fingerprint();
     let changed = [
         TargetConfig {
-            quantity: Quantity::from(2),
+            risk: "0.4%".parse().unwrap(),
             ..config()
         },
         of(exiting(BracketSpec {
@@ -911,7 +924,7 @@ fn an_outcome_has_the_sign_of_its_pnl() {
             pnl: Money::from(pnl),
             commission: Money::from("0.1 USD"),
             exit: Exit::Time,
-            unit: 1.0,
+            unit: Money::from("1 USD"),
         }
         .sign()
     };
@@ -921,34 +934,102 @@ fn an_outcome_has_the_sign_of_its_pnl() {
     assert_eq!(sign("0 USD"), 0);
 }
 
-/// 1000 AUD/USD with a stop 10 pips away: 1 USD at risk.
+// ------------------------------------------------------- reference stake
+
+/// A stop of 3.00 on gold, whole ounces: on a dataset balance of 100 USD
+/// the reference stake, 0.30 USD, buys 0.1 oz, rounded down to none, on
+/// either side, so no target, saying which side and its one R, rather than
+/// a unit of nought.
 #[test]
-fn a_stop_is_worth_its_distance_on_the_targets_quantity() {
-    let instrument = InstrumentAny::CurrencyPair(nautilus_model::instruments::stubs::audusd_sim());
+fn a_target_whose_size_at_the_reference_stake_rounds_to_none_is_none() {
+    let probe = Probe::holding(Some(gold()));
+    probe.quoted_at(InstrumentId::from(GOLD), "4001.50", "4001.70");
+    let venue = DatasetVenue {
+        balance: Money::from("100 USD"),
+        ..venue_of(commission())
+    };
 
-    let worth = stop_worth(&instrument, Quantity::from(1000), Decimal::new(1, 3)).unwrap();
+    let set = setter_on(&of(wide_take_profit()), &venue)
+        .at(&probe)
+        .unwrap();
 
-    assert!((worth - 1.0).abs() < 1e-9, "{worth}");
+    assert_eq!(
+        set,
+        Err(NoTarget::NoSize {
+            side: Side::Long,
+            one_r: Decimal::from(3)
+        })
+    );
 }
 
-/// A worth past what a `Decimal` holds is an error, not a panic.
+/// A dataset run sends each side at the reference stake of the dataset
+/// balance, whatever the account holds (the probe holds none): the 428,571
+/// AUD/USD of a stop of 0.0007 at 300 USD, its entry tagged with the R the
+/// row's unit is, 299.9997 USD, and the multiple 1.
 #[test]
-fn a_stop_worth_more_than_a_decimal_holds_is_an_error() {
-    let instrument = InstrumentAny::CurrencyPair(audusd_sim());
+fn a_dataset_run_sends_each_side_at_the_size_its_row_is_priced_at() {
+    let mut probe = Probe::holding(aud());
+    probe.quoted(InstrumentId::from(AUD), "0.70000");
+    let targets = targets(on_aud(in_bps(20, 10)));
 
-    assert!(stop_worth(&instrument, Quantity::from(1000), Decimal::MAX).is_err());
+    targets.open(&mut probe, decision()).unwrap();
+
+    for entry in ["D0-L-E", "D0-S-E"] {
+        let order = probe.cache().order(&ClientOrderId::from(entry)).unwrap();
+        assert_eq!(order.quantity(), Quantity::from(428_571), "{entry}");
+        assert_eq!(
+            orders::entry_risk(&order),
+            Some(orders::EntryRisk {
+                r: Money::from_str_exact("299.9997 USD").unwrap(),
+                multiple: Decimal::ONE,
+            }),
+            "{entry}"
+        );
+    }
 }
 
-/// Bybit's inverse BTCUSD: Nautilus' notional value of a distance on it
-/// divides by the price, which is not what the stop risks.
+/// A denial fails the dataset run with its reason: no row is dropped
+/// silently.
 #[test]
-fn a_stop_on_an_inverse_instrument_is_refused() {
-    let instrument =
-        InstrumentAny::CryptoPerpetual(nautilus_model::instruments::stubs::btcusd_bybit());
+fn a_denied_order_fails_the_dataset_run_with_its_reason() {
+    let probe = Probe::holding(aud());
+    let targets = targets(on_aud(in_bps(20, 10)));
+    let rows = SettledRows::default();
+    let denied = OrderDenied::new(
+        TraderId::from("HELIX-001"),
+        StrategyId::from("S-001"),
+        InstrumentId::from(AUD),
+        ClientOrderId::from("D3-L-E"),
+        Ustr::from("INITIAL_MARGIN_EXCEEDS_FREE_BALANCE: free=1 USD, margin=2 USD"),
+        nautilus_core::UUID4::new(),
+        UnixNanos::default(),
+        UnixNanos::default(),
+    );
 
-    let err = stop_worth(&instrument, Quantity::from(1), Decimal::from(10)).unwrap_err();
+    targets.on_order_denied(&probe, &denied, &rows);
 
-    assert!(err.to_string().contains("inverse"), "{err}");
+    let err = format!("{:#}", rows.take().unwrap_err());
+    assert!(
+        err.contains("D3-L-E") && err.contains("INITIAL_MARGIN_EXCEEDS_FREE_BALANCE"),
+        "{err}"
+    );
+}
+
+/// A dataset balance in EUR on gold, whose P&L is in USD: the reference
+/// stake is not sized on it, which is not converted, and the targets do not
+/// start.
+#[test]
+fn a_dataset_balance_in_another_currency_than_the_targets_pnl_is_refused_as_the_targets_start() {
+    let mut probe = Probe::holding(Some(gold()));
+    let venue = DatasetVenue {
+        balance: Money::from("100000 EUR"),
+        ..venue_of(commission())
+    };
+    let targets = Targets::new(lot(no_exits()), rule(), &quotes(), &venue).unwrap();
+
+    let err = format!("{:#}", targets.start(&mut probe).unwrap_err());
+
+    assert!(err.contains("EUR") && err.contains("balance"), "{err}");
 }
 
 /// A strategy registered without a node, as the handle's tests do.
@@ -1044,18 +1125,18 @@ fn inverse() -> InstrumentAny {
     InstrumentAny::CryptoPerpetual(btcusd_bybit())
 }
 
-/// `spec`, of `quantity` of `instrument_id`.
-fn trading(spec: Target, instrument_id: InstrumentId, quantity: u64) -> TargetConfig {
+/// `spec` on `instrument_id` at the tests' reference stake.
+fn trading(spec: Target, instrument_id: InstrumentId) -> TargetConfig {
     TargetConfig::builder()
         .instrument_id(instrument_id)
-        .quantity(Quantity::from(quantity))
+        .risk(risk())
         .spec(spec)
         .build()
 }
 
-/// `spec` of 1000 AUD/USD.
+/// `spec` on AUD/USD.
 fn on_aud(spec: Target) -> TargetConfig {
-    trading(spec, InstrumentId::from(AUD), 1000)
+    trading(spec, InstrumentId::from(AUD))
 }
 
 /// A target closed after an hour, with no exits, its unit measured in the ATR
@@ -1095,12 +1176,17 @@ fn reading_its_quotes(config: &TargetConfig) -> DataRequirements {
 }
 
 fn setter(config: &TargetConfig) -> TargetSetter {
-    TargetSetter::new(config, rule(), &reading_its_quotes(config), commission()).unwrap()
+    setter_on(config, &venue_of(commission()))
+}
+
+/// The setter of `config` of the dataset runs on `venue`.
+fn setter_on(config: &TargetConfig, venue: &DatasetVenue) -> TargetSetter {
+    TargetSetter::new(config, rule(), &reading_its_quotes(config), venue).unwrap()
 }
 
 fn targets(config: TargetConfig) -> Rc<Targets> {
     let requirements = reading_its_quotes(&config);
-    Targets::new(config, rule(), &requirements, commission()).unwrap()
+    Targets::new(config, rule(), &requirements, &venue_of(commission())).unwrap()
 }
 
 /// `setter` started on `probe` and handed `bar`, a bar of its ATR's, if it
@@ -1137,11 +1223,13 @@ fn decision() -> FeatureRow {
     }
 }
 
-/// From the mid of 0.70000, 10 bps is 0.0007, and on 1000 AUD/USD that stop
-/// is worth 0.70 USD; 20 bps is 0.0014. The long's stop is below the price, its
-/// take profit above; the short's the reverse.
+/// From the mid of 0.70000, 10 bps is 0.0007, its one R; 20 bps is 0.0014.
+/// The long's stop is below the price, its take profit above; the short's the
+/// reverse. At the reference stake, 300 USD, over 0.0007 on one AUD/USD, each
+/// side is 428,571.43 AUD/USD rounded down, 428,571, its stop worth 299.9997
+/// USD, the unit.
 #[test]
-fn a_bracket_is_set_on_each_side_with_the_worth_of_its_stop() {
+fn a_bracket_is_set_on_each_side_with_the_worth_of_its_stop_at_the_reference_stake() {
     let probe = Probe::holding(aud());
     probe.quoted(InstrumentId::from(AUD), "0.70000");
 
@@ -1162,15 +1250,17 @@ fn a_bracket_is_set_on_each_side_with_the_worth_of_its_stop() {
             stop_loss: Price::from("0.70070"),
         })
     );
-    for unit in [set.long.unit, set.short.unit] {
-        assert!((unit - 0.70).abs() < 1e-9, "{unit}");
+    for side in [&set.long, &set.short] {
+        assert_eq!(side.one_r, Decimal::new(70, 5));
+        assert_eq!(side.unit, Money::from_str_exact("299.9997 USD").unwrap());
     }
 }
 
-/// One ounce of gold at 4000.00/4000.01: the mid, 4000.005, is on a half tick,
-/// and exits a hundredth of a basis point from it, 0.004, are on the ticks
-/// either side, half a cent away. Each stop is worth 0.005 USD, under the
-/// currency's cents.
+/// Gold at 4000.00/4000.01: the mid, 4000.005, is on a half tick, and exits a
+/// hundredth of a basis point from it, 0.004, are on the ticks either side,
+/// half a cent away. The reference stake, 300 USD, over half a cent would buy
+/// 60,000 oz, which Nautilus' sizer caps at gold's maximum of 10,000: each
+/// stop is worth exactly 50 USD on them.
 #[test]
 fn a_stop_half_a_tick_from_a_mid_on_a_half_tick_is_worth_exactly_that() {
     let probe = Probe::holding(Some(gold()));
@@ -1183,26 +1273,36 @@ fn a_stop_half_a_tick_from_a_mid_on_a_half_tick_is_worth_exactly_that() {
 
     let set = setter(&of(exits)).at(&probe).unwrap().unwrap();
 
-    assert_eq!(set.long.unit, 0.005);
-    assert_eq!(set.short.unit, 0.005);
+    assert_eq!(set.long.unit, Money::from("50 USD"));
+    assert_eq!(set.short.unit, Money::from("50 USD"));
 }
 
-/// 10 AUD/USD at 0.70000/0.70001: 3 bps of the mid of 0.700005 is 0.00021, and
-/// the nearest ticks put each stop 0.000215 from the mid, outside the spread,
-/// worth 0.00215 USD. A trade losing 0.0043 USD on it realised -2R.
+/// AUD/USD at 0.70000/0.70001: 3 bps of the mid of 0.700005 is 0.00021, and
+/// the nearest ticks put each stop 0.000215 from the mid, outside the spread.
+/// On a dataset balance of 1 USD the reference stake, 0.003 USD, buys 13.95
+/// AUD/USD over it, rounded down 13, on which one R is worth 0.002795 USD.
+/// A trade losing 0.00559 USD on it realised -2R.
 #[test]
 fn a_trade_on_a_stop_worth_under_half_a_cent_realises_over_its_exact_worth() {
     let probe = Probe::holding(aud());
     let aud = InstrumentId::from(AUD);
     probe.quoted_at(aud, "0.70000", "0.70001");
+    let venue = DatasetVenue {
+        balance: Money::from("1 USD"),
+        ..venue_of(commission())
+    };
 
-    let set = setter(&trading(in_bps(20, 3), aud, 10))
+    let set = setter_on(&trading(in_bps(20, 3), aud), &venue)
         .at(&probe)
         .unwrap()
         .unwrap();
 
+    assert_eq!(
+        set.long.unit,
+        Money::from_str_exact("0.002795 USD").unwrap()
+    );
     let outcome = |unit| Outcome {
-        pnl: Money::from_str_exact("-0.0043 USD").unwrap(),
+        pnl: Money::from_str_exact("-0.00559 USD").unwrap(),
         commission: Money::from("0 USD"),
         exit: Exit::Stop,
         unit,
@@ -1251,23 +1351,29 @@ fn swap() -> InstrumentAny {
     )
 }
 
-/// Worked by hand. With no exits, the unit is the worth of the target's ATR
-/// as a stop's distance: 3 contracts of BTC-USDT-SWAP, its ATR of one bar
-/// from 99,925 to 100,075, 150, on 0.03 BTC through the multiplier of 0.01 a
-/// contract, 4.5 USDT on either side. The trade is a market entry from the
-/// mid of 99,999.9/100,000.1, closed after its hour.
+/// Worked by hand. With no exits, one R is the target's ATR: of one bar of
+/// BTC-USDT-SWAP from 99,925 to 100,075, 150. The reference stake, 0.3% of
+/// 100,000 USDT, 300 USDT, over 150 on a contract of 0.01 BTC, 1.5 USDT, buys
+/// 200 contracts; one R is worth 300 USDT on them, on either side. The trade
+/// is a market entry from the mid of 99,999.9/100,000.1, closed after its
+/// hour.
 #[test]
 fn a_time_only_target_is_set_with_the_worth_of_its_atr_through_the_multiplier() {
     let mut probe = Probe::holding(Some(swap()));
     probe.quoted_at(InstrumentId::from(SWAP), "99999.9", "100000.1");
-    let config = trading(no_exits(), InstrumentId::from(SWAP), 3);
+    let config = trading(no_exits(), InstrumentId::from(SWAP));
     let bar = quarter(SWAP, ["100000.0", "100075.0", "99925.0", "100000.0"]);
-    let setter = warmed(setter(&config), &mut probe, &bar);
+    let venue = DatasetVenue {
+        balance: Money::from("100000 USDT"),
+        ..venue_of(Commission::Rate(Decimal::ZERO))
+    };
+    let setter = warmed(setter_on(&config, &venue), &mut probe, &bar);
 
     let set = setter.at(&probe).unwrap().unwrap();
 
     for side in [&set.long, &set.short] {
-        assert_eq!(side.unit, 4.5);
+        assert_eq!(side.one_r, Decimal::from(150));
+        assert_eq!(side.unit, Money::from("300 USDT"));
         assert_eq!(side.bracket, None);
         assert_eq!(side.reference, Price::from("100000.00"));
         assert_eq!(side.time_limit, SignedDuration::from_hours(1));
@@ -1377,8 +1483,14 @@ fn wide_gold_bar() -> Bar {
 fn a_setter_sharing_a_width_sets_its_exits_at_the_width_read_then() {
     let config = symmetric();
     let width = config.width(rule(), &quotes()).unwrap();
-    let setter =
-        TargetSetter::sharing(&config, rule(), &quotes(), commission(), Some(&width)).unwrap();
+    let setter = TargetSetter::sharing(
+        &config,
+        rule(),
+        &quotes(),
+        &venue_of(commission()),
+        Some(&width),
+    )
+    .unwrap();
     let mut probe = Probe::holding(Some(gold()));
     probe.quoted_at(InstrumentId::from(GOLD), "3999.99", "4000.01");
     setter.start(&mut probe);
@@ -1416,9 +1528,14 @@ fn a_setter_refuses_to_share_the_atr_of_another_width() {
 
     for other in [fourteen, in_bps(10, 10)] {
         let width = of(other).width(rule(), &quotes()).unwrap();
-        let err =
-            TargetSetter::sharing(&symmetric(), rule(), &quotes(), commission(), Some(&width))
-                .unwrap_err();
+        let err = TargetSetter::sharing(
+            &symmetric(),
+            rule(),
+            &quotes(),
+            &venue_of(commission()),
+            Some(&width),
+        )
+        .unwrap_err();
 
         assert!(err.to_string().contains("ATR"), "{other:?}: {err}");
     }
@@ -1501,7 +1618,7 @@ fn a_target_on_an_inverse_instrument_is_refused_as_the_targets_start() {
     let mut probe = Probe::holding(Some(instrument.clone()));
 
     for spec in [in_bps(20, 10), no_exits()] {
-        let target = trading(spec, instrument.id(), 1);
+        let target = trading(spec, instrument.id());
 
         let err = format!("{:#}", targets(target).start(&mut probe).unwrap_err());
 
@@ -1533,7 +1650,7 @@ fn a_stop_with_no_worth_at_a_decision_is_an_error_before_any_order() {
     let instrument = inverse();
     let mut probe = Probe::holding(Some(instrument.clone()));
     probe.quoted(instrument.id(), "100000.00000");
-    let targets = targets(trading(in_bps(20, 10), instrument.id(), 1));
+    let targets = targets(trading(in_bps(20, 10), instrument.id()));
 
     let err = targets.open(&mut probe, decision()).unwrap_err();
 
@@ -1566,12 +1683,10 @@ fn a_time_only_target_missing_its_instrument_errs_before_any_order() {
     assert_eq!(probe.orders(), ["D0-L-E", "D0-S-E"]);
 }
 
-/// A lot of gold, 100 oz, of `spec`.
+/// Gold on `spec` at the reference stake, 300 USD: a lot, 100 oz, on a
+/// stop of 3.00, 150 oz on an ATR of 2.
 fn lot(spec: Target) -> TargetConfig {
-    TargetConfig {
-        quantity: Quantity::from(100),
-        ..of(spec)
-    }
+    of(spec)
 }
 
 /// A take profit 15 bps and a stop 7.5 bps of the decision's price away.
@@ -1596,7 +1711,7 @@ fn per_ounce() -> Commission {
 /// The payoff features of each side of a lot of `spec` at `commission`, on
 /// `probe`, its ATR, if any, of the bar `gold_bar` alone: a true range of 2.
 fn payoff_on(probe: &mut Probe, spec: Target, commission: Commission) -> PerSide<Vec<f64>> {
-    let setter = TargetSetter::new(&lot(spec), rule(), &quotes(), commission).unwrap();
+    let setter = TargetSetter::new(&lot(spec), rule(), &quotes(), &venue_of(commission)).unwrap();
     warmed(setter, probe, &gold_bar())
         .at(probe)
         .unwrap()
@@ -1692,24 +1807,26 @@ fn a_brackets_payoff_at_a_commission_per_quantity_is_worked_out_by_hand_on_each_
     );
 }
 
-/// The quote of the bracket's tests and no exits: the unit is the worth of
-/// the ATR of 2, 200 USD on a lot, and the entry cost the spread's 20 USD and
-/// the entry's commission over it: at IC's rate 12.01 at the long's ask and
-/// 12.00 at the short's bid; 3 an order; 3.50 a lot.
+/// The quote of the bracket's tests and no exits: the reference stake, 300
+/// USD, over the ATR of 2 buys 150 oz, the unit the ATR's worth on them, 300
+/// USD, and the entry cost the spread's 0.20 on them, 30 USD, and the
+/// entry's commission over it: at IC's rate, 0.003 of 150 oz's price to the
+/// cent, 18.01 at the long's ask, 4001.70 (18.00765), and at the short's
+/// bid, 4001.50 (18.00675); 3 an order; 5.25 at 0.035 an ounce.
 #[test]
 fn a_time_only_targets_entry_cost_is_over_the_worth_of_its_atr_on_each_side() {
     for (commission, long, short) in [
-        (commission(), 32.01, 32.00),
-        (per_order(), 23.0, 23.0),
-        (per_ounce(), 23.5, 23.5),
+        (commission(), 48.01, 48.01),
+        (per_order(), 33.0, 33.0),
+        (per_ounce(), 35.25, 35.25),
     ] {
         let payoff = payoff_quoted(no_exits(), commission);
 
         assert_near(
             &payoff,
             &PerSide {
-                long: vec![long / 200.0],
-                short: vec![short / 200.0],
+                long: vec![long / 300.0],
+                short: vec![short / 300.0],
             },
         );
     }
@@ -1751,7 +1868,7 @@ fn a_bracket_on_trades_alone_reads_its_payoff_from_the_last_trade_with_no_spread
 
 /// A bar of gold closing at 4001.60 and no quote: a time-only target's sides
 /// enter at the close, no spread, the entry costing its 3 USD alone, over the
-/// worth of the ATR of 2 on a lot, 200 USD.
+/// worth of the ATR of 2 on the 150 oz the reference stake buys, 300 USD.
 #[test]
 fn a_time_only_target_on_bars_alone_reads_its_payoff_from_the_last_close_with_no_spread() {
     let mut probe = Probe::holding(Some(gold()));
@@ -1769,8 +1886,8 @@ fn a_time_only_target_on_bars_alone_reads_its_payoff_from_the_last_close_with_no
     assert_near(
         &payoff,
         &PerSide {
-            long: vec![3.0 / 200.0],
-            short: vec![3.0 / 200.0],
+            long: vec![3.0 / 300.0],
+            short: vec![3.0 / 300.0],
         },
     );
 }
@@ -1784,7 +1901,7 @@ fn in_euros() -> Commission {
 #[test]
 fn a_commission_in_another_currency_than_the_targets_pnl_is_refused_as_the_targets_start() {
     let mut probe = Probe::holding(Some(gold()));
-    let targets = Targets::new(lot(no_exits()), rule(), &quotes(), in_euros()).unwrap();
+    let targets = Targets::new(lot(no_exits()), rule(), &quotes(), &venue_of(in_euros())).unwrap();
 
     let err = targets.start(&mut probe).unwrap_err();
 
@@ -1799,7 +1916,8 @@ fn a_commission_in_another_currency_than_the_targets_pnl_is_an_error_at_a_decisi
     probe.quoted_at(InstrumentId::from(GOLD), "4001.50", "4001.70");
 
     for spec in [wide_take_profit(), no_exits()] {
-        let setter = TargetSetter::new(&lot(spec), rule(), &quotes(), in_euros()).unwrap();
+        let setter =
+            TargetSetter::new(&lot(spec), rule(), &quotes(), &venue_of(in_euros())).unwrap();
         let err = warmed(setter, &mut probe, &gold_bar())
             .at(&probe)
             .unwrap_err();

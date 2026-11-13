@@ -566,7 +566,10 @@ impl Training {
         let trades: Vec<_> = held_out
             .iter()
             .zip(&expected)
-            .map(|(row, &expected)| (margin.takes(expected), row.trade))
+            .map(|(row, &expected)| {
+                let taken = R::finite(expected).is_some_and(|expected| margin.takes(expected));
+                (taken, row.trade)
+            })
             .collect();
         let holdout = Holdout {
             earnings: Earnings::of(&trades),
@@ -904,10 +907,7 @@ mod tests {
     use std::{path::Path, rc::Rc};
 
     use jiff::SignedDuration;
-    use nautilus_model::{
-        identifiers::InstrumentId,
-        types::{Money, Quantity},
-    };
+    use nautilus_model::{identifiers::InstrumentId, types::Money};
     use rust_decimal::Decimal;
 
     use super::*;
@@ -964,7 +964,7 @@ mod tests {
             .target(
                 TargetConfig::builder()
                     .instrument_id(InstrumentId::from(AUD))
-                    .quantity(Quantity::from(1))
+                    .risk("0.5%".parse().unwrap())
                     .spec(
                         Target::builder()
                             .bracket(BracketSpec {
@@ -1078,7 +1078,7 @@ mod tests {
                 pnl: Money::from(pnl),
                 commission: Money::from("0.2 USD"),
                 exit,
-                unit: 2.0,
+                unit: Money::from("2 USD"),
             }
         };
         TargetRow {
@@ -1155,9 +1155,9 @@ mod tests {
         ];
         let outcomes = &mut rows[4].outcomes;
         for outcome in [&mut outcomes.long, &mut outcomes.short] {
-            outcome.unit = 4.0;
+            outcome.unit = Money::from("4 USD");
         }
-        rows[7].outcomes.short.unit = 4.0;
+        rows[7].outcomes.short.unit = Money::from("4 USD");
         rows
     }
 
@@ -1394,7 +1394,7 @@ mod tests {
     fn short_showing_no_skill() -> Vec<TargetRow> {
         let mut rows = rows();
         rows[7] = row_of("2026-01-06T19:00:00Z", vec![0.8], (true, false), hour());
-        rows[7].outcomes.short.unit = 4.0;
+        rows[7].outcomes.short.unit = Money::from("4 USD");
         rows[8] = row_of("2026-01-06T20:00:00Z", vec![0.3], (false, true), hour());
         rows
     }
@@ -1573,7 +1573,7 @@ mod tests {
         let training = training(dir.path(), config());
         let mut rows = rows();
         rows[7] = row_of("2026-01-06T19:00:00Z", vec![0.8], (false, false), hour());
-        rows[7].outcomes.short.unit = 4.0;
+        rows[7].outcomes.short.unit = Money::from("4 USD");
         rows[8] = row_of("2026-01-06T20:00:00Z", vec![0.3], (true, true), hour());
 
         let trained = training.train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(rows));
@@ -1610,7 +1610,7 @@ mod tests {
             publish_baseline(&store(dir.path(), &config(), side), side, sixth, 0.0);
         }
         let mut rows = rows();
-        rows[1].outcomes.short.unit = 0.0;
+        rows[1].outcomes.short.unit = Money::from("0 USD");
 
         let trained =
             training(dir.path(), config()).train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(rows));
@@ -2575,7 +2575,7 @@ mod tests {
     fn at_their_time(rows: Vec<TargetRow>) -> Vec<TargetRow> {
         let at_its_time = |outcome| TargetOutcome {
             exit: Exit::Time,
-            unit: 1.0,
+            unit: Money::from("1 USD"),
             ..outcome
         };
         rows.into_iter()
@@ -2643,7 +2643,7 @@ mod tests {
         let rows: Vec<DatasetRow> = meta_rows()
             .into_iter()
             .map(|mut row| {
-                row.outcomes.short.unit = 4.0;
+                row.outcomes.short.unit = Money::from("4 USD");
                 DatasetRow::of(&row)
             })
             .collect();

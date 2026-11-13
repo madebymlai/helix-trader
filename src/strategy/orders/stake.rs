@@ -5,7 +5,7 @@ use std::{fmt, str::FromStr};
 
 use anyhow::ensure;
 use rust_decimal::Decimal;
-use serde::{Deserialize, Deserializer, de};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 /// The fraction of equity a trade risks at the config's stake, `[trade]
 /// risk`, written as a percentage, `"0.5%"`. The config's load holds it
@@ -45,6 +45,13 @@ impl fmt::Display for Risk {
 impl<'de> Deserialize<'de> for Risk {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         deserializer.deserialize_str(Percentage)
+    }
+}
+
+/// As it is written, `"0.5%"`, which reads back to it.
+impl Serialize for Risk {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
     }
 }
 
@@ -172,6 +179,14 @@ mod tests {
                 .unwrap_err();
             assert!(err.to_string().contains("positive"), "{multiple}: {err}");
         }
+    }
+
+    /// A target's manifest holds its risk as the config writes it.
+    #[test]
+    fn a_risk_serializes_as_written_and_reads_back() {
+        let json = serde_json::to_string(&risk("0.25%")).unwrap();
+        assert_eq!(json, "\"0.25%\"");
+        assert_eq!(serde_json::from_str::<Risk>(&json).unwrap(), risk("0.25%"));
     }
 
     #[test]

@@ -19,6 +19,7 @@ use helix_trader::{
     catalog::fill_catalog,
     model::{
         config::ModelConfig,
+        dataset::DatasetVenue,
         features::FeatureSet,
         handle::{Mode, SettledRows},
         targets::TargetConfig,
@@ -183,7 +184,11 @@ fn a_decision_on_hour_bars_reads_the_bar_closing_on_its_grid() {
         &requirements,
         Mode::Dataset {
             rows: SettledRows::default(),
-            commission: backtest.commission,
+            venue: DatasetVenue {
+                commission: backtest.commission,
+                balance: backtest.balance,
+                leverage: backtest.leverage,
+            },
         },
     );
     backtest.bar_types = requirements.bar_types.clone();

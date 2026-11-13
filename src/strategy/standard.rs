@@ -193,7 +193,7 @@ impl<P: Part> StandardConfig<P> {
             errors.collect(
                 model
                     .clone()
-                    .trading(traded)
+                    .trading(traded, self.trade.risk)
                     .validate(&self.data_requirements()),
             );
         }
@@ -212,8 +212,8 @@ impl<P: Part> StandardConfig<P> {
             .expect("a validated config has a strategy id")
     }
 
-    /// The model, its target trading the instrument of `[trade]`, of its
-    /// size.
+    /// The model, its target trading the instrument of `[trade]` at its
+    /// risk, the reference stake.
     ///
     /// # Panics
     ///
@@ -225,7 +225,7 @@ impl<P: Part> StandardConfig<P> {
         let (Some(model), [traded]) = (&self.model, self.trade.instruments.as_slice()) else {
             panic!("a validated config of a strategy trading on a model has it, of one instrument");
         };
-        model.clone().trading(traded)
+        model.clone().trading(traded, self.trade.risk)
     }
 
     /// The config's stake: `[trade] risk`, multiple 1. A strategy stakes
@@ -523,9 +523,9 @@ pub struct CompositeSource {
 #[serde(deny_unknown_fields)]
 pub struct TradeConfig {
     /// The instruments traded, each with its size: as many as the
-    /// strategy trades (`Part::INSTRUMENTS`). The size is the model
-    /// strategies' targets' alone; a trade sent at a stake is sized from
-    /// `risk`.
+    /// strategy trades (`Part::INSTRUMENTS`). No trade reads the size:
+    /// every trade is sized from `risk`, a model's targets at the
+    /// reference stake.
     pub instruments: Vec<TradedInstrument>,
     /// The fraction of equity a trade risks at the config's stake
     /// (`StandardConfig::stake`), `"0.5%"`.
@@ -606,8 +606,8 @@ impl TradeConfig {
     }
 }
 
-/// An instrument traded and the size of each of a model strategy's
-/// trades on it.
+/// An instrument traded, and a size no trade reads: every trade is sized
+/// at a stake.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TradedInstrument {
@@ -1472,13 +1472,13 @@ mod tests {
             assert!(err.contains("`model`"), "{err}");
         }
 
-        /// The target trades what `[trade]` names: its one instrument, of
-        /// its size.
+        /// The target trades what `[trade]` names: its one instrument, at
+        /// its risk, the reference stake.
         #[test]
-        fn the_target_trades_the_instrument_and_size_of_the_trade_table() {
+        fn the_target_trades_the_instrument_and_risk_of_the_trade_table() {
             let target = load(TOML).unwrap().model().target;
             assert_eq!(target.instrument_id, InstrumentId::from("XAUUSD.ICMARKETS"));
-            assert_eq!(target.quantity, Quantity::from(2));
+            assert_eq!(target.risk, "0.5%".parse().unwrap());
         }
 
         #[test]

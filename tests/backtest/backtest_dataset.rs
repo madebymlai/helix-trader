@@ -305,7 +305,9 @@ fn a_closed_market_stores_no_row() {
 /// The probe's config with the bracket 1.5 ATRs away on both sides,
 /// closed after 45 minutes, inside the hourly cadence, the ATR of its
 /// default 14 bars of that cadence, which it declares nowhere: the targets
-/// subscribe to IC's gold's hourly mids.
+/// subscribe to IC's gold's hourly mids. Its reference stake, 100 USD of
+/// the dataset balance of 10M, buys whole ounces on the walk's stops of
+/// some dollars, which the probe's of 4 USD would not.
 fn atr_config() -> ModelConfig {
     let bracket = Target::builder()
         .bracket(BracketSpec {
@@ -318,6 +320,7 @@ fn atr_config() -> ModelConfig {
     ModelConfig {
         target: TargetConfig {
             spec: bracket,
+            risk: "0.001%".parse().unwrap(),
             ..target()
         },
         ..config()

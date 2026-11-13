@@ -9,7 +9,11 @@ mod costs;
 mod node;
 mod report;
 
-use std::{collections::BTreeSet, fmt::Debug, path::PathBuf};
+use std::{
+    collections::BTreeSet,
+    fmt::Debug,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, ensure};
 use jiff::{SignedDuration, Timestamp};
@@ -118,43 +122,18 @@ impl Backtest {
         node::run_dataset(config, node::custom_data(self)?, strategy)
     }
 
-    /// Refuses the run unless its balance is in the P&L currency
-    /// (`Instrument::cost_currency`) of each instrument of `traded`, those
-    /// the strategy trades, as the catalog defines them: a trade sent at a
-    /// stake is sized on the equity in its P&L currency alone, which is not
-    /// converted (`strategy::orders::Trade::send`), so on a balance in
-    /// another it would send nothing.
+    /// Refuses the run unless its balance is in the P&L currency of each
+    /// instrument of `traded`, those the strategy trades
+    /// (`refuse_balance`): a trade sent at a stake is sized on the equity in
+    /// its P&L currency alone, which is not converted
+    /// (`strategy::orders::Trade::send`), so on a balance in another it
+    /// would send nothing.
     ///
     /// # Errors
     ///
-    /// Returns an error if an instrument of `traded` is not in the catalog
-    /// or its P&L is in another currency than the balance.
+    /// As `refuse_balance`.
     pub fn refuse_balance(&self, traded: &[InstrumentId]) -> anyhow::Result<()> {
-        let catalog = ParquetDataCatalog::new(&self.catalog, None, None, None, None);
-        let ids: Vec<String> = traded.iter().map(ToString::to_string).collect();
-        let defined = catalog
-            .instruments(Some(&ids), None, None)
-            .with_context(|| format!("reading {} from the catalog", ids.join(", ")))?;
-        for &id in traded {
-            let instrument = defined
-                .iter()
-                .find(|instrument| instrument.id() == id)
-                .with_context(|| {
-                    format!(
-                        "the traded instrument {id} is not in the catalog {}",
-                        self.catalog.display()
-                    )
-                })?;
-            let pnl = instrument.cost_currency();
-            ensure!(
-                pnl == self.balance.currency,
-                "the balance {} is in {}, the P&L of {id}, which the strategy trades, in {pnl}: \
-                 a trade is sized on the equity in its P&L currency, which is not converted",
-                self.balance,
-                self.balance.currency
-            );
-        }
-        Ok(())
+        refuse_balance(&self.catalog, self.balance, traded)
     }
 
     /// The continuous bars of the bar types on roots over the run,
@@ -288,6 +267,45 @@ impl Backtest {
                 .chain(funding),
         ))
     }
+}
+
+/// Refuses `balance` unless it is in the P&L currency
+/// (`Instrument::cost_currency`) of each instrument of `traded`, as the
+/// catalog at `catalog` defines them: the equity a trade is sized on, by
+/// Nautilus' fixed-risk sizer, which reads it as given, is not converted.
+///
+/// # Errors
+///
+/// Returns an error if an instrument of `traded` is not in the catalog or
+/// its P&L is in another currency than the balance.
+pub fn refuse_balance(
+    catalog: &Path,
+    balance: Money,
+    traded: &[InstrumentId],
+) -> anyhow::Result<()> {
+    let ids: Vec<String> = traded.iter().map(ToString::to_string).collect();
+    let defined = ParquetDataCatalog::new(catalog, None, None, None, None)
+        .instruments(Some(&ids), None, None)
+        .with_context(|| format!("reading {} from the catalog", ids.join(", ")))?;
+    for &id in traded {
+        let instrument = defined
+            .iter()
+            .find(|instrument| instrument.id() == id)
+            .with_context(|| {
+                format!(
+                    "the traded instrument {id} is not in the catalog {}",
+                    catalog.display()
+                )
+            })?;
+        let pnl = instrument.cost_currency();
+        ensure!(
+            pnl == balance.currency,
+            "the balance {balance} is in {}, the P&L of {id}, which the strategy trades, in \
+             {pnl}: a trade is sized on the equity in its P&L currency, which is not converted",
+            balance.currency
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]

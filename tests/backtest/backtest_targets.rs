@@ -15,8 +15,8 @@
 //! from the quotes, from the trades alone and from minute bars alone, a
 //! time-only target's unit the worth of such an ATR on quotes and on minute
 //! bars, no order before the ATR is initialized; deciding on LAST bars the run
-//! builds from the trades alone is deciding on the trades. Orders the
-//! risk engine denies leave their decisions unsettled, without a row. A
+//! builds from the trades alone is deciding on the trades. An order the
+//! risk engine denies fails the run with its reason and stops it. A
 //! stop from a mid on a half tick settles at its exact worth, and one in the
 //! market the venue rejects, without a row. The probe opens its targets at
 //! its run's commission: at one per quantity, a backtest of it charges each
@@ -36,14 +36,19 @@ use crate::common::{
 use helix_trader::{
     backtest::{Backtest, Commission},
     model::{
+        dataset::DatasetVenue,
         decide::{self, DecisionRule, FeatureRow},
         features::FeatureSet,
+        handle::SettledRows,
         targets::{
             BracketSpec, DEFAULT_ATR, Distance, Exit, Outcome, Outcomes, Target, TargetConfig,
             TargetRow, Targets,
         },
     },
-    strategy::{AtrArgs, DataRequirements, Declared, TickSeries, orders},
+    strategy::{
+        AtrArgs, DataRequirements, Declared, TickSeries,
+        orders::{self, Risk},
+    },
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
@@ -135,6 +140,8 @@ struct Record {
     commissions: Vec<Money>,
     /// The client order id of each of its orders the venue rejected, in order.
     rejected: Vec<String>,
+    /// The denial that failed the run, if any (`Targets::on_order_denied`).
+    denial: Option<String>,
 }
 
 /// Decides every hour on its one feature and opens the targets of each
@@ -146,12 +153,15 @@ struct TargetProbe {
     every: SignedDuration,
     features: Rc<FeatureSet>,
     targets: Rc<Targets>,
+    /// What the targets fail the run with: a denial.
+    settled: SettledRows,
     record: Rc<RefCell<Record>>,
 }
 
 impl TargetProbe {
     /// The probe deciding every hour on `source`, opening `targets` at the
-    /// commission of `backtest`, the run it runs in.
+    /// commission and the reference stake of the balance of `backtest`, the
+    /// run it runs in.
     fn new(
         source: Source,
         targets: TargetConfig,
@@ -197,9 +207,14 @@ impl TargetProbe {
                 targets,
                 DecisionRule::Every(every),
                 &source.requirements(),
-                backtest.commission,
+                &DatasetVenue {
+                    commission: backtest.commission,
+                    balance: backtest.balance,
+                    leverage: backtest.leverage,
+                },
             )
             .unwrap(),
+            settled: SettledRows::default(),
             record: Rc::clone(&record),
         };
         (probe, record)
@@ -219,7 +234,8 @@ nautilus_strategy!(TargetProbe, {
     }
 
     fn on_order_denied(&mut self, event: OrderDenied) {
-        self.targets.on_order_denied(&event);
+        let settled = self.settled.clone();
+        Rc::clone(&self.targets).on_order_denied(self, &event, &settled);
     }
 
     fn on_order_rejected(&mut self, event: OrderRejected) {
@@ -281,28 +297,41 @@ impl DataActor for TargetProbe {
     }
 
     fn on_stop(&mut self) -> anyhow::Result<()> {
-        self.record.borrow_mut().closed_orders = self
+        let mut record = self.record.borrow_mut();
+        record.closed_orders = self
             .cache()
             .orders_closed(None, None, None, None, None)
             .len();
+        record.denial = self.settled.take().err().map(|e| format!("{e:#}"));
+        drop(record);
         self.targets.on_stop();
         Ok(())
     }
 }
 
-/// `spec`, of `quantity` of `instrument_id`.
-fn trading(spec: Target, instrument_id: &str, quantity: &str) -> TargetConfig {
+/// The risk at which the reference stake is `money` of the runs' balance of
+/// ten million, USD or USDT: a target whose one R `money` is worth on one
+/// unit, and less than on two, trades one unit, as the tests work out.
+fn risking(money: &str) -> Risk {
+    let fraction = Decimal::from_str_exact(money).unwrap() / Decimal::from(10_000_000);
+    format!("{}%", (fraction * Decimal::ONE_HUNDRED).normalize())
+        .parse()
+        .unwrap()
+}
+
+/// `spec` on `instrument_id` at `risk`.
+fn trading(spec: Target, instrument_id: &str, risk: Risk) -> TargetConfig {
     TargetConfig::builder()
         .instrument_id(InstrumentId::from(instrument_id))
-        .quantity(Quantity::from(quantity))
+        .risk(risk)
         .spec(spec)
         .build()
 }
 
 /// A bracket `bps` basis points of the decision's price away on both
-/// sides, closed 45 minutes after its decision, of `quantity` of
-/// `instrument_id`.
-fn bracket(instrument_id: &str, quantity: &str, bps: Decimal) -> TargetConfig {
+/// sides, closed 45 minutes after its decision, on `instrument_id` at
+/// `risk`.
+fn bracket(instrument_id: &str, risk: Risk, bps: Decimal) -> TargetConfig {
     let spec = Target::builder()
         .bracket(BracketSpec {
             take_profit: Distance::BasisPoints(bps),
@@ -311,13 +340,13 @@ fn bracket(instrument_id: &str, quantity: &str, bps: Decimal) -> TargetConfig {
         })
         .limit(SignedDuration::from_mins(45))
         .build();
-    trading(spec, instrument_id, quantity)
+    trading(spec, instrument_id, risk)
 }
 
-/// A trade with no exits, closed 30 minutes after its decision, of
-/// `quantity` of `instrument_id`, its unit the worth of the average true
-/// range of 2 hourly bars, the cadence's, which the targets subscribe to.
-fn time_only(instrument_id: &str, quantity: &str) -> TargetConfig {
+/// A trade with no exits, closed 30 minutes after its decision, on
+/// `instrument_id` at `risk`, its one R the average true range of 2 hourly
+/// bars, the cadence's, which the targets subscribe to.
+fn time_only(instrument_id: &str, risk: Risk) -> TargetConfig {
     let spec = Target::builder()
         .limit(SignedDuration::from_mins(30))
         .atr(AtrArgs {
@@ -325,7 +354,7 @@ fn time_only(instrument_id: &str, quantity: &str) -> TargetConfig {
             ..DEFAULT_ATR
         })
         .build();
-    trading(spec, instrument_id, quantity)
+    trading(spec, instrument_id, risk)
 }
 
 /// The decision at `hh_mm` and `features`: it fires 10 ms after its time.
@@ -342,11 +371,12 @@ fn decision(at: Timestamp, features: f64) -> FeatureRow {
 /// The outcome of a position closed by `exit` with `pnl`, net of
 /// `commission`, of a unit of 1 until `of_unit` gives it its target's.
 fn outcome(pnl: &str, commission: &str, exit: Exit) -> Outcome {
+    let pnl = Money::from(pnl);
     Outcome {
-        pnl: Money::from(pnl),
+        pnl,
         commission: Money::from(commission),
         exit,
-        unit: 1.0,
+        unit: Money::new(1.0, pnl.currency),
     }
 }
 
@@ -354,12 +384,22 @@ fn outcomes(long: Outcome, short: Outcome) -> Outcomes {
     Outcomes { long, short }
 }
 
-/// The outcomes `long` and `short`, each side's unit worth `unit`: a
-/// bracket's stop's worth, a time-only target's ATR's.
+/// The outcomes `long` and `short`, each side's unit worth `unit` in its
+/// P&L's currency: a bracket's stop's worth, a time-only target's ATR's.
 fn of_unit(long: Outcome, short: Outcome, unit: f64) -> Outcomes {
+    let unit = |outcome: Outcome| {
+        let unit = Decimal::try_from(unit).unwrap();
+        Money::from_decimal_native(unit, outcome.pnl.currency).unwrap()
+    };
     Outcomes {
-        long: Outcome { unit, ..long },
-        short: Outcome { unit, ..short },
+        long: Outcome {
+            unit: unit(long),
+            ..long
+        },
+        short: Outcome {
+            unit: unit(short),
+            ..short
+        },
     }
 }
 
@@ -467,7 +507,7 @@ fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
     let backtest = gold_backtest(catalog.path().to_path_buf());
     let (probe, record) = TargetProbe::new(
         source,
-        bracket(ic::INSTRUMENT_ID, "1", Decimal::new(75, 1)),
+        bracket(ic::INSTRUMENT_ID, risking("4"), Decimal::new(75, 1)),
         &backtest,
     );
 
@@ -518,7 +558,7 @@ fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
     let side = [2.66 / 3.0, 3.34 / 3.0, 0.32 / 3.0];
     assert_payoff(&record.rows, &side, &side);
     let take_profit = record.rows[1].outcomes.long;
-    assert!((take_profit.pnl.as_f64() / take_profit.unit - side[0]).abs() < 1e-12);
+    assert!((take_profit.pnl.as_f64() / take_profit.unit.as_f64() - side[0]).abs() < 1e-12);
 }
 
 /// Pepperstone's commission on gold, 3.5 USD per lot of 100 oz: 0.035 USD
@@ -541,7 +581,7 @@ fn hand_worked_run(commission: Commission, dataset: bool) -> Record {
         let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
         let (probe, record) = TargetProbe::new(
             source,
-            bracket(ic::INSTRUMENT_ID, "1", Decimal::new(75, 1)),
+            bracket(ic::INSTRUMENT_ID, risking("4"), Decimal::new(75, 1)),
             &backtest,
         );
         if dataset {
@@ -639,7 +679,7 @@ fn a_stop_from_a_mid_on_a_half_tick_settles_at_its_exact_worth() {
     let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
     let (probe, record) = TargetProbe::new(
         source,
-        bracket(ic::INSTRUMENT_ID, "1", Decimal::new(75, 1)),
+        bracket(ic::INSTRUMENT_ID, risking("4"), Decimal::new(75, 1)),
         &backtest,
     );
 
@@ -666,7 +706,7 @@ fn a_stop_half_a_tick_from_a_mid_on_a_half_tick_is_rejected_and_stores_no_row() 
     let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
     let (probe, record) = TargetProbe::new(
         source,
-        bracket(ic::INSTRUMENT_ID, "1", Decimal::new(1, 2)),
+        bracket(ic::INSTRUMENT_ID, risking("4"), Decimal::new(1, 2)),
         &backtest,
     );
 
@@ -695,7 +735,11 @@ fn time_only_targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
     let catalog = ic::catalog_of(hand_worked_quotes(), from, to);
     let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
     let backtest = gold_backtest(catalog.path().to_path_buf());
-    let (probe, record) = TargetProbe::new(source, time_only(ic::INSTRUMENT_ID, "1"), &backtest);
+    let (probe, record) = TargetProbe::new(
+        source,
+        time_only(ic::INSTRUMENT_ID, risking("3")),
+        &backtest,
+    );
 
     backtest.run_dataset(probe).unwrap();
 
@@ -748,7 +792,7 @@ fn a_targets_orders_are_named_by_their_decision_side_and_leg() {
     };
     let (probe, record) = TargetProbe::new(
         source,
-        bracket(ic::INSTRUMENT_ID, "1", Decimal::new(75, 1)),
+        bracket(ic::INSTRUMENT_ID, risking("4"), Decimal::new(75, 1)),
         &backtest,
     );
 
@@ -759,28 +803,42 @@ fn a_targets_orders_are_named_by_their_decision_side_and_leg() {
     assert_eq!(filled, ["D0-L-E", "D0-L-SL", "D0-S-E", "D0-S-TP"]);
 }
 
-/// Every order exceeds the instrument's largest, 10,000 oz: the risk
-/// engine denies each, and their decision, unsettled, has no row. The run
-/// ends at 09:20, before the 09:00 decision's time limit.
+/// Half of a balance of 100,000 USD, 50,000 USD, over a stop of 3.00 buys
+/// 16,666 oz, which Nautilus' sizer caps at gold's largest order, 10,000
+/// oz: 40M USD of gold, whose margin at IC's 1 / 30, 1.33M USD, the account
+/// cannot carry at leverage 1. The risk engine denies the first order,
+/// which fails the run with its reason and stops it there, at the 09:00
+/// decision, rather than leave the decision without its row: no row, and no
+/// later decision.
 #[test]
-fn denied_orders_leave_their_decisions_unsettled() {
+fn a_denied_order_fails_the_dataset_run_and_stops_it() {
     let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
     let catalog = ic::catalog_of(hand_worked_quotes(), from, to);
     let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
     let backtest = Backtest {
-        end: ic::at("09:20:00"),
+        balance: Money::from("100000 USD"),
         ..gold_backtest(catalog.path().to_path_buf())
     };
     let (probe, record) = TargetProbe::new(
         source,
-        bracket(ic::INSTRUMENT_ID, "20000", Decimal::new(75, 1)),
+        bracket(
+            ic::INSTRUMENT_ID,
+            "50%".parse().unwrap(),
+            Decimal::new(75, 1),
+        ),
         &backtest,
     );
 
     backtest.run_dataset(probe).unwrap();
 
-    assert_eq!(record.borrow().decisions, 1);
-    assert_eq!(record.borrow().rows, []);
+    let record = record.borrow();
+    let err = record.denial.clone().unwrap_or_default();
+    assert!(
+        err.contains("D0-L-E") && err.contains("INITIAL_MARGIN_EXCEEDS_FREE_BALANCE"),
+        "{err}"
+    );
+    assert_eq!(record.decisions, 1);
+    assert_eq!(record.rows, []);
 }
 
 // ------------------------------------------------------------------ bars
@@ -886,8 +944,11 @@ fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
     let catalog = btc_catalog(btc_bar);
     let source = Source::Bars(BarType::from(BTC_MINUTE));
     let backtest = btc_backtest(&catalog);
-    let (probe, record) =
-        TargetProbe::new(source, bracket(BTC, "1.00", Decimal::from(10)), &backtest);
+    let (probe, record) = TargetProbe::new(
+        source,
+        bracket(BTC, risking("1"), Decimal::from(10)),
+        &backtest,
+    );
 
     backtest.run_dataset(probe).unwrap();
 
@@ -960,7 +1021,7 @@ fn time_only_targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
     let catalog = btc_catalog(btc_bar);
     let source = Source::Bars(BarType::from(BTC_MINUTE));
     let backtest = btc_backtest(&catalog);
-    let (probe, record) = TargetProbe::new(source, time_only(BTC, "1.00"), &backtest);
+    let (probe, record) = TargetProbe::new(source, time_only(BTC, risking("1.5")), &backtest);
 
     backtest.run_dataset(probe).unwrap();
 
@@ -1045,8 +1106,8 @@ fn inverse_run() -> (tempfile::TempDir, Backtest) {
 #[test]
 fn a_target_on_an_inverse_instrument_fails_the_dataset_run() {
     for target in [
-        bracket(INVERSE, "1000", Decimal::from(10)),
-        time_only(INVERSE, "1000"),
+        bracket(INVERSE, risking("1"), Decimal::from(10)),
+        time_only(INVERSE, risking("1")),
     ] {
         let spec = target.spec;
         // One node per thread.
@@ -1114,7 +1175,7 @@ fn targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand() {
         limit: SignedDuration::from_mins(45),
         atr: None,
     };
-    let config = trading(spec, ic::INSTRUMENT_ID, "1");
+    let config = trading(spec, ic::INSTRUMENT_ID, risking("1"));
     let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
     let (probe, record) = TargetProbe::new(source, config, &backtest);
 
@@ -1173,7 +1234,7 @@ fn a_stop_rounding_onto_the_decisions_price_opens_no_target() {
         limit: SignedDuration::from_mins(45),
         atr: None,
     };
-    let config = trading(spec, ic::INSTRUMENT_ID, "1");
+    let config = trading(spec, ic::INSTRUMENT_ID, risking("1"));
     let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
     let (probe, record) = TargetProbe::new(source, config, &backtest);
 
@@ -1200,7 +1261,7 @@ fn btc_atr_targets() -> TargetConfig {
         limit: SignedDuration::from_mins(45),
         atr: None,
     };
-    trading(spec, BTC, "1.00")
+    trading(spec, BTC, risking("0.825"))
 }
 
 /// A trade of one contract of BTC-USDT-SWAP at `time` and `price`, of no
@@ -1439,7 +1500,7 @@ fn walk_run(
             })
             .limit(SignedDuration::from_hours(2))
             .build();
-        let config = trading(spec, ic::INSTRUMENT_ID, "1");
+        let config = trading(spec, ic::INSTRUMENT_ID, risking("4"));
         let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
         let (probe, record) =
             TargetProbe::every(source, config, SignedDuration::from_mins(15), &backtest);

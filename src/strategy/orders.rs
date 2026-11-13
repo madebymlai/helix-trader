@@ -6,8 +6,10 @@
 //! distance in price from the price its exits are set from to its stop.
 //! A strategy sends it at a `Stake`, the config's `Risk` times a multiple
 //! it picks: `Trade::send` sizes it with Nautilus' fixed-risk sizer to
-//! risk that fraction of the venue's equity over its one R, tags its
-//! entry with its R in money and the multiple (`entry_risk`), and sends,
+//! risk that fraction of the venue's equity over its one R
+//! (`Trade::size`; `Trade::send_at` at a fixed equity, a dataset run's
+//! balance), tags its entry with its R in money and the multiple
+//! (`entry_risk`), and sends,
 //! with a `Bracket`, a Nautilus bracket (`OrderFactory::bracket`: a market
 //! entry, a take-profit limit and a stop-market, one-updates-the-other,
 //! the legs reduce-only and the take profit post-only where the
@@ -103,31 +105,19 @@ const R_TAG: &str = "R:";
 /// multiple, followed by it, `MULTIPLE:2` (`entry_risk`).
 const MULTIPLE_TAG: &str = "MULTIPLE:";
 
-/// A trade to send: of `instrument_id` on `side`, ended by its exits, of
-/// the size `Size` sets: `Staked`, sized as it is sent at a stake from
-/// the distance one R spans (`Trade::new`), or `Fixed`, of a quantity
-/// given, the model path's alone until its trades are staked
-/// (`Trade::fixed`). Its fields are the module's: what it trades, its
-/// exits and its one R are set as it is built.
+/// A trade to send: of `instrument_id` on `side`, ended by its exits, one
+/// R of it spanning `one_r` in price from `reference`, the price its exits
+/// are set from, and sized as it is sent at a stake (`Trade::send`). Its
+/// fields are the module's: what it trades, its exits and its one R are
+/// set as it is built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Trade<Size = Staked> {
+pub struct Trade {
     instrument_id: InstrumentId,
     side: OrderSide,
-    exits: Exits,
-    size: Size,
-}
-
-/// How a trade sent at a stake is sized: one R of it spans `one_r` in
-/// price from `reference`, the price its exits are set from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Staked {
     reference: Price,
     one_r: Decimal,
+    exits: Exits,
 }
-
-/// The quantity of a trade of a fixed size.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Fixed(Quantity);
 
 /// What an entry sent at a stake risks, as its tags say (`entry_risk`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,32 +202,25 @@ impl Trade {
         Self {
             instrument_id,
             side,
+            reference,
+            one_r,
             exits,
-            size: Staked { reference, one_r },
         }
     }
 
-    /// Sends the trade from `strategy` at `stake`, its orders of the
-    /// factory's ids: a Nautilus bracket with a `Bracket`, a market entry
-    /// without one, and its time alert if it has a time limit.
+    /// Sends the trade from `strategy` at `stake` of the equity of the
+    /// account its orders are checked against, its orders of the factory's
+    /// ids: a Nautilus bracket with a `Bracket`, a market entry without one,
+    /// and its time alert if it has a time limit. Its quantity is its
+    /// size at that stake of that equity (`size`), its entry tagged with
+    /// its R in money and the stake's multiple (`entry_risk`).
     ///
-    /// Its quantity is Nautilus' fixed-risk size
-    /// (`calculate_fixed_risk_position_size`): the stake's fraction of the
-    /// equity (`Portfolio::equity`) in the instrument's P&L currency of the
-    /// account its orders are checked against (`routed_account`), over what
-    /// its stop is worth on one unit,
-    /// rounded down to the instrument's size increment, at most its
-    /// maximum quantity, no commission counted. The stop it is sized at is
-    /// one R from its reference price, against it, on the instrument's
-    /// tick grid, the tick away from the reference when one R is no whole
-    /// count of ticks: its quantity never risks more than its stake over
-    /// one R. Its entry is tagged with its R in money and the stake's
-    /// multiple (`entry_risk`).
-    ///
-    /// The equity is the account's balance and the open P&L of its
-    /// positions on the instrument's venue: positions the account holds on
-    /// its broker's other venues are left out, as are those of other
-    /// processes, which this cache does not hold anyway, one process
+    /// The equity is the account's (`Portfolio::equity`) in the
+    /// instrument's P&L currency, the account Nautilus' risk engine checks
+    /// the orders against (`routed_account`): its balance and the open P&L
+    /// of its positions on the instrument's venue. Positions the account
+    /// holds on its broker's other venues are left out, as are those of
+    /// other processes, which this cache does not hold anyway, one process
     /// running one strategy.
     ///
     /// It sends nothing, and logs why, if the account cannot be read, holds
@@ -253,25 +236,6 @@ impl Trade {
     /// prices, Nautilus fails to size it, or Nautilus refuses an order or
     /// the alert.
     pub fn send<S>(&self, strategy: &mut S, stake: Stake) -> anyhow::Result<()>
-    where
-        S: Strategy + StrategyNative + DataActor + DataActorNative,
-    {
-        self.staked(strategy, stake, None)
-    }
-
-    /// Sends the trade at `stake` as `send`, its orders named `ids`.
-    ///
-    /// # Errors
-    ///
-    /// As `send`.
-    pub fn send_as<S>(&self, strategy: &mut S, stake: Stake, ids: OrderIds) -> anyhow::Result<()>
-    where
-        S: Strategy + StrategyNative + DataActor + DataActorNative,
-    {
-        self.staked(strategy, stake, Some(ids))
-    }
-
-    fn staked<S>(&self, strategy: &mut S, stake: Stake, ids: Option<OrderIds>) -> anyhow::Result<()>
     where
         S: Strategy + StrategyNative + DataActor + DataActorNative,
     {
@@ -303,12 +267,56 @@ impl Trade {
             );
             return Ok(());
         };
-        let Staked { reference, one_r } = self.size;
-        let stop = self.stop(&instrument)?;
-        let quantity = calculate_fixed_risk_position_size(
-            &instrument,
-            reference,
-            stop,
+        self.sized(strategy, &instrument, stake, equity, None)
+    }
+
+    /// Sends the trade from `strategy` at `stake` of `equity`, as `send`
+    /// does but for a fixed equity in place of the account's, its orders
+    /// named `ids`: a dataset run's, at its balance, which a target's row
+    /// is priced at whatever the run's P&L (`model::targets`).
+    ///
+    /// # Errors
+    ///
+    /// As `send`.
+    pub fn send_at<S>(
+        &self,
+        strategy: &mut S,
+        stake: Stake,
+        equity: Money,
+        ids: OrderIds,
+    ) -> anyhow::Result<()>
+    where
+        S: Strategy + StrategyNative + DataActor + DataActorNative,
+    {
+        let instrument = linear(strategy, self.instrument_id)?;
+        self.sized(strategy, &instrument, stake, equity, Some(ids))
+    }
+
+    /// Its size at `stake` of `equity`, in the P&L currency of
+    /// `instrument`, its instrument: Nautilus' fixed-risk size
+    /// (`calculate_fixed_risk_position_size`), the stake's fraction of the
+    /// equity over what its stop is worth on one unit, rounded down to the
+    /// instrument's size increment, at most its maximum quantity, no
+    /// commission counted. The stop it is sized at is one R from its
+    /// reference price, against it, on the instrument's tick grid, the tick
+    /// away from the reference when one R is no whole count of ticks: its
+    /// size never risks more than its stake over one R. None if it rounds
+    /// down to none.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if its stop is outside the instrument's prices or
+    /// Nautilus fails to size it.
+    pub fn size(
+        &self,
+        instrument: &InstrumentAny,
+        stake: Stake,
+        equity: Money,
+    ) -> anyhow::Result<Quantity> {
+        calculate_fixed_risk_position_size(
+            instrument,
+            self.reference,
+            self.stop(instrument)?,
             equity,
             stake.fraction(),
             Decimal::ZERO,
@@ -319,25 +327,60 @@ impl Trade {
         )
         // In the message, not as context: Nautilus logs only the top
         // error of the chain.
-        .map_err(|e| anyhow::anyhow!("sizing the {} of {instrument_id}: {e}", self.side))?;
+        .map_err(|e| anyhow::anyhow!("sizing the {} of {}: {e}", self.side, self.instrument_id))
+    }
+
+    /// Its R in money on `quantity` of `instrument`, its instrument: what
+    /// one R is worth on it in the instrument's P&L currency, exact
+    /// (`worth`), as its entry is tagged (`entry_risk`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the worth overflows or is more money than
+    /// Nautilus holds.
+    pub fn risk(&self, instrument: &InstrumentAny, quantity: Quantity) -> anyhow::Result<Money> {
+        Money::from_decimal_native(
+            worth(instrument, quantity, self.one_r)?,
+            instrument.cost_currency(),
+        )
+        .map_err(|e| anyhow::anyhow!("the R of {quantity} of {}: {e}", self.instrument_id))
+    }
+
+    /// Sends the trade from `strategy` on `instrument`, its instrument, at
+    /// `stake` of `equity` (`size`), its entry tagged with its R in money
+    /// and the stake's multiple, its orders named `ids` or of the
+    /// factory's; nothing, logged, if its size rounds down to none.
+    fn sized<S>(
+        &self,
+        strategy: &mut S,
+        instrument: &InstrumentAny,
+        stake: Stake,
+        equity: Money,
+        ids: Option<OrderIds>,
+    ) -> anyhow::Result<()>
+    where
+        S: Strategy + StrategyNative + DataActor + DataActorNative,
+    {
+        let quantity = self.size(instrument, stake, equity)?;
         if quantity.is_zero() {
             log::warn!(
-                "not sending the {} of {instrument_id}: at a stake of {stake} of {equity}, its \
-                 size rounds down to zero, its stop at {stop}, one R of {one_r} from {reference}, \
-                 worth more than that on its size increment {}",
+                "not sending the {} of {}: at a stake of {stake} of {equity}, its size rounds \
+                 down to zero, one R of {} from {} worth more than that on its size increment {}",
                 self.side,
+                self.instrument_id,
+                self.one_r,
+                self.reference,
                 instrument.size_increment()
             );
             return Ok(());
         }
-        let r = Money::from_decimal_native(worth(&instrument, quantity, one_r)?, currency)
-            .map_err(|e| anyhow::anyhow!("the R of {quantity} of {instrument_id}: {e}"))?;
+        let r = self.risk(instrument, quantity)?;
         let tags = [
             format!("{R_TAG}{r}"),
             format!("{MULTIPLE_TAG}{}", stake.multiple().normalize()),
         ]
         .map(|tag| Ustr::from(&tag));
-        self.submit(strategy, &instrument, quantity, &tags, ids)
+        self.submit(strategy, instrument, quantity, &tags, ids)
     }
 
     /// The stop the trade is sized at: one R from its reference, against
@@ -348,8 +391,7 @@ impl Trade {
     ///
     /// Returns an error if it is outside the instrument's prices.
     fn stop(&self, instrument: &InstrumentAny) -> anyhow::Result<Price> {
-        let Staked { reference, one_r } = self.size;
-        let reference = reference.as_decimal();
+        let (reference, one_r) = (self.reference.as_decimal(), self.one_r);
         let sell = self.side == OrderSide::Sell;
         let stop = if sell {
             reference + one_r
@@ -372,70 +414,7 @@ impl Trade {
                 )
             })
     }
-}
 
-impl Trade<Fixed> {
-    /// The trade of `quantity` of `instrument_id` on `side`, ended by
-    /// `exits`: the model path's, until its trades are staked.
-    #[must_use]
-    pub const fn fixed(
-        instrument_id: InstrumentId,
-        side: OrderSide,
-        quantity: Quantity,
-        exits: Exits,
-    ) -> Self {
-        Self {
-            instrument_id,
-            side,
-            exits,
-            size: Fixed(quantity),
-        }
-    }
-
-    /// Sends the trade from `strategy`, as a trade at a stake is sent
-    /// (`Trade::send`), of its quantity rounded to the instrument's sizes,
-    /// its entry untagged with a stake.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the instrument is not in the cache, the quantity
-    /// rounds to no size of it, or Nautilus refuses an order or the alert.
-    pub fn send<S>(&self, strategy: &mut S) -> anyhow::Result<()>
-    where
-        S: Strategy + StrategyNative + DataActor + DataActorNative,
-    {
-        self.sized(strategy, None)
-    }
-
-    /// Sends the trade as `send`, its orders named `ids`.
-    ///
-    /// # Errors
-    ///
-    /// As `send`.
-    pub fn send_as<S>(&self, strategy: &mut S, ids: OrderIds) -> anyhow::Result<()>
-    where
-        S: Strategy + StrategyNative + DataActor + DataActorNative,
-    {
-        self.sized(strategy, Some(ids))
-    }
-
-    fn sized<S>(&self, strategy: &mut S, ids: Option<OrderIds>) -> anyhow::Result<()>
-    where
-        S: Strategy + StrategyNative + DataActor + DataActorNative,
-    {
-        let instrument_id = self.instrument_id;
-        let instrument = cached(strategy, instrument_id)?;
-        let size = self.size.0.as_decimal();
-        let quantity = instrument
-            .try_make_qty_from_decimal(size, None)
-            // In the message, not as context: Nautilus logs only the top
-            // error of the chain.
-            .map_err(|e| anyhow::anyhow!("ordering {size} of {instrument_id}: {e}"))?;
-        self.submit(strategy, &instrument, quantity, &[], ids)
-    }
-}
-
-impl<Size> Trade<Size> {
     /// Sends `quantity` of the trade from `strategy`, its entry tagged
     /// with `tags` as well, its orders named `ids` or of the factory's.
     fn submit<S>(
@@ -769,7 +748,7 @@ fn holds_open(cache: &CacheApi<'_>, position: &Position, entry: ClientOrderId) -
 
 /// What `entry` risks, as it is tagged by a send at a stake
 /// (`Trade::send`): its R in money and the stake's multiple. None of an
-/// entry sent otherwise, a trade of a fixed quantity's.
+/// order sent otherwise, a time close's or another strategy's.
 #[must_use]
 pub fn entry_risk(entry: &OrderAny) -> Option<EntryRisk> {
     let tags = entry.tags()?;

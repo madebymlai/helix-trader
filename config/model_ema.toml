@@ -43,15 +43,19 @@ period = 10
 period = 30
 
 [trade]
-# The one instrument traded, whose target the model learns, and the size
-# of each of the model's trades.
+# The one instrument traded, whose target the model learns. Its trade_size
+# is read by nothing: a model's trades are sized at a stake.
 instruments = [{ instrument_id = "XAUUSD.ICMARKETS", trade_size = "1" }]
 # The fraction of equity a trade sent at the config's stake risks over its
-# one R (see config/ema.toml); the model's trades are of trade_size.
+# one R (see config/ema.toml): each decision's trade is sent at it, of the
+# account's equity. It is the reference stake too, of the dataset balance
+# (--dataset-balance, --balance of train, --retrain-balance live), which the
+# model's targets, its dataset's rows and its decisions' payoff features,
+# are priced at: changing it, or that balance, retrains the model.
 risk = "0.5%"
 
 # The model, of a strategy trading on one: its target trades [trade]'s
-# instrument, of its trade_size.
+# instrument at its risk.
 [model]
 # A decision every hour, on the hour's bars.
 decision = { every = "1h" }
@@ -68,13 +72,12 @@ retrain = "168h"
 window = "720h"
 holdout = "120h"
 # Both sides traded, each from an expected net 0.03R a trade, R the money
-# its stop risks: 3% of that, about 0.45 USD on an ounce with gold's hourly
-# ATR near 15 USD. A margin is in R, written with its suffix.
+# its stop risks: 3% of that, whatever the trade's size. A margin is in R,
+# written with its suffix.
 margins = { long = "0.03R", short = "0.03R" }
 # The sides' models are published together if the trades picked between them
-# earn at least a net 0.07R a trade over at least 30 trades of the holdout:
-# about 1 USD on an ounce with gold's hourly ATR near 15 USD. Like a margin,
-# it is in R, written with its suffix.
+# earn at least a net 0.07R a trade over at least 30 trades of the holdout.
+# Like a margin, it is in R, written with its suffix.
 min_pnl = "0.07R"
 min_trades = 30
 # LightGBM, its trees of up to 31 leaves of 20 rows at least, over 100

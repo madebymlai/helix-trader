@@ -73,6 +73,7 @@ use super::{
     store::{Baselined, ModelSet, Swap},
     targets::Side,
 };
+use crate::strategy::r::R;
 
 /// The retrains and scores of one strategy's backtests.
 #[derive(Debug)]
@@ -241,7 +242,7 @@ impl WalkForward {
                     Ok(Judged {
                         expected,
                         baseline: model.baseline(),
-                        taken: margin.takes(expected),
+                        taken: R::finite(expected).is_some_and(|expected| margin.takes(expected)),
                     })
                 },
             )?);
@@ -420,7 +421,7 @@ mod tests {
     use jiff::SignedDuration;
     use nautilus_model::{
         identifiers::{InstrumentId, StrategyId},
-        types::{Money, Quantity},
+        types::{Currency, Money},
     };
     use rust_decimal::Decimal;
 
@@ -464,7 +465,7 @@ mod tests {
             .target(
                 TargetConfig::builder()
                     .instrument_id(InstrumentId::from(GOLD))
-                    .quantity(Quantity::from(1))
+                    .risk("0.5%".parse().unwrap())
                     .spec(
                         Target::builder()
                             .limit(SignedDuration::from_hours(1))
@@ -546,7 +547,7 @@ mod tests {
             pnl: Money::from(pnl),
             commission: Money::from("0.1 USD"),
             exit: Exit::Time,
-            unit: 1.0,
+            unit: Money::from("1 USD"),
         };
         let (long, short) = if wins {
             ("1 USD", "-1 USD")
@@ -1070,7 +1071,7 @@ mod tests {
         ModelConfig {
             target: TargetConfig::builder()
                 .instrument_id(InstrumentId::from("AUD/USD.SIM"))
-                .quantity(Quantity::from(1))
+                .risk("0.5%".parse().unwrap())
                 .spec(
                     Target::builder()
                         .bracket(BracketSpec {
@@ -1090,8 +1091,8 @@ mod tests {
     /// what `(long, short)` say, its payoff features a bracket's.
     fn row_of_stops(time: &str, (long, short): (f64, f64)) -> TargetRow {
         let mut row = row(time, 0.8, true);
-        row.outcomes.long.unit = long;
-        row.outcomes.short.unit = short;
+        row.outcomes.long.unit = Money::new(long, Currency::USD());
+        row.outcomes.short.unit = Money::new(short, Currency::USD());
         row.payoff = PerSide {
             long: vec![1.4, 1.1, 0.07],
             short: vec![1.3, 1.2, 0.08],
@@ -1183,8 +1184,8 @@ mod tests {
         let at_two: Vec<TargetRow> = rows()
             .into_iter()
             .map(|mut row| {
-                row.outcomes.long.unit = 2.0;
-                row.outcomes.short.unit = 2.0;
+                row.outcomes.long.unit = Money::from("2 USD");
+                row.outcomes.short.unit = Money::from("2 USD");
                 row
             })
             .collect();

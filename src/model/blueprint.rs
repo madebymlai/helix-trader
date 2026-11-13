@@ -190,7 +190,7 @@ impl ModelBlueprint {
 #[cfg(test)]
 mod tests {
     use jiff::SignedDuration;
-    use nautilus_model::{identifiers::InstrumentId, types::Quantity};
+    use nautilus_model::identifiers::InstrumentId;
 
     use super::*;
     use crate::model::{
@@ -223,21 +223,6 @@ mod tests {
         assert_eq!(
             format!("{err:#}"),
             "the decision interval 0s is not positive"
-        );
-    }
-
-    /// A target of no size is refused as the blueprint is built, under its
-    /// field.
-    #[test]
-    fn a_target_of_no_size_is_refused() {
-        let mut config = config();
-        config.target.quantity = Quantity::from(0);
-
-        let err = blueprint(config).unwrap_err();
-
-        assert_eq!(
-            format!("{err:#}"),
-            "invalid model.target: the target quantity must be positive"
         );
     }
 

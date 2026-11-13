@@ -47,7 +47,7 @@ Catalog coverage is not proof of complete market data: promotion leaves small in
 
 ## Retraining
 
-A model strategy requires retraining costs and balance at live startup, retrained or not: they are the costs of its dataset runs and key the model store it reads; see `live --help`.
+A model strategy requires retraining costs and balance at live startup, retrained or not: they are the costs of its dataset runs and key the model store it reads, and the balance is the equity of its reference stake, at which the handle prices each decision's payoff features as the dataset run priced the rows; see `live --help`. The strategy's own trades are staked on the live account's equity.
 
 A retrained strategy has a Nautilus actor added before the strategy, named `RETRAIN-<strategy id>`. Its own clock fires on the epoch-aligned retrain grid and launches `train` in a child process, since another Nautilus node cannot run simultaneously in the live process. Training cuts data off at the earliest last stored timestamp across required series, capped at the scheduled time. Missing series or no advance since the preceding retrain skips the run with a warning. Only one retrain per strategy runs at a time; an overlapping firing is skipped with a warning, and a finished retrain makes way for the next whether it published or kept the current model.
 

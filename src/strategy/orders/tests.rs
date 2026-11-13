@@ -163,6 +163,12 @@ fn stake() -> Stake {
     Stake::new("0.5%".parse().unwrap())
 }
 
+/// The equity of the accounts of `cache`, which a trade named by its ids
+/// is sent at.
+fn equity() -> Money {
+    Money::from("100000 USD")
+}
+
 /// A buy of AUD/USD set from 0.70150, one R of it 0.00500, the distance
 /// to the stop of `bracket`: at `stake`, 500 USD buys 100,000 AUD/USD.
 fn buy(exits: Exits) -> Trade {
@@ -271,7 +277,7 @@ fn fill_of(
 /// Sends `trade` named after `entry` from `probe` at `stake` and accepts
 /// its orders.
 fn sent(probe: &mut Probe, entry: &str, trade: Trade) {
-    trade.send_as(probe, stake(), ids(entry)).unwrap();
+    trade.send_at(probe, stake(), equity(), ids(entry)).unwrap();
     accept(probe, entry);
     if trade.exits.bracket.is_some() {
         accept(probe, &format!("{entry}-TP"));
@@ -331,7 +337,7 @@ fn a_trade_with_both_exits_is_a_bracket_its_legs_on_them() {
     let (mut probe, _) = registered();
 
     buy(bracket(4))
-        .send_as(&mut probe, stake(), ids("T-1"))
+        .send_at(&mut probe, stake(), equity(), ids("T-1"))
         .unwrap();
 
     let cache = probe.cache();
@@ -388,7 +394,9 @@ fn a_trade_on_ib_has_legs_neither_reduce_only_nor_post_only() {
         ..buy(bracket(4))
     };
 
-    trade.send_as(&mut probe, stake(), ids("T-1")).unwrap();
+    trade
+        .send_at(&mut probe, stake(), equity(), ids("T-1"))
+        .unwrap();
 
     let cache = probe.cache();
     let flags = |of: &str| {
@@ -635,41 +643,47 @@ fn an_inverse_instrument_is_refused_naming_it() {
     refuse_inverse(&probe, InstrumentId::from(AUD)).unwrap();
 }
 
-/// The model path's trade of a fixed quantity sends it, untagged with a
-/// stake.
+/// A dataset run's trade is sized at its balance, not at the account's
+/// equity: 0.5% of 40,000 USD, 200 USD, over one R of 0.00500 buys 40,000
+/// AUD/USD, where the account's 100,000 USD would buy 100,000.
 #[test]
-fn a_trade_of_a_fixed_quantity_sends_it_untagged_with_a_stake() {
+fn a_trade_sent_at_an_equity_is_sized_on_it_not_on_the_accounts() {
     let (mut probe, _) = registered();
-    let trade = Trade::fixed(
-        InstrumentId::from(AUD),
-        OrderSide::Buy,
-        Quantity::from(1_000),
-        held(1),
+
+    buy(held(1))
+        .send_at(&mut probe, stake(), Money::from("40000 USD"), ids("D0-L-E"))
+        .unwrap();
+
+    let entry = probe.cache().order(&id("D0-L-E")).unwrap();
+    assert_eq!(entry.quantity(), Quantity::from(40_000));
+    assert_eq!(
+        entry_risk(&entry),
+        Some(EntryRisk {
+            r: Money::from("200 USD"),
+            multiple: Decimal::ONE,
+        })
     );
-
-    trade.send(&mut probe).unwrap();
-
-    assert_eq!(entry_quantity(&probe), Quantity::from(1_000));
-    assert_eq!(entry_risk(&orders(&probe)[0]), None);
 }
 
-/// AUD/USD trades whole units: a fixed 0.4 rounds to none.
+/// What sending sizes it at, without sending: 0.5% of 100,000 USD over
+/// one R of 0.00500 is 100,000 AUD/USD, whose R is 500 USD; of 0.50 USD,
+/// none.
 #[test]
-fn a_fixed_quantity_rounding_to_no_size_is_refused() {
-    let (mut probe, _) = registered();
-    let trade = Trade::fixed(
-        InstrumentId::from(AUD),
-        OrderSide::Buy,
-        Quantity::from("0.4"),
-        held(1),
-    );
+fn a_trades_size_and_its_r_are_those_it_is_sent_at() {
+    let instrument = aud(InstrumentId::from(AUD));
+    let trade = buy(held(1));
 
-    let err = trade.send(&mut probe).unwrap_err();
+    let size = trade.size(&instrument, stake(), equity()).unwrap();
 
-    assert!(
-        err.to_string().contains(&format!("ordering 0.4 of {AUD}")),
-        "{err}"
+    assert_eq!(size, Quantity::from(100_000));
+    assert_eq!(
+        trade.risk(&instrument, size).unwrap(),
+        Money::from("500 USD")
     );
+    let none = trade
+        .size(&instrument, stake(), Money::from("0.50 USD"))
+        .unwrap();
+    assert!(none.is_zero(), "{none}");
 }
 
 // ------------------------------------------------------------ time limit
