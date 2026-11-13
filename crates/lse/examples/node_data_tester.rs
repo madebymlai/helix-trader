@@ -2,26 +2,30 @@
 //! Nautilus' `DataTester`, run against LSE itself, for the cases of
 //! Nautilus' data testing spec (`docs/developer_guide/spec_data_testing.md`)
 //! the adapter supports: TC-D01, the venue's instruments, which the node's
-//! catalog answers, LSE publishing no definitions; TC-D31, historical
-//! trades, of gold futures (gold spot's fails with LSE's refusal, a
-//! commodity, of which LSE stores no trades); and TC-D41, historical bars,
-//! gold spot's 1-minute candles. The adapter streams nothing yet, so every
-//! subscription case is skipped.
+//! catalog answers, LSE publishing no definitions; TC-D21, historical
+//! quotes, of GCZ6 of 2026, `GCZ26.GLBX`, CME Globex's Level 1 (the derived
+//! series' fail with LSE's refusal, LSE serving their past as timeframes
+//! alone); TC-D31, historical trades, of gold futures and of GCZ26.GLBX
+//! (gold spot's fails with LSE's refusal, a commodity, of which LSE stores
+//! no trades); and TC-D41, historical bars, gold spot's 1-minute candles.
+//! The adapter streams nothing yet, so every subscription case is skipped.
 //!
 //! LSE publishes no definitions: the tester writes the crate's test
-//! definitions of the two series into a temporary catalog the node reads,
-//! as one written by hand would be. The window is a past hour, as LSE's
+//! definitions into a temporary catalog the node reads, the two series' as
+//! one written by hand would be, GCZ26.GLBX's as Databento gives it. The window is a past hour, as LSE's
 //! history ends at the previous session's close. Edit the constants below
 //! to change them. The node runs until interrupted (Ctrl+C).
 //!
 //! Run with: `cargo run -p lse --features test-support --example lse-data-tester`
 //!
-//! Required credential environment variables:
-//! - `LSE_API_KEY`, from the environment or `.env`
+//! Required credential environment variables, from the environment or
+//! `.env`:
+//! - `LSE_API_KEY`, for the derived series
+//! - `LSE_CME_API_KEY`, a CME Group plan's key, for GCZ26.GLBX
 
 use lse::{
     LseDataClientConfig, LseDataClientFactory,
-    testing::{GOLD_FUTURES, GOLD_SPOT, gold_futures, gold_spot},
+    testing::{GCZ26, GOLD_FUTURES, GOLD_SPOT, gcz26, gold_futures, gold_spot},
 };
 use nautilus_common::{enums::Environment, factories::DataClientFactory};
 use nautilus_live::{builder::LiveNodeBuilder, config::LiveNodeConfig};
@@ -47,8 +51,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
 
     let dir = tempfile::tempdir()?;
-    ParquetDataCatalog::new(dir.path(), None, None, None, None)
-        .write_instruments(vec![gold_futures(), gold_spot()])?;
+    ParquetDataCatalog::new(dir.path(), None, None, None, None).write_instruments(vec![
+        gold_futures(),
+        gold_spot(),
+        gcz26(),
+    ])?;
     let catalog_path = dir.path().to_str().ok_or("a catalog path in UTF-8")?;
 
     let config = LiveNodeConfig {
@@ -76,9 +83,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .instrument_ids(vec![
             InstrumentId::from(GOLD_FUTURES),
             InstrumentId::from(GOLD_SPOT),
+            InstrumentId::from(GCZ26),
         ])
         .bar_types(vec![BarType::from(BAR_TYPE)])
         .request_instruments(true)
+        .request_quotes(true)
         .request_trades(true)
         .request_bars(true)
         .request_start(REQUEST_START.parse()?)
