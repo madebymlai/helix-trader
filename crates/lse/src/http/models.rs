@@ -8,6 +8,11 @@ use serde::Deserialize;
 /// selection, or no session in its dates. Its answer is no rows.
 const NO_ROWS: &[&str] = &["data-unavailable", "date-not-trading"];
 
+/// The code of an export past the rows one export may read (2,500,000 on
+/// every plan), or one LSE could not count in time: shorter dates may be
+/// served.
+const TOO_WIDE: &str = "export-too-wide";
+
 /// The codes of a 429 that waiting a minute does not lift: the free
 /// plan's weekly allowance and its rows a day, which reset on Monday and
 /// at 00:00 UTC.
@@ -43,6 +48,11 @@ impl LseRefusal {
         NO_ROWS.contains(&self.code.as_str())
     }
 
+    /// Whether the refusal says the export selects too many rows.
+    pub(crate) fn is_too_wide(&self) -> bool {
+        self.code == TOO_WIDE
+    }
+
     /// Whether the refusal is a quota of the free plan, past which every
     /// export is refused until it resets.
     pub(crate) fn is_quota(&self) -> bool {
@@ -62,8 +72,13 @@ impl fmt::Display for LseRefusal {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
-    use crate::testing::{DATA_UNAVAILABLE, DATE_NOT_TRADING, PLAN_REQUIRED, ROWS_EXHAUSTED};
+    use crate::testing::{
+        ALLOWANCE_EXHAUSTED, DATA_UNAVAILABLE, DATE_NOT_TRADING, EXPORT_TOO_WIDE, PLAN_REQUIRED,
+        ROWS_EXHAUSTED,
+    };
 
     fn refusal(body: &str) -> LseRefusal {
         serde_json::from_str(body).unwrap()
@@ -84,9 +99,16 @@ mod tests {
         assert!(!refusal(PLAN_REQUIRED).is_no_rows());
     }
 
+    #[rstest]
+    fn an_export_past_the_rows_one_export_may_read_is_too_wide() {
+        assert!(refusal(EXPORT_TOO_WIDE).is_too_wide());
+        assert!(!refusal(ROWS_EXHAUSTED).is_too_wide());
+    }
+
     #[test]
     fn the_rows_a_day_are_a_quota_and_a_plan_is_not() {
         assert!(refusal(ROWS_EXHAUSTED).is_quota());
+        assert!(refusal(ALLOWANCE_EXHAUSTED).is_quota());
         assert!(!refusal(PLAN_REQUIRED).is_quota());
     }
 }

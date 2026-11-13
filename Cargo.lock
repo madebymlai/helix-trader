@@ -3050,6 +3050,7 @@ dependencies = [
  "nautilus-persistence",
  "nautilus-testkit",
  "parquet",
+ "rstest",
  "rust_decimal",
  "serde",
  "serde_json",

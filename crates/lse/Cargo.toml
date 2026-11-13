@@ -47,6 +47,9 @@ nautilus-live = { workspace = true, features = ["streaming"] }
 nautilus-model = { workspace = true, features = ["test-support"] }
 nautilus-persistence.workspace = true
 nautilus-testkit.workspace = true
+# Test functions, as Nautilus' adapter guide has them ("Rust testing"),
+# declared as Nautilus declares it.
+rstest = { version = "0.28.0", default-features = false }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
