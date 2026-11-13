@@ -211,6 +211,40 @@ fn data_inside_a_delay_is_read_first_by_the_delayed_decision() {
     );
 }
 
+/// The grid starts at the epoch: what is made up to the firing of its
+/// decision there is that decision's to read first.
+#[test]
+fn data_up_to_the_firing_of_the_epochs_decision_is_read_by_it() {
+    let of = |ns: u64| decision_of(every(15), SignedDuration::ZERO, UnixNanos::from(ns));
+
+    assert_eq!(of(0), UnixNanos::default());
+    assert_eq!(of(MARGIN), UnixNanos::default());
+    assert_eq!(of(MARGIN + 1), UnixNanos::from(900 * SECOND));
+}
+
+/// A cadence of 4 ms, shorter than its margin: what is made less than an
+/// interval before the epoch's decision fires is that decision's.
+#[test]
+fn data_within_an_interval_before_the_epochs_decision_fires_is_read_by_it() {
+    let every_4_ms = DecisionRule::Every(SignedDuration::from_millis(4));
+
+    assert_eq!(
+        decision_of(every_4_ms, SignedDuration::ZERO, UnixNanos::from(7_000_000)),
+        UnixNanos::default()
+    );
+}
+
+/// A cadence of 4 ms: what is made 6 ms after the epoch, a whole interval
+/// before the epoch's decision fires, would be read first by a decision
+/// before the epoch.
+#[test]
+#[should_panic(expected = "a decision after the epoch")]
+fn data_read_first_by_a_decision_before_the_epoch_is_refused() {
+    let every_4_ms = DecisionRule::Every(SignedDuration::from_millis(4));
+
+    let _ = decision_of(every_4_ms, SignedDuration::ZERO, UnixNanos::from(6_000_000));
+}
+
 /// Started between a grid time and its delayed decision: that decision
 /// is still to come.
 #[test]
@@ -318,6 +352,32 @@ fn data_since_the_previous_decision_is_fresh_and_data_up_to_it_stale() {
         None
     );
     assert!(decide(&probe, &warm_until(previous + 1), every(15), aud()).is_some());
+}
+
+/// The decision an interval after the epoch has the epoch's before it: a
+/// quote made at the epoch is stale, one a nanosecond later fresh.
+#[test]
+fn the_decision_an_interval_after_the_epoch_judges_its_data_from_the_epoch() {
+    let (probe, _clock) = registered(900 * SECOND);
+    let warm_at = |ns: u64| {
+        let features = features();
+        features.handle_quote(&quote_of(AUD, 0.7, ns)).unwrap();
+        features.handle_quote(&quote_of(AUD, 0.8, ns)).unwrap();
+        features
+    };
+
+    assert_eq!(decide(&probe, &warm_at(0), every(15), aud()), None);
+    assert!(decide(&probe, &warm_at(1), every(15), aud()).is_some());
+}
+
+/// A decision less than an interval after the epoch has no previous
+/// decision to judge its data from.
+#[test]
+#[should_panic(expected = "a decision an interval after the epoch")]
+fn a_decision_within_an_interval_of_the_epoch_is_refused() {
+    let (probe, _clock) = registered(600 * SECOND);
+
+    let _ = decide(&probe, &features(), every(15), aud());
 }
 
 /// The traded instrument's market is closed, another's open: the
