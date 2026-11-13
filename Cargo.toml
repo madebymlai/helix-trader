@@ -71,8 +71,6 @@ bon = "=3.9.3"
 clap = { version = "4", features = ["derive", "env"] }
 # The cTrader Open API adapter, which the IC Markets and Pepperstone venues wire in.
 ctrader.workspace = true
-# The version of nautilus-databento, for the dataset's end.
-databento = "=0.63.0"
 dotenvy = "0.15"
 jiff.workspace = true
 # LightGBM, built from its C++ sources (needs cmake and clang) without OpenMP:

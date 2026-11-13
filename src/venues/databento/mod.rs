@@ -11,7 +11,13 @@ use std::path::PathBuf;
 
 use anyhow::{Context, ensure};
 use jiff::{SignedDuration, Timestamp};
-use nautilus_databento::{data::DatabentoDataClientConfig, factories::DatabentoDataClientFactory};
+use nautilus_core::time::get_atomic_clock_realtime;
+use nautilus_databento::{
+    common::Credential,
+    data::DatabentoDataClientConfig,
+    factories::DatabentoDataClientFactory,
+    historical::{DatabentoHistoricalClient, DatasetRange},
+};
 use nautilus_live::config::RoutingConfig;
 use nautilus_model::identifiers::Venue;
 
@@ -38,8 +44,8 @@ const DAY: SignedDuration = SignedDuration::from_hours(24);
 /// Databento's historical API, for the history of `GLBX` instruments.
 #[derive(Debug)]
 pub struct DatabentoHistory {
-    /// Databento's own client, for the dataset's end.
-    metadata: databento::HistoricalClient,
+    /// Nautilus' historical client, for the dataset's end.
+    metadata: DatabentoHistoricalClient,
     /// The config of Nautilus' data client, the node's.
     config: DatabentoDataClientConfig,
 }
@@ -50,13 +56,15 @@ impl DatabentoHistory {
     /// # Errors
     ///
     /// Returns an error if Databento's client cannot be built (a malformed
-    /// key).
+    /// key, or the map of publishers, which it reads, unreadable).
     pub fn new(api_key: &str) -> anyhow::Result<Self> {
-        let metadata = databento::HistoricalClient::builder()
-            .key(api_key)
-            .context("building Databento's client")?
-            .build()
-            .context("building Databento's client")?;
+        let metadata = DatabentoHistoricalClient::new(
+            Credential::new(api_key),
+            PathBuf::from(PUBLISHERS),
+            get_atomic_clock_realtime(),
+            false,
+        )
+        .context("building Databento's client")?;
         let config =
             DatabentoDataClientConfig::new(api_key, PathBuf::from(PUBLISHERS), false, false);
         Ok(Self { metadata, config })
@@ -90,15 +98,10 @@ impl DatabentoHistory {
         };
         let available = self
             .metadata
-            .clone()
-            .metadata()
             .get_dataset_range(DATASET)
             .await
             .with_context(|| format!("requesting the range of {DATASET}"))?;
-        ensure_available(
-            end,
-            Timestamp::from_nanosecond(available.end.unix_timestamp_nanos())?,
-        )
+        ensure_available(end, end_of(&available)?)
     }
 
     /// The node's data client: Nautilus' Databento client, routed the
@@ -115,6 +118,15 @@ impl DatabentoHistory {
             },
         }
     }
+}
+
+/// The exclusive end of `range`, which Nautilus' client gives as the
+/// `Display` of Databento's `time::OffsetDateTime`, such as
+/// `2023-07-20 0:00:00.12 +00:00:00`: the hour unpadded, the fraction to
+/// its last nonzero digit, at least one, and the offset to the second.
+fn end_of(range: &DatasetRange) -> anyhow::Result<Timestamp> {
+    Timestamp::strptime("%Y-%m-%d %H:%M:%S%.f %::z", &range.end)
+        .with_context(|| format!("reading the end of {DATASET}, {}", range.end))
 }
 
 /// Refuses an `end` Databento has no data up to yet: a request over it
@@ -160,6 +172,31 @@ mod tests {
         assert!(ensure_available(before, monday).is_ok());
         let err = ensure_available(monday, monday).unwrap_err().to_string();
         assert!(err.contains("2026-10-26"), "{err}");
+    }
+
+    /// The ends Nautilus' client gives, as Databento's `time` crate writes
+    /// them (`time::OffsetDateTime`'s `Display` at the locked version, of the
+    /// instants on the right), read as the instants they are.
+    #[test]
+    fn the_dataset_end_nautilus_gives_reads_as_its_instant() {
+        for (end, instant) in [
+            ("2023-07-20 0:00:00.0 +00:00:00", "2023-07-20T00:00:00Z"),
+            ("2023-07-20 0:00:00.12 +00:00:00", "2023-07-20T00:00:00.12Z"),
+            (
+                "2023-07-20 12:34:56.123456789 +00:00:00",
+                "2023-07-20T12:34:56.123456789Z",
+            ),
+            (
+                "2026-07-14 3:33:20.000000001 +00:00:00",
+                "2026-07-14T03:33:20.000000001Z",
+            ),
+        ] {
+            let range = DatasetRange {
+                start: String::new(),
+                end: end.to_string(),
+            };
+            assert_eq!(end_of(&range).unwrap(), ts(instant), "{end}");
+        }
     }
 
     #[test]

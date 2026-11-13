@@ -2342,7 +2342,6 @@ dependencies = [
  "bon",
  "clap",
  "ctrader",
- "databento",
  "dotenvy",
  "ibapi",
  "jiff",
