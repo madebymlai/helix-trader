@@ -27,7 +27,11 @@ use nautilus_live::task::TaskGroup;
 use nautilus_model::{data::Data, identifiers::InstrumentId, instruments::Instrument};
 
 use crate::{
-    common::{consts::LseSocket, credential::LseCredential, symbol::LseSymbol},
+    common::{
+        consts::{LSE_API_KEY, LseSocket},
+        credential::LseCredential,
+        symbol::LseSymbol,
+    },
     config::LseDataClientConfig,
     websocket::{
         client::{KEEPALIVE_SECS, LseWebSocketClient, LseWsMessage},
@@ -55,7 +59,9 @@ type QuotedBySymbol = Arc<AtomicMap<(LseSocket, String), Quoted>>;
 /// The sockets of the instruments the client streams.
 #[derive(Debug)]
 pub(super) struct LseStreams {
-    credential: LseCredential,
+    /// The LSE key, which the sockets take; none if no instrument is
+    /// streamed.
+    credential: Option<LseCredential>,
     /// Each instrument streamed, with its socket and its symbol there.
     streamed: Vec<(InstrumentId, LseSocket, String)>,
     /// The sockets of the instruments streamed, in the order first named,
@@ -71,15 +77,16 @@ pub(super) struct LseStreams {
 
 impl LseStreams {
     /// The streams of the instruments `config` streams, on the key of
-    /// `credential`; none open.
+    /// `credential`, the LSE key; none open.
     ///
     /// # Errors
     ///
     /// Returns an error naming it if an instrument is not an `LSEDGE`
-    /// series, or is one of a market streamed on no socket here.
+    /// series, or is one of a market streamed on no socket here, and
+    /// naming `LSE_API_KEY` if an instrument is streamed with no LSE key.
     pub(super) fn new(
         config: &LseDataClientConfig,
-        credential: LseCredential,
+        credential: Option<LseCredential>,
         data_sender: EventSender<DataEvent>,
         clock: &'static AtomicTime,
     ) -> anyhow::Result<Self> {
@@ -93,6 +100,16 @@ impl LseStreams {
                 Ok((id, socket, symbol))
             })
             .collect::<anyhow::Result<_>>()?;
+        if credential.is_none() && !streamed.is_empty() {
+            bail!(
+                "streaming {} needs the LSE key: set {LSE_API_KEY}, or give the config's",
+                streamed
+                    .iter()
+                    .map(|(id, ..)| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
         let mut urls: Vec<(LseSocket, String)> = Vec::new();
         for &(_, socket, _) in &streamed {
             if !urls.iter().any(|(of, _)| *of == socket) {
@@ -141,9 +158,12 @@ impl LseStreams {
     async fn open_socket(&mut self, socket: LseSocket, url: &str) -> anyhow::Result<()> {
         let name = socket.name();
         let (out_tx, out) = tokio::sync::mpsc::unbounded_channel();
+        let credential = self
+            .credential
+            .as_ref()
+            .context("an instrument streamed with no LSE key")?;
         let client =
-            LseWebSocketClient::connect(socket, url, &self.credential, KEEPALIVE_SECS, out_tx)
-                .await?;
+            LseWebSocketClient::connect(socket, url, credential, KEEPALIVE_SECS, out_tx).await?;
         let streamed: Vec<_> = self
             .streamed
             .iter()

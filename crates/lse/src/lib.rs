@@ -6,18 +6,20 @@
 //!
 //! Nautilus has no LSE adapter; this one is laid out as Nautilus' adapters
 //! are (`docs/developer_guide/adapters.md`): `common` (the venue, the
-//! sockets and the variable of the key, the key, and the symbol boundary
-//! between LSE's market and symbol and an instrument id, and its name on
-//! a socket), `http` (the HTTP client, its typed export query, an export
-//! over any span, LSE's refusals and the parsing of an export's Parquet
-//! file), `websocket` (the frames of LSE's sockets, the client of one, and
-//! the parsing of a tick), `config` (the data client's config), `data`
-//! (the data client), `factories`, and `types`, the custom data type of
-//! LSE's rows that are not prices (`LseRow`).
+//! sockets and the variables of the keys, the keys by the product each
+//! opens, and the symbol boundary between an instrument id and what LSE is
+//! asked for, a derived market's symbol, its name on a socket, or a CME
+//! contract's listing), `http` (the HTTP client, its typed queries, an
+//! export over any span, the listings of CME contracts, LSE's answers and
+//! refusals and the parsing of an export's Parquet file), `websocket` (the
+//! frames of LSE's sockets, the client of one, and the parsing of a tick),
+//! `config` (the data client's config), `data` (the data client),
+//! `factories`, and `types`, the custom data type of LSE's rows that are
+//! not prices (`LseRow`).
 
 pub use self::{
     common::{
-        consts::{LSE_API_KEY, LSEDGE_VENUE},
+        consts::{LSE_API_KEY, LSE_CME_API_KEY, LSEDGE_VENUE},
         symbol::LseSymbol,
     },
     config::LseDataClientConfig,

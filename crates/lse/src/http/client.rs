@@ -1,8 +1,9 @@
 //! The HTTP client of LSE's REST API, on Nautilus' `HttpClient`: every
 //! call a GET with the key in the `X-API-Key` header, kept within the
 //! calls a minute of the key's plan, and a refusal for the moment waited
-//! out, as long as its `Retry-After` says. It calls a market's exports,
-//! and the reference catalogue and a reference collection's exports.
+//! out, as long as its `Retry-After` says. It calls a market's exports and
+//! the lookups of its catalogue, and the reference catalogue and a
+//! reference collection's exports.
 
 use std::{collections::HashMap, fmt, num::NonZeroU32, time::Duration};
 
@@ -22,14 +23,15 @@ use tokio::sync::Mutex;
 
 use super::{
     error::LseHttpError,
-    models::{LseRefusal, ReferenceCatalogue, ReferenceCollection},
-    query::{ExportQuery, ReferenceQuery},
+    models::{LsePair, LsePairs, LseRefusal, ReferenceCatalogue, ReferenceCollection},
+    query::{ExportQuery, PairsQuery, ReferenceQuery},
 };
 use crate::common::credential::LseCredential;
 
-/// The paths of the calls: a market's export, the reference catalogue
-/// and a reference collection's export.
+/// The paths of the calls: a market's export, a lookup of its catalogue,
+/// the reference catalogue and a reference collection's export.
 const EXPORT_PATH: &str = "/v3/export";
+const PAIRS_PATH: &str = "/v3/pairs";
 const REFERENCE_PATH: &str = "/v3/reference";
 const REFERENCE_EXPORT_PATH: &str = "/v3/reference/export";
 /// The header carrying the key.
@@ -179,6 +181,35 @@ impl LseHttpClient {
             })
     }
 
+    /// The listings LSE's catalogue holds of `query`'s symbol. A call LSE
+    /// refuses for the moment is asked again as `export`'s is.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if LSE refuses the lookup (its code, message and
+    /// required plan in the error), answers as its docs do not say, or
+    /// cannot be reached, after the retries a transient failure gets.
+    pub(crate) async fn pairs(&self, query: &PairsQuery) -> Result<Vec<LsePair>, LseHttpError> {
+        let retry_after = |e: &LseHttpError| e.retry_after();
+        let response = self
+            .retries
+            .invocation(
+                "pairs",
+                || self.get(PAIRS_PATH, Some(query)),
+                LseHttpError::is_transient,
+                LseHttpError::Retry,
+            )
+            .retry_delay(&retry_after)
+            .execute()
+            .await?;
+        serde_json::from_slice::<LsePairs>(&response.body)
+            .map(|page| page.pairs)
+            .map_err(|source| LseHttpError::Malformed {
+                what: "catalogue",
+                source,
+            })
+    }
+
     /// The file of the export of `path` that `query` selects, or `None`
     /// (see `export`), one download at a time.
     async fn download<Q>(&self, path: &str, query: &Q) -> Result<Option<Bytes>, LseHttpError>
@@ -291,18 +322,23 @@ mod tests {
 
     use super::*;
     use crate::{
-        common::symbol::LseSymbol,
-        http::query::ReferenceQuery,
+        common::{credential::LseProduct, symbol::LseSymbol},
+        http::query::{PairsQuery, ReferenceQuery, Rows},
         testing::{
-            API_KEY, CALLS_EXHAUSTED, DATA_UNAVAILABLE, DATE_NOT_TRADING, EXPORT_ID, GOLD_TRADES,
-            MockLse, PLAN_REQUIRED, REFERENCE_CATALOGUE, REFERENCE_DATA_UNAVAILABLE,
-            ROWS_EXHAUSTED, Reply, TICKS_NOT_STORED, US10Y_BOND_YIELDS,
+            API_KEY, CALLS_EXHAUSTED, DATA_UNAVAILABLE, DATA_UNAVAILABLE_QUOTES, DATE_NOT_TRADING,
+            EXPORT_ID, GCZ26_PAIR_ID, GCZ26_QUOTES, GOLD_TRADES, MockLse, PAIRS_ESZ6,
+            PLAN_REQUIRED, REFERENCE_CATALOGUE, REFERENCE_DATA_UNAVAILABLE, ROWS_EXHAUSTED, Reply,
+            TICKS_NOT_STORED, US10Y_BOND_YIELDS,
         },
     };
 
     fn client(lse: &MockLse, calls_per_minute: u32) -> LseHttpClient {
-        let credential =
-            LseCredential::resolve(Some(SecretString::from(API_KEY)), |_| None).unwrap();
+        let credential = LseCredential::resolve(
+            LseProduct::Global,
+            Some(SecretString::from(API_KEY)),
+            |_| None,
+        )
+        .unwrap();
         LseHttpClient::new(
             lse.url().to_string(),
             &credential,
@@ -314,8 +350,9 @@ mod tests {
     /// GOLD in `futures` over the captured second.
     fn gold_second() -> ExportQuery {
         let gold = LseSymbol::new("futures", "GOLD").unwrap();
-        ExportQuery::trades(
+        ExportQuery::series(
             &gold,
+            Rows::TradeSlice,
             "2026-10-21T10:00:00Z".parse().unwrap(),
             "2026-10-21T10:00:01Z".parse().unwrap(),
         )
@@ -655,6 +692,89 @@ mod tests {
             .unwrap();
 
         assert_eq!(file, None);
+    }
+
+    /// LSE's catalogue lists ESZ6's two listings, of 2016 and of 2026.
+    #[tokio::test]
+    async fn a_lookup_asks_lse_s_catalogue_for_a_symbol_s_listings() {
+        let lse = MockLse::start(vec![Reply::json(PAIRS_ESZ6)]);
+
+        let pairs = client(&lse, 60)
+            .pairs(&PairsQuery::new("cme", "ESZ6"))
+            .await
+            .unwrap();
+
+        let listed: Vec<_> = pairs
+            .iter()
+            .map(|pair| (pair.pair_id, pair.name.as_str()))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                (4_000_000_001, "ES futures 2026-12"),
+                (4_000_658_762, "ES futures 2016-12")
+            ]
+        );
+        let [call] = &lse.calls()[..] else {
+            panic!("{:?}", lse.calls())
+        };
+        assert_eq!(call.path, "/v3/pairs");
+        assert_eq!(call.api_key.as_deref(), Some(API_KEY));
+        let mut query = call.query.clone();
+        query.sort();
+        assert_eq!(
+            query,
+            [("market", "cme"), ("symbol", "ESZ6")]
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+        );
+    }
+
+    /// A listing's rows are selected by its number and by `data`, no
+    /// symbol or timeframe beside them.
+    #[tokio::test]
+    async fn an_export_of_a_listing_asks_for_its_rows_by_its_pair_id() {
+        let lse = MockLse::start(vec![Reply::file(GCZ26_QUOTES)]);
+        let query = ExportQuery::listing(
+            "cme",
+            GCZ26_PAIR_ID,
+            Rows::Quotes,
+            "2026-11-12T14:30:00Z".parse().unwrap(),
+            "2026-11-12T14:30:01Z".parse().unwrap(),
+        );
+
+        let file = client(&lse, 60).export(&query).await.unwrap();
+
+        assert_eq!(file.as_deref(), Some(GCZ26_QUOTES));
+        let [call] = &lse.calls()[..] else {
+            panic!("{:?}", lse.calls())
+        };
+        let mut query = call.query.clone();
+        query.sort();
+        let expected = [
+            ("adjusted", "0"),
+            ("data", "quotes"),
+            ("format", "parquet"),
+            ("from", "2026-11-12T14:30:00Z"),
+            ("market", "cme"),
+            ("pair_id", "4000000002"),
+            ("to", "2026-11-12T14:30:01Z"),
+        ]
+        .map(|(name, value)| (name.to_string(), value.to_string()));
+        assert_eq!(query, expected);
+    }
+
+    /// `data-unavailable` is no rows as a 404 only: as a 400 it says the
+    /// market serves no such rows, as a derived market's quotes.
+    #[tokio::test]
+    async fn a_400_data_unavailable_is_lse_s_refusal_not_an_empty_export() {
+        let lse = MockLse::start(vec![Reply::refusal(400, DATA_UNAVAILABLE_QUOTES)]);
+
+        let err = client(&lse, 60).export(&gold_second()).await.unwrap_err();
+
+        let err = err.to_string();
+        for part in ["400", "data-unavailable", "This market offers timeframes"] {
+            assert!(err.contains(part), "{part}: {err}");
+        }
     }
 
     #[test]

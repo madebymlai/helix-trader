@@ -1,6 +1,8 @@
-//! The symbol boundary: an `LSEDGE` instrument id and the LSE market and
-//! symbol it stands for, converted both ways here only, and the socket the
-//! series streams on with its name there.
+//! The symbol boundary: an instrument id and what it stands for at LSE
+//! (`LseInstrument`), converted both ways here only: an `LSEDGE` id and the
+//! LSE market and symbol of a derived series (`LseSymbol`), with the socket
+//! the series streams on and its name there, and a `GLBX` id and the CME
+//! contract LSE lists (`CmeContract`).
 //!
 //! A derived market's series is one instrument under `LSEDGE`, its LSE
 //! market the suffix of its symbol, as Bybit's product suffix (Nautilus'
@@ -10,14 +12,24 @@
 //! `GOLD-FUTURES.LSEDGE` is GOLD in `futures`. The market is written in
 //! capitals in the id, LSE's folder name in lower case, and the symbol as
 //! LSE lists it. An exchange market's listings take Databento's ids, so
-//! none is an `LSEDGE` instrument.
+//! none is an `LSEDGE` instrument: a CME Globex contract is Databento's
+//! `GLBX` id, found among LSE's listings of its exchange name (see
+//! `CmeContract`).
 
 use std::fmt;
 
-use anyhow::{bail, ensure};
-use nautilus_model::identifiers::InstrumentId;
+use anyhow::{Context, bail, ensure};
+use jiff::{ToSpan, civil::Date};
+use nautilus_model::identifiers::{
+    InstrumentId, Symbol, Venue,
+    futures::{format_futures_symbol, futures_month, parse_futures_symbol, resolve_futures_year},
+};
 
-use super::consts::{EXCHANGE_MARKETS, LSEDGE_VENUE, LseSocket};
+use super::{
+    consts::{EXCHANGE_MARKETS, LSEDGE_VENUE, LseSocket},
+    credential::LseProduct,
+};
+use crate::http::models::LsePair;
 
 /// A series of an LSE derived market: its market, LSE's folder name, and
 /// its symbol, as `/v3/pairs` lists it.
@@ -133,8 +145,8 @@ impl LseSymbol {
                 };
                 (LseSocket::London, format!("{base}/USD"))
             }
-            "uk_stocks" => (LseSocket::London, format!("{}.L", listing(symbol))),
-            "ca_stocks" => (LseSocket::Tsx, format!("{}.TO", listing(symbol))),
+            "uk_stocks" => (LseSocket::London, format!("{}.L", hyphenated(symbol))),
+            "ca_stocks" => (LseSocket::Tsx, format!("{}.TO", hyphenated(symbol))),
             market => bail!("the series of LSE's {market} stream on no LSE socket"),
         })
     }
@@ -148,8 +160,206 @@ impl fmt::Display for LseSymbol {
 
 /// A UK or Canadian stock's symbol as its socket spells it before its
 /// exchange's suffix: its dots hyphens, a trailing one dropped.
-fn listing(symbol: &str) -> String {
+fn hyphenated(symbol: &str) -> String {
     symbol.strip_suffix('.').unwrap_or(symbol).replace('.', "-")
+}
+
+/// What an instrument stands for at LSE, by its venue: a series of a
+/// derived market under `LSEDGE`, asked with the LSE key by its symbol, or a
+/// CME Globex contract under `GLBX`, asked with the CME key by its listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LseInstrument {
+    Series(LseSymbol),
+    Cme(CmeContract),
+}
+
+impl LseInstrument {
+    /// What `id` stands for, a CME contract's two-digit year resolved
+    /// against `reference_year` (see `CmeContract::from_instrument_id`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming `id` if it is on neither venue, or not an
+    /// instrument of its venue (see `LseSymbol::from_instrument_id` and
+    /// `CmeContract::from_instrument_id`).
+    pub(crate) fn from_instrument_id(
+        id: InstrumentId,
+        reference_year: i16,
+    ) -> anyhow::Result<Self> {
+        if id.venue == *LSEDGE_VENUE {
+            LseSymbol::from_instrument_id(id).map(Self::Series)
+        } else if id.venue == Venue::GLBX() {
+            CmeContract::from_instrument_id(id, reference_year).map(Self::Cme)
+        } else {
+            bail!(
+                "{id} is on {}, which LSE does not serve: LSE serves LSEDGE, its own series, \
+                 and GLBX, CME Globex",
+                id.venue
+            )
+        }
+    }
+
+    /// The product whose key asks LSE for the instrument.
+    pub(crate) const fn product(&self) -> LseProduct {
+        match self {
+            Self::Series(_) => LseProduct::Global,
+            Self::Cme(_) => LseProduct::Cme,
+        }
+    }
+}
+
+/// A CME Globex contract under `GLBX`, the venue Databento gives CME Globex
+/// and Nautilus' IB adapter maps, written in Nautilus' default two-digit
+/// year (`FuturesYearDigits::Two`), as Databento's client writes it:
+/// `ESZ26.GLBX` is the E-mini S&P 500 of December 2026.
+///
+/// CME names a contract by its product, its month letter and the last digit
+/// of its year, two for natural gas and, from 2030, crude oil, so a name
+/// comes round again after ten years: LSE lists ESZ6 of 2016 and of 2026
+/// under one name, and the number of each listing, its `pair_id`, names it
+/// alone (LSE's docs, "The market: cme"). So a contract is asked of LSE by
+/// its listing's number, the listing found among those of its exchange
+/// names (`listing`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CmeContract {
+    root: String,
+    month_code: char,
+    /// The first day of the contract's month.
+    month: Date,
+}
+
+impl CmeContract {
+    /// The contract `id` stands for, its two-digit year resolved against
+    /// `reference_year` as Nautilus resolves one (`resolve_futures_year`:
+    /// within 30 years before it and 69 after).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming `id` if it is not on `GLBX`, or not a
+    /// futures contract's symbol with a two-digit year, a one-digit year
+    /// standing for contracts ten years apart.
+    pub(crate) fn from_instrument_id(
+        id: InstrumentId,
+        reference_year: i16,
+    ) -> anyhow::Result<Self> {
+        ensure!(
+            id.venue == Venue::GLBX(),
+            "{id} is not a CME Globex contract, under GLBX"
+        );
+        let parsed = parse_futures_symbol(id.symbol.as_str())
+            .filter(|parsed| {
+                parsed.year_digits.len() == 2
+                    && parsed
+                        .root
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+            })
+            .with_context(|| {
+                format!(
+                    "{id} is not a CME futures contract with a two-digit year, as ESZ26.GLBX: \
+                     a one-digit year names contracts ten years apart"
+                )
+            })?;
+        let year = resolve_futures_year(parsed.year_digits, i32::from(reference_year))
+            .and_then(|year| i16::try_from(year).ok())
+            .with_context(|| format!("the year of {id}"))?;
+        let month = futures_month(parsed.month_code)
+            .and_then(|month| i8::try_from(month).ok())
+            .with_context(|| format!("the month of {id}"))?;
+        Ok(Self {
+            root: parsed.root.to_owned(),
+            month_code: parsed.month_code,
+            month: Date::new(year, month, 1).with_context(|| format!("the month of {id}"))?,
+        })
+    }
+
+    /// The contract's id, under `GLBX`, in Nautilus' two-digit year.
+    #[must_use]
+    pub(crate) fn instrument_id(&self) -> InstrumentId {
+        InstrumentId::new(Symbol::from(self.name(2).as_str()), Venue::GLBX())
+    }
+
+    /// The exchange names the contract may go by at LSE, in the order to
+    /// look them up: its year's last digit, CME's usual name, then its two
+    /// last digits, natural gas's and crude oil's from 2030 (LSE's docs,
+    /// "The market: cme": "read a name from the catalogue instead of
+    /// building it").
+    #[must_use]
+    pub(crate) fn exchange_names(&self) -> [String; 2] {
+        [self.name(1), self.name(2)]
+    }
+
+    /// The contract's name with `year_digits` digits of its year.
+    fn name(&self, year_digits: u8) -> String {
+        format_futures_symbol(
+            &self.root,
+            self.month_code,
+            i32::from(self.month.year()),
+            year_digits,
+        )
+        .expect("a root, a month code and a year of 1 to 9999 make a name")
+    }
+
+    /// The contract's listing among `pairs`, LSE's listings of one of its
+    /// exchange names: the one whose name says the contract's month (`GC
+    /// futures 2026-12`), or, for a listing LSE names by its symbol alone,
+    /// the one delisted when a contract of its month expires, from three
+    /// months before the month to its end (CME's crude oil of January
+    /// expires in December, its gold of December in December). None if no
+    /// listing is the contract's.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming them if more than one listing is the
+    /// contract's.
+    pub(crate) fn listing<'a>(&self, pairs: &'a [LsePair]) -> anyhow::Result<Option<&'a LsePair>> {
+        let listings: Vec<&LsePair> = pairs
+            .iter()
+            .filter(|pair| self.is_listed_as(pair))
+            .collect();
+        match listings[..] {
+            [] => Ok(None),
+            [listing] => Ok(Some(listing)),
+            _ => bail!(
+                "LSE lists {} listings of {self}: {}",
+                listings.len(),
+                listings
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+
+    /// Whether `pair` is the contract's listing: by the month its name
+    /// says, or, its name saying none, by the day it was delisted.
+    fn is_listed_as(&self, pair: &LsePair) -> bool {
+        match named_month(&pair.name) {
+            Some(month) => month == self.month,
+            None => pair.delisted_date.is_some_and(|delisted| {
+                self.month - 3.months() <= delisted && delisted < self.month + 1.month()
+            }),
+        }
+    }
+}
+
+/// The month a CME listing's name says, as in `GC futures 2026-12`.
+fn named_month(name: &str) -> Option<Date> {
+    let (_, month) = name.rsplit_once(" futures ")?;
+    Date::strptime("%Y-%m-%d", format!("{month}-01")).ok()
+}
+
+impl fmt::Display for CmeContract {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}, the {} futures of {}",
+            self.instrument_id(),
+            self.root,
+            self.month.strftime("%Y-%m")
+        )
+    }
 }
 
 #[cfg(test)]
@@ -157,6 +367,10 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+    use crate::{
+        http::models::LsePairs,
+        testing::{PAIRS_ESZ6, PAIRS_ESZ26, PAIRS_GCZ4, PAIRS_NGZ6, PAIRS_NGZ26},
+    };
 
     fn of(id: &str) -> anyhow::Result<LseSymbol> {
         LseSymbol::from_instrument_id(InstrumentId::from(id))
@@ -295,5 +509,139 @@ mod tests {
 
             assert!(err.contains("exchange market"), "{id}: {err}");
         }
+    }
+
+    /// A CME contract of `id` as of 2026.
+    fn cme(id: &str) -> anyhow::Result<CmeContract> {
+        CmeContract::from_instrument_id(InstrumentId::from(id), 2026)
+    }
+
+    fn pairs(answer: &str) -> Vec<LsePair> {
+        serde_json::from_str::<LsePairs>(answer).unwrap().pairs
+    }
+
+    /// The pair id of the listing of `id` among LSE's listings `answer`.
+    fn listed(id: &str, answer: &str) -> Option<u64> {
+        cme(id)
+            .unwrap()
+            .listing(&pairs(answer))
+            .unwrap()
+            .map(|pair| pair.pair_id)
+    }
+
+    #[rstest]
+    #[case::es_of_2026("ESZ26.GLBX", ["ESZ6", "ESZ26"])]
+    #[case::es_of_2016("ESZ16.GLBX", ["ESZ6", "ESZ16"])]
+    #[case::natural_gas("NGZ26.GLBX", ["NGZ6", "NGZ26"])]
+    #[case::crude_of_2030("CLZ30.GLBX", ["CLZ0", "CLZ30"])]
+    #[case::sofr("SR3H27.GLBX", ["SR3H7", "SR3H27"])]
+    #[case::euro_fx("6EH27.GLBX", ["6EH7", "6EH27"])]
+    fn a_glbx_contract_goes_by_its_year_s_last_digit_or_two_at_lse(
+        #[case] id: &str,
+        #[case] names: [&str; 2],
+    ) {
+        assert_eq!(cme(id).unwrap().exchange_names(), names.map(String::from));
+    }
+
+    #[rstest]
+    #[case("ESZ26.GLBX")]
+    #[case("GCZ16.GLBX")]
+    #[case("SR3H27.GLBX")]
+    #[case("6EH27.GLBX")]
+    fn a_glbx_contract_round_trips_through_its_instrument_id(#[case] id: &str) {
+        assert_eq!(cme(id).unwrap().instrument_id(), InstrumentId::from(id));
+    }
+
+    /// A one-digit year stands for contracts ten years apart; a root is no
+    /// contract; a spread or an option is not served.
+    #[rstest]
+    #[case::one_digit_year("ESZ6.GLBX")]
+    #[case::four_digit_year("ESZ2026.GLBX")]
+    #[case::root("GC.GLBX")]
+    #[case::continuous("GC.v.0.GLBX")]
+    #[case::spread("ESU26-ESM27.GLBX")]
+    #[case::no_month("ES26.GLBX")]
+    fn a_glbx_id_that_is_no_contract_with_a_two_digit_year_is_refused_naming_it(#[case] id: &str) {
+        let err = cme(id).unwrap_err().to_string();
+
+        assert!(err.contains(id), "{id}: {err}");
+    }
+
+    #[rstest]
+    fn an_id_of_another_venue_is_no_cme_contract() {
+        let err = cme("ESZ26.CME").unwrap_err().to_string();
+
+        assert!(err.contains("ESZ26.CME"), "{err}");
+    }
+
+    /// LSE's ESZ6 names the contracts of 2016 and of 2026, numbered
+    /// 4000658762 and 4000000001.
+    #[rstest]
+    #[case::of_2026("ESZ26.GLBX", 4_000_000_001)]
+    #[case::of_2016("ESZ16.GLBX", 4_000_658_762)]
+    fn esz6_of_2016_and_of_2026_resolve_to_their_own_listings(
+        #[case] id: &str,
+        #[case] pair_id: u64,
+    ) {
+        assert_eq!(listed(id, PAIRS_ESZ6), Some(pair_id));
+    }
+
+    /// GCZ4 of 2014 is named `GC futures 2014-12`; GCZ4 of 2024 by its
+    /// symbol alone, delisted on 27 December 2024.
+    #[rstest]
+    #[case::named_by_its_month("GCZ14.GLBX", 4_000_992_242)]
+    #[case::named_by_its_symbol("GCZ24.GLBX", 4_000_402_563)]
+    fn a_listing_named_by_its_symbol_alone_is_found_by_its_delisting(
+        #[case] id: &str,
+        #[case] pair_id: u64,
+    ) {
+        assert_eq!(listed(id, PAIRS_GCZ4), Some(pair_id));
+    }
+
+    /// LSE's NGZ6 is the contract of 2016 alone; 2026's is NGZ26.
+    #[rstest]
+    fn a_contract_none_of_a_name_s_listings_is_has_no_listing_there() {
+        assert_eq!(listed("NGZ26.GLBX", PAIRS_NGZ6), None);
+        assert_eq!(listed("NGZ26.GLBX", PAIRS_NGZ26), Some(4_000_000_128));
+        assert_eq!(listed("GCZ34.GLBX", PAIRS_GCZ4), None);
+        assert_eq!(listed("ESZ26.GLBX", PAIRS_ESZ26), None);
+    }
+
+    #[rstest]
+    fn two_listings_of_one_contract_are_refused_naming_both() {
+        let mut twice = pairs(PAIRS_ESZ6);
+        twice[1].name = twice[0].name.clone();
+
+        let err = cme("ESZ26.GLBX")
+            .unwrap()
+            .listing(&twice)
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("4000000001") && err.contains("4000658762"),
+            "{err}"
+        );
+    }
+
+    #[rstest]
+    #[case::series("GOLD-FUTURES.LSEDGE", LseProduct::Global)]
+    #[case::cme_contract("GCZ26.GLBX", LseProduct::Cme)]
+    fn each_venue_s_instruments_are_asked_with_its_product_s_key(
+        #[case] id: &str,
+        #[case] product: LseProduct,
+    ) {
+        let instrument = LseInstrument::from_instrument_id(InstrumentId::from(id), 2026).unwrap();
+
+        assert_eq!(instrument.product(), product);
+    }
+
+    #[rstest]
+    fn an_instrument_of_a_venue_lse_does_not_serve_is_refused_naming_it() {
+        let err = LseInstrument::from_instrument_id(InstrumentId::from("XAUUSD.ICMARKETS"), 2026)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("XAUUSD.ICMARKETS"), "{err}");
     }
 }

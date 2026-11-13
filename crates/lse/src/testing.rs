@@ -14,8 +14,9 @@ use std::{
 
 use nautilus_core::UnixNanos;
 use nautilus_model::{
+    enums::AssetClass,
     identifiers::{InstrumentId, Symbol},
-    instruments::{IndexInstrument, InstrumentAny},
+    instruments::{FuturesContract, IndexInstrument, InstrumentAny},
     types::{Currency, Price, Quantity},
 };
 use nautilus_network::http::Url;
@@ -85,6 +86,39 @@ pub const DATA_UNAVAILABLE_TODAY: &str =
     include_str!("../test_data/refusal_data_unavailable_today.json");
 /// LSE's answer for the tick slice of a market storing no trades, `forex`.
 pub const TICKS_NOT_STORED: &str = include_str!("../test_data/refusal_data_unavailable_tick.json");
+/// LSE's refusal of a derived market's quotes, a 400: it serves them as
+/// timeframes alone.
+pub const DATA_UNAVAILABLE_QUOTES: &str =
+    include_str!("../test_data/refusal_data_unavailable_quotes.json");
+/// LSE's refusal of CME rows older than the CME Group Lite+ plan's twelve
+/// years of Level 1, captured with that plan's key.
+pub const HISTORY_LIMIT: &str = include_str!("../test_data/refusal_history_limit.json");
+
+/// LSE's catalogue of CME Globex (`/v3/pairs?market=cme&symbol=…`), captured
+/// with the CME Group Lite+ key: the listings of each exchange name. ESZ6
+/// and GCZ6 name the contracts of 2016 and of 2026; GCZ4 those of 2014 and
+/// of 2024, the second named by its symbol alone; NGZ6 the contract of
+/// 2016 alone, natural gas naming 2026's NGZ26; LSE lists no ESZ26.
+pub const PAIRS_ESZ6: &str = include_str!("../test_data/pairs_cme_esz6.json");
+pub const PAIRS_GCZ6: &str = include_str!("../test_data/pairs_cme_gcz6.json");
+pub const PAIRS_GCZ4: &str = include_str!("../test_data/pairs_cme_gcz4.json");
+pub const PAIRS_NGZ6: &str = include_str!("../test_data/pairs_cme_ngz6.json");
+pub const PAIRS_NGZ26: &str = include_str!("../test_data/pairs_cme_ngz26.json");
+pub const PAIRS_ESZ26: &str = include_str!("../test_data/pairs_cme_esz26.json");
+
+/// The pair id LSE gives GCZ6 of 2026, `GCZ26.GLBX`.
+pub const GCZ26_PAIR_ID: u64 = 4_000_000_002;
+/// The trades and the quotes of GCZ6 of 2026 over
+/// `[2026-11-12T14:30:00Z, 2026-11-12T14:30:01Z)`, as LSE exported them by
+/// that pair id to the CME key: 38 trades and 636 quotes.
+pub const GCZ26_TRADES: &[u8] = include_bytes!("../test_data/export_gcz6_trades.parquet");
+pub const GCZ26_QUOTES: &[u8] = include_bytes!("../test_data/export_gcz6_quotes.parquet");
+
+/// The CME contract of `GCZ26_TRADES`.
+pub const GCZ26: &str = "GCZ26.GLBX";
+
+/// The CME key the tests give the adapter, which the peer records.
+pub const CME_API_KEY: &str = "lse-cme-test-key-0123456789";
 
 /// LSE's data-ws frames, captured with the free key on 13 November 2026
 /// (`test_data/README.md`): its welcome; its authenticated frame, trimmed
@@ -173,6 +207,34 @@ pub fn gold_spot() -> InstrumentAny {
             .ts_init(UnixNanos::default())
             .build()
             .expect("a valid index"),
+    )
+}
+
+/// GCZ6 of 2026 as Databento defines it, `GCZ26.GLBX` (as Nautilus' Databento
+/// client wrote it into a catalog): COMEX gold, 100 troy ounces, priced in
+/// USD to two decimals in ticks of a tenth.
+#[must_use]
+pub fn gcz26() -> InstrumentAny {
+    let at = |time: &str| UnixNanos::from(time.parse::<jiff::Timestamp>().expect("a time"));
+    InstrumentAny::FuturesContract(
+        FuturesContract::builder()
+            .instrument_id(InstrumentId::from(GCZ26))
+            .raw_symbol(Symbol::from("GCZ6"))
+            .asset_class(AssetClass::Commodity)
+            .exchange("XCEC".into())
+            .underlying("GC".into())
+            .activation_ns(at("2020-12-30T22:30:00Z"))
+            .expiration_ns(at("2026-12-29T18:30:00Z"))
+            .currency(Currency::USD())
+            .price_precision(2)
+            .price_increment(Price::from("0.10"))
+            .multiplier(Quantity::from(100))
+            .lot_size(Quantity::from(1))
+            .min_quantity(Quantity::from(1))
+            .ts_event(at("2026-07-31T00:00:00Z"))
+            .ts_init(at("2026-07-31T00:00:00Z"))
+            .build()
+            .expect("a valid futures contract"),
     )
 }
 

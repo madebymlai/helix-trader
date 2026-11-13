@@ -1,6 +1,6 @@
 # Interactive Brokers
 
-IB serves every venue without a row of its own in the [routing table](../mod.rs), definitions, history and live data, and is its broker; it also serves GLBX's live data and trades its instruments. See [catalog](../../catalog/README.md) for shared fill semantics and [live](../../live/README.md) for node startup, routing, Redis and recovery.
+IB serves every venue without a row of its own in the [routing table](../mod.rs), definitions, history and live data, and is its broker; it also serves GLBX's live data and trades its instruments, whose definitions are [Databento](../databento/README.md)'s and history [LSE](../lse/README.md)'s. See [catalog](../../catalog/README.md) for shared fill semantics and [live](../../live/README.md) for node startup, routing, Redis and recovery.
 
 ## History
 
