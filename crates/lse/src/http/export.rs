@@ -9,7 +9,9 @@
 //! (`data-unavailable`: "the dates asked may not be loaded yet (or nothing
 //! traded in them)", `test_data/`). So the current UTC day is not loaded,
 //! whatever LSE answers; the day before is once LSE answers rows of it;
-//! and an earlier day LSE holds no row of had none.
+//! and an earlier day LSE holds no row of had none. A day's export that
+//! takes the next day's first instant (see `utc_days`) reaches into that
+//! day too, LSE answering no rows of it apart.
 
 use std::cmp::Ordering;
 
@@ -21,6 +23,8 @@ use super::{client::LseHttpClient, query::ExportQuery};
 
 /// A UTC day.
 const DAY: SignedDuration = SignedDuration::from_hours(24);
+/// The finest step of a time, Nautilus' and LSE's.
+const INSTANT: SignedDuration = SignedDuration::from_nanos(1);
 
 /// What LSE holds of an export.
 #[derive(Debug)]
@@ -53,9 +57,14 @@ pub(crate) async fn fetch(
     let mut unloaded_from = None;
     for day in utc_days(query) {
         let day_files = fetch_halving(http, day.clone()).await?;
-        let (from, _) = day.window();
-        if unloaded_from.is_none() && !loaded(from, !day_files.is_empty(), now) {
-            unloaded_from = Some(from);
+        let (from, to) = day.window();
+        let last = to - INSTANT;
+        if unloaded_from.is_none() {
+            if !loaded(from, !day_files.is_empty(), now) {
+                unloaded_from = Some(from);
+            } else if midnight(last) != midnight(from) && !loaded(last, false, now) {
+                unloaded_from = Some(last);
+            }
         }
         files.extend(day_files);
     }
@@ -93,13 +102,22 @@ async fn fetch_halving(
 }
 
 /// `query` as the UTC days its span crosses, each over its part of the
-/// span, in time order.
+/// span, in time order. A span ending an instant past a midnight, as a
+/// closed window of the data engine's ending at that midnight is asked
+/// (`[start, end]` as `[start, end + 1 ns)`, as Nautilus' Databento client
+/// asks one), has that instant asked in the day before's export, LSE
+/// serving exports across midnight, rather than in an export of its own.
 fn utc_days(query: &ExportQuery) -> Vec<ExportQuery> {
     let (start, end) = query.window();
     let mut days = Vec::new();
     let mut from = start;
     while from < end {
-        let to = (midnight(from) + DAY).min(end);
+        let next = midnight(from) + DAY;
+        let to = if end.duration_since(next) <= INSTANT {
+            end
+        } else {
+            next
+        };
         days.push(query.over(from, to));
         from = to;
     }
@@ -212,6 +230,27 @@ mod tests {
         assert_eq!(exported.files.len(), 2);
     }
 
+    /// A closed window ending at a midnight, `[start, end]` asked as
+    /// `[start, end + 1 ns)`: the midnight's instant is asked in the day's
+    /// export, LSE serving an export across midnight.
+    #[tokio::test]
+    async fn a_span_ending_an_instant_past_a_midnight_is_one_export_through_it() {
+        let lse = MockLse::start(vec![Reply::file(GOLD_TRADES)]);
+        let query = gold("2026-10-20T00:00:00Z", "2026-10-21T00:00:00.000000001Z");
+
+        let exported = fetch(&client(&lse), &query, at(LONG_AFTER)).await.unwrap();
+
+        assert_eq!(
+            asked(&lse),
+            [span(
+                "2026-10-20T00:00:00Z",
+                "2026-10-21T00:00:00.000000001Z"
+            )]
+        );
+        assert_eq!(exported.files.len(), 1);
+        assert_eq!(exported.unloaded_from, None);
+    }
+
     /// LSE refuses the four seconds and their second half; the first half
     /// and the two quarters are served, the third quarter holding no row.
     #[tokio::test]
@@ -312,6 +351,19 @@ mod tests {
 
         assert_eq!(exported.files.len(), 1);
         assert_eq!(exported.unloaded_from, None);
+    }
+
+    /// The 21st's export takes the 22nd's first instant, which LSE has not
+    /// loaded, rows of the 21st or not.
+    #[tokio::test]
+    async fn a_day_whose_export_takes_the_current_day_s_first_instant_reaches_into_it() {
+        let lse = MockLse::start(vec![Reply::file(GOLD_TRADES)]);
+        let query = gold("2026-10-21T00:00:00Z", "2026-10-22T00:00:00.000000001Z");
+
+        let exported = fetch(&client(&lse), &query, at(ON_THE_22ND)).await.unwrap();
+
+        assert_eq!(lse.calls().len(), 1);
+        assert_eq!(exported.unloaded_from, Some(at("2026-10-22T00:00:00Z")));
     }
 
     /// LSE's answer cannot tell a day not loaded from one with no trading.

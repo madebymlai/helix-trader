@@ -13,8 +13,9 @@ test-support = []
 
 [dependencies]
 anyhow.workspace = true
-# The columns of an export's Parquet file.
-arrow.workspace = true
+# The columns of an export's Parquet file, and a row's fields as JSON, its
+# times in their named zone, LSE's UTC (chrono-tz).
+arrow = { workspace = true, features = ["chrono-tz", "json"] }
 # The `DataClient` trait of the data client.
 async-trait.workspace = true
 bon.workspace = true
@@ -27,6 +28,8 @@ nautilus-core.workspace = true
 nautilus-live.workspace = true
 nautilus-model.workspace = true
 nautilus-network.workspace = true
+# The arrow encoding and registry of the custom data type of LSE's rows.
+nautilus-serialization = { workspace = true, features = ["arrow"] }
 # The version Nautilus' persistence reads with, and the codec LSE's exports
 # are compressed with.
 parquet = { version = "59.3", default-features = false, features = ["arrow", "zstd"] }
@@ -40,8 +43,22 @@ thiserror = "2"
 tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
+# The data tester's: the key from `.env`, the node's catalog (registered
+# through nautilus-live's `streaming`) and Nautilus' `DataTester`.
+dotenvy = "0.15"
+nautilus-live = { workspace = true, features = ["streaming"] }
 nautilus-model = { workspace = true, features = ["test-support"] }
+nautilus-persistence.workspace = true
+nautilus-testkit.workspace = true
 # Test functions, as Nautilus' adapter guide has them ("Rust testing"),
 # declared as Nautilus declares it.
 rstest = { version = "0.28.0", default-features = false }
+tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+
+# Nautilus' data tester on LSE (see the README, "Data testing"), on the
+# crate's test definitions.
+[[example]]
+name = "lse-data-tester"
+path = "examples/node_data_tester.rs"
+required-features = ["test-support"]

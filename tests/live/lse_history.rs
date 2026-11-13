@@ -1,14 +1,17 @@
 //! End to end on LSE: fill-catalog fills one UTC day, Thursday 12 November
-//! 2026, into a temporary catalog, through the node from LSE's exports: of
-//! LSE's gold and 10-year Treasury futures trades, `GOLD-FUTURES.LSEDGE`
-//! and `US10Y-FUTURES.LSEDGE`, the catalog holding their definitions,
-//! written by hand as LSE publishes none; and of the trades and quotes of
+//! 2026, of LSE's gold and 10-year Treasury futures trades,
+//! `GOLD-FUTURES.LSEDGE` and `US10Y-FUTURES.LSEDGE`, and of its gold spot
+//! candles as 1-minute bars, `XAU/USD-COMMODITIES.LSEDGE`, a series LSE
+//! serves only as candles, into a temporary catalog holding their
+//! definitions, written by hand as LSE publishes none, and of LSE's daily
+//! 10-year US bond yield, custom data of no instrument (`lse::LseRow`),
+//! through the node from LSE's exports; and of the trades and quotes of
 //! GCZ6 of 2026, `GCZ26.GLBX`, from LSE's CME Globex, its definition from
 //! Databento. It needs the LSE key, `LSE_API_KEY`, a CME Group key,
 //! `LSE_CME_API_KEY`, and Databento's, `DATABENTO_API_KEY`, from the
-//! environment or `.env`; the free LSE key serves the derived series, CME
-//! Group Lite+ the CME contract's Level 1. The derived series' exports
-//! count against the free key's rows a day; Databento charges about
+//! environment or `.env`; the free LSE key serves the derived series and
+//! the bond yield, CME Group Lite+ the CME contract's Level 1. The free
+//! key's exports count against its rows a day; Databento charges about
 //! $0.000001 for the definition.
 //!
 //! Gated as `okx_demo.rs` is: the test returns at once, saying it was
@@ -24,9 +27,10 @@ use helix_trader::{
     venues::{HistoryVenueArgs, fill_history},
 };
 use jiff::{SignedDuration, Timestamp};
+use lse::LseRow;
 use nautilus_core::UnixNanos;
 use nautilus_model::{
-    data::NautilusDataType,
+    data::{BarType, Data, NautilusDataType},
     enums::AggressorSide,
     identifiers::{InstrumentId, Symbol},
     instruments::{IndexInstrument, InstrumentAny},
@@ -36,6 +40,7 @@ use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 
 const GOLD: &str = "GOLD-FUTURES.LSEDGE";
 const US10Y: &str = "US10Y-FUTURES.LSEDGE";
+const GOLD_SPOT: &str = "XAU/USD-COMMODITIES.LSEDGE";
 const GCZ26: &str = "GCZ26.GLBX";
 
 /// Whether the run is opted in: from the shell, before `.env` is read, so
@@ -71,22 +76,22 @@ fn index(id: &str, raw: &str, tick: &str) -> InstrumentAny {
     )
 }
 
-/// The UTC day filled, Thursday 12 November 2026: `[start, end]`.
-fn the_12th() -> (Timestamp, Timestamp) {
-    let start: Timestamp = "2026-11-12T00:00:00Z".parse().unwrap();
-    (
-        start,
-        start + SignedDuration::from_hours(24) - SignedDuration::from_nanos(1),
-    )
-}
-
-/// fill-catalog's venue flags, none given.
-fn venues() -> HistoryVenueArgs {
+/// The venues' settings of fill-catalog, by default.
+fn history_venues() -> HistoryVenueArgs {
     HistoryVenueArgs::from_arg_matches(
         &HistoryVenueArgs::augment_args(Command::new("fill-catalog"))
             .get_matches_from(["fill-catalog"]),
     )
     .unwrap()
+}
+
+/// Thursday 12 November 2026, a UTC day, closed.
+fn the_day() -> (Timestamp, Timestamp) {
+    let start: Timestamp = "2026-11-12T00:00:00Z".parse().unwrap();
+    (
+        start,
+        start + SignedDuration::from_hours(24) - SignedDuration::from_nanos(1),
+    )
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -112,11 +117,12 @@ async fn a_day_of_gold_and_treasury_futures_trades_fills_from_lse() {
                 instrument_id: InstrumentId::from(id),
             })
             .to_vec(),
+        custom: vec![],
         warmup: SignedDuration::ZERO,
     };
-    let (start, end) = the_12th();
+    let (start, end) = the_day();
 
-    fill_history(&requirements, start, end, &venues(), dir.path())
+    fill_history(&requirements, start, end, &history_venues(), dir.path())
         .await
         .unwrap();
 
@@ -144,7 +150,122 @@ async fn a_day_of_gold_and_treasury_futures_trades_fills_from_lse() {
     }
 }
 
-/// A day of GCZ6 of 2026's quotes, about 2.7 million, is past the 2,500,000
+/// Each bar closes on a minute of the day, LSE stamping its candles at
+/// their open.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_day_of_gold_spot_candles_fills_from_lse_as_bars_stamped_at_their_close() {
+    if !opted_in("a_day_of_gold_spot_candles_fills_from_lse_as_bars_stamped_at_their_close") {
+        return;
+    }
+    dotenvy::dotenv().ok();
+    let dir = tempfile::tempdir().unwrap();
+    let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+    // Gold spot to a cent; LSE gives it no volume.
+    catalog
+        .write_instruments(vec![index(GOLD_SPOT, "XAU/USD", "0.01")])
+        .unwrap();
+    let bar_type = format!("{GOLD_SPOT}-1-MINUTE-LAST-EXTERNAL");
+    let requirements = DataRequirements {
+        bar_types: vec![BarType::from(bar_type.as_str())],
+        ticks: vec![],
+        custom: vec![],
+        warmup: SignedDuration::ZERO,
+    };
+    let (start, end) = the_day();
+
+    fill_history(&requirements, start, end, &history_venues(), dir.path())
+        .await
+        .unwrap();
+
+    let (from, to) = (UnixNanos::from(start), UnixNanos::from(end));
+    let bars = catalog
+        .bars(Some(vec![bar_type.clone()]), None, None)
+        .unwrap();
+    println!("{bar_type}: {} bars", bars.len());
+    assert!(!bars.is_empty(), "no bars");
+    assert!(
+        bars.iter().all(|bar| (from..=to).contains(&bar.ts_event)
+            && bar.ts_event.as_u64() % 60_000_000_000 == 0),
+        "a bar outside the day or off the minute"
+    );
+    let lacking = catalog
+        .get_missing_intervals_for_request(
+            from.as_u64(),
+            to.as_u64(),
+            &NautilusDataType::Bar.into(),
+            Some(&bar_type),
+        )
+        .unwrap();
+    assert_eq!(lacking, []);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_day_of_bond_yields_fills_from_lse_as_custom_data() {
+    if !opted_in("a_day_of_bond_yields_fills_from_lse_as_custom_data") {
+        return;
+    }
+    dotenvy::dotenv().ok();
+    let dir = tempfile::tempdir().unwrap();
+    let us10y = LseRow::data_type("bond_yields", "US10Y");
+    let requirements = DataRequirements {
+        bar_types: vec![],
+        ticks: vec![],
+        custom: vec![us10y.clone()],
+        warmup: SignedDuration::ZERO,
+    };
+    let (start, end) = the_day();
+
+    fill_history(&requirements, start, end, &history_venues(), dir.path())
+        .await
+        .unwrap();
+
+    LseRow::register();
+    let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+    let identifier = us10y.identifier().unwrap().to_string();
+    let stored = catalog
+        .query_custom_data_dynamic(
+            us10y.type_name(),
+            Some(std::slice::from_ref(&identifier)),
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+    println!("{us10y}: {} rows", stored.len());
+    let (from, to) = (UnixNanos::from(start), UnixNanos::from(end));
+    let rows: Vec<&LseRow> = stored
+        .iter()
+        .map(|data| {
+            let Data::Custom(custom) = data else {
+                panic!("not custom data: {data:?}");
+            };
+            assert_eq!(custom.data_type, us10y);
+            custom.data.as_any().downcast_ref::<LseRow>().unwrap()
+        })
+        .collect();
+    assert_eq!(rows.len(), 1, "one daily row");
+    assert!(
+        rows.iter()
+            .all(|row| (from..=to).contains(&row.ts_init) && row.fields["close"].is_number()),
+        "a row outside the day or with no close: {rows:?}"
+    );
+    let lacking = catalog
+        .get_missing_intervals_for_request(
+            from.as_u64(),
+            to.as_u64(),
+            &NautilusDataType::Custom {
+                type_name: us10y.type_name().to_string(),
+            }
+            .into(),
+            Some(&identifier),
+        )
+        .unwrap();
+    assert_eq!(lacking, []);
+}
+
+/// A day of GCZ6 of 2026's quotes, about 2.6 million, is past the 2,500,000
 /// rows one export may read, so LSE is asked for it in halves.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_day_of_a_gc_contract_s_trades_and_quotes_fills_from_lse_its_definition_from_databento() {
@@ -163,11 +284,12 @@ async fn a_day_of_a_gc_contract_s_trades_and_quotes_fills_from_lse_its_definitio
                 instrument_id: InstrumentId::from(GCZ26),
             })
             .to_vec(),
+        custom: vec![],
         warmup: SignedDuration::ZERO,
     };
-    let (start, end) = the_12th();
+    let (start, end) = the_day();
 
-    fill_history(&requirements, start, end, &venues(), dir.path())
+    fill_history(&requirements, start, end, &history_venues(), dir.path())
         .await
         .unwrap();
 

@@ -1,24 +1,28 @@
 //! LSE history, filled through the node (see `catalog::NodeFill`) by the LSE
 //! adapter's data client (`lse`), whose answers the data engine writes back
-//! to the catalog: the trades of `LSEDGE` instruments, London Strategic
-//! Edge's own derived series, each an index instrument named after its LSE
-//! market (`GOLD-FUTURES.LSEDGE`: GOLD in `futures`), from LSE's tick
-//! slices; and the trades and quotes of `GLBX` contracts, CME Globex's
-//! Level 1, under the ids Databento gives them (`GCZ26.GLBX`). Each
-//! contract's definition is its row's definitions source's: `LSEDGE`'s the
-//! catalog's alone, written there by hand, LSE publishing none, the data
-//! engine answering a definition request from the catalog before asking the
-//! client; `GLBX`'s Databento's, asked of Nautilus' Databento client. The
-//! client converts LSE's prices at the definition's precision. See
+//! to the catalog: of `LSEDGE` instruments, London Strategic Edge's own
+//! derived series, each an index instrument named after its LSE market
+//! (`GOLD-FUTURES.LSEDGE`: GOLD in `futures`), trades, from LSE's tick
+//! slices, and bars, from its candles, each stamped at its close; and of
+//! `GLBX` contracts, CME Globex's Level 1 under the ids Databento gives
+//! them (`GCZ26.GLBX`), trades and quotes. Each contract's definition is
+//! its row's definitions source's: `LSEDGE`'s the catalog's alone, written
+//! there by hand, LSE publishing none, the data engine answering a
+//! definition request from the catalog before asking the client; `GLBX`'s
+//! Databento's, asked of Nautilus' Databento client. The client converts
+//! LSE's prices at the definition's precision. LSE's reference series, the
+//! rows of its reference collections, are custom data of no instrument
+//! (`lse::LseRow`), filled by the same client with no definition. See
 //! `README.md`.
 
 use ::lse::{LseDataClientConfig, LseDataClientFactory};
-use jiff::SignedDuration;
+use jiff::{SignedDuration, Timestamp};
+use nautilus_model::data::DataType;
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 
 use super::{DefinitionsSource, Row, databento::DatabentoHistory};
 use crate::{
-    catalog::{FillData, NodeClient, NodeFill, missing},
+    catalog::{FillData, NodeClient, NodeFill, missing, missing_custom},
     strategy::SeriesSlice,
 };
 
@@ -27,27 +31,33 @@ use crate::{
 const DAY: SignedDuration = SignedDuration::from_hours(24);
 
 /// Adds to `node` the fill of what the catalog lacks of `slices`, series
-/// LSE gives the history of (see `catalog::missing`): first each contract's
-/// definition, asked of its row's definitions source, Databento's client,
-/// which `databento` makes only if Databento has a definition to give,
-/// checked against its dataset's end, for the contracts Databento defines,
-/// and LSE's for the others, the data engine answering them from the
-/// catalog before the client; then the series, asked of the LSE client
-/// `config` configures, its keys read only when the node creates it, so
-/// only if something is missing. The data engine puts each definition in
-/// the cache, where the client reads the precision of its prices; a
-/// definition neither source gives leaves the series' request to fail
-/// naming the instrument.
+/// LSE gives the history of (see `catalog::missing`), and of `custom`,
+/// LSE's rows (`lse::LseRow`) over `[start, end]` (see
+/// `catalog::missing_custom`): first each contract's definition, asked of
+/// its row's definitions source, Databento's client, which `databento`
+/// makes only if Databento has a definition to give, checked against its
+/// dataset's end, for the contracts Databento defines, and LSE's for the
+/// others, the data engine answering them from the catalog before the
+/// client, which fails a definition the catalog lacks, naming the
+/// instrument, before LSE is asked; then the series and the rows, asked of
+/// the LSE client `config` configures, its keys read only when the node
+/// creates it, so only if something is missing. The data engine puts each
+/// definition in the cache, where the client reads the precision of its
+/// prices. LSE's rows are of no instrument and have none.
 ///
 /// # Errors
 ///
 /// Returns an error if a series is not one the node fills (see `missing`),
-/// if the catalog cannot be read, or as `databento` and
-/// `DatabentoHistory::check`.
+/// if a custom series has no identifier, if the catalog cannot be read, or
+/// as `databento` and `DatabentoHistory::check`.
+#[expect(clippy::too_many_arguments, reason = "a fill's parts")]
 pub(super) async fn add_fill(
     node: &mut NodeFill,
     catalog: &ParquetDataCatalog,
     slices: &[SeriesSlice],
+    custom: &[DataType],
+    start: Timestamp,
+    end: Timestamp,
     config: LseDataClientConfig,
     databento: impl FnOnce() -> anyhow::Result<DatabentoHistory>,
 ) -> anyhow::Result<()> {
@@ -56,6 +66,7 @@ pub(super) async fn add_fill(
             request.data == FillData::Instrument
                 && Row::of(request.instrument_id.venue).definitions == DefinitionsSource::Databento
         });
+    let custom = missing_custom(catalog, custom, start, end)?;
     if !definitions.is_empty() {
         let databento = databento()?;
         databento.check(&definitions).await?;
@@ -63,7 +74,7 @@ pub(super) async fn add_fill(
             unreachable!("Databento's check passes definitions alone, not {data}")
         });
     }
-    node.add(node_client(config), &requests, period);
+    node.add_with_custom(node_client(config), &requests, &custom, period);
     Ok(())
 }
 
@@ -86,15 +97,19 @@ fn node_client(config: LseDataClientConfig) -> NodeClient {
 mod tests {
     use std::{collections::HashSet, path::Path};
 
-    use ::lse::testing::{
-        ALLOWANCE_EXHAUSTED, API_KEY, CME_API_KEY, DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING, GCZ26,
-        GCZ26_QUOTES, GCZ26_TRADES, GOLD_FUTURES, GOLD_TRADES, MockLse, PAIRS_GCZ6, PLAN_REQUIRED,
-        ROWS_EXHAUSTED, Reply, SYMBOL_UNKNOWN, gold_futures,
+    use ::lse::{
+        LseRow,
+        testing::{
+            ALLOWANCE_EXHAUSTED, API_KEY, CME_API_KEY, DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING,
+            GCZ26, GCZ26_QUOTES, GCZ26_TRADES, GOLD_FUTURES, GOLD_SPOT, GOLD_SPOT_MINUTES,
+            GOLD_TRADES, MockLse, PAIRS_GCZ6, PLAN_REQUIRED, REFERENCE_CATALOGUE, ROWS_EXHAUSTED,
+            Reply, SYMBOL_UNKNOWN, US10Y_BOND_YIELDS, gold_futures, gold_spot,
+        },
     };
     use jiff::Timestamp;
     use nautilus_core::{UnixNanos, string::secret::SecretString};
     use nautilus_model::{
-        data::{NautilusDataType, TradeTick},
+        data::{BarType, Data, DataType, NautilusDataType, TradeTick},
         enums::AggressorSide,
         identifiers::{InstrumentId, TradeId},
         instruments::InstrumentAny,
@@ -152,25 +167,40 @@ mod tests {
         from: Timestamp,
         to: Timestamp,
     ) -> anyhow::Result<()> {
-        fill_series(
-            dir,
-            lse,
-            None,
-            &[(NautilusDataType::TradeTick, id)],
-            definitions,
-            (from, to),
-        )
+        let requirements = DataRequirements {
+            bar_types: vec![],
+            ticks: vec![TickSeries {
+                data: NautilusDataType::TradeTick,
+                instrument_id: InstrumentId::from(id),
+            }],
+            custom: vec![],
+            warmup: SignedDuration::ZERO,
+        };
+        fill_requirements(dir, lse, &requirements, definitions, from, to)
     }
 
-    /// fill-catalog's fill of `series`, each a data type of an instrument,
-    /// over `[from, to]`, into the catalog in `dir`, from `lse` and
-    /// `databento`, Databento's mock peer, the catalog holding
-    /// `definitions`. With no peer of Databento's, Databento is never asked.
-    fn fill_series(
+    /// fill-catalog's fill of `requirements` over `[from, to]` into the
+    /// catalog in `dir`, from `lse`, the catalog holding `definitions`.
+    fn fill_requirements(
+        dir: &Path,
+        lse: &MockLse,
+        requirements: &DataRequirements,
+        definitions: Vec<InstrumentAny>,
+        from: Timestamp,
+        to: Timestamp,
+    ) -> anyhow::Result<()> {
+        fill_from(dir, lse, None, requirements, definitions, (from, to))
+    }
+
+    /// fill-catalog's fill of `requirements` over `[from, to]` into the
+    /// catalog in `dir`, from `lse` and `databento`, Databento's mock peer,
+    /// the catalog holding `definitions`. With no peer of Databento's,
+    /// Databento is never asked.
+    fn fill_from(
         dir: &Path,
         lse: &MockLse,
         databento: Option<&MockDatabento>,
-        series: &[(NautilusDataType, &str)],
+        requirements: &DataRequirements,
         definitions: Vec<InstrumentAny>,
         (from, to): (Timestamp, Timestamp),
     ) -> anyhow::Result<()> {
@@ -178,17 +208,6 @@ mod tests {
         if !definitions.is_empty() {
             catalog.write_instruments(definitions).unwrap();
         }
-        let requirements = DataRequirements {
-            bar_types: vec![],
-            ticks: series
-                .iter()
-                .map(|(data, id)| TickSeries {
-                    data: data.clone(),
-                    instrument_id: InstrumentId::from(*id),
-                })
-                .collect(),
-            warmup: SignedDuration::ZERO,
-        };
         let slices = requirements.slices(from, to);
         let config = LseDataClientConfig::builder()
             .api_key(SecretString::from(API_KEY))
@@ -205,7 +224,17 @@ mod tests {
             .unwrap()
             .block_on(async {
                 let mut node = NodeFill::new();
-                add_fill(&mut node, &catalog, &slices, config, databento).await?;
+                add_fill(
+                    &mut node,
+                    &catalog,
+                    &slices,
+                    &requirements.custom,
+                    from,
+                    to,
+                    config,
+                    databento,
+                )
+                .await?;
                 node.run(dir).await
             })
     }
@@ -272,6 +301,75 @@ mod tests {
         );
     }
 
+    /// The captured five minutes of gold spot, candles LSE stamps at 10:00
+    /// to 10:04, their open, as pyarrow reads them; the bars closing over
+    /// `[10:01, 10:05]`.
+    #[test]
+    fn lse_s_candles_are_written_back_to_the_catalog_as_bars_stamped_at_their_close() {
+        let dir = tempfile::tempdir().unwrap();
+        let lse = MockLse::start(vec![Reply::file(GOLD_SPOT_MINUTES)]);
+        let bars = format!("{GOLD_SPOT}-1-MINUTE-LAST-EXTERNAL");
+        let requirements = DataRequirements {
+            bar_types: vec![BarType::from(bars.as_str())],
+            ticks: vec![],
+            custom: vec![],
+            warmup: SignedDuration::ZERO,
+        };
+
+        fill_requirements(
+            dir.path(),
+            &lse,
+            &requirements,
+            vec![gold_spot()],
+            at("10:01:00"),
+            at("10:05:00"),
+        )
+        .unwrap();
+
+        let stored = ParquetDataCatalog::new(dir.path(), None, None, None, None)
+            .bars(Some(vec![bars.clone()]), None, None)
+            .unwrap();
+        let rows: Vec<_> = stored
+            .iter()
+            .map(|b| (b.ts_event, b.open, b.high, b.low, b.close, b.volume))
+            .collect();
+        let row = |close, [open, high, low, last]: [&str; 4]| {
+            (
+                UnixNanos::from(at(close)),
+                Price::from(open),
+                Price::from(high),
+                Price::from(low),
+                Price::from(last),
+                Quantity::from(0),
+            )
+        };
+        assert_eq!(
+            rows,
+            [
+                row("10:01:00", ["4118.01", "4119.21", "4116.91", "4118.01"]),
+                row("10:02:00", ["4118.15", "4118.24", "4116.25", "4116.94"]),
+                row("10:03:00", ["4116.97", "4117.27", "4115.27", "4116.17"]),
+                row("10:04:00", ["4116.02", "4116.93", "4115.62", "4116.12"]),
+                row("10:05:00", ["4116.25", "4118.36", "4116.25", "4118.16"]),
+            ]
+        );
+        let [export] = &lse.calls()[..] else {
+            panic!("{:?}", lse.calls())
+        };
+        assert_eq!(
+            (
+                export.param("timeframe"),
+                export.param("from"),
+                export.param("to")
+            ),
+            (
+                Some("1m"),
+                Some("2026-10-21T10:00:00Z"),
+                Some("2026-10-21T10:05:00Z")
+            )
+        );
+    }
+
     #[test]
     fn lse_s_symbol_unknown_fails_the_fill_naming_the_request() {
         let dir = tempfile::tempdir().unwrap();
@@ -285,7 +383,8 @@ mod tests {
         assert!(err.contains("symbol-unknown"), "{err}");
     }
 
-    /// LSE is never asked: its prices could not be read.
+    /// The definition request fails, LSE publishing none, and LSE is never
+    /// asked.
     #[test]
     fn a_fill_of_an_lsedge_instrument_with_no_definition_fails_naming_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -295,12 +394,97 @@ mod tests {
             .unwrap_err()
             .to_string();
 
-        assert!(
-            err.contains(&format!("{GOLD_FUTURES} is not in the cache")),
-            "{err}"
-        );
+        let request = format!("the definition of {GOLD_FUTURES}");
+        for part in [request.as_str(), "LSE publishes no instrument definitions"] {
+            assert!(err.contains(part), "{part}: {err}");
+        }
         assert!(lse.calls().is_empty(), "{:?}", lse.calls());
         assert_eq!(stored_trades(dir.path()), []);
+    }
+
+    /// US10Y's daily bond yields, custom data of no instrument.
+    fn us10y() -> DataType {
+        LseRow::data_type("bond_yields", "US10Y")
+    }
+
+    /// fill-catalog's fill of `us10y()` over the captured days, the 9th to
+    /// the 12th of November, into the catalog in `dir`, from `lse`.
+    fn fill_bond_yields(dir: &Path, lse: &MockLse) -> anyhow::Result<()> {
+        let requirements = DataRequirements {
+            bar_types: vec![],
+            ticks: vec![],
+            custom: vec![us10y()],
+            warmup: SignedDuration::ZERO,
+        };
+        fill_requirements(
+            dir,
+            lse,
+            &requirements,
+            vec![],
+            november("09T00:00:00"),
+            november("12T23:59:59.999999999"),
+        )
+    }
+
+    fn november(time: &str) -> Timestamp {
+        format!("2026-11-{time}Z").parse().unwrap()
+    }
+
+    /// The captured rows, as pyarrow reads LSE's file: the 9th's, the
+    /// 10th's and the 12th's, read back as Nautilus decodes custom data.
+    #[test]
+    fn the_bond_yields_lse_exports_are_written_back_as_custom_data_of_their_series() {
+        let dir = tempfile::tempdir().unwrap();
+        let lse = MockLse::start(vec![
+            Reply::json(REFERENCE_CATALOGUE),
+            Reply::file(US10Y_BOND_YIELDS),
+        ]);
+
+        fill_bond_yields(dir.path(), &lse).unwrap();
+
+        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let identifier = us10y().identifier().unwrap().to_string();
+        let stored = catalog
+            .query_custom_data_dynamic("LseRow", Some(&[identifier]), None, None, None, None, true)
+            .unwrap();
+        let rows: Vec<_> = stored
+            .iter()
+            .map(|data| {
+                let Data::Custom(custom) = data else {
+                    panic!("not custom data: {data:?}");
+                };
+                let row = custom.data.as_any().downcast_ref::<LseRow>().unwrap();
+                (
+                    custom.data_type.clone(),
+                    row.ts_init,
+                    row.fields["close"].clone(),
+                )
+            })
+            .collect();
+        let row = |day: &str, close: f64| {
+            (
+                us10y(),
+                UnixNanos::from(november(&format!("{day}T00:00:00"))),
+                serde_json::json!(close),
+            )
+        };
+        assert_eq!(rows, [row("09", 4.884), row("10", 5.0), row("12", 5.133)]);
+    }
+
+    /// The window is stored whole, the days without a row too: a second
+    /// fill asks LSE nothing.
+    #[test]
+    fn a_filled_window_of_bond_yields_is_not_asked_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let lse = MockLse::start(vec![
+            Reply::json(REFERENCE_CATALOGUE),
+            Reply::file(US10Y_BOND_YIELDS),
+        ]);
+        fill_bond_yields(dir.path(), &lse).unwrap();
+
+        fill_bond_yields(dir.path(), &lse).unwrap();
+
+        assert_eq!(lse.calls().len(), 2, "{:?}", lse.calls());
     }
 
     #[test]
@@ -333,12 +517,10 @@ mod tests {
         );
         for quota in [ROWS_EXHAUSTED, ALLOWANCE_EXHAUSTED] {
             let dir = tempfile::tempdir().unwrap();
-            let refusing = MockLse::start(vec![
-                Reply::file(GOLD_TRADES),
-                // The first window ends at the first instant of the 22nd.
-                Reply::refusal(404, DATE_NOT_TRADING),
-                Reply::refusal(429, quota),
-            ]);
+            // The first window ends at the first instant of the 22nd, which
+            // its export takes.
+            let refusing =
+                MockLse::start(vec![Reply::file(GOLD_TRADES), Reply::refusal(429, quota)]);
 
             let err = fill_over(
                 dir.path(),
@@ -355,6 +537,14 @@ mod tests {
             let message = refusal["message"].as_str().unwrap();
             assert!(err.contains(message), "{message}: {err}");
             assert_eq!(stored_trades(dir.path()).len(), 6);
+            let span = |from: &str, to: &str| (from.to_string(), to.to_string());
+            assert_eq!(
+                asked(&refusing),
+                [
+                    span("2026-10-21T00:00:00Z", "2026-10-22T00:00:00.000000001Z"),
+                    span("2026-10-22T00:00:00.000000001Z", "2026-10-23T00:00:00Z"),
+                ]
+            );
 
             let resuming = MockLse::start(vec![Reply::refusal(404, DATE_NOT_TRADING)]);
             fill_over(dir.path(), &resuming, GOLD_FUTURES, vec![], from, to).unwrap();
@@ -437,7 +627,7 @@ mod tests {
     fn a_glbx_fill_takes_its_definition_from_databento_and_its_trades_and_quotes_from_lse() {
         let dir = tempfile::tempdir().unwrap();
         let lse = MockLse::start(vec![
-            Reply::answer(PAIRS_GCZ6),
+            Reply::json(PAIRS_GCZ6),
             Reply::file(GCZ26_TRADES),
             Reply::file(GCZ26_QUOTES),
         ]);
@@ -447,14 +637,23 @@ mod tests {
             "2026-11-12T14:30:00.999999999Z".parse().unwrap(),
         );
 
-        fill_series(
+        let requirements = DataRequirements {
+            bar_types: vec![],
+            ticks: [NautilusDataType::TradeTick, NautilusDataType::QuoteTick]
+                .map(|data| TickSeries {
+                    data,
+                    instrument_id: InstrumentId::from(GCZ26),
+                })
+                .to_vec(),
+            custom: vec![],
+            warmup: SignedDuration::ZERO,
+        };
+
+        fill_from(
             dir.path(),
             &lse,
             Some(&databento),
-            &[
-                (NautilusDataType::TradeTick, GCZ26),
-                (NautilusDataType::QuoteTick, GCZ26),
-            ],
+            &requirements,
             vec![],
             second,
         )

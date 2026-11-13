@@ -201,6 +201,7 @@ pub fn backtest(catalog: &Path, start: Timestamp, end: Timestamp, commission: &s
         start,
         end,
         ticks: vec![],
+        custom: vec![],
         commission: Commission::PerOrder(Money::from(commission)),
         balance: Money::from("10000 EUR"),
         leverage: Decimal::ONE,

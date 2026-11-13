@@ -121,6 +121,7 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
     let requirements = DataRequirements {
         bar_types: vec![bar_type],
         ticks: vec![],
+        custom: vec![],
         warmup,
     };
     let record = Rc::new(RefCell::new(Record::default()));

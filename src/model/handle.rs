@@ -948,6 +948,7 @@ mod tests {
                 tick(NautilusDataType::TradeTick, InstrumentId::from(AUD)),
                 tick(NautilusDataType::QuoteTick, gbp),
             ],
+            custom: vec![],
             warmup: SignedDuration::ZERO,
         };
         let handle = ModelHandle::new(
@@ -1537,6 +1538,7 @@ mod tests {
                     instrument_id: gcz26,
                 },
             ],
+            custom: vec![],
             warmup: SignedDuration::from_hours(1),
         };
         let model = ModelHandle::new(
@@ -2322,6 +2324,7 @@ mod tests {
                 },
                 aud_quotes(),
             ],
+            custom: vec![],
             warmup: SignedDuration::from_hours(1),
         };
         let handle = ModelHandle::new(
@@ -2382,6 +2385,7 @@ mod tests {
         let requirements = DataRequirements {
             bar_types,
             ticks,
+            custom: vec![],
             warmup: SignedDuration::from_hours(1),
         };
         let handle = ModelHandle::new(
@@ -2514,6 +2518,7 @@ mod tests {
         let requirements = DataRequirements {
             bar_types: vec![],
             ticks,
+            custom: vec![],
             warmup: SignedDuration::from_hours(1),
         };
         let handle = ModelHandle::new(
@@ -2633,6 +2638,7 @@ mod tests {
         let requirements = DataRequirements {
             bar_types: vec![],
             ticks: vec![imbalances_of("GC.GLBX"), aud_quotes()],
+            custom: vec![],
             warmup: SignedDuration::ZERO,
         };
         let features = last_imbalance("GC.GLBX");

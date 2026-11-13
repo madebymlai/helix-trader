@@ -25,6 +25,22 @@ use sha2::{Digest, Sha256};
 /// `[2026-10-21T10:00:00Z, 2026-10-21T10:00:01Z)`, as LSE exported it:
 /// six trades.
 pub const GOLD_TRADES: &[u8] = include_bytes!("../test_data/export_gold_futures_tick.parquet");
+/// LSE's catalogue of its reference collections (`/v3/reference`).
+pub const REFERENCE_CATALOGUE: &str = include_str!("../test_data/reference_catalogue.json");
+/// The rows of the US 10-year yield (`US10Y`) in LSE's daily bond yields
+/// (`bond_yields`) from 9 to 12 November 2026, as LSE exported them: three
+/// rows, of the 9th, 10th and 12th.
+pub const US10Y_BOND_YIELDS: &[u8] =
+    include_bytes!("../test_data/reference_bond_yields_us10y.parquet");
+/// The 1-minute candles of LSE's gold spot series (`XAU/USD` in
+/// `commodities`) over `[2026-10-21T10:00:00Z, 2026-10-21T10:05:00Z)`, as LSE
+/// exported them: five candles, stamped at their open, of no volume.
+pub const GOLD_SPOT_MINUTES: &[u8] =
+    include_bytes!("../test_data/export_xau_usd_commodities_1m.parquet");
+/// The 4-hour candles of `GOLD` in `futures` over
+/// `[2026-10-21T00:00:00Z, 2026-10-21T12:00:00Z)`, as LSE exported them:
+/// three candles, stamped at their open.
+pub const GOLD_FUTURES_4H: &[u8] = include_bytes!("../test_data/export_gold_futures_4h.parquet");
 /// LSE's refusals, captured with the free key, but the calls a minute and
 /// the quotas, which are LSE's documented answers, and the export too wide,
 /// captured with the CME key (`test_data/README.md`).
@@ -32,6 +48,8 @@ pub const SYMBOL_UNKNOWN: &str = include_str!("../test_data/refusal_symbol_unkno
 pub const PLAN_REQUIRED: &str = include_str!("../test_data/refusal_plan_required.json");
 pub const DATA_UNAVAILABLE: &str = include_str!("../test_data/refusal_data_unavailable.json");
 pub const DATE_NOT_TRADING: &str = include_str!("../test_data/refusal_date_not_trading.json");
+pub const REFERENCE_DATA_UNAVAILABLE: &str =
+    include_str!("../test_data/refusal_reference_data_unavailable.json");
 pub const CALLS_EXHAUSTED: &str = include_str!("../test_data/refusal_calls_exhausted.json");
 pub const ROWS_EXHAUSTED: &str = include_str!("../test_data/refusal_rows_exhausted.json");
 pub const ALLOWANCE_EXHAUSTED: &str = include_str!("../test_data/refusal_allowance_exhausted.json");
@@ -41,6 +59,8 @@ pub const EXPORT_TOO_WIDE: &str = include_str!("../test_data/refusal_export_too_
 /// LSE's answer for a day it had not loaded yet, the current one.
 pub const DATA_UNAVAILABLE_TODAY: &str =
     include_str!("../test_data/refusal_data_unavailable_today.json");
+/// LSE's answer for the tick slice of a market storing no trades, `forex`.
+pub const TICKS_NOT_STORED: &str = include_str!("../test_data/refusal_data_unavailable_tick.json");
 /// LSE's refusal of a derived market's quotes, a 400: it serves them as
 /// timeframes alone.
 pub const DATA_UNAVAILABLE_QUOTES: &str =
@@ -79,8 +99,11 @@ pub const CME_API_KEY: &str = "lse-cme-test-key-0123456789";
 /// `GOLD_TRADES`; the peer sends it with every file.
 pub const EXPORT_ID: &str = "15f88a2dca3f401d90c7acae13236f86";
 
-/// The series of `GOLD_TRADES`.
+/// The series of `GOLD_TRADES` and `GOLD_FUTURES_4H`.
 pub const GOLD_FUTURES: &str = "GOLD-FUTURES.LSEDGE";
+
+/// The series of `GOLD_SPOT_MINUTES`.
+pub const GOLD_SPOT: &str = "XAU/USD-COMMODITIES.LSEDGE";
 
 /// The key the tests give the adapter, which the peer records.
 pub const API_KEY: &str = "lse-test-key-0123456789";
@@ -98,6 +121,27 @@ pub fn gold_futures() -> InstrumentAny {
             .price_precision(1)
             .size_precision(0)
             .price_increment(Price::from("0.1"))
+            .size_increment(Quantity::from(1))
+            .ts_event(UnixNanos::default())
+            .ts_init(UnixNanos::default())
+            .build()
+            .expect("a valid index"),
+    )
+}
+
+/// A definition of `GOLD_SPOT` as one would be written by hand: an index in
+/// USD, its prices to a cent, as LSE sends them, and its sizes whole,
+/// stamped at 1970 so that it stands for any time.
+#[must_use]
+pub fn gold_spot() -> InstrumentAny {
+    InstrumentAny::IndexInstrument(
+        IndexInstrument::builder()
+            .instrument_id(InstrumentId::from(GOLD_SPOT))
+            .raw_symbol(Symbol::from("XAU/USD"))
+            .currency(Currency::USD())
+            .price_precision(2)
+            .size_precision(0)
+            .price_increment(Price::from("0.01"))
             .size_increment(Quantity::from(1))
             .ts_event(UnixNanos::default())
             .ts_init(UnixNanos::default())
@@ -187,19 +231,21 @@ impl Reply {
         }
     }
 
+    /// A JSON answer of the catalogue, as LSE sends one: 200.
+    #[must_use]
+    pub fn json(body: &str) -> Self {
+        Self {
+            status: 200,
+            headers: vec![("Content-Type".into(), "application/json".into())],
+            body: body.as_bytes().to_vec(),
+            delay: Duration::ZERO,
+            cut_at: None,
+        }
+    }
+
     /// A refusal: `status` and LSE's JSON `body`.
     #[must_use]
     pub fn refusal(status: u16, body: &str) -> Self {
-        Self::json(status, body)
-    }
-
-    /// An answer of LSE's catalogue: 200 and its JSON `body`.
-    #[must_use]
-    pub fn answer(body: &str) -> Self {
-        Self::json(200, body)
-    }
-
-    fn json(status: u16, body: &str) -> Self {
         Self {
             status,
             headers: vec![("Content-Type".into(), "application/json".into())],
@@ -223,12 +269,27 @@ impl Reply {
         self.delay = delay;
         self
     }
+
+    /// The reply with the status `status`.
+    #[must_use]
+    pub fn with_status(mut self, status: u16) -> Self {
+        self.status = status;
+        self
+    }
+
+    /// The reply without the file's SHA-256.
+    #[must_use]
+    pub fn without_checksum(mut self) -> Self {
+        self.headers
+            .retain(|(name, _)| !name.eq_ignore_ascii_case("x-checksum-sha256"));
+        self
+    }
 }
 
 /// A call the peer received.
 #[derive(Debug, Clone)]
 pub struct Call {
-    /// The path, `/v3/export`.
+    /// The path, `/v3/export`, `/v3/reference`, `/v3/reference/export`.
     pub path: String,
     /// The query's parameters, decoded, in order.
     pub query: Vec<(String, String)>,
@@ -371,6 +432,7 @@ fn serve(stream: TcpStream, log: &Mutex<Vec<Call>>, script: &Mutex<std::vec::Int
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
+        202 => "Accepted",
         403 => "Forbidden",
         404 => "Not Found",
         413 => "Payload Too Large",

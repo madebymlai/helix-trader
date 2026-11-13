@@ -12,7 +12,8 @@
 //! client, its typed queries, an export over any span, the listings of CME
 //! contracts, LSE's answers and refusals and the parsing of an export's
 //! Parquet file), `config` (the data client's config), `data` (the data
-//! client) and `factories`.
+//! client), `factories`, and `types`, the custom data type of LSE's rows
+//! that are not prices (`LseRow`).
 
 pub use self::{
     common::{
@@ -21,6 +22,7 @@ pub use self::{
     },
     config::LseDataClientConfig,
     factories::LseDataClientFactory,
+    types::LseRow,
 };
 
 mod common;
@@ -30,3 +32,4 @@ mod factories;
 mod http;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
+mod types;

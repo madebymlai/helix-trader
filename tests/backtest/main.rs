@@ -22,6 +22,7 @@ mod backtest_catalog_gaps;
 mod backtest_commission_rate;
 mod backtest_composite_bars;
 mod backtest_continuous_bars;
+mod backtest_custom_series;
 mod backtest_dataset;
 mod backtest_ema_entries;
 mod backtest_ema_exits;

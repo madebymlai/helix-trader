@@ -243,6 +243,7 @@ impl<P: Part> StandardConfig<P> {
         DataRequirements {
             bar_types: self.data.bar_types().collect(),
             ticks,
+            custom: vec![],
             warmup: self.data.warmup,
         }
     }
@@ -768,6 +769,7 @@ mod tests {
                     data: NautilusDataType::TradeTick,
                     instrument_id: InstrumentId::from("ESH24.CME"),
                 }],
+                custom: vec![],
                 warmup: SignedDuration::from_hours(720),
             }
         );

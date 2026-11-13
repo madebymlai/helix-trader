@@ -278,6 +278,7 @@ mod tests {
         DataRequirements {
             bar_types: vec![],
             ticks,
+            custom: vec![],
             warmup: SignedDuration::ZERO,
         }
     }

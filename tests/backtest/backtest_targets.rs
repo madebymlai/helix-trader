@@ -97,6 +97,7 @@ impl Source {
                 data,
                 instrument_id,
             }],
+            custom: vec![],
             warmup: SignedDuration::ZERO,
         };
         match self {
@@ -105,6 +106,7 @@ impl Source {
             Self::Bars(bar_type) => DataRequirements {
                 bar_types: vec![bar_type],
                 ticks: vec![],
+                custom: vec![],
                 warmup: SignedDuration::ZERO,
             },
         }
@@ -425,6 +427,7 @@ fn gold_backtest(catalog: PathBuf) -> Backtest {
             data: NautilusDataType::QuoteTick,
             instrument_id: InstrumentId::from(ic::INSTRUMENT_ID),
         }],
+        custom: vec![],
         start: ic::at("08:30:00"),
         end: ic::at("12:30:00"),
         commission: Commission::Rate(Decimal::new(3, 5)),

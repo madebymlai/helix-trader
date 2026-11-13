@@ -1,13 +1,27 @@
-//! The queries of LSE's calls, typed: an export's (`/v3/export`), LSE's
-//! selection of an instrument's rows, and a catalogue lookup's
-//! (`/v3/pairs`), as LSE's docs name their parameters.
+//! The queries of LSE's calls, typed: the exports of a market's
+//! instrument (`/v3/export`), LSE's selection of its rows, and of a
+//! reference collection's (`/v3/reference/export`), and a lookup of LSE's
+//! catalogue (`/v3/pairs`), as LSE's docs name their parameters.
 
 use std::fmt;
 
-use jiff::{SignedDuration, Timestamp};
+use anyhow::{bail, ensure};
+use jiff::{SignedDuration, Timestamp, civil::Date};
+use nautilus_model::{
+    data::{BarSpecification, BarType},
+    enums::{AggregationSource, BarAggregation, PriceType},
+};
 use serde::{Serialize, Serializer, ser::SerializeMap};
 
 use crate::common::symbol::LseSymbol;
+
+/// The candle widths LSE serves below a day, by unit: its letter, and the
+/// steps of it LSE serves (LSE's docs, "The selection", `timeframe`).
+const CANDLE_WIDTHS: [(BarAggregation, char, &[usize]); 3] = [
+    (BarAggregation::Second, 's', &[1, 5, 15, 30]),
+    (BarAggregation::Minute, 'm', &[1, 3, 5, 15, 30]),
+    (BarAggregation::Hour, 'h', &[1, 4]),
+];
 
 /// What an export's rows are, and the parameter that selects them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +29,9 @@ pub(crate) enum Rows {
     /// The tick slice of a derived market, its trades, `time, price, size,
     /// kind` (`timeframe=tick`).
     TradeSlice,
+    /// Candles, `time, open, high, low, close, volume, trades`, each
+    /// stamped at its open (`timeframe=5m`, LSE's name of the width).
+    Candles(CandleWidth),
     /// The trades of an exchange market, `time, price, size, kind`
     /// (`data=trades`).
     Trades,
@@ -23,34 +40,28 @@ pub(crate) enum Rows {
     Quotes,
 }
 
-impl Rows {
-    /// The parameter selecting the rows, and its value.
-    const fn parameter(self) -> (&'static str, &'static str) {
-        match self {
-            Self::TradeSlice => ("timeframe", "tick"),
-            Self::Trades => ("data", "trades"),
-            Self::Quotes => ("data", "quotes"),
-        }
-    }
-}
-
 /// The one parameter selecting the rows, flattened into the query.
 impl Serialize for Rows {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let (name, value) = self.parameter();
         let mut map = serializer.serialize_map(Some(1))?;
-        map.serialize_entry(name, value)?;
+        match self {
+            Self::TradeSlice => map.serialize_entry("timeframe", "tick")?,
+            Self::Candles(width) => map.serialize_entry("timeframe", &width.to_string())?,
+            Self::Trades => map.serialize_entry("data", "trades")?,
+            Self::Quotes => map.serialize_entry("data", "quotes")?,
+        }
         map.end()
     }
 }
 
 impl fmt::Display for Rows {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::TradeSlice => "trade slice",
-            Self::Trades => "trades",
-            Self::Quotes => "quotes",
-        })
+        match self {
+            Self::TradeSlice => f.write_str("trade slice"),
+            Self::Candles(width) => write!(f, "{width} candles"),
+            Self::Trades => f.write_str("trades"),
+            Self::Quotes => f.write_str("quotes"),
+        }
     }
 }
 
@@ -70,6 +81,96 @@ impl fmt::Display for Selection {
             Self::Symbol(symbol) => f.write_str(symbol),
             Self::PairId(pair_id) => write!(f, "pair {pair_id}"),
         }
+    }
+}
+
+/// A width of LSE's candles, as the bar specification of Nautilus' it is:
+/// LSE's `1s` is `1-SECOND-LAST`, its `4h` `4-HOUR-LAST`, below a day, the
+/// widths whose candles LSE stamps on a grid from 1970. LSE's daily, weekly
+/// and monthly candles are none: LSE stamps each at its session's first
+/// traded minute and gives no close, and builds them from its minute bars,
+/// so a bar of those widths is declared from a shorter LSE candle, which
+/// Nautilus aggregates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CandleWidth(BarSpecification);
+
+impl CandleWidth {
+    /// The candles of `bar_type`: external bars, of the last price, LSE's
+    /// one price a candle, a width LSE serves below a day.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming `bar_type` if its bars are not those of
+    /// LSE's candles; for daily, weekly and monthly bars, saying why and
+    /// that the bar is declared from a shorter LSE candle instead.
+    pub(crate) fn of(bar_type: BarType) -> anyhow::Result<Self> {
+        let spec = bar_type.spec();
+        ensure!(
+            bar_type.aggregation_source() == AggregationSource::External,
+            "{bar_type}: LSE's candles are EXTERNAL bars"
+        );
+        ensure!(
+            spec.price_type == PriceType::Last,
+            "{bar_type}: LSE's candles are of the LAST price, their one price"
+        );
+        if matches!(
+            spec.aggregation,
+            BarAggregation::Day | BarAggregation::Week | BarAggregation::Month
+        ) {
+            bail!(
+                "{bar_type}: LSE stamps its daily, weekly and monthly candles at their \
+                 session's first traded minute and gives no close, and builds them from its \
+                 minute bars; declare the bar from a shorter LSE candle (1-MINUTE or 4-HOUR \
+                 EXTERNAL) instead, which Nautilus aggregates"
+            );
+        }
+        ensure!(
+            CANDLE_WIDTHS.iter().any(|(aggregation, _, steps)| {
+                *aggregation == spec.aggregation && steps.contains(&spec.step.get())
+            }),
+            "{bar_type}: LSE serves no candles of that width, only 1, 5, 15 and 30 seconds, \
+             1, 3, 5, 15 and 30 minutes, and 1 and 4 hours wide"
+        );
+        Ok(Self(spec))
+    }
+
+    /// The span of the whole candles that close over `[start, end]`,
+    /// closed, as LSE takes a span, `[from, to)`: from the first one's open
+    /// to the last one's close; none if no candle closes in it. A candle
+    /// opens on a multiple of its width from 1970, which divides a day, as
+    /// LSE stamps them.
+    pub(crate) fn candles_closing(
+        self,
+        start: Timestamp,
+        end: Timestamp,
+    ) -> Option<(Timestamp, Timestamp)> {
+        let width = self.duration();
+        let first = self.floor(start - SignedDuration::from_nanos(1));
+        let last = self.floor(end - width);
+        (first <= last).then(|| (first, last + width))
+    }
+
+    /// The open of the candle `at` falls in.
+    fn floor(self, at: Timestamp) -> Timestamp {
+        let (nanos, width) = (at.as_nanosecond(), self.duration().as_nanos());
+        Timestamp::from_nanosecond(nanos - nanos.rem_euclid(width))
+            .expect("the open of a candle at or before a timestamp is one")
+    }
+
+    /// How long a candle lasts, from its open to its close.
+    fn duration(self) -> SignedDuration {
+        self.0.timedelta()
+    }
+}
+
+/// LSE's name of the width, such as `5m`.
+impl fmt::Display for CandleWidth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (_, unit, _) = CANDLE_WIDTHS
+            .iter()
+            .find(|(aggregation, _, _)| *aggregation == self.0.aggregation)
+            .expect("a width LSE serves");
+        write!(f, "{}{unit}", self.0.step)
     }
 }
 
@@ -107,6 +208,17 @@ impl ExportQuery {
             from,
             to,
         )
+    }
+
+    /// The candles `width` wide of `series` opening over `[from, to)`, as
+    /// Parquet. LSE folds a candle from the rows inside the export alone.
+    pub(crate) fn candles(
+        series: &LseSymbol,
+        width: CandleWidth,
+        from: Timestamp,
+        to: Timestamp,
+    ) -> Self {
+        Self::series(series, Rows::Candles(width), from, to)
     }
 
     /// The `rows` of LSE's listing `pair_id` in `market` over `[from,
@@ -157,13 +269,19 @@ impl ExportQuery {
     /// second or less: no second of any series LSE serves holds the
     /// 2,500,000 rows one export may read (ESZ6's busiest minute of book
     /// held 99,104, LSE's docs, "The market: cme"), so halving one further
-    /// would not get past a refusal.
+    /// would not get past a refusal. An export of candles is split between
+    /// the two candles nearest its middle, as LSE folds a candle from the
+    /// rows inside the export alone, and one of a candle is not split.
     pub(crate) fn halves(&self) -> Option<(Self, Self)> {
         let span = self.to.duration_since(self.from);
-        if span <= SignedDuration::from_secs(1) {
+        let middle = match self.rows {
+            Rows::Candles(width) => width.floor(self.from + span / 2),
+            _ if span <= SignedDuration::from_secs(1) => return None,
+            _ => self.from + span / 2,
+        };
+        if middle <= self.from {
             return None;
         }
-        let middle = self.from + span / 2;
         Some((self.over(self.from, middle), self.over(middle, self.to)))
     }
 }
@@ -181,6 +299,49 @@ impl fmt::Display for ExportQuery {
         write!(
             f,
             "the {rows} of {instrument} in LSE's {market} over [{from}, {to})"
+        )
+    }
+}
+
+/// An export of the rows of `symbol` in LSE's reference collection
+/// `dataset` over the dates `[from, to]`, both included, which bound the
+/// collection's time column, a date or a time: LSE refuses a time
+/// (`filter-bad`) of a collection keyed by dates, and selects a day's rows
+/// by its date either way.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct ReferenceQuery {
+    dataset: String,
+    symbol: String,
+    from: Date,
+    to: Date,
+    format: ExportFormat,
+}
+
+impl ReferenceQuery {
+    /// The rows of `symbol` in `dataset` over `[from, to]`, as Parquet.
+    pub(crate) fn new(dataset: &str, symbol: &str, from: Date, to: Date) -> Self {
+        Self {
+            dataset: dataset.to_owned(),
+            symbol: symbol.to_owned(),
+            from,
+            to,
+            format: ExportFormat::Parquet,
+        }
+    }
+}
+
+impl fmt::Display for ReferenceQuery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            dataset,
+            symbol,
+            from,
+            to,
+            ..
+        } = self;
+        write!(
+            f,
+            "the rows of {symbol} in LSE's reference collection {dataset} over [{from}, {to}]"
         )
     }
 }
@@ -227,6 +388,43 @@ mod tests {
             from.parse().unwrap(),
             to.parse().unwrap(),
         )
+    }
+
+    /// GOLD's candles of the bar specification `spec` over `[from, to)`.
+    fn gold_candles(spec: &str, from: &str, to: &str) -> ExportQuery {
+        let gold = LseSymbol::new("futures", "GOLD").unwrap();
+        let bar_type = BarType::from(format!("GOLD-FUTURES.LSEDGE-{spec}-LAST-EXTERNAL").as_str());
+        let width = CandleWidth::of(bar_type).unwrap();
+        ExportQuery::candles(&gold, width, from.parse().unwrap(), to.parse().unwrap())
+    }
+
+    /// Three 4-hour candles, cut after the first rather than at 06:00, the
+    /// middle: LSE folds a candle from the rows inside the export alone.
+    #[rstest]
+    fn a_candle_export_halves_between_two_candles() {
+        let (first, second) =
+            gold_candles("4-HOUR", "2026-10-21T00:00:00Z", "2026-10-21T12:00:00Z")
+                .halves()
+                .unwrap();
+
+        assert_eq!(
+            first,
+            gold_candles("4-HOUR", "2026-10-21T00:00:00Z", "2026-10-21T04:00:00Z")
+        );
+        assert_eq!(
+            second,
+            gold_candles("4-HOUR", "2026-10-21T04:00:00Z", "2026-10-21T12:00:00Z")
+        );
+    }
+
+    #[rstest]
+    #[case::four_hours("4-HOUR", "2026-10-21T04:00:00Z")]
+    #[case::a_second("1-SECOND", "2026-10-21T00:00:01Z")]
+    fn a_candle_export_of_one_candle_does_not_halve(#[case] spec: &str, #[case] to: &str) {
+        assert_eq!(
+            gold_candles(spec, "2026-10-21T00:00:00Z", to).halves(),
+            None
+        );
     }
 
     #[rstest]

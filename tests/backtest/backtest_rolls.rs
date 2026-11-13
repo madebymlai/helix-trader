@@ -168,6 +168,7 @@ fn backtest(catalog: &tempfile::TempDir, ticks: Vec<TickSeries>) -> Backtest {
         catalog: catalog.path().to_path_buf(),
         bar_types: vec![],
         ticks,
+        custom: vec![],
         start: tuesday("23:00:00"),
         end: wednesday("01:00:00"),
         commission: Commission::Rate(Decimal::ZERO),

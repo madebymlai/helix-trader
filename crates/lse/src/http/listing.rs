@@ -116,7 +116,7 @@ mod tests {
     /// LSE's GCZ6 of 2026 is its listing 4000000002.
     #[tokio::test]
     async fn a_contract_is_its_listing_under_its_exchange_name() {
-        let lse = MockLse::start(vec![Reply::answer(PAIRS_GCZ6)]);
+        let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6)]);
 
         let pair_id = CmeListings::default()
             .pair_id(&client(&lse), &contract("GCZ26.GLBX"))
@@ -129,7 +129,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_contract_is_looked_up_once() {
-        let lse = MockLse::start(vec![Reply::answer(PAIRS_GCZ6), Reply::answer(PAIRS_GCZ6)]);
+        let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6), Reply::json(PAIRS_GCZ6)]);
         let (listings, http) = (CmeListings::default(), client(&lse));
 
         let first = listings
@@ -148,7 +148,7 @@ mod tests {
     /// LSE's NGZ6 is the contract of 2016; natural gas names 2026's NGZ26.
     #[tokio::test]
     async fn a_contract_not_listed_under_its_year_s_last_digit_is_looked_up_under_its_two() {
-        let lse = MockLse::start(vec![Reply::answer(PAIRS_NGZ6), Reply::answer(PAIRS_NGZ26)]);
+        let lse = MockLse::start(vec![Reply::json(PAIRS_NGZ6), Reply::json(PAIRS_NGZ26)]);
 
         let pair_id = CmeListings::default()
             .pair_id(&client(&lse), &contract("NGZ26.GLBX"))
@@ -164,7 +164,7 @@ mod tests {
     /// captured for ESZ26).
     #[tokio::test]
     async fn a_contract_lse_lists_under_neither_name_fails_naming_it_and_what_lse_lists() {
-        let lse = MockLse::start(vec![Reply::answer(PAIRS_ESZ6), Reply::answer(PAIRS_ESZ26)]);
+        let lse = MockLse::start(vec![Reply::json(PAIRS_ESZ6), Reply::json(PAIRS_ESZ26)]);
 
         let err = CmeListings::default()
             .pair_id(&client(&lse), &contract("ESZ36.GLBX"))

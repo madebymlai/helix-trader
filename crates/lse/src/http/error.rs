@@ -24,6 +24,13 @@ pub(crate) enum LseHttpError {
     /// its body.
     #[error("LSE answered {status}, not as its docs say: {body}")]
     Unexpected { status: u16, body: String },
+    /// An answer whose body is not what LSE's docs say it holds: what it
+    /// should have been and why it is not.
+    #[error("LSE's {what} is not as its docs say: {source}")]
+    Malformed {
+        what: &'static str,
+        source: serde_json::Error,
+    },
     /// A whole file whose SHA-256 is not the one LSE gave with it, with
     /// LSE's id of the export (`x-export-id`), if it gave one.
     #[error(
@@ -56,15 +63,11 @@ impl LseHttpError {
             Self::Refusal {
                 status, refusal, ..
             } => (*status == 429 && !refusal.is_quota()) || *status == 503,
-            Self::Checksum { .. } | Self::Unexpected { .. } | Self::Retry(_) => false,
+            Self::Checksum { .. }
+            | Self::Unexpected { .. }
+            | Self::Malformed { .. }
+            | Self::Retry(_) => false,
         }
-    }
-
-    /// Whether LSE holds no row of the export: a 404 saying no stored row
-    /// is in the selection or no session in its dates. A 400
-    /// `data-unavailable` says the market serves no such rows at all.
-    pub(crate) fn is_no_rows(&self) -> bool {
-        matches!(self, Self::Refusal { status: 404, refusal, .. } if refusal.is_no_rows())
     }
 
     /// Whether LSE refused the export as too wide: shorter dates may be
