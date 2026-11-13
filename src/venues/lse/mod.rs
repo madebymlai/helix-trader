@@ -107,8 +107,8 @@ fn node_client(config: LseDataClientConfig) -> NodeClient {
 /// read when the node creates it, the LSE key for `LSEDGE` and the CME key
 /// for `GLBX`, and no execution client, LSE trading nothing; GLBX's orders
 /// go to IB's. The client is on no venue, so it takes the routes of theirs
-/// (`RoutingConfig::venues`) and not the default, which IB keeps for the
-/// venues without a client of their own.
+/// (`RoutingConfig::venues`); no data client is the default (see
+/// `live::node::Clients`).
 pub(super) fn live_clients(instrument_ids: &[InstrumentId]) -> Clients {
     clients(
         LseDataClientConfig::builder()
@@ -119,7 +119,7 @@ pub(super) fn live_clients(instrument_ids: &[InstrumentId]) -> Clients {
 
 /// The live node's clients on `config`, routed the venues of the
 /// instruments it streams.
-fn clients(config: LseDataClientConfig) -> Clients {
+pub(super) fn clients(config: LseDataClientConfig) -> Clients {
     let mut venues: Vec<String> = Vec::new();
     for id in &config.stream_ids {
         let venue = id.venue.to_string();
@@ -130,11 +130,11 @@ fn clients(config: LseDataClientConfig) -> Clients {
     Clients {
         data_factory: Box::new(LseDataClientFactory::new()),
         data_config: Box::new(config),
-        exec: None,
-        routing: RoutingConfig {
+        data_routing: RoutingConfig {
             default: false,
             venues: Some(venues),
         },
+        exec: None,
     }
 }
 

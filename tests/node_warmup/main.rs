@@ -1565,10 +1565,10 @@ impl DataActor for GlbxStreaming {
 /// records: LSE's quotes and trade, not the other client's. The warmup's
 /// two days of the contract's history are asked of LSE too, which answers
 /// that it holds none (`404 data-unavailable`); the other client is asked
-/// nothing. The other client is not made the default route, as the live
-/// node makes IB's: Nautilus' node builder makes the first client on no
-/// venue it registers the default, in no set order, and then refuses
-/// another made the default ("default client already registered").
+/// nothing. Neither is made the default route, as on the live node, where
+/// IB's data client is routed the venues of its live data: Nautilus' node
+/// builder makes the first client on no venue it registers the default, in
+/// no set order, and refuses another made the default after it.
 #[test]
 fn glbx_data_comes_from_lse_s_cme_stream_routed_glbx_beside_another_client() {
     let dir = tempfile::tempdir().unwrap();
