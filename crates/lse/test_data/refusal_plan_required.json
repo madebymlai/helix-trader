@@ -1,0 +1,1 @@
+{"code":"plan-required","message":"This feed requires a subscription","required_plan":{"market":"cme","name":"CME Group Lite","subscribe_url":"/data?tab=subscriptions","tier":"lite"}}

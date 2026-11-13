@@ -6,23 +6,27 @@ rust-version.workspace = true
 publish = false
 
 [workspace]
-members = ["crates/ctrader"]
-# Plain `cargo test` and `cargo clippy` at the root cover both crates.
-default-members = [".", "crates/ctrader"]
+members = ["crates/ctrader", "crates/lse"]
+# Plain `cargo test` and `cargo clippy` at the root cover every crate.
+default-members = [".", "crates/ctrader", "crates/lse"]
 
 [workspace.package]
 edition = "2024"
 rust-version = "1.99.1"
 
-# The Nautilus pin, one for the workspace, so that both crates build
-# against one copy of Nautilus' types; and the versions both crates use.
+# The Nautilus pin, one for the workspace, so that every crate builds
+# against one copy of Nautilus' types; and the versions the crates share.
 # Each crate names the features it needs.
 [workspace.dependencies]
 anyhow = "1"
+# The arrow schema of Nautilus' custom data macros, and of LSE's exports.
+arrow = { version = "59.3", default-features = false }
 async-trait = "0.1"
+bon = "=3.9.3"
 ctrader = { path = "crates/ctrader" }
 jiff = { version = "0.2", features = ["serde"] }
 log = "0.4"
+lse = { path = "crates/lse" }
 nautilus-analysis = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8b184c8af85068d788b591e10cb900fa2aba2cf2" }
 nautilus-backtest = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8b184c8af85068d788b591e10cb900fa2aba2cf2" }
 nautilus-common = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "8b184c8af85068d788b591e10cb900fa2aba2cf2" }
@@ -62,10 +66,10 @@ strategy-tests = []
 anyhow.workspace = true
 # The arrow schema Nautilus' custom data macros generate, for the dataset
 # rows and the custom data of the backtest tests.
-arrow = { version = "59.3", default-features = false }
+arrow.workspace = true
 # The version and features of Nautilus' IB gateway.
 bollard = { version = "0.21.1", default-features = false, features = ["http", "pipe"] }
-bon = "=3.9.3"
+bon.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 # The cTrader Open API adapter, which the IC Markets and Pepperstone venues wire in.
 ctrader.workspace = true
@@ -77,6 +81,8 @@ jiff.workspace = true
 # whose syn 2 does not build with bindgen's syn 3.
 lightgbm3 = "1.0.11"
 log.workspace = true
+# The LSE adapter, which the LSEDGE venue wires in.
+lse.workspace = true
 nautilus-analysis.workspace = true
 nautilus-backtest = { workspace = true, features = ["streaming"] }
 nautilus-common = { workspace = true, features = ["indicators", "live", "tracing-bridge"] }
@@ -116,6 +122,8 @@ async-trait.workspace = true
 # The hooks of the demo test of the cTrader session's token renewal
 # (`tests/live/ctrader_token_demo.rs`).
 ctrader = { workspace = true, features = ["test-support"] }
+# The mock LSE peer and its captured payloads, for the tests of the LSE fill.
+lse = { workspace = true, features = ["test-support"] }
 # Nautilus' Redis client, to delete what the live tests leave in the cache.
 redis = { version = "1.7.1", default-features = false, features = ["tokio-comp"] }
 nautilus-model = { workspace = true, features = ["test-support"] }

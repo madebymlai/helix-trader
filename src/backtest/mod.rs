@@ -65,7 +65,9 @@ pub struct Backtest {
     /// The commission, which the fee model of each venue is made from
     /// (`Commission::fee_model`).
     pub commission: Commission,
-    /// The starting balance of the account of each venue.
+    /// The starting balance of the account of each venue a broker trades;
+    /// a venue only read, which no broker trades (`venues::has_broker`),
+    /// starts with nothing in its currency, so that it adds no money.
     pub balance: Money,
     /// The leverage of each venue's account on every instrument, positive:
     /// a position locks its value / leverage times the instrument's margin

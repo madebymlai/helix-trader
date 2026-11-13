@@ -4,7 +4,7 @@
 
 # Helix trader
 
-A systematic trading system in Rust built on [NautilusTrader](https://github.com/nautechsystems/nautilus_trader). The same strategy type runs in backtest, paper and live on Interactive Brokers, OKX, and IC Markets and Pepperstone (cTrader hedging accounts).
+A systematic trading system in Rust built on [NautilusTrader](https://github.com/nautechsystems/nautilus_trader). The same strategy type runs in backtest, paper and live on Interactive Brokers, OKX, and IC Markets and Pepperstone (cTrader hedging accounts), and can read London Strategic Edge's market data, which trades nothing.
 
 ## Quick start
 
@@ -32,13 +32,14 @@ cargo test
 
 Lint with `cargo clippy --all-targets --all-features`; `--all-features` is for clippy only.
 
-Real-venue live tests are gated by `NAUTILUS_IB_RUN=1`, `NAUTILUS_OKX_RUN=1`, or `NAUTILUS_CTRADER_RUN=ic` or `pepperstone`. Run one live module per process, for example `NAUTILUS_CTRADER_RUN=ic cargo test --test live ctrader_demo:: -- --nocapture`. Read the relevant [live](src/live/README.md) and venue documentation first: tests can place orders or rotate tokens.
+Real-venue live tests are gated by `NAUTILUS_IB_RUN=1`, `NAUTILUS_OKX_RUN=1`, `NAUTILUS_CTRADER_RUN=ic` or `pepperstone`, or `NAUTILUS_LSE_RUN=1`. Run one live module per process, for example `NAUTILUS_CTRADER_RUN=ic cargo test --test live ctrader_demo:: -- --nocapture`. Read the relevant [live](src/live/README.md) and venue documentation first: tests can place orders or rotate tokens.
 
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md): design and process constraints.
 - [Catalog](src/catalog/README.md): catalog filling; each venue's history and live clients are documented in its module under `src/venues`.
 - [cTrader](crates/ctrader/README.md): the cTrader Open API adapter, a crate of the workspace, which IC Markets and [Pepperstone](src/venues/pepperstone/README.md) run on.
+- [LSE](crates/lse/README.md): the London Strategic Edge adapter, a crate of the workspace, a data client only, which [LSEDGE history](src/venues/lse/README.md) runs on.
 - [Strategy](src/strategy/README.md): strategy authoring and configuration.
 - [Model](src/model/README.md): model strategy internals.
 - [Backtest](src/backtest/README.md): replay, costs and limitations.

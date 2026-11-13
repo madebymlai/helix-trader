@@ -39,6 +39,7 @@ mod ib_gateway;
 mod ib_minute_bars;
 mod ib_restart;
 mod ib_warmup_days;
+mod lse_history;
 mod okx_demo;
 mod streaming;
 
