@@ -11,7 +11,7 @@ A strategy implements Nautilus' `Strategy` trait; backtest and live do not depen
 
 **Keeping a strategy private:** list its folder in `.git/info/exclude` (`/src/strategy/<name>/`), never in `.gitignore`, so that no committed file names it. A checkout without the folder builds without the strategy.
 
-**Formatting:** the strategies reach the crate through the build script's generated `include!`, which `cargo fmt` does not follow. Format them with `rustfmt --edition 2024 src/strategy/*/mod.rs` after `cargo fmt`.
+**Formatting:** the strategies reach the crate through the build script's generated `include!`, which `cargo fmt` does not follow. Format them with `rustfmt src/strategy/*/mod.rs` after `cargo fmt`.
 
 **Model strategies:** for features, decisions, labels, training, stores, meta-labeling or version bumps, read the [model guide](../model/README.md). `model_ema/` and [`config/model_ema.toml`](../../config/model_ema.toml) are the example. For run orchestration see [backtest](../backtest/README.md); for live operations see [live](../live/README.md).
 
