@@ -1,7 +1,9 @@
 //! The queries of LSE's calls, typed: the exports of a market's
-//! instrument (`/v3/export`), LSE's selection of its rows, and of a
-//! reference collection's (`/v3/reference/export`), and a lookup of LSE's
-//! catalogue (`/v3/pairs`), as LSE's docs name their parameters.
+//! instrument (`/v3/export`), LSE's selection of its rows, of a reference
+//! collection's (`/v3/reference/export`) and of a macro series'
+//! (`/v3/macro/export`), an instrument's splits and dividends
+//! (`/v3/factors`), and a lookup of LSE's catalogue (`/v3/pairs`), as LSE's
+//! docs name their parameters.
 
 use std::fmt;
 
@@ -349,28 +351,44 @@ impl fmt::Display for ExportQuery {
     }
 }
 
+/// The dates of a series' export, both included, which bound its time
+/// column, a date or a time: LSE refuses a time (`filter-bad`) of a
+/// collection keyed by dates, and selects a day's rows by its date either
+/// way. With no first date, the series is asked from its first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) struct Dates {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) from: Option<Date>,
+    pub(crate) to: Date,
+}
+
+impl fmt::Display for Dates {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.from {
+            Some(from) => write!(f, "over [{from}, {}]", self.to),
+            None => write!(f, "up to {}", self.to),
+        }
+    }
+}
+
 /// An export of the rows of `symbol` in LSE's reference collection
-/// `dataset` over the dates `[from, to]`, both included, which bound the
-/// collection's time column, a date or a time: LSE refuses a time
-/// (`filter-bad`) of a collection keyed by dates, and selects a day's rows
-/// by its date either way.
+/// `dataset` over its `dates`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ReferenceQuery {
     dataset: String,
     symbol: String,
-    from: Date,
-    to: Date,
+    #[serde(flatten)]
+    dates: Dates,
     format: ExportFormat,
 }
 
 impl ReferenceQuery {
-    /// The rows of `symbol` in `dataset` over `[from, to]`, as Parquet.
-    pub(crate) fn new(dataset: &str, symbol: &str, from: Date, to: Date) -> Self {
+    /// The rows of `symbol` in `dataset` over `dates`, as Parquet.
+    pub(crate) fn new(dataset: &str, symbol: &str, dates: Dates) -> Self {
         Self {
             dataset: dataset.to_owned(),
             symbol: symbol.to_owned(),
-            from,
-            to,
+            dates,
             format: ExportFormat::Parquet,
         }
     }
@@ -381,13 +399,72 @@ impl fmt::Display for ReferenceQuery {
         let Self {
             dataset,
             symbol,
-            from,
-            to,
+            dates,
             ..
         } = self;
         write!(
             f,
-            "the rows of {symbol} in LSE's reference collection {dataset} over [{from}, {to}]"
+            "the rows of {symbol} in LSE's reference collection {dataset} {dates}"
+        )
+    }
+}
+
+/// An export of LSE's macro series `code` of the kind `kind` (`release`,
+/// `yield`) over its `dates` (`/v3/macro/export`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct MacroQuery {
+    kind: &'static str,
+    code: String,
+    #[serde(flatten)]
+    dates: Dates,
+    format: ExportFormat,
+}
+
+impl MacroQuery {
+    /// The rows of the series `code` of `kind` over `dates`, as Parquet.
+    pub(crate) fn new(kind: &'static str, code: &str, dates: Dates) -> Self {
+        Self {
+            kind,
+            code: code.to_owned(),
+            dates,
+            format: ExportFormat::Parquet,
+        }
+    }
+}
+
+impl fmt::Display for MacroQuery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            kind, code, dates, ..
+        } = self;
+        write!(f, "LSE's macro series of {kind}s {code} {dates}")
+    }
+}
+
+/// A call of an instrument's splits and dividends (`/v3/factors`), by its
+/// market and its symbol in it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct FactorsQuery {
+    market: String,
+    symbol: String,
+}
+
+impl FactorsQuery {
+    /// The factors of `symbol` in LSE's `market`.
+    pub(crate) fn new(market: &str, symbol: &str) -> Self {
+        Self {
+            market: market.to_owned(),
+            symbol: symbol.to_owned(),
+        }
+    }
+}
+
+impl fmt::Display for FactorsQuery {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the splits and dividends of {} in LSE's {}",
+            self.symbol, self.market
         )
     }
 }

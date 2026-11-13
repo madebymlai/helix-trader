@@ -17,11 +17,13 @@
 //! asked a UTC day an export, a book or orders a UTC hour, one download at
 //! a time on each key, an export LSE refuses as too wide asked again in
 //! halves (see `http::export`). It serves the rows of LSE's reference
-//! collections as custom data (`LseRow`) too, its source and symbol named
-//! in the metadata of the request's data type, each row stamped when its
-//! values are known, with the LSE key; its definitions request fails, LSE
-//! publishing none. Live, it streams the quotes of the instruments its
-//! config names, on their sockets (see `streams`). Every other request and
+//! collections, its macro series of releases and of yields and an
+//! instrument's splits and dividends as custom data (`LseRow`) too, its
+//! source and symbol named in the metadata of the request's data type,
+//! each row stamped when its values are known, with the LSE key (see
+//! `http::rows`); its definitions request fails, LSE publishing none.
+//! Live, it streams the quotes of the instruments its config names, on
+//! their sockets (see `streams`). Every other request and
 //! subscription is left to Nautilus' defaults: a request fails as
 //! unsupported, a subscription is logged as not implemented. A request is
 //! answered from a task, in one completed response envelope, the data
@@ -44,7 +46,7 @@ use std::{collections::HashMap, future::Future, num::NonZeroUsize, sync::Arc};
 use anyhow::{Context, bail, ensure};
 use async_trait::async_trait;
 use bytes::Bytes;
-use jiff::{SignedDuration, Timestamp, civil::Date, tz::TimeZone};
+use jiff::{SignedDuration, Timestamp, tz::TimeZone};
 use nautilus_common::{
     cache::CacheView,
     clients::{DataClient, execute_instrument_subscriptions},
@@ -81,13 +83,14 @@ use crate::{
     config::LseDataClientConfig,
     http::{
         client::LseHttpClient,
-        export::{fetch, loaded, midnight},
+        export::fetch,
         listing::CmeListings,
         parse::{
-            parse_book, parse_candles, parse_index_quotes, parse_orders, parse_quotes, parse_rows,
+            parse_book, parse_candles, parse_index_quotes, parse_orders, parse_quotes,
             parse_trade_slice,
         },
-        query::{CandleWidth, ExportQuery, ReferenceQuery, Rows},
+        query::{CandleWidth, ExportQuery, Rows},
+        rows::{self, Fetched, RowSource},
     },
     types::{LseRow, SOURCE, SYMBOL},
 };
@@ -670,19 +673,18 @@ impl DataClient for LseDataClient {
         Ok(())
     }
 
-    /// Answers with the rows of the reference collection and the symbol
-    /// the request's data type names (`LseRow::data_type`: `source` and
-    /// `symbol` in its metadata) known over `[start, end]` (end: now if
-    /// none), each stamped when its values are known (`RowKey::span`: a
-    /// date at its end, an interval at its close), the newest `limit` if
-    /// one is given, each an `LseRow` of that data type, in one completed
-    /// response envelope; or in a plain response, logging the span, if the
-    /// last date asked is one LSE has not loaded yet (`http::export`'s
-    /// rule). LSE is asked its catalogue, for the collection's time column
-    /// and so its key, then the collection's export over the UTC dates of
-    /// the rows known in the window. A failure, the data type not
-    /// `LseRow`'s or naming no source or symbol, the source no collection
-    /// LSE lists, or LSE's refusal of a call, is the envelope's, with no
+    /// Answers with the rows of the source and the series the request's
+    /// data type names (`LseRow::data_type`: `source` and `symbol` in its
+    /// metadata) known over `[start, end]` (end: now if none), each stamped
+    /// when its values are known, the newest `limit` if one is given, each
+    /// an `LseRow` of that data type, in one completed response envelope;
+    /// or in a plain response, logging the span, if LSE may not have loaded
+    /// them all yet (see `http::rows`). Its sources are LSE's reference
+    /// collections, its macro series of releases and of yields, and an
+    /// instrument's splits and dividends, LSE's factors. A failure, the
+    /// data type not `LseRow`'s or naming no source or symbol, a source the
+    /// client does not stamp or LSE's macro observations, refused before
+    /// LSE is asked, or LSE's refusal of a call, is the envelope's, with no
     /// rows: LSE's refusal carries its code, message and required plan.
     fn request_data(&self, request: RequestCustomData) -> anyhow::Result<()> {
         let data_type = request.data_type.clone();
@@ -699,16 +701,16 @@ impl DataClient for LseDataClient {
                 data_type
                     .metadata()
                     .and_then(|metadata| metadata.get_str(key))
-                    .map(str::to_owned)
                     .with_context(|| format!("{data_type:?} names no {key} in its metadata"))
             };
+            let source = RowSource::of(named(SOURCE)?, named(SYMBOL)?)?;
             let start = request
                 .start
                 .with_context(|| format!("a request of {data_type} needs a start"))?;
             let http = self.http(LseProduct::Global)?;
-            Ok::<_, anyhow::Error>((named(SOURCE)?, named(SYMBOL)?, start, http))
+            Ok::<_, anyhow::Error>((source, start, http))
         })();
-        let (source, symbol, start, http) = match checked {
+        let (source, start, http) = match checked {
             Ok(checked) => checked,
             Err(e) => {
                 self.fail(request.request_id, format!("{e:#}"));
@@ -721,47 +723,15 @@ impl DataClient for LseDataClient {
         let client_id = request.client_id;
         let clock = self.clock;
         self.spawn_request(async move {
-            let fetched = async {
-                let collections = http
-                    .reference_collections()
-                    .await
-                    .context("reading LSE's reference catalogue")?;
-                let collection = collections
-                    .into_iter()
-                    .find(|collection| collection.dataset == source)
-                    .with_context(|| format!("LSE lists no reference collection {source}"))?;
-                let key = collection.key();
-                // The rows known over `[start, end]`, each a span after its
-                // time (`RowKey::span`).
-                let (first, last) = (start - key.span(), end - key.span());
-                let query = ReferenceQuery::new(&source, &symbol, utc_date(first), utc_date(last));
-                let file = http
-                    .reference_export(&query)
-                    .await
-                    .with_context(|| format!("exporting {query}"))?;
-                let rows = match file {
-                    Some(file) => parse_rows(file, &source, &symbol, &collection.time_column, key)
-                        .with_context(|| format!("reading {query}"))?,
-                    None => Vec::new(),
-                };
-                // The last date asked, of the rows known last, is the one
-                // LSE may not have loaded yet.
-                let rows_of_last = rows.iter().any(|row| {
-                    midnight(Timestamp::from(row.ts_init) - key.span()) == midnight(last)
-                });
-                let unloaded_from =
-                    (!loaded(last, rows_of_last, now)).then(|| midnight(last) + key.span());
-                let window = UnixNanos::from(start)..=UnixNanos::from(end);
-                let rows = rows
-                    .into_iter()
-                    .filter(|row| window.contains(&row.ts_init))
-                    .map(|row| CustomData::new(Arc::new(row), data_type.clone()))
-                    .collect::<Vec<_>>();
-                Ok::<_, anyhow::Error>((rows, unloaded_from))
-            }
-            .await;
-            let event = match fetched {
-                Ok((mut rows, unloaded_from)) => {
+            let event = match rows::fetch(&http, &source, start, end, now).await {
+                Ok(Fetched {
+                    rows,
+                    unloaded_from,
+                }) => {
+                    let mut rows: Vec<_> = rows
+                        .into_iter()
+                        .map(|row| CustomData::new(Arc::new(row), data_type.clone()))
+                        .collect();
                     if let Some(limit) = request.limit {
                         let excess = rows.len().saturating_sub(limit.get());
                         rows.drain(..excess);
@@ -784,10 +754,10 @@ impl DataClient for LseDataClient {
                         )),
                         Some(from) => {
                             log::warn!(
-                                "{client_id}: LSE has not loaded the rows of {data_type} known \
-                                 over [{from}, {end}] yet, a date being stored the morning after \
-                                 it: answered with the {count} rows it holds, written to no \
-                                 catalog"
+                                "{client_id}: LSE may not have loaded {source} known over \
+                                 [{from}, {end}] yet, a date being stored the morning after it \
+                                 and a release filled once out: answered with the {count} rows \
+                                 it holds, written to no catalog"
                             );
                             DataEvent::Response(response)
                         }
@@ -884,11 +854,6 @@ impl DataClient for LseDataClient {
     }
 }
 
-/// The UTC date of `at`.
-fn utc_date(at: Timestamp) -> Date {
-    at.to_zoned(TimeZone::UTC).date()
-}
-
 /// Sends `event` to the node; a closed channel means the node is stopping.
 fn send(sender: &EventSender<DataEvent>, event: DataEvent) {
     if let Err(e) = sender.send(event) {
@@ -931,14 +896,17 @@ mod tests {
     use crate::{
         LseDataClientFactory, LseRow,
         testing::{
-            AAPL_CALL, AAPL_CALL_MINUTES, AAPL_CALL_TRADES, API_KEY, CME_API_KEY, DATA_UNAVAILABLE,
-            DATA_UNAVAILABLE_QUOTES, DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING, EXPORT_TOO_WIDE,
-            GCZ26, GCZ26_BOOK, GCZ26_ORDERS, GCZ26_QUOTES, GCZ26_TRADES, GOLD_FUTURES,
-            GOLD_FUTURES_4H, GOLD_SPOT_MINUTES, GOLD_TRADES, HISTORY_LIMIT, LEVEL_REQUIRED_BOOK,
-            LEVEL_REQUIRED_ORDERS, MockLse, MockLseSocket, PAIRS_GCZ6, PLAN_REQUIRED,
-            REFERENCE_CATALOGUE, REFERENCE_DATA_UNAVAILABLE, Reply, SPX_TICKS, SYMBOL_UNKNOWN,
-            US10Y_BOND_YIELDS, WS_AUTHENTICATED_DATA, WS_AUTHENTICATED_LONDON,
-            WS_AUTHENTICATED_TSX, WS_TICKS_DATA, WS_TICKS_LONDON, WS_TICKS_TSX, aapl_call,
+            AAPL_CALL, AAPL_CALL_MINUTES, AAPL_CALL_TRADES, AAPL_DIVIDENDS, AAPL_FACTORS,
+            AAPL_FINANCIAL_REPORTS, AHMA_COMPANY_PROFILES, API_KEY, AUGB10Y_SOVEREIGN_YIELDS,
+            CME_API_KEY, DATA_UNAVAILABLE, DATA_UNAVAILABLE_QUOTES, DATA_UNAVAILABLE_TODAY,
+            DATE_NOT_TRADING, EXPORT_TOO_WIDE, GCZ26, GCZ26_BOOK, GCZ26_ORDERS, GCZ26_QUOTES,
+            GCZ26_TRADES, GOLD_FACTORS, GOLD_FUTURES, GOLD_FUTURES_4H, GOLD_SPOT_MINUTES,
+            GOLD_TRADES, HISTORY_LIMIT, LEVEL_REQUIRED_BOOK, LEVEL_REQUIRED_ORDERS, MockLse,
+            MockLseSocket, PAIRS_GCZ6, PLAN_REQUIRED, REFERENCE_CATALOGUE,
+            REFERENCE_DATA_UNAVAILABLE, Reply, SPX_TICKS, SYMBOL_UNKNOWN, TEAM_INSIDER_TRADES,
+            US_CORE_CPI_CALENDAR, US_CORE_CPI_RELEASES, US10Y_BOND_YIELDS,
+            US10Y_BOND_YIELDS_MINUTE, US10Y_YIELDS, WS_AUTHENTICATED_DATA, WS_AUTHENTICATED_LONDON,
+            WS_AUTHENTICATED_TSX, WS_TICKS_DATA, WS_TICKS_LONDON, WS_TICKS_TSX, ZN_COT, aapl_call,
             data_ws_answer, gcz26, gold_futures, gold_spot, socket_answer,
         },
     };
@@ -1861,11 +1829,11 @@ mod tests {
         assert!(reason.contains("symbol-unknown"), "{reason}");
     }
 
-    /// LSE is asked its catalogue, which lists no such collection, and no
-    /// export.
+    /// A source the client knows no stamp of is refused before LSE is
+    /// asked: when its rows are known is not known.
     #[tokio::test]
-    async fn a_source_that_is_no_reference_collection_of_lse_fails_naming_it() {
-        let lse = MockLse::start(vec![Reply::json(REFERENCE_CATALOGUE)]);
+    async fn a_source_the_client_knows_no_stamp_of_fails_naming_it_unasked() {
+        let lse = MockLse::start(vec![]);
         let (client, mut events) = connected(&lse, false).await;
 
         client
@@ -1879,7 +1847,500 @@ mod tests {
         let envelope = next_envelope(&mut events).await;
         let reason = envelope.failure_reason().expect("a failure");
         assert!(reason.contains("no_such_collection"), "{reason}");
+        assert!(lse.calls().is_empty(), "{:?}", lse.calls());
+    }
+
+    /// LSE is asked its catalogue, which lists no such collection, and no
+    /// export.
+    #[tokio::test]
+    async fn a_collection_lse_s_catalogue_does_not_list_fails_naming_it() {
+        let lse = MockLse::start(vec![Reply::json(r#"{"datasets": []}"#)]);
+        let (client, mut events) = connected(&lse, false).await;
+
+        client
+            .request_data(bond_yields(
+                "2026-11-09T00:00:00Z",
+                "2026-11-12T23:59:59.999999999Z",
+            ))
+            .unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        let reason = envelope.failure_reason().expect("a failure");
+        assert!(reason.contains("bond_yields"), "{reason}");
         assert_eq!(lse.calls().len(), 1);
+    }
+
+    /// The times of the rows of `envelope`'s custom data response.
+    fn stamps(envelope: &DataResponseEnvelope) -> Vec<UnixNanos> {
+        custom_data(&rows_in(envelope))
+            .iter()
+            .map(CustomData::ts_init)
+            .collect()
+    }
+
+    fn utc(time: &str) -> UnixNanos {
+        UnixNanos::from(at(time))
+    }
+
+    /// Each collection's rows known over the window, asked of LSE by the
+    /// dates of their keys: a day before the window for a row known at its
+    /// date's end, an interval before for one known at its interval's
+    /// close, the window's own for a snapshot known when it was updated.
+    #[rstest]
+    #[case::market_values(
+        "sovereign_yields", "AUGB10Y", AUGB10Y_SOVEREIGN_YIELDS,
+        ("2026-11-11T00:00:00Z", "2026-11-12T00:00:00Z"), ("2026-11-10", "2026-11-11"), 72
+    )]
+    #[case::a_filing_s_day(
+        "insider_trades", "TEAM", TEAM_INSIDER_TRADES,
+        ("2026-10-14T00:00:00Z", "2026-10-14T23:59:59Z"), ("2026-10-13", "2026-10-13"), 1
+    )]
+    #[case::an_ex_date(
+        "dividends", "AAPL", AAPL_DIVIDENDS,
+        ("2026-05-01T00:00:00Z", "2026-11-01T00:00:00Z"), ("2026-04-30", "2026-10-31"), 2
+    )]
+    #[case::a_minute(
+        "bond_yields_minute", "US10Y", US10Y_BOND_YIELDS_MINUTE,
+        ("2026-11-10T00:00:00Z", "2026-11-10T00:30:00Z"), ("2026-11-09", "2026-11-10"), 16
+    )]
+    #[case::a_snapshot(
+        "company_profiles", "AHMA", AHMA_COMPANY_PROFILES,
+        ("2026-10-13T00:00:00Z", "2026-10-13T12:00:00Z"), ("2026-10-13", "2026-10-13"), 1
+    )]
+    #[tokio::test]
+    async fn a_collection_s_rows_known_over_the_window_are_asked_by_the_dates_of_their_keys(
+        #[case] dataset: &str,
+        #[case] symbol: &str,
+        #[case] file: &'static [u8],
+        #[case] (from, to): (&str, &str),
+        #[case] dates: (&str, &str),
+        #[case] count: usize,
+    ) {
+        let lse = MockLse::start(vec![Reply::json(REFERENCE_CATALOGUE), Reply::file(file)]);
+        let (client, mut events) = connected(&lse, false).await;
+
+        client
+            .request_data(rows_of(LseRow::data_type(dataset, symbol), from, to))
+            .unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        assert_eq!(envelope.failure_reason(), None);
+        let stamps = stamps(&envelope);
+        assert_eq!(stamps.len(), count);
+        assert!(
+            stamps
+                .iter()
+                .all(|&stamp| utc(from) <= stamp && stamp <= utc(to))
+        );
+        assert!(stamps.is_sorted());
+        let export = &lse.calls()[1];
+        assert_eq!(
+            (
+                export.path.as_str(),
+                export.param("dataset"),
+                export.param("symbol"),
+                export.param("from"),
+                export.param("to")
+            ),
+            (
+                "/v3/reference/export",
+                Some(dataset),
+                Some(symbol),
+                Some(dates.0),
+                Some(dates.1)
+            )
+        );
+    }
+
+    /// A row stamped at a time of another column than its key may be keyed
+    /// any time before the window: the series is asked whole, up to the
+    /// window's last date, so that none known in the window is missed. ZN's
+    /// reports known in September 2026, of no release date and stamped when
+    /// LSE ingested them, the Fridays at about 20:30 UTC; AAPL's reports of
+    /// periods ending June 2025 to March 2026, known when their statements
+    /// were accepted.
+    #[rstest]
+    #[case::cot(
+        "cot", "ZN", ZN_COT, ("2026-09-01T00:00:00Z", "2026-10-01T00:00:00Z"), "2026-10-01",
+        vec!["2026-09-04T20:30:16Z", "2026-09-11T20:30:11Z", "2026-09-18T20:30:09Z", "2026-09-25T20:30:08Z"]
+    )]
+    #[case::financial_reports(
+        "financial_reports", "AAPL", AAPL_FINANCIAL_REPORTS,
+        ("2025-07-01T00:00:00Z", "2026-06-30T00:00:00Z"), "2026-06-30",
+        [
+            &["2025-08-01T10:00:42Z"; 6][..],
+            &["2025-10-31T10:01:26Z"; 12],
+            &["2026-01-30T11:01:32Z"; 6],
+            &["2026-05-01T14:01:00Z"; 6],
+        ].concat()
+    )]
+    #[tokio::test]
+    async fn a_series_of_rows_known_at_another_column_s_time_is_asked_whole_up_to_the_window_s_end(
+        #[case] dataset: &str,
+        #[case] symbol: &str,
+        #[case] file: &'static [u8],
+        #[case] (from, to): (&str, &str),
+        #[case] last_date: &str,
+        #[case] expected: Vec<&str>,
+    ) {
+        let lse = MockLse::start(vec![Reply::json(REFERENCE_CATALOGUE), Reply::file(file)]);
+        let (client, mut events) = connected(&lse, false).await;
+
+        client
+            .request_data(rows_of(LseRow::data_type(dataset, symbol), from, to))
+            .unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        assert_eq!(envelope.failure_reason(), None);
+        assert_eq!(
+            stamps(&envelope),
+            expected.iter().map(|time| utc(time)).collect::<Vec<_>>()
+        );
+        let export = &lse.calls()[1];
+        assert_eq!(
+            (export.param("from"), export.param("to")),
+            (None, Some(last_date))
+        );
+    }
+
+    fn core_cpi_calendar(from: &str, to: &str) -> RequestCustomData {
+        rows_of(
+            LseRow::data_type("economic_calendar", "US.Core Inflation Rate YoY"),
+            from,
+            to,
+        )
+    }
+
+    /// The releases of March to October 2026, each with its actual: stamped
+    /// when they came out, written back.
+    #[tokio::test]
+    async fn economic_releases_are_stamped_when_they_came_out_and_answered_complete() {
+        let lse = MockLse::start(vec![
+            Reply::json(REFERENCE_CATALOGUE),
+            Reply::file(US_CORE_CPI_CALENDAR),
+        ]);
+        let (client, mut events) = connected(&lse, false).await;
+
+        client
+            .request_data(core_cpi_calendar(
+                "2026-03-01T00:00:00Z",
+                "2026-10-31T00:00:00Z",
+            ))
+            .unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        assert_eq!(envelope.failure_reason(), None);
+        assert_eq!(stamps(&envelope).len(), 8);
+        assert_eq!(stamps(&envelope)[0], utc("2026-03-11T12:30:00Z"));
+        let export = &lse.calls()[1];
+        assert_eq!(
+            (
+                export.param("symbol"),
+                export.param("from"),
+                export.param("to")
+            ),
+            (Some("US.Core Inflation Rate YoY"), None, Some("2026-10-31"))
+        );
+    }
+
+    /// February 2026 holds the release of the 11th, past, with no actual:
+    /// LSE has not filled it, so the window is answered in a plain
+    /// response, which the data engine writes to no catalog, and a fill
+    /// asks for it again.
+    #[tokio::test]
+    async fn a_window_of_releases_one_of_which_lse_has_not_filled_is_answered_unwritten() {
+        let lse = MockLse::start(vec![
+            Reply::json(REFERENCE_CATALOGUE),
+            Reply::file(US_CORE_CPI_CALENDAR),
+        ]);
+        let (client, mut events) = connected(&lse, false).await;
+        let request = core_cpi_calendar("2026-02-01T00:00:00Z", "2026-02-28T00:00:00Z");
+        let id = request.request_id;
+
+        client.request_data(request).unwrap();
+
+        let event = next_event(&mut events).await;
+        let DataEvent::Response(DataResponse::Data(response)) = event else {
+            panic!("not a plain custom data response: {event:?}");
+        };
+        assert_eq!(response.correlation_id, id);
+        let stamped: Vec<_> = custom_data(&response)
+            .iter()
+            .map(CustomData::ts_init)
+            .collect();
+        assert_eq!(
+            stamped,
+            [utc("2026-02-11T13:30:00Z"), utc("2026-02-13T13:30:00Z")]
+        );
+    }
+
+    fn macro_series(source: &str, code: &str, from: &str, to: &str) -> RequestCustomData {
+        rows_of(LseRow::data_type(source, code), from, to)
+    }
+
+    /// The releases of March to October 2026, each with its actual, asked
+    /// of LSE's macro series by the dates of their release; and US10Y's
+    /// closes of the 9th to the 12th of November, known at each day's end.
+    #[rstest]
+    #[case::releases(
+        "macro_release", "release", "US.Core Inflation Rate YoY", US_CORE_CPI_RELEASES,
+        ("2026-03-01T00:00:00Z", "2026-10-31T00:00:00Z"), ("2026-03-01", "2026-10-31"), 8
+    )]
+    #[case::yields(
+        "macro_yield", "yield", "US10Y", US10Y_YIELDS,
+        ("2026-11-10T00:00:00Z", "2026-11-13T00:00:00Z"), ("2026-11-09", "2026-11-12"), 3
+    )]
+    #[tokio::test]
+    async fn a_macro_series_is_asked_by_its_kind_and_code(
+        #[case] source: &str,
+        #[case] kind: &str,
+        #[case] code: &str,
+        #[case] file: &'static [u8],
+        #[case] (from, to): (&str, &str),
+        #[case] dates: (&str, &str),
+        #[case] count: usize,
+    ) {
+        let lse = MockLse::start(vec![Reply::file(file)]);
+        let (client, mut events) = connected(&lse, false).await;
+
+        client
+            .request_data(macro_series(source, code, from, to))
+            .unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        assert_eq!(envelope.failure_reason(), None);
+        assert_eq!(stamps(&envelope).len(), count);
+        let [export] = &lse.calls()[..] else {
+            panic!("{:?}", lse.calls());
+        };
+        assert_eq!(
+            (
+                export.path.as_str(),
+                export.param("kind"),
+                export.param("code"),
+                export.param("from"),
+                export.param("to"),
+                export.param("format"),
+                export.api_key.as_deref()
+            ),
+            (
+                "/v3/macro/export",
+                Some(kind),
+                Some(code),
+                Some(dates.0),
+                Some(dates.1),
+                Some("parquet"),
+                Some(API_KEY)
+            )
+        );
+    }
+
+    /// An observation is keyed by the day of its period, not when it came
+    /// out (US core inflation's September at 1 September, out on 14
+    /// October): refused before LSE is asked, naming the series of its
+    /// releases.
+    #[tokio::test]
+    async fn a_macro_observation_is_refused_unasked_naming_the_releases() {
+        let lse = MockLse::start(vec![]);
+        let (client, mut events) = connected(&lse, false).await;
+
+        client
+            .request_data(macro_series(
+                "macro_observation",
+                "US.core_inflation_rate",
+                "2026-06-01T00:00:00Z",
+                "2026-10-31T00:00:00Z",
+            ))
+            .unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        let reason = envelope.failure_reason().expect("a failure");
+        assert!(reason.contains("macro_release"), "{reason}");
+        assert!(lse.calls().is_empty(), "{:?}", lse.calls());
+    }
+
+    fn factors(source: &str, symbol: &str, from: &str, to: &str) -> RequestCustomData {
+        rows_of(LseRow::data_type(source, symbol), from, to)
+    }
+
+    /// AAPL's splits from 2000, of its five, each known at its day's end,
+    /// with the factors LSE gives it.
+    #[tokio::test]
+    async fn an_instrument_s_splits_are_asked_of_lse_s_factors_by_its_market_and_symbol() {
+        let lse = MockLse::start(vec![Reply::json(AAPL_FACTORS)]);
+        let (client, mut events) = connected(&lse, false).await;
+
+        client
+            .request_data(factors(
+                "factors_splits",
+                "AAPL-US_STOCKS",
+                "2000-01-01T00:00:00Z",
+                "2026-11-01T00:00:00Z",
+            ))
+            .unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        assert_eq!(envelope.failure_reason(), None);
+        let rows: Vec<_> = custom_data(&rows_in(&envelope))
+            .iter()
+            .map(|data| {
+                let row = data.data.as_any().downcast_ref::<LseRow>().unwrap().clone();
+                (row.ts_init, row.fields["volume_factor"].clone())
+            })
+            .collect();
+        let split = |day: &str, factor: f64| (utc(day), serde_json::json!(factor));
+        assert_eq!(
+            rows,
+            [
+                split("2000-06-22T00:00:00Z", 2.0),
+                split("2005-03-01T00:00:00Z", 2.0),
+                split("2014-06-10T00:00:00Z", 7.0),
+                split("2020-09-01T00:00:00Z", 4.0),
+            ]
+        );
+        let [call] = &lse.calls()[..] else {
+            panic!("{:?}", lse.calls());
+        };
+        assert_eq!(
+            (
+                call.path.as_str(),
+                call.param("market"),
+                call.param("symbol")
+            ),
+            ("/v3/factors", Some("us_stocks"), Some("AAPL"))
+        );
+    }
+
+    /// AAPL's dividends of 2026 to October, each known at its ex-date's
+    /// end, in time order, LSE sending them newest first, each with the
+    /// unit of its amount.
+    #[tokio::test]
+    async fn an_instrument_s_dividends_are_its_factors_with_the_unit_of_their_amount() {
+        let lse = MockLse::start(vec![Reply::json(AAPL_FACTORS)]);
+        let (client, mut events) = connected(&lse, false).await;
+
+        client
+            .request_data(factors(
+                "factors_dividends",
+                "AAPL-US_STOCKS",
+                "2026-01-01T00:00:00Z",
+                "2026-10-31T00:00:00Z",
+            ))
+            .unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        assert_eq!(envelope.failure_reason(), None);
+        let rows: Vec<_> = custom_data(&rows_in(&envelope))
+            .iter()
+            .map(|data| {
+                let row = data.data.as_any().downcast_ref::<LseRow>().unwrap().clone();
+                (
+                    row.ts_init,
+                    row.fields["amount"].clone(),
+                    row.fields["unit"].clone(),
+                )
+            })
+            .collect();
+        let dividend = |day: &str, amount: f64| {
+            (
+                utc(day),
+                serde_json::json!(amount),
+                serde_json::json!("USD"),
+            )
+        };
+        assert_eq!(
+            rows,
+            [
+                dividend("2026-02-10T00:00:00Z", 0.26),
+                dividend("2026-05-12T00:00:00Z", 0.27),
+                dividend("2026-08-11T00:00:00Z", 0.27),
+            ]
+        );
+    }
+
+    /// LSE gives a futures series no dividends.
+    #[tokio::test]
+    async fn an_instrument_of_no_dividends_has_none() {
+        let lse = MockLse::start(vec![Reply::json(GOLD_FACTORS)]);
+        let (client, mut events) = connected(&lse, false).await;
+
+        client
+            .request_data(factors(
+                "factors_dividends",
+                "GOLD-FUTURES",
+                "2026-01-01T00:00:00Z",
+                "2026-10-31T00:00:00Z",
+            ))
+            .unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        assert_eq!(envelope.failure_reason(), None);
+        assert_eq!(stamps(&envelope), Vec::<UnixNanos>::new());
+    }
+
+    /// AAPL's factors as if LSE had cut its dividends to the newest it
+    /// gives, its oldest of 11 May 1987.
+    fn truncated_aapl_factors() -> String {
+        let mut factors: Value = serde_json::from_str(AAPL_FACTORS).unwrap();
+        factors["dividends"]["truncated"] = json!(true);
+        factors["dividends"]["count"] = json!(600);
+        factors.to_string()
+    }
+
+    /// A window from before the oldest dividend LSE gave may lack some LSE
+    /// left out: it fails, naming the reference collection holding them
+    /// all; a window after it holds every one.
+    #[rstest]
+    #[case::from_before_the_oldest("1980-01-01T00:00:00Z", false)]
+    #[case::from_after_the_oldest("2026-01-01T00:00:00Z", true)]
+    #[tokio::test]
+    async fn dividends_lse_cut_to_its_newest_fail_a_window_from_before_them(
+        #[case] from: &str,
+        #[case] served: bool,
+    ) {
+        let lse = MockLse::start(vec![Reply::json(&truncated_aapl_factors())]);
+        let (client, mut events) = connected(&lse, false).await;
+
+        client
+            .request_data(factors(
+                "factors_dividends",
+                "AAPL-US_STOCKS",
+                from,
+                "2026-10-31T00:00:00Z",
+            ))
+            .unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        match envelope.failure_reason() {
+            None => assert!(served, "served a window from before the oldest"),
+            Some(reason) => {
+                assert!(!served, "{reason}");
+                assert!(reason.contains("600"), "{reason}");
+                assert!(reason.contains("dividends"), "{reason}");
+            }
+        }
+    }
+
+    /// LSE's factors take a market and a symbol: one written without its
+    /// market is refused before LSE is asked, naming it.
+    #[tokio::test]
+    async fn factors_of_a_symbol_naming_no_market_fail_naming_it_unasked() {
+        let lse = MockLse::start(vec![]);
+        let (client, mut events) = connected(&lse, false).await;
+
+        client
+            .request_data(factors(
+                "factors_splits",
+                "AAPL",
+                "2026-01-01T00:00:00Z",
+                "2026-10-31T00:00:00Z",
+            ))
+            .unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        let reason = envelope.failure_reason().expect("a failure");
+        assert!(reason.contains("AAPL"), "{reason}");
+        assert!(lse.calls().is_empty(), "{:?}", lse.calls());
     }
 
     /// Neither is asked of LSE.

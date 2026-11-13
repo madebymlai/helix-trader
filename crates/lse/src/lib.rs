@@ -11,7 +11,8 @@
 //! asked for, a derived market's symbol, its name on a socket, a CME
 //! contract's listing, or a US option's OSI symbol), `http` (the HTTP client, its typed queries, an
 //! export over any span, the listings of CME contracts, LSE's answers and
-//! refusals and the parsing of an export's Parquet file), `websocket` (the
+//! refusals, the parsing of an export's Parquet file, and the rows of its
+//! sources that are not prices over any window), `websocket` (the
 //! frames of LSE's sockets, the client of one, and the parsing of a tick),
 //! `config` (the data client's config), `data` (the data client),
 //! `factories`, and `types`, the custom data type of LSE's rows that are

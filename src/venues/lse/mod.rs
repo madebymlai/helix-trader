@@ -17,8 +17,10 @@
 //! client; `GLBX`'s and `OPRA`'s Databento's, asked of Nautilus' Databento
 //! client. The client converts
 //! LSE's prices at the definition's precision. LSE's reference series, the
-//! rows of its reference collections, are custom data of no instrument
-//! (`lse::LseRow`), filled by the same client with no definition. See
+//! rows of its reference collections, of its macro series of releases and
+//! of yields and of an instrument's splits and dividends, are custom data
+//! of no instrument (`lse::LseRow`), filled by the same client with no
+//! definition, each row stamped when its values are known. See
 //! `README.md`.
 
 use ::lse::{LseDataClientConfig, LseDataClientFactory};
@@ -143,13 +145,14 @@ mod tests {
     use ::lse::{
         LseRow,
         testing::{
-            AAPL_CALL, AAPL_CALL_MINUTES, AAPL_CALL_TRADES, AAPL_TRADES, ALLOWANCE_EXHAUSTED,
-            API_KEY, BTCUSDT_TRADES, CME_API_KEY, DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING,
-            EUR_USD_MINUTES, GCZ26, GCZ26_BOOK, GCZ26_ORDERS, GCZ26_QUOTES, GCZ26_TRADES,
-            GOLD_FUTURES, GOLD_SPOT, GOLD_SPOT_MINUTES, GOLD_TRADES, MockLse, PAIRS_GCZ6,
-            PLAN_REQUIRED, REFERENCE_CATALOGUE, REFERENCE_DATA_UNAVAILABLE, ROWS_EXHAUSTED,
-            RY_TRADES, Reply, SPX_MINUTES, SPX_TICKS, SYMBOL_UNKNOWN, US10Y_BOND_YIELDS,
-            VOD_TRADES, gold_futures, gold_spot,
+            AAPL_CALL, AAPL_CALL_MINUTES, AAPL_CALL_TRADES, AAPL_FACTORS, AAPL_TRADES,
+            ALLOWANCE_EXHAUSTED, API_KEY, BTCUSDT_TRADES, CME_API_KEY, DATA_UNAVAILABLE_TODAY,
+            DATE_NOT_TRADING, EUR_USD_MINUTES, GCZ26, GCZ26_BOOK, GCZ26_ORDERS, GCZ26_QUOTES,
+            GCZ26_TRADES, GOLD_FUTURES, GOLD_SPOT, GOLD_SPOT_MINUTES, GOLD_TRADES, MockLse,
+            PAIRS_GCZ6, PLAN_REQUIRED, REFERENCE_CATALOGUE, REFERENCE_DATA_UNAVAILABLE,
+            ROWS_EXHAUSTED, RY_TRADES, Reply, SPX_MINUTES, SPX_TICKS, SYMBOL_UNKNOWN,
+            US_CORE_CPI_CALENDAR, US_CORE_CPI_RELEASES, US10Y_BOND_YIELDS, VOD_TRADES, ZN_COT,
+            gold_futures, gold_spot,
         },
     };
     use jiff::Timestamp;
@@ -907,6 +910,172 @@ mod tests {
             froms,
             [Some("2026-11-12"), Some("2026-11-12")].map(|from| from.map(String::from))
         );
+    }
+
+    /// fill-catalog's fill of `data_type` alone over `[from, to]` into the
+    /// catalog in `dir`, from `lse`.
+    fn fill_custom(
+        dir: &Path,
+        lse: &MockLse,
+        data_type: &DataType,
+        (from, to): (&str, &str),
+    ) -> anyhow::Result<()> {
+        let requirements = DataRequirements {
+            bar_types: vec![],
+            ticks: vec![],
+            custom: vec![data_type.clone()],
+            warmup: SignedDuration::ZERO,
+        };
+        fill_requirements(
+            dir,
+            lse,
+            &requirements,
+            vec![],
+            from.parse().unwrap(),
+            to.parse().unwrap(),
+        )
+    }
+
+    /// The times of the rows of `data_type` the catalog in `dir` holds,
+    /// read back as Nautilus decodes custom data.
+    fn stored_stamps(dir: &Path, data_type: &DataType) -> Vec<UnixNanos> {
+        let mut catalog = ParquetDataCatalog::new(dir, None, None, None, None);
+        let identifier = data_type.identifier().unwrap().to_string();
+        catalog
+            .query_custom_data_dynamic("LseRow", Some(&[identifier]), None, None, None, None, true)
+            .unwrap()
+            .iter()
+            .map(|data| {
+                let Data::Custom(custom) = data else {
+                    panic!("not custom data: {data:?}");
+                };
+                assert_eq!(&custom.data_type, data_type);
+                custom
+                    .data
+                    .as_any()
+                    .downcast_ref::<LseRow>()
+                    .unwrap()
+                    .ts_init
+            })
+            .collect()
+    }
+
+    /// A series of each kind of LSE's other sources, filled through the
+    /// node and written back under its identifier, a code of spaces and
+    /// dots among them, each row at the time it is known: US core
+    /// inflation's releases of March to October 2026, in the economic
+    /// calendar and in the macro series of releases; ZN's Commitments of
+    /// Traders known in September 2026; and AAPL's dividends of 2026 to
+    /// October, from its factors. The window is stored whole: a second
+    /// fill asks LSE nothing.
+    #[test]
+    fn each_kind_of_lse_s_other_sources_fills_written_back_at_the_times_its_rows_are_known() {
+        let utc = |time: &str| UnixNanos::from(time.parse::<Timestamp>().unwrap());
+        let cpi = [
+            "2026-03-11T12:30:00Z",
+            "2026-04-10T12:30:00Z",
+            "2026-05-12T12:30:00Z",
+            "2026-06-10T12:30:00Z",
+            "2026-07-14T12:30:00Z",
+            "2026-08-12T12:30:00Z",
+            "2026-09-11T12:30:00Z",
+            "2026-10-14T12:30:00Z",
+        ];
+        let cases = [
+            (
+                LseRow::data_type("economic_calendar", "US.Core Inflation Rate YoY"),
+                vec![
+                    Reply::json(REFERENCE_CATALOGUE),
+                    Reply::file(US_CORE_CPI_CALENDAR),
+                ],
+                ("2026-03-01T00:00:00Z", "2026-10-31T00:00:00Z"),
+                cpi.to_vec(),
+            ),
+            (
+                LseRow::data_type("macro_release", "US.Core Inflation Rate YoY"),
+                vec![Reply::file(US_CORE_CPI_RELEASES)],
+                ("2026-03-01T00:00:00Z", "2026-10-31T00:00:00Z"),
+                cpi.to_vec(),
+            ),
+            (
+                LseRow::data_type("cot", "ZN"),
+                vec![Reply::json(REFERENCE_CATALOGUE), Reply::file(ZN_COT)],
+                ("2026-09-01T00:00:00Z", "2026-10-01T00:00:00Z"),
+                vec![
+                    "2026-09-04T20:30:16Z",
+                    "2026-09-11T20:30:11Z",
+                    "2026-09-18T20:30:09Z",
+                    "2026-09-25T20:30:08Z",
+                ],
+            ),
+            (
+                LseRow::data_type("factors_dividends", "AAPL-US_STOCKS"),
+                vec![Reply::json(AAPL_FACTORS)],
+                ("2026-01-01T00:00:00Z", "2026-10-31T00:00:00Z"),
+                vec![
+                    "2026-02-10T00:00:00Z",
+                    "2026-05-12T00:00:00Z",
+                    "2026-08-11T00:00:00Z",
+                ],
+            ),
+        ];
+        for (data_type, script, window, stamps) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let calls = script.len();
+            let lse = MockLse::start(script);
+
+            fill_custom(dir.path(), &lse, &data_type, window).unwrap();
+            fill_custom(dir.path(), &lse, &data_type, window).unwrap();
+
+            assert_eq!(
+                stored_stamps(dir.path(), &data_type),
+                stamps.iter().map(|time| utc(time)).collect::<Vec<_>>(),
+                "{data_type}"
+            );
+            assert_eq!(lse.calls().len(), calls, "{data_type}: {:?}", lse.calls());
+        }
+    }
+
+    /// LSE has not filled the release of 11 February 2026, past: the window
+    /// is not written back, and the next run asks for it again.
+    #[test]
+    fn a_window_of_releases_lse_has_not_filled_is_asked_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let calendar = LseRow::data_type("economic_calendar", "US.Core Inflation Rate YoY");
+        let february = ("2026-02-01T00:00:00Z", "2026-02-28T00:00:00Z");
+        let lse = MockLse::start(vec![
+            Reply::json(REFERENCE_CATALOGUE),
+            Reply::file(US_CORE_CPI_CALENDAR),
+            Reply::json(REFERENCE_CATALOGUE),
+            Reply::file(US_CORE_CPI_CALENDAR),
+        ]);
+
+        fill_custom(dir.path(), &lse, &calendar, february).unwrap();
+        fill_custom(dir.path(), &lse, &calendar, february).unwrap();
+
+        assert_eq!(
+            stored_stamps(dir.path(), &calendar),
+            Vec::<UnixNanos>::new()
+        );
+        assert_eq!(lse.calls().len(), 4, "{:?}", lse.calls());
+    }
+
+    /// Refused by LSE's client before LSE is asked, naming the releases.
+    #[test]
+    fn a_fill_of_macro_observations_fails_naming_the_releases() {
+        let dir = tempfile::tempdir().unwrap();
+        let lse = MockLse::start(vec![]);
+
+        let err = fill_custom(
+            dir.path(),
+            &lse,
+            &LseRow::data_type("macro_observation", "US.core_inflation_rate"),
+            ("2026-06-01T00:00:00Z", "2026-10-31T00:00:00Z"),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("macro_release"), "{err:#}");
+        assert!(lse.calls().is_empty(), "{:?}", lse.calls());
     }
 
     #[test]

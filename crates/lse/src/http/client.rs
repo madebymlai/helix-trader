@@ -2,8 +2,9 @@
 //! call a GET with the key in the `X-API-Key` header, kept within the
 //! calls a minute of the key's plan, and a refusal for the moment waited
 //! out, as long as its `Retry-After` says. It calls a market's exports and
-//! the lookups of its catalogue, and the reference catalogue and a
-//! reference collection's exports.
+//! the lookups of its catalogue, the reference catalogue and a reference
+//! collection's exports, a macro series' exports, and an instrument's
+//! splits and dividends.
 
 use std::{collections::HashMap, fmt, num::NonZeroU32, time::Duration};
 
@@ -23,17 +24,20 @@ use tokio::sync::Mutex;
 
 use super::{
     error::LseHttpError,
-    models::{LsePair, LsePairs, LseRefusal, ReferenceCatalogue, ReferenceCollection},
-    query::{ExportQuery, PairsQuery, ReferenceQuery},
+    models::{LseFactors, LsePair, LsePairs, LseRefusal, ReferenceCatalogue, ReferenceCollection},
+    query::{ExportQuery, FactorsQuery, MacroQuery, PairsQuery, ReferenceQuery},
 };
 use crate::common::credential::LseCredential;
 
 /// The paths of the calls: a market's export, a lookup of its catalogue,
-/// the reference catalogue and a reference collection's export.
+/// the reference catalogue, a reference collection's export, a macro
+/// series' export and an instrument's factors.
 const EXPORT_PATH: &str = "/v3/export";
 const PAIRS_PATH: &str = "/v3/pairs";
 const REFERENCE_PATH: &str = "/v3/reference";
 const REFERENCE_EXPORT_PATH: &str = "/v3/reference/export";
+const MACRO_EXPORT_PATH: &str = "/v3/macro/export";
+const FACTORS_PATH: &str = "/v3/factors";
 /// The header carrying the key.
 const API_KEY_HEADER: &str = "X-API-Key";
 /// The headers read of LSE's answers: a file's SHA-256 and LSE's id of
@@ -149,6 +153,19 @@ impl LseHttpClient {
         self.download(REFERENCE_EXPORT_PATH, query).await
     }
 
+    /// The file of the macro export `query` selects, or `None` if LSE holds
+    /// no row of it, downloaded as `export` downloads one.
+    ///
+    /// # Errors
+    ///
+    /// As `export`.
+    pub(crate) async fn macro_export(
+        &self,
+        query: &MacroQuery,
+    ) -> Result<Option<Bytes>, LseHttpError> {
+        self.download(MACRO_EXPORT_PATH, query).await
+    }
+
     /// LSE's reference collections, as its catalogue lists them
     /// (`/v3/reference`), each with the column of its rows' time. A call
     /// LSE refuses for the moment is asked again as `export`'s is.
@@ -161,24 +178,9 @@ impl LseHttpClient {
     pub(crate) async fn reference_collections(
         &self,
     ) -> Result<Vec<ReferenceCollection>, LseHttpError> {
-        let retry_after = |e: &LseHttpError| e.retry_after();
-        let response = self
-            .retries
-            .invocation(
-                "reference catalogue",
-                || self.get(REFERENCE_PATH, None::<&()>),
-                LseHttpError::is_transient,
-                LseHttpError::Retry,
-            )
-            .retry_delay(&retry_after)
-            .execute()
-            .await?;
-        serde_json::from_slice::<ReferenceCatalogue>(&response.body)
+        self.json::<(), ReferenceCatalogue>("reference catalogue", REFERENCE_PATH, None)
+            .await
             .map(|catalogue| catalogue.datasets)
-            .map_err(|source| LseHttpError::Malformed {
-                what: "reference catalogue",
-                source,
-            })
     }
 
     /// The listings LSE's catalogue holds of `query`'s symbol. A call LSE
@@ -190,24 +192,48 @@ impl LseHttpClient {
     /// required plan in the error), answers as its docs do not say, or
     /// cannot be reached, after the retries a transient failure gets.
     pub(crate) async fn pairs(&self, query: &PairsQuery) -> Result<Vec<LsePair>, LseHttpError> {
+        self.json::<_, LsePairs>("catalogue", PAIRS_PATH, Some(query))
+            .await
+            .map(|page| page.pairs)
+    }
+
+    /// The splits and dividends of `query`'s instrument, whole, as LSE's
+    /// factors answer them. A call LSE refuses for the moment is asked
+    /// again as `export`'s is.
+    ///
+    /// # Errors
+    ///
+    /// As `pairs`.
+    pub(crate) async fn factors(&self, query: &FactorsQuery) -> Result<LseFactors, LseHttpError> {
+        self.json("factors", FACTORS_PATH, Some(query)).await
+    }
+
+    /// LSE's JSON answer to a GET of `path` with `query`, `what` it is,
+    /// asked again for a refusal for the moment as an export is.
+    async fn json<Q, T>(
+        &self,
+        what: &'static str,
+        path: &str,
+        query: Option<&Q>,
+    ) -> Result<T, LseHttpError>
+    where
+        Q: Serialize + Sync,
+        T: serde::de::DeserializeOwned,
+    {
         let retry_after = |e: &LseHttpError| e.retry_after();
         let response = self
             .retries
             .invocation(
-                "pairs",
-                || self.get(PAIRS_PATH, Some(query)),
+                what,
+                || self.get(path, query),
                 LseHttpError::is_transient,
                 LseHttpError::Retry,
             )
             .retry_delay(&retry_after)
             .execute()
             .await?;
-        serde_json::from_slice::<LsePairs>(&response.body)
-            .map(|page| page.pairs)
-            .map_err(|source| LseHttpError::Malformed {
-                what: "catalogue",
-                source,
-            })
+        serde_json::from_slice(&response.body)
+            .map_err(|source| LseHttpError::Malformed { what, source })
     }
 
     /// The file of the export of `path` that `query` selects, or `None`
@@ -323,7 +349,7 @@ mod tests {
     use super::*;
     use crate::{
         common::{credential::LseProduct, symbol::LseSymbol},
-        http::query::{PairsQuery, ReferenceQuery, Rows},
+        http::query::{Dates, PairsQuery, ReferenceQuery, Rows},
         testing::{
             API_KEY, CALLS_EXHAUSTED, DATA_UNAVAILABLE, DATA_UNAVAILABLE_QUOTES, DATE_NOT_TRADING,
             EXPORT_ID, GCZ26_PAIR_ID, GCZ26_QUOTES, GOLD_TRADES, MockLse, PAIRS_ESZ6,
@@ -615,8 +641,10 @@ mod tests {
         ReferenceQuery::new(
             "bond_yields",
             "US10Y",
-            "2026-11-09".parse().unwrap(),
-            "2026-11-12".parse().unwrap(),
+            Dates {
+                from: Some("2026-11-09".parse().unwrap()),
+                to: "2026-11-12".parse().unwrap(),
+            },
         )
     }
 

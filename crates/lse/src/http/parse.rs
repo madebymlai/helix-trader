@@ -2,7 +2,8 @@
 //! snapshots, book deltas and bars at the instrument's precision, LSE
 //! sending prices and sizes as doubles, each converted once here through
 //! its shortest decimal form, which must fit the precision; and the rows of
-//! a reference collection as `LseRow`s.
+//! a reference collection or a macro series as `LseRow`s, each stamped
+//! when its values are known.
 
 use std::{collections::HashMap, str::FromStr};
 
@@ -16,6 +17,7 @@ use arrow::{
     json::{WriterBuilder, writer::JsonArray},
 };
 use bytes::Bytes;
+use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::{
@@ -30,7 +32,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use rust_decimal::Decimal;
 use serde_json::{Map, Value};
 
-use super::models::RowKey;
+use super::models::Stamp;
 use crate::types::LseRow;
 
 /// The kind of every row of a tick slice: a trade.
@@ -526,34 +528,72 @@ pub(crate) fn parse_candles(
     Ok(bars)
 }
 
-/// The rows of a reference export of `symbol` in LSE's collection
-/// `source`, each stamped when its values are known, both `ts_event` and
-/// `ts_init`: its value of `time_column`, the column LSE names its time,
-/// and the span of `key`, the collection's (`RowKey::span`), a date at its
-/// end in UTC, an interval at its close. Every other column but `symbol` is
-/// a field of the row, as LSE sent it, in JSON (Arrow's): numbers, strings,
-/// `null`, and dates and times in ISO 8601.
+/// A UTC day.
+const DAY: SignedDuration = SignedDuration::from_hours(24);
+
+/// The column of a financial report's kind, and its kinds: the statements
+/// filed, and the rows derived from them.
+const REPORT_TYPE: &str = "report_type";
+const STATEMENTS: &[&str] = &["income", "balance", "cashflow"];
+const DERIVED: &[&str] = &["metrics", "ratios", "growth"];
+/// The column of a financial report's fiscal period (`FY`, `Q3`).
+const PERIOD: &str = "period";
+
+/// A source's rows read from LSE's answer: each keyed and stamped, and the
+/// rows left out as known at no time, each named with why.
+#[derive(Debug, Default)]
+pub(crate) struct Parsed {
+    pub(crate) rows: Vec<Keyed>,
+    pub(crate) refused: Vec<String>,
+}
+
+/// A row and its key, the time of the column LSE's export selects it by, a
+/// date at its start.
+#[derive(Debug)]
+pub(crate) struct Keyed {
+    pub(crate) key: Timestamp,
+    pub(crate) row: LseRow,
+}
+
+/// A row read, its stamp still to settle: the time it is known at, or why
+/// none is.
+struct Pending {
+    key: UnixNanos,
+    fields: Map<String, Value>,
+    known: Result<UnixNanos, String>,
+}
+
+/// The rows of an export of `symbol` in LSE's `source`, a reference
+/// collection or a macro series, each stamped as `stamp` says when its
+/// values are known, both `ts_event` and `ts_init`, from its key, its value
+/// of `time_column`, the column LSE selects its rows by, or from a column
+/// of its release (see `Stamp`); a row that says when it was known nowhere
+/// is left out, named, rather than stamped at a time of the client's
+/// choosing. Every other column but `symbol` is a field of the row, as LSE
+/// sent it, in JSON (Arrow's): numbers, strings, `null`, and dates and
+/// times in ISO 8601.
 ///
 /// # Errors
 ///
 /// Returns an error if the file is not Parquet, or if its time column is
-/// missing, holds an empty row or a time before 1970, or is not of `key`:
-/// dates for a collection keyed by date, times for one of intervals.
+/// missing, holds an empty row or a time before 1970, or is not of `stamp`:
+/// dates for a source keyed by date, times for one keyed by time; or if a
+/// column of a release `stamp` reads is missing or not of its kind.
 pub(crate) fn parse_rows(
     file: Bytes,
     source: &str,
     symbol: &str,
     time_column: &str,
-    key: RowKey,
-) -> anyhow::Result<Vec<LseRow>> {
+    stamp: Stamp,
+) -> anyhow::Result<Parsed> {
     let reader = ParquetRecordBatchReaderBuilder::try_new(file)
         .context("reading LSE's Parquet file")?
         .build()?;
-    let span = u64::try_from(key.span().as_nanos()).expect("a positive span");
-    let mut rows = Vec::new();
+    let mut pending = Vec::new();
     for batch in reader {
         let batch = batch.context("reading LSE's Parquet file")?;
-        let times = row_times(&batch, time_column, key)?;
+        let keys = row_times(&batch, time_column, stamp)?;
+        let known = known_times(&batch, &keys, stamp)?;
         let mut writer = WriterBuilder::new()
             .with_explicit_nulls(true)
             .build::<_, JsonArray>(Vec::new());
@@ -561,59 +601,188 @@ pub(crate) fn parse_rows(
         writer.finish()?;
         let objects: Vec<Map<String, Value>> =
             serde_json::from_slice(&writer.into_inner()).context("reading LSE's rows as JSON")?;
-        for (mut fields, time) in objects.into_iter().zip(times) {
+        for ((mut fields, key), known) in objects.into_iter().zip(keys).zip(known) {
             fields.remove(time_column);
             fields.remove("symbol");
-            let known = UnixNanos::from(
-                time.as_u64()
-                    .checked_add(span)
-                    .context("a row known past 2554")?,
-            );
-            rows.push(LseRow::new(
-                source.to_owned(),
-                symbol.to_owned(),
-                fields,
-                known,
-                known,
-            ));
+            pending.push(Pending { key, fields, known });
         }
     }
-    Ok(rows)
+    if stamp == Stamp::Filing {
+        file_derived(&mut pending);
+    }
+    let mut parsed = Parsed::default();
+    for Pending { key, fields, known } in pending {
+        let key = Timestamp::from(key);
+        match known {
+            Ok(known) => parsed.rows.push(Keyed {
+                key,
+                row: LseRow::new(source.to_owned(), symbol.to_owned(), fields, known, known),
+            }),
+            Err(why) => parsed.refused.push(format!(
+                "the row of {symbol} keyed {key} in {source}: {why}"
+            )),
+        }
+    }
+    Ok(parsed)
+}
+
+/// When each row of `batch`, keyed `keys`, is known, as `stamp` says, or
+/// why it is known at no time.
+fn known_times(
+    batch: &RecordBatch,
+    keys: &[UnixNanos],
+    stamp: Stamp,
+) -> anyhow::Result<Vec<Result<UnixNanos, String>>> {
+    let after = |lag: SignedDuration| keys.iter().map(|&key| later(key, lag).map(Ok)).collect();
+    match stamp {
+        Stamp::DateEnd => after(DAY),
+        Stamp::Close(width) => after(width),
+        Stamp::Key => after(SignedDuration::ZERO),
+        Stamp::At(column) => Ok(column_times(batch, column, false)?
+            .into_iter()
+            .map(|time| time.ok_or_else(|| format!("no {column}")))
+            .collect()),
+        Stamp::Release => {
+            let released = column_times(batch, "release_date", true)?;
+            let ingested = column_times(batch, "created_at", false)?;
+            released
+                .into_iter()
+                .zip(ingested)
+                .map(|(released, ingested)| {
+                    Ok(released
+                        .map(|date| later(date, DAY))
+                        .transpose()?
+                        .or(ingested)
+                        .ok_or_else(|| "no release_date or created_at".to_string()))
+                })
+                .collect()
+        }
+        Stamp::Filing => Ok(column_times(batch, "accepted_date", false)?
+            .into_iter()
+            .map(|accepted| accepted.ok_or_else(|| "no accepted_date".to_string()))
+            .collect()),
+    }
+}
+
+/// Settles when each financial report of `rows` is known: a statement's at
+/// its own acceptance, a row derived from the statements at the latest
+/// acceptance of the statements of its period, its key and `period`; a row
+/// of another kind, or a derived row of a period of no statement accepted,
+/// at no time.
+fn file_derived(rows: &mut [Pending]) {
+    let text = |fields: &Map<String, Value>, name: &str| {
+        fields.get(name).and_then(Value::as_str).map(str::to_owned)
+    };
+    let mut accepted: HashMap<(UnixNanos, Option<String>), UnixNanos> = HashMap::new();
+    for row in rows.iter_mut() {
+        let kind = text(&row.fields, REPORT_TYPE);
+        let period = text(&row.fields, PERIOD);
+        match kind.as_deref() {
+            Some(kind) if STATEMENTS.contains(&kind) => {
+                if let Ok(known) = row.known {
+                    accepted
+                        .entry((row.key, period))
+                        .and_modify(|latest| *latest = (*latest).max(known))
+                        .or_insert(known);
+                }
+            }
+            Some(kind) if DERIVED.contains(&kind) => {}
+            _ => {
+                row.known = Err(format!(
+                    "a report of the kind {}, neither a statement ({}) nor derived from them ({})",
+                    kind.as_deref().unwrap_or("none"),
+                    STATEMENTS.join(", "),
+                    DERIVED.join(", ")
+                ));
+            }
+        }
+    }
+    for row in rows.iter_mut() {
+        let kind = text(&row.fields, REPORT_TYPE);
+        if kind.as_deref().is_some_and(|kind| DERIVED.contains(&kind)) {
+            let period = text(&row.fields, PERIOD);
+            row.known = accepted
+                .get(&(row.key, period.clone()))
+                .copied()
+                .ok_or_else(|| {
+                    format!(
+                        "{} of the period {}, of which no statement was accepted",
+                        kind.as_deref().unwrap_or_default(),
+                        period.as_deref().unwrap_or("none")
+                    )
+                });
+        }
+    }
+}
+
+/// `time`, `lag` later.
+fn later(time: UnixNanos, lag: SignedDuration) -> anyhow::Result<UnixNanos> {
+    let lag = u64::try_from(lag.as_nanos()).expect("a lag is not negative");
+    time.as_u64()
+        .checked_add(lag)
+        .map(UnixNanos::from)
+        .context("a row known past 2554")
 }
 
 /// The times of the rows of `batch`, its column `time_column`'s, in UTC:
 /// a date at its start, a time as it is, the column's type checked
-/// against `key`.
+/// against `stamp`.
 fn row_times(
     batch: &RecordBatch,
     time_column: &str,
-    key: RowKey,
+    stamp: Stamp,
 ) -> anyhow::Result<Vec<UnixNanos>> {
+    let times = column_times(batch, time_column, stamp.keyed_by_date()).map_err(|e| {
+        e.context(format!(
+            "the time column of the source, by which LSE selects its rows, is {time_column}"
+        ))
+    })?;
+    times
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .with_context(|| format!("the time column {time_column} of LSE's file has empty rows"))
+}
+
+/// The times in the column `name` of `batch`, in UTC, empty where it is:
+/// a date at its start if `date`, else a time as it is.
+///
+/// # Errors
+///
+/// Returns an error if the column is missing, is not of dates if `date` or
+/// of times if not, or holds a time before 1970 or past 2262.
+fn column_times(
+    batch: &RecordBatch,
+    name: &str,
+    date: bool,
+) -> anyhow::Result<Vec<Option<UnixNanos>>> {
     let column = batch
-        .column_by_name(time_column)
-        .with_context(|| format!("no time column {time_column} in LSE's file"))?;
-    match (key, column.data_type()) {
-        (RowKey::Date, DataType::Date32 | DataType::Date64)
-        | (RowKey::Open(_), DataType::Timestamp(_, _)) => {}
-        (key, other) => bail!(
-            "the time column {time_column} of LSE's file is {other}, not the {} its collection keys its rows by",
-            match key {
-                RowKey::Date => "dates",
-                RowKey::Open(_) => "times",
-            }
+        .column_by_name(name)
+        .with_context(|| format!("no column {name} in LSE's file"))?;
+    match (date, column.data_type()) {
+        (true, DataType::Date32 | DataType::Date64) | (false, DataType::Timestamp(_, _)) => {}
+        (date, other) => bail!(
+            "the column {name} of LSE's file is {other}, not {}",
+            if date { "dates" } else { "times" }
         ),
     }
-    let nanos = cast(
+    let options = CastOptions {
+        safe: false,
+        ..CastOptions::default()
+    };
+    let nanos = cast_with_options(
         column,
         &DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
-    )?;
-    ensure!(
-        nanos.null_count() == 0,
-        "the time column {time_column} of LSE's file has empty rows, or times past 2262"
-    );
+        &options,
+    )
+    .with_context(|| format!("the column {name} of LSE's file holds a time past 2262"))?;
     let nanos = nanos.as_primitive::<TimestampNanosecondType>();
     (0..nanos.len())
-        .map(|row| time(nanos, row).map(UnixNanos::from))
+        .map(|row| {
+            nanos
+                .is_valid(row)
+                .then(|| time(nanos, row).map(UnixNanos::from))
+                .transpose()
+        })
         .collect()
 }
 
@@ -743,11 +912,16 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use jiff::SignedDuration;
 
     use crate::testing::{
-        GCZ26_BOOK, GCZ26_ORDERS, GCZ26_QUOTES, GCZ26_TRADES, GOLD_FUTURES_4H, GOLD_SPOT_MINUTES,
-        GOLD_TRADES, US10Y_BOND_YIELDS, US10Y_BOND_YIELDS_FOUR_HOURS,
+        AAPL_DIVIDENDS, AAPL_EARNINGS_CALENDAR, AAPL_FINANCIAL_REPORTS, AAPL_STOCK_SPLITS,
+        AHMA_COMPANY_PROFILES, AHMA_STOCK_FUNDAMENTALS, AT016322245_CORPORATE_BONDS,
+        AUDUSD_FX_DERIVATIVES, AUGB10Y_SOVEREIGN_YIELDS, CNH_CREDIT_INDICES, GCZ26_BOOK,
+        GCZ26_ORDERS, GCZ26_QUOTES, GCZ26_TRADES, GOLD_FUTURES_4H, GOLD_SPOT_MINUTES, GOLD_TRADES,
+        TEAM_INSIDER_TRADES, US_CORE_CPI_CALENDAR, US_CORE_CPI_RELEASES, US10Y_BOND_YIELDS,
+        US10Y_BOND_YIELDS_FIFTEEN_MINUTES, US10Y_BOND_YIELDS_FIVE_MINUTES,
+        US10Y_BOND_YIELDS_FOUR_HOURS, US10Y_BOND_YIELDS_HOURLY, US10Y_BOND_YIELDS_INTRADAY,
+        US10Y_BOND_YIELDS_MINUTE, US10Y_BOND_YIELDS_THIRTY_MINUTES, US10Y_YIELDS, ZN_COT,
     };
 
     fn gold() -> InstrumentId {
@@ -822,16 +996,30 @@ mod tests {
         );
     }
 
+    /// The rows of `file`, of `symbol` in LSE's `source`, keyed by
+    /// `time_column` and stamped as `stamp`, none refused.
+    fn rows_of(
+        file: &'static [u8],
+        source: &str,
+        symbol: &str,
+        time_column: &str,
+        stamp: Stamp,
+    ) -> Vec<LseRow> {
+        let parsed =
+            parse_rows(Bytes::from_static(file), source, symbol, time_column, stamp).unwrap();
+        assert_eq!(parsed.refused, Vec::<String>::new());
+        parsed.rows.into_iter().map(|keyed| keyed.row).collect()
+    }
+
     /// The captured rows of US10Y, as pyarrow reads LSE's file.
     fn us10y_rows() -> Vec<LseRow> {
-        parse_rows(
-            Bytes::from_static(US10Y_BOND_YIELDS),
+        rows_of(
+            US10Y_BOND_YIELDS,
             "bond_yields",
             "US10Y",
             "date",
-            RowKey::Date,
+            Stamp::DateEnd,
         )
-        .unwrap()
     }
 
     fn day(date: &str) -> UnixNanos {
@@ -839,11 +1027,12 @@ mod tests {
     }
 
     fn nov(time: &str) -> UnixNanos {
-        UnixNanos::from(
-            format!("2026-11-{time}Z")
-                .parse::<jiff::Timestamp>()
-                .unwrap(),
-        )
+        utc(&format!("2026-11-{time}"))
+    }
+
+    /// `time`, a UTC time with no zone.
+    fn utc(time: &str) -> UnixNanos {
+        UnixNanos::from(format!("{time}Z").parse::<jiff::Timestamp>().unwrap())
     }
 
     /// The day's close is known when the day ends: the 9th's row at the
@@ -880,14 +1069,13 @@ mod tests {
     /// pyarrow reads LSE's file.
     #[rstest]
     fn a_row_of_an_interval_is_stamped_at_its_close() {
-        let rows: Vec<_> = parse_rows(
-            Bytes::from_static(US10Y_BOND_YIELDS_FOUR_HOURS),
+        let rows: Vec<_> = rows_of(
+            US10Y_BOND_YIELDS_FOUR_HOURS,
             "bond_yields_four_hour",
             "US10Y",
             "ts",
-            RowKey::Open(SignedDuration::from_hours(4)),
+            Stamp::Close(SignedDuration::from_hours(4)),
         )
-        .unwrap()
         .into_iter()
         .map(|row| (row.ts_event, row.ts_init, row.fields["close"].clone()))
         .collect();
@@ -907,25 +1095,371 @@ mod tests {
         );
     }
 
+    /// The 10th's rows of each of LSE's other intervals, as pyarrow reads
+    /// them: how many, and the first and the last at their close, with
+    /// their close.
+    #[rstest]
+    #[case::a_minute(US10Y_BOND_YIELDS_MINUTE, "bond_yields_minute", 1, 971, ("10T00:09:00", 4.876), "10T22:26:00")]
+    #[case::five_minutes(US10Y_BOND_YIELDS_FIVE_MINUTES, "bond_yields_five_minute", 5, 265, ("10T00:10:00", 4.878), "10T22:30:00")]
+    #[case::fifteen_minutes(US10Y_BOND_YIELDS_FIFTEEN_MINUTES, "bond_yields_fifteen_minute", 15, 90, ("10T00:15:00", 4.88), "10T22:30:00")]
+    #[case::thirty_minutes(US10Y_BOND_YIELDS_THIRTY_MINUTES, "bond_yields_thirty_minute", 30, 45, ("10T00:30:00", 4.88), "10T22:30:00")]
+    #[case::an_hour(US10Y_BOND_YIELDS_HOURLY, "bond_yields_hourly", 60, 23, ("10T01:00:00", 4.88), "10T23:00:00")]
+    #[case::hourly(US10Y_BOND_YIELDS_INTRADAY, "bond_yields_intraday", 60, 23, ("10T01:00:00", 4.88), "10T23:00:00")]
+    fn a_row_of_each_interval_is_stamped_at_its_close(
+        #[case] file: &'static [u8],
+        #[case] source: &str,
+        #[case] minutes: i64,
+        #[case] count: usize,
+        #[case] (first, close): (&str, f64),
+        #[case] last: &str,
+    ) {
+        let rows = rows_of(
+            file,
+            source,
+            "US10Y",
+            "ts",
+            Stamp::Close(SignedDuration::from_mins(minutes)),
+        );
+
+        assert_eq!(rows.len(), count);
+        assert_eq!(
+            (rows[0].ts_init, rows[0].fields["close"].clone()),
+            (nov(first), serde_json::json!(close))
+        );
+        assert_eq!(rows[count - 1].ts_init, nov(last));
+        assert!(rows.iter().all(|row| row.ts_event == row.ts_init));
+    }
+
+    /// A day's market values, a row a field, as pyarrow reads LSE's files:
+    /// each known at its date's end; how many, and the first and the last
+    /// with their field and value.
+    #[rstest]
+    #[case::sovereign_yields(AUGB10Y_SOVEREIGN_YIELDS, "sovereign_yields", "AUGB10Y", 72, ("11", "ask", 94.373), ("12", "z_spread", -11.9303))]
+    #[case::corporate_bonds(AT016322245_CORPORATE_BONDS, "corporate_bonds", "AT016322245", 3, ("10", "accrued_interest", 0.666), ("12", "accrued_interest", 0.6824))]
+    #[case::credit_indices(CNH_CREDIT_INDICES, "credit_indices", "CNH_NONFIN_IG_0_1", 12, ("10", "high", 101.26864), ("12", "open", 101.2486))]
+    #[case::fx_derivatives(AUDUSD_FX_DERIVATIVES, "fx_derivatives", "AUDUSD_1M_ATM", 30, ("10", "ask", 7.55), ("12", "mid_price", 7.7))]
+    fn a_day_s_market_value_is_stamped_at_the_day_s_end(
+        #[case] file: &'static [u8],
+        #[case] source: &str,
+        #[case] symbol: &str,
+        #[case] count: usize,
+        #[case] first: (&str, &str, f64),
+        #[case] last: (&str, &str, f64),
+    ) {
+        let rows = rows_of(file, source, symbol, "date", Stamp::DateEnd);
+
+        let read = |row: &LseRow| {
+            (
+                row.ts_init,
+                row.fields["field"].clone(),
+                row.fields["value"].clone(),
+            )
+        };
+        let expected = |(stamped, field, value): (&str, &str, f64)| {
+            (
+                day(stamped),
+                serde_json::json!(field),
+                serde_json::json!(value),
+            )
+        };
+        assert_eq!(rows.len(), count);
+        assert_eq!(read(&rows[0]), expected(first));
+        assert_eq!(read(&rows[count - 1]), expected(last));
+        assert!(
+            rows.iter()
+                .all(|row| !row.fields.contains_key("date") && !row.fields.contains_key("symbol"))
+        );
+    }
+
+    /// Keyed by a date: an insider trade by its filing's, earnings by the
+    /// report date, a dividend by its ex-date and a split by its effective
+    /// date; each known at its date's end.
+    #[rstest]
+    #[case::insider_trades(TEAM_INSIDER_TRADES, "insider_trades", "TEAM", "filing_date", &["2026-10-14"])]
+    #[case::earnings_calendar(AAPL_EARNINGS_CALENDAR, "earnings_calendar", "AAPL", "date", &["2026-01-30", "2026-05-01", "2026-07-31", "2026-10-30", "2026-11-03"])]
+    #[case::dividends(AAPL_DIVIDENDS, "dividends", "AAPL", "effective_date", &["2026-02-10", "2026-05-12", "2026-08-11", "2026-11-13"])]
+    #[case::stock_splits(AAPL_STOCK_SPLITS, "stock_splits", "AAPL", "effective_date", &["2014-06-10", "2020-09-01"])]
+    fn a_row_keyed_by_a_date_is_stamped_at_the_date_s_end(
+        #[case] file: &'static [u8],
+        #[case] source: &str,
+        #[case] symbol: &str,
+        #[case] time_column: &str,
+        #[case] stamps: &[&str],
+    ) {
+        let rows = rows_of(file, source, symbol, time_column, Stamp::DateEnd);
+
+        let stamped: Vec<_> = rows.iter().map(|row| row.ts_init).collect();
+        let expected: Vec<_> = stamps
+            .iter()
+            .map(|date| utc(&format!("{date}T00:00:00")))
+            .collect();
+        assert_eq!(stamped, expected);
+    }
+
+    /// A company's snapshot, updated on 13 October 2026 at 05:08:01 UTC.
+    #[rstest]
+    #[case::company_profiles(AHMA_COMPANY_PROFILES, "company_profiles")]
+    #[case::stock_fundamentals(AHMA_STOCK_FUNDAMENTALS, "stock_fundamentals")]
+    fn a_snapshot_is_stamped_when_it_was_updated(
+        #[case] file: &'static [u8],
+        #[case] source: &str,
+    ) {
+        let rows = rows_of(file, source, "AHMA", "updated_at", Stamp::Key);
+
+        let read: Vec<_> = rows
+            .iter()
+            .map(|row| (row.ts_event, row.ts_init, row.fields["market_cap"].clone()))
+            .collect();
+        let at = utc("2026-10-13T05:08:01");
+        assert_eq!(read, [(at, at, serde_json::json!(37_156_248.0))]);
+    }
+
+    /// The releases of US core inflation, as pyarrow reads LSE's file, each
+    /// at the time it came out, in UTC: 12:30 in the American summer,
+    /// 13:30 in its winter.
+    fn core_cpi_releases() -> Vec<(UnixNanos, Option<&'static str>)> {
+        [
+            ("2025-12-18T13:30:00", Some("2.6%")),
+            ("2026-01-13T13:30:00", Some("2.6%")),
+            ("2026-02-11T13:30:00", None),
+            ("2026-02-13T13:30:00", Some("2.5%")),
+            ("2026-03-11T12:30:00", Some("2.5%")),
+            ("2026-04-10T12:30:00", Some("2.6%")),
+            ("2026-05-12T12:30:00", Some("2.8%")),
+            ("2026-06-10T12:30:00", Some("2.9%")),
+            ("2026-07-14T12:30:00", Some("2.6%")),
+            ("2026-08-12T12:30:00", Some("2.5%")),
+            ("2026-09-11T12:30:00", Some("2.4%")),
+            ("2026-10-14T12:30:00", Some("2.6%")),
+            ("2026-11-10T13:30:00", None),
+            ("2026-12-10T13:30:00", None),
+        ]
+        .map(|(at, actual)| (utc(at), actual))
+        .to_vec()
+    }
+
+    fn released(rows: &[LseRow]) -> Vec<(UnixNanos, Option<&str>)> {
+        rows.iter()
+            .map(|row| (row.ts_init, row.fields["actual"].as_str()))
+            .collect()
+    }
+
+    /// The economic calendar keys a release by its day and times it in
+    /// `datetime`: each row known at that time.
+    #[rstest]
+    fn an_economic_release_is_stamped_at_the_time_it_came_out() {
+        let rows = rows_of(
+            US_CORE_CPI_CALENDAR,
+            "economic_calendar",
+            "US.Core Inflation Rate YoY",
+            "date",
+            Stamp::At("datetime"),
+        );
+
+        assert_eq!(released(&rows), core_cpi_releases());
+        assert!(rows.iter().all(|row| row.ts_event == row.ts_init));
+        assert!(rows.iter().all(|row| row.fields.contains_key("datetime")));
+    }
+
+    /// A macro series of releases is keyed by the time each came out.
+    #[rstest]
+    fn a_macro_release_is_stamped_at_the_time_it_came_out() {
+        let rows = rows_of(
+            US_CORE_CPI_RELEASES,
+            "macro_release",
+            "US.Core Inflation Rate YoY",
+            "released_at",
+            Stamp::Key,
+        );
+
+        assert_eq!(released(&rows), core_cpi_releases());
+    }
+
+    /// A macro series of yields is a day's close, as the daily bond yields.
+    #[rstest]
+    fn a_macro_yield_is_stamped_at_its_day_s_end() {
+        let rows: Vec<_> = rows_of(US10Y_YIELDS, "macro_yield", "US10Y", "day", Stamp::DateEnd)
+            .into_iter()
+            .map(|row| (row.ts_init, row.fields["close"].clone()))
+            .collect();
+
+        let row = |stamped, close: f64| (day(stamped), serde_json::json!(close));
+        assert_eq!(rows, [row("10", 4.884), row("11", 5.0), row("13", 5.133)]);
+    }
+
+    /// ZN's reports, as pyarrow reads LSE's file: of a Tuesday, out on its
+    /// Friday, `release_date`, and stamped at that day's end; since 28 April
+    /// 2026 with no release date, and stamped at `created_at`, LSE's ingest
+    /// of each, the Friday at about 20:30 UTC.
+    #[rstest]
+    fn a_cot_report_is_stamped_at_its_release_date_s_end_or_when_lse_ingested_it() {
+        let parsed = parse_rows(
+            Bytes::from_static(ZN_COT),
+            "cot",
+            "ZN",
+            "date",
+            Stamp::Release,
+        )
+        .unwrap();
+
+        let stamped: Vec<_> = parsed
+            .rows
+            .iter()
+            .map(|keyed| (UnixNanos::from(keyed.key), keyed.row.ts_init))
+            .collect();
+        assert_eq!(parsed.refused, Vec::<String>::new());
+        assert_eq!(stamped.len(), 614);
+        let report = |tuesday: &str, known: &str| (utc(&format!("{tuesday}T00:00:00")), utc(known));
+        assert_eq!(stamped[0], report("2015-01-06", "2015-01-10T00:00:00"));
+        let first_unreleased = stamped
+            .iter()
+            .position(|&(tuesday, _)| tuesday == utc("2026-04-28T00:00:00"))
+            .unwrap();
+        assert_eq!(
+            stamped[first_unreleased - 1..=first_unreleased],
+            [
+                report("2026-04-21", "2026-04-25T00:00:00"),
+                report("2026-04-28", "2026-05-01T20:30:18"),
+            ]
+        );
+        assert_eq!(stamped[613], report("2026-10-06", "2026-10-09T20:30:10"));
+    }
+
+    /// A file of one row of `symbol`, keyed by its date of `day` days from
+    /// 1970, with each of `columns`, a time column of `type_` holding
+    /// nothing, built here.
+    fn keyed_with_empty(symbol: &str, day: i32, columns: &[(&str, DataType)]) -> Bytes {
+        let mut fields = vec![
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("date", DataType::Date32, false),
+        ];
+        let mut arrays: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(vec![symbol])),
+            Arc::new(arrow::array::Date32Array::from(vec![day])),
+        ];
+        for (name, type_) in columns {
+            fields.push(Field::new(*name, type_.clone(), true));
+            arrays.push(arrow::array::new_null_array(type_, 1));
+        }
+        let schema = Arc::new(Schema::new(fields));
+        let batch = RecordBatch::try_new(Arc::clone(&schema), arrays).unwrap();
+        let mut file = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        Bytes::from(file)
+    }
+
+    /// 22 September 2026, in days from 1970.
+    const SEPTEMBER_22: i32 = 20_718;
+
+    /// A row that says when it was known nowhere is left out, named, rather
+    /// than stamped at a time of the client's choosing.
+    #[rstest]
+    #[case::a_report_of_no_release_or_ingest(
+        "cot",
+        Stamp::Release,
+        &[
+            ("release_date", DataType::Date32),
+            ("created_at", DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into()))),
+        ]
+    )]
+    #[case::a_release_of_no_time(
+        "economic_calendar",
+        Stamp::At("datetime"),
+        &[("datetime", DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())))]
+    )]
+    fn a_row_known_at_no_time_is_left_out_naming_it(
+        #[case] source: &str,
+        #[case] stamp: Stamp,
+        #[case] columns: &[(&str, DataType)],
+    ) {
+        let file = keyed_with_empty("ZN", SEPTEMBER_22, columns);
+
+        let parsed = parse_rows(file, source, "ZN", "date", stamp).unwrap();
+
+        assert_eq!(parsed.rows.len(), 0);
+        let [refused] = &parsed.refused[..] else {
+            panic!("not one row refused: {:?}", parsed.refused);
+        };
+        assert!(refused.contains("2026-09-22"), "{refused}");
+    }
+
+    /// AAPL's reports, as pyarrow reads LSE's file: each statement at the
+    /// SEC's acceptance of its filing, each row derived from the statements
+    /// at their acceptance, those of its period; the trailing twelve
+    /// months' metrics and ratios of 7 October 2026, of no statement, left
+    /// out, named.
+    #[rstest]
+    fn a_financial_report_is_stamped_when_its_period_s_statements_were_accepted() {
+        let parsed = parse_rows(
+            Bytes::from_static(AAPL_FINANCIAL_REPORTS),
+            "financial_reports",
+            "AAPL",
+            "date",
+            Stamp::Filing,
+        )
+        .unwrap();
+
+        let stamped: HashSet<_> = parsed
+            .rows
+            .iter()
+            .map(|keyed| {
+                (
+                    UnixNanos::from(keyed.key),
+                    keyed.row.fields["period"].as_str().unwrap().to_string(),
+                    keyed.row.ts_init,
+                )
+            })
+            .collect();
+        let period = |end: &str, period: &str, accepted: &str| {
+            (
+                utc(&format!("{end}T00:00:00")),
+                period.to_string(),
+                utc(accepted),
+            )
+        };
+        assert_eq!(
+            stamped,
+            HashSet::from([
+                period("2025-06-28", "Q3", "2025-08-01T10:00:42"),
+                period("2025-09-27", "FY", "2025-10-31T10:01:26"),
+                period("2025-09-27", "Q4", "2025-10-31T10:01:26"),
+                period("2025-12-27", "Q1", "2026-01-30T11:01:32"),
+                period("2026-03-28", "Q2", "2026-05-01T14:01:00"),
+                period("2026-06-27", "Q3", "2026-07-31T10:01:02"),
+            ])
+        );
+        assert_eq!(parsed.rows.len(), 36);
+        let mut refused = parsed.refused.clone();
+        refused.sort();
+        assert_eq!(refused.len(), 2, "{refused:?}");
+        for (refused, report_type) in refused.iter().zip(["metrics", "ratios"]) {
+            for part in [report_type, "TTM", "2026-10-07"] {
+                assert!(refused.contains(part), "{part}: {refused}");
+            }
+        }
+    }
+
     /// Its stamp would not be when its values are known.
     #[rstest]
     #[case::dates_as_intervals(
         US10Y_BOND_YIELDS,
         "date",
-        RowKey::Open(SignedDuration::from_hours(4))
+        Stamp::Close(SignedDuration::from_hours(4))
     )]
-    #[case::times_as_dates(US10Y_BOND_YIELDS_FOUR_HOURS, "ts", RowKey::Date)]
+    #[case::times_as_dates(US10Y_BOND_YIELDS_FOUR_HOURS, "ts", Stamp::DateEnd)]
     fn a_time_column_not_of_the_key_of_its_collection_is_refused_naming_it(
         #[case] file: &'static [u8],
         #[case] time_column: &str,
-        #[case] key: RowKey,
+        #[case] stamp: Stamp,
     ) {
         let err = parse_rows(
             Bytes::from_static(file),
             "bond_yields",
             "US10Y",
             time_column,
-            key,
+            stamp,
         )
         .unwrap_err();
 
@@ -972,7 +1506,7 @@ mod tests {
             "bond_yields",
             "US10Y",
             "ts",
-            RowKey::Date,
+            Stamp::DateEnd,
         )
         .unwrap_err();
 

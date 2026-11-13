@@ -42,6 +42,80 @@ pub const US10Y_BOND_YIELDS: &[u8] =
 /// 00:00 to 20:00.
 pub const US10Y_BOND_YIELDS_FOUR_HOURS: &[u8] =
     include_bytes!("../test_data/reference_bond_yields_four_hour_us10y.parquet");
+/// The rows of `US10Y` in LSE's other interval collections of 10 November
+/// 2026, as LSE exported them, each stamped at its interval's open: at 1,
+/// 5, 15 and 30 minutes, an hour (`bond_yields_hourly`) and LSE's hourly
+/// bond yields (`bond_yields_intraday`).
+pub const US10Y_BOND_YIELDS_MINUTE: &[u8] =
+    include_bytes!("../test_data/reference_bond_yields_minute_us10y.parquet");
+pub const US10Y_BOND_YIELDS_FIVE_MINUTES: &[u8] =
+    include_bytes!("../test_data/reference_bond_yields_five_minute_us10y.parquet");
+pub const US10Y_BOND_YIELDS_FIFTEEN_MINUTES: &[u8] =
+    include_bytes!("../test_data/reference_bond_yields_fifteen_minute_us10y.parquet");
+pub const US10Y_BOND_YIELDS_THIRTY_MINUTES: &[u8] =
+    include_bytes!("../test_data/reference_bond_yields_thirty_minute_us10y.parquet");
+pub const US10Y_BOND_YIELDS_HOURLY: &[u8] =
+    include_bytes!("../test_data/reference_bond_yields_hourly_us10y.parquet");
+pub const US10Y_BOND_YIELDS_INTRADAY: &[u8] =
+    include_bytes!("../test_data/reference_bond_yields_intraday_us10y.parquet");
+/// A series of each of LSE's collections of a day's market values, a row
+/// a field, as LSE exported them on 13 November 2026: the Australian
+/// 10-year bond (`AUGB10Y` in `sovereign_yields`) of the 10th and 11th,
+/// Erste Group's 2.96% bond (`AT016322245` in `corporate_bonds`), an
+/// offshore RMB credit index (`CNH_NONFIN_IG_0_1` in `credit_indices`) and
+/// AUD/USD's 1-month at-the-money implied volatility (`AUDUSD_1M_ATM` in
+/// `fx_derivatives`) of the 9th to the 11th.
+pub const AUGB10Y_SOVEREIGN_YIELDS: &[u8] =
+    include_bytes!("../test_data/reference_sovereign_yields_augb10y.parquet");
+pub const AT016322245_CORPORATE_BONDS: &[u8] =
+    include_bytes!("../test_data/reference_corporate_bonds_at016322245.parquet");
+pub const CNH_CREDIT_INDICES: &[u8] =
+    include_bytes!("../test_data/reference_credit_indices_cnh_nonfin_ig_0_1.parquet");
+pub const AUDUSD_FX_DERIVATIVES: &[u8] =
+    include_bytes!("../test_data/reference_fx_derivatives_audusd_1m_atm.parquet");
+/// Atlassian's (`TEAM`) insider trade filed on 13 October 2026, as LSE
+/// exported it.
+pub const TEAM_INSIDER_TRADES: &[u8] =
+    include_bytes!("../test_data/reference_insider_trades_team.parquet");
+/// AAPL's earnings calendar of 2026, its dividends of 2026 and its stock
+/// splits since 2014, as LSE exported them.
+pub const AAPL_EARNINGS_CALENDAR: &[u8] =
+    include_bytes!("../test_data/reference_earnings_calendar_aapl.parquet");
+pub const AAPL_DIVIDENDS: &[u8] = include_bytes!("../test_data/reference_dividends_aapl.parquet");
+pub const AAPL_STOCK_SPLITS: &[u8] =
+    include_bytes!("../test_data/reference_stock_splits_aapl.parquet");
+/// The snapshot of a company (`AHMA`) in LSE's company profiles and stock
+/// fundamentals, as LSE exported it: one row each, updated on 13 October
+/// 2026 at 05:08:01 UTC.
+pub const AHMA_COMPANY_PROFILES: &[u8] =
+    include_bytes!("../test_data/reference_company_profiles_ahma.parquet");
+pub const AHMA_STOCK_FUNDAMENTALS: &[u8] =
+    include_bytes!("../test_data/reference_stock_fundamentals_ahma.parquet");
+/// The whole series of US core inflation's releases in LSE's economic
+/// calendar (`US.Core Inflation Rate YoY`), as LSE exported it: 14 rows,
+/// from 18 December 2025 to 10 December 2026, the past ones of 11
+/// February and 10 November 2026 with no actual.
+pub const US_CORE_CPI_CALENDAR: &[u8] =
+    include_bytes!("../test_data/reference_economic_calendar_us_core_cpi.parquet");
+/// The whole series of the 10-year T-note's Commitments of Traders (`ZN` in
+/// `cot`), as LSE exported it: 614 reports, of 6 January 2015 to 6
+/// October 2026, those since 28 April 2026 with no release date.
+pub const ZN_COT: &[u8] = include_bytes!("../test_data/reference_cot_zn.parquet");
+/// AAPL's financial reports of its fiscal periods ending 28 June 2025 to
+/// 27 June 2026, and its trailing twelve months' metrics and ratios of 7
+/// October 2026, as LSE exported them: 38 rows.
+pub const AAPL_FINANCIAL_REPORTS: &[u8] =
+    include_bytes!("../test_data/reference_financial_reports_aapl.parquet");
+/// The whole series of US core inflation's releases in LSE's macro series
+/// (`/v3/macro/export`, `kind=release`), and US10Y's yields of 9 to 12
+/// November 2026 (`kind=yield`), as LSE exported them.
+pub const US_CORE_CPI_RELEASES: &[u8] =
+    include_bytes!("../test_data/macro_release_us_core_cpi.parquet");
+pub const US10Y_YIELDS: &[u8] = include_bytes!("../test_data/macro_yield_us10y.parquet");
+/// LSE's factors (`/v3/factors`) of AAPL in `us_stocks`, its five splits
+/// and 93 dividends, and of GOLD in `futures`, no split and no dividends.
+pub const AAPL_FACTORS: &str = include_str!("../test_data/factors_aapl_us_stocks.json");
+pub const GOLD_FACTORS: &str = include_str!("../test_data/factors_gold_futures.json");
 /// The 1-minute candles of LSE's gold spot series (`XAU/USD` in
 /// `commodities`) over `[2026-10-21T10:00:00Z, 2026-10-21T10:05:00Z)`, as LSE
 /// exported them: five candles, stamped at their open, of no volume.
