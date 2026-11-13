@@ -7,14 +7,17 @@
 //! of LSE's daily 10-year US bond yield, custom data of no instrument
 //! (`lse::LseRow`) known at the day's end, through the node from LSE's
 //! exports; five minutes of that day of the S&P 500's values as quotes,
-//! `SPX-INDICES.LSEDGE`, from its tick slice; and of the trades and quotes
-//! of GCZ6 of 2026, `GCZ26.GLBX`, from LSE's CME Globex, its definition
-//! from Databento. It needs the LSE key, `LSE_API_KEY`, a CME Group key,
-//! `LSE_CME_API_KEY`, and Databento's, `DATABENTO_API_KEY`, from the
-//! environment or `.env`; the free LSE key serves the derived series and
-//! the bond yield, CME Group Lite+ the CME contract's Level 1. The free
-//! key's exports count against its rows a day; Databento charges about
-//! $0.000001 for the definition.
+//! `SPX-INDICES.LSEDGE`, from its tick slice; of the trades and quotes of
+//! GCZ6 of 2026, `GCZ26.GLBX`, from LSE's CME Globex, its definition from
+//! Databento; and of the trades and 1-minute bars of AAPL's 355 call of 20
+//! November 2026, `AAPL  261120C00355000.OPRA`, from LSE's US options, its
+//! definition from Databento. It needs the LSE key, `LSE_API_KEY`, a CME
+//! Group key, `LSE_CME_API_KEY`, and Databento's, `DATABENTO_API_KEY`, from
+//! the environment or `.env`; the free LSE key serves the derived series,
+//! the bond yield and the option, CME Group Lite+ the CME contract's
+//! Level 1. The free key's exports count against its rows a day;
+//! Databento charges about $0.000001 for the CME definition and $0.000002
+//! for the option's.
 //!
 //! Gated as `okx_demo.rs` is: the test returns at once, saying it was
 //! skipped, unless `NAUTILUS_LSE_RUN=1` is set in the shell. Run it with:
@@ -45,6 +48,7 @@ const US10Y: &str = "US10Y-FUTURES.LSEDGE";
 const GOLD_SPOT: &str = "XAU/USD-COMMODITIES.LSEDGE";
 const SPX: &str = "SPX-INDICES.LSEDGE";
 const GCZ26: &str = "GCZ26.GLBX";
+const AAPL_CALL: &str = "AAPL  261120C00355000.OPRA";
 
 /// Whether the run is opted in: from the shell, before `.env` is read, so
 /// that the file cannot opt in.
@@ -389,6 +393,79 @@ async fn a_day_of_a_gc_contract_s_trades_and_quotes_fills_from_lse_its_definitio
                 to.as_u64(),
                 &data.clone().into(),
                 Some(GCZ26),
+            )
+            .unwrap();
+        assert_eq!(lacking, [], "{data}");
+    }
+}
+
+/// A listed option near the money that day, AAPL at about 355: its
+/// trades, which OPRA reports with no side, and its 1-minute bars, each
+/// closing on a minute of the day, at the precision of Databento's
+/// definition.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_day_of_an_option_s_trades_and_bars_fills_from_lse_its_definition_from_databento() {
+    if !opted_in(
+        "a_day_of_an_option_s_trades_and_bars_fills_from_lse_its_definition_from_databento",
+    ) {
+        return;
+    }
+    dotenvy::dotenv().ok();
+    let dir = tempfile::tempdir().unwrap();
+    let bar_type = format!("{AAPL_CALL}-1-MINUTE-LAST-EXTERNAL");
+    let requirements = DataRequirements {
+        bar_types: vec![BarType::from(bar_type.as_str())],
+        ticks: vec![TickSeries {
+            data: NautilusDataType::TradeTick,
+            instrument_id: InstrumentId::from(AAPL_CALL),
+        }],
+        custom: vec![],
+        warmup: SignedDuration::ZERO,
+    };
+    let (start, end) = the_day();
+
+    fill_history(&requirements, start, end, &history_venues(), dir.path())
+        .await
+        .unwrap();
+
+    let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+    let definitions = catalog
+        .instruments(Some(&[AAPL_CALL.to_string()]), None, None)
+        .unwrap();
+    let [InstrumentAny::OptionContract(definition)] = &definitions[..] else {
+        panic!("{AAPL_CALL}: {definitions:?}");
+    };
+    assert_eq!(definition.raw_symbol.as_str(), "AAPL  261120C00355000");
+    let (from, to) = (UnixNanos::from(start), UnixNanos::from(end));
+    let trades = catalog
+        .trade_ticks(Some(vec![AAPL_CALL.to_string()]), None, None)
+        .unwrap();
+    let bars = catalog
+        .bars(Some(vec![bar_type.clone()]), None, None)
+        .unwrap();
+    println!("{AAPL_CALL}: {} trades, {} bars", trades.len(), bars.len());
+    assert!(!trades.is_empty() && !bars.is_empty());
+    assert!(
+        trades.iter().all(|t| (from..=to).contains(&t.ts_event)
+            && t.aggressor_side == AggressorSide::NoAggressor
+            && t.price.precision == definition.price_precision),
+        "a trade outside the day, with a side or off the definition's precision"
+    );
+    assert!(
+        bars.iter().all(|bar| (from..=to).contains(&bar.ts_event)
+            && bar.ts_event.as_u64() % 60_000_000_000 == 0),
+        "a bar outside the day or off the minute"
+    );
+    for (data, identifier) in [
+        (NautilusDataType::TradeTick, AAPL_CALL),
+        (NautilusDataType::Bar, bar_type.as_str()),
+    ] {
+        let lacking = catalog
+            .get_missing_intervals_for_request(
+                from.as_u64(),
+                to.as_u64(),
+                &data.clone().into(),
+                Some(identifier),
             )
             .unwrap();
         assert_eq!(lacking, [], "{data}");

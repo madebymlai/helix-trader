@@ -1,8 +1,9 @@
 //! The symbol boundary: an instrument id and what it stands for at LSE
 //! (`LseInstrument`), converted both ways here only: an `LSEDGE` id and the
 //! LSE market and symbol of a derived series (`LseSymbol`), with the socket
-//! the series streams on and its name there, and a `GLBX` id and the CME
-//! contract LSE lists (`CmeContract`).
+//! the series streams on and its name there, a `GLBX` id and the CME
+//! contract LSE lists (`CmeContract`), and an `OPRA` id and the OSI symbol
+//! LSE lists a US option under (`OpraContract`).
 //!
 //! A derived market's series is one instrument under `LSEDGE`, its LSE
 //! market the suffix of its symbol, as Bybit's product suffix (Nautilus'
@@ -14,19 +15,28 @@
 //! LSE lists it. An exchange market's listings take Databento's ids, so
 //! none is an `LSEDGE` instrument: a CME Globex contract is Databento's
 //! `GLBX` id, found among LSE's listings of its exchange name (see
-//! `CmeContract`).
+//! `CmeContract`), and a US option Databento's `OPRA` id, its OSI symbol,
+//! which LSE lists too (see `OpraContract`).
 
 use std::fmt;
 
 use anyhow::{Context, bail, ensure};
 use jiff::{ToSpan, civil::Date};
-use nautilus_model::identifiers::{
-    InstrumentId, Symbol, Venue,
-    futures::{format_futures_symbol, futures_month, parse_futures_symbol, resolve_futures_year},
+use nautilus_model::{
+    enums::OptionKind,
+    identifiers::{
+        InstrumentId, Symbol, Venue,
+        futures::{
+            format_futures_symbol, futures_month, parse_futures_symbol, resolve_futures_year,
+        },
+        osi_option_symbol,
+    },
+    types::Price,
 };
+use rust_decimal::Decimal;
 
 use super::{
-    consts::{EXCHANGE_MARKETS, LSEDGE_VENUE, LseSocket},
+    consts::{EXCHANGE_MARKETS, LSEDGE_VENUE, LseSocket, OPRA_VENUE},
     credential::LseProduct,
 };
 use crate::http::models::LsePair;
@@ -171,12 +181,15 @@ fn hyphenated(symbol: &str) -> String {
 }
 
 /// What an instrument stands for at LSE, by its venue: a series of a
-/// derived market under `LSEDGE`, asked with the LSE key by its symbol, or a
-/// CME Globex contract under `GLBX`, asked with the CME key by its listing.
+/// derived market under `LSEDGE`, asked with the LSE key by its symbol; a
+/// CME Globex contract under `GLBX`, asked with the CME key by its listing;
+/// or a US option contract under `OPRA`, asked with the LSE key, which
+/// opens LSE's `us_options`, by its OSI symbol.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LseInstrument {
     Series(LseSymbol),
     Cme(CmeContract),
+    Opra(OpraContract),
 }
 
 impl LseInstrument {
@@ -185,9 +198,10 @@ impl LseInstrument {
     ///
     /// # Errors
     ///
-    /// Returns an error naming `id` if it is on neither venue, or not an
-    /// instrument of its venue (see `LseSymbol::from_instrument_id` and
-    /// `CmeContract::from_instrument_id`).
+    /// Returns an error naming `id` if it is on none of the venues, or not
+    /// an instrument of its venue (see `LseSymbol::from_instrument_id`,
+    /// `CmeContract::from_instrument_id` and
+    /// `OpraContract::from_instrument_id`).
     pub(crate) fn from_instrument_id(
         id: InstrumentId,
         reference_year: i16,
@@ -196,10 +210,12 @@ impl LseInstrument {
             LseSymbol::from_instrument_id(id).map(Self::Series)
         } else if id.venue == Venue::GLBX() {
             CmeContract::from_instrument_id(id, reference_year).map(Self::Cme)
+        } else if id.venue == *OPRA_VENUE {
+            OpraContract::from_instrument_id(id).map(Self::Opra)
         } else {
             bail!(
                 "{id} is on {}, which LSE does not serve: LSE serves LSEDGE, its own series, \
-                 and GLBX, CME Globex",
+                 GLBX, CME Globex, and OPRA, US options",
                 id.venue
             )
         }
@@ -208,7 +224,7 @@ impl LseInstrument {
     /// The product whose key asks LSE for the instrument.
     pub(crate) const fn product(&self) -> LseProduct {
         match self {
-            Self::Series(_) => LseProduct::Global,
+            Self::Series(_) | Self::Opra(_) => LseProduct::Global,
             Self::Cme(_) => LseProduct::Cme,
         }
     }
@@ -354,6 +370,95 @@ impl CmeContract {
 fn named_month(name: &str) -> Option<Date> {
     let (_, month) = name.rsplit_once(" futures ")?;
     Date::strptime("%Y-%m-%d", format!("{month}-01")).ok()
+}
+
+/// A US option contract under `OPRA`, the venue Databento gives the
+/// listings of OPRA's consolidated feed (`OPRA.PILLAR`, whose definitions
+/// its publisher `OPRA` sends) and Nautilus' IB adapter maps, its symbol
+/// the contract's OSI symbol as Databento writes it: the root padded to
+/// six characters, the expiry's YYMMDD, C or P, and the strike in
+/// thousandths to eight digits (Databento's OPRA specification,
+/// "Symbology"). `AAPL  261120C00355000.OPRA` is AAPL's 355 call of 20
+/// November 2026. LSE lists the contract under that symbol in `us_options`
+/// (LSE's docs, "Symbols": "The OCC symbol exactly as listed: capitals,
+/// the root padded to six characters"), and a symbol names one contract,
+/// so it is asked by it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OpraContract {
+    osi: String,
+}
+
+impl OpraContract {
+    /// The contract `id` stands for.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming `id` if it is not on `OPRA`, or if its
+    /// symbol is not an OSI symbol as Databento and LSE write it: padded,
+    /// its root in capitals, as Nautilus' OSI function writes one
+    /// (`osi_option_symbol`), not as LSE's sockets do, unpadded.
+    pub(crate) fn from_instrument_id(id: InstrumentId) -> anyhow::Result<Self> {
+        ensure!(
+            id.venue == *OPRA_VENUE,
+            "{id} is not a US option contract, under OPRA"
+        );
+        let osi = id.symbol.as_str();
+        ensure!(
+            is_osi(osi),
+            "{id} is not an OSI symbol under OPRA, as AAPL  261120C00355000.OPRA: its root in \
+             capitals padded to six characters, its expiry's YYMMDD, C or P, and its strike in \
+             thousandths to eight digits"
+        );
+        Ok(Self {
+            osi: osi.to_owned(),
+        })
+    }
+
+    /// The contract's id, its OSI symbol under `OPRA`.
+    #[must_use]
+    pub(crate) fn instrument_id(&self) -> InstrumentId {
+        InstrumentId::new(Symbol::from(self.osi.as_str()), *OPRA_VENUE)
+    }
+
+    /// The contract's OSI symbol, padded, as LSE lists it.
+    #[must_use]
+    pub(crate) fn osi(&self) -> &str {
+        &self.osi
+    }
+}
+
+impl fmt::Display for OpraContract {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.instrument_id())
+    }
+}
+
+/// Whether `symbol` is an OSI symbol as Nautilus writes one from its parts
+/// (`osi_option_symbol`), its root in capitals: its root, the six
+/// characters before the expiry, unpadded; the expiry's two-digit year of
+/// this century, month and day; C or P; and the strike in thousandths.
+fn is_osi(symbol: &str) -> bool {
+    let written = (|| {
+        let (root, expiry) = (symbol.get(..6)?, symbol.get(6..12)?);
+        let (kind, strike) = (symbol.get(12..13)?, symbol.get(13..)?);
+        let root = root.trim_end_matches(' ');
+        if !root
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        {
+            return None;
+        }
+        let part = |range: std::ops::Range<usize>| expiry.get(range)?.parse::<i8>().ok();
+        let expiry = Date::new(2000 + i16::from(part(0..2)?), part(2..4)?, part(4..6)?).ok()?;
+        let kind = match kind {
+            "C" => OptionKind::Call,
+            "P" => OptionKind::Put,
+            _ => return None,
+        };
+        let strike = Price::from_decimal_dp(Decimal::new(strike.parse().ok()?, 3), 3).ok()?;
+        osi_option_symbol(root, expiry, kind, strike).ok()
+    })();
+    written.is_some_and(|written| written == symbol)
 }
 
 impl fmt::Display for CmeContract {
@@ -630,9 +735,46 @@ mod tests {
         );
     }
 
+    /// An OSI symbol, as Databento's OPRA listings and LSE's `us_options`
+    /// spell it: the root padded to six characters, the expiry's YYMMDD, C
+    /// or P, and the strike in thousandths to eight digits (Databento's
+    /// OPRA specification, "Symbology").
+    #[rstest]
+    #[case::aapl_call("AAPL  261120C00355000.OPRA", "AAPL  261120C00355000")]
+    #[case::spy_put("SPY   240319P00511000.OPRA", "SPY   240319P00511000")]
+    #[case::one_letter_root("F     261218C00012500.OPRA", "F     261218C00012500")]
+    #[case::six_letter_root("GOOGL1270115P00150000.OPRA", "GOOGL1270115P00150000")]
+    #[case::weekly_root("SPXW  261120P05900000.OPRA", "SPXW  261120P05900000")]
+    fn an_opra_contract_is_the_osi_symbol_lse_lists_and_back(#[case] id: &str, #[case] osi: &str) {
+        let contract = OpraContract::from_instrument_id(InstrumentId::from(id)).unwrap();
+
+        assert_eq!(contract.osi(), osi);
+        assert_eq!(contract.instrument_id(), InstrumentId::from(id));
+    }
+
+    /// Unpadded, as LSE's sockets write it; a root in lower case; no such
+    /// day; neither call nor put; a strike short of its eight digits; a
+    /// stock; and another venue's id.
+    #[rstest]
+    #[case::unpadded("AAPL261120C00355000.OPRA")]
+    #[case::lower_case_root("aapl  261120C00355000.OPRA")]
+    #[case::no_such_day("AAPL  261131C00355000.OPRA")]
+    #[case::neither_call_nor_put("AAPL  261120X00355000.OPRA")]
+    #[case::short_strike("AAPL  261120C0035500.OPRA")]
+    #[case::stock("AAPL.OPRA")]
+    #[case::another_venue("AAPL  261120C00355000.XCBO")]
+    fn an_id_that_is_no_osi_symbol_under_opra_is_refused_naming_it(#[case] id: &str) {
+        let err = OpraContract::from_instrument_id(InstrumentId::from(id))
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains(id), "{id}: {err}");
+    }
+
     #[rstest]
     #[case::series("GOLD-FUTURES.LSEDGE", LseProduct::Global)]
     #[case::cme_contract("GCZ26.GLBX", LseProduct::Cme)]
+    #[case::us_option("AAPL  261120C00355000.OPRA", LseProduct::Global)]
     fn each_venue_s_instruments_are_asked_with_its_product_s_key(
         #[case] id: &str,
         #[case] product: LseProduct,

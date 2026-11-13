@@ -13,7 +13,10 @@ use nautilus_model::{
 };
 use serde::{Serialize, Serializer, ser::SerializeMap};
 
-use crate::common::symbol::LseSymbol;
+use crate::common::{
+    consts::US_OPTIONS_MARKET,
+    symbol::{LseSymbol, OpraContract},
+};
 
 /// The candle widths LSE serves below a day, by unit: its letter, and the
 /// steps of it LSE serves (LSE's docs, "The selection", `timeframe`).
@@ -26,14 +29,16 @@ const CANDLE_WIDTHS: [(BarAggregation, char, &[usize]); 3] = [
 /// What an export's rows are, and the parameter that selects them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rows {
-    /// The tick slice of a derived market, `time, price, size, kind`
-    /// (`timeframe=tick`): its trades, or an index's values, of no size.
+    /// The tick slice of a derived market or of US options, `time, price,
+    /// size, kind` (`timeframe=tick`): its trades, or an index's values, of
+    /// no size.
     TradeSlice,
     /// Candles, `time, open, high, low, close, volume, trades`, each
     /// stamped at its open (`timeframe=5m`, LSE's name of the width).
     Candles(CandleWidth),
-    /// The trades of an exchange market, `time, price, size, kind`
-    /// (`data=trades`).
+    /// The trades of a paid exchange market, CME Globex or Nasdaq
+    /// TotalView, `time, price, size, kind` (`data=trades`), which US
+    /// options, an included market, serve as their tick slice alone.
     Trades,
     /// The quotes of an exchange market, `time, bid_price, ask_price,
     /// bid_size, ask_size` (`data=quotes`).
@@ -230,6 +235,24 @@ impl ExportQuery {
         to: Timestamp,
     ) -> Self {
         Self::series(series, Rows::Candles(width), from, to)
+    }
+
+    /// The `rows` of the US option `contract` over `[from, to)`, as
+    /// Parquet: of LSE's `us_options`, by its OSI symbol, which names one
+    /// contract.
+    pub(crate) fn option(
+        contract: &OpraContract,
+        rows: Rows,
+        from: Timestamp,
+        to: Timestamp,
+    ) -> Self {
+        Self::new(
+            US_OPTIONS_MARKET,
+            Selection::Symbol(contract.osi().to_owned()),
+            rows,
+            from,
+            to,
+        )
     }
 
     /// The `rows` of LSE's listing `pair_id` in `market` over `[from,

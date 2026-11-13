@@ -1,14 +1,21 @@
 //! A mock Databento historical API for the tests: an HTTP server on
 //! 127.0.0.1 answering the two calls a definitions fill makes with what
-//! Databento answered (`testdata/`), whatever they ask, and recording each
-//! call it receives.
+//! Databento answered of the call's dataset (`testdata/`), whatever else
+//! they ask, and recording each call it receives.
 //!
 //! - `metadata.get_dataset_range`: the range of `GLBX.MDP3`, captured on
-//!   2026-11-13 (its end 2026-11-13T09:31:29.885311Z).
+//!   2026-11-13 (its end 2026-11-13T09:31:29.885311Z), and of
+//!   `OPRA.PILLAR`, captured on 2026-11-13 (its end
+//!   2026-11-13T14:30:00Z).
 //! - `timeseries.get_range`: GCZ6's definition records of 12 November 2026
 //!   (`schema=definition`, `symbols=GCZ6`, `stype_in=raw_symbol`, DBN
 //!   compressed with zstd, as Databento's client asks), captured on
-//!   2026-11-13 for $0.0000008.
+//!   2026-11-13 for $0.0000008; and of `OPRA.PILLAR`, the definition record
+//!   of AAPL's 355 call of 20 November 2026 of 12 November 2026
+//!   (`symbols=AAPL  261120C00355000`, otherwise as GCZ6's, and so as
+//!   Databento's client asks), captured on 2026-11-13 for $0.0000017, the
+//!   cost Databento's `metadata.get_cost` gave before: DBN version 1, as
+//!   Databento sent it, which Databento's client upgrades as it decodes.
 
 use std::{
     io::{BufRead, BufReader, Read, Write},
@@ -16,10 +23,22 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-/// Databento's range of `GLBX.MDP3`.
-const DATASET_RANGE: &[u8] = include_bytes!("testdata/dataset_range_glbx.json");
-/// Databento's definition of GCZ6 of 2026, `GCZ26.GLBX`.
-const DEFINITION_GCZ6: &[u8] = include_bytes!("testdata/definition_gcz6.dbn.zst");
+/// Databento's answers of each dataset: its range, and its definition of
+/// a contract, GCZ6 of 2026, `GCZ26.GLBX`, of `GLBX.MDP3`, and AAPL's 355
+/// call of 20 November 2026, `AAPL  261120C00355000.OPRA`, of
+/// `OPRA.PILLAR`.
+const DATASETS: [(&str, &[u8], &[u8]); 2] = [
+    (
+        "GLBX.MDP3",
+        include_bytes!("testdata/dataset_range_glbx.json"),
+        include_bytes!("testdata/definition_gcz6.dbn.zst"),
+    ),
+    (
+        "OPRA.PILLAR",
+        include_bytes!("testdata/dataset_range_opra.json"),
+        include_bytes!("testdata/definition_aapl_call.dbn.zst"),
+    ),
+];
 
 /// A call the peer received: its path and its parameters, of its query or
 /// its form.
@@ -115,17 +134,23 @@ fn serve(stream: TcpStream, log: &Mutex<Vec<DatabentoCall>>) {
             .collect::<Vec<_>>()
         })
         .collect();
-    let (content_type, answer) = if path.ends_with("metadata.get_dataset_range") {
-        ("application/json", DATASET_RANGE)
-    } else if path.ends_with("timeseries.get_range") {
-        ("application/octet-stream", DEFINITION_GCZ6)
-    } else {
-        ("text/plain", &b"no such call in the mock"[..])
-    };
-    log.lock().expect("not poisoned").push(DatabentoCall {
+    let call = DatabentoCall {
         path: path.to_string(),
         params,
-    });
+    };
+    let dataset = DATASETS
+        .iter()
+        .find(|(dataset, ..)| call.param("dataset") == Some(dataset));
+    let (content_type, answer) = match dataset {
+        Some((_, range, _)) if path.ends_with("metadata.get_dataset_range") => {
+            ("application/json", *range)
+        }
+        Some((_, _, definition)) if path.ends_with("timeseries.get_range") => {
+            ("application/octet-stream", *definition)
+        }
+        _ => ("text/plain", &b"no such call or dataset in the mock"[..]),
+    };
+    log.lock().expect("not poisoned").push(call);
     let head = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         answer.len()
