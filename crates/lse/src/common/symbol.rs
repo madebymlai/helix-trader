@@ -124,19 +124,41 @@ impl LseSymbol {
         &self.symbol
     }
 
-    /// The socket the series streams on, and its name there: a futures
-    /// series on data-ws, as its symbol suffixed `.F` (`GOLD.F`), as LSE's
-    /// socket documentation spells it ("Symbols on each socket").
+    /// The socket the series streams on, and its name there, as LSE's
+    /// socket documentation spells it ("Symbols on each socket"): on
+    /// data-ws, a US stock, a commodity and a forex pair under their
+    /// symbol, the pair's underscore a slash (`EUR/USD`), a futures series
+    /// suffixed `.F` (`GOLD.F`) and an index `.IDX` (`SPX.IDX`); on
+    /// london-ws, a UK stock suffixed `.L` and a crypto pair in dollars
+    /// (`BTCUSDT` is `BTC/USD`); on tsx-ws, a Canadian stock suffixed
+    /// `.TO`. A UK or Canadian stock's dots are hyphens there, a trailing
+    /// one dropped (`BT.A` is `BT-A.L`, `BP.` is `BP.L`).
     ///
     /// # Errors
     ///
     /// Returns an error naming the market if its series stream on no
-    /// socket here yet: every market but futures.
+    /// socket, or naming a crypto symbol not quoted in Tether, as LSE's
+    /// crypto symbols are.
     pub(crate) fn stream(&self) -> anyhow::Result<(LseSocket, String)> {
-        match self.market.as_str() {
-            "futures" => Ok((LseSocket::Data, format!("{}.F", self.symbol))),
-            market => bail!("the series of LSE's {market} stream on no LSE socket here yet"),
-        }
+        let symbol = &self.symbol;
+        Ok(match self.market.as_str() {
+            "us_stocks" | "commodities" => (LseSocket::Data, symbol.clone()),
+            "forex" => (LseSocket::Data, symbol.replace('_', "/")),
+            "futures" => (LseSocket::Data, format!("{symbol}.F")),
+            "indices" => (LseSocket::Data, format!("{symbol}.IDX")),
+            "crypto" => {
+                let Some(base) = symbol.strip_suffix("USDT") else {
+                    bail!(
+                        "{symbol} in LSE's crypto is not quoted in Tether, as LSE's crypto \
+                         symbols are (BTCUSDT): london-ws names no pair of it"
+                    );
+                };
+                (LseSocket::London, format!("{base}/USD"))
+            }
+            "uk_stocks" => (LseSocket::London, format!("{}.L", hyphenated(symbol))),
+            "ca_stocks" => (LseSocket::Tsx, format!("{}.TO", hyphenated(symbol))),
+            market => bail!("the series of LSE's {market} stream on no LSE socket"),
+        })
     }
 }
 
@@ -144,6 +166,12 @@ impl fmt::Display for LseSymbol {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} in LSE's {}", self.symbol, self.market)
     }
+}
+
+/// A UK or Canadian stock's symbol as its socket spells it before its
+/// exchange's suffix: its dots hyphens, a trailing one dropped.
+fn hyphenated(symbol: &str) -> String {
+    symbol.strip_suffix('.').unwrap_or(symbol).replace('.', "-")
 }
 
 /// What an instrument stands for at LSE, by its venue: a series of a
@@ -520,15 +548,57 @@ mod tests {
         assert_eq!((socket.name(), streamed.as_str()), ("data-ws", name));
     }
 
+    /// As LSE's socket documentation spells them ("Symbols on each
+    /// socket"), and as each socket acknowledged and ticked them on 13
+    /// November 2026: a UK or Canadian stock's dots as hyphens, a UK
+    /// stock's trailing dot dropped, crypto quoted in dollars where LSE's
+    /// REST API quotes it in Tether.
     #[rstest]
-    fn a_series_of_a_market_streamed_nowhere_yet_is_refused_naming_its_market() {
-        let err = of("AAPL-US_STOCKS.LSEDGE")
+    #[case("AAPL-US_STOCKS.LSEDGE", "data-ws", "AAPL")]
+    #[case("BRK.B-US_STOCKS.LSEDGE", "data-ws", "BRK.B")]
+    #[case("EUR_USD-FOREX.LSEDGE", "data-ws", "EUR/USD")]
+    #[case("XAU/USD-COMMODITIES.LSEDGE", "data-ws", "XAU/USD")]
+    #[case("SPX-INDICES.LSEDGE", "data-ws", "SPX.IDX")]
+    #[case("BTCUSDT-CRYPTO.LSEDGE", "london-ws", "BTC/USD")]
+    #[case("VOD-UK_STOCKS.LSEDGE", "london-ws", "VOD.L")]
+    #[case("BT.A-UK_STOCKS.LSEDGE", "london-ws", "BT-A.L")]
+    #[case("BP.-UK_STOCKS.LSEDGE", "london-ws", "BP.L")]
+    #[case("RY-CA_STOCKS.LSEDGE", "tsx-ws", "RY.TO")]
+    #[case("BBD.B-CA_STOCKS.LSEDGE", "tsx-ws", "BBD-B.TO")]
+    #[case("AP.UN-CA_STOCKS.LSEDGE", "tsx-ws", "AP-UN.TO")]
+    fn a_series_of_each_derived_market_streams_on_its_socket_under_that_socket_s_name(
+        #[case] id: &str,
+        #[case] socket: &str,
+        #[case] name: &str,
+    ) {
+        let (streamed_on, streamed) = of(id).unwrap().stream().unwrap();
+
+        assert_eq!((streamed_on.name(), streamed.as_str()), (socket, name));
+    }
+
+    /// LSE's crypto is quoted in Tether over REST, and london-ws spells
+    /// a pair in dollars: another quote has no name there.
+    #[rstest]
+    fn a_crypto_series_not_quoted_in_tether_is_refused_naming_it() {
+        let err = of("BTCEUR-CRYPTO.LSEDGE")
             .unwrap()
             .stream()
             .unwrap_err()
             .to_string();
 
-        assert!(err.contains("us_stocks"), "{err}");
+        assert!(err.contains("BTCEUR"), "{err}");
+    }
+
+    /// LSE lists the London Stock Exchange as coming soon.
+    #[rstest]
+    fn a_series_of_a_market_streamed_on_no_socket_is_refused_naming_its_market() {
+        let err = of("VOD-LONDON_STOCK_EXCHANGE.LSEDGE")
+            .unwrap()
+            .stream()
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("london_stock_exchange"), "{err}");
     }
 
     /// Their listings take Databento's ids.
