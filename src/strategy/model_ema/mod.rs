@@ -3,11 +3,12 @@
 //! predicts each side on its features, the averages of its bars of
 //! `[indicators.fast]` and `[indicators.slow]` (`features.rs`), and a
 //! side expected to clear its margin is a decision
-//! (`handle::Decision`), whose trade it sends as given through the shared
-//! order module (`decision.trade().send`, `strategy::orders`): the target
-//! its model learned, as a dataset run sets it at the decision on that
-//! side, a bracket or a market entry, closed at the target's limit from the
-//! send. It hands the module its time
+//! (`handle::Decision`), whose trade it sends at the config's stake through
+//! the shared order module (`decision.trade().send(self, stake)`,
+//! `strategy::orders`): the target its model learned, as a dataset run sets
+//! it at the decision on that side, a bracket or a market entry, closed at
+//! the target's limit from the send, sized at `[trade] risk` of the
+//! account's equity. It hands the module its time
 //! events, which close the trades at their time, and the module sets the
 //! time of the trades still open again at start, as after a restart.
 //! The target closes before the next decision (`ModelConfig::validate`),
@@ -52,7 +53,11 @@ use crate::{
         features::FeatureSet,
         handle::{Mode, ModelHandle},
     },
-    strategy::{Declaration, Part, Series, StandardConfig, Visitor, orders, warmup::Warmup},
+    strategy::{
+        Declaration, Part, Series, StandardConfig, Visitor,
+        orders::{self, Stake},
+        warmup::Warmup,
+    },
 };
 
 /// Config of the `model_ema` strategy, loaded from TOML: the standard
@@ -61,7 +66,7 @@ use crate::{
 pub type ModelEmaConfig = StandardConfig<ModelEmaParams>;
 
 /// The strategy's part: no fields of its own. It trades on a model, whose
-/// target trades the one instrument of `[trade]`, of its size; its
+/// target trades the one instrument of `[trade]`, at its risk; its
 /// features are a fast and a slow Nautilus `ExponentialMovingAverage`,
 /// `[indicators.fast]` and `[indicators.slow]`, of every bars series of
 /// `[data]`.
@@ -109,6 +114,8 @@ pub struct ModelEma {
     core: StrategyCore,
     /// Its model handle, which owns its warmup.
     model: Rc<ModelHandle>,
+    /// The stake its decisions' trades are sent at, the config's.
+    stake: Stake,
 }
 
 impl ModelStrategy for ModelEma {
@@ -132,6 +139,7 @@ impl ModelStrategy for ModelEma {
         Ok(Self {
             core: StrategyCore::new_checked(config.base.clone())?,
             model,
+            stake: config.stake(),
         })
     }
 
@@ -154,7 +162,7 @@ nautilus_strategy!(ModelEma, {
     }
 
     fn on_order_denied(&mut self, event: OrderDenied) {
-        self.model.on_order_denied(&event);
+        Rc::clone(&self.model).on_order_denied(self, &event);
     }
 
     fn on_order_rejected(&mut self, event: OrderRejected) {
@@ -181,7 +189,7 @@ impl DataActor for ModelEma {
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {
         if decide::is_decision(event) {
             return match Rc::clone(&self.model).decide(self)? {
-                Some(decision) => decision.trade().send(self),
+                Some(decision) => decision.trade().send(self, self.stake),
                 None => Ok(()),
             };
         }
@@ -211,11 +219,13 @@ mod tests {
     use nautilus_model::{
         enums::{OmsType, OrderSide},
         events::OrderEventAny,
-        identifiers::{AccountId, InstrumentId, PositionId, TradeId, TraderId, VenueOrderId},
+        identifiers::{
+            AccountId, ClientOrderId, InstrumentId, PositionId, TradeId, TraderId, VenueOrderId,
+        },
         instruments::{InstrumentAny, stubs::audusd_sim},
         orders::{Order, stubs::TestOrderEventStubs},
         position::Position,
-        types::{Money, Price, Quantity},
+        types::{Money, Price},
     };
     use nautilus_portfolio::portfolio::Portfolio;
     use rust_decimal::Decimal;
@@ -224,7 +234,7 @@ mod tests {
     use crate::{
         backtest::Commission,
         model::{dataset::DatasetVenue, decide::DecisionRule, learner::LearnerConfig},
-        strategy::orders::{Exits, Trade},
+        strategy::orders::{Exits, OrderIds, Trade},
     };
 
     /// Trades AUD/USD on a time-only target of 30 minutes, its unit measured
@@ -508,16 +518,25 @@ mod tests {
         let models = tempfile::tempdir().unwrap();
         let sent = NOW - 20 * MINUTE;
         let (mut before, _) = started(&cache, models.path(), sent);
-        let trade = Trade::fixed(
+        let trade = Trade::new(
             InstrumentId::from("AUD/USD.SIM"),
             OrderSide::Buy,
-            Quantity::from(100_000),
+            Price::from("0.70010"),
+            Decimal::new(5, 3),
             Exits {
                 bracket: None,
                 time_limit: Some(SignedDuration::from_mins(30)),
             },
         );
-        trade.send(&mut before).unwrap();
+        let ids = OrderIds {
+            entry: ClientOrderId::from("T-1"),
+            take_profit: ClientOrderId::from("T-1-TP"),
+            stop_loss: ClientOrderId::from("T-1-SL"),
+        };
+        let stake = before.stake;
+        trade
+            .send_at(&mut before, stake, Money::from("100000 USD"), ids)
+            .unwrap();
         let entry = cache
             .borrow()
             .orders(None, None, None, None, None)

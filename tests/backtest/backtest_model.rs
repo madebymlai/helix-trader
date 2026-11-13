@@ -315,10 +315,11 @@ fn a_decision_reads_each_sides_row_as_its_dataset_row_holds_it() {
 }
 
 /// The hand-worked targets' bracket (`backtest_targets`): 7.5 bps of the
-/// decision's mid away on both sides, 3.00 USD on one ounce of gold,
+/// decision's mid away on both sides, 3.00 USD on the one ounce of gold the
+/// reference stake buys (`common::dataset::RISK`),
 /// closed after 45 minutes, inside the hourly cadence; trading `side` alone
 /// at every decision.
-fn hand_worked(side: Side) -> ModelConfig {
+pub(crate) fn hand_worked(side: Side) -> ModelConfig {
     let traded = Some(R::new(f64::MIN));
     let margins = match side {
         Side::Long => Margins {

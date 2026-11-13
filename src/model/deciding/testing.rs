@@ -140,7 +140,7 @@ pub fn config() -> ModelConfig {
         .target(
             TargetConfig::builder()
                 .instrument_id(InstrumentId::from(AUD))
-                .quantity(Quantity::from(1000))
+                .risk("0.5%".parse().unwrap())
                 .spec(
                     Target::builder()
                         .limit(SignedDuration::from_hours(1))

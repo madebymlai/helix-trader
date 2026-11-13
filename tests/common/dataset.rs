@@ -30,7 +30,9 @@ use helix_trader::{
         targets::{BracketSpec, Distance, Side, Target, TargetConfig, TargetRow},
     },
     strategy::{
-        DataRequirements, Declared, IndicatorArgs, IndicatorsConfig, TickSeries, orders, r::R,
+        DataRequirements, Declared, IndicatorArgs, IndicatorsConfig, TickSeries,
+        orders::{self, EntryRisk, Stake},
+        r::R,
     },
 };
 use jiff::{SignedDuration, Timestamp};
@@ -45,7 +47,7 @@ use nautilus_indicators::indicator::Indicator;
 use nautilus_model::{
     data::{CustomData, NautilusDataType, QuoteTick},
     enums::OmsType,
-    events::{OrderCanceled, OrderDenied, OrderRejected, PositionClosed},
+    events::{OrderCanceled, OrderDenied, OrderFilled, OrderRejected, PositionClosed},
     identifiers::{InstrumentId, StrategyId},
     types::{Money, Quantity},
 };
@@ -59,11 +61,14 @@ pub const STRATEGY: &str = "DATASET-001";
 
 /// Decides every hour on the last mid of IC's gold through its model
 /// handle; records the rows published for its decisions and the trades
-/// they make, which it sends, and the positions they closed.
+/// they make, which it sends at its stake, their entries' fills, and the
+/// positions they closed.
 #[derive(Debug)]
 pub struct ModelProbe {
     core: StrategyCore,
     model: Rc<ModelHandle>,
+    /// The stake its decisions' trades are sent at.
+    stake: Stake,
     record: Rc<RefCell<Record>>,
 }
 
@@ -76,6 +81,9 @@ pub struct Record {
     pub trades: Vec<(UnixNanos, Decision)>,
     /// Each position closed, when it opened and its realised P&L.
     pub closed: Vec<(UnixNanos, Money)>,
+    /// Each entry filled, when, of how much, and what its tags say it
+    /// risks (`orders::entry_risk`).
+    pub entries: Vec<(UnixNanos, Quantity, Option<EntryRisk>)>,
 }
 
 nautilus_strategy!(ModelProbe, {
@@ -84,7 +92,20 @@ nautilus_strategy!(ModelProbe, {
     }
 
     fn on_order_denied(&mut self, event: OrderDenied) {
-        self.model.on_order_denied(&event);
+        Rc::clone(&self.model).on_order_denied(self, &event);
+    }
+
+    fn on_order_filled(&mut self, event: &OrderFilled) {
+        let risk = self
+            .cache()
+            .order(&event.client_order_id)
+            .and_then(|order| orders::entry_risk(&order));
+        if risk.is_some() {
+            self.record
+                .borrow_mut()
+                .entries
+                .push((event.ts_event, event.last_qty, risk));
+        }
     }
 
     fn on_order_rejected(&mut self, event: OrderRejected) {
@@ -118,7 +139,7 @@ impl DataActor for ModelProbe {
             if let Some(decision) = Rc::clone(&self.model).decide(self)? {
                 let now = self.clock().timestamp_ns();
                 self.record.borrow_mut().trades.push((now, decision));
-                decision.trade().send(self)?;
+                decision.trade().send(self, self.stake)?;
             }
             return Ok(());
         }
@@ -155,11 +176,16 @@ pub fn features() -> Rc<FeatureSet> {
         .unwrap()
 }
 
-/// A bracket 7.5 bps away on both sides closed after 2 hours, of one ounce.
+/// The reference stake of the probe's target: 4 USD of the dataset
+/// balance of 10M USD (`venue`), which buys one ounce, IC's whole ounces,
+/// on a stop worth from 2 to 4 USD on one, as 7.5 bps of gold near 4000 is.
+pub const RISK: &str = "0.00004%";
+
+/// A bracket 7.5 bps away on both sides closed after 2 hours, at `RISK`.
 pub fn target() -> TargetConfig {
     TargetConfig::builder()
         .instrument_id(InstrumentId::from(ic::INSTRUMENT_ID))
-        .quantity(Quantity::from(1))
+        .risk(RISK.parse().unwrap())
         .spec(
             Target::builder()
                 .bracket(BracketSpec {
@@ -240,12 +266,25 @@ fn probe(
 }
 
 /// The probe deciding on `features` as `config` says, for a strategy of
-/// `requirements`, in `mode`, and what it records.
+/// `requirements`, in `mode`, sending its trades at the config's stake,
+/// and what it records.
 pub fn probe_reading(
     features: Rc<FeatureSet>,
     config: &ModelConfig,
     requirements: &DataRequirements,
     mode: Mode,
+) -> (ModelProbe, Rc<RefCell<Record>>) {
+    probe_staking(features, config, requirements, mode, Decimal::ONE)
+}
+
+/// The probe of `probe_reading`, sending its trades at `multiple` times
+/// the config's stake.
+fn probe_staking(
+    features: Rc<FeatureSet>,
+    config: &ModelConfig,
+    requirements: &DataRequirements,
+    mode: Mode,
+    multiple: Decimal,
 ) -> (ModelProbe, Rc<RefCell<Record>>) {
     let record = Rc::new(RefCell::new(Record::default()));
     let probe = ModelProbe {
@@ -259,6 +298,7 @@ pub fn probe_reading(
             mode,
         )
         .unwrap(),
+        stake: Stake::new(config.target.risk).times(multiple).unwrap(),
         record: Rc::clone(&record),
     };
     (probe, record)
@@ -353,12 +393,12 @@ pub fn replay_of(
         features,
         config,
         Mode::Dataset {
-            rows: Rc::clone(&rows),
-            commission: venue().commission,
+            rows: rows.clone(),
+            venue: venue(),
         },
     );
     backtest(catalog.path(), from, to).run_dataset(probe)?;
-    Ok(rows.take())
+    rows.take()
 }
 
 /// The probe of `config` trading over `[from, to]` on the models of the
@@ -382,15 +422,46 @@ pub fn trade_on(
     config: &ModelConfig,
     models: &Path,
 ) -> Record {
-    let (probe, record) = probe(
+    let account = Account {
+        balance: venue().balance,
+        multiple: Decimal::ONE,
+    };
+    trade_staking(catalog, features, (from, to), config, models, account)
+}
+
+/// The account a probe trades on and the multiple of the config's stake it
+/// sends its trades at.
+pub struct Account {
+    pub balance: Money,
+    pub multiple: Decimal,
+}
+
+/// What the probe deciding on `features` decided trading over `[from,
+/// to]` on the models of `config` under `models`, its backtest's account
+/// and its stake `account`'s; the models' dataset venue `venue`'s.
+pub fn trade_staking(
+    catalog: &tempfile::TempDir,
+    features: Rc<FeatureSet>,
+    (from, to): (Timestamp, Timestamp),
+    config: &ModelConfig,
+    models: &Path,
+    account: Account,
+) -> Record {
+    let (probe, record) = probe_staking(
         features,
         config,
+        &requirements(),
         Mode::Backtest {
             models: models.to_path_buf(),
             venue: venue(),
         },
+        account.multiple,
     );
-    backtest(catalog.path(), from, to).run(probe).unwrap();
+    let backtest = Backtest {
+        balance: account.balance,
+        ..backtest(catalog.path(), from, to)
+    };
+    backtest.run(probe).unwrap();
     record.take()
 }
 

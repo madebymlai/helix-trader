@@ -15,7 +15,7 @@
 //! GOLDEN_ROWS=write cargo test --test backtest backtest_golden_rows::
 //! ```
 
-use std::{fmt::Write as _, fs, path::Path, rc::Rc};
+use std::{fmt::Write as _, fs, path::Path};
 
 use crate::common::{
     dataset::{backtest, venue, walk},
@@ -34,7 +34,9 @@ use jiff::{SignedDuration, Timestamp};
 
 /// Hourly decisions on IC's gold's 1-minute bars, its averages of 10 and
 /// 30 of them, warmed up 4 hours; a bracket 1.5 ATRs of 3 hourly bars in
-/// its favour, 7.5 bps against, closed after 45 minutes, of one ounce.
+/// its favour, 7.5 bps against, closed after 45 minutes, at the reference
+/// stake of 4 USD of the dataset balance of 10M USD (`venue`), one ounce,
+/// IC's whole ounces, on its stops of about 3 USD.
 const CONFIG: &str = r#"
     [data]
     series = [
@@ -50,7 +52,7 @@ const CONFIG: &str = r#"
 
     [trade]
     instruments = [{ instrument_id = "XAUUSD.ICMARKETS", trade_size = "1" }]
-    risk = "0.5%"
+    risk = "0.00004%"
 
     [model]
     decision = { every = "1h" }
@@ -92,8 +94,8 @@ fn the_rows_of_the_example_model_strategy_are_the_snapshots() {
             let requirements = config.data_requirements();
             let rows = SettledRows::default();
             let mode = Mode::Dataset {
-                rows: Rc::clone(&rows),
-                commission: venue().commission,
+                rows: rows.clone(),
+                venue: venue(),
             };
             let backtest = Backtest {
                 bar_types: requirements.bar_types,
@@ -101,7 +103,7 @@ fn the_rows_of_the_example_model_strategy_are_the_snapshots() {
                 ..backtest(catalog.path(), start, end)
             };
             backtest.run_dataset(ModelEma::new(config.clone(), mode)?)?;
-            Ok(rows.take())
+            rows.take()
         })
         .unwrap();
     let manifest = dataset.manifest().unwrap();

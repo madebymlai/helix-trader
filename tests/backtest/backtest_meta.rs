@@ -287,7 +287,7 @@ fn a_meta_model_trains_on_the_sides_trades_and_takes_them_in_the_run() {
         assert!(
             trades.iter().all(|trade| trade.side == OrderSide::Buy
                 && trade.level == means[period]
-                && trade.meta_expected_r == Some(taken)),
+                && trade.meta_expected_r == Some(R::new(taken))),
             "period {period}: {trades:?}, not longs at {taken}"
         );
     }

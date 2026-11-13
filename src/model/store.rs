@@ -972,10 +972,7 @@ mod values {
 #[cfg(test)]
 mod tests {
     use jiff::SignedDuration;
-    use nautilus_model::{
-        identifiers::InstrumentId,
-        types::{Money, Quantity},
-    };
+    use nautilus_model::{identifiers::InstrumentId, types::Money};
     use rust_decimal::Decimal;
 
     use super::*;
@@ -1006,7 +1003,7 @@ mod tests {
             .target(
                 TargetConfig::builder()
                     .instrument_id(InstrumentId::from(GOLD))
-                    .quantity(Quantity::from(1))
+                    .risk("0.5%".parse().unwrap())
                     .spec(
                         Target::builder()
                             .limit(SignedDuration::from_hours(1))
@@ -1341,7 +1338,7 @@ mod tests {
             store.directory,
             Path::new(
                 "models/STORE-001/\
-                 1e922efd486f7b35b5cc3913a1865df50fca063b86a89b7f83015690cf754cf6/\
+                 4ce8dc244e8399e17ec5e18d119eedb9ee503e18a704542cf3d6950472123d6b/\
                  4fde0b9e20b35edde95fe4d35678d1548497a87b9da66b8387ad828b2da940f1/\
                  long/7172a4d37d514662d105b99d75e9f7b1fc21aac68322ca53912d5254d40403c5"
             )
@@ -1360,11 +1357,40 @@ mod tests {
             store.directory,
             Path::new(
                 "models/STORE-001/\
-                 1e922efd486f7b35b5cc3913a1865df50fca063b86a89b7f83015690cf754cf6/\
+                 4ce8dc244e8399e17ec5e18d119eedb9ee503e18a704542cf3d6950472123d6b/\
                  4fde0b9e20b35edde95fe4d35678d1548497a87b9da66b8387ad828b2da940f1/\
                  meta/d88b50a1d9ca9158b6a0506a4ed81d6e0e83914b2edcecf8a216f544d09b557f"
             )
         );
+    }
+
+    /// A dataset's rows and a model's payoff features are priced at the
+    /// reference stake, the config's risk of the dataset balance: a model
+    /// published at one is not listed at another risk or balance, so the
+    /// strategy retrains rather than reuse it.
+    #[test]
+    fn a_model_is_listed_only_at_the_risk_and_dataset_balance_it_was_trained_at() {
+        let dir = tempfile::tempdir().unwrap();
+        side_store(dir.path(), &config(), &venue(), Side::Long)
+            .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
+            .unwrap();
+        let mut riskier = config();
+        riskier.target.risk = "1%".parse().unwrap();
+        let richer = DatasetVenue {
+            balance: Money::from("20000000 USD"),
+            ..venue()
+        };
+
+        let listed = |config: &ModelConfig, venue: &DatasetVenue| {
+            side_store(dir.path(), config, venue, Side::Long)
+                .valid_froms()
+                .unwrap()
+                .len()
+        };
+
+        assert_eq!(listed(&config(), &venue()), 1);
+        assert_eq!(listed(&riskier, &venue()), 0);
+        assert_eq!(listed(&config(), &richer), 0);
     }
 
     /// One side's margin changes which side is picked on a row, so what the
@@ -1629,8 +1655,8 @@ mod tests {
         let (_, pair) = pairs.at(midnight, &[midnight]).unwrap();
         let expected = pair
             .expect(&PerSide {
-                long: SideRow::new(&[0.4], &[0.02], 1.0),
-                short: SideRow::new(&[0.1], &[0.02], 1.0),
+                long: SideRow::new(&[0.4], &[0.02]),
+                short: SideRow::new(&[0.1], &[0.02]),
             })
             .unwrap();
 

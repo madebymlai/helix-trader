@@ -22,7 +22,7 @@ use super::{
     schedule::Retrain,
     targets::{Side, Target, TargetConfig},
 };
-use crate::strategy::{DataRequirements, TradedInstrument, r::R};
+use crate::strategy::{DataRequirements, TradedInstrument, orders::Risk, r::R};
 
 /// A strategy's model, loaded from TOML, such as
 ///
@@ -151,8 +151,8 @@ impl TryFrom<MetaFields> for MetaConfig {
         }
         if size.is_some() {
             return Err(
-                "a meta has no `size`: the trade it takes is of the target's size, the \
-                 instrument's `trade_size` in `[trade]`"
+                "a meta has no `size`: it takes or leaves the decision's trade, which the \
+                 strategy sends at its stake, `[trade] risk` times the multiple it picks"
                     .to_string(),
             );
         }
@@ -202,9 +202,10 @@ impl Margins {
 pub type ModelSection = ModelConfig<Target>;
 
 impl ModelSection {
-    /// The section, its target trading `traded` (`Target::trading`).
+    /// The section, its target trading `traded` at `risk`, the config's,
+    /// its reference stake (`Target::trading`).
     #[must_use]
-    pub fn trading(self, traded: &TradedInstrument) -> ModelConfig {
+    pub fn trading(self, traded: &TradedInstrument, risk: Risk) -> ModelConfig {
         let Self {
             decision,
             target,
@@ -219,7 +220,7 @@ impl ModelSection {
         } = self;
         ModelConfig {
             decision,
-            target: target.trading(traded),
+            target: target.trading(traded, risk),
             retrain,
             window,
             holdout,
@@ -500,7 +501,7 @@ mod tests {
 
     /// The section of `toml`, trading gold.
     fn parse(toml: &str) -> anyhow::Result<ModelConfig> {
-        Ok(toml::from_str::<ModelSection>(toml)?.trading(&gold()))
+        Ok(toml::from_str::<ModelSection>(toml)?.trading(&gold(), "0.5%".parse().unwrap()))
     }
 
     /// The error of loading `toml` for a strategy reading gold, if any.
@@ -1177,18 +1178,20 @@ mod tests {
         assert!(err.contains("missing field `margin`"), "{err}");
     }
 
-    /// A meta takes or leaves a trade of the target's size: a size is
-    /// refused as the section is parsed, naming the size the trade is of.
+    /// A meta takes or leaves a decision's trade, which the strategy sizes
+    /// by its stake: a size is refused as the section is parsed, pointing
+    /// to the stake, `[trade] risk` and the strategy's multiple of it.
     #[test]
-    fn a_meta_size_is_refused_at_parsing_naming_the_size_of_the_trade() {
+    fn a_meta_size_is_refused_at_parsing_pointing_to_the_stake() {
         let toml = format!("{SECTION}\n{META}\nsize = {{ min = 0.5, max = 2 }}");
 
         let err = refused_parsing(&toml);
 
         assert!(
-            err.contains("`size`") && err.contains("trade_size"),
+            err.contains("`size`") && err.contains("stake") && err.contains("risk"),
             "{err}"
         );
+        assert!(!err.contains("trade_size"), "{err}");
     }
 
     /// The refusal of the section with `META`, `line` added to it or, if

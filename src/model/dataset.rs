@@ -121,7 +121,7 @@ use crate::{
 /// then rebuilds every dataset and model. The golden rows
 /// (`tests/backtest/backtest_golden_rows.rs`) fail on a change of their rows
 /// made without a bump; a change reaching none of them is bumped all the same.
-pub const VERSION: u32 = 9;
+pub const VERSION: u32 = 10;
 
 /// The key of the feature names in the metadata of the rows' data type.
 const FEATURE_NAMES: &str = "feature_names";
@@ -150,7 +150,8 @@ pub struct DatasetRow {
     /// How the long closed (`targets::Exit::value`).
     pub long_exit: f64,
     /// The unit of the long's payoff, as its decision set it
-    /// (`targets::SideTarget::unit`).
+    /// (`targets::SideTarget::unit`): what one R of its trade at the
+    /// reference stake is worth, in the target's P&L currency.
     pub long_unit: f64,
     /// The short's payoff features, as the long's.
     pub short_payoff: Vec<f64>,
@@ -589,12 +590,12 @@ impl DatasetRow {
             long_pnl: long.pnl.as_f64(),
             long_commission: long.commission.as_f64(),
             long_exit: long.exit.value(),
-            long_unit: long.unit,
+            long_unit: long.unit.as_f64(),
             short_payoff: row.payoff.short.clone(),
             short_pnl: short.pnl.as_f64(),
             short_commission: short.commission.as_f64(),
             short_exit: short.exit.value(),
-            short_unit: short.unit,
+            short_unit: short.unit.as_f64(),
             settled_at: row.settled_at,
             ts_event: row.decision.ts_event,
             ts_init: row.decision.ts_init,
@@ -618,13 +619,12 @@ impl DatasetRow {
         }
     }
 
-    /// `side`'s row, the row its model reads, and its unit
-    /// (`deciding::SideRow`).
+    /// `side`'s row, the row its model reads (`deciding::SideRow`).
     #[must_use]
     pub fn side(&self, side: Side) -> SideRow {
         match side {
-            Side::Long => SideRow::new(&self.features, &self.long_payoff, self.long_unit),
-            Side::Short => SideRow::new(&self.features, &self.short_payoff, self.short_unit),
+            Side::Long => SideRow::new(&self.features, &self.long_payoff),
+            Side::Short => SideRow::new(&self.features, &self.short_payoff),
         }
     }
 
@@ -717,7 +717,7 @@ fn end_of(day: Date) -> anyhow::Result<UnixNanos> {
 mod tests {
     use std::rc::Rc;
 
-    use nautilus_model::{identifiers::InstrumentId, types::Quantity};
+    use nautilus_model::identifiers::InstrumentId;
 
     use super::*;
     use crate::{
@@ -769,7 +769,7 @@ mod tests {
     fn target() -> TargetConfig {
         TargetConfig::builder()
             .instrument_id(InstrumentId::from(GOLD))
-            .quantity(Quantity::from(1))
+            .risk("0.5%".parse().unwrap())
             .spec(
                 Target::builder()
                     .bracket(BracketSpec {
@@ -867,7 +867,7 @@ mod tests {
             pnl: Money::from(&*format!("{pnl} USD")),
             commission: Money::from("0.1 USD"),
             exit,
-            unit: 2.0,
+            unit: Money::from("2 USD"),
         };
         TargetRow {
             decision: FeatureRow {
@@ -946,7 +946,7 @@ mod tests {
             pnl: Money::from("-3.5 USD"),
             commission: Money::from("0.12 USD"),
             exit: Exit::Time,
-            unit: 4.5,
+            unit: Money::from("4.5 USD"),
         };
 
         let stored = DatasetRow::of(&settled);
@@ -968,8 +968,8 @@ mod tests {
     }
 
     /// A long gaining 0.25 net of 0.75 and a short at nought: each answers
-    /// its own trade, and its row, the decision's features then its own
-    /// payoff features, and unit.
+    /// its own trade and unit, and its row, the decision's features then its
+    /// own payoff features.
     #[test]
     fn a_row_answers_each_sides_trade_row_and_unit() {
         let row = DatasetRow {
@@ -1003,11 +1003,9 @@ mod tests {
             PerSide {
                 long: SideRow {
                     features: vec![4000.5, -2.0, 1.4, 1.1, 0.07],
-                    unit: 3.0
                 },
                 short: SideRow {
                     features: vec![4000.5, -2.0, 1.3, 1.2, 0.08],
-                    unit: 1.5
                 },
             }
         );
@@ -1357,7 +1355,7 @@ mod tests {
 
         assert_eq!(
             dataset.identifier(),
-            "DATASET-001-3d0e48528c359f4fdf8c9f3273cca169421759001ebfef577bacfa99940ea28d"
+            "DATASET-001-6ed4706b3a4ffe4b7b7b64348730825ccf384456d5c4ab7e43f84d5388119a41"
         );
     }
 

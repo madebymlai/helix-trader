@@ -792,7 +792,7 @@ fn a_set_registered_twice_gets_each_update_once() {
 fn width_of(distance: Distance) -> Rc<BracketWidth> {
     let target = TargetConfig::builder()
         .instrument_id(id(AUD))
-        .quantity(Quantity::from(1))
+        .risk("0.5%".parse().unwrap())
         .spec(Target {
             bracket: Some(BracketSpec {
                 take_profit: distance,

@@ -338,8 +338,8 @@ fn streamed_dataset() {
             let requirements = config.data_requirements();
             let rows = SettledRows::default();
             let mode = Mode::Dataset {
-                rows: Rc::clone(&rows),
-                commission: venue.commission,
+                rows: rows.clone(),
+                venue: venue.clone(),
             };
             Backtest {
                 catalog: catalog.clone(),
@@ -354,7 +354,7 @@ fn streamed_dataset() {
                 logging: LoggerConfig::default(),
             }
             .run_dataset(ModelEma::new(config.clone(), mode)?)?;
-            Ok(rows.take())
+            rows.take()
         })
         .unwrap();
 

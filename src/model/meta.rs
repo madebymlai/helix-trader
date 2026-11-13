@@ -1,5 +1,6 @@
 //! Meta-labeling: the side models pick the side of a trade, and a meta
-//! model decides whether to take it, the trade of the target's size.
+//! model decides whether to take it, the trade as the target sets it,
+//! staked by the strategy.
 //!
 //! The side picked is the one the decision picks (`deciding`) among the
 //! side models of a `ModelConfig` with a meta section, on the expected R of
@@ -23,8 +24,8 @@
 //! (`store::ModelSet`) as its stores are when the rows are made, listed
 //! once, a read error failing them: the latest valid then, trained on
 //! rows settled by its valid-from, so every decision is out of sample; each
-//! side's row, its payoff features and the worth of its stop, is the row's
-//! own (`dataset::DatasetRow::sides`).
+//! side's row, its payoff features, is the row's own
+//! (`dataset::DatasetRow::sides`).
 //! A row before the sides' first pair has no decision: the meta's rows
 //! start there at the earliest, and with no pair of the sides before a
 //! train the meta waits (`schedule::Schedule::plan`). Never retrained, with

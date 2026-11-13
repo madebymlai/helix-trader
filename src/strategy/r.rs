@@ -15,7 +15,7 @@ use anyhow::{Context, anyhow, ensure};
 use serde::{Deserialize, Deserializer, de};
 
 /// A finite number of R, as a config writes it: `"0.5R"`, `"-1R"`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct R(f64);
 
 impl R {
@@ -28,6 +28,19 @@ impl R {
     pub const fn new(value: f64) -> Self {
         assert!(value.is_finite(), "a value in R is a finite number");
         Self(value)
+    }
+
+    /// `value` R, if it is finite: none of NaN or an infinity, which a
+    /// model's prediction may be.
+    #[must_use]
+    pub fn finite(value: f64) -> Option<Self> {
+        value.is_finite().then_some(Self(value))
+    }
+
+    /// Its number of R.
+    #[must_use]
+    pub const fn as_f64(self) -> f64 {
+        self.0
     }
 
     /// Whether `r`, a value in R, is at least this: NaN is not.
@@ -139,6 +152,16 @@ mod tests {
     #[should_panic(expected = "finite")]
     fn a_value_in_r_not_finite_cannot_be_made() {
         let _ = R::new(f64::NAN);
+    }
+
+    /// A prediction not finite is no value in R, rather than a panic.
+    #[test]
+    fn a_finite_value_is_an_r_and_nan_or_an_infinity_none() {
+        assert_eq!(R::finite(0.25), Some(R::new(0.25)));
+        assert_eq!(R::finite(0.25).map(R::as_f64), Some(0.25));
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(R::finite(value), None, "{value}");
+        }
     }
 
     #[test]

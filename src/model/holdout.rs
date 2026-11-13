@@ -137,10 +137,10 @@ pub struct MetaMargin(pub R);
 
 impl MetaMargin {
     /// Whether a meta model expecting `expected_r` of the trade takes it: at
-    /// or above the margin, so NaN does not.
+    /// or above the margin.
     #[must_use]
-    pub fn takes(self, expected_r: f64) -> bool {
-        self.0.reached_by(expected_r)
+    pub fn takes(self, expected_r: R) -> bool {
+        expected_r >= self.0
     }
 }
 
@@ -331,16 +331,15 @@ mod tests {
     /// A margin of 0.25R, and one below nought, which a trade expected to
     /// lose a little clears.
     #[test]
-    fn a_meta_margin_takes_an_expected_r_at_or_above_it_and_not_nan() {
+    fn a_meta_margin_takes_an_expected_r_at_or_above_it() {
         let margin = MetaMargin(R::new(0.25));
         let below_nought = MetaMargin(R::new(-0.5));
 
-        assert!(margin.takes(0.25));
-        assert!(margin.takes(0.26));
-        assert!(!margin.takes(0.24));
-        assert!(!margin.takes(f64::NAN));
-        assert!(below_nought.takes(-0.5));
-        assert!(!below_nought.takes(-0.75));
+        assert!(margin.takes(R::new(0.25)));
+        assert!(margin.takes(R::new(0.26)));
+        assert!(!margin.takes(R::new(0.24)));
+        assert!(below_nought.takes(R::new(-0.5)));
+        assert!(!below_nought.takes(R::new(-0.75)));
     }
 
     /// Taken, wins of 3 over units of 2, 1.5R twice, and a loss of 2 over a
