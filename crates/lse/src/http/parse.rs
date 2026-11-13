@@ -407,6 +407,18 @@ mod tests {
         );
     }
 
+    #[rstest]
+    #[case::malformed(b"not a Parquet file")]
+    #[case::short(&GOLD_TRADES[..GOLD_TRADES.len() / 2])]
+    fn a_file_that_is_no_whole_parquet_file_is_refused(#[case] file: &'static [u8]) {
+        let err = parse_trade_slice(Bytes::from_static(file), gold(), 1, 0).unwrap_err();
+
+        assert!(
+            err.to_string().contains("reading LSE's Parquet file"),
+            "{err:#}"
+        );
+    }
+
     /// The captured rows of US10Y, as pyarrow reads LSE's file.
     fn us10y_rows() -> Vec<LseRow> {
         parse_rows(

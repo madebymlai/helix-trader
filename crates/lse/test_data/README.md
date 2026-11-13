@@ -11,6 +11,7 @@ What LSE answered, as it answered, but where noted.
 - `refusal_symbol_unknown.json`: 404, the same export of `symbol=NOSUCH`, captured on 2026-11-13.
 - `refusal_plan_required.json`: 403, the same export of `market=cme&symbol=ESZ6` on the free key, captured on 2026-11-13.
 - `refusal_data_unavailable.json`: 404, GOLD's export over `[2026-11-08T03:00:00Z, 2026-11-08T03:00:02Z)`, a Sunday, captured on 2026-11-13.
+- `refusal_data_unavailable_tick.json`: 404, the same export of `market=forex&symbol=EUR_USD`, captured on 2026-11-13: LSE stores quotes of forex, not trades.
 - `refusal_reference_data_unavailable.json`: 404, the bond yields export of US10Y over the dates `2026-11-07` to `2026-11-08`, a weekend, captured on 2026-11-13.
 - `refusal_date_not_trading.json`: 404, GOLD's export of the date `2026-11-07`, a Saturday, captured on 2026-11-13.
 - `refusal_data_unavailable_today.json`: 404, GOLD's export over `[2026-11-13T00:00:00Z, 2026-11-13T16:00:00Z)`, captured at 16:47 UTC that day, which LSE had not loaded: it stores a day after it ends.

@@ -34,8 +34,8 @@ const DAY: SignedDuration = SignedDuration::from_hours(24);
 /// definition is asked of the client too: the data engine answers it from
 /// the catalog, before the client, and puts it in the cache, where the
 /// client reads the precision of its prices; a definition the catalog lacks
-/// leaves the series' request to fail naming the instrument. LSE's rows are
-/// of no instrument and have none.
+/// fails its request, naming the instrument, before LSE is asked. LSE's rows
+/// are of no instrument and have none.
 ///
 /// # Errors
 ///
@@ -334,7 +334,8 @@ mod tests {
         assert!(err.contains("symbol-unknown"), "{err}");
     }
 
-    /// LSE is never asked: its prices could not be read.
+    /// The definition request fails, LSE publishing none, and LSE is never
+    /// asked.
     #[test]
     fn a_fill_of_an_lsedge_instrument_with_no_definition_fails_naming_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -344,10 +345,10 @@ mod tests {
             .unwrap_err()
             .to_string();
 
-        assert!(
-            err.contains(&format!("{GOLD_FUTURES} is not in the cache")),
-            "{err}"
-        );
+        let request = format!("the definition of {GOLD_FUTURES}");
+        for part in [request.as_str(), "LSE publishes no instrument definitions"] {
+            assert!(err.contains(part), "{part}: {err}");
+        }
         assert!(lse.calls().is_empty(), "{:?}", lse.calls());
         assert_eq!(stored_trades(dir.path()), []);
     }
@@ -511,12 +512,10 @@ mod tests {
         );
         for quota in [ROWS_EXHAUSTED, ALLOWANCE_EXHAUSTED] {
             let dir = tempfile::tempdir().unwrap();
-            let refusing = MockLse::start(vec![
-                Reply::file(GOLD_TRADES),
-                // The first window ends at the first instant of the 22nd.
-                Reply::refusal(404, DATE_NOT_TRADING),
-                Reply::refusal(429, quota),
-            ]);
+            // The first window ends at the first instant of the 22nd, which
+            // its export takes.
+            let refusing =
+                MockLse::start(vec![Reply::file(GOLD_TRADES), Reply::refusal(429, quota)]);
 
             let err = fill_over(
                 dir.path(),
@@ -533,6 +532,14 @@ mod tests {
             let message = refusal["message"].as_str().unwrap();
             assert!(err.contains(message), "{message}: {err}");
             assert_eq!(stored_trades(dir.path()).len(), 6);
+            let span = |from: &str, to: &str| (from.to_string(), to.to_string());
+            assert_eq!(
+                asked(&refusing),
+                [
+                    span("2026-10-21T00:00:00Z", "2026-10-22T00:00:00.000000001Z"),
+                    span("2026-10-22T00:00:00.000000001Z", "2026-10-23T00:00:00Z"),
+                ]
+            );
 
             let resuming = MockLse::start(vec![Reply::refusal(404, DATE_NOT_TRADING)]);
             fill_over(dir.path(), &resuming, GOLD_FUTURES, vec![], from, to).unwrap();

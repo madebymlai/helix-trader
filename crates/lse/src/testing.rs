@@ -63,6 +63,8 @@ pub const EXPORT_TOO_WIDE: &str = include_str!("../test_data/refusal_export_too_
 /// LSE's answer for a day it had not loaded yet, the current one.
 pub const DATA_UNAVAILABLE_TODAY: &str =
     include_str!("../test_data/refusal_data_unavailable_today.json");
+/// LSE's answer for the tick slice of a market storing no trades, `forex`.
+pub const TICKS_NOT_STORED: &str = include_str!("../test_data/refusal_data_unavailable_tick.json");
 
 /// The export id LSE sends with a file (`x-export-id`), the one it gave
 /// `GOLD_TRADES`; the peer sends it with every file.
@@ -208,6 +210,21 @@ impl Reply {
     #[must_use]
     pub fn after(mut self, delay: Duration) -> Self {
         self.delay = delay;
+        self
+    }
+
+    /// The reply with the status `status`.
+    #[must_use]
+    pub fn with_status(mut self, status: u16) -> Self {
+        self.status = status;
+        self
+    }
+
+    /// The reply without the file's SHA-256.
+    #[must_use]
+    pub fn without_checksum(mut self) -> Self {
+        self.headers
+            .retain(|(name, _)| !name.eq_ignore_ascii_case("x-checksum-sha256"));
         self
     }
 }
@@ -358,6 +375,7 @@ fn serve(stream: TcpStream, log: &Mutex<Vec<Call>>, script: &Mutex<std::vec::Int
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
+        202 => "Accepted",
         403 => "Forbidden",
         404 => "Not Found",
         413 => "Payload Too Large",
