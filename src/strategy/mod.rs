@@ -57,7 +57,7 @@ use std::{fmt, str::FromStr};
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::{ClosedInterval, UnixNanos};
 use nautilus_model::{
-    data::{BarType, NautilusDataType},
+    data::{BarType, DataType, NautilusDataType},
     enums::PriceType,
     identifiers::InstrumentId,
 };
@@ -79,14 +79,24 @@ pub struct DataRequirements {
     /// of bars, book deltas and custom data among them (see
     /// `TickSeries`): fetched by fill-catalog from their instrument's
     /// source (Databento fetches a GLBX instrument's book and trades
-    /// whatever is declared; no source serves custom data) and replayed in
-    /// a backtest as declared, those of its harness among them (a model
-    /// strategy's traded quotes when no series prices the traded
-    /// instrument, `StandardConfig::data_requirements`). Their instruments
-    /// are read too: live sets up their clients but subscribes to none of
-    /// the ticks, which the strategy (a model strategy's handle) subscribes
-    /// to and warms up on (`warmup::Warmup::reading`).
+    /// whatever is declared; no source serves an instrument's custom data)
+    /// and replayed in a backtest as declared, those of its harness among
+    /// them (a model strategy's traded quotes when no series prices the
+    /// traded instrument, `StandardConfig::data_requirements`). Their
+    /// instruments are read too: live sets up their clients but subscribes
+    /// to none of the ticks, which the strategy (a model strategy's handle)
+    /// subscribes to and warms up on (`warmup::Warmup::reading`).
     pub ticks: Vec<TickSeries>,
+    /// The custom data the strategy reads that is of no instrument, a
+    /// reference series such as LSE's daily bond yields: each series a
+    /// Nautilus data type keyed by its identifier, as Nautilus keys custom
+    /// data in the catalog, its metadata saying what its source asks for
+    /// (`lse::LseRow::data_type`). Fetched by fill-catalog from the source
+    /// of its type, with no definition, and replayed in a backtest over the
+    /// run's window; a live run neither warms it up nor streams it. Custom
+    /// data of an instrument is a tick series, keyed by the instrument and
+    /// rolled with it.
+    pub custom: Vec<DataType>,
     /// How far back before a live start the warmup history starts: a
     /// backtest requests none.
     pub warmup: SignedDuration,
@@ -166,6 +176,7 @@ impl DataRequirements {
                 .filter(|tick| instrument_ids.contains(&tick.instrument_id))
                 .cloned()
                 .collect(),
+            custom: vec![],
             warmup: self.warmup,
         }
     }
@@ -420,6 +431,7 @@ mod tests {
                 BarType::from("SXR8.IBIS-1-DAY-MID-INTERNAL"),
             ],
             ticks: vec![],
+            custom: vec![],
             warmup: SignedDuration::from_hours(720),
         };
         assert_eq!(
@@ -439,6 +451,7 @@ mod tests {
                 BarType::from("BTC-USDT-SWAP.OKX-1-HOUR-MID-INTERNAL"),
             ],
             ticks: vec![],
+            custom: vec![],
             warmup: SignedDuration::from_hours(720),
         };
         let okx = requirements.of_instruments(&[InstrumentId::from("BTC-USDT-SWAP.OKX")]);
@@ -447,6 +460,7 @@ mod tests {
             DataRequirements {
                 bar_types: vec![BarType::from("BTC-USDT-SWAP.OKX-1-HOUR-MID-INTERNAL")],
                 ticks: vec![],
+                custom: vec![],
                 warmup: SignedDuration::from_hours(720),
             }
         );
@@ -469,6 +483,7 @@ mod tests {
                 tick(NautilusDataType::TradeTick, "GC.v.0.GLBX"),
                 tick(NautilusDataType::OrderBookDepth, "GC.v.0.GLBX"),
             ],
+            custom: vec![],
             warmup: SignedDuration::ZERO,
         }
     }
@@ -510,6 +525,7 @@ mod tests {
                     tick(NautilusDataType::TradeTick, "GC.v.0.GLBX"),
                     tick(NautilusDataType::OrderBookDepth, "GC.v.0.GLBX"),
                 ],
+                custom: vec![],
                 warmup: SignedDuration::ZERO,
             }
         );
@@ -592,6 +608,7 @@ mod tests {
                 tick(NautilusDataType::OrderBookDelta, "GC.v.0.GLBX"),
                 tick(imbalance.clone(), "GC.v.0.GLBX"),
             ],
+            custom: vec![],
             warmup: SignedDuration::ZERO,
         };
         assert_eq!(
@@ -641,6 +658,7 @@ mod tests {
                 tick(NautilusDataType::QuoteTick, "XAUUSD.ICMARKETS"),
                 tick(NautilusDataType::TradeTick, "GCZ26.GLBX"),
             ],
+            custom: vec![],
             warmup: SignedDuration::ZERO,
         };
         let (start, end) = (at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
@@ -673,6 +691,7 @@ mod tests {
                 tick(NautilusDataType::TradeTick, "GC.GLBX"),
                 tick(NautilusDataType::OrderBookDepth, "GC.GLBX"),
             ],
+            custom: vec![],
             warmup: SignedDuration::ZERO,
         };
         let (start, end) = (at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
@@ -717,6 +736,7 @@ mod tests {
         let requirements = DataRequirements {
             bar_types: vec![BarType::from("GC.GLBX-1-HOUR-LAST-INTERNAL")],
             ticks: vec![],
+            custom: vec![],
             warmup: SignedDuration::from_hours(24),
         };
         let (start, end) = (at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
@@ -748,6 +768,7 @@ mod tests {
         DataRequirements {
             bar_types: vec![BarType::from(bar_type)],
             ticks: vec![],
+            custom: vec![],
             warmup: SignedDuration::ZERO,
         }
         .slices(at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"))
@@ -777,6 +798,7 @@ mod tests {
                 tick(NautilusDataType::TradeTick, "GC.GLBX"),
                 tick(NautilusDataType::TradeTick, "GCQ26.GLBX"),
             ],
+            custom: vec![],
             warmup: SignedDuration::ZERO,
         };
         let (start, end) = (at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
@@ -806,6 +828,7 @@ mod tests {
         let requirements = DataRequirements {
             bar_types: vec![BarType::from("GC.GLBX-1-HOUR-LAST-INTERNAL")],
             ticks: vec![tick(NautilusDataType::OrderBookDepth, "GCQ26.GLBX")],
+            custom: vec![],
             warmup: SignedDuration::ZERO,
         };
         let (start, end) = (at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));

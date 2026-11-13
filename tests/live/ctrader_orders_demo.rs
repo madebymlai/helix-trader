@@ -216,6 +216,7 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
     let requirements = DataRequirements {
         bar_types: bar_types.to_vec(),
         ticks: vec![],
+        custom: vec![],
         warmup: SignedDuration::from_mins(5),
     };
     let record = Arc::new(Mutex::new(Record::default()));

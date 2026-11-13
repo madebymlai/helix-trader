@@ -658,6 +658,7 @@ fn warm(
     let requirements = DataRequirements {
         bar_types: vec![BarType::from(bar_type)],
         ticks: vec![],
+        custom: vec![],
         warmup: length,
     };
     let fed = Rc::new(Fed::default());
@@ -956,6 +957,7 @@ fn bracket_of(bar_types: Vec<BarType>, ticks: Vec<TickSeries>) -> SideTarget {
     let requirements = DataRequirements {
         bar_types,
         ticks,
+        custom: vec![],
         warmup: WARMUP,
     };
     let spec: Target = toml::from_str(
@@ -1047,6 +1049,7 @@ fn read_live(
     let requirements = DataRequirements {
         bar_types: vec![],
         ticks: vec![series.clone()],
+        custom: vec![],
         warmup: length,
     };
     let features = Rc::new(Fed::default());
@@ -1229,6 +1232,7 @@ fn warm_deltas(dir: &Path) -> (Rc<Books>, Vec<(u64, u64)>) {
     let requirements = DataRequirements {
         bar_types: vec![],
         ticks: ticks.clone(),
+        custom: vec![],
         warmup: WARMUP,
     };
     let books = Rc::new(Books {
@@ -1388,6 +1392,7 @@ fn an_lsedge_definition_the_cache_lacks_comes_from_the_catalog_before_lse_stream
     let requirements = DataRequirements {
         bar_types: vec![],
         ticks: ticks.clone(),
+        custom: vec![],
         warmup: SignedDuration::from_hours(1),
     };
     let warmup = Rc::new(Warmup::live(&requirements).reading(ticks.clone()));

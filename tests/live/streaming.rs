@@ -345,6 +345,7 @@ fn streamed_dataset() {
                 catalog: catalog.clone(),
                 bar_types: requirements.bar_types,
                 ticks: requirements.ticks,
+                custom: vec![],
                 start: from,
                 end: to,
                 commission: venue.commission,
