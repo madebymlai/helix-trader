@@ -227,7 +227,7 @@ impl<P: Part> StandardConfig<P> {
 
     /// What the strategy needs from data: the bars and the ticks of its
     /// series, then the quotes of each instrument traded that no series
-    /// reads (`TradeConfig::quotes_unread_by`), and the warmup.
+    /// prices (`TradeConfig::quotes_unpriced_by`), and the warmup.
     #[must_use]
     pub fn data_requirements(&self) -> DataRequirements {
         let ticks = self
@@ -238,7 +238,7 @@ impl<P: Part> StandardConfig<P> {
                 Series::Bars(_) => None,
                 Series::Ticks(ticks) => Some(ticks.clone()),
             })
-            .chain(self.trade.quotes_unread_by(&self.data))
+            .chain(self.trade.quotes_unpriced_by(&self.data))
             .collect();
         DataRequirements {
             bar_types: self.data.bar_types().collect(),
@@ -275,12 +275,23 @@ impl DataConfig {
         })
     }
 
-    /// Whether a series reads `instrument_id`, its bars or its ticks.
+    /// Whether a series prices `instrument_id` as Nautilus prices a market
+    /// order and the top of a simulated L1 book: its bars, its quotes or
+    /// its trades. Its depth, book deltas and custom data do not: the risk
+    /// engine prices a market order from the cache's bid or ask, last
+    /// trade or external bar (`Cache::price` reads quotes and trades
+    /// alone), and an L1 book ignores deltas.
     #[must_use]
-    pub fn reads(&self, instrument_id: InstrumentId) -> bool {
+    pub fn prices(&self, instrument_id: InstrumentId) -> bool {
         self.series.iter().any(|series| match series {
             Series::Bars(bar_type) => bar_type.instrument_id() == instrument_id,
-            Series::Ticks(ticks) => ticks.instrument_id == instrument_id,
+            Series::Ticks(ticks) => {
+                ticks.instrument_id == instrument_id
+                    && matches!(
+                        ticks.data,
+                        NautilusDataType::QuoteTick | NautilusDataType::TradeTick
+                    )
+            }
         })
     }
 
@@ -497,7 +508,7 @@ pub struct CompositeSource {
 
 /// `[trade]`: what the strategy trades, and the size of each trade. The
 /// execution data of an instrument traded comes from it: its quotes,
-/// when no series of `[data]` reads it (`quotes_unread_by`).
+/// when no series of `[data]` prices it (`quotes_unpriced_by`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TradeConfig {
@@ -544,18 +555,21 @@ impl TradeConfig {
     }
 
     /// The quotes of each instrument traded that no series of `data`
-    /// reads, in order: its prices for the strategy's orders and their
-    /// fills, and for a model harness' decisions, whatever the strategy; a
-    /// series reading it gives them otherwise. They are not series of
-    /// `[data]`: the strategy's data requirements add them
-    /// (`StandardConfig::data_requirements`).
-    fn quotes_unread_by<'a>(
+    /// prices (`DataConfig::prices`), in order: its prices for the
+    /// strategy's orders and their fills, and for a model harness'
+    /// decisions, whatever the strategy; a series pricing it gives them
+    /// otherwise. Without them, an instrument read only through its depth,
+    /// book deltas or custom data has its market orders denied for want of
+    /// a price, and one read only through custom data is not even loaded
+    /// into a backtest. They are not series of `[data]`: the strategy's
+    /// data requirements add them (`StandardConfig::data_requirements`).
+    fn quotes_unpriced_by<'a>(
         &'a self,
         data: &'a DataConfig,
     ) -> impl Iterator<Item = TickSeries> + 'a {
         self.instruments
             .iter()
-            .filter(|traded| !data.reads(traded.instrument_id))
+            .filter(|traded| !data.prices(traded.instrument_id))
             .map(|traded| TickSeries {
                 data: NautilusDataType::QuoteTick,
                 instrument_id: traded.instrument_id,
@@ -1166,7 +1180,7 @@ mod tests {
     }
 
     /// Execution needs the prices of what is traded, model or not: an
-    /// instrument traded that no series reads adds its quotes, after the
+    /// instrument traded that no series prices adds its quotes, after the
     /// series' ticks; the series stay as listed.
     #[test]
     fn a_traded_instrument_no_series_reads_loads_its_quotes_into_the_requirements() {
@@ -1189,6 +1203,34 @@ mod tests {
             ]
         );
         assert_eq!(config.data.series.len(), 3);
+    }
+
+    /// Depth, book deltas and custom data of an instrument traded give
+    /// Nautilus no price of it for a market order, and the latter two move
+    /// no L1 book: an instrument traded that only they read adds its
+    /// quotes, after the series' ticks.
+    #[test]
+    fn a_traded_instrument_read_only_through_depth_deltas_or_custom_data_loads_its_quotes() {
+        for data in ["order_book_depths", "order_book_deltas", "Custom:Imbalance"] {
+            let toml = TOML.replace(
+                r#"{ data = "bars", instrument_id = "ESM24.CME", bar_spec = { step = 5, aggregation = "MINUTE", price_type = "BID" } },"#,
+                &format!(r#"{{ data = "{data}", instrument_id = "ESM24.CME" }},"#),
+            );
+            let config = load(&toml).unwrap();
+            let es = |data: &str, instrument_id: &str| TickSeries {
+                data: NautilusDataType::from_str(data).unwrap(),
+                instrument_id: InstrumentId::from(instrument_id),
+            };
+            assert_eq!(
+                config.data_requirements().ticks,
+                [
+                    es(data, "ESM24.CME"),
+                    es("trades", "ESH24.CME"),
+                    es("quotes", "ESM24.CME"),
+                ],
+                "{data}"
+            );
+        }
     }
 
     /// Each instrument traded is read by a series, its bars or its
@@ -1390,7 +1432,7 @@ mod tests {
         }
 
         /// The harness reads the quotes of the instrument traded when no
-        /// series reads it: the requirements hold them after the series'
+        /// series prices it: the requirements hold them after the series'
         /// ticks.
         #[test]
         fn a_traded_instrument_not_read_loads_its_quotes_into_the_requirements() {
