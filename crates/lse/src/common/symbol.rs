@@ -114,6 +114,12 @@ impl LseSymbol {
         &self.symbol
     }
 
+    /// Whether the series is an index, which has no trades: its ticks are
+    /// its values, of no size, which LSE's tick slice and its socket send.
+    pub(crate) fn is_index(&self) -> bool {
+        self.market == "indices"
+    }
+
     /// The socket the series streams on, and its name there, as LSE's
     /// socket documentation spells it ("Symbols on each socket"): on
     /// data-ws, a US stock, a commodity and a forex pair under their

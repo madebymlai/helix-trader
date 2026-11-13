@@ -144,7 +144,7 @@ mod tests {
             DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING, EUR_USD_MINUTES, GCZ26, GCZ26_BOOK,
             GCZ26_ORDERS, GCZ26_QUOTES, GCZ26_TRADES, GOLD_FUTURES, GOLD_SPOT, GOLD_SPOT_MINUTES,
             GOLD_TRADES, MockLse, PAIRS_GCZ6, PLAN_REQUIRED, REFERENCE_CATALOGUE,
-            REFERENCE_DATA_UNAVAILABLE, ROWS_EXHAUSTED, RY_TRADES, Reply, SPX_MINUTES,
+            REFERENCE_DATA_UNAVAILABLE, ROWS_EXHAUSTED, RY_TRADES, Reply, SPX_MINUTES, SPX_TICKS,
             SYMBOL_UNKNOWN, US10Y_BOND_YIELDS, VOD_TRADES, gold_futures, gold_spot,
         },
     };
@@ -573,8 +573,8 @@ mod tests {
     /// `[10:01, 10:05]` and `[15:01, 15:05]` under their `LSEDGE` ids, as
     /// pyarrow reads LSE's files: five bars, the first and the last of
     /// them stamped at their close. LSE stores no trades of forex, and an
-    /// index's tick slice carries no size. Commodities' bars are gold
-    /// spot's (`lse_s_candles_are_written_back_to_the_catalog_as_bars_stamped_at_their_close`).
+    /// index has none. Commodities' bars are gold spot's
+    /// (`lse_s_candles_are_written_back_to_the_catalog_as_bars_stamped_at_their_close`).
     #[test]
     fn the_bars_of_a_forex_pair_and_an_index_fill_under_their_lsedge_ids() {
         /// A bar's close, then its open, high, low and last prices.
@@ -675,6 +675,73 @@ mod tests {
                 "{id}"
             );
         }
+    }
+
+    /// The S&P 500's tick slice of 12 November captured from LSE, its values
+    /// of no size, filled as quotes over `[15:00:00, 15:00:05)` under its
+    /// `LSEDGE` id, as pyarrow reads LSE's file: each a quote whose bid and
+    /// ask are the value, with no sizes, as data-ws sends an index's ticks.
+    /// LSE is asked the index's tick slice.
+    #[test]
+    fn an_index_s_quotes_fill_from_its_tick_slice_under_its_lsedge_id() {
+        const SPX: &str = "SPX-INDICES.LSEDGE";
+        let dir = tempfile::tempdir().unwrap();
+        let lse = MockLse::start(vec![Reply::file(SPX_TICKS)]);
+        let requirements = DataRequirements {
+            bar_types: vec![],
+            ticks: vec![TickSeries {
+                data: NautilusDataType::QuoteTick,
+                instrument_id: InstrumentId::from(SPX),
+            }],
+            custom: vec![],
+            warmup: SignedDuration::ZERO,
+        };
+
+        fill_requirements(
+            dir.path(),
+            &lse,
+            &requirements,
+            vec![index(SPX, "SPX", 2)],
+            on_the_12th("15:00:00"),
+            on_the_12th("15:00:04.999999999"),
+        )
+        .unwrap();
+
+        let stored = ParquetDataCatalog::new(dir.path(), None, None, None, None)
+            .quote_ticks(Some(vec![SPX.to_string()]), None, None)
+            .unwrap();
+        let rows: Vec<_> = stored
+            .iter()
+            .map(|q| (q.ts_event, q.bid_price, q.ask_price, q.bid_size, q.ask_size))
+            .collect();
+        let row = |time, value| {
+            (
+                UnixNanos::from(on_the_12th(time)),
+                Price::from(value),
+                Price::from(value),
+                Quantity::from(0),
+                Quantity::from(0),
+            )
+        };
+        assert_eq!(
+            rows,
+            [
+                row("15:00:00.034", "7600.07"),
+                row("15:00:02.035", "7599.15"),
+                row("15:00:03.067", "7599.18"),
+            ]
+        );
+        let [export] = &lse.calls()[..] else {
+            panic!("{:?}", lse.calls())
+        };
+        assert_eq!(
+            (
+                export.param("market"),
+                export.param("symbol"),
+                export.param("timeframe")
+            ),
+            (Some("indices"), Some("SPX"), Some("tick"))
+        );
     }
 
     #[test]
