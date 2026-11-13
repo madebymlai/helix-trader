@@ -3,7 +3,8 @@
 //! LSE market and symbol of a derived series (`LseSymbol`), with the socket
 //! the series streams on and its name there, a `GLBX` id and the CME
 //! contract LSE lists (`CmeContract`), and an `OPRA` id and the OSI symbol
-//! LSE lists a US option under (`OpraContract`).
+//! LSE lists a US option under (`OpraContract`), with its name on data-ws
+//! and the root of the chain it streams in.
 //!
 //! A derived market's series is one instrument under `LSEDGE`, its LSE
 //! market the suffix of its symbol, as Bybit's product suffix (Nautilus'
@@ -425,6 +426,22 @@ impl OpraContract {
     pub(crate) fn osi(&self) -> &str {
         &self.osi
     }
+
+    /// The socket the contract streams on, data-ws, and its name there, its
+    /// OSI symbol without spaces (LSE's socket documentation, "Option
+    /// chains": `AAPL261120C00100000`), in the chain of its root (`root`).
+    #[must_use]
+    pub(crate) fn stream(&self) -> (LseSocket, String) {
+        (LseSocket::Data, self.osi.replace(' ', ""))
+    }
+
+    /// The root of the contract's OSI symbol, unpadded: the underlying
+    /// whose chain LSE streams it in (`subscribe_options`), as LSE's
+    /// options chain names a root its underlying.
+    #[must_use]
+    pub(crate) fn root(&self) -> &str {
+        self.osi[..6].trim_end_matches(' ')
+    }
 }
 
 impl fmt::Display for OpraContract {
@@ -769,6 +786,25 @@ mod tests {
             .to_string();
 
         assert!(err.contains(id), "{id}: {err}");
+    }
+
+    /// LSE's socket documentation ("Option chains"): contracts stream on
+    /// data-ws, in their underlying's chain, under "the OSI form without
+    /// spaces", `AAPL261120C00100000` the AAPL 100 call of 20 November
+    /// 2026; the chain is asked by its root (`subscribe_options`).
+    #[rstest]
+    #[case::aapl_call("AAPL  261120C00355000.OPRA", "AAPL261120C00355000", "AAPL")]
+    #[case::one_letter_root("F     261218C00012500.OPRA", "F261218C00012500", "F")]
+    #[case::six_letter_root("GOOGL1270115P00150000.OPRA", "GOOGL1270115P00150000", "GOOGL1")]
+    fn an_opra_contract_streams_on_data_ws_unpadded_in_its_root_s_chain(
+        #[case] id: &str,
+        #[case] name: &str,
+        #[case] root: &str,
+    ) {
+        let contract = OpraContract::from_instrument_id(InstrumentId::from(id)).unwrap();
+
+        assert_eq!(contract.stream(), (LseSocket::Data, name.to_string()));
+        assert_eq!(contract.root(), root);
     }
 
     #[rstest]

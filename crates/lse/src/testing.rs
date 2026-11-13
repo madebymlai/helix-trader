@@ -194,6 +194,28 @@ pub const WS_TICKS_LONDON: &str = include_str!("../test_data/ws_ticks_london.jso
 pub const WS_AUTHENTICATED_TSX: &str = include_str!("../test_data/ws_authenticated_tsx.json");
 pub const WS_TICKS_TSX: &str = include_str!("../test_data/ws_ticks_tsx.jsonl");
 
+/// LSE's data-ws frames of an option chain (`test_data/README.md`): its
+/// acknowledgements of AAPL's chain, subscribed and unsubscribed, and its
+/// refusal of an underlying with no listed options, `NOSUCHX`, captured
+/// with the free key on 13 November 2026, US options closed; and five
+/// option ticks, not captured, as LSE's WebSocket documentation gives an
+/// option contract's tick, each a trade of AAPL's chain of 12 November 2026
+/// from 14:30:00 UTC as LSE exported it to the free key: two of
+/// `AAPL_CALL`, then one each of the 360 calls of 13 and 18 November 2026,
+/// then one of the 325 put of 17 September 2027 (`AAPL_PUT_2027`).
+pub const WS_OPTIONS_SUBSCRIBED_AAPL: &str =
+    include_str!("../test_data/ws_options_subscribed_aapl.json");
+pub const WS_OPTIONS_UNSUBSCRIBED_AAPL: &str =
+    include_str!("../test_data/ws_options_unsubscribed_aapl.json");
+pub const WS_INVALID_UNDERLYING: &str =
+    include_str!("../test_data/ws_error_invalid_underlying.json");
+pub const WS_TICKS_AAPL_OPTIONS: &str =
+    include_str!("../test_data/ws_ticks_aapl_options_documented.jsonl");
+
+/// The 325 put of 17 September 2027 of AAPL, whose trade
+/// `WS_TICKS_AAPL_OPTIONS` ends with, under the id Databento gives it.
+pub const AAPL_PUT_2027: &str = "AAPL  270917P00325000.OPRA";
+
 /// The export id LSE sends with a file (`x-export-id`), the one it gave
 /// `GOLD_TRADES`; the peer sends it with every file.
 pub const EXPORT_ID: &str = "15f88a2dca3f401d90c7acae13236f86";
@@ -336,6 +358,25 @@ pub fn aapl_call() -> InstrumentAny {
             .build()
             .expect("a valid option contract"),
     )
+}
+
+/// AAPL's 325 put of 17 September 2027, `AAPL_PUT_2027`, defined as
+/// `aapl_call` is, its kind, strike and expiry, 16:00 New York, its own.
+#[must_use]
+pub fn aapl_put_2027() -> InstrumentAny {
+    let InstrumentAny::OptionContract(mut put) = aapl_call() else {
+        unreachable!("an option contract")
+    };
+    put.id = InstrumentId::from(AAPL_PUT_2027);
+    put.raw_symbol = Symbol::from("AAPL  270917P00325000");
+    put.option_kind = OptionKind::Put;
+    put.strike_price = Price::from("325.00");
+    put.expiration_ns = UnixNanos::from(
+        "2027-09-17T20:00:00Z"
+            .parse::<jiff::Timestamp>()
+            .expect("a time"),
+    );
+    InstrumentAny::OptionContract(put)
 }
 
 /// An answer of the peer.

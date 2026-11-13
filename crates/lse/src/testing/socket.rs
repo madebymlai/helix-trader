@@ -17,8 +17,8 @@ use tungstenite::{
 };
 
 use super::{
-    WS_AUTHENTICATED_FUTURES, WS_PONG, WS_SUBSCRIBED_GOLD, WS_TICKS_GOLD, WS_UNSUBSCRIBED_GOLD,
-    WS_WELCOME,
+    WS_AUTHENTICATED_FUTURES, WS_OPTIONS_SUBSCRIBED_AAPL, WS_OPTIONS_UNSUBSCRIBED_AAPL, WS_PONG,
+    WS_SUBSCRIBED_GOLD, WS_TICKS_AAPL_OPTIONS, WS_TICKS_GOLD, WS_UNSUBSCRIBED_GOLD, WS_WELCOME,
 };
 
 /// What the peer does after a frame.
@@ -183,6 +183,10 @@ pub fn data_ws_answer(frame: &Value) -> Vec<SocketAction> {
 /// with `authenticated`, its authenticated frame; a subscription with its
 /// acknowledgement, then the ticks of its symbol among `ticks`, one a
 /// line; an unsubscription with its acknowledgement; a ping with a pong.
+/// And, from LSE's documentation, an underlying's chain's subscription
+/// with its acknowledgement, then the ticks of its contracts among
+/// `WS_TICKS_AAPL_OPTIONS`, and its unsubscription with its
+/// acknowledgement.
 ///
 /// # Panics
 ///
@@ -208,6 +212,34 @@ pub fn socket_answer(authenticated: &str, ticks: &str, frame: &Value) -> Vec<Soc
             answer
         }
         Some("unsubscribe") => vec![send(&WS_UNSUBSCRIBED_GOLD.replace("GOLD.F", symbol))],
+        Some("subscribe_options") => {
+            let underlying = frame["underlying"].as_str().unwrap_or_default();
+            let mut answer = vec![send(
+                &WS_OPTIONS_SUBSCRIBED_AAPL.replace("AAPL", underlying),
+            )];
+            answer.extend(
+                WS_TICKS_AAPL_OPTIONS
+                    .lines()
+                    .filter(|line| {
+                        let tick: Value = serde_json::from_str(line).expect("a tick a line");
+                        // An OSI symbol without spaces: its root, then 15
+                        // characters of expiry, kind and strike.
+                        let contract = tick["symbol"].as_str().expect("a symbol");
+                        contract
+                            .len()
+                            .checked_sub(15)
+                            .is_some_and(|end| contract[..end] == *underlying)
+                    })
+                    .map(send),
+            );
+            answer
+        }
+        Some("unsubscribe_options") => {
+            let underlying = frame["underlying"].as_str().unwrap_or_default();
+            vec![send(
+                &WS_OPTIONS_UNSUBSCRIBED_AAPL.replace("AAPL", underlying),
+            )]
+        }
         Some("ping") => vec![send(WS_PONG)],
         _ => panic!("the socket has no answer here for {frame}"),
     }
