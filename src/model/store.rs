@@ -1077,12 +1077,11 @@ mod tests {
     }
 
     /// The venue of the dataset runs: a commission rate of 30 per million,
-    /// 10 million USD, no leverage.
+    /// 10 million USD.
     fn venue() -> DatasetVenue {
         DatasetVenue {
             commission: Commission::Rate(Decimal::new(3, 5)),
             balance: Money::from("10000000 USD"),
-            leverage: Decimal::ONE,
         }
     }
 
@@ -1339,7 +1338,7 @@ mod tests {
             store.directory,
             Path::new(
                 "models/STORE-001/\
-                 4ce8dc244e8399e17ec5e18d119eedb9ee503e18a704542cf3d6950472123d6b/\
+                 0614a0ef7ecea9c6cf17bdf7a38ab2ab47a955646cf2257595b30158aa9e35c9/\
                  4fde0b9e20b35edde95fe4d35678d1548497a87b9da66b8387ad828b2da940f1/\
                  long/7172a4d37d514662d105b99d75e9f7b1fc21aac68322ca53912d5254d40403c5"
             )
@@ -1358,7 +1357,7 @@ mod tests {
             store.directory,
             Path::new(
                 "models/STORE-001/\
-                 4ce8dc244e8399e17ec5e18d119eedb9ee503e18a704542cf3d6950472123d6b/\
+                 0614a0ef7ecea9c6cf17bdf7a38ab2ab47a955646cf2257595b30158aa9e35c9/\
                  4fde0b9e20b35edde95fe4d35678d1548497a87b9da66b8387ad828b2da940f1/\
                  meta/d88b50a1d9ca9158b6a0506a4ed81d6e0e83914b2edcecf8a216f544d09b557f"
             )

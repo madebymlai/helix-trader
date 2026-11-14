@@ -501,12 +501,11 @@ mod tests {
     }
 
     /// The venue of the dataset runs: a commission rate of 30 per million,
-    /// 10 million USD, no leverage.
+    /// 10 million USD.
     fn venue() -> DatasetVenue {
         DatasetVenue {
             commission: Commission::Rate(Decimal::new(3, 5)),
             balance: Money::from("10000000 USD"),
-            leverage: Decimal::ONE,
         }
     }
 

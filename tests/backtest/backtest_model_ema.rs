@@ -268,8 +268,9 @@ fn a_live_retrain_through_the_train_subcommand_keeping_the_model_is_kept_with_it
 }
 
 /// The binary's `backtest` of the strategy of `config` over `[start,
-/// end]`, retraining into the store under `models`; its stdout and its
-/// stderr.
+/// end]`, retraining into the store under `models`, on the balance of the
+/// fixture's dataset runs (`venue`), which its own dataset runs take; its
+/// stdout and its stderr.
 fn backtest(
     config: &Path,
     catalog: &Path,
@@ -287,8 +288,7 @@ fn backtest(
         .arg("--models")
         .arg(models)
         .args(["--start", &start.to_string(), "--end", &end.to_string()])
-        .args(["--commission-rate", "0.00003", "--balance", "100000 USD"])
-        .args(["--dataset-balance", "10000000 USD"])
+        .args(["--commission-rate", "0.00003", "--balance", "10000000 USD"])
         .output()
         .unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -406,11 +406,11 @@ fn refused(
     (stdout, stderr)
 }
 
-/// A dataset balance in EUR, where IC's gold's P&L is in USD: the model's
-/// targets, its dataset's rows, would be sized on it unconverted, so the
-/// backtest refuses it before building any day of the dataset, and `train`
-/// before replaying any, no node started, naming the dataset balance and
-/// both currencies.
+/// A balance in EUR, where IC's gold's P&L is in USD: the model's targets,
+/// its dataset's rows, would be sized on it unconverted, so the backtest,
+/// whose dataset runs take its balance, refuses it before building any day
+/// of the dataset, and `train` before replaying any, no node started,
+/// naming both currencies, and `train` the dataset balance.
 #[test]
 fn a_dataset_balance_in_another_currency_than_the_pnl_is_refused_before_any_build() {
     let catalog = walk(ic::at("00:00:00"), ic::at("06:00:00"));
@@ -427,15 +427,7 @@ fn a_dataset_balance_in_another_currency_than_the_pnl_is_refused_before_any_buil
     let backtest: Vec<String> = span
         .into_iter()
         .chain(costs.clone())
-        .chain(
-            [
-                "--balance",
-                "100000 USD",
-                "--dataset-balance",
-                "10000000 EUR",
-            ]
-            .map(String::from),
-        )
+        .chain(["--balance", "10000000 EUR"].map(String::from))
         .collect();
     let train: Vec<String> = ["--at".to_string(), ic::at("05:00:00").to_string()]
         .into_iter()
@@ -443,13 +435,22 @@ fn a_dataset_balance_in_another_currency_than_the_pnl_is_refused_before_any_buil
         .chain(["--balance", "10000000 EUR"].map(String::from))
         .collect();
 
-    for (subcommand, args) in [("backtest", backtest), ("train", train)] {
+    for (subcommand, args, named) in [
+        (
+            "backtest",
+            backtest,
+            ["EUR", "USD", ic::INSTRUMENT_ID].as_slice(),
+        ),
+        (
+            "train",
+            train,
+            ["dataset balance", "EUR", "USD", ic::INSTRUMENT_ID].as_slice(),
+        ),
+    ] {
         let (stdout, stderr) = refused(subcommand, &config, catalog.path(), &models, &args);
 
         assert!(
-            ["dataset balance", "EUR", "USD", ic::INSTRUMENT_ID]
-                .iter()
-                .all(|named| stderr.contains(named)),
+            named.iter().all(|named| stderr.contains(named)),
             "{subcommand}: {stderr}"
         );
         assert!(!stdout.contains("BacktestEngine"), "{subcommand}: {stdout}");
@@ -503,8 +504,6 @@ fn usd_args(subcommand: &str, dir: &Path) -> Vec<String> {
             "--commission-rate",
             "0.00003",
             "--balance",
-            "100000 USD",
-            "--dataset-balance",
             "10000000 USD",
         ],
         "train" => vec![

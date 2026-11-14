@@ -17,8 +17,8 @@
 //! `DatasetVenue`, and the dataset `VERSION`): a change to the feature
 //! names, the arguments of their `[indicators]` tables, their warmup or
 //! version, the decision rule, the target, what the
-//! strategy reads that its ATR is built from, the commission,
-//! balance or leverage of its dataset runs, or the dataset version finds
+//! strategy reads that its ATR is built from, the commission or
+//! balance of its dataset runs, or the dataset version finds
 //! no row, and the dataset is rebuilt. The
 //! config is read by value, the code by version: the dataset's for the
 //! code making every strategy's rows, the strategy's own for its features
@@ -94,7 +94,6 @@ use nautilus_model::{
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use nautilus_serialization::arrow_custom_data;
-use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -203,22 +202,22 @@ pub struct Manifest {
 }
 
 /// The venue settings a dataset run takes, each of which its rows depend
-/// on: the commission its targets are net of, and its account's starting
-/// balance and leverage, under which Nautilus' risk engine denies an
-/// order the account cannot margin. Part of the dataset's fingerprint,
+/// on: the commission its targets are net of, and its account's balance,
+/// the equity of the reference stake its targets are sized at, which no
+/// trade of the run moves. Its accounts margin nothing (`backtest::node`),
+/// so no leverage is among them. Part of the dataset's fingerprint,
 /// normalized, so neither rows nor models of other settings are ever read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatasetVenue {
     pub commission: Commission,
     pub balance: Money,
-    pub leverage: Decimal,
 }
 
 impl DatasetVenue {
     /// The settings as the fingerprint reads them: the commission's kind
     /// and its amount normalized (`Commission::normalized`), and the
-    /// balance and the leverage without trailing zeros, so that every
-    /// spelling of one is one key.
+    /// balance without trailing zeros, so that every spelling of one is one
+    /// key.
     fn fingerprint_part(&self) -> String {
         let kind = match self.commission {
             Commission::PerOrder(_) => "per order",
@@ -226,11 +225,10 @@ impl DatasetVenue {
             Commission::PerQuantity(_) => "per quantity",
         };
         format!(
-            "commission {kind} {}, balance {} {}, leverage {}",
+            "commission {kind} {}, balance {} {}",
             self.commission.normalized(),
             self.balance.as_decimal().normalize(),
-            self.balance.currency.code,
-            self.leverage.normalize()
+            self.balance.currency.code
         )
     }
 }
@@ -719,6 +717,8 @@ mod tests {
 
     use nautilus_model::identifiers::InstrumentId;
 
+    use rust_decimal::Decimal;
+
     use super::*;
     use crate::{
         model::{
@@ -797,12 +797,11 @@ mod tests {
     }
 
     /// The venue of the dataset runs: a commission rate of 30 per million,
-    /// 10 million USD, no leverage.
+    /// 10 million USD.
     fn venue() -> DatasetVenue {
         DatasetVenue {
             commission: Commission::Rate(Decimal::new(3, 5)),
             balance: Money::from("10000000 USD"),
-            leverage: Decimal::ONE,
         }
     }
 
@@ -1356,7 +1355,7 @@ mod tests {
 
         assert_eq!(
             dataset.identifier(),
-            "DATASET-001-6ed4706b3a4ffe4b7b7b64348730825ccf384456d5c4ab7e43f84d5388119a41"
+            "DATASET-001-ebabdcfdc08b9b3f91bb4242f96cab59906b9cbfea0e52869e73ef5d85125798"
         );
     }
 
@@ -1388,11 +1387,11 @@ mod tests {
         assert_ne!(of(&composite), of(&requirements()));
     }
 
-    /// Nautilus' risk engine denies an order its account cannot margin, so
-    /// a dataset run's balance and leverage can change its rows: another
-    /// of either is another fingerprint, another spelling of one is not.
+    /// A dataset run's balance is the equity of the reference stake its
+    /// targets are sized at, so it can change their rows: another balance
+    /// is another fingerprint, another spelling of one is not.
     #[test]
-    fn another_balance_or_leverage_of_the_dataset_run_is_another_fingerprint() {
+    fn another_balance_of_the_dataset_run_is_another_fingerprint() {
         let of = |venue: DatasetVenue| {
             blueprint(
                 STRATEGY,
@@ -1412,18 +1411,10 @@ mod tests {
                 ..venue()
             })
         );
-        assert_ne!(
-            of(venue()),
-            of(DatasetVenue {
-                leverage: Decimal::from(10),
-                ..venue()
-            })
-        );
         assert_eq!(
             of(venue()),
             of(DatasetVenue {
                 balance: Money::from("10000000.00 USD"),
-                leverage: Decimal::new(100, 2),
                 ..venue()
             })
         );
@@ -1431,7 +1422,8 @@ mod tests {
 
     /// The text of the venue settings keys every dataset and model store
     /// built: a commission reads as its kind and its amount without
-    /// trailing zeros, beside the balance and the leverage.
+    /// trailing zeros, beside the balance; a dataset run's accounts
+    /// margin nothing, so no leverage keys it.
     #[test]
     fn a_dataset_runs_venue_is_keyed_by_its_commissions_kind_and_amount() {
         let of = |commission| {
@@ -1444,17 +1436,17 @@ mod tests {
 
         assert_eq!(
             of(Commission::Rate(Decimal::new(30, 6))),
-            "commission rate 0.00003, balance 10000000 USD, leverage 1"
+            "commission rate 0.00003, balance 10000000 USD"
         );
         assert_eq!(
             of(Commission::PerOrder(Money::from("3.00 USD"))),
-            "commission per order 3 USD, balance 10000000 USD, leverage 1"
+            "commission per order 3 USD, balance 10000000 USD"
         );
         assert_eq!(
             of(Commission::PerQuantity(
                 Money::from_str_exact("0.0350 USD").unwrap()
             )),
-            "commission per quantity 0.035 USD, balance 10000000 USD, leverage 1"
+            "commission per quantity 0.035 USD, balance 10000000 USD"
         );
     }
 

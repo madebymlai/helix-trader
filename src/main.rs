@@ -127,14 +127,6 @@ struct BacktestArgs {
     /// sides or its meta then have no model in use there.
     #[arg(long, default_value = "models")]
     models: PathBuf,
-    /// Starting balance of the account of the dataset runs that build a
-    /// model strategy's dataset before the backtest, the equity its
-    /// targets are sized on at `[trade] risk`, in the traded instrument's
-    /// P&L currency and large enough that no target is denied, which fails
-    /// the build, for example "10000000 USD"; required for a strategy
-    /// trading on a model.
-    #[arg(long, value_parser = parse_money)]
-    dataset_balance: Option<Money>,
 }
 
 #[derive(Debug, Args)]
@@ -157,29 +149,20 @@ struct TrainArgs {
     /// The costs of the dataset run, whose targets are net of them.
     #[command(flatten)]
     commission: CommissionArgs,
-    /// Starting balance of the dataset run's account, the equity its
-    /// targets are sized on at `[trade] risk`, in the traded instrument's
-    /// P&L currency and large enough that no target is denied, which fails
-    /// the train, for example "10000000 USD".
+    /// Balance of the dataset run's account, the equity its targets are
+    /// sized on at `[trade] risk`, in the traded instrument's P&L
+    /// currency: the account the model is trained for, for example "10000
+    /// USD". The run's trades leave it whole and it margins nothing.
     #[arg(long, value_parser = parse_money)]
     balance: Money,
-    /// The dataset run's leverage, as a backtest's.
-    #[arg(long, default_value = "1")]
-    leverage: Decimal,
 }
 
 impl BacktestArgs {
     /// The venue of the dataset runs of the backtest of a strategy trading
-    /// on a model: its commission and leverage, and its dataset balance.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the backtest has no dataset balance.
-    fn dataset_venue(&self) -> anyhow::Result<dataset::DatasetVenue> {
-        let balance = self
-            .dataset_balance
-            .context("a backtest of a strategy trading on a model needs --dataset-balance")?;
-        Ok(self.commission.venue(balance, self.leverage))
+    /// on a model: the backtest's commission and balance, so that the model
+    /// is trained for the account backtested.
+    fn dataset_venue(&self) -> dataset::DatasetVenue {
+        self.commission.venue(self.balance)
     }
 }
 
@@ -216,13 +199,11 @@ impl CommissionArgs {
         .expect("clap requires one commission flag")
     }
 
-    /// The venue of a dataset run at this commission, `balance` and
-    /// `leverage`.
-    fn venue(&self, balance: Money, leverage: Decimal) -> dataset::DatasetVenue {
+    /// The venue of a dataset run at this commission and `balance`.
+    fn venue(&self, balance: Money) -> dataset::DatasetVenue {
         dataset::DatasetVenue {
             commission: self.commission(),
             balance,
-            leverage,
         }
     }
 }
@@ -286,7 +267,7 @@ struct LiveArgs {
 
 /// The costs of the dataset runs of a live node's retrains, as `train`
 /// takes them (its `--commission`, `--commission-rate` or
-/// `--commission-per-quantity`, and `--balance`), its leverage the node's.
+/// `--commission-per-quantity`, and `--balance`).
 /// Checked as `train` checks them, for the `train` the node starts
 /// (`Children::of_live`). Required of a
 /// strategy never retrained too: they key the store its models are read
@@ -312,10 +293,11 @@ struct RetrainCosts {
     /// retrain, for example "0.035 USD".
     #[arg(long, value_parser = parse_commission_per_quantity)]
     retrain_commission_per_quantity: Option<Commission>,
-    /// Starting balance of a retrain's dataset run, the equity its targets
-    /// and the live decisions' payoff features are sized on at `[trade]
-    /// risk`, in the traded instrument's P&L currency and large enough that
-    /// no target is denied, for example "10000000 USD".
+    /// Balance of a retrain's dataset run, the equity its targets and the
+    /// live decisions' payoff features are sized on at `[trade] risk`, in
+    /// the traded instrument's P&L currency: the account the model is
+    /// trained for, for example "10000 USD". The run's trades leave it
+    /// whole and it margins nothing.
     #[arg(long, value_parser = parse_money)]
     retrain_balance: Option<Money>,
 }
@@ -363,16 +345,15 @@ impl RetrainCosts {
         )
     }
 
-    /// The venue of the retrains' dataset runs, at the node's `leverage`.
+    /// The venue of the retrains' dataset runs.
     ///
     /// # Errors
     ///
     /// Returns an error if the commission or the balance was not given.
-    fn venue(&self, leverage: Decimal) -> anyhow::Result<dataset::DatasetVenue> {
+    fn venue(&self) -> anyhow::Result<dataset::DatasetVenue> {
         Ok(dataset::DatasetVenue {
             commission: self.commission()?,
             balance: self.balance()?,
-            leverage,
         })
     }
 }
@@ -575,14 +556,13 @@ fn backtest_on_models<S: ModelStrategy>(
     let config = load_config::<S::Params>(&args.run.config)?;
     let backtest = backtest(config.data_requirements());
     backtest.refuse_balance(&config.trade.instrument_ids())?;
-    let venue = args.dataset_venue()?;
+    let venue = args.dataset_venue();
     let (catalog, models) = (&args.run.catalog, &args.models);
     let run = DatasetRun {
         catalog: catalog.clone(),
         venue: venue.clone(),
         logging,
     };
-    run.refuse_balance(&config.trade.instrument_ids())?;
     let walk = S::walk_forward(&config, catalog, models, &venue)?;
     let dataset = S::dataset(&config, catalog, &venue)?;
     let training = S::training(&config, catalog, models, &venue)?;
@@ -620,8 +600,7 @@ fn backtest_on_models<S: ModelStrategy>(
 
 /// The child processes of a live node whose strategy trades on a model:
 /// its retrains, this binary's `train` on the node's strategy, config,
-/// catalog and store, at the retrains' costs and the node's leverage
-/// (`Launcher::process`). A live node is the one node of its process
+/// catalog and store, at the retrains' costs (`Launcher::process`). A live node is the one node of its process
 /// while it runs, and a train replays the dataset days it lacks through a
 /// node of its own, so each retrain is a process.
 struct Children {
@@ -629,14 +608,13 @@ struct Children {
     config: PathBuf,
     catalog: PathBuf,
     models: PathBuf,
-    /// The venue of the retrains' dataset runs: the retrain costs and the
-    /// node's leverage.
+    /// The venue of the retrains' dataset runs: the retrain costs.
     venue: dataset::DatasetVenue,
 }
 
 impl Children {
     /// The children of the live node of `args`: its retrains, at their
-    /// costs and the node's leverage.
+    /// costs.
     ///
     /// # Errors
     ///
@@ -648,13 +626,13 @@ impl Children {
             config: args.config.clone(),
             catalog: args.catalog.clone(),
             models: args.models.clone(),
-            venue: args.retrain.venue(args.leverage)?,
+            venue: args.retrain.venue()?,
         })
     }
 
     /// The arguments of `train` but its `--at`, which the launcher gives:
     /// the strategy, config, catalog and store, and the dataset runs'
-    /// commission, balance and leverage.
+    /// commission and balance.
     fn train_args(&self) -> Vec<OsString> {
         let strategy = self
             .strategy
@@ -668,15 +646,7 @@ impl Children {
             self.catalog.clone().into_os_string(),
         ]);
         args.extend(commission_args(&self.venue.commission).map(OsString::from));
-        args.extend(
-            [
-                "--balance".to_string(),
-                self.venue.balance.to_string(),
-                "--leverage".to_string(),
-                self.venue.leverage.to_string(),
-            ]
-            .map(OsString::from),
-        );
+        args.extend(["--balance".into(), self.venue.balance.to_string().into()]);
         args.extend(["--models".into(), self.models.clone().into_os_string()]);
         args
     }
@@ -770,8 +740,9 @@ async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyho
 /// The dataset runs of a process: the strategy over the catalog in
 /// `Mode::Dataset`, on hedging venues (`model::targets`), on `venue`: its
 /// commission the venues' and the targets', its balance the account's and
-/// the equity the targets' reference stake is of, and its leverage; each
-/// replay a node of its own, disposed at its end.
+/// the equity the targets' reference stake is of, which the runs' trades
+/// leave whole, margining nothing (`Backtest::run_dataset`); each replay a
+/// node of its own, disposed at its end.
 struct DatasetRun {
     catalog: PathBuf,
     venue: dataset::DatasetVenue,
@@ -824,7 +795,8 @@ impl DatasetRun {
             end,
             commission: self.venue.commission,
             balance: self.venue.balance,
-            leverage: self.venue.leverage,
+            // Read by no dataset run, whose accounts margin nothing.
+            leverage: Decimal::ONE,
             venue_oms: |_| OmsType::Hedging,
             logging: self.logging.clone(),
         };
@@ -853,7 +825,7 @@ fn reported(trained: &Trained) -> anyhow::Result<()> {
 fn run_train(args: TrainArgs) -> anyhow::Result<()> {
     let run = DatasetRun {
         catalog: args.catalog.clone(),
-        venue: args.commission.venue(args.balance, args.leverage),
+        venue: args.commission.venue(args.balance),
         logging: logger_config(std::env::var("NAUTILUS_LOG"))?,
     };
     let outcome = args.strategy.visit(Training {
@@ -1236,6 +1208,15 @@ mod tests {
         assert_eq!(args.balance, Money::from("10000000 USD"));
     }
 
+    /// A train's dataset runs margin nothing, so it takes no leverage.
+    #[test]
+    fn a_train_takes_no_leverage() {
+        let mut argv = TRAIN.to_vec();
+        argv.extend(["--leverage", "2"]);
+        let err = parse_train(&argv).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument, "{err}");
+    }
+
     #[test]
     fn a_train_requires_its_time_and_its_costs() {
         for flag in ["--at", "--commission-rate", "--balance"] {
@@ -1371,10 +1352,10 @@ mod tests {
     }
 
     /// A live node's retrain is a `train` on the node's strategy, config,
-    /// catalog and store, at the retrains' commission and balance and the
-    /// node's leverage.
+    /// catalog and store, at the retrains' commission and balance; the
+    /// node's leverage is not its dataset runs', which margin nothing.
     #[test]
-    fn a_live_nodes_retrain_parses_as_train_on_its_files_store_leverage_and_costs() {
+    fn a_live_nodes_retrain_parses_as_train_on_its_files_store_and_costs() {
         let mut argv = LIVE_RETRAINING.to_vec();
         argv.extend(["--catalog", "/data/catalog", "--models", "/data/models"]);
         argv.extend(["--leverage", "2"]);
@@ -1387,17 +1368,13 @@ mod tests {
         assert_eq!(train.catalog, PathBuf::from("/data/catalog"));
         assert_eq!(train.models, PathBuf::from("/data/models"));
         assert_eq!(
-            train.commission.venue(train.balance, train.leverage),
+            train.commission.venue(train.balance),
             dataset::DatasetVenue {
                 commission: Commission::Rate(Decimal::new(3, 5)),
                 balance: Money::from("10000000 USD"),
-                leverage: Decimal::from(2),
             }
         );
-        assert_eq!(
-            children.venue,
-            train.commission.venue(train.balance, train.leverage)
-        );
+        assert_eq!(children.venue, train.commission.venue(train.balance));
     }
 
     #[test]
@@ -1445,7 +1422,7 @@ mod tests {
             let err = parse_live(&argv)
                 .unwrap()
                 .retrain
-                .venue(Decimal::ONE)
+                .venue()
                 .unwrap_err()
                 .to_string();
             assert!(err.contains("model store"), "{err}");
@@ -1577,17 +1554,22 @@ mod tests {
         assert_eq!(retrain("0.000030"), backtest.commission.commission());
     }
 
+    /// A model backtest's dataset runs are at its own commission and
+    /// balance: it takes no balance of theirs.
     #[test]
-    fn a_backtest_of_a_model_strategy_needs_a_dataset_balance() {
-        let err = parse_backtest(&backtest_required())
-            .unwrap()
-            .dataset_venue()
-            .unwrap_err();
-        assert!(err.to_string().contains("--dataset-balance"), "{err}");
+    fn a_backtests_dataset_runs_are_at_its_commission_and_balance() {
+        let args = parse_backtest(&backtest_required()).unwrap();
+        assert_eq!(
+            args.dataset_venue(),
+            dataset::DatasetVenue {
+                commission: Commission::PerOrder(Money::from("3 EUR")),
+                balance: Money::from("10000 EUR"),
+            }
+        );
         let mut argv = backtest_required();
         argv.extend(["--dataset-balance", "10000000 EUR"]);
-        let venue = parse_backtest(&argv).unwrap().dataset_venue().unwrap();
-        assert_eq!(venue.balance, Money::from("10000000 EUR"));
+        let err = parse_backtest(&argv).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument, "{err}");
     }
 
     /// Every subcommand takes the strategy first, by its command-line

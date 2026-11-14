@@ -70,7 +70,6 @@ fn venue_of(commission: Commission) -> DatasetVenue {
     DatasetVenue {
         commission,
         balance: Money::from("100000 USD"),
-        leverage: Decimal::ONE,
     }
 }
 

@@ -333,13 +333,11 @@ pub fn requirements() -> DataRequirements {
     }
 }
 
-/// The venue of `backtest`, as given: 30 USD per million traded, 10M USD,
-/// no leverage.
+/// The venue of `backtest`, as given: 30 USD per million traded, 10M USD.
 pub fn venue() -> DatasetVenue {
     DatasetVenue {
         commission: Commission::Rate(Decimal::new(3, 5)),
         balance: Money::from("10000000 USD"),
-        leverage: Decimal::ONE,
     }
 }
 
@@ -355,7 +353,8 @@ pub fn backtest(catalog: &Path, from: Timestamp, to: Timestamp) -> Backtest {
         end: to,
         commission: venue().commission,
         balance: venue().balance,
-        leverage: venue().leverage,
+        // Read by no dataset run, whose accounts margin nothing.
+        leverage: Decimal::ONE,
         venue_oms: |_| OmsType::Hedging,
         logging: LoggerConfig::default(),
     }

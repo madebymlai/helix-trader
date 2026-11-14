@@ -72,7 +72,6 @@ use nautilus_model::{
 use nautilus_persistence::{
     backend::parquet::catalog::ParquetDataCatalog, config::DataCatalogConfig,
 };
-use rust_decimal::Decimal;
 
 const GCZ26: &str = "GCZ26.GLBX";
 /// Hour bars built from the venue's minute bars.
@@ -1003,7 +1002,6 @@ fn bracket_of(bar_types: Vec<BarType>, ticks: Vec<TickSeries>) -> SideTarget {
     let dataset = DatasetVenue {
         commission,
         balance: Money::from("100000 USD"),
-        leverage: Decimal::ONE,
     };
     let traded = Rc::new(TargetSetter::new(&target, hourly, &requirements, &dataset).unwrap());
     let warmup = traded.warmed(Warmup::live(&requirements));

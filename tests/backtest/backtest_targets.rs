@@ -209,7 +209,6 @@ impl TargetProbe {
                 &DatasetVenue {
                     commission: backtest.commission,
                     balance: backtest.balance,
-                    leverage: backtest.leverage,
                 },
             )
             .unwrap(),
@@ -805,13 +804,12 @@ fn a_targets_orders_are_named_by_their_decision_side_and_leg() {
 
 /// Half of a balance of 100,000 USD, 50,000 USD, over a stop of 3.00 buys
 /// 16,666 oz, which Nautilus' sizer caps at gold's largest order, 10,000
-/// oz: 40M USD of gold, whose margin at IC's 1 / 30, 1.33M USD, the account
-/// cannot carry at leverage 1. The risk engine denies the first order,
-/// which fails the run with its reason and stops it there, at the 09:00
-/// decision, rather than leave the decision without its row: no row, and no
-/// later decision.
+/// oz: 40M USD of gold a side, whose margin at IC's 1 / 30, 1.33M USD, an
+/// account of 100,000 USD could not carry. A dataset run's account locks no
+/// margin, so nothing is denied: each decision settles as the hand-worked
+/// targets do, each side's unit its stop's worth on 10,000 oz, 30,000 USD.
 #[test]
-fn a_denied_order_fails_the_dataset_run_and_stops_it() {
+fn a_dataset_run_locks_no_margin_so_a_size_beyond_its_balance_settles() {
     let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
     let catalog = ic::catalog_of(hand_worked_quotes(), from, to);
     let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
@@ -832,9 +830,93 @@ fn a_denied_order_fails_the_dataset_run_and_stops_it() {
     backtest.run_dataset(probe).unwrap();
 
     let record = record.borrow();
+    assert_eq!(record.denial, None);
+    let units: Vec<(UnixNanos, Money, Money)> = record
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                row.settled_at,
+                row.outcomes.long.unit,
+                row.outcomes.short.unit,
+            )
+        })
+        .collect();
+    let unit = Money::from("30000 USD");
+    assert_eq!(
+        units,
+        [
+            (UnixNanos::from(ic::at("09:20:00")), unit, unit),
+            (UnixNanos::from(ic::at("10:45:00.010")), unit, unit),
+            (UnixNanos::from(ic::at("11:45:00.010")), unit, unit),
+        ]
+    );
+}
+
+/// A commission of 4M USD an order on the 10M USD balance: the 09:00
+/// decision's four fills, its entries and exits, cost 16M USD, more than
+/// the balance, which an account of the run's P&L would leave at -6M USD,
+/// below any margin. A dataset run's account is frozen, its balance whole
+/// whatever its trades lose, so every later decision opens and settles as
+/// the hand-worked targets do.
+#[test]
+fn a_dataset_runs_account_keeps_its_balance_whatever_its_trades_lose() {
+    let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
+    let catalog = ic::catalog_of(hand_worked_quotes(), from, to);
+    let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
+    let backtest = Backtest {
+        commission: Commission::PerOrder(Money::from("4000000 USD")),
+        ..gold_backtest(catalog.path().to_path_buf())
+    };
+    let (probe, record) = TargetProbe::new(
+        source,
+        bracket(ic::INSTRUMENT_ID, risking("4"), Decimal::new(75, 1)),
+        &backtest,
+    );
+
+    backtest.run_dataset(probe).unwrap();
+
+    let record = record.borrow();
+    assert_eq!(record.denial, None);
+    let settled_at: Vec<UnixNanos> = record.rows.iter().map(|row| row.settled_at).collect();
+    assert_eq!(
+        settled_at,
+        ["09:20:00", "10:45:00.010", "11:45:00.010"].map(|t| UnixNanos::from(ic::at(t)))
+    );
+}
+
+/// IC's gold defined with a minimum of 5 oz: the hand-worked targets'
+/// one ounce is below it, and Nautilus' risk engine, its checks kept in a
+/// dataset run, denies the first entry, which fails the run with its reason
+/// and stops it there, at the 09:00 decision, rather than leave the
+/// decision without its row: no row, and no later decision.
+#[test]
+fn a_size_below_the_instruments_minimum_fails_the_dataset_run_and_stops_it() {
+    let InstrumentAny::CurrencyPair(mut gold) = ic::instrument() else {
+        unreachable!("IC's gold is a currency pair")
+    };
+    gold.min_quantity = Some(Quantity::from(5));
+    let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
+    let catalog = ic::catalog_defining(
+        InstrumentAny::CurrencyPair(gold),
+        hand_worked_quotes(),
+        from,
+        to,
+    );
+    let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
+    let backtest = gold_backtest(catalog.path().to_path_buf());
+    let (probe, record) = TargetProbe::new(
+        source,
+        bracket(ic::INSTRUMENT_ID, risking("4"), Decimal::new(75, 1)),
+        &backtest,
+    );
+
+    backtest.run_dataset(probe).unwrap();
+
+    let record = record.borrow();
     let err = record.denial.clone().unwrap_or_default();
     assert!(
-        err.contains("D0-L-E") && err.contains("INITIAL_MARGIN_EXCEEDS_FREE_BALANCE"),
+        err.contains("D0-L-E") && err.contains("QUANTITY_BELOW_MINIMUM"),
         "{err}"
     );
     assert_eq!(record.decisions, 1);

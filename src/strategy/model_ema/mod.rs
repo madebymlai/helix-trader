@@ -478,7 +478,6 @@ mod tests {
             venue: DatasetVenue {
                 commission: Commission::Rate(Decimal::new(3, 5)),
                 balance: Money::from("10000000 USD"),
-                leverage: Decimal::ONE,
             },
         };
         let mut strategy = ModelEma::new(ModelEmaConfig::load(CONFIG).unwrap(), mode).unwrap();
