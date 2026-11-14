@@ -2272,7 +2272,7 @@ mod tests {
     )]
     #[case::a_filing_s_day(
         "insider_trades", "TEAM", TEAM_INSIDER_TRADES,
-        ("2026-10-14T00:00:00Z", "2026-10-14T23:59:59Z"), ("2026-10-13", "2026-10-13"), 1
+        ("2026-10-14T00:00:00Z", "2026-10-14T23:59:59Z"), ("2026-10-12", "2026-10-13"), 1
     )]
     #[case::an_ex_date(
         "dividends", "AAPL", AAPL_DIVIDENDS,
@@ -2329,6 +2329,29 @@ mod tests {
                 Some(dates.1)
             )
         );
+    }
+
+    /// Atlassian's insider trade filed on 13 October 2026: a Form 3, 4 or 5
+    /// takes the day's filing date up to 22:00 New York time, so it is
+    /// known then, 02:00 UTC on the 14th, not at the day's end in UTC.
+    #[tokio::test]
+    async fn an_insider_trade_is_known_at_22_00_new_york_time_of_its_filing_s_day() {
+        let lse = MockLse::start(vec![
+            Reply::json(REFERENCE_CATALOGUE),
+            Reply::file(TEAM_INSIDER_TRADES),
+        ]);
+        let (client, mut events) = connected(&lse, false).await;
+
+        client
+            .request_data(rows_of(
+                LseRow::data_type("insider_trades", "TEAM"),
+                "2026-10-14T00:00:00Z",
+                "2026-10-14T23:59:59Z",
+            ))
+            .unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        assert_eq!(stamps(&envelope), [utc("2026-10-14T02:00:00Z")]);
     }
 
     /// A row stamped at a time of another column than its key may be keyed

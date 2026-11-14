@@ -4,8 +4,11 @@
 
 use std::fmt;
 
-use jiff::SignedDuration;
-use jiff::civil::Date;
+use jiff::{
+    SignedDuration, Timestamp,
+    civil::{self, Date, Time},
+    tz::TimeZone,
+};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -139,8 +142,15 @@ const DAY: SignedDuration = SignedDuration::from_hours(24);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Stamp {
     /// At the end of its key, a date, 00:00 UTC of the next: a day's close,
-    /// a filing's day, an ex-date or a report date.
+    /// an ex-date or a report date.
     DateEnd,
+    /// At a time of the day of its key, a date, in a time zone: an insider
+    /// trade at 22:00 New York time of its SEC filing's day, the latest a
+    /// Form 3, 4 or 5 is filed on that day (Regulation S-T, Rule 13(a)(4):
+    /// one "submitted by direct transmission commencing on or before 10
+    /// p.m." Eastern time "shall be deemed filed on the same business
+    /// day"), which EDGAR disseminates that evening.
+    DateAt(Time, &'static str),
     /// At the close of its interval of the width, its key the interval's
     /// open, as a candle is.
     Close(SignedDuration),
@@ -205,8 +215,12 @@ const COLLECTIONS: &[(&str, Stamp)] = &[
     ("corporate_bonds", Stamp::DateEnd),
     ("credit_indices", Stamp::DateEnd),
     ("fx_derivatives", Stamp::DateEnd),
-    // Keyed by the day of its publication, an SEC filing's.
-    ("insider_trades", Stamp::DateEnd),
+    // Keyed by the day of its publication, an SEC filing's, a Form 3, 4 or
+    // 5 taking it up to 22:00 Eastern time.
+    (
+        "insider_trades",
+        Stamp::DateAt(civil::time(22, 0, 0, 0), "America/New_York"),
+    ),
     // Keyed by the report date, LSE giving no report time; its figures as
     // LSE holds them today, restated (split-adjusted).
     ("earnings_calendar", Stamp::DateEnd),
@@ -238,18 +252,62 @@ impl Stamp {
         !matches!(self, Self::Close(_) | Self::Key)
     }
 
-    /// How long after its key a row is known, if always as long: then the
-    /// rows known over a window are those keyed over it, that long before.
-    /// `None` for a row known at a time of another column, of which the
-    /// rows known over a window may be keyed any time before it.
-    pub(crate) fn lag(self) -> Option<SignedDuration> {
+    /// When a row keyed `key` is known, if its key alone says: at its
+    /// date's end, at its date's time in its zone, at its interval's close
+    /// or at its key. `None` for a row known at a time of another column,
+    /// which may be any time after its key.
+    pub(crate) fn known(self, key: Timestamp) -> Option<Timestamp> {
         match self {
-            Self::DateEnd => Some(DAY),
-            Self::Close(width) => Some(width),
-            Self::Key => Some(SignedDuration::ZERO),
+            Self::DateEnd => Some(key + DAY),
+            Self::DateAt(time, zone) => Some(
+                key.to_zoned(TimeZone::UTC)
+                    .date()
+                    .to_datetime(time)
+                    .to_zoned(time_zone(zone))
+                    .expect("a key of LSE's, from 1970 to 2262, is a time jiff holds")
+                    .timestamp(),
+            ),
+            Self::Close(width) => Some(key + width),
+            Self::Key => Some(key),
             Self::At(_) | Self::Release | Self::Filing => None,
         }
     }
+
+    /// The latest key of a row known at `at`, if its key alone says when it
+    /// is known (see `known`): the rows known over a window are those keyed
+    /// from the key of its start to the key of its end, a date's at its
+    /// start. `None` for a row known at a time of another column, of which
+    /// the rows known over a window may be keyed any time before it.
+    pub(crate) fn key(self, at: Timestamp) -> Option<Timestamp> {
+        match self {
+            Self::DateEnd => Some(at - DAY),
+            Self::DateAt(time, zone) => {
+                let local = at.to_zoned(time_zone(zone));
+                let date = if local.time() >= time {
+                    local.date()
+                } else {
+                    local
+                        .date()
+                        .yesterday()
+                        .expect("a request's time is past jiff's first day")
+                };
+                Some(
+                    date.to_zoned(TimeZone::UTC)
+                        .expect("a request's date is one jiff holds")
+                        .timestamp(),
+                )
+            }
+            Self::Close(width) => Some(at - width),
+            Self::Key => Some(at),
+            Self::At(_) | Self::Release | Self::Filing => None,
+        }
+    }
+}
+
+/// The time zone `name` of the tz database jiff bundles in the build
+/// (its `tzdb-bundle-always` feature), whatever the host holds.
+fn time_zone(name: &str) -> TimeZone {
+    TimeZone::get(name).unwrap_or_else(|e| panic!("jiff's bundled tz database holds {name}: {e}"))
 }
 
 impl LseRefusal {
@@ -382,7 +440,10 @@ mod tests {
     #[case::hourly("bond_yields_intraday", Stamp::Close(SignedDuration::from_hours(1)))]
     #[case::a_minute("bond_yields_minute", Stamp::Close(SignedDuration::from_mins(1)))]
     #[case::market_values("sovereign_yields", Stamp::DateEnd)]
-    #[case::a_filing_s_day("insider_trades", Stamp::DateEnd)]
+    #[case::a_filing_s_day(
+        "insider_trades",
+        Stamp::DateAt(civil::time(22, 0, 0, 0), "America/New_York")
+    )]
     #[case::a_snapshot("company_profiles", Stamp::Key)]
     #[case::a_release_s_time("economic_calendar", Stamp::At("datetime"))]
     #[case::cot("cot", Stamp::Release)]
@@ -399,24 +460,61 @@ mod tests {
         assert_eq!(Stamp::of_collection("no_such_collection"), None);
     }
 
+    fn at(time: &str) -> Timestamp {
+        time.parse().unwrap()
+    }
+
+    fn insider_trades() -> Stamp {
+        Stamp::of_collection("insider_trades").unwrap()
+    }
+
     /// A row of a date is known a day after its key, one of an interval an
-    /// interval after, a snapshot at its key; one released at another
-    /// column's time any time after.
+    /// interval after, a snapshot at its key, and an insider trade at 22:00
+    /// New York time of its filing's day, 02:00 UTC the next day in summer
+    /// and 03:00 in winter; and the latest key of a row known then is that
+    /// key again. One released at another column's time is known any time
+    /// after its key, which says nothing of it.
     #[rstest]
-    #[case::a_date(Stamp::DateEnd, Some(SignedDuration::from_hours(24)))]
+    #[case::a_date(Stamp::DateEnd, "2026-10-13T00:00:00Z", Some("2026-10-14T00:00:00Z"))]
     #[case::an_interval(
         Stamp::Close(SignedDuration::from_hours(4)),
-        Some(SignedDuration::from_hours(4))
+        "2026-10-13T20:00:00Z",
+        Some("2026-10-14T00:00:00Z")
     )]
-    #[case::a_snapshot(Stamp::Key, Some(SignedDuration::ZERO))]
-    #[case::a_release(Stamp::At("datetime"), None)]
-    #[case::cot(Stamp::Release, None)]
-    #[case::a_filing(Stamp::Filing, None)]
-    fn a_row_is_known_its_lag_after_its_key(
+    #[case::a_snapshot(Stamp::Key, "2026-10-13T05:08:01Z", Some("2026-10-13T05:08:01Z"))]
+    #[case::a_filing_s_day_in_summer(
+        insider_trades(),
+        "2026-10-13T00:00:00Z",
+        Some("2026-10-14T02:00:00Z")
+    )]
+    #[case::a_filing_s_day_in_winter(
+        insider_trades(),
+        "2026-12-01T00:00:00Z",
+        Some("2026-12-02T03:00:00Z")
+    )]
+    #[case::a_release(Stamp::At("datetime"), "2026-10-13T00:00:00Z", None)]
+    #[case::cot(Stamp::Release, "2026-10-13T00:00:00Z", None)]
+    #[case::a_filing(Stamp::Filing, "2026-10-13T00:00:00Z", None)]
+    fn a_row_is_known_when_its_key_says(
         #[case] stamp: Stamp,
-        #[case] lag: Option<SignedDuration>,
+        #[case] key: &str,
+        #[case] known: Option<&str>,
     ) {
-        assert_eq!(stamp.lag(), lag);
+        assert_eq!(stamp.known(at(key)), known.map(at));
+        assert_eq!(
+            stamp.key(known.map_or_else(|| at(key), at)),
+            known.map(|_| at(key))
+        );
+    }
+
+    /// Filed on 13 October 2026, known at 02:00 UTC on the 14th: a second
+    /// before, the latest filing day known is the 12th.
+    #[rstest]
+    fn an_insider_trade_is_not_known_before_22_00_new_york_time_of_its_filing_s_day() {
+        assert_eq!(
+            insider_trades().key(at("2026-10-14T01:59:59Z")),
+            Some(at("2026-10-12T00:00:00Z"))
+        );
     }
 
     #[test]

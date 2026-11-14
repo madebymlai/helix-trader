@@ -6,16 +6,17 @@
 //! rows known over a window, and whether LSE may not have loaded them all
 //! yet.
 //!
-//! A row known a fixed time after its key, the column LSE's export selects
-//! rows by (`Stamp::lag`), is asked by the dates of the keys of the rows
-//! known in the window; one known at a time of another column, which may
-//! be any time after its key, is asked of the whole series up to the
-//! window's last date, so that none known in the window is missed. The
-//! rows outside the window are left out. LSE stores a date the morning
-//! after it (see `export`): the window's last key date may not be loaded,
-//! the current UTC day, or the day before while LSE holds no row of it
-//! (`export::loaded`). A release LSE has not filled yet is a row of no
-//! actual: a window of releases holding one, past, is not loaded either.
+//! A row known at a time its key, the column LSE's export selects rows by,
+//! says (`Stamp::known`), is asked by the dates of the keys of the rows
+//! known in the window (`Stamp::key`); one known at a time of another
+//! column, which may be any time after its key, is asked of the whole
+//! series up to the window's last date, so that none known in the window
+//! is missed. The rows outside the window are left out. LSE stores a date
+//! the morning after it (see `export`): the window's last key date may not
+//! be loaded, the current UTC day, or the day before while LSE holds no row
+//! of it (`export::loaded`). A release LSE has not filled yet is a row of
+//! no actual: a window of releases holding one, past, is not loaded
+//! either.
 
 use std::fmt;
 
@@ -298,13 +299,13 @@ pub(crate) async fn fetch(
         );
     }
     // The window's last key date, the one LSE may not have loaded yet.
-    let lag = stamp.lag().unwrap_or(SignedDuration::ZERO);
-    let last = end - lag;
+    let last = stamp.key(end).unwrap_or(end);
     let rows_of_last = parsed
         .rows
         .iter()
         .any(|keyed| midnight(keyed.key) == midnight(last));
-    let mut unloaded_from = (!loaded(last, rows_of_last, now)).then(|| midnight(last) + lag);
+    let mut unloaded_from = (!loaded(last, rows_of_last, now))
+        .then(|| stamp.known(midnight(last)).unwrap_or(midnight(last)));
     let window = UnixNanos::from(start)..=UnixNanos::from(end);
     let mut rows: Vec<LseRow> = parsed
         .rows
@@ -350,16 +351,17 @@ fn read(
 }
 
 /// The dates of the keys of the rows stamped as `stamp` known over
-/// `[start, end]`: those of the window, `stamp`'s lag before, or, for rows
-/// known at another column's time, every date up to the window's last.
+/// `[start, end]`: from the key of its start to the key of its end (see
+/// `Stamp::key`), or, for rows known at another column's time, every date
+/// up to the window's last.
 fn dates(stamp: Stamp, start: Timestamp, end: Timestamp) -> Dates {
     let date = |at: Timestamp| at.to_zoned(TimeZone::UTC).date();
-    match stamp.lag() {
-        Some(lag) => Dates {
-            from: Some(date(start - lag)),
-            to: date(end - lag),
+    match (stamp.key(start), stamp.key(end)) {
+        (Some(from), Some(to)) => Dates {
+            from: Some(date(from)),
+            to: date(to),
         },
-        None => Dates {
+        _ => Dates {
             from: None,
             to: date(end),
         },

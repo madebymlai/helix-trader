@@ -625,11 +625,16 @@ fn known_times(
     keys: &[UnixNanos],
     stamp: Stamp,
 ) -> anyhow::Result<Vec<Result<UnixNanos, String>>> {
-    let after = |lag: SignedDuration| keys.iter().map(|&key| later(key, lag).map(Ok)).collect();
     match stamp {
-        Stamp::DateEnd => after(DAY),
-        Stamp::Close(width) => after(width),
-        Stamp::Key => after(SignedDuration::ZERO),
+        Stamp::DateEnd | Stamp::DateAt(..) | Stamp::Close(_) | Stamp::Key => Ok(keys
+            .iter()
+            .map(|&key| {
+                let known = stamp
+                    .known(Timestamp::from(key))
+                    .expect("a row of the stamp is known when its key says");
+                Ok(UnixNanos::from(known))
+            })
+            .collect()),
         Stamp::At(column) => Ok(column_times(batch, column, false)?
             .into_iter()
             .map(|time| time.ok_or_else(|| format!("no {column}")))
@@ -1195,11 +1200,10 @@ mod tests {
         );
     }
 
-    /// Keyed by a date: an insider trade by its filing's, earnings by the
-    /// report date, a dividend by its ex-date and a split by its effective
-    /// date; each known at its date's end.
+    /// Keyed by a date: earnings by the report date, a dividend by its
+    /// ex-date and a split by its effective date; each known at its date's
+    /// end.
     #[rstest]
-    #[case::insider_trades(TEAM_INSIDER_TRADES, "insider_trades", "TEAM", "filing_date", &["2026-10-14"])]
     #[case::earnings_calendar(AAPL_EARNINGS_CALENDAR, "earnings_calendar", "AAPL", "date", &["2026-01-30", "2026-05-01", "2026-07-31", "2026-10-30", "2026-11-03"])]
     #[case::dividends(AAPL_DIVIDENDS, "dividends", "AAPL", "effective_date", &["2026-02-10", "2026-05-12", "2026-08-11", "2026-11-13"])]
     #[case::stock_splits(AAPL_STOCK_SPLITS, "stock_splits", "AAPL", "effective_date", &["2014-06-10", "2020-09-01"])]
@@ -1218,6 +1222,25 @@ mod tests {
             .map(|date| utc(&format!("{date}T00:00:00")))
             .collect();
         assert_eq!(stamped, expected);
+    }
+
+    /// Atlassian's insider trade filed on 13 October 2026, keyed by its
+    /// filing's day: known at 22:00 New York time that day, 02:00 UTC on the
+    /// 14th, New York keeping summer time.
+    #[rstest]
+    fn an_insider_trade_is_stamped_at_22_00_new_york_time_of_its_filing_s_day() {
+        let stamp = Stamp::of_collection("insider_trades").unwrap();
+
+        let rows = rows_of(
+            TEAM_INSIDER_TRADES,
+            "insider_trades",
+            "TEAM",
+            "filing_date",
+            stamp,
+        );
+
+        let stamped: Vec<_> = rows.iter().map(|row| row.ts_init).collect();
+        assert_eq!(stamped, [utc("2026-10-14T02:00:00")]);
     }
 
     /// A company's snapshot, updated on 13 October 2026 at 05:08:01 UTC.
