@@ -18,7 +18,10 @@ use nautilus_model::{
 };
 
 use super::Transition;
-use crate::strategy::{TickSeries, warmup::subscription_params};
+use crate::{
+    strategy::{TickSeries, warmup::subscription_params},
+    venues,
+};
 
 /// The prefix of an instrument's roll alert, followed by its id.
 const ROLL_ALERT: &str = "ROLL:";
@@ -63,10 +66,12 @@ enum Loading {
     Registered,
     /// A live node loads at its start the contract standing for each
     /// instrument; the roller requests each post contract when it sets the
-    /// alert of its roll, past the catalogs to the venue's data client,
-    /// which loads it into its instrument provider as it answers (IB
-    /// subscribes only to what its provider holds), and the data engine
-    /// adds it to the cache.
+    /// alert of its roll, past the catalogs to the data client the venue's
+    /// definitions are asked of live (`venues::live_definitions_client`: its
+    /// broker's, IB's for GLBX, whose live data is LSE's, which publishes no
+    /// definitions), which loads it into its instrument provider as it
+    /// answers (IB subscribes only to what its provider holds), and the
+    /// data engine adds it to the cache.
     Requested,
 }
 
@@ -172,7 +177,8 @@ impl Roller {
         set_alert(actor, instrument_id, next)?;
         if self.loading == Loading::Requested {
             let params = Params::new([(FORCE_INSTRUMENT_UPDATE.to_string(), true.into())].into());
-            actor.request_instrument(next.post, None, None, None, Some(params))?;
+            let client = venues::live_definitions_client(next.post.venue);
+            actor.request_instrument(next.post, None, None, Some(client), Some(params))?;
         }
         Ok(())
     }
@@ -314,7 +320,7 @@ mod tests {
         timer::TimeEventCallback,
     };
     use nautilus_core::UnixNanos;
-    use nautilus_model::identifiers::{StrategyId, TraderId};
+    use nautilus_model::identifiers::{ClientId, StrategyId, TraderId};
     use nautilus_portfolio::portfolio::Portfolio;
     use nautilus_trading::{
         nautilus_strategy,
@@ -337,9 +343,9 @@ mod tests {
     enum Sent {
         Subscribe(InstrumentId),
         Unsubscribe(InstrumentId),
-        /// A request for the instrument, and whether it skips the catalog
-        /// to reach the venue's client.
-        Request(InstrumentId, bool),
+        /// A request for the instrument, whether it skips the catalog, and
+        /// the client it names.
+        Request(InstrumentId, bool, Option<ClientId>),
     }
 
     fn id(id: &str) -> InstrumentId {
@@ -410,7 +416,11 @@ mod tests {
                         .as_ref()
                         .and_then(|params| params.get_bool("force_instrument_update"))
                         == Some(true);
-                    Sent::Request(only(Some(&request.instrument_ids)), forced)
+                    Sent::Request(
+                        only(Some(&request.instrument_ids)),
+                        forced,
+                        request.client_id,
+                    )
                 }
                 other => panic!("unexpected {other:?}"),
             })
@@ -446,6 +456,9 @@ mod tests {
     /// GC rolls into GCG27 at 00:00 UTC on 2026-11-26 and into GCJ27 on
     /// 2027-01-27, two business days before the last business day of the
     /// month before delivery (`calendar.toml`); GCJ27 rolls into GCM27.
+    /// Each post contract is asked of GLBX's broker's client, IB's, which
+    /// resolves GLBX contracts, not of LSE's, which streams GLBX's data and
+    /// publishes no definitions.
     #[test]
     fn a_live_roller_rolls_twice_requesting_each_post_contract_before_its_roll() {
         let (sent, rolls) = run(
@@ -467,13 +480,13 @@ mod tests {
             sent,
             [
                 Sent::Subscribe(id("GCZ26.GLBX")),
-                Sent::Request(id("GCG27.GLBX"), true),
+                Sent::Request(id("GCG27.GLBX"), true, Some(ClientId::from("IB"))),
                 Sent::Unsubscribe(id("GCZ26.GLBX")),
                 Sent::Subscribe(id("GCG27.GLBX")),
-                Sent::Request(id("GCJ27.GLBX"), true),
+                Sent::Request(id("GCJ27.GLBX"), true, Some(ClientId::from("IB"))),
                 Sent::Unsubscribe(id("GCG27.GLBX")),
                 Sent::Subscribe(id("GCJ27.GLBX")),
-                Sent::Request(id("GCM27.GLBX"), true),
+                Sent::Request(id("GCM27.GLBX"), true, Some(ClientId::from("IB"))),
             ]
         );
     }

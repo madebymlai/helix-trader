@@ -1,0 +1,140 @@
+//! Nautilus' data tester on LSE: a live node with the LSE data client and
+//! Nautilus' `DataTester`, run against LSE itself, for the cases of
+//! Nautilus' data testing spec (`docs/developer_guide/spec_data_testing.md`)
+//! the adapter supports: TC-D01, the venue's instruments, which the node's
+//! catalog answers, LSE publishing no definitions; TC-D21, historical
+//! quotes, of GCZ6 of 2026, `GCZ26.GLBX`, CME Globex's Level 1 (the derived
+//! series' fail with LSE's refusal, LSE serving their past as timeframes
+//! alone); TC-D31, historical trades, of gold futures and of GCZ26.GLBX
+//! (gold spot's fails with LSE's refusal, a commodity, of which LSE stores
+//! no trades); TC-D41, historical bars, gold spot's 1-minute candles; and,
+//! by a second tester, TC-D20, gold futures' quotes, which the client
+//! streams on data-ws, and TC-D70, their subscription ended on stop; and,
+//! by a third, TC-D20 and TC-D30, GCZ26.GLBX's quotes and trades, which the
+//! client streams on LSE's CME stream (its opening quote alone while CME is
+//! closed), and TC-D70. The adapter streams no other kind, so every other
+//! subscription case is skipped.
+//!
+//! LSE publishes no definitions: the tester writes the crate's test
+//! definitions into a temporary catalog the node reads, the two series' as
+//! one written by hand would be, GCZ26.GLBX's as Databento gives it. The window is a past hour, as LSE's
+//! history ends at the previous session's close. Edit the constants below
+//! to change them. The node runs until interrupted (Ctrl+C).
+//!
+//! Run with: `cargo run -p lse --features test-support --example lse-data-tester`
+//!
+//! Required credential environment variables, from the environment or
+//! `.env`:
+//! - `LSE_API_KEY`, for the derived series
+//! - `LSE_CME_API_KEY`, a CME Group plan's key, for GCZ26.GLBX
+
+use lse::{
+    LseDataClientConfig, LseDataClientFactory,
+    testing::{GCZ26, GOLD_FUTURES, GOLD_SPOT, gcz26, gold_futures, gold_spot},
+};
+use nautilus_common::{actor::DataActorConfig, enums::Environment, factories::DataClientFactory};
+use nautilus_live::{builder::LiveNodeBuilder, config::LiveNodeConfig};
+use nautilus_model::{
+    data::BarType,
+    identifiers::{ActorId, ClientId, InstrumentId, TraderId},
+};
+use nautilus_persistence::{
+    backend::parquet::catalog::ParquetDataCatalog, config::DataCatalogConfig,
+};
+use nautilus_testkit::testers::{DataTester, DataTesterConfig};
+
+const TRADER_ID: &str = "TESTER-001";
+const NODE_NAME: &str = "LSE-TESTER-001";
+/// Gold spot's bars, a series LSE serves only as candles.
+const BAR_TYPE: &str = "XAU/USD-COMMODITIES.LSEDGE-1-MINUTE-LAST-EXTERNAL";
+/// An hour of Thursday 12 November 2026.
+const REQUEST_START: &str = "2026-11-12T10:00:00Z";
+const REQUEST_END: &str = "2026-11-12T11:00:00Z";
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    dotenvy::dotenv().ok();
+
+    let dir = tempfile::tempdir()?;
+    ParquetDataCatalog::new(dir.path(), None, None, None, None).write_instruments(vec![
+        gold_futures(),
+        gold_spot(),
+        gcz26(),
+    ])?;
+    let catalog_path = dir.path().to_str().ok_or("a catalog path in UTF-8")?;
+
+    let config = LiveNodeConfig {
+        environment: Environment::Live,
+        trader_id: TraderId::from(TRADER_ID),
+        load_state: false,
+        save_state: false,
+        catalogs: vec![DataCatalogConfig::new(catalog_path.to_owned(), None, None)],
+        ..Default::default()
+    };
+    let factory = LseDataClientFactory::new();
+    let client_id = ClientId::from(factory.name());
+    let mut node = LiveNodeBuilder::from_config(config)?
+        .with_name(NODE_NAME)
+        .with_delay_post_stop_secs(2)
+        .add_data_client(
+            None,
+            Box::new(factory),
+            Box::new(
+                LseDataClientConfig::builder()
+                    .stream_ids(vec![
+                        InstrumentId::from(GOLD_FUTURES),
+                        InstrumentId::from(GCZ26),
+                    ])
+                    .build(),
+            ),
+        )?
+        .build()?;
+
+    let tester_config = DataTesterConfig::builder()
+        .base(tester("DATA-TESTER-HISTORY"))
+        .client_id(client_id)
+        .instrument_ids(vec![
+            InstrumentId::from(GOLD_FUTURES),
+            InstrumentId::from(GOLD_SPOT),
+            InstrumentId::from(GCZ26),
+        ])
+        .bar_types(vec![BarType::from(BAR_TYPE)])
+        .request_instruments(true)
+        .request_quotes(true)
+        .request_trades(true)
+        .request_bars(true)
+        .request_start(REQUEST_START.parse()?)
+        .request_end(REQUEST_END.parse()?)
+        .build()?;
+
+    let quotes_config = DataTesterConfig::builder()
+        .base(tester("DATA-TESTER-QUOTES"))
+        .client_id(client_id)
+        .instrument_ids(vec![InstrumentId::from(GOLD_FUTURES)])
+        .subscribe_quotes(true)
+        .can_unsubscribe(true)
+        .build()?;
+
+    let cme_config = DataTesterConfig::builder()
+        .base(tester("DATA-TESTER-CME"))
+        .client_id(client_id)
+        .instrument_ids(vec![InstrumentId::from(GCZ26)])
+        .subscribe_quotes(true)
+        .subscribe_trades(true)
+        .can_unsubscribe(true)
+        .build()?;
+    node.add_actor(DataTester::new(tester_config))?;
+    node.add_actor(DataTester::new(quotes_config))?;
+    node.add_actor(DataTester::new(cme_config))?;
+    node.run().await?;
+
+    Ok(())
+}
+
+/// The config of the tester `actor_id`, one of the node's three.
+fn tester(actor_id: &str) -> DataActorConfig {
+    DataActorConfig {
+        actor_id: Some(ActorId::from(actor_id)),
+        ..Default::default()
+    }
+}

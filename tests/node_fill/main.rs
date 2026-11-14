@@ -1,11 +1,11 @@
 //! fill-catalog's fill through a Nautilus node, at its seam: what the
 //! catalog lacks (`catalog::missing`), filled by a `NodeFill` whose node holds
-//! a fake data client answering as Databento's does (a completed
-//! `DataResponseEnvelope`, `RequestFailed` on an error), and the catalog.
-//! The data engine writes each answer back; the tests read the catalog,
-//! what the client was asked, and what the fill returns. Hermetic: no
-//! venue. Each test runs its nodes on its own thread, as Nautilus' message
-//! bus is thread-local.
+//! fake data clients answering as Databento's does (a completed
+//! `DataResponseEnvelope`, `RequestFailed` on an error), each asked by the
+//! requests naming it, and the catalog. The data engine writes each answer
+//! back; the tests read the catalog, what each client was asked and by which
+//! name, and what the fill returns. Hermetic: no venue. Each test runs its
+//! nodes on its own thread, as Nautilus' message bus is thread-local.
 //!
 //! ```sh
 //! cargo test --test node_fill
@@ -23,7 +23,7 @@ use std::{
 };
 
 use helix_trader::{
-    catalog::{FillData, NodeClient, NodeFill, missing},
+    catalog::{FillData, FillRequest, NodeClient, NodeFill, missing},
     rolls::Slice,
     strategy::{DataRequirements, SeriesSlice, TickSeries},
 };
@@ -45,7 +45,6 @@ use nautilus_common::{
     },
 };
 use nautilus_core::{UnixNanos, datetime::datetime_to_unix_nanos};
-use nautilus_live::config::RoutingConfig;
 use nautilus_model::{
     data::{
         Bar, BarType, BookOrder, FundingRateUpdate, NautilusDataType, OrderBookDelta,
@@ -174,6 +173,8 @@ struct FakeVenue {
     answer: Answer,
     /// Each request: what, from, to (ns).
     asked: Vec<(FillData, u64, u64)>,
+    /// The client each request named, in the same order.
+    named: Vec<Option<ClientId>>,
     /// Requests asked and not answered yet, and the most at once.
     in_flight: Arc<AtomicUsize>,
     most_in_flight: usize,
@@ -185,6 +186,7 @@ impl FakeVenue {
             book: book(),
             answer,
             asked: vec![],
+            named: vec![],
             in_flight: Arc::default(),
             most_in_flight: 0,
         }))
@@ -200,8 +202,9 @@ impl ClientConfig for FakeConfig {
     }
 }
 
+/// The factory of a client of the fake venue, named as given.
 #[derive(Debug)]
-struct FakeFactory(Rc<RefCell<FakeVenue>>);
+struct FakeFactory(Rc<RefCell<FakeVenue>>, &'static str);
 
 impl DataClientFactory for FakeFactory {
     fn create(
@@ -220,7 +223,7 @@ impl DataClientFactory for FakeFactory {
     }
 
     fn name(&self) -> &str {
-        "FAKE"
+        self.1
     }
 
     fn config_type(&self) -> &str {
@@ -228,8 +231,8 @@ impl DataClientFactory for FakeFactory {
     }
 }
 
-/// A data client answering as the fake venue says; on no venue, so
-/// routed by the node's routing, as Databento's.
+/// A data client answering as the fake venue says; on no venue, as
+/// Databento's, so asked only by the requests naming it.
 struct FakeClient {
     id: ClientId,
     venue: Rc<RefCell<FakeVenue>>,
@@ -238,17 +241,18 @@ struct FakeClient {
 }
 
 impl FakeClient {
-    /// Records the request of `data` over `[start, end]`, then answers it
-    /// with `response` as the venue says.
+    /// Records the request of `data` over `[start, end]` naming
+    /// `client_id`, then answers it with `response` as the venue says.
     fn answer(
         &self,
         data: FillData,
-        request_id: nautilus_core::UUID4,
+        (request_id, client_id): (nautilus_core::UUID4, Option<ClientId>),
         (start, end): (u64, u64),
         response: DataResponse,
     ) -> anyhow::Result<()> {
         let mut venue = self.venue.borrow_mut();
         venue.asked.push((data, start, end));
+        venue.named.push(client_id);
         let in_flight = venue.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
         venue.most_in_flight = venue.most_in_flight.max(in_flight);
         let done = Arc::clone(&venue.in_flight);
@@ -332,10 +336,11 @@ impl DataClient for FakeClient {
     /// The definition, at once, whatever the venue's answer to data.
     fn request_instrument(&self, request: RequestInstrument) -> anyhow::Result<()> {
         let (start, end) = window(request.start, request.end);
-        self.venue
-            .borrow_mut()
-            .asked
-            .push((FillData::Instrument, start, end));
+        {
+            let mut venue = self.venue.borrow_mut();
+            venue.asked.push((FillData::Instrument, start, end));
+            venue.named.push(request.client_id);
+        }
         let response = InstrumentResponse::new(
             request.request_id,
             self.id,
@@ -372,7 +377,12 @@ impl DataClient for FakeClient {
             UnixNanos::from(end),
             request.params.clone(),
         ));
-        self.answer(FillData::Depth, request.request_id, (start, end), response)
+        self.answer(
+            FillData::Depth,
+            (request.request_id, request.client_id),
+            (start, end),
+            response,
+        )
     }
 
     /// One delta, on Monday at 10:00, if the window holds it.
@@ -392,7 +402,12 @@ impl DataClient for FakeClient {
             UnixNanos::from(end),
             request.params.clone(),
         ));
-        self.answer(FillData::Deltas, request.request_id, (start, end), response)
+        self.answer(
+            FillData::Deltas,
+            (request.request_id, request.client_id),
+            (start, end),
+            response,
+        )
     }
 
     fn request_trades(&self, request: RequestTrades) -> anyhow::Result<()> {
@@ -412,7 +427,12 @@ impl DataClient for FakeClient {
             UnixNanos::from(end),
             request.params.clone(),
         ));
-        self.answer(FillData::Trades, request.request_id, (start, end), response)
+        self.answer(
+            FillData::Trades,
+            (request.request_id, request.client_id),
+            (start, end),
+            response,
+        )
     }
 
     /// One bar, closing on Friday at 10:00, if the window holds it.
@@ -435,7 +455,7 @@ impl DataClient for FakeClient {
         ));
         self.answer(
             FillData::Bars(bar_type),
-            request.request_id,
+            (request.request_id, request.client_id),
             (start, end),
             response,
         )
@@ -460,7 +480,7 @@ impl DataClient for FakeClient {
         ));
         self.answer(
             FillData::Funding,
-            request.request_id,
+            (request.request_id, request.client_id),
             (start, end),
             response,
         )
@@ -475,6 +495,7 @@ fn reading(data: NautilusDataType) -> DataRequirements {
             data,
             instrument_id: InstrumentId::from(GCZ26),
         }],
+        custom: vec![],
         warmup: SignedDuration::ZERO,
     }
 }
@@ -504,23 +525,25 @@ fn fill_slices(
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     let requests = missing(&catalog, slices)?;
     let mut node = NodeFill::new();
-    node.add(
-        NodeClient {
-            factory: Box::new(FakeFactory(Rc::clone(venue))),
-            config: Box::new(FakeConfig),
-            routing: RoutingConfig {
-                default: false,
-                venues: Some(vec!["GLBX".to_string()]),
-            },
-        },
-        &requests,
-        |_| period,
-    );
+    node.add(fake_client(venue, "FAKE"), &requests, |_| period);
+    run(node, dir)
+}
+
+/// Runs `node` into the catalog in `dir`.
+fn run(node: NodeFill, dir: &Path) -> anyhow::Result<()> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap()
         .block_on(node.run(dir))
+}
+
+/// A client of the fake `venue` named `name`, on no venue.
+fn fake_client(venue: &Rc<RefCell<FakeVenue>>, name: &'static str) -> NodeClient {
+    NodeClient {
+        factory: Box::new(FakeFactory(Rc::clone(venue), name)),
+        config: Box::new(FakeConfig),
+    }
 }
 
 fn depth_intervals(dir: &Path) -> Vec<(u64, u64)> {
@@ -808,6 +831,49 @@ fn a_failed_request_fails_the_fill_naming_it_and_writes_nothing() {
         assert_eq!(venue.borrow().asked.len(), 2, "{answer:?}");
         assert_eq!(depth_intervals(dir.path()), [], "{answer:?}");
     }
+}
+
+/// GCZ26's definition asked of one client and its book of another, both on
+/// no venue and with no route, as two sources of one venue share a fill's
+/// node: each request names its client, and that client answers it.
+#[test]
+fn each_request_is_answered_by_the_client_it_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+    let definitions = FakeVenue::new(Answer::Data);
+    let history = FakeVenue::new(Answer::Data);
+    let slices = reading(NautilusDataType::OrderBookDepth).slices(ts(FRI), end_before(SUN));
+    let (definition, book): (Vec<FillRequest>, Vec<FillRequest>) = missing(&catalog, &slices)
+        .unwrap()
+        .into_iter()
+        .partition(|request| request.data == FillData::Instrument);
+    let mut node = NodeFill::new();
+    node.add(
+        fake_client(&definitions, "DEFINITIONS"),
+        &definition,
+        |_| DAY,
+    );
+    node.add(fake_client(&history, "HISTORY"), &book, |_| DAY);
+
+    run(node, dir.path()).unwrap();
+
+    assert_eq!(
+        definitions.borrow().asked,
+        [(FillData::Instrument, ns(FRI), before(SUN))]
+    );
+    assert_eq!(
+        definitions.borrow().named,
+        [Some(ClientId::from("DEFINITIONS"))]
+    );
+    assert_eq!(
+        history.borrow().asked,
+        [
+            (FillData::Depth, ns(FRI), ns(SAT)),
+            (FillData::Depth, after(SAT), before(SUN)),
+        ]
+    );
+    assert_eq!(history.borrow().named, [Some(ClientId::from("HISTORY")); 2]);
+    assert_eq!(stored_book(dir.path()), [ns("2025-10-17T10:00:00Z")]);
 }
 
 #[test]

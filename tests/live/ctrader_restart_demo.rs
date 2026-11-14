@@ -151,6 +151,7 @@ async fn phase() {
             .map(|id| BarType::from(format!("{id}-1-MINUTE-MID-INTERNAL").as_str()))
             .to_vec(),
         ticks: vec![],
+        custom: vec![],
         warmup: SignedDuration::from_mins(2),
     };
     // An empty catalog of its own: the venue answers the whole warmup.

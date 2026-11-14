@@ -45,7 +45,7 @@ use rust_decimal::Decimal;
 use serde::Deserialize;
 
 use super::selection;
-use crate::live::node::Clients;
+use crate::live::node::{Clients, ExecClient};
 
 /// The variable naming the OKX environment of the run, `demo` or `live`.
 const ENVIRONMENT_VAR: &str = "OKX_ENVIRONMENT";
@@ -145,8 +145,12 @@ impl OkxClients {
         Clients {
             data_factory,
             data_config,
-            exec: Some((exec_factory, exec_config)),
-            routing: RoutingConfig::default(),
+            data_routing: RoutingConfig::default(),
+            exec: Some(ExecClient {
+                factory: exec_factory,
+                config: exec_config,
+                routing: RoutingConfig::default(),
+            }),
         }
     }
 }
@@ -338,7 +342,7 @@ mod tests {
     use nautilus_okx::OKXInstrumentType;
 
     use super::*;
-    use crate::venues::{LiveBroker, tests::created_oms_type};
+    use crate::venues::{Broker, tests::created_oms_type};
 
     fn xperp() -> InstrumentId {
         InstrumentId::from("BTC-USD_UM_XPERP-310328.OKX")
@@ -363,7 +367,7 @@ mod tests {
 
             let created = created_oms_type(clients.into_node_clients());
 
-            assert_eq!(created, LiveBroker::Okx.oms_type(), "{ids:?}");
+            assert_eq!(created, Broker::Okx.oms_type(), "{ids:?}");
         }
     }
 

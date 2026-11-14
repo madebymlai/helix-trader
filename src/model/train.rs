@@ -998,6 +998,7 @@ mod tests {
                 data: nautilus_model::data::NautilusDataType::QuoteTick,
                 instrument_id: InstrumentId::from(AUD),
             }],
+            custom: vec![],
             warmup: SignedDuration::ZERO,
         }
     }

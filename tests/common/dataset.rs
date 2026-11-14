@@ -328,6 +328,7 @@ pub fn requirements() -> DataRequirements {
             data: NautilusDataType::QuoteTick,
             instrument_id: InstrumentId::from(ic::INSTRUMENT_ID),
         }],
+        custom: vec![],
         warmup: SignedDuration::ZERO,
     }
 }
@@ -349,6 +350,7 @@ pub fn backtest(catalog: &Path, from: Timestamp, to: Timestamp) -> Backtest {
         catalog: catalog.to_path_buf(),
         bar_types: vec![],
         ticks: requirements().ticks,
+        custom: vec![],
         start: from,
         end: to,
         commission: venue().commission,

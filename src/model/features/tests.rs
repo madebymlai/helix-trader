@@ -814,6 +814,7 @@ fn width_of(distance: Distance) -> Rc<BracketWidth> {
             data: nautilus_model::data::NautilusDataType::QuoteTick,
             instrument_id: id(AUD),
         }],
+        custom: vec![],
         warmup: SignedDuration::from_hours(24),
     };
     let rule = DecisionRule::Every(SignedDuration::from_mins(15));

@@ -377,6 +377,7 @@ fn reading_quotes(warmup: SignedDuration) -> DataRequirements {
             data: NautilusDataType::QuoteTick,
             instrument_id: InstrumentId::from(ic::INSTRUMENT_ID),
         }],
+        custom: vec![],
         warmup,
     }
 }

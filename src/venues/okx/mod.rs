@@ -13,7 +13,6 @@
 use anyhow::{Context, bail, ensure};
 use jiff::SignedDuration;
 use nautilus_core::{UnixNanos, time::get_atomic_clock_realtime};
-use nautilus_live::config::RoutingConfig;
 use nautilus_model::{
     data::NautilusDataType,
     identifiers::InstrumentId,
@@ -36,7 +35,7 @@ use nautilus_okx::{
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use rust_decimal::Decimal;
 
-use super::HistorySource;
+use super::{HistorySource, Row};
 use crate::{
     catalog::{FillData, FillRequest, NodeClient, missing},
     strategy::SeriesSlice,
@@ -168,8 +167,7 @@ pub fn period(data: FillData) -> SignedDuration {
 
 /// The node's data client: Nautilus' OKX data client loading the instrument
 /// types and families of `instrument_ids` (see `selection`), on OKX's
-/// public API with no key. OKX is one venue, so Nautilus routes its
-/// requests to it without a route of ours.
+/// public API with no key.
 ///
 /// # Errors
 ///
@@ -183,7 +181,6 @@ pub fn node_client(instrument_ids: &[InstrumentId]) -> anyhow::Result<NodeClient
             instrument_families: Some(families),
             ..Default::default()
         }),
-        routing: RoutingConfig::default(),
     })
 }
 
@@ -245,7 +242,7 @@ impl Contract {
     /// The contract of `id`; an error if it is not an OKX swap or future.
     fn of(id: InstrumentId) -> anyhow::Result<Self> {
         ensure!(
-            HistorySource::of(id) == HistorySource::Okx,
+            Row::of(id.venue).history == HistorySource::Okx,
             "{id} is not on {}",
             *OKX_VENUE
         );
@@ -390,6 +387,7 @@ mod tests {
                 BarType::from("BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@5-MINUTE-EXTERNAL"),
             ],
             ticks: vec![],
+            custom: vec![],
             warmup: SignedDuration::ZERO,
         }
         .slices(at(from), at(to))
@@ -445,6 +443,7 @@ mod tests {
                         ),
                     ],
                     ticks: vec![],
+                    custom: vec![],
                     warmup: SignedDuration::ZERO,
                 }
                 .slices(at("2026-10-01T00:00:00Z"), at("2026-10-08T00:00:00Z")),

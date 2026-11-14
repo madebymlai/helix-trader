@@ -1,0 +1,1 @@
+{"type":"error","code":"TOO_MANY_CONNECTIONS","message":"Max 1 concurrent websocket connection(s) for this API key; 1 already open from this same address. Close it and retry.","max_connections":1,"open_connections":1}

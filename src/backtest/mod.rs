@@ -21,7 +21,7 @@ use nautilus_common::{
     actor::DataActorNative, component::Component, logging::logger::LoggerConfig,
 };
 use nautilus_model::{
-    data::{BarType, NautilusDataType},
+    data::{BarType, DataType, NautilusDataType},
     enums::{ContinuousFutureAdjustmentType, OmsType},
     identifiers::{InstrumentId, Venue},
     instruments::{Instrument, InstrumentAny},
@@ -65,12 +65,21 @@ pub struct Backtest {
     /// contracts' over their slices (see `series`). Their instruments
     /// are read too, each a simulated venue of the run as well.
     pub ticks: Vec<TickSeries>,
+    /// The custom data of no instrument the strategy reads (see
+    /// `strategy::DataRequirements::custom`): each series replayed over the
+    /// window, beside the others, each row when it is known (`lse::LseRow`:
+    /// a date's at its end). The run registers the types the venues'
+    /// sources serve with Nautilus, which decodes custom data by its type's
+    /// name (`venues::register_custom_data`).
+    pub custom: Vec<DataType>,
     pub start: Timestamp,
     pub end: Timestamp,
     /// The commission, which the fee model of each venue is made from
     /// (`Commission::fee_model`).
     pub commission: Commission,
-    /// The starting balance of the account of each venue.
+    /// The starting balance of the account of each venue a broker trades;
+    /// a venue only read, which no broker trades (`venues::has_broker`),
+    /// starts with nothing in its currency, so that it adds no money.
     pub balance: Money,
     /// The leverage of each venue's account on every instrument, positive:
     /// a position locks its value / leverage times the instrument's margin
@@ -161,13 +170,14 @@ impl Backtest {
         self.requirements().instrument_ids().into_iter().collect()
     }
 
-    /// The bar types and the ticks as data requirements, which expand them
-    /// into the contracts standing for their instruments. A backtest
-    /// requests no warmup: none.
+    /// The bar types, the ticks and the custom data as data requirements,
+    /// which expand the first two into the contracts standing for their
+    /// instruments. A backtest requests no warmup: none.
     fn requirements(&self) -> DataRequirements {
         DataRequirements {
             bar_types: self.bar_types.clone(),
             ticks: self.ticks.clone(),
+            custom: self.custom.clone(),
             warmup: SignedDuration::ZERO,
         }
     }
@@ -224,6 +234,7 @@ impl Backtest {
             DataRequirements {
                 bar_types,
                 ticks,
+                custom: vec![],
                 warmup: SignedDuration::ZERO,
             }
             .slices(from, to)
@@ -360,6 +371,7 @@ mod tests {
             start: "2026-09-01T00:00:00Z".parse().unwrap(),
             end: "2026-09-30T00:00:00Z".parse().unwrap(),
             ticks: vec![],
+            custom: vec![],
             commission: Commission::Rate(Decimal::ZERO),
             balance: Money::from("10000 USDT"),
             leverage: Decimal::ONE,

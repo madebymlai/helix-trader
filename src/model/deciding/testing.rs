@@ -205,6 +205,7 @@ pub fn requirements() -> DataRequirements {
             data: NautilusDataType::QuoteTick,
             instrument_id: InstrumentId::from(AUD),
         }],
+        custom: vec![],
         warmup: SignedDuration::ZERO,
     }
 }

@@ -52,9 +52,9 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Fills the Nautilus catalog with the strategy's history from OKX
-    /// (OKX instruments), Databento (GLBX instruments), cTrader (IC
-    /// Markets' and Pepperstone's instruments) or Interactive Brokers (the
-    /// others).
+    /// (OKX instruments), LSE (LSEDGE instruments, and GLBX, XNAS and OPRA
+    /// instruments, defined by Databento), cTrader (IC Markets' and
+    /// Pepperstone's instruments) or Interactive Brokers (the others).
     FillCatalog(FillCatalogArgs),
     /// Backtests the strategy over a window of the catalog and prints the results.
     Backtest(Box<BacktestArgs>),
@@ -515,6 +515,7 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
         start,
         end,
         ticks: requirements.ticks,
+        custom: requirements.custom,
         commission: args.commission.commission(),
         balance: args.balance,
         leverage: args.leverage,
@@ -818,6 +819,7 @@ impl DatasetRun {
             catalog: self.catalog.clone(),
             bar_types: requirements.bar_types,
             ticks: requirements.ticks,
+            custom: requirements.custom,
             start,
             end,
             commission: self.venue.commission,

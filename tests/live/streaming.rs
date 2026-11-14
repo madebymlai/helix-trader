@@ -345,6 +345,7 @@ fn streamed_dataset() {
                 catalog: catalog.clone(),
                 bar_types: requirements.bar_types,
                 ticks: requirements.ticks,
+                custom: vec![],
                 start: from,
                 end: to,
                 commission: venue.commission,
@@ -408,8 +409,8 @@ async fn run_node(
     let stub = live::node::Clients {
         data_factory: Box::new(StubFactory),
         data_config: Box::new(StubConfig { first_seq }),
+        data_routing: RoutingConfig::default(),
         exec: None,
-        routing: RoutingConfig::default(),
     };
     let mut node = live::node::build(
         trader_id,

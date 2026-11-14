@@ -6,20 +6,26 @@
 //! catalog lacks of them, by Nautilus' own count
 //! (`get_missing_intervals_for_request`): per contract its definitions, then
 //! each series' missing windows, the slivers between a live node's promoted
-//! files among them, each asked once and closed by its write-back. A
-//! `NodeFill` gathers each source's data client with its requests and the
-//! source's period, and `run` builds a live node with those clients and the
-//! catalog, and an actor asking for one request at a time with
-//! `update_catalog`, each series by Nautilus' time-range pipeline
+//! files among them, each asked once and closed by its write-back.
+//! `missing_custom` does the same for custom data of no instrument, keyed by
+//! its data type's identifier, with no definition. A `NodeFill` gathers each
+//! source's data client with its requests and the source's period, and `run`
+//! builds a live node with those clients and the catalog, and an actor asking
+//! for one request at a time, naming the client it was added with, which the
+//! data engine sends it to before any venue route (`DataEngine::get_client`),
+//! with `update_catalog`, each series by Nautilus' time-range pipeline
 //! (`time_range_generator`): the data engine asks for a window of the period
 //! at a time, serves what the catalog holds, asks the client for the rest and
-//! writes each answer back over its window. The actor waits for Nautilus'
-//! answer to each request (`on_data_response`) with no deadline of its own,
-//! as Nautilus' requests have none: each client the fill asks answers every
-//! request, a failed one with the failure in its response envelope, and one
-//! that never answered would hold the run until it is interrupted. The actor
-//! records the first failure (a failed request, a failure envelope) and stops
-//! the node; `run` returns it. See `README.md`, "Fill paths".
+//! writes each answer back over its window. A custom data request is asked
+//! whole, as the pipeline windows none, and written back over its window, as
+//! custom data under its type and identifier.
+//! The actor waits for Nautilus' answer to each request (`on_data_response`)
+//! with no deadline of its own, as Nautilus' requests have none: each client
+//! the fill asks answers every request, a failed one with the failure in its
+//! response envelope, and one that never answered would hold the run until
+//! it is interrupted. The actor records the first failure (a failed request,
+//! a failure envelope) and stops the node; `run` returns it. See
+//! `README.md`, "Fill paths".
 
 use std::{cell::RefCell, collections::VecDeque, fmt, path::Path, rc::Rc};
 
@@ -33,13 +39,10 @@ use nautilus_common::{
     nautilus_actor,
 };
 use nautilus_core::{Params, UUID4, UnixNanos};
-use nautilus_live::{
-    builder::LiveNodeBuilder,
-    config::{LiveNodeConfig, RoutingConfig},
-};
+use nautilus_live::{builder::LiveNodeBuilder, config::LiveNodeConfig};
 use nautilus_model::{
-    data::{BarType, NautilusDataType},
-    identifiers::{InstrumentId, TraderId},
+    data::{BarType, CustomData, DataType, NautilusDataType},
+    identifiers::{ClientId, InstrumentId, TraderId},
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use serde_json::json;
@@ -73,8 +76,9 @@ pub enum FillData {
 impl FillData {
     /// The series of `data_type` keyed by `identifier`, as the catalog
     /// keys it (see `strategy::catalog_series`): the bar type of bars, the
-    /// instrument id of anything else; an error for custom data, which no
-    /// node source serves here.
+    /// instrument id of anything else; an error for custom data of an
+    /// instrument, which no node source serves here (custom data of no
+    /// instrument is asked by `missing_custom`).
     fn of(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<Self> {
         Ok(match data_type {
             NautilusDataType::QuoteTick => Self::Quotes,
@@ -83,7 +87,7 @@ impl FillData {
             NautilusDataType::OrderBookDelta => Self::Deltas,
             NautilusDataType::Bar => Self::Bars(identifier.parse()?),
             NautilusDataType::FundingRateUpdate => Self::Funding,
-            other => bail!("no source filled through the node serves {other}"),
+            other => bail!("no source filled through the node serves the {other} of an instrument"),
         })
     }
 
@@ -201,6 +205,68 @@ pub fn missing(
         .collect())
 }
 
+/// A request of a fill of custom data of no instrument (see
+/// `strategy::DataRequirements::custom`): the rows of `data_type` over the
+/// closed window `[from, to]`, as the catalog stores intervals, stored under
+/// its type and identifier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomFillRequest {
+    pub data_type: DataType,
+    pub from: Timestamp,
+    pub to: Timestamp,
+}
+
+impl fmt::Display for CustomFillRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the {} over [{}, {}]",
+            self.data_type, self.from, self.to
+        )
+    }
+}
+
+/// What `catalog` lacks of each of `custom`, custom data of no instrument,
+/// over `[from, to]`: its missing windows (Nautilus'
+/// `get_missing_intervals_for_request`, of its type and identifier), in time
+/// order, the series in the order given; a config lists each once
+/// (`StandardConfig::validate`). No definition: it is of no instrument.
+///
+/// # Errors
+///
+/// Returns an error if a data type has no identifier, which keys a custom
+/// series in the catalog, or if the catalog cannot be read.
+pub fn missing_custom(
+    catalog: &ParquetDataCatalog,
+    custom: &[DataType],
+    from: Timestamp,
+    to: Timestamp,
+) -> anyhow::Result<Vec<CustomFillRequest>> {
+    let mut requests = Vec::new();
+    for data_type in custom {
+        let identifier = data_type.identifier().with_context(|| {
+            format!("{data_type:?} has no identifier, which keys custom data in the catalog")
+        })?;
+        let stored = NautilusDataType::Custom {
+            type_name: data_type.type_name().to_string(),
+        };
+        let gaps = catalog
+            .get_missing_intervals_for_request(
+                nanos(from),
+                nanos(to),
+                &stored.into(),
+                Some(identifier),
+            )
+            .with_context(|| format!("reading the stored {data_type}"))?;
+        requests.extend(gaps.into_iter().map(|(from, to)| CustomFillRequest {
+            data_type: data_type.clone(),
+            from: at(from),
+            to: at(to),
+        }));
+    }
+    Ok(requests)
+}
+
 fn nanos(at: Timestamp) -> u64 {
     UnixNanos::from(at).as_u64()
 }
@@ -209,13 +275,12 @@ fn at(ns: u64) -> Timestamp {
     Timestamp::from(UnixNanos::from(ns))
 }
 
-/// A source's data client for the node: its factory and config, and the
-/// venues Nautilus routes its requests to it by (none for a client naming
-/// its venue, as a cTrader broker's).
+/// A source's data client for the node: its factory and config. It takes
+/// no venue route: each request names the client it asks (see
+/// `NodeFill::add`), so two sources of one venue share a node.
 pub struct NodeClient {
     pub factory: Box<dyn DataClientFactory>,
     pub config: Box<dyn ClientConfig>,
-    pub routing: RoutingConfig,
 }
 
 /// The data clients of a fill through the node, and the requests asked of
@@ -226,12 +291,31 @@ pub struct NodeFill {
     requests: Vec<Asked>,
 }
 
-/// A request of the fill, and the period of the windows the data engine asks
-/// it in; a definition has none, being asked whole.
-#[derive(Debug, Clone, Copy)]
+/// A request of the fill, the client it names, and the period of the
+/// windows the data engine asks it in; a definition and custom data have
+/// none, being asked whole.
+#[derive(Debug, Clone)]
 struct Asked {
-    request: FillRequest,
+    request: Request,
+    client: ClientId,
     period: Option<SignedDuration>,
+}
+
+/// What a request of the fill asks: an instrument's definition or one of
+/// its series, or custom data of no instrument.
+#[derive(Debug, Clone)]
+enum Request {
+    Series(FillRequest),
+    Custom(CustomFillRequest),
+}
+
+impl fmt::Display for Request {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Series(request) => fmt::Display::fmt(request, f),
+            Self::Custom(request) => fmt::Display::fmt(request, f),
+        }
+    }
 }
 
 impl NodeFill {
@@ -243,7 +327,10 @@ impl NodeFill {
 
     /// Adds `requests` (see `missing`), asked of `client`, each series in
     /// windows of `period(data)`: the most of it one answer holds, and one
-    /// write-back covers. A definition is asked whole. No request leaves the
+    /// write-back covers. A definition is asked whole. Each request names
+    /// the client by the name the node registers it under, its factory's,
+    /// which Nautilus' factories give the client they create, so the data
+    /// engine sends it there whatever its venue. No request leaves the
     /// client out of the node, so it never connects.
     pub fn add(
         &mut self,
@@ -251,25 +338,51 @@ impl NodeFill {
         requests: &[FillRequest],
         period: impl Fn(FillData) -> SignedDuration,
     ) {
-        if requests.is_empty() {
+        self.add_with_custom(client, requests, &[], period);
+    }
+
+    /// Adds `requests` as `add` does, then `custom` (see `missing_custom`),
+    /// custom data of no instrument, asked of the same client, each whole:
+    /// Nautilus' time-range pipeline windows no custom data request
+    /// (`data/src/engine/time_range.rs`, `is_time_range_pipeline_variant`).
+    /// No request of either kind leaves the client out of the node.
+    pub fn add_with_custom(
+        &mut self,
+        client: NodeClient,
+        requests: &[FillRequest],
+        custom: &[CustomFillRequest],
+        period: impl Fn(FillData) -> SignedDuration,
+    ) {
+        if requests.is_empty() && custom.is_empty() {
             return;
         }
+        let id = ClientId::new(client.factory.name());
         self.clients.push(client);
         self.requests.extend(requests.iter().map(|&request| Asked {
-            request,
+            request: Request::Series(request),
+            client: id,
             period: match request.data {
                 FillData::Instrument => None,
                 data => Some(period(data)),
             },
         }));
+        self.requests.extend(custom.iter().map(|request| Asked {
+            request: Request::Custom(request.clone()),
+            client: id,
+            period: None,
+        }));
     }
 
-    /// What a fill was told to ask, each request with its period.
+    /// What a fill was told to ask of instruments, each request with its
+    /// period.
     #[cfg(test)]
     pub(crate) fn asked(&self) -> Vec<(FillRequest, Option<SignedDuration>)> {
         self.requests
             .iter()
-            .map(|asked| (asked.request, asked.period))
+            .filter_map(|asked| match asked.request {
+                Request::Series(request) => Some((request, asked.period)),
+                Request::Custom(_) => None,
+            })
             .collect()
     }
 
@@ -308,12 +421,7 @@ impl NodeFill {
             .with_name("FILL")
             .with_delay_post_stop_secs(0);
         for client in clients {
-            builder = builder.add_data_client_with_routing(
-                None,
-                client.factory,
-                client.config,
-                client.routing,
-            )?;
+            builder = builder.add_data_client(None, client.factory, client.config)?;
         }
         let mut node = builder.build()?;
         let outcome = Rc::new(RefCell::new(Outcome::default()));
@@ -363,7 +471,7 @@ struct FillActor {
     core: DataActorCore,
     requests: VecDeque<Asked>,
     /// The request in flight and its id.
-    pending: Option<(UUID4, FillRequest)>,
+    pending: Option<(UUID4, Request)>,
     /// The rows the request in flight has got so far, over its windows.
     rows: usize,
     outcome: Rc<RefCell<Outcome>>,
@@ -377,8 +485,8 @@ impl FillActor {
             self.shutdown_system(Some("every fill request answered".to_string()));
             return;
         };
-        let request = asked.request;
-        log::info!("Asking for {request}");
+        let request = asked.request.clone();
+        log::info!("Asking {} for {request}", asked.client);
         self.rows = 0;
         match self.issue(asked) {
             Ok(id) => self.pending = Some((id, request)),
@@ -386,41 +494,63 @@ impl FillActor {
         }
     }
 
-    /// Sends `asked` to the data engine, with `update_catalog`, a series in
-    /// windows of its period.
+    /// Sends `asked` to the data engine, naming its client, with
+    /// `update_catalog`, a series in windows of its period, custom data
+    /// whole.
     fn issue(&mut self, asked: Asked) -> anyhow::Result<UUID4> {
-        let request = asked.request;
-        let FillRequest {
-            data,
-            instrument_id,
-            from,
-            to,
-        } = request;
+        let Asked {
+            request,
+            client,
+            period,
+        } = asked;
+        let (from, to) = match &request {
+            Request::Series(request) => (request.from, request.to),
+            Request::Custom(request) => (request.from, request.to),
+        };
         let mut params = vec![("update_catalog".to_string(), json!(true))];
-        if let Some(period) = asked.period {
+        if let Some(period) = period {
             params.extend(time_range::params(from, to, period));
         }
         let params = Some(Params::new(params.into_iter().collect()));
-        let (from, to) = (Some(from), Some(to));
+        let FillRequest {
+            data,
+            instrument_id,
+            ..
+        } = match request {
+            Request::Series(request) => request,
+            Request::Custom(request) => {
+                return self.request_data(
+                    request.data_type,
+                    client,
+                    Some(from),
+                    Some(to),
+                    None,
+                    params,
+                );
+            }
+        };
+        let (from, to, client) = (Some(from), Some(to), Some(client));
         match data {
-            FillData::Instrument => self.request_instrument(instrument_id, from, to, None, params),
-            FillData::Quotes => self.request_quotes(instrument_id, from, to, None, None, params),
-            FillData::Trades => self.request_trades(instrument_id, from, to, None, None, params),
+            FillData::Instrument => {
+                self.request_instrument(instrument_id, from, to, client, params)
+            }
+            FillData::Quotes => self.request_quotes(instrument_id, from, to, None, client, params),
+            FillData::Trades => self.request_trades(instrument_id, from, to, None, client, params),
             FillData::Depth => self.request_book_depth(
                 instrument_id,
                 from,
                 to,
                 None,
                 std::num::NonZeroUsize::new(DEPTH),
-                None,
+                client,
                 params,
             ),
             FillData::Deltas => {
-                self.request_book_deltas(instrument_id, from, to, None, None, params)
+                self.request_book_deltas(instrument_id, from, to, None, client, params)
             }
-            FillData::Bars(bar_type) => self.request_bars(bar_type, from, to, None, None, params),
+            FillData::Bars(bar_type) => self.request_bars(bar_type, from, to, None, client, params),
             FillData::Funding => {
-                self.request_funding_rates(instrument_id, from, to, None, None, params)
+                self.request_funding_rates(instrument_id, from, to, None, client, params)
             }
         }
     }
@@ -441,12 +571,13 @@ impl DataActor for FillActor {
     }
 
     fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
-        let Some((id, request)) = self.pending else {
+        let Some((id, request)) = &self.pending else {
             return Ok(());
         };
-        if *response.correlation_id() != id {
+        if response.correlation_id() != id {
             return Ok(());
         }
+        let request = request.to_string();
         if let Some(reason) = response.failure_reason() {
             self.fail(format!("{request} failed: {reason}"));
             return Ok(());
@@ -459,6 +590,10 @@ impl DataActor for FillActor {
             Some(DataResponse::BookDeltas(answer)) => answer.data.len(),
             Some(DataResponse::Bars(answer)) => answer.data.len(),
             Some(DataResponse::FundingRates(answer)) => answer.data.len(),
+            Some(DataResponse::Data(answer)) => answer
+                .data
+                .downcast_ref::<Vec<CustomData>>()
+                .map_or(0, Vec::len),
             _ => 0,
         };
         // A window of the request, written back; the next one is on its way.
@@ -477,7 +612,7 @@ nautilus_actor!(FillActor);
 #[cfg(test)]
 mod tests {
     use nautilus_model::{
-        data::{Bar, BarType, TradeTick},
+        data::{Bar, BarType, DataType, TradeTick},
         enums::AggressorSide,
         identifiers::TradeId,
         types::{Price, Quantity},
@@ -861,8 +996,59 @@ mod tests {
         );
     }
 
+    fn bond_yields() -> DataType {
+        DataType::new(
+            "LseRow",
+            Some(Params::new(
+                [("source".to_string(), json!("bond_yields"))].into(),
+            )),
+            Some("US10Y-BOND_YIELDS".to_string()),
+        )
+    }
+
+    /// No definition: the series is of no instrument.
     #[test]
-    fn custom_data_is_refused_naming_its_type_and_instrument() {
+    fn custom_data_of_no_instrument_is_lacking_over_its_window_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let (from, to) = (
+            ts("2026-11-09T00:00:00Z"),
+            ts("2026-11-12T23:59:59.999999999Z"),
+        );
+
+        let asked = missing_custom(&catalog, &[bond_yields()], from, to).unwrap();
+
+        assert_eq!(
+            asked,
+            [CustomFillRequest {
+                data_type: bond_yields(),
+                from,
+                to,
+            }]
+        );
+    }
+
+    /// Nautilus would store it under its type alone, beside every other
+    /// series of the type.
+    #[test]
+    fn custom_data_with_no_identifier_is_refused_naming_its_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let unkeyed = DataType::new("LseRow", None, None);
+
+        let err = missing_custom(
+            &catalog,
+            &[unkeyed],
+            ts("2026-11-09T00:00:00Z"),
+            ts("2026-11-12T23:59:59.999999999Z"),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("LseRow"), "{err:#}");
+    }
+
+    #[test]
+    fn custom_data_of_an_instrument_is_refused_naming_its_type_and_instrument() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
         let slices = [slice(

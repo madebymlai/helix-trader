@@ -141,6 +141,7 @@ fn backtest(dir: &Path, end: &str) -> Backtest {
         start: at("06:30"),
         end: at(end),
         ticks: vec![],
+        custom: vec![],
         commission: Commission::Rate(Decimal::ZERO),
         balance: Money::from("10000 USDT"),
         leverage: Decimal::ONE,

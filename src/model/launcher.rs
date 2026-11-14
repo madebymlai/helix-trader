@@ -581,6 +581,7 @@ mod tests {
             DataRequirements {
                 bar_types: vec![],
                 ticks: vec![quotes(AUD), quotes(EUR)],
+                custom: vec![],
                 warmup: SignedDuration::ZERO,
             },
             launcher,
