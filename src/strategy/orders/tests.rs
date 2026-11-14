@@ -4,12 +4,18 @@
 
 use std::{cell::RefCell, rc::Rc};
 
+use ibapi::orders::OcaType;
 use nautilus_common::{
     cache::Cache,
     clock::{Clock, VirtualClock},
     timer::TimeEventCallback,
 };
 use nautilus_core::{UUID4, UnixNanos};
+use nautilus_interactive_brokers::{
+    config::InteractiveBrokersInstrumentProviderConfig,
+    execution::transform::nautilus_order_to_ib_order,
+    providers::instruments::InteractiveBrokersInstrumentProvider,
+};
 use nautilus_model::{
     accounts::{AccountAny, MarginAccount},
     enums::{AccountType, OmsType, OrderStatus, OrderType},
@@ -37,6 +43,8 @@ const STRATEGY: &str = "ORDERS-001";
 const AUD: &str = "AUDUSD.PEPPERSTONE";
 /// AUD/USD on IDEALPRO, IB's venue, whose execution client takes neither.
 const IB_AUD: &str = "AUD/USD.IDEALPRO";
+/// AUD/USD at IC, a cTrader broker as Pepperstone is.
+const IC_AUD: &str = "AUDUSD.ICMARKETS";
 
 /// 2026-10-26T10:00:00Z.
 const NOW: u64 = 1_792_922_400_000_000_000;
@@ -404,6 +412,129 @@ fn a_trade_on_ib_has_legs_neither_reduce_only_nor_post_only() {
         (order.is_reduce_only(), order.is_post_only())
     };
     assert_eq!([flags("T-1-TP"), flags("T-1-SL")], [(false, false); 2]);
+}
+
+/// `trade` on AUD/USD on IDEALPRO.
+fn on_ib(trade: Trade) -> Trade {
+    Trade {
+        instrument_id: InstrumentId::from(IB_AUD),
+        ..trade
+    }
+}
+
+/// The OCA group and type IB's execution client sends `order` in, its tags
+/// read as Nautilus' IB adapter reads them (`IBOrderTags`).
+fn oca_at_ib(order: &OrderAny) -> (String, OcaType) {
+    let provider = InteractiveBrokersInstrumentProvider::new(
+        InteractiveBrokersInstrumentProviderConfig::default(),
+    )
+    .unwrap();
+    let sent =
+        nautilus_order_to_ib_order(order, &provider, 1, order.client_order_id().as_str()).unwrap();
+    (sent.oca_group, sent.oca_type)
+}
+
+/// The orders of `probe`'s cache a bracket's entry is the parent of, its
+/// exits.
+fn exits(probe: &Probe) -> Vec<OrderAny> {
+    orders(probe)
+        .into_iter()
+        .filter(|order| order.parent_order_id().is_some())
+        .collect()
+}
+
+/// IB cancels or reduces the other exit itself, the node up or not: a
+/// trade sent on IB has its two exits in one OCA group reducing the other
+/// with block, IB's one-updates-the-other with overfill protection.
+#[test]
+fn a_trade_on_ib_links_its_exits_in_one_oca_group_each_reducing_the_other() {
+    let (mut probe, _) = registered();
+
+    on_ib(buy(bracket(4))).send(&mut probe, stake()).unwrap();
+
+    let exits: Vec<(String, OcaType)> = exits(&probe).iter().map(oca_at_ib).collect();
+    let [take_profit, stop_loss] = exits.as_slice() else {
+        panic!("{exits:?}")
+    };
+    assert_eq!(take_profit, stop_loss);
+    assert_ne!(take_profit.0, "");
+    assert_eq!(take_profit.1, OcaType::ReduceWithBlock);
+}
+
+#[test]
+fn a_trade_on_ib_sends_its_entry_in_no_oca_group() {
+    let (mut probe, _) = registered();
+
+    on_ib(buy(bracket(4)))
+        .send_at(&mut probe, stake(), equity(), ids("T-1"))
+        .unwrap();
+
+    let entry = probe.cache().order(&id("T-1")).unwrap();
+    assert_eq!(oca_at_ib(&entry).0, "");
+}
+
+/// IB holds an OCA group's name once used: each trade's is its own.
+#[test]
+fn two_trades_on_ib_link_their_exits_in_two_groups() {
+    let (mut probe, _) = registered();
+    let trade = on_ib(buy(bracket(4)));
+
+    trade.send(&mut probe, stake()).unwrap();
+    trade.send(&mut probe, stake()).unwrap();
+
+    let groups: BTreeSet<String> = exits(&probe).iter().map(|exit| oca_at_ib(exit).0).collect();
+    assert_eq!(groups.len(), 2, "{groups:?}");
+}
+
+/// The OCA group's tag is added to Nautilus' tags of a bracket's exits,
+/// not in place of them.
+#[test]
+fn a_trade_on_ib_keeps_nautilus_tags_on_its_exits() {
+    let (mut probe, _) = registered();
+
+    on_ib(buy(bracket(4)))
+        .send_at(&mut probe, stake(), equity(), ids("T-1"))
+        .unwrap();
+
+    let tagged = |of: &str, tag: &str| {
+        let order = probe.cache().order(&id(of)).unwrap();
+        order.tags().unwrap().contains(&Ustr::from(tag))
+    };
+    assert!(tagged("T-1-TP", "TAKE_PROFIT"));
+    assert!(tagged("T-1-SL", "STOP_LOSS"));
+}
+
+/// IC, a cTrader broker, links a bracket's exits itself as its position's
+/// protections: its exits carry Nautilus' tags alone
+/// (`OrderFactory::bracket`).
+#[test]
+fn a_trade_at_ic_tags_its_exits_as_nautilus_does() {
+    let cache = cache();
+    cache
+        .borrow_mut()
+        .add_instrument(aud(InstrumentId::from(IC_AUD)))
+        .unwrap();
+    let (mut probe, _) = registered_on(&cache, STRATEGY, NOW);
+    let trade = Trade {
+        instrument_id: InstrumentId::from(IC_AUD),
+        ..buy(bracket(4))
+    };
+
+    trade
+        .send_at(&mut probe, stake(), equity(), ids("T-1"))
+        .unwrap();
+
+    let tags = |of: &str| {
+        probe
+            .cache()
+            .order(&id(of))
+            .unwrap()
+            .tags()
+            .unwrap()
+            .to_vec()
+    };
+    assert_eq!(tags("T-1-TP"), [Ustr::from("TAKE_PROFIT")]);
+    assert_eq!(tags("T-1-SL"), [Ustr::from("STOP_LOSS")]);
 }
 
 #[test]
