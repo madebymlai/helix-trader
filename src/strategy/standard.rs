@@ -1681,6 +1681,7 @@ mod tests {
             risk = "0.5%"
 
             [model]
+            dataset = { commission = { rate = "0.00003" }, balance = "10000000 USD" }
             decision = { every = "1h" }
             target = { limit = "30m", atr = { period = 1 } }
             retrain = "24h"

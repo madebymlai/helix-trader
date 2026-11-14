@@ -22,11 +22,16 @@ use nautilus_model::{
     types::{Currency, Money, Price, Quantity},
 };
 use rust_decimal::Decimal;
+use serde::Deserialize;
 
-/// The commission of a run, as its command line gives it, which every cost
-/// of the run reads: the fee model of its simulated venues (`fee_model`) and
-/// the cost of a fill (`cost`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The commission of a run, as its command line or a model's config gives
+/// it, which every cost of the run reads: the fee model of its simulated
+/// venues (`fee_model`) and the cost of a fill (`cost`). In TOML, a table of
+/// one of its kinds, such as `{ per_quantity = "0.035 USD" }`, `{ rate =
+/// "0.0005" }` or `{ per_order = "3 EUR" }`, read as the flags read it
+/// (`per_order`, `rate`, `per_quantity`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "CommissionFields")]
 pub enum Commission {
     /// Charged once per order, on its first fill.
     PerOrder(Money),
@@ -41,7 +46,81 @@ pub enum Commission {
     PerQuantity(Money),
 }
 
+/// A commission as TOML writes it: exactly one of its kinds, each an amount
+/// as text.
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CommissionFields {
+    PerOrder(String),
+    Rate(String),
+    PerQuantity(String),
+}
+
+impl TryFrom<CommissionFields> for Commission {
+    type Error = anyhow::Error;
+
+    fn try_from(fields: CommissionFields) -> anyhow::Result<Self> {
+        match fields {
+            CommissionFields::PerOrder(amount) => Self::per_order(&amount),
+            CommissionFields::Rate(rate) => Self::rate(&rate),
+            CommissionFields::PerQuantity(amount) => Self::per_quantity(&amount),
+        }
+    }
+}
+
+/// Its kind and its amount normalized (`normalized`), such as `rate
+/// 0.00003`, `per order 3 EUR` or `per quantity 0.035 USD`.
+impl std::fmt::Display for Commission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kind = match self {
+            Self::PerOrder(_) => "per order",
+            Self::Rate(_) => "rate",
+            Self::PerQuantity(_) => "per quantity",
+        };
+        write!(f, "{kind} {}", self.normalized())
+    }
+}
+
 impl Commission {
+    /// A commission per order of `amount`, an amount and a currency code,
+    /// such as `"3 EUR"`, rounded to the currency's precision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `amount` is not an amount of a currency, or is
+    /// negative.
+    pub fn per_order(amount: &str) -> anyhow::Result<Self> {
+        Self::PerOrder(amount.parse::<Money>().map_err(anyhow::Error::msg)?).checked()
+    }
+
+    /// A commission of `rate`, a decimal, on the value of each fill, such as
+    /// `"0.0005"`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `rate` is not a decimal, or is negative.
+    pub fn rate(rate: &str) -> anyhow::Result<Self> {
+        Self::Rate(rate.parse()?).checked()
+    }
+
+    /// A commission of `amount` on each unit of quantity, an amount and a
+    /// currency code, exact rather than rounded to the currency's precision,
+    /// so that `"0.035 USD"` charges 3.50 USD on 100 units.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `amount` is not an amount of a currency, or is
+    /// negative.
+    pub fn per_quantity(amount: &str) -> anyhow::Result<Self> {
+        Self::PerQuantity(Money::from_str_exact(amount).map_err(anyhow::Error::msg)?).checked()
+    }
+
+    /// The commission, if it has a fee model: not negative.
+    fn checked(self) -> anyhow::Result<Self> {
+        self.fee_model()?;
+        Ok(self)
+    }
+
     /// The Nautilus fee model charging the commission on the fills of a
     /// simulated venue.
     ///

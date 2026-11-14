@@ -63,7 +63,7 @@ use jiff::Timestamp;
 use nautilus_core::UnixNanos;
 
 use super::{
-    blueprint::OnVenue,
+    blueprint::Stored,
     dataset::{self, Dataset, DatasetRow},
     deciding::DecidingModels,
     holdout::{Earnings, Example, MetaMargin, STRESS, in_r},
@@ -124,8 +124,8 @@ impl WalkForward {
     /// The backtests of the models of `model`, a strategy's model on the
     /// venue of its dataset runs, on its dataset and in its model set, on
     /// its schedule.
-    pub(super) fn new(model: OnVenue<'_>) -> Self {
-        let OnVenue {
+    pub(super) fn new(model: Stored<'_>) -> Self {
+        let Stored {
             dataset,
             models,
             schedule,
@@ -475,6 +475,7 @@ mod tests {
                     .build(),
             )
             .retrain(SignedDuration::from_hours(24))
+            .dataset(venue())
             .window(SignedDuration::from_hours(24))
             .holdout(SignedDuration::from_hours(6))
             .margins(Margins {
@@ -528,7 +529,7 @@ mod tests {
     fn walk_of(dir: &Path, config: ModelConfig) -> WalkForward {
         std::fs::create_dir_all(dir.join("catalog")).unwrap();
         blueprint(&config)
-            .walk_forward(&dir.join("catalog"), &dir.join("models"), &venue())
+            .walk_forward(&dir.join("catalog"), &dir.join("models"))
             .unwrap()
     }
 
@@ -595,9 +596,7 @@ mod tests {
 
     /// The dataset of a walk in `dir` as `config` says, in its catalog.
     fn dataset(dir: &Path, config: &ModelConfig) -> Dataset {
-        blueprint(config)
-            .dataset(&dir.join("catalog"), &venue())
-            .unwrap()
+        blueprint(config).dataset(&dir.join("catalog")).unwrap()
     }
 
     /// Builds the dataset of `walk(dir)` from the 6th to the 8th.
@@ -657,9 +656,7 @@ mod tests {
 
     /// The models of a walk in `dir` as `config` says.
     fn models(dir: &Path, config: &ModelConfig) -> ModelSet {
-        blueprint(config)
-            .model_set(&dir.join("models"), &venue())
-            .unwrap()
+        blueprint(config).model_set(&dir.join("models")).unwrap()
     }
 
     /// The store of the `side` models of a walk in `dir` as `config` says.
@@ -1478,11 +1475,7 @@ Meta model scores, out of sample, over the span
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("catalog")).unwrap();
         let walk = blueprint(&with_meta())
-            .walk_forward(
-                &dir.path().join("catalog"),
-                &dir.path().join("models"),
-                &venue(),
-            )
+            .walk_forward(&dir.path().join("catalog"), &dir.path().join("models"))
             .unwrap();
         for at in [
             at("2026-01-05T00:00:00Z"),

@@ -18,7 +18,7 @@
 use std::{fmt::Write as _, fs, path::Path};
 
 use crate::common::{
-    dataset::{backtest, venue, walk},
+    dataset::{backtest, walk},
     ic,
 };
 use helix_trader::{
@@ -55,6 +55,7 @@ const CONFIG: &str = r#"
     risk = "0.00004%"
 
     [model]
+    dataset = { commission = { rate = "0.00003" }, balance = "10000000 USD" }
     decision = { every = "1h" }
     target = { bracket = { take_profit = { atr = 1.5 }, stop = { bps = 7.5 }, atr = { period = 3 } }, limit = "45m" }
     retrain = "24h"
@@ -87,16 +88,13 @@ fn the_rows_of_the_example_model_strategy_are_the_snapshots() {
         from - SignedDuration::from_hours(5),
         to + SignedDuration::from_hours(1),
     );
-    let dataset = ModelEma::dataset(&config, catalog.path(), &venue()).unwrap();
+    let dataset = ModelEma::dataset(&config, catalog.path()).unwrap();
     let (first, last) = dataset::days(from, to - SignedDuration::from_nanos(1));
     dataset
         .build(first, last, |start, end| {
             let requirements = config.data_requirements();
             let rows = SettledRows::default();
-            let mode = Mode::Dataset {
-                rows: rows.clone(),
-                venue: venue(),
-            };
+            let mode = Mode::Dataset { rows: rows.clone() };
             let backtest = Backtest {
                 bar_types: requirements.bar_types,
                 ticks: requirements.ticks,

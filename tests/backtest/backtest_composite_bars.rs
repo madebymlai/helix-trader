@@ -171,24 +171,24 @@ fn a_decision_on_hour_bars_reads_the_bar_closing_on_its_grid() {
         custom: vec![],
         warmup: SignedDuration::ZERO,
     };
+    let mut backtest = common::backtest(dir.path(), at("10:30"), at("15:00"), "0 EUR");
     let config = ModelConfig {
         target: TargetConfig {
             instrument_id: InstrumentId::from(common::INSTRUMENT_ID),
             ..dataset::target()
         },
+        dataset: DatasetVenue {
+            commission: backtest.commission,
+            balance: backtest.balance,
+        },
         ..dataset::config()
     };
-    let mut backtest = common::backtest(dir.path(), at("10:30"), at("15:00"), "0 EUR");
     let (probe, record) = dataset::probe_reading(
         features,
         &config,
         &requirements,
         Mode::Dataset {
             rows: SettledRows::default(),
-            venue: DatasetVenue {
-                commission: backtest.commission,
-                balance: backtest.balance,
-            },
         },
     );
     backtest.bar_types = requirements.bar_types.clone();

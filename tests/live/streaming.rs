@@ -35,11 +35,10 @@ use std::{
 use anyhow::Context;
 use async_trait::async_trait;
 use helix_trader::{
-    backtest::{Backtest, Commission},
+    backtest::Backtest,
     live::{self, Recording},
     model::{
-        ModelStrategy,
-        dataset::{self, DatasetVenue},
+        ModelStrategy, dataset,
         handle::{Mode, SettledRows},
     },
     strategy::model_ema::{ModelEma, ModelEmaConfig},
@@ -66,7 +65,7 @@ use nautilus_model::{
     enums::{AggressorSide, BookType, OmsType},
     identifiers::{ClientId, InstrumentId, TradeId, TraderId, Venue},
     instruments::{Instrument, InstrumentAny, stubs::audusd_sim},
-    types::{Money, Price, Quantity},
+    types::{Price, Quantity},
 };
 use nautilus_persistence::{
     backend::parquet::catalog::ParquetDataCatalog, config::DataCatalogConfig,
@@ -324,21 +323,15 @@ fn streamed_dataset() {
     let (start, end): (Timestamp, Timestamp) = (start.parse().unwrap(), end.parse().unwrap());
     let catalog = PathBuf::from(root).join("catalog");
     let config = ModelEmaConfig::load(MODEL_EMA_CONFIG).unwrap();
-    let venue = DatasetVenue {
-        commission: Commission::PerOrder(Money::from("1 USD")),
-        balance: Money::from("1000000 USD"),
-    };
     let (first, last) = dataset::days(start, end);
 
-    let built = ModelEma::dataset(&config, &catalog, &venue)
+    let built = ModelEma::dataset(&config, &catalog)
         .unwrap()
         .build(first, last, |from, to| {
             let requirements = config.data_requirements();
             let rows = SettledRows::default();
-            let mode = Mode::Dataset {
-                rows: rows.clone(),
-                venue: venue.clone(),
-            };
+            let mode = Mode::Dataset { rows: rows.clone() };
+            let venue = config.model().dataset;
             Backtest {
                 catalog: catalog.clone(),
                 bar_types: requirements.bar_types,
@@ -640,6 +633,7 @@ const MODEL_EMA_CONFIG: &str = r#"
     risk = "0.5%"
 
     [model]
+    dataset = { commission = { per_order = "1 USD" }, balance = "1000000 USD" }
     decision = { every = "2s" }
     target = { limit = "1s", atr = { period = 1 } }
     retrain = "24h"

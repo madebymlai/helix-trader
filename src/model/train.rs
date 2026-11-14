@@ -102,7 +102,7 @@ use nautilus_core::UnixNanos;
 use nautilus_model::identifiers::StrategyId;
 
 use super::{
-    blueprint::OnVenue,
+    blueprint::Stored,
     calibration::Ksplit,
     dataset::{Dataset, DatasetRow, SchemaMismatch},
     deciding::DecidingModels,
@@ -247,8 +247,8 @@ impl Training {
     /// venue of its dataset runs, one for each side of its margins, and of
     /// its meta model if its config has one, on its dataset and in its
     /// model set, as its config says.
-    pub(super) fn new(model: OnVenue<'_>) -> Self {
-        let OnVenue {
+    pub(super) fn new(model: Stored<'_>) -> Self {
+        let Stored {
             blueprint,
             dataset,
             models,
@@ -978,6 +978,7 @@ mod tests {
                     .build(),
             )
             .retrain(SignedDuration::from_hours(24))
+            .dataset(venue())
             .window(SignedDuration::from_hours(24))
             .holdout(SignedDuration::from_hours(6))
             .margins(Margins {
@@ -1029,7 +1030,7 @@ mod tests {
         let catalog = dir.join("catalog");
         std::fs::create_dir_all(&catalog).unwrap();
         blueprint(config)
-            .training(&catalog, &dir.join("models"), &venue())
+            .training(&catalog, &dir.join("models"))
             .unwrap()
     }
 
@@ -1037,7 +1038,7 @@ mod tests {
     /// keys them.
     fn models(dir: &Path, config: &ModelConfig) -> ModelSet {
         blueprint(config.clone())
-            .model_set(&dir.join("models"), &venue())
+            .model_set(&dir.join("models"))
             .unwrap()
     }
 
@@ -1985,10 +1986,7 @@ mod tests {
         );
         assert_eq!(
             manifest.fingerprint,
-            blueprint(config())
-                .fingerprint(&venue())
-                .unwrap()
-                .to_string()
+            blueprint(config()).fingerprint().unwrap().to_string()
         );
         assert_eq!(manifest.target, config().target);
         assert_eq!(manifest.learner, LearnerConfig::Fake {});
@@ -2305,10 +2303,7 @@ mod tests {
                 manifest: ModelManifest {
                     strategy_id: StrategyId::from(STRATEGY),
                     valid_from: at(valid_from),
-                    fingerprint: blueprint(config.clone())
-                        .fingerprint(&venue())
-                        .unwrap()
-                        .to_string(),
+                    fingerprint: blueprint(config.clone()).fingerprint().unwrap().to_string(),
                     feature_names: names,
                     calibration: unchanged(&config, at(valid_from)),
                     target: config.target,

@@ -209,6 +209,7 @@ pub fn config() -> ModelConfig {
         .decision(rule())
         .target(target())
         .retrain(SignedDuration::from_hours(24))
+        .dataset(venue())
         .window(SignedDuration::from_hours(46))
         .holdout(SignedDuration::from_hours(12))
         .margins(Margins {
@@ -388,14 +389,7 @@ pub fn replay_of(
     to: Timestamp,
 ) -> anyhow::Result<Vec<TargetRow>> {
     let rows = SettledRows::default();
-    let (probe, _) = probe(
-        features,
-        config,
-        Mode::Dataset {
-            rows: rows.clone(),
-            venue: venue(),
-        },
-    );
+    let (probe, _) = probe(features, config, Mode::Dataset { rows: rows.clone() });
     backtest(catalog.path(), from, to).run_dataset(probe)?;
     rows.take()
 }
@@ -452,7 +446,6 @@ pub fn trade_staking(
         &requirements(),
         Mode::Backtest {
             models: models.to_path_buf(),
-            venue: venue(),
         },
         account.multiple,
     );
@@ -610,7 +603,7 @@ fn stored_baseline(
     set: &TrainingSet,
 ) -> StoredModel {
     let fingerprint = blueprint(Rc::clone(features), config.clone())
-        .fingerprint(&venue())
+        .fingerprint()
         .unwrap();
     baseline_stored(
         StrategyId::from(STRATEGY),

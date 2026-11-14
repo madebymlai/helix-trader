@@ -20,8 +20,7 @@ use crate::{
     backtest_targets::hand_worked_quotes,
     common::{
         dataset::{
-            baseline_of, blueprint, config, features, r, replay, replay_of, target, trade, venue,
-            walk,
+            baseline_of, blueprint, config, features, r, replay, replay_of, target, trade, walk,
         },
         ic,
     },
@@ -43,7 +42,7 @@ use rust_decimal::Decimal;
 
 fn store(models: &Path, config: &ModelConfig, side: Side) -> ModelStore {
     blueprint(features(), config.clone())
-        .model_set(models, &venue())
+        .model_set(models)
         .unwrap()
         .side(side)
         .unwrap()

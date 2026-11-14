@@ -17,7 +17,7 @@
 use std::{path::Path, rc::Rc};
 
 use crate::common::{
-    dataset::{baseline_of, blueprint, config, missing, replay_on, trade_on, venue, walk},
+    dataset::{baseline_of, blueprint, config, missing, replay_on, trade_on, walk},
     ic,
 };
 use helix_trader::{
@@ -72,7 +72,7 @@ fn span() -> (Timestamp, Timestamp) {
 /// The store of the long models under `models`.
 fn long_store(models: &Path) -> ModelStore {
     blueprint(features(), config_daily())
-        .model_set(models, &venue())
+        .model_set(models)
         .unwrap()
         .side(Side::Long)
         .unwrap()
@@ -82,7 +82,7 @@ fn long_store(models: &Path) -> ModelStore {
 
 fn walk_forward(catalog: &TempDir, models: &Path) -> WalkForward {
     blueprint(features(), config_daily())
-        .walk_forward(catalog.path(), models, &venue())
+        .walk_forward(catalog.path(), models)
         .unwrap()
 }
 
@@ -100,8 +100,7 @@ fn prepare(catalog: &TempDir, models: &Path) -> (Vec<(Timestamp, Timestamp)>, Ve
             end,
             |from, to| {
                 built.push((from, to));
-                let dataset =
-                    blueprint(features(), config_daily()).dataset(catalog.path(), &venue())?;
+                let dataset = blueprint(features(), config_daily()).dataset(catalog.path())?;
                 let (first, last) = dataset::days(from, to);
                 dataset.build(first, last, |from, to| {
                     replay_on(catalog, features(), from, to)
@@ -208,7 +207,7 @@ fn each_period_scores_its_model_beside_that_models_own_baseline() {
 
     let store = long_store(models.path());
     let rows = blueprint(features(), config_daily())
-        .dataset(catalog.path(), &venue())
+        .dataset(catalog.path())
         .unwrap()
         .read(start, end)
         .unwrap();

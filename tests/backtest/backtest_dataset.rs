@@ -13,7 +13,7 @@ use std::{collections::VecDeque, rc::Rc};
 use crate::common::{
     dataset::{
         Lcg, MID, blueprint, config, features, mid_tables, replay, replay_of, replay_on, target,
-        venue, walk,
+        walk,
     },
     features::tables,
     ic,
@@ -47,7 +47,7 @@ fn a_second_build_of_the_same_span_replays_no_day_and_rows_read_back_as_written(
         ic::at("00:00:00") + SignedDuration::from_hours(51),
     );
     let dataset = blueprint(features(), config())
-        .dataset(catalog.path(), &venue())
+        .dataset(catalog.path())
         .unwrap();
     let (mut replayed, mut settled) = (vec![], vec![]);
 
@@ -171,7 +171,7 @@ fn thursday_stored_by_a_build_from(first: Date) -> Vec<DatasetRow> {
             on(Date::constant(2026, 10, 23), "03:00:00"),
         );
         let dataset = blueprint(two_hour_mean(), config())
-            .dataset(catalog.path(), &venue())
+            .dataset(catalog.path())
             .unwrap();
         dataset
             .build(first, thursday, |from, to| {
@@ -238,7 +238,7 @@ fn stored_by_a_build_to(last: Date, from: Timestamp, to: Timestamp) -> Vec<Datas
     std::thread::spawn(move || {
         let catalog = weekend_walk();
         let dataset = blueprint(features(), config())
-            .dataset(catalog.path(), &venue())
+            .dataset(catalog.path())
             .unwrap();
         dataset
             .build(Date::constant(2026, 10, 22), last, |from, to| {
@@ -350,7 +350,7 @@ fn thursday_decided_after_a_warmup_of(warmup: SignedDuration) -> Vec<Timestamp> 
         );
         let config = atr_config();
         let dataset = blueprint(mid_warming_for(warmup), config.clone())
-            .dataset(catalog.path(), &venue())
+            .dataset(catalog.path())
             .unwrap();
         dataset
             .build(thursday, thursday, |from, to| {

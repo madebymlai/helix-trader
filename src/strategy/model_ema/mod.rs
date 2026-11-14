@@ -230,8 +230,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        backtest::Commission,
-        model::{dataset::DatasetVenue, decide::DecisionRule, learner::LearnerConfig},
+        model::{decide::DecisionRule, learner::LearnerConfig},
         strategy::orders::{Exits, OrderIds, Trade},
     };
 
@@ -256,6 +255,7 @@ mod tests {
         risk = "0.5%"
 
         [model]
+        dataset = { commission = { rate = "0.00003" }, balance = "10000000 USD" }
         decision = { every = "1h" }
         target = { limit = "30m", atr = { period = 14 } }
         retrain = "24h"
@@ -475,10 +475,6 @@ mod tests {
     ) -> (ModelEma, Rc<RefCell<VirtualClock>>) {
         let mode = Mode::Backtest {
             models: models.to_path_buf(),
-            venue: DatasetVenue {
-                commission: Commission::Rate(Decimal::new(3, 5)),
-                balance: Money::from("10000000 USD"),
-            },
         };
         let mut strategy = ModelEma::new(ModelEmaConfig::load(CONFIG).unwrap(), mode).unwrap();
         let clock = Rc::new(RefCell::new(VirtualClock::new()));
