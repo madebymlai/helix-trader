@@ -28,6 +28,7 @@ use helix_trader::{
     backtest::{Backtest, Commission},
     strategy::{
         DataConfig, IndicatorsConfig, Part, Series, Session, TradeConfig, TradedInstrument,
+        conversions::Conversions,
         ema::{EmaCross, EmaCrossConfig, EmaParams},
     },
     venues,
@@ -272,6 +273,7 @@ pub fn ema_config(fast: usize, slow: usize, session: Option<Session>) -> EmaCros
         trade: TradeConfig {
             instruments: vec![TradedInstrument { instrument_id }],
             risk: Some(RISK.parse().unwrap()),
+            conversions: Conversions::default(),
         },
         model: None,
         own: EmaParams {},

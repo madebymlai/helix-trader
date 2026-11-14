@@ -37,6 +37,7 @@
 //! requests none. The catalog
 //! stores what their bars are built from (see `catalog_series`).
 
+pub mod conversions;
 mod indicators;
 mod kind;
 pub mod orders;

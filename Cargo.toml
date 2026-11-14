@@ -65,6 +65,10 @@ ustr = "1"
 strategy-tests = []
 
 [dependencies]
+# The quote maps of Nautilus' exchange-rate path search
+# (`nautilus_common::xrate::get_exchange_rate`), which the conversions'
+# balance check asks.
+ahash = "0.8"
 anyhow.workspace = true
 # The arrow schema Nautilus' custom data macros generate, for the dataset
 # rows and the custom data of the backtest tests.

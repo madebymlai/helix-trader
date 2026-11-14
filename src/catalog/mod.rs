@@ -41,37 +41,33 @@ pub(crate) fn catalog_config(dir: &Path) -> anyhow::Result<DataCatalogConfig> {
     Ok(DataCatalogConfig::new(path.to_owned(), None, None))
 }
 
-/// The instruments of `traded`, those a strategy trades, as the catalog at
-/// `catalog` defines them. The catalog is opened through Nautilus'
+/// The instruments of `instrument_ids`, in their order, as the catalog at
+/// `catalog` defines them: those a strategy trades, or the pairs it
+/// converts through. The catalog is opened through Nautilus'
 /// `ParquetDataCatalog::from_uri`, whose error a missing directory is,
 /// where `ParquetDataCatalog::new` panics.
 ///
 /// # Errors
 ///
 /// Returns an error if the catalog cannot be opened or read, or an
-/// instrument of `traded` is not in it.
-pub fn traded_instruments(
+/// instrument of `instrument_ids` is not in it.
+pub fn instruments(
     catalog: &Path,
-    traded: &[InstrumentId],
+    instrument_ids: &[InstrumentId],
 ) -> anyhow::Result<Vec<InstrumentAny>> {
-    let ids: Vec<String> = traded.iter().map(ToString::to_string).collect();
+    let ids: Vec<String> = instrument_ids.iter().map(ToString::to_string).collect();
     let defined = ParquetDataCatalog::from_uri(&catalog.to_string_lossy(), None, None, None, None)
         .with_context(|| format!("opening the catalog {}", catalog.display()))?
         .instruments(Some(&ids), None, None)
         .with_context(|| format!("reading {} from the catalog", ids.join(", ")))?;
-    traded
+    instrument_ids
         .iter()
         .map(|&id| {
             defined
                 .iter()
                 .find(|instrument| instrument.id() == id)
                 .cloned()
-                .with_context(|| {
-                    format!(
-                        "the traded instrument {id} is not in the catalog {}",
-                        catalog.display()
-                    )
-                })
+                .with_context(|| format!("{id} is not in the catalog {}", catalog.display()))
         })
         .collect()
 }

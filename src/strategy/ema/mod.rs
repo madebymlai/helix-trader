@@ -337,7 +337,9 @@ impl DataActor for EmaCross {
             return Ok(());
         }
         match self.signal.cross(bar) {
-            Some(side) => self.trade(bar, side)?.send(self, self.config.stake()),
+            Some(side) => self
+                .trade(bar, side)?
+                .send(self, self.config.stake(), self.config.rates()),
             None => Ok(()),
         }
     }

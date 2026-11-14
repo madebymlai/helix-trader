@@ -6,7 +6,8 @@
 //! distance in price from the price its exits are set from to its stop.
 //! A strategy sends it at a `Stake`, the config's `Risk` times a multiple
 //! it picks: `Trade::send` sizes it with Nautilus' fixed-risk sizer to
-//! risk that fraction of the venue's equity over its one R
+//! risk that fraction of the venue's equity, converted into the
+//! instrument's P&L currency at the strategy's `Rates`, over its one R
 //! (`Trade::size`; `Trade::send_at` at a fixed equity, a dataset run's
 //! balance), tags its entry with its R in money and the multiple
 //! (`entry_risk`), and sends,
@@ -78,7 +79,7 @@ use nautilus_trading::strategy::{Strategy, StrategyNative};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use ustr::Ustr;
 
-use super::risk::Stake;
+use super::{conversions::Rates, risk::Stake};
 use crate::venues;
 
 /// The prefix of a trade's time alert, followed by its entry's client
@@ -222,27 +223,29 @@ impl Trade {
     /// size at that stake of that equity (`size`), its entry tagged with
     /// its R in money and the stake's multiple (`entry_risk`).
     ///
-    /// The equity is the account's (`Portfolio::equity`) in the
-    /// instrument's P&L currency, the account Nautilus' risk engine checks
-    /// the orders against (`routed_account`): its balance and the open P&L
-    /// of its positions on the instrument's venue. Positions the account
-    /// holds on its broker's other venues are left out, as are those of
-    /// other processes, which this cache does not hold anyway, one process
-    /// running one strategy.
+    /// The equity is the account's (`Portfolio::equity`), the account
+    /// Nautilus' risk engine checks the orders against (`routed_account`):
+    /// its balance and the open P&L of its positions on the instrument's
+    /// venue, converted into the instrument's P&L currency at `rates`, the
+    /// strategy's (`Rates::convert`); its R stays in the P&L currency.
+    /// Positions the account holds on its broker's other venues are left
+    /// out, as are those of other processes, which this cache does not hold
+    /// anyway, one process running one strategy.
     ///
-    /// It sends nothing, and logs why, if the account holds no equity in the
-    /// P&L currency (equity is not converted), or if its size rounds down
-    /// to none. Nautilus' risk engine judges what it sends: a
-    /// quantity below the instrument's minimum, or a margin beyond the
-    /// free balance, is denied.
+    /// It sends nothing, and logs why, if `rates` do not convert the
+    /// account's equity into the P&L currency (no pair reaching a currency
+    /// it holds, or no rate cached yet), or if its size rounds down to
+    /// none. Nautilus' risk engine judges what it sends: a quantity below
+    /// the instrument's minimum, or a margin beyond the free balance, is
+    /// denied.
     ///
     /// # Errors
     ///
     /// Returns an error if the instrument is not in the cache or is
-    /// inverse (as `refuse_inverse` refuses it), its stop is outside its
-    /// prices, Nautilus fails to size it, or Nautilus refuses an order or
-    /// the alert.
-    pub fn send<S>(&self, strategy: &mut S, stake: Stake) -> anyhow::Result<()>
+    /// inverse (as `refuse_inverse` refuses it), the equity converted
+    /// overflows, its stop is outside its prices, Nautilus fails to size
+    /// it, or Nautilus refuses an order or the alert.
+    pub fn send<S>(&self, strategy: &mut S, stake: Stake, rates: Rates) -> anyhow::Result<()>
     where
         S: Strategy + StrategyNative + DataActor + DataActorNative,
     {
@@ -252,12 +255,12 @@ impl Trade {
         let currency = instrument.cost_currency();
         let account = routed_account(strategy, venue);
         let held = strategy.portfolio().equity(&venue, account.as_ref());
-        let Some(&equity) = held.get(&currency) else {
+        let converted = rates.convert(&strategy.cache_ref(), held.values().copied(), currency);
+        let Some(equity) = converted? else {
             let held: Vec<String> = held.values().map(ToString::to_string).collect();
             log::error!(
                 "not sending the {} of {instrument_id} at a stake of {stake}: the account {} \
-                 holds no equity in {currency}, the currency of its P&L, but [{}], which is not \
-                 converted",
+                 holds [{}], not converted into {currency}, the currency of its P&L, at {rates}",
                 self.side,
                 account.map_or_else(|| format!("of {venue}"), |account| account.to_string()),
                 held.join(", ")
