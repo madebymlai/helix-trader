@@ -1,0 +1,909 @@
+https://download.londonstrategicedge.com
+requests
+How a request works
+address | The key
+calls | Calls a minute
+plans | What needs a plan
+markets-list | Markets
+symbols | Symbols
+dates | Dates and times
+answers | Answers and refusals
+files | Files
+one-download | One download at a time
+rows | Rows per export and per day
+service
+Service and keys
+health | /v3/health
+usage | /v3/usage
+catalogue
+Catalogue
+markets | /v3/markets
+pairs | /v3/pairs
+catalogue-call | /v3/catalogue
+factors | /v3/factors
+tables | /v3/tables
+photo | /v3/photo
+overview | /v3/overview
+market-data
+Market data
+selection | The selection
+preview | /v3/preview
+estimate | /v3/estimate
+export | /v3/export
+slice | /v3/slice
+dataset-builder
+Dataset builder
+dataset-export | /v3/dataset/export
+options
+Options
+us-options | The market: us_options
+options-chain | /v3/options/chain
+options-flow | /v3/options/flow
+macro
+Macro
+macro-call | /v3/macro
+macro-series | Macro preview, estimate, series, export
+macro-chart | /v3/macro/chart/export
+reference
+Reference
+collections | The collections
+reference-call | /v3/reference
+reference-series | Reference preview, estimate, export
+paid-feeds
+Paid feeds
+cme-market | The market: cme
+cme-options-market | The market: cme_options
+refusals | Refusal codes
+python | The Python client
+retired | Retired endpoints
+API Documentation | LSE Data 3.0 | London Strategic Edge | Every call of the LSE Data 3.0 API: the catalogue of eleven markets, previews, estimates and resumable CSV or Parquet exports of candles, trades, quotes, order books and Level 3 orders, options chains and flow, macro series and twenty-one reference collections, with real answers and every refusal code. | /api-documentation
+HTTPS
+GET
+JSON · CSV · Parquet
+API documentation
+LSE Data 3.0 is one HTTPS service. Every call is a GET under /v3 with your key in the X-API-Key header. Answers are JSON, except files, which are CSV or Parquet, and pictures, which are WebP. The examples on this page are real answers from the server on 25 October 2026, shortened.
+https://download.londonstrategicedge.com/v3/<call>?<parameters>
+Get your key on the /data#api | Databank. Live prices stream over WebSockets with the same key: /websocket-documentation | WebSocket documentation.
+requests
+How a request works
+address
+The key
+Send your key in the X-API-Key header on every call. The server also accepts it as ?key= in the address; use the header, so the key never sits in a URL. A key made on the Databank works within a minute.
+curl -H "X-API-Key: $LSE_KEY" "https://download.londonstrategicedge.com/v3/usage"
+Answer | When
+401 key-missing | No key in the header or the address.
+401 key-unknown | A key the server does not know.
+403 plan-ended | The key's subscription has ended. It still reads the catalogue and its own `/v3/usage`; every download is refused with the reason.
+403 key-withheld | The account holds more keys than its plan allows.
+calls
+Calls a minute
+Every call with a known key counts against its plan, including calls answered with a refusal. One call more answers 429 calls-exhausted, with a Retry-After header and retry_after in the body, both in seconds. /v3/usage shows your figure as calls_per_minute.
+Plan | Calls a minute
+Free | 60
+Global Markets Standard | 500
+Global Markets Standard+ | 1,000
+Global Markets Ultimate | 5,000
+CME Group and Nasdaq: Lite, Lite+, Standard, Standard+, Ultimate | 200, 300, 500, 1,000, 5,000
+GET /v3/health          (the 61st call of a minute on the free plan)
+429  Retry-After: 57
+{"code": "calls-exhausted", "message": "Your plan allows 60 API calls a minute; try again in 57 s", "retry_after": 57}
+plans
+What any key may read, and what needs a plan
+What | Who may read it
+The catalogue: /v3/markets, /v3/pairs, /v3/catalogue, /v3/factors, /v3/tables, /v3/overview, /v3/photo, the macro and reference lists | Any key
+Previews and estimates of candles and Greeks on the nine included markets, for any dates | Any key
+A paid market's figures: tick counts, stored rows, sizes, history bounds and estimates | Any key
+Exports, the dataset builder, the options calls, macro and reference rows | A key that belongs to an account
+A paid market's rows, its candles included: CME Globex, Nasdaq TotalView | A key on that market's plan, from Lite
+Level 2 book and Level 3 orders | A tier that sells the level, on a market that serves it
+A request that needs more is checked in this order, and the first check that fails answers:
+403 account-required: the key belongs to no account.
+403 plan-ended or 403 key-withheld: the key is withheld; the message says why.
+403 plan-required: the plan does not open the paid market. The body names the cheapest tier on sale in required_plan. An included market the plan does not open answers 403 market-not-in-plan.
+404 level-not-served when the market does not serve the level, with its levels; 403 level-required when the tier does not sell it, naming the cheapest tier that does.
+403 history-limit: the dates start before the tier's history for that level, counted back from today at 00:00 UTC. The body gives plan, level, earliest, requested_from and the next tier that reaches further. The included markets have no window.
+GET /v3/preview?market=cme&symbol=ESZ6&timeframe=1m          (a free key)
+403  {"code": "plan-required", "message": "This feed requires a subscription",
+      "required_plan": {"market": "cme", "tier": "lite", "name": "CME Group Lite", "subscribe_url": "/data?tab=subscriptions"}}
+GET /v3/export?market=cme&symbol=ESZ6&timeframe=tick&data=book&from=2026-11-05 14:30:00&to=2026-11-05 14:31:00&format=csv          (a CME Group Lite key)
+403  {"code": "level-required", "level": "L2", "message": "Level 2 book needs CME Group Standard or above",
+      "required_plan": {"market": "cme", "tier": "standard", "name": "CME Group Standard", "subscribe_url": "/data?tab=subscriptions"}}
+markets-list
+Markets
+A market is named by its folder. Instrument counts are what /v3/markets answered on 10 November 2026; read them from the call.
+Folder | Market | Instruments | Plan | Levels
+us_stocks | US stocks | 13,551 | Free | L1
+uk_stocks | UK stocks | 6,354 | Free | L1
+ca_stocks | Canadian stocks | 1,677 | Free | L1
+forex | Forex | 60 | Free | L1
+crypto | Crypto | 56 | Free | L1
+futures | Futures | 33 | Free | L1
+indices | Indices | 93 | Free | L1
+commodities | Commodities | 18 | Free | L1
+us_options | US options | 67,350,157 contracts of 14,133 underlyings | Free | L1
+cme | CME Globex | 1,689,737 contracts of 9,045 underlyings | CME Group, from Lite | L1, L2, L3
+nasdaq | Nasdaq TotalView | 34,002 | Nasdaq, from Lite | L1, L2, L3
+opra is a second name for us_options. Eurex, the London Stock Exchange and the Toronto Stock Exchange are coming soon. They, and a market that is switched off or not offered, answer 404 market-not-enabled with the market's name in the message, for example "Eurex is not served yet". A folder the server does not know answers 404 market-unknown.
+symbols
+Symbols
+A symbol is spelt as /v3/pairs lists it, and matched in any case: aapl finds AAPL. Every instrument also has a number, pair_id, which may be given instead of the symbol. Nasdaq TotalView uses the numbers of us_stocks: NVDA is 2000008377 in both.
+Market | Spelling | Example
+US stocks, Nasdaq TotalView | The ticker | AAPL
+UK stocks, Canadian stocks | The ticker, without a suffix | VOD, RY
+Forex | The pair with an underscore; its name has a slash | EUR_USD
+Crypto | Quoted in Tether | BTCUSDT
+Futures | The contract family | CRUDEOIL, SP500
+Indices, commodities | As listed | SPX, XAU/USD
+CME Globex
+The contract's exchange name; #cme-market | The market: cme has the rules
+ESZ6, NGZ26
+US options | The OCC symbol exactly as listed: capitals, the root padded to six characters | AAPL  261120C00100000
+A search with q looks in symbols and names, so q=EUR/USD finds EUR_USD, while symbol=EUR/USD finds nothing. An option contract written without its padding, or in lower case, answers 404 pair-unknown, and the sentence shows the padded form to write; the Python client adds the padding for you.
+A US stock symbol that was renamed still answers a request whose first day is on or before the last day the exchange listed it: the rows are the instrument's, the file is named by the symbol it has now, an export says so in x-lse3-symbol and an estimate or a preview in renamed. Without dates, or for later dates, it answers 404 symbol-unknown and the sentence names the new symbol. A pair_id never changes with a rename.
+dates
+Dates and times
+Form | Example | Selects
+Two dates | from=2026-10-08&to=2026-10-14 | Exchange trading days, both ends included
+Two UTC timestamps | from=2026-10-08 13:30:00&to=2026-10-08 13:35:00 | From the first instant up to the second, which is excluded. A fraction, a T between date and time and a trailing Z are accepted.
+Refusal | When
+400 date-mixed | A date on one side and a timestamp on the other.
+400 time-bad | A timestamp without seconds.
+400 date-bad | A date that does not exist.
+400 date-order | `from` after `to`.
+400 date-missing | An export without `from` and `to`. Previews and estimates may leave both out.
+404 date-not-trading | CME Globex or futures dates with no session.
+Daily, weekly and monthly candles follow exchange sessions. A daily candle's time is its first minute with a trade, in UTC: AAPL's candle for 1 October 2026 reads 2026-10-01 04:02:00.
+answers
+Answers and refusals
+A JSON answer is an object. Lists are paged with limit and offset, and a page carries total, count, limit and offset; an offset past the end is an empty page. A refusal is an object with code and message, plus the fields named for that code, and its HTTP status says the kind.
+Status | Kind
+400 | The request is wrong.
+401 | The key.
+403 | The plan.
+404 | Nothing there.
+410 | Gone.
+413 | Too wide.
+416 | A range past the end of a file.
+429 | Too many, the weekly allowance, or the rows a day.
+502 | The data store refused the query.
+503 | Busy or unavailable; try again.
+504 | Timed out.
+Every code is listed under #refusals | Refusal codes. Browsers may call the server only from londonstrategicedge.com, so call it from your own code, not from a web page on another site.
+files
+Files
+An export answers the bytes at once: 200 with Content-Disposition naming the file, Content-Length, x-checksum-sha256 (the file's SHA-256), x-export-id (the server's name for this export in its log), x-export-rows (the rows it charged) and x-lse3-adjusted 1 or 0. The file is built whole in the server's memory before the first byte goes out, so the size and the checksum are exact, and nothing is kept once it has been sent.
+A download that is cut is requested again from the start. prepare=1 is accepted and ignored. /v3/jobs/<id> and /v3/jobs/<id>/file, the prepared-file routes of earlier servers, answer 404 export-unknown.
+one-download
+One download at a time
+A key has one download open at a time, on every plan. While a file of the key is streaming, one more export, dataset export, macro or reference export answers 429 connections-exhausted, naming the file to wait for. While a job of the key is building, one more export answers 429 exports-busy with the same message; both carry Retry-After: 5. Every build takes a place in one of the server's two lanes, a fast one for small builds and a long one for the rest, each served in arrival order; a build that finds its lane full waits in a queue, its job building in the phase queued, and the export call answers 202 past its 10 seconds as usual. Only when the queue is full, or no counter was free to measure the export, does the export answer 503 exports-busy with Retry-After: 30; send it again then.
+GET /v3/export?market=us_stocks&symbol=AAPL&timeframe=1m&from=2021-10-21&to=2026-10-22&format=parquet      (sent while the same key's first file was still downloading)
+429  {"code": "connections-exhausted", "message": "One download at a time. AAPL_us_stocks_1m_2021-10-21_2026-10-21.parquet is still coming."}
+Downloads are paced per key: 50 Mbit/s on the free plan and 250 Mbit/s on a paid plan, after a first 4 MiB at full speed. The free plan also has a weekly allowance of 12.5 GiB, counted on exports and job files. Past it every export answers 429 allowance-exhausted until Monday 00:00 UTC.
+429  {"code": "allowance-exhausted", "message": "Your plan's weekly allowance of 12.5 GiB is used up (12.63 GiB this week); it resets Monday 00:00 UTC. A paid plan has no weekly allowance."}
+rows
+Rows per export and per day
+Every export is measured in rows before it is built. Trades, quotes, orders and the book of one instrument are counted from the stored rows, the count stopping at the plan's rows an export plus one: the rows charged are the rows of the file. Candles are measured by the stored bars the file is made from: a width that is stored is its own rows; a day, a week or a month read from the stored daily candles is one row a session; a file folded from finer bars is measured by the bars it reads, which /v3/estimate names as measured_rows (daily candles of a market without stored days, forex among them, read its minute bars). The plan sets two figures, which GET /v3/usage reports under rows.
+Plan | Rows one export may read | Rows a day
+Free | 2,500,000 | 12,500,000, reset at 00:00 UTC
+Paid tiers | 2,500,000 | No daily limit
+Past the rows an export the request answers 413 export-too-wide before anything is built, with both figures in the sentence. Past the rows a day it answers 429 rows-exhausted, with Retry-After and retry_after giving the seconds to 00:00 UTC. The rows are charged once, when the build is admitted, so used_today moves before the file exists; nothing is charged for a selection with no rows, a refused export or a resumed file, and a build that fails on our side gives its rows back. An export the server could not measure within 10 seconds is not built: it answers 413 export-too-wide saying so; choose shorter dates.
+GET /v3/export?market=us_stocks&symbol=AAPL&timeframe=1m&from=2003-01-01&to=2026-10-24&format=csv      (a free key)
+413  {"code": "export-too-wide", "message": "This export would read 4,132,385 rows; your plan allows at most 2,500,000 rows an export. Choose shorter dates."}
+GET /v3/export?market=us_stocks&symbol=AAPL&timeframe=1d&from=2000-01-01&to=2026-10-24&format=csv      (a free key with 11,900,000 rows used today)
+429  {"code": "rows-exhausted", "message": "Your plan allows 12,500,000 rows a day; 11,900,000 are used and this export would read 6,743. It resets at 00:00 UTC, in 5 h 12 min.", "retry_after": 18720}
+service
+Service and keys
+health
+/v3/health
+Whether the data server is up. No parameters.
+Answer
+Field | Meaning
+ok | `true` when the server answers
+markets | How many markets are enabled
+service, version | The server and its version
+Example
+GET /v3/health
+{"ok": true, "markets": 11, "service": "...", "version": "...", ...}
+usage
+/v3/usage
+What this key may do and has used. No parameters.
+Answer
+Field | Meaning
+key | The key's name, as you typed it on the Databank
+plan
+The plan: free, a tier such as nasdaq:standard, or cme:ended once a subscription has ended
+product
+global for an LSE key, else the exchange
+markets | The enabled markets the key opens
+rate_mbit | Download pace in Mbit/s
+connections, open | Downloads at once, and downloads running now
+calls_per_minute | Calls a minute
+levels, history | Per paid market: the levels sold, and the months of history per level (`l1`, `l2`, `l3`; `-1` for the whole archive) with the tier's name
+weekly | `allowance_bytes` (`-1` on a paid plan), `used_bytes`, and `week` as `2026-W43`; it resets Monday 00:00 UTC
+rows | `per_export`, the rows one export may read (the plan's figure, or the server's own where the plan sets none); `per_day` (`-1` none); `used_today`; `day`; and `resets_in_seconds` to 00:00 UTC
+bytes_since_start | Bytes this key has downloaded since the server last started
+withheld | `null`, or the sentence that says why every download is refused
+Example
+GET /v3/usage                                    (a free key)
+{"key": "<your key's name>", "plan": "free", "product": "global",
+ "markets": ["us_stocks", "uk_stocks", "ca_stocks", "forex", "crypto", "futures", "indices", "commodities", "us_options"],
+ "rate_mbit": 50.0, "connections": 1, "open": 0, "calls_per_minute": 60, "levels": {}, "history": {},
+ "weekly": {"allowance_bytes": 13421772800, "used_bytes": 134318, "week": "2026-W43"},
+ "rows": {"per_export": 2500000, "per_day": 12500000, "used_today": 1200000, "day": "2026-10-26", "resets_in_seconds": 18720},
+ "bytes_since_start": 55967, "withheld": null}
+GET /v3/usage                                    (a key whose CME Group subscription has ended)
+{"plan": "cme:ended", "product": "cme", "markets": [], ...,
+ "withheld": "your CME Group subscription has ended; renew it to download CME Group data"}
+catalogue
+Catalogue
+Every catalogue call answers any key, on any plan.
+markets
+/v3/markets
+Every market the server serves, with what this key may open, and the coming-soon markets apart. No parameters.
+Answer
+Field | Meaning
+plan | The key's plan
+markets[] | `folder`, `code`, `name`, `label`, `time_zone`, `pairs` (how many `/v3/pairs` lists), `underlyings` (options and CME), `allowed` (this key may download it), `required_plan` (a paid market's cheapest tier, else `null`), `levels`, `product`, `capabilities`
+capabilities | `candles`, `tick`, `trades`, `quotes`, `orders` (Level 3), `book` (Level 2), `greeks`: `true` or `false`
+coming_soon[] | `folder`, `code`, `label`, `status` (`coming_soon`), `enabled` (`false`), `levels`, `product`, `required_plan`, `time_zone` and a `note`
+Example
+GET /v3/markets
+{"plan": "free",
+ "markets": [{"folder": "us_options", "code": "US_OPTIONS", "label": "US options", "time_zone": "America/New_York", "pairs": 67194456, "underlyings": 14120,
+              "allowed": true, "required_plan": null, "levels": ["L1"], "product": "global",
+              "capabilities": {"candles": true, "tick": true, "greeks": true, "trades": false, "quotes": false, "orders": false, "book": false}}, ...],
+ "coming_soon": [{"folder": "london_stock_exchange", "code": "XLON", "label": "London Stock Exchange", "status": "coming_soon", "enabled": false,
+                  "levels": ["L1"], "product": "lse", "required_plan": {"market": "london_stock_exchange", "tier": "lite", "name": "London Stock Exchange Lite", ...},
+                  "note": "trades and bars from 2021-10-29; no quotes, no order book", "time_zone": "Europe/London"}, ...]}
+pairs
+/v3/pairs
+A market's instruments, searched and paged. Without a market it searches every enabled market. us_options pages by cursor; cme and us_options can be grouped by underlying.
+Parameters
+Parameter | Meaning
+market | The folder; leave it out to search every market
+symbol | Exactly this symbol, any case
+q | A search in symbols and names (on `us_options` at most 128 characters). The rows come by rank: the symbol is `q`, begins with it, holds it, then the name holds it; then the symbols that hold `q` once `/`, `-`, `_`, `.` and spaces are dropped on both sides (`BTC/USD` finds BTCUSDT, `BRK-B` finds BRK.B), and on `cme` the contracts of a product family whose name holds a `q` of three characters or more (`gold` finds GC and MGC)
+limit, offset | Rows a page, 0 to 10000 (100 when not given), and rows to skip
+sort
+symbol (default) or popular: a short list of familiar instruments first, then the rest by symbol
+cursor
+On us_options: the next_cursor of the page before, sent back unchanged with the same filters
+group_by
+underlying, on cme or us_options: lists underlyings instead of contracts
+underlying
+On cme or us_options: the contracts of one underlying, by the id the grouped list gives, such as SP500 or AAPL
+product, expiry, instrument_type, option_type
+With underlying: one product; one expiry day; future, option, spread, strategy, other or all; call, put or all
+Answer
+Field | Meaning
+market, total, count, limit, offset | The page
+sort, sort_basis
+The order asked for, and the one used: symbol, editorial or search_relevance
+pairs[] | `folder`, `symbol`, `name`, `pair_id`, `company_id` and `photo` where known, `active`, `listed_date`, `delisted_date`, `splits[]`, `availability`, and the stored tick count
+tick_count | The instrument's stored rows (stored trades for an option contract), with `tick_count_basis`, `tick_count_status` (`counted`, `not-collected`, `unavailable`) and `tick_count_as_of`
+tick_first, tick_last | The first and last day of the count, or `null`
+next_cursor, has_more | On `us_options`: the next page. A first page and a page by `offset` count the search for `total`; a page by `next_cursor` carries the count its search took within the last minute, so the pages of one walk agree and a cursor page's `total` can be up to a minute old
+underlyings[] | With `group_by`: `id`, `symbol`, `name`, `products`, `contract_count`, `active_contract_count`
+Example
+GET /v3/pairs?market=us_stocks&q=apple&limit=25
+{"market": "us_stocks", "total": 6, "count": 6, "limit": 25, "offset": 0, "sort": "symbol", "sort_basis": "search_relevance",
+ "pairs": [{"symbol": "AAPL", "name": "Apple Inc. - Common Stock", "pair_id": 2000000040, "company_id": 412,
+            "photo": {"light": "/v3/photo/company/412/light?v=76aae5e90b7e", "dark": "/v3/photo/company/412/dark?v=76aae5e90b7e"},
+            "active": true, "splits": [..., {"date": "2020-08-31", "price_factor": 0.25, "volume_factor": 4.0, "type": "split"}],
+            "tick_count": 1826455436, "tick_count_basis": "stored_rows", "tick_count_status": "counted", "tick_count_as_of": "2026-10-25T01:25:56Z", ...}, ...]}
+GET /v3/pairs?market=us_options&limit=5
+{"market": "us_options", "count": 5, "has_more": true, "next_cursor": "[\"1BOX  200228C00016000\",6039808675]", ...}
+GET /v3/pairs?market=cme&group_by=underlying&sort=popular&limit=3
+{"market": "cme", "group_by": "underlying", "sort_basis": "editorial", "total": 7269, "has_more": true,
+ "underlyings": [{"id": "SP500", "name": "S&P 500", "products": ["ES", "MES"], "contract_count": 391, "active_contract_count": 58},
+                 {"id": "NASDAQ100", "name": "Nasdaq 100", ...}, {"id": "DOW", "name": "Dow Jones Industrial Average", ...}]}
+GET /v3/pairs?market=cme&underlying=SP500&expiry=2026-12-18&instrument_type=future
+{"market": "cme", "total": 2, "pairs": [{"symbol": "ESZ6", "pair_id": 4000000001, "name": "ES futures 2026-12", ...},
+                                        {"symbol": "MESZ6", "pair_id": 4000000013, ...}], "products": ["ES", "MES"], ...}
+Refusals
+Code | When
+404 market-unknown, market-not-enabled | See Markets
+400 limit-bad, offset-bad, sort-bad | A `limit` over 10000, a negative `offset`, a `sort` other than `symbol` or `popular`
+400 cursor-bad | A `cursor` this server did not give
+400 group-by-bad, group-market-bad | `group_by` other than `underlying`, or grouping on a market other than `cme` or `us_options`
+400 expiry-bad, instrument-type-bad, option-type-bad | A filter value not in its list
+400 q-bad | A search on `us_options` over 128 characters
+catalogue-call
+/v3/catalogue
+What the archive holds. With largest=N (1 to 50): the N symbols with the most stored rows across the listed markets. With market: the /v3/pairs page, with symbols as a copy of pairs. With neither: the /v3/markets answer with count and exchanges[] added. q, limit and offset work as on /v3/pairs.
+Example
+GET /v3/catalogue?largest=5
+{"count": 5, "largest": [{"exchange": "cme", "symbol": "SR3Z6", "name": "SR3 futures 2026-12", "pair_id": 4000000054, "level": "L1",
+                          "rows": 2665744576, "first": "2025-09-28", "last": "2026-10-11"}, ...]}
+Refusals
+Code | When
+400 largest-bad | `largest` outside 1 to 50
+factors
+/v3/factors
+An instrument's splits and, for a share or fund in us_stocks, uk_stocks, ca_stocks or nasdaq, its dividends. Give market and symbol or pair_id.
+Answer
+Field | Meaning
+market, pair_id, symbol | The instrument
+splits[] | `date`, `price_factor`, `volume_factor`, `type` (`split` or `consolidation`)
+dividends | `status` (`ok`, `none`, `unlinked`, `unavailable`), `unit` (`GBX` is pence), `as_of`, `last_added`, `count`, `truncated` (more than 500 rows exist) and `rows[]` newest first
+dividends.rows[] | `ex_date`, `amount`, `payment_date`, `record_date`, `declaration_date`, `frequency`, `special`
+Example
+GET /v3/factors?market=uk_stocks&symbol=ULVR
+{"market": "uk_stocks", "symbol": "ULVR", "pair_id": 1000007737,
+ "splits": [{"date": "2006-05-22", "price_factor": 2.2222222222222223, "volume_factor": 0.45, "type": "consolidation"},
+            {"date": "2025-12-09", "price_factor": 1.125, "volume_factor": 0.8888888888888888, "type": "consolidation"}],
+ "dividends": {"status": "ok", "unit": "GBX", "as_of": "2026-10-25T08:17:02Z", "last_added": "2026-09-07T13:37:29Z", "count": 103, "truncated": false,
+               "rows": [{"ex_date": "2026-08-06", "amount": 39.82, "payment_date": "2026-09-18", "record_date": "2026-08-07", "frequency": "Quarterly", "special": false}, ...]}}
+Refusals
+Code | When
+400 market-missing, symbol-missing | No `market`, or neither `symbol` nor `pair_id`
+404 symbol-unknown, pair-unknown | An instrument the market does not list
+400 pair-bad | A `pair_id` that is not a number
+tables
+/v3/tables
+The stored tables of one market and their size. Give market.
+Answer
+Field | Meaning
+tables[] | `table`, `rows`, `bytes`, the `first` and `last` month as `YYYYMM`, and `partitions` (months stored)
+Example
+GET /v3/tables?market=us_stocks
+{"market": "us_stocks", "tables": [{"table": "bars", "rows": 38705401491, "bytes": 456262711665, "first": "200309", "last": "202610", "partitions": 278}]}
+photo
+/v3/photo/{kind}/{key}/{theme}
+A company's or an instrument's picture, as the photo field of /v3/pairs links it: /v3/photo/company/412/light. A WebP with an ETag and Cache-Control: public, max-age=86400; the ?v= in the link is a cache key the server ignores. It needs a key, and takes no download slot.
+Refusals
+Code | When
+404 theme-unknown | A `theme` other than `light` or `dark`
+404 photo-unknown | No picture for this key
+overview
+/v3/overview
+The overview of the archive. With market and symbol or pair_id, the instrument's stored 1-minute history is added.
+Answer
+Field | Meaning
+stats, countries | Totals across every market, and per country
+markets[] | Each market's `stored_rows`, and `ticks` with `ticks_day`, the day of the newest daily count; `contracts` for options and CME
+archives[] | Familiar instruments with their stored rows, first and last day
+history | With an instrument: `rows`, `first` and `last` of its 1-minute candles, and `as_of`, when they were counted
+The history counts are rebuilt every 10 minutes, so last can trail the newest candle by that much. A market still being counted, or a read that fails, answers null bounds with a note; bounds older than a day carry a note that says so.
+Example
+GET /v3/overview?market=us_stocks&symbol=AAPL
+{..., "history": {"symbol": "AAPL", "pair_id": 2000000040, "timeframe": "1m", "rows": 4132385,
+                  "first": "2003-09-10 12:51:00", "last": "2026-10-23 23:59:00", "as_of": "2026-10-24T18:09:39Z", ...}}
+Refusals
+Code | When
+400 timeframe-bad | A `timeframe` other than `1m`
+503 overview-unavailable | The overview figures could not be read
+market-data
+Market data
+Five calls read prices: preview, estimate, export, its second name candles, and slice. They take the same selection.
+selection
+The selection
+Parameter | Meaning
+market | The folder; required
+symbol or pair_id | The instrument; required unless `underlying` is given
+underlying | US options only: every contract of one root (`META`, `SPXW`) in one file, in place of a symbol. The contracts are those listed for the dates (not expired before `from`, listed by `to`), at most 20,000 (`413 contracts-too-many` past that: choose one expiry or shorter dates). Every row begins with `symbol` and `pair_id`; the file is sorted by symbol, then time; prices are as published. The file is `<ROOT>_contracts[_<expiry>][_calls|_puts]_us_options_<timeframe>_<from>_<to>`
+expiry, option_type | With `underlying`: one expiry day (`YYYY-MM-DD`); `call`, `put` or `all` (the default)
+data | `candles` (default), `trades`, `quotes`, `orders` (Level 3), `book` (Level 2), `greeks` (US options)
+timeframe | `tick`, `1s`, `5s`, `15s`, `30s`, `1m` (default), `3m`, `5m`, `15m`, `30m`, `1h`, `4h`, `1d`, `1w`, `1mo`. `tick` with `candles` is the trade slice. Greeks need `1m` or longer.
+from, to | Two dates or two UTC timestamps; required for an export
+format | `parquet` (default) or `csv`
+adjusted | `1` (default) adjusts prices and volumes for splits; `0` gives them as published, as does `as_published=1`
+What each data returns
+data | Columns | Where
+candles | time, open, high, low, close, volume, trades | Every market
+tick | time, price, size, kind | Every market with trades; not forex or commodities
+trades | time, price, size, kind | CME Globex, Nasdaq TotalView
+quotes | time, bid_price, ask_price, bid_size, ask_size | CME Globex, Nasdaq TotalView
+orders | time, action, side, order_id, price, size | Level 3: CME Globex, Nasdaq TotalView
+book
+time, sequence, action, side, price, size, depth, then ten bid and ten ask levels of price, size and orders: 67 columns
+Level 2: CME Globex, Nasdaq TotalView
+greeks | time, price_at, iv, delta, gamma, theta, vega, option_price, price_source, underlying_price, years_to_expiry, rate, dividends_pv | US options
+Trades, quotes, orders and book on an included market answer 400 data-unavailable ("This market offers timeframes, including tick"). Forex and commodities store quotes, not trades, so tick on them answers 404 data-unavailable. Sub-minute candles are built from 1-second bars, 1m to 4h from 1-minute bars. A Greek the formula cannot give is null, \N in CSV.
+preview
+/v3/preview
+The newest ten rows of a selection, or the rows of a short window given by from and to. Candles and Greeks of the included markets answer any key for any dates; everything else follows the plan checks.
+Answer
+Field | Meaning
+market, symbol, timeframe, data, adjusted | The selection
+columns[], rows[] | The column names, and the rows in time order
+message | Why there are no rows, when there are none
+Example
+GET /v3/preview?market=us_stocks&symbol=AAPL&timeframe=5m
+{"market": "us_stocks", "symbol": "AAPL", "timeframe": "5m", "data": "candles", "adjusted": true,
+ "columns": ["time", "open", "high", "low", "close", "volume", "trades"],
+ "rows": [{"time": "2026-10-23 23:10:00", "open": 347.4, "high": 347.45, "low": 347.25, "close": 347.32, "volume": 2252, "trades": 54}, ... ten rows ...],
+ "message": null}
+estimate
+/v3/estimate
+The rows and bytes an export would have, and what the export will be held to. Trades, quotes, orders and the book of one instrument are counted from the stored rows, the count stopping at the plan's rows an export plus one, so the figure is the one the export is charged; candles are read from the stored bar counts. Without from and to it describes the newest-ten-rows window of the preview.
+Answer
+Field | Meaning
+rows | The rows of the file. Ticks: counted from the stored rows; for a selection past the plan's rows an export, the month figures or a wider count, and `null` with a `basis` that begins "not counted yet" when neither answers. Candles: the stored bar counts of the months the dates touch, a month at either end in proportion
+measured_rows | Present when the export is held to more rows than its file has: the stored bars a folded candle file reads
+estimated_bytes | The size of the file to expect
+ceiling_bytes, mode | The most the file can weigh, and `stream` or `file`: above 100 MB a browser should write the file to disk as it arrives
+filename | The name the file will have
+basis | What the figure was read from
+download | The refusal a download would meet: for a selection the key may not download, with `required_plan`; for one past the plan's rows, the export's own `413 export-too-wide` or `429 rows-exhausted`
+renamed | Present when the symbol asked is one the instrument carried before a rename: `asked`, the `symbol` it has now, its `pair_id`
+message | Why the rows are 0, when they are
+Example
+GET /v3/estimate?market=us_stocks&symbol=AAPL&timeframe=5m&from=2026-10-08&to=2026-10-14&format=csv
+{"rows": 1059, "estimated_bytes": 92632, "ceiling_bytes": 268864, "mode": "stream", "filename": "AAPL_us_stocks_5m_2026-10-08_2026-10-14.csv",
+ "basis": "stored 60-second bars of AAPL in the months 202610 to 202610, as counted at 2026-10-25 15:45:06.668 UTC; a month at either end in proportion",
+ "message": null}
+GET /v3/estimate?market=nasdaq&symbol=NVDA&timeframe=tick&data=orders&from=2026-10-01&to=2026-10-23&format=csv     (a free key)
+{"rows": 124227886, "estimated_bytes": 10435158808, "mode": "file", "basis": "stored orders of NVDA in the months 202610 to 202610, as counted daily",
+ "download": {"status": 403, "code": "plan-required", "message": "This feed requires a subscription",
+              "required_plan": {"market": "nasdaq", "tier": "lite", "name": "Nasdaq Lite", "subscribe_url": "/data?tab=subscriptions"}}, ...}
+GET /v3/estimate?market=cme&symbol=ESZ6&timeframe=tick&data=trades&from=2026-11-06 15:00:00&to=2026-11-06 15:00:02&format=csv
+{"rows": 354, "estimated_bytes": 38332, "ceiling_bytes": 110848, "mode": "stream", "basis": "counted from the stored rows", ...}
+GET /v3/estimate?market=forex&symbol=EUR_USD&timeframe=1d&from=2010-01-01&to=2026-11-10&format=csv
+{"rows": 4383, "measured_rows": 6209919, "basis": "stored 60-second bars of EUR_USD in the months 200912 to 202611, ...",
+ "download": {"status": 413, "code": "export-too-wide",
+              "message": "This export would read 6,209,919 rows; your plan allows at most 2,500,000 rows an export. Choose shorter dates."}, ...}
+GET /v3/estimate?market=us_stocks&symbol=AAPL&timeframe=5m&from=2026-10-17&to=2026-10-18          (a weekend)
+{"rows": 0, "estimated_bytes": 0, "ceiling_bytes": 0, "mode": "stream", "message": "...", ...}
+Refusals
+Code | When
+404 level-not-served | A level the market does not serve, for every key
+503 estimate-unavailable | The stored figures could not be read
+export
+/v3/export
+The file, whole in this answer, by the rules under #files | Files. /v3/candles is a second name for the same call. Send prepare=1 for a job even when the file is small.
+Example
+GET /v3/export?market=us_stocks&symbol=AAPL&timeframe=1d&from=2026-10-01&to=2026-10-14&format=csv
+200  content-type: text/csv; charset=utf-8
+     content-disposition: attachment; filename="AAPL_us_stocks_1d_2026-10-01_2026-10-14.csv"
+     content-length: 714   x-checksum-sha256: 72ebd43f3a0d25e14b737e280abc0561a380a0c98819dd69b2f580db4ba721de
+     x-export-id: b9f431d4f94d4bca80b15c8699673179   x-export-rows: 10   x-lse3-adjusted: 1
+"time","open","high","low","close","volume","trades"
+"2026-10-01 04:02:00",334.18,334.83,325.82,330.79,15666143,265910
+"2026-10-02 04:00:00",331.14,334.54,330.17,333.53,15026716,228816
+...
+GET /v3/export?...&format=csv&prepare=1
+200  the same file: prepare=1 is accepted and ignored (until 2026-11-06 it asked for a prepared job)
+GET /v3/export?market=us_stocks&symbol=AAA&timeframe=1d&from=2026-10-01&to=2026-10-14
+404  {"code": "data-unavailable", "message": "..."}
+curl --get "https://download.londonstrategicedge.com/v3/export" \
+  -H "X-API-Key: $LSE_KEY" \
+  -d "market=us_stocks&symbol=NVDA&timeframe=5m" \
+  -d "from=2026-10-08&to=2026-10-14" \
+  -d "adjusted=1&format=csv" \
+  -o NVDA_5m.csv
+Refusals
+Code | When
+400 date-missing | No `from` or `to`
+404 data-unavailable | No stored rows in the selection
+429 connections-exhausted, exports-busy | This key's one download is still open or building
+429 allowance-exhausted | The free plan's weekly allowance is used
+413 export-too-wide | Past the plan's rows an export (2,500,000 on every plan), or the rows could not be measured within 10 seconds
+429 rows-exhausted | Past the plan's rows a day (12,500,000 free); `Retry-After` gives the seconds to 00:00 UTC
+503 exports-busy | The server's queue of waiting builds is full, or no counter was free to measure the export; `Retry-After` says 30 seconds
+jobs
+/v3/jobs/{id}
+The prepared-file routes of earlier servers, /v3/jobs/<id> and /v3/jobs/<id>/file. Since 2026-11-06 nothing is kept after an export is sent, so both answer 404 export-unknown: request the export again.
+Example
+GET /v3/jobs/14abc920bf274ec1ae3c62ff4885a45c
+404  {"code": "export-unknown", "message": "Exports are no longer kept after they are sent. Request the export again."}
+slice
+/v3/slice
+The call before /v3/export, kept for older code; it answers as /v3/export. table (bars, trades, quotes, orders, book, greeks) stands for data, and for bars bar_seconds (1, 5, 15, 30, 60, 180, 300, 900, 1800, 3600, 14400) for timeframe: table=bars&bar_seconds=300 is the 5m file. Another table answers 400 data-bad, another bar width 400 timeframe-bad.
+dataset-builder
+Dataset builder
+dataset-export
+/v3/dataset/export
+Candles with indicators, a second instrument's columns and local-time filters, computed on the server and delivered as a file. It takes the selection of an export, candles only, plus these parameters.
+Parameters
+Parameter | Meaning | Example
+indicators | Indicator ids with periods, comma-separated | rsi:14,sma:20
+companion_market | A second instrument's market; both markets are checked against the plan | us_stocks
+companion_symbol or companion_pair_id | The second instrument | MSFT
+companion_features | `close`, `return`, `corr`, comma-separated | close,return,corr
+corr_window | Rolling correlation window; 60 when not given | 20
+hour_start, hour_end | Inclusive local hours; give both | 10, 15
+tz | IANA zone for the hours and weekdays; UTC when not given | America/New_York
+day_of_week | Lower-case day names, comma-separated | monday,tuesday,wednesday,thursday,friday
+The second instrument joins at its latest candle at or before each candle. Indicator warm-up rows stay empty. The file name ends in _dataset.
+Example
+GET /v3/dataset/export?market=us_stocks&symbol=AAPL&timeframe=5m&from=2026-10-08&to=2026-10-13&indicators=rsi:14,sma:20
+    &companion_market=us_stocks&companion_symbol=MSFT&companion_features=close,return,corr&corr_window=20
+    &hour_start=10&hour_end=15&tz=America/New_York&day_of_week=monday,tuesday,wednesday,thursday,friday&format=csv
+200  content-length: 28112   x-checksum-sha256: 18e8d02d2d469c31f5fbd88a482a01d090b6547265a66b0aaf95856d1da3ab35
+     content-disposition: attachment; filename="AAPL_us_stocks_5m_2026-10-08_2026-10-13_dataset.csv"
+time,open,high,low,close,volume,trades,rsi_14,sma_20,msft_close,msft_return,corr_msft
+2026-10-08 14:00:00,337.27,337.66,337.06,337.325,186128.0,3492,,,531.145,,
+2026-10-08 14:05:00,337.3106,337.42,336.94,337.12,121757.0,2486,,,530.91,-0.0442,
+Refusals
+Code | When
+400 dataset-data-bad | `data` other than `candles`, or `timeframe=tick`
+400 dataset-options-bad | An indicator, period, feature or filter the builder does not know
+400 companion-missing | A companion market without its instrument, or the reverse
+503 dataset-unavailable | The builder did not answer within 10 seconds
+options
+Options
+Both calls read us_options, one of the included markets, and need a key that belongs to an account.
+us-options
+The market: us_options
+67.6 million US option contracts listed since 1 April 2013, on 14,138 underlyings: stocks, ETFs and indices. Candles start on 1 April 2013. Trades start on 18 January 2024, each as the exchanges report it on the OPRA feed, with the venue letter. On 14 November 2026 the market held 14.9 billion candles of 1 second, 1 minute and 15 minutes, 579 million daily candles and 5.46 billion trades. It answers:
+Contracts: /v3/pairs?market=us_options, paged by cursor, by underlying, or grouped by underlying.
+Candles at every timeframe, from 1 April 2013.
+The trade slice, timeframe=tick, from 18 January 2024: time, price, size, kind, for example 2026-10-21 13:34:17.213383276 | 239.25 | 6 | trade. data=trades belongs to the paid feeds and answers 400 data-unavailable here.
+Greeks, data=greeks, from 1 July 2024: one row per traded minute, computed twice a day.
+Splits: /v3/factors on a contract answers the underlying's splits.
+There are no quotes, book or orders: the feed carries trades. Before 18 January 2024 there are no ticks, and before 1 July 2024 no Greeks. The session of 18 June 2021 is missing. A contract that did not trade in the dates asked answers rows 0 with a message from the estimate, and 404 data-unavailable from the export.
+options-chain
+/v3/options/chain
+The listed, unexpired contracts of one underlying, with the last trade, today's volume and premium, and the Greeks of the newest computed day.
+Parameters
+Parameter | Meaning
+underlying | The root, up to six characters; required
+type | `call` or `put`
+expiry | One expiry day
+strike, strike_min, strike_max | One strike, or a range
+min_dte, max_dte | Days to expiry
+limit, offset | 1 to 5000 (1000 when not given), and rows to skip
+Answer
+Field | Meaning
+underlying_price, underlying_at | The underlying's last trade in US stocks, today or within the last week; `null` when the root is not a US stock, such as SPX
+contracts, returned, limit, offset | Contracts matched, and the page
+greeks_as_of | When the newest Greeks were computed
+rows[] | `ticker`, `symbol`, `pair_id`, `contract_type`, `strike`, `expiry`, `dte`, `last_price`, `last_trade_at`, `volume_today`, `premium_today`, `iv`, `delta`, `gamma`, `theta`, `vega`, `greeks_underlying_price`, `greeks_at`
+Example
+GET /v3/options/chain?underlying=AAPL&type=call&max_dte=30&limit=50
+{"underlying": "AAPL", "underlying_price": 347.65, "underlying_at": "2026-10-23 23:59:57.359570000",
+ "contracts": 453, "returned": 50, "limit": 50, "offset": 0, "greeks_as_of": "2026-10-23 20:14:24.009749359",
+ "rows": [..., {"ticker": "AAPL261026C00255000", "symbol": "AAPL  261026C00255000", "contract_type": "call", "strike": 255.0, "expiry": "2026-10-26", "dte": 1,
+                "last_price": 91.6, "last_trade_at": "2026-10-23 15:00:11.697433273", "volume_today": 0, "premium_today": 0.0,
+                "iv": 1.3409784, "delta": 0.99444896, "gamma": 0.0003588981, "theta": -0.13456006, "vega": 0.0052324333,
+                "greeks_underlying_price": 348.88, "greeks_at": "2026-10-23 13:45:14.014623553"}, ...]}
+Refusals
+Code | When
+400 underlying-missing, underlying-bad | No `underlying`, or one over six characters
+404 underlying-unknown | An underlying with no listed contracts
+400 type-bad, strike-bad, dte-bad | A filter value that is not valid
+504 options-timeout | Past 20 seconds; ask a narrower chain
+options-flow
+/v3/options/flow
+Trades of the OPRA feed with their premium (price × size × 100), newest first, each with its venue, dte (days from the trade's day to the expiry, 0 on the expiry day) and the Greeks of its minute where that day's figures are computed. With underlying the trades are those of every contract that could have traded in the window, its expiry on or after the window's first day, whether or not it has expired since, and the chain's filters apply, min_dte and max_dte judged on each day of the window. Without an underlying the call sweeps the whole market over at most seven days and takes min_premium, from, to, order and limit only.
+Parameters
+Parameter | Meaning
+underlying | The root; leave it out to sweep every contract
+min_premium | Trades of at least this premium
+from, to | Dates or UTC timestamps, `to` excluded; a date as `to` means that whole day. Today when not given.
+order | `desc` (default) or `asc`
+limit, offset | 1 to 5000 (1000 when not given), and rows to skip
+Example
+GET /v3/options/flow?underlying=AAPL&min_premium=100000&from=2026-10-22&to=2026-10-22&limit=2
+{"underlying": "AAPL", "from": "2026-10-22 00:00:00", "to": "2026-10-23 00:00:00", "order": "desc", "limit": 2, "offset": 0, "returned": 2,
+ "rows": [{"ts": "2026-10-22 19:59:58.091147533", "symbol": "AAPL  270416P00300000", "ticker": "AAPL270416P00300000", "contract_type": "put",
+           "strike": 300.0, "expiry": "2027-04-16", "dte": 173, "price": 7.33, "size": 340, "premium": 249219.99999999997, "venue": "A",
+           "iv": 0.28817976, "delta": -0.17714728, "underlying_price": 348.28, ...}, ...]}
+Refusals
+Code | When
+400 window-too-wide | A sweep over more than seven days
+400 underlying-required | Contract filters on a sweep
+400 from-bad, to-bad, window-bad | Dates that do not parse, or `to` not after `from`
+400 order-bad, min_premium-bad | A value that is not valid
+413 contracts-too-many | More than 20,000 contracts could have traded in the window: narrow the dates, or name an expiry or a type
+macro
+Macro
+Economic observations, economic releases and government bond yields, by country. On 25 October 2026: 15,067 observation series across 209 countries, the oldest from 1900; 26,615 release series across 143 countries. Since 12 November 2026: 587 yield series across 50 countries, from 2000. The list answers any key; rows need a key that belongs to an account.
+macro-call
+/v3/macro
+Without kind: kinds[] (kind, series, countries, first, last) and countries[]. With kind, a page of series.
+Parameters
+Parameter | Meaning
+kind | `observation`, `release` or `yield`
+country | Two letters
+code | One series
+q | A search in `code`, `name` and `category`, up to 128 characters
+group | `credit`: the credit, loan, mortgage, delinquency and lending series
+limit, offset | 0 to 1000 (100 when not given), and rows to skip
+Example
+GET /v3/macro?kind=observation&country=US&q=core%20inflation&limit=20
+{"kind": "observation", "country": "US", "total": 2, "count": 2, "limit": 20, "offset": 0,
+ "series": [{"code": "US.core_inflation_rate", "name": "US Core Inflation Rate", "category": "core_inflation_rate", "unit": "percent",
+             "frequency": "monthly", "first": "1957-02-01", "last": "2026-09-01", "stored_records": 835, "latest_value": 2.6, "latest_at": "2026-09-01", ...}, ...]}
+macro-series
+/v3/macro/preview · estimate · series · export
+All four take kind (observation when not given) and code, with from and to as dates, both included; the series' first and last day when not given.
+Call | Answers
+/v3/macro/preview | The last ten rows in time order: `kind`, `code`, `columns`, `rows[]`, `from`, `to`
+/v3/macro/estimate | `rows`, `estimated_bytes` (an upper bound; the file is much smaller), `mode`, `filename`
+/v3/macro/series | Every row of the window as JSON, for a chart; above 100,000 rows `413 series-window-too-wide`
+/v3/macro/export | The file, with `format` and `prepare`. `/v3/macro/values` is a second name for it.
+kind | Columns
+observation | day, value
+yield | day, close
+release
+released_at, actual, previous, consensus, forecast, in UTC; a scheduled release has a null actual
+Example
+GET /v3/macro/preview?kind=observation&code=US.core_inflation_rate
+{"kind": "observation", "code": "US.core_inflation_rate", "columns": ["day", "value"], "from": "1957-02-01", "to": "2026-09-01",
+ "rows": [{"day": "2025-12-01", "value": 2.6}, {"day": "2026-01-01", "value": 2.5}, ..., {"day": "2026-09-01", "value": 2.6}]}
+GET /v3/macro/estimate?kind=observation&code=US.core_inflation_rate&format=csv
+{"rows": 835, "estimated_bytes": 493056, "mode": "stream", "filename": "US.core_inflation_rate_macro_observation_1957-02-01_2026-09-01.csv"}
+Refusals
+Code | When
+400 kind-bad, country-bad, group-bad, search-bad | A value that is not valid
+400 code-missing | No `code`
+404 series-unknown | A code the catalogue does not hold
+400 range-bad | `from` after `to`
+504 macro-timeout | Past 25 seconds
+macro-chart
+/v3/macro/chart/export
+One to six observation series on their own dates, as level, yoy or mom change (mode), between from and to (both required), as csv (default) or parquet. codes is comma-separated, each code once. The file has date and one column per series, named after the code with every character other than letters, digits and _ replaced by _. Year-on-year and month-on-month compare with the latest value on or before 360 or 28 days earlier; a missing or zero base leaves the cell blank.
+Example
+GET /v3/macro/chart/export?codes=US.core_inflation_rate,US.inflation_rate&mode=yoy&from=2024-01-01&to=2026-10-14&format=csv
+"date","US_core_inflation_rate","US_inflation_rate"
+"2024-01-01",-30.357142857142854,-51.5625
+"2024-02-01",-30.909090909090914,-46.666666666666664
+Refusals
+Code | When
+400 codes-missing, codes-bad | No `codes`, more than six, or one repeated
+400 mode-bad | A `mode` other than `level`, `yoy` or `mom`
+reference
+Reference
+Research and reference collections, 21 in all. The list answers any key; rows need a key that belongs to an account.
+collections
+The collections
+Collection | Name | Time column | From
+company_profiles | Company profiles | updated_at | The current snapshot
+stock_fundamentals | Stock fundamentals | updated_at | The current snapshot
+financial_reports | Financial reports | date | 1984
+earnings_calendar | Earnings calendar | date | 1985
+insider_trades | Insider trades | filing_date | 2003
+dividends | Dividends | effective_date | 1962
+stock_splits | Stock splits | effective_date | 1930
+economic_calendar | Economic calendar | date | 2015
+bond_yields | Bond yields | date | 2000
+bond_yields_intraday | Hourly bond yields | ts | 1996
+bond_yields_minute | Bond yields, 1 minute | ts | 1996
+bond_yields_five_minute | Bond yields, 5 minutes | ts | 1996
+bond_yields_fifteen_minute | Bond yields, 15 minutes | ts | 1996
+bond_yields_thirty_minute | Bond yields, 30 minutes | ts | 1996
+bond_yields_hourly | Bond yields, 1 hour | ts | 1996
+bond_yields_four_hour | Bond yields, 4 hours | ts | 1996
+cot | Commitments of Traders | date | 2015
+sovereign_yields | Sovereign yields | date | 2010
+corporate_bonds | Corporate bonds | date | 2020
+credit_indices | Credit indices | date | 2010
+fx_derivatives | FX derivatives | date | 2015
+reference-call
+/v3/reference
+Without dataset: datasets[] with dataset, name, category, rows, series, first, last, as_of, columns and time_column. With dataset: that collection's series, filtered by symbol, country and q and paged with limit (0 to 1000, 100 when not given) and offset. A series carries symbol, name, country, rows, first, last, and company_id with photo where it names a company.
+Refusals
+Code | When
+404 dataset-unknown | A collection the catalogue does not list
+400 filter-bad | A filter over 128 characters, or a symbol over 512
+504 reference-timeout | Past 25 seconds
+reference-series
+/v3/reference/preview · estimate · export
+dataset is required. symbol selects one series; leave it out for the whole collection. country and q filter, and from and to bound the time column, both included; leaving them out selects the whole archive, rows without a date included. The preview answers dataset, symbol, columns and the last ten rows; the estimate rows, estimated_bytes, mode and filename; the export every native column as csv or parquet, with prepare.
+Example
+GET /v3/reference/estimate?dataset=company_profiles&symbol=AAPL&format=csv
+{"rows": 1, "estimated_bytes": 70488, "mode": "stream", "filename": "AAPL_company_profiles_first_latest.csv"}
+GET /v3/reference/preview?dataset=earnings_calendar&symbol=AAPL
+{"dataset": "earnings_calendar", "symbol": "AAPL",
+ "columns": ["id", "symbol", "date", "eps_estimated", "eps_actual", "revenue_estimated", "revenue_actual", "last_updated", "created_at", "updated_at"],
+ "rows": [..., {"symbol": "AAPL", "date": "2026-07-30", "eps_estimated": 1.89, "eps_actual": 2.02, "revenue_estimated": 109038900000, "revenue_actual": 109417000000, ...},
+          {"symbol": "AAPL", "date": "2026-10-29", "eps_estimated": 1.99, "eps_actual": null, "revenue_estimated": 113368900000, "revenue_actual": null, ...}, ...]}
+The earnings calendar has one row per company and report date: the EPS and revenue estimates, the actuals once reported, and last_updated, the day the row last changed. A company profile has 37 columns of the company's own public details, among them ceo, address, phone, website, isin and cusip.
+paid-feeds
+Paid feeds: what changes with a plan
+A key of a CME Group or Nasdaq tier opens its market's candles, trades and quotes from Lite, the Level 2 book and Level 3 orders as the tier sells them, within the tier's months of history per level. A paid plan has no weekly allowance, downloads at 250 Mbit/s, and has no daily rows limit; one export still reads at most 2,500,000 rows. Without the tier, the market's rows answer 403 plan-required; its figures answer every key. CME Globex and Nasdaq TotalView serve L1, L2 and L3. The /pricing | pricing page shows each tier's limits and a sample of each feed.
+Answers recorded by keys on these tiers in the plan tests of 21 October 2026:
+Nasdaq Standard key   GET /v3/estimate?market=nasdaq&symbol=NVDA&timeframe=tick&data=book&from=2026-10-14&to=2026-10-14
+                      200  rows 4,397,278
+Nasdaq Lite key       the same request
+                      403  level-required  "Level 2 book needs Nasdaq Standard or above", required_plan tier standard
+Nasdaq Standard key   the same request with from=2026-04-20
+                      403  history-limit  level L2  "Your Nasdaq Standard plan includes 6 months of L2 history, from 21 Apr 2026.
+                           You asked for data from 20 Apr 2026. Nasdaq Standard+ includes 1 year."
+cme-market
+The market: cme
+The contracts of CME Globex: futures, options, spreads and strategies, with candles, trades, quotes, the Level 2 book and the Level 3 orders. The same contracts stream live on the /websocket-documentation#cme | CME Group stream, under the same names.
+Names: a contract goes by its exchange name: the product, the month letter and the last digit of the year, as in ESZ6. Natural gas carries two digits of the year, as in NGZ26, and so does crude oil from 2030, as in CLZ30, so read a name from the catalogue instead of building it. /v3/pairs?market=cme&group_by=underlying lists the products, and underlying=SP500&instrument_type=future one product's contracts.
+A name comes round again after ten years: ESZ6 is the contract of December 2026 and the one of December 2016. With dates, a symbol means the contract that was listed on the first day you ask for, by the listed_date and delisted_date of the listing below, so ESZ6 from a day of 2016 is the contract of 2016. Without dates, or when no contract of that name was listed on that day, it means the contract that trades now, or else the one listed last. pair_id always names one contract.
+Dates are trade dates: a trade date opens the evening before, at 23:00 UTC in winter and 22:00 UTC in summer, so from=2026-11-05&to=2026-11-05 runs from 2026-11-04 23:00:00 up to 2026-11-05 22:00:00 UTC. A date with no session, such as a Saturday, answers 404 date-not-trading.
+The newest date: the trades, quotes and candles of an exchange day are loaded the morning after it, UTC, and its book and orders after them. Until then its trade date answers only what is already stored, the part of its evening before 00:00 UTC, and a later date answers 404 data-unavailable.
+Sizes: for the trade date 5 November 2026, ESZ6 has 1,380 one-minute candles and 1,257,319 trades, 62 MB as CSV. Its book for the one minute from 14:30 UTC is 99,104 rows and 33 MB, and for the whole date 10.8 GB. Ask for the book and the orders by time, with two UTC timestamps, an hour or less of a busy contract at a time.
+GET /v3/pairs?market=cme&symbol=ESZ6
+{"market": "cme", "total": 2,
+ "pairs": [{"symbol": "ESZ6", "pair_id": 4000000001, "name": "ES futures 2026-12", "active": true, "listed_date": "2021-09-17", "delisted_date": null, ...},
+           {"symbol": "ESZ6", "pair_id": 4000658762, "name": "ES futures 2016-12", "active": false, "listed_date": "2015-09-18", "delisted_date": "2016-12-16", ...}]}
+GET /v3/export?market=cme&symbol=ESZ6&timeframe=1m&from=2016-11-03&to=2016-11-03&format=csv
+200  1,365 candles, from "2016-11-02 22:00:00",2088.25,2089.75,2087.75,2089,2646,404       (the contract listed on that day: the one of 2016)
+GET /v3/export?market=cme&pair_id=4000658762&timeframe=1m&from=2016-11-03&to=2016-11-03&format=csv
+200  the same file
+With the Python client, a trade date of trades, one minute of the book, and the 2016 contract by its number:
+import os
+import sys
+from lse import LSE
+client = LSE(api_key=os.environ["LSE_KEY"])
+for contract in client.pairs("cme", symbol="ESZ6"):
+    sys.stdout.write(f"{contract['symbol']} {contract['pair_id']} {contract['name']} active={contract['active']}\n")
+trades = client.export(
+    "cme", "ESZ6", "tick", "2026-11-05", "2026-11-05",
+    data="trades", format="csv", dest="ESZ6_trades_2026-11-05.csv",
+)
+book = client.export(
+    "cme", "ESZ6", "tick", "2026-11-05 14:30:00", "2026-11-05 14:31:00",
+    data="book", format="csv", dest="ESZ6_book_1430.csv",
+)
+december_2016 = client.export(
+    "cme", "ESZ6", "1m", "2016-11-03", "2016-11-03",
+    pair_id=4000658762, format="csv", dest="ESZ6_2016_1m.csv",
+)
+for path in (trades, book, december_2016):
+    sys.stdout.write(f"{path} {os.path.getsize(path):,} bytes\n")
+ESZ6 4000000001 ES futures 2026-12 active=True
+ESZ6 4000658762 ES futures 2016-12 active=False
+ESZ6_trades_2026-11-05.csv 61,650,762 bytes
+ESZ6_book_1430.csv 32,628,394 bytes
+ESZ6_2016_1m.csv 78,284 bytes | Output
+cme-options-market
+The market: cme_options
+The options on CME Globex's futures, served as candles. A key that opens cme opens cme_options, under the same plan and the same months of history. On 14 November 2026 it listed 16.5 million contracts on 3,962 underlying products, each linked to the future it is on.
+Contracts: /v3/pairs?market=cme_options with one of symbol, underlying (a future, as in ESZ6) or product (the option product, as in E1C), narrowed by expiry, option_type and active. A contract goes by its exchange name, as in E1CZ6 P100, or by its pair_id.
+Candles of 1 minute and wider. Daily, weekly and monthly candles follow CME Globex's trade dates, as they do for cme.
+Not served yet: trades, quotes, the book, orders, Greeks and timeframes under a minute answer 400 data-unavailable.
+The history is being loaded from the newest day backwards, to 6 June 2010. On 14 November 2026 it had reached 25 July 2021: 123 million one-minute candles on 2.9 million contracts that traded.
+refusals
+Refusal codes
+The codes the server answers, with their status. A refusal is {"code": ..., "message": ...} plus the fields named for the code.
+Status | Code | When
+400 | code-bad | A release code without `region.name`
+400 | code-missing | A macro call without code
+400 | codes-bad | No codes, more than six, repeated or malformed
+400 | codes-missing | /v3/macro/chart/export without codes
+400 | companion-missing | A companion market without its instrument, or the reverse
+400 | country-bad | Not two letters
+400 | cursor-bad | A `cursor` this server did not give
+400 | data-bad | `data` not one of the six
+400 | dataset-data-bad | `data` other than `candles`, or `tick`, in the dataset builder
+400 | dataset-options-bad | An indicator, period, feature or filter the builder does not know
+400 | date-bad | A date that does not exist
+400 | date-missing | An export without `from` or `to`
+400 | date-mixed | A date on one side and a timestamp on the other
+400 | date-order | `from` after `to`
+400 | dte-bad | A `dte` that is not a whole number, or `min_dte` above `max_dte`
+400 | expiry-bad | `expiry` not `YYYY-MM-DD`
+400 | export-bad | The built specification is not valid
+400 | export-kind-bad | A non-market export that names a market
+400 | filter-bad | A filter too long: 128 characters, 512 for a reference symbol
+400 | format-bad | `format` not `parquet` or `csv`
+400 | from-bad | Options flow: `from` is neither a date nor a UTC timestamp
+400 | group-bad | `group` not `credit`
+400 | group-by-bad | `group_by` not `underlying`
+400 | group-market-bad | Grouping on a market other than `cme` or `us_options`
+400 | instrument-type-bad | `instrument_type` not `future`, `option`, `spread`, `strategy`, `other` or `all`
+400 | kind-bad | `kind` not `observation`, `release` or `yield`
+400 | largest-bad | `largest` not 1 to 50
+400 | limit-bad | `limit` not a whole number up to 10000
+400 | market-missing | A call that needs a market without one
+400 | max_dte-bad, min_dte-bad | Not a whole number of days
+400 | min_premium-bad | `min_premium` not a number
+400 | mode-bad | `mode` not `level`, `yoy` or `mom`
+400 | offset-bad | `offset` not a whole number
+400 | option-bad | `adjusted`, `as_published` or `prepare` not `1`, `0`, `true` or `false`
+400 | option-type-bad | `option_type` not `call`, `put` or `all`
+400 | order-bad | `order` not `asc` or `desc`
+400 | pair-bad | `pair_id` not a number
+400 | pair-required | `us_options` without `symbol` or `pair_id`
+400 | q-bad | A search on `us_options` over 128 characters
+400 | range-bad | `from` after `to`
+400 | search-bad | `/v3/macro`: `q` over 128 characters
+400 | sort-bad | `sort` not `symbol` or `popular`
+400 | strike-bad, strike_max-bad, strike_min-bad | A strike that is not a number, or `strike_min` above `strike_max`
+400 | symbol-bad | `us_options`: a symbol over 128 characters
+400 | symbol-missing | Neither `symbol` nor `pair_id`
+400 | time-bad | A timestamp without seconds
+400 | timeframe-bad | A `timeframe` the call does not take, or a `bar_seconds` outside the list
+400 | to-bad | Options flow: `to` is neither a date nor a UTC timestamp
+400 | type-bad | `type` not `call` or `put`
+400 | underlying-bad | Over six characters, or characters a root does not have
+400 | underlying-missing | `/v3/options/chain` without `underlying`
+400 | underlying-required | Contract filters on a sweep
+400 | window-bad | `to` not after `from`
+400 | window-too-wide | A sweep over more than seven days
+400, 404 | data-unavailable | 400: `trades`, `quotes`, `orders` or `book` on an included market, or Greeks outside `us_options`. 404: `tick` on forex or commodities, an instrument with no data yet, or a selection with no stored rows. For that last one the message begins "No stored data for this selection" and says why: the dates begin after today, the day may not be loaded yet (a trading day is stored after it ends), the contract was listed after the dates or stopped trading before them, or nothing of that kind is stored for the dates
+401 | key-missing | No key
+401 | key-unknown | A key the server does not know
+403 | account-required | A key that belongs to no account
+403 | history-limit | Dates before the plan's window for the level
+403 | key-withheld | The account holds more keys than its plan allows
+403 | level-required | A level the tier does not sell; `required_plan` names the cheapest that does
+403 | market-not-in-plan | An included market the key's plan does not open
+403 | plan-ended | The key's subscription has ended
+403 | plan-required | A paid market's rows; `required_plan` names the cheapest tier
+404 | dataset-unknown | A collection the reference catalogue does not list
+404 | date-not-trading | CME Globex or futures dates with no session
+404 | export-unknown | A job this key did not make, or a malformed id
+404 | file-unknown | A retired file path that names no market
+404 | level-not-served | A level the market does not serve
+404 | market-not-enabled | A market coming soon, switched off or not offered; the message names it
+404 | market-unknown | A folder the server does not know
+404 | pair-unknown | A `pair_id` or option contract the market does not list
+404 | photo-missing, photo-unknown | No picture
+404 | series-unknown | A macro code the catalogue does not hold
+404 | symbol-unknown | A symbol the market does not list
+404 | theme-unknown | `theme` not `light` or `dark`
+404 | underlying-unknown | An underlying with no listed contracts
+404, 503 | dataset-unavailable | 404: a collection not available yet. 503: the dataset builder did not answer
+409, 502 | export-failed | The build failed
+410 | export-expired | A job past its 24 hours
+410 | export-required | `/v3/files` and `/v3/file`, retired
+413 | series-window-too-wide | More than 100,000 rows
+413 | export-too-wide | An export past the plan's rows an export (2,500,000 on every plan), or one the server could not measure within 10 seconds
+429 | allowance-exhausted | The free plan's weekly allowance is used
+429 | calls-exhausted | Past the plan's calls a minute; `Retry-After` says when
+429 | rows-exhausted | Past the plan's rows a day (12,500,000 free); `Retry-After` and `retry_after` give the seconds to 00:00 UTC
+429 | connections-exhausted | One more download while this key's download is open
+429, 503 | exports-busy | 429: this key's download is still building. 503: the queue of waiting builds is full, or no counter was free to measure the export (Retry-After 30)
+502 | dataset-failed | The dataset build failed
+502 | query-invalid | The data store refused the query
+502, 503 | catalogue-invalid | The catalogue answered badly (502) or could not be loaded (503)
+503 | calendar-conflict, calendar-invalid, calendar-unavailable | The exchange calendar could not be read
+503 | catalogue-busy, catalogue-unavailable | The catalogue is busy or did not answer
+503 | estimate-unavailable | The stored figures could not be read
+503 | export-unavailable | The job could not be written or its file opened
+503 | overview-unavailable | The overview figures could not be read
+503 | query-busy | Too many reads at once
+504 | macro-timeout, reference-timeout | Past 25 seconds
+504 | options-timeout | Past 20 seconds
+Two more 502 codes say that the data store refused a query or did not answer; try again shortly.
+python
+The Python client
+Install the lse-data package, then client = LSE(api_key). The same package streams live prices; see the /websocket-documentation | WebSocket documentation. The source is on https://github.com/londonstrategicedge/lse-data | _blank | noopener noreferrer | GitHub.
+python -m pip install lse-data
+import os
+from lse import LSE
+client = LSE(api_key=os.environ["LSE_KEY"])
+markets = client.markets()
+pairs = client.pair_page("us_stocks", q="AAPL", limit=5)
+rows = client.preview("us_stocks", "AAPL", "1m")["rows"]
+size = client.estimate("us_stocks", "AAPL", "5m", "2026-10-08", "2026-10-14")
+path = client.export(
+    "us_stocks", "AAPL", "1m", "2026-10-08", "2026-10-08",
+    format="csv", dest="AAPL_1m.csv",
+)
+macro = client.macro_catalogue()
+reference = client.reference_catalogue()
+client.dataset_export(
+    "us_stocks", "AAPL", "5m", "2026-10-08", "2026-10-14",
+    indicators=["rsi:14", "sma:20"], format="csv",
+)
+client.reference_export("financial_reports", "AAPL", format="parquet")
+Which method makes which call
+Method | Call
+health(), usage() | `/v3/health`, `/v3/usage`
+markets(), tables(market), catalogue() | `/v3/markets`, `/v3/tables`, `/v3/catalogue`
+pair_page(), iter_pairs(), pairs(), catalog(), datasets(), options_underlyings() | `/v3/pairs`
+factors(market, symbol), overview(market, symbol) | `/v3/factors`, `/v3/overview`
+preview(), estimate() | `/v3/preview`, `/v3/estimate`
+export(), history(), job() | `/v3/export` and the job calls
+rows(), candles(), option_candles() | `/v3/export` as CSV, held in memory
+dataset_export() | `/v3/dataset/export`
+options_chain(), options() | `/v3/options/chain`
+options_flow_page(), options_flow() | `/v3/options/flow`
+macro_catalogue(), iter_macro_series(), economics() | `/v3/macro`
+macro_preview(), macro_series(), series(), macro_estimate(), macro_export(), macro_chart_export() | The macro calls
+reference_catalogue(), iter_reference_series(), reference() | `/v3/reference`
+reference_preview(), reference_estimate(), reference_export(), dataset() | The reference calls
+reference_rows(), bond_yields(), economic_calendar(), insider_trades(), dividends(), splits(), cot(), financial_reports(), company_profiles(), fundamentals() | `/v3/reference/export` as CSV, held in memory
+The client keeps the key in the header and follows no redirect. It accepts a job's download_url only on the server's own origin, resumes an interrupted file with Range and If-Range from its .part file, and checks the size and the SHA-256 before it places the file. A refusal raises LSEError with status, code, message and required_plan. An export that outlasts its timeout raises it with code timeout; the same call again continues it. A call past the plan's calls a minute waits once for Retry-After and tries again, unless the client was made with wait_for_limit=False.
+retired
+Retired endpoints
+New integrations use LSE Data 3.0. The earlier /v1, /databank-api and /iso routes on api.londonstrategicedge.com are retired and answer 410 Gone with a Link header that points here.
+The published LSE Terminal keeps its existing data calls: /vault/catalog, /vault/candles, /vault/usage, /vault/meta, /vault/reference, /vault/options/chain, /vault/options/flow, /vault/ref/economic_calendar and /vault/series. These require an API key and use the data available for the selected instrument. Other /vault routes, including exports, tick history and other reference datasets, remain retired. The terminal's prices and screener remain available at data-api.londonstrategicedge.com/v1/prices and /v1/screener.
+Old call | Use instead
+/vault/candles | /v3/preview, /v3/export
+/vault/series | The macro calls
+/vault/ref/<dataset> | The reference calls
+/vault/options/chain, /vault/options/flow | /v3/options/chain, /v3/options/flow
+POST /vault/export | GET /v3/export
+/vault/catalog, /vault/meta | /v3/markets, /v3/pairs
+The 0.x Python readers keep their names in version 3.0 of the package: pip install -U lse-data. Within /v3, /v3/files and /v3/file/... are retired and answer 410 export-required.
