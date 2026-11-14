@@ -39,9 +39,9 @@ use crate::{
 ///   without one.
 /// - `[trade]`: what it trades and, of a strategy sizing its trades by
 ///   risk (`Part::SIZES_BY_RISK`), how much each risks, its `risk` (see
-///   `TradeConfig`); required of such a strategy, and a key `[trade]` takes
-///   of no other; and the pairs its equity converts through, its
-///   `conversions`, if any.
+///   `TradeConfig`), required of such a strategy, and the pairs its equity
+///   converts through, its `conversions`, if any: keys `[trade]` takes of
+///   no other.
 /// - `[model]`: the model of a strategy trading on one
 ///   (`Part::TAKES_MODEL`), whose target trades `[trade]`'s instrument (see
 ///   `ModelSection`, `model`); required of such a strategy, and a key no
@@ -83,11 +83,11 @@ pub trait Part: DeserializeOwned + fmt::Debug + Clone {
     /// says.
     const TAKES_MODEL: bool = false;
     /// Whether it sizes its trades by risk, at a stake of `[trade] risk`
-    /// (`StandardConfig::stake`): if so its `[trade]` has a `risk`, and
-    /// otherwise takes none, the strategy sizing its orders itself rather
-    /// than sending `orders::Trade`s at a stake. A part trading on a model
-    /// sizes by risk, its model priced at the reference stake. Every part
-    /// does unless it says.
+    /// (`StandardConfig::stake`): if so its `[trade]` has a `risk` and
+    /// may list `conversions`, and otherwise takes neither, the strategy
+    /// sizing its orders itself rather than sending `orders::Trade`s at a
+    /// stake. A part trading on a model sizes by risk, its model priced at
+    /// the reference stake. Every part does unless it says.
     const SIZES_BY_RISK: bool = true;
     /// Its `[base]` when the TOML has none: its strategy id alone, since
     /// Nautilus tags its orders with the id's tag when `order_id_tag` is
@@ -629,7 +629,10 @@ pub struct TradeConfig {
     pub risk: Option<Risk>,
     /// The FX pairs the equity a trade is sized from is converted through
     /// into its instrument's P&L currency (`StandardConfig::rates`), each
-    /// by its id, all on one venue; none if left out.
+    /// by its id, all on one venue, the traded instrument's if its
+    /// broker's account has a base currency (`Conversions::validate`);
+    /// none if left out, and none of a strategy not sizing its trades by
+    /// risk (`TradeKeys`).
     #[serde(default)]
     pub conversions: Conversions,
 }
@@ -648,7 +651,9 @@ impl TradeConfig {
     /// `count` instruments listed; an instrument a futures root of the
     /// roll calendar (`rolls::Transition`), since an order goes to a
     /// contract; a `risk` not a proper fraction of equity
-    /// (`Risk::is_proper`), if it has one.
+    /// (`Risk::is_proper`), if it has one; pairs on more than one venue,
+    /// or off the venue of an instrument traded whose broker's account has
+    /// a base currency (`Conversions::validate`).
     fn validate(&self, count: usize, errors: &mut ConfigErrorCollector) {
         let listed = self.instruments.len();
         errors.check(
@@ -676,6 +681,7 @@ impl TradeConfig {
             self.risk.is_none_or(Risk::is_proper),
             ConfigError::range("trade.risk", "must be above 0% and below 100% of equity"),
         );
+        self.conversions.validate(&self.instrument_ids(), errors);
     }
 
     /// The quotes of each instrument traded that no series of `data`
@@ -808,8 +814,11 @@ impl<'de, P: Part> Visitor<'de> for Keys<P> {
 }
 
 /// Reads `[trade]` with the keys the strategy's part `P` takes: its
-/// `risk`, required, only of a part sizing its trades by risk
-/// (`Part::SIZES_BY_RISK`), and of any other a key it does not take.
+/// `risk`, required, and its `conversions`, only of a part sizing its
+/// trades by risk (`Part::SIZES_BY_RISK`); of any other, each is a key it
+/// does not take, since such a part sizes no trade from equity and so
+/// converts none (`conversions = []` lists no pair, as leaving it out
+/// does).
 struct TradeKeys<P>(PhantomData<P>);
 
 impl<'de, P: Part> DeserializeSeed<'de> for TradeKeys<P> {
@@ -817,9 +826,13 @@ impl<'de, P: Part> DeserializeSeed<'de> for TradeKeys<P> {
 
     fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<TradeConfig, D::Error> {
         let trade = TradeConfig::deserialize(deserializer)?;
+        let converts = !trade.conversions.pairs().is_empty();
         match (P::SIZES_BY_RISK, trade.risk) {
             (true, None) => Err(de::Error::missing_field("risk")),
             (false, Some(_)) => Err(de::Error::unknown_field("risk", &["instruments"])),
+            (false, None) if converts => {
+                Err(de::Error::unknown_field("conversions", &["instruments"]))
+            }
             _ => Ok(trade),
         }
     }
@@ -1620,6 +1633,76 @@ mod tests {
         );
     }
 
+    /// A strategy's rates are Nautilus' on one venue: pairs on two are
+    /// refused under the conversions, naming both venues.
+    #[test]
+    fn pairs_on_more_than_one_venue_are_refused_naming_the_venues() {
+        let err = load(&converting(r#"["EURUSD.ICMARKETS", "EUR/USD.IDEALPRO"]"#)).unwrap_err();
+
+        assert_eq!(fields_of(&err), ["trade.conversions"]);
+        assert!(
+            ["ICMARKETS", "IDEALPRO"]
+                .iter()
+                .all(|venue| err.to_string().contains(venue)),
+            "{err}"
+        );
+    }
+
+    /// `TOML` trading IC Markets' gold in place of ESM24.CME, converting
+    /// through `pairs`.
+    fn trading_gold_converting(pairs: &str) -> String {
+        let toml = converting(pairs).replace(
+            "{ instrument_id = \"ESM24.CME\" }",
+            "{ instrument_id = \"XAUUSD.ICMARKETS\" }",
+        );
+        assert!(toml.contains("XAUUSD.ICMARKETS"));
+        toml
+    }
+
+    /// An IC Markets account has a base currency, which Nautilus converts
+    /// its margins, commissions and P&L into only through rates on the
+    /// traded instrument's venue: an IDEALPRO pair is refused for the gold
+    /// IC trades, under its field, naming the pair and the gold.
+    #[test]
+    fn a_pair_off_the_venue_of_an_instrument_whose_account_has_a_base_currency_is_refused() {
+        let err = load(&trading_gold_converting(r#"["EUR/USD.IDEALPRO"]"#)).unwrap_err();
+
+        assert_eq!(fields_of(&err), ["trade.conversions[0]"]);
+        assert!(
+            ["EUR/USD.IDEALPRO", "XAUUSD.ICMARKETS"]
+                .iter()
+                .all(|named| err.to_string().contains(named)),
+            "{err}"
+        );
+    }
+
+    /// IC's own pair is on the gold's venue.
+    #[test]
+    fn a_pair_on_the_venue_of_an_instrument_whose_account_has_a_base_currency_is_taken() {
+        let config = load(&trading_gold_converting(r#"["EURUSD.ICMARKETS"]"#)).unwrap();
+
+        assert_eq!(
+            config.trade.conversions.pairs(),
+            [InstrumentId::from("EURUSD.ICMARKETS")]
+        );
+    }
+
+    /// IB's account, as helix configures it, has no base currency, so only
+    /// the sizer converts, at the pairs' venue: for the futures IB trades,
+    /// on CME, a pair of any one venue is taken.
+    #[test]
+    fn a_pair_of_any_venue_is_taken_for_instruments_whose_account_has_no_base_currency() {
+        for pair in ["EUR/USD.IDEALPRO", "EURUSD.ICMARKETS"] {
+            let config = load(&converting(&format!(r#"["{pair}"]"#))).unwrap();
+
+            assert_eq!(
+                config.trade.conversions.pairs(),
+                [InstrumentId::from(pair)],
+                "{pair}"
+            );
+        }
+    }
+
     #[test]
     fn the_strategys_own_rules_are_applied() {
         let toml = TOML.replace("spread = 3", "spread = 0");
@@ -1710,6 +1793,24 @@ mod tests {
             assert_ne!(toml, TOML);
             let err = shape_of(&load(&toml).unwrap_err());
             assert!(err.contains("unknown") && err.contains("`risk`"), "{err}");
+        }
+
+        /// It sizes no trade from equity, so it converts none: pairs it
+        /// would never read are refused, not ignored, as a key its
+        /// `[trade]` does not take.
+        #[test]
+        fn a_strategy_not_sizing_by_risk_refuses_conversions_as_an_unknown_key() {
+            let toml = TOML.replace(
+                r#"instruments = [{ instrument_id = "SPY.XNAS" }]"#,
+                "instruments = [{ instrument_id = \"SPY.XNAS\" }]\nconversions = \
+                 [\"EUR/USD.IDEALPRO\"]",
+            );
+            assert_ne!(toml, TOML);
+            let err = shape_of(&load(&toml).unwrap_err());
+            assert!(
+                err.contains("unknown") && err.contains("`conversions`"),
+                "{err}"
+            );
         }
 
         /// It has no stake to ask for: asking is the code's mistake, which
