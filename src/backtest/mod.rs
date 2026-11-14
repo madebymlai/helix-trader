@@ -49,12 +49,14 @@ pub struct Backtest {
     /// window alone. It serves no request: the strategy warms up on the
     /// replay.
     pub catalog: PathBuf,
-    /// The internal bar types the strategy trades on. Their instruments
+    /// The bar types the strategy trades on, internal, and the external
+    /// bars of a pair it converts through, an IB pair's BID and ASK bars
+    /// (`strategy::DataRequirements::bar_types`). Their instruments
     /// are those the strategy reads, on one venue or several, each a
     /// simulated venue of the run. The series Nautilus builds the
     /// bars from (see `strategy::catalog_series`: the quotes of their
-    /// instrument, or the source bars of a composite bar type) are
-    /// replayed, as is the book of each instrument the catalog stores one
+    /// instrument, the source bars of a composite bar type, or external
+    /// bars themselves) are replayed, as is the book of each instrument the catalog stores one
     /// of (see `series`).
     pub bar_types: Vec<BarType>,
     /// The tick series the strategy reads as they are: each replayed as

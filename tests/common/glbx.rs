@@ -4,7 +4,8 @@
 //! quotes. Here a few snapshots and trades on Wednesday 21 October 2026,
 //! the day of `common::ic`; and its book deltas, as Databento's MBO fills
 //! the catalog with them, and custom data of it, `Imbalance`, a type of
-//! the tests'.
+//! the tests'; and, apart, its quotes, as LSE streams CME Globex's Level
+//! 1, for a run trading it.
 
 use std::{path::Path, sync::Arc};
 
@@ -13,7 +14,7 @@ use nautilus_core::UnixNanos;
 use nautilus_model::{
     custom_data,
     data::{
-        BookOrder, CustomData, DataType, OrderBookDelta, OrderBookDepth, TradeTick,
+        BookOrder, CustomData, DataType, OrderBookDelta, OrderBookDepth, QuoteTick, TradeTick,
         stubs::stub_depth10,
     },
     enums::{AggressorSide, BookAction, OrderSide, RecordFlag},
@@ -25,7 +26,7 @@ use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use nautilus_serialization::arrow_custom_data;
 use ustr::Ustr;
 
-use super::ic::at;
+use super::ic::{self, at};
 
 pub const INSTRUMENT_ID: &str = "GC.v.0.GLBX";
 /// Bars of gold the catalog holds no source of: left out of a backtest.
@@ -79,6 +80,36 @@ pub fn store(dir: &Path) {
     catalog
         .write_to_parquet(
             &depths(),
+            Some(at("08:00:00").into()),
+            Some(at("12:00:00").into()),
+            None,
+        )
+        .unwrap();
+}
+
+/// Gold's quotes as LSE streams CME Globex's Level 1, for a run trading
+/// the contract through IB: IC's gold quotes (`ic::quotes`) on the
+/// contract, from 08:00 to 12:00, the hours closing 10:00, 11:00 and
+/// 12:00 last quoted 4005.90 / 4006.10, 4011.90 / 4012.15 and 4000.90 /
+/// 4001.10.
+pub fn quotes() -> Vec<QuoteTick> {
+    ic::quotes()
+        .into_iter()
+        .map(|quote| QuoteTick {
+            instrument_id: InstrumentId::from(INSTRUMENT_ID),
+            ..quote
+        })
+        .collect()
+}
+
+/// Writes gold and `quotes()` into the catalog in `dir`, stored over 08:00
+/// to 12:00: no book.
+pub fn store_quotes(dir: &Path) {
+    let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
+    catalog.write_instruments(vec![instrument()]).unwrap();
+    catalog
+        .write_to_parquet(
+            &quotes(),
             Some(at("08:00:00").into()),
             Some(at("12:00:00").into()),
             None,

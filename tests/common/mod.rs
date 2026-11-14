@@ -16,6 +16,7 @@ pub mod dataset;
 pub mod features;
 pub mod glbx;
 pub mod ic;
+pub mod idealpro;
 pub mod recorder;
 pub mod rolls;
 

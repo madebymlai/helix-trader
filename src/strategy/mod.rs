@@ -72,10 +72,12 @@ use crate::rolls::{Slice, TransitionTable};
 /// catalog, backtesting and going live all read it from here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataRequirements {
-    /// The internal bar types the strategy reads and warms up on: their
-    /// instruments are those it reads (see `instrument_ids`), and a live
-    /// node sizes its cache to hold their warmup (see
-    /// `warmup::Warmup::cache_config`).
+    /// The bar types the strategy reads and warms up on, internal bars
+    /// Nautilus builds and, of a pair it converts through whose history is
+    /// bars, the pair's own (an IB pair's 1-minute BID and ASK bars,
+    /// `StandardConfig::data_requirements`): their instruments are those it
+    /// reads (see `instrument_ids`), and a live node sizes its cache to hold
+    /// their warmup (see `warmup::Warmup::cache_config`).
     pub bar_types: Vec<BarType>,
     /// The tick series the strategy reads as they are, beside or instead
     /// of bars, book deltas and custom data among them (see

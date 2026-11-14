@@ -274,9 +274,11 @@ impl<P: Part> StandardConfig<P> {
 
     /// What the strategy needs from data: the bars and the ticks of its
     /// series, then the quotes of each instrument traded that no series
-    /// prices (`TradeConfig::quotes_unpriced_by`), then those of each pair
-    /// of `[trade] conversions` not read yet, which its rates are read from
-    /// (`Conversions::quotes`), and the warmup.
+    /// prices (`TradeConfig::quotes_unpriced_by`), then the series of each
+    /// pair of `[trade] conversions` its rates are read from, as its venue's
+    /// history serves them (`Conversions::series`), those not read yet: a
+    /// cTrader pair's quotes after the ticks, an IB pair's 1-minute BID and
+    /// ASK bars after the bar types. And the warmup.
     #[must_use]
     pub fn data_requirements(&self) -> DataRequirements {
         let mut ticks: Vec<TickSeries> = self
@@ -289,13 +291,16 @@ impl<P: Part> StandardConfig<P> {
             })
             .chain(self.trade.quotes_unpriced_by(&self.data))
             .collect();
-        for quotes in self.trade.conversions.quotes() {
-            if !ticks.contains(&quotes) {
-                ticks.push(quotes);
+        let mut bar_types: Vec<BarType> = self.data.bar_types().collect();
+        for series in self.trade.conversions.series() {
+            match series {
+                Series::Bars(bars) if !bar_types.contains(&bars) => bar_types.push(bars),
+                Series::Ticks(read) if !ticks.contains(&read) => ticks.push(read),
+                Series::Bars(_) | Series::Ticks(_) => {}
             }
         }
         DataRequirements {
-            bar_types: self.data.bar_types().collect(),
+            bar_types,
             ticks,
             custom: self.data.custom.clone(),
             warmup: self.data.warmup,
@@ -614,7 +619,7 @@ pub struct CompositeSource {
 /// equity a trade is sized from is converted through.
 /// The execution data of an instrument traded comes from it: its quotes,
 /// when no series of `[data]` prices it (`quotes_unpriced_by`); so do the
-/// pairs' quotes (`Conversions::quotes`).
+/// pairs' quotes or bars (`Conversions::series`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TradeConfig {
@@ -1619,18 +1624,46 @@ mod tests {
     /// A pair whose quotes a series already reads is read once.
     #[test]
     fn a_pair_whose_quotes_a_series_reads_is_read_once() {
-        let toml = converting(r#"["ESH24.CME"]"#).replace(
+        let toml = converting(r#"["EURUSD.ICMARKETS"]"#).replace(
             r#"{ data = "trades", instrument_id = "ESH24.CME" }"#,
-            r#"{ data = "quotes", instrument_id = "ESH24.CME" }"#,
+            r#"{ data = "quotes", instrument_id = "EURUSD.ICMARKETS" }"#,
         );
 
         assert_eq!(
             load(&toml).unwrap().data_requirements().ticks,
             [TickSeries {
                 data: NautilusDataType::QuoteTick,
+                instrument_id: InstrumentId::from("EURUSD.ICMARKETS"),
+            }]
+        );
+    }
+
+    /// IB's history serves an FX pair as its 1-minute BID and ASK bars,
+    /// no quotes, which Nautilus' rates read when a pair has no quotes: an
+    /// IDEALPRO pair loads its bars, after the series' bar types, and no
+    /// ticks; the series stay as listed.
+    #[test]
+    fn an_ib_pair_converted_through_loads_its_bid_and_ask_minute_bars_into_the_requirements() {
+        let config = load(&converting(r#"["EUR/USD.IDEALPRO"]"#)).unwrap();
+
+        let requirements = config.data_requirements();
+        assert_eq!(
+            requirements.bar_types,
+            [
+                BarType::from("ESH24.CME-1-HOUR-MID-INTERNAL"),
+                BarType::from("ESM24.CME-5-MINUTE-BID-INTERNAL"),
+                BarType::from("EUR/USD.IDEALPRO-1-MINUTE-BID-EXTERNAL"),
+                BarType::from("EUR/USD.IDEALPRO-1-MINUTE-ASK-EXTERNAL"),
+            ]
+        );
+        assert_eq!(
+            requirements.ticks,
+            [TickSeries {
+                data: NautilusDataType::TradeTick,
                 instrument_id: InstrumentId::from("ESH24.CME"),
             }]
         );
+        assert_eq!(config.data.series.len(), 3);
     }
 
     /// A strategy's rates are Nautilus' on one venue: pairs on two are

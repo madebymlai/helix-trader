@@ -32,6 +32,7 @@ mod backtest_ema_time_exit;
 mod backtest_failed_run;
 mod backtest_features;
 mod backtest_golden_rows;
+mod backtest_ib_conversions;
 mod backtest_ic_conversions;
 mod backtest_ic_hedging;
 mod backtest_ic_margin;
