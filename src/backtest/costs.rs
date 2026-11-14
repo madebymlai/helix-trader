@@ -49,7 +49,7 @@ pub enum Commission {
 /// A commission as TOML writes it: exactly one of its kinds, each an amount
 /// as text.
 #[derive(Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[serde(rename_all = "snake_case")]
 enum CommissionFields {
     PerOrder(String),
     Rate(String),
@@ -65,6 +65,19 @@ impl TryFrom<CommissionFields> for Commission {
             CommissionFields::Rate(rate) => Self::rate(&rate),
             CommissionFields::PerQuantity(amount) => Self::per_quantity(&amount),
         }
+    }
+}
+
+/// Its kind and its amount normalized (`normalized`), such as `rate
+/// 0.00003`, `per order 3 EUR` or `per quantity 0.035 USD`.
+impl std::fmt::Display for Commission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kind = match self {
+            Self::PerOrder(_) => "per order",
+            Self::Rate(_) => "rate",
+            Self::PerQuantity(_) => "per quantity",
+        };
+        write!(f, "{kind} {}", self.normalized())
     }
 }
 

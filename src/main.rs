@@ -145,16 +145,16 @@ struct TrainArgs {
 #[group(required = true, multiple = false)]
 struct CommissionArgs {
     /// Commission charged once per order, for example "3 EUR".
-    #[arg(long, value_parser = parse_commission)]
+    #[arg(long, value_parser = Commission::per_order)]
     commission: Option<Commission>,
     /// Commission rate on the value of each fill, with no minimum, for
     /// example 0.0005 (0.05%).
-    #[arg(long, value_parser = parse_commission_rate)]
+    #[arg(long, value_parser = Commission::rate)]
     commission_rate: Option<Commission>,
     /// Commission charged on each unit of the quantity of each fill, each
     /// fill's charge rounded to the currency's precision, for example
     /// "0.035 USD" (3.5 USD per 100 oz of gold, Pepperstone's).
-    #[arg(long, value_parser = parse_commission_per_quantity)]
+    #[arg(long, value_parser = Commission::per_quantity)]
     commission_per_quantity: Option<Commission>,
 }
 
@@ -214,6 +214,29 @@ struct LiveArgs {
 }
 
 impl LiveArgs {
+    /// The arguments of the `train` of the node's retrains but its `--at`,
+    /// which the launcher gives (`Launcher::process`): the node's strategy,
+    /// config, catalog and store, the train reading the commission and
+    /// balance of its dataset runs from the config (`[model] dataset`). A
+    /// live node is the one node of its process while it runs, and a train
+    /// replays the dataset days it lacks through a node of its own, so each
+    /// retrain is a process.
+    fn train_args(&self) -> Vec<OsString> {
+        let strategy = self
+            .strategy
+            .to_possible_value()
+            .expect("every strategy has a name");
+        let mut args: Vec<OsString> = vec!["train".into(), strategy.get_name().into()];
+        args.extend([
+            "--config".into(),
+            self.config.clone().into_os_string(),
+            "--catalog".into(),
+            self.catalog.clone().into_os_string(),
+        ]);
+        args.extend(["--models".into(), self.models.clone().into_os_string()]);
+        args
+    }
+
     /// The recording of the live node: staged in `--staging`.
     fn recording(&self) -> Recording {
         Recording {
@@ -234,21 +257,6 @@ fn parse_time(s: &str) -> Result<Timestamp, String> {
 /// clap would otherwise pick `Money: From<&str>`, which panics.
 fn parse_money(s: &str) -> Result<Money, String> {
     s.parse()
-}
-
-/// A commission per order (`Commission::per_order`).
-fn parse_commission(s: &str) -> anyhow::Result<Commission> {
-    Commission::per_order(s)
-}
-
-/// A commission rate (`Commission::rate`).
-fn parse_commission_rate(s: &str) -> anyhow::Result<Commission> {
-    Commission::rate(s)
-}
-
-/// A commission per unit of quantity (`Commission::per_quantity`).
-fn parse_commission_per_quantity(s: &str) -> anyhow::Result<Commission> {
-    Commission::per_quantity(s)
 }
 
 /// Reads the config of the strategy of part `P` from `path` and validates
@@ -331,9 +339,10 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
 /// (`Backtest::refuse_balance`). A strategy trading on a
 /// model is first trained on its schedule (`model::walk`): its dataset
 /// built over the span and its models trained at each train time the
-/// store lacks one, in this process, on the backtest's catalog, store
-/// and costs and the dataset balance; the out-of-sample scores of its
-/// models follow the results.
+/// store lacks one, in this process, on the backtest's catalog and store,
+/// at the commission and balance of the config's `[model] dataset`; the
+/// out-of-sample scores of its models follow the results, after the costs
+/// of the run and of its models' dataset runs.
 fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     // The node installs Nautilus' logger from its engine config: pass the
@@ -443,57 +452,19 @@ fn backtest_on_models<S: ModelStrategy>(
     let trained_at = config.model().dataset;
     let outcome = backtest.run(S::new(config, mode)?)?;
     print!("{}", backtest::report(&outcome));
+    println!(
+        "Run at: commission {}, balance {} (--commission, --balance)",
+        args.commission.commission(),
+        args.balance
+    );
     println!("Models trained at: {trained_at} ([model] dataset)");
     print!("{}", walk.scores(start, end)?);
     Ok(())
 }
 
-/// The child processes of a live node whose strategy trades on a model:
-/// its retrains, this binary's `train` on the node's strategy, config,
-/// catalog and store (`Launcher::process`), at the commission and balance
-/// the config declares (`[model] dataset`). A live node is the one node of its process
-/// while it runs, and a train replays the dataset days it lacks through a
-/// node of its own, so each retrain is a process.
-struct Children {
-    strategy: StrategyName,
-    config: PathBuf,
-    catalog: PathBuf,
-    models: PathBuf,
-}
-
-impl Children {
-    /// The children of the live node of `args`: its retrains.
-    fn of_live(args: &LiveArgs) -> Self {
-        Self {
-            strategy: args.strategy,
-            config: args.config.clone(),
-            catalog: args.catalog.clone(),
-            models: args.models.clone(),
-        }
-    }
-
-    /// The arguments of `train` but its `--at`, which the launcher gives:
-    /// the strategy, config, catalog and store.
-    fn train_args(&self) -> Vec<OsString> {
-        let strategy = self
-            .strategy
-            .to_possible_value()
-            .expect("every strategy has a name");
-        let mut args: Vec<OsString> = vec!["train".into(), strategy.get_name().into()];
-        args.extend([
-            "--config".into(),
-            self.config.clone().into_os_string(),
-            "--catalog".into(),
-            self.catalog.clone().into_os_string(),
-        ]);
-        args.extend(["--models".into(), self.models.clone().into_os_string()]);
-        args
-    }
-}
-
 /// Builds the strategy from its config and runs it live until Ctrl-C. A
 /// strategy trading on a model retrains, if ever, in a child process,
-/// this binary's `train` (see `Children`).
+/// this binary's `train` (see `LiveArgs::train_args`).
 async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
     let live = Live {
         trader_id: args.trader_id,
@@ -539,7 +510,7 @@ impl<'a> Visitor for Running<'a> {
 /// Runs the model strategy `S` of `args` on `live` until Ctrl-C, on the
 /// models of the store its config keys, beside the actor of its
 /// retrains if it is retrained (`RetrainActor`), each retrain in a child
-/// process (`Children::of_live`) on the node's catalog. Refuses first,
+/// process (`LiveArgs::train_args`) on the node's catalog. Refuses first,
 /// before any node is built, a catalog without the traded instruments, which
 /// its models and retrains are built from (`catalog::traded_instruments`),
 /// and a dataset balance (`[model] dataset`) in another currency than a
@@ -550,7 +521,6 @@ impl<'a> Visitor for Running<'a> {
 async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyhow::Result<()> {
     let config = load_config::<S::Params>(&args.config)?;
     let program = std::env::current_exe().context("finding this binary to retrain")?;
-    let children = Children::of_live(args);
     let traded = catalog::traded_instruments(&args.catalog, &config.trade.instrument_ids())
         .context(
             "a model strategy runs live only on a --catalog holding the instruments it trades, \
@@ -571,7 +541,7 @@ async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyho
         config.model().retrain,
         args.catalog.clone(),
         requirements.clone(),
-        Launcher::process(program, children.train_args()),
+        Launcher::process(program, args.train_args()),
     );
     let mode = Mode::Live {
         models: args.models.clone(),
@@ -1179,10 +1149,10 @@ mod tests {
     /// The arguments of a `model_ema` live node.
     const LIVE: [&str; 3] = ["model_ema", "--config", "model_ema.toml"];
 
-    /// The `train` `children` start, given its `--at`, parsed as this
-    /// binary parses it.
-    fn started_train(children: &Children) -> TrainArgs {
-        let argv: Vec<String> = children
+    /// The `train` the live node of `live` starts, given its `--at`, parsed
+    /// as this binary parses it.
+    fn started_train(live: &LiveArgs) -> TrainArgs {
+        let argv: Vec<String> = live
             .train_args()
             .into_iter()
             .map(|arg| arg.into_string().unwrap())
@@ -1202,7 +1172,7 @@ mod tests {
         let mut argv = LIVE.to_vec();
         argv.extend(["--catalog", "/data/catalog", "--models", "/data/models"]);
 
-        let train = started_train(&Children::of_live(&parse_live(&argv).unwrap()));
+        let train = started_train(&parse_live(&argv).unwrap());
 
         assert_eq!(train.strategy, StrategyName::ModelEma);
         assert_eq!(train.config, PathBuf::from("model_ema.toml"));

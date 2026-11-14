@@ -41,6 +41,7 @@ use crate::strategy::{
 /// min_expectancy = "0.1R"
 /// min_trades = 30
 /// learner = { kind = "lightgbm" }
+/// dataset = { commission = { rate = "0.00003" }, balance = "10000 USD" }
 /// ```
 ///
 /// Its target `T` is as the TOML has it, a `Target` (a `ModelSection`),
@@ -844,8 +845,6 @@ mod tests {
         assert_eq!(config.margins.of(Side::Short), None);
     }
 
-    /// The name the least expectancy had, before it was read as Nautilus'
-    /// expectancy in R: spelled so that a rename of the key leaves it.
     /// The section's dataset venue: the commission and balance its dataset
     /// runs are made at.
     fn dataset_of(line: &str) -> anyhow::Result<DatasetVenue> {
@@ -956,6 +955,8 @@ mod tests {
         assert!(err.contains("leverage"), "{err}");
     }
 
+    /// The name the least expectancy had, before it was read as Nautilus'
+    /// expectancy in R: spelled so that a rename of the key leaves it.
     const OLD_MINIMUM: &str = concat!("min_", "pnl");
 
     /// The least expectancy is `min_expectancy`: a section of its old name

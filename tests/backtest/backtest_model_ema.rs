@@ -233,7 +233,7 @@ fn a_live_retrain_through_the_train_subcommand_keeping_the_model_is_kept_with_it
     let dir = tempfile::tempdir().unwrap();
     let (config_path, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
     std::fs::write(&config_path, CONFIG).unwrap();
-    // As a live node starts it (`Children::train_args`).
+    // As a live node starts it (`LiveArgs::train_args`).
     let args = [
         "train".as_ref(),
         "model_ema".as_ref(),
@@ -374,6 +374,10 @@ fn the_binarys_backtest_on_a_store_holding_each_retrains_model_builds_and_trains
     assert!(!stdout.contains("days of the dataset"), "{stdout}");
     assert!(!stdout.contains("the dataset holds every day"), "{stdout}");
     assert!(!stderr.contains("the retrain at"), "{stderr}");
+    assert!(
+        stdout.contains("Run at: commission rate 0.0001, balance 100000.00 USD"),
+        "{stdout}"
+    );
     assert!(
         stdout.contains("Models trained at: commission rate 0.00003, balance 10000000 USD"),
         "{stdout}"

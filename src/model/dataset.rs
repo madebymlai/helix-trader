@@ -247,15 +247,10 @@ impl DatasetVenue {
 /// `commission rate 0.00003, balance 10000 USD`.
 impl fmt::Display for DatasetVenue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let kind = match self.commission {
-            Commission::PerOrder(_) => "per order",
-            Commission::Rate(_) => "rate",
-            Commission::PerQuantity(_) => "per quantity",
-        };
         write!(
             f,
-            "commission {kind} {}, balance {} {}",
-            self.commission.normalized(),
+            "commission {}, balance {} {}",
+            self.commission,
             self.balance.as_decimal().normalize(),
             self.balance.currency.code
         )
