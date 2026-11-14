@@ -893,17 +893,12 @@ fn a_dataset_runs_account_keeps_its_balance_whatever_its_trades_lose() {
 /// decision without its row: no row, and no later decision.
 #[test]
 fn a_size_below_the_instruments_minimum_fails_the_dataset_run_and_stops_it() {
-    let InstrumentAny::CurrencyPair(mut gold) = ic::instrument() else {
-        unreachable!("IC's gold is a currency pair")
+    let InstrumentAny::Cfd(mut gold) = ic::instrument() else {
+        unreachable!("IC's gold is a CFD")
     };
     gold.min_quantity = Some(Quantity::from(5));
     let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
-    let catalog = ic::catalog_defining(
-        InstrumentAny::CurrencyPair(gold),
-        hand_worked_quotes(),
-        from,
-        to,
-    );
+    let catalog = ic::catalog_defining(InstrumentAny::Cfd(gold), hand_worked_quotes(), from, to);
     let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
     let backtest = gold_backtest(catalog.path().to_path_buf());
     let (probe, record) = TargetProbe::new(

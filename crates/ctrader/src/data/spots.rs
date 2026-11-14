@@ -137,21 +137,19 @@ impl SpotQuotes {
 
 #[cfg(test)]
 mod tests {
-    use nautilus_model::{
-        instruments::{CurrencyPair, stubs::audusd_sim},
-        types::Quantity,
-    };
+    use nautilus_model::types::Quantity;
     use prost::Message as _;
 
     use super::*;
-    use crate::testing::{SPOT_EVENT_EURUSD_ASK, SPOT_EVENT_EURUSD_BID, SPOT_EVENT_EURUSD_FIRST};
+    use crate::testing::{
+        self, SPOT_EVENT_EURUSD_ASK, SPOT_EVENT_EURUSD_BID, SPOT_EVENT_EURUSD_FIRST,
+    };
 
-    /// EUR/USD-like, 5 decimals, maximum order 1,000,000; cTrader's
-    /// EURUSD symbol on the server the fixtures come from.
+    /// EURUSD as the clients load it, 5 decimals, maximum order
+    /// 100,000,000, and its cTrader symbol id on the server the fixtures
+    /// come from.
     fn eurusd() -> (InstrumentAny, i64) {
-        let mut pair: CurrencyPair = audusd_sim();
-        pair.id = InstrumentId::from("EURUSD.ACMEFX");
-        (InstrumentAny::CurrencyPair(pair), 1)
+        (InstrumentAny::Cfd(testing::instrument("EURUSD")), 1)
     }
 
     fn id() -> InstrumentId {

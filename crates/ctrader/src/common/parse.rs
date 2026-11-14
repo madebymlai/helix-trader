@@ -7,8 +7,15 @@
 //! stored.
 //!
 //! A symbol whose base and quote assets are both currencies Nautilus knows
-//! (forex, and metals such as XAU) becomes a `CurrencyPair`:
+//! (forex, and metals such as XAU) becomes a `Cfd`: a broker's cTrader
+//! products are over-the-counter contracts for difference, cash-settled with
+//! no ownership of the asset, which Nautilus' `Cfd` models
+//! (`docs/concepts/instruments/cfd.md`), as its IB adapter defines IB's CFDs
+//! (`adapters/interactive_brokers/src/providers/parse.rs`):
 //!
+//! - the asset class of its underlying, the base asset, by its Nautilus
+//!   currency type: FX for a fiat currency, Commodity for a metal,
+//!   Cryptocurrency for a crypto;
 //! - prices: `digits` decimals, cTrader's integer prices being in
 //!   1/100000;
 //! - sizes in units of the base asset: cTrader's volumes are in cents of a
@@ -31,8 +38,9 @@ use anyhow::{Context, ensure};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::NautilusDataType,
+    enums::{AssetClass, CurrencyType},
     identifiers::{InstrumentId, Symbol, Venue},
-    instruments::CurrencyPair,
+    instruments::Cfd,
     types::{Currency, Price, Quantity},
 };
 use rust_decimal::Decimal;
@@ -96,17 +104,17 @@ pub(crate) fn margin(
     Ok(Decimal::ONE_HUNDRED / Decimal::from(applied))
 }
 
-/// The `CurrencyPair` on `venue` of the symbol listed as `light`, with the
-/// details `symbol`, at the margin rate `margin` (see `margin`); `assets`
-/// name the asset ids.
-pub(crate) fn currency_pair(
+/// The `Cfd` on `venue` of the symbol listed as `light`, with the details
+/// `symbol`, at the margin rate `margin` (see `margin`); `assets` name the
+/// asset ids.
+pub(crate) fn cfd(
     light: &ProtoOaLightSymbol,
     symbol: &ProtoOaSymbol,
     venue: Venue,
     assets: &HashMap<i64, ProtoOaAsset>,
     margin: Decimal,
     ts_init: UnixNanos,
-) -> anyhow::Result<CurrencyPair> {
+) -> anyhow::Result<Cfd> {
     let name = light
         .symbol_name
         .as_deref()
@@ -124,8 +132,8 @@ pub(crate) fn currency_pair(
             .with_context(|| format!("{name}: the {side} asset {asset_id} is not listed"))?;
         asset.name.parse().map_err(|_| {
             anyhow::anyhow!(
-                "{name} is not a currency pair: its {side} asset {} is no currency \
-                 Nautilus knows; only forex and metals are served",
+                "{name} is not served: its {side} asset {} is no currency Nautilus \
+                 knows; only forex and metals are served",
                 asset.name
             )
         })
@@ -165,9 +173,10 @@ pub(crate) fn currency_pair(
         quantity(Some(step), "stepVolume")?.with_context(|| format!("{name}: no stepVolume"))?;
 
     let id = instrument_id(name, venue)?;
-    CurrencyPair::builder()
+    Cfd::builder()
         .instrument_id(id)
         .raw_symbol(id.symbol)
+        .asset_class(asset_class(base_currency))
         .base_currency(base_currency)
         .quote_currency(quote_currency)
         .price_precision(price_precision)
@@ -183,6 +192,15 @@ pub(crate) fn currency_pair(
         .ts_init(ts_init)
         .build()
         .with_context(|| format!("building the instrument of {name}"))
+}
+
+/// The asset class of a CFD on `base`, by its currency type.
+fn asset_class(base: Currency) -> AssetClass {
+    match base.currency_type {
+        CurrencyType::Fiat => AssetClass::FX,
+        CurrencyType::CommodityBacked => AssetClass::Commodity,
+        CurrencyType::Crypto => AssetClass::Cryptocurrency,
+    }
 }
 
 /// A cTrader volume, in cents of a unit, in units.
@@ -229,6 +247,7 @@ pub fn quoted(
 
 #[cfg(test)]
 mod tests {
+    use nautilus_model::{enums::InstrumentClass, instruments::Instrument};
     use prost::Message as _;
 
     use super::*;
@@ -325,9 +344,9 @@ mod tests {
         }
     }
 
-    fn pair(fixtures: &Fixtures, name: &str) -> anyhow::Result<CurrencyPair> {
+    fn instrument(fixtures: &Fixtures, name: &str) -> anyhow::Result<Cfd> {
         let light = &fixtures.light[name];
-        currency_pair(
+        cfd(
             light,
             &fixtures.details[&light.symbol_id],
             venue(),
@@ -436,12 +455,14 @@ mod tests {
     }
 
     #[test]
-    fn xauusd_is_gold_in_ounces_quoted_in_dollars() {
-        let xau = pair(&fixtures(), "XAUUSD").unwrap();
+    fn xauusd_is_a_commodity_cfd_on_gold_in_ounces_quoted_in_dollars() {
+        let xau = instrument(&fixtures(), "XAUUSD").unwrap();
 
         assert_eq!(xau.id, InstrumentId::from("XAUUSD.ACMEFX"));
         assert_eq!(xau.raw_symbol, Symbol::new("XAUUSD"));
-        assert_eq!(xau.base_currency, Currency::from("XAU"));
+        assert_eq!(xau.instrument_class(), InstrumentClass::Cfd);
+        assert_eq!(xau.asset_class, AssetClass::Commodity);
+        assert_eq!(xau.base_currency, Some(Currency::from("XAU")));
         assert_eq!(xau.quote_currency, Currency::from("USD"));
         assert_eq!(xau.price_precision, 2);
         assert_eq!(xau.price_increment, Price::from("0.01"));
@@ -450,7 +471,7 @@ mod tests {
         assert_eq!(xau.lot_size, Some(Quantity::from(100)));
         assert_eq!(xau.min_quantity, Some(Quantity::from(1)));
         assert_eq!(xau.max_quantity, Some(Quantity::from(10_000)));
-        assert_eq!(xau.multiplier, Quantity::from(1));
+        assert_eq!(xau.multiplier(), Quantity::from(1));
         assert_eq!(xau.margin_init, d("0.05"));
         assert_eq!(xau.margin_maint, d("0.05"));
         assert_eq!(
@@ -460,11 +481,13 @@ mod tests {
     }
 
     #[test]
-    fn eurusd_is_in_euros_by_the_thousand() {
-        let eur = pair(&fixtures(), "EURUSD").unwrap();
+    fn eurusd_is_an_fx_cfd_in_euros_by_the_thousand() {
+        let eur = instrument(&fixtures(), "EURUSD").unwrap();
 
         assert_eq!(eur.id, InstrumentId::from("EURUSD.ACMEFX"));
-        assert_eq!(eur.base_currency, Currency::from("EUR"));
+        assert_eq!(eur.instrument_class(), InstrumentClass::Cfd);
+        assert_eq!(eur.asset_class, AssetClass::FX);
+        assert_eq!(eur.base_currency, Some(Currency::from("EUR")));
         assert_eq!(eur.quote_currency, Currency::from("USD"));
         assert_eq!(eur.price_precision, 5);
         assert_eq!(eur.price_increment, Price::from("0.00001"));
@@ -473,16 +496,31 @@ mod tests {
         assert_eq!(eur.lot_size, Some(Quantity::from(100_000)));
         assert_eq!(eur.min_quantity, Some(Quantity::from(1_000)));
         assert_eq!(eur.max_quantity, Some(Quantity::from(100_000_000)));
+        assert_eq!(eur.margin_init, d("0.05"));
+        assert_eq!(eur.margin_maint, d("0.05"));
+    }
+
+    /// Synthetic: the EURUSD fixture with its base asset renamed BTC.
+    #[test]
+    fn a_crypto_base_makes_a_cryptocurrency_cfd() {
+        let mut fixtures = fixtures();
+        let base = fixtures.light["EURUSD"].base_asset_id.unwrap();
+        fixtures.assets.get_mut(&base).unwrap().name = "BTC".to_owned();
+
+        let btc = instrument(&fixtures, "EURUSD").unwrap();
+
+        assert_eq!(btc.asset_class, AssetClass::Cryptocurrency);
+        assert_eq!(btc.base_currency, Some(Currency::from("BTC")));
     }
 
     #[test]
-    fn an_index_is_not_a_currency_pair() {
-        let err = pair(&fixtures(), "US500").unwrap_err().to_string();
+    fn an_index_is_refused_naming_its_asset() {
+        let err = instrument(&fixtures(), "US500").unwrap_err().to_string();
 
         assert_eq!(
             err,
-            "US500 is not a currency pair: its base asset US500 is no currency Nautilus \
-             knows; only forex and metals are served"
+            "US500 is not served: its base asset US500 is no currency Nautilus knows; \
+             only forex and metals are served"
         );
     }
 
@@ -493,7 +531,7 @@ mod tests {
         let id = fixtures.light["XAUUSD"].symbol_id;
         fixtures.details.get_mut(&id).unwrap().step_volume = None;
 
-        let err = pair(&fixtures, "XAUUSD").unwrap_err().to_string();
+        let err = instrument(&fixtures, "XAUUSD").unwrap_err().to_string();
 
         assert_eq!(err, "XAUUSD: no positive stepVolume");
     }
@@ -505,7 +543,7 @@ mod tests {
         let id = fixtures.light["XAUUSD"].symbol_id;
         fixtures.details.get_mut(&id).unwrap().min_volume = Some(50);
 
-        let err = pair(&fixtures, "XAUUSD").unwrap_err().to_string();
+        let err = instrument(&fixtures, "XAUUSD").unwrap_err().to_string();
 
         assert_eq!(
             err,
@@ -520,7 +558,7 @@ mod tests {
         let id = fixtures.light["EURUSD"].symbol_id;
         fixtures.details.get_mut(&id).unwrap().digits = 12;
 
-        let err = pair(&fixtures, "EURUSD").unwrap_err().to_string();
+        let err = instrument(&fixtures, "EURUSD").unwrap_err().to_string();
 
         assert_eq!(err, "EURUSD: digits 12 out of range");
     }
@@ -531,7 +569,7 @@ mod tests {
         let mut fixtures = fixtures();
         fixtures.light.get_mut("EURUSD").unwrap().quote_asset_id = Some(999);
 
-        let err = pair(&fixtures, "EURUSD").unwrap_err().to_string();
+        let err = instrument(&fixtures, "EURUSD").unwrap_err().to_string();
 
         assert_eq!(err, "EURUSD: the quote asset 999 is not listed");
     }
@@ -542,7 +580,7 @@ mod tests {
         let eur = &fixtures.light["EURUSD"];
         let xau = &fixtures.details[&fixtures.light["XAUUSD"].symbol_id];
 
-        let err = currency_pair(
+        let err = cfd(
             eur,
             xau,
             venue(),

@@ -371,16 +371,12 @@ fn price(tick: i64, precision: u8) -> anyhow::Result<Price> {
 
 #[cfg(test)]
 mod tests {
-    use nautilus_model::{
-        identifiers::InstrumentId,
-        instruments::{CurrencyPair, stubs::audusd_sim},
-    };
     use prost::Message as _;
 
     use super::*;
     use crate::{
         common::messages::ProtoOaGetTickDataRes,
-        testing::{TICK_DATA_ASK_RES, TICK_DATA_BID_RES, venue_page},
+        testing::{self, TICK_DATA_ASK_RES, TICK_DATA_BID_RES, venue_page},
     };
 
     fn tick(ms: i64, price: i64) -> Tick {
@@ -549,11 +545,9 @@ mod tests {
         );
     }
 
-    /// EUR/USD-like, 5 decimals, sizes in whole units.
+    /// EURUSD as the clients load it: 5 decimals, sizes in whole units.
     fn instrument() -> InstrumentAny {
-        let mut pair: CurrencyPair = audusd_sim();
-        pair.id = InstrumentId::from("EURUSD.ACMEFX");
-        InstrumentAny::CurrencyPair(pair)
+        InstrumentAny::Cfd(testing::instrument("EURUSD"))
     }
 
     fn side(before: Option<Tick>, ticks: &[Tick]) -> SideTicks {
@@ -690,7 +684,7 @@ mod tests {
     fn quotes_are_stamped_at_their_millisecond_with_a_size_of_100000() {
         let bid = side(None, &[tick(1_792_591_200_040, 116_000)]);
         let ask = side(None, &[tick(1_792_591_200_040, 116_010)]);
-        // The stub's maximum order is 1,000,000.
+        // EURUSD's maximum order is 100,000,000.
         let instrument = instrument();
 
         let merged = merge(&instrument, &bid, &ask).unwrap();
@@ -707,11 +701,11 @@ mod tests {
     fn the_size_is_the_maximum_order_where_that_is_smaller() {
         let bid = side(None, &[tick(1, 116_000)]);
         let ask = side(None, &[tick(1, 116_010)]);
-        let mut pair: CurrencyPair = audusd_sim();
+        let mut eur = testing::instrument("EURUSD");
         // XAUUSD's on the demo: 10,000 oz.
-        pair.max_quantity = Some(Quantity::from(10_000));
+        eur.max_quantity = Some(Quantity::from(10_000));
 
-        let merged = merge(&InstrumentAny::CurrencyPair(pair), &bid, &ask).unwrap();
+        let merged = merge(&InstrumentAny::Cfd(eur), &bid, &ask).unwrap();
 
         assert_eq!(merged.quotes[0].bid_size, Quantity::from(10_000));
         assert_eq!(merged.quotes[0].ask_size, Quantity::from(10_000));
@@ -725,13 +719,10 @@ mod tests {
             ticks.reverse();
             side(None, &ticks)
         };
-        let mut xau: CurrencyPair = audusd_sim();
-        xau.id = InstrumentId::from("XAUUSD.ACMEFX");
-        xau.price_precision = 2;
-        xau.price_increment = Price::from("0.01");
+        let xau = InstrumentAny::Cfd(testing::instrument("XAUUSD"));
 
         let merged = merge(
-            &InstrumentAny::CurrencyPair(xau),
+            &xau,
             &side_of(TICK_DATA_BID_RES),
             &side_of(TICK_DATA_ASK_RES),
         )
@@ -755,11 +746,11 @@ mod tests {
     fn a_price_off_the_instruments_precision_is_refused() {
         let bid = side(None, &[tick(1, 116_000)]);
         let ask = side(None, &[tick(1, 116_011)]);
-        let mut pair: CurrencyPair = audusd_sim();
-        pair.price_precision = 4;
-        pair.price_increment = Price::from("0.0001");
+        let mut eur = testing::instrument("EURUSD");
+        eur.price_precision = 4;
+        eur.price_increment = Price::from("0.0001");
 
-        let err = merge(&InstrumentAny::CurrencyPair(pair), &bid, &ask).unwrap_err();
+        let err = merge(&InstrumentAny::Cfd(eur), &bid, &ask).unwrap_err();
 
         assert!(err.to_string().contains("1.16011"), "{err}");
     }

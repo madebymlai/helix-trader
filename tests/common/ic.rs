@@ -1,5 +1,5 @@
-//! IC Markets' gold on its tick quotes: XAUUSD.ICMARKETS, a `CurrencyPair`
-//! of ounces quoted in USD as `fill-catalog` loads it from IC (IC's margin
+//! IC Markets' gold on its tick quotes: XAUUSD.ICMARKETS, a `Cfd` on gold
+//! in ounces quoted in USD as `fill-catalog` loads it from IC (IC's margin
 //! on the demo, 1:30, at most 10,000 oz an order), and quotes as fill-catalog stores them:
 //! stamped at their tick's millisecond, at irregular times, both sides
 //! sized 10,000 (the instrument's maximum order), written through
@@ -15,8 +15,9 @@ use nautilus_common::logging::logger::LoggerConfig;
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::{BarType, Data, NautilusDataType, QuoteTick},
+    enums::AssetClass,
     identifiers::{InstrumentId, Symbol},
-    instruments::{CurrencyPair, InstrumentAny},
+    instruments::{Cfd, InstrumentAny},
     types::{Currency, Money, Price, Quantity},
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
@@ -44,10 +45,11 @@ pub fn margin() -> Decimal {
 /// XAUUSD as IC defines it (`crates/ctrader/README.md`, "Instruments and
 /// account").
 pub fn instrument() -> InstrumentAny {
-    InstrumentAny::CurrencyPair(
-        CurrencyPair::builder()
+    InstrumentAny::Cfd(
+        Cfd::builder()
             .instrument_id(InstrumentId::from(INSTRUMENT_ID))
             .raw_symbol(Symbol::from("XAUUSD"))
+            .asset_class(AssetClass::Commodity)
             .base_currency(Currency::from("XAU"))
             .quote_currency(Currency::USD())
             .price_precision(2)

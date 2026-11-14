@@ -376,7 +376,7 @@ impl CTraderSession {
     ///
     /// Returns an error if an id is not on the session's venue (before any
     /// request), if a request fails, if the broker lists no symbol of that
-    /// name, or if a symbol is no currency pair.
+    /// name, or if a symbol's assets are not both currencies Nautilus knows.
     pub async fn instruments(&self, ids: &[InstrumentId]) -> anyhow::Result<Vec<InstrumentAny>> {
         let symbols = self.symbols(ids).await?;
         Ok(symbols.into_iter().map(|s| s.instrument).collect())
@@ -475,9 +475,9 @@ impl CTraderSession {
                     .with_context(|| format!("{venue} returned no details of {name}"))?;
                 let symbol_leverage = symbol.leverage_id.and_then(|id| leverages.get(&id));
                 let margin = parse::margin(name, venue, account_leverage, symbol_leverage)?;
-                let pair = parse::currency_pair(light, symbol, venue, &assets, margin, ts_init)?;
+                let cfd = parse::cfd(light, symbol, venue, &assets, margin, ts_init)?;
                 Ok(CTraderSymbol {
-                    instrument: InstrumentAny::CurrencyPair(pair),
+                    instrument: InstrumentAny::Cfd(cfd),
                     symbol_id: light.symbol_id,
                 })
             })
@@ -696,7 +696,7 @@ mod tests {
         enums::{AccountType, OrderSide, OrderType},
         events::{AccountState, OrderEventAny},
         identifiers::AccountId,
-        instruments::{CurrencyPair, Instrument},
+        instruments::{Cfd, Instrument},
         orders::{Order, OrderTestBuilder},
         types::{AccountBalance, Currency, Money, Price, Quantity},
     };
@@ -809,15 +809,11 @@ mod tests {
 
         let instruments = session.instruments(&ids).await.unwrap();
 
-        let [
-            InstrumentAny::CurrencyPair(xau),
-            InstrumentAny::CurrencyPair(eur),
-        ] = instruments.as_slice()
-        else {
+        let [InstrumentAny::Cfd(xau), InstrumentAny::Cfd(eur)] = instruments.as_slice() else {
             panic!("{instruments:?}");
         };
         assert_eq!((xau.id(), eur.id()), (ids[0], ids[1]));
-        assert_eq!(xau.base_currency, Currency::from("XAU"));
+        assert_eq!(xau.base_currency, Some(Currency::from("XAU")));
         assert_eq!(xau.lot_size, Some(Quantity::from(100)));
         assert_eq!(eur.price_precision, 5);
         let requests = requests(&received);
@@ -1067,10 +1063,7 @@ mod tests {
     /// USD). The order's value, about 3,590 EUR, is above the balance; the
     /// broker's margin at 1:30, about 120 EUR, is below it. The order events
     /// the engine sends back, and whether it passed the order on.
-    fn risk_check_of_one_ounce(
-        xau: CurrencyPair,
-        eur: InstrumentAny,
-    ) -> (Vec<OrderEventAny>, usize) {
+    fn risk_check_of_one_ounce(xau: Cfd, eur: InstrumentAny) -> (Vec<OrderEventAny>, usize) {
         let (events, saved_events) = get_typed_into_message_saving_handler::<OrderEventAny>(None);
         msgbus::register_order_event_endpoint(MessagingSwitchboard::exec_engine_process(), events);
         let (commands, saved_commands) =
@@ -1098,9 +1091,7 @@ mod tests {
         cache
             .add_quote(quote(eur.id(), "1.11964", "1.11965"))
             .unwrap();
-        cache
-            .add_instrument(InstrumentAny::CurrencyPair(xau))
-            .unwrap();
+        cache.add_instrument(InstrumentAny::Cfd(xau)).unwrap();
         cache.add_instrument(eur).unwrap();
         let account = AccountState::new(
             AccountId::from("ACMEFX-DEMO"),
@@ -1152,7 +1143,7 @@ mod tests {
 
     /// XAUUSD and EURUSD as the live clients load them from the captured
     /// details and leverages.
-    async fn gold_and_euro_dollar() -> (CurrencyPair, InstrumentAny) {
+    async fn gold_and_euro_dollar() -> (Cfd, InstrumentAny) {
         let (session, _) = connected().await;
         let mut instruments = session
             .instruments(&[
@@ -1163,7 +1154,7 @@ mod tests {
             .unwrap();
         session.disconnect().await;
         let eur = instruments.pop().unwrap();
-        let Some(InstrumentAny::CurrencyPair(xau)) = instruments.pop() else {
+        let Some(InstrumentAny::Cfd(xau)) = instruments.pop() else {
             panic!("no gold")
         };
         (xau, eur)
