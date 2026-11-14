@@ -26,7 +26,7 @@
 //! A model is published (`Holdout::refusal` none) when, on its holdout, its
 //! skill is above nought (`Holdout::score_refusal`), and the trades taken, at
 //! least the minimum count (`Minimums`), earned per trade at least the
-//! minimum net P&L, in R, and more than every trade of the rows did. A side's model
+//! least expectancy, in R, and more than every trade of the rows did. A side's model
 //! is published only with the other sides of its pair, each of a skill above
 //! nought, on the earnings of the pair's picks (`train`); a meta's alone, on
 //! the trades its margin takes. The slope and the gap are reported, never
@@ -75,7 +75,7 @@ pub(super) struct Example {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Trades {
     pub count: usize,
-    /// The net P&L per trade, in R.
+    /// The expectancy: the average net P&L per trade, in R.
     pub expectancy: Option<f64>,
     pub win_rate: Option<f64>,
 }
@@ -107,11 +107,11 @@ pub struct Holdout {
     pub score: ExpectedScore,
 }
 
-/// The least a model's holdout is published with: the net P&L per trade taken,
-/// in R, over at least a count of trades.
+/// The least a model's holdout is published with: the expectancy of the
+/// trades taken, their average net R, over at least a count of trades.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Minimums {
-    pub min_pnl: R,
+    pub min_expectancy: R,
     pub min_trades: usize,
 }
 
@@ -122,10 +122,11 @@ pub enum Refusal {
     Skill { skill: Option<f64> },
     /// Fewer trades were taken than the minimum.
     Trades { trades: usize, min_trades: usize },
-    /// The net P&L per trade taken, in R, is below the minimum.
-    MinPnl { pnl: f64, min_pnl: R },
-    /// The net P&L per trade taken, in R, is not above every trade's.
-    Every { pnl: f64, every: f64 },
+    /// The expectancy of the trades taken, in R, is below the minimum.
+    MinExpectancy { expectancy: f64, min_expectancy: R },
+    /// The expectancy of the trades taken, in R, is not above every
+    /// trade's.
+    Every { expectancy: f64, every: f64 },
 }
 
 /// A meta model's decision rule: the trade of the side picked taken when the
@@ -188,8 +189,8 @@ impl Earnings {
 
 impl Holdout {
     /// Why a model of this holdout is not published under `minimums`, the
-    /// first reason of its score, its count of trades, the minimum net
-    /// P&L and every trade's; none if it is.
+    /// first reason of its score, its count of trades, the least
+    /// expectancy and every trade's; none if it is.
     #[must_use]
     pub fn refusal(&self, minimums: Minimums) -> Option<Refusal> {
         if let Some(refusal) = self.score_refusal() {
@@ -202,16 +203,16 @@ impl Holdout {
                 min_trades: minimums.min_trades,
             });
         }
-        let pnl = taken.expectancy.unwrap_or(f64::NAN);
-        if !minimums.min_pnl.reached_by(pnl) {
-            return Some(Refusal::MinPnl {
-                pnl,
-                min_pnl: minimums.min_pnl,
+        let expectancy = taken.expectancy.unwrap_or(f64::NAN);
+        if !minimums.min_expectancy.reached_by(expectancy) {
+            return Some(Refusal::MinExpectancy {
+                expectancy,
+                min_expectancy: minimums.min_expectancy,
             });
         }
         // Every trade includes those taken: it has an expectancy too.
         let every = every.expectancy.unwrap_or(f64::NAN);
-        (pnl <= every).then_some(Refusal::Every { pnl, every })
+        (expectancy <= every).then_some(Refusal::Every { expectancy, every })
     }
 
     /// Why a model of this holdout is not published whatever it earned: its
@@ -255,7 +256,7 @@ impl fmt::Display for Trades {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{} trades, net P&L per trade {}, win rate {}",
+            "{} trades, expectancy {}, win rate {}",
             self.count,
             in_r(self.expectancy),
             value(self.win_rate)
@@ -298,13 +299,18 @@ impl fmt::Display for Refusal {
                 f,
                 "{trades} holdout trades taken, fewer than the minimum {min_trades}"
             ),
-            Self::MinPnl { pnl, min_pnl } => write!(
+            Self::MinExpectancy {
+                expectancy,
+                min_expectancy,
+            } => write!(
                 f,
-                "holdout net P&L per trade taken {pnl:.6}R below the minimum {min_pnl}"
+                "holdout expectancy of the trades taken {expectancy:.6}R below the minimum \
+                 {min_expectancy}"
             ),
-            Self::Every { pnl, every } => write!(
+            Self::Every { expectancy, every } => write!(
                 f,
-                "holdout net P&L per trade taken {pnl:.6}R not above every trade's {every:.6}R"
+                "holdout expectancy of the trades taken {expectancy:.6}R not above every \
+                 trade's {every:.6}R"
             ),
         }
     }
@@ -423,7 +429,7 @@ mod tests {
     }
 
     const MINIMUMS: Minimums = Minimums {
-        min_pnl: R::new(1.0),
+        min_expectancy: R::new(1.0),
         min_trades: 3,
     };
 
@@ -432,7 +438,7 @@ mod tests {
      {
         assert_eq!(holdout().refusal(MINIMUMS), None);
         let at_the_minimum = Minimums {
-            min_pnl: R::new(1.2),
+            min_expectancy: R::new(1.2),
             ..MINIMUMS
         };
         assert_eq!(holdout().refusal(at_the_minimum), None);
@@ -475,15 +481,15 @@ mod tests {
     #[test]
     fn a_net_pnl_per_trade_below_the_minimum_is_refused() {
         let minimums = Minimums {
-            min_pnl: R::new(1.5),
+            min_expectancy: R::new(1.5),
             ..MINIMUMS
         };
 
         assert_eq!(
             holdout().refusal(minimums),
-            Some(Refusal::MinPnl {
-                pnl: 1.2,
-                min_pnl: R::new(1.5)
+            Some(Refusal::MinExpectancy {
+                expectancy: 1.2,
+                min_expectancy: R::new(1.5)
             })
         );
     }
@@ -502,15 +508,15 @@ mod tests {
     fn a_net_r_per_trade_below_the_minimum_is_refused_whatever_its_money() {
         let wins = earning(&[(true, trade(3.0, 4.0)), (true, trade(3.0, 4.0))]);
         let minimums = Minimums {
-            min_pnl: R::new(1.0),
+            min_expectancy: R::new(1.0),
             min_trades: 2,
         };
 
         assert_eq!(
             wins.refusal(minimums),
-            Some(Refusal::MinPnl {
-                pnl: 0.75,
-                min_pnl: R::new(1.0)
+            Some(Refusal::MinExpectancy {
+                expectancy: 0.75,
+                min_expectancy: R::new(1.0)
             })
         );
     }
@@ -522,14 +528,14 @@ mod tests {
     fn a_net_r_per_trade_not_above_every_trades_is_refused_whatever_its_money() {
         let taken_less = earning(&[(true, trade(3.0, 4.0)), (false, trade(1.0, 1.0))]);
         let minimums = Minimums {
-            min_pnl: R::new(0.5),
+            min_expectancy: R::new(0.5),
             min_trades: 1,
         };
 
         assert_eq!(
             taken_less.refusal(minimums),
             Some(Refusal::Every {
-                pnl: 0.75,
+                expectancy: 0.75,
                 every: 0.875
             })
         );
@@ -541,12 +547,12 @@ mod tests {
     /// 2.85 over 4, 0.7125R, beside 0.85 over 1, 0.78125R a trade.
     #[test]
     fn a_refusal_and_a_holdout_say_their_figures_in_r() {
-        let below = Refusal::MinPnl {
-            pnl: 0.75,
-            min_pnl: R::new(1.0),
+        let below = Refusal::MinExpectancy {
+            expectancy: 0.75,
+            min_expectancy: R::new(1.0),
         };
         let not_above = Refusal::Every {
-            pnl: 0.75,
+            expectancy: 0.75,
             every: 0.875,
         };
         let reported = earning(&[(true, trade(3.0, 4.0)), (false, trade(1.0, 1.0))]);
@@ -570,7 +576,7 @@ mod tests {
         }
     }
 
-    /// No trade taken has no net P&L per trade: below any minimum.
+    /// No trade taken has no expectancy: below any minimum.
     #[test]
     fn no_trade_taken_is_refused() {
         let mut none = holdout();
@@ -581,7 +587,7 @@ mod tests {
         };
 
         assert!(
-            matches!(none.refusal(minimums), Some(Refusal::MinPnl { .. })),
+            matches!(none.refusal(minimums), Some(Refusal::MinExpectancy { .. })),
             "{:?}",
             none.refusal(minimums)
         );
@@ -595,7 +601,7 @@ mod tests {
         assert_eq!(
             no_better.refusal(MINIMUMS),
             Some(Refusal::Every {
-                pnl: 1.2,
+                expectancy: 1.2,
                 every: 1.2
             })
         );

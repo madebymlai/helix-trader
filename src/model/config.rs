@@ -37,7 +37,7 @@ use crate::strategy::{
 /// window = "720h"
 /// holdout = "120h"
 /// margins = { long = "0.5R", short = "0.5R" }
-/// min_pnl = "0.1R"
+/// min_expectancy = "0.1R"
 /// min_trades = 30
 /// learner = { kind = "lightgbm" }
 /// ```
@@ -67,10 +67,10 @@ pub struct ModelConfig<T = TargetConfig> {
     pub holdout: SignedDuration,
     /// The sides traded, each with the expected net R it trades from.
     pub margins: Margins,
-    /// The least net P&L per trade, in R, the trades picked between the
+    /// The least expectancy, the average net R per trade, the trades picked between the
     /// sides earn on the holdout for the sides' models to be published
     /// (`holdout`, `train`).
-    pub min_pnl: R,
+    pub min_expectancy: R,
     /// The fewest trades picked between the sides on the holdout for the
     /// sides' models to be published.
     pub min_trades: usize,
@@ -105,9 +105,9 @@ pub struct MetaConfig {
     /// calibrated expected R, from which the trade is taken
     /// (`holdout::MetaMargin`).
     pub margin: R,
-    /// The least net P&L per trade, in R, the meta's decisions earn on the
+    /// The least expectancy, the average net R per trade, the meta's decisions earn on the
     /// holdout for its model to be published (`holdout`).
-    pub min_pnl: R,
+    pub min_expectancy: R,
     /// The fewest trades the meta's decisions take on the holdout for its
     /// model to be published.
     pub min_trades: usize,
@@ -124,7 +124,7 @@ struct MetaFields {
     window: SignedDuration,
     holdout: SignedDuration,
     margin: Option<R>,
-    min_pnl: R,
+    min_expectancy: R,
     min_trades: usize,
     learner: LearnerConfig,
     threshold: Option<IgnoredAny>,
@@ -139,7 +139,7 @@ impl TryFrom<MetaFields> for MetaConfig {
             window,
             holdout,
             margin,
-            min_pnl,
+            min_expectancy,
             min_trades,
             learner,
             threshold,
@@ -163,7 +163,7 @@ impl TryFrom<MetaFields> for MetaConfig {
             window,
             holdout,
             margin: margin.ok_or("missing field `margin`")?,
-            min_pnl,
+            min_expectancy,
             min_trades,
             learner,
         })
@@ -216,7 +216,7 @@ impl ModelSection {
             window,
             holdout,
             margins,
-            min_pnl,
+            min_expectancy,
             min_trades,
             learner,
             meta,
@@ -228,7 +228,7 @@ impl ModelSection {
             window,
             holdout,
             margins,
-            min_pnl,
+            min_expectancy,
             min_trades,
             learner,
             meta,
@@ -290,7 +290,7 @@ impl ModelConfig {
     #[must_use]
     pub const fn minimums(&self) -> Minimums {
         Minimums {
-            min_pnl: self.min_pnl,
+            min_expectancy: self.min_expectancy,
             min_trades: self.min_trades,
         }
     }
@@ -339,7 +339,7 @@ impl MetaConfig {
     #[must_use]
     pub const fn minimums(&self) -> Minimums {
         Minimums {
-            min_pnl: self.min_pnl,
+            min_expectancy: self.min_expectancy,
             min_trades: self.min_trades,
         }
     }
@@ -426,7 +426,7 @@ fn validate_window(
 
 /// Pushes onto `errors`, under `section` (`model` or `model.meta`), the
 /// violation of the minimum count of trades of `minimums` below one; their
-/// minimum net P&L, an R, is a finite number as it is parsed.
+/// least expectancy, an R, is a finite number as it is parsed.
 fn validate_minimums(minimums: Minimums, section: &str, errors: &mut ConfigErrorCollector) {
     errors.check(
         minimums.min_trades >= 1,
@@ -465,7 +465,7 @@ mod tests {
         window = "48h"
         holdout = "12h"
         margins = { long = "0.5R", short = "0.5R" }
-        min_pnl = "1R"
+        min_expectancy = "1R"
         min_trades = 30
         learner = { kind = "fake" }
     "#;
@@ -582,7 +582,7 @@ mod tests {
         assert_eq!(
             config.minimums(),
             Minimums {
-                min_pnl: R::new(1.0),
+                min_expectancy: R::new(1.0),
                 min_trades: 30
             }
         );
@@ -830,12 +830,43 @@ mod tests {
         assert_eq!(config.margins.of(Side::Short), None);
     }
 
-    /// The minimum net P&L per trade is in R: a bare number, a minimum in
+    /// The name the least expectancy had, before it was read as Nautilus'
+    /// expectancy in R: spelled so that a rename of the key leaves it.
+    const OLD_MINIMUM: &str = concat!("min_", "pnl");
+
+    /// The least expectancy is `min_expectancy`: a section of its old name
+    /// is refused, naming the new one.
+    #[test]
+    fn the_old_name_of_the_least_expectancy_is_refused_naming_the_new() {
+        let old = SECTION.replace("min_expectancy", OLD_MINIMUM);
+
+        let err = refused_parsing(&old);
+
+        assert!(
+            err.contains(OLD_MINIMUM) && err.contains("min_expectancy"),
+            "{err}"
+        );
+    }
+
+    /// The meta's too.
+    #[test]
+    fn the_old_name_of_the_metas_least_expectancy_is_refused_naming_the_new() {
+        let meta = META.replace("min_expectancy", OLD_MINIMUM);
+
+        let err = refused_parsing(&format!("{SECTION}\n{meta}"));
+
+        assert!(
+            err.contains(OLD_MINIMUM) && err.contains("min_expectancy"),
+            "{err}"
+        );
+    }
+
+    /// The least expectancy is in R: a bare number, a minimum in
     /// money say, is refused as the section is parsed, at its field, saying
     /// so.
     #[test]
-    fn a_bare_number_minimum_net_pnl_is_refused_at_parsing_saying_it_is_in_r() {
-        for line in ["min_pnl = 1.0", "min_pnl = 1"] {
+    fn a_bare_number_least_expectancy_is_refused_at_parsing_saying_it_is_in_r() {
+        for line in ["min_expectancy = 1.0", "min_expectancy = 1"] {
             let err = refused_parsing(&section(line));
 
             assert!(err.contains(line) && err.contains("in R"), "{err}");
@@ -843,8 +874,8 @@ mod tests {
     }
 
     #[test]
-    fn a_minimum_net_pnl_not_a_finite_number_of_r_is_refused_at_parsing() {
-        for line in [r#"min_pnl = "nanR""#, r#"min_pnl = "-infR""#] {
+    fn a_least_expectancy_not_a_finite_number_of_r_is_refused_at_parsing() {
+        for line in [r#"min_expectancy = "nanR""#, r#"min_expectancy = "-infR""#] {
             let err = refused_parsing(&section(line));
 
             assert!(err.contains("not a finite number of R"), "{err}");
@@ -853,9 +884,11 @@ mod tests {
 
     /// A minimum below nought publishes a model expected to lose a little.
     #[test]
-    fn a_minimum_net_pnl_below_nought_loads_and_no_minimum_trade_is_refused() {
+    fn a_least_expectancy_below_nought_loads_and_no_minimum_trade_is_refused() {
         assert_eq!(
-            load(&section(r#"min_pnl = "-0.5R""#)).unwrap().min_pnl,
+            load(&section(r#"min_expectancy = "-0.5R""#))
+                .unwrap()
+                .min_expectancy,
             R::new(-0.5)
         );
         assert_eq!(
@@ -1104,7 +1137,7 @@ mod tests {
         window = "36h"
         holdout = "12h"
         margin = "0.25R"
-        min_pnl = "0.5R"
+        min_expectancy = "0.5R"
         min_trades = 20
         learner = { kind = "baseline" }
     "#;
@@ -1120,7 +1153,7 @@ mod tests {
         assert_eq!(
             meta.minimums(),
             Minimums {
-                min_pnl: R::new(0.5),
+                min_expectancy: R::new(0.5),
                 min_trades: 20
             }
         );
@@ -1238,13 +1271,13 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_number_meta_minimum_net_pnl_is_refused_at_parsing_saying_it_is_in_r() {
-        let meta = META.replace(r#"min_pnl = "0.5R""#, "min_pnl = 0.5");
+    fn a_bare_number_meta_least_expectancy_is_refused_at_parsing_saying_it_is_in_r() {
+        let meta = META.replace(r#"min_expectancy = "0.5R""#, "min_expectancy = 0.5");
 
         let err = refused_parsing(&format!("{SECTION}\n{meta}"));
 
         assert!(
-            err.contains("min_pnl = 0.5") && err.contains("in R"),
+            err.contains("min_expectancy = 0.5") && err.contains("in R"),
             "{err}"
         );
     }

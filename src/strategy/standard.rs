@@ -1687,7 +1687,7 @@ mod tests {
             window = "48h"
             holdout = "12h"
             margins = { long = "0.5R", short = "0.5R" }
-            min_pnl = "0.5R"
+            min_expectancy = "0.5R"
             min_trades = 30
             learner = { kind = "baseline" }
         "#;
@@ -1949,8 +1949,8 @@ mod tests {
 
         #[test]
         fn a_misspelt_field_of_the_model_is_refused_at_load() {
-            let err = shape_error(&TOML.replace("min_pnl", "min_pn"));
-            assert!(err.contains("unknown field `min_pn`"), "{err}");
+            let err = shape_error(&TOML.replace("min_expectancy", "min_expectanc"));
+            assert!(err.contains("unknown field `min_expectanc`"), "{err}");
         }
 
         /// The target's ATR takes Nautilus' `AverageTrueRange` arguments
@@ -2061,7 +2061,7 @@ mod tests {
                 window = "48h"
                 holdout = "24h"
                 margin = "0.25R"
-                min_pnl = "0.5R"
+                min_expectancy = "0.5R"
                 min_trades = 0
                 learner = { kind = "baseline" }
                 "#,
@@ -2084,7 +2084,7 @@ mod tests {
                 window = "48h"
                 holdout = "12h"
                 margin = "0.25R"
-                min_pnl = "0.5R"
+                min_expectancy = "0.5R"
                 min_trades = 30
                 learner = { kind = "baseline" }
                 "#,

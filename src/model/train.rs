@@ -54,7 +54,7 @@
 //! (`deciding::DecidingModels::pick_among`), each side's `E'` held to its
 //! margin in R, on each side's row, among the pair's own sides alone. A row
 //! where both sides clear their margins counts one trade, the side expected
-//! the most; a tie, none. The minimums (`ModelConfig::min_pnl`, `ModelConfig::min_trades`,
+//! the most; a tie, none. The minimums (`ModelConfig::min_expectancy`, `ModelConfig::min_trades`,
 //! `Holdout::refusal`) read those picks, beside every trade of the pair's
 //! sides on the rows, each trade's net P&L in R, over its unit, as the
 //! sides learn it (`holdout::Earnings`).
@@ -984,7 +984,7 @@ mod tests {
                 long: Some(R::new(1.0)),
                 short: Some(R::new(0.5)),
             })
-            .min_pnl(R::new(0.25))
+            .min_expectancy(R::new(0.25))
             .min_trades(1)
             .learner(LearnerConfig::Fake {})
             .build()
@@ -1510,11 +1510,15 @@ mod tests {
             let Some(Outcome::Kept(Kept::Refused { why, .. })) = outcome else {
                 panic!("{trained:?}");
             };
-            let Refusal::MinPnl { pnl, min_pnl } = why else {
+            let Refusal::MinExpectancy {
+                expectancy,
+                min_expectancy,
+            } = why
+            else {
                 panic!("{why:?}");
             };
-            close(*pnl, -0.125);
-            assert_eq!(*min_pnl, R::new(0.25));
+            close(*expectancy, -0.125);
+            assert_eq!(*min_expectancy, R::new(0.25));
             assert!(
                 store(dir.path(), &config, side)
                     .valid_froms()
@@ -1695,7 +1699,7 @@ mod tests {
                 long: Some(R::new(-10.0)),
                 short: None,
             },
-            min_pnl: R::new(-10.0),
+            min_expectancy: R::new(-10.0),
             ..config()
         };
         let dir = tempfile::tempdir().unwrap();
@@ -1706,10 +1710,10 @@ mod tests {
         let Some(Outcome::Kept(Kept::Refused { why, .. })) = trained.long else {
             panic!("{trained:?}");
         };
-        let Refusal::Every { pnl, every } = why else {
+        let Refusal::Every { expectancy, every } = why else {
             panic!("{why:?}");
         };
-        close(pnl, 0.25);
+        close(expectancy, 0.25);
         close(every, 0.25);
     }
 
@@ -2131,7 +2135,7 @@ mod tests {
         assert_eq!(
             why,
             Refusal::Every {
-                pnl: 1.5,
+                expectancy: 1.5,
                 every: 1.5
             }
         );
@@ -2208,7 +2212,7 @@ mod tests {
     }
 
     /// What a train reports of a side's holdout, published or not: its
-    /// trades, net P&L per trade taken and per trade of every trade, in R, at the
+    /// trades, expectancy of the trades taken and of every trade, in R, at the
     /// commission and at 1.5 times it, its skill, its mean R - E', its
     /// calibration slope and its top-decile gap.
     #[test]
@@ -2218,9 +2222,9 @@ mod tests {
             holdout: Box::new(holdout()),
         };
         let below = Outcome::Kept(Kept::Refused {
-            why: Refusal::MinPnl {
-                pnl: 1.25,
-                min_pnl: R::new(1.5),
+            why: Refusal::MinExpectancy {
+                expectancy: 1.25,
+                min_expectancy: R::new(1.5),
             },
             holdout: Box::new(holdout()),
         });
@@ -2270,7 +2274,7 @@ mod tests {
             .window(SignedDuration::from_hours(window))
             .holdout(SignedDuration::from_hours(6))
             .margin(R::new(0.5))
-            .min_pnl(R::new(0.0))
+            .min_expectancy(R::new(0.0))
             .min_trades(1)
             .learner(LearnerConfig::Fake {})
             .build()

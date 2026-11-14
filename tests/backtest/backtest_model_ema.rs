@@ -70,7 +70,7 @@ const CONFIG: &str = r#"
     window = "46h"
     holdout = "12h"
     margins = { long = "-1e9R" }
-    min_pnl = "0R"
+    min_expectancy = "0R"
     min_trades = 1
     learner = { kind = "fake" }
 "#;

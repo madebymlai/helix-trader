@@ -58,7 +58,7 @@ fn meta() -> MetaConfig {
         .window(SignedDuration::from_hours(46))
         .holdout(SignedDuration::from_hours(6))
         .margin(R::new(f64::MIN))
-        .min_pnl(R::new(0.0))
+        .min_expectancy(R::new(0.0))
         .min_trades(1)
         .learner(LearnerConfig::Fake {})
         .build()
