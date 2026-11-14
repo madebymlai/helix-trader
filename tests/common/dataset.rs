@@ -339,6 +339,7 @@ pub fn venue() -> DatasetVenue {
     DatasetVenue {
         commission: Commission::Rate(Decimal::new(3, 5)),
         balance: Money::from("10000000 USD"),
+        latency: None,
     }
 }
 
@@ -353,6 +354,7 @@ pub fn backtest(catalog: &Path, from: Timestamp, to: Timestamp) -> Backtest {
         start: from,
         end: to,
         commission: venue().commission,
+        latency: venue().latency,
         balance: venue().balance,
         venue_oms: |_| OmsType::Hedging,
         logging: LoggerConfig::default(),

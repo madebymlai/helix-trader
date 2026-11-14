@@ -1097,6 +1097,7 @@ mod tests {
         DatasetVenue {
             commission: Commission::Rate(Decimal::new(3, 5)),
             balance: Money::from("10000000 USD"),
+            latency: None,
         }
     }
 

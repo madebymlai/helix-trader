@@ -83,11 +83,11 @@ pub struct ModelConfig<T = TargetConfig> {
     pub meta: Option<MetaConfig>,
     /// The venue its dataset runs are made at, such as `{ commission = {
     /// per_quantity = "0.035 USD" }, balance = "10000 USD" }`: the
-    /// commission their targets are net of and the balance their reference
-    /// stake is of. It keys the dataset and the stores
-    /// (`dataset::fingerprint`), so `train`, a backtest's retrains and a live
-    /// node all read the one store of the config, whatever a backtest's own
-    /// commission and balance.
+    /// commission their targets are net of, the balance their reference
+    /// stake is of and, optionally, their latency (`latency = "150ms"`). It
+    /// keys the dataset and the stores (`dataset::fingerprint`), so `train`,
+    /// a backtest's retrains and a live node all read the one store of the
+    /// config, whatever a backtest's own commission, balance and latency.
     pub dataset: DatasetVenue,
 }
 
@@ -266,8 +266,10 @@ impl ModelConfig {
     /// positive or leaving no fitted row (see `validate_window`), the
     /// margins naming no side, the minimums invalid (see
     /// `validate_minimums`), the meta model invalid (see
-    /// `MetaConfig::validate`), or the target's limit not shorter than the
-    /// decision cadence (see `validate_cadence`).
+    /// `MetaConfig::validate`), the target's limit not shorter than the
+    /// decision cadence (see `validate_cadence`), or shorter than the
+    /// longest its dataset runs take to process a command (see
+    /// `validate_latency`).
     pub fn validate(&self, requirements: &DataRequirements) -> ConfigResult<()> {
         let mut errors = ConfigErrorCollector::new();
         validate_decisions(
@@ -295,6 +297,7 @@ impl ModelConfig {
             meta.validate(&self.target, &mut errors);
         }
         validate_cadence(self.decision, &self.target, &mut errors);
+        validate_latency(&self.target, &self.dataset, &mut errors);
         errors.into_result()
     }
 
@@ -322,6 +325,37 @@ fn validate_cadence(rule: DecisionRule, target: &TargetConfig, errors: &mut Conf
             format!(
                 "the target's limit {limit:#} is not shorter than the decision cadence \
                  {cadence:#}: a trade would still be open at the next decision"
+            ),
+        ),
+    );
+}
+
+/// Pushes onto `errors` the violation of the limit of `target` being
+/// shorter than the longest a dataset run at the latency of `dataset`
+/// takes to process a command (`DatasetVenue::delay`): the time alert
+/// would find an entry still on its way to the venue, which Nautilus counts
+/// neither open nor filled (`Order::is_open`), so it would neither cancel
+/// nor close it, and the entry would fill with no time limit. A limit of
+/// that delay exactly is taken: the purge timer bounding it fires once in
+/// every minute, so the entry is processed before the alert.
+fn validate_latency(
+    target: &TargetConfig,
+    dataset: &DatasetVenue,
+    errors: &mut ConfigErrorCollector,
+) {
+    let Some(latency) = dataset.latency else {
+        return;
+    };
+    let (limit, delay) = (target.settles_within(), dataset.delay());
+    errors.check(
+        limit >= delay,
+        ConfigError::invalid_value(
+            "model.target.limit",
+            format!(
+                "the target's limit {limit:#} is shorter than {delay:#}, the dataset latency \
+                 {latency} and the minute a dataset run may wait to process a command: its time \
+                 alert could fire before its entry reaches the venue, which would then fill \
+                 with no time limit"
             ),
         ),
     );
@@ -459,7 +493,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        backtest::Commission,
+        backtest::{Commission, Latency},
         model::{
             dataset::DatasetVenue,
             learner::LightGbmConfig,
@@ -845,8 +879,8 @@ mod tests {
         assert_eq!(config.margins.of(Side::Short), None);
     }
 
-    /// The section's dataset venue: the commission and balance its dataset
-    /// runs are made at.
+    /// The section's dataset venue: the commission, balance and latency
+    /// its dataset runs are made at.
     fn dataset_of(line: &str) -> anyhow::Result<DatasetVenue> {
         Ok(load(&section(line))?.dataset)
     }
@@ -860,6 +894,7 @@ mod tests {
             DatasetVenue {
                 commission: Commission::PerQuantity(exact),
                 balance: Money::from("10000 USD"),
+                latency: None,
             }
         );
     }
@@ -944,6 +979,90 @@ mod tests {
             );
             let err = format!("{:#}", dataset_of(&line).unwrap_err());
             assert!(err.contains("balance"), "{balance}: {err}");
+        }
+    }
+
+    /// 150 ms, as jiff reads a config's durations: each command of its
+    /// dataset runs reaches their venues 150 ms after it is sent.
+    #[test]
+    fn a_dataset_venue_may_declare_the_latency_of_its_runs() {
+        let at_150ms = Latency::try_from(SignedDuration::from_millis(150)).unwrap();
+        for latency in ["150ms", "0.15s", "PT0.15S"] {
+            let line = format!(
+                r#"dataset = {{ commission = {{ rate = "0.0005" }}, balance = "1000 USD", latency = "{latency}" }}"#
+            );
+            assert_eq!(
+                dataset_of(&line).unwrap().latency,
+                Some(at_150ms),
+                "{latency}"
+            );
+        }
+    }
+
+    /// Nautilus' default: each command reaches the venue as it is sent.
+    #[test]
+    fn a_dataset_venue_without_a_latency_has_none() {
+        assert_eq!(load(SECTION).unwrap().dataset.latency, None);
+    }
+
+    /// The section with a bracket closed after `limit`, its dataset runs
+    /// at a latency of `latency`.
+    fn at_latency(limit: &str, latency: &str) -> String {
+        let target = format!(
+            r#"target = {{ bracket = {{ take_profit = {{ bps = 7.5 }}, stop = {{ bps = 5 }} }}, limit = "{limit}" }}"#
+        );
+        let dataset = format!(
+            r#"dataset = {{ commission = {{ rate = "0.00003" }}, balance = "10000 USD", latency = "{latency}" }}"#
+        );
+        let kept = SECTION.lines().filter(|line| {
+            let key = line.split('=').next().unwrap().trim();
+            key != "target" && key != "dataset"
+        });
+        kept.chain([target.as_str(), dataset.as_str()])
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// A dataset run processes a command at most its latency and a minute
+    /// after it is sent: a time alert before then can find its entry not
+    /// yet at the venue, neither open nor filled, and leave the entry to
+    /// fill with no time limit. 30 s against 1 m and a minute; 1 m against
+    /// 150 ms and a minute.
+    #[test]
+    fn a_limit_shorter_than_its_dataset_runs_latency_and_a_minute_is_refused_naming_both() {
+        for (limit, latency) in [("30s", "1m"), ("1m", "150ms")] {
+            let toml = at_latency(limit, latency);
+
+            assert_eq!(refused_fields(&toml), ["model.target.limit"], "{limit}");
+            let err = refused(&toml);
+            assert!(
+                err.contains(&format!("limit {limit}"))
+                    && err.contains(&format!("latency {latency}")),
+                "{limit} {latency}: {err}"
+            );
+        }
+    }
+
+    /// 61 s against 1 s and a minute, the shortest limit taken at that
+    /// latency; 45 m against 150 ms.
+    #[test]
+    fn a_limit_as_long_as_its_dataset_runs_latency_and_a_minute_loads() {
+        for (limit, latency) in [("61s", "1s"), ("45m", "150ms")] {
+            assert!(
+                load(&at_latency(limit, latency)).is_ok(),
+                "{limit} {latency}"
+            );
+        }
+    }
+
+    /// None is left out, not a latency of nothing.
+    #[test]
+    fn a_dataset_latency_that_is_no_positive_duration_is_refused_at_parsing() {
+        for latency in [r#""-1s""#, r#""0s""#, r#""150""#, "150"] {
+            let line = format!(
+                r#"dataset = {{ commission = {{ rate = "0.0005" }}, balance = "1000 USD", latency = {latency} }}"#
+            );
+            assert!(dataset_of(&line).is_err(), "{latency}");
         }
     }
 

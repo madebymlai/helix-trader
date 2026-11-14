@@ -37,6 +37,7 @@ mod backtest_ic_margin;
 mod backtest_ic_quotes;
 mod backtest_inputs;
 mod backtest_last_bars;
+mod backtest_latency;
 mod backtest_max_drawdown;
 mod backtest_meta;
 mod backtest_model;

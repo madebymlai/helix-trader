@@ -39,6 +39,7 @@ fn backtest(catalog: &TempDir) -> Backtest {
         start: tuesday("23:00:00"),
         end: wednesday("01:00:00"),
         commission: Commission::Rate(Decimal::ZERO),
+        latency: None,
         balance: Money::from("1000000 USD"),
         venue_oms: venues::oms_type,
         logging: LoggerConfig::default(),

@@ -215,6 +215,7 @@ pub fn backtest(catalog: &Path, start: Timestamp, end: Timestamp, commission: &s
         ticks: vec![],
         custom: vec![],
         commission: Commission::PerOrder(Money::from(commission)),
+        latency: None,
         balance: Money::from("10000 EUR"),
         venue_oms: venues::oms_type,
         logging: LoggerConfig::default(),

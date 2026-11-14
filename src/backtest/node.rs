@@ -41,7 +41,7 @@ use nautilus_persistence::{
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 use rust_decimal::Decimal;
 
-use super::{Backtest, report::Outcome};
+use super::{Backtest, Latency, report::Outcome};
 use crate::{
     catalog::catalog_config,
     strategy::{SeriesSlice, warmup},
@@ -62,8 +62,10 @@ const CHUNK_SIZE: usize = 100_000;
 /// events as they come, never from the cache afterwards. Kept, they slow
 /// the run more than in proportion to its days: 16 days of quotes every
 /// 5 s and targets every 15 minutes took 70 s against 25 s purged, 2 days
-/// 4.2 s against 3.1 s.
-const DATASET_PURGE_MINS: u32 = 1;
+/// 4.2 s against 3.1 s. Purging by a timer, which releases every command
+/// due at a latency, it bounds how long a dataset run's command waits for
+/// its venue once it has arrived (`Latency::dataset_delay`).
+pub(super) const DATASET_PURGE_MINS: u32 = 1;
 
 /// The leverage of a dataset run's accounts: the largest a `Decimal` holds,
 /// so that under Nautilus' default margin model, the notional / leverage
@@ -179,10 +181,12 @@ fn config(backtest: &Backtest, run: Run) -> anyhow::Result<BacktestRunConfig> {
 /// The simulated `venue` of `backtest` for `run`: a margin account keeping
 /// positions as `backtest.venue_oms` says, with the run's balance if a
 /// broker trades the venue (`venues::has_broker`), else nothing in its
-/// currency, and the fee model of its commission, filling on the top of
+/// currency, the fee model of its commission and the latency model of its
+/// latency, if any (`Latency::model`), filling on the top of
 /// the book on Nautilus' default fill model: a market order fills at the
 /// quote (a buy at the ask, a sell at the bid), or on bars at the last
-/// price, with no slippage, and a limit order whenever touched. A
+/// price, with no slippage, and a limit order whenever touched; at a
+/// latency, at the first settlement point after its arrival. A
 /// backtest's account is unleveraged: under Nautilus' default margin model,
 /// the notional / leverage times the instrument's margin, a position locks
 /// its instrument's margin, which holds the account's (IC's definitions
@@ -216,6 +220,7 @@ fn venue_config(
         .default_leverage(leverage)
         .frozen_account(run == Run::Dataset)
         .fee_model(backtest.commission.fee_model()?)
+        .maybe_latency_model(backtest.latency.map(Latency::model))
         .build()?)
 }
 
@@ -449,10 +454,22 @@ where
 mod tests {
     use std::path::Path;
 
-    use jiff::Timestamp;
-    use nautilus_common::logging::logger::LoggerConfig;
-    use nautilus_execution::models::fee::FeeModelAny;
-    use nautilus_model::{data::BarType, enums::OmsType, types::Money};
+    use jiff::{SignedDuration, Timestamp};
+    use nautilus_common::{
+        logging::logger::LoggerConfig,
+        messages::execution::{CancelAllOrders, TradingCommand},
+    };
+    use nautilus_core::UUID4;
+    use nautilus_execution::models::{
+        fee::FeeModelAny,
+        latency::{LatencyModel, LatencyModelAny},
+    };
+    use nautilus_model::{
+        data::BarType,
+        enums::OmsType,
+        identifiers::{StrategyId, TraderId},
+        types::Money,
+    };
     use rust_decimal::Decimal;
 
     use super::*;
@@ -471,6 +488,7 @@ mod tests {
             ticks: vec![],
             custom: vec![],
             commission: Commission::PerOrder(Money::from("3 EUR")),
+            latency: None,
             balance: Money::from("10000 EUR"),
             venue_oms: |_| OmsType::Netting,
             logging: LoggerConfig {
@@ -527,6 +545,72 @@ mod tests {
         let venue = &config.venues()[0];
         assert!(venue.margin_model().is_none(), "{:?}", venue.margin_model());
         assert_eq!(venue.default_leverage(), Some(Decimal::ONE));
+    }
+
+    /// The latency model of each venue of `config`, if any: its base
+    /// latency, then the latency of a submit, a modify and a cancel, in
+    /// nanoseconds.
+    fn latencies(config: &BacktestRunConfig) -> Vec<Option<[u64; 4]>> {
+        let command = TradingCommand::CancelAllOrders(CancelAllOrders::new(
+            TraderId::from("TESTER-001"),
+            None,
+            StrategyId::from("S-001"),
+            InstrumentId::from("SXR8.IBIS"),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        ));
+        let now = UnixNanos::default();
+        config
+            .venues()
+            .iter()
+            .map(|venue| {
+                venue.latency_model().map(|model: &LatencyModelAny| {
+                    [
+                        model.get_base_latency(),
+                        model.get_insert_latency(&command, now).unwrap(),
+                        model.get_update_latency(&command, now).unwrap(),
+                        model.get_delete_latency(&command, now).unwrap(),
+                    ]
+                    .map(|latency| latency.as_u64())
+                })
+            })
+            .collect()
+    }
+
+    /// 150 ms, Nautilus' static model of that base latency and no extra:
+    /// a submit, a modify and a cancel each reach the venue 150 ms after
+    /// they are sent, in a trading run as in a dataset run, on every venue.
+    #[test]
+    fn a_backtest_at_a_latency_delays_every_command_by_it_on_every_venue() {
+        let dir = tempfile::tempdir().unwrap();
+        let backtest = Backtest {
+            bar_types: vec![
+                BarType::from("XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL"),
+                BarType::from("GC.v.0.GLBX-1-MINUTE-MID-INTERNAL"),
+            ],
+            latency: Some(Latency::try_from(SignedDuration::from_millis(150)).unwrap()),
+            ..backtest(dir.path())
+        };
+        let delayed = Some([150_000_000; 4]);
+
+        assert_eq!(latencies(&run_config(&backtest).unwrap()), [delayed; 2]);
+        assert_eq!(
+            latencies(&dataset_run_config(&backtest).unwrap()),
+            [delayed; 2]
+        );
+    }
+
+    /// Nautilus' default: each command reaches the venue as it is sent.
+    #[test]
+    fn a_backtest_without_a_latency_has_no_latency_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let backtest = backtest(dir.path());
+
+        assert_eq!(latencies(&run_config(&backtest).unwrap()), [None]);
+        assert_eq!(latencies(&dataset_run_config(&backtest).unwrap()), [None]);
     }
 
     /// The venue matches as Nautilus does by default, which the backtest
