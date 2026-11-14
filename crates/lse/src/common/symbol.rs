@@ -48,7 +48,7 @@ use crate::http::models::LsePair;
 /// A series of an LSE derived market: its market, LSE's folder name, and
 /// its symbol, as `/v3/pairs` lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LseSymbol {
+pub(crate) struct LseSymbol {
     market: String,
     symbol: String,
 }
@@ -61,7 +61,7 @@ impl LseSymbol {
     /// Returns an error if the symbol is empty, or if the market is not a
     /// derived market's name: empty, holding anything but lower-case
     /// letters, digits and underscores, or an exchange market's.
-    pub fn new(market: &str, symbol: &str) -> anyhow::Result<Self> {
+    pub(crate) fn new(market: &str, symbol: &str) -> anyhow::Result<Self> {
         ensure!(!symbol.is_empty(), "an LSE symbol is not empty");
         ensure!(
             !market.is_empty()
@@ -86,7 +86,7 @@ impl LseSymbol {
     ///
     /// Returns an error naming `id` if it is not on `LSEDGE`, or if its
     /// symbol is not an LSE symbol, a hyphen and its market in capitals.
-    pub fn from_instrument_id(id: InstrumentId) -> anyhow::Result<Self> {
+    pub(crate) fn from_instrument_id(id: InstrumentId) -> anyhow::Result<Self> {
         if id.venue != *LSEDGE_VENUE {
             bail!("{id} is not an LSEDGE instrument");
         }
@@ -101,30 +101,15 @@ impl LseSymbol {
             .map_err(|e| anyhow::anyhow!("{id} is not an LSEDGE series: {e}"))
     }
 
-    /// The `LSEDGE` instrument the series is: its symbol, a hyphen and its
-    /// market in capitals.
-    #[must_use]
-    pub fn instrument_id(&self) -> InstrumentId {
-        InstrumentId::from(
-            format!(
-                "{}-{}.{}",
-                self.symbol,
-                self.market.to_ascii_uppercase(),
-                *LSEDGE_VENUE
-            )
-            .as_str(),
-        )
-    }
-
     /// LSE's name of the market, its folder.
     #[must_use]
-    pub fn market(&self) -> &str {
+    pub(crate) fn market(&self) -> &str {
         &self.market
     }
 
     /// The symbol, as LSE lists it.
     #[must_use]
-    pub fn symbol(&self) -> &str {
+    pub(crate) fn symbol(&self) -> &str {
         &self.symbol
     }
 
@@ -594,7 +579,7 @@ mod tests {
     }
 
     #[test]
-    fn a_series_round_trips_through_its_instrument_id() {
+    fn an_instrument_id_is_the_series_of_its_symbol_and_market() {
         for (market, symbol, id) in [
             ("futures", "GOLD", "GOLD-FUTURES.LSEDGE"),
             ("us_stocks", "BRK-B", "BRK-B-US_STOCKS.LSEDGE"),
@@ -602,7 +587,6 @@ mod tests {
         ] {
             let series = LseSymbol::new(market, symbol).unwrap();
 
-            assert_eq!(series.instrument_id(), InstrumentId::from(id));
             assert_eq!(of(id).unwrap(), series, "{id}");
         }
     }

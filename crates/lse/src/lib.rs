@@ -22,10 +22,7 @@
 //! not prices (`LseRow`).
 
 pub use self::{
-    common::{
-        consts::{LSE_API_KEY, LSE_CME_API_KEY, LSE_NASDAQ_API_KEY, LSEDGE_VENUE},
-        symbol::LseSymbol,
-    },
+    common::consts::{LSE_API_KEY, LSE_CME_API_KEY, LSE_NASDAQ_API_KEY, LSEDGE_VENUE},
     config::LseDataClientConfig,
     data::check_streamed,
     factories::LseDataClientFactory,

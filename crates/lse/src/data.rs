@@ -108,7 +108,8 @@ use crate::{
     types::{LseRow, SOURCE, SYMBOL},
 };
 
-/// How long the request tasks get to finish at a disconnect, then to abort.
+/// How long the client's tasks get to finish at a close, then to abort:
+/// its requests', its sockets' ticks' and its exchange streams' records'.
 const TASK_GRACE: Duration = Duration::from_secs(1);
 const TASK_FORCE: Duration = Duration::from_secs(2);
 
@@ -236,18 +237,6 @@ impl LseDataClient {
         })
     }
 
-    /// The price and size precisions of `id`, the instrument's in the cache.
-    fn precisions(&self, id: InstrumentId) -> anyhow::Result<(u8, u8)> {
-        let cache = self.cache.borrow();
-        let instrument = cache.instrument(&id).with_context(|| {
-            format!(
-                "{id} is not in the cache: LSE publishes no definitions, and its prices are \
-                 read at the definition's precision, so it must come from elsewhere, a catalog"
-            )
-        })?;
-        Ok((instrument.price_precision(), instrument.size_precision()))
-    }
-
     /// Runs `future`, a request's, on a task of the client.
     fn spawn_request<F>(&self, future: F)
     where
@@ -295,7 +284,7 @@ impl LseDataClient {
                 LseInstrument::from_instrument_id(id, now.to_zoned(TimeZone::UTC).year())?;
             let (rows, read) = select(&instrument)?;
             let http = self.http(instrument.product())?;
-            let precisions = self.precisions(id)?;
+            let precisions = precisions(&self.cache, id)?;
             let start = start.with_context(|| format!("a request of {id} needs a start"))?;
             Ok::<_, anyhow::Error>((instrument, rows, read, http, precisions, start))
         })();
@@ -315,8 +304,8 @@ impl LseDataClient {
             Ok(Some(match instrument {
                 LseInstrument::Series(series) => ExportQuery::series(&series, rows, start, to),
                 LseInstrument::Cme(contract) => {
-                    let pair_id = listings.pair_id(&lookup, &contract).await?;
-                    ExportQuery::listing(CME_MARKET, pair_id, rows, start, to)
+                    let listing = listings.listing(&lookup, &contract).await?;
+                    ExportQuery::listing(CME_MARKET, listing.pair_id, rows, start, to)
                 }
                 LseInstrument::Nasdaq(stock) => ExportQuery::stock(&stock, rows, start, to),
                 LseInstrument::Opra(contract) => ExportQuery::option(&contract, rows, start, to),
@@ -951,9 +940,8 @@ impl DataClient for LseDataClient {
                 .with_context(|| format!("a request of the {bar_type} bars needs a start"))?;
             let candles = width.candles_closing(start, end);
             let query = match instrument {
-                LseInstrument::Series(series) => {
-                    candles.map(|(from, to)| ExportQuery::candles(&series, width, from, to))
-                }
+                LseInstrument::Series(series) => candles
+                    .map(|(from, to)| ExportQuery::series(&series, Rows::Candles(width), from, to)),
                 LseInstrument::Opra(contract) => candles.map(|(from, to)| {
                     ExportQuery::option(&contract, Rows::Candles(width), from, to)
                 }),
@@ -966,7 +954,7 @@ impl DataClient for LseDataClient {
                      contracts, not of {stock}, a Nasdaq TotalView stock"
                 ),
             };
-            let precisions = self.precisions(id)?;
+            let precisions = precisions(&self.cache, id)?;
             let http = self.http(LseProduct::Global)?;
             Ok::<_, anyhow::Error>((query, precisions, http))
         })();
@@ -998,6 +986,24 @@ impl DataClient for LseDataClient {
         );
         Ok(())
     }
+}
+
+/// The price and size precisions of `id`, its definition's in `cache`.
+///
+/// # Errors
+///
+/// Returns an error naming it if `cache` has no definition of it: LSE
+/// publishes none, and its prices are read at the definition's precision.
+fn precisions(cache: &CacheView, id: InstrumentId) -> anyhow::Result<(u8, u8)> {
+    let cache = cache.borrow();
+    let instrument = cache.instrument(&id).with_context(|| {
+        format!(
+            "{id} is not in the cache: LSE publishes no definitions, and its prices are read at \
+             the definition's precision, so it must come from elsewhere, a catalog or a broker's \
+             client"
+        )
+    })?;
+    Ok((instrument.price_precision(), instrument.size_precision()))
 }
 
 /// Sends `event` to the node; a closed channel means the node is stopping.

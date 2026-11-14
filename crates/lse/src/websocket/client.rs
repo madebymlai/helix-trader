@@ -36,7 +36,7 @@ use ahash::AHashSet;
 use anyhow::Context;
 use nautilus_common::live::dst::time::{self, Duration};
 use nautilus_core::{UnixNanos, time::get_atomic_clock_realtime};
-use nautilus_live::task::{TaskJoinOutcome, TaskSlot, finish_task};
+use nautilus_live::task::TaskSlot;
 use nautilus_network::{
     Message, RECONNECTED,
     websocket::{
@@ -44,7 +44,11 @@ use nautilus_network::{
     },
 };
 
-use super::messages::{LseTick, LseWsAction, LseWsAuthenticated, LseWsFrame, LseWsRefusal};
+use super::{
+    RECONNECT_BACKOFF_FACTOR, RECONNECT_DELAY_INITIAL_MS, RECONNECT_DELAY_MAX_MS,
+    RECONNECT_JITTER_MS, finish_handler,
+    messages::{LseTick, LseWsAction, LseWsAuthenticated, LseWsFrame, LseWsRefusal},
+};
 use crate::common::{consts::LseSocket, credential::LseCredential};
 
 /// How long LSE may take to authenticate the key.
@@ -54,17 +58,6 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
 /// keeps a connection open on every socket (LSE's WebSocket
 /// documentation, "The Python client").
 pub(crate) const KEEPALIVE_SECS: u64 = 25;
-
-/// The transport's backoff between reconnect attempts.
-const RECONNECT_DELAY_INITIAL_MS: u64 = 1_000;
-const RECONNECT_DELAY_MAX_MS: u64 = 30_000;
-const RECONNECT_BACKOFF_FACTOR: f64 = 2.0;
-const RECONNECT_JITTER_MS: u64 = 500;
-
-/// How long `disconnect` waits for the handler to close the transport,
-/// then for its abort.
-const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const ABORT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The close code LSE refuses a connection with (LSE's WebSocket
 /// documentation, "Error codes").
@@ -312,19 +305,7 @@ impl LseWebSocketClient {
     pub(crate) async fn disconnect(mut self) {
         // The handler is gone once it has stopped.
         let _ = self.cmd_tx.send(HandlerCommand::Disconnect);
-        let name = self.socket.name();
-        match finish_task(&mut self.handler, DISCONNECT_TIMEOUT, ABORT_TIMEOUT).await {
-            None | Some(TaskJoinOutcome::Completed(())) => {}
-            Some(TaskJoinOutcome::Aborted) => {
-                log::warn!("the handler of LSE's {name} did not stop in time: aborted");
-            }
-            Some(TaskJoinOutcome::Failed(e)) => {
-                log::error!("the handler of LSE's {name} failed: {e}")
-            }
-            Some(TaskJoinOutcome::Incomplete) => {
-                log::error!("the handler of LSE's {name} did not stop after its abort");
-            }
-        }
+        finish_handler(&mut self.handler, self.socket.name()).await;
     }
 }
 

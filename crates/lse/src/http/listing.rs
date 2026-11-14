@@ -16,20 +16,6 @@ use crate::common::{consts::CME_MARKET, symbol::CmeContract};
 pub(crate) struct CmeListings(AtomicMap<InstrumentId, LsePair>);
 
 impl CmeListings {
-    /// The number of `contract`'s listing (`pair_id`), which names it alone
-    /// (see `listing`).
-    ///
-    /// # Errors
-    ///
-    /// As `listing`.
-    pub(crate) async fn pair_id(
-        &self,
-        http: &LseHttpClient,
-        contract: &CmeContract,
-    ) -> anyhow::Result<u64> {
-        Ok(self.listing(http, contract).await?.pair_id)
-    }
-
     /// `contract`'s listing: the one found before, or the one LSE's
     /// catalogue lists under the contract's exchange names, looked up
     /// through `http` in the order `CmeContract::exchange_names` gives them,
@@ -136,9 +122,10 @@ mod tests {
         let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6)]);
 
         let pair_id = CmeListings::default()
-            .pair_id(&client(&lse), &contract("GCZ26.GLBX"))
+            .listing(&client(&lse), &contract("GCZ26.GLBX"))
             .await
-            .unwrap();
+            .unwrap()
+            .pair_id;
 
         assert_eq!(pair_id, 4_000_000_002);
         assert_eq!(looked_up(&lse), ["GCZ6"]);
@@ -150,13 +137,15 @@ mod tests {
         let (listings, http) = (CmeListings::default(), client(&lse));
 
         let first = listings
-            .pair_id(&http, &contract("GCZ26.GLBX"))
+            .listing(&http, &contract("GCZ26.GLBX"))
             .await
-            .unwrap();
+            .unwrap()
+            .pair_id;
         let again = listings
-            .pair_id(&http, &contract("GCZ26.GLBX"))
+            .listing(&http, &contract("GCZ26.GLBX"))
             .await
-            .unwrap();
+            .unwrap()
+            .pair_id;
 
         assert_eq!((first, again), (4_000_000_002, 4_000_000_002));
         assert_eq!(looked_up(&lse), ["GCZ6"]);
@@ -168,9 +157,10 @@ mod tests {
         let lse = MockLse::start(vec![Reply::json(PAIRS_NGZ6), Reply::json(PAIRS_NGZ26)]);
 
         let pair_id = CmeListings::default()
-            .pair_id(&client(&lse), &contract("NGZ26.GLBX"))
+            .listing(&client(&lse), &contract("NGZ26.GLBX"))
             .await
-            .unwrap();
+            .unwrap()
+            .pair_id;
 
         assert_eq!(pair_id, 4_000_000_128);
         assert_eq!(looked_up(&lse), ["NGZ6", "NGZ26"]);
@@ -184,7 +174,7 @@ mod tests {
         let lse = MockLse::start(vec![Reply::json(PAIRS_ESZ6), Reply::json(PAIRS_ESZ26)]);
 
         let err = CmeListings::default()
-            .pair_id(&client(&lse), &contract("ESZ36.GLBX"))
+            .listing(&client(&lse), &contract("ESZ36.GLBX"))
             .await
             .unwrap_err();
 

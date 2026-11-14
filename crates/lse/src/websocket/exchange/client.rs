@@ -58,7 +58,7 @@ use std::sync::Arc;
 use ahash::AHashMap;
 use anyhow::Context;
 use nautilus_common::live::dst::time::{self, Duration};
-use nautilus_live::task::{TaskJoinOutcome, TaskSlot, finish_task};
+use nautilus_live::task::TaskSlot;
 use nautilus_network::{
     Message, RECONNECTED,
     websocket::{
@@ -70,6 +70,10 @@ use super::messages::{
     ExchangeLevel, ExchangeRecord, ExchangeRecordFrame, ExchangeSubscription, ExchangeText,
 };
 use crate::common::{consts::LseExchange, credential::LseCredential};
+use crate::websocket::{
+    RECONNECT_BACKOFF_FACTOR, RECONNECT_DELAY_INITIAL_MS, RECONNECT_DELAY_MAX_MS,
+    RECONNECT_JITTER_MS, finish_handler,
+};
 
 /// How long LSE may take to answer the subscription.
 pub(crate) const OPEN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -77,17 +81,6 @@ pub(crate) const OPEN_TIMEOUT: Duration = Duration::from_secs(30);
 /// How often the client pings: as often as LSE pings it, every 15 s; a
 /// connection silent for three pings is replaced.
 const PING_SECS: u64 = 15;
-
-/// The transport's backoff between reconnect attempts.
-const RECONNECT_DELAY_INITIAL_MS: u64 = 1_000;
-const RECONNECT_DELAY_MAX_MS: u64 = 30_000;
-const RECONNECT_BACKOFF_FACTOR: f64 = 2.0;
-const RECONNECT_JITTER_MS: u64 = 500;
-
-/// How long `disconnect` waits for the handler to close the transport,
-/// then for its abort.
-const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const ABORT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The closes of a refusal a new connection would not lift: the
 /// subscription refused (1008), the key replaced or revoked, or its plan
@@ -290,19 +283,7 @@ impl ExchangeStreamClient {
     pub(crate) async fn disconnect(mut self) {
         // The handler is gone once it has stopped.
         let _ = self.cmd_tx.send(HandlerCommand::Disconnect);
-        let exchange = self.exchange;
-        match finish_task(&mut self.handler, DISCONNECT_TIMEOUT, ABORT_TIMEOUT).await {
-            None | Some(TaskJoinOutcome::Completed(())) => {}
-            Some(TaskJoinOutcome::Aborted) => {
-                log::warn!("the handler of LSE's {exchange} stream did not stop in time: aborted");
-            }
-            Some(TaskJoinOutcome::Failed(e)) => {
-                log::error!("the handler of LSE's {exchange} stream failed: {e}");
-            }
-            Some(TaskJoinOutcome::Incomplete) => {
-                log::error!("the handler of LSE's {exchange} stream did not stop after its abort");
-            }
-        }
+        finish_handler(&mut self.handler, &format!("{} stream", self.exchange)).await;
     }
 }
 

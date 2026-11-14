@@ -86,13 +86,10 @@ impl fmt::Display for LsePair {
     }
 }
 
-/// A plan LSE names in a refusal.
+/// A plan LSE names in a refusal, of which its name is kept.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub(crate) struct RequiredPlan {
     pub(crate) name: String,
-    pub(crate) market: Option<String>,
-    pub(crate) tier: Option<String>,
-    pub(crate) subscribe_url: Option<String>,
 }
 
 /// LSE's catalogue of its reference collections (`/v3/reference`).

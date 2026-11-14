@@ -67,10 +67,7 @@ use dbn::{MboMsg, Mbp1Msg, Mbp10Msg};
 use jiff::{Timestamp, tz::TimeZone};
 use nautilus_common::{
     cache::CacheView,
-    live::{
-        dst::time::{self, Duration},
-        sender::EventSender,
-    },
+    live::{dst::time, sender::EventSender},
     messages::DataEvent,
 };
 use nautilus_core::{collections::AtomicMap, time::AtomicTime};
@@ -80,9 +77,9 @@ use nautilus_model::{
     data::{Data, OrderBookDelta, OrderBookDeltas},
     enums::RecordFlag,
     identifiers::{InstrumentId, TradeId},
-    instruments::Instrument,
 };
 
+use super::{TASK_FORCE, TASK_GRACE, precisions, send};
 use crate::{
     common::{
         consts::LseExchange,
@@ -98,10 +95,6 @@ use crate::{
         messages::{ExchangeLevel, ExchangeRecord},
     },
 };
-
-/// How long the record tasks get to finish at a close, then to abort.
-const TASK_GRACE: Duration = Duration::from_secs(1);
-const TASK_FORCE: Duration = Duration::from_secs(2);
 
 /// The data of a contract a subscription takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -577,17 +570,7 @@ impl ExchangeStreams {
             .to_zoned(TimeZone::UTC)
             .year();
         let instrument = ExchangeInstrument::of(id, year)?;
-        let price_precision = cache
-            .borrow()
-            .instrument(&id)
-            .with_context(|| {
-                format!(
-                    "{id} is not in the cache: LSE publishes no definitions, and its prices are \
-                     read at the definition's precision, so it must come from elsewhere, a \
-                     catalog or a broker"
-                )
-            })?
-            .price_precision();
+        let (price_precision, _) = precisions(cache, id)?;
         let subscriber = self.subscriber(kind.level())?;
         let reopen = kind.reopens();
         let named = self
@@ -822,13 +805,6 @@ fn take(
         of.price_precision = price_precision;
         of.set(kind, true);
     });
-}
-
-/// Sends `event` to the node; a closed channel means the node is stopping.
-fn send(sender: &EventSender<DataEvent>, event: DataEvent) {
-    if let Err(e) = sender.send(event) {
-        log::warn!("data event not sent: {e}");
-    }
 }
 
 #[cfg(test)]

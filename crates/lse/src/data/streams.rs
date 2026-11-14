@@ -29,20 +29,19 @@ use std::{str::FromStr, sync::Arc};
 use ahash::AHashMap;
 use anyhow::{Context, bail};
 use jiff::{Timestamp, tz::TimeZone};
-use nautilus_common::{
-    cache::CacheView,
-    live::{dst::time::Duration, sender::EventSender},
-    messages::DataEvent,
-};
+use nautilus_common::{cache::CacheView, live::sender::EventSender, messages::DataEvent};
 use nautilus_core::{collections::AtomicMap, time::AtomicTime};
 use nautilus_live::task::TaskGroup;
 use nautilus_model::{
     data::{Data, NautilusDataType},
     identifiers::InstrumentId,
-    instruments::Instrument,
 };
 
-use super::exchange::{ExchangeAccess, ExchangeInstrument, ExchangeStreams, StreamKind};
+use super::{
+    TASK_FORCE, TASK_GRACE,
+    exchange::{ExchangeAccess, ExchangeInstrument, ExchangeStreams, StreamKind},
+    precisions, send,
+};
 use crate::{
     common::{
         consts::{LSE_API_KEY, LSEDGE_VENUE, LseExchange, LseSocket, OPRA_VENUE},
@@ -56,10 +55,6 @@ use crate::{
         parse::{parse_quote, parse_trade},
     },
 };
-
-/// How long the tick tasks get to finish at a close, then to abort.
-const TASK_GRACE: Duration = Duration::from_secs(1);
-const TASK_FORCE: Duration = Duration::from_secs(2);
 
 /// An instrument whose ticks are subscribed: its id and precisions.
 #[derive(Debug, Clone, Copy)]
@@ -727,28 +722,14 @@ fn booked(id: InstrumentId, data: &NautilusDataType) -> anyhow::Result<LseExchan
 ///
 /// # Errors
 ///
-/// Returns an error naming it if `cache` has no definition of it: LSE
-/// publishes none, and its prices are read at the definition's precision.
+/// As `precisions`.
 fn defined(id: InstrumentId, cache: &CacheView) -> anyhow::Result<Subscribed> {
-    let cache = cache.borrow();
-    let instrument = cache.instrument(&id).with_context(|| {
-        format!(
-            "{id} is not in the cache: LSE publishes no definitions, and its prices are read at \
-             the definition's precision, so it must come from elsewhere, a catalog"
-        )
-    })?;
+    let (price_precision, size_precision) = precisions(cache, id)?;
     Ok(Subscribed {
         instrument_id: id,
-        price_precision: instrument.price_precision(),
-        size_precision: instrument.size_precision(),
+        price_precision,
+        size_precision,
     })
-}
-
-/// Sends `event` to the node; a closed channel means the node is stopping.
-fn send(sender: &EventSender<DataEvent>, event: DataEvent) {
-    if let Err(e) = sender.send(event) {
-        log::warn!("data event not sent: {e}");
-    }
 }
 
 #[cfg(test)]

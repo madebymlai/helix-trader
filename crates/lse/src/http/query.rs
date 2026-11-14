@@ -228,17 +228,6 @@ impl ExportQuery {
         )
     }
 
-    /// The candles `width` wide of `series` opening over `[from, to)`, as
-    /// Parquet. LSE folds a candle from the rows inside the export alone.
-    pub(crate) fn candles(
-        series: &LseSymbol,
-        width: CandleWidth,
-        from: Timestamp,
-        to: Timestamp,
-    ) -> Self {
-        Self::series(series, Rows::Candles(width), from, to)
-    }
-
     /// The `rows` of the US option `contract` over `[from, to)`, as
     /// Parquet: of LSE's `us_options`, by its OSI symbol, which names one
     /// contract.
@@ -530,7 +519,12 @@ mod tests {
         let gold = LseSymbol::new("futures", "GOLD").unwrap();
         let bar_type = BarType::from(format!("GOLD-FUTURES.LSEDGE-{spec}-LAST-EXTERNAL").as_str());
         let width = CandleWidth::of(bar_type).unwrap();
-        ExportQuery::candles(&gold, width, from.parse().unwrap(), to.parse().unwrap())
+        ExportQuery::series(
+            &gold,
+            Rows::Candles(width),
+            from.parse().unwrap(),
+            to.parse().unwrap(),
+        )
     }
 
     /// Three 4-hour candles, cut after the first rather than at 06:00, the
