@@ -278,7 +278,7 @@ impl DatasetVenue {
     /// its target's limit: without a latency, not at all, a time close
     /// filling as it is sent; at one, by the longest its time close waits
     /// to be processed (`Latency::dataset_delay`).
-    fn delay(&self) -> SignedDuration {
+    pub(super) fn delay(&self) -> SignedDuration {
         self.latency
             .map_or(SignedDuration::ZERO, Latency::dataset_delay)
     }
