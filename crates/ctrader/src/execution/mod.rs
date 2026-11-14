@@ -15,12 +15,13 @@
 //! whole, or adds to it. A modification amends a pending order, or moves a
 //! protection (`ProtoOAAmendPositionSLTPReq`, both prices, cTrader dropping
 //! one left out, the other as last asked); a cancel cancels a pending
-//! order, or removes a protection. A new order or a close the session
-//! never sent is rejected, a modify or cancel denied; one sent but
-//! unanswered stays in flight
-//! (`retain_unresolved_submissions`) until its events, a query or
-//! reconciliation resolve it; a query finding no such order at the broker
-//! rejects it.
+//! order, or removes a protection. A failed request takes Nautilus' policy
+//! for its `CommandFailure` class (see `failure`): a new order or a close
+//! the session never sent is rejected, a modify or cancel denied; one
+//! cTrader refused is rejected; one sent but unanswered, or of unknown
+//! outcome, stays in flight (`retain_unresolved_submissions`) until its
+//! events, a query or reconciliation resolve it; a query finding no such
+//! order at the broker rejects it.
 //!
 //! Reconciliation reads the reconcile request (open positions, their stop
 //! loss and take profit, pending orders), the deal list (fills), the
@@ -54,7 +55,10 @@ use nautilus_core::{
     DurationNanos, Params, UUID4, UnixNanos,
     time::{AtomicTime, get_atomic_clock_realtime},
 };
-use nautilus_live::{ExecutionClientCore, ExecutionEventEmitter, task::TaskGroup};
+use nautilus_live::{
+    ExecutionClientCore, ExecutionEventEmitter, SocketControl, execution::failure::CommandFailure,
+    task::TaskGroup,
+};
 use nautilus_model::{
     accounts::AccountAny,
     enums::{AccountType, ContingencyType, OmsType, OrderType},
@@ -67,7 +71,7 @@ use nautilus_model::{
 };
 
 use self::{
-    dispatch::{Command, Denial, Dispatch, Output, Role, Want},
+    dispatch::{Dispatch, Output, Role, Want},
     orders::{Leg, Placement, Protection, Tag, parse_protection_id},
     reports::{Reports, explained, open_volumes},
 };
@@ -75,18 +79,24 @@ use super::{
     common::{
         account::CTraderAccount,
         messages::{
-            ProtoOaAmendOrderReq, ProtoOaAmendPositionSltpReq, ProtoOaCancelOrderReq, ProtoOaOrder,
-            ProtoOaOrderStatus, ProtoOaOrderType, ProtoOaReconcileRes, TradeRequest,
+            ProtoOaAmendOrderReq, ProtoOaAmendPositionSltpReq, ProtoOaCancelOrderReq, ProtoOaDeal,
+            ProtoOaOrder, ProtoOaOrderStatus, ProtoOaOrderType, ProtoOaReconcileRes, TradeRequest,
         },
     },
     config::{CTraderConnection, CTraderCredential},
     session::CTraderSession,
-    websocket::{HEARTBEAT_INTERVAL, TradeSent},
+    websocket::HEARTBEAT_INTERVAL,
 };
 
 mod dispatch;
+mod failure;
 mod orders;
 mod reports;
+
+/// The label of the execution client's socket in Nautilus' socket state
+/// events and reconnect commands, beside the data client's under the same
+/// client id.
+const SOCKET_ENDPOINT: &str = "ctrader-open-api-trading";
 
 /// How long connect waits for the node's cache to hold the account.
 const ACCOUNT_REGISTERED_TIMEOUT: Duration = Duration::from_secs(30);
@@ -114,6 +124,8 @@ pub(super) struct CTraderExecutionClient {
     instrument_ids: Vec<InstrumentId>,
     emitter: ExecutionEventEmitter,
     clock: &'static AtomicTime,
+    /// Its session's socket in the node's socket state and reconnects.
+    socket: SocketControl,
     session: Option<Session>,
     session_tasks: TaskGroup,
     command_tasks: TaskGroup,
@@ -176,6 +188,7 @@ impl CTraderExecutionClient {
         if let Some(sender) = try_get_exec_event_sender() {
             emitter.set_sender(sender);
         }
+        let socket = SocketControl::new(core.client_id, Some(core.venue), SOCKET_ENDPOINT);
         Self {
             core,
             url,
@@ -183,6 +196,7 @@ impl CTraderExecutionClient {
             instrument_ids,
             emitter,
             clock,
+            socket,
             session: None,
             session_tasks: TaskGroup::new(),
             command_tasks: TaskGroup::new(),
@@ -204,6 +218,7 @@ impl CTraderExecutionClient {
             self.core.venue,
             self.credential.clone(),
             HEARTBEAT_INTERVAL,
+            Some(self.socket.clone()),
         )
         .await?;
         let opened = async {
@@ -364,21 +379,33 @@ impl CTraderExecutionClient {
             .collect()
     }
 
-    /// The fills of the deals over `[from, to]`.
+    /// The fills `cmd` asks for: of the deals over its `[start, end]`
+    /// (start: the epoch, end: now), of its instrument and its venue order
+    /// id if it names them. Only those deals' fills are built, so a deal
+    /// the request does not cover fails it in no case (see
+    /// `reports::commission`), as Nautilus' targeted order recovery asks the
+    /// fills of one order.
     async fn fill_reports(
         &self,
         session: &Session,
-        ts_init: UnixNanos,
-        from: UnixNanos,
-        to: UnixNanos,
+        cmd: &GenerateFillReports,
     ) -> anyhow::Result<Vec<FillReport>> {
+        let from = cmd.start.unwrap_or_default();
+        let to = cmd.end.unwrap_or_else(|| self.now());
         let deals = session
             .ctrader
             .deals(orders::millis(from), orders::millis(to))
             .await?;
-        let reports = self.reports(session, ts_init);
+        let asked = |deal: &&ProtoOaDeal| {
+            cmd.instrument_id
+                .is_none_or(|id| session.symbols.get(&id) == Some(&deal.symbol_id))
+                && cmd
+                    .venue_order_id
+                    .is_none_or(|id| id.as_str() == deal.order_id.to_string())
+        };
+        let reports = self.reports(session, cmd.ts_init);
         let mut fills = Vec::new();
-        for deal in &deals {
+        for deal in deals.iter().filter(asked) {
             fills.extend(reports.fill(deal)?);
         }
         Ok(fills)
@@ -513,8 +540,8 @@ impl CTraderExecutionClient {
 
     /// Sends `request` under `tag`, for `commands`, each order's modify or
     /// cancel it carries with its command's id (none for a new order or a
-    /// close); if the session never sends it, the commands are refused (see
-    /// `Dispatch::unsent`).
+    /// close); what became of its frame, if it failed, takes Nautilus'
+    /// policy for its class (see `failure::sending`, `Dispatch::sending`).
     fn send<Req: TradeRequest>(
         &self,
         session: &Session,
@@ -523,49 +550,28 @@ impl CTraderExecutionClient {
         commands: Vec<(ClientOrderId, UUID4)>,
     ) {
         let sent = session.ctrader.trade(request, tag.to_string());
-        self.refuse_unsent(session, tag, commands, sent);
-    }
-
-    fn refuse_unsent(
-        &self,
-        session: &Session,
-        tag: Tag,
-        commands: Vec<(ClientOrderId, UUID4)>,
-        sent: TradeSent,
-    ) {
         let dispatch = Arc::clone(&session.dispatch);
         let emitter = self.emitter.clone();
         let (clock, venue) = (self.clock, self.core.venue);
         self.spawn_command("trade request", async move {
-            let refused = match sent.await {
-                Ok(Ok(())) => {
-                    dispatch
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .sent(tag);
-                    return Ok(());
-                }
-                Ok(Err(e)) => format!("not sent to {venue}: {e}"),
-                Err(_) => format!("not sent to {venue}: the session closed"),
-            };
-            log::warn!("{tag} {refused}");
+            let sending = failure::sending(sent.await, venue);
             let outputs = dispatch
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .unsent(tag, &commands, &refused, clock.get_time_ns());
+                .sending(tag, &commands, sending, clock.get_time_ns());
             emit(&emitter, outputs);
             Ok(())
         });
     }
 
-    /// Refuses `tag`, the request of the command `command_id` of the order
-    /// `tag` names, at once: it was never sent.
-    fn refuse_now(&self, session: &Session, tag: Tag, command_id: UUID4, reason: &str) {
-        log::warn!("{tag} not sent: {reason}");
+    /// Fails `tag`, the request of the command `command_id` of the order
+    /// `tag` names, at once: it could not be made, so it was never sent.
+    fn fail_now(&self, session: &Session, tag: Tag, command_id: UUID4, reason: String) {
         let commands = [(tag.client_order_id(), command_id)];
-        let outputs = session
-            .dispatch()
-            .unsent(tag, &commands, reason, self.now());
+        let outputs =
+            session
+                .dispatch()
+                .fail(tag, &commands, CommandFailure::NotSent(reason), self.now());
         emit(&self.emitter, outputs);
     }
 
@@ -881,7 +887,7 @@ impl CTraderExecutionClient {
                 Ok::<_, String>(())
             })();
             if let Err(reason) = outcome {
-                self.refuse_now(session, Tag::Cancel(id), command_id, &reason);
+                self.fail_now(session, Tag::Cancel(id), command_id, reason);
             }
         }
         for (position, legs) in protections {
@@ -992,31 +998,6 @@ fn emit(emitter: &ExecutionEventEmitter, outputs: Vec<Output>) {
         match output {
             Output::Event(event) => emitter.send_order_event(event),
             Output::Report(report) => emitter.send_execution_report(report),
-            Output::Denied(Denial {
-                command,
-                strategy_id,
-                instrument_id,
-                client_order_id,
-                venue_order_id,
-                reason,
-                ts_event,
-                command_id,
-            }) => {
-                let emit_denied = match command {
-                    Command::Modify => ExecutionEventEmitter::emit_order_modify_denied_event,
-                    Command::Cancel => ExecutionEventEmitter::emit_order_cancel_denied_event,
-                };
-                emit_denied(
-                    emitter,
-                    strategy_id,
-                    instrument_id,
-                    client_order_id,
-                    venue_order_id,
-                    &reason,
-                    ts_event,
-                    Some(command_id),
-                );
-            }
         }
     }
 }
@@ -1403,20 +1384,13 @@ impl ExecutionClient for CTraderExecutionClient {
         Ok(orders)
     }
 
-    /// The fills of the deals over `[start, end]` (start: the epoch, end:
-    /// now).
+    /// The fills of the deals `cmd` covers (see `fill_reports`).
     async fn generate_fill_reports(
         &self,
         cmd: GenerateFillReports,
     ) -> anyhow::Result<Vec<FillReport>> {
         let session = self.session()?;
-        let from = cmd.start.unwrap_or_default();
-        let to = cmd.end.unwrap_or_else(|| self.now());
-        let mut fills = self.fill_reports(session, cmd.ts_init, from, to).await?;
-        fills.retain(|f| {
-            cmd.instrument_id.is_none_or(|id| f.instrument_id == id)
-                && cmd.venue_order_id.is_none_or(|id| f.venue_order_id == id)
-        });
+        let fills = self.fill_reports(session, &cmd).await?;
         log_receipt(
             fills.len(),
             "FillReport",
@@ -1631,7 +1605,18 @@ mod tests {
     use std::{cell::RefCell, rc::Rc};
 
     use nautilus_common::{
-        cache::Cache, live::runner::replace_exec_event_sender, messages::ExecutionEvent,
+        cache::Cache,
+        clients::DataClient,
+        live::runner::{
+            replace_data_event_sender, replace_exec_event_sender, replace_system_event_sender,
+        },
+        messages::{
+            ExecutionEvent, SystemEvent,
+            system::{SocketState, SocketStateChange},
+        },
+    };
+    use nautilus_live::{
+        SocketReconnectLookup, SocketReconnectRegistry, SocketReconnectRequestOutcome,
     };
     use nautilus_model::{
         enums::{OrderSide, OrderStatus, OrderType, PositionSide, TimeInForce, TriggerType},
@@ -1641,6 +1626,7 @@ mod tests {
     use prost::Message as _;
     use rust_decimal::Decimal;
     use tokio::sync::mpsc;
+    use ustr::Ustr;
 
     use super::*;
     use crate::{
@@ -1656,6 +1642,7 @@ mod tests {
             ProtoOaSymbolsListReq, ProtoOaSymbolsListRes, ProtoOaTimeInForce, ProtoOaTradeData,
             ProtoOaTradeSide, ProtoOaTraderReq, ProtoOaTraderRes,
         },
+        data::CTraderDataClient,
         testing::{
             self, ACCOUNT_AUTH_TOKEN_INVALID, ACCOUNT_ID, ASSET_LIST_RES, Action, CLIENT,
             DEAL_LIST_RES_EMPTY, RECONCILE_RES_EMPTY, Received, SYMBOL_BY_ID_RES, SYMBOLS_LIST_RES,
@@ -2071,6 +2058,123 @@ mod tests {
             .collect()
     }
 
+    /// The session's socket under Nautilus' `SocketControl` (`live.md`,
+    /// "Socket transport state"): its availability goes to the node as the
+    /// client's, on its venue, endpoint `ctrader-open-api-trading`,
+    /// registered for the node's reconnect until the client disconnects.
+    #[tokio::test]
+    async fn the_sessions_socket_state_goes_to_the_node_until_the_client_disconnects() {
+        let (system_tx, mut system) = mpsc::unbounded_channel();
+        replace_system_event_sender(system_tx);
+        let registry = SocketReconnectRegistry::default();
+        let (mut client, cache, mut events, _received, _tokens) =
+            registry.scope(|| started(Script::default()));
+        let endpoint = Ustr::from("ctrader-open-api-trading");
+
+        connect(&mut client, &mut events, &cache).await;
+
+        let event = tokio::time::timeout(Duration::from_secs(10), system.recv())
+            .await
+            .expect("no socket state within 10 s")
+            .expect("the system events ended");
+        let SystemEvent::SocketState(connected) = event;
+        assert_eq!(
+            connected,
+            SocketStateChange::new(
+                ClientId::from(CLIENT),
+                Some(Venue::new(VENUE)),
+                endpoint,
+                SocketState::Connected
+            )
+        );
+        assert!(registry.handle(ClientId::from(CLIENT), endpoint).is_some());
+        client.disconnect().await.unwrap();
+        assert!(registry.handle(ClientId::from(CLIENT), endpoint).is_none());
+    }
+
+    /// A broker's data and execution clients under its one client id, as
+    /// the factories name them and a node's caller makes them: each socket
+    /// is its own endpoint, registered once, and the node's reconnect of
+    /// it replaces that transport alone, its session authenticating again.
+    #[tokio::test]
+    async fn a_brokers_data_and_trading_sockets_are_two_endpoints_each_reconnectable() {
+        let (system_tx, mut system) = mpsc::unbounded_channel();
+        replace_system_event_sender(system_tx);
+        let (data_tx, _data_events) = mpsc::unbounded_channel();
+        replace_data_event_sender(data_tx);
+        let registry = SocketReconnectRegistry::default();
+        let (mut trading, cache, mut events, trading_received, _tokens) =
+            registry.scope(|| started(Script::default()));
+        let (url, data_received) = testing::start(peer(Script::default()));
+        let (credential, _data_tokens) = testing::credential();
+        let mut data = registry.scope(|| {
+            CTraderDataClient::with_endpoint(
+                ClientId::from(CLIENT),
+                url,
+                Venue::new(VENUE),
+                credential,
+                vec![InstrumentId::from(XAUUSD)],
+                get_atomic_clock_realtime(),
+            )
+        });
+        connect(&mut trading, &mut events, &cache).await;
+        data.connect().await.unwrap();
+        let client = ClientId::from(CLIENT);
+        let endpoints = ["ctrader-open-api-data", "ctrader-open-api-trading"].map(Ustr::from);
+
+        for endpoint in endpoints {
+            let SocketReconnectLookup::Handle(reconnect) = registry.get(client, endpoint) else {
+                panic!("{endpoint}: {:?}", registry.get(client, endpoint));
+            };
+            assert_eq!(
+                reconnect.request_reconnect(),
+                SocketReconnectRequestOutcome::Accepted,
+                "{endpoint}"
+            );
+        }
+
+        let mut states: HashMap<Ustr, Vec<SocketState>> = HashMap::new();
+        for _ in 0..6 {
+            let event = tokio::time::timeout(Duration::from_secs(10), system.recv())
+                .await
+                .expect("no socket state within 10 s")
+                .expect("the system events ended");
+            let SystemEvent::SocketState(change) = event;
+            assert_eq!(change.client_id, client);
+            states
+                .entry(change.endpoint)
+                .or_default()
+                .push(change.state);
+        }
+        for endpoint in endpoints {
+            assert_eq!(
+                states[&endpoint],
+                [
+                    SocketState::Connected,
+                    SocketState::Disconnected,
+                    SocketState::Connected
+                ],
+                "{endpoint}"
+            );
+        }
+        for received in [&trading_received, &data_received] {
+            let frames = testing::wait_until(received, |frames| {
+                frames
+                    .iter()
+                    .any(|(c, f)| *c == 1 && f.payload_type == ProtoOaAccountAuthReq::TYPE)
+            })
+            .await;
+            assert!(
+                frames
+                    .iter()
+                    .any(|(c, f)| *c == 1 && f.payload_type == ProtoOaAccountAuthReq::TYPE),
+                "a session did not authenticate again"
+            );
+        }
+        trading.disconnect().await.unwrap();
+        data.disconnect().await.unwrap();
+    }
+
     #[tokio::test]
     async fn connecting_publishes_the_captured_account_state_and_waits_for_the_node() {
         let (mut client, cache, mut events, _, _tokens) = started(Script::default());
@@ -2384,6 +2488,95 @@ mod tests {
         assert_eq!(asked[0].from_timestamp, Some(T0));
         assert_eq!(mass_status.lookback_start(), Some(ns(T0)));
         assert!(mass_status.reports_complete());
+    }
+
+    /// A deal cTrader states no commission for (Nautilus'
+    /// `spec_exec_testing.md`, TC-E88): the fill reports and the mass status
+    /// fail, naming it, rather than book it at zero or leave it out.
+    #[tokio::test]
+    async fn a_deal_without_its_commission_fails_the_fill_reports_and_the_mass_status() {
+        let mut deals = gold_deals();
+        deals[0].commission = None;
+        let venue = Script {
+            deals: Some(deals),
+            ..gold_venue()
+        };
+        let (mut client, cache, mut events, _received, _tokens) = started(venue);
+        connect(&mut client, &mut events, &cache).await;
+
+        let fills = client
+            .generate_fill_reports(GenerateFillReports::new(
+                UUID4::new(),
+                client.now(),
+                None,
+                None,
+                Some(ns(T0)),
+                None,
+                None,
+                None,
+            ))
+            .await;
+        let mass_status = client.generate_mass_status(None).await;
+        client.disconnect().await.unwrap();
+
+        let fills = format!("{:#}", fills.unwrap_err());
+        assert!(fills.contains("cTrader deal 1"), "{fills}");
+        assert!(fills.contains("no commission"), "{fills}");
+        let mass_status = format!("{:#}", mass_status.unwrap_err());
+        assert!(mass_status.contains("cTrader deal 1"), "{mass_status}");
+    }
+
+    /// Nautilus' targeted order recovery asks the fills of one order, of
+    /// its instrument, with no start (`live/src/execution/reconciliation.rs`):
+    /// deal 2, of order 1002, states no commission. Fills asked of order
+    /// 1001, or of another instrument, are reported; a request covering
+    /// deal 2 fails.
+    #[tokio::test]
+    async fn a_fill_request_fails_only_on_a_deal_it_covers_without_its_commission() {
+        let mut deals = gold_deals();
+        deals[1].commission = None;
+        let venue = Script {
+            deals: Some(deals),
+            ..gold_venue()
+        };
+        let (mut client, cache, mut events, _received, _tokens) = started(venue);
+        connect(&mut client, &mut events, &cache).await;
+        let asking = |instrument: Option<&str>, order: Option<&str>| {
+            GenerateFillReports::new(
+                UUID4::new(),
+                client.now(),
+                instrument.map(InstrumentId::from),
+                order.map(VenueOrderId::from),
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+
+        let of_order = client
+            .generate_fill_reports(asking(Some(XAUUSD), Some("1001")))
+            .await;
+        let of_other_instrument = client
+            .generate_fill_reports(asking(Some(EURUSD), None))
+            .await;
+        let of_deal_2 = client
+            .generate_fill_reports(asking(Some(XAUUSD), Some("1002")))
+            .await;
+        let of_all = client.generate_fill_reports(asking(None, None)).await;
+        client.disconnect().await.unwrap();
+
+        let trades: Vec<String> = of_order
+            .unwrap()
+            .iter()
+            .map(|f| f.trade_id.to_string())
+            .collect();
+        assert_eq!(trades, ["1"]);
+        assert!(of_other_instrument.unwrap().is_empty());
+        for covering in [of_deal_2, of_all] {
+            let error = format!("{:#}", covering.unwrap_err());
+            assert!(error.contains("cTrader deal 2"), "{error}");
+        }
     }
 
     #[tokio::test]

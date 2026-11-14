@@ -2,11 +2,13 @@
 //! session.
 //!
 //! On connect it authenticates, loads its instruments (as `CTraderSession`
-//! does) and sends them to the node. Quote subscriptions become spot
-//! subscriptions, their spot events quotes (see `spots`); the session
-//! sends them again after a reconnect. Quote requests are answered from
-//! the tick history, merged as a fill merges it, up to the request's end
-//! or now. Bars are left to Nautilus, built from the quotes.
+//! does) and sends them to the node; they read the spot events and the
+//! tick history, and an instrument request asks cTrader anew. Quote
+//! subscriptions become spot subscriptions, their spot events quotes (see
+//! `spots`); the session sends them again after a reconnect. Quote
+//! requests are answered from the tick history, merged as a fill merges
+//! it, up to the request's end or now. Bars are left to Nautilus, built
+//! from the quotes.
 
 use std::{
     collections::HashMap,
@@ -24,8 +26,8 @@ use nautilus_common::{
     messages::{
         DataEvent, DataResponse,
         data::{
-            DataResponseEnvelope, InstrumentResponse, QuotesResponse, RequestInstrument,
-            RequestQuotes, SubscribeQuotes, UnsubscribeQuotes,
+            DataRequestFailed, DataResponseEnvelope, InstrumentResponse, QuotesResponse,
+            RequestInstrument, RequestQuotes, SubscribeQuotes, UnsubscribeQuotes,
         },
     },
 };
@@ -33,7 +35,7 @@ use nautilus_core::{
     datetime::datetime_to_unix_nanos,
     time::{AtomicTime, get_atomic_clock_realtime},
 };
-use nautilus_live::task::TaskGroup;
+use nautilus_live::{SocketControl, task::TaskGroup};
 use nautilus_model::{
     data::Data,
     identifiers::{ClientId, InstrumentId, Venue},
@@ -49,6 +51,11 @@ use super::{
 
 mod spots;
 
+/// The label of the data client's socket in Nautilus' socket state events
+/// and reconnect commands, beside the execution client's under the same
+/// client id.
+const SOCKET_ENDPOINT: &str = "ctrader-open-api-data";
+
 /// How long tasks get to finish at a disconnect, then to abort.
 const TASK_GRACE: Duration = Duration::from_secs(1);
 const TASK_FORCE: Duration = Duration::from_secs(2);
@@ -62,6 +69,8 @@ pub(super) struct CTraderDataClient {
     venue: Venue,
     credential: CTraderCredential,
     instrument_ids: Vec<InstrumentId>,
+    /// Its session's socket in the node's socket state and reconnects.
+    socket: SocketControl,
     session: Option<Session>,
     session_tasks: TaskGroup,
     command_tasks: TaskGroup,
@@ -102,7 +111,7 @@ impl CTraderDataClient {
         )
     }
 
-    fn with_endpoint(
+    pub(super) fn with_endpoint(
         client_id: ClientId,
         url: String,
         venue: Venue,
@@ -116,6 +125,7 @@ impl CTraderDataClient {
             venue,
             credential,
             instrument_ids,
+            socket: SocketControl::new(client_id, Some(venue), SOCKET_ENDPOINT),
             session: None,
             session_tasks: TaskGroup::new(),
             command_tasks: TaskGroup::new(),
@@ -138,6 +148,7 @@ impl CTraderDataClient {
             self.venue,
             self.credential.clone(),
             HEARTBEAT_INTERVAL,
+            Some(self.socket.clone()),
         )
         .await?;
         let loaded = async {
@@ -329,36 +340,56 @@ impl DataClient for CTraderDataClient {
         })
     }
 
-    /// Answers with the instrument loaded at connect, in one completed
+    /// Answers with the instrument as cTrader defines it now, asked of it
+    /// as at connect (`CTraderSession::instruments`), in one completed
     /// response envelope: the data engine writes it to the catalog if asked
-    /// (`update_catalog`) and none of its id is stored.
+    /// (`update_catalog`) and none of its id is stored. A request cTrader
+    /// does not answer fails (`DataRequestFailed`). An instrument request
+    /// fetches from the provider (Nautilus' `adapters.md`, "Data client"):
+    /// the instruments loaded at connect only read the spot events and the
+    /// tick history.
     ///
     /// # Errors
     ///
-    /// Returns an error if the request is of more than one instrument, or
-    /// of one not loaded.
+    /// Returns an error if the client is not connected, or the request is
+    /// of more than one instrument.
     fn request_instrument(&self, request: RequestInstrument) -> anyhow::Result<()> {
         let session = self.session()?;
         let id = request.single_instrument_id()?;
-        let symbol = session
-            .symbols
-            .get(&id)
-            .with_context(|| format!("{id} is not an instrument the data client loaded"))?;
-        let response = InstrumentResponse::new(
-            request.request_id,
-            request.client_id.unwrap_or(self.client_id),
-            id,
-            symbol.instrument.clone(),
-            datetime_to_unix_nanos(request.start),
-            datetime_to_unix_nanos(request.end),
-            self.clock.get_time_ns(),
-            request.params,
-        );
-        let response = DataResponse::Instrument(Box::new(response));
-        send(
-            &self.data_sender,
-            DataEvent::ResponseEnvelope(DataResponseEnvelope::new(response, true, None)),
-        );
+        let ctrader = Arc::clone(&session.ctrader);
+        let sender = self.data_sender.clone();
+        let client_id = request.client_id.unwrap_or(self.client_id);
+        let clock = self.clock;
+        self.spawn_command("instrument request", async move {
+            // One instrument per id asked.
+            let fetched = ctrader.instruments(&[id]).await;
+            let event = match fetched.map(|mut instruments| instruments.remove(0)) {
+                Ok(instrument) => {
+                    let response = InstrumentResponse::new(
+                        request.request_id,
+                        client_id,
+                        id,
+                        instrument,
+                        datetime_to_unix_nanos(request.start),
+                        datetime_to_unix_nanos(request.end),
+                        clock.get_time_ns(),
+                        request.params,
+                    );
+                    let response = DataResponse::Instrument(Box::new(response));
+                    DataEvent::ResponseEnvelope(DataResponseEnvelope::new(response, true, None))
+                }
+                Err(e) => {
+                    log::warn!("the instrument {id} not fetched: {e:#}");
+                    DataEvent::RequestFailed(DataRequestFailed {
+                        request_id: request.request_id,
+                        reason: format!("{e:#}"),
+                        response: None,
+                    })
+                }
+            };
+            send(&sender, event);
+            Ok(())
+        });
         Ok(())
     }
 
@@ -440,37 +471,46 @@ fn send(sender: &EventSender<DataEvent>, event: DataEvent) {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroUsize;
+    use std::{
+        num::NonZeroUsize,
+        sync::atomic::{AtomicBool, Ordering},
+    };
 
     use std::{cell::RefCell, rc::Rc};
 
     use nautilus_common::{
         cache::Cache,
         clock::VirtualClock,
-        live::runner::replace_data_event_sender,
-        messages::data::RequestCommand,
+        live::runner::{replace_data_event_sender, replace_system_event_sender},
+        messages::{
+            SystemEvent,
+            data::RequestCommand,
+            system::{SocketState, SocketStateChange},
+        },
         msgbus::{self, MessageBus, TypedHandler},
     };
     use nautilus_core::{Params, UUID4, UnixNanos};
     use nautilus_data::{client::DataClientAdapter, engine::DataEngine};
+    use nautilus_live::{SocketReconnectRegistry, SocketReconnectRequestOutcome};
     use nautilus_model::identifiers::TraderId;
     use nautilus_model::{
-        instruments::Instrument,
+        instruments::{Instrument, InstrumentAny},
         types::{Price, Quantity},
     };
     use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
     use prost::Message as _;
     use tokio::sync::mpsc;
+    use ustr::Ustr;
 
     use super::*;
     use crate::{
         common::messages::{
-            Payload, ProtoMessage, ProtoOaAssetListReq, ProtoOaAssetListRes, ProtoOaErrorRes,
-            ProtoOaGetDynamicLeverageByIdReq, ProtoOaGetTickDataReq, ProtoOaRefreshTokenReq,
-            ProtoOaSpotEvent, ProtoOaSubscribeSpotsReq, ProtoOaSubscribeSpotsRes,
-            ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes, ProtoOaSymbolsListReq,
-            ProtoOaSymbolsListRes, ProtoOaTraderReq, ProtoOaTraderRes, ProtoOaUnsubscribeSpotsReq,
-            ProtoOaUnsubscribeSpotsRes,
+            Payload, ProtoMessage, ProtoOaAccountAuthReq, ProtoOaAssetListReq, ProtoOaAssetListRes,
+            ProtoOaErrorRes, ProtoOaGetDynamicLeverageByIdReq, ProtoOaGetTickDataReq,
+            ProtoOaRefreshTokenReq, ProtoOaSpotEvent, ProtoOaSubscribeSpotsReq,
+            ProtoOaSubscribeSpotsRes, ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes,
+            ProtoOaSymbolsListReq, ProtoOaSymbolsListRes, ProtoOaTraderReq, ProtoOaTraderRes,
+            ProtoOaUnsubscribeSpotsReq, ProtoOaUnsubscribeSpotsRes,
         },
         session::ticks::Tick,
         testing::{
@@ -682,6 +722,88 @@ mod tests {
         assert_eq!(client.client_id(), ClientId::from(CLIENT));
         client.disconnect().await.unwrap();
         assert!(client.is_disconnected());
+    }
+
+    /// The next socket state the node is told of.
+    async fn next_socket_state(
+        system: &mut mpsc::UnboundedReceiver<SystemEvent>,
+    ) -> SocketStateChange {
+        let event = tokio::time::timeout(Duration::from_secs(10), system.recv())
+            .await
+            .expect("no socket state within 10 s")
+            .expect("the system events ended");
+        let SystemEvent::SocketState(change) = event;
+        change
+    }
+
+    /// The session's socket under Nautilus' `SocketControl` (`live.md`,
+    /// "Socket transport state"): its availability goes to the node as the
+    /// client's, on its venue, endpoint `ctrader-open-api-data`; the node's
+    /// reconnect of it replaces the transport, on which the session
+    /// authenticates again; a disconnect deregisters it.
+    #[tokio::test]
+    async fn the_sessions_socket_state_goes_to_the_node_which_can_reconnect_it() {
+        let (system_tx, mut system) = mpsc::unbounded_channel();
+        replace_system_event_sender(system_tx);
+        let (data_tx, _events) = mpsc::unbounded_channel();
+        replace_data_event_sender(data_tx);
+        let (url, received) = testing::start(peer(vec![], vec![]));
+        let (credential, _tokens) = testing::credential();
+        let registry = SocketReconnectRegistry::default();
+        let mut client = registry.scope(|| {
+            CTraderDataClient::with_endpoint(
+                ClientId::from(CLIENT),
+                url,
+                Venue::new(VENUE),
+                credential,
+                vec![InstrumentId::from(XAUUSD), InstrumentId::from(EURUSD)],
+                get_atomic_clock_realtime(),
+            )
+        });
+        let endpoint = Ustr::from("ctrader-open-api-data");
+
+        client.connect().await.unwrap();
+
+        let connected = next_socket_state(&mut system).await;
+        assert_eq!(
+            connected,
+            SocketStateChange::new(
+                ClientId::from(CLIENT),
+                Some(Venue::new(VENUE)),
+                endpoint,
+                SocketState::Connected
+            )
+        );
+        let reconnect = registry
+            .handle(ClientId::from(CLIENT), endpoint)
+            .expect("the session's socket is registered");
+        assert_eq!(
+            reconnect.request_reconnect(),
+            SocketReconnectRequestOutcome::Accepted
+        );
+        assert_eq!(
+            next_socket_state(&mut system).await.state,
+            SocketState::Disconnected
+        );
+        assert_eq!(
+            next_socket_state(&mut system).await.state,
+            SocketState::Connected
+        );
+        let frames = testing::wait_until(&received, |frames| {
+            frames
+                .iter()
+                .any(|(c, f)| *c == 1 && f.payload_type == ProtoOaAccountAuthReq::TYPE)
+        })
+        .await;
+        assert!(
+            frames
+                .iter()
+                .any(|(c, f)| *c == 1 && f.payload_type == ProtoOaAccountAuthReq::TYPE),
+            "the session did not authenticate again"
+        );
+
+        client.disconnect().await.unwrap();
+        assert!(registry.handle(ClientId::from(CLIENT), endpoint).is_none());
     }
 
     /// The client's clock stopped 210 ms after the captured spot event.
@@ -1034,8 +1156,91 @@ mod tests {
         assert_eq!(windows, [before, before, gap, gap]);
     }
 
+    fn instrument_request(id: &str) -> RequestInstrument {
+        RequestInstrument::new(
+            InstrumentId::from(id),
+            None,
+            None,
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+        )
+    }
+
+    /// The instrument `envelope` answers with.
+    fn instrument_of(envelope: &DataResponseEnvelope) -> InstrumentAny {
+        match envelope.response() {
+            Some(DataResponse::Instrument(response)) => response.data.clone(),
+            other => panic!("not an instrument response: {other:?}"),
+        }
+    }
+
+    /// Nautilus' regression for a fresh instrument request (`adapters.md`,
+    /// "Data client"): cTrader's definition of XAUUSD changes between two
+    /// requests, its digits from 2 to 3, and the second answer is the new
+    /// one, not the one loaded at connect.
     #[tokio::test]
-    async fn an_instrument_request_is_answered_with_the_loaded_instrument_written_back_once() {
+    async fn an_instrument_request_answers_ctraders_definition_of_the_moment() {
+        let changed = Arc::new(AtomicBool::new(false));
+        let since = Arc::clone(&changed);
+        let mut answer = peer(vec![], vec![]);
+        let script = move |connection, request: &ProtoMessage| {
+            if since.load(Ordering::SeqCst) && request.payload_type == ProtoOaSymbolByIdReq::TYPE {
+                let mut details = ProtoOaSymbolByIdRes::decode(SYMBOL_BY_ID_RES).unwrap();
+                for symbol in &mut details.symbol {
+                    if symbol.symbol_id == XAUUSD_SYMBOL_ID {
+                        symbol.digits = 3;
+                    }
+                }
+                return vec![reply(request, &details)];
+            }
+            answer(connection, request)
+        };
+        let (mut client, mut events, received, _tokens) = connected(script).await;
+        skip_instruments(&mut events).await;
+
+        client
+            .request_instrument(instrument_request(XAUUSD))
+            .unwrap();
+        let before = instrument_of(&next_envelope(&mut events).await);
+        changed.store(true, Ordering::SeqCst);
+        client
+            .request_instrument(instrument_request(XAUUSD))
+            .unwrap();
+        let after = instrument_of(&next_envelope(&mut events).await);
+
+        assert_eq!(before.id(), InstrumentId::from(XAUUSD));
+        assert_eq!(before.price_precision(), 2);
+        assert_eq!(after.id(), InstrumentId::from(XAUUSD));
+        assert_eq!(after.price_precision(), 3);
+        // The details asked for at connect, then for each request.
+        let asked: Vec<ProtoOaSymbolByIdReq> = received_of(&received);
+        assert_eq!(asked.len(), 3);
+        client.disconnect().await.unwrap();
+    }
+
+    /// cTrader lists no such symbol: the request fails, naming why.
+    #[tokio::test]
+    async fn an_instrument_request_ctrader_cannot_answer_fails() {
+        let (mut client, mut events, _, _tokens) = connected(peer(vec![], vec![])).await;
+        skip_instruments(&mut events).await;
+        let request = instrument_request("GBPJPY.ACMEFX");
+        let request_id = request.request_id;
+
+        client.request_instrument(request).unwrap();
+
+        let DataEvent::RequestFailed(failed) = next_event(&mut events).await else {
+            panic!("not a failed request");
+        };
+        assert_eq!(failed.request_id, request_id);
+        assert!(failed.reason.contains("GBPJPY"), "{}", failed.reason);
+        assert!(failed.response.is_none());
+        client.disconnect().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_instrument_request_is_answered_with_ctraders_instrument_written_back_once() {
         let (client, mut events, _, _tokens) = connected(peer(vec![], vec![])).await;
         skip_instruments(&mut events).await;
         let dir = tempfile::tempdir().unwrap();

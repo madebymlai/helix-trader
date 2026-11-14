@@ -12,6 +12,13 @@
 //! that reconnect (`WebSocketClient::request_reconnect`). Requests in
 //! flight at a reconnect fail: their session is gone.
 //!
+//! The socket's state is Nautilus' to report: given the client's
+//! `SocketControl`, the transport tells the node when the socket becomes
+//! available and when it is lost (`SocketStateChanged`, under the client's
+//! endpoint label), and the node's reconnect of the endpoint replaces the
+//! transport as a drop does, the handler authenticating the new session; a
+//! disconnect deregisters it (`live.md`, "Socket transport state").
+//!
 //! The handler task is held in Nautilus' `TaskSlot`: `begin_shutdown`
 //! tells it to close, `disconnect` joins it (`finish_task`), a token
 //! renewal out answered and saved first. Time goes through Nautilus'
@@ -54,7 +61,10 @@ use std::{sync::Arc, time::Duration};
 
 use anyhow::Context;
 use nautilus_common::live::dst::time;
-use nautilus_live::task::{TaskJoinOutcome, TaskSlot, finish_task};
+use nautilus_live::{
+    SocketControl,
+    task::{TaskJoinOutcome, TaskSlot, finish_task},
+};
 use nautilus_network::{
     Message,
     ratelimiter::{RateLimiter, clock::MonotonicClock, quota::Quota},
@@ -162,8 +172,12 @@ pub(crate) enum TradeMessage {
     Execution(ProtoOaExecutionEvent),
     /// An order the server refused.
     OrderError(ProtoOaOrderErrorEvent),
-    /// cTrader's error answer to a trade request (`CTraderError::Venue`).
-    Refused(CTraderError),
+    /// cTrader's error answer to a trade request (`ProtoOAErrorRes`, or
+    /// the proxy's `ProtoErrorRes`): its code and description.
+    Refused {
+        code: String,
+        description: Option<String>,
+    },
 }
 
 /// Whether a trade request was sent: `Ok` once its frame is written, an
@@ -182,6 +196,9 @@ pub(super) struct CTraderWebSocketClient {
     auth: AuthTracker,
     /// The slots of the historical requests.
     historical: RateLimiter<Ustr, MonotonicClock>,
+    /// The socket's state publication and reconnect registration, if a
+    /// node's client owns the session.
+    socket: Option<SocketControl>,
 }
 
 impl std::fmt::Debug for CTraderWebSocketClient {
@@ -197,7 +214,8 @@ impl CTraderWebSocketClient {
     /// account of `credential` with the token file's pair (seeded from the
     /// credential the first time, renewed first if due), sending the
     /// heartbeat every `heartbeat`; with the spot events of the symbols
-    /// `subscribe_spots` subscribes.
+    /// `subscribe_spots` subscribes. `socket`, a node's client's, reports
+    /// the socket's state and takes the node's reconnect of it.
     ///
     /// # Errors
     ///
@@ -209,6 +227,7 @@ impl CTraderWebSocketClient {
         url: &str,
         credential: CTraderCredential,
         heartbeat: Duration,
+        socket: Option<SocketControl>,
     ) -> anyhow::Result<(Self, SpotEvents)> {
         // While another session renews the pair, its new one is awaited.
         let tokens = loop {
@@ -234,9 +253,11 @@ impl CTraderWebSocketClient {
         let client = WebSocketClient::epoch_builder()
             .config(config)
             .epoch_handler(message_handler)
+            .maybe_state_sink(socket.as_ref().map(SocketControl::sink))
             .connect()
             .await
             .with_context(|| format!("connecting to cTrader at {url}"))?;
+        let reconnect = client.reconnect_handle();
 
         // The transport invalidates the session's authentication when the
         // connection drops and fails it once closed. Its reconnect buffer
@@ -266,12 +287,16 @@ impl CTraderWebSocketClient {
         handler_task
             .spawn(handler.run())
             .map_err(|e| anyhow::anyhow!("starting the cTrader handler: {e}"))?;
+        if let Some(socket) = &socket {
+            socket.register(move || reconnect.request_reconnect());
+        }
         let connected = Self {
             cmd_tx,
             handler: handler_task,
             subscriptions,
             auth: auth.clone(),
             historical,
+            socket,
         };
         match auth
             .wait_for_result::<String>(AUTH_TIMEOUT, authenticated)
@@ -405,8 +430,9 @@ impl CTraderWebSocketClient {
         let _ = self.cmd_tx.send(HandlerCommand::Disconnect);
     }
 
-    /// Closes the connection as `begin_shutdown` asks, and joins the
-    /// handler within `DISCONNECT_TIMEOUT`, then aborts it.
+    /// Closes the connection as `begin_shutdown` asks, joins the handler
+    /// within `DISCONNECT_TIMEOUT`, then aborts it, and deregisters the
+    /// socket from the node's reconnects.
     pub(super) async fn disconnect(mut self) {
         self.begin_shutdown();
         match finish_task(&mut self.handler, DISCONNECT_TIMEOUT, ABORT_TIMEOUT).await {
@@ -418,6 +444,9 @@ impl CTraderWebSocketClient {
             Some(TaskJoinOutcome::Incomplete) => {
                 log::error!("the cTrader handler did not stop after its abort");
             }
+        }
+        if let Some(socket) = &self.socket {
+            socket.deregister();
         }
     }
 }
@@ -457,7 +486,7 @@ mod tests {
         credential: CTraderCredential,
         heartbeat: Duration,
     ) -> anyhow::Result<CTraderWebSocketClient> {
-        let (client, _) = CTraderWebSocketClient::connect(url, credential, heartbeat).await?;
+        let (client, _) = CTraderWebSocketClient::connect(url, credential, heartbeat, None).await?;
         Ok(client)
     }
 
@@ -1213,9 +1242,10 @@ mod tests {
     async fn a_spot_subscription_asks_for_timestamps_and_its_spot_events_come_through() {
         let (url, received) = testing::start(spots_peer);
         let (credential, _tokens) = testing::credential();
-        let (client, mut spots) = CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
-            .await
-            .unwrap();
+        let (client, mut spots) =
+            CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT, None)
+                .await
+                .unwrap();
 
         client.subscribe_spots(41).unwrap();
 
@@ -1232,9 +1262,10 @@ mod tests {
     async fn a_symbol_subscribed_twice_is_asked_for_once() {
         let (url, received) = testing::start(spots_peer);
         let (credential, _tokens) = testing::credential();
-        let (client, mut spots) = CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
-            .await
-            .unwrap();
+        let (client, mut spots) =
+            CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT, None)
+                .await
+                .unwrap();
 
         client.subscribe_spots(41).unwrap();
         client.subscribe_spots(41).unwrap();
@@ -1273,9 +1304,10 @@ mod tests {
             actions
         });
         let (credential, _tokens) = testing::credential();
-        let (client, mut spots) = CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
-            .await
-            .unwrap();
+        let (client, mut spots) =
+            CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT, None)
+                .await
+                .unwrap();
 
         client.subscribe_spots(41).unwrap();
         client.subscribe_spots(1).unwrap();
@@ -1307,9 +1339,10 @@ mod tests {
     async fn after_a_reconnect_the_spot_subscriptions_are_sent_again() {
         let (url, received) = testing::start(closing_peer(ProtoOaSubscribeSpotsReq::TYPE));
         let (credential, _tokens) = testing::credential();
-        let (client, mut spots) = CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
-            .await
-            .unwrap();
+        let (client, mut spots) =
+            CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT, None)
+                .await
+                .unwrap();
 
         client.subscribe_spots(41).unwrap();
 
@@ -1333,9 +1366,10 @@ mod tests {
     async fn an_unsubscribed_symbol_is_not_subscribed_again_after_a_reconnect() {
         let (url, received) = testing::start(closing_peer(ProtoOaUnsubscribeSpotsReq::TYPE));
         let (credential, _tokens) = testing::credential();
-        let (client, mut spots) = CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
-            .await
-            .unwrap();
+        let (client, mut spots) =
+            CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT, None)
+                .await
+                .unwrap();
         client.subscribe_spots(41).unwrap();
         client.subscribe_spots(1).unwrap();
         next_spot(&mut spots).await;
@@ -1381,9 +1415,10 @@ mod tests {
             closing_peer(ProtoOaSubscribeSpotsReq::TYPE),
         );
         let (credential, _tokens) = testing::credential();
-        let (client, mut spots) = CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
-            .await
-            .unwrap();
+        let (client, mut spots) =
+            CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT, None)
+                .await
+                .unwrap();
         client.subscribe_spots(1).unwrap();
         assert_eq!(next_spot(&mut spots).await, spot_event(1));
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -1599,9 +1634,10 @@ mod tests {
             actions
         });
         let (credential, _dir) = testing::credential();
-        let (client, mut spots) = CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
-            .await
-            .unwrap();
+        let (client, mut spots) =
+            CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT, None)
+                .await
+                .unwrap();
         client.subscribe_spots(41).unwrap();
         next_spot(&mut spots).await;
         let request = symbol_request(3);
@@ -2001,9 +2037,10 @@ mod tests {
         let (url, received) =
             testing::start(slow_renewal(Duration::from_millis(300), venue_peer(&venue)));
         let (credential, _dir) = testing::credential();
-        let (client, mut spots) = CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT)
-            .await
-            .unwrap();
+        let (client, mut spots) =
+            CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT, None)
+                .await
+                .unwrap();
         client.subscribe_spots(41).unwrap();
         next_spot(&mut spots).await;
 
