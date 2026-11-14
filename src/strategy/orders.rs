@@ -14,7 +14,10 @@
 //! entry, a take-profit limit and a stop-market, one-updates-the-other,
 //! the legs reduce-only and the take profit post-only where the
 //! instrument's live broker takes such orders, in a backtest as live:
-//! `venues::takes_reduce_only_and_post_only`), without one a market entry.
+//! `venues::takes_reduce_only_and_post_only`, the legs tagged besides
+//! Nautilus' tags with the venue's tag linking them at its broker, named
+//! after the entry: `venues::bracket_exits_tag`, IB's OCA group), without
+//! one a market entry.
 //! A time limit sets a time alert named after the entry, `TIME_ALERT` and
 //! its client order id, the time limit after the send, and tags the entry
 //! with it (`TIME_LIMIT_TAG`), where the cache, persisted live, keeps it.
@@ -91,6 +94,14 @@ const TIME_CLOSE_TAG: &str = "TIME_CLOSE";
 
 /// The tag of a bracket's entry, Nautilus' default (`OrderFactory::bracket`).
 const ENTRY_TAG: &str = "ENTRY";
+
+/// The tag of a bracket's take profit, Nautilus' default, which the venue's
+/// tag of its exits joins (`venues::bracket_exits_tag`).
+const TAKE_PROFIT_TAG: &str = "TAKE_PROFIT";
+
+/// The tag of a bracket's stop loss, Nautilus' default, which the venue's
+/// tag of its exits joins (`venues::bracket_exits_tag`).
+const STOP_LOSS_TAG: &str = "STOP_LOSS";
 
 /// The prefix of the tag of an entry sent at a stake with its R in money,
 /// what its quantity is worth over one R in the instrument's P&L
@@ -431,7 +442,19 @@ impl Trade {
                 take_profit,
                 stop_loss,
             }) => {
-                let takes = venues::takes_reduce_only_and_post_only(instrument_id.venue);
+                let venue = instrument_id.venue;
+                let takes = venues::takes_reduce_only_and_post_only(venue);
+                // The factory's entry id is drawn here, first, as the
+                // bracket would draw it, so that the venue's tag of the
+                // exits can name it.
+                let entry = ids.map_or_else(
+                    || strategy.order().generate_client_order_id(),
+                    |ids| ids.entry,
+                );
+                let linked = venues::bracket_exits_tag(venue, entry);
+                let exit_tags = |tag: &str| -> Vec<Ustr> {
+                    std::iter::once(Ustr::from(tag)).chain(linked).collect()
+                };
                 let orders = strategy
                     .order()
                     .bracket()
@@ -439,17 +462,17 @@ impl Trade {
                     .order_side(self.side)
                     .quantity(quantity)
                     .entry_tags(tagged(Some(Ustr::from(ENTRY_TAG))))
-                    .maybe_entry_client_order_id(ids.map(|ids| ids.entry))
+                    .entry_client_order_id(entry)
                     .maybe_tp_client_order_id(ids.map(|ids| ids.take_profit))
                     .maybe_sl_client_order_id(ids.map(|ids| ids.stop_loss))
                     .tp_price(take_profit)
                     .tp_post_only(takes)
                     .tp_reduce_only(takes)
+                    .tp_tags(exit_tags(TAKE_PROFIT_TAG))
                     .sl_trigger_price(stop_loss)
                     .sl_reduce_only(takes)
+                    .sl_tags(exit_tags(STOP_LOSS_TAG))
                     .call();
-                // Nautilus' bracket is the entry, then its legs.
-                let entry = orders[0].client_order_id();
                 strategy.submit_order_list(orders, None, None, None)?;
                 entry
             }

@@ -11,11 +11,13 @@
 //! venue keeps positions (`oms_type`, its broker's answer) and whether it has
 //! money (`has_broker`: a venue no broker trades has none), a trade whether its
 //! orders may be reduce-only and post-only (`takes_reduce_only_and_post_only`,
-//! its broker's answer); venue code checks its own instruments against the
-//! table. Custom data of no instrument has no venue and no row: its type
-//! names its source, LSE's rows LSE (`fill_history`). The settings each
-//! command takes of the venues are composed here, `LiveVenueArgs` for live
-//! and `HistoryVenueArgs` for fill-catalog, which the commands flatten.
+//! its broker's answer) and the tag linking a bracket's exits at its broker
+//! (`bracket_exits_tag`, IB's OCA group); venue code checks its own
+//! instruments against the table. Custom data of no instrument has no venue
+//! and no row: its type names its source, LSE's rows LSE (`fill_history`).
+//! The settings each command takes of the venues are composed here,
+//! `LiveVenueArgs` for live and `HistoryVenueArgs` for fill-catalog, which
+//! the commands flatten.
 //!
 //! The cTrader brokers are one kind (`CTraderBroker`), which both dispatches
 //! loop over: each one's module names its venue and account, and its row of
@@ -53,10 +55,11 @@ use nautilus_live::config::RoutingConfig;
 use nautilus_model::{
     data::{CustomDataTrait, DataType, NautilusDataType},
     enums::OmsType,
-    identifiers::{ClientId, InstrumentId, Venue},
+    identifiers::{ClientId, ClientOrderId, InstrumentId, Venue},
 };
 use nautilus_okx::factories::OKXDataClientFactory;
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
+use ustr::Ustr;
 
 use self::{databento::DatabentoHistory, ib::IbHistory, okx::OkxHistory};
 use crate::{
@@ -206,6 +209,18 @@ impl Broker {
         match self {
             Self::CTrader(_) | Self::Okx => true,
             Self::Ib => false,
+        }
+    }
+
+    /// The tag of a bracket's exits linking them at the broker, the bracket
+    /// named by `entry`, its entry's client order id: on IB their OCA group
+    /// (`ib::bracket_exits_tag`); none on the others, whose execution
+    /// clients read no IB tag.
+    #[must_use]
+    pub(crate) fn bracket_exits_tag(self, entry: ClientOrderId) -> Option<Ustr> {
+        match self {
+            Self::CTrader(_) | Self::Okx => None,
+            Self::Ib => Some(ib::bracket_exits_tag(entry)),
         }
     }
 
@@ -385,6 +400,18 @@ pub fn takes_reduce_only_and_post_only(venue: Venue) -> bool {
     Row::of(venue)
         .broker
         .is_some_and(Broker::takes_reduce_only_and_post_only)
+}
+
+/// The tag a bracket's exits on `venue` carry besides Nautilus' own,
+/// linking them at its broker (`Broker::bracket_exits_tag`), the bracket
+/// named by `entry`, its entry's client order id: so every venue without a
+/// row of its own as IB; a venue no broker trades has none. A trade tags
+/// them in a backtest as live, the simulated venue reading no tag.
+#[must_use]
+pub fn bracket_exits_tag(venue: Venue, entry: ClientOrderId) -> Option<Ustr> {
+    Row::of(venue)
+        .broker
+        .and_then(|broker| broker.bracket_exits_tag(entry))
 }
 
 /// The venues' settings of a live node, the live command's flags, each
@@ -1527,6 +1554,30 @@ mod tests {
             assert_eq!(
                 takes_reduce_only_and_post_only(Venue::new(venue)),
                 takes,
+                "{venue}"
+            );
+        }
+    }
+
+    /// IB's execution client links a bracket's exits in an OCA group only
+    /// when they are tagged with one, GLBX's and every venue's without a
+    /// row of its own; no other broker reads IB's tags, and LSEDGE, which
+    /// no broker trades, sends no order.
+    #[test]
+    fn each_venue_tags_a_brackets_exits_as_its_live_broker_links_them() {
+        let entry = ClientOrderId::from("O-1");
+        for (venue, tagged) in [
+            ("ICMARKETS", false),
+            ("PEPPERSTONE", false),
+            ("OKX", false),
+            ("GLBX", true),
+            ("IBIS", true),
+            ("IDEALPRO", true),
+            ("LSEDGE", false),
+        ] {
+            assert_eq!(
+                bracket_exits_tag(Venue::new(venue), entry).is_some(),
+                tagged,
                 "{venue}"
             );
         }

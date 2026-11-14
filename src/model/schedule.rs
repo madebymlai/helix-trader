@@ -459,6 +459,15 @@ pub fn start<A: DataActor + DataActorNative>(
 /// start, then each grid time before `to`, as the timer `start` sets
 /// fires them.
 ///
+/// They are read off that timer rather than worked out: it is set as
+/// `start` sets it (`Clock::set_timer_ns`, from the last grid time not
+/// after the clock's now, with its `allow_past` and `fire_immediately`) on
+/// a `VirtualClock`, which registers it as the live clock does
+/// (`validate_and_prepare_timer`) and fires it without waiting, so a
+/// backtest trains at the times a live node retrains by Nautilus' own
+/// timer semantics, which this module does not restate. A `VirtualTimer`
+/// alone would skip that registration.
+///
 /// # Errors
 ///
 /// Returns an error if `every` is not positive, `from` is not before
