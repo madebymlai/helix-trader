@@ -89,8 +89,9 @@ min_trades = 30
 # learner's default leaves of 200 rows to split.
 learner = { kind = "lightgbm", num_iterations = 100, learning_rate = 0.1, num_leaves = 31, min_data_in_leaf = 20 }
 # The commission and balance its dataset runs are made at: their targets are
-# net of the commission and sized at [trade] risk of the balance, in the
-# traded instrument's P&L currency. They key the model store, so train, a
+# net of the commission, in the traded instrument's P&L currency, and sized
+# at [trade] risk of the balance, in that currency or one [trade]
+# conversions reaches it from, converted at each decision's rate. They key the model store, so train, a
 # backtest's retrains and live all read the one store of this config,
 # whatever a backtest's own --commission and --balance: changing either
 # retrains the model. IC's Raw account charges 30 USD per million a side.

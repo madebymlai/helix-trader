@@ -111,10 +111,22 @@ pub fn pair(id: &str, base: Currency, quote: Currency, price_precision: u8) -> I
 /// Quotes of the pair `id` at `bid` and `ask`, one a minute at :15 from
 /// 08:00 to 12:00.
 pub fn pair_quotes(id: &str, bid: &str, ask: &str) -> Vec<QuoteTick> {
+    pair_quotes_over(id, bid, ask, at("08:00:00"), at("12:00:00"))
+}
+
+/// Quotes of the pair `id` at `bid` and `ask`, one a minute 15 s after
+/// each minute from `from` to `to`.
+pub fn pair_quotes_over(
+    id: &str,
+    bid: &str,
+    ask: &str,
+    from: Timestamp,
+    to: Timestamp,
+) -> Vec<QuoteTick> {
     let size = Quantity::from(10_000_000);
     let mut quotes = vec![];
-    let mut time = at("08:00:15");
-    while time < at("12:00:00") {
+    let mut time = from + SignedDuration::from_secs(15);
+    while time < to {
         quotes.push(QuoteTick::new(
             InstrumentId::from(id),
             Price::from(bid),
@@ -208,8 +220,9 @@ pub fn store(dir: &Path, quotes: Vec<QuoteTick>, from: Timestamp, to: Timestamp)
 }
 
 /// Stores `defined` and its `quotes` in the catalog in `dir`, over `[from,
-/// to]`, as `catalog_of` does.
-fn store_defined(
+/// to]`, as `catalog_of` does: the gold as another definition gives it, or
+/// a pair beside it.
+pub fn store_defined(
     dir: &Path,
     defined: InstrumentAny,
     quotes: Vec<QuoteTick>,
