@@ -280,10 +280,10 @@ async fn the_records_after_a_gap_come_and_nothing_stands_in_for_those_missed() {
     assert!(events.try_recv().is_err(), "data beside the trade");
 }
 
-/// GCZ6 of 2026 streamed from the start; GCG7 of 2027, its next
-/// contract, subscribed later, as a roll subscribes it: looked up, then
-/// carried from a new connection, which opens it with its captured best
-/// bid and offer, bid 3890.0 x 1 and ask 3932.0 x 1.
+/// GCZ6 of 2026 streamed from the start and quoted; GCG7 of 2027, its
+/// next contract, subscribed later, as a roll subscribes it: looked up,
+/// then carried from a new connection beside GCZ6, which opens it with its
+/// captured best bid and offer, bid 3890.0 x 1 and ask 3932.0 x 1.
 #[tokio::test]
 async fn a_contract_subscribed_after_the_start_is_looked_up_and_carried_from_a_new_connection() {
     let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6), Reply::json(PAIRS_GCG7)]);
@@ -297,6 +297,11 @@ async fn a_contract_subscribed_after_the_start_is_looked_up_and_carried_from_a_n
     let (mut client, connected, mut events) =
         streaming(&lse, &stream, &[GCZ26], vec![gcz26(), gcg27()]).await;
     connected.unwrap();
+    client.subscribe_quotes(quotes_of(&[GCZ26])).unwrap();
+    let Data::Quote(opening) = next(&mut events).await else {
+        panic!("not GCZ6's opening quote")
+    };
+    assert_eq!(opening.instrument_id, InstrumentId::from(GCZ26));
 
     client.subscribe_quotes(quotes_of(&[GCG27])).unwrap();
 
@@ -441,6 +446,27 @@ async fn a_contract_whose_data_ended_at_one_level_is_left_out_of_every_level_it_
             None,
         ))
         .unwrap();
+    stream.release();
+
+    assert_eq!(
+        level_1_subscriptions(&stream, 2).await,
+        [json!(["GCG7", "GCZ6"]), json!(["GCG7"])]
+    );
+}
+
+/// A run started just before a roll streams GCZ6 and GCG7, both named at
+/// Level 1 when the client connects, LSE checking them, but subscribes
+/// GCG7's quotes alone: Level 1's next connection names GCG7 alone, so
+/// that GCZ6, never taken and once expired, does not have LSE refuse it.
+#[tokio::test]
+async fn a_reconnect_names_only_the_contracts_taken_at_its_level_not_those_streamed_untaken() {
+    let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6), Reply::json(PAIRS_GCG7)]);
+    let stream = level_1_dropped_once();
+    let (mut client, connected, _events) =
+        streaming(&lse, &stream, &[GCZ26, GCG27], vec![gcz26(), gcg27()]).await;
+    connected.unwrap();
+
+    client.subscribe_quotes(quotes_of(&[GCG27])).unwrap();
     stream.release();
 
     assert_eq!(

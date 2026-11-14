@@ -200,8 +200,9 @@ async fn a_key_lse_does_not_take_fails_the_connect_without_showing_the_key() {
     assert!(!err.contains(other), "{err}");
 }
 
-/// GCZ6 opened, then GCG7 asked: a second connection carries both, and
-/// GCZ6's opening there brings nothing new.
+/// GCZ6 named and opened, then subscribed, which this connection carries,
+/// and GCG7 asked: a second connection carries both, and GCZ6's opening
+/// there brings nothing new.
 #[tokio::test]
 async fn a_contract_not_carried_yet_is_carried_from_a_new_connection() {
     let peer = MockExchangeStream::cme(|_, subscription| {
@@ -220,6 +221,7 @@ async fn a_contract_not_carried_yet_is_carried_from_a_new_connection() {
     });
     let (client, mut out) = connect(&peer, &["GCZ6"]).await.unwrap();
     assert_eq!(record(&next(&mut out).await), ("GCZ6", 1794, true, b'M'));
+    client.subscriber().subscribe("GCZ6", false).unwrap();
 
     client.subscriber().subscribe("GCG7", true).unwrap();
 
@@ -236,7 +238,7 @@ async fn a_contract_not_carried_yet_is_carried_from_a_new_connection() {
     assert!(out.recv().await.is_none(), "GCZ6 passed on again");
 }
 
-/// GCZ6 and GCG7 carried, then GCG7 no longer, as a roll leaves its old
+/// GCZ6 and GCG7 subscribed, then GCG7 no longer, as a roll leaves its old
 /// contract: the peer drops the connection, and the next one's
 /// subscription names GCZ6 alone, LSE refusing a whole subscription
 /// that names a contract it does not carry, such as one expired.
@@ -253,6 +255,8 @@ async fn a_contract_carried_no_longer_is_left_out_of_the_next_connection_s_subsc
     let (client, mut out) = connect(&peer, &["GCZ6", "GCG7"]).await.unwrap();
     assert_eq!(record(&next(&mut out).await), ("GCZ6", 1794, true, b'M'));
     assert_eq!(record(&next(&mut out).await), ("GCG7", 58, true, b'M'));
+    client.subscriber().subscribe("GCZ6", false).unwrap();
+    client.subscriber().subscribe("GCG7", false).unwrap();
 
     client.subscriber().unsubscribe("GCG7");
     peer.release();
@@ -287,20 +291,23 @@ async fn a_new_subscriber_of_a_contract_carried_is_passed_on_after_its_records()
     assert_eq!(peer.received().len(), 1);
 }
 
-/// The peer drops the first connection after ESZ6's record 555; the
-/// second replays LSE's documented session from its opening, of which
-/// only the trade 556 is new.
+/// ESZ6 subscribed; the peer drops the first connection after its record
+/// 555; the second replays LSE's documented session from its opening, of
+/// which only the trade 556 is new.
 #[tokio::test]
 async fn a_dropped_connection_subscribes_again_and_passes_on_only_what_is_new() {
     let peer = MockExchangeStream::cme(|connection, _| {
         let mut frames = sent(dbn_frames(CME_ESZ6_DOCUMENTED));
         if connection == 0 {
             frames.truncate(5);
+            frames.push(StreamAction::Hold);
             frames.push(StreamAction::Close(1001, "going away".to_string()));
         }
         frames
     });
-    let (_client, mut out) = connect(&peer, &["ESZ6"]).await.unwrap();
+    let (client, mut out) = connect(&peer, &["ESZ6"]).await.unwrap();
+    client.subscriber().subscribe("ESZ6", false).unwrap();
+    peer.release();
 
     let passed = [
         next(&mut out).await,
@@ -459,7 +466,9 @@ async fn a_client_whose_first_subscription_lse_refuses_stops() {
 
 /// Synthetic: LSE closes the first connection with 1013, a contract not
 /// ready, which a new connection may lift: the opening learns of it,
-/// and the transport reconnects, the new connection's opening coming.
+/// and the transport reconnects, the new connection's opening coming. The
+/// contract is subscribed, as a level's connection after the first
+/// carries the contracts taken at it.
 #[tokio::test]
 async fn a_client_whose_first_subscription_is_closed_for_now_carries_it_from_its_next_connection() {
     let peer = MockExchangeStream::cme(|connection, _| {
@@ -470,15 +479,16 @@ async fn a_client_whose_first_subscription_is_closed_for_now_carries_it_from_its
         }
     });
     let (out_tx, mut out) = tokio::sync::mpsc::unbounded_channel();
-    let (_client, opening) = ExchangeStreamClient::start(
+    let (client, opening) = ExchangeStreamClient::start(
         LseExchange::Cme,
         peer.url(),
         &credential(CME_API_KEY),
         ExchangeLevel::Mbp1,
-        &["GCZ6".to_string()],
+        &[],
         out_tx,
     )
     .unwrap();
+    client.subscriber().subscribe("GCZ6", false).unwrap();
 
     let refused = opening.await.unwrap().unwrap_err();
 
