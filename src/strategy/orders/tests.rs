@@ -26,7 +26,7 @@ use nautilus_model::{
         Cfd, CryptoPerpetual, InstrumentAny,
         stubs::{audusd_sim, btcusd_bybit},
     },
-    orders::stubs::TestOrderEventStubs,
+    orders::{builder::OrderTestBuilder, stubs::TestOrderEventStubs},
     types::{AccountBalance, Currency, Money},
 };
 use nautilus_portfolio::portfolio::Portfolio;
@@ -115,10 +115,26 @@ fn cache_holding(balance: &str) -> Rc<RefCell<Cache>> {
     cache
 }
 
-/// The margin account `account` holding `balance`, none of it locked.
+/// The margin account `account` holding `balance`, none of it locked, its
+/// state calculated by Nautilus from its fills, as a backtest's simulated
+/// account's is.
 fn margin_account(account: AccountId, balance: &str) -> AccountAny {
+    AccountAny::Margin(MarginAccount::new(margin_state(account, balance), true))
+}
+
+/// The margin account `account` holding `balance`, none of it locked, as
+/// its broker reports it: the cache keeps an execution client's account as
+/// its first reported state makes it (`Cache::update_account_state`), its
+/// state not calculated by Nautilus.
+fn reported_margin_account(account: AccountId, balance: &str) -> AccountAny {
+    AccountAny::from(margin_state(account, balance))
+}
+
+/// A reported state of the margin account `account` holding `balance`,
+/// none of it locked.
+fn margin_state(account: AccountId, balance: &str) -> AccountState {
     let total = Money::from(balance);
-    let state = AccountState::new(
+    AccountState::new(
         account,
         AccountType::Margin,
         vec![AccountBalance::new(
@@ -132,8 +148,7 @@ fn margin_account(account: AccountId, balance: &str) -> AccountAny {
         UnixNanos::default(),
         UnixNanos::default(),
         None,
-    );
-    AccountAny::Margin(MarginAccount::new(state, true))
+    )
 }
 
 /// AUD/USD at a cTrader broker as `id`, a CFD on 5 decimals and whole
@@ -876,6 +891,112 @@ fn a_trade_is_sized_on_the_account_of_the_client_its_venue_routes_to() {
     trade.send(&mut probe, stake(), unconverted()).unwrap();
 
     assert_eq!(entry_quantity(&probe), Quantity::from(200_000));
+}
+
+/// A cache holding `instrument`, its venue routed to the execution client
+/// `client`, whose account `account` holds 200,000 USD and a long of
+/// 1,000,000 of it bought at 0.70000, bid at 0.72000 now: 20,000 USD of
+/// open P&L.
+fn holding_open_pnl(
+    instrument: InstrumentAny,
+    client: &str,
+    account: AccountAny,
+) -> Rc<RefCell<Cache>> {
+    let cache = Rc::new(RefCell::new(Cache::default()));
+    let id = instrument.id();
+    let order = OrderTestBuilder::new(OrderType::Market)
+        .instrument_id(id)
+        .side(OrderSide::Buy)
+        .quantity(Quantity::from(1_000_000))
+        .build();
+    let filled = TestOrderEventStubs::filled(
+        &order,
+        &instrument,
+        Some(TradeId::from("OPEN-1")),
+        Some(PositionId::from("OPEN-1")),
+        Some(Price::from("0.70000")),
+        None,
+        None,
+        None,
+        Some(UnixNanos::from(NOW - MINUTE)),
+        Some(account.id()),
+    );
+    let OrderEventAny::Filled(fill) = filled else {
+        panic!("not a fill");
+    };
+    let mut held = cache.borrow_mut();
+    held.add_instrument(instrument.clone()).unwrap();
+    held.add_client_account(ClientId::from(client), account.id());
+    held.add_client_route(ClientId::from(client), id.venue);
+    held.add_account(account).unwrap();
+    held.add_position_without_order(&Position::new(&instrument, fill), OmsType::Netting)
+        .unwrap();
+    held.add_quote(QuoteTick::new(
+        id,
+        Price::from("0.72000"),
+        Price::from("0.72010"),
+        Quantity::from(1_000_000),
+        Quantity::from(1_000_000),
+        UnixNanos::from(NOW),
+        UnixNanos::from(NOW),
+    ))
+    .unwrap();
+    drop(held);
+    cache
+}
+
+/// The quantity a buy of `instrument_id` set from 0.70150, one R of it
+/// 0.00500, is sent at from `cache`: at the 0.5% stake, one AUD/USD for
+/// each USD of the equity it is sized on.
+fn sized_from(cache: &Rc<RefCell<Cache>>, instrument_id: InstrumentId) -> Quantity {
+    let (mut probe, _) = registered_on(cache, STRATEGY, NOW);
+    let trade = Trade {
+        instrument_id,
+        ..buy(held(1))
+    };
+    trade.send(&mut probe, stake(), unconverted()).unwrap();
+    entry_quantity(&probe)
+}
+
+/// IB reports its net liquidation as the account's balance, which holds
+/// the open position's 20,000 USD of P&L already: the trade is sized on
+/// the 200,000 USD it reports, 200,000 AUD/USD, not on 220,000 USD with
+/// that P&L counted again.
+#[test]
+fn a_trade_on_ib_is_sized_on_the_balance_ib_reports_its_open_pnl_counted_once() {
+    let account = reported_margin_account(AccountId::from("IB-DU1234567"), "200000 USD");
+    let cache = holding_open_pnl(ib_aud(), "IB", account);
+
+    let quantity = sized_from(&cache, InstrumentId::from(IB_AUD));
+
+    assert_eq!(quantity, Quantity::from(200_000));
+}
+
+/// A cTrader broker reports its account's balance without its open
+/// positions: the trade is sized on its 200,000 USD and the open
+/// position's 20,000 USD of P&L, 220,000 AUD/USD.
+#[test]
+fn a_trade_at_a_ctrader_broker_is_sized_on_its_balance_and_its_open_pnl() {
+    let account = reported_margin_account(AccountId::from("PEPPERSTONE-001"), "200000 USD");
+    let cache = holding_open_pnl(aud(InstrumentId::from(AUD)), "PEPPERSTONE", account);
+
+    let quantity = sized_from(&cache, InstrumentId::from(AUD));
+
+    assert_eq!(quantity, Quantity::from(220_000));
+}
+
+/// A backtest simulates IB's account, its balance calculated by Nautilus
+/// from its fills and holding no open P&L, whatever IB reports live: the
+/// trade is sized on its 200,000 USD and the open position's 20,000 USD of
+/// P&L, 220,000 AUD/USD.
+#[test]
+fn a_trade_on_ibs_simulated_account_is_sized_on_its_balance_and_its_open_pnl() {
+    let account = margin_account(AccountId::from("IDEALPRO-001"), "200000 USD");
+    let cache = holding_open_pnl(ib_aud(), "IDEALPRO", account);
+
+    let quantity = sized_from(&cache, InstrumentId::from(IB_AUD));
+
+    assert_eq!(quantity, Quantity::from(220_000));
 }
 
 /// Nautilus' sizer is linear: an inverse instrument's P&L is no multiple
