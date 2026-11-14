@@ -1,0 +1,438 @@
+sockets | The sockets
+symbols | Symbols on each socket
+quickstart | Quickstart
+client | The Python client
+protocol
+Protocol
+send | What you send
+receive | What you receive
+tick | The tick
+options | Option chains
+catalogue | The catalogue
+limits | Limits
+connection | Connection handling
+errors | Error codes
+examples | Examples
+cme
+The CME Group stream
+cme-connect | Connect and subscribe
+cme-messages | What you receive
+cme-contracts | Contracts
+cme-refusals | Refusals and closes
+WebSocket Documentation | Live Market Data Feed | London Strategic Edge | The LSE live price WebSockets: which socket streams which market and how to spell its symbols, authentication, subscribe and unsubscribe, option chains, the tick of each feed, the limits of each plan, connection handling and every error code, with Python and JavaScript examples. | /websocket-documentation
+WSS
+JSON
+Live
+WebSocket documentation
+Live prices arrive over a WebSocket: you authenticate with your API key, subscribe to symbols, and each price update is sent the moment it reaches the socket. Four sockets carry different markets with one protocol. The same key pulls history over HTTPS: /api-documentation | API documentation.
+wss://data-ws.londonstrategicedge.com
+Get your key on the /data#api | Databank. The frames on this page are real, sent by the sockets on 25 October 2026.
+sockets
+The sockets
+A tick is served by the socket that receives it, so connect to the socket that streams the market you want. A subscription to a symbol of another socket is accepted and sends nothing.
+Socket | Streams
+wss://data-ws.londonstrategicedge.com | US stocks and ETFs, US option contracts, forex, commodities, futures, US bond yields
+wss://chicago-ws.londonstrategicedge.com | Futures and the major forex pairs
+wss://london-ws.londonstrategicedge.com | UK stocks, crypto (crypto since 8 November 2026; data-ws before)
+wss://tsx-ws.londonstrategicedge.com | Canadian stocks
+An LSE key, which the free plan and the Global Markets plans issue, authenticates on all four. An exchange key authenticates only on the socket that carries its market: a Nasdaq TotalView key on data-ws, a CME Group key on chicago-ws. Elsewhere it is refused with INVALID_KEY.
+Nasdaq TotalView Level 3 is a separate stream, wss://nasdaq.londonstrategicedge.com/v1/stream, with its own messages, for Nasdaq subscribers whose tier includes Level 3. Other keys are refused there with HTTP 401.
+CME Group contracts stream at Levels 1, 2 and 3 on a separate socket of their own, wss://cme.londonstrategicedge.com/v1/stream, for CME Group subscribers (since 9 November 2026), by their exchange names, such as ESZ6 or CLZ6. It has its own messages, which the Nasdaq stream shares: #cme | The CME Group stream has the address, the subscription, every message, the contracts and the refusals.
+symbols
+Symbols on each socket
+The sockets spell some symbols differently from the HTTP API. Each row below was checked by subscribing on 25 October 2026.
+Market | WebSocket symbol | HTTP API symbol | Socket
+US stocks and ETFs | AAPL, SPY | AAPL, SPY | data-ws
+US option contracts | AAPL261120C00100000 | AAPL  261120C00100000 | data-ws
+Crypto | BTC/USD | BTCUSDT | london-ws
+Forex | EUR/USD | EUR_USD | data-ws, chicago-ws
+Commodities | XAU/USD, WTICO/USD | XAU/USD, WTICO/USD | data-ws
+Futures | SP500.F, CRUDEOIL.F | SP500, CRUDEOIL | data-ws, chicago-ws
+CME Group contracts | ESZ6, CLZ6 | ESZ6, CLZ6 | cme (Levels 1, 2 and 3)
+US bond yields | USB10Y/USD | USB10Y/USD | data-ws
+UK stocks | VOD.L | VOD | london-ws
+Canadian stocks | RY.TO | RY | tsx-ws
+Symbols are matched in any case. An older spelling is accepted and the acknowledgement carries the current one: ES.F is acknowledged as SP500.F. On chicago-ws the forex pairs are the majors, such as EUR/USD, GBP/USD, USD/JPY, USD/CHF and EUR/JPY. Most index symbols of the HTTP API, such as SPX and DJI, are not streamed.
+quickstart
+Quickstart
+Use the Python websockets package to send the messages below. Set LSE_KEY to your key.
+python -m pip install websockets
+import json
+import os
+import sys
+from websockets.sync.client import connect
+with connect("wss://data-ws.londonstrategicedge.com") as socket:
+    socket.send(json.dumps({
+        "action": "auth", "api_key": os.environ["LSE_KEY"]
+    }))
+    for raw in socket:
+        message = json.loads(raw)
+        if message["type"] == "authenticated":
+            for symbol in ["NVDA", "AAPL"]:
+                socket.send(json.dumps({
+                    "action": "subscribe", "symbol": symbol
+                }))
+        elif message["type"] == "tick":
+            sys.stdout.write(f"{message['ts']} {message['symbol']} {message['price']}\n")
+        elif message["type"] == "error":
+            raise RuntimeError(message.get("message", "Stream refused"))
+Right after each subscribed reply the socket sends the symbol's last price as a tick, so the loop starts with current prices even while the market is closed. Run on 25 October 2026, a Sunday, it printed:
+2026-10-23T23:59:53.378856+00:00 NVDA 211.16
+2026-10-23T23:59:57.237585+00:00 AAPL 347.64
+client
+The Python client
+The lse-data package wraps the protocol and the HTTP calls in one client. It connects to data-ws unless you pass another socket as url, and it sends {"action": "ping"} every 25 seconds, which keeps the connection open on every socket.
+python -m pip install lse-data
+import sys
+from lse import LSE
+client = LSE(api_key="your_key")
+for tick in client.stream(["AAPL", "NVDA", "SPY"]):
+    sys.stdout.write(f"{tick.symbol} {tick.price}\n")
+Callbacks instead of a loop. connect() runs until disconnect() is called, so set the subscriptions before it. subscribe(), unsubscribe() and subscribe_options() also work while it runs, from a callback or another thread.
+client = LSE(api_key="your_key")
+client.on("tick", lambda t: sys.stdout.write(f"{t.symbol} {t.price}\n"))
+client.subscribe(["NVDA"])
+client.subscribe_options(["AAPL"])   # every AAPL contract at once
+client.connect(["SPY"])              # runs until client.disconnect()
+UK stocks and crypto, on london-ws:
+client = LSE(api_key="your_key", url="wss://london-ws.londonstrategicedge.com")
+for tick in client.stream(["VOD.L", "BTC/USD"]):
+    sys.stdout.write(f"{tick.symbol} {tick.price}\n")
+The events are tick, connected, authenticated, disconnected and error. A tick has symbol, price, bid, ask, volume, timestamp and, where the feed sends one, name; tick.datetime is the parsed time. stream_async is the same loop for asyncio. The key never goes in a URL: the stream sends it in its first message.
+protocol
+Protocol
+Each message is one JSON object. The socket speaks first, with welcome; you answer with your key, then subscribe.
+send
+What you send
+Action | Purpose
+auth
+Authenticate with your key. The same key again repeats the authenticated reply; a different key is refused with ALREADY_AUTHENTICATED.
+subscribe
+Start one symbol. Subscribing again to a symbol you hold repeats the acknowledgement with "Already subscribed".
+unsubscribe | Stop one symbol.
+subscribe_options | Start every listed contract of one underlying.
+unsubscribe_options | Stop an underlying's contracts.
+list_symbols
+The catalogue, or with category options the option contracts, or all.
+ping
+Answered with pong.
+{"action": "auth", "api_key": "your_api_key_here"}
+{"action": "subscribe", "symbol": "BTC/USD"}
+{"action": "unsubscribe", "symbol": "BTC/USD"}
+{"action": "subscribe_options", "underlying": "AAPL"}
+{"action": "unsubscribe_options", "underlying": "AAPL"}
+{"action": "list_symbols"}
+{"action": "list_symbols", "category": "options"}
+{"action": "ping"}
+A message that is not valid JSON answers INVALID_JSON, an action the socket does not know UNKNOWN_ACTION, and both keep the connection. A message that is valid JSON but not an object closes the connection.
+receive
+What you receive
+Type | Fields
+welcome
+On connect: message, symbols_available, options_available
+authenticated
+tier, key_type, name (your key's name), symbols (the catalogue: symbol, name, category), options_available, max_subscriptions, max_connections
+subscribed
+symbol, count (slots in use on this connection, option chains included), max
+unsubscribed
+symbol, count
+options_subscribed
+underlying, contracts, active_underlyings, count, max
+options_unsubscribed
+underlying, active_underlyings, count, max
+symbols
+The answer to list_symbols: symbols, and for options or all also category and count
+tick
+A price update; see #tick | The tick
+pong
+ts, the socket's time in epoch seconds
+error
+code and message, plus figures for the limit errors; see #errors | Error codes
+Example
+{"type": "welcome", "message": "LSE Data Feed. Send {\"action\": \"auth\", \"api_key\": \"...\"} to authenticate.", "symbols_available": 5248, "options_available": 188367}
+{"type": "authenticated", "tier": "registered", "key_type": "main", "name": "<your key's name>",
+ "symbols": [{"symbol": "0001.HK", "name": "CK Hutchison Holdings Limited", "category": "Stocks"}, ...],
+ "options_available": 188367, "max_subscriptions": 16, "max_connections": 1}
+{"type": "subscribed", "symbol": "AAPL", "count": 1, "max": 16}
+{"type": "tick", "symbol": "AAPL", "price": 347.64, "volume": 8, "bid": 347.64, "ask": 347.75, "ts": "2026-10-23T23:59:57.237585+00:00"}
+{"type": "options_subscribed", "underlying": "AAPL", "contracts": 3221, "active_underlyings": 1, "count": 2, "max": 16}
+{"type": "options_unsubscribed", "underlying": "AAPL", "active_underlyings": 0, "count": 1, "max": 16}
+{"type": "error", "code": "LIMIT_REACHED", "message": "Max 16 symbols on this key."}
+tick
+The tick
+A tick is the feed's record with type added. Every tick has symbol, price and ts; most have bid, ask and volume; some feeds add fields. Read the fields you need by name.
+Field | Meaning
+symbol | The instrument, as the socket spells it
+price | The latest price
+bid, ask | The best bid and ask; on Canadian stocks both repeat the price, because that feed carries no quotes
+volume | The size of the trade; `0` on a quote
+ts
+The source time in UTC, as a string. Its form differs by feed: a T or a space between date and time, no fraction up to nine digits, +00:00 or Z. Python's datetime.fromisoformat from 3.11 reads every form, and so does Date in Chrome and Node.
+event_id, pair_id, seq, ts_ns | Forex majors: the event, the pair's number, its sequence, and the time in nanoseconds
+name | Option contracts: the contract's name
+One tick of each feed
+{"type": "tick", "symbol": "AAPL", "price": 347.64, "volume": 8, "bid": 347.64, "ask": 347.75, "ts": "2026-10-23T23:59:57.237585+00:00"}
+{"type": "tick", "symbol": "BTC/USD", "ts": "2026-10-25T16:05:34.037000+00:00", "price": 80571.92, "bid": 80571.92, "ask": 80571.93, "volume": 0.00118}
+{"type": "tick", "event_id": "forex:10000000026:20261008:1792721068023492328:quantity:55419", "pair_id": 10000000026, "seq": 55419,
+ "symbol": "EUR/USD", "ts": "2026-10-23T20:59:05.029000000Z", "ts_ns": 1792789145029000000, "volume": 0, "price": 1.1203, "bid": 1.12026, "ask": 1.12034}
+{"type": "tick", "symbol": "XAU/USD", "ts": "2026-10-23 20:59:56.585500+00:00", "price": 3995.22, "bid": 3995.22, "ask": 3997.17, "volume": 1.0}
+{"type": "tick", "symbol": "SP500.F", "ts": "2026-10-23T20:59:58.006924+00:00", "price": 7672.5, "bid": 7672.5, "ask": 7672.75, "volume": 8}
+{"type": "tick", "symbol": "VOD.L", "ts": "2026-10-23T16:30:00+00:00", "price": 117.0, "bid": 112.0, "ask": 122.0, "volume": 0.0}
+{"type": "tick", "symbol": "RY.TO", "ts": "2026-10-23T19:59:59+00:00", "price": 281.7, "bid": 281.7, "ask": 281.7, "volume": 100}
+While a market is closed its symbols send nothing after their last price; that is not an error.
+options
+Option chains
+One message subscribes every listed contract of an underlying, all strikes and expiries; the ticks arrive in the same loop as the stocks'. Unlike a symbol, a chain sends no last prices: its first ticks are the contracts' next trades. A chain takes one subscription slot, however many contracts it has: AAPL had 3,221 on 25 October 2026. Chains stream on data-ws. An underlying with no listed options is refused with INVALID_UNDERLYING.
+Contract symbols use the OSI form without spaces: the root, the expiry as YYMMDD, C or P, then the strike times 1,000 in eight digits. AAPL261120C00100000 is the AAPL 100 call expiring on 20 November 2026.
+socket.send(json.dumps({"action": "subscribe_options", "underlying": "AAPL"}))
+# Stop the chain later, on the same connection.
+socket.send(json.dumps({"action": "unsubscribe_options", "underlying": "AAPL"}))
+catalogue
+The catalogue
+Each socket keeps its own catalogue, and the authenticated reply carries it: on 25 October 2026 data-ws listed 5,248 symbols, chicago-ws 4,199, london-ws 4,169 and tsx-ws 6,909. list_symbols returns it again, or the option contracts with category: "options", or both with category: "all". The options and full lists need an authenticated connection; before that they answer AUTH_REQUIRED. A connection may list the catalogue six times a minute; the seventh answers RATE_LIMITED.
+The catalogue also names symbols that send nothing at present, among them the Hong Kong, Tokyo, Seoul, Taipei, Mumbai and Sydney listings and most index symbols. Use the table under #symbols | Symbols on each socket for what streams.
+socket.send(json.dumps({"action": "list_symbols"}))
+socket.send(json.dumps({"action": "list_symbols", "category": "options"}))
+The plain list is about 0.3 MB, like the authenticated reply. The option contracts are about 9.3 MB and the full list about 9.6 MB, more than the 1 MiB that Python's websockets package accepts by default; past it, the package closes the connection with code 1009. Open the connection with connect(url, max_size=None) before asking for either.
+limits
+Limits
+Your plan sets how many symbols your key may stream at once and how many connections it may open on each socket. The authenticated reply reports them as max_subscriptions and max_connections.
+Plan | Symbols per key, across all sockets | Connections per key, on each socket | Monthly streaming allowance
+Free | 16 | 1 | 50 GiB
+Global Markets Standard | 100 | No cap | None
+Global Markets Standard+ | 500 | No cap | None
+Global Markets Ultimate | 10,000, sold as Unlimited | No cap | None
+CME Group or Nasdaq Lite | 500 | As the account's plan: 1 on a free account | As the account's plan
+CME Group or Nasdaq Lite+, Standard, Standard+, Ultimate | 10,000, sold as Unlimited | As the account's plan | As the account's plan
+A symbol or an option chain takes one slot. The slots are counted for the key across all its connections and all four sockets (data-ws, chicago-ws, london-ws, tsx-ws): a symbol streamed on two connections to one socket counts once, and a symbol streamed on two sockets counts twice. One more than max_subscriptions answers LIMIT_REACHED; unsubscribe one, on any connection, to add another.
+When part of the allowance is in use on other connections, the message says where: Max 16 symbols on this key, counted across all its connections and sockets: 6 on this connection, 10 on other sockets (london-ws 10). A socket learns what the key holds on another connection to the same socket within five seconds, and on another socket within ten seconds. If two connections subscribe in the same moment and take the key past its allowance, the newest connection receives LIMIT_REACHED with max_subscriptions and open_subscriptions and is closed with code 1008; reconnect and subscribe to what the allowance has left.
+Connections are counted on each socket: a free key may hold one on data-ws and one on london-ws at the same time, sharing its 16 symbols between them. One more on the same socket is refused with TOO_MANY_CONNECTIONS, unless your older connection there has stopped answering pings (see Connection handling).
+On plans with a connection cap, one address may hold two connections and open ten a minute on each socket, across all its keys. Past that the socket answers TOO_MANY_CONNECTIONS_FROM_ADDRESS or ADDRESS_CONNECT_RATE and closes. Only connections that are admitted count towards the ten a minute: a refused attempt does not, so a retry after a refusal is answered for its own reason and is admitted as soon as that reason has passed. ADDRESS_CONNECT_RATE carries retry_after, the seconds until one more connection fits.
+Where the plan has a monthly allowance, the bytes streamed to you count against it. Once it is used up, authentication is refused with QUOTA_EXCEEDED, which carries limit_bytes, used_bytes and resets_at. It resets at the start of the month, UTC.
+connection
+Connection handling
+Order. Wait for welcome, send auth, wait for authenticated, then subscribe. A subscription before that answers NOT_AUTHENTICATED.
+Keepalive. Every socket pings every 30 seconds, and your WebSocket library answers for you. Also send {"action": "ping"} every few minutes. london-ws closes a connection that has sent no message of its own for 10 minutes with code 1000 "Idle timeout", even while it is subscribed, and answering the socket's pings does not count. The Python client sends one every 25 seconds.
+A connection that answers no ping is closed with code 1011. On data-ws, chicago-ws and tsx-ws that happens once it has answered none for 300 seconds while nothing is waiting to be sent to it, with the reason "dead connection"; the check runs with each ping, so the close comes between 300 and 330 seconds. On london-ws it comes 10 seconds after the first ping left unanswered, with the reason "keepalive ping timeout".
+Slow readers are not disconnected. Each connection has a bounded queue. When a reader falls behind, its oldest unsent ticks are dropped, so what it receives is current. Replies to its own messages are never dropped, and nothing is sent to mark the gap.
+A reader that takes nothing for 120 seconds, while data waits for it, is closed. The front door may close it first, without a close frame, which your library reports as code 1006.
+Reconnecting at the cap. When your key is at max_connections on a socket and a new connection arrives from the same address, the socket pings your older connection there. If it gets no answer within 5 seconds, 2 on london-ws, it closes that one with CONNECTION_REPLACED and code 1008 and admits the new one. A live older connection keeps its slot, and the new one is refused.
+Maintenance. A socket restarting closes every connection with code 1001. Reconnect, authenticate and subscribe again; the last prices arrive at once.
+Keys. A key revoked or replaced while connected closes the connection with KEY_REVOKED and code 1008; reconnect with your current key.
+The examples on this page do not reconnect by themselves. After a disconnect, open a new connection, authenticate and subscribe again; the first tick of each symbol is its last price.
+errors
+Error codes
+An error is {"type": "error", "code": ..., "message": ...}. Unless the table says it closes, the connection stays open and your other subscriptions continue.
+Code | Meaning | Connection
+INVALID_JSON | The message was not valid JSON, or was too large | Stays open
+UNKNOWN_ACTION | An action the socket does not know | Stays open
+MISSING_KEY | `auth` without `api_key` | Stays open
+INVALID_KEY | A key the socket does not know, an inactive key, or an exchange key on another market's socket | Stays open
+ALREADY_AUTHENTICATED | `auth` with a different key on an authenticated connection; open another connection for another key | Stays open
+LIMITS_UNAVAILABLE | The key's limits could not be read; retry shortly | Stays open
+NOT_AUTHENTICATED | `subscribe` or `subscribe_options` before authenticating | Stays open
+AUTH_REQUIRED | The options or full catalogue before authenticating | Stays open
+MISSING_SYMBOL | `subscribe` or `unsubscribe` without a `symbol` | Stays open
+NOT_SUBSCRIBED | `unsubscribe` from a symbol you do not hold | Stays open
+MISSING_UNDERLYING | `subscribe_options` or `unsubscribe_options` without an `underlying` | Stays open
+INVALID_UNDERLYING | An underlying with no listed options | Stays open
+LIMIT_REACHED | `max_subscriptions` reached for this key, counted across all its connections and sockets | Stays open; the newest connection of a key already past its allowance is closed, 1008
+RATE_LIMITED | More than six catalogue listings in a minute | Stays open
+TOO_MANY_CONNECTIONS | `max_connections` already open for this key on this socket; the body gives `max_connections` and `open_connections` | Closes, 1008
+TOO_MANY_CONNECTIONS_FROM_ADDRESS | This address already holds its connections; the body gives `max_connections_from_address` and `open_from_address` | Closes, 1008
+ADDRESS_CONNECT_RATE | Too many connections admitted from this address in a minute; the body gives `retry_after` in seconds | Closes, 1008
+CONNECTION_REPLACED | A newer connection from your address took this connection's slot | Closes, 1008
+KEY_IN_USE | A plan tied to one address: the key is in use from another address | Closes, 1008
+KEY_REVOKED | The key was revoked or replaced | Closes, 1008
+QUOTA_EXCEEDED | The monthly streaming allowance is used up; do not retry before `resets_at` | Closes, 1008
+A symbol that is not in the catalogue is not an error: the subscription is accepted and sends nothing.
+examples
+Examples
+Save ticks to CSV:
+import csv
+import json
+import os
+from websockets.sync.client import connect
+with open("ticks.csv", "w", newline="") as output, connect(
+    "wss://data-ws.londonstrategicedge.com"
+) as socket:
+    writer = csv.writer(output)
+    fields = ["ts", "symbol", "price", "bid", "ask"]
+    writer.writerow(fields)
+    socket.send(json.dumps({
+        "action": "auth", "api_key": os.environ["LSE_KEY"]
+    }))
+    for raw in socket:
+        message = json.loads(raw)
+        if message["type"] == "authenticated":
+            for symbol in ["NVDA", "AAPL"]:
+                socket.send(json.dumps({
+                    "action": "subscribe", "symbol": symbol
+                }))
+        elif message["type"] == "tick":
+            writer.writerow([message.get(field) for field in fields])
+            output.flush()
+        elif message["type"] == "error":
+            raise RuntimeError(message.get("message", "Stream refused"))
+The protocol from JavaScript, without a client library:
+const ws = new WebSocket("wss://data-ws.londonstrategicedge.com");
+ws.onmessage = (event) => {
+  const data = JSON.parse(event.data);
+  if (data.type === "welcome") {
+    ws.send(JSON.stringify({ action: "auth", api_key: "your_key" }));
+  }
+  if (data.type === "authenticated") {
+    ws.send(JSON.stringify({ action: "subscribe", symbol: "SPY" }));
+    ws.send(JSON.stringify({ action: "subscribe", symbol: "AAPL" }));
+  }
+  if (data.type === "tick") {
+    console.log(data.symbol, data.price);
+  }
+};
+Rotate symbols without reconnecting: free a slot, then take it again.
+socket.send(json.dumps({"action": "unsubscribe", "symbol": "AAPL"}))
+socket.send(json.dumps({"action": "subscribe", "symbol": "NVDA"}))
+UK stocks stream on london-ws, with the .L spelling. A second thread sends a ping every four minutes, because london-ws closes a connection that sends nothing for 10 minutes:
+import threading
+import time
+from websockets.exceptions import ConnectionClosed
+def keepalive(socket):
+    while True:
+        time.sleep(240)
+        try:
+            socket.send(json.dumps({"action": "ping"}))
+        except ConnectionClosed:
+            return
+with connect("wss://london-ws.londonstrategicedge.com") as socket:
+    socket.send(json.dumps({"action": "auth", "api_key": os.environ["LSE_KEY"]}))
+    threading.Thread(target=keepalive, args=(socket,), daemon=True).start()
+    for raw in socket:
+        message = json.loads(raw)
+        if message["type"] == "authenticated":
+            socket.send(json.dumps({"action": "subscribe", "symbol": "VOD.L"}))
+        elif message["type"] == "tick":
+            sys.stdout.write(f"{message['ts']} {message['symbol']} {message['price']}\n")
+cme
+The CME Group stream
+CME Group contracts stream on a socket of their own, at three levels of depth, to keys of a CME Group plan. It does not use the protocol above: the key travels with the opening request, one message subscribes, and each update is one record of the level you asked for. The Nasdaq TotalView stream, wss://nasdaq.londonstrategicedge.com/v1/stream, sends the same messages for stocks.
+cme-connect
+Connect and subscribe
+wss://cme.londonstrategicedge.com/v1/stream
+Send your key with the opening request, as the header X-API-Key or as Authorization: Bearer. A browser cannot set headers and adds it to the address as ?key=. Then send one message within five seconds:
+{"op": "subscribe", "symbols": ["ESZ6", "NQZ6"], "level": 1, "encoding": "json"}
+Field | Meaning
+symbols
+The contracts, by their exchange names in capitals, each named once. #cme-contracts | Contracts says how to list them.
+level
+1, 2 or 3, as in the table below. Left out, it is 3.
+encoding
+json for the messages on this page, or dbn for the same records as binary frames. Left out, it is dbn.
+Level | Carries | Record | Plans
+1 | Every trade, and the best bid and offer | mbp1 | Lite for 500 contracts at once; Lite+ and above for 10,000
+2 | The ten best prices of each side, with sizes and order counts | mbp10 | Standard for 50 contracts at once, Standard+ for 200, Ultimate for 10,000, counted together with Level 3
+3 | Order events: an order added, changed or removed | mbo | As Level 2
+A connection carries one subscription: to change the contracts or the level, open another connection. The contracts are counted across all of an account's connections, and a contract counts once however many connections carry it.
+python -m pip install websockets
+import json
+import os
+import sys
+from websockets.sync.client import connect
+NO_PRICE = "9223372036854775807"
+def price(text):
+    return None if text == NO_PRICE else int(text) / 1e9
+with connect(
+    "wss://cme.londonstrategicedge.com/v1/stream",
+    additional_headers={"X-API-Key": os.environ["LSE_KEY"]},
+    max_size=None,
+) as socket:
+    socket.send(json.dumps({
+        "op": "subscribe", "symbols": ["ESZ6", "NQZ6"],
+        "level": 1, "encoding": "json",
+    }))
+    for raw in socket:
+        message = json.loads(raw)
+        if message["type"] != "mbp1":
+            continue
+        record = message["record"]
+        best = record["levels"][0]
+        if record["action"] == "T":
+            sys.stdout.write(f"{message['symbol']} trade {price(record['price'])} x {record['size']}\n")
+        else:
+            sys.stdout.write(
+                f"{message['symbol']} bid {price(best['bid_px'])} x {best['bid_sz']}"
+                f"  ask {price(best['ask_px'])} x {best['ask_sz']}\n")
+Run on 10 November 2026 with a CME Group key in LSE_KEY, it began:
+ESZ6 bid 7580.5 x 2  ask 7580.75 x 7
+NQZ6 bid 27999.0 x 2  ask 28000.25 x 1
+ESZ6 trade 7580.5 x 1
+NQZ6 trade 27999.0 x 1
+ESZ6 trade 7580.5 x 1
+NQZ6 trade 27999.0 x 1
+ESZ6 bid 7580.5 x 1  ask 7580.75 x 9 | Output
+cme-messages
+What you receive
+The stream answers with hello. Each contract then opens between snapshot_begin and snapshot_end, and the live records follow. These are the first six messages of a Level 1 subscription to ESZ6 on 10 November 2026: the opening, a change of the best bid and offer, and a trade.
+{"dataset":"...","encoding":"json","epoch":2,"level":1,"protocol":"L3DB/1","type":"hello"}
+{"count":1,"epoch":2,"instrument_id":151837975,"level":1,"sequence":554,"symbol":"ESZ6","type":"snapshot_begin"}
+{"epoch":2,"record":{"action":"M","depth":0,"flags":128,"instrument_id":151837975,"length":20,"levels":[{"ask_ct":0,"ask_px":"7570000000000","ask_sz":11,"bid_ct":0,"bid_px":"7569750000000","bid_sz":2}],"price":"9223372036854775807","publisher_id":0,"rtype":1,"sequence":0,"side":"N","size":0,"ts_event":"1794272217698936000","ts_in_delta":0,"ts_recv":"1794272217707781000"},"sequence":554,"symbol":"ESZ6","type":"snapshot_book"}
+{"epoch":2,"sequence":554,"symbol":"ESZ6","type":"snapshot_end"}
+{"epoch":2,"record":{"action":"M","depth":0,"flags":128,"instrument_id":151837975,"length":20,"levels":[{"ask_ct":0,"ask_px":"7570000000000","ask_sz":12,"bid_ct":0,"bid_px":"7569500000000","bid_sz":18}],"price":"9223372036854775807","publisher_id":0,"rtype":1,"sequence":0,"side":"N","size":0,"ts_event":"1794272217974523000","ts_in_delta":0,"ts_recv":"1794272218208093000"},"sequence":555,"symbol":"ESZ6","type":"mbp1"}
+{"epoch":2,"record":{"action":"T","depth":0,"flags":128,"instrument_id":151837975,"length":20,"levels":[{"ask_ct":0,"ask_px":"7570000000000","ask_sz":12,"bid_ct":0,"bid_px":"7569500000000","bid_sz":18}],"price":"7570000000000","publisher_id":0,"rtype":1,"sequence":0,"side":"N","size":1,"ts_event":"1794272218208718000","ts_in_delta":0,"ts_recv":"1794272218213015000"},"sequence":556,"symbol":"ESZ6","type":"mbp1"}
+Message | Carries
+hello
+First, once: the protocol, the level and encoding you asked for, the feed's name in dataset, and epoch, a number that every later message repeats.
+snapshot_begin
+A contract opens: its symbol, the stream's number for it in instrument_id, how many records follow in count, and the sequence its live records continue from.
+snapshot_book | Levels 1 and 2: one record with the contract's last best bid and offer, or its last ten levels. A contract that has not traded or quoted since the stream started has no price in it.
+snapshot_end
+The contract is open. At Level 3 it follows snapshot_begin directly, with a count of 0: the stream carries order events and no opening book.
+mbp1, mbp10, mbo
+One live record of Level 1, 2 or 3. Its sequence is one more than the contract's last; a jump means records you did not receive.
+The record
+Field | Meaning
+action
+Level 1: T a trade, M a change of the best bid or offer. Level 2: A a price level added, M changed, C removed, R the book cleared. Level 3: A an order added, M changed, C removed. N is none of these.
+side
+B the bid, A the ask, N neither. A trade is always N: the feed does not say which side took it.
+price, size
+The trade's price and size; the new price and size of the level or the order. A Level 1 change that moved both sides at once has N and no price here: read levels.
+levels
+Levels 1 and 2, after the record: the best bid and offer, or the ten best of each side from the best outwards, as bid_px, bid_sz, ask_px, ask_sz. At Level 2 bid_ct and ask_ct count the orders at the price, and depth says which level changed, 0 being the best.
+order_id | Level 3: the exchange's number for the order, as a string.
+ts_event, ts_recv | The exchange's time of the event and the time the feed reached us, in nanoseconds since 1970 UTC, as strings.
+instrument_id
+The number snapshot_begin gave for the contract.
+A price is a whole number of billionths, written as a string: "7570000000000" is 7570.00. "9223372036854775807" means no price. The remaining fields, rtype, length, flags, publisher_id, ts_in_delta and the record's own sequence, belong to the binary record and need no handling; at Level 3 flags 128 marks the last order event of one exchange message.
+With "encoding": "dbn" the hello and the snapshot markers stay JSON text, and each record arrives as a binary frame: a 24-byte little-endian header (L3DB, version 1, a kind byte that is 1 in a snapshot and 2 live, two unused bytes, the 8-byte sequence, the 4-byte instrument number and a 4-byte record count) followed by the records in the DBN format: Mbp1Msg of 80 bytes at Level 1, Mbp10Msg of 368 at Level 2, MboMsg of 56 at Level 3.
+A reader that falls behind is not disconnected: it misses the records it could not take, and sequence shows the jump. Reconnect for a fresh opening. The stream sends a WebSocket ping every 15 seconds, which your library answers by itself, so a connection stays open while its contracts are quiet, through the daily halt from 22:00 to 23:00 UTC and the weekend.
+cme-contracts
+Contracts
+A contract goes by its exchange name: the product, the month letter and the last digit of the year, so ESZ6 is the E-mini S&P 500 of December 2026. Natural gas carries two digits of the year, as in NGZ26, and so does crude oil from 2030, as in CLZ30; the list below has every name as the stream takes it. The names are in capitals, and they are the names the /api-documentation#cme-market | HTTP API downloads the same contracts by.
+The stream carried 2,526 contracts on 10 November 2026. Ask it for the list, with your key:
+import json
+import os
+import sys
+import urllib.request
+request = urllib.request.Request(
+    "https://cme.londonstrategicedge.com/v1/symbols",
+    headers={"X-API-Key": os.environ["LSE_KEY"]},
+)
+with urllib.request.urlopen(request) as answer:
+    listing = json.load(answer)
+natural_gas = [name for name in listing["symbols"] if name.startswith("NG")]
+sys.stdout.write(f"{listing['count']} contracts, {len(natural_gas)} beginning NG: {natural_gas[:4]}\n")
+2526 contracts, 59 beginning NG: ['NGF27', 'NGF28', 'NGF29', 'NGF31'] | Output
+The answer is {"market", "dataset", "count", "symbols"}, the names in order. A subscription that names a contract not on the list is refused whole, and the close reason names it.
+cme-refusals
+Refusals and closes
+Answer | When
+HTTP 401 key-unknown
+No key, or a key that is not a CME Group key. The body is {"code": "key-unknown", "message": "send a valid API key"}.
+HTTP 429 | The stream has no free connection. Try again.
+1008
+The subscription is refused, and the reason says why: subscribe within five seconds; invalid subscription (not JSON); invalid symbols or encoding (no symbols, one named twice, an encoding that is not json or dbn); level must be 1, 2 or 3; symbol unavailable: NGZ6 (a name the stream does not carry); CME Levels 2 and 3 need CME Standard or above; this account's plan allows 50 contracts at once; it would hold 51; reconnect to change subscription (a second message on a connection).
+4003 | The account already holds as many connections as its plan allows.
+4001 | The key was replaced or revoked, or its plan ended, while it was streaming.
+1012
+The feed's connection was reset. Reconnect: the new hello carries a new epoch, and each contract opens again.
+1013 | A contract is not ready yet. Reconnect in a moment.
