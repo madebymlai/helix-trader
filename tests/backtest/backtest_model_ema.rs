@@ -36,7 +36,7 @@ use helix_trader::{
     strategy::model_ema::{ModelEma, ModelEmaConfig},
 };
 use jiff::{SignedDuration, Timestamp};
-use nautilus_model::types::Money;
+use nautilus_model::types::{Currency, Money};
 use tempfile::TempDir;
 
 /// Hourly decisions on IC's gold's 1-minute bars, its averages of 10 and
@@ -216,6 +216,7 @@ fn traded_from(catalog: &TempDir, models: PathBuf, start: Timestamp) -> (usize, 
         ticks: requirements.ticks,
         start,
         end: t() + SignedDuration::from_hours(3),
+        pairs: vec![],
         balance: Money::from("100000 USD"),
         ..ic::backtest(catalog)
     };
@@ -496,6 +497,86 @@ fn a_live_dataset_balance_in_another_currency_than_the_pnl_is_refused_before_any
         "{stderr}"
     );
     assert!(!dir.path().join("staging").exists());
+}
+
+/// The fixture's config converting through IC's EURUSD (`[trade]
+/// conversions`), its dataset balance `balance`.
+fn converting_config(balance: &str) -> String {
+    let (risk, usd) = (r#"risk = "0.5%""#, r#"balance = "10000000 USD""#);
+    assert!(CONFIG.contains(risk) && CONFIG.contains(usd));
+    let conversions = format!("{risk}\n    conversions = [\"{}\"]", ic::EURUSD);
+    CONFIG
+        .replace(risk, &conversions)
+        .replace(usd, &format!("balance = \"{balance}\""))
+}
+
+/// `walk`'s catalog of IC's gold over `[from, to)`, IC's EURUSD beside it,
+/// quoted 1.24990 / 1.25010 every minute.
+fn walk_with_eurusd(from: Timestamp, to: Timestamp) -> TempDir {
+    let catalog = walk(from, to);
+    ic::store_defined(
+        catalog.path(),
+        ic::pair(ic::EURUSD, Currency::EUR(), Currency::USD(), 5),
+        ic::pair_quotes_over(ic::EURUSD, "1.24990", "1.25010", from, to),
+        from,
+        to,
+    );
+    catalog
+}
+
+/// A dataset balance in JPY, which EURUSD, the pair the config converts
+/// through, does not reach USD, IC's gold's P&L currency, from: `live`,
+/// `backtest` and `train` each refuse it before any node, by the check of
+/// a backtest's balance, through the pair as the catalog defines it,
+/// naming the dataset balance, both currencies and the pair.
+#[test]
+fn a_dataset_balance_its_conversions_do_not_reach_the_pnl_from_is_refused_before_any_node() {
+    let catalog = walk_with_eurusd(ic::at("00:00:00"), ic::at("06:00:00"));
+    let dir = tempfile::tempdir().unwrap();
+    let (config, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
+    std::fs::write(&config, converting_config("15000000 JPY")).unwrap();
+
+    for subcommand in ["live", "backtest", "train"] {
+        let args = usd_args(subcommand, dir.path());
+
+        let (stdout, stderr) = refused(subcommand, &config, catalog.path(), &models, &args);
+
+        assert!(
+            [
+                "dataset balance",
+                "JPY",
+                "USD",
+                ic::INSTRUMENT_ID,
+                ic::EURUSD
+            ]
+            .iter()
+            .all(|named| stderr.contains(named)),
+            "{subcommand}: {stderr}"
+        );
+        assert!(!stdout.contains("BacktestEngine"), "{subcommand}: {stdout}");
+    }
+    assert!(!dir.path().join("staging").exists());
+}
+
+/// A dataset balance in EUR, which EURUSD, the pair the config converts
+/// through, reaches USD, IC's gold's P&L currency, from: `train` accepts
+/// it, builds the dataset at the balance converted at each row's rate and
+/// refuses the fake learner on its holdout's figures, as it does a dataset
+/// balance in USD.
+#[test]
+fn the_train_subcommand_accepts_a_dataset_balance_its_conversions_reach_the_pnl_from() {
+    let catalog = walk_with_eurusd(
+        ic::at("00:00:00") - SignedDuration::from_hours(3),
+        t() + SignedDuration::from_hours(4),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let (config, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
+    std::fs::write(&config, converting_config("10000000 EUR")).unwrap();
+
+    let stderr = train_refused(&config, catalog.path(), &models, t());
+
+    assert!(!stderr.contains("dataset balance"), "{stderr}");
+    assert!(kept_with_its_figures(&stderr), "{stderr}");
 }
 
 /// The arguments of `subcommand` of `refused` beyond its config, catalog

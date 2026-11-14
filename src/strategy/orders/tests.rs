@@ -18,6 +18,7 @@ use nautilus_interactive_brokers::{
 };
 use nautilus_model::{
     accounts::{AccountAny, MarginAccount},
+    data::QuoteTick,
     enums::{AccountType, AssetClass, OmsType, OrderStatus, OrderType},
     events::{AccountState, OrderEventAny},
     identifiers::{AccountId, ClientId, PositionId, StrategyId, TradeId, TraderId, VenueOrderId},
@@ -25,8 +26,8 @@ use nautilus_model::{
         Cfd, CryptoPerpetual, InstrumentAny,
         stubs::{audusd_sim, btcusd_bybit},
     },
-    orders::stubs::TestOrderEventStubs,
-    types::{AccountBalance, Money},
+    orders::{builder::OrderTestBuilder, stubs::TestOrderEventStubs},
+    types::{AccountBalance, Currency, Money},
 };
 use nautilus_portfolio::portfolio::Portfolio;
 use nautilus_trading::{
@@ -35,7 +36,7 @@ use nautilus_trading::{
 };
 
 use super::*;
-use crate::log_capture;
+use crate::{log_capture, strategy::conversions::Conversions};
 
 const STRATEGY: &str = "ORDERS-001";
 /// AUD/USD at Pepperstone, whose live broker takes reduce-only and
@@ -114,10 +115,26 @@ fn cache_holding(balance: &str) -> Rc<RefCell<Cache>> {
     cache
 }
 
-/// The margin account `account` holding `balance`, none of it locked.
+/// The margin account `account` holding `balance`, none of it locked, its
+/// state calculated by Nautilus from its fills, as a backtest's simulated
+/// account's is.
 fn margin_account(account: AccountId, balance: &str) -> AccountAny {
+    AccountAny::Margin(MarginAccount::new(margin_state(account, balance), true))
+}
+
+/// The margin account `account` holding `balance`, none of it locked, as
+/// its broker reports it: the cache keeps an execution client's account as
+/// its first reported state makes it (`Cache::update_account_state`), its
+/// state not calculated by Nautilus.
+fn reported_margin_account(account: AccountId, balance: &str) -> AccountAny {
+    AccountAny::from(margin_state(account, balance))
+}
+
+/// A reported state of the margin account `account` holding `balance`,
+/// none of it locked.
+fn margin_state(account: AccountId, balance: &str) -> AccountState {
     let total = Money::from(balance);
-    let state = AccountState::new(
+    AccountState::new(
         account,
         AccountType::Margin,
         vec![AccountBalance::new(
@@ -131,8 +148,7 @@ fn margin_account(account: AccountId, balance: &str) -> AccountAny {
         UnixNanos::default(),
         UnixNanos::default(),
         None,
-    );
-    AccountAny::Margin(MarginAccount::new(state, true))
+    )
 }
 
 /// AUD/USD at a cTrader broker as `id`, a CFD on 5 decimals and whole
@@ -196,6 +212,12 @@ fn decimal(s: &str) -> Decimal {
 /// 500 USD of the accounts' 100,000.
 fn stake() -> Stake {
     Stake::new("0.5%".parse().unwrap())
+}
+
+/// The rates of a config converting through no pair, which the trades are
+/// sent at unless a test says.
+fn unconverted() -> Rates {
+    Conversions::default().rates()
 }
 
 /// The equity of the accounts of `cache`, which a trade named by its ids
@@ -481,7 +503,9 @@ fn exits(probe: &Probe) -> Vec<OrderAny> {
 fn a_trade_on_ib_links_its_exits_in_one_oca_group_each_reducing_the_other() {
     let (mut probe, _) = registered();
 
-    on_ib(buy(bracket(4))).send(&mut probe, stake()).unwrap();
+    on_ib(buy(bracket(4)))
+        .send(&mut probe, stake(), unconverted())
+        .unwrap();
 
     let exits: Vec<(String, OcaType)> = exits(&probe).iter().map(oca_at_ib).collect();
     let [take_profit, stop_loss] = exits.as_slice() else {
@@ -510,8 +534,8 @@ fn two_trades_on_ib_link_their_exits_in_two_groups() {
     let (mut probe, _) = registered();
     let trade = on_ib(buy(bracket(4)));
 
-    trade.send(&mut probe, stake()).unwrap();
-    trade.send(&mut probe, stake()).unwrap();
+    trade.send(&mut probe, stake(), unconverted()).unwrap();
+    trade.send(&mut probe, stake(), unconverted()).unwrap();
 
     let groups: BTreeSet<String> = exits(&probe).iter().map(|exit| oca_at_ib(exit).0).collect();
     assert_eq!(groups.len(), 2, "{groups:?}");
@@ -572,7 +596,9 @@ fn a_trade_at_ic_tags_its_exits_as_nautilus_does() {
 fn a_trade_without_exits_is_one_market_entry() {
     let (mut probe, _) = registered();
 
-    buy(held(1)).send(&mut probe, stake()).unwrap();
+    buy(held(1))
+        .send(&mut probe, stake(), unconverted())
+        .unwrap();
 
     let cache = probe.cache();
     let orders = cache.orders(None, None, None, None, None);
@@ -626,7 +652,7 @@ fn a_trade_risks_its_stake_of_equity_over_its_one_r_rounded_down_to_its_size() {
         held(1),
     );
 
-    trade.send(&mut probe, stake()).unwrap();
+    trade.send(&mut probe, stake(), unconverted()).unwrap();
 
     assert_eq!(entry_quantity(&probe), Quantity::from(138_888));
 }
@@ -648,7 +674,7 @@ fn a_trade_is_sized_at_its_stop_on_the_tick_away_from_its_price() {
             held(1),
         );
 
-        trade.send(&mut probe, stake()).unwrap();
+        trade.send(&mut probe, stake(), unconverted()).unwrap();
 
         assert_eq!(entry_quantity(&probe), Quantity::from(115_473), "{side}");
     }
@@ -659,7 +685,7 @@ fn a_trade_at_twice_the_stake_is_twice_the_size() {
     let (mut probe, _) = registered();
 
     let twice = stake().times(decimal("2")).unwrap();
-    buy(held(1)).send(&mut probe, twice).unwrap();
+    buy(held(1)).send(&mut probe, twice, unconverted()).unwrap();
 
     assert_eq!(entry_quantity(&probe), Quantity::from(200_000));
 }
@@ -691,7 +717,7 @@ fn a_trades_entry_at_a_multiple_of_the_stake_is_tagged_with_it() {
     let (mut probe, _) = registered();
 
     let twice = stake().times(decimal("2")).unwrap();
-    buy(held(1)).send(&mut probe, twice).unwrap();
+    buy(held(1)).send(&mut probe, twice, unconverted()).unwrap();
 
     let orders = orders(&probe);
     assert_eq!(
@@ -715,7 +741,9 @@ fn a_trade_whose_size_rounds_to_none_sends_nothing_and_logs_why() {
     log_capture::capture(log::LevelFilter::Info);
     let (mut probe, clock) = registered_on(&cache_holding("0.50 USD"), STRATEGY, NOW);
 
-    buy(bracket(4)).send(&mut probe, stake()).unwrap();
+    buy(bracket(4))
+        .send(&mut probe, stake(), unconverted())
+        .unwrap();
 
     assert_eq!(orders(&probe), []);
     assert_eq!(clock.borrow().timer_names(), Vec::<&str>::new());
@@ -740,7 +768,9 @@ fn a_trade_without_equity_in_its_pnl_currency_sends_nothing_and_logs_why() {
     log_capture::capture(log::LevelFilter::Info);
     let (mut probe, clock) = registered_on(&cache_holding("100000 EUR"), STRATEGY, NOW);
 
-    buy(bracket(4)).send(&mut probe, stake()).unwrap();
+    buy(bracket(4))
+        .send(&mut probe, stake(), unconverted())
+        .unwrap();
 
     assert_eq!(orders(&probe), []);
     assert_eq!(clock.borrow().timer_names(), Vec::<&str>::new());
@@ -751,6 +781,119 @@ fn a_trade_without_equity_in_its_pnl_currency_sends_nothing_and_logs_why() {
             .any(|line| line.starts_with("ERROR") && line.contains(AUD) && line.contains("USD")),
         "{lines:#?}"
     );
+}
+
+/// The cache holds no account of Pepperstone yet, as before its execution
+/// client reports one: there is no equity to size the trade on, and it
+/// sends nothing, saying the account holds none, not that its size rounds
+/// down to zero.
+#[test]
+fn a_trade_on_an_account_holding_no_equity_sends_nothing_and_logs_why() {
+    let name = "a_trade_on_an_account_holding_no_equity_sends_nothing_and_logs_why";
+    if !log_capture::alone(module_path!(), name) {
+        return;
+    }
+    log_capture::capture(log::LevelFilter::Info);
+    let cache = Rc::new(RefCell::new(Cache::default()));
+    cache
+        .borrow_mut()
+        .add_instrument(aud(InstrumentId::from(AUD)))
+        .unwrap();
+    let (mut probe, clock) = registered_on(&cache, STRATEGY, NOW);
+
+    buy(bracket(4))
+        .send(&mut probe, stake(), unconverted())
+        .unwrap();
+
+    assert_eq!(orders(&probe), []);
+    assert_eq!(clock.borrow().timer_names(), Vec::<&str>::new());
+    let lines = log_capture::lines();
+    assert!(
+        lines.iter().any(|line| line.starts_with("ERROR")
+            && line.contains(AUD)
+            && line.contains("no equity")),
+        "{lines:#?}"
+    );
+}
+
+/// EUR/USD at Pepperstone, the pair a config converts EUR through into
+/// USD, the P&L currency of AUD/USD: a CFD as AUD/USD at Pepperstone is,
+/// of EUR.
+const EURUSD: &str = "EURUSD.PEPPERSTONE";
+
+/// A cache as `cache_holding("100000 EUR")`, defining Pepperstone's
+/// EUR/USD too, of which it holds no quote yet.
+fn cache_converting() -> Rc<RefCell<Cache>> {
+    let cache = cache_holding("100000 EUR");
+    let InstrumentAny::Cfd(mut eurusd) = aud(InstrumentId::from(EURUSD)) else {
+        panic!("Pepperstone's pairs are CFDs")
+    };
+    eurusd.base_currency = Some(Currency::EUR());
+    cache
+        .borrow_mut()
+        .add_instrument(InstrumentAny::Cfd(eurusd))
+        .unwrap();
+    cache
+}
+
+/// The rates of a config converting through Pepperstone's EUR/USD.
+fn through_eurusd() -> Rates {
+    Conversions::new(vec![InstrumentId::from(EURUSD)]).rates()
+}
+
+/// Pepperstone's account holds 100,000 EUR, converted into USD through
+/// EUR/USD, whose first quote has not come yet, as at a live start: there
+/// is no rate, and the trade sends nothing, no order and no time alert,
+/// and says why.
+#[test]
+fn a_trade_sent_before_its_pairs_first_quote_sends_nothing_and_logs_why() {
+    let name = "a_trade_sent_before_its_pairs_first_quote_sends_nothing_and_logs_why";
+    if !log_capture::alone(module_path!(), name) {
+        return;
+    }
+    log_capture::capture(log::LevelFilter::Info);
+    let (mut probe, clock) = registered_on(&cache_converting(), STRATEGY, NOW);
+
+    buy(bracket(4))
+        .send(&mut probe, stake(), through_eurusd())
+        .unwrap();
+
+    assert_eq!(orders(&probe), []);
+    assert_eq!(clock.borrow().timer_names(), Vec::<&str>::new());
+    let lines = log_capture::lines();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("ERROR") && line.contains(AUD) && line.contains("quote")),
+        "{lines:#?}"
+    );
+}
+
+/// Once EUR/USD's first quote is cached, 1.24990 / 1.25010, its mid 1.25:
+/// the same trade is sized on 125,000 USD, 0.5% of it, 625 USD, over one
+/// R of 0.00500, 125,000 AUD/USD.
+#[test]
+fn a_trade_sent_after_its_pairs_first_quote_is_sized_on_the_equity_converted() {
+    let cache = cache_converting();
+    cache
+        .borrow_mut()
+        .add_quote(QuoteTick::new(
+            InstrumentId::from(EURUSD),
+            Price::from("1.24990"),
+            Price::from("1.25010"),
+            Quantity::from(1),
+            Quantity::from(1),
+            UnixNanos::from(NOW),
+            UnixNanos::from(NOW),
+        ))
+        .unwrap();
+    let (mut probe, _) = registered_on(&cache, STRATEGY, NOW);
+
+    buy(held(4))
+        .send(&mut probe, stake(), through_eurusd())
+        .unwrap();
+
+    assert_eq!(entry_quantity(&probe), Quantity::from(125_000));
 }
 
 /// IB's account is issued under IB, not under IDEALPRO, the venue of the
@@ -778,9 +921,207 @@ fn a_trade_is_sized_on_the_account_of_the_client_its_venue_routes_to() {
         ..buy(held(1))
     };
 
-    trade.send(&mut probe, stake()).unwrap();
+    trade.send(&mut probe, stake(), unconverted()).unwrap();
 
     assert_eq!(entry_quantity(&probe), Quantity::from(200_000));
+}
+
+/// A cache holding `instrument`, its venue routed to the execution client
+/// `client`, whose account `account` holds 200,000 USD and a long of
+/// 1,000,000 of it bought at 0.70000, bid at 0.72000 now: 20,000 USD of
+/// open P&L.
+fn holding_open_pnl(
+    instrument: InstrumentAny,
+    client: &str,
+    account: AccountAny,
+) -> Rc<RefCell<Cache>> {
+    let cache = Rc::new(RefCell::new(Cache::default()));
+    let id = instrument.id();
+    let order = OrderTestBuilder::new(OrderType::Market)
+        .instrument_id(id)
+        .side(OrderSide::Buy)
+        .quantity(Quantity::from(1_000_000))
+        .build();
+    let filled = TestOrderEventStubs::filled(
+        &order,
+        &instrument,
+        Some(TradeId::from("OPEN-1")),
+        Some(PositionId::from("OPEN-1")),
+        Some(Price::from("0.70000")),
+        None,
+        None,
+        None,
+        Some(UnixNanos::from(NOW - MINUTE)),
+        Some(account.id()),
+    );
+    let OrderEventAny::Filled(fill) = filled else {
+        panic!("not a fill");
+    };
+    let mut held = cache.borrow_mut();
+    held.add_instrument(instrument.clone()).unwrap();
+    held.add_client_account(ClientId::from(client), account.id());
+    held.add_client_route(ClientId::from(client), id.venue);
+    held.add_account(account).unwrap();
+    held.add_position_without_order(&Position::new(&instrument, fill), OmsType::Netting)
+        .unwrap();
+    held.add_quote(QuoteTick::new(
+        id,
+        Price::from("0.72000"),
+        Price::from("0.72010"),
+        Quantity::from(1_000_000),
+        Quantity::from(1_000_000),
+        UnixNanos::from(NOW),
+        UnixNanos::from(NOW),
+    ))
+    .unwrap();
+    drop(held);
+    cache
+}
+
+/// The quantity a buy of `instrument_id` set from 0.70150, one R of it
+/// 0.00500, is sent at from `cache`: at the 0.5% stake, one AUD/USD for
+/// each USD of the equity it is sized on.
+fn sized_from(cache: &Rc<RefCell<Cache>>, instrument_id: InstrumentId) -> Quantity {
+    let (mut probe, _) = registered_on(cache, STRATEGY, NOW);
+    let trade = Trade {
+        instrument_id,
+        ..buy(held(1))
+    };
+    trade.send(&mut probe, stake(), unconverted()).unwrap();
+    entry_quantity(&probe)
+}
+
+/// IB reports its net liquidation as the account's balance, which holds
+/// the open position's 20,000 USD of P&L already: the trade is sized on
+/// the 200,000 USD it reports, 200,000 AUD/USD, not on 220,000 USD with
+/// that P&L counted again.
+#[test]
+fn a_trade_on_ib_is_sized_on_the_balance_ib_reports_its_open_pnl_counted_once() {
+    let account = reported_margin_account(AccountId::from("IB-DU1234567"), "200000 USD");
+    let cache = holding_open_pnl(ib_aud(), "IB", account);
+
+    let quantity = sized_from(&cache, InstrumentId::from(IB_AUD));
+
+    assert_eq!(quantity, Quantity::from(200_000));
+}
+
+/// A cTrader broker reports its account's balance without its open
+/// positions: the trade is sized on its 200,000 USD and the open
+/// position's 20,000 USD of P&L, 220,000 AUD/USD.
+#[test]
+fn a_trade_at_a_ctrader_broker_is_sized_on_its_balance_and_its_open_pnl() {
+    let account = reported_margin_account(AccountId::from("PEPPERSTONE-001"), "200000 USD");
+    let cache = holding_open_pnl(aud(InstrumentId::from(AUD)), "PEPPERSTONE", account);
+
+    let quantity = sized_from(&cache, InstrumentId::from(AUD));
+
+    assert_eq!(quantity, Quantity::from(220_000));
+}
+
+/// A backtest simulates IB's account, its balance calculated by Nautilus
+/// from its fills and holding no open P&L, whatever IB reports live: the
+/// trade is sized on its 200,000 USD and the open position's 20,000 USD of
+/// P&L, 220,000 AUD/USD.
+#[test]
+fn a_trade_on_ibs_simulated_account_is_sized_on_its_balance_and_its_open_pnl() {
+    let account = margin_account(AccountId::from("IDEALPRO-001"), "200000 USD");
+    let cache = holding_open_pnl(ib_aud(), "IDEALPRO", account);
+
+    let quantity = sized_from(&cache, InstrumentId::from(IB_AUD));
+
+    assert_eq!(quantity, Quantity::from(220_000));
+}
+
+/// IB's EUR/USD on IDEALPRO, the pair a config on IB converts EUR through
+/// into USD: Nautilus' FX pair, of EUR.
+const IB_EURUSD: &str = "EUR/USD.IDEALPRO";
+
+/// The rates of a config converting through IB's EUR/USD.
+fn through_ib_eurusd() -> Rates {
+    Conversions::new(vec![InstrumentId::from(IB_EURUSD)]).rates()
+}
+
+/// `cache` defining IB's EUR/USD too, none of its quotes or bars cached.
+fn defining_ib_eurusd(cache: &Rc<RefCell<Cache>>) {
+    let mut pair = audusd_sim();
+    pair.id = InstrumentId::from(IB_EURUSD);
+    pair.base_currency = Currency::EUR();
+    cache
+        .borrow_mut()
+        .add_instrument(InstrumentAny::CurrencyPair(pair))
+        .unwrap();
+}
+
+/// An account without a base currency holds each currency apart: 100,000
+/// EUR, and the open long's 20,000 USD of P&L. IB's EUR/USD quoted 1.24990
+/// / 1.25010, its mid 1.25, the trade is sized on both, converted and
+/// summed: 145,000 USD, 0.5% of it, 725 USD, over one R of 0.00500,
+/// 145,000 AUD/USD. On the EUR alone it would be 125,000, on the P&L alone
+/// 20,000.
+#[test]
+fn a_trade_on_an_account_without_a_base_currency_is_sized_on_each_currency_converted_and_summed() {
+    let account = margin_account(AccountId::from("IDEALPRO-001"), "100000 EUR");
+    let cache = holding_open_pnl(ib_aud(), "IDEALPRO", account);
+    defining_ib_eurusd(&cache);
+    cache
+        .borrow_mut()
+        .add_quote(QuoteTick::new(
+            InstrumentId::from(IB_EURUSD),
+            Price::from("1.24990"),
+            Price::from("1.25010"),
+            Quantity::from(1),
+            Quantity::from(1),
+            UnixNanos::from(NOW),
+            UnixNanos::from(NOW),
+        ))
+        .unwrap();
+    let (mut probe, _) = registered_on(&cache, STRATEGY, NOW);
+    let trade = Trade {
+        instrument_id: InstrumentId::from(IB_AUD),
+        ..buy(held(1))
+    };
+
+    trade
+        .send(&mut probe, stake(), through_ib_eurusd())
+        .unwrap();
+
+    assert_eq!(entry_quantity(&probe), Quantity::from(145_000));
+}
+
+/// IB's EUR/USD is read as its BID and ASK bars, none of which is cached
+/// yet: the account's 100,000 EUR are not converted into USD, and the
+/// trade sends nothing, no order and no time alert, and says why, naming
+/// the currencies and the venue whose rates it lacks.
+#[test]
+fn a_trade_converting_through_an_ib_pair_before_its_first_bars_sends_nothing_and_logs_why() {
+    let name =
+        "a_trade_converting_through_an_ib_pair_before_its_first_bars_sends_nothing_and_logs_why";
+    if !log_capture::alone(module_path!(), name) {
+        return;
+    }
+    log_capture::capture(log::LevelFilter::Info);
+    let cache = cache_holding("100000 EUR");
+    defining_ib_eurusd(&cache);
+    let (mut probe, clock) = registered_on(&cache, STRATEGY, NOW);
+    let trade = Trade {
+        instrument_id: InstrumentId::from(IB_AUD),
+        ..buy(bracket(4))
+    };
+
+    trade
+        .send(&mut probe, stake(), through_ib_eurusd())
+        .unwrap();
+
+    assert_eq!(orders(&probe), []);
+    assert_eq!(clock.borrow().timer_names(), Vec::<&str>::new());
+    let lines = log_capture::lines();
+    let line = lines
+        .iter()
+        .find(|line| line.starts_with("ERROR") && line.contains(IB_AUD))
+        .unwrap_or_else(|| panic!("{lines:#?}"));
+    for named in ["EUR", "USD", "IDEALPRO"] {
+        assert!(line.contains(named), "{named}: {line}");
+    }
 }
 
 /// Nautilus' sizer is linear: an inverse instrument's P&L is no multiple

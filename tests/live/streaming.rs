@@ -341,6 +341,7 @@ fn streamed_dataset() {
                 end: to,
                 commission: venue.commission,
                 latency: venue.latency,
+                pairs: vec![],
                 balance: venue.balance,
                 venue_oms: |_| OmsType::Hedging,
                 logging: LoggerConfig::default(),

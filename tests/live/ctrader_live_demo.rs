@@ -172,7 +172,8 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
 
     let ran = tokio::time::timeout(
         LIVE_RUN + Duration::from_secs(60),
-        live.run(&requirements, &warming, recorder, None),
+        // The recorder trades nothing: it claims no instrument.
+        live.run(&requirements, &[], &warming, recorder, None),
     )
     .await;
 

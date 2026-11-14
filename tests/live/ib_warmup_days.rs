@@ -136,7 +136,8 @@ async fn a_warmup_of_days_holds_every_minute_bar_of_ibs_history_and_builds_each_
     };
     let ran = tokio::time::timeout(
         Duration::from_secs(300),
-        live.run(&requirements, &warmup, probe, None),
+        // The probe trades nothing: it claims no instrument.
+        live.run(&requirements, &[], &warmup, probe, None),
     )
     .await;
     common::cache::delete_trader(TRADER).await;

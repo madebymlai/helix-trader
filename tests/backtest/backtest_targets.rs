@@ -469,6 +469,7 @@ fn gold_backtest(catalog: PathBuf) -> Backtest {
         end: ic::at("12:30:00"),
         commission: Commission::Rate(Decimal::new(3, 5)),
         latency: None,
+        pairs: vec![],
         balance: Money::from("10000000 USD"),
         venue_oms: |_| OmsType::Hedging,
         logging: LoggerConfig::default(),
@@ -815,6 +816,7 @@ fn a_dataset_run_locks_no_margin_so_a_size_beyond_its_balance_settles() {
     let catalog = ic::catalog_of(hand_worked_quotes(), from, to);
     let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
     let backtest = Backtest {
+        pairs: vec![],
         balance: Money::from("100000 USD"),
         ..gold_backtest(catalog.path().to_path_buf())
     };
@@ -1001,6 +1003,7 @@ fn btc_backtest(catalog: &tempfile::TempDir) -> Backtest {
         bar_types: vec![BarType::from(BTC_MINUTE)],
         ticks: vec![],
         commission: Commission::Rate(Decimal::new(5, 4)),
+        pairs: vec![],
         balance: Money::from("10000000 USDT"),
         ..gold_backtest(PathBuf::new())
     }
@@ -1170,6 +1173,7 @@ fn inverse_run() -> (tempfile::TempDir, Backtest) {
         bar_types: vec![BarType::from(INVERSE_MINUTE)],
         ticks: vec![],
         commission: Commission::Rate(Decimal::new(5, 4)),
+        pairs: vec![],
         balance: Money::from("10 BTC"),
         ..gold_backtest(PathBuf::new())
     };

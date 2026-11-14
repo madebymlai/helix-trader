@@ -4,7 +4,7 @@
 //! same quotes, each a buy set from its bar's close, one R of 30 EUR a
 //! share. One node per thread, so one run per test.
 
-use std::process::Command;
+use std::{path::Path, process::Command};
 
 use helix_trader::strategy::{
     ema::EmaCross,
@@ -18,9 +18,10 @@ use nautilus_model::{
     orders::Order,
     types::{Money, Quantity},
 };
+use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use rust_decimal::Decimal;
 
-use crate::common::{self, recorder::Recorder, trades};
+use crate::common::{self, glbx, recorder::Recorder, trades};
 
 fn decimal(s: &str) -> Decimal {
     s.parse().unwrap()
@@ -142,14 +143,16 @@ fn a_size_below_the_instruments_minimum_is_denied_and_the_run_goes_on() {
     assert_eq!(filled, [Quantity::from(0), Quantity::from(6)]);
 }
 
-/// The crossover trading SXR8, whose P&L is in EUR, on a balance of
-/// 10,000 USD: its trades would be sized on equity in EUR, which the
-/// account would not hold, and the backtest command refuses to run,
-/// naming both currencies, before printing any result.
-#[test]
-fn a_backtest_whose_balance_is_not_in_a_traded_instruments_pnl_currency_is_refused() {
-    let levels = trades::TIME_EXIT;
-    let catalog = trades::catalog(&levels);
+/// The backtest command running the crossover on the trades of `levels`
+/// in the catalog at `catalog`, on `balance`, its `[trade]` ending with
+/// `more`, lines of TOML: whether it succeeded, its standard output and
+/// its standard error.
+fn crossover_command(
+    catalog: &Path,
+    levels: &[f64],
+    balance: &str,
+    more: &str,
+) -> (bool, String, String) {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("ema.toml");
     std::fs::write(
@@ -169,6 +172,7 @@ fn a_backtest_whose_balance_is_not_in_a_traded_instruments_pnl_currency_is_refus
             [trade]
             instruments = [{{ instrument_id = "{id}" }}]
             risk = "{risk}"
+            {more}
             "#,
             id = common::INSTRUMENT_ID,
             risk = common::RISK,
@@ -180,22 +184,65 @@ fn a_backtest_whose_balance_is_not_in_a_traded_instruments_pnl_currency_is_refus
         .args(["backtest", "ema", "--config"])
         .arg(&config)
         .arg("--catalog")
-        .arg(catalog.path())
+        .arg(catalog)
         .args(["--start", &trades::start().to_string()])
-        .args(["--end", &trades::end(&levels).to_string()])
-        .args(["--balance", "10000 USD", "--commission", "0 USD"])
+        .args(["--end", &trades::end(levels).to_string()])
+        .args(["--balance", balance, "--commission", "0 USD"])
         .output()
         .unwrap();
 
-    let (stdout, stderr) = (
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
-    assert!(!output.status.success(), "{stdout}{stderr}");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// The crossover trading SXR8, whose P&L is in EUR, on a balance of
+/// 10,000 USD: its trades would be sized on equity in EUR, which the
+/// account would not hold, and the backtest command refuses to run,
+/// naming both currencies, before printing any result.
+#[test]
+fn a_backtest_whose_balance_is_not_in_a_traded_instruments_pnl_currency_is_refused() {
+    let levels = trades::TIME_EXIT;
+    let catalog = trades::catalog(&levels);
+
+    let (succeeded, stdout, stderr) = crossover_command(catalog.path(), &levels, "10000 USD", "");
+
+    assert!(!succeeded, "{stdout}{stderr}");
     assert!(
         [common::INSTRUMENT_ID, "USD", "EUR"]
             .iter()
             .all(|named| stderr.contains(named)),
+        "{stderr}"
+    );
+    assert!(!stdout.contains("Orders:"), "{stdout}");
+}
+
+/// CME's gold future, listed among the pairs to convert through, is
+/// defined in the catalog as a `FuturesContract`, with no base currency,
+/// which Nautilus' exchange rates read a pair by: it would give no rate,
+/// and the backtest command refuses to run, naming it, before printing
+/// any result, even on a balance in SXR8's own P&L currency, which needs
+/// no rate.
+#[test]
+fn a_backtest_converting_through_a_pair_defined_without_a_base_currency_is_refused() {
+    let levels = trades::TIME_EXIT;
+    let catalog = trades::catalog(&levels);
+    ParquetDataCatalog::new(catalog.path(), None, None, None, None)
+        .write_instruments(vec![glbx::instrument()])
+        .unwrap();
+
+    let (succeeded, stdout, stderr) = crossover_command(
+        catalog.path(),
+        &levels,
+        "10000 EUR",
+        &format!("conversions = [\"{}\"]", glbx::INSTRUMENT_ID),
+    );
+
+    assert!(!succeeded, "{stdout}{stderr}");
+    assert!(
+        stderr.contains(glbx::INSTRUMENT_ID) && stderr.contains("base currency"),
         "{stderr}"
     );
     assert!(!stdout.contains("Orders:"), "{stdout}");

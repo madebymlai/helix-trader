@@ -99,7 +99,8 @@ enum Run {
 /// The run config of `backtest`: one simulated venue per venue of the
 /// instruments, named after it, keeping positions as `backtest.venue_oms`
 /// says of it, each with the run's balance, or nothing if no broker trades
-/// it, and its fee model, which fills
+/// it or the run reads its pairs alone on it (`Backtest::funds`), and its
+/// fee model, which fills
 /// orders on the replayed data and settles funding, the series of the
 /// window from the catalog (the only data replayed: the data engine builds
 /// the strategy's bars from them and keeps the books the strategy
@@ -180,8 +181,14 @@ fn config(backtest: &Backtest, run: Run) -> anyhow::Result<BacktestRunConfig> {
 
 /// The simulated `venue` of `backtest` for `run`: a margin account keeping
 /// positions as `backtest.venue_oms` says, with the run's balance if a
-/// broker trades the venue (`venues::has_broker`), else nothing in its
-/// currency, the fee model of its commission and the latency model of its
+/// broker trades the venue and the run reads more on it than the pairs it
+/// converts through (`Backtest::funds`), else nothing in its
+/// currency, a backtest's with the balance's currency as its base if its
+/// broker's account has a base currency (`venues::has_base_currency`, a
+/// cTrader broker's), so that Nautilus books its margins, commissions and
+/// P&L in that currency, converting at the rates of the venue's pairs, as
+/// the live account does, and else none, each currency held apart, the
+/// fee model of its commission and the latency model of its
 /// latency, if any (`Latency::model`), filling on the top of
 /// the book on Nautilus' default fill model: a market order fills at the
 /// quote (a buy at the ask, a sell at the bid), or on bars at the last
@@ -196,13 +203,16 @@ fn config(backtest: &Backtest, run: Run) -> anyhow::Result<BacktestRunConfig> {
 /// balances (`adjust_account_balance`, backtest/src/exchange.rs) and the
 /// portfolio locks no margin of an account that does not calculate its
 /// state (portfolio/src/portfolio.rs), so trades that lose leave its
-/// balance whole; and it is at `DATASET_LEVERAGE`, margining nothing.
+/// balance whole; it is at `DATASET_LEVERAGE`, margining nothing; and it
+/// has no base currency on any venue: its trades are sized at a fixed
+/// equity, not at the account's (`strategy::orders::Trade::send_at`), so
+/// one would add conversions nothing reads.
 fn venue_config(
     backtest: &Backtest,
     venue: Venue,
     run: Run,
 ) -> anyhow::Result<BacktestVenueConfig> {
-    let balance = if venues::has_broker(venue) {
+    let balance = if backtest.funds(venue) {
         backtest.balance
     } else {
         Money::zero(backtest.balance.currency)
@@ -211,12 +221,15 @@ fn venue_config(
         Run::Backtest => Decimal::ONE,
         Run::Dataset => DATASET_LEVERAGE,
     };
+    let base_currency = (run == Run::Backtest && venues::has_base_currency(venue))
+        .then_some(backtest.balance.currency);
     Ok(BacktestVenueConfig::builder()
         .name(venue.as_str())
         .oms_type((backtest.venue_oms)(venue))
         .account_type(AccountType::Margin)
         .book_type(BookType::L1_MBP)
         .starting_balances(vec![balance.to_string()])
+        .maybe_base_currency(base_currency)
         .default_leverage(leverage)
         .frozen_account(run == Run::Dataset)
         .fee_model(backtest.commission.fee_model()?)
@@ -468,7 +481,7 @@ mod tests {
         data::BarType,
         enums::OmsType,
         identifiers::{StrategyId, TraderId},
-        types::Money,
+        types::{Currency, Money},
     };
     use rust_decimal::Decimal;
 
@@ -489,6 +502,7 @@ mod tests {
             custom: vec![],
             commission: Commission::PerOrder(Money::from("3 EUR")),
             latency: None,
+            pairs: vec![],
             balance: Money::from("10000 EUR"),
             venue_oms: |_| OmsType::Netting,
             logging: LoggerConfig {
@@ -545,6 +559,41 @@ mod tests {
         let venue = &config.venues()[0];
         assert!(venue.margin_model().is_none(), "{:?}", venue.margin_model());
         assert_eq!(venue.default_leverage(), Some(Decimal::ONE));
+    }
+
+    /// A cTrader venue's account has a base currency live, IB's none
+    /// (`venues::has_base_currency`): a backtest's simulated account of
+    /// IC Markets takes the balance's currency as its base, IBIS's none; a
+    /// dataset run's takes none on any venue.
+    #[test]
+    fn a_backtests_venue_has_the_balances_currency_as_its_base_if_its_broker_has_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let backtest = Backtest {
+            bar_types: vec![
+                BarType::from("XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL"),
+                BarType::from("SXR8.IBIS-1-MINUTE-MID-INTERNAL"),
+            ],
+            ..backtest(dir.path())
+        };
+        let bases = |config: BacktestRunConfig| -> Vec<(String, Option<Currency>)> {
+            config
+                .venues()
+                .iter()
+                .map(|venue| (venue.name().to_string(), venue.base_currency()))
+                .collect()
+        };
+
+        assert_eq!(
+            bases(run_config(&backtest).unwrap()),
+            [
+                ("IBIS".to_string(), None),
+                ("ICMARKETS".to_string(), Some(Currency::EUR())),
+            ]
+        );
+        assert_eq!(
+            bases(dataset_run_config(&backtest).unwrap()),
+            [("IBIS".to_string(), None), ("ICMARKETS".to_string(), None)]
+        );
     }
 
     /// The latency model of each venue of `config`, if any: its base

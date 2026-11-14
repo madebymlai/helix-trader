@@ -36,7 +36,11 @@ use nautilus_common::logging::{
     bridge::init_tracing, init_logging, logger::LoggerConfig, writer::FileWriterConfig,
 };
 use nautilus_core::{UUID4, UnixNanos};
-use nautilus_model::{enums::OmsType, identifiers::TraderId, types::Money};
+use nautilus_model::{
+    enums::OmsType,
+    identifiers::{InstrumentId, TraderId},
+    types::Money,
+};
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -341,13 +345,13 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
 }
 
 /// Builds the strategy from its config, runs it over the window of the
-/// catalog and prints the results to stdout, refusing first a balance in
-/// another currency than a traded instrument's P&L
-/// (`Backtest::refuse_balance`). A strategy trading on a
-/// model is first trained on its schedule (`model::walk`): its dataset
-/// built over the span and its models trained at each train time the
-/// store lacks one, in this process, on the backtest's catalog and store,
-/// at the commission, balance and latency of the config's `[model]
+/// catalog and prints the results to stdout, refusing first a balance
+/// whose currency the config's conversions do not reach a traded
+/// instrument's P&L currency from (`Backtest::refuse_balance`). A strategy
+/// trading on a model is first trained on its schedule (`model::walk`): its
+/// dataset built over the span and its models trained at each train time
+/// the store lacks one, in this process, on the backtest's catalog and
+/// store, at the commission, balance and latency of the config's `[model]
 /// dataset`; the out-of-sample scores of its models follow the results,
 /// after the costs of the run and of its models' dataset runs.
 fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
@@ -357,7 +361,7 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
     let logging = logger_config(std::env::var("NAUTILUS_LOG"))?;
     let dataset_logging = logging.clone();
     // Each simulated venue keeps positions as the real one does.
-    let backtest = |requirements: DataRequirements| Backtest {
+    let backtest = |requirements: DataRequirements, pairs: &[InstrumentId]| Backtest {
         catalog: args.run.catalog.clone(),
         bar_types: requirements.bar_types,
         start,
@@ -366,6 +370,7 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
         custom: requirements.custom,
         commission: args.commission.commission(),
         latency: args.latency,
+        pairs: pairs.to_vec(),
         balance: args.balance,
         venue_oms: venues::oms_type,
         logging,
@@ -378,7 +383,8 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
 }
 
 /// The visitor backtesting a strategy: `backtest` builds its `Backtest`
-/// of its data requirements; a model strategy's dataset runs log as
+/// of its data requirements and the pairs of its `[trade] conversions` it
+/// does not trade; a model strategy's dataset runs log as
 /// `dataset_logging` says (`backtest_on_models`).
 struct Backtesting<'a, B> {
     args: &'a BacktestArgs,
@@ -386,13 +392,13 @@ struct Backtesting<'a, B> {
     backtest: B,
 }
 
-impl<B: FnOnce(DataRequirements) -> Backtest> Visitor for Backtesting<'_, B> {
+impl<B: FnOnce(DataRequirements, &[InstrumentId]) -> Backtest> Visitor for Backtesting<'_, B> {
     type Output = anyhow::Result<()>;
 
     fn plain<S: PlainStrategy>(self) -> Self::Output {
         let config = load_config::<S::Params>(&self.args.run.config)?;
-        let backtest = (self.backtest)(config.data_requirements());
-        backtest.refuse_balance(&config.trade.instrument_ids())?;
+        let backtest = (self.backtest)(config.data_requirements(), &config.trade.untraded_pairs());
+        backtest.refuse_balance(&config.trade)?;
         let outcome = backtest.run(S::backtest(config)?)?;
         print!("{}", backtest::report(&outcome));
         Ok(())
@@ -404,7 +410,8 @@ impl<B: FnOnce(DataRequirements) -> Backtest> Visitor for Backtesting<'_, B> {
 }
 
 /// The backtest of `args` of the model strategy `S`, its `Backtest` of
-/// its data requirements `backtest`: retrained on its schedule first
+/// its data requirements and the pairs of its `[trade] conversions` it
+/// does not trade `backtest`: retrained on its schedule first
 /// (`WalkForward::prepare`), then run, its results printed and the
 /// out-of-sample scores of its models after them. The dataset build, each
 /// train and the run are one after another in this process, a train as the
@@ -417,12 +424,12 @@ impl<B: FnOnce(DataRequirements) -> Backtest> Visitor for Backtesting<'_, B> {
 fn backtest_on_models<S: ModelStrategy>(
     args: &BacktestArgs,
     logging: LoggerConfig,
-    backtest: impl FnOnce(DataRequirements) -> Backtest,
+    backtest: impl FnOnce(DataRequirements, &[InstrumentId]) -> Backtest,
 ) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     let config = load_config::<S::Params>(&args.run.config)?;
-    let backtest = backtest(config.data_requirements());
-    backtest.refuse_balance(&config.trade.instrument_ids())?;
+    let backtest = backtest(config.data_requirements(), &config.trade.untraded_pairs());
+    backtest.refuse_balance(&config.trade)?;
     let (catalog, models) = (&args.run.catalog, &args.models);
     let run = DatasetRun {
         catalog: catalog.clone(),
@@ -508,9 +515,10 @@ impl<'a> Visitor for Running<'a> {
         Box::pin(async move {
             let config = load_config::<S::Params>(&self.args.config)?;
             let requirements = config.data_requirements();
+            let traded = config.trade.instrument_ids();
             let strategy = S::live(config)?;
             self.live
-                .run(&requirements, &strategy.warmup(), strategy, None)
+                .run(&requirements, &traded, &strategy.warmup(), strategy, None)
                 .await
         })
     }
@@ -524,22 +532,27 @@ impl<'a> Visitor for Running<'a> {
 /// models of the store its config keys, beside the actor of its
 /// retrains if it is retrained (`RetrainActor`), each retrain in a child
 /// process (`LiveArgs::train_args`) on the node's catalog. Refuses first,
-/// before any node is built, a catalog without the traded instruments, which
-/// its models and retrains are built from (`catalog::traded_instruments`),
-/// and a dataset balance (`[model] dataset`) in another currency than a
-/// traded instrument's P&L (`backtest::refuse_balance`), as `backtest`
-/// and `train` refuse it. Warns, naming the store, when it holds no model
-/// to trade on yet (`ModelSet::trades_by`): the strategy then makes no
-/// trade until one is published there.
+/// before any node is built, a catalog without the traded instruments or
+/// the pairs of `[trade] conversions`, which its models and retrains are
+/// built from (`catalog::instruments`), and a dataset balance (`[model]
+/// dataset`) whose currency those pairs do not reach a traded instrument's
+/// P&L currency from (`backtest::refuse_balance`), as `backtest` and
+/// `train` refuse it. Warns, naming the store, when it holds no model to
+/// trade on yet (`ModelSet::trades_by`): the strategy then makes no trade
+/// until one is published there.
 async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyhow::Result<()> {
     let config = load_config::<S::Params>(&args.config)?;
     let program = std::env::current_exe().context("finding this binary to retrain")?;
-    let traded = catalog::traded_instruments(&args.catalog, &config.trade.instrument_ids())
-        .context(
-            "a model strategy runs live only on a --catalog holding the instruments it trades, \
-             which its models and retrains are built from",
-        )?;
-    backtest::refuse_balance(config.model().dataset.balance, &traded).context(DATASET_BALANCE)?;
+    let traded = catalog::instruments(&args.catalog, &config.trade.instrument_ids()).context(
+        "a model strategy runs live only on a --catalog holding the instruments it trades, \
+         which its models and retrains are built from",
+    )?;
+    let pairs = catalog::instruments(&args.catalog, config.trade.conversions.pairs()).context(
+        "a model strategy runs live only on a --catalog holding the pairs of [trade] \
+         conversions, which its retrains convert the dataset balance through",
+    )?;
+    backtest::refuse_balance(config.model().dataset.balance, &traded, &pairs)
+        .context(DATASET_BALANCE)?;
     let models = S::blueprint(&config)?.model_set(&args.models)?;
     if !models.trades_by(Timestamp::now())? {
         eprintln!(
@@ -549,6 +562,7 @@ async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyho
         );
     }
     let requirements = config.data_requirements();
+    let traded = config.trade.instrument_ids();
     let retraining = RetrainActor::new(
         config.strategy_id(),
         config.model().retrain,
@@ -560,8 +574,14 @@ async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyho
         models: args.models.clone(),
     };
     let strategy = S::new(config, mode)?;
-    live.run(&requirements, &strategy.warmup(), strategy, retraining)
-        .await
+    live.run(
+        &requirements,
+        &traded,
+        &strategy.warmup(),
+        strategy,
+        retraining,
+    )
+    .await
 }
 
 /// What a refused dataset balance is.
@@ -582,21 +602,27 @@ struct DatasetRun {
 
 impl DatasetRun {
     /// Refuses the runs of the strategy `config` describes, before any,
-    /// unless their balance is in the P&L currency of each instrument it
-    /// trades, as their catalog defines them
-    /// (`catalog::traded_instruments`, `backtest::refuse_balance`): a
-    /// target's trades are sized on it, which is not converted.
+    /// unless the pairs of its `[trade] conversions` reach the P&L currency
+    /// of each instrument it trades from their balance's, all as their
+    /// catalog defines them (`catalog::instruments`,
+    /// `backtest::refuse_balance`, the check of a backtest's balance): a
+    /// target's trades are sized on the balance converted through them.
     ///
     /// # Errors
     ///
     /// Returns an error if the catalog cannot be read, a traded instrument
-    /// is not in it or its P&L is in another currency than the balance.
+    /// or a pair is not in it, or the pairs do not reach a traded
+    /// instrument's P&L currency from the balance's.
     fn refuse_balance<S: ModelStrategy>(
         &self,
         config: &StandardConfig<S::Params>,
     ) -> anyhow::Result<()> {
-        let traded = catalog::traded_instruments(&self.catalog, &config.trade.instrument_ids())?;
-        backtest::refuse_balance(config.model().dataset.balance, &traded).context(DATASET_BALANCE)
+        let traded = catalog::instruments(&self.catalog, &config.trade.instrument_ids())
+            .context("reading the instruments traded")?;
+        let pairs = catalog::instruments(&self.catalog, config.trade.conversions.pairs())
+            .context("reading the pairs of [trade] conversions")?;
+        backtest::refuse_balance(config.model().dataset.balance, &traded, &pairs)
+            .context(DATASET_BALANCE)
     }
 
     /// The rows the model strategy `S` of `config` settles over `[start,
@@ -626,6 +652,7 @@ impl DatasetRun {
             end,
             commission: venue.commission,
             latency: venue.latency,
+            pairs: config.trade.untraded_pairs(),
             balance: venue.balance,
             venue_oms: |_| OmsType::Hedging,
             logging: self.logging.clone(),
@@ -690,7 +717,8 @@ impl Visitor for Training<'_> {
 
 /// Trains the model of the model strategy `S` of `args` at `--at`, the
 /// days its dataset lacks replayed by `run`, its dataset balance refused
-/// first if it is in another currency than the traded instrument's P&L.
+/// first if the pairs of `[trade] conversions` do not reach the traded
+/// instrument's P&L currency from it (`DatasetRun::refuse_balance`).
 fn train<S: ModelStrategy>(args: &TrainArgs, run: &DatasetRun) -> anyhow::Result<Trained> {
     let config = load_config::<S::Params>(&args.config)?;
     run.refuse_balance::<S>(&config)?;

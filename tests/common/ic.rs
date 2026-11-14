@@ -3,7 +3,8 @@
 //! on the demo, 1:30, at most 10,000 oz an order), and quotes as fill-catalog stores them:
 //! stamped at their tick's millisecond, at irregular times, both sides
 //! sized 10,000 (the instrument's maximum order), written through
-//! `fill_catalog`.
+//! `fill_catalog`. Beside it, IC's FX pairs a strategy converts through
+//! (`pair`), with quotes of their own (`pair_quotes`).
 
 use helix_trader::{
     backtest::{Backtest, Commission},
@@ -17,7 +18,7 @@ use nautilus_model::{
     data::{BarType, Data, NautilusDataType, QuoteTick},
     enums::AssetClass,
     identifiers::{InstrumentId, Symbol},
-    instruments::{Cfd, InstrumentAny},
+    instruments::{Cfd, Instrument, InstrumentAny},
     types::{Currency, Money, Price, Quantity},
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
@@ -29,6 +30,10 @@ use super::ts;
 
 pub const INSTRUMENT_ID: &str = "XAUUSD.ICMARKETS";
 pub const HOUR_BARS: &str = "XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL";
+/// IC's euro in US dollars.
+pub const EURUSD: &str = "EURUSD.ICMARKETS";
+/// IC's US dollar in yen.
+pub const USDJPY: &str = "USDJPY.ICMARKETS";
 
 /// `hh:mm:ss.fff` UTC on Wednesday 21 October 2026.
 pub fn at(time: &str) -> Timestamp {
@@ -66,6 +71,80 @@ pub fn instrument() -> InstrumentAny {
             .build()
             .unwrap(),
     )
+}
+
+/// The FX pair `id` as the cTrader adapter defines a forex symbol
+/// (`crates/ctrader/README.md`, "Instruments and account"): a `Cfd` of
+/// class FX on `base`, quoted in `quote` on `price_precision` decimals, at
+/// IC's margin; its sizes, by the thousand, are this fixture's.
+pub fn pair(id: &str, base: Currency, quote: Currency, price_precision: u8) -> InstrumentAny {
+    let instrument_id = InstrumentId::from(id);
+    InstrumentAny::Cfd(
+        Cfd::builder()
+            .instrument_id(instrument_id)
+            .raw_symbol(instrument_id.symbol)
+            .asset_class(AssetClass::FX)
+            .base_currency(base)
+            .quote_currency(quote)
+            .price_precision(price_precision)
+            .size_precision(0)
+            .price_increment(
+                Price::from_decimal_dp(
+                    Decimal::new(1, u32::from(price_precision)),
+                    price_precision,
+                )
+                .unwrap(),
+            )
+            .size_increment(Quantity::from(1_000))
+            .lot_size(Quantity::from(100_000))
+            .min_quantity(Quantity::from(1_000))
+            .max_quantity(Quantity::from(10_000_000))
+            .margin_init(margin())
+            .margin_maint(margin())
+            .ts_event(UnixNanos::default())
+            .ts_init(UnixNanos::default())
+            .build()
+            .unwrap(),
+    )
+}
+
+/// Quotes of the pair `id` at `bid` and `ask`, one a minute at :15 from
+/// 08:00 to 12:00.
+pub fn pair_quotes(id: &str, bid: &str, ask: &str) -> Vec<QuoteTick> {
+    pair_quotes_over(id, bid, ask, at("08:00:00"), at("12:00:00"))
+}
+
+/// Quotes of the pair `id` at `bid` and `ask`, one a minute 15 s after
+/// each minute from `from` to `to`.
+pub fn pair_quotes_over(
+    id: &str,
+    bid: &str,
+    ask: &str,
+    from: Timestamp,
+    to: Timestamp,
+) -> Vec<QuoteTick> {
+    let size = Quantity::from(10_000_000);
+    let mut quotes = vec![];
+    let mut time = from + SignedDuration::from_secs(15);
+    while time < to {
+        quotes.push(QuoteTick::new(
+            InstrumentId::from(id),
+            Price::from(bid),
+            Price::from(ask),
+            size,
+            size,
+            time.into(),
+            time.into(),
+        ));
+        time += SignedDuration::from_mins(1);
+    }
+    quotes
+}
+
+/// Stores the pair `pair` and its `quotes` in the catalog in `dir`, from
+/// 08:00 to 12:00, as `store` stores the gold's.
+pub fn store_pair(dir: &Path, pair: InstrumentAny, quotes: Vec<QuoteTick>) {
+    store_defined(dir, pair, quotes, at("08:00:00"), at("12:00:00"));
 }
 
 /// An IC quote at `time`, sized as IC's fill sizes XAUUSD's.
@@ -140,9 +219,10 @@ pub fn store(dir: &Path, quotes: Vec<QuoteTick>, from: Timestamp, to: Timestamp)
     store_defined(dir, instrument(), quotes, from, to);
 }
 
-/// Stores `defined` and `quotes` in the catalog in `dir`, over `[from,
-/// to]`, as `catalog_of` does.
-fn store_defined(
+/// Stores `defined` and its `quotes` in the catalog in `dir`, over `[from,
+/// to]`, as `catalog_of` does: the gold as another definition gives it, or
+/// a pair beside it.
+pub fn store_defined(
     dir: &Path,
     defined: InstrumentAny,
     quotes: Vec<QuoteTick>,
@@ -150,7 +230,7 @@ fn store_defined(
     to: Timestamp,
 ) {
     let mut catalog = ParquetDataCatalog::new(dir, None, None, None, None);
-    let series = [(NautilusDataType::QuoteTick, INSTRUMENT_ID.to_owned())];
+    let series = [(NautilusDataType::QuoteTick, defined.id().to_string())];
     let data: Vec<Data> = quotes.into_iter().map(Data::Quote).collect();
     let fill = fill_catalog(
         &mut catalog,
@@ -180,6 +260,7 @@ pub fn backtest(catalog: &TempDir) -> Backtest {
         custom: vec![],
         commission: Commission::Rate(Decimal::new(3, 5)),
         latency: None,
+        pairs: vec![],
         balance: Money::from("2000000 USD"),
         venue_oms: venues::oms_type,
         logging: LoggerConfig::default(),

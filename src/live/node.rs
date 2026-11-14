@@ -7,10 +7,10 @@
 //! caller gives (`with_cache_database_factory`; `Live`'s is Redis, see
 //! `redis`), promotes what the last run left staged once built
 //! (`promote_staged`), adds the actor of the strategy's retrains, if it is
-//! retrained (`add_actor`), then the strategy (`add_strategy`), claims its
-//! instruments' external orders, calls `run`, which stops on SIGINT or
-//! SIGTERM, and disposes the node, which closes the cache database, as
-//! it does when a step after its build fails.
+//! retrained (`add_actor`), then the strategy (`add_strategy`), claims the
+//! external orders of the instruments it trades, calls `run`, which stops
+//! on SIGINT or SIGTERM, and disposes the node, which closes the cache
+//! database, as it does when a step after its build fails.
 //! Follows the IB adapter's `node_exec_tester` example.
 //! Never names a broker.
 
@@ -156,8 +156,11 @@ pub(crate) fn add_clients(
 
 /// Adds `retraining`, the actor of the retrains of `strategy` if it is
 /// retrained, then `strategy` to `node` claiming the external orders of
-/// `instrument_ids`, and runs it until SIGINT or SIGTERM, then disposes
-/// it, as it does when any of that fails.
+/// `traded`, the instruments it trades (`[trade] instruments`), and runs it
+/// until SIGINT or SIGTERM, then disposes it, as it does when any of that
+/// fails. The other instruments the node loads, the pairs it converts
+/// through and those its features read, are not claimed: their orders and
+/// positions on the account are not the strategy's.
 ///
 /// # Errors
 ///
@@ -167,14 +170,14 @@ pub(crate) fn add_clients(
 /// unresolved after the post-stop delay included).
 pub(super) async fn run<S>(
     mut node: LiveNode,
-    instrument_ids: &[InstrumentId],
+    traded: &[InstrumentId],
     strategy: S,
     retraining: Option<RetrainActor>,
 ) -> anyhow::Result<()>
 where
     S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
 {
-    let result = match add(&mut node, instrument_ids, strategy, retraining) {
+    let result = match add(&mut node, traded, strategy, retraining) {
         Ok(()) => node.run().await,
         Err(e) => Err(e),
     };
@@ -184,10 +187,10 @@ where
 }
 
 /// Adds `retraining`, if any, then `strategy` to `node`, claiming the
-/// external orders of `instrument_ids` (see `run`).
+/// external orders of `traded` (see `run`).
 fn add<S>(
     node: &mut LiveNode,
-    instrument_ids: &[InstrumentId],
+    traded: &[InstrumentId],
     strategy: S,
     retraining: Option<RetrainActor>,
 ) -> anyhow::Result<()>
@@ -199,7 +202,7 @@ where
         .context("the strategy has no id to claim its instruments with")?;
     // Its config may claim some already; `add_strategy` registers those.
     let claimed = strategy.external_order_instrument_ids().unwrap_or_default();
-    let unclaimed: Vec<InstrumentId> = instrument_ids
+    let unclaimed: Vec<InstrumentId> = traded
         .iter()
         .filter(|id| !claimed.contains(id))
         .copied()
@@ -259,10 +262,69 @@ fn config(
 
 #[cfg(test)]
 mod tests {
+    use ahash::AHashSet;
+    use nautilus_common::actor::DataActor;
+    use nautilus_model::identifiers::StrategyId;
+    use nautilus_trading::{
+        nautilus_strategy,
+        strategy::{StrategyConfig, StrategyCore},
+    };
+
     use super::*;
     use crate::live::Recording;
 
     const INSTANCE_ID: &str = "2d89666b-1a1e-4a75-b193-4eb3b454c757";
+
+    #[derive(Debug)]
+    struct Probe {
+        core: StrategyCore,
+    }
+
+    nautilus_strategy!(Probe);
+
+    impl DataActor for Probe {}
+
+    /// A live node on no client, Nautilus' defaults otherwise: built, it
+    /// connects to nothing.
+    fn offline_node() -> LiveNode {
+        let config = LiveNodeConfig {
+            environment: Environment::Live,
+            trader_id: TraderId::from("HELIX-001"),
+            ..Default::default()
+        };
+        LiveNodeBuilder::from_config(config)
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    /// A strategy trading IC's gold converts through IC's EUR/USD, which
+    /// the node loads too: it is handed the instruments it trades, and
+    /// claims the external orders of the gold alone, so that an order or a
+    /// position on the account's EUR/USD is not taken for its own.
+    #[tokio::test]
+    async fn a_strategy_claims_the_external_orders_of_the_instruments_it_trades_alone() {
+        let mut node = offline_node();
+        let strategy_id = StrategyId::from("PROBE-001");
+        let probe = Probe {
+            core: StrategyCore::new(StrategyConfig {
+                strategy_id: Some(strategy_id),
+                order_id_tag: Some("001".to_string()),
+                ..Default::default()
+            }),
+        };
+        let gold = InstrumentId::from("XAUUSD.ICMARKETS");
+
+        add(&mut node, &[gold], probe, None).unwrap();
+
+        let claimed = node
+            .kernel()
+            .cache()
+            .borrow()
+            .external_order_claim_instrument_ids(None);
+        node.dispose();
+        assert_eq!(claimed, AHashSet::from_iter([gold]));
+    }
 
     fn node_config() -> LiveNodeConfig {
         let catalog = DataCatalogConfig::new("/data/catalog".to_string(), None, None);
