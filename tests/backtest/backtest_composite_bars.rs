@@ -188,7 +188,6 @@ fn a_decision_on_hour_bars_reads_the_bar_closing_on_its_grid() {
             venue: DatasetVenue {
                 commission: backtest.commission,
                 balance: backtest.balance,
-                leverage: backtest.leverage,
             },
         },
     );

@@ -81,9 +81,11 @@ pub struct Backtest {
     /// a venue only read, which no broker trades (`venues::has_broker`),
     /// starts with nothing in its currency, so that it adds no money.
     pub balance: Money,
-    /// The leverage of each venue's account on every instrument, positive:
-    /// a position locks its value / leverage times the instrument's margin
-    /// (Nautilus' default margin model). 1 is no leverage.
+    /// The leverage of each venue's account on every instrument in a
+    /// backtest (`run`), positive: a position locks its value / leverage
+    /// times the instrument's margin (Nautilus' default margin model). 1 is
+    /// no leverage. A dataset run's accounts (`run_dataset`) margin
+    /// nothing, whatever it is.
     pub leverage: Decimal,
     /// How each simulated venue keeps positions: a normal run passes the
     /// real venue's, `venues::oms_type`, and a dataset run hedging on every
@@ -115,10 +117,13 @@ impl Backtest {
 
     /// Runs `strategy` over the window on a `BacktestNode` as `run` does,
     /// for what the strategy does alone, as a dataset run builds the
-    /// training table (`model::targets`): the execution engine purges the
-    /// closed orders and positions from the cache a minute after they
-    /// close, so that the run takes time in proportion to its days, and
-    /// there is no result to read from it.
+    /// training table (`model::targets`): each venue's account is frozen at
+    /// the balance, whatever the run's trades lose, and margins nothing, so
+    /// that Nautilus' risk engine denies no order for its margin, its
+    /// other checks kept (`node::dataset_run_config`); the execution engine
+    /// purges the closed orders and positions from the cache a minute after
+    /// they close, so that the run takes time in proportion to its days,
+    /// and there is no result to read from it.
     ///
     /// # Errors
     ///

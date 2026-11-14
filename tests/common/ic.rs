@@ -119,15 +119,40 @@ pub fn catalog_of(quotes: Vec<QuoteTick>, from: Timestamp, to: Timestamp) -> Tem
     dir
 }
 
+/// A catalog of `defined`, the gold as another definition of it gives it,
+/// and `quotes`, stored over `[from, to]` as `catalog_of` does.
+pub fn catalog_defining(
+    defined: InstrumentAny,
+    quotes: Vec<QuoteTick>,
+    from: Timestamp,
+    to: Timestamp,
+) -> TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    store_defined(dir.path(), defined, quotes, from, to);
+    dir
+}
+
 /// Stores the instrument and `quotes` in the catalog in `dir`, over
 /// `[from, to]`, as `catalog_of` does.
 pub fn store(dir: &Path, quotes: Vec<QuoteTick>, from: Timestamp, to: Timestamp) {
+    store_defined(dir, instrument(), quotes, from, to);
+}
+
+/// Stores `defined` and `quotes` in the catalog in `dir`, over `[from,
+/// to]`, as `catalog_of` does.
+fn store_defined(
+    dir: &Path,
+    defined: InstrumentAny,
+    quotes: Vec<QuoteTick>,
+    from: Timestamp,
+    to: Timestamp,
+) {
     let mut catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     let series = [(NautilusDataType::QuoteTick, INSTRUMENT_ID.to_owned())];
     let data: Vec<Data> = quotes.into_iter().map(Data::Quote).collect();
     let fill = fill_catalog(
         &mut catalog,
-        vec![instrument()],
+        vec![defined],
         &series,
         from,
         to,

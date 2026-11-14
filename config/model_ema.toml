@@ -49,7 +49,7 @@ instruments = [{ instrument_id = "XAUUSD.ICMARKETS" }]
 # The fraction of equity a trade sent at the config's stake risks over its
 # one R (see config/ema.toml): each decision's trade is sent at it, of the
 # account's equity. It is the reference stake too, of the dataset balance
-# (--dataset-balance, --balance of train, --retrain-balance live), which the
+# (--balance of backtest and of train, --retrain-balance live), which the
 # model's targets, its dataset's rows and its decisions' payoff features,
 # are priced at: changing it, or that balance, retrains the model.
 risk = "0.5%"

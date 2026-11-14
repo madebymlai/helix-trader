@@ -328,7 +328,6 @@ fn streamed_dataset() {
     let venue = DatasetVenue {
         commission: Commission::PerOrder(Money::from("1 USD")),
         balance: Money::from("1000000 USD"),
-        leverage: Decimal::ONE,
     };
     let (first, last) = dataset::days(start, end);
 
@@ -350,7 +349,8 @@ fn streamed_dataset() {
                 end: to,
                 commission: venue.commission,
                 balance: venue.balance,
-                leverage: venue.leverage,
+                // Read by no dataset run, whose accounts margin nothing.
+                leverage: Decimal::ONE,
                 venue_oms: |_| OmsType::Hedging,
                 logging: LoggerConfig::default(),
             }

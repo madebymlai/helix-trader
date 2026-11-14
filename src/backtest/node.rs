@@ -39,6 +39,7 @@ use nautilus_persistence::{
     config::DataCatalogConfig,
 };
 use nautilus_trading::strategy::{Strategy, StrategyNative};
+use rust_decimal::Decimal;
 
 use super::{Backtest, report::Outcome};
 use crate::{
@@ -64,6 +65,35 @@ const CHUNK_SIZE: usize = 100_000;
 /// 4.2 s against 3.1 s.
 const DATASET_PURGE_MINS: u32 = 1;
 
+/// The leverage of a dataset run's accounts: the largest a `Decimal` holds,
+/// so that under Nautilus' default margin model, the notional / leverage
+/// times the instrument's margin (`LeveragedMarginModel`,
+/// model/src/accounts/margin_model.rs), every order's margin rounds to
+/// nothing, and the risk engine, which checks an order's initial margin
+/// against the free balance (`check_margin`, risk/src/engine/mod.rs),
+/// denies none for it while keeping its other checks: a size below the
+/// instrument's minimum is still denied. A dataset run opens a long and a
+/// short at every decision, at all hours, which no account trades; whether
+/// an account can margin a trade is checked by the strategy's backtest and
+/// the live venue. Nautilus has no margin-free model for a
+/// `BacktestVenueConfig`, whose margin model is the standard or the
+/// leveraged one (`MarginModelAny`).
+const DATASET_LEVERAGE: Decimal = Decimal::MAX;
+
+/// What a run is for, which its node is configured by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Run {
+    /// A backtest of the strategy: each venue's account at the run's
+    /// leverage, its balance moving with the run's P&L.
+    Backtest,
+    /// A dataset run (`Backtest::run_dataset`): each venue's account
+    /// frozen at the run's balance and margining nothing
+    /// (`DATASET_LEVERAGE`), its execution engine purging closed orders
+    /// and positions `DATASET_PURGE_MINS` after they close, every
+    /// `DATASET_PURGE_MINS`.
+    Dataset,
+}
+
 /// The run config of `backtest`: one simulated venue per venue of the
 /// instruments, named after it, keeping positions as `backtest.venue_oms`
 /// says of it, each with the run's balance, or nothing if no broker trades
@@ -85,28 +115,18 @@ const DATASET_PURGE_MINS: u32 = 1;
 /// `custom_data`) and the data is loaded at once. Build and run errors are
 /// raised, not only logged; the engine outlives the run (see `run`).
 pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfig> {
-    config(backtest, None)
+    config(backtest, Run::Backtest)
 }
 
-/// The run config of a dataset run of `backtest`: that of `run_config`,
-/// its execution engine purging closed orders and positions
-/// `DATASET_PURGE_MINS` after they close, every `DATASET_PURGE_MINS`.
+/// The run config of a dataset run of `backtest`: that of `run_config` as
+/// a dataset run's (`Run::Dataset`), its accounts frozen and margining
+/// nothing, its cache purged as it goes.
 pub(super) fn dataset_run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfig> {
-    let exec_engine = ExecutionEngineConfig::builder()
-        .purge_closed_orders_interval_mins(DATASET_PURGE_MINS)
-        .purge_closed_orders_buffer_mins(DATASET_PURGE_MINS)
-        .purge_closed_positions_interval_mins(DATASET_PURGE_MINS)
-        .purge_closed_positions_buffer_mins(DATASET_PURGE_MINS)
-        .build()?;
-    config(backtest, Some(exec_engine))
+    config(backtest, Run::Dataset)
 }
 
-/// The run config of `backtest` (see `run_config`), with `exec_engine`, or
-/// Nautilus' default execution engine.
-fn config(
-    backtest: &Backtest,
-    exec_engine: Option<ExecutionEngineConfig>,
-) -> anyhow::Result<BacktestRunConfig> {
+/// The run config of `backtest` for `run` (see `run_config`).
+fn config(backtest: &Backtest, run: Run) -> anyhow::Result<BacktestRunConfig> {
     // Nautilus only checks the engine start against the end, which lets a
     // run starting on its end through.
     let (start, end) = (backtest.start, backtest.end);
@@ -120,7 +140,7 @@ fn config(
     let catalog = catalog_config(&backtest.catalog)?;
     let venues = venues
         .into_iter()
-        .map(|venue| venue_config(backtest, venue))
+        .map(|venue| venue_config(backtest, venue, run))
         .collect::<anyhow::Result<Vec<_>>>()?;
     let (custom, series): (Vec<SeriesSlice>, Vec<SeriesSlice>) =
         backtest.series()?.into_iter().partition(is_custom);
@@ -128,6 +148,17 @@ fn config(
         .into_iter()
         .map(|series| data_config(&catalog, series))
         .collect::<anyhow::Result<Vec<_>>>()?;
+    let exec_engine = match run {
+        Run::Backtest => None,
+        Run::Dataset => Some(
+            ExecutionEngineConfig::builder()
+                .purge_closed_orders_interval_mins(DATASET_PURGE_MINS)
+                .purge_closed_orders_buffer_mins(DATASET_PURGE_MINS)
+                .purge_closed_positions_interval_mins(DATASET_PURGE_MINS)
+                .purge_closed_positions_buffer_mins(DATASET_PURGE_MINS)
+                .build()?,
+        ),
+    };
     let engine_config = BacktestEngineConfig::builder()
         .data_engine(warmup::data_engine_config(&backtest.bar_types))
         .maybe_exec_engine(exec_engine)
@@ -146,18 +177,32 @@ fn config(
         .build()?)
 }
 
-/// The simulated `venue` of `backtest`: a margin account keeping positions
-/// as `backtest.venue_oms` says, with the run's balance if a broker trades
-/// the venue (`venues::has_broker`), else nothing in its currency, its
-/// leverage and the fee model of its commission, filling on the top of the
-/// book on Nautilus' default fill model: a market order fills at the quote
-/// (a buy at the ask, a sell at the bid), or on bars at the last price,
-/// with no slippage, and a limit order whenever touched.
-fn venue_config(backtest: &Backtest, venue: Venue) -> anyhow::Result<BacktestVenueConfig> {
+/// The simulated `venue` of `backtest` for `run`: a margin account keeping
+/// positions as `backtest.venue_oms` says, with the run's balance if a
+/// broker trades the venue (`venues::has_broker`), else nothing in its
+/// currency, and the fee model of its commission, filling on the top of
+/// the book on Nautilus' default fill model: a market order fills at the
+/// quote (a buy at the ask, a sell at the bid), or on bars at the last
+/// price, with no slippage, and a limit order whenever touched. A
+/// backtest's account is at the run's leverage. A dataset run's is frozen,
+/// Nautilus' `frozen_account`: the simulated exchange adjusts none of its
+/// balances (`adjust_account_balance`, backtest/src/exchange.rs) and the
+/// portfolio locks no margin of an account that does not calculate its
+/// state (portfolio/src/portfolio.rs), so trades that lose leave its
+/// balance whole; and it is at `DATASET_LEVERAGE`, margining nothing.
+fn venue_config(
+    backtest: &Backtest,
+    venue: Venue,
+    run: Run,
+) -> anyhow::Result<BacktestVenueConfig> {
     let balance = if venues::has_broker(venue) {
         backtest.balance
     } else {
         Money::zero(backtest.balance.currency)
+    };
+    let leverage = match run {
+        Run::Backtest => backtest.leverage,
+        Run::Dataset => DATASET_LEVERAGE,
     };
     Ok(BacktestVenueConfig::builder()
         .name(venue.as_str())
@@ -165,7 +210,8 @@ fn venue_config(backtest: &Backtest, venue: Venue) -> anyhow::Result<BacktestVen
         .account_type(AccountType::Margin)
         .book_type(BookType::L1_MBP)
         .starting_balances(vec![balance.to_string()])
-        .default_leverage(backtest.leverage)
+        .default_leverage(leverage)
+        .frozen_account(run == Run::Dataset)
         .fee_model(backtest.commission.fee_model()?)
         .build()?)
 }
