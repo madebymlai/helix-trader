@@ -783,6 +783,39 @@ fn a_trade_without_equity_in_its_pnl_currency_sends_nothing_and_logs_why() {
     );
 }
 
+/// The cache holds no account of Pepperstone yet, as before its execution
+/// client reports one: there is no equity to size the trade on, and it
+/// sends nothing, saying the account holds none, not that its size rounds
+/// down to zero.
+#[test]
+fn a_trade_on_an_account_holding_no_equity_sends_nothing_and_logs_why() {
+    let name = "a_trade_on_an_account_holding_no_equity_sends_nothing_and_logs_why";
+    if !log_capture::alone(module_path!(), name) {
+        return;
+    }
+    log_capture::capture(log::LevelFilter::Info);
+    let cache = Rc::new(RefCell::new(Cache::default()));
+    cache
+        .borrow_mut()
+        .add_instrument(aud(InstrumentId::from(AUD)))
+        .unwrap();
+    let (mut probe, clock) = registered_on(&cache, STRATEGY, NOW);
+
+    buy(bracket(4))
+        .send(&mut probe, stake(), unconverted())
+        .unwrap();
+
+    assert_eq!(orders(&probe), []);
+    assert_eq!(clock.borrow().timer_names(), Vec::<&str>::new());
+    let lines = log_capture::lines();
+    assert!(
+        lines.iter().any(|line| line.starts_with("ERROR")
+            && line.contains(AUD)
+            && line.contains("no equity")),
+        "{lines:#?}"
+    );
+}
+
 /// EUR/USD at Pepperstone, the pair a config converts EUR through into
 /// USD, the P&L currency of AUD/USD: a CFD as AUD/USD at Pepperstone is,
 /// of EUR.

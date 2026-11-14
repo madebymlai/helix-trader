@@ -234,12 +234,13 @@ impl Trade {
     /// out, as are those of other processes, which this cache does not hold
     /// anyway, one process running one strategy.
     ///
-    /// It sends nothing, and logs why, if `rates` do not convert the
-    /// account's equity into the P&L currency (no pair reaching a currency
-    /// it holds, or no rate cached yet), or if its size rounds down to
-    /// none. Nautilus' risk engine judges what it sends: a quantity below
-    /// the instrument's minimum, or a margin beyond the free balance, is
-    /// denied.
+    /// It sends nothing, and logs why, if the account holds no equity (the
+    /// cache holds no balance of it, as before its client reports one), if
+    /// `rates` do not convert the account's equity into the P&L currency
+    /// (no pair reaching a currency it holds, or no rate cached yet), or if
+    /// its size rounds down to none. Nautilus' risk engine judges what it
+    /// sends: a quantity below the instrument's minimum, or a margin beyond
+    /// the free balance, is denied.
     ///
     /// # Errors
     ///
@@ -256,7 +257,17 @@ impl Trade {
         let instrument = linear(strategy, instrument_id)?;
         let currency = instrument.cost_currency();
         let account = routed_account(strategy, venue);
+        let named = || account.map_or_else(|| format!("of {venue}"), |account| account.to_string());
         let held = equity(strategy, venue, account);
+        if held.is_empty() {
+            log::error!(
+                "not sending the {} of {instrument_id} at a stake of {stake}: the account {} \
+                 holds no equity, the cache holding no balance of it",
+                self.side,
+                named()
+            );
+            return Ok(());
+        }
         let converted = rates.convert(&strategy.cache_ref(), held.iter().copied(), currency);
         let Some(equity) = converted? else {
             let held: Vec<String> = held.iter().map(ToString::to_string).collect();
@@ -264,7 +275,7 @@ impl Trade {
                 "not sending the {} of {instrument_id} at a stake of {stake}: the account {} \
                  holds [{}], not converted into {currency}, the currency of its P&L, at {rates}",
                 self.side,
-                account.map_or_else(|| format!("of {venue}"), |account| account.to_string()),
+                named(),
                 held.join(", ")
             );
             return Ok(());
