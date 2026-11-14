@@ -58,9 +58,11 @@ pub struct LseDataClientConfig {
     /// The instruments the client streams, on a live node: `connect` opens
     /// the socket each one's market streams on, authenticates the key, and
     /// fails unless each socket lists its instruments and allows them all
-    /// on its one connection; for `GLBX` contracts, LSE's CME stream, with
-    /// the CME key, subscribing them all, and fails with LSE's refusal of
-    /// the subscription; and for `XNAS` stocks, LSE's Nasdaq TotalView
+    /// on its one connection, an `OPRA` contract's underlying's chain
+    /// taking one subscription, whose every contract the client then
+    /// streams, named here or not; for `GLBX` contracts, LSE's CME stream,
+    /// with the CME key, subscribing them all, and fails with LSE's refusal
+    /// of the subscription; and for `XNAS` stocks, LSE's Nasdaq TotalView
     /// stream, with the Nasdaq key, alike. None on a fill's node, which
     /// opens no socket.
     #[builder(default)]

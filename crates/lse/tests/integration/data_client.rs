@@ -404,6 +404,63 @@ async fn an_underlying_s_chain_ends_with_the_trades_of_its_last_contract_subscri
     );
 }
 
+/// LSE's chain of AAPL carries every listed contract of AAPL, so the
+/// client streams one the config does not name, of an underlying whose
+/// chain it streams, as a strategy following strikes subscribes it: the
+/// 325 put of September 2027, the config naming the 355 call alone,
+/// receives its trade, its chain asked once.
+#[tokio::test]
+async fn an_option_contract_of_an_underlying_the_client_streams_receives_its_trades_unnamed() {
+    let socket = MockLseSocket::start(|_, frame| data_ws_answer(frame));
+    let (mut client, connected, mut events) = streaming_options(&socket, &[AAPL_CALL]).await;
+    connected.unwrap();
+
+    client
+        .subscribe_trades(trades_subscribed(&[AAPL_PUT_2027]))
+        .unwrap();
+
+    let event = next_event(&mut events).await;
+    let DataEvent::Data(Data::Trade(trade)) = event else {
+        panic!("not a trade: {event:?}")
+    };
+    assert_eq!(
+        (trade.instrument_id, trade.price, trade.size),
+        (
+            InstrumentId::from(AAPL_PUT_2027),
+            Price::from("19.10"),
+            Quantity::from(2)
+        )
+    );
+    assert_eq!(
+        sent(&socket),
+        [json!({"action": "subscribe_options", "underlying": "AAPL"})]
+    );
+}
+
+/// A contract the config does not name ends its chain as one it names.
+#[tokio::test]
+async fn an_option_contract_the_config_does_not_name_ends_its_chain_with_its_trades() {
+    let socket = MockLseSocket::start(|_, frame| data_ws_answer(frame));
+    let (mut client, connected, _) = streaming_options(&socket, &[AAPL_CALL]).await;
+    connected.unwrap();
+    client
+        .subscribe_trades(trades_subscribed(&[AAPL_PUT_2027]))
+        .unwrap();
+
+    client
+        .unsubscribe_trades(&trades_ended(AAPL_PUT_2027))
+        .unwrap();
+
+    socket.wait_until(|received| received.len() == 3).await;
+    assert_eq!(
+        sent(&socket),
+        [
+            json!({"action": "subscribe_options", "underlying": "AAPL"}),
+            json!({"action": "unsubscribe_options", "underlying": "AAPL"}),
+        ]
+    );
+}
+
 /// A chain takes one of the 16 subscriptions data-ws allows the free
 /// key a connection, however many of its contracts are streamed, and
 /// the socket's list holds no contract to check them against: 15
@@ -463,21 +520,37 @@ async fn trades_of_an_option_contract_the_cache_does_not_define_fail_naming_it_u
     assert_eq!(sent(&socket), Vec::<Value>::new());
 }
 
+/// A contract of another underlying would take a chain of its own, a
+/// subscription beyond those `connect` checked against LSE's limit: it
+/// is refused though the cache defines it.
 #[tokio::test]
-async fn trades_of_an_option_contract_the_client_does_not_stream_fail_naming_it() {
+async fn trades_of_an_option_contract_of_an_underlying_the_client_does_not_stream_fail_naming_it() {
+    const MSFT_CALL: &str = "MSFT  261120C00500000.OPRA";
+    let InstrumentAny::OptionContract(mut msft_call) = aapl_call() else {
+        unreachable!("an option contract")
+    };
+    msft_call.id = InstrumentId::from(MSFT_CALL);
+    msft_call.raw_symbol = Symbol::from("MSFT  261120C00500000");
+    msft_call.underlying = "MSFT".into();
     let socket = MockLseSocket::start(|_, frame| data_ws_answer(frame));
-    let (mut client, connected, _) = streaming_options(&socket, &[AAPL_CALL]).await;
+    let config = LseDataClientConfig::builder()
+        .api_key(SecretString::from(API_KEY))
+        .base_url_ws_data(socket.url().to_string())
+        .stream_ids(vec![InstrumentId::from(AAPL_CALL)])
+        .build();
+    let (mut client, connected, _) = connecting(
+        &config,
+        vec![aapl_call(), InstrumentAny::OptionContract(msft_call)],
+    )
+    .await;
     connected.unwrap();
 
     let err = client
-        .subscribe_trades(trades_subscribed(&[AAPL_PUT_2027]))
+        .subscribe_trades(trades_subscribed(&[MSFT_CALL]))
         .unwrap_err();
 
     let err = format!("{err:#}");
-    assert!(
-        err.contains(&format!("{AAPL_PUT_2027} is not among")),
-        "{err}"
-    );
+    assert!(err.contains(MSFT_CALL), "{err}");
     assert_eq!(sent(&socket), Vec::<Value>::new());
 }
 
