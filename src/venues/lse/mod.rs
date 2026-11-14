@@ -118,18 +118,8 @@ fn node_client(config: LseDataClientConfig) -> NodeClient {
 /// is on no venue, so it takes the routes of theirs (`RoutingConfig::venues`);
 /// no data client is the default (see `live::node::Clients`).
 pub(super) fn live_clients(instrument_ids: &[InstrumentId]) -> Clients {
-    clients(
-        LseDataClientConfig::builder()
-            .stream_ids(instrument_ids.to_vec())
-            .build(),
-    )
-}
-
-/// The live node's clients on `config`, routed the venues of the
-/// instruments it streams.
-pub(super) fn clients(config: LseDataClientConfig) -> Clients {
     let mut venues: Vec<String> = Vec::new();
-    for id in &config.stream_ids {
+    for id in instrument_ids {
         let venue = id.venue.to_string();
         if !venues.contains(&venue) {
             venues.push(venue);
@@ -137,7 +127,11 @@ pub(super) fn clients(config: LseDataClientConfig) -> Clients {
     }
     Clients {
         data_factory: Box::new(LseDataClientFactory::new()),
-        data_config: Box::new(config),
+        data_config: Box::new(
+            LseDataClientConfig::builder()
+                .stream_ids(instrument_ids.to_vec())
+                .build(),
+        ),
         data_routing: RoutingConfig {
             default: false,
             venues: Some(venues),
