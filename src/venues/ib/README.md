@@ -10,7 +10,7 @@ History starts or reuses the Docker paper gateway, even for a live account. Set 
 
 The requested end must be at least one minute before now, checked before starting the gateway: IB can return an in-progress bar, which would otherwise be stored and skipped on resume. IB gives bar opens; the adapter stamps minute bars at their close (`ts_event` and `ts_init`). Full-session data is used for consistency with live; partial session bars can still have misleading close timestamps at coarser cadences.
 
-The history client walks backwards with overlapping explicit-duration requests. IB's start-based segmentation can leave silent gaps because its day durations count trading sessions rather than 24-hour days (nautilus_trader#5384). Expired futures are resolved using explicit contracts with `includeExpired`; availability is limited and varies, so verify depth for the instrument. IB can return flat zero-volume bars after expiry. Its continuous future is not a substitute for per-contract history: its roll and adjustment differ and it is not directly tradable.
+The history client walks backwards with overlapping explicit-duration requests, each one IB answers within the request timeout: a request by start over the whole range, which Nautilus' IB client sends as one request between its bounds (nautilus_trader#5621), took 1,164 s for a year of minute bars against the 60 s timeout (measured 2026-11-08). Expired futures are resolved using explicit contracts with `includeExpired`; availability is limited and varies, so verify depth for the instrument. IB can return flat zero-volume bars after expiry. Its continuous future is not a substitute for per-contract history: its roll and adjustment differ and it is not directly tradable.
 
 IB's simplified IDs use the contract exchange as venue. Configure MIC mappings explicitly when matching another source; automatic exchange-to-MIC conversion can be nondeterministic where an exchange has multiple MICs. See [instrument identity](../../catalog/README.md).
 
@@ -34,7 +34,7 @@ IB is netting. Its execution adapter denies reduce-only and post-only orders, so
 
 Live bars use full-session IB minute TRADES bars, matching history. Market orders can be priced from cached LAST bars; MID bars alone do not supply that price. Warmup ends at the request time, excluding the partial minute; the live subscription starts there. The data client does not write its historical answer back to the catalog.
 
-IB counts a duration of days as sessions, the current one included, so a multi-day request can lose the oldest session. Warmup asks in windows under a day, which IB's client asks in seconds, and holds every bar of IB's history over them. IB's client reports a failed history request as an answer with what it got, so a window failing leaves a gap in the warmup with no failure. See [history](#history) for history limitations.
+Warmup asks in windows under a day: IB's client asks each as one request between its bounds (nautilus_trader#5621), which goes to IB in seconds, where a day's window would go as `3 D`, IB counting days in sessions, three fetched to keep one day's bars. It holds every bar of IB's history over them. IB's client reports a failed history request as an answer with what it got, so a window failing leaves a gap in the warmup with no failure. See [history](#history) for history limitations.
 
 ## Tests
 
