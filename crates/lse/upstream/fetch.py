@@ -1,29 +1,38 @@
-"""Copies the text of LSE's documentation beside this script.
+"""Copies LSE's documentation beside this script: the pages of its site, under
+site/, and the files of its lse-data repository's docs/, under lse-data/docs/.
 
 LSE's site is a JavaScript bundle loading a module for each page. A page is
 documentation when it is laid out by the site's documentation kit (its
 module imports DocKit and gives the layout a `rail`, its sidebar of
 contents): the API and WebSocket documentation, and the terms and licence,
-on 14 November 2026. Every module the bundle loads is read to find them, so
-a page added is copied and the copy of a page removed is deleted.
-
-A page's module is read as text and never run: each string of the page, a
+on 14 November 2026. Every module the bundle loads is read to find them. A
+page's module is read as text and never run: each string of the page, a
 paragraph a line, its inline code joined into it; table rows and objects of
 strings as cells joined by " | "; class names, element tags, React keys and
 module paths left out, so that a redeploy that changes no text changes no
 line. Each copy is named by its page's module.
 
+lse-data's docs/ is copied as its main branch holds it, file for file.
+
+A page or a file added is copied, and the copy of one removed is deleted.
+Everything is read before any copy is written or deleted.
+
 Usage: python3 crates/lse/upstream/fetch.py
 Then `git diff crates/lse/upstream/` shows what LSE changed since the copies
 committed last (see the crate's README, "LSE's documentation").
 """
+import json
 import re
 import sys
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 SITE = "https://londonstrategicedge.com"
+REPO = "londonstrategicedge/lse-data"
+# The directories of the copies, each source's own.
+ROOTS = ("site", "lse-data/docs")
 # A page laid out by the documentation kit, and its module's name.
 DOCUMENT = re.compile(r'from"\./DocKit-[\w-]+\.js".*\brail:', re.S)
 MODULE = re.compile(r"(.+)-[\w-]{8}\.js")
@@ -32,16 +41,16 @@ MODULE = re.compile(r"(.+)-[\w-]{8}\.js")
 def get(url):
     request = urllib.request.Request(url, headers={"User-Agent": "lse-docs-copy"})
     with urllib.request.urlopen(request, timeout=60) as response:
-        return response.headers.get_content_type(), response.read().decode("utf-8")
+        return response.headers.get_content_type(), response.read()
 
 
 def module(url):
     """The JavaScript at `url`, failing on the page LSE's site answers a
     file it does not have with."""
-    kind, text = get(url)
+    kind, body = get(url)
     if kind != "text/javascript" and kind != "application/javascript":
         sys.exit(f"{url} answered {kind}, not a script: LSE's site has no such file")
-    return text
+    return body.decode("utf-8")
 
 
 def one(pattern, text, where):
@@ -306,23 +315,50 @@ def text(src):
     return "\n".join(line for line in lines if line.strip()) + "\n"
 
 
-def main():
+def site_pages():
+    """The text of each page of LSE's documentation kit, by its copy's name."""
     _, html = get(f"{SITE}/")
-    index = one(r'src="(/assets/index-[\w-]+\.js)"', html, SITE)
+    index = one(r'src="(/assets/index-[\w-]+\.js)"', html.decode("utf-8"), SITE)
     files = sorted(set(re.findall(r'import\("\./([\w-]+\.js)"\)', module(SITE + index))))
     with ThreadPoolExecutor(8) as pool:
         sources = pool.map(lambda file: module(f"{SITE}/assets/{file}"), files)
         documents = {f: src for f, src in zip(files, sources) if DOCUMENT.search(src)}
     if not documents:
         sys.exit(f"none of the {len(files)} modules of {index} is a page of LSE's documentation kit")
+    return {
+        f"site/{MODULE.fullmatch(f).group(1)}.txt": text(src).encode("utf-8")
+        for f, src in documents.items()
+    }
+
+
+def repo_docs():
+    """Each file of lse-data's docs/ on its main branch, by its copy's name."""
+    sha = json.loads(get(f"https://api.github.com/repos/{REPO}/commits/main")[1])["sha"]
+    tree = json.loads(get(f"https://api.github.com/repos/{REPO}/git/trees/{sha}?recursive=1")[1])
+    if tree["truncated"]:
+        sys.exit(f"GitHub listed {REPO} at {sha} in part")
+    paths = [e["path"] for e in tree["tree"] if e["type"] == "blob" and e["path"].startswith("docs/")]
+    if not paths:
+        sys.exit(f"{REPO} at {sha} has no docs/")
+    raw = f"https://raw.githubusercontent.com/{REPO}/{sha}/"
+    with ThreadPoolExecutor(8) as pool:
+        files = pool.map(lambda path: get(raw + urllib.parse.quote(path))[1], paths)
+        return {f"lse-data/{path}": body for path, body in zip(paths, files)}
+
+
+def main():
+    copies = {**site_pages(), **repo_docs()}
     here = Path(__file__).parent
-    copies = {here / f"{MODULE.fullmatch(f).group(1)}.txt": text(src) for f, src in documents.items()}
-    for stale in set(here.glob("*.txt")) - copies.keys():
-        stale.unlink()
-        print(f"{stale.name}: no longer a page of LSE's documentation, deleted")
-    for copy, page in sorted(copies.items()):
-        copy.write_text(page, encoding="utf-8")
-        print(copy.name)
+    kept = {here / name for name in copies}
+    for root in ROOTS:
+        for stale in sorted(p for p in (here / root).rglob("*") if p.is_file() and p not in kept):
+            stale.unlink()
+            print(f"{stale.relative_to(here)}: gone upstream, deleted")
+    for name, body in sorted(copies.items()):
+        path = here / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(body)
+        print(name)
 
 
 if __name__ == "__main__":
