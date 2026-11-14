@@ -46,7 +46,8 @@ use crate::model::launcher::RetrainActor;
 /// in the node builder's `HashMap` order of them (crates/live/src/node/
 /// builder.rs:94, :642), and then refuses another made the default
 /// (`set_default_client`, registry.rs:101); its execution engine makes none
-/// so.
+/// so. Helix makes no data client the default, routing every venue a run
+/// reads instead, so nothing depends on which Nautilus makes it.
 pub struct Clients {
     pub data_factory: Box<dyn DataClientFactory>,
     pub data_config: Box<dyn ClientConfig>,

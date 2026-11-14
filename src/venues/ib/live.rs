@@ -100,7 +100,8 @@ fn configs(gateway: &IbGateway, account: &IbAccount, instrument_ids: &[Instrumen
 impl IbClients {
     /// The factories and configs, for the node: the data client routed the
     /// venues of `data_venues`, those whose live data is IB's, and none if
-    /// none is, never the default (see `live::node::Clients`); the execution
+    /// none is, helix making it not the default, which Nautilus may make it,
+    /// nothing depending on that (see `live::node::Clients`); the execution
     /// client the default route of orders, since IB trades many venues, GLBX
     /// among them, whose data is LSE's.
     pub(crate) fn into_node_clients(self, data_venues: &[Venue]) -> Clients {
@@ -166,8 +167,8 @@ mod tests {
         assert_eq!(created, Broker::Ib.oms_type());
     }
 
-    /// Never the default of data: Nautilus makes the first data client on
-    /// no venue the default, and refuses another made it after.
+    /// Not made the default of data: Nautilus makes the first data client
+    /// on no venue the default itself, and refuses another made it after.
     #[test]
     fn the_data_client_is_routed_its_venues_and_the_execution_client_takes_every_order() {
         let ibis = || configs(&gateway(), &paper(), &[sxr8()]);

@@ -1,6 +1,6 @@
 # Futures rolls
 
-The calendar maps futures roots to dated contracts. Nautilus' data sources and venues use dated contracts; its continuous bars take a caller-supplied transition table. A root is an instrument listed in `calendar.toml`; every other instrument, including a dated contract or a vendor's continuous symbol, is plain and maps to itself. Configs need no roll flag.
+The calendar maps futures roots to dated contracts. Nautilus' data sources and venues use dated contracts; its continuous bars take a caller-supplied transition table. A root is an instrument listed in `calendar.toml`; every other instrument, including a dated contract or a vendor's continuous symbol, is plain and maps to itself. No source serves a vendor's continuous symbol now: Databento's `GC.v.0.GLBX` filled from Databento until LSE took `GLBX`'s history, and LSE, which serves dated contracts alone, refuses it, so read the root, `GC.GLBX`, whose contracts the calendar rolls. Configs need no roll flag.
 
 ## Boundaries and subscriptions
 

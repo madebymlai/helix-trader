@@ -674,10 +674,11 @@ impl LiveRoutes {
 /// client is routed the venues whose live data is IB's, and its execution
 /// client takes the default route of orders, every order but OKX's and the
 /// cTrader brokers'. So every venue the run reads has a route of its data,
-/// and no data client is the default: Nautilus makes the first data client
-/// on no venue it registers the default, LSE's or IB's in no set order, and
-/// would refuse IB's made the default after LSE's (see
-/// `live::node::Clients`). No source streams custom data of no
+/// and helix makes no data client the default: Nautilus makes the first
+/// data client on no venue it registers the default itself, LSE's or IB's
+/// in no set order, and would refuse IB's made the default after LSE's
+/// (see `live::node::Clients`); nothing depends on which, every venue read
+/// having a route. No source streams custom data of no
 /// instrument, LSE's rows, so a run reading any is refused before anything
 /// connects, and so is one reading a series of LSE's venues LSE's client
 /// does not stream (`lse::check_streamed`): external bars, LSE streaming no
@@ -1549,7 +1550,10 @@ mod tests {
             broker: Some(Broker::CTrader(broker)),
         };
         // An exchange's listings, under the ids Databento gives them, CME
-        // Globex's, Nasdaq TotalView's and US options', streamed from LSE.
+        // Globex's, Nasdaq TotalView's and US options', streamed from LSE;
+        // a row is its venue's, so a GLBX root and a Databento continuous
+        // symbol take GLBX's too, which LSE's client refuses the latter of,
+        // serving dated contracts alone.
         let exchange = Row {
             definitions: DefinitionsSource::Databento,
             history: HistorySource::Lse,
@@ -1869,9 +1873,9 @@ mod tests {
         assert_eq!(Row::of(*LSEDGE_VENUE).history, HistorySource::Lse);
     }
 
-    /// LSE's data client alone, on the route of LSEDGE, the default left to
-    /// IB; its key is read when the node creates it, so nothing is read or
-    /// connected here.
+    /// LSE's data client alone, on the route of LSEDGE, not made the
+    /// default; its key is read when the node creates it, so nothing is read
+    /// or connected here.
     #[tokio::test]
     async fn a_run_reading_lsedge_instruments_streams_them_from_lse_routed_lsedge_with_no_broker() {
         let requirements = ticks(&[
