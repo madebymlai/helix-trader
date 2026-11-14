@@ -25,14 +25,24 @@
 //! live ones the strategy hands it, these held until it ends
 //! (`strategy::warmup`'s `hold`, which goes once Nautilus holds them, the
 //! set then registered for quotes and trades again); in a replay, as they
-//! come. Nautilus routes no depth, book deltas or custom data to
-//! indicators either: a live warmup hands the set its own (`BookIndicator`,
-//! `Warmup::on_historical_book_depth` and `on_historical_book_deltas`;
-//! `CustomDataIndicator`, `Warmup::on_historical_data`), and no strategy
-//! hands it live or replayed ones, none declaring a feature on them, which
-//! would read a live warmup's alone. Bars built from a warmup's quotes,
-//! trades or source bars reach only the cache, not the indicators: the
-//! strategy's warmup hands them to `handle_bar` (`Warmup::on_data_response`).
+//! come. Nautilus routes no depth or book deltas to indicators either: a
+//! live warmup hands the set its own (`BookIndicator`,
+//! `Warmup::on_historical_book_depth` and `on_historical_book_deltas`), and
+//! no strategy hands it live or replayed ones, none declaring a feature on
+//! them, which would read a live warmup's alone. Bars built from a warmup's
+//! quotes, trades or source bars reach only the cache, not the indicators:
+//! the strategy's warmup hands them to `handle_bar`
+//! (`Warmup::on_data_response`).
+//!
+//! A raw feature reads its custom data from Nautilus' cache, which the set
+//! takes from the actor it is registered with (`register`): the data
+//! engine caches each point it processes, live or replayed, before the
+//! strategy's handlers run, one history per data type, and the feature's
+//! value is its `read` of the latest point of its data type
+//! (`Cache::custom_data`), read as the set's values are. The data engine
+//! does not cache a request's response, so a live warmup adds its own
+//! (`Warmup::on_historical_data`). A raw feature is cold until the cache
+//! holds a point of its data type.
 //!
 //! A feature on the ticks or custom data of a futures root (`GC.GLBX`, see
 //! `rolls`) reads the contract standing for it: `register` sets it from
@@ -41,10 +51,12 @@
 //! The set's tick series (`ticks`), custom data among them, are what a
 //! `rolls::Roller` subscribes to and a live warmup requests, the model
 //! handle's; at the roller's transition, `roll` moves the root's features
-//! to the post contract and resets them (Nautilus' `Indicator::reset`, a
-//! raw feature to no value): their windows never mix two contracts, which
-//! trade at different prices, and the set is not initialized until they
-//! refill, so decisions wait. Other instruments' features are untouched.
+//! to the post contract and resets them (Nautilus' `Indicator::reset`):
+//! their windows never mix two contracts, which trade at different prices,
+//! and the set is not initialized until they refill, so decisions wait. A
+//! raw feature has no window: it reads the latest point of the post
+//! contract the cache holds, if any. Other instruments' features are
+//! untouched.
 //!
 //! Each update reaches only the features declared on its kind and source.
 //! An update of a kind or source no feature reads is a no-op, so the
@@ -62,8 +74,9 @@
 //! `meta_row`).
 //! A feature exposes its current value through `Feature`, which every
 //! Nautilus moving average has with no extra code. Custom data of an
-//! instrument, which Nautilus' `Indicator` does not handle, feeds a raw
-//! feature: the value a function of the strategy reads from it.
+//! instrument, which Nautilus' `Indicator` does not handle, is read by a
+//! raw feature: the value a function of the strategy reads from the
+//! latest point the cache holds.
 //!
 //! The set records, for each instrument, the time (`ts_init`) of the
 //! latest quote, trade, bar, depth or deltas a feature read
@@ -107,9 +120,12 @@ use std::{
 
 use anyhow::{bail, ensure};
 use jiff::SignedDuration;
-use nautilus_common::actor::{
-    DataActor, DataActorNative,
-    indicators::{ActorIndicator, SharedActorIndicator},
+use nautilus_common::{
+    actor::{
+        DataActor, DataActorNative,
+        indicators::{ActorIndicator, SharedActorIndicator},
+    },
+    cache::Cache,
 };
 use nautilus_core::UnixNanos;
 use nautilus_indicators::indicator::{Indicator, MovingAverage};
@@ -127,8 +143,7 @@ use super::{calibration::Expected, targets::BracketWidth};
 use crate::{
     rolls::{Transition, front},
     strategy::{
-        Declaration, Declared, IndicatorArgs, IndicatorsConfig, TickSeries,
-        warmup::{BookIndicator, CustomDataIndicator},
+        Declaration, Declared, IndicatorArgs, IndicatorsConfig, TickSeries, warmup::BookIndicator,
     },
 };
 
@@ -206,16 +221,17 @@ pub trait OverBracket: Feature {
 /// How a raw feature reads its value from a custom data point.
 type Read = Box<dyn Fn(&CustomData) -> f64>;
 
-/// A declared feature: its source, and the indicator, or the raw value,
-/// fed from it.
+/// A declared feature: its source, and the indicator fed from it, or how a
+/// raw feature reads its value.
 enum Slot {
     Quotes(Reading, Box<dyn Feature>),
     Trades(Reading, Box<dyn Feature>),
     Bars(BarType, Box<dyn Feature>),
     Depth(Reading, Box<dyn Feature>),
     Deltas(Reading, Box<dyn Feature>),
-    /// The custom data of a type name, of the instrument read.
-    Data(Reading, String, Read, Option<f64>),
+    /// The custom data of a type name, of the instrument read, read from
+    /// the cache.
+    Data(Reading, String, Read),
 }
 
 /// The instrument whose ticks a feature reads, a futures root or a plain
@@ -236,6 +252,9 @@ pub struct FeatureSet {
     width: Option<Rc<BracketWidth>>,
     /// The time of the latest update of each instrument a feature read.
     updates: RefCell<BTreeMap<InstrumentId, UnixNanos>>,
+    /// The cache of the actor the set is registered with, which its raw
+    /// features read (`register`).
+    cache: RefCell<Option<Rc<RefCell<Cache>>>>,
     warmup: SignedDuration,
     fingerprint: Fingerprint,
 }
@@ -317,19 +336,22 @@ impl FeatureSet {
     }
 
     /// The value of each feature, in the order of the names, if every
-    /// feature is initialized.
+    /// feature is initialized: a raw feature's read from the cache now.
     #[must_use]
     pub fn values(&self) -> Option<Vec<f64>> {
-        self.slots.borrow().iter().map(Slot::value).collect()
+        let cache = self.cache.borrow();
+        let cache = cache.as_ref().map(|cache| cache.borrow());
+        self.slots
+            .borrow()
+            .iter()
+            .map(|slot| slot.value(cache.as_deref()))
+            .collect()
     }
 
     /// Whether every feature is initialized.
     #[must_use]
     pub fn initialized(&self) -> bool {
-        self.slots
-            .borrow()
-            .iter()
-            .all(|slot| slot.value().is_some())
+        self.values().is_some()
     }
 
     /// The fingerprint of the feature names in order, the arguments of
@@ -394,11 +416,13 @@ impl FeatureSet {
 
     /// Registers the set with `actor`'s Nautilus indicators, from its
     /// `on_start`: each tick or raw feature reads the contract standing for
-    /// its instrument now (`rolls::front`), and the set is registered for the
-    /// bars of each bar type a feature reads (`register_contracts`). Nautilus
-    /// registers an indicator once per source, so a set registered again, on
-    /// a restart, gets each bar once.
+    /// its instrument now (`rolls::front`), the raw features from `actor`'s
+    /// cache, and the set is registered for the bars of each bar type a
+    /// feature reads (`register_contracts`). Nautilus registers an indicator
+    /// once per source, so a set registered again, on a restart, gets each
+    /// bar once.
     pub fn register<A: DataActor + DataActorNative>(self: &Rc<Self>, actor: &mut A) {
+        *self.cache.borrow_mut() = Some(actor.cache_rc());
         let now = actor.clock().utc_now();
         for slot in self.slots.borrow_mut().iter_mut() {
             if let Some(reading) = slot.reading_mut() {
@@ -417,10 +441,10 @@ impl FeatureSet {
     /// Moves the features reading a root rolled by `roll` (those on its
     /// pre contract that are not the contract itself, read as a plain
     /// instrument), tick and raw features alike, to its post contract, and
-    /// resets them (`Indicator::reset`, a raw
-    /// feature to no value): they are cold until they refill on the post
-    /// contract, so the set is not initialized and decisions wait. The
-    /// other features are untouched. From the roller's transition
+    /// resets the tick features (`Indicator::reset`): they are cold until
+    /// they refill on the post contract, so the set is not initialized and
+    /// decisions wait; a raw feature reads the post contract's latest point
+    /// the cache holds. The other features are untouched. From the roller's transition
     /// (`rolls::Roller::on_time_event`).
     pub fn roll<A: DataActorNative>(self: &Rc<Self>, actor: &mut A, roll: &Transition) {
         for slot in self.slots.borrow_mut().iter_mut() {
@@ -481,34 +505,21 @@ impl BookIndicator for FeatureSet {
     }
 }
 
-/// The warmup's side of the set for custom data, which Nautilus routes to
-/// no indicator: a live warmup hands it that of its responses
-/// (`Warmup::feeding_custom_data`); no strategy hands it live data (see the
-/// module).
-impl CustomDataIndicator for FeatureSet {
-    /// Feeds `data` to the raw features declared on its data type.
-    fn handle_data(&self, data: &CustomData) {
-        for slot in self.slots.borrow_mut().iter_mut() {
-            if let Slot::Data(reading, type_name, read, value) = slot
-                && DataType::new(type_name, None, Some(reading.contract.to_string()))
-                    == data.data_type
-            {
-                *value = Some(read(data));
-            }
-        }
-    }
-}
-
 impl Slot {
-    /// The feature's value, if it is initialized.
-    fn value(&self) -> Option<f64> {
+    /// The feature's value, if it is initialized: a raw feature's read of
+    /// the latest point of its data type in `cache`, none before the set is
+    /// registered with one.
+    fn value(&self, cache: Option<&Cache>) -> Option<f64> {
         match self {
             Self::Quotes(_, feature)
             | Self::Trades(_, feature)
             | Self::Bars(_, feature)
             | Self::Depth(_, feature)
             | Self::Deltas(_, feature) => feature.initialized().then(|| feature.value()),
-            Self::Data(.., value) => *value,
+            Self::Data(reading, type_name, read) => {
+                let data_type = DataType::new(type_name, None, Some(reading.contract.to_string()));
+                cache?.custom_data(&data_type).map(&**read)
+            }
         }
     }
 
@@ -536,8 +547,8 @@ impl Slot {
         }
     }
 
-    /// Makes the feature cold: an indicator reset (`Indicator::reset`), a
-    /// raw feature without a value.
+    /// Makes the feature cold: an indicator reset (`Indicator::reset`); a
+    /// raw feature holds nothing to reset, reading the cache.
     fn reset(&mut self) {
         match self {
             Self::Quotes(_, feature)
@@ -545,7 +556,7 @@ impl Slot {
             | Self::Bars(_, feature)
             | Self::Depth(_, feature)
             | Self::Deltas(_, feature) => feature.reset(),
-            Self::Data(.., value) => *value = None,
+            Self::Data(..) => {}
         }
     }
 
@@ -817,7 +828,8 @@ impl FeatureSetBuilder {
 
     /// Declares a raw feature, named `name`, on the custom data
     /// `type_name` of `instrument_id` (see `strategy::TickSeries`): its
-    /// value is the last `read` of a data point, initialized by the first.
+    /// value is `read` of the latest point of that data type the cache
+    /// holds, cold until it holds one.
     #[must_use]
     pub fn data(
         self,
@@ -832,7 +844,6 @@ impl FeatureSetBuilder {
                 Reading::of(instrument_id),
                 type_name.to_string(),
                 Box::new(read),
-                None,
             ),
         )
     }
@@ -919,6 +930,7 @@ impl FeatureSetBuilder {
             slots: RefCell::new(self.slots),
             width: self.width,
             updates: RefCell::default(),
+            cache: RefCell::default(),
             warmup: self.warmup,
             fingerprint,
         }))

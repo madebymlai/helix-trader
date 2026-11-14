@@ -4,12 +4,14 @@
 //! handlers, in time order with the quotes, and nothing else the catalog
 //! stores. The probe subscribes to the quotes of IC's gold, the deltas of
 //! CME gold and its imbalances, keyed by its id, and records each it gets.
-//! One node per thread, so one run per test.
+//! A raw feature on the imbalances reads each from Nautilus' cache, where
+//! the data engine puts it before the strategy's handler runs. One node per
+//! thread, so one run per test.
 
 use std::{cell::RefCell, rc::Rc};
 
 use crate::common::{glbx, ic};
-use helix_trader::{backtest::Backtest, strategy::TickSeries};
+use helix_trader::{backtest::Backtest, model::features::FeatureSet, strategy::TickSeries};
 use nautilus_common::actor::DataActor;
 use nautilus_core::UnixNanos;
 use nautilus_model::{
@@ -78,6 +80,30 @@ impl DataActor for Probe {
             .expect("an imbalance");
         let got = Got::Imbalance(imbalance.value, imbalance.ts_init);
         self.got.borrow_mut().push(got);
+        Ok(())
+    }
+}
+
+/// Registers a raw feature on CME gold's imbalances at its start,
+/// subscribes to them, and records the feature's values at each it gets.
+#[derive(Debug)]
+struct Reader {
+    core: StrategyCore,
+    features: Rc<FeatureSet>,
+    read: Rc<RefCell<Vec<Option<Vec<f64>>>>>,
+}
+
+nautilus_strategy!(Reader);
+
+impl DataActor for Reader {
+    fn on_start(&mut self) -> anyhow::Result<()> {
+        Rc::clone(&self.features).register(self);
+        self.subscribe_data(glbx::imbalance_type(), None, None);
+        Ok(())
+    }
+
+    fn on_data(&mut self, _data: &CustomData) -> anyhow::Result<()> {
+        self.read.borrow_mut().push(self.features.values());
         Ok(())
     }
 }
@@ -179,4 +205,47 @@ fn deltas_and_custom_data_the_strategy_does_not_declare_are_not_replayed() {
 
     assert_eq!(unquoted(&got), []);
     assert_eq!(got.len(), 360);
+}
+
+/// The feature reads each imbalance the run replays as the strategy gets
+/// it, the data engine having cached it first, from no strategy code.
+#[test]
+fn a_raw_feature_reads_each_replayed_imbalance_from_the_cache() {
+    let catalog = catalog();
+    let features = FeatureSet::builder()
+        .data(
+            glbx::IMBALANCE,
+            InstrumentId::from(glbx::INSTRUMENT_ID),
+            "imbalance",
+            |data| {
+                data.data
+                    .as_any()
+                    .downcast_ref::<glbx::Imbalance>()
+                    .map_or(f64::NAN, |imbalance| imbalance.value)
+            },
+        )
+        .build()
+        .unwrap();
+    let read = Rc::new(RefCell::new(Vec::new()));
+    let reader = Reader {
+        core: StrategyCore::new(StrategyConfig {
+            strategy_id: Some(StrategyId::from("READER-001")),
+            order_id_tag: Some("001".to_string()),
+            ..Default::default()
+        }),
+        features,
+        read: Rc::clone(&read),
+    };
+    let backtest = Backtest {
+        bar_types: vec![],
+        ticks: vec![
+            tick(NautilusDataType::QuoteTick, ic::INSTRUMENT_ID),
+            tick(imbalances(), glbx::INSTRUMENT_ID),
+        ],
+        ..ic::backtest(&catalog)
+    };
+
+    backtest.run(reader).unwrap();
+
+    assert_eq!(read.take(), [Some(vec![-0.25]), Some(vec![0.75])]);
 }

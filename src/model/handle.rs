@@ -103,7 +103,8 @@
 //! older window of the history (`strategy::warmup`'s `hold`); in a replay
 //! the ticks go straight through. Live, the warmup requests the history of
 //! the features' ticks, a root's on the contract standing for it, their
-//! custom data from the catalog alone, handed to the features, and the
+//! custom data from the catalog alone, added to the cache the features
+//! read it from (`FeatureSet::data`), and the
 //! roller's subscriptions continue from its end, so the first decision
 //! after a start is warm. A series of the traded instrument no feature
 //! reads, custom data among them, has no warmup, and its live ticks reach
@@ -156,7 +157,7 @@ use crate::{
     strategy::{
         orders::{self, Trade},
         risk::R,
-        warmup::{self, BookIndicator, CustomDataIndicator, Warmup},
+        warmup::{self, BookIndicator, Warmup},
     },
 };
 
@@ -346,8 +347,7 @@ impl ModelHandle {
         .reading(features.ticks())
         .feeding(Rc::clone(features) as SharedActorIndicator)
         .feeding_ticks(Rc::clone(features) as SharedActorIndicator)
-        .feeding_books(Rc::clone(features) as Rc<dyn BookIndicator>)
-        .feeding_custom_data(Rc::clone(features) as Rc<dyn CustomDataIndicator>);
+        .feeding_books(Rc::clone(features) as Rc<dyn BookIndicator>);
         let roller = match mode {
             Mode::Live { .. } => Roller::live(ticks),
             Mode::Backtest { .. } | Mode::Dataset { .. } => Roller::replayed(ticks),
@@ -612,7 +612,7 @@ macro_rules! model_data_hooks {
         }
 
         fn on_historical_data(&mut self, data: &dyn ::std::any::Any) -> ::anyhow::Result<()> {
-            self.$model.warmup().on_historical_data(data);
+            self.$model.warmup().on_historical_data(self, data);
             Ok(())
         }
 
@@ -746,8 +746,8 @@ mod tests {
     /// (`model_data_hooks!`).
     impl DataActor for Decider {
         fn on_historical_data(&mut self, data: &dyn std::any::Any) -> anyhow::Result<()> {
-            if let Some(warmup) = &self.warmup {
-                warmup.on_historical_data(data);
+            if let Some(warmup) = self.warmup.clone() {
+                warmup.on_historical_data(self, data);
             }
             Ok(())
         }
@@ -2705,6 +2705,39 @@ mod tests {
         assert_eq!(features.values(), Some(vec![-0.5]));
     }
 
+    /// Live on 2026-08-10 at 14:30, the node takes a live imbalance of
+    /// AUD/USD stamped 14:30:00 while the warmup's request is pending, and
+    /// the data engine caches it. The catalog's answer, older, is added to
+    /// the cache behind it, not over it: the feature reads the live one, and
+    /// the cache holds no point the history and the live stream both carry
+    /// twice.
+    #[test]
+    fn a_warmup_answer_older_than_a_live_point_leaves_it_the_latest() {
+        let features = last_imbalance(AUD);
+        let (mut probe, _handle, _sent, _models) =
+            started_live_reading(Rc::clone(&features), vec![imbalances_of(AUD)]);
+        let live = imbalance(AUD, "2026-08-10T14:30:00Z", 0.1);
+        probe.cache_rc().borrow_mut().add_custom_data(live);
+
+        probe.handle_data_response(&catalog_answer(
+            AUD,
+            vec![
+                imbalance(AUD, "2026-08-10T14:00:00Z", 0.25),
+                imbalance(AUD, "2026-08-10T14:29:00Z", -0.5),
+                imbalance(AUD, "2026-08-10T14:30:00Z", 0.1),
+            ],
+        ));
+
+        assert_eq!(features.values(), Some(vec![0.1]));
+        assert_eq!(
+            probe
+                .cache()
+                .custom_data_history(&imbalance_type(AUD))
+                .len(),
+            1
+        );
+    }
+
     /// Live on 2026-08-10 at 14:30, a feature on the imbalances of the
     /// root GC reads GCZ26's, the contract standing for it (GC rolls into
     /// GCZ26 on 2026-07-29, `rolls/README.md`): the start requests GCZ26's
@@ -2749,12 +2782,13 @@ mod tests {
 
     /// A feature on the imbalances of the root GC, in a backtest from
     /// 2026-11-25 at 23:00, reads GCZ26's, the contract standing for it,
-    /// not GCG27's. GC rolls into GCG27 at 00:00 UTC on 2026-11-26: the
-    /// roll's alert, handed to the handle, moves the subscription to
-    /// GCG27's and resets the feature, cold through GCZ26's imbalances after
-    /// it, and the feature reads GCG27's from then.
+    /// not GCG27's, each as the data engine caches it. GC rolls into GCG27
+    /// at 00:00 UTC on 2026-11-26: the roll's alert, handed to the handle,
+    /// moves the subscription to GCG27's, and the feature reads GCG27's
+    /// latest imbalance the cache holds from then, the one of 23:20, then
+    /// later ones, not GCZ26's.
     #[test]
-    fn a_custom_feature_on_a_root_reads_each_contract_in_turn_reset_at_the_roll() {
+    fn a_custom_feature_on_a_root_reads_each_contract_in_turn_from_the_cache() {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, clock) = registered(at("2026-11-25T23:00:00Z"));
         let requirements = DataRequirements {
@@ -2773,22 +2807,34 @@ mod tests {
         )
         .unwrap();
         handle.start(&mut probe).unwrap();
-        let read = |data: CustomData| {
-            features.handle_data(&data);
+        let read = |probe: &Decider, data: CustomData| {
+            probe.cache_rc().borrow_mut().add_custom_data(data);
             features.values()
         };
 
-        let pre = read(imbalance("GCZ26.GLBX", "2026-11-25T23:10:00Z", 0.25));
-        let post_before_the_roll = read(imbalance("GCG27.GLBX", "2026-11-25T23:20:00Z", 0.75));
+        let pre = read(
+            &probe,
+            imbalance("GCZ26.GLBX", "2026-11-25T23:10:00Z", 0.25),
+        );
+        let post_before_the_roll = read(
+            &probe,
+            imbalance("GCG27.GLBX", "2026-11-25T23:20:00Z", 0.75),
+        );
         run_to(&handle, &mut probe, &clock, "2026-11-26T00:30:00Z");
         let rolled = features.values();
-        let pre_after_the_roll = read(imbalance("GCZ26.GLBX", "2026-11-26T00:40:00Z", -0.25));
-        let post = read(imbalance("GCG27.GLBX", "2026-11-26T00:50:00Z", -0.75));
+        let pre_after_the_roll = read(
+            &probe,
+            imbalance("GCZ26.GLBX", "2026-11-26T00:40:00Z", -0.25),
+        );
+        let post = read(
+            &probe,
+            imbalance("GCG27.GLBX", "2026-11-26T00:50:00Z", -0.75),
+        );
 
         assert_eq!(pre, Some(vec![0.25]));
         assert_eq!(post_before_the_roll, Some(vec![0.25]));
-        assert_eq!(rolled, None);
-        assert_eq!(pre_after_the_roll, None);
+        assert_eq!(rolled, Some(vec![0.75]));
+        assert_eq!(pre_after_the_roll, Some(vec![0.75]));
         assert_eq!(post, Some(vec![-0.75]));
         assert_eq!(
             (

@@ -140,10 +140,13 @@
 //! contract's data type) is requested in the same group over the same
 //! window with `request_data`, naming the client `CATALOG`, which no node
 //! registers: no data client serves an instrument's custom data, and
-//! Nautilus answers the request from the catalog alone. Nautilus routes
-//! custom data to no indicator either, so the warmup hands the response's
-//! points to its custom data indicators (`CustomDataIndicator`), oldest
-//! first.
+//! Nautilus answers the request from the catalog alone. The features read
+//! custom data from Nautilus' cache, where the data engine puts each point
+//! it processes, live or replayed, but not a request's response
+//! (`docs/concepts/cache.md`, "Custom data"): the warmup adds the
+//! response's points to the cache itself, oldest first, as Nautilus' docs
+//! ask (`Cache::add_custom_data`), but a point no later than the latest the
+//! cache holds of its data type (`Warmup::on_historical_data`).
 //!
 //! A strategy holds a `Warmup`, which runs these calls, and delegates its
 //! hooks to it; a model strategy's `ModelHandle` builds and owns it, and
@@ -223,13 +226,6 @@ pub trait BookIndicator {
     fn handle_deltas(&self, deltas: &OrderBookDeltas);
 }
 
-/// What a warmup hands the custom data of its responses to, which Nautilus
-/// routes to no indicator: a model strategy's features.
-pub trait CustomDataIndicator {
-    /// Reads `data`, a point of the warmup, oldest first.
-    fn handle_data(&self, data: &CustomData);
-}
-
 /// A strategy's warmup, built from its data requirements for a live node
 /// (`live`) or a replay (`replayed`, a backtest or a dataset run): the one
 /// owner of the protocol above, so that a strategy holds one and its hooks
@@ -248,7 +244,7 @@ pub trait CustomDataIndicator {
 /// first, when it completes, each response's quotes and trades to its tick
 /// indicators (`feeding_ticks`), holding the live ones until the group ends,
 /// its depth and deltas to its book indicators (`feeding_books`), its
-/// custom data to its custom data indicators (`feeding_custom_data`).
+/// custom data to the cache (`on_historical_data`).
 /// On a replay `start` subscribes to the strategy's bar types alone: the
 /// harness subscribes to its own; the live ticks go straight to the tick
 /// indicators.
@@ -269,8 +265,6 @@ pub struct Warmup {
     indicators: Vec<SharedActorIndicator>,
     /// What the warmup's book depth and deltas are handed to.
     books: Vec<Rc<dyn BookIndicator>>,
-    /// What the warmup's custom data is handed to.
-    custom_data: Vec<Rc<dyn CustomDataIndicator>>,
     /// What hands the quotes and trades, of the warmup and live, to the
     /// indicators reading them, holding the live ones while a live start's
     /// group is pending.
@@ -316,7 +310,6 @@ impl Warmup {
             ticks: Vec::new(),
             indicators: Vec::new(),
             books: Vec::new(),
-            custom_data: Vec::new(),
             hold: Hold::default(),
             group: Cell::new(UUID4::new()),
             warming: Cell::new(false),
@@ -350,8 +343,8 @@ impl Warmup {
     /// (`rolls::front`): the series a strategy's features read, which its
     /// roller subscribes to from the warmup's end. Quotes and trades reach
     /// the indicators `feeding_ticks` names; depth and deltas reach those
-    /// `feeding_books` names, custom data, requested from the catalog alone
-    /// (see `CATALOG`), those `feeding_custom_data` names.
+    /// `feeding_books` names; custom data, requested from the catalog alone
+    /// (see `CATALOG`), the cache (`on_historical_data`).
     #[must_use]
     pub fn reading(mut self, ticks: Vec<TickSeries>) -> Self {
         self.ticks = ticks;
@@ -363,14 +356,6 @@ impl Warmup {
     #[must_use]
     pub fn feeding_books(mut self, books: Rc<dyn BookIndicator>) -> Self {
         self.books.push(books);
-        self
-    }
-
-    /// The warmup handing the custom data of its responses to `custom_data`
-    /// too.
-    #[must_use]
-    pub fn feeding_custom_data(mut self, custom_data: Rc<dyn CustomDataIndicator>) -> Self {
-        self.custom_data.push(custom_data);
         self
     }
 
@@ -520,18 +505,29 @@ impl Warmup {
         }
     }
 
-    /// Hands the custom data of `response`, a response to the warmup's
-    /// request, to the custom data indicators it feeds, oldest first, from
-    /// the actor's `on_historical_data`. Nautilus answers `request_data`
+    /// Adds the custom data of `response`, a response to the warmup's
+    /// request, to `actor`'s cache, oldest first, from the actor's
+    /// `on_historical_data`: the data engine caches the custom data it
+    /// processes, not a response (see the module). The cache keeps a data
+    /// type's points in the order added, the latest added first, so a
+    /// point no later (`ts_event`) than the latest the cache holds of its
+    /// data type is left out: a live point the node took while the request
+    /// was pending stays the latest, and a point the history and the live
+    /// stream both carry is held once. Nautilus answers `request_data`
     /// with a batch (`Vec<CustomData>`); any other payload is no response
     /// of the warmup's.
-    pub fn on_historical_data(&self, response: &dyn Any) {
+    pub fn on_historical_data<A: DataActorNative>(&self, actor: &A, response: &dyn Any) {
         let Some(data) = response.downcast_ref::<Vec<CustomData>>() else {
             return;
         };
+        let cache = actor.cache_rc();
+        let mut cache = cache.borrow_mut();
         for point in data {
-            for custom_data in &self.custom_data {
-                custom_data.handle_data(point);
+            let later = cache
+                .custom_data(&point.data_type)
+                .is_none_or(|latest| point.data.ts_event() > latest.data.ts_event());
+            if later {
+                cache.add_custom_data(point.clone());
             }
         }
     }
@@ -615,7 +611,6 @@ impl Debug for Warmup {
             .field("ticks", &self.ticks)
             .field("indicators", &self.indicators.len())
             .field("books", &self.books.len())
-            .field("custom_data", &self.custom_data.len())
             .field("hold", &self.hold)
             .field("group", &self.group)
             .field("warming", &self.warming)
