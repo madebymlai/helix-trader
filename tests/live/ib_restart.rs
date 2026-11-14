@@ -127,7 +127,13 @@ async fn phase() {
     let probe = Probe::new(step, PathBuf::from(std::env::var(STATE).unwrap()));
     let ran = tokio::time::timeout(
         Duration::from_secs(300),
-        live.run(&requirements, &Warmup::live(&requirements), probe, None),
+        live.run(
+            &requirements,
+            &[InstrumentId::from(INSTRUMENT)],
+            &Warmup::live(&requirements),
+            probe,
+            None,
+        ),
     )
     .await;
     ran.expect("the node stops within 5 minutes").unwrap();

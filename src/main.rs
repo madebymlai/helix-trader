@@ -516,9 +516,10 @@ impl<'a> Visitor for Running<'a> {
         Box::pin(async move {
             let config = load_config::<S::Params>(&self.args.config)?;
             let requirements = config.data_requirements();
+            let traded = config.trade.instrument_ids();
             let strategy = S::live(config)?;
             self.live
-                .run(&requirements, &strategy.warmup(), strategy, None)
+                .run(&requirements, &traded, &strategy.warmup(), strategy, None)
                 .await
         })
     }
@@ -562,6 +563,7 @@ async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyho
         );
     }
     let requirements = config.data_requirements();
+    let traded = config.trade.instrument_ids();
     let retraining = RetrainActor::new(
         config.strategy_id(),
         config.model().retrain,
@@ -573,8 +575,14 @@ async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyho
         models: args.models.clone(),
     };
     let strategy = S::new(config, mode)?;
-    live.run(&requirements, &strategy.warmup(), strategy, retraining)
-        .await
+    live.run(
+        &requirements,
+        &traded,
+        &strategy.warmup(),
+        strategy,
+        retraining,
+    )
+    .await
 }
 
 /// What a refused dataset balance is.

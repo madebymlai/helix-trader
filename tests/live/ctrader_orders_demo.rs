@@ -220,13 +220,15 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
     };
     let record = Arc::new(Mutex::new(Record::default()));
     let done = Arc::new(AtomicBool::new(false));
+    // The gold alone is traded, EUR/USD read for its rate.
+    let gold = broker.gold();
     let strategy = BracketOnce {
         core: StrategyCore::new(StrategyConfig {
             strategy_id: Some(StrategyId::from("BRACKET-001")),
             order_id_tag: Some("001".to_string()),
             ..Default::default()
         }),
-        gold: broker.gold(),
+        gold,
         eurusd: broker.eurusd(),
         record: Arc::clone(&record),
         done: Arc::clone(&done),
@@ -262,7 +264,13 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
 
     let ran = tokio::time::timeout(
         DEADLINE + Duration::from_secs(90),
-        live.run(&requirements, &Warmup::live(&requirements), strategy, None),
+        live.run(
+            &requirements,
+            &[gold],
+            &Warmup::live(&requirements),
+            strategy,
+            None,
+        ),
     )
     .await;
 

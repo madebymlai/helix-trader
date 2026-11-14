@@ -216,8 +216,10 @@ async fn the_live_minute_bars_follow_the_warmup_with_no_gap_and_no_duplicate() {
     let started = Timestamp::now();
     let ran = tokio::time::timeout(
         Duration::from_secs(600),
+        // The probe trades nothing: it claims no instrument.
         live.run(
             &requirements,
+            &[],
             &warmup::Warmup::live(&requirements),
             probe,
             None,
