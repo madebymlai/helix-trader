@@ -26,7 +26,7 @@ use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use nautilus_serialization::arrow_custom_data;
 use ustr::Ustr;
 
-use super::ic::{self, at};
+use super::ic::at;
 
 pub const INSTRUMENT_ID: &str = "GC.v.0.GLBX";
 /// Bars of gold the catalog holds no source of: left out of a backtest.
@@ -87,33 +87,28 @@ pub fn store(dir: &Path) {
         .unwrap();
 }
 
-/// Gold's quotes as LSE streams CME Globex's Level 1, for a run trading
-/// the contract through IB: IC's gold quotes (`ic::quotes`) on the
-/// contract, from 08:00 to 12:00, the hours closing 10:00, 11:00 and
-/// 12:00 last quoted 4005.90 / 4006.10, 4011.90 / 4012.15 and 4000.90 /
-/// 4001.10.
-pub fn quotes() -> Vec<QuoteTick> {
-    ic::quotes()
-        .into_iter()
-        .map(|quote| QuoteTick {
-            instrument_id: InstrumentId::from(INSTRUMENT_ID),
-            ..quote
-        })
-        .collect()
+/// A quote of the contract at `time`, as LSE streams CME Globex's Level
+/// 1, sized 10,000 contracts a side.
+pub fn quote(time: Timestamp, bid: &str, ask: &str) -> QuoteTick {
+    let size = Quantity::from(10_000);
+    QuoteTick::new(
+        InstrumentId::from(INSTRUMENT_ID),
+        Price::from(bid),
+        Price::from(ask),
+        size,
+        size,
+        time.into(),
+        time.into(),
+    )
 }
 
-/// Writes gold and `quotes()` into the catalog in `dir`, stored over 08:00
-/// to 12:00: no book.
-pub fn store_quotes(dir: &Path) {
+/// Writes gold and `quotes` into the catalog in `dir`, stored over `[from,
+/// to]`: no book.
+pub fn store_quotes(dir: &Path, quotes: &[QuoteTick], from: Timestamp, to: Timestamp) {
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     catalog.write_instruments(vec![instrument()]).unwrap();
     catalog
-        .write_to_parquet(
-            &quotes(),
-            Some(at("08:00:00").into()),
-            Some(at("12:00:00").into()),
-            None,
-        )
+        .write_to_parquet(quotes, Some(from.into()), Some(to.into()), None)
         .unwrap();
 }
 

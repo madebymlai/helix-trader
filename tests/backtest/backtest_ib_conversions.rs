@@ -1,164 +1,93 @@
-//! CME gold on GLBX (`common::glbx`), its P&L in USD, traded through IB on
-//! an account in EUR, the strategy converting through IB's EUR/USD on
-//! IDEALPRO (`common::idealpro`), whose 1-minute BID and ASK bars the run
-//! replays beside the gold's quotes, as its data requirements carry them.
-//! IB's simulated account has no base currency, as IB's execution client
-//! keeps none: it holds each currency apart. The hours closing 10:00,
-//! 11:00 and 12:00 are last quoted 4005.90 / 4006.10, 4011.90 / 4012.15
-//! and 4000.90 / 4001.10, so their MID bars close at 4006.00, 4012.025 and
-//! 4001.00. No commission is charged: one in USD is not booked on an
-//! account holding no USD. One node per thread, so one run per test.
+//! CME gold on GLBX (`common::glbx`), its P&L in USD, traded through IB,
+//! the strategy converting through IB's EUR/USD on IDEALPRO
+//! (`common::idealpro`), read as its 1-minute BID and ASK bars, as its data
+//! requirements carry them. IB's account has no base currency, and Nautilus
+//! books such a simulated account in each currency apart, booking no loss
+//! in a currency it does not hold: a backtest on a balance in another
+//! currency than the gold's is refused, one in USD runs. A model's dataset
+//! run, whose account is frozen and books nothing, takes a balance in EUR,
+//! its reference converted at the pair's bars. One node per thread, so one
+//! run per test.
 
-use std::{cell::RefCell, path::Path, process::Command, rc::Rc};
+use std::{path::Path, process::Command};
 
 use helix_trader::{
-    backtest::{Backtest, Commission},
-    strategy::{
-        ema::EmaCrossConfig,
-        orders::{EntryRisk, entry_risk},
-        risk::Stake,
+    backtest::Backtest,
+    model::{
+        ModelStrategy,
+        handle::{Mode, SettledRows},
+        targets::TargetRow,
     },
-    venues,
+    strategy::model_ema::{ModelEma, ModelEmaConfig},
 };
-use jiff::Timestamp;
+use jiff::{SignedDuration, Timestamp};
 use nautilus_common::logging::logger::LoggerConfig;
 use nautilus_model::{
-    data::BarType,
-    enums::OrderSide,
-    orders::Order,
-    types::{Money, Quantity},
-};
-use rust_decimal::Decimal;
-
-use crate::common::{
-    glbx, ic, idealpro,
-    recorder::{Record, Recorder},
+    data::QuoteTick,
+    enums::OmsType,
+    types::{Currency, Money},
 };
 
-/// The EMA crossover trading gold on its hour MID bars, the shortest
-/// crossover, at a stake of 1%, converting through IB's EUR/USD.
-fn toml() -> String {
-    format!(
-        r#"
-        [data]
-        series = [
-            {{ data = "bars", instrument_id = "{gold}", bar_spec = {{ step = 1, aggregation = "HOUR", price_type = "MID" }} }},
-        ]
-        warmup = "1h"
+use crate::common::{glbx, ic, idealpro};
 
-        [indicators]
-        fast = {{ period = 1 }}
-        slow = {{ period = 2 }}
-
-        [trade]
-        instruments = [{{ instrument_id = "{gold}" }}]
-        risk = "1%"
-        conversions = ["{eurusd}"]
-        "#,
-        gold = glbx::INSTRUMENT_ID,
-        eurusd = idealpro::EURUSD,
-    )
+/// The gold at 4000.00 / 4000.20 every 5 s from 08:00 to 13:00: its mid
+/// 4000.10.
+fn gold_quotes() -> Vec<QuoteTick> {
+    let mut quotes = vec![];
+    let mut time = ic::at("08:00:00");
+    while time < ic::at("13:00:00") {
+        quotes.push(glbx::quote(time, "4000.00", "4000.20"));
+        time += SignedDuration::from_secs(5);
+    }
+    quotes
 }
 
-/// A catalog of gold and its quotes, and of EUR/USD and its bars from
-/// 08:00, BID at 1.24990 and ASK at 1.25010, their mid 1.25 USD per EUR.
-fn catalog() -> tempfile::TempDir {
+/// A catalog of the gold and its quotes, from 08:00 to 13:00, and of
+/// EUR/USD and its BID and ASK bars at 1.19990 and 1.20010, their mid 1.2
+/// USD per EUR, from `pair_from` to 12:00.
+fn catalog(pair_from: Timestamp) -> tempfile::TempDir {
     let catalog = tempfile::tempdir().unwrap();
-    glbx::store_quotes(catalog.path());
-    idealpro::store(catalog.path(), "1.24990", "1.25010", ic::at("08:00:00"));
+    glbx::store_quotes(
+        catalog.path(),
+        &gold_quotes(),
+        ic::at("08:00:00"),
+        ic::at("13:00:00"),
+    );
+    idealpro::store(catalog.path(), "1.19990", "1.20010", pair_from);
     catalog
 }
 
-/// A run from `start` to 12:00 of what the config reads, its data
-/// requirements, on 100,000 EUR, each venue as its broker keeps it: the
-/// recorder buys on each hour bar in turn at 1%, one R of `one_rs[i]` USD
-/// a contract from the bar's close, a market entry, on equity converted at
-/// the config's rates. Its record.
-fn run(start: Timestamp, one_rs: &[&str]) -> Rc<RefCell<Record>> {
-    let catalog = catalog();
-    let config = EmaCrossConfig::load(&toml()).unwrap();
-    let requirements = config.data_requirements();
-    let backtest = Backtest {
-        catalog: catalog.path().to_path_buf(),
-        bar_types: requirements.bar_types,
-        ticks: requirements.ticks,
-        custom: requirements.custom,
-        start,
-        end: ic::at("12:00:00"),
-        commission: Commission::Rate(Decimal::ZERO),
-        latency: None,
-        balance: Money::from("100000 EUR"),
-        venue_oms: venues::oms_type,
-        logging: LoggerConfig::default(),
-    };
-    let stake = Stake::new("1%".parse().unwrap());
-    let staked = one_rs
-        .iter()
-        .map(|one_r| (OrderSide::Buy, one_r.parse().unwrap(), stake))
-        .collect();
-    let gold = BarType::from(format!("{}-1-HOUR-MID-INTERNAL", glbx::INSTRUMENT_ID));
-    let (recorder, record) = Recorder::staking(gold, staked);
-
-    backtest.run(recorder.converting(config.rates())).unwrap();
-
-    record
-}
-
-/// The quantity filled and the risk tagged of each order of `record`.
-fn filled(record: &Rc<RefCell<Record>>) -> Vec<(Quantity, Option<EntryRisk>)> {
-    record
-        .borrow()
-        .orders
-        .iter()
-        .map(|order| (order.filled_qty(), entry_risk(order)))
-        .collect()
-}
-
-/// On 100,000 EUR, EUR/USD's last BID and ASK bars closing at 1.24990 and
-/// 1.25010, their mid 1.25000 USD per EUR: 125,000 USD. 1% of it, 1,250
-/// USD, over one R of 10.00 USD a contract from the 10:00 close buys 125,
-/// whose R is 1,250 USD. The contract margins nothing, so the account's
-/// lack of USD denies nothing. At the BID alone it would buy 124, taken as
-/// USD 100, at the rate swapped 80.
-#[test]
-fn a_glbx_trade_through_ib_is_sized_on_the_eur_balance_converted_at_idealpro_s_bars() {
-    let record = run(ic::at("09:00:00"), &["10"]);
-
-    assert_eq!(record.borrow().denials, Vec::<String>::new());
-    assert_eq!(
-        filled(&record),
-        [(
-            Quantity::from(125),
-            Some(EntryRisk {
-                r: Money::from("1250 USD"),
-                multiple: Decimal::ONE,
-            })
-        )]
-    );
-}
-
-/// From 10:00, the buy of 11:00, one R of 2.005 USD from its close
-/// 4012.025, its stop on the tick 4010.02, is 623 contracts (1,250 USD
-/// over 2.005), bought at the ask 4012.15. Still open at 12:00, its bid
-/// 4000.90, it has lost 623 times 11.25, 7,008.75 USD, so the account's
-/// equity holds 100,000 EUR and -7,008.75 USD: 117,991.25 USD. 1% of it
-/// over one R of 2.00 USD from 4001.00 buys 589. On the EUR alone it would
-/// buy 625; on the USD alone, below nothing, none.
-#[test]
-fn a_trade_sent_while_a_usd_position_is_open_is_sized_on_the_eur_balance_and_the_usd_pnl() {
-    let record = run(ic::at("10:00:00"), &["2.005", "2"]);
-
-    assert_eq!(record.borrow().denials, Vec::<String>::new());
-    let quantities: Vec<Quantity> = filled(&record).into_iter().map(|(q, _)| q).collect();
-    assert_eq!(quantities, [Quantity::from(623), Quantity::from(589)]);
-}
-
-/// The backtest command running the config on the catalog at `catalog`
-/// from 09:00 to 12:00 on 100,000 EUR, no commission: its output.
-fn backtest_command(catalog: &Path) -> std::process::Output {
+/// The backtest command running the EMA crossover on the gold's hour MID
+/// bars, the shortest crossover, at a stake of 1%, converting through
+/// IB's EUR/USD, on the catalog at `catalog` from 09:00 to 12:00 on
+/// `balance`, no commission: its output.
+fn backtest_command(catalog: &Path, balance: &str) -> std::process::Output {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("ema.toml");
-    std::fs::write(&config, toml()).unwrap();
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+            [data]
+            series = [
+                {{ data = "bars", instrument_id = "{gold}", bar_spec = {{ step = 1, aggregation = "HOUR", price_type = "MID" }} }},
+            ]
+            warmup = "1h"
+
+            [indicators]
+            fast = {{ period = 1 }}
+            slow = {{ period = 2 }}
+
+            [trade]
+            instruments = [{{ instrument_id = "{gold}" }}]
+            risk = "1%"
+            conversions = ["{eurusd}"]
+            "#,
+            gold = glbx::INSTRUMENT_ID,
+            eurusd = idealpro::EURUSD,
+        ),
+    )
+    .unwrap();
     Command::new(env!("CARGO_BIN_EXE_helix-trader"))
         .args(["backtest", "ema", "--config"])
         .arg(&config)
@@ -166,39 +95,157 @@ fn backtest_command(catalog: &Path) -> std::process::Output {
         .arg(catalog)
         .args(["--start", &ic::at("09:00:00").to_string()])
         .args(["--end", &ic::at("12:00:00").to_string()])
-        .args(["--balance", "100000 EUR", "--commission", "0 USD"])
+        .args(["--balance", balance, "--commission", "0 USD"])
         .output()
         .unwrap()
 }
 
-/// The crossover warms on the bars of 10:00 and 11:00, long, and crosses
-/// down at 12:00, 4001.00 below its slow EMA, 4009.0125. The catalog
-/// defines EUR/USD but holds none of its bars, so no rate is cached: the
-/// sell is not sent, and the log says why, naming the account's EUR, the
-/// gold's USD and the rates of IDEALPRO it is not converted at.
+/// EUR reaches USD through EUR/USD, but IB's simulated account, holding
+/// EUR alone, would book none of the gold's USD losses: the backtest is
+/// refused before the run, naming the gold, its venue, both currencies
+/// and the Nautilus code booking such an account.
 #[test]
-fn with_no_rate_cached_a_trade_is_not_sent_and_the_log_says_why() {
-    let catalog = tempfile::tempdir().unwrap();
-    glbx::store_quotes(catalog.path());
-    idealpro::store_definition(catalog.path());
+fn a_backtest_through_ib_on_a_balance_off_the_pnl_currency_is_refused_naming_why() {
+    let catalog = catalog(ic::at("08:00:00"));
 
-    let output = backtest_command(catalog.path());
+    let output = backtest_command(catalog.path(), "100000 EUR");
+
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(!output.status.success(), "{stdout}{stderr}");
+    for named in [
+        glbx::INSTRUMENT_ID,
+        "GLBX",
+        "EUR",
+        "USD",
+        "update_balance_multi_currency",
+    ] {
+        assert!(stderr.contains(named), "{named}: {stderr}");
+    }
+    assert!(!stdout.contains("Orders:"), "{stdout}");
+}
+
+/// On a balance in USD, the gold's P&L currency, the same backtest runs,
+/// IB's account keeping USD.
+#[test]
+fn a_backtest_through_ib_on_a_balance_in_the_pnl_currency_runs() {
+    let catalog = catalog(ic::at("08:00:00"));
+
+    let output = backtest_command(catalog.path(), "100000 USD");
 
     let (stdout, stderr) = (
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
     assert!(output.status.success(), "{stdout}{stderr}");
-    assert!(stdout.contains("Orders: 0"), "{stdout}");
-    let log = format!("{stdout}{stderr}");
-    let line = log
-        .lines()
-        .find(|line| line.contains("not sending"))
-        .unwrap_or_else(|| panic!("{log}"));
     assert!(
-        [glbx::INSTRUMENT_ID, "EUR", "USD", "IDEALPRO"]
-            .iter()
-            .all(|named| line.contains(named)),
-        "{line}"
+        stdout.contains("account.GLBX.balance.USD.total"),
+        "{stdout}"
+    );
+}
+
+/// Hourly decisions on the gold's 1-minute bars, its averages of 1 and 2
+/// of them; a bracket 7.5 bps of the decision's mid away on both sides,
+/// closed after 45 minutes, at the reference stake of 0.00004% of the
+/// dataset balance of 20M EUR, converted into USD through IB's EUR/USD.
+fn model_config() -> String {
+    format!(
+        r#"
+        [data]
+        series = [
+            {{ data = "bars", instrument_id = "{gold}", bar_spec = {{ step = 1, aggregation = "MINUTE", price_type = "MID" }} }},
+        ]
+        warmup = "1h"
+
+        [indicators.fast]
+        period = 1
+
+        [indicators.slow]
+        period = 2
+
+        [trade]
+        instruments = [{{ instrument_id = "{gold}" }}]
+        risk = "0.00004%"
+        conversions = ["{eurusd}"]
+
+        [model]
+        dataset = {{ commission = {{ rate = "0.00003" }}, balance = "20000000 EUR" }}
+        decision = {{ every = "1h" }}
+        target = {{ bracket = {{ take_profit = {{ bps = 7.5 }}, stop = {{ bps = 7.5 }} }}, limit = "45m" }}
+        retrain = "24h"
+        window = "46h"
+        holdout = "12h"
+        margins = {{ long = "0R", short = "0R" }}
+        min_expectancy = "0R"
+        min_trades = 1
+        learner = {{ kind = "fake" }}
+        "#,
+        gold = glbx::INSTRUMENT_ID,
+        eurusd = idealpro::EURUSD,
+    )
+}
+
+/// The rows the dataset run of `model_config` settles from 08:00 to
+/// 13:00, EUR/USD's bars from 09:30, its data the strategy's requirements,
+/// its venue the config's dataset venue, as the commands' dataset runs
+/// are.
+fn rows() -> Vec<TargetRow> {
+    let config = ModelEmaConfig::load(&model_config()).unwrap();
+    let catalog = catalog(ic::at("09:30:00"));
+    let requirements = config.data_requirements();
+    let venue = config.model().dataset;
+    let backtest = Backtest {
+        catalog: catalog.path().to_path_buf(),
+        bar_types: requirements.bar_types,
+        ticks: requirements.ticks,
+        custom: requirements.custom,
+        start: ic::at("08:00:00"),
+        end: ic::at("13:00:00"),
+        commission: venue.commission,
+        latency: venue.latency,
+        balance: venue.balance,
+        venue_oms: |_| OmsType::Hedging,
+        logging: LoggerConfig::default(),
+    };
+    let rows = SettledRows::default();
+    let mode = Mode::Dataset { rows: rows.clone() };
+
+    backtest
+        .run_dataset(ModelEma::new(config, mode).unwrap())
+        .unwrap();
+
+    rows.take().unwrap()
+}
+
+/// At 09:00 none of EUR/USD's bars is cached: no rate, no row. From 10:00
+/// its last BID and ASK bars close at 1.19990 and 1.20010, their mid 1.2:
+/// 20M EUR is 24M USD, 0.00004% of it 9.60 USD, over the stop's 3.00 USD
+/// on a contract, 7.5 bps of 4000.10 on the nearest cent, 3.2 contracts,
+/// whole contracts 3, one R worth 9 USD. Unconverted, 20M taken as USD
+/// would be 2 contracts, as would the rate swapped.
+#[test]
+fn a_dataset_runs_reference_is_converted_at_its_ib_pairs_bid_and_ask_bars() {
+    let rows = std::thread::spawn(rows).join().unwrap();
+
+    let nine = Money::new(9.0, Currency::USD());
+    let units: Vec<(Timestamp, Money, Money)> = rows
+        .iter()
+        .map(|row| {
+            (
+                Timestamp::from(row.decision.ts_event),
+                row.outcomes.long.unit,
+                row.outcomes.short.unit,
+            )
+        })
+        .collect();
+    assert_eq!(
+        units,
+        [
+            (ic::at("10:00:00.010"), nine, nine),
+            (ic::at("11:00:00.010"), nine, nine),
+            (ic::at("12:00:00.010"), nine, nine),
+        ]
     );
 }

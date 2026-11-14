@@ -37,6 +37,7 @@ pub use self::{
 use crate::{
     rolls::ContinuousBars,
     strategy::{DataRequirements, SeriesSlice, TickSeries, TradeConfig, conversions},
+    venues,
 };
 
 /// One backtest: a window of the catalog, the bar types whose source data
@@ -133,24 +134,29 @@ impl Backtest {
         node::run_dataset(config, node::custom_data(self)?, strategy)
     }
 
-    /// Refuses the run unless its balance's currency reaches the P&L
-    /// currency of each instrument `trade` trades through the pairs it
-    /// converts through (`[trade] conversions`), all as its catalog defines
-    /// them (`catalog::instruments`, `refuse_balance`): a trade sent at a
-    /// stake is sized on the account's equity converted into its P&L
-    /// currency at the pairs' rates (`strategy::orders::Trade::send`), so
-    /// on a balance they do not convert it would send nothing. A pair
-    /// defined without a base currency, which gives no rate, is refused
-    /// whatever the balance.
+    /// Refuses the run unless its balance's currency is the P&L currency
+    /// of each instrument `trade` trades whose broker's account has no base
+    /// currency, which its simulated account would not book the trades'
+    /// losses in otherwise (`refuse_unheld_pnl_currency`), and reaches the
+    /// P&L currency of each through the pairs it converts through (`[trade]
+    /// conversions`), all as its catalog defines them
+    /// (`catalog::instruments`, `refuse_balance`): a trade sent at a stake
+    /// is sized on the account's equity converted into its P&L currency at
+    /// the pairs' rates (`strategy::orders::Trade::send`), so on a balance
+    /// they do not convert it would send nothing. A pair defined without a
+    /// base currency, which gives no rate, is refused whatever the balance.
+    /// A dataset run's balance is checked by `refuse_balance` alone.
     ///
     /// # Errors
     ///
-    /// Returns an error as `catalog::instruments` and `refuse_balance` do.
+    /// Returns an error as `catalog::instruments`,
+    /// `refuse_unheld_pnl_currency` and `refuse_balance` do.
     pub fn refuse_balance(&self, trade: &TradeConfig) -> anyhow::Result<()> {
         let traded = crate::catalog::instruments(&self.catalog, &trade.instrument_ids())
             .context("reading the instruments traded")?;
         let pairs = crate::catalog::instruments(&self.catalog, trade.conversions.pairs())
             .context("reading the pairs of [trade] conversions")?;
+        refuse_unheld_pnl_currency(self.balance, &traded)?;
         refuse_balance(self.balance, &traded, &pairs)
     }
 
@@ -324,6 +330,45 @@ pub fn refuse_balance(
             "the balance {balance} is in {}, which {through} converts into {pnl}, the P&L \
              currency of {}, which the strategy trades: a trade is sized on the equity \
              converted into its P&L currency through the pairs of [trade] conversions",
+            balance.currency,
+            instrument.id()
+        );
+    }
+    Ok(())
+}
+
+/// Refuses `balance` for a backtest's simulated accounts unless its
+/// currency is the P&L currency (`Instrument::cost_currency`) of each
+/// instrument of `traded` whose venue's broker keeps an account without a
+/// base currency (`venues::has_base_currency`). Nautilus books such an
+/// account in each currency apart and never funds one currency from
+/// another: a fill's loss or commission in a currency the account does not
+/// hold is not booked, while a gain is (`AccountsManager::
+/// update_balance_multi_currency` in Nautilus' portfolio crate, its
+/// branches "intentionally asymmetric until cross-currency equity tracking
+/// is implemented"), so a run on a balance in another currency would count
+/// the trades' wins and lose their losses. A dataset run, whose accounts are
+/// frozen and book nothing, and a live run, whose broker books its own
+/// account, are not refused.
+///
+/// # Errors
+///
+/// Returns an error naming the instrument, its venue, the balance's
+/// currency, the P&L currency and the Nautilus limitation.
+fn refuse_unheld_pnl_currency(balance: Money, traded: &[InstrumentAny]) -> anyhow::Result<()> {
+    for instrument in traded {
+        let (pnl, venue) = (instrument.cost_currency(), instrument.id().venue);
+        if balance.currency == pnl || venues::has_base_currency(venue) {
+            continue;
+        }
+        bail!(
+            "the balance {balance} is in {}, not in {pnl}, the P&L currency of {}, which the \
+             strategy trades on {venue}, whose broker's account has no base currency: Nautilus \
+             books a simulated account without one in each currency apart and books no loss or \
+             commission in a currency it does not hold, while it books gains \
+             (AccountsManager::update_balance_multi_currency in Nautilus' portfolio crate, \
+             intentionally asymmetric until cross-currency equity tracking is implemented), so \
+             the backtest would drop the {pnl} losses; backtest it on a balance in {pnl}",
             balance.currency,
             instrument.id()
         );
@@ -566,5 +611,71 @@ mod tests {
             (NautilusDataType::Bar, XPERP_MINUTE_BARS.to_string()),
         ];
         assert_eq!(backtest.series().unwrap(), whole(&backtest, expected));
+    }
+
+    /// A futures contract in USD on `id`'s venue, as Databento defines
+    /// GLBX's.
+    fn future(id: &str) -> InstrumentAny {
+        let mut future = nautilus_model::instruments::stubs::futures_contract_es(None, None);
+        future.id = InstrumentId::from(id);
+        InstrumentAny::FuturesContract(future)
+    }
+
+    /// Gold in USD as a cTrader broker defines it, a CFD, on `id`'s venue.
+    fn cfd(id: &str) -> InstrumentAny {
+        let mut gold = nautilus_model::instruments::stubs::cfd_gold();
+        gold.id = InstrumentId::from(id);
+        InstrumentAny::Cfd(gold)
+    }
+
+    /// GLBX's orders go to IB, whose account has no base currency: a
+    /// simulated account on a balance in EUR would book none of a USD
+    /// contract's losses. Refused, naming the contract, its venue, both
+    /// currencies and the Nautilus code that books such an account.
+    #[test]
+    fn a_balance_off_the_pnl_currency_of_an_instrument_on_a_broker_without_a_base_currency_is_refused()
+     {
+        let err = refuse_unheld_pnl_currency(Money::from("100000 EUR"), &[future("GCZ6.GLBX")])
+            .unwrap_err()
+            .to_string();
+
+        for named in [
+            "GCZ6.GLBX",
+            "GLBX",
+            "EUR",
+            "USD",
+            "update_balance_multi_currency",
+        ] {
+            assert!(err.contains(named), "{named}: {err}");
+        }
+    }
+
+    /// The rule is the venues table's alone: a balance in the contract's
+    /// P&L currency is accepted on a broker without a base currency, any
+    /// balance on a broker whose account has one, a cTrader broker's, as
+    /// Nautilus books it in that base.
+    #[test]
+    fn a_balance_in_the_pnl_currency_or_on_a_broker_with_a_base_currency_is_accepted() {
+        for (balance, instrument) in [
+            ("100000 USD", future("GCZ6.GLBX")),
+            ("100000 USD", future("GCZ6.IDEALPRO")),
+            ("100000 EUR", cfd("XAUUSD.ICMARKETS")),
+            ("100000 EUR", cfd("XAUUSD.PEPPERSTONE")),
+        ] {
+            let id = instrument.id();
+            refuse_unheld_pnl_currency(Money::from(balance), &[instrument])
+                .unwrap_or_else(|e| panic!("{balance} on {id}: {e}"));
+        }
+    }
+
+    /// Every instrument traded is checked, one of them refusing the
+    /// balance.
+    #[test]
+    fn a_balance_is_refused_for_any_instrument_traded_it_is_not_the_pnl_currency_of() {
+        let traded = [cfd("XAUUSD.ICMARKETS"), future("GCZ6.GLBX")];
+
+        let err = refuse_unheld_pnl_currency(Money::from("100000 EUR"), &traded).unwrap_err();
+
+        assert!(err.to_string().contains("GCZ6.GLBX"), "{err}");
     }
 }

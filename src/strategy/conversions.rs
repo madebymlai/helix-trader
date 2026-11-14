@@ -24,7 +24,7 @@
 //! - `Rates::convert`: an equity per currency into one currency, each
 //!   amount but zero at Nautilus' cached rate on the pairs' venue
 //!   (`Cache::get_xrate`, at the mid, as Nautilus' portfolio converts),
-//!   the amounts summed: an account without a base currency, IB's, holds
+//!   the amounts summed: an account without a base currency, OKX's, holds
 //!   its balance and its positions' open P&L each in its own currency.
 //!   `get_xrate(from, to)` gives `to` per `from`: an amount in `from` times
 //!   it is in `to`.
