@@ -686,9 +686,10 @@ impl TargetConfig {
             .collect()
     }
 
-    /// The longest time a decision's target stays open: its limit. A
-    /// decision is settled by then: a time close fills at once, on the
-    /// venue's last quote at the alert's own time.
+    /// The longest time a decision's target stays open: its limit. On a
+    /// venue without latency a decision is settled by then: a time close
+    /// fills at once, on the venue's last quote at the alert's own time; at
+    /// a latency, the delay of its venue later (`dataset::DatasetVenue`).
     #[must_use]
     pub const fn settles_within(&self) -> SignedDuration {
         self.spec.limit

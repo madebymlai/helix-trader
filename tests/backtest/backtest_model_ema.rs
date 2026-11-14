@@ -342,7 +342,7 @@ fn a_retrain_keeping_the_model_does_not_fail_the_binarys_backtest() {
 
 /// With a model in the store at each retrain time of the span, published
 /// straight once the dataset is built, a backtest builds and retrains
-/// nothing, whatever its own commission and balance, which are its
+/// nothing, whatever its own commission, balance and latency, which are its
 /// simulated account's alone: its models are the config's
 /// (`[model] dataset`), whose costs it reports, followed by the scores of
 /// both periods, each of its model.
@@ -361,7 +361,14 @@ fn the_binarys_backtest_on_a_store_holding_each_retrains_model_builds_and_trains
     for at in [t(), next] {
         publish(&catalog, &models, at);
     }
-    let other_costs = ["--commission-rate", "0.0001", "--balance", "100000 USD"];
+    let other_costs = [
+        "--commission-rate",
+        "0.0001",
+        "--balance",
+        "100000 USD",
+        "--latency",
+        "150ms",
+    ];
 
     let (stdout, stderr) = backtest_at(
         &config_path,
@@ -375,7 +382,10 @@ fn the_binarys_backtest_on_a_store_holding_each_retrains_model_builds_and_trains
     assert!(!stdout.contains("the dataset holds every day"), "{stdout}");
     assert!(!stderr.contains("the retrain at"), "{stderr}");
     assert!(
-        stdout.contains("Run at: commission rate 0.0001, balance 100000.00 USD"),
+        stdout.contains(
+            "Run at: commission rate 0.0001, balance 100000.00 USD, latency 150ms \
+             (--commission, --balance, --latency)"
+        ),
         "{stdout}"
     );
     assert!(

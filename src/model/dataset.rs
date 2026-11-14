@@ -17,8 +17,8 @@
 //! `DatasetVenue`, and the dataset `VERSION`): a change to the feature
 //! names, the arguments of their `[indicators]` tables, their warmup or
 //! version, the decision rule, the target, what the
-//! strategy reads that its ATR is built from, the commission or
-//! balance of its dataset runs, or the dataset version finds
+//! strategy reads that its ATR is built from, the commission, balance or
+//! latency of its dataset runs, or the dataset version finds
 //! no row, and the dataset is rebuilt. The
 //! config is read by value, the code by version: the dataset's for the
 //! code making every strategy's rows, the strategy's own for its features
@@ -31,8 +31,11 @@
 //!
 //! The catalog's intervals of the rows are the cache: `missing` asks the
 //! catalog for the days of a span it does not cover, and `build` replays
-//! them, once, from the first missing day to the last plus the target's
-//! limit (`TargetConfig::settles_within`), then writes them. The replay
+//! them, once, from the first missing day to the last plus the time a
+//! decision settles within: the target's limit
+//! (`TargetConfig::settles_within`), and at a latency the longest its time
+//! close waits to be processed (`DatasetVenue::delay`), then writes them.
+//! The replay
 //! starts the features' warmup (`FeatureSet::warmup`) before the first
 //! day, so that the indicators read at the day's first decisions the data
 //! before it, as inside a longer build; the rows decided before the day
@@ -56,8 +59,10 @@
 //! reason of its own (a denial, a rejection, an entry unfilled by its
 //! time), wherever the replay ends: its time close, a market order, fills
 //! at its time on the venue's last quote, even with no quote since (a
-//! weekend), as any market order between quotes does. So a day is stored
-//! the same by every build replaying it.
+//! weekend), as any market order between quotes does; at a latency, on the
+//! first quote after its arrival or, none coming, at the run's next timer,
+//! on the last, within the delay the replay runs past the day. So a day is
+//! stored the same by every build replaying it.
 //!
 //! A train at a time sees only what was settled then: `settled` replays
 //! the days it lacks to that time and no further, from the warmup before
@@ -106,7 +111,7 @@ use super::{
     targets::{self, PerSide, Side, TargetConfig, TargetRow},
 };
 use crate::{
-    backtest::Commission,
+    backtest::{Commission, Latency},
     strategy::{DataRequirements, warmup},
 };
 
@@ -202,20 +207,24 @@ pub struct Manifest {
 }
 
 /// The venue settings a dataset run takes, each of which its rows depend
-/// on: the commission its targets are net of, and its account's balance,
-/// the equity of the reference stake its targets are sized at, which no
-/// trade of the run moves. Its accounts margin nothing (`backtest::node`),
-/// so no leverage is among them. Part of the dataset's fingerprint,
-/// normalized, so neither rows nor models of other settings are ever read.
-/// Declared in a model's config (`ModelConfig::dataset`), such as `{
-/// commission = { per_quantity = "0.035 USD" }, balance = "10000 USD" }`,
-/// its balance positive.
+/// on: the commission its targets are net of, its account's balance, the
+/// equity of the reference stake its targets are sized at, which no trade
+/// of the run moves, and its latency, if any, which moves its fills. Its
+/// accounts margin nothing (`backtest::node`), so no leverage is among
+/// them. Part of the dataset's fingerprint, normalized, so neither rows nor
+/// models of other settings are ever read. Declared in a model's config
+/// (`ModelConfig::dataset`), such as `{ commission = { per_quantity =
+/// "0.035 USD" }, balance = "10000 USD" }`, its balance positive, and
+/// optionally `latency = "150ms"`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DatasetVenue {
     pub commission: Commission,
     #[serde(deserialize_with = "positive_balance")]
     pub balance: Money,
+    /// Left out, none: each command reaches the venue as it is sent.
+    #[serde(default)]
+    pub latency: Option<Latency>,
 }
 
 /// A balance as TOML writes it, an amount and a currency code, such as
@@ -235,16 +244,19 @@ fn positive_balance<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result
 
 impl DatasetVenue {
     /// The settings as the fingerprint reads them: the commission's kind
-    /// and its amount normalized (`Commission::normalized`), and the
-    /// balance without trailing zeros, so that every spelling of one is one
-    /// key.
+    /// and its amount normalized (`Commission::normalized`), the balance
+    /// without trailing zeros, and the latency, if any, in its largest
+    /// units (`Latency`'s text), so that every spelling of one is one key. A
+    /// venue of no latency reads as it did before latency was a setting,
+    /// keeping its datasets and stores.
     fn fingerprint_part(&self) -> String {
         self.to_string()
     }
 }
 
 /// The settings as the fingerprint reads them (`fingerprint_part`), such as
-/// `commission rate 0.00003, balance 10000 USD`.
+/// `commission rate 0.00003, balance 10000 USD`, or `commission rate
+/// 0.00003, balance 10000 USD, latency 150ms`.
 impl fmt::Display for DatasetVenue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -253,7 +265,22 @@ impl fmt::Display for DatasetVenue {
             self.commission,
             self.balance.as_decimal().normalize(),
             self.balance.currency.code
-        )
+        )?;
+        match self.latency {
+            Some(latency) => write!(f, ", latency {latency}"),
+            None => Ok(()),
+        }
+    }
+}
+
+impl DatasetVenue {
+    /// How much later a dataset run at the venue settles a decision than
+    /// its target's limit: without a latency, not at all, a time close
+    /// filling as it is sent; at one, by the longest its time close waits
+    /// to be processed (`Latency::dataset_delay`).
+    pub(super) fn delay(&self) -> SignedDuration {
+        self.latency
+            .map_or(SignedDuration::ZERO, Latency::dataset_delay)
     }
 }
 
@@ -268,6 +295,10 @@ pub struct Dataset {
     payoff_names: Vec<String>,
     /// How much a replay runs before its first day: the features' warmup.
     warmup: SignedDuration,
+    /// How long after its decision a row is settled by: the target's limit
+    /// (`TargetConfig::settles_within`) and the delay of the venue of its
+    /// runs (`DatasetVenue::delay`).
+    settles_within: SignedDuration,
     target: TargetConfig,
 }
 
@@ -283,12 +314,14 @@ impl Dataset {
         fingerprint: Fingerprint,
     ) -> Self {
         nautilus_serialization::ensure_custom_data_registered::<DatasetRow>();
-        let (features, target) = (blueprint.features(), &blueprint.config().target);
+        let (features, config) = (blueprint.features(), blueprint.config());
+        let target = &config.target;
         Self {
             catalog: catalog.to_path_buf(),
             strategy_id: blueprint.strategy_id(),
             fingerprint,
             warmup: features.warmup(),
+            settles_within: target.settles_within() + config.dataset.delay(),
             feature_names: features.names().to_vec(),
             payoff_names: target.payoff_names(),
             target: target.clone(),
@@ -297,7 +330,8 @@ impl Dataset {
 
     /// Builds the days `first` to `last` the dataset is missing: `replay`
     /// runs the strategy from the features' warmup before the first missing
-    /// day's start to the last's end plus the target's limit and returns
+    /// day's start to the last's end plus the time a decision settles
+    /// within (the target's limit and the venue's delay) and returns
     /// the rows it settled, which are written (see `write`), but those
     /// decided before the first day. The cached days among them are written
     /// again, recomputed. With no day missing, nothing is replayed.
@@ -318,7 +352,7 @@ impl Dataset {
             return Ok(missing);
         };
         let from = start_of(first)?;
-        let to = start_of(last.tomorrow()?)? + self.target.settles_within();
+        let to = start_of(last.tomorrow()?)? + self.settles_within;
         let rows = replay(from - self.warmup, to)?;
         self.write(&rows, from, to)?;
         Ok(missing)
@@ -398,10 +432,10 @@ impl Dataset {
     }
 
     /// Writes the `rows` of a replay over `[from, to]` for the days it
-    /// settled, those it replayed whole and whose end plus the target's
-    /// limit is not after `to`, and the manifest. What the catalog holds
-    /// over those days is deleted first; the rows of other days are
-    /// dropped.
+    /// settled, those it replayed whole and whose end plus the time a
+    /// decision settles within is not after `to`, and the manifest. What
+    /// the catalog holds over those days is deleted first; the rows of
+    /// other days are dropped.
     ///
     /// # Errors
     ///
@@ -532,7 +566,8 @@ impl Dataset {
     }
 
     /// The days a replay over `[from, to]` settles: those it replayed
-    /// whole, its end at least the target's limit past theirs.
+    /// whole, its end at least the time a decision settles within past
+    /// theirs.
     fn settled_days(&self, from: Timestamp, to: Timestamp) -> anyhow::Result<Vec<Date>> {
         let first = day_of(from.into());
         let mut day = if start_of(first)? == from {
@@ -541,7 +576,7 @@ impl Dataset {
             first.tomorrow()?
         };
         let mut days = vec![];
-        while start_of(day.tomorrow()?)? + self.target.settles_within() <= to {
+        while start_of(day.tomorrow()?)? + self.settles_within <= to {
             days.push(day);
             day = day.tomorrow()?;
         }
@@ -826,6 +861,7 @@ mod tests {
         DatasetVenue {
             commission: Commission::Rate(Decimal::new(3, 5)),
             balance: Money::from("10000000 USD"),
+            latency: None,
         }
     }
 
@@ -1140,6 +1176,79 @@ mod tests {
                 .read(at("2026-01-05T00:00:00Z"), at("2026-01-07T00:00:00Z"))
                 .unwrap(),
             &[stored("2026-01-05T09:00:00Z", vec![1.0], 1.0)],
+        );
+    }
+
+    /// At a latency of 30 s, a decision's time close, sent at its limit of
+    /// 2 hours, reaches the venue 30 s later, and fills at the run's next
+    /// settlement point, at most a minute after: its execution engine's
+    /// purge timer. The day is settled 2 hours, 30 s and a minute after its
+    /// end, not before.
+    #[test]
+    fn at_a_latency_a_day_is_written_once_replay_has_passed_its_end_its_limit_its_latency_and_a_minute()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let dataset = blueprint_on(
+            STRATEGY,
+            features(1),
+            DecisionRule::Every(SignedDuration::from_hours(1)),
+            target(),
+            requirements(),
+            DatasetVenue {
+                latency: Some(latency(30_000)),
+                ..venue()
+            },
+        )
+        .dataset(dir.path())
+        .unwrap();
+        let rows = [row("2026-01-05T09:00:00Z", vec![1.0], "1")];
+        let from = at("2026-01-05T00:00:00Z");
+        let missing = || {
+            dataset
+                .missing(day("2026-01-05"), day("2026-01-05"))
+                .unwrap()
+        };
+
+        dataset
+            .write(&rows, from, at("2026-01-06T02:01:29.999Z"))
+            .unwrap();
+        assert_eq!(missing(), [day("2026-01-05")]);
+        dataset
+            .write(&rows, from, at("2026-01-06T02:01:30Z"))
+            .unwrap();
+        assert!(missing().is_empty(), "{:?}", missing());
+    }
+
+    /// A build at a latency of 30 s replays its last day to its end plus
+    /// the target's limit of 2 hours, the latency and a minute.
+    #[test]
+    fn at_a_latency_a_build_replays_past_the_last_day_by_its_limit_its_latency_and_a_minute() {
+        let dir = tempfile::tempdir().unwrap();
+        let dataset = blueprint_on(
+            STRATEGY,
+            features(1),
+            DecisionRule::Every(SignedDuration::from_hours(1)),
+            target(),
+            requirements(),
+            DatasetVenue {
+                latency: Some(latency(30_000)),
+                ..venue()
+            },
+        )
+        .dataset(dir.path())
+        .unwrap();
+        let mut replays = vec![];
+
+        dataset
+            .build(day("2026-01-05"), day("2026-01-05"), |from, to| {
+                replays.push((from, to));
+                Ok(vec![])
+            })
+            .unwrap();
+
+        assert_eq!(
+            replays,
+            [(at("2026-01-05T00:00:00Z"), at("2026-01-06T02:01:30Z"))]
         );
     }
 
@@ -1490,6 +1599,50 @@ mod tests {
             )),
             "commission per quantity 0.035 USD, balance 10000000 USD"
         );
+    }
+
+    /// A latency of `millis` milliseconds.
+    fn latency(millis: i64) -> Latency {
+        Latency::try_from(SignedDuration::from_millis(millis)).unwrap()
+    }
+
+    /// A latency keys the venue, after its commission and balance, only
+    /// when declared: every venue declaring none keeps the text, so the
+    /// datasets and stores, it was keyed by before.
+    #[test]
+    fn a_dataset_runs_latency_keys_its_venue_only_when_declared() {
+        let at = |latency| DatasetVenue { latency, ..venue() }.fingerprint_part();
+
+        assert_eq!(at(None), "commission rate 0.00003, balance 10000000 USD");
+        assert_eq!(
+            at(Some(latency(150))),
+            "commission rate 0.00003, balance 10000000 USD, latency 150ms"
+        );
+        assert_eq!(
+            at(Some(latency(1500))),
+            "commission rate 0.00003, balance 10000000 USD, latency 1s 500ms"
+        );
+    }
+
+    /// A dataset run's latency moves its fills, so its rows: another
+    /// latency, or one where there was none, is another fingerprint.
+    #[test]
+    fn another_latency_of_the_dataset_run_is_another_fingerprint() {
+        let of = |latency| {
+            blueprint_on(
+                STRATEGY,
+                features(1),
+                DecisionRule::Every(SignedDuration::from_hours(1)),
+                target(),
+                requirements(),
+                DatasetVenue { latency, ..venue() },
+            )
+            .fingerprint()
+            .unwrap()
+        };
+
+        assert_ne!(of(None), of(Some(latency(150))));
+        assert_ne!(of(Some(latency(150))), of(Some(latency(200))));
     }
 
     #[test]

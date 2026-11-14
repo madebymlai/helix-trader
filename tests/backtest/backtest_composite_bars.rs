@@ -180,6 +180,7 @@ fn a_decision_on_hour_bars_reads_the_bar_closing_on_its_grid() {
         dataset: DatasetVenue {
             commission: backtest.commission,
             balance: backtest.balance,
+            latency: None,
         },
         ..dataset::config()
     };
