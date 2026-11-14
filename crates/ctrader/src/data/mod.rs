@@ -46,10 +46,15 @@ use self::spots::SpotQuotes;
 use super::{
     config::{CTraderConnection, CTraderCredential},
     session::{CTraderSession, CTraderSymbol},
-    websocket::{HEARTBEAT_INTERVAL, SOCKET_ENDPOINT},
+    websocket::HEARTBEAT_INTERVAL,
 };
 
 mod spots;
+
+/// The label of the data client's socket in Nautilus' socket state events
+/// and reconnect commands, beside the execution client's under the same
+/// client id.
+const SOCKET_ENDPOINT: &str = "ctrader-open-api-data";
 
 /// How long tasks get to finish at a disconnect, then to abort.
 const TASK_GRACE: Duration = Duration::from_secs(1);
@@ -106,7 +111,7 @@ impl CTraderDataClient {
         )
     }
 
-    fn with_endpoint(
+    pub(super) fn with_endpoint(
         client_id: ClientId,
         url: String,
         venue: Venue,
@@ -733,7 +738,7 @@ mod tests {
 
     /// The session's socket under Nautilus' `SocketControl` (`live.md`,
     /// "Socket transport state"): its availability goes to the node as the
-    /// client's, on its venue, endpoint `ctrader-open-api`; the node's
+    /// client's, on its venue, endpoint `ctrader-open-api-data`; the node's
     /// reconnect of it replaces the transport, on which the session
     /// authenticates again; a disconnect deregisters it.
     #[tokio::test]
@@ -755,7 +760,7 @@ mod tests {
                 get_atomic_clock_realtime(),
             )
         });
-        let endpoint = Ustr::from("ctrader-open-api");
+        let endpoint = Ustr::from("ctrader-open-api-data");
 
         client.connect().await.unwrap();
 

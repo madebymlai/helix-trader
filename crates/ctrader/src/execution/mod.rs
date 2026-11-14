@@ -79,19 +79,24 @@ use super::{
     common::{
         account::CTraderAccount,
         messages::{
-            ProtoOaAmendOrderReq, ProtoOaAmendPositionSltpReq, ProtoOaCancelOrderReq, ProtoOaOrder,
-            ProtoOaOrderStatus, ProtoOaOrderType, ProtoOaReconcileRes, TradeRequest,
+            ProtoOaAmendOrderReq, ProtoOaAmendPositionSltpReq, ProtoOaCancelOrderReq, ProtoOaDeal,
+            ProtoOaOrder, ProtoOaOrderStatus, ProtoOaOrderType, ProtoOaReconcileRes, TradeRequest,
         },
     },
     config::{CTraderConnection, CTraderCredential},
     session::CTraderSession,
-    websocket::{HEARTBEAT_INTERVAL, SOCKET_ENDPOINT},
+    websocket::HEARTBEAT_INTERVAL,
 };
 
 mod dispatch;
 mod failure;
 mod orders;
 mod reports;
+
+/// The label of the execution client's socket in Nautilus' socket state
+/// events and reconnect commands, beside the data client's under the same
+/// client id.
+const SOCKET_ENDPOINT: &str = "ctrader-open-api-trading";
 
 /// How long connect waits for the node's cache to hold the account.
 const ACCOUNT_REGISTERED_TIMEOUT: Duration = Duration::from_secs(30);
@@ -374,21 +379,33 @@ impl CTraderExecutionClient {
             .collect()
     }
 
-    /// The fills of the deals over `[from, to]`.
+    /// The fills `cmd` asks for: of the deals over its `[start, end]`
+    /// (start: the epoch, end: now), of its instrument and its venue order
+    /// id if it names them. Only those deals' fills are built, so a deal
+    /// the request does not cover fails it in no case (see
+    /// `reports::commission`), as Nautilus' targeted order recovery asks the
+    /// fills of one order.
     async fn fill_reports(
         &self,
         session: &Session,
-        ts_init: UnixNanos,
-        from: UnixNanos,
-        to: UnixNanos,
+        cmd: &GenerateFillReports,
     ) -> anyhow::Result<Vec<FillReport>> {
+        let from = cmd.start.unwrap_or_default();
+        let to = cmd.end.unwrap_or_else(|| self.now());
         let deals = session
             .ctrader
             .deals(orders::millis(from), orders::millis(to))
             .await?;
-        let reports = self.reports(session, ts_init);
+        let asked = |deal: &&ProtoOaDeal| {
+            cmd.instrument_id
+                .is_none_or(|id| session.symbols.get(&id) == Some(&deal.symbol_id))
+                && cmd
+                    .venue_order_id
+                    .is_none_or(|id| id.as_str() == deal.order_id.to_string())
+        };
+        let reports = self.reports(session, cmd.ts_init);
         let mut fills = Vec::new();
-        for deal in &deals {
+        for deal in deals.iter().filter(asked) {
             fills.extend(reports.fill(deal)?);
         }
         Ok(fills)
@@ -1367,20 +1384,13 @@ impl ExecutionClient for CTraderExecutionClient {
         Ok(orders)
     }
 
-    /// The fills of the deals over `[start, end]` (start: the epoch, end:
-    /// now).
+    /// The fills of the deals `cmd` covers (see `fill_reports`).
     async fn generate_fill_reports(
         &self,
         cmd: GenerateFillReports,
     ) -> anyhow::Result<Vec<FillReport>> {
         let session = self.session()?;
-        let from = cmd.start.unwrap_or_default();
-        let to = cmd.end.unwrap_or_else(|| self.now());
-        let mut fills = self.fill_reports(session, cmd.ts_init, from, to).await?;
-        fills.retain(|f| {
-            cmd.instrument_id.is_none_or(|id| f.instrument_id == id)
-                && cmd.venue_order_id.is_none_or(|id| f.venue_order_id == id)
-        });
+        let fills = self.fill_reports(session, &cmd).await?;
         log_receipt(
             fills.len(),
             "FillReport",
@@ -1596,13 +1606,18 @@ mod tests {
 
     use nautilus_common::{
         cache::Cache,
-        live::runner::{replace_exec_event_sender, replace_system_event_sender},
+        clients::DataClient,
+        live::runner::{
+            replace_data_event_sender, replace_exec_event_sender, replace_system_event_sender,
+        },
         messages::{
             ExecutionEvent, SystemEvent,
             system::{SocketState, SocketStateChange},
         },
     };
-    use nautilus_live::SocketReconnectRegistry;
+    use nautilus_live::{
+        SocketReconnectLookup, SocketReconnectRegistry, SocketReconnectRequestOutcome,
+    };
     use nautilus_model::{
         enums::{OrderSide, OrderStatus, OrderType, PositionSide, TimeInForce, TriggerType},
         identifiers::{PositionId, TraderId, VenueOrderId},
@@ -1627,6 +1642,7 @@ mod tests {
             ProtoOaSymbolsListReq, ProtoOaSymbolsListRes, ProtoOaTimeInForce, ProtoOaTradeData,
             ProtoOaTradeSide, ProtoOaTraderReq, ProtoOaTraderRes,
         },
+        data::CTraderDataClient,
         testing::{
             self, ACCOUNT_AUTH_TOKEN_INVALID, ACCOUNT_ID, ASSET_LIST_RES, Action, CLIENT,
             DEAL_LIST_RES_EMPTY, RECONCILE_RES_EMPTY, Received, SYMBOL_BY_ID_RES, SYMBOLS_LIST_RES,
@@ -2044,8 +2060,8 @@ mod tests {
 
     /// The session's socket under Nautilus' `SocketControl` (`live.md`,
     /// "Socket transport state"): its availability goes to the node as the
-    /// client's, on its venue, endpoint `ctrader-open-api`, registered for
-    /// the node's reconnect until the client disconnects.
+    /// client's, on its venue, endpoint `ctrader-open-api-trading`,
+    /// registered for the node's reconnect until the client disconnects.
     #[tokio::test]
     async fn the_sessions_socket_state_goes_to_the_node_until_the_client_disconnects() {
         let (system_tx, mut system) = mpsc::unbounded_channel();
@@ -2053,7 +2069,7 @@ mod tests {
         let registry = SocketReconnectRegistry::default();
         let (mut client, cache, mut events, _received, _tokens) =
             registry.scope(|| started(Script::default()));
-        let endpoint = Ustr::from("ctrader-open-api");
+        let endpoint = Ustr::from("ctrader-open-api-trading");
 
         connect(&mut client, &mut events, &cache).await;
 
@@ -2074,6 +2090,89 @@ mod tests {
         assert!(registry.handle(ClientId::from(CLIENT), endpoint).is_some());
         client.disconnect().await.unwrap();
         assert!(registry.handle(ClientId::from(CLIENT), endpoint).is_none());
+    }
+
+    /// A broker's data and execution clients under its one client id, as
+    /// the factories name them and a node's caller makes them: each socket
+    /// is its own endpoint, registered once, and the node's reconnect of
+    /// it replaces that transport alone, its session authenticating again.
+    #[tokio::test]
+    async fn a_brokers_data_and_trading_sockets_are_two_endpoints_each_reconnectable() {
+        let (system_tx, mut system) = mpsc::unbounded_channel();
+        replace_system_event_sender(system_tx);
+        let (data_tx, _data_events) = mpsc::unbounded_channel();
+        replace_data_event_sender(data_tx);
+        let registry = SocketReconnectRegistry::default();
+        let (mut trading, cache, mut events, trading_received, _tokens) =
+            registry.scope(|| started(Script::default()));
+        let (url, data_received) = testing::start(peer(Script::default()));
+        let (credential, _data_tokens) = testing::credential();
+        let mut data = registry.scope(|| {
+            CTraderDataClient::with_endpoint(
+                ClientId::from(CLIENT),
+                url,
+                Venue::new(VENUE),
+                credential,
+                vec![InstrumentId::from(XAUUSD)],
+                get_atomic_clock_realtime(),
+            )
+        });
+        connect(&mut trading, &mut events, &cache).await;
+        data.connect().await.unwrap();
+        let client = ClientId::from(CLIENT);
+        let endpoints = ["ctrader-open-api-data", "ctrader-open-api-trading"].map(Ustr::from);
+
+        for endpoint in endpoints {
+            let SocketReconnectLookup::Handle(reconnect) = registry.get(client, endpoint) else {
+                panic!("{endpoint}: {:?}", registry.get(client, endpoint));
+            };
+            assert_eq!(
+                reconnect.request_reconnect(),
+                SocketReconnectRequestOutcome::Accepted,
+                "{endpoint}"
+            );
+        }
+
+        let mut states: HashMap<Ustr, Vec<SocketState>> = HashMap::new();
+        for _ in 0..6 {
+            let event = tokio::time::timeout(Duration::from_secs(10), system.recv())
+                .await
+                .expect("no socket state within 10 s")
+                .expect("the system events ended");
+            let SystemEvent::SocketState(change) = event;
+            assert_eq!(change.client_id, client);
+            states
+                .entry(change.endpoint)
+                .or_default()
+                .push(change.state);
+        }
+        for endpoint in endpoints {
+            assert_eq!(
+                states[&endpoint],
+                [
+                    SocketState::Connected,
+                    SocketState::Disconnected,
+                    SocketState::Connected
+                ],
+                "{endpoint}"
+            );
+        }
+        for received in [&trading_received, &data_received] {
+            let frames = testing::wait_until(received, |frames| {
+                frames
+                    .iter()
+                    .any(|(c, f)| *c == 1 && f.payload_type == ProtoOaAccountAuthReq::TYPE)
+            })
+            .await;
+            assert!(
+                frames
+                    .iter()
+                    .any(|(c, f)| *c == 1 && f.payload_type == ProtoOaAccountAuthReq::TYPE),
+                "a session did not authenticate again"
+            );
+        }
+        trading.disconnect().await.unwrap();
+        data.disconnect().await.unwrap();
     }
 
     #[tokio::test]
@@ -2425,6 +2524,59 @@ mod tests {
         assert!(fills.contains("no commission"), "{fills}");
         let mass_status = format!("{:#}", mass_status.unwrap_err());
         assert!(mass_status.contains("cTrader deal 1"), "{mass_status}");
+    }
+
+    /// Nautilus' targeted order recovery asks the fills of one order, of
+    /// its instrument, with no start (`live/src/execution/reconciliation.rs`):
+    /// deal 2, of order 1002, states no commission. Fills asked of order
+    /// 1001, or of another instrument, are reported; a request covering
+    /// deal 2 fails.
+    #[tokio::test]
+    async fn a_fill_request_fails_only_on_a_deal_it_covers_without_its_commission() {
+        let mut deals = gold_deals();
+        deals[1].commission = None;
+        let venue = Script {
+            deals: Some(deals),
+            ..gold_venue()
+        };
+        let (mut client, cache, mut events, _received, _tokens) = started(venue);
+        connect(&mut client, &mut events, &cache).await;
+        let asking = |instrument: Option<&str>, order: Option<&str>| {
+            GenerateFillReports::new(
+                UUID4::new(),
+                client.now(),
+                instrument.map(InstrumentId::from),
+                order.map(VenueOrderId::from),
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+
+        let of_order = client
+            .generate_fill_reports(asking(Some(XAUUSD), Some("1001")))
+            .await;
+        let of_other_instrument = client
+            .generate_fill_reports(asking(Some(EURUSD), None))
+            .await;
+        let of_deal_2 = client
+            .generate_fill_reports(asking(Some(XAUUSD), Some("1002")))
+            .await;
+        let of_all = client.generate_fill_reports(asking(None, None)).await;
+        client.disconnect().await.unwrap();
+
+        let trades: Vec<String> = of_order
+            .unwrap()
+            .iter()
+            .map(|f| f.trade_id.to_string())
+            .collect();
+        assert_eq!(trades, ["1"]);
+        assert!(of_other_instrument.unwrap().is_empty());
+        for covering in [of_deal_2, of_all] {
+            let error = format!("{:#}", covering.unwrap_err());
+            assert!(error.contains("cTrader deal 2"), "{error}");
+        }
     }
 
     #[tokio::test]

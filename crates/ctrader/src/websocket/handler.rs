@@ -938,18 +938,18 @@ impl CTraderWsHandler {
             t if t == ProtoOaOrderErrorEvent::TYPE => {
                 open::<ProtoOaOrderErrorEvent>(envelope).map(TradeMessage::OrderError)
             }
-            t if t == ProtoOaErrorRes::TYPE => open::<ProtoOaErrorRes>(envelope).map(|e| {
-                TradeMessage::Refused(CTraderError::Venue {
+            t if t == ProtoOaErrorRes::TYPE => {
+                open::<ProtoOaErrorRes>(envelope).map(|e| TradeMessage::Refused {
                     code: e.error_code,
                     description: e.description,
                 })
-            }),
-            t if t == ProtoErrorRes::TYPE => open::<ProtoErrorRes>(envelope).map(|e| {
-                TradeMessage::Refused(CTraderError::Venue {
+            }
+            t if t == ProtoErrorRes::TYPE => {
+                open::<ProtoErrorRes>(envelope).map(|e| TradeMessage::Refused {
                     code: e.error_code,
                     description: e.description,
                 })
-            }),
+            }
             other => Err(CTraderError::Protocol(format!(
                 "unexpected {}",
                 payload_name(other)

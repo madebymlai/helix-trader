@@ -329,7 +329,9 @@ impl Dispatch {
             TradeMessage::OrderError(error) => {
                 failure::refusal(&error.error_code, error.description.as_deref())
             }
-            TradeMessage::Refused(error) => failure::answer(&error),
+            TradeMessage::Refused { code, description } => {
+                failure::refusal(&code, description.as_deref())
+            }
         };
         let id = event.client_msg_id.as_deref();
         match id.map(str::parse::<Tag>) {
@@ -1235,7 +1237,7 @@ mod tests {
     use crate::{
         common::{
             messages::{
-                CTraderError, ProtoOaAssetListRes, ProtoOaOrderErrorEvent, ProtoOaSymbolByIdRes,
+                ProtoOaAssetListRes, ProtoOaOrderErrorEvent, ProtoOaSymbolByIdRes,
                 ProtoOaSymbolsListRes,
             },
             parse,
@@ -1337,10 +1339,10 @@ mod tests {
 
     /// cTrader's error answer `code`.
     fn refused(code: &str, description: Option<&str>) -> TradeMessage {
-        TradeMessage::Refused(CTraderError::Venue {
+        TradeMessage::Refused {
             code: code.to_owned(),
             description: description.map(str::to_owned),
-        })
+        }
     }
 
     /// Each output's order, and what it is.

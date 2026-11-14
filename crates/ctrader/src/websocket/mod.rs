@@ -14,11 +14,10 @@
 //!
 //! The socket's state is Nautilus' to report: given the client's
 //! `SocketControl`, the transport tells the node when the socket becomes
-//! available and when it is lost (`SocketStateChanged`, endpoint
-//! `SOCKET_ENDPOINT`), and the node's reconnect of the endpoint replaces
-//! the transport as a drop does, the handler authenticating the new
-//! session; a disconnect deregisters it (`live.md`, "Socket transport
-//! state").
+//! available and when it is lost (`SocketStateChanged`, under the client's
+//! endpoint label), and the node's reconnect of the endpoint replaces the
+//! transport as a drop does, the handler authenticating the new session; a
+//! disconnect deregisters it (`live.md`, "Socket transport state").
 //!
 //! The handler task is held in Nautilus' `TaskSlot`: `begin_shutdown`
 //! tells it to close, `disconnect` joins it (`finish_task`), a token
@@ -88,10 +87,6 @@ use super::{
 
 /// cTrader's heartbeat interval.
 pub(crate) const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
-
-/// The label of a client's cTrader socket in Nautilus' socket state
-/// events and reconnect commands: one socket carries all its session.
-pub(crate) const SOCKET_ENDPOINT: &str = "ctrader-open-api";
 
 /// How long a connection may bring no frame at all before the transport
 /// takes its peer for dead and reconnects (`heartbeat_timeout_secs`), as it
@@ -177,8 +172,12 @@ pub(crate) enum TradeMessage {
     Execution(ProtoOaExecutionEvent),
     /// An order the server refused.
     OrderError(ProtoOaOrderErrorEvent),
-    /// cTrader's error answer to a trade request (`CTraderError::Venue`).
-    Refused(CTraderError),
+    /// cTrader's error answer to a trade request (`ProtoOAErrorRes`, or
+    /// the proxy's `ProtoErrorRes`): its code and description.
+    Refused {
+        code: String,
+        description: Option<String>,
+    },
 }
 
 /// Whether a trade request was sent: `Ok` once its frame is written, an

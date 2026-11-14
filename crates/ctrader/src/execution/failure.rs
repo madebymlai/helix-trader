@@ -11,7 +11,7 @@
 //! - **Unknown** (`Ambiguous`): the session ended without saying what
 //!   became of the frame (its handler gone, maybe mid-write); cTrader
 //!   answered with a code that does not say the request was not carried
-//!   out (`UNKNOWN_OUTCOME`); or an error answer is not cTrader's. A frame
+//!   out (`UNKNOWN_OUTCOME`). A frame
 //!   whose write began and failed counts as sent (the handler's
 //!   `failed_send`): its outcome is unknown too, and like any sent request
 //!   it waits for its events.
@@ -76,15 +76,6 @@ pub(super) fn refusal(code: &str, description: Option<&str>) -> CommandFailure {
         CommandFailure::Ambiguous(reason)
     } else {
         CommandFailure::VenueRejected(reason)
-    }
-}
-
-/// The error answering a trade request: cTrader's refusal (see `refusal`),
-/// else no answer of cTrader's.
-pub(super) fn answer(error: &CTraderError) -> CommandFailure {
-    match error {
-        CTraderError::Venue { code, description } => refusal(code, description.as_deref()),
-        other => CommandFailure::ambiguous(other.to_string()),
     }
 }
 
@@ -176,39 +167,6 @@ mod tests {
             assert!(
                 matches!(refusal(code, None), CommandFailure::Ambiguous(_)),
                 "{code}"
-            );
-        }
-    }
-
-    #[test]
-    fn an_error_answer_is_classified_by_its_code() {
-        let refused = CTraderError::Venue {
-            code: "POSITION_NOT_FOUND".to_owned(),
-            description: Some("Position not found with id 690004734".to_owned()),
-        };
-        assert_eq!(
-            answer(&refused),
-            CommandFailure::VenueRejected(
-                "POSITION_NOT_FOUND: Position not found with id 690004734".to_owned()
-            )
-        );
-        let limited = CTraderError::Venue {
-            code: "REQUEST_FREQUENCY_EXCEEDED".to_owned(),
-            description: None,
-        };
-        assert!(matches!(answer(&limited), CommandFailure::Ambiguous(_)));
-    }
-
-    #[test]
-    fn an_answer_that_is_not_ctraders_refusal_is_ambiguous() {
-        for error in [
-            CTraderError::Protocol("unexpected ProtoOASpotEvent".to_owned()),
-            CTraderError::Timeout,
-            CTraderError::ConnectionLost,
-        ] {
-            assert!(
-                matches!(answer(&error), CommandFailure::Ambiguous(_)),
-                "{error:?}"
             );
         }
     }
