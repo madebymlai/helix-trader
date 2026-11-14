@@ -95,13 +95,13 @@
 //! from its requirements and mode, reading the features' tick series
 //! (`FeatureSet::ticks`) and feeding the features, and `start` starts it,
 //! the features registered first. The strategy's data hooks hand it the
-//! responses and the live quotes and trades: `model_data_hooks!` writes
-//! them, the one place they are written, so that no strategy misses one.
-//! The features are registered with Nautilus for their bars alone: the
-//! warmup hands them the quotes and trades of its responses and the live
-//! ones, held until it ends, so that no live tick reaches them before an
-//! older window of the history (`strategy::warmup`'s `hold`); in a replay
-//! the ticks go straight through. Live, the warmup requests the history of
+//! responses and the live quotes, trades, depth and deltas:
+//! `model_data_hooks!` writes them, the one place they are written, so that
+//! no strategy misses one. The features are registered with Nautilus for
+//! their bars alone: the warmup hands them the quotes, trades, depth and
+//! deltas of its responses and the live ones, held until it ends, so that
+//! no live tick reaches them before an older window of the history
+//! (`strategy::warmup`'s `hold`); in a replay they go straight through. Live, the warmup requests the history of
 //! the features' ticks, a root's on the contract standing for it, their
 //! custom data from the catalog alone, added to the cache the features
 //! read it from (`FeatureSet::data`), and the
@@ -569,8 +569,9 @@ impl ModelHandle {
 /// holding its `Rc<ModelHandle>`, they hand its warmup (`ModelHandle::warmup`)
 /// the end of each request (`on_data_response`), the quotes, trades, book
 /// depth, deltas and custom data of each response (`on_historical_*`), and
-/// the live quotes and trades (`on_quote`, `on_trade`), which it holds while
-/// it is pending and then hands to the features (`strategy::warmup`).
+/// the live quotes, trades, depth and deltas (`on_quote`, `on_trade`,
+/// `on_book_depth`, `on_book_deltas`), which it holds while it is pending
+/// and then hands to the features (`strategy::warmup`).
 #[macro_export]
 macro_rules! model_data_hooks {
     ($model:ident) => {
@@ -599,16 +600,28 @@ macro_rules! model_data_hooks {
             &mut self,
             depths: &[::nautilus_model::data::OrderBookDepth],
         ) -> ::anyhow::Result<()> {
-            self.$model.warmup().on_historical_book_depth(depths);
-            Ok(())
+            self.$model.warmup().on_historical_book_depth(depths)
         }
 
         fn on_historical_book_deltas(
             &mut self,
             deltas: &[::nautilus_model::data::OrderBookDelta],
         ) -> ::anyhow::Result<()> {
-            self.$model.warmup().on_historical_book_deltas(deltas);
-            Ok(())
+            self.$model.warmup().on_historical_book_deltas(deltas)
+        }
+
+        fn on_book_depth(
+            &mut self,
+            depth: &::nautilus_model::data::OrderBookDepth,
+        ) -> ::anyhow::Result<()> {
+            self.$model.warmup().on_book_depth(depth)
+        }
+
+        fn on_book_deltas(
+            &mut self,
+            deltas: &::nautilus_model::data::OrderBookDeltas,
+        ) -> ::anyhow::Result<()> {
+            self.$model.warmup().on_book_deltas(deltas)
         }
 
         fn on_historical_data(&mut self, data: &dyn ::std::any::Any) -> ::anyhow::Result<()> {
@@ -1675,6 +1688,81 @@ mod tests {
                 Some(UnixNanos::from(at("2026-08-10T14:30:02Z")))
             )
         );
+    }
+
+    /// The hooks `model_data_hooks!` writes hand the warmup a strategy's
+    /// live book depth and deltas too, which Nautilus hands no indicator,
+    /// only the strategy's handlers. In a backtest, which holds nothing, a
+    /// feature counting GCZ26's snapshots and one counting its batches of
+    /// deltas read the one of each the strategy gets.
+    #[test]
+    fn the_hooks_of_model_data_hooks_hand_the_features_a_strategys_live_book() {
+        let models = tempfile::tempdir().unwrap();
+        let gcz26 = InstrumentId::from("GCZ26.GLBX");
+        let features = crate::model::features::testing::book_counts(gcz26)
+            .build()
+            .unwrap();
+        let series = |data| TickSeries {
+            data,
+            instrument_id: gcz26,
+        };
+        let requirements = DataRequirements {
+            bar_types: vec![],
+            ticks: vec![
+                aud_quotes(),
+                series(NautilusDataType::OrderBookDepth),
+                series(NautilusDataType::OrderBookDelta),
+            ],
+            custom: vec![],
+            warmup: SignedDuration::ZERO,
+        };
+        let model = ModelHandle::new(
+            &blueprint_of(&features, &config(), requirements),
+            Mode::Backtest {
+                models: models.path().to_path_buf(),
+                venue: venue(),
+            },
+        )
+        .unwrap();
+        let mut hooked = Hooked {
+            core: strategy_core(),
+            model: Rc::clone(&model),
+        };
+        register(&mut hooked.core, at("2026-08-10T14:30:00Z"));
+        model.start(&mut hooked).unwrap();
+        let ts = UnixNanos::from(at("2026-08-10T14:30:01Z"));
+        let depth = nautilus_model::data::OrderBookDepth {
+            instrument_id: gcz26,
+            ts_event: ts,
+            ts_init: ts,
+            ..nautilus_model::data::stubs::stub_depth10()
+        };
+        let delta = nautilus_model::data::OrderBookDelta::new(
+            gcz26,
+            nautilus_model::enums::BookAction::Add,
+            nautilus_model::data::BookOrder::new(
+                nautilus_model::enums::OrderSide::Buy,
+                Price::from("4000.0"),
+                Quantity::from(1),
+                1,
+            ),
+            nautilus_model::enums::RecordFlag::F_LAST as u8,
+            1,
+            ts,
+            ts,
+        );
+        let cold = features.values();
+
+        DataActor::on_book_depth(&mut hooked, &depth).unwrap();
+        DataActor::on_book_deltas(
+            &mut hooked,
+            &nautilus_model::data::OrderBookDeltas::new(gcz26, vec![delta]),
+        )
+        .unwrap();
+
+        assert_eq!(cold, None);
+        assert_eq!(features.values(), Some(vec![1.0, 1.0]));
+        assert_eq!(features.last_update(gcz26), Some(ts));
     }
 
     /// Hour bars built from minute bars, a composite bar type.

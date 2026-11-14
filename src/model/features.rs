@@ -25,11 +25,11 @@
 //! live ones the strategy hands it, these held until it ends
 //! (`strategy::warmup`'s `hold`, which goes once Nautilus holds them, the
 //! set then registered for quotes and trades again); in a replay, as they
-//! come. Nautilus routes no depth or book deltas to indicators either: a
-//! live warmup hands the set its own (`BookIndicator`,
-//! `Warmup::on_historical_book_depth` and `on_historical_book_deltas`), and
-//! no strategy hands it live or replayed ones, none declaring a feature on
-//! them, which would read a live warmup's alone. Bars built from a warmup's
+//! come. Nautilus routes no depth or book deltas to indicators at all, only
+//! to the actor's handlers: the strategy hands the warmup those of its
+//! responses and its live and replayed ones from them (`model_data_hooks!`),
+//! which hands them to the set (`BookIndicator`), the live ones held while a
+//! live warmup is pending, as quotes and trades are. Bars built from a warmup's
 //! quotes, trades or source bars reach only the cache, not the indicators:
 //! the strategy's warmup hands them to `handle_bar`
 //! (`Warmup::on_data_response`).
@@ -474,8 +474,8 @@ impl FeatureSet {
 }
 
 /// The warmup's side of the set for books, which Nautilus routes to no
-/// indicator: a live warmup hands it those of its responses
-/// (`Warmup::feeding_books`); no strategy hands it live ones (see the
+/// indicator: the warmup hands it those of its responses and the live and
+/// replayed ones the strategy hands it (`Warmup::feeding_books`, see the
 /// module).
 impl BookIndicator for FeatureSet {
     /// Feeds `depth` to the features declared on its instrument's depth,

@@ -1,11 +1,15 @@
 //! The features of the harness' tests: the last mid of an instrument's
-//! quotes, and the same over the bracket's width, declared and set in
-//! `[indicators]` as a strategy's features are.
+//! quotes, the same over the bracket's width, and a count of an
+//! instrument's book depth and deltas, declared and set in `[indicators]`
+//! as a strategy's features are.
 
 use std::rc::Rc;
 
 use nautilus_indicators::indicator::Indicator;
-use nautilus_model::{data::QuoteTick, identifiers::InstrumentId};
+use nautilus_model::{
+    data::{OrderBookDeltas, OrderBookDepth, QuoteTick},
+    identifiers::InstrumentId,
+};
 
 use super::{Feature, FeatureSet, FeatureSetBuilder, OverBracket};
 use crate::{
@@ -96,4 +100,67 @@ pub const OVER: Declared<MidOverWidthArgs> = Declared::new("over");
 pub fn mid_over(instrument_id: InstrumentId, width: &Rc<BracketWidth>) -> FeatureSetBuilder {
     let tables: IndicatorsConfig = toml::from_str("over = {}").unwrap();
     FeatureSet::builder().over_bracket(instrument_id, OVER, &tables, width)
+}
+
+/// A count of the depth and deltas a feature gets, `[indicators.book]`.
+pub const BOOK: Declared<BookCountArgs> = Declared::new("book");
+
+/// The features of two, the count of `instrument_id`'s depth snapshots,
+/// then of its batches of deltas, each warm once one came.
+pub fn book_counts(instrument_id: InstrumentId) -> FeatureSetBuilder {
+    let tables: IndicatorsConfig = toml::from_str("book = {}").unwrap();
+    FeatureSet::builder()
+        .depth(instrument_id, BOOK, &tables)
+        .deltas(instrument_id, BOOK, &tables)
+}
+
+/// A feature counting the depth and deltas it gets, initialized by the
+/// first, its value the count.
+pub struct BookCount {
+    count: usize,
+}
+
+impl Indicator for BookCount {
+    fn name(&self) -> String {
+        "BookCount".to_string()
+    }
+
+    fn has_inputs(&self) -> bool {
+        self.count > 0
+    }
+
+    fn initialized(&self) -> bool {
+        self.count > 0
+    }
+
+    fn handle_depth(&mut self, _depth: &OrderBookDepth) {
+        self.count += 1;
+    }
+
+    fn handle_deltas(&mut self, _deltas: &OrderBookDeltas) {
+        self.count += 1;
+    }
+
+    fn reset(&mut self) {
+        self.count = 0;
+    }
+}
+
+impl Feature for BookCount {
+    fn value(&self) -> f64 {
+        self.count as f64
+    }
+}
+
+/// The arguments of `BookCount`: none.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BookCountArgs {}
+
+impl IndicatorArgs for BookCountArgs {
+    type Indicator = BookCount;
+
+    fn build(self) -> anyhow::Result<BookCount> {
+        Ok(BookCount { count: 0 })
+    }
 }

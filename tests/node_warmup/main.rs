@@ -604,9 +604,14 @@ impl DataActor for Warming {
         Ok(())
     }
 
+    /// The deltas, of the warmup and live, go to the warmup, as a model
+    /// strategy hands them (`model_data_hooks!`).
     fn on_historical_book_deltas(&mut self, deltas: &[OrderBookDelta]) -> anyhow::Result<()> {
-        self.warmup.on_historical_book_deltas(deltas);
-        Ok(())
+        self.warmup.on_historical_book_deltas(deltas)
+    }
+
+    fn on_book_deltas(&mut self, deltas: &OrderBookDeltas) -> anyhow::Result<()> {
+        self.warmup.on_book_deltas(deltas)
     }
 
     /// The ticks, of the warmup and live, go to the warmup, as a model

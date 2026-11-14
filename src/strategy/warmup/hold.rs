@@ -1,8 +1,8 @@
-//! The hold of a live warmup's quotes and trades: the warmup hands the
-//! indicators reading ticks, a model strategy's features, the quotes and
-//! trades of its responses as they come, holds the live ones the strategy
+//! The hold of a live warmup's quotes, trades, book depth and deltas: the
+//! warmup hands the indicators reading them, a model strategy's features,
+//! those of its responses as they come, holds the live ones the strategy
 //! hands it until its group ends, the last window answered, and then hands
-//! those over in the order they came; from then on live ticks go straight
+//! those over in the order they came; from then on live ones go straight
 //! through. A replay requests no warmup and holds nothing.
 //!
 //! It stands in for Nautilus. Nautilus hands a live tick to the indicators
@@ -16,15 +16,24 @@
 //! ones before the older windows, and time runs backwards for them. So the
 //! features are not registered for quotes and trades (`FeatureSet::register`)
 //! and the strategy hands the warmup its live ones (`model::handle`'s
-//! `model_data_hooks!`). Once Nautilus holds live ticks for an actor's
-//! indicators while a request of it with `update_subscriptions` is pending,
-//! releasing them in time order after the response and deduplicated against
-//! it, this module goes, the features are registered for quotes and trades
-//! again, and the strategy hands the warmup no ticks: helix-trader issue #16
+//! `model_data_hooks!`). Book depth and deltas Nautilus hands no indicator
+//! at all (`ActorIndicator` reads quotes, trades and bars): an actor gets
+//! them in its own handlers (`DataActor::on_book_depth`, `on_book_deltas`),
+//! as it gets a response's in `on_historical_book_depth` and
+//! `on_historical_book_deltas`, and Nautilus holds nothing for the handlers
+//! while a request is pending either. So the strategy hands the warmup its
+//! live depth and deltas from its handlers too, held as ticks are. Once
+//! Nautilus holds live data for an actor's indicators and handlers while a
+//! request of it with `update_subscriptions` is pending, releasing them in
+//! time order after the response and deduplicated against it, this module
+//! goes: the features are registered for quotes and trades again, the
+//! strategy hands the warmup no ticks, and its handlers hand its depth and
+//! deltas to the features straight: helix-trader issue #16
 //! (<https://github.com/madebymlai/helix-trader/issues/16>).
 //!
 //! A live tick the history holds is dropped, held or not, judged within its
-//! series, the quotes or the trades of one instrument. The series' seam is
+//! series, the quotes, the trades, the depth or the deltas of one
+//! instrument, a batch of deltas by its last delta's time. The series' seam is
 //! the latest `ts_event` of its ticks the warmup handed over; a live tick of
 //! the series made at or before it (`ts_event`) is dropped, one made after
 //! it handed over. Made at the seam itself, it is the venue's resend of the
@@ -42,20 +51,26 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     fmt::{self, Debug},
+    rc::Rc,
 };
 
 use nautilus_common::actor::indicators::SharedActorIndicator;
 use nautilus_core::UnixNanos;
 use nautilus_model::{
-    data::{QuoteTick, TradeTick},
+    data::{OrderBookDeltas, OrderBookDepth, QuoteTick, TradeTick},
     identifiers::InstrumentId,
 };
 
-/// A quote or a trade.
-#[derive(Debug, Clone, Copy)]
+use super::BookIndicator;
+
+/// A quote, a trade, a snapshot of a book's depth or a batch of its deltas.
+#[derive(Debug, Clone)]
 pub(super) enum Tick {
     Quote(QuoteTick),
     Trade(TradeTick),
+    /// Boxed: ten levels a side, against a quote's few fields.
+    Depth(Box<OrderBookDepth>),
+    Deltas(OrderBookDeltas),
 }
 
 /// The series of a tick, within which a live tick is judged against the
@@ -64,14 +79,19 @@ pub(super) enum Tick {
 enum Series {
     Quotes(InstrumentId),
     Trades(InstrumentId),
+    Depth(InstrumentId),
+    Deltas(InstrumentId),
 }
 
-/// What hands a warmup's quotes and trades to the indicators reading them,
-/// holding the live ones while a live start's group is pending.
+/// What hands a warmup's quotes, trades, depth and deltas to the
+/// indicators reading them, holding the live ones while a live start's
+/// group is pending.
 #[derive(Default)]
 pub(super) struct Hold {
-    /// What the ticks are handed to.
+    /// What the quotes and trades are handed to.
     indicators: Vec<SharedActorIndicator>,
+    /// What the depth and deltas are handed to.
+    books: Vec<Rc<dyn BookIndicator>>,
     /// The live ticks held while a group is pending, in the order they
     /// came; none when live ticks go straight through.
     held: RefCell<Option<Vec<Tick>>>,
@@ -81,9 +101,14 @@ pub(super) struct Hold {
 }
 
 impl Hold {
-    /// Hands the ticks to `indicator` too.
+    /// Hands the quotes and trades to `indicator` too.
     pub(super) fn feeding(&mut self, indicator: SharedActorIndicator) {
         self.indicators.push(indicator);
+    }
+
+    /// Hands the depth and deltas to `books` too.
+    pub(super) fn feeding_books(&mut self, books: Rc<dyn BookIndicator>) {
+        self.books.push(books);
     }
 
     /// Holds the live ticks from now, a live start's group pending, with
@@ -170,10 +195,26 @@ impl Hold {
     }
 
     fn hand(&self, tick: Tick) -> anyhow::Result<()> {
-        for indicator in &self.indicators {
-            match &tick {
-                Tick::Quote(quote) => indicator.handle_quote(quote)?,
-                Tick::Trade(trade) => indicator.handle_trade(trade)?,
+        match &tick {
+            Tick::Quote(quote) => {
+                for indicator in &self.indicators {
+                    indicator.handle_quote(quote)?;
+                }
+            }
+            Tick::Trade(trade) => {
+                for indicator in &self.indicators {
+                    indicator.handle_trade(trade)?;
+                }
+            }
+            Tick::Depth(depth) => {
+                for books in &self.books {
+                    books.handle_depth(depth);
+                }
+            }
+            Tick::Deltas(deltas) => {
+                for books in &self.books {
+                    books.handle_deltas(deltas);
+                }
             }
         }
         Ok(())
@@ -181,17 +222,22 @@ impl Hold {
 }
 
 impl Tick {
-    const fn series(&self) -> Series {
+    fn series(&self) -> Series {
         match self {
             Self::Quote(quote) => Series::Quotes(quote.instrument_id),
             Self::Trade(trade) => Series::Trades(trade.instrument_id),
+            Self::Depth(depth) => Series::Depth(depth.instrument_id),
+            Self::Deltas(deltas) => Series::Deltas(deltas.instrument_id),
         }
     }
 
-    const fn ts_event(&self) -> UnixNanos {
+    /// When the tick was made, a batch of deltas when its last delta was.
+    fn ts_event(&self) -> UnixNanos {
         match self {
             Self::Quote(quote) => quote.ts_event,
             Self::Trade(trade) => trade.ts_event,
+            Self::Depth(depth) => depth.ts_event,
+            Self::Deltas(deltas) => deltas.ts_event,
         }
     }
 }
@@ -200,6 +246,7 @@ impl Debug for Hold {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct(stringify!(Hold))
             .field("indicators", &self.indicators.len())
+            .field("books", &self.books.len())
             .field("held", &self.held.borrow().as_ref().map(Vec::len))
             .field("seams", &self.seams.borrow())
             .finish()
