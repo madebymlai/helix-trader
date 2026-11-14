@@ -5,15 +5,19 @@
 //! A trade is sized from a fraction of the account's equity in its
 //! instrument's P&L currency (`orders::Trade::send`), and an account's
 //! money may be in another currency: an IC Markets account in EUR trading
-//! gold quoted in USD, or an IB account in EUR trading GLBX's gold. The
-//! config lists the pairs to convert through, all on one venue,
-//! `conversions = ["EURUSD.ICMARKETS"]` or `["EUR/USD.IDEALPRO"]`, and the
-//! strategy reads each in the form its venue's history serves
-//! (`venues::rate_series`, `StandardConfig::data_requirements`), a
-//! cTrader broker's quotes, IB's 1-minute BID and ASK bars: fill-catalog
-//! fills them, a backtest replays them, and Nautilus' data engine caches
-//! each quote and bar it processes, which its exchange rates are read
-//! from, a pair's quotes before its bars.
+//! gold quoted in USD. The config lists the pairs to convert through, all
+//! on one venue, `conversions = ["EURUSD.ICMARKETS"]` or
+//! `["EUR/USD.IDEALPRO"]`, and the strategy reads each in the form its
+//! venue's history serves (`venues::rate_series`,
+//! `StandardConfig::data_requirements`), a cTrader broker's quotes, IB's
+//! 1-minute BID and ASK bars: fill-catalog fills them, a backtest replays
+//! them, a live strategy subscribes to them from its start, a cTrader
+//! pair's quotes with no warmup (`rolls::Roller`), an IB pair's bars as
+//! any bar type it warms up on, and Nautilus' data engine caches each
+//! quote and bar it processes, which its exchange rates are read from, a
+//! pair's quotes before its bars. Before a pair's first quote or bars
+//! there is no rate through it, and a trade sends nothing, logged
+//! (`orders::Trade::send`).
 //!
 //! Both answers are Nautilus':
 //!
@@ -53,7 +57,7 @@ use nautilus_model::{
     types::{Currency, Money},
 };
 use rust_decimal::Decimal;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use ustr::Ustr;
 
 use super::Series;
@@ -62,7 +66,7 @@ use crate::venues;
 /// `[trade] conversions`: the FX pairs a strategy converts equity through,
 /// each by its instrument id, `["EURUSD.ICMARKETS"]`, all on one venue;
 /// none if the config lists none.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Conversions(Vec<InstrumentId>);
 
@@ -77,6 +81,12 @@ impl Conversions {
     #[must_use]
     pub fn pairs(&self) -> &[InstrumentId] {
         &self.0
+    }
+
+    /// Whether the config lists no pair.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 
     /// Pushes onto `errors` the violations of the pairs of a strategy

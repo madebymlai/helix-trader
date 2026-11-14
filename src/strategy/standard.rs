@@ -205,7 +205,7 @@ impl<P: Part> StandardConfig<P> {
             errors.collect(
                 model
                     .clone()
-                    .trading(traded, self.risk())
+                    .trading(traded, self.risk(), self.trade.conversions.clone())
                     .validate(&self.data_requirements()),
             );
         }
@@ -225,7 +225,7 @@ impl<P: Part> StandardConfig<P> {
     }
 
     /// The model, its target trading the instrument of `[trade]` at its
-    /// risk, the reference stake.
+    /// risk, the reference stake, through its conversions.
     ///
     /// # Panics
     ///
@@ -237,7 +237,9 @@ impl<P: Part> StandardConfig<P> {
         let (Some(model), [traded]) = (&self.model, self.trade.instruments.as_slice()) else {
             panic!("a validated config of a strategy trading on a model has it, of one instrument");
         };
-        model.clone().trading(traded, self.risk())
+        model
+            .clone()
+            .trading(traded, self.risk(), self.trade.conversions.clone())
     }
 
     /// The config's stake: `[trade] risk`, multiple 1. A strategy stakes

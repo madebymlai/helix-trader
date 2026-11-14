@@ -34,7 +34,10 @@
 //! LAST bars); a `warmup::Warmup`, which
 //! each strategy holds, asks for their history live and hands it back, so
 //! that no strategy knows how, and subscribes to them in a backtest, which
-//! requests none. The catalog
+//! requests none. The ticks of its data requirements, the quotes of the FX
+//! pairs its equity converts through among them, a `rolls::Roller`, which
+//! each strategy holds too (a model strategy's handle), subscribes to from
+//! its start. The catalog
 //! stores what their bars are built from (see `catalog_series`).
 
 pub mod conversions;
@@ -86,10 +89,13 @@ pub struct DataRequirements {
     /// refuses its book; no source serves an instrument's custom data)
     /// and replayed in a backtest as declared, those of its harness among
     /// them (a model strategy's traded quotes when no series prices the
-    /// traded instrument, `StandardConfig::data_requirements`). Their
-    /// instruments are read too: live sets up their clients but subscribes
-    /// to none of the ticks, which the strategy (a model strategy's handle)
-    /// subscribes to and warms up on (`warmup::Warmup::reading`).
+    /// traded instrument, `StandardConfig::data_requirements`), and the
+    /// quotes of its `[trade] conversions` pairs. Their instruments are
+    /// read too: live sets up their clients, which load them, but
+    /// subscribes to none of the ticks: the strategy subscribes to each
+    /// from its start through its roller (`rolls::Roller`, a model
+    /// strategy's handle's), and warms up on those its features read
+    /// (`warmup::Warmup::reading`) alone, a pair's quotes having no warmup.
     pub ticks: Vec<TickSeries>,
     /// The custom data the strategy reads that is of no instrument, a
     /// reference series such as LSE's daily bond yields: each series a

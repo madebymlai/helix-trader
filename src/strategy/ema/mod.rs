@@ -15,8 +15,10 @@
 //! The config (`EmaCrossConfig`) lists the series read in `[data]`, whose
 //! bars it subscribes to through `strategy::warmup`, its warmup requested
 //! there live; `[trade]` names the one instrument traded, read on its one
-//! bars series, the only series `[data]` lists, and `[indicators]` its
-//! fast and slow EMAs. Its signal is its Nautilus indicator, and it
+//! bars series, the only series `[data]` lists, and the FX pairs its
+//! equity converts through, a cTrader pair's quotes it subscribes to from
+//! its start through a roller (`rolls::Roller`), with no warmup; and
+//! `[indicators]` its fast and slow EMAs. Its signal is its Nautilus indicator, and it
 //! decides only once its indicators are initialized, on the replay in a
 //! backtest, on the warmup live. A minimal strategy to drive data,
 //! backtest and paper.
@@ -46,11 +48,14 @@ use rust_decimal::{Decimal, prelude::Signed};
 use serde::Deserialize;
 
 use self::signal::Signal;
-use crate::strategy::{
-    DataRequirements, Declaration, Declared, EmaArgs, Part, PlainStrategy, Series, StandardConfig,
-    Visitor,
-    orders::{self, Bracket, Exits, Trade},
-    warmup::Warmup,
+use crate::{
+    rolls::Roller,
+    strategy::{
+        DataRequirements, Declaration, Declared, EmaArgs, Part, PlainStrategy, Series,
+        StandardConfig, TickSeries, Visitor,
+        orders::{self, Bracket, Exits, Trade},
+        warmup::Warmup,
+    },
 };
 
 /// The take profit of each trade, in basis points of the close of the bar
@@ -190,6 +195,10 @@ pub struct EmaCross {
     signal: Rc<Signal>,
     /// Its warmup, which feeds the signal.
     warmup: Rc<Warmup>,
+    /// Subscribes the ticks of its data requirements, its cTrader
+    /// conversion pairs' quotes: none is on a root, so none rolls, and the
+    /// strategy hands it no time event.
+    roller: Roller,
 }
 
 impl EmaCross {
@@ -200,7 +209,7 @@ impl EmaCross {
     ///
     /// Returns an error if the config is invalid.
     pub fn new(config: EmaCrossConfig) -> anyhow::Result<Self> {
-        Self::built(config, Warmup::replayed)
+        Self::built(config, Warmup::replayed, Roller::replayed)
     }
 
     /// The strategy as a live node runs it: it requests its warmup
@@ -210,24 +219,27 @@ impl EmaCross {
     ///
     /// Returns an error if the config is invalid.
     pub fn live(config: EmaCrossConfig) -> anyhow::Result<Self> {
-        Self::built(config, Warmup::live)
+        Self::built(config, Warmup::live, Roller::live)
     }
 
     /// The strategy of `config`, its warmup `warmup` of its data
-    /// requirements, set to feed the signal.
+    /// requirements, set to feed the signal, and its roller `roller` of
+    /// their ticks.
     fn built(
         config: EmaCrossConfig,
         warmup: fn(&DataRequirements) -> Warmup,
+        roller: fn(Vec<TickSeries>) -> Roller,
     ) -> anyhow::Result<Self> {
         config.validate()?;
         let signal = Rc::new(Signal::new(&config));
-        let warmup =
-            warmup(&config.data_requirements()).feeding(Rc::clone(&signal) as SharedActorIndicator);
+        let requirements = config.data_requirements();
+        let warmup = warmup(&requirements).feeding(Rc::clone(&signal) as SharedActorIndicator);
         Ok(Self {
             core: StrategyCore::new_checked(config.base.clone())?,
             signal,
             config,
             warmup: Rc::new(warmup),
+            roller: roller(requirements.ticks),
         })
     }
 
@@ -313,7 +325,8 @@ impl DataActor for EmaCross {
     /// (`orders::refuse_inverse`), sets the time of each trade still open
     /// again, as after a restart (`orders::arm_open_trades`), registers the
     /// signal for the traded instrument's bars, then subscribes to the
-    /// bars, live after requesting the warmup.
+    /// bars, live after requesting the warmup, and to the conversion pairs'
+    /// quotes from now, where the warmup ends.
     fn on_start(&mut self) -> anyhow::Result<()> {
         orders::refuse_inverse(self, self.config.trade_instrument_id())?;
         orders::arm_open_trades(self)?;
@@ -321,7 +334,8 @@ impl DataActor for EmaCross {
         let signal = Rc::clone(&self.signal) as SharedActorIndicator;
         self.core_mut()
             .register_indicator_for_bars(bar_type, signal);
-        Rc::clone(&self.warmup).start(self)
+        Rc::clone(&self.warmup).start(self)?;
+        self.roller.clone().start(self)
     }
 
     /// The warmup's bars reach only the cache: the warmup hands them to
@@ -337,9 +351,10 @@ impl DataActor for EmaCross {
             return Ok(());
         }
         match self.signal.cross(bar) {
-            Some(side) => self
-                .trade(bar, side)?
-                .send(self, self.config.stake(), self.config.rates()),
+            Some(side) => {
+                self.trade(bar, side)?
+                    .send(self, self.config.stake(), self.config.rates())
+            }
             None => Ok(()),
         }
     }

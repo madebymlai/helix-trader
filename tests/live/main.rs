@@ -29,6 +29,7 @@ use nautilus_model::data::{Bar, QuoteTick, TradeTick};
 #[path = "../common/mod.rs"]
 mod common;
 
+mod ctrader_conversions_demo;
 mod ctrader_demo;
 mod ctrader_live_demo;
 mod ctrader_orders_demo;

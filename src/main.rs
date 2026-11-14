@@ -524,14 +524,14 @@ impl<'a> Visitor for Running<'a> {
 /// models of the store its config keys, beside the actor of its
 /// retrains if it is retrained (`RetrainActor`), each retrain in a child
 /// process (`LiveArgs::train_args`) on the node's catalog. Refuses first,
-/// before any node is built, a catalog without the traded instruments, which
-/// its models and retrains are built from (`catalog::instruments`),
-/// and a dataset balance (`[model] dataset`) in another currency than a
-/// traded instrument's P&L (`backtest::refuse_balance`, through no pair:
-/// the dataset balance is not converted), as `backtest` and `train` refuse
-/// it. Warns, naming the store, when it holds no model to trade on yet
-/// (`ModelSet::trades_by`): the strategy then makes no trade until one is
-/// published there.
+/// before any node is built, a catalog without the traded instruments or
+/// the pairs of `[trade] conversions`, which its models and retrains are
+/// built from (`catalog::instruments`), and a dataset balance (`[model]
+/// dataset`) whose currency those pairs do not reach a traded instrument's
+/// P&L currency from (`backtest::refuse_balance`), as `backtest` and
+/// `train` refuse it. Warns, naming the store, when it holds no model to
+/// trade on yet (`ModelSet::trades_by`): the strategy then makes no trade
+/// until one is published there.
 async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyhow::Result<()> {
     let config = load_config::<S::Params>(&args.config)?;
     let program = std::env::current_exe().context("finding this binary to retrain")?;
@@ -539,7 +539,11 @@ async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyho
         "a model strategy runs live only on a --catalog holding the instruments it trades, \
          which its models and retrains are built from",
     )?;
-    backtest::refuse_balance(config.model().dataset.balance, &traded, &[])
+    let pairs = catalog::instruments(&args.catalog, config.trade.conversions.pairs()).context(
+        "a model strategy runs live only on a --catalog holding the pairs of [trade] \
+         conversions, which its retrains convert the dataset balance through",
+    )?;
+    backtest::refuse_balance(config.model().dataset.balance, &traded, &pairs)
         .context(DATASET_BALANCE)?;
     let models = S::blueprint(&config)?.model_set(&args.models)?;
     if !models.trades_by(Timestamp::now())? {
@@ -583,22 +587,26 @@ struct DatasetRun {
 
 impl DatasetRun {
     /// Refuses the runs of the strategy `config` describes, before any,
-    /// unless their balance is in the P&L currency of each instrument it
-    /// trades, as their catalog defines them (`catalog::instruments`,
-    /// `backtest::refuse_balance`, through no pair): a target's trades are
-    /// sized on it, which is not converted.
+    /// unless the pairs of its `[trade] conversions` reach the P&L currency
+    /// of each instrument it trades from their balance's, all as their
+    /// catalog defines them (`catalog::instruments`,
+    /// `backtest::refuse_balance`, the check of a backtest's balance): a
+    /// target's trades are sized on the balance converted through them.
     ///
     /// # Errors
     ///
     /// Returns an error if the catalog cannot be read, a traded instrument
-    /// is not in it or its P&L is in another currency than the balance.
+    /// or a pair is not in it, or the pairs do not reach a traded
+    /// instrument's P&L currency from the balance's.
     fn refuse_balance<S: ModelStrategy>(
         &self,
         config: &StandardConfig<S::Params>,
     ) -> anyhow::Result<()> {
         let traded = catalog::instruments(&self.catalog, &config.trade.instrument_ids())
             .context("reading the instruments traded")?;
-        backtest::refuse_balance(config.model().dataset.balance, &traded, &[])
+        let pairs = catalog::instruments(&self.catalog, config.trade.conversions.pairs())
+            .context("reading the pairs of [trade] conversions")?;
+        backtest::refuse_balance(config.model().dataset.balance, &traded, &pairs)
             .context(DATASET_BALANCE)
     }
 
@@ -693,7 +701,8 @@ impl Visitor for Training<'_> {
 
 /// Trains the model of the model strategy `S` of `args` at `--at`, the
 /// days its dataset lacks replayed by `run`, its dataset balance refused
-/// first if it is in another currency than the traded instrument's P&L.
+/// first if the pairs of `[trade] conversions` do not reach the traded
+/// instrument's P&L currency from it (`DatasetRun::refuse_balance`).
 fn train<S: ModelStrategy>(args: &TrainArgs, run: &DatasetRun) -> anyhow::Result<Trained> {
     let config = load_config::<S::Params>(&args.config)?;
     run.refuse_balance::<S>(&config)?;
