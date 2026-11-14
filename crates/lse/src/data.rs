@@ -2163,6 +2163,50 @@ mod tests {
         assert_eq!(custom_data(&response), []);
     }
 
+    /// LSE's catalogue, captured on 13 November 2026, held insider trades
+    /// filed up to 13 October (`last`) and company profiles updated up to
+    /// 05:08:52 on 13 October: a window whose last key's date is after it
+    /// is one LSE has not loaded, however long ago, and is answered in a
+    /// plain response, written to no catalog, so that a fill asks for it
+    /// again; one whose last key is of the catalogue's last date, LSE
+    /// loading a day whole, is answered complete.
+    #[rstest]
+    #[case::filed_after_the_last_date(
+        "insider_trades", "TEAM", TEAM_INSIDER_TRADES,
+        ("2026-10-20T00:00:00Z", "2026-10-21T00:00:00Z"), false
+    )]
+    #[case::updated_after_the_last_date(
+        "company_profiles", "AHMA", AHMA_COMPANY_PROFILES,
+        ("2026-10-20T00:00:00Z", "2026-10-21T00:00:00Z"), false
+    )]
+    #[case::updated_on_the_last_date(
+        "company_profiles", "AHMA", AHMA_COMPANY_PROFILES,
+        ("2026-10-13T00:00:00Z", "2026-10-13T12:00:00Z"), true
+    )]
+    #[tokio::test]
+    async fn a_window_keyed_after_the_last_lse_s_catalogue_holds_is_answered_unwritten(
+        #[case] dataset: &str,
+        #[case] symbol: &str,
+        #[case] file: &'static [u8],
+        #[case] (from, to): (&str, &str),
+        #[case] written: bool,
+    ) {
+        let lse = MockLse::start(vec![Reply::json(REFERENCE_CATALOGUE), Reply::file(file)]);
+        let (client, mut events) = connected(&lse, false).await;
+
+        client
+            .request_data(rows_of(LseRow::data_type(dataset, symbol), from, to))
+            .unwrap();
+
+        let event = next_event(&mut events).await;
+        let answered = match event {
+            DataEvent::ResponseEnvelope(envelope) if envelope.failure_reason().is_none() => true,
+            DataEvent::Response(DataResponse::Data(_)) => false,
+            other => panic!("neither a complete envelope nor a plain response: {other:?}"),
+        };
+        assert_eq!(answered, written);
+    }
+
     #[tokio::test]
     async fn a_selection_lse_holds_no_row_of_is_answered_complete_with_no_rows() {
         let lse = MockLse::start(vec![

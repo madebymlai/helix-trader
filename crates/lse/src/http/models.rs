@@ -4,6 +4,7 @@
 
 use std::fmt;
 
+use anyhow::Context;
 use jiff::{
     SignedDuration, Timestamp,
     civil::{self, Date, Time},
@@ -100,12 +101,40 @@ pub(crate) struct ReferenceCatalogue {
     pub(crate) datasets: Vec<ReferenceCollection>,
 }
 
-/// A reference collection, as LSE's catalogue lists it: its name and the
-/// column holding its rows' time, a date or a time.
+/// A reference collection, as LSE's catalogue lists it: its name, the
+/// column holding its rows' time, a date or a time, and the last of them
+/// LSE holds, if any (`last`: `2026-11-11`, `2026-11-12 23:29:00`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub(crate) struct ReferenceCollection {
     pub(crate) dataset: String,
     pub(crate) time_column: String,
+    pub(crate) last: Option<String>,
+}
+
+impl ReferenceCollection {
+    /// The key of the last rows LSE holds of the collection, its
+    /// catalogue's `last` in UTC, LSE's time: a date at its start, or a
+    /// time; `None` if the catalogue gives none.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming the collection if `last` is neither a date
+    /// nor a time.
+    pub(crate) fn last_key(&self) -> anyhow::Result<Option<Timestamp>> {
+        self.last
+            .as_deref()
+            .map(|last| {
+                let time: civil::DateTime = last.parse().with_context(|| {
+                    format!(
+                        "LSE's reference catalogue gives {} a last of {last}, neither a date \
+                         nor a time",
+                        self.dataset
+                    )
+                })?;
+                Ok(time.to_zoned(TimeZone::UTC)?.timestamp())
+            })
+            .transpose()
+    }
 }
 
 /// An instrument's splits and dividends, as LSE's `/v3/factors` answers
@@ -415,6 +444,44 @@ mod tests {
 
         assert_eq!(catalogue.datasets.len(), 21);
         assert_eq!(unclassified, Vec::<&str>::new());
+    }
+
+    /// LSE's catalogue gives each collection's last key, a date or a time,
+    /// in UTC, captured on 13 November 2026.
+    #[rstest]
+    fn each_collection_s_last_key_is_read_from_lse_s_catalogue() {
+        let catalogue: ReferenceCatalogue = serde_json::from_str(REFERENCE_CATALOGUE).unwrap();
+        let last = |name: &str| {
+            catalogue
+                .datasets
+                .iter()
+                .find(|collection| collection.dataset == name)
+                .unwrap()
+                .last_key()
+                .unwrap()
+        };
+
+        assert_eq!(last("insider_trades"), Some(at("2026-10-13T00:00:00Z")));
+        assert_eq!(last("bond_yields_minute"), Some(at("2026-11-12T23:29:00Z")));
+        assert!(
+            catalogue
+                .datasets
+                .iter()
+                .all(|collection| collection.last_key().unwrap().is_some())
+        );
+    }
+
+    #[rstest]
+    fn a_last_key_that_is_no_date_or_time_fails_naming_its_collection() {
+        let collection = ReferenceCollection {
+            dataset: "insider_trades".to_string(),
+            time_column: "filing_date".to_string(),
+            last: Some("yesterday".to_string()),
+        };
+
+        let err = collection.last_key().unwrap_err().to_string();
+
+        assert!(err.contains("insider_trades"), "{err}");
     }
 
     /// A collection's key is its catalogue's time column: a date for those
