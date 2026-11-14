@@ -31,7 +31,7 @@ use nautilus_common::{
         DataEvent,
         data::{
             SubscribeBookDeltas, SubscribeBookDepth, SubscribeQuotes, SubscribeTrades,
-            UnsubscribeQuotes,
+            UnsubscribeBookDepth, UnsubscribeQuotes,
         },
     },
 };
@@ -280,10 +280,10 @@ async fn the_records_after_a_gap_come_and_nothing_stands_in_for_those_missed() {
     assert!(events.try_recv().is_err(), "data beside the trade");
 }
 
-/// GCZ6 of 2026 streamed from the start; GCG7 of 2027, its next
-/// contract, subscribed later, as a roll subscribes it: looked up, then
-/// carried from a new connection, which opens it with its captured best
-/// bid and offer, bid 3890.0 x 1 and ask 3932.0 x 1.
+/// GCZ6 of 2026 streamed from the start and quoted; GCG7 of 2027, its
+/// next contract, subscribed later, as a roll subscribes it: looked up,
+/// then carried from a new connection beside GCZ6, which opens it with its
+/// captured best bid and offer, bid 3890.0 x 1 and ask 3932.0 x 1.
 #[tokio::test]
 async fn a_contract_subscribed_after_the_start_is_looked_up_and_carried_from_a_new_connection() {
     let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6), Reply::json(PAIRS_GCG7)]);
@@ -297,6 +297,11 @@ async fn a_contract_subscribed_after_the_start_is_looked_up_and_carried_from_a_n
     let (mut client, connected, mut events) =
         streaming(&lse, &stream, &[GCZ26], vec![gcz26(), gcg27()]).await;
     connected.unwrap();
+    client.subscribe_quotes(quotes_of(&[GCZ26])).unwrap();
+    let Data::Quote(opening) = next(&mut events).await else {
+        panic!("not GCZ6's opening quote")
+    };
+    assert_eq!(opening.instrument_id, InstrumentId::from(GCZ26));
 
     client.subscribe_quotes(quotes_of(&[GCG27])).unwrap();
 
@@ -376,6 +381,98 @@ async fn a_contract_whose_data_at_a_level_all_ended_is_left_out_of_its_next_conn
         .map(|(_, frame)| frame["symbols"].clone())
         .collect();
     assert_eq!(subscriptions, [json!(["GCG7", "GCZ6"]), json!(["GCZ6"])]);
+}
+
+/// The mock CME stream answering Level 1 with GCZ6's and GCG7's captured
+/// openings, its first Level 1 connection then held until the test
+/// releases it and dropped, and Level 2 with GCZ6's documented session.
+fn level_1_dropped_once() -> MockExchangeStream {
+    let mut level_1 = 0;
+    MockExchangeStream::cme(move |_, subscription| {
+        if subscription["level"] != 1 {
+            return sent(dbn_frames(CME_GCZ6_L2_DOCUMENTED));
+        }
+        level_1 += 1;
+        let mut actions = sent(frames(CME_GCZ6_GCG7));
+        if level_1 == 1 {
+            actions.push(StreamAction::Hold);
+            actions.push(StreamAction::Close(1001, "going away".to_string()));
+        }
+        actions
+    })
+}
+
+/// The contracts each Level 1 subscription `stream` received named, in
+/// order, once it received `count` of them.
+async fn level_1_subscriptions(stream: &MockExchangeStream, count: usize) -> Vec<Value> {
+    let level_1 = |received: &[(usize, Value)]| -> Vec<Value> {
+        received
+            .iter()
+            .filter(|(_, frame)| frame["level"] == 1)
+            .map(|(_, frame)| frame["symbols"].clone())
+            .collect()
+    };
+    level_1(
+        &stream
+            .wait_until(|received| level_1(received).len() == count)
+            .await,
+    )
+}
+
+/// The review's case: a config reading a rolled root's depth and the next
+/// contract's quotes streams GCZ6 and GCG7, both named at Level 1 when the
+/// client connects; GCZ6's depth, taken at Level 2, ends at the roll. GCZ6
+/// takes no data at Level 1 either, so Level 1's next connection leaves it
+/// out too: once GCZ6 expired, LSE would refuse a subscription naming it
+/// (`symbol unavailable`, 1008, not reconnected) and stop GCG7's quotes.
+#[tokio::test]
+async fn a_contract_whose_data_ended_at_one_level_is_left_out_of_every_level_it_takes_none_at() {
+    let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6), Reply::json(PAIRS_GCG7)]);
+    let stream = level_1_dropped_once();
+    let (mut client, connected, _events) =
+        streaming(&lse, &stream, &[GCZ26, GCG27], vec![gcz26(), gcg27()]).await;
+    connected.unwrap();
+    client.subscribe_book_depth(depth_of(&[GCZ26], 10)).unwrap();
+    client.subscribe_quotes(quotes_of(&[GCG27])).unwrap();
+
+    client
+        .unsubscribe_book_depth(&UnsubscribeBookDepth::new(
+            ids(&[GCZ26]),
+            Some(ClientId::from("LSE")),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        ))
+        .unwrap();
+    stream.release();
+
+    assert_eq!(
+        level_1_subscriptions(&stream, 2).await,
+        [json!(["GCG7", "GCZ6"]), json!(["GCG7"])]
+    );
+}
+
+/// A run started just before a roll streams GCZ6 and GCG7, both named at
+/// Level 1 when the client connects, LSE checking them, but subscribes
+/// GCG7's quotes alone: Level 1's next connection names GCG7 alone, so
+/// that GCZ6, never taken and once expired, does not have LSE refuse it.
+#[tokio::test]
+async fn a_reconnect_names_only_the_contracts_taken_at_its_level_not_those_streamed_untaken() {
+    let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6), Reply::json(PAIRS_GCG7)]);
+    let stream = level_1_dropped_once();
+    let (mut client, connected, _events) =
+        streaming(&lse, &stream, &[GCZ26, GCG27], vec![gcz26(), gcg27()]).await;
+    connected.unwrap();
+
+    client.subscribe_quotes(quotes_of(&[GCG27])).unwrap();
+    stream.release();
+
+    assert_eq!(
+        level_1_subscriptions(&stream, 2).await,
+        [json!(["GCG7", "GCZ6"]), json!(["GCG7"])]
+    );
 }
 
 /// LSE's captured close of a subscription naming a contract the stream

@@ -10,9 +10,9 @@
 //! `open` names each contract the config streams as the stream takes it,
 //! a CME contract by its listing's symbol, which it looks up in LSE's
 //! catalogue with the CME key (see `http::listing`), a Nasdaq stock by its
-//! ticker, then connects to the stream subscribing them all at Level 1 (see
-//! `ExchangeStreamClient`), and fails with LSE's refusal of a lookup or of
-//! the subscription. A subscription reads the contract's price precision
+//! ticker, then connects to the stream naming them all in Level 1's first
+//! subscription (see `ExchangeStreamClient`), LSE checking each, and fails
+//! with LSE's refusal of a lookup or of the subscription. A subscription reads the contract's price precision
 //! from the cache and has the stream carry the contract at the level of its
 //! data: quotes and trades at Level 1, depth at Level 2 and deltas at Level
 //! 3, each level on a connection of its own, LSE taking one level a
@@ -25,11 +25,13 @@
 //! levels, unless they went out already, and one not carried yet at the
 //! level, a later contract of a rolled root or a stock the config does not
 //! stream, is named, a CME contract looked up, and carried from the level's
-//! next connection, which opens it. A contract whose last subscription at a
-//! level ends is left out of the level's next connection, so that one
-//! rolled out of and expired, which LSE would refuse (`symbol unavailable`,
-//! closing the connection with 1008, not reconnected), does not stop the
-//! level's data.
+//! next connection, which opens it. A level's later connections name only
+//! the contracts taking data at that level: one the config streams that no
+//! subscription takes is named on Level 1's first connection alone, and one
+//! whose subscriptions end is left out of every level it then takes no data
+//! at, so that one rolled out of and expired, which LSE would refuse
+//! (`symbol unavailable`, closing the connection with 1008, not
+//! reconnected), does not stop the level's data.
 //!
 //! Each record of a contract subscribed becomes Nautilus data through
 //! Nautilus' Databento decoder, LSE's records being Databento's, at the
@@ -331,9 +333,10 @@ impl ExchangeStreams {
     }
 
     /// Names the contracts streamed as the stream takes them, looking a CME
-    /// contract up, and connects to the stream subscribing them all at
-    /// Level 1; starts turning their records into data. Nothing to do if
-    /// none is streamed.
+    /// contract up, and connects to the stream naming them all in Level 1's
+    /// first subscription, which LSE checks, later connections naming those
+    /// subscribed alone; starts turning their records into data. Nothing to
+    /// do if none is streamed.
     ///
     /// # Errors
     ///
@@ -380,9 +383,9 @@ impl ExchangeStreams {
     }
 
     /// The subscriber of the connection of `level`: its open one, or a new
-    /// one carrying the contracts subscribed at the level, which connects
-    /// with its first contract, and whose records and answer are taken up
-    /// here.
+    /// one carrying the contracts taken at the level, subscribed on it, so
+    /// that each of its connections names them, which connects with its
+    /// first contract, and whose records and answer are taken up here.
     ///
     /// # Errors
     ///
@@ -408,10 +411,13 @@ impl ExchangeStreams {
             &self.url,
             &access.credential,
             level,
-            &carried,
+            &[],
             out_tx,
         )?;
         let subscriber = client.subscriber();
+        for symbol in &carried {
+            subscriber.subscribe(symbol, false)?;
+        }
         // A closed client's handler has stopped.
         self.clients.insert(level, client);
         self.spawn_records(level, out)?;
@@ -604,10 +610,10 @@ impl ExchangeStreams {
             .map_err(|e| anyhow::anyhow!("looking up {id} to stream it: {e}"))
     }
 
-    /// Ends `kind` of the contract `id`. If it takes no data of `kind`'s
-    /// level then, the level's connection carries it no longer from its
-    /// next connection (see `ExchangeSubscriber::unsubscribe`): the stream
-    /// carries it on until then.
+    /// Ends `kind` of the contract `id`. Each level's connection it takes no
+    /// data at then, `kind`'s or another, carries it no longer from its next
+    /// connection (see `ExchangeSubscriber::unsubscribe`): the stream carries
+    /// it on until then.
     ///
     /// # Errors
     ///
@@ -622,13 +628,11 @@ impl ExchangeStreams {
                 of.set(kind, false);
             }
         });
-        let level = kind.level();
-        let taken = self
-            .subscribed
-            .get_cloned(&symbol)
-            .is_some_and(|of| of.takes_at(level));
-        if !taken && let Some(client) = self.clients.get(&level) {
-            client.subscriber().unsubscribe(&symbol);
+        let of = self.subscribed.get_cloned(&symbol);
+        for (level, client) in &self.clients {
+            if !of.is_some_and(|of| of.takes_at(*level)) {
+                client.subscriber().unsubscribe(&symbol);
+            }
         }
         Ok(())
     }

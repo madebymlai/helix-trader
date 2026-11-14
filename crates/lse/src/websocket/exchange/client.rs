@@ -9,11 +9,16 @@
 //! A connection carries one subscription, of one level: the contracts by
 //! their names at LSE at Level 1, 2 or 3, which the handler sends first on
 //! each connection (`send_text_on_connection`, never replayed on another),
-//! from the contracts it carries (Nautilus' `SubscriptionState`, topics:
-//! the names). The handler connects once it carries a contract, those it
-//! was started with or the first subscribed, and its first subscription
-//! names every contract subscribed by then; no subscription overtakes the
-//! connection, each waiting in the handler's commands. The key of the
+//! from the contracts subscribed (Nautilus' `SubscriptionState`, topics:
+//! the names). The handler connects once it has a contract to name, those
+//! it was started with or the first subscribed, and its first subscription
+//! names them and every contract subscribed by then; no subscription
+//! overtakes the connection, each waiting in the handler's commands. A
+//! contract it was started with is named on the first connection alone,
+//! for LSE to check it, unless subscribed: a later connection names only
+//! the contracts subscribed, so that one never taken, once expired, does
+//! not have LSE refuse the whole subscription, and a connection with none
+//! to name sends no subscription. The key of the
 //! exchange's plan goes in the `X-API-Key` header of the opening request, a
 //! reconnect's too. LSE
 //! answers with `hello`, then opens each contract, with its last best bid
@@ -30,8 +35,9 @@
 //! beyond the last but one is a gap, passed on and left: the records
 //! between did not come, as when the stream drops what a slow reader could
 //! not take; a record not beyond the last is passed over, as is an opening
-//! that brings nothing new. A contract the client does not carry yet is
-//! carried on a new connection: the handler asks Nautilus' transport to
+//! that brings nothing new. A contract subscribed that the connection does
+//! not carry is carried on a new connection: the handler asks Nautilus'
+//! transport to
 //! reconnect (`request_reconnect`), and the new connection's subscription
 //! names it too, LSE taking no second subscription on a connection. A new
 //! subscriber of a contract carried already is passed on in its place
@@ -55,7 +61,7 @@
 
 use std::sync::Arc;
 
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use anyhow::Context;
 use nautilus_common::live::dst::time::{self, Duration};
 use nautilus_live::task::TaskSlot;
@@ -146,11 +152,13 @@ pub struct ExchangeSubscriber {
 
 impl ExchangeStreamClient {
     /// Starts the client of `exchange`'s stream at `url` with the key of
-    /// `credential`, carrying the contracts `symbols`, by their names at
-    /// LSE, at `level`, and passing their records and gaps to `out`: its
-    /// handler connects once it carries a contract, `symbols` or the first
-    /// subscribed (`ExchangeSubscriber::subscribe`), and subscribes every
-    /// contract it carries by then. The opening returned gets LSE's answer.
+    /// `credential`, at `level`, passing the records and gaps of its
+    /// contracts to `out`: its handler connects once it has a contract to
+    /// name, `symbols`, by their names at LSE, or the first subscribed
+    /// (`ExchangeSubscriber::subscribe`), and its first subscription names
+    /// `symbols` and every contract subscribed by then. A later connection
+    /// names only the contracts subscribed, `symbols` among them only if
+    /// subscribed. The opening returned gets LSE's answer.
     ///
     /// # Errors
     ///
@@ -193,9 +201,6 @@ impl ExchangeStreamClient {
             .with_context(|| format!("the config of LSE's {exchange} stream"))?;
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
         let subscriptions = SubscriptionState::new(TOPIC_DELIMITER);
-        for symbol in symbols {
-            subscriptions.mark_subscribe(symbol);
-        }
         let (opened_tx, opened_rx) = tokio::sync::oneshot::channel();
         let handler = ExchangeHandler {
             exchange,
@@ -210,7 +215,9 @@ impl ExchangeStreamClient {
             raw_rx,
             out,
             opening: Some(opened_tx),
+            first: symbols.to_vec(),
             subscriptions,
+            carried: AHashSet::new(),
             epoch: 0,
             feed: None,
             sequences: AHashMap::new(),
@@ -230,8 +237,10 @@ impl ExchangeStreamClient {
     }
 
     /// Connects to `exchange`'s stream at `url` with the key of
-    /// `credential`, subscribing the contracts `symbols`, by their names at
-    /// LSE, at `level`, and passing their records and gaps to `out`.
+    /// `credential`, its first subscription naming the contracts `symbols`,
+    /// by their names at LSE, at `level`, which LSE checks, and passing their
+    /// records and gaps to `out`; a later connection names those subscribed
+    /// alone (see `start`).
     ///
     /// # Errors
     ///
@@ -288,11 +297,11 @@ impl ExchangeStreamClient {
 }
 
 impl ExchangeSubscriber {
-    /// Has the connection carry the contract `symbol`, its name at LSE: if
-    /// it carries it already and `reopen`, the new subscriber is passed on
-    /// (`ExchangeWsMessage::Reopen`); if not, the connection's first
-    /// subscription names it, if not sent yet, or a new connection carries
-    /// it, opening it.
+    /// Has the connection carry the contract `symbol`, its name at LSE, on
+    /// this connection and every later one: if it carries it already and
+    /// `reopen`, the new subscriber is passed on (`ExchangeWsMessage::Reopen`);
+    /// if not, the connection's first subscription names it, if not sent
+    /// yet, or a new connection carries it, opening it.
     ///
     /// # Errors
     ///
@@ -350,8 +359,14 @@ struct ExchangeHandler {
     /// Where the first `hello`, or the refusal of the first subscription,
     /// goes, until it comes.
     opening: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
-    /// The contracts carried, by their names at LSE.
+    /// The contracts the first connection's subscription names beside those
+    /// subscribed, until it is sent.
+    first: Vec<String>,
+    /// The contracts subscribed, by their names at LSE, which every
+    /// connection's subscription names.
     subscriptions: SubscriptionState,
+    /// The contracts the connection's subscription named, which it carries.
+    carried: AHashSet<String>,
     /// The transport's connection the handler speaks on: 0, then each
     /// replacement's.
     epoch: u64,
@@ -395,12 +410,13 @@ impl ExchangeHandler {
         }
     }
 
-    /// Connects once a contract is carried, and sends the subscription of
-    /// the contracts carried by then, those subscribed while it connected
-    /// among them. Whether it did: not if disconnected first, nor if the
-    /// transport does not connect, which the opening is told.
+    /// Connects once it has a contract to name, and sends the subscription
+    /// of the contracts it was started with and those subscribed by then,
+    /// while it connected among them. Whether it did: not if disconnected
+    /// first, nor if the transport does not connect, which the opening is
+    /// told.
     async fn open(&mut self) -> bool {
-        while self.subscriptions.is_empty() {
+        while self.first.is_empty() && self.subscriptions.is_empty() {
             match self.cmd_rx.recv().await {
                 Some(HandlerCommand::Subscribe { symbol, .. }) => {
                     self.subscriptions.mark_subscribe(&symbol);
@@ -440,7 +456,12 @@ impl ExchangeHandler {
                 HandlerCommand::Disconnect => return false,
             }
         }
-        let symbols = self.subscriptions.all_topics();
+        let mut symbols = std::mem::take(&mut self.first);
+        for symbol in self.subscriptions.all_topics() {
+            if !symbols.contains(&symbol) {
+                symbols.push(symbol);
+            }
+        }
         self.send_subscription(symbols).await;
         true
     }
@@ -552,10 +573,16 @@ impl ExchangeHandler {
         });
     }
 
-    /// Carries `symbol`: if carried already and `reopen`, the new
-    /// subscriber is passed on; if not, a new connection carries it.
+    /// Carries `symbol` on every connection: if carried already and
+    /// `reopen`, the new subscriber is passed on; if not, a new connection
+    /// carries it.
     fn subscribe(&mut self, symbol: String, reopen: bool) {
-        if self.subscriptions.try_mark_subscribe(&symbol) {
+        let newly = self.subscriptions.try_mark_subscribe(&symbol);
+        if newly && self.carried.contains(&symbol) {
+            // Named on this connection, the first, before it was subscribed:
+            // its opening came, or comes, here.
+            self.subscriptions.confirm_subscribe(&symbol);
+        } else if newly {
             log::info!(
                 "LSE's {} stream carries {symbol} from its next connection, one subscription a \
                  connection: reconnecting",
@@ -604,7 +631,7 @@ impl ExchangeHandler {
             .as_ref()
             .is_some_and(|(code, _)| TERMINAL.contains(code));
         if let Some(opening) = self.opening.take() {
-            let mut symbols = self.subscriptions.all_topics();
+            let mut symbols: Vec<&String> = self.carried.iter().collect();
             symbols.sort();
             let _ = opening.send(Err(format!(
                 "LSE's {} stream refused the {} subscription of {symbols:?}: {described}",
@@ -628,9 +655,21 @@ impl ExchangeHandler {
     }
 
     /// Sends the subscription of `symbols` on the connection, if it is
-    /// still the transport's and live. One not sent never is: the next
-    /// connection sends its own.
-    async fn send_subscription(&self, mut symbols: Vec<String>) {
+    /// still the transport's and live, and takes them as what it carries;
+    /// none if there are none, a later subscription carrying its contract
+    /// on a new connection. One not sent never is: the next connection
+    /// sends its own.
+    async fn send_subscription(&mut self, mut symbols: Vec<String>) {
+        self.carried = symbols.iter().cloned().collect();
+        if symbols.is_empty() {
+            log::info!(
+                "LSE's {} stream carries no contract at {}: no subscription until one is \
+                 subscribed",
+                self.exchange,
+                self.level
+            );
+            return;
+        }
         let Some(client) = self.client.as_ref().filter(|client| client.is_active()) else {
             return;
         };
