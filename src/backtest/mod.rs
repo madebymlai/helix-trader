@@ -137,7 +137,9 @@ impl Backtest {
     /// them (`catalog::instruments`, `refuse_balance`): a trade sent at a
     /// stake is sized on the account's equity converted into its P&L
     /// currency at the pairs' rates (`strategy::orders::Trade::send`), so
-    /// on a balance they do not convert it would send nothing.
+    /// on a balance they do not convert it would send nothing. A pair
+    /// defined without a base currency, which gives no rate, is refused
+    /// whatever the balance.
     ///
     /// # Errors
     ///
@@ -296,8 +298,10 @@ impl Backtest {
 ///
 /// # Errors
 ///
-/// Returns an error naming both currencies if the pairs do not reach the
-/// P&L currency of an instrument of `traded` from the balance's.
+/// Returns an error naming a pair of `pairs` defined without a base
+/// currency, which gives no rate (`conversions::reaches`), or naming both
+/// currencies if the pairs do not reach the P&L currency of an instrument
+/// of `traded` from the balance's.
 pub fn refuse_balance(
     balance: Money,
     traded: &[InstrumentAny],
