@@ -15,7 +15,7 @@ use nautilus_trading::{
 
 use rust_decimal::Decimal;
 
-use super::*;
+use super::{testing::BOOK, *};
 use crate::{
     model::{
         decide::DecisionRule,
@@ -39,8 +39,6 @@ const LAST: Declared<EmaArgs> = Declared::new("last");
 /// Nautilus' exponential average of two mids, prices or closes, the mean
 /// of the first two once both came, `[indicators.two]`.
 const TWO: Declared<EmaArgs> = Declared::new("two");
-/// The tests' count of depth and deltas, `[indicators.book]`.
-const BOOK: Declared<BookCountArgs> = Declared::new("book");
 /// The tests' feature failing on every quote, `[indicators.failing]`.
 const FAILING: Declared<FailingQuotesArgs> = Declared::new("failing");
 
@@ -94,57 +92,6 @@ fn bar(bar_type: &str, close: f64) -> Bar {
         UnixNanos::default(),
         UnixNanos::default(),
     )
-}
-
-/// A feature counting the depth and deltas it gets, initialized by the
-/// first, its value the count.
-struct BookCount {
-    count: usize,
-}
-
-impl Indicator for BookCount {
-    fn name(&self) -> String {
-        "BookCount".to_string()
-    }
-
-    fn has_inputs(&self) -> bool {
-        self.count > 0
-    }
-
-    fn initialized(&self) -> bool {
-        self.count > 0
-    }
-
-    fn handle_depth(&mut self, _depth: &OrderBookDepth) {
-        self.count += 1;
-    }
-
-    fn handle_deltas(&mut self, _deltas: &OrderBookDeltas) {
-        self.count += 1;
-    }
-
-    fn reset(&mut self) {
-        self.count = 0;
-    }
-}
-
-impl Feature for BookCount {
-    fn value(&self) -> f64 {
-        self.count as f64
-    }
-}
-
-/// The arguments of `BookCount`: none.
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BookCountArgs {}
-
-impl IndicatorArgs for BookCountArgs {
-    type Indicator = BookCount;
-
-    fn build(self) -> anyhow::Result<BookCount> {
-        Ok(BookCount { count: 0 })
-    }
 }
 
 fn deltas(instrument: &str) -> OrderBookDeltas {

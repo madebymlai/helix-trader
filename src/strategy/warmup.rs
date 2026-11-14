@@ -131,10 +131,13 @@
 //! the group ends, then hands them over in the order they came, dropping
 //! those the history holds (`hold`, which says the rule and what upstream
 //! change replaces it); after the warmup, and in a replay, live ticks go
-//! straight through. Nautilus routes depth and deltas to no indicator, so
-//! the warmup hands a response's to its book indicators (`BookIndicator`),
-//! the deltas in the batches the live stream carries (`batches`), with no
-//! hold: no strategy's features read them.
+//! straight through. Nautilus routes depth and deltas to no indicator, only
+//! to the actor's handlers, so the warmup hands a response's to its book
+//! indicators (`BookIndicator`, `feeding_books`), from the actor's
+//! `on_historical_book_depth` and `on_historical_book_deltas`, the deltas in
+//! the batches the live stream carries (`batches`), and the live ones the
+//! actor hands it from `on_book_depth` and `on_book_deltas` the same way,
+//! held as live ticks are.
 //!
 //! Custom data the features read (a raw feature's, a root's on its
 //! contract's data type) is requested in the same group over the same
@@ -154,7 +157,8 @@
 //! its parts: `start` from `on_start`, `Warmup::on_historical_quotes`,
 //! `on_historical_trades`, `on_historical_book_depth`,
 //! `on_historical_book_deltas` and `on_historical_data` from the hooks of
-//! the same names, `Warmup::on_quote` and `on_trade` from those, and
+//! the same names, `Warmup::on_quote`, `on_trade`, `on_book_depth` and
+//! `on_book_deltas` from those, and
 //! `Warmup::on_data_response`, or `finished` alone, from `on_data_response`,
 //! then, on bars on a root, `continuous_bars`; in a backtest or a dataset run
 //! `subscribe` from `on_start` alone.
@@ -237,7 +241,8 @@ pub trait BookIndicator {
 /// `on_data_response` from `on_data_response`, `on_historical_quotes`,
 /// `on_historical_trades`, `on_historical_book_depth`,
 /// `on_historical_book_deltas` and `on_historical_data` from theirs, and
-/// `on_quote` and `on_trade` from its live hooks.
+/// `on_quote`, `on_trade`, `on_book_depth` and `on_book_deltas` from its
+/// live hooks.
 ///
 /// Live, `start` requests the warmup of the bar types the strategy reads,
 /// of those the strategy's harness needs warm (`building`, the target's
@@ -246,11 +251,12 @@ pub trait BookIndicator {
 /// go to the indicators the warmup feeds (`feeding`, `building`), oldest
 /// first, when it completes, each response's quotes and trades to its tick
 /// indicators (`feeding_ticks`), holding the live ones until the group ends,
-/// its depth and deltas to its book indicators (`feeding_books`), its
-/// custom data to the cache (`on_historical_data`).
+/// its depth and deltas to its book indicators (`feeding_books`), holding
+/// the live ones as ticks, its custom data to the cache
+/// (`on_historical_data`).
 /// On a replay `start` subscribes to the strategy's bar types alone: the
-/// harness subscribes to its own; the live ticks go straight to the tick
-/// indicators.
+/// harness subscribes to its own; the live ticks, depth and deltas go
+/// straight to their indicators.
 /// The strategies read no bars on a root, so a warmup has no continuous
 /// bars. A live node sizes its cache from `cache_config`, which holds the
 /// warmup of every bar type the warmup builds.
@@ -266,8 +272,6 @@ pub struct Warmup {
     ticks: Vec<TickSeries>,
     /// What the warmup's bars are handed to.
     indicators: Vec<SharedActorIndicator>,
-    /// What the warmup's book depth and deltas are handed to.
-    books: Vec<Rc<dyn BookIndicator>>,
     /// What hands the quotes and trades, of the warmup and live, to the
     /// indicators reading them, holding the live ones while a live start's
     /// group is pending.
@@ -312,7 +316,6 @@ impl Warmup {
             harness: Vec::new(),
             ticks: Vec::new(),
             indicators: Vec::new(),
-            books: Vec::new(),
             hold: Hold::default(),
             group: Cell::new(UUID4::new()),
             warming: Cell::new(false),
@@ -355,10 +358,12 @@ impl Warmup {
     }
 
     /// The warmup handing the book depth and deltas of its responses to
-    /// `books` too.
+    /// `books` too, and the live ones the strategy hands it
+    /// (`on_book_depth`, `on_book_deltas`): live, those held until its group
+    /// ends, and those the history holds dropped (see `hold`).
     #[must_use]
     pub fn feeding_books(mut self, books: Rc<dyn BookIndicator>) -> Self {
-        self.books.push(books);
+        self.hold.feeding_books(books);
         self
     }
 
@@ -488,24 +493,50 @@ impl Warmup {
     /// Hands the book depth of `response`, a response to the warmup's
     /// request, to the book indicators it feeds, oldest first, from the
     /// actor's `on_historical_book_depth`.
-    pub fn on_historical_book_depth(&self, response: &[OrderBookDepth]) {
-        for depth in response {
-            for books in &self.books {
-                books.handle_depth(depth);
-            }
-        }
+    ///
+    /// # Errors
+    ///
+    /// None: a book indicator reads depth without failing. Returned as the
+    /// tick hand-overs' are.
+    pub fn on_historical_book_depth(&self, response: &[OrderBookDepth]) -> anyhow::Result<()> {
+        response
+            .iter()
+            .try_for_each(|depth| self.hold.history(Tick::Depth(Box::new(depth.clone()))))
     }
 
     /// Hands the book deltas of `response`, a response to the warmup's
     /// request, to the book indicators it feeds, in the batches the live
     /// stream carries (see `batches`), oldest first, from the actor's
     /// `on_historical_book_deltas`.
-    pub fn on_historical_book_deltas(&self, response: &[OrderBookDelta]) {
-        for deltas in batches(response) {
-            for books in &self.books {
-                books.handle_deltas(&deltas);
-            }
-        }
+    ///
+    /// # Errors
+    ///
+    /// As `on_historical_book_depth`.
+    pub fn on_historical_book_deltas(&self, response: &[OrderBookDelta]) -> anyhow::Result<()> {
+        batches(response)
+            .into_iter()
+            .try_for_each(|deltas| self.hold.history(Tick::Deltas(deltas)))
+    }
+
+    /// Takes `depth`, a live snapshot, from the actor's `on_book_depth`: the
+    /// book indicators read it once a live start's group has ended, held
+    /// until then, and never if the history holds it (see `hold`).
+    ///
+    /// # Errors
+    ///
+    /// As `on_historical_book_depth`.
+    pub fn on_book_depth(&self, depth: &OrderBookDepth) -> anyhow::Result<()> {
+        self.hold.live(Tick::Depth(Box::new(depth.clone())))
+    }
+
+    /// Takes `deltas`, a live batch, from the actor's `on_book_deltas`, as
+    /// `on_book_depth` does a snapshot.
+    ///
+    /// # Errors
+    ///
+    /// As `on_historical_book_depth`.
+    pub fn on_book_deltas(&self, deltas: &OrderBookDeltas) -> anyhow::Result<()> {
+        self.hold.live(Tick::Deltas(deltas.clone()))
     }
 
     /// Adds the custom data of `response`, a response to the warmup's
@@ -613,7 +644,6 @@ impl Debug for Warmup {
             .field("harness", &self.harness)
             .field("ticks", &self.ticks)
             .field("indicators", &self.indicators.len())
-            .field("books", &self.books.len())
             .field("hold", &self.hold)
             .field("group", &self.group)
             .field("warming", &self.warming)
@@ -1518,12 +1548,9 @@ mod tests {
         let warmup = Warmup::live(&reading(&[])).feeding_books(Rc::clone(&books) as _);
         let last = RecordFlag::F_LAST as u8;
 
-        warmup.on_historical_book_deltas(&[
-            delta(1, 0),
-            delta(2, last),
-            delta(3, last),
-            delta(4, 0),
-        ]);
+        warmup
+            .on_historical_book_deltas(&[delta(1, 0), delta(2, last), delta(3, last), delta(4, 0)])
+            .unwrap();
 
         let batches: Vec<Vec<u64>> = books
             .deltas
@@ -1545,10 +1572,82 @@ mod tests {
             ..stub_depth10()
         };
 
-        warmup.on_historical_book_depth(&[depth(7), depth(8)]);
+        warmup
+            .on_historical_book_depth(&[depth(7), depth(8)])
+            .unwrap();
 
         let sequences: Vec<u64> = books.depths.borrow().iter().map(|d| d.sequence).collect();
         assert_eq!(sequences, [7, 8]);
+    }
+
+    /// A snapshot of a book's depth made, and numbered, at `at`.
+    fn depth_at(at: u64) -> OrderBookDepth {
+        OrderBookDepth {
+            sequence: at,
+            ts_event: UnixNanos::from(at),
+            ..stub_depth10()
+        }
+    }
+
+    /// A batch of GCZ26's deltas, one made, and numbered, at `at`.
+    fn deltas_at(at: u64) -> OrderBookDeltas {
+        OrderBookDeltas::new(
+            InstrumentId::from("GCZ26.GLBX"),
+            vec![delta(at, RecordFlag::F_LAST as u8)],
+        )
+    }
+
+    /// Depth and deltas as quotes: started live, its group pending, the
+    /// history answers snapshots made at 1 and 2 and a batch of deltas made
+    /// at 3; live, the venue sends the snapshot of 2 again, one made at 5,
+    /// the batch of 3 again and one made at 6, all held until the group
+    /// ends. The book indicators then read the history's, then the live
+    /// snapshot of 5 and batch of 6; the two the history holds are dropped.
+    #[test]
+    fn live_book_depth_and_deltas_are_held_and_dropped_at_the_seam_as_ticks_are() {
+        let books = Rc::new(Books::default());
+        let warmup = Warmup::live(&reading(&[]))
+            .reading(vec![tick(NautilusDataType::QuoteTick, XAU)])
+            .feeding_books(Rc::clone(&books) as _);
+        let (mut probe, _) = registered();
+        warmup.start(&mut probe).unwrap();
+
+        warmup
+            .on_historical_book_depth(&[depth_at(1), depth_at(2)])
+            .unwrap();
+        warmup
+            .on_historical_book_deltas(&[delta(3, RecordFlag::F_LAST as u8)])
+            .unwrap();
+        for live in [depth_at(2), depth_at(5)] {
+            warmup.on_book_depth(&live).unwrap();
+        }
+        for live in [deltas_at(3), deltas_at(6)] {
+            warmup.on_book_deltas(&live).unwrap();
+        }
+        let pending = (books.depths.borrow().len(), books.deltas.borrow().len());
+        warmup.complete(&probe).unwrap();
+
+        let depths: Vec<u64> = books.depths.borrow().iter().map(|d| d.sequence).collect();
+        let batches: Vec<u64> = books.deltas.borrow().iter().map(|b| b.sequence).collect();
+        assert_eq!(pending, (2, 1));
+        assert_eq!(depths, [1, 2, 5]);
+        assert_eq!(batches, [3, 6]);
+    }
+
+    /// A replay holds nothing: the live depth and deltas the strategy
+    /// hands its warmup reach the book indicators as they come.
+    #[test]
+    fn in_a_replay_live_book_depth_and_deltas_go_straight_through() {
+        let books = Rc::new(Books::default());
+        let warmup = Warmup::replayed(&reading(&[])).feeding_books(Rc::clone(&books) as _);
+
+        warmup.on_book_depth(&depth_at(5)).unwrap();
+        warmup.on_book_deltas(&deltas_at(6)).unwrap();
+
+        assert_eq!(
+            (books.depths.borrow().len(), books.deltas.borrow().len()),
+            (1, 1)
+        );
     }
 
     /// The cache holds the warmup of the harness's bars too: 1,440
