@@ -33,7 +33,7 @@ use nautilus_core::{
     datetime::datetime_to_unix_nanos,
     time::{AtomicTime, get_atomic_clock_realtime},
 };
-use nautilus_live::task::TaskGroup;
+use nautilus_live::{SocketControl, task::TaskGroup};
 use nautilus_model::{
     data::Data,
     identifiers::{ClientId, InstrumentId, Venue},
@@ -44,7 +44,7 @@ use self::spots::SpotQuotes;
 use super::{
     config::{CTraderConnection, CTraderCredential},
     session::{CTraderSession, CTraderSymbol},
-    websocket::HEARTBEAT_INTERVAL,
+    websocket::{HEARTBEAT_INTERVAL, SOCKET_ENDPOINT},
 };
 
 mod spots;
@@ -62,6 +62,8 @@ pub(super) struct CTraderDataClient {
     venue: Venue,
     credential: CTraderCredential,
     instrument_ids: Vec<InstrumentId>,
+    /// Its session's socket in the node's socket state and reconnects.
+    socket: SocketControl,
     session: Option<Session>,
     session_tasks: TaskGroup,
     command_tasks: TaskGroup,
@@ -116,6 +118,7 @@ impl CTraderDataClient {
             venue,
             credential,
             instrument_ids,
+            socket: SocketControl::new(client_id, Some(venue), SOCKET_ENDPOINT),
             session: None,
             session_tasks: TaskGroup::new(),
             command_tasks: TaskGroup::new(),
@@ -138,6 +141,7 @@ impl CTraderDataClient {
             self.venue,
             self.credential.clone(),
             HEARTBEAT_INTERVAL,
+            Some(self.socket.clone()),
         )
         .await?;
         let loaded = async {
@@ -447,12 +451,17 @@ mod tests {
     use nautilus_common::{
         cache::Cache,
         clock::VirtualClock,
-        live::runner::replace_data_event_sender,
-        messages::data::RequestCommand,
+        live::runner::{replace_data_event_sender, replace_system_event_sender},
+        messages::{
+            SystemEvent,
+            data::RequestCommand,
+            system::{SocketState, SocketStateChange},
+        },
         msgbus::{self, MessageBus, TypedHandler},
     };
     use nautilus_core::{Params, UUID4, UnixNanos};
     use nautilus_data::{client::DataClientAdapter, engine::DataEngine};
+    use nautilus_live::{SocketReconnectRegistry, SocketReconnectRequestOutcome};
     use nautilus_model::identifiers::TraderId;
     use nautilus_model::{
         instruments::Instrument,
@@ -461,16 +470,17 @@ mod tests {
     use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
     use prost::Message as _;
     use tokio::sync::mpsc;
+    use ustr::Ustr;
 
     use super::*;
     use crate::{
         common::messages::{
-            Payload, ProtoMessage, ProtoOaAssetListReq, ProtoOaAssetListRes, ProtoOaErrorRes,
-            ProtoOaGetDynamicLeverageByIdReq, ProtoOaGetTickDataReq, ProtoOaRefreshTokenReq,
-            ProtoOaSpotEvent, ProtoOaSubscribeSpotsReq, ProtoOaSubscribeSpotsRes,
-            ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes, ProtoOaSymbolsListReq,
-            ProtoOaSymbolsListRes, ProtoOaTraderReq, ProtoOaTraderRes, ProtoOaUnsubscribeSpotsReq,
-            ProtoOaUnsubscribeSpotsRes,
+            Payload, ProtoMessage, ProtoOaAccountAuthReq, ProtoOaAssetListReq, ProtoOaAssetListRes,
+            ProtoOaErrorRes, ProtoOaGetDynamicLeverageByIdReq, ProtoOaGetTickDataReq,
+            ProtoOaRefreshTokenReq, ProtoOaSpotEvent, ProtoOaSubscribeSpotsReq,
+            ProtoOaSubscribeSpotsRes, ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes,
+            ProtoOaSymbolsListReq, ProtoOaSymbolsListRes, ProtoOaTraderReq, ProtoOaTraderRes,
+            ProtoOaUnsubscribeSpotsReq, ProtoOaUnsubscribeSpotsRes,
         },
         session::ticks::Tick,
         testing::{
@@ -682,6 +692,88 @@ mod tests {
         assert_eq!(client.client_id(), ClientId::from(CLIENT));
         client.disconnect().await.unwrap();
         assert!(client.is_disconnected());
+    }
+
+    /// The next socket state the node is told of.
+    async fn next_socket_state(
+        system: &mut mpsc::UnboundedReceiver<SystemEvent>,
+    ) -> SocketStateChange {
+        let event = tokio::time::timeout(Duration::from_secs(10), system.recv())
+            .await
+            .expect("no socket state within 10 s")
+            .expect("the system events ended");
+        let SystemEvent::SocketState(change) = event;
+        change
+    }
+
+    /// The session's socket under Nautilus' `SocketControl` (`live.md`,
+    /// "Socket transport state"): its availability goes to the node as the
+    /// client's, on its venue, endpoint `ctrader-open-api`; the node's
+    /// reconnect of it replaces the transport, on which the session
+    /// authenticates again; a disconnect deregisters it.
+    #[tokio::test]
+    async fn the_sessions_socket_state_goes_to_the_node_which_can_reconnect_it() {
+        let (system_tx, mut system) = mpsc::unbounded_channel();
+        replace_system_event_sender(system_tx);
+        let (data_tx, _events) = mpsc::unbounded_channel();
+        replace_data_event_sender(data_tx);
+        let (url, received) = testing::start(peer(vec![], vec![]));
+        let (credential, _tokens) = testing::credential();
+        let registry = SocketReconnectRegistry::default();
+        let mut client = registry.scope(|| {
+            CTraderDataClient::with_endpoint(
+                ClientId::from(CLIENT),
+                url,
+                Venue::new(VENUE),
+                credential,
+                vec![InstrumentId::from(XAUUSD), InstrumentId::from(EURUSD)],
+                get_atomic_clock_realtime(),
+            )
+        });
+        let endpoint = Ustr::from("ctrader-open-api");
+
+        client.connect().await.unwrap();
+
+        let connected = next_socket_state(&mut system).await;
+        assert_eq!(
+            connected,
+            SocketStateChange::new(
+                ClientId::from(CLIENT),
+                Some(Venue::new(VENUE)),
+                endpoint,
+                SocketState::Connected
+            )
+        );
+        let reconnect = registry
+            .handle(ClientId::from(CLIENT), endpoint)
+            .expect("the session's socket is registered");
+        assert_eq!(
+            reconnect.request_reconnect(),
+            SocketReconnectRequestOutcome::Accepted
+        );
+        assert_eq!(
+            next_socket_state(&mut system).await.state,
+            SocketState::Disconnected
+        );
+        assert_eq!(
+            next_socket_state(&mut system).await.state,
+            SocketState::Connected
+        );
+        let frames = testing::wait_until(&received, |frames| {
+            frames
+                .iter()
+                .any(|(c, f)| *c == 1 && f.payload_type == ProtoOaAccountAuthReq::TYPE)
+        })
+        .await;
+        assert!(
+            frames
+                .iter()
+                .any(|(c, f)| *c == 1 && f.payload_type == ProtoOaAccountAuthReq::TYPE),
+            "the session did not authenticate again"
+        );
+
+        client.disconnect().await.unwrap();
+        assert!(registry.handle(ClientId::from(CLIENT), endpoint).is_none());
     }
 
     /// The client's clock stopped 210 ms after the captured spot event.

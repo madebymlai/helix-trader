@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use anyhow::{Context, ensure};
 use jiff::Timestamp;
 use nautilus_core::time::get_atomic_clock_realtime;
+use nautilus_live::SocketControl;
 use nautilus_model::{
     data::QuoteTick,
     identifiers::{InstrumentId, Venue},
@@ -84,6 +85,7 @@ impl CTraderSession {
             venue,
             connection.credential.clone(),
             HEARTBEAT_INTERVAL,
+            None,
         )
         .await?;
         log::info!("connected to {venue} on cTrader's {environment:?} server");
@@ -91,15 +93,18 @@ impl CTraderSession {
     }
 
     /// Connects to `url` as `credential`, at the broker of `venue`, with
-    /// the spot events of the symbols `subscribe_spots` subscribes.
+    /// the spot events of the symbols `subscribe_spots` subscribes; its
+    /// socket under `socket`, a node's client's (see `websocket`).
     pub(crate) async fn connect_to(
         url: &str,
         venue: Venue,
         credential: CTraderCredential,
         heartbeat: std::time::Duration,
+        socket: Option<SocketControl>,
     ) -> anyhow::Result<(Self, SpotEvents)> {
         let (account_id, names) = (credential.account_id, credential.names);
-        let (client, spots) = CTraderWebSocketClient::connect(url, credential, heartbeat).await?;
+        let (client, spots) =
+            CTraderWebSocketClient::connect(url, credential, heartbeat, socket).await?;
         let session = Self {
             client,
             venue,
@@ -636,6 +641,7 @@ impl CTraderSession {
             connection.venue,
             connection.credential.clone(),
             HEARTBEAT_INTERVAL,
+            None,
         )
         .await?;
         for symbol in session.symbols(instrument_ids).await? {
@@ -770,10 +776,15 @@ mod tests {
     ) -> (CTraderSession, Received) {
         let (url, received) = testing::start(peer);
         let (credential, _tokens) = testing::credential();
-        let (session, _) =
-            CTraderSession::connect_to(&url, Venue::new(VENUE), credential, HEARTBEAT_INTERVAL)
-                .await
-                .unwrap();
+        let (session, _) = CTraderSession::connect_to(
+            &url,
+            Venue::new(VENUE),
+            credential,
+            HEARTBEAT_INTERVAL,
+            None,
+        )
+        .await
+        .unwrap();
         (session, received)
     }
 
@@ -1026,6 +1037,7 @@ mod tests {
             Venue::new(VENUE),
             credential.clone(),
             HEARTBEAT_INTERVAL,
+            None,
         )
         .await
         .unwrap();

@@ -56,7 +56,8 @@ use nautilus_core::{
     time::{AtomicTime, get_atomic_clock_realtime},
 };
 use nautilus_live::{
-    ExecutionClientCore, ExecutionEventEmitter, execution::failure::CommandFailure, task::TaskGroup,
+    ExecutionClientCore, ExecutionEventEmitter, SocketControl, execution::failure::CommandFailure,
+    task::TaskGroup,
 };
 use nautilus_model::{
     accounts::AccountAny,
@@ -84,7 +85,7 @@ use super::{
     },
     config::{CTraderConnection, CTraderCredential},
     session::CTraderSession,
-    websocket::HEARTBEAT_INTERVAL,
+    websocket::{HEARTBEAT_INTERVAL, SOCKET_ENDPOINT},
 };
 
 mod dispatch;
@@ -118,6 +119,8 @@ pub(super) struct CTraderExecutionClient {
     instrument_ids: Vec<InstrumentId>,
     emitter: ExecutionEventEmitter,
     clock: &'static AtomicTime,
+    /// Its session's socket in the node's socket state and reconnects.
+    socket: SocketControl,
     session: Option<Session>,
     session_tasks: TaskGroup,
     command_tasks: TaskGroup,
@@ -180,6 +183,7 @@ impl CTraderExecutionClient {
         if let Some(sender) = try_get_exec_event_sender() {
             emitter.set_sender(sender);
         }
+        let socket = SocketControl::new(core.client_id, Some(core.venue), SOCKET_ENDPOINT);
         Self {
             core,
             url,
@@ -187,6 +191,7 @@ impl CTraderExecutionClient {
             instrument_ids,
             emitter,
             clock,
+            socket,
             session: None,
             session_tasks: TaskGroup::new(),
             command_tasks: TaskGroup::new(),
@@ -208,6 +213,7 @@ impl CTraderExecutionClient {
             self.core.venue,
             self.credential.clone(),
             HEARTBEAT_INTERVAL,
+            Some(self.socket.clone()),
         )
         .await?;
         let opened = async {
@@ -1614,8 +1620,14 @@ mod tests {
     use std::{cell::RefCell, rc::Rc};
 
     use nautilus_common::{
-        cache::Cache, live::runner::replace_exec_event_sender, messages::ExecutionEvent,
+        cache::Cache,
+        live::runner::{replace_exec_event_sender, replace_system_event_sender},
+        messages::{
+            ExecutionEvent, SystemEvent,
+            system::{SocketState, SocketStateChange},
+        },
     };
+    use nautilus_live::SocketReconnectRegistry;
     use nautilus_model::{
         enums::{OrderSide, OrderStatus, OrderType, PositionSide, TimeInForce, TriggerType},
         identifiers::{PositionId, TraderId, VenueOrderId},
@@ -1624,6 +1636,7 @@ mod tests {
     use prost::Message as _;
     use rust_decimal::Decimal;
     use tokio::sync::mpsc;
+    use ustr::Ustr;
 
     use super::*;
     use crate::{
@@ -2052,6 +2065,40 @@ mod tests {
             .filter(|(_, f)| f.payload_type == M::TYPE)
             .map(|(_, f)| M::decode(f.payload.as_deref().unwrap_or_default()).unwrap())
             .collect()
+    }
+
+    /// The session's socket under Nautilus' `SocketControl` (`live.md`,
+    /// "Socket transport state"): its availability goes to the node as the
+    /// client's, on its venue, endpoint `ctrader-open-api`, registered for
+    /// the node's reconnect until the client disconnects.
+    #[tokio::test]
+    async fn the_sessions_socket_state_goes_to_the_node_until_the_client_disconnects() {
+        let (system_tx, mut system) = mpsc::unbounded_channel();
+        replace_system_event_sender(system_tx);
+        let registry = SocketReconnectRegistry::default();
+        let (mut client, cache, mut events, _received, _tokens) =
+            registry.scope(|| started(Script::default()));
+        let endpoint = Ustr::from("ctrader-open-api");
+
+        connect(&mut client, &mut events, &cache).await;
+
+        let event = tokio::time::timeout(Duration::from_secs(10), system.recv())
+            .await
+            .expect("no socket state within 10 s")
+            .expect("the system events ended");
+        let SystemEvent::SocketState(connected) = event;
+        assert_eq!(
+            connected,
+            SocketStateChange::new(
+                ClientId::from(CLIENT),
+                Some(Venue::new(VENUE)),
+                endpoint,
+                SocketState::Connected
+            )
+        );
+        assert!(registry.handle(ClientId::from(CLIENT), endpoint).is_some());
+        client.disconnect().await.unwrap();
+        assert!(registry.handle(ClientId::from(CLIENT), endpoint).is_none());
     }
 
     #[tokio::test]
