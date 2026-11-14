@@ -2,9 +2,10 @@
 //!
 //! The four `.proto` files in `proto/` are Spotware's, copied unchanged
 //! from github.com/spotware/openapi-proto-messages at commit
-//! 3fd8bddfbe0cfc2ecfda079623dc4e498af11e66 (2025-11-13), MIT-licensed
-//! (`LICENSE` there). They declare no package, so the types land in one
-//! file, `ctrader_open_api.rs`. Needs `protoc` (or `PROTOC` naming it).
+//! a9676f27f40b60569fb8a510aeadedba901b74e9 (2026-11-04, release 100),
+//! MIT-licensed (`LICENSE` there). They declare no package, so the types
+//! land in one file, `ctrader_open_api.rs`. Needs `protoc` (or `PROTOC`
+//! naming it).
 
 use std::io::Result;
 

@@ -20,8 +20,8 @@ use super::common::messages::{
     ProtoOaAccountsTokenInvalidatedEvent, ProtoOaApplicationAuthReq, ProtoOaApplicationAuthRes,
     ProtoOaAssetListRes, ProtoOaErrorRes, ProtoOaGetDynamicLeverageByIdReq,
     ProtoOaGetDynamicLeverageByIdRes, ProtoOaGetTickDataReq, ProtoOaGetTickDataRes,
-    ProtoOaRefreshTokenReq, ProtoOaRefreshTokenRes, ProtoOaSymbolByIdRes, ProtoOaSymbolsListRes,
-    ProtoOaTickData, frame,
+    ProtoOaRefreshTokenReq, ProtoOaRefreshTokenRes, ProtoOaSubscribeSpotsReq,
+    ProtoOaSubscribeSpotsRes, ProtoOaSymbolByIdRes, ProtoOaSymbolsListRes, ProtoOaTickData, frame,
 };
 use super::common::{parse, token::TokenPair};
 use nautilus_core::UnixNanos;
@@ -142,6 +142,16 @@ pub(crate) fn reply<M: Payload>(request: &ProtoMessage, response: &M) -> Action 
 /// `message`, an event, under `client_msg_id`.
 pub(crate) fn event<M: Payload>(message: &M, client_msg_id: Option<&str>) -> Action {
     Action::Send(frame(message, client_msg_id.map(str::to_owned)))
+}
+
+/// cTrader's answer to `request`, a spot subscription, as its demo
+/// answers one: the captured answer, listing each symbol asked as
+/// subscribed.
+pub(crate) fn spots_answer(request: &ProtoMessage) -> Action {
+    let asked = ProtoOaSubscribeSpotsReq::decode(request.payload.as_deref().unwrap()).unwrap();
+    let mut answer = ProtoOaSubscribeSpotsRes::decode(SUBSCRIBE_SPOTS_RES).unwrap();
+    answer.subscribed_symbol_id = asked.symbol_id;
+    reply(request, &answer)
 }
 
 /// The answer to `request`: the captured `payload`, an `M`, under the

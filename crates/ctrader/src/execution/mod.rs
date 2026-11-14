@@ -2849,7 +2849,7 @@ mod tests {
                 closed_volume: Some(100),
                 ..Default::default()
             }),
-            ..opening
+            ..opening.clone()
         };
         let entry = ProtoOaOrder {
             order_id: 76_919_227,

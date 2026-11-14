@@ -726,7 +726,7 @@ async fn a_lookup_of_an_order_whose_deal_states_no_commission_fails() {
             &ProtoOaOrderDetailsRes {
                 ctid_trader_account_id: ACCOUNT_ID,
                 order: held.clone(),
-                deal: vec![deal],
+                deal: vec![deal.clone()],
                 ..Default::default()
             },
         )],

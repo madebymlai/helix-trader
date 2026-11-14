@@ -979,14 +979,17 @@ impl CTraderWsHandler {
     }
 
     /// cTrader's answer to the handler's spot (un)subscription of
-    /// `symbol_ids`: an acceptance confirms it in the state, a refused
-    /// subscription is marked failed (kept for the next connection) and
+    /// `symbol_ids`: an acceptance confirms in the state the symbols it
+    /// names, a subscription's those it lists as subscribed
+    /// (`subscribedSymbolId`, which cTrader's demo filled with each symbol
+    /// asked on 14 November 2026); a symbol it does not list, or a refused
+    /// subscription's, is marked failed (kept for the next connection) and
     /// logged, as is a refused unsubscription.
     fn spots_answered(&self, subscribe: bool, symbol_ids: &[i64], envelope: &ProtoMessage) {
         let outcome = if subscribe {
-            open::<ProtoOaSubscribeSpotsRes>(envelope).map(|_| ())
+            open::<ProtoOaSubscribeSpotsRes>(envelope).map(|res| res.subscribed_symbol_id)
         } else {
-            open::<ProtoOaUnsubscribeSpotsRes>(envelope).map(|_| ())
+            open::<ProtoOaUnsubscribeSpotsRes>(envelope).map(|_| symbol_ids.to_vec())
         };
         let action = if subscribe {
             "subscription"
@@ -994,8 +997,10 @@ impl CTraderWsHandler {
             "unsubscription"
         };
         match outcome {
-            Ok(()) => {
-                for symbol_id in symbol_ids {
+            Ok(answered) => {
+                let (done, missing): (Vec<i64>, Vec<i64>) =
+                    symbol_ids.iter().partition(|id| answered.contains(id));
+                for symbol_id in &done {
                     let topic = spot_topic(*symbol_id);
                     if subscribe {
                         self.subscriptions.confirm_subscribe(&topic);
@@ -1003,7 +1008,18 @@ impl CTraderWsHandler {
                         self.subscriptions.confirm_unsubscribe(&topic);
                     }
                 }
-                log::debug!("cTrader spot {action} of symbols {symbol_ids:?} done");
+                for symbol_id in &missing {
+                    self.subscriptions.mark_failure(&spot_topic(*symbol_id));
+                }
+                if !done.is_empty() {
+                    log::debug!("cTrader spot {action} of symbols {done:?} done");
+                }
+                if !missing.is_empty() {
+                    log::error!(
+                        "cTrader answered the spot subscription of symbols {symbol_ids:?} \
+                         without subscribing {missing:?}"
+                    );
+                }
             }
             Err(e) => {
                 if subscribe {

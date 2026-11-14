@@ -22,7 +22,7 @@ Synthetic quote size is 100,000 units or the instrument's maximum order size if 
 
 ## Live quotes
 
-The data client's live quotes are the spot events, merged by the rule of the tick history: on a demo the spot events of a minute were the ticks the history serves for it. It serves quotes, not external or composite bars; bars are built internally from its quotes. Failed history requests report the failure and are not written back. A market closed throughout a short warmup can produce an empty response and a cold strategy.
+The data client's live quotes are the spot events, merged by the rule of the tick history: on a demo the spot events of a minute were the ticks the history serves for it. It serves quotes, not external or composite bars; bars are built internally from its quotes. Failed history requests report the failure and are not written back. A market closed throughout a short warmup can produce an empty response and a cold strategy. A spot subscription is confirmed for the symbols cTrader's answer lists as subscribed (`subscribedSymbolId`, which its demos filled with each symbol asked on 14 November 2026); a symbol the answer leaves out, or a refused subscription's, is logged as an error and stays pending, sent again on the next connection.
 
 ## Instruments and account
 
