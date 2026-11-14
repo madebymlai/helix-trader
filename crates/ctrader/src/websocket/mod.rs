@@ -1195,14 +1195,15 @@ mod tests {
         if let Some(actions) = accept_auth(request) {
             return actions;
         }
-        let answered = |account| ProtoOaSubscribeSpotsRes {
-            ctid_trader_account_id: account,
-            ..Default::default()
-        };
         match request.payload_type {
             t if t == ProtoOaSubscribeSpotsReq::TYPE => {
                 let asked: ProtoOaSubscribeSpotsReq = decode(request);
-                let mut actions = vec![reply(request, &answered(asked.ctid_trader_account_id))];
+                let answered = ProtoOaSubscribeSpotsRes {
+                    ctid_trader_account_id: asked.ctid_trader_account_id,
+                    subscribed_symbol_id: asked.symbol_id.clone(),
+                    ..Default::default()
+                };
+                let mut actions = vec![reply(request, &answered)];
                 actions.extend(asked.symbol_id.iter().map(|&id| {
                     Action::Send(crate::common::messages::frame(&spot_event(id), None))
                 }));
@@ -1319,6 +1320,46 @@ mod tests {
             .map(|r| r.symbol_id)
             .collect();
         assert_eq!(again, [vec![1, 41]]);
+        client.disconnect().await;
+    }
+
+    /// Synthetic, as OpenApiMessages.proto defines the answer: cTrader
+    /// answering the spot subscription of symbol 41 without listing it as
+    /// subscribed (`subscribedSymbolId`), as its demo lists each symbol it
+    /// subscribes. The symbol stays pending rather than confirmed, kept for
+    /// the next connection; symbol 1, listed, is confirmed.
+    #[tokio::test]
+    async fn a_symbol_the_answer_does_not_list_as_subscribed_is_not_confirmed() {
+        let (url, _received) = testing::start(|connection, request| {
+            if request.payload_type == ProtoOaSubscribeSpotsReq::TYPE {
+                let asked: ProtoOaSubscribeSpotsReq = decode(request);
+                if asked.symbol_id == [41] {
+                    let answer = ProtoOaSubscribeSpotsRes {
+                        ctid_trader_account_id: asked.ctid_trader_account_id,
+                        ..Default::default()
+                    };
+                    return vec![reply(request, &answer)];
+                }
+            }
+            spots_peer(connection, request)
+        });
+        let (credential, _tokens) = testing::credential();
+        let (client, mut spots) =
+            CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT, None)
+                .await
+                .unwrap();
+
+        client.subscribe_spots(41).unwrap();
+        client.subscribe_spots(1).unwrap();
+        // The handler reads the answers in order, symbol 1's before its
+        // spot event.
+        assert_eq!(next_spot(&mut spots).await, spot_event(1));
+
+        assert_eq!(
+            client.subscriptions.pending_subscribe_topics(),
+            [spot_topic(41)]
+        );
+        assert!(spot_subscribed(&client.subscriptions, 1));
         client.disconnect().await;
     }
 

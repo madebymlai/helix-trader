@@ -508,16 +508,16 @@ mod tests {
             Payload, ProtoMessage, ProtoOaAccountAuthReq, ProtoOaAssetListReq, ProtoOaAssetListRes,
             ProtoOaErrorRes, ProtoOaGetDynamicLeverageByIdReq, ProtoOaGetTickDataReq,
             ProtoOaRefreshTokenReq, ProtoOaSpotEvent, ProtoOaSubscribeSpotsReq,
-            ProtoOaSubscribeSpotsRes, ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes,
-            ProtoOaSymbolsListReq, ProtoOaSymbolsListRes, ProtoOaTraderReq, ProtoOaTraderRes,
-            ProtoOaUnsubscribeSpotsReq, ProtoOaUnsubscribeSpotsRes,
+            ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes, ProtoOaSymbolsListReq,
+            ProtoOaSymbolsListRes, ProtoOaTraderReq, ProtoOaTraderRes, ProtoOaUnsubscribeSpotsReq,
+            ProtoOaUnsubscribeSpotsRes,
         },
         session::ticks::Tick,
         testing::{
             self, ASSET_LIST_RES, Action, CLIENT, Received, SPOT_EVENT_EURUSD_FIRST,
-            SPOT_EVENT_XAUUSD_FIRST, SUBSCRIBE_SPOTS_RES, SYMBOL_BY_ID_RES, SYMBOLS_LIST_RES,
-            TRADER_RES, UNSUBSCRIBE_SPOTS_RES, VENUE, accept_auth, dynamic_leverage_answer, replay,
-            reply, tick_answer,
+            SPOT_EVENT_XAUUSD_FIRST, SYMBOL_BY_ID_RES, SYMBOLS_LIST_RES, TRADER_RES,
+            UNSUBSCRIBE_SPOTS_RES, VENUE, accept_auth, dynamic_leverage_answer, replay, reply,
+            spots_answer, tick_answer,
         },
     };
 
@@ -577,10 +577,7 @@ mod tests {
                 }
                 t if t == ProtoOaSubscribeSpotsReq::TYPE => {
                     let asked = ProtoOaSubscribeSpotsReq::decode(payload).unwrap();
-                    let mut actions = vec![replay::<ProtoOaSubscribeSpotsRes>(
-                        request,
-                        SUBSCRIBE_SPOTS_RES,
-                    )];
+                    let mut actions = vec![spots_answer(request)];
                     actions.extend(asked.symbol_id.iter().map(|&id| first_spot(id)));
                     actions
                 }

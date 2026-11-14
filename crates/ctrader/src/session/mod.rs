@@ -708,15 +708,15 @@ mod tests {
     use super::{
         messages::{
             Payload, ProtoMessage, ProtoOaRefreshTokenReq, ProtoOaSpotEvent,
-            ProtoOaSubscribeSpotsReq, ProtoOaSubscribeSpotsRes,
+            ProtoOaSubscribeSpotsReq,
         },
         ticks::Tick,
         *,
     };
     use crate::testing::{
         self, ACCOUNT_ID, ASSET_LIST_RES, Action, Received, SPOT_EVENT_EURUSD_FIRST,
-        SPOT_EVENT_XAUUSD_FIRST, SUBSCRIBE_SPOTS_RES, SYMBOL_BY_ID_RES, SYMBOLS_LIST_RES,
-        TRADER_RES, VENUE, accept_auth, replay, reply, tick_answer,
+        SPOT_EVENT_XAUUSD_FIRST, SYMBOL_BY_ID_RES, SYMBOLS_LIST_RES, TRADER_RES, VENUE,
+        accept_auth, replay, reply, spots_answer, tick_answer,
     };
 
     /// A cTrader serving the captured assets, symbols and details.
@@ -965,10 +965,7 @@ mod tests {
             return fixtures_peer(connection, request);
         }
         let asked = ProtoOaSubscribeSpotsReq::decode(request.payload.as_deref().unwrap()).unwrap();
-        let mut actions = vec![replay::<ProtoOaSubscribeSpotsRes>(
-            request,
-            SUBSCRIBE_SPOTS_RES,
-        )];
+        let mut actions = vec![spots_answer(request)];
         actions.extend(asked.symbol_id.iter().map(|&symbol_id| {
             let captured = match symbol_id {
                 41 => SPOT_EVENT_XAUUSD_FIRST,
