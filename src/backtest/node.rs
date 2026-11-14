@@ -99,7 +99,8 @@ enum Run {
 /// The run config of `backtest`: one simulated venue per venue of the
 /// instruments, named after it, keeping positions as `backtest.venue_oms`
 /// says of it, each with the run's balance, or nothing if no broker trades
-/// it, and its fee model, which fills
+/// it or the run reads its pairs alone on it (`Backtest::funds`), and its
+/// fee model, which fills
 /// orders on the replayed data and settles funding, the series of the
 /// window from the catalog (the only data replayed: the data engine builds
 /// the strategy's bars from them and keeps the books the strategy
@@ -180,7 +181,8 @@ fn config(backtest: &Backtest, run: Run) -> anyhow::Result<BacktestRunConfig> {
 
 /// The simulated `venue` of `backtest` for `run`: a margin account keeping
 /// positions as `backtest.venue_oms` says, with the run's balance if a
-/// broker trades the venue (`venues::has_broker`), else nothing in its
+/// broker trades the venue and the run reads more on it than the pairs it
+/// converts through (`Backtest::funds`), else nothing in its
 /// currency, a backtest's with the balance's currency as its base if its
 /// broker's account has a base currency (`venues::has_base_currency`, a
 /// cTrader broker's), so that Nautilus books its margins, commissions and
@@ -210,7 +212,7 @@ fn venue_config(
     venue: Venue,
     run: Run,
 ) -> anyhow::Result<BacktestVenueConfig> {
-    let balance = if venues::has_broker(venue) {
+    let balance = if backtest.funds(venue) {
         backtest.balance
     } else {
         Money::zero(backtest.balance.currency)
@@ -500,6 +502,7 @@ mod tests {
             custom: vec![],
             commission: Commission::PerOrder(Money::from("3 EUR")),
             latency: None,
+            pairs: vec![],
             balance: Money::from("10000 EUR"),
             venue_oms: |_| OmsType::Netting,
             logging: LoggerConfig {

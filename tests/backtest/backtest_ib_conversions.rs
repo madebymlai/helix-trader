@@ -146,6 +146,28 @@ fn a_backtest_through_ib_on_a_balance_in_the_pnl_currency_runs() {
     );
 }
 
+/// IDEALPRO, IB's as GLBX is, is read for EUR/USD alone, the pair the gold
+/// converts through, and nothing is traded on it: its account starts with
+/// nothing in the balance's currency, as a venue no broker trades does, so
+/// that the run's money is GLBX's 100,000 USD alone, and the report lists
+/// IDEALPRO's account empty.
+#[test]
+fn a_venue_the_run_reads_for_its_pairs_alone_starts_with_nothing() {
+    let catalog = catalog(ic::at("08:00:00"));
+
+    let output = backtest_command(catalog.path(), "100000 USD");
+
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(output.status.success(), "{stdout}{stderr}");
+    assert!(
+        stdout.contains("account.IDEALPRO.balance.USD.total: 0.00 USD"),
+        "{stdout}"
+    );
+}
+
 /// Hourly decisions on the gold's 1-minute bars, its averages of 1 and 2
 /// of them; a bracket 7.5 bps of the decision's mid away on both sides,
 /// closed after 45 minutes, at the reference stake of 0.00004% of the
@@ -205,6 +227,7 @@ fn rows() -> Vec<TargetRow> {
         end: ic::at("13:00:00"),
         commission: venue.commission,
         latency: venue.latency,
+        pairs: config.trade.conversions.pairs().to_vec(),
         balance: venue.balance,
         venue_oms: |_| OmsType::Hedging,
         logging: LoggerConfig::default(),

@@ -36,7 +36,11 @@ use nautilus_common::logging::{
     bridge::init_tracing, init_logging, logger::LoggerConfig, writer::FileWriterConfig,
 };
 use nautilus_core::{UUID4, UnixNanos};
-use nautilus_model::{enums::OmsType, identifiers::TraderId, types::Money};
+use nautilus_model::{
+    enums::OmsType,
+    identifiers::{InstrumentId, TraderId},
+    types::Money,
+};
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -357,7 +361,7 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
     let logging = logger_config(std::env::var("NAUTILUS_LOG"))?;
     let dataset_logging = logging.clone();
     // Each simulated venue keeps positions as the real one does.
-    let backtest = |requirements: DataRequirements| Backtest {
+    let backtest = |requirements: DataRequirements, pairs: &[InstrumentId]| Backtest {
         catalog: args.run.catalog.clone(),
         bar_types: requirements.bar_types,
         start,
@@ -366,6 +370,7 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
         custom: requirements.custom,
         commission: args.commission.commission(),
         latency: args.latency,
+        pairs: pairs.to_vec(),
         balance: args.balance,
         venue_oms: venues::oms_type,
         logging,
@@ -378,7 +383,8 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
 }
 
 /// The visitor backtesting a strategy: `backtest` builds its `Backtest`
-/// of its data requirements; a model strategy's dataset runs log as
+/// of its data requirements and the pairs of its `[trade] conversions`; a
+/// model strategy's dataset runs log as
 /// `dataset_logging` says (`backtest_on_models`).
 struct Backtesting<'a, B> {
     args: &'a BacktestArgs,
@@ -386,12 +392,13 @@ struct Backtesting<'a, B> {
     backtest: B,
 }
 
-impl<B: FnOnce(DataRequirements) -> Backtest> Visitor for Backtesting<'_, B> {
+impl<B: FnOnce(DataRequirements, &[InstrumentId]) -> Backtest> Visitor for Backtesting<'_, B> {
     type Output = anyhow::Result<()>;
 
     fn plain<S: PlainStrategy>(self) -> Self::Output {
         let config = load_config::<S::Params>(&self.args.run.config)?;
-        let backtest = (self.backtest)(config.data_requirements());
+        let backtest =
+            (self.backtest)(config.data_requirements(), config.trade.conversions.pairs());
         backtest.refuse_balance(&config.trade)?;
         let outcome = backtest.run(S::backtest(config)?)?;
         print!("{}", backtest::report(&outcome));
@@ -404,7 +411,8 @@ impl<B: FnOnce(DataRequirements) -> Backtest> Visitor for Backtesting<'_, B> {
 }
 
 /// The backtest of `args` of the model strategy `S`, its `Backtest` of
-/// its data requirements `backtest`: retrained on its schedule first
+/// its data requirements and the pairs of its `[trade] conversions`
+/// `backtest`: retrained on its schedule first
 /// (`WalkForward::prepare`), then run, its results printed and the
 /// out-of-sample scores of its models after them. The dataset build, each
 /// train and the run are one after another in this process, a train as the
@@ -417,11 +425,11 @@ impl<B: FnOnce(DataRequirements) -> Backtest> Visitor for Backtesting<'_, B> {
 fn backtest_on_models<S: ModelStrategy>(
     args: &BacktestArgs,
     logging: LoggerConfig,
-    backtest: impl FnOnce(DataRequirements) -> Backtest,
+    backtest: impl FnOnce(DataRequirements, &[InstrumentId]) -> Backtest,
 ) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     let config = load_config::<S::Params>(&args.run.config)?;
-    let backtest = backtest(config.data_requirements());
+    let backtest = backtest(config.data_requirements(), config.trade.conversions.pairs());
     backtest.refuse_balance(&config.trade)?;
     let (catalog, models) = (&args.run.catalog, &args.models);
     let run = DatasetRun {
@@ -637,6 +645,7 @@ impl DatasetRun {
             end,
             commission: venue.commission,
             latency: venue.latency,
+            pairs: config.trade.conversions.pairs().to_vec(),
             balance: venue.balance,
             venue_oms: |_| OmsType::Hedging,
             logging: self.logging.clone(),

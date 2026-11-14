@@ -357,6 +357,7 @@ pub fn backtest(catalog: &Path, from: Timestamp, to: Timestamp) -> Backtest {
         end: to,
         commission: venue().commission,
         latency: venue().latency,
+        pairs: vec![],
         balance: venue().balance,
         venue_oms: |_| OmsType::Hedging,
         logging: LoggerConfig::default(),
@@ -454,6 +455,7 @@ pub fn trade_staking(
         account.multiple,
     );
     let backtest = Backtest {
+        pairs: vec![],
         balance: account.balance,
         ..backtest(catalog.path(), from, to)
     };

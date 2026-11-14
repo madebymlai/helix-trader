@@ -216,6 +216,7 @@ fn traded_from(catalog: &TempDir, models: PathBuf, start: Timestamp) -> (usize, 
         ticks: requirements.ticks,
         start,
         end: t() + SignedDuration::from_hours(3),
+        pairs: vec![],
         balance: Money::from("100000 USD"),
         ..ic::backtest(catalog)
     };

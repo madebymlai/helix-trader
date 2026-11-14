@@ -139,6 +139,7 @@ fn backtest(dir: &Path) -> Backtest {
         custom: vec![],
         commission: Commission::Rate(Decimal::new(5, 4)),
         latency: None,
+        pairs: vec![],
         balance: Money::from("10000 USDT"),
         venue_oms: venues::oms_type,
         logging: LoggerConfig::default(),

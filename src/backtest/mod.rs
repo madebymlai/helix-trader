@@ -81,9 +81,14 @@ pub struct Backtest {
     /// from (`Latency::model`): each order command reaches the venue that
     /// long after it is sent. None, each reaches it as it is sent.
     pub latency: Option<Latency>,
+    /// The FX pairs the strategy converts through (`[trade] conversions`),
+    /// read through the bar types or the ticks: they decide no venue's
+    /// money (see `balance`).
+    pub pairs: Vec<InstrumentId>,
     /// The starting balance of the account of each venue a broker trades;
     /// a venue only read, which no broker trades (`venues::has_broker`),
-    /// starts with nothing in its currency, so that it adds no money.
+    /// or read for the pairs alone, starts with nothing in its currency, so
+    /// that it adds no money (`funds`).
     pub balance: Money,
     /// How each simulated venue keeps positions: a normal run passes the
     /// real venue's, `venues::oms_type`, and a dataset run hedging on every
@@ -176,6 +181,18 @@ impl Backtest {
         mode: ContinuousFutureAdjustmentType,
     ) -> anyhow::Result<ContinuousBars> {
         ContinuousBars::read(&self.catalog, &self.bar_types, self.start, self.end, mode)
+    }
+
+    /// Whether the simulated `venue` starts with the balance: a broker
+    /// trades it (`venues::has_broker`) and the strategy reads an
+    /// instrument on it besides the pairs, IDEALPRO's EUR/USD for gold on
+    /// GLBX leaving IDEALPRO with nothing, as a venue only read.
+    fn funds(&self, venue: Venue) -> bool {
+        venues::has_broker(venue)
+            && self
+                .declared()
+                .iter()
+                .any(|id| id.venue == venue && !self.pairs.contains(id))
     }
 
     /// The instruments the strategy reads: those of the bar types and of
@@ -412,6 +429,7 @@ mod tests {
             custom: vec![],
             commission: Commission::Rate(Decimal::ZERO),
             latency: None,
+            pairs: vec![],
             balance: Money::from("10000 USDT"),
             venue_oms: crate::venues::oms_type,
             logging: LoggerConfig::default(),
