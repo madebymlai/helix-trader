@@ -264,7 +264,9 @@ struct LiveArgs {
     trader_id: TraderId,
     /// The catalog directory, fill-catalog's and the backtests': the warmup
     /// is read from it first, and a cTrader broker's history is written
-    /// back to it.
+    /// back to it. A strategy trading on a model requires it to exist and
+    /// hold the instruments it trades, which its models and retrains are
+    /// built from.
     #[arg(long, default_value = "catalog")]
     catalog: PathBuf,
     /// The directory the node stages the data it streams into the
@@ -729,19 +731,21 @@ impl<'a> Visitor for Running<'a> {
 /// models of the store its dataset costs key, beside the actor of its
 /// retrains if it is retrained (`RetrainActor`), each retrain in a child
 /// process (`Children::of_live`) on the node's catalog. Refuses first,
-/// before any node is built, a retrain balance in another currency than a
-/// traded instrument's P&L (`backtest::refuse_balance`), as `backtest`
-/// and `train` refuse their dataset balance.
+/// before any node is built, a catalog without the traded instruments, which
+/// its models and retrains are built from (`backtest::traded_instruments`),
+/// and a retrain balance in another currency than a traded instrument's
+/// P&L (`backtest::refuse_balance`), as `backtest` and `train` refuse
+/// their dataset balance.
 async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyhow::Result<()> {
     let config = load_config::<S::Params>(&args.config)?;
     let program = std::env::current_exe().context("finding this binary to retrain")?;
     let children = Children::of_live(args)?;
-    backtest::refuse_balance(
-        &args.catalog,
-        children.venue.balance,
-        &config.trade.instrument_ids(),
-    )
-    .context(
+    let traded = backtest::traded_instruments(&args.catalog, &config.trade.instrument_ids())
+        .context(
+            "a model strategy runs live only on a --catalog holding the instruments it trades, \
+             which its models and retrains are built from",
+        )?;
+    backtest::refuse_balance(children.venue.balance, &traded).context(
         "the retrains' dataset balance (--retrain-balance), which a model's targets and the \
          decisions' payoff features are sized at",
     )?;
@@ -775,15 +779,18 @@ struct DatasetRun {
 
 impl DatasetRun {
     /// Refuses the runs, before any, unless their balance is in the P&L
-    /// currency of each instrument of `traded` (`backtest::refuse_balance`):
-    /// a target's trades are sized on it, which is not converted.
+    /// currency of each instrument of `traded`, as their catalog defines
+    /// them (`backtest::traded_instruments`, `backtest::refuse_balance`): a
+    /// target's trades are sized on it, which is not converted.
     ///
     /// # Errors
     ///
-    /// Returns an error if an instrument of `traded` is not in the catalog
-    /// or its P&L is in another currency than the balance.
+    /// Returns an error if the catalog cannot be read, an instrument of
+    /// `traded` is not in it or its P&L is in another currency than the
+    /// balance.
     fn refuse_balance(&self, traded: &[InstrumentId]) -> anyhow::Result<()> {
-        backtest::refuse_balance(&self.catalog, self.venue.balance, traded)
+        let traded = backtest::traded_instruments(&self.catalog, traded)?;
+        backtest::refuse_balance(self.venue.balance, &traded)
             .context("the dataset balance, which a model's targets are sized at")
     }
 

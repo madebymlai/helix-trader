@@ -489,3 +489,91 @@ fn a_live_retrain_balance_in_another_currency_than_the_pnl_is_refused_before_any
     );
     assert!(!staging.exists());
 }
+
+/// The arguments of `subcommand` of `refused` beyond its config, catalog
+/// and store: a window and costs, a balance in USD, IC's gold's P&L
+/// currency, and for `live` a staging directory under `dir`.
+fn usd_args(subcommand: &str, dir: &Path) -> Vec<String> {
+    let args: Vec<&str> = match subcommand {
+        "backtest" => vec![
+            "--start",
+            "2026-07-21T03:00:00Z",
+            "--end",
+            "2026-07-21T05:00:00Z",
+            "--commission-rate",
+            "0.00003",
+            "--balance",
+            "100000 USD",
+            "--dataset-balance",
+            "10000000 USD",
+        ],
+        "train" => vec![
+            "--at",
+            "2026-07-21T05:00:00Z",
+            "--commission-rate",
+            "0.00003",
+            "--balance",
+            "10000000 USD",
+        ],
+        "live" => vec![
+            "--retrain-commission-rate",
+            "0.00003",
+            "--retrain-balance",
+            "10000000 USD",
+            "--staging",
+        ],
+        _ => unreachable!("{subcommand}"),
+    };
+    let staging = (subcommand == "live").then(|| dir.join("staging").display().to_string());
+    args.into_iter().map(String::from).chain(staging).collect()
+}
+
+/// A catalog directory that does not exist: `live`, `backtest` and
+/// `train` each refuse it with an error naming it, none panicking.
+#[test]
+fn a_missing_catalog_is_refused_with_an_error_not_a_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
+    let catalog = dir.path().join("no-catalog");
+    std::fs::write(&config, CONFIG).unwrap();
+
+    for subcommand in ["live", "backtest", "train"] {
+        let args = usd_args(subcommand, dir.path());
+
+        let (_, stderr) = refused(subcommand, &config, &catalog, &models, &args);
+
+        assert!(!stderr.contains("panicked"), "{subcommand}: {stderr}");
+        assert!(
+            stderr.contains(&catalog.display().to_string()),
+            "{subcommand}: {stderr}"
+        );
+    }
+}
+
+/// A live node of a model strategy on a catalog without IC's gold, which
+/// it trades: its models and retrains are built from the catalog, so the
+/// start refuses it before any node is built, naming `--catalog` and the
+/// instrument, not the retrains' balance, which is in its P&L currency.
+#[test]
+fn a_live_model_strategy_on_a_catalog_without_its_traded_instrument_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (config, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
+    let catalog = dir.path().join("catalog");
+    std::fs::create_dir(&catalog).unwrap();
+    std::fs::write(&config, CONFIG).unwrap();
+
+    let (_, stderr) = refused(
+        "live",
+        &config,
+        &catalog,
+        &models,
+        &usd_args("live", dir.path()),
+    );
+
+    assert!(
+        stderr.contains("--catalog") && stderr.contains(ic::INSTRUMENT_ID),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("--retrain-balance"), "{stderr}");
+    assert!(!dir.path().join("staging").exists());
+}
