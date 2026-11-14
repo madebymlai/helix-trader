@@ -26,7 +26,7 @@ The data client's live quotes are the spot events, merged by the rule of the tic
 
 ## Instruments and account
 
-An instrument id is the symbol's name in cTrader on the venue (`XAUUSD.<venue>`). Symbols with known currency assets become currency pairs; indices and shares are refused. cTrader symbol IDs differ between servers and are resolved by name. Initial and maintenance margins use the reciprocal of the lower of account leverage and the symbol's first dynamic-leverage tier; higher tiers can require more margin at the broker than this single rate models. Margins are fixed at connect.
+An instrument id is the symbol's name in cTrader on the venue (`XAUUSD.<venue>`). Symbols with known currency assets become currency pairs; indices and shares are refused. cTrader symbol IDs differ between servers and are resolved by name. Initial and maintenance margins use the reciprocal of the lower of account leverage and the symbol's first dynamic-leverage tier; higher tiers can require more margin at the broker than this single rate models. Margins are fixed at connect for the clients' own use; an instrument request asks cTrader for the instrument anew, so its answer holds the symbol's definition and margin of the moment.
 
 The account must be hedged, be the credential's, and use a deposit currency Nautilus knows: the execution client checks it on connect, and the caller can check it before (`CTraderSession::check_account`). Account balance and margin state are published at connect but are not refreshed after fills, so they can become stale.
 
