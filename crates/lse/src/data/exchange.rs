@@ -25,7 +25,11 @@
 //! levels, unless they went out already, and one not carried yet at the
 //! level, a later contract of a rolled root or a stock the config does not
 //! stream, is named, a CME contract looked up, and carried from the level's
-//! next connection, which opens it.
+//! next connection, which opens it. A contract whose last subscription at a
+//! level ends is left out of the level's next connection, so that one
+//! rolled out of and expired, which LSE would refuse (`symbol unavailable`,
+//! closing the connection with 1008, not reconnected), does not stop the
+//! level's data.
 //!
 //! Each record of a contract subscribed becomes Nautilus data through
 //! Nautilus' Databento decoder, LSE's records being Databento's, at the
@@ -617,7 +621,10 @@ impl ExchangeStreams {
             .map_err(|e| anyhow::anyhow!("looking up {id} to stream it: {e}"))
     }
 
-    /// Ends `kind` of the contract `id`; the stream carries it on.
+    /// Ends `kind` of the contract `id`. If it takes no data of `kind`'s
+    /// level then, the level's connection carries it no longer from its
+    /// next connection (see `ExchangeSubscriber::unsubscribe`): the stream
+    /// carries it on until then.
     ///
     /// # Errors
     ///
@@ -632,6 +639,14 @@ impl ExchangeStreams {
                 of.set(kind, false);
             }
         });
+        let level = kind.level();
+        let taken = self
+            .subscribed
+            .get_cloned(&symbol)
+            .is_some_and(|of| of.takes_at(level));
+        if !taken && let Some(client) = self.clients.get(&level) {
+            client.subscriber().unsubscribe(&symbol);
+        }
         Ok(())
     }
 
@@ -833,6 +848,7 @@ mod tests {
         live::runner::replace_data_event_sender,
         messages::data::{
             SubscribeBookDeltas, SubscribeBookDepth, SubscribeQuotes, SubscribeTrades,
+            UnsubscribeQuotes,
         },
     };
     use nautilus_core::{UUID4, UnixNanos, string::secret::SecretString};
@@ -1146,6 +1162,49 @@ mod tests {
             .map(|call| call.param("symbol").unwrap().to_string())
             .collect();
         assert_eq!(looked_up, ["GCZ6", "GCG7"]);
+    }
+
+    /// GCZ6 and GCG7 streamed from the start and quoted; then GCG7's quotes
+    /// ended, as a roll ends its old contract's: when LSE drops the
+    /// connection, the next one subscribes GCZ6 alone, so that GCG7, once
+    /// expired, does not have the level's whole subscription refused
+    /// (`symbol unavailable`, a close with 1008, which is not reconnected).
+    #[tokio::test]
+    async fn a_contract_whose_data_at_a_level_all_ended_is_left_out_of_its_next_connection() {
+        let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6), Reply::json(PAIRS_GCG7)]);
+        let stream = MockExchangeStream::cme(|connection, _| {
+            let mut actions = sent(frames(CME_GCZ6_GCG7));
+            if connection == 0 {
+                actions.push(StreamAction::Hold);
+                actions.push(StreamAction::Close(1001, "going away".to_string()));
+            }
+            actions
+        });
+        let (mut client, connected, _events) =
+            streaming(&lse, &stream, &[GCZ26, GCG27], vec![gcz26(), gcg27()]).await;
+        connected.unwrap();
+        client.subscribe_quotes(quotes_of(&[GCZ26, GCG27])).unwrap();
+
+        client
+            .unsubscribe_quotes(&UnsubscribeQuotes::new(
+                ids(&[GCG27]),
+                Some(ClientId::from("LSE")),
+                None,
+                UUID4::new(),
+                UnixNanos::default(),
+                None,
+                None,
+            ))
+            .unwrap();
+        stream.release();
+
+        let subscriptions: Vec<Value> = stream
+            .wait_until(|received| received.len() == 2)
+            .await
+            .into_iter()
+            .map(|(_, frame)| frame["symbols"].clone())
+            .collect();
+        assert_eq!(subscriptions, [json!(["GCG7", "GCZ6"]), json!(["GCZ6"])]);
     }
 
     /// LSE's captured close of a subscription naming a contract the stream

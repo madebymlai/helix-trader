@@ -36,7 +36,10 @@
 //! names it too, LSE taking no second subscription on a connection. A new
 //! subscriber of a contract carried already is passed on in its place
 //! among the records, for whoever keeps the contract's latest record to
-//! open it again.
+//! open it again. A contract carried no longer is left out of the next
+//! connection's subscription, the current one carrying it on, LSE taking
+//! no unsubscription: an expired contract named there would have LSE
+//! refuse the whole subscription.
 //!
 //! Nautilus' transport reconnects a dropped connection with backoff. On the
 //! new one each contract opens again: an opening beyond the contract's
@@ -323,11 +326,24 @@ impl ExchangeSubscriber {
             .ok()
             .with_context(|| format!("the connection to LSE's {} stream is closed", self.exchange))
     }
+
+    /// Has the connection carry the contract `symbol` no longer: the next
+    /// connection's subscription leaves it out, LSE refusing a whole
+    /// subscription that names a contract it does not carry, such as one
+    /// expired. LSE takes no unsubscription on a connection, so this one
+    /// carries it on until replaced. A stopped handler carries nothing.
+    pub(crate) fn unsubscribe(&self, symbol: &str) {
+        // The handler is gone once it has stopped.
+        let _ = self.cmd_tx.send(HandlerCommand::Unsubscribe {
+            symbol: symbol.to_owned(),
+        });
+    }
 }
 
 /// Commands from the outer client to the handler.
 enum HandlerCommand {
     Subscribe { symbol: String, reopen: bool },
+    Unsubscribe { symbol: String },
     Disconnect,
 }
 
@@ -378,6 +394,7 @@ impl ExchangeHandler {
                         Some(HandlerCommand::Subscribe { symbol, reopen }) => {
                             self.subscribe(symbol, reopen);
                         }
+                        Some(HandlerCommand::Unsubscribe { symbol }) => self.unsubscribe(&symbol),
                         Some(HandlerCommand::Disconnect) | None => break,
                     },
                     inbound = self.raw_rx.recv() => match inbound {
@@ -407,6 +424,7 @@ impl ExchangeHandler {
                 Some(HandlerCommand::Subscribe { symbol, .. }) => {
                     self.subscriptions.mark_subscribe(&symbol);
                 }
+                Some(HandlerCommand::Unsubscribe { symbol }) => self.unsubscribe(&symbol),
                 Some(HandlerCommand::Disconnect) | None => return false,
             }
         }
@@ -437,6 +455,7 @@ impl ExchangeHandler {
                 HandlerCommand::Subscribe { symbol, .. } => {
                     self.subscriptions.mark_subscribe(&symbol);
                 }
+                HandlerCommand::Unsubscribe { symbol } => self.unsubscribe(&symbol),
                 HandlerCommand::Disconnect => return false,
             }
         }
@@ -569,6 +588,14 @@ impl ExchangeHandler {
         if reopen {
             let _ = self.out.send(ExchangeWsMessage::Reopen { symbol });
         }
+    }
+
+    /// Carries `symbol` no longer: the subscription of the next connection
+    /// leaves it out (Nautilus' `SubscriptionState`). LSE takes no
+    /// unsubscription on a connection, so none is sent.
+    fn unsubscribe(&mut self, symbol: &str) {
+        self.subscriptions.mark_unsubscribe(symbol);
+        self.subscriptions.confirm_unsubscribe(symbol);
     }
 
     /// The transport replaced the connection with that of `epoch`, a later
@@ -870,6 +897,37 @@ mod tests {
         );
         client.disconnect().await;
         assert!(out.recv().await.is_none(), "GCZ6 passed on again");
+    }
+
+    /// GCZ6 and GCG7 carried, then GCG7 no longer, as a roll leaves its old
+    /// contract: the peer drops the connection, and the next one's
+    /// subscription names GCZ6 alone, LSE refusing a whole subscription
+    /// that names a contract it does not carry, such as one expired.
+    #[tokio::test]
+    async fn a_contract_carried_no_longer_is_left_out_of_the_next_connection_s_subscription() {
+        let peer = MockExchangeStream::cme(|connection, _| {
+            let mut actions = sent(frames(CME_GCZ6_GCG7));
+            if connection == 0 {
+                actions.push(StreamAction::Hold);
+                actions.push(StreamAction::Close(1001, "going away".to_string()));
+            }
+            actions
+        });
+        let (client, mut out) = connect(&peer, &["GCZ6", "GCG7"]).await.unwrap();
+        assert_eq!(record(&next(&mut out).await), ("GCZ6", 1794, true, b'M'));
+        assert_eq!(record(&next(&mut out).await), ("GCG7", 58, true, b'M'));
+
+        client.subscriber().unsubscribe("GCG7");
+        peer.release();
+
+        let received = peer.wait_until(|received| received.len() == 2).await;
+        assert_eq!(
+            received,
+            [
+                (0, subscription(&["GCG7", "GCZ6"])),
+                (1, subscription(&["GCZ6"]))
+            ]
+        );
     }
 
     /// On the same connection, after the records passed on before it.
