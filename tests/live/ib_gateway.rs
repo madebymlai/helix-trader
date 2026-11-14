@@ -507,7 +507,7 @@ fn sample(updates: &[AccountUpdate]) -> Sample {
     let pnl = updates
         .iter()
         .find_map(|update| match update {
-            AccountUpdate::PortfolioValue(held) if held.contract.symbol.to_string() == "SXR8" => {
+            AccountUpdate::PortfolioValue(held) if held.contract.symbol == "SXR8" => {
                 Some(held.unrealized_pnl)
             }
             _ => None,
