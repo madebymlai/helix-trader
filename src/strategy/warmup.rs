@@ -10,11 +10,14 @@
 //! Owns Nautilus' protocol, so that no strategy names it. The request is
 //! chosen from the bar type alone: a composite bar type is built from its
 //! source bars, so their bars over `[now - warmup, now]` are requested
-//! (`request_bars` of `BarType::composite`); any other bar type is built
-//! from the ticks its price type names, as Nautilus builds it: LAST bars
-//! from trades, so the trades of its instrument are requested
-//! (`request_trades`), BID, ASK and MID bars from quotes, so its quotes
-//! are (`request_quotes`), over the same window.
+//! (`request_bars` of `BarType::composite`); an external bar type, which
+//! its venue builds (a conversion pair's BID and ASK bars on IB), is
+//! requested as it is (`request_bars` of itself), building nothing, as
+//! Nautilus aggregates a request into internal bar types alone; any other
+//! bar type is built from the ticks its price type names, as Nautilus
+//! builds it: LAST bars from trades, so the trades of its instrument are
+//! requested (`request_trades`), BID, ASK and MID bars from quotes, so its
+//! quotes are (`request_quotes`), over the same window.
 //!
 //! The window ends at `now`, given, not left open: the data engine trims a
 //! response to its request's bounds (`DataResponse::trim_to_bounds`), so
@@ -37,7 +40,8 @@
 //! initialized on the older windows alone; a decision waits for the end.
 //!
 //! Each request carries the params
-//! `bar_types` (the data engine aggregates the response into those bars),
+//! `bar_types` (the data engine aggregates the response into those bars,
+//! none for a request building none, as an external bar type's),
 //! `update_subscriptions` (the aggregator goes on with the live data, so
 //! the bar spanning the warmup end comes out once and complete; without it
 //! that bar comes out partial, or as a one-update bar when the warmup ends
@@ -49,8 +53,12 @@
 //! reach only the cache, Nautilus delivering no built bars, under their
 //! standard type, a composite's without its source: the warmup hands them to
 //! its indicators, each once, when the request completes
-//! (`Warmup::on_data_response`). A response's data is that window's alone,
-//! and the request's completion carries none.
+//! (`Warmup::on_data_response`). An external bar type's request hands its
+//! indicators nothing: its bars come in its responses, which the data
+//! engine caches (where `get_xrate` reads a conversion pair's), and no
+//! indicator reads external bars, which the strategies' bar types are not.
+//! A response's data is that window's alone, and the request's completion
+//! carries none.
 //!
 //! First, a live start asks the definition of each instrument it warms up
 //! that the cache lacks (`request_instrument`), naming the client the
@@ -81,7 +89,7 @@
 //! The cache keeps at most `bar_capacity` bars per bar type and evicts the
 //! oldest beyond it, so the live node running the strategy takes its cache
 //! config from `Warmup::cache_config`, which holds the whole warmup of
-//! every bar type the warmup builds.
+//! every bar type the warmup builds or, if external, requests.
 //!
 //! An hour with no tick or source bar at all means the market is closed
 //! (a night, a weekend, a holiday): the data engine builds no bar for it,
@@ -259,7 +267,7 @@ pub trait BookIndicator {
 /// straight to their indicators.
 /// The strategies read no bars on a root, so a warmup has no continuous
 /// bars. A live node sizes its cache from `cache_config`, which holds the
-/// warmup of every bar type the warmup builds.
+/// warmup of every bar type the warmup builds or, if external, requests.
 pub struct Warmup {
     start: Start,
     /// How far back the live request starts: the requirements' warmup.
@@ -624,8 +632,8 @@ impl Warmup {
         cache_config(&self.built(), self.length)
     }
 
-    /// The bar types a live warmup builds: the strategy's, then the
-    /// harness's.
+    /// The bar types a live warmup brings into the cache, built or, if
+    /// external, requested: the strategy's, then the harness's.
     fn built(&self) -> Vec<BarType> {
         self.bar_types
             .iter()
@@ -652,15 +660,16 @@ impl Debug for Warmup {
     }
 }
 
-/// Requests the warmup of `bar_types`, internal bar types, and of `ticks`,
-/// over `[now - warmup, now]` as the request group `group`, then subscribes
+/// Requests the warmup of `bar_types` and of `ticks`, over
+/// `[now - warmup, now]` as the request group `group`, then subscribes
 /// `actor` to the bars from `now`; the ticks' subscriptions are their
 /// roller's. The bars on a root with continuous bars in `continuous` are
 /// its continuous future, requested per bar type with
 /// their `continuous_future_*` params; the others are requested per series
 /// they are built from (see `requests`): the source bars of a composite bar
-/// type, the trades of the instrument of LAST bars, the quotes of the
-/// instrument of BID, ASK and MID bars; each tick series is requested on
+/// type, the trades of the instrument of internal LAST bars, the quotes of
+/// the instrument of internal BID, ASK and MID bars; an external bar type
+/// is requested as it is, building nothing; each tick series is requested on
 /// the contract standing for its instrument now, once with the bars built
 /// from it if any, custom data from the catalog alone (see `CATALOG`). The
 /// warmup of each request arrives a window at a time in
@@ -869,10 +878,11 @@ where
     undefined
 }
 
-/// The warmup requests of `bar_types`, internal bar types on no root, and
-/// of `ticks` at `now`: one per series the bars are built from, as
-/// Nautilus' data engine builds them (see `strategy::catalog_series`), with
-/// the bar types built from it, in the order the series first come; then
+/// The warmup requests of `bar_types`, bar types on no root, and of
+/// `ticks` at `now`: one per series the bars are built from, as Nautilus'
+/// data engine builds them (see `strategy::catalog_series`), with the bar
+/// types built from it, in the order the series first come, an external
+/// bar type being its own series, which builds none of it; then
 /// one per tick series on the contract standing for its instrument at
 /// `now` (`rolls::front`) that no bar is built from, building none.
 fn requests(
@@ -882,9 +892,12 @@ fn requests(
 ) -> Vec<(Source, Vec<BarType>)> {
     let mut requests: Vec<(Source, Vec<BarType>)> = Vec::new();
     for (source, bar_type) in bar_sources(bar_types).zip(bar_types) {
+        // An external bar type is its own source: requested as it is, it
+        // builds nothing, Nautilus aggregating into internal bar types alone.
+        let built = (source != Source::Bars(*bar_type)).then_some(*bar_type);
         match requests.iter_mut().find(|(of, _)| *of == source) {
-            Some((_, built)) => built.push(*bar_type),
-            None => requests.push((source, vec![*bar_type])),
+            Some((_, of_source)) => of_source.extend(built),
+            None => requests.push((source, built.into_iter().collect())),
         }
     }
     for tick in ticks {
@@ -1703,6 +1716,37 @@ mod tests {
                     Source::Bars(BarType::from("ESM24.CME-1-MINUTE-LAST-EXTERNAL")),
                     vec![composite]
                 ),
+            ]
+        );
+    }
+
+    /// An external bar type, an IDEALPRO pair's BID and ASK bars, is
+    /// requested as it is and builds nothing: Nautilus' data engine refuses
+    /// a request naming one in its `bar_types`, aggregating into internal
+    /// bar types alone. One that is also a composite's source is requested
+    /// once, building the composite.
+    #[test]
+    fn an_external_bar_type_is_requested_as_it_is_building_nothing() {
+        let bid = BarType::from("EUR/USD.IDEALPRO-1-MINUTE-BID-EXTERNAL");
+        let ask = BarType::from("EUR/USD.IDEALPRO-1-MINUTE-ASK-EXTERNAL");
+        let minutes = BarType::from("ESM24.CME-1-MINUTE-LAST-EXTERNAL");
+        let composite = BarType::from("ESM24.CME-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL");
+        let warmup = Warmup::live(&reading(&[
+            "ESM24.CME-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
+            "EUR/USD.IDEALPRO-1-MINUTE-BID-EXTERNAL",
+            "EUR/USD.IDEALPRO-1-MINUTE-ASK-EXTERNAL",
+            "ESM24.CME-1-MINUTE-LAST-EXTERNAL",
+        ]));
+        let (mut probe, commands) = registered();
+
+        warmup.start(&mut probe).unwrap();
+
+        assert_eq!(
+            requested(&commands),
+            vec![
+                (Source::Bars(minutes), vec![composite]),
+                (Source::Bars(bid), vec![]),
+                (Source::Bars(ask), vec![]),
             ]
         );
     }
