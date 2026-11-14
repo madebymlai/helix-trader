@@ -7,7 +7,10 @@
 //! against the mock CME stream replaying LSE's documented records; the
 //! definition loaded from the node's catalog (TC-D01, LSE publishing none,
 //! from the catalog alone), quotes and trades flowing after start (TC-D20,
-//! TC-D30) and their subscriptions ended on stop (TC-D70). TC-D21,
+//! TC-D30) and their subscriptions ended on stop (TC-D70), and its book
+//! depth (TC-D12) and book deltas (TC-D10), against the mock CME stream
+//! replaying the Level 2 and Level 3 records LSE's documentation describes,
+//! ended on stop too (TC-D70). TC-D21,
 //! historical quotes, is skipped here: LSE has no quotes of a derived
 //! market's past, and a CME contract's run against LSE in
 //! `examples/node_data_tester.rs`. A CME
@@ -22,7 +25,9 @@ use nautilus_common::{
     enums::Environment,
     msgbus::{
         self, TypedHandler,
-        switchboard::{get_quotes_topic, get_trades_topic},
+        switchboard::{
+            get_book_deltas_pattern, get_book_depth_pattern, get_quotes_topic, get_trades_topic,
+        },
     },
     nautilus_actor,
     testing::wait_until_async,
@@ -30,8 +35,8 @@ use nautilus_common::{
 use nautilus_core::{UnixNanos, string::secret::SecretString};
 use nautilus_live::{builder::LiveNodeBuilder, config::LiveNodeConfig};
 use nautilus_model::{
-    data::{OrderBookDelta, OrderBookDepth, QuoteTick, TradeTick},
-    enums::{AggressorSide, RecordFlag},
+    data::{OrderBookDelta, OrderBookDeltas, OrderBookDepth, QuoteTick, TradeTick},
+    enums::{AggressorSide, BookAction, BookType, RecordFlag},
     identifiers::{ClientId, InstrumentId, TraderId},
     types::{Price, Quantity},
 };
@@ -44,9 +49,10 @@ use serde_json::json;
 use crate::{
     LseDataClientConfig, LseDataClientFactory,
     testing::{
-        AAPL_CALL, API_KEY, CME_API_KEY, CME_ESZ6_DOCUMENTED, ESZ26, GCZ26, GCZ26_BOOK,
-        GCZ26_ORDERS, GOLD_FUTURES, MockCmeStream, MockLse, MockLseSocket, PAIRS_ESZ6, PAIRS_GCZ6,
-        Reply, aapl_call, data_ws_answer, dbn_frames, esz26, gcz26, gold_futures, held,
+        AAPL_CALL, API_KEY, CME_API_KEY, CME_ESZ6_DOCUMENTED, CME_GCZ6_GCG7,
+        CME_GCZ6_L2_DOCUMENTED, CME_GCZ6_L3_DOCUMENTED, ESZ26, GCZ26, GCZ26_BOOK, GCZ26_ORDERS,
+        GOLD_FUTURES, MockCmeStream, MockLse, MockLseSocket, PAIRS_ESZ6, PAIRS_GCZ6, Reply,
+        aapl_call, data_ws_answer, dbn_frames, esz26, frames, gcz26, gold_futures, held, sent,
     },
 };
 
@@ -525,4 +531,193 @@ async fn the_data_tester_receives_a_cme_contract_s_quotes_and_trades_from_lse() 
             AggressorSide::NoAggressor
         )
     );
+}
+
+/// LSE's CME stream answering each connection by its level: GCZ6's
+/// captured opening at Level 1, and its Level 2 and Level 3 sessions as
+/// LSE's documentation records them.
+fn gcz6_by_level() -> MockCmeStream {
+    MockCmeStream::start(|_, subscription| match subscription["level"].as_u64() {
+        Some(2) => sent(dbn_frames(CME_GCZ6_L2_DOCUMENTED)),
+        Some(3) => sent(dbn_frames(CME_GCZ6_L3_DOCUMENTED)),
+        _ => sent(frames(CME_GCZ6_GCG7)[..4].to_vec()),
+    })
+}
+
+/// A node streaming GCZ26 from LSE against `lse` and `stream`, its
+/// definition in the catalog at `dir`, with `tester`.
+fn gcz26_node(
+    lse: &MockLse,
+    stream: &MockCmeStream,
+    dir: &std::path::Path,
+    tester: DataTesterConfig,
+) -> nautilus_live::node::LiveNode {
+    ParquetDataCatalog::new(dir, None, None, None, None)
+        .write_instruments(vec![gcz26()])
+        .unwrap();
+    let config = LiveNodeConfig {
+        environment: Environment::Live,
+        trader_id: TraderId::from("TESTER-001"),
+        load_state: false,
+        save_state: false,
+        catalogs: vec![DataCatalogConfig::new(
+            dir.to_str().unwrap().to_string(),
+            None,
+            None,
+        )],
+        ..Default::default()
+    };
+    let lse = LseDataClientConfig::builder()
+        .cme_api_key(SecretString::from(CME_API_KEY))
+        .base_url_http(lse.url().to_string())
+        .base_url_ws_cme(stream.url().to_string())
+        .stream_ids(vec![InstrumentId::from(GCZ26)])
+        .build();
+    let mut node = LiveNodeBuilder::from_config(config)
+        .unwrap()
+        .with_name("LSE-TESTER")
+        .with_delay_post_stop_secs(1)
+        .add_data_client(None, Box::new(LseDataClientFactory::new()), Box::new(lse))
+        .unwrap()
+        .build()
+        .unwrap();
+    node.add_actor(DataTester::new(tester)).unwrap();
+    node
+}
+
+/// Runs `node` until `done` holds, then stops it.
+async fn run_until(node: &mut nautilus_live::node::LiveNode, done: impl Fn() -> bool) {
+    let handle = node.handle();
+    let stopped = async {
+        wait_until_async(
+            || {
+                let met = done();
+                async move { met }
+            },
+            Duration::from_secs(30),
+        )
+        .await;
+        handle.stop();
+    };
+    let (ran, ()) = tokio::time::timeout(Duration::from_secs(60), async {
+        tokio::join!(node.run(), stopped)
+    })
+    .await
+    .expect("the node stops within a minute");
+    ran.unwrap();
+    node.dispose();
+}
+
+/// GCZ6's book depth at Level 2 as LSE's documentation records it, its
+/// definition in the node's catalog: the tester's depth opens with the
+/// contract's last ten levels, then a depth a change of its book, each
+/// ten levels a side or fewer, bids falling and asks rising from the best;
+/// the node stops once the four reached the message bus.
+#[tokio::test]
+async fn the_data_tester_receives_a_cme_contract_s_book_depth_from_lse() {
+    let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6)]);
+    let stream = gcz6_by_level();
+    let dir = tempfile::tempdir().unwrap();
+    let gc = InstrumentId::from(GCZ26);
+    let tester = DataTesterConfig::builder()
+        .client_id(ClientId::from("LSE"))
+        .instrument_ids(vec![gc])
+        .request_instruments(true)
+        .subscribe_book_depth(true)
+        .book_type(BookType::L2_MBP)
+        .book_depth(10)
+        .can_unsubscribe(true)
+        .build()
+        .unwrap();
+    let mut node = gcz26_node(&lse, &stream, dir.path(), tester);
+    let depths: Rc<RefCell<Vec<OrderBookDepth>>> = Rc::default();
+    let seen = Rc::clone(&depths);
+    msgbus::subscribe_book_depth(
+        get_book_depth_pattern(gc),
+        TypedHandler::from(move |depth: &OrderBookDepth| seen.borrow_mut().push(depth.clone())),
+        None,
+    );
+
+    run_until(&mut node, || depths.borrow().len() == 4).await;
+
+    let depths = depths.borrow();
+    assert_eq!(
+        (depths[0].bids[0].price, depths[0].asks[0].price),
+        (Price::from("3908.10"), Price::from("3908.30"))
+    );
+    for depth in depths.iter() {
+        let bids: Vec<Price> = depth
+            .bids
+            .iter()
+            .filter(|bid| bid.side.is_some())
+            .map(|bid| bid.price)
+            .collect();
+        let asks: Vec<Price> = depth
+            .asks
+            .iter()
+            .filter(|ask| ask.side.is_some())
+            .map(|ask| ask.price)
+            .collect();
+        assert!(bids.len() <= 10 && asks.len() <= 10);
+        assert!(bids.windows(2).all(|pair| pair[0] > pair[1]), "{bids:?}");
+        assert!(asks.windows(2).all(|pair| pair[0] < pair[1]), "{asks:?}");
+        assert!(bids[0] < asks[0]);
+    }
+}
+
+/// GCZ6's book deltas at Level 3 as LSE's documentation records them, its
+/// definition in the node's catalog: the tester's deltas start at the
+/// first order event, no book opening them, each batch ending `F_LAST`,
+/// the first adding a bid and an ask; the node stops once the three
+/// batches reached the message bus.
+#[tokio::test]
+async fn the_data_tester_receives_a_cme_contract_s_book_deltas_from_lse() {
+    let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6)]);
+    let stream = gcz6_by_level();
+    let dir = tempfile::tempdir().unwrap();
+    let gc = InstrumentId::from(GCZ26);
+    let tester = DataTesterConfig::builder()
+        .client_id(ClientId::from("LSE"))
+        .instrument_ids(vec![gc])
+        .request_instruments(true)
+        .subscribe_book_deltas(true)
+        .book_type(BookType::L3_MBO)
+        .can_unsubscribe(true)
+        .build()
+        .unwrap();
+    let mut node = gcz26_node(&lse, &stream, dir.path(), tester);
+    let batches: Rc<RefCell<Vec<OrderBookDeltas>>> = Rc::default();
+    let seen = Rc::clone(&batches);
+    msgbus::subscribe_book_deltas(
+        get_book_deltas_pattern(gc),
+        TypedHandler::from(move |deltas: &OrderBookDeltas| seen.borrow_mut().push(deltas.clone())),
+        None,
+    );
+
+    run_until(&mut node, || batches.borrow().len() == 3).await;
+
+    let batches = batches.borrow();
+    let first: Vec<(BookAction, Price)> = batches[0]
+        .deltas
+        .iter()
+        .map(|delta| (delta.action, delta.order.price))
+        .collect();
+    assert_eq!(
+        first,
+        [
+            (BookAction::Add, Price::from("3908.10")),
+            (BookAction::Add, Price::from("3908.30")),
+        ]
+    );
+    for batch in batches.iter() {
+        assert_eq!(batch.instrument_id, gc);
+        assert!(RecordFlag::F_LAST.matches(batch.deltas.last().unwrap().flags));
+        assert!(
+            batch
+                .deltas
+                .iter()
+                .all(|delta| delta.action != BookAction::Clear
+                    && !RecordFlag::F_SNAPSHOT.matches(delta.flags))
+        );
+    }
 }

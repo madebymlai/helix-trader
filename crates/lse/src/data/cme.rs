@@ -1,44 +1,72 @@
 //! The data client's CME Globex data: the `GLBX` contracts it streams on
-//! LSE's CME stream at Level 1, as quotes and trades.
+//! LSE's CME stream, at Level 1 as quotes and trades, at Level 2 as book
+//! depth and at Level 3 as book deltas.
 //!
 //! `open` looks each contract the config streams up in LSE's catalogue
 //! with the CME key (see `http::listing`), its listing's symbol being its
-//! name on the stream, then connects to the stream subscribing them all
-//! (see `CmeStreamClient`), and fails with LSE's refusal of a lookup or of
-//! the subscription. A quotes or trades subscription reads the contract's
-//! price precision from the cache and has the stream carry the contract:
-//! one carried already opens for a new quotes subscriber with its latest
-//! best bid and offer, unless that went out already, and one not carried
-//! yet, a later contract of a rolled root, is looked up and carried from
-//! the stream's next connection, which opens it. Each record
-//! of a contract subscribed becomes Nautilus data through Nautilus'
-//! Databento decoder (`decode_mbp1_msg`), LSE's records being Databento's:
-//! its best bid and offer a quote, with the sizes LSE sends, and its trade,
-//! if it is one and not an opening, a trade with no aggressor side, LSE
-//! sending side `N` for every trade ("the feed does not say which side took
-//! it"). The decoder stamps both at the record's `ts_recv` (`ts_event`),
-//! when LSE received it, as Nautilus' Databento client stamps its data, and
-//! `ts_init` when the record came. The decoder takes a trade's id from the
-//! record's own sequence, which LSE leaves 0; the trade takes the stream's
-//! sequence of its record instead, one of its contract's alone. A gap of a
-//! contract's sequence is logged and left.
+//! name on the stream, then connects to the stream subscribing them all at
+//! Level 1 (see `CmeStreamClient`), and fails with LSE's refusal of a
+//! lookup or of the subscription. A subscription reads the contract's price
+//! precision from the cache and has the stream carry the contract at the
+//! level of its data: quotes and trades at Level 1, depth at Level 2 and
+//! deltas at Level 3, each level on a connection of its own, LSE taking one
+//! level a connection ("to change the contracts or the level, open another
+//! connection"). The first depth or deltas subscription opens its level's
+//! connection; LSE's refusal of it, such as of a level the key's plan
+//! lacks, is logged as an error, and a later subscription of the level asks
+//! LSE again on a new connection. A contract carried already opens for a
+//! new quotes or depth subscriber with its latest best bid and offer or ten
+//! levels, unless they went out already, and one not carried yet at the
+//! level, a later contract of a rolled root, is looked up and carried from
+//! the level's next connection, which opens it.
+//!
+//! Each record of a contract subscribed becomes Nautilus data through
+//! Nautilus' Databento decoder, LSE's records being Databento's, at the
+//! contract's price precision. At Level 1 (`decode_mbp1_msg`): its best
+//! bid and offer a quote, with the sizes LSE sends, and its trade, if it is
+//! one and not an opening, a trade with no aggressor side, LSE sending side
+//! `N` for every trade ("the feed does not say which side took it"). At
+//! Level 2 (`decode_mbp10_msg`): its ten levels a side, after the record's
+//! change, an `OrderBookDepth` with each level's count of orders, an empty
+//! level none, the contract opening with its last ten levels. At Level 3
+//! (`decode_mbo_msg`): the order it adds (`A`), changes (`M`) or removes
+//! (`C`), an `OrderBookDelta`; an event of no action (`N`) changes no order
+//! and gives none. LSE's Level 3 opens with no book ("the stream carries
+//! order events and no opening book"), so a contract's deltas start at its
+//! first order event and none is invented. LSE flags the last event of each
+//! exchange message (128, `F_LAST`): the deltas are gathered until it, then
+//! sent as one `OrderBookDeltas`, as Nautilus' Databento client sends a
+//! live event's; a flagged event of no delta ends its message too, its
+//! `F_LAST` put on the message's last delta, as Nautilus' Databento decoder
+//! does on history (`MboDeltaBuffer`), so that every event ends `F_LAST`
+//! (Nautilus' adapter guide: "Each logical update ends with `F_LAST`"). The
+//! decoder stamps each at the record's `ts_recv` (`ts_event`), when LSE
+//! received it, as Nautilus' Databento client stamps its data, and
+//! `ts_init` when the record came. It numbers a trade, a depth and a delta
+//! by the record's own sequence, which LSE leaves 0; each takes the
+//! stream's sequence of its record instead, one of its contract's and
+//! level's alone. A gap of a contract's sequence is logged and left.
 
 use std::sync::Arc;
 
 use ahash::AHashMap;
 use anyhow::{Context, bail};
-use dbn::Mbp1Msg;
+use dbn::{MboMsg, Mbp1Msg, Mbp10Msg};
 use jiff::{Timestamp, tz::TimeZone};
 use nautilus_common::{
     cache::CacheView,
-    live::{dst::time::Duration, sender::EventSender},
+    live::{
+        dst::time::{self, Duration},
+        sender::EventSender,
+    },
     messages::DataEvent,
 };
 use nautilus_core::{collections::AtomicMap, time::AtomicTime};
-use nautilus_databento::decode::decode_mbp1_msg;
+use nautilus_databento::decode::{decode_mbo_msg, decode_mbp1_msg, decode_mbp10_msg};
 use nautilus_live::task::TaskGroup;
 use nautilus_model::{
-    data::Data,
+    data::{Data, OrderBookDelta, OrderBookDeltas},
+    enums::RecordFlag,
     identifiers::{InstrumentId, TradeId},
     instruments::Instrument,
 };
@@ -46,7 +74,10 @@ use nautilus_model::{
 use crate::{
     common::{consts::LSE_CME_API_KEY, credential::LseCredential, symbol::CmeContract},
     http::{client::LseHttpClient, listing::CmeListings},
-    websocket::cme::client::{CmeStreamClient, CmeWsMessage},
+    websocket::cme::{
+        client::{CmeOpening, CmeStreamClient, CmeSubscriber, CmeWsMessage, OPEN_TIMEOUT},
+        messages::{CmeLevel, CmeRecord},
+    },
 };
 
 /// How long the record tasks get to finish at a close, then to abort.
@@ -58,6 +89,25 @@ const TASK_FORCE: Duration = Duration::from_secs(2);
 pub(super) enum CmeKind {
     Quotes,
     Trades,
+    Depth,
+    Deltas,
+}
+
+impl CmeKind {
+    /// The level of LSE's stream that carries the data.
+    const fn level(self) -> CmeLevel {
+        match self {
+            Self::Quotes | Self::Trades => CmeLevel::Mbp1,
+            Self::Depth => CmeLevel::Mbp10,
+            Self::Deltas => CmeLevel::Mbo,
+        }
+    }
+
+    /// Whether a new subscriber gets the contract's latest record: its best
+    /// bid and offer, or its ten levels.
+    const fn reopens(self) -> bool {
+        matches!(self, Self::Quotes | Self::Depth)
+    }
 }
 
 /// A contract subscribed: its id, its price precision and the data taken.
@@ -67,18 +117,42 @@ struct Subscribed {
     price_precision: u8,
     quotes: bool,
     trades: bool,
+    depth: bool,
+    deltas: bool,
+}
+
+impl Subscribed {
+    /// Whether data of `level` is taken.
+    const fn takes_at(&self, level: CmeLevel) -> bool {
+        match level {
+            CmeLevel::Mbp1 => self.quotes || self.trades,
+            CmeLevel::Mbp10 => self.depth,
+            CmeLevel::Mbo => self.deltas,
+        }
+    }
+
+    /// Takes `kind`, or stops taking it.
+    const fn set(&mut self, kind: CmeKind, taken: bool) {
+        match kind {
+            CmeKind::Quotes => self.quotes = taken,
+            CmeKind::Trades => self.trades = taken,
+            CmeKind::Depth => self.depth = taken,
+            CmeKind::Deltas => self.deltas = taken,
+        }
+    }
 }
 
 /// The contracts subscribed, by their names on the stream: read on each
 /// record, written on each subscription.
 type SubscribedByName = Arc<AtomicMap<String, Subscribed>>;
 
-/// A contract's latest record, whose levels are its best bid and offer, its
-/// sequence, and whether its quote went out.
+/// A contract's latest record at Level 1 or 2, whose levels are its best
+/// bid and offer or its ten levels, its sequence, and whether those went
+/// out.
 struct Latest {
-    record: Mbp1Msg,
+    record: CmeRecord,
     sequence: u64,
-    quoted: bool,
+    sent: bool,
 }
 
 /// The CME key, and LSE's API on it, which looks the contracts up.
@@ -96,14 +170,17 @@ pub(super) struct CmeStreams {
     listings: Arc<CmeListings>,
     /// The stream's address.
     url: String,
-    /// The contracts the config streams, which `open` subscribes.
+    /// The contracts the config streams, which `open` subscribes at Level
+    /// 1.
     streamed: Vec<CmeContract>,
-    client: Option<CmeStreamClient>,
+    /// The connection of each level: Level 1's from `open`, the others'
+    /// from their first subscription.
+    clients: AHashMap<CmeLevel, CmeStreamClient>,
     /// The names on the stream of the contracts subscribed.
     names: Arc<AtomicMap<InstrumentId, String>>,
     subscribed: SubscribedByName,
-    /// The tasks turning records into quotes and trades, and looking up the
-    /// contracts subscribed after `open`.
+    /// The tasks turning records into data, logging each connection's
+    /// answer, and looking up the contracts subscribed after `open`.
     tasks: TaskGroup,
     data_sender: EventSender<DataEvent>,
     clock: &'static AtomicTime,
@@ -140,7 +217,7 @@ impl CmeStreams {
             listings,
             url,
             streamed,
-            client: None,
+            clients: AHashMap::new(),
             names: Arc::default(),
             subscribed: Arc::default(),
             tasks: TaskGroup::new(),
@@ -150,8 +227,8 @@ impl CmeStreams {
     }
 
     /// Looks the contracts streamed up and connects to the stream
-    /// subscribing them all; starts turning their records into data.
-    /// Nothing to do if none is streamed.
+    /// subscribing them all at Level 1; starts turning their records into
+    /// data. Nothing to do if none is streamed.
     ///
     /// # Errors
     ///
@@ -184,20 +261,86 @@ impl CmeStreams {
             symbols.push(listing.symbol);
         }
         let (out_tx, out) = tokio::sync::mpsc::unbounded_channel();
-        let client =
-            CmeStreamClient::connect(&self.url, &access.credential, &symbols, out_tx).await?;
-        self.client = Some(client);
-        if let Err(e) = self.spawn_records(out) {
+        let client = CmeStreamClient::connect(
+            &self.url,
+            &access.credential,
+            CmeLevel::Mbp1,
+            &symbols,
+            out_tx,
+        )
+        .await?;
+        self.clients.insert(CmeLevel::Mbp1, client);
+        if let Err(e) = self.spawn_records(CmeLevel::Mbp1, out) {
             self.close().await?;
             return Err(e);
         }
         Ok(())
     }
 
-    /// Turns the records `out` passes on into quotes and trades of the
-    /// contracts subscribed, and logs gaps.
+    /// The subscriber of the connection of `level`: its open one, or a new
+    /// one carrying the contracts subscribed at the level, which connects
+    /// with its first contract, and whose records and answer are taken up
+    /// here.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the client has no CME key, or a new connection's
+    /// client or tasks do not start.
+    fn subscriber(&mut self, level: CmeLevel) -> anyhow::Result<CmeSubscriber> {
+        if let Some(client) = self.clients.get(&level)
+            && !client.is_closed()
+        {
+            return Ok(client.subscriber());
+        }
+        let access = self
+            .access
+            .as_ref()
+            .context("CME contracts streamed with no CME key")?;
+        let carried: Vec<String> = self
+            .subscribed
+            .load()
+            .iter()
+            .filter(|(_, of)| of.takes_at(level))
+            .map(|(symbol, _)| symbol.clone())
+            .collect();
+        let (out_tx, out) = tokio::sync::mpsc::unbounded_channel();
+        let (client, opening) =
+            CmeStreamClient::start(&self.url, &access.credential, level, &carried, out_tx)?;
+        let subscriber = client.subscriber();
+        // A closed client's handler has stopped.
+        self.clients.insert(level, client);
+        self.spawn_records(level, out)?;
+        self.spawn_opening(level, opening)?;
+        Ok(subscriber)
+    }
+
+    /// Logs LSE's answer to the first subscription of the connection of
+    /// `level`, which `opening` gets: its refusal as an error.
+    fn spawn_opening(&self, level: CmeLevel, opening: CmeOpening) -> anyhow::Result<()> {
+        self.tasks
+            .spawn(async move {
+                match time::timeout(OPEN_TIMEOUT, opening).await {
+                    Ok(Ok(Ok(()))) => log::info!("LSE's CME stream opened at {level}"),
+                    Ok(Ok(Err(refused))) => log::error!(
+                        "{refused}: no data of its contracts streams at {level} until a later \
+                         subscription of the level is answered"
+                    ),
+                    // Disconnected before LSE answered.
+                    Ok(Err(_)) => {}
+                    Err(_) => log::warn!(
+                        "LSE's CME stream did not answer the {level} subscription within \
+                         {OPEN_TIMEOUT:?}"
+                    ),
+                }
+            })
+            .map_err(|e| anyhow::anyhow!("awaiting LSE's answer at {level}: {e}"))
+    }
+
+    /// Turns the records `out` passes on, of the connection of `level`, into
+    /// the data of the contracts subscribed, and logs gaps.
     fn spawn_records(
         &self,
+        level: CmeLevel,
         mut out: tokio::sync::mpsc::UnboundedReceiver<CmeWsMessage>,
     ) -> anyhow::Result<()> {
         let subscribed = Arc::clone(&self.subscribed);
@@ -207,6 +350,8 @@ impl CmeStreams {
         self.tasks
             .spawn(async move {
                 let mut latest: AHashMap<String, Latest> = AHashMap::new();
+                // Each contract's deltas of the exchange message under way.
+                let mut events: AHashMap<String, Vec<OrderBookDelta>> = AHashMap::new();
                 loop {
                     let message = tokio::select! {
                         biased;
@@ -220,28 +365,40 @@ impl CmeStreams {
                         CmeWsMessage::Record {
                             symbol,
                             sequence,
+                            record: CmeRecord::Mbo(record),
+                            ..
+                        } => {
+                            let event = events.entry(symbol.clone()).or_default();
+                            match subscribed.get_cloned(&symbol).filter(|of| of.deltas) {
+                                Some(of) => gather(&sender, clock, of, &record, sequence, event),
+                                // Of a contract whose deltas are not taken.
+                                None => event.clear(),
+                            }
+                        }
+                        CmeWsMessage::Record {
+                            symbol,
+                            sequence,
                             record,
                             opening,
                         } => {
-                            let quoted = match subscribed.get_cloned(&symbol) {
-                                Some(of) => emit(&sender, clock, of, &record, sequence, opening),
-                                None => false,
-                            };
+                            let sent = subscribed.get_cloned(&symbol).is_some_and(|of| {
+                                emit(&sender, clock, of, &record, sequence, opening)
+                            });
                             latest.insert(
                                 symbol,
                                 Latest {
                                     record,
                                     sequence,
-                                    quoted,
+                                    sent,
                                 },
                             );
                         }
                         CmeWsMessage::Reopen { symbol } => {
                             if let (Some(of), Some(latest)) =
                                 (subscribed.get_cloned(&symbol), latest.get_mut(&symbol))
-                                && !latest.quoted
+                                && !latest.sent
                             {
-                                latest.quoted =
+                                latest.sent =
                                     emit(&sender, clock, of, &latest.record, latest.sequence, true);
                             }
                         }
@@ -250,19 +407,20 @@ impl CmeStreams {
                                 .get_cloned(&symbol)
                                 .map_or_else(|| symbol.clone(), |of| of.instrument_id.to_string());
                             log::warn!(
-                                "LSE's CME stream: the records {from} to {to} of {contract} \
-                                 ({symbol}) did not come, a gap left as it is"
+                                "LSE's CME stream: the {level} records {from} to {to} of \
+                                 {contract} ({symbol}) did not come, a gap left as it is"
                             );
                         }
                     }
                 }
             })
-            .map_err(|e| anyhow::anyhow!("starting the records of LSE's CME stream: {e}"))
+            .map_err(|e| anyhow::anyhow!("starting the {level} records of LSE's CME stream: {e}"))
     }
 
     /// Subscribes to `kind` of the contract `id`, at the price precision of
-    /// its definition in `cache`: has the stream carry it, looking it up
-    /// first if no subscription has yet.
+    /// its definition in `cache`: has the stream carry it at `kind`'s
+    /// level, opening the level's connection if none is, and looking the
+    /// contract up first if no subscription has yet.
     ///
     /// # Errors
     ///
@@ -270,21 +428,18 @@ impl CmeStreams {
     /// CME contract, or if `cache` has no definition of it: LSE publishes
     /// none, and its prices are read at the definition's precision.
     pub(super) fn subscribe(
-        &self,
+        &mut self,
         id: InstrumentId,
         kind: CmeKind,
         cache: &CacheView,
     ) -> anyhow::Result<()> {
-        let (client, access) = self
-            .client
-            .as_ref()
-            .zip(self.access.as_ref())
-            .with_context(|| {
-                format!(
-                    "{id} is not streamed: LSE's CME stream opens only for the CME contracts the \
-                 LSE client's config streams (its stream_ids)"
-                )
-            })?;
+        // `open` opens Level 1 for the contracts the config streams.
+        if !self.clients.contains_key(&CmeLevel::Mbp1) {
+            bail!(
+                "{id} is not streamed: LSE's CME stream opens only for the CME contracts the LSE \
+                 client's config streams (its stream_ids)"
+            );
+        }
         let year = Timestamp::from(self.clock.get_time_ns())
             .to_zoned(TimeZone::UTC)
             .year();
@@ -300,13 +455,20 @@ impl CmeStreams {
                 )
             })?
             .price_precision();
-        let subscriber = client.subscriber();
-        let reopen = kind == CmeKind::Quotes;
+        let subscriber = self.subscriber(kind.level())?;
+        let reopen = kind.reopens();
         if let Some(symbol) = self.names.get_cloned(&id) {
             take(&self.subscribed, &symbol, id, price_precision, kind);
             return subscriber.subscribe(&symbol, reopen);
         }
-        let (listings, http) = (Arc::clone(&self.listings), Arc::clone(&access.http));
+        let http = Arc::clone(
+            &self
+                .access
+                .as_ref()
+                .context("CME contracts streamed with no CME key")?
+                .http,
+        );
+        let listings = Arc::clone(&self.listings);
         let (names, subscribed) = (Arc::clone(&self.names), Arc::clone(&self.subscribed));
         self.tasks
             .spawn(async move {
@@ -336,10 +498,7 @@ impl CmeStreams {
             .with_context(|| format!("{id} is not subscribed on LSE's CME stream"))?;
         self.subscribed.rcu(|subscribed| {
             if let Some(of) = subscribed.get_mut(&symbol) {
-                match kind {
-                    CmeKind::Quotes => of.quotes = false,
-                    CmeKind::Trades => of.trades = false,
-                }
+                of.set(kind, false);
             }
         });
         Ok(())
@@ -350,7 +509,7 @@ impl CmeStreams {
         self.tasks.begin_shutdown();
     }
 
-    /// Stops the record tasks and disconnects the stream.
+    /// Stops the record tasks and disconnects the stream's connections.
     ///
     /// # Errors
     ///
@@ -358,7 +517,7 @@ impl CmeStreams {
     pub(super) async fn close(&mut self) -> anyhow::Result<()> {
         self.tasks.begin_shutdown();
         let stopped = self.tasks.finish_shutdown(TASK_GRACE, TASK_FORCE).await;
-        if let Some(client) = self.client.take() {
+        for (_, client) in self.clients.drain() {
             client.disconnect().await;
         }
         self.subscribed.rcu(|subscribed| subscribed.clear());
@@ -367,10 +526,28 @@ impl CmeStreams {
 }
 
 /// Sends the data of `record`, of the contract `of`, at its `sequence`,
-/// that `of` takes: its best bid and offer as a quote, and its trade, if it
-/// is one and not an `opening`, as a trade with that sequence as its id.
-/// Whether a quote went out.
+/// that `of` takes, an `opening` carrying no event of its own. Whether the
+/// data a new subscriber opens with went out: a quote, or a depth.
 fn emit(
+    sender: &EventSender<DataEvent>,
+    clock: &'static AtomicTime,
+    of: Subscribed,
+    record: &CmeRecord,
+    sequence: u64,
+    opening: bool,
+) -> bool {
+    match record {
+        CmeRecord::Mbp1(record) => emit_mbp1(sender, clock, of, record, sequence, opening),
+        CmeRecord::Mbp10(record) => emit_mbp10(sender, clock, of, record, sequence),
+        // Gathered into events (see `gather`); a contract opens with none.
+        CmeRecord::Mbo(_) => false,
+    }
+}
+
+/// Sends `record`'s best bid and offer as a quote, and its trade, if it is
+/// one and not an `opening`, as a trade with `sequence` as its id. Whether
+/// a quote went out.
+fn emit_mbp1(
     sender: &EventSender<DataEvent>,
     clock: &'static AtomicTime,
     of: Subscribed,
@@ -407,6 +584,78 @@ fn emit(
     quoted
 }
 
+/// Sends `record`'s ten levels a side as a depth numbered `sequence`, if
+/// `of` takes depth. Whether it went out.
+fn emit_mbp10(
+    sender: &EventSender<DataEvent>,
+    clock: &'static AtomicTime,
+    of: Subscribed,
+    record: &Mbp10Msg,
+    sequence: u64,
+) -> bool {
+    if !of.depth {
+        return false;
+    }
+    match decode_mbp10_msg(
+        record,
+        of.instrument_id,
+        of.price_precision,
+        Some(clock.get_time_ns()),
+    ) {
+        Ok(mut depth) => {
+            depth.sequence = sequence;
+            send(sender, DataEvent::Data(Data::BookDepth(Box::new(depth))));
+            true
+        }
+        Err(e) => {
+            log::warn!(
+                "a record of {} from LSE's CME stream skipped: {e:#}",
+                of.instrument_id
+            );
+            false
+        }
+    }
+}
+
+/// Adds the delta of `record`, the contract `of`'s order event, numbered
+/// `sequence`, to `event`, the deltas of its exchange message so far; at
+/// the message's last event, which LSE flags `F_LAST`, sends them as one
+/// `OrderBookDeltas`, the last flagged `F_LAST`, if any came.
+fn gather(
+    sender: &EventSender<DataEvent>,
+    clock: &'static AtomicTime,
+    of: Subscribed,
+    record: &MboMsg,
+    sequence: u64,
+    event: &mut Vec<OrderBookDelta>,
+) {
+    match decode_mbo_msg(
+        record,
+        of.instrument_id,
+        of.price_precision,
+        Some(clock.get_time_ns()),
+        false,
+    ) {
+        Ok((Some(mut delta), _)) => {
+            delta.sequence = sequence;
+            event.push(delta);
+        }
+        // An event of no action.
+        Ok((None, _)) => {}
+        Err(e) => log::warn!(
+            "a record of {} from LSE's CME stream skipped: {e:#}",
+            of.instrument_id
+        ),
+    }
+    if record.flags.is_last()
+        && let Some(last) = event.last_mut()
+    {
+        last.flags |= RecordFlag::F_LAST as u8;
+        let deltas = OrderBookDeltas::new(of.instrument_id, std::mem::take(event));
+        send(sender, DataEvent::Data(Data::BookDeltas(Box::new(deltas))));
+    }
+}
+
 /// Records that `kind` of `id`, named `symbol` on the stream, is taken.
 fn take(
     subscribed: &SubscribedByName,
@@ -421,12 +670,11 @@ fn take(
             price_precision,
             quotes: false,
             trades: false,
+            depth: false,
+            deltas: false,
         });
         of.price_precision = price_precision;
-        match kind {
-            CmeKind::Quotes => of.quotes = true,
-            CmeKind::Trades => of.trades = true,
-        }
+        of.set(kind, true);
     });
 }
 
@@ -439,7 +687,12 @@ fn send(sender: &EventSender<DataEvent>, event: DataEvent) {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, num::NonZeroU32, rc::Rc, time::Duration};
+    use std::{
+        cell::RefCell,
+        num::{NonZeroU32, NonZeroUsize},
+        rc::Rc,
+        time::Duration,
+    };
 
     use nautilus_common::{
         cache::Cache,
@@ -447,12 +700,14 @@ mod tests {
         clock::{Clock, VirtualClock},
         factories::DataClientFactory,
         live::runner::replace_data_event_sender,
-        messages::data::{SubscribeQuotes, SubscribeTrades},
+        messages::data::{
+            SubscribeBookDeltas, SubscribeBookDepth, SubscribeQuotes, SubscribeTrades,
+        },
     };
     use nautilus_core::{UUID4, UnixNanos, string::secret::SecretString};
     use nautilus_model::{
-        data::{QuoteTick, TradeTick},
-        enums::AggressorSide,
+        data::{BookOrder, OrderBookDelta, QuoteTick, TradeTick},
+        enums::{AggressorSide, BookAction, BookType, OrderSide, RecordFlag},
         identifiers::{ClientId, Symbol},
         instruments::InstrumentAny,
         types::{Price, Quantity},
@@ -464,9 +719,10 @@ mod tests {
     use crate::{
         LseDataClientConfig, LseDataClientFactory,
         testing::{
-            API_KEY, CME_API_KEY, CME_ESZ6_DOCUMENTED, CME_GCZ6_GCG7, CME_SYMBOL_UNAVAILABLE,
-            CmeAction, ESZ26, GCZ26, MockCmeStream, MockLse, PAIRS_ESZ6, PAIRS_GCG7, PAIRS_GCZ6,
-            Reply, dbn_frames, esz26, frames, gcz26, held, sent,
+            API_KEY, CME_API_KEY, CME_ESZ6_DOCUMENTED, CME_GCZ6_GCG7, CME_GCZ6_L2_DOCUMENTED,
+            CME_GCZ6_L3_DOCUMENTED, CME_LEVEL_REQUIRED, CME_SYMBOL_UNAVAILABLE, CmeAction, ESZ26,
+            GCZ26, MockCmeStream, MockLse, PAIRS_ESZ6, PAIRS_GCG7, PAIRS_GCZ6, Reply, dbn_frames,
+            esz26, frames, gcz26, held, sent,
         },
     };
 
@@ -808,5 +1064,354 @@ mod tests {
             err.contains(GCZ26) && err.contains("LSE_CME_API_KEY"),
             "{err}"
         );
+    }
+
+    /// The book depth of `of`, `depth` levels, as the data engine asks the
+    /// client for it.
+    fn depth_of(of: &[&str], depth: usize) -> SubscribeBookDepth {
+        SubscribeBookDepth::new(
+            InstrumentId::from(of[0]),
+            BookType::L2_MBP,
+            Some(ClientId::from("LSE")),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            NonZeroUsize::new(depth),
+            false,
+            None,
+            None,
+        )
+    }
+
+    /// The book deltas of `of`, as the data engine asks the client for them.
+    fn deltas_of(of: &str) -> SubscribeBookDeltas {
+        SubscribeBookDeltas::new(
+            InstrumentId::from(of),
+            BookType::L3_MBO,
+            Some(ClientId::from("LSE")),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            false,
+            None,
+            None,
+        )
+    }
+
+    /// The mock stream answering each connection by its level: GCZ6's
+    /// captured opening at Level 1, and `level_2` and `level_3` at theirs.
+    fn by_level(
+        level_2: impl Fn(usize) -> Vec<CmeAction> + Send + 'static,
+        level_3: impl Fn(usize) -> Vec<CmeAction> + Send + 'static,
+    ) -> MockCmeStream {
+        MockCmeStream::start(
+            move |connection, subscription| match subscription["level"].as_u64() {
+                Some(2) => level_2(connection),
+                Some(3) => level_3(connection),
+                _ => sent(frames(CME_GCZ6_GCG7)[..4].to_vec()),
+            },
+        )
+    }
+
+    /// LSE's captured close of a level the key's plan lacks.
+    fn level_required() -> Vec<CmeAction> {
+        let close: Value = serde_json::from_str(CME_LEVEL_REQUIRED).unwrap();
+        vec![CmeAction::Close(
+            u16::try_from(close["code"].as_u64().unwrap()).unwrap(),
+            close["reason"].as_str().unwrap().to_string(),
+        )]
+    }
+
+    /// A level of a depth: its price, size and count of orders.
+    fn level(order: &BookOrder, count: u32) -> (Price, Quantity, u32) {
+        (order.price, order.size, count)
+    }
+
+    /// GCZ6 at Level 2 as LSE's documentation records it: its opening, its
+    /// last ten levels a side, then the book after each of three changes,
+    /// the best bid's size cut to 1, an order of 2 joining the best ask,
+    /// and the ninth ask level removed, each a depth of ten levels, its
+    /// counts of orders, stamped when LSE received the record and numbered
+    /// by its sequence on the stream.
+    #[tokio::test]
+    async fn a_level_2_subscription_delivers_the_contract_s_ten_levels_then_its_depths() {
+        let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6)]);
+        let stream = by_level(|_| sent(dbn_frames(CME_GCZ6_L2_DOCUMENTED)), |_| Vec::new());
+        let (mut client, connected, mut events) =
+            streaming(&lse, &stream, &[GCZ26], vec![gcz26()]).await;
+        connected.unwrap();
+
+        client.subscribe_book_depth(depth_of(&[GCZ26], 10)).unwrap();
+
+        let mut depths = Vec::new();
+        for _ in 0..4 {
+            let Data::BookDepth(depth) = next(&mut events).await else {
+                panic!("not a depth")
+            };
+            depths.push(depth);
+        }
+        let opening = &depths[0];
+        assert_eq!(opening.instrument_id, InstrumentId::from(GCZ26));
+        assert_eq!(
+            (
+                opening.ts_event,
+                opening.sequence,
+                level(&opening.bids[0], opening.bid_counts[0]),
+                level(&opening.asks[0], opening.ask_counts[0]),
+                level(&opening.bids[9], opening.bid_counts[9]),
+                level(&opening.asks[9], opening.ask_counts[9]),
+            ),
+            (
+                UnixNanos::from(1_794_493_800_000_471_000),
+                1001,
+                (Price::from("3908.10"), Quantity::from(2), 1),
+                (Price::from("3908.30"), Quantity::from(9), 4),
+                (Price::from("3907.20"), Quantity::from(8), 6),
+                (Price::from("3909.20"), Quantity::from(7), 4),
+            )
+        );
+        assert_eq!(
+            depths[1..]
+                .iter()
+                .map(|depth| (
+                    depth.sequence,
+                    depth.ts_event,
+                    level(&depth.bids[0], depth.bid_counts[0]),
+                    level(&depth.asks[0], depth.ask_counts[0]),
+                    depth.asks.iter().filter(|ask| ask.side.is_some()).count(),
+                ))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    1002,
+                    UnixNanos::from(1_794_493_800_001_706_000),
+                    (Price::from("3908.10"), Quantity::from(1), 1),
+                    (Price::from("3908.30"), Quantity::from(9), 4),
+                    10
+                ),
+                (
+                    1003,
+                    UnixNanos::from(1_794_493_800_001_707_000),
+                    (Price::from("3908.10"), Quantity::from(1), 1),
+                    (Price::from("3908.30"), Quantity::from(11), 5),
+                    10
+                ),
+                (
+                    1004,
+                    UnixNanos::from(1_794_493_800_999_131_000),
+                    (Price::from("3908.10"), Quantity::from(1), 1),
+                    (Price::from("3908.30"), Quantity::from(11), 5),
+                    8
+                ),
+            ]
+        );
+        let subscriptions: Vec<Value> = stream
+            .received()
+            .into_iter()
+            .map(|(_, frame)| frame)
+            .collect();
+        assert_eq!(
+            subscriptions,
+            [
+                json!({"op": "subscribe", "symbols": ["GCZ6"], "level": 1, "encoding": "dbn"}),
+                json!({"op": "subscribe", "symbols": ["GCZ6"], "level": 2, "encoding": "dbn"}),
+            ]
+        );
+    }
+
+    /// GCZ6 at Level 3 as LSE's documentation records it: no opening book,
+    /// so the deltas start at the first order event; each exchange message's
+    /// events, up to the one LSE flags 128, its last, come as one batch
+    /// ending `F_LAST`: the two orders added at one time, the change of one,
+    /// then its removal, whose message LSE ends with an event of no action,
+    /// which changes no order and gives no delta. Each is stamped when LSE
+    /// received the record and numbered by its sequence on the stream.
+    #[tokio::test]
+    async fn a_level_3_subscription_delivers_order_book_deltas_from_the_first_live_record() {
+        let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6)]);
+        let stream = by_level(|_| Vec::new(), |_| sent(dbn_frames(CME_GCZ6_L3_DOCUMENTED)));
+        let (mut client, connected, mut events) =
+            streaming(&lse, &stream, &[GCZ26], vec![gcz26()]).await;
+        connected.unwrap();
+
+        client.subscribe_book_deltas(deltas_of(GCZ26)).unwrap();
+
+        let mut batches = Vec::new();
+        for _ in 0..3 {
+            let Data::BookDeltas(deltas) = next(&mut events).await else {
+                panic!("not book deltas")
+            };
+            batches.push(deltas);
+        }
+        let last = RecordFlag::F_LAST as u8;
+        let delta = |action, side, id: u64, price: &str, size: u64, flags, sequence, ts: u64| {
+            OrderBookDelta::new(
+                InstrumentId::from(GCZ26),
+                action,
+                BookOrder::new(side, Price::from(price), Quantity::from(size), id),
+                flags,
+                sequence,
+                UnixNanos::from(ts),
+                UnixNanos::default(),
+            )
+        };
+        let received: Vec<Vec<OrderBookDelta>> = batches
+            .iter()
+            .map(|batch| {
+                assert_eq!(batch.instrument_id, InstrumentId::from(GCZ26));
+                batch
+                    .deltas
+                    .iter()
+                    .map(|delta| OrderBookDelta {
+                        ts_init: UnixNanos::default(),
+                        ..*delta
+                    })
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            received,
+            [
+                vec![
+                    delta(
+                        BookAction::Add,
+                        OrderSide::Buy,
+                        6_411_893_001,
+                        "3908.10",
+                        1,
+                        0,
+                        7312,
+                        1_794_493_800_000_471_000
+                    ),
+                    delta(
+                        BookAction::Add,
+                        OrderSide::Sell,
+                        6_411_893_002,
+                        "3908.30",
+                        2,
+                        last,
+                        7313,
+                        1_794_493_800_000_472_000
+                    ),
+                ],
+                vec![delta(
+                    BookAction::Update,
+                    OrderSide::Buy,
+                    6_411_893_001,
+                    "3908.10",
+                    3,
+                    last,
+                    7314,
+                    1_794_493_800_001_706_000
+                )],
+                vec![delta(
+                    BookAction::Delete,
+                    OrderSide::Sell,
+                    6_411_893_002,
+                    "3908.30",
+                    2,
+                    last,
+                    7315,
+                    1_794_493_800_027_391_000
+                )],
+            ]
+        );
+        assert_eq!(
+            stream.received().last().unwrap().1,
+            json!({"op": "subscribe", "symbols": ["GCZ6"], "level": 3, "encoding": "dbn"})
+        );
+    }
+
+    /// LSE refuses Level 2 to the CME Group Lite+ key, closing the
+    /// connection with its reason, which the client logs; a later
+    /// subscription of the level asks LSE again, on a new connection, here
+    /// answered.
+    #[tokio::test]
+    async fn a_level_lse_refused_is_asked_again_by_a_later_subscription() {
+        let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6)]);
+        let stream = by_level(
+            |connection| {
+                if connection == 1 {
+                    level_required()
+                } else {
+                    sent(dbn_frames(CME_GCZ6_L2_DOCUMENTED))
+                }
+            },
+            |_| Vec::new(),
+        );
+        let (mut client, connected, mut events) =
+            streaming(&lse, &stream, &[GCZ26], vec![gcz26()]).await;
+        connected.unwrap();
+        client.subscribe_book_depth(depth_of(&[GCZ26], 10)).unwrap();
+        stream.wait_until(|received| received.len() == 2).await;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !stream
+            .received()
+            .iter()
+            .any(|(connection, _)| *connection == 2)
+        {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "LSE not asked again"
+            );
+            client.subscribe_book_depth(depth_of(&[GCZ26], 10)).unwrap();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let Data::BookDepth(depth) = next(&mut events).await else {
+            panic!("not a depth")
+        };
+        assert_eq!(depth.sequence, 1001);
+        let levels: Vec<(usize, Value)> = stream
+            .received()
+            .into_iter()
+            .map(|(connection, frame)| (connection, frame["level"].clone()))
+            .collect();
+        assert_eq!(levels, [(0, json!(1)), (1, json!(2)), (2, json!(2))]);
+    }
+
+    /// Nautilus' Databento client serves MBP-10's ten levels alone, and LSE
+    /// streams ten: another depth is refused naming it, before LSE is
+    /// asked.
+    #[tokio::test]
+    async fn a_depth_of_other_than_ten_levels_is_refused_unasked() {
+        let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6)]);
+        let stream = by_level(|_| sent(dbn_frames(CME_GCZ6_L2_DOCUMENTED)), |_| Vec::new());
+        let (mut client, connected, _events) =
+            streaming(&lse, &stream, &[GCZ26], vec![gcz26()]).await;
+        connected.unwrap();
+
+        let err = client
+            .subscribe_book_depth(depth_of(&[GCZ26], 5))
+            .unwrap_err();
+
+        let err = format!("{err:#}");
+        assert!(err.contains(GCZ26) && err.contains("depth of 5"), "{err}");
+        assert_eq!(stream.received().len(), 1);
+    }
+
+    /// LSE's sockets stream a series' ticks alone, no book.
+    #[tokio::test]
+    async fn the_book_of_an_lsedge_series_is_refused_naming_it() {
+        let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6)]);
+        let stream = by_level(|_| Vec::new(), |_| Vec::new());
+        let (mut client, connected, _) = streaming(&lse, &stream, &[GCZ26], vec![gcz26()]).await;
+        connected.unwrap();
+
+        let depth = client
+            .subscribe_book_depth(depth_of(&["GOLD-FUTURES.LSEDGE"], 10))
+            .unwrap_err();
+        let deltas = client
+            .subscribe_book_deltas(deltas_of("GOLD-FUTURES.LSEDGE"))
+            .unwrap_err();
+
+        for err in [depth, deltas] {
+            assert!(
+                format!("{err:#}").contains("GOLD-FUTURES.LSEDGE"),
+                "{err:#}"
+            );
+        }
     }
 }

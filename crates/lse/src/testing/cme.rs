@@ -12,7 +12,9 @@ use std::{
     time::Duration,
 };
 
-use dbn::{BidAskPair, FlagSet, Mbp1Msg, RecordHeader, RecordRef, rtype};
+use dbn::{
+    BidAskPair, FlagSet, HasRType, MboMsg, Mbp1Msg, Mbp10Msg, RecordHeader, RecordRef, rtype,
+};
 use nautilus_common::testing::wait_until_async;
 use serde_json::Value;
 use tungstenite::{
@@ -42,6 +44,26 @@ pub const CME_GCZ6_JSON: &str = include_str!("../../test_data/cme_stream_gcz6_l1
 /// bid and offer, then a change of the best bid and offer and a trade.
 pub const CME_ESZ6_DOCUMENTED: &str =
     include_str!("../../test_data/cme_stream_esz6_l1_json_documented.txt");
+
+/// A Level 2 session of GCZ6 in the `json` encoding, built from LSE's
+/// WebSocket documentation ("What you receive", "The record"), helix's key
+/// holding no Level 2: `hello`, GCZ6's opening with its last ten levels a
+/// side, then three changes of its book, the levels after each those of
+/// `GCZ26_BOOK`'s rows.
+pub const CME_GCZ6_L2_DOCUMENTED: &str =
+    include_str!("../../test_data/cme_stream_gcz6_l2_json_documented.txt");
+
+/// A Level 3 session of GCZ6 in the `json` encoding, built from LSE's
+/// WebSocket documentation, helix's key holding no Level 3: `hello`,
+/// GCZ6's opening with no book (`snapshot_begin` of no record, then
+/// `snapshot_end`), then five order events, the orders of `GCZ26_ORDERS`,
+/// the last of each exchange message flagged 128.
+pub const CME_GCZ6_L3_DOCUMENTED: &str =
+    include_str!("../../test_data/cme_stream_gcz6_l3_json_documented.txt");
+
+/// LSE's close of a Level 2 or Level 3 subscription on a key of a plan
+/// without them, CME Group Lite+'s, captured: its code and reason, as JSON.
+pub const CME_LEVEL_REQUIRED: &str = include_str!("../../test_data/cme_close_level_required.json");
 
 /// LSE's answer to a stream connection with no CME Group key, HTTP 401, as
 /// its documentation and a capture give it.
@@ -91,10 +113,9 @@ pub fn frames(captured: &str) -> Vec<CmeFrame> {
 
 /// The frames of a session LSE gives in the `json` encoding as LSE sends
 /// them in the `dbn` encoding, which its documentation describes: the
-/// `hello` of the `dbn` encoding, as captured (`CME_GCZ6_GCG7`'s, of the
-/// same epoch as the documented one); the snapshot markers as they are,
-/// JSON text in both encodings; and each record as its binary frame (see
-/// `dbn_frame`).
+/// `hello` and the snapshot markers as they are, JSON text in both
+/// encodings, the `hello` naming the `dbn` encoding; and each record as its
+/// binary frame (see `dbn_frame`).
 ///
 /// # Panics
 ///
@@ -102,18 +123,19 @@ pub fn frames(captured: &str) -> Vec<CmeFrame> {
 /// write.
 #[must_use]
 pub fn dbn_frames(json_encoded: &str) -> Vec<CmeFrame> {
-    let hello = frames(CME_GCZ6_GCG7)
-        .into_iter()
-        .next()
-        .expect("the captured hello");
     json_encoded
         .lines()
         .filter(|line| !line.is_empty())
         .map(|line| {
-            let message: Value = serde_json::from_str(line).expect("JSON");
+            let mut message: Value = serde_json::from_str(line).expect("JSON");
             match message["type"].as_str() {
-                Some("hello") => hello.clone(),
-                Some("snapshot_book" | "mbp1") => CmeFrame::Binary(dbn_frame(line)),
+                Some("hello") => {
+                    message["encoding"] = Value::from("dbn");
+                    CmeFrame::Text(message.to_string())
+                }
+                Some("snapshot_book" | "mbp1" | "mbp10" | "mbo") => {
+                    CmeFrame::Binary(dbn_frame(line))
+                }
                 _ => CmeFrame::Text(line.to_string()),
             }
         })
@@ -121,11 +143,13 @@ pub fn dbn_frames(json_encoded: &str) -> Vec<CmeFrame> {
 }
 
 /// The binary frame LSE sends in the `dbn` encoding for a record `message`
-/// of the `json` encoding (`snapshot_book` or `mbp1`), as LSE's
-/// documentation describes it: a 24-byte little-endian header, `L3DB`,
-/// version 1, a kind byte, 1 in a snapshot and 2 live, two unused bytes,
-/// the message's sequence in 8 bytes, the contract's number in 4 and a
-/// record count in 4, then the record as Databento's `Mbp1Msg`.
+/// of the `json` encoding (`snapshot_book`, `mbp1`, `mbp10` or `mbo`), as
+/// LSE's documentation describes it: a 24-byte little-endian header,
+/// `L3DB`, version 1, a kind byte, 1 in a snapshot and 2 live, two unused
+/// bytes, the message's sequence in 8 bytes, the contract's number in 4
+/// and a record count in 4, then the record as Databento's, of the type its
+/// `rtype` names: `Mbp1Msg` (1), `Mbp10Msg` (10) or `MboMsg` (160), whose
+/// `channel_id`, which LSE's documentation does not list, is 0.
 ///
 /// # Panics
 ///
@@ -135,60 +159,118 @@ pub fn dbn_frame(message: &str) -> Vec<u8> {
     let message: Value = serde_json::from_str(message).expect("JSON");
     let kind: u8 = match message["type"].as_str() {
         Some("snapshot_book") => 1,
-        Some("mbp1") => 2,
+        Some("mbp1" | "mbp10" | "mbo") => 2,
         other => panic!("{other:?} is no record message"),
     };
     let record = &message["record"];
-    let level = &record["levels"][0];
-    fn whole(value: &Value) -> u64 {
-        value.as_u64().expect("a whole number")
-    }
-    fn text_number(value: &Value) -> &str {
-        value.as_str().expect("a number as a string")
-    }
-    fn price(value: &Value) -> i64 {
-        text_number(value).parse().expect("a price")
-    }
-    fn time(value: &Value) -> u64 {
-        text_number(value).parse().expect("a time")
-    }
-    fn char_of(value: &Value) -> c_char {
-        value.as_str().expect("a character").as_bytes()[0] as c_char
-    }
     let instrument_id = u32::try_from(whole(&record["instrument_id"])).expect("u32");
-    let mbp1 = Mbp1Msg {
-        hd: RecordHeader::new::<Mbp1Msg>(
-            rtype::MBP_1,
-            u16::try_from(whole(&record["publisher_id"])).expect("u16"),
-            instrument_id,
-            time(&record["ts_event"]),
-        ),
-        price: price(&record["price"]),
-        size: u32::try_from(whole(&record["size"])).expect("u32"),
-        action: char_of(&record["action"]),
-        side: char_of(&record["side"]),
-        flags: FlagSet::new(u8::try_from(whole(&record["flags"])).expect("u8")),
-        depth: u8::try_from(whole(&record["depth"])).expect("u8"),
-        ts_recv: time(&record["ts_recv"]),
-        ts_in_delta: i32::try_from(record["ts_in_delta"].as_i64().expect("i32")).expect("i32"),
-        sequence: u32::try_from(whole(&record["sequence"])).expect("u32"),
-        levels: [BidAskPair {
-            bid_px: price(&level["bid_px"]),
-            ask_px: price(&level["ask_px"]),
-            bid_sz: u32::try_from(whole(&level["bid_sz"])).expect("u32"),
-            ask_sz: u32::try_from(whole(&level["ask_sz"])).expect("u32"),
-            bid_ct: u32::try_from(whole(&level["bid_ct"])).expect("u32"),
-            ask_ct: u32::try_from(whole(&level["ask_ct"])).expect("u32"),
-        }],
+    let bytes = match u8::try_from(whole(&record["rtype"])).expect("u8") {
+        rtype::MBP_1 => {
+            let mbp1 = Mbp1Msg {
+                hd: header::<Mbp1Msg>(rtype::MBP_1, record),
+                price: price(&record["price"]),
+                size: u32::try_from(whole(&record["size"])).expect("u32"),
+                action: char_of(&record["action"]),
+                side: char_of(&record["side"]),
+                flags: FlagSet::new(u8::try_from(whole(&record["flags"])).expect("u8")),
+                depth: u8::try_from(whole(&record["depth"])).expect("u8"),
+                ts_recv: time(&record["ts_recv"]),
+                ts_in_delta: i32::try_from(record["ts_in_delta"].as_i64().expect("i32"))
+                    .expect("i32"),
+                sequence: u32::try_from(whole(&record["sequence"])).expect("u32"),
+                levels: [level(&record["levels"][0])],
+            };
+            RecordRef::from(&mbp1).as_ref().to_vec()
+        }
+        rtype::MBP_10 => {
+            let mbp10 = Mbp10Msg {
+                hd: header::<Mbp10Msg>(rtype::MBP_10, record),
+                price: price(&record["price"]),
+                size: u32::try_from(whole(&record["size"])).expect("u32"),
+                action: char_of(&record["action"]),
+                side: char_of(&record["side"]),
+                flags: FlagSet::new(u8::try_from(whole(&record["flags"])).expect("u8")),
+                depth: u8::try_from(whole(&record["depth"])).expect("u8"),
+                ts_recv: time(&record["ts_recv"]),
+                ts_in_delta: i32::try_from(record["ts_in_delta"].as_i64().expect("i32"))
+                    .expect("i32"),
+                sequence: u32::try_from(whole(&record["sequence"])).expect("u32"),
+                levels: std::array::from_fn(|at| level(&record["levels"][at])),
+            };
+            RecordRef::from(&mbp10).as_ref().to_vec()
+        }
+        rtype::MBO => {
+            let mbo = MboMsg {
+                hd: header::<MboMsg>(rtype::MBO, record),
+                order_id: text_number(&record["order_id"])
+                    .parse()
+                    .expect("an order id"),
+                price: price(&record["price"]),
+                size: u32::try_from(whole(&record["size"])).expect("u32"),
+                flags: FlagSet::new(u8::try_from(whole(&record["flags"])).expect("u8")),
+                channel_id: 0,
+                action: char_of(&record["action"]),
+                side: char_of(&record["side"]),
+                ts_recv: time(&record["ts_recv"]),
+                ts_in_delta: i32::try_from(record["ts_in_delta"].as_i64().expect("i32"))
+                    .expect("i32"),
+                sequence: u32::try_from(whole(&record["sequence"])).expect("u32"),
+            };
+            RecordRef::from(&mbo).as_ref().to_vec()
+        }
+        other => panic!("a record of rtype {other}, none of LSE's levels"),
     };
-    let mut frame = Vec::with_capacity(24 + size_of::<Mbp1Msg>());
+    let mut frame = Vec::with_capacity(24 + bytes.len());
     frame.extend_from_slice(b"L3DB");
     frame.extend_from_slice(&[1, kind, 0, 0]);
     frame.extend_from_slice(&whole(&message["sequence"]).to_le_bytes());
     frame.extend_from_slice(&instrument_id.to_le_bytes());
     frame.extend_from_slice(&1_u32.to_le_bytes());
-    frame.extend_from_slice(RecordRef::from(&mbp1).as_ref());
+    frame.extend_from_slice(&bytes);
     frame
+}
+
+fn whole(value: &Value) -> u64 {
+    value.as_u64().expect("a whole number")
+}
+
+fn text_number(value: &Value) -> &str {
+    value.as_str().expect("a number as a string")
+}
+
+fn price(value: &Value) -> i64 {
+    text_number(value).parse().expect("a price")
+}
+
+fn time(value: &Value) -> u64 {
+    text_number(value).parse().expect("a time")
+}
+
+fn char_of(value: &Value) -> c_char {
+    value.as_str().expect("a character").as_bytes()[0] as c_char
+}
+
+/// The header of a record of `rtype` of type `R`, of `record`'s publisher,
+/// contract and `ts_event`.
+fn header<R: HasRType>(rtype: u8, record: &Value) -> RecordHeader {
+    RecordHeader::new::<R>(
+        rtype,
+        u16::try_from(whole(&record["publisher_id"])).expect("u16"),
+        u32::try_from(whole(&record["instrument_id"])).expect("u32"),
+        time(&record["ts_event"]),
+    )
+}
+
+/// A level of a record's `levels`.
+fn level(level: &Value) -> BidAskPair {
+    BidAskPair {
+        bid_px: price(&level["bid_px"]),
+        ask_px: price(&level["ask_px"]),
+        bid_sz: u32::try_from(whole(&level["bid_sz"])).expect("u32"),
+        ask_sz: u32::try_from(whole(&level["ask_sz"])).expect("u32"),
+        bid_ct: u32::try_from(whole(&level["bid_ct"])).expect("u32"),
+        ask_ct: u32::try_from(whole(&level["ask_ct"])).expect("u32"),
+    }
 }
 
 /// What the mock stream does after a connection's subscription.

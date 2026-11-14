@@ -9,11 +9,12 @@
 //! book depths and book deltas; and of `OPRA` contracts, US options under
 //! the ids Databento gives them, their OSI symbols
 //! (`AAPL  261120C00355000.OPRA`), trades and bars, as an `LSEDGE`
-//! series'. Live, the client streams the quotes of `LSEDGE` instruments and
-//! the Level 1 of `GLBX` contracts, quotes and trades, and the trades of
-//! `OPRA` contracts, through one subscription of each underlying's chain,
-//! on the live node, routed their venues (`live_clients`), IB's execution
-//! client taking `GLBX`'s and `OPRA`'s orders. Each contract's definition
+//! series'. Live, the client streams the quotes of `LSEDGE` instruments,
+//! the Levels 1 to 3 of `GLBX` contracts, quotes and trades, book depths
+//! and book deltas, and the trades of `OPRA` contracts, through one
+//! subscription of each underlying's chain, on the live node, routed their
+//! venues (`live_clients`), IB's execution client taking `GLBX`'s and
+//! `OPRA`'s orders. Each contract's definition
 //! is its row's definitions source's: `LSEDGE`'s the catalog's alone,
 //! written there by hand, LSE publishing none, the data engine answering a
 //! definition request from the catalog before asking the client; `GLBX`'s
