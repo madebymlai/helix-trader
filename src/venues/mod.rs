@@ -66,7 +66,7 @@ use self::{databento::DatabentoHistory, ib::IbHistory, okx::OkxHistory};
 use crate::{
     catalog::{NodeClient, NodeFill, missing},
     live::node::{Clients, ExecClient},
-    strategy::{DataRequirements, SeriesSlice, catalog_series},
+    strategy::{DataRequirements, SeriesSlice},
 };
 
 /// A cTrader broker: the venue of its instruments, which names its clients
@@ -653,14 +653,17 @@ fn ctrader_clients(connection: CTraderConnection, instrument_ids: Vec<Instrument
 
 /// What a node needs of the cTrader broker of `venue` to trade its
 /// instruments `ids`: the connection `connection` reads, and the instruments
-/// of the bars `requirements` reads of them, their quotes being all cTrader
-/// serves. Nothing connects.
+/// of the series `requirements` reads of them, those its bars are built from
+/// and its ticks, as a fill reads them (`DataRequirements::catalog_series`),
+/// their quotes being all cTrader serves: an instrument read as its quotes
+/// alone, a conversion pair's, is loaded, so that the strategy's
+/// subscription to them is served. Nothing connects.
 ///
 /// # Errors
 ///
-/// Returns an error if a bar type is not built from the quotes of an
-/// instrument on `venue` (see `ctrader::quoted`), before the connection is
-/// read, or as `connection`.
+/// Returns an error if a series is not the quotes of an instrument on
+/// `venue` (see `ctrader::quoted`), a bar type not built from them or ticks
+/// of another kind, before the connection is read, or as `connection`.
 fn ctrader_read(
     requirements: &DataRequirements,
     ids: &[InstrumentId],
@@ -669,7 +672,7 @@ fn ctrader_read(
 ) -> anyhow::Result<(CTraderConnection, Vec<InstrumentId>)> {
     let instrument_ids = ctrader::quoted(
         Venue::new(venue),
-        &catalog_series(&requirements.of_instruments(ids).bar_types),
+        &requirements.of_instruments(ids).catalog_series(),
     )?;
     Ok((connection()?, instrument_ids))
 }
@@ -739,8 +742,8 @@ impl LiveRoutes {
 /// does not stream (`lse::check_streamed`): external bars, LSE streaming no
 /// candles, a GLBX or XNAS contract's among them, which IB streamed before
 /// LSE took their live data; an LSEDGE series' trades; an OPRA contract's
-/// quotes. The cTrader brokers' bar types are checked and their
-/// environments and credential read before anything connects; OKX's
+/// quotes. The cTrader brokers' series, bars and ticks, are checked and
+/// their environments and credential read before anything connects; OKX's
 /// clients are set up once its account trades each instrument at the
 /// leverage its definition in `catalog` holds, IB's trading the IB account
 /// of `venues` with its client id.
@@ -749,8 +752,8 @@ impl LiveRoutes {
 ///
 /// Returns an error naming them if `requirements` reads custom data of no
 /// instrument or a series LSE's client does not stream of a venue whose
-/// live data is LSE's, if a cTrader broker's bar type is not built from
-/// quotes or its environment or credential is missing (see `ctrader_read`,
+/// live data is LSE's, if a cTrader broker's series is not its quotes or
+/// built from them, or its environment or credential is missing (see `ctrader_read`,
 /// checked before anything connects), if OKX's clients cannot be set up or the OKX
 /// account does not suit the run (see `okx::clients`), if cTrader is
 /// unreachable or a broker's account is not hedging or not the
@@ -976,6 +979,55 @@ mod tests {
         .unwrap();
 
         assert_eq!(loaded, ids);
+    }
+
+    /// A pair of `[trade] conversions` is read as its quotes alone, no bars
+    /// built from them: the broker's clients load it beside the gold of the
+    /// bars, so that the strategy's subscription to its quotes is served.
+    #[test]
+    fn a_ctrader_venue_loads_an_instrument_read_as_quotes_alone() {
+        let eurusd = InstrumentId::from("EURUSD.PEPPERSTONE");
+        let requirements = DataRequirements {
+            ticks: vec![TickSeries {
+                data: NautilusDataType::QuoteTick,
+                instrument_id: eurusd,
+            }],
+            ..reading(&["XAUUSD.PEPPERSTONE-1-HOUR-MID-INTERNAL"])
+        };
+        let ids = [InstrumentId::from("XAUUSD.PEPPERSTONE"), eurusd];
+
+        let (_, loaded) = ctrader_read(&requirements, &ids, pepperstone::VENUE, || {
+            Ok(demo_connection(pepperstone::BROKER))
+        })
+        .unwrap();
+
+        assert_eq!(
+            loaded.iter().collect::<HashSet<_>>(),
+            ids.iter().collect::<HashSet<_>>()
+        );
+    }
+
+    /// Ticks of a cTrader instrument are checked as its bars are: its
+    /// trades, which cTrader does not serve, fail the start without the
+    /// environment, naming them.
+    #[test]
+    fn ticks_but_quotes_are_refused_before_the_connection_is_read() {
+        let gold = InstrumentId::from("XAUUSD.PEPPERSTONE");
+        let requirements = DataRequirements {
+            ticks: vec![TickSeries {
+                data: NautilusDataType::TradeTick,
+                instrument_id: gold,
+            }],
+            ..reading(&[])
+        };
+
+        let Err(err) = ctrader_read(&requirements, &[gold], pepperstone::VENUE, || {
+            panic!("the connection was read before the ticks were checked")
+        }) else {
+            panic!("trades passed");
+        };
+
+        assert!(err.to_string().contains("serves quotes only"), "{err}");
     }
 
     /// As the node does: each client created by its factory, under the
