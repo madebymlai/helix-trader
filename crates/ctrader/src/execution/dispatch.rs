@@ -1226,26 +1226,18 @@ fn interned(text: &str) -> Ustr {
 mod tests {
     use nautilus_model::{
         enums::{OrderSide, OrderType},
-        identifiers::{InstrumentId, Venue},
+        identifiers::InstrumentId,
         orders::OrderTestBuilder,
         types::{Money, Quantity},
     };
     use prost::Message as _;
-    use rust_decimal::Decimal;
 
     use super::*;
     use crate::{
-        common::{
-            messages::{
-                ProtoOaAssetListRes, ProtoOaOrderErrorEvent, ProtoOaSymbolByIdRes,
-                ProtoOaSymbolsListRes,
-            },
-            parse,
-        },
+        common::messages::ProtoOaOrderErrorEvent,
         testing::{
-            ASSET_LIST_RES, EXECUTION_LIMIT_ACCEPTED, EXECUTION_LIMIT_CANCELLED,
-            EXECUTION_MARKET_FILLED, EXECUTION_STOP_LOSS_FILLED, ORDER_ERROR_BAD_VOLUME,
-            SYMBOL_BY_ID_RES, SYMBOLS_LIST_RES, VENUE,
+            self, EXECUTION_LIMIT_ACCEPTED, EXECUTION_LIMIT_CANCELLED, EXECUTION_MARKET_FILLED,
+            EXECUTION_STOP_LOSS_FILLED, ORDER_ERROR_BAD_VOLUME,
         },
     };
 
@@ -1255,31 +1247,7 @@ mod tests {
     /// XAUUSD on the made-up venue, from the captured symbol, its details
     /// and the assets.
     fn gold() -> InstrumentAny {
-        let light = ProtoOaSymbolsListRes::decode(SYMBOLS_LIST_RES)
-            .unwrap()
-            .symbol
-            .into_iter()
-            .find(|s| s.symbol_id == GOLD)
-            .unwrap();
-        let details = ProtoOaSymbolByIdRes::decode(SYMBOL_BY_ID_RES)
-            .unwrap()
-            .symbol
-            .into_iter()
-            .find(|s| s.symbol_id == GOLD)
-            .unwrap();
-        let assets =
-            parse::assets_by_id(ProtoOaAssetListRes::decode(ASSET_LIST_RES).unwrap().asset);
-        InstrumentAny::CurrencyPair(
-            parse::currency_pair(
-                &light,
-                &details,
-                Venue::from(VENUE),
-                &assets,
-                Decimal::new(5, 2),
-                UnixNanos::default(),
-            )
-            .unwrap(),
-        )
+        InstrumentAny::Cfd(testing::instrument("XAUUSD"))
     }
 
     /// The dispatch of the account the fixtures come from, in EUR, on

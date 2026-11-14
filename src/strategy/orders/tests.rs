@@ -18,11 +18,11 @@ use nautilus_interactive_brokers::{
 };
 use nautilus_model::{
     accounts::{AccountAny, MarginAccount},
-    enums::{AccountType, OmsType, OrderStatus, OrderType},
+    enums::{AccountType, AssetClass, OmsType, OrderStatus, OrderType},
     events::{AccountState, OrderEventAny},
     identifiers::{AccountId, ClientId, PositionId, StrategyId, TradeId, TraderId, VenueOrderId},
     instruments::{
-        CryptoPerpetual, InstrumentAny,
+        Cfd, CryptoPerpetual, InstrumentAny,
         stubs::{audusd_sim, btcusd_bybit},
     },
     orders::stubs::TestOrderEventStubs,
@@ -105,8 +105,7 @@ fn cache() -> Rc<RefCell<Cache>> {
 /// margin account holding `balance`, its equity.
 fn cache_holding(balance: &str) -> Rc<RefCell<Cache>> {
     let cache = Rc::new(RefCell::new(Cache::default()));
-    for id in [AUD, IB_AUD] {
-        let aud = aud(InstrumentId::from(id));
+    for aud in [aud(InstrumentId::from(AUD)), ib_aud()] {
         let account = AccountId::from(format!("{}-001", aud.id().venue).as_str());
         let mut cache = cache.borrow_mut();
         cache.add_instrument(aud).unwrap();
@@ -136,10 +135,38 @@ fn margin_account(account: AccountId, balance: &str) -> AccountAny {
     AccountAny::Margin(MarginAccount::new(state, true))
 }
 
-/// AUD/USD as `id`, on 5 decimals and whole units.
+/// AUD/USD at a cTrader broker as `id`, a CFD on 5 decimals and whole
+/// units, priced and sized as Nautilus' AUD/USD.
 fn aud(id: InstrumentId) -> InstrumentAny {
+    let pair = audusd_sim();
+    InstrumentAny::Cfd(
+        Cfd::builder()
+            .instrument_id(id)
+            .raw_symbol(id.symbol)
+            .asset_class(AssetClass::FX)
+            .base_currency(pair.base_currency)
+            .quote_currency(pair.quote_currency)
+            .price_precision(pair.price_precision)
+            .size_precision(pair.size_precision)
+            .price_increment(pair.price_increment)
+            .size_increment(pair.size_increment)
+            .maybe_lot_size(pair.lot_size)
+            .maybe_min_quantity(pair.min_quantity)
+            .maybe_max_quantity(pair.max_quantity)
+            .margin_init(pair.margin_init)
+            .margin_maint(pair.margin_maint)
+            .maybe_tick_scheme(pair.tick_scheme)
+            .ts_event(pair.ts_event)
+            .ts_init(pair.ts_init)
+            .build()
+            .unwrap(),
+    )
+}
+
+/// AUD/USD on IDEALPRO, IB's cash FX pair, on 5 decimals and whole units.
+fn ib_aud() -> InstrumentAny {
     let mut pair = audusd_sim();
-    pair.id = id;
+    pair.id = InstrumentId::from(IB_AUD);
     InstrumentAny::CurrencyPair(pair)
 }
 
@@ -245,7 +272,11 @@ fn fill_of(
 ) {
     let cache = probe.cache_rc();
     let order = cache.borrow().order_owned(&id(order)).unwrap();
-    let instrument = aud(order.instrument_id());
+    let instrument = cache
+        .borrow()
+        .instrument(&order.instrument_id())
+        .cloned()
+        .unwrap();
     let filled = TestOrderEventStubs::filled(
         &order,
         &instrument,
@@ -734,9 +765,7 @@ fn a_trade_is_sized_on_the_account_of_the_client_its_venue_routes_to() {
     let account = AccountId::from("IB-DU1234567");
     {
         let mut cache = cache.borrow_mut();
-        cache
-            .add_instrument(aud(InstrumentId::from(IB_AUD)))
-            .unwrap();
+        cache.add_instrument(ib_aud()).unwrap();
         cache
             .add_account(margin_account(account, "200000 USD"))
             .unwrap();

@@ -1,6 +1,6 @@
 //! End to end on a cTrader broker's demo: the session authenticates the
-//! app and the demo account, XAU/USD and EUR/USD load as currency pairs at
-//! the broker's margins, a day of XAU/USD's quotes fills a temporary
+//! app and the demo account, XAU/USD and EUR/USD load as CFDs at the
+//! broker's margins, a day of XAU/USD's quotes fills a temporary
 //! catalog through the node (the broker's data client), in one fill and
 //! resumed, and the execution client reads the account: its state and its
 //! startup reconciliation. It needs the login's `CTRADER_*` credential, and
@@ -31,7 +31,7 @@ use nautilus_common::{
 use nautilus_model::{
     accounts::AccountAny,
     data::{NautilusDataType, QuoteTick},
-    enums::{AccountType, OmsType},
+    enums::{AccountType, AssetClass, OmsType},
     identifiers::{InstrumentId, TraderId},
     instruments::InstrumentAny,
     types::{Currency, Quantity},
@@ -41,9 +41,9 @@ use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use crate::demo_broker::opted_in;
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_demo_account_loads_gold_and_euro_dollar_as_currency_pairs() {
+async fn the_demo_account_loads_gold_and_euro_dollar_as_cfds() {
     let Some(broker) = opted_in(
-        "the_demo_account_loads_gold_and_euro_dollar_as_currency_pairs",
+        "the_demo_account_loads_gold_and_euro_dollar_as_cfds",
         module_path!(),
     ) else {
         return;
@@ -55,18 +55,16 @@ async fn the_demo_account_loads_gold_and_euro_dollar_as_currency_pairs() {
     session.disconnect().await;
 
     let instruments = instruments.unwrap();
-    let [
-        InstrumentAny::CurrencyPair(xau),
-        InstrumentAny::CurrencyPair(eur),
-    ] = instruments.as_slice()
-    else {
-        panic!("not two currency pairs: {instruments:?}");
+    let [InstrumentAny::Cfd(xau), InstrumentAny::Cfd(eur)] = instruments.as_slice() else {
+        panic!("not two CFDs: {instruments:?}");
     };
     println!("{xau:?}\n{eur:?}");
-    assert_eq!(xau.base_currency, Currency::from("XAU"));
+    assert_eq!(xau.asset_class, AssetClass::Commodity);
+    assert_eq!(xau.base_currency, Some(Currency::from("XAU")));
     assert_eq!(xau.quote_currency, Currency::from("USD"));
     assert_eq!(xau.lot_size, Some(Quantity::from(100)));
-    assert_eq!(eur.base_currency, Currency::from("EUR"));
+    assert_eq!(eur.asset_class, AssetClass::FX);
+    assert_eq!(eur.base_currency, Some(Currency::from("EUR")));
     assert_eq!(eur.quote_currency, Currency::from("USD"));
     assert_eq!(eur.lot_size, Some(Quantity::from(100_000)));
     assert_eq!(eur.price_precision, 5);

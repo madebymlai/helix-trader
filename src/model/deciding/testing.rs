@@ -9,8 +9,9 @@ use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::NautilusDataType,
+    enums::AssetClass,
     identifiers::{InstrumentId, StrategyId, Symbol},
-    instruments::{CurrencyPair, InstrumentAny},
+    instruments::{Cfd, InstrumentAny},
     types::{Currency, Money, Price, Quantity},
 };
 use rust_decimal::Decimal;
@@ -68,10 +69,11 @@ pub const GOLD: &str = "XAUUSD.ICMARKETS";
 /// account"): whole ounces quoted in USD on ticks of a cent.
 pub fn gold() -> InstrumentAny {
     let margin = Decimal::ONE / Decimal::from(30);
-    InstrumentAny::CurrencyPair(
-        CurrencyPair::builder()
+    InstrumentAny::Cfd(
+        Cfd::builder()
             .instrument_id(InstrumentId::from(GOLD))
             .raw_symbol(Symbol::from("XAUUSD"))
+            .asset_class(AssetClass::Commodity)
             .base_currency(Currency::from("XAU"))
             .quote_currency(Currency::USD())
             .price_precision(2)

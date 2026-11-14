@@ -18,12 +18,15 @@ use tungstenite::Message;
 use super::common::messages::{
     Payload, ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq, ProtoOaAccountAuthRes,
     ProtoOaAccountsTokenInvalidatedEvent, ProtoOaApplicationAuthReq, ProtoOaApplicationAuthRes,
-    ProtoOaErrorRes, ProtoOaGetDynamicLeverageByIdReq, ProtoOaGetDynamicLeverageByIdRes,
-    ProtoOaGetTickDataReq, ProtoOaGetTickDataRes, ProtoOaRefreshTokenReq, ProtoOaRefreshTokenRes,
+    ProtoOaAssetListRes, ProtoOaErrorRes, ProtoOaGetDynamicLeverageByIdReq,
+    ProtoOaGetDynamicLeverageByIdRes, ProtoOaGetTickDataReq, ProtoOaGetTickDataRes,
+    ProtoOaRefreshTokenReq, ProtoOaRefreshTokenRes, ProtoOaSymbolByIdRes, ProtoOaSymbolsListRes,
     ProtoOaTickData, frame,
 };
-use super::common::token::TokenPair;
-use nautilus_model::identifiers::Venue;
+use super::common::{parse, token::TokenPair};
+use nautilus_core::UnixNanos;
+use nautilus_model::{identifiers::Venue, instruments::Cfd};
+use rust_decimal::Decimal;
 
 use super::config::{
     CTraderAccountId, CTraderConnection, CTraderCredential, CTraderEnvironment, CTraderSettingNames,
@@ -166,6 +169,34 @@ pub(crate) fn dynamic_leverage_answer(request: &ProtoMessage) -> Action {
         other => panic!("no leverage {other} captured"),
     };
     replay::<ProtoOaGetDynamicLeverageByIdRes>(request, captured)
+}
+
+/// The captured symbol `name` on the made-up venue, from the symbol list,
+/// its details and the assets, at a margin of 5%: XAUUSD or EURUSD as the
+/// clients load it.
+pub(crate) fn instrument(name: &str) -> Cfd {
+    let light = ProtoOaSymbolsListRes::decode(SYMBOLS_LIST_RES)
+        .unwrap()
+        .symbol
+        .into_iter()
+        .find(|s| s.symbol_name.as_deref() == Some(name))
+        .unwrap();
+    let details = ProtoOaSymbolByIdRes::decode(SYMBOL_BY_ID_RES)
+        .unwrap()
+        .symbol
+        .into_iter()
+        .find(|s| s.symbol_id == light.symbol_id)
+        .unwrap();
+    let assets = parse::assets_by_id(ProtoOaAssetListRes::decode(ASSET_LIST_RES).unwrap().asset);
+    parse::cfd(
+        &light,
+        &details,
+        Venue::from(VENUE),
+        &assets,
+        Decimal::new(5, 2),
+        UnixNanos::default(),
+    )
+    .unwrap()
 }
 
 /// The captured answers of a cTrader that accepts the application and the
