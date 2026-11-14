@@ -230,9 +230,11 @@ impl Trade {
     /// on the instrument's venue, IB's net liquidation holding both,
     /// converted into the instrument's P&L currency at `rates`, the
     /// strategy's (`Rates::convert`); its R stays in the P&L currency.
-    /// Positions the account holds on its broker's other venues are left
-    /// out, as are those of other processes, which this cache does not hold
-    /// anyway, one process running one strategy.
+    /// Live on IB, the equity is the account's net liquidation, which counts
+    /// every position of the account, on any venue and of any process.
+    /// Otherwise positions the account holds on its broker's other venues
+    /// are left out, as are those of other processes, which this cache does
+    /// not hold anyway, one process running one strategy.
     ///
     /// It sends nothing, and logs why, if the account holds no equity (the
     /// cache holds no balance of it, as before its client reports one), if
