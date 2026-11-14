@@ -112,7 +112,10 @@ fn container() -> ContainerCreateBody {
 }
 
 /// The node's cache database: the container's Redis, Nautilus' defaults
-/// otherwise.
+/// otherwise. Its host and port are the container's binding, set from the
+/// constants that bind it, so one value decides both; they happen to equal
+/// Nautilus' defaults with none set (`get_redis_url`,
+/// `crates/infrastructure/src/redis/mod.rs`), which this does not rely on.
 fn cache_database() -> RedisCacheConfig {
     RedisCacheConfig {
         host: Some(HOST.to_string()),
