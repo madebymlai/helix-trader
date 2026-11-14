@@ -1,0 +1,38 @@
+2026-11-14
+14 November 2026
+Affiliate Terms
+These terms
+These terms are the Affiliate Agreement between you and London Strategic Edge ("we"). You sign the agreement in your affiliate account, where it carries these terms and the two percentages set for you, and it applies from the date you sign it. It applies in addition to our [Terms of Service](/terms).
+Your affiliate account is your ordinary London Strategic Edge account, and you sign in to it at [affiliates.londonstrategicedge.com](https://affiliates.londonstrategicedge.com). A person or a company may hold one affiliate account.
+Your code
+You choose the name of your code. We may refuse or revoke a code whose name uses our name, uses another person's or company's name, or is offensive.
+We set two percentages for your account, and your account shows both: the discount a customer receives when they buy with your code, and the commission you earn on what that customer pays.
+A subscription counts as your referral when the customer enters your code in the discount code box at checkout. A referral is counted by the code entered there and by nothing else.
+We may change either percentage. Your account always shows the percentages in force, and a changed commission applies to payments we receive after the change.
+Commission
+Your commission is your percentage of the amount the customer pays us for the referred subscription, after any discount and excluding tax.
+You earn it on the customer's first payment and on every later payment for the same subscription, for as long as that subscription continues: each monthly payment of a monthly subscription, and each yearly payment of a yearly one.
+Only subscriptions bought through the checkout on our website count. Commission is recorded in US dollars. Where a customer pays in pounds sterling or euros, we convert that payment to US dollars at our exchange rate when the commission is recorded, and your commission is your percentage of the converted amount.
+When you are paid
+A commission becomes payable 30 calendar days after we receive the customer's payment on which it was earned.
+Your balance is kept in US dollars, and the smallest payment is US$100. You can request payment from your affiliate account when your payable balance reaches US$100. A smaller balance stays in your account until it reaches that amount.
+We pay by bank transfer to the bank account you enter in your affiliate account. That bank account must be in your own name, or in the name of the company that holds the affiliate account, and we may ask for proof of identity before we pay. You are responsible for the bank details being correct and for any tax due on what you earn.
+Refunds and chargebacks
+If a customer's payment is refunded, reversed or charged back, the commission earned on that payment is cancelled. Where we have already paid that commission to you, we may deduct it from commission that later becomes payable or ask you to repay it.
+What you must not do
+Commission is paid for customers you bring to us. You must not:
+Buy with your own code, whether from your own account, another account you control, or a company you own or work for | Arrange for an existing customer to cancel a subscription and buy it again with your code | Pay, reward or reimburse anyone for subscribing, or pass any part of your commission to the customer | Publish your code on coupon, voucher, deal or cashback websites, or supply it to browser extensions that apply codes at checkout | Bid on "London Strategic Edge" or its misspellings in paid search or social advertising, or use our name in a domain name or an account name | Present yourself as London Strategic Edge, as our employee, or as acting on our behalf | Send unsolicited bulk email or messages, or post your code where the rules of that website or community forbid it | Make a false or misleading statement about our data, our prices or the discount, promise trading profits, or give investment advice in connection with our name | Create accounts or payments that are not genuine, or encourage anyone else to, including payments with a card the payer is not entitled to use | Open a second affiliate account, or apply again after we have closed one
+When you recommend us, you must say that you earn commission wherever the law or the platform you publish on requires that disclosure.
+If you break these terms
+If you break these terms we may revoke your codes, suspend or close your affiliate account, cancel the commission earned through the breach, and recover any of that commission we have already paid. Commission earned on genuine referrals before a suspension or closure remains payable under section 4, unless the account was closed for fraud. No commission is earned on payments we receive after your affiliate account is suspended or closed.
+Our name and your status
+While you are an affiliate you may use our name and logo to refer to us accurately. You may not alter the logo, or suggest that we employ you or that you speak for us. These terms do not make you our employee or agent, and you cannot make commitments on our behalf.
+Leaving, and changes to these terms
+You may leave the programme at any time by writing to [support@londonstrategicedge.com](mailto:support@londonstrategicedge.com), and we may end your participation at any time by email. Commission on payments we received before that date remains payable under section 4.
+We may change these terms. The current version is on this page with the date of its last change, and using your code after a change means you accept it.
+Liability, governing law and contact
+Our liability to you under these terms is limited to the commission that is payable to you. Nothing in these terms limits a liability that cannot be limited by law.
+These terms are governed by the laws of England and Wales, and the courts of England and Wales have exclusive jurisdiction over any dispute about them.
+Questions about these terms or about a payment go to [support@londonstrategicedge.com](mailto:support@londonstrategicedge.com).
+Affiliate Terms | London Strategic Edge | The terms of the London Strategic Edge affiliate programme: how a referral is counted, how commission is earned and when it is paid, and what an affiliate must not do. | /affiliates/terms
+Last updated:

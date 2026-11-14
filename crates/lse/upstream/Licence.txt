@@ -1,0 +1,4 @@
+rules
+Data Licence | London Strategic Edge | What you may and may not do with London Strategic Edge data: personal use, model training, charts, companies, distribution and exchange data, with examples. | /licence
+Last updated: . Plain-text copy: /licence.md | licence.md
+rules
