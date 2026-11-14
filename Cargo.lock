@@ -129,9 +129,9 @@ dependencies = [
 
 [[package]]
 name = "arc-swap"
-version = "1.9.3"
+version = "1.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "380962b3d93b99642e50b9febf72c071e97e8b32d86eae9cf4ef582bb960ae6e"
+checksum = "84a22b5d51209f6de83d37a0b33d320acb8da88823e42a94c075140708f032a5"
 dependencies = [
  "rustversion",
 ]
@@ -344,7 +344,7 @@ version = "59.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e87acb0c6bf6237fca7a50d7b51e801c98a18a5fe6f3bb34f7d77b85ca165388"
 dependencies = [
- "bitflags 2.13.2",
+ "bitflags",
  "serde_core",
  "serde_json",
 ]
@@ -520,7 +520,7 @@ version = "0.73.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "787ef8ef523575546b106a58213d6e6b06198a05c2f757258c68a74273670cfa"
 dependencies = [
- "bitflags 2.13.2",
+ "bitflags",
  "cexpr",
  "clang-sys",
  "log",
@@ -532,12 +532,6 @@ dependencies = [
  "shlex",
  "syn 3.0.9",
 ]
-
-[[package]]
-name = "bitflags"
-version = "1.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
 
 [[package]]
 name = "bitflags"
@@ -1862,37 +1856,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "defmt"
-version = "1.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4a0795ac740cb54d7b3775c9c17345f6aaecf884c01733b39d6017738e0e3e1"
-dependencies = [
- "bitflags 1.3.2",
- "defmt-macros",
-]
-
-[[package]]
-name = "defmt-macros"
-version = "1.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "840bb056bd99c495c9188198a258ab787c79f306d864db3e6e8451442d6d8366"
-dependencies = [
- "defmt-parser",
- "proc-macro2",
- "quote",
- "syn 3.0.9",
-]
-
-[[package]]
-name = "defmt-parser"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71958f69fb2de856c5dd51ac9377e986ca1aa5919f931bf5395a807277f889a0"
-dependencies = [
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "deranged"
 version = "0.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2087,15 +2050,15 @@ version = "25.12.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35f6839d7b3b98adde531effaf34f0c2badc6f4735d26fe74709d8e513a96ef3"
 dependencies = [
- "bitflags 2.13.2",
+ "bitflags",
  "rustc_version",
 ]
 
 [[package]]
 name = "flate2"
-version = "1.1.10"
+version = "1.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb"
+checksum = "626d4928326b646e70f65ed36fc7cf9f206bdb68a0019ee7c6b4709da4e084c4"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
@@ -2745,11 +2708,10 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "jiff"
-version = "0.2.38"
+version = "0.2.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2b005715dcbeb0089a3c0dab99f2ff1cc3b2525323552703d648585d342a383"
+checksum = "26699905cc795a23e3949585cc7ba3ee8ade090872a27e4316304a777297894a"
 dependencies = [
- "defmt",
  "jiff-core",
  "jiff-static",
  "jiff-tzdb",
@@ -2763,19 +2725,18 @@ dependencies = [
 
 [[package]]
 name = "jiff-core"
-version = "0.1.1"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5e52fe76043ccecc9005d2305ebaadf7d7fc0cc89ca6baa10a94d6bc68c7128c"
+checksum = "ffe6854081f5ac0a3046a9b223729ccd7a20b1e0e8277e44dc0660eedf67dfe2"
 dependencies = [
- "defmt",
  "log",
 ]
 
 [[package]]
 name = "jiff-static"
-version = "0.2.38"
+version = "0.2.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2cc9817253cf7c7ee4684451bd327e88d6f3658014e54a29198625590650695c"
+checksum = "4b4ff49b2887190c760b86207b55cdcaabbdecaf7a0660d68aa2ed6f652abf0a"
 dependencies = [
  "jiff-core",
  "proc-macro2",
@@ -3126,8 +3087,8 @@ checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 
 [[package]]
 name = "nautilus-analysis"
-version = "0.68.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8b184c8af85068d788b591e10cb900fa2aba2cf2#8b184c8af85068d788b591e10cb900fa2aba2cf2"
+version = "0.69.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=97ecbafd6621241a2222ef5a31cf887c6d96d950#97ecbafd6621241a2222ef5a31cf887c6d96d950"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3140,8 +3101,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-backtest"
-version = "0.68.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8b184c8af85068d788b591e10cb900fa2aba2cf2#8b184c8af85068d788b591e10cb900fa2aba2cf2"
+version = "0.69.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=97ecbafd6621241a2222ef5a31cf887c6d96d950#97ecbafd6621241a2222ef5a31cf887c6d96d950"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3171,8 +3132,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-common"
-version = "0.68.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8b184c8af85068d788b591e10cb900fa2aba2cf2#8b184c8af85068d788b591e10cb900fa2aba2cf2"
+version = "0.69.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=97ecbafd6621241a2222ef5a31cf887c6d96d950#97ecbafd6621241a2222ef5a31cf887c6d96d950"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3207,8 +3168,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-core"
-version = "0.68.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8b184c8af85068d788b591e10cb900fa2aba2cf2#8b184c8af85068d788b591e10cb900fa2aba2cf2"
+version = "0.69.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=97ecbafd6621241a2222ef5a31cf887c6d96d950#97ecbafd6621241a2222ef5a31cf887c6d96d950"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3231,8 +3192,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-cryptography"
-version = "0.68.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8b184c8af85068d788b591e10cb900fa2aba2cf2#8b184c8af85068d788b591e10cb900fa2aba2cf2"
+version = "0.69.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=97ecbafd6621241a2222ef5a31cf887c6d96d950#97ecbafd6621241a2222ef5a31cf887c6d96d950"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -3247,8 +3208,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-data"
-version = "0.68.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8b184c8af85068d788b591e10cb900fa2aba2cf2#8b184c8af85068d788b591e10cb900fa2aba2cf2"
+version = "0.69.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=97ecbafd6621241a2222ef5a31cf887c6d96d950#97ecbafd6621241a2222ef5a31cf887c6d96d950"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3270,14 +3231,13 @@ dependencies = [
 
 [[package]]
 name = "nautilus-databento"
-version = "0.68.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8b184c8af85068d788b591e10cb900fa2aba2cf2#8b184c8af85068d788b591e10cb900fa2aba2cf2"
+version = "0.69.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=97ecbafd6621241a2222ef5a31cf887c6d96d950#97ecbafd6621241a2222ef5a31cf887c6d96d950"
 dependencies = [
  "ahash",
  "anyhow",
  "async-trait",
  "databento",
- "dotenvy",
  "fallible-streaming-iterator",
  "indexmap",
  "jiff",
@@ -3301,8 +3261,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-execution"
-version = "0.68.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8b184c8af85068d788b591e10cb900fa2aba2cf2#8b184c8af85068d788b591e10cb900fa2aba2cf2"
+version = "0.69.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=97ecbafd6621241a2222ef5a31cf887c6d96d950#97ecbafd6621241a2222ef5a31cf887c6d96d950"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3327,8 +3287,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-indicators"
-version = "0.68.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8b184c8af85068d788b591e10cb900fa2aba2cf2#8b184c8af85068d788b591e10cb900fa2aba2cf2"
+version = "0.69.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=97ecbafd6621241a2222ef5a31cf887c6d96d950#97ecbafd6621241a2222ef5a31cf887c6d96d950"
 dependencies = [
  "anyhow",
  "arraydeque",
@@ -3339,8 +3299,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-infrastructure"
-version = "0.68.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8b184c8af85068d788b591e10cb900fa2aba2cf2#8b184c8af85068d788b591e10cb900fa2aba2cf2"
+version = "0.69.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=97ecbafd6621241a2222ef5a31cf887c6d96d950#97ecbafd6621241a2222ef5a31cf887c6d96d950"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3369,8 +3329,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-interactive-brokers"
-version = "0.68.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8b184c8af85068d788b591e10cb900fa2aba2cf2#8b184c8af85068d788b591e10cb900fa2aba2cf2"
+version = "0.69.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=97ecbafd6621241a2222ef5a31cf887c6d96d950#97ecbafd6621241a2222ef5a31cf887c6d96d950"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3403,8 +3363,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-live"
-version = "0.68.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8b184c8af85068d788b591e10cb900fa2aba2cf2#8b184c8af85068d788b591e10cb900fa2aba2cf2"
+version = "0.69.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=97ecbafd6621241a2222ef5a31cf887c6d96d950#97ecbafd6621241a2222ef5a31cf887c6d96d950"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3437,8 +3397,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-macros"
-version = "0.68.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8b184c8af85068d788b591e10cb900fa2aba2cf2#8b184c8af85068d788b591e10cb900fa2aba2cf2"
+version = "0.69.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=97ecbafd6621241a2222ef5a31cf887c6d96d950#97ecbafd6621241a2222ef5a31cf887c6d96d950"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3447,8 +3407,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-model"
-version = "0.68.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8b184c8af85068d788b591e10cb900fa2aba2cf2#8b184c8af85068d788b591e10cb900fa2aba2cf2"
+version = "0.69.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=97ecbafd6621241a2222ef5a31cf887c6d96d950#97ecbafd6621241a2222ef5a31cf887c6d96d950"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3479,8 +3439,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-network"
-version = "0.68.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8b184c8af85068d788b591e10cb900fa2aba2cf2#8b184c8af85068d788b591e10cb900fa2aba2cf2"
+version = "0.69.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=97ecbafd6621241a2222ef5a31cf887c6d96d950#97ecbafd6621241a2222ef5a31cf887c6d96d950"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3526,8 +3486,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-okx"
-version = "0.68.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8b184c8af85068d788b591e10cb900fa2aba2cf2#8b184c8af85068d788b591e10cb900fa2aba2cf2"
+version = "0.69.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=97ecbafd6621241a2222ef5a31cf887c6d96d950#97ecbafd6621241a2222ef5a31cf887c6d96d950"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3565,8 +3525,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-persistence"
-version = "0.68.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8b184c8af85068d788b591e10cb900fa2aba2cf2#8b184c8af85068d788b591e10cb900fa2aba2cf2"
+version = "0.69.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=97ecbafd6621241a2222ef5a31cf887c6d96d950#97ecbafd6621241a2222ef5a31cf887c6d96d950"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3595,8 +3555,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-portfolio"
-version = "0.68.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8b184c8af85068d788b591e10cb900fa2aba2cf2#8b184c8af85068d788b591e10cb900fa2aba2cf2"
+version = "0.69.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=97ecbafd6621241a2222ef5a31cf887c6d96d950#97ecbafd6621241a2222ef5a31cf887c6d96d950"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3614,8 +3574,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-risk"
-version = "0.68.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8b184c8af85068d788b591e10cb900fa2aba2cf2#8b184c8af85068d788b591e10cb900fa2aba2cf2"
+version = "0.69.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=97ecbafd6621241a2222ef5a31cf887c6d96d950#97ecbafd6621241a2222ef5a31cf887c6d96d950"
 dependencies = [
  "ahash",
  "bon",
@@ -3634,8 +3594,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-serialization"
-version = "0.68.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8b184c8af85068d788b591e10cb900fa2aba2cf2#8b184c8af85068d788b591e10cb900fa2aba2cf2"
+version = "0.69.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=97ecbafd6621241a2222ef5a31cf887c6d96d950#97ecbafd6621241a2222ef5a31cf887c6d96d950"
 dependencies = [
  "anyhow",
  "arrow",
@@ -3653,8 +3613,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-system"
-version = "0.68.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8b184c8af85068d788b591e10cb900fa2aba2cf2#8b184c8af85068d788b591e10cb900fa2aba2cf2"
+version = "0.69.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=97ecbafd6621241a2222ef5a31cf887c6d96d950#97ecbafd6621241a2222ef5a31cf887c6d96d950"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3680,8 +3640,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-testkit"
-version = "0.68.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8b184c8af85068d788b591e10cb900fa2aba2cf2#8b184c8af85068d788b591e10cb900fa2aba2cf2"
+version = "0.69.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=97ecbafd6621241a2222ef5a31cf887c6d96d950#97ecbafd6621241a2222ef5a31cf887c6d96d950"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3704,8 +3664,8 @@ dependencies = [
 
 [[package]]
 name = "nautilus-trading"
-version = "0.68.0"
-source = "git+https://github.com/nautechsystems/nautilus_trader?rev=8b184c8af85068d788b591e10cb900fa2aba2cf2#8b184c8af85068d788b591e10cb900fa2aba2cf2"
+version = "0.69.0"
+source = "git+https://github.com/nautechsystems/nautilus_trader?rev=97ecbafd6621241a2222ef5a31cf887c6d96d950#97ecbafd6621241a2222ef5a31cf887c6d96d950"
 dependencies = [
  "ahash",
  "anyhow",
@@ -3836,7 +3796,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a180dd8642fa45cdb7dd721cd4c11b1cadd4929ce112ebd8b9f5803cc79d536"
 dependencies = [
- "bitflags 2.13.2",
+ "bitflags",
 ]
 
 [[package]]
@@ -4454,7 +4414,7 @@ version = "11.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "498cd0dc59d73224351ee52a95fee0f1a617a2eae0e7d9d720cc622c73a54186"
 dependencies = [
- "bitflags 2.13.2",
+ "bitflags",
 ]
 
 [[package]]
@@ -4515,7 +4475,7 @@ version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
- "bitflags 2.13.2",
+ "bitflags",
 ]
 
 [[package]]
@@ -4524,7 +4484,7 @@ version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "580c875845b41ecb1564ad1ae4703044cef774145e3d7a94dc2b3fa7c97868fd"
 dependencies = [
- "bitflags 2.13.2",
+ "bitflags",
 ]
 
 [[package]]
@@ -4725,7 +4685,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
 dependencies = [
- "bitflags 2.13.2",
+ "bitflags",
  "errno",
  "libc",
  "linux-raw-sys",
@@ -4850,7 +4810,7 @@ version = "3.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7f4bc775c73d9a02cde8bf7b2ec4c9d12743edf609006c7facc23998404cd1d"
 dependencies = [
- "bitflags 2.13.2",
+ "bitflags",
  "core-foundation",
  "core-foundation-sys",
  "libc",
@@ -5057,9 +5017,9 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "smallvec"
-version = "1.16.4"
+version = "1.16.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0d5d4b1981b8bbbb7aed204cae5726d683d5d6ac7e74ec54122ea28f315e7c8"
+checksum = "149309498a5f7334b12ddae0cad8aba81ce785fe91755068867e017cf98fee46"
 dependencies = [
  "serde",
 ]
@@ -5082,9 +5042,9 @@ dependencies = [
 
 [[package]]
 name = "sockudo-ws"
-version = "3.1.0"
+version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bed5f19c13fe5ffe390d4e30c4617ed65117e83d2792d7bb0092f4efd62536e0"
+checksum = "2a4c1d672d3e2a594a681273179516d8c93c9e29844c49791acb06866d2b71bc"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -5544,7 +5504,7 @@ version = "0.6.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4cfcf7e2740e6fc6d4d688b4ef00650406bb94adf4731e43c096c3a19fe40840"
 dependencies = [
- "bitflags 2.13.2",
+ "bitflags",
  "bytes",
  "futures-util",
  "http",
@@ -5562,7 +5522,7 @@ version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "08a05a66a4fdd61cbbe0a1d755ffe0ca6aba159dd4820936a0ff8a8278245b9c"
 dependencies = [
- "bitflags 2.13.2",
+ "bitflags",
  "bytes",
  "futures-util",
  "http",
@@ -5732,9 +5692,9 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
-version = "1.29.0"
+version = "1.29.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a0e2d11620c50695fe12bbbfde96b3477fe606e7284c22d505c12ce51214514"
+checksum = "bed99139f7dac9b5cfe5f17be4d66dc7079a34dee1d74bcc77217119240e267c"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
@@ -6149,7 +6109,7 @@ version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 dependencies = [
- "bitflags 2.13.2",
+ "bitflags",
 ]
 
 [[package]]

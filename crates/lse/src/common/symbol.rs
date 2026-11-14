@@ -364,16 +364,20 @@ fn named_month(name: &str) -> Option<Date> {
 /// A Nasdaq TotalView stock under `XNAS`, the venue Databento gives the
 /// listings of Nasdaq's TotalView-ITCH feed (`XNAS.ITCH`) and Nautilus' IB
 /// adapter maps to IB's NASDAQ: `NVDA.XNAS` is NVIDIA's common stock. Its
-/// symbol is its ticker in Nasdaq's convention, a class after a dot
-/// (`BRK.B.XNAS`), as Databento's raw symbols of `XNAS.ITCH` are
-/// (Databento's symbology standard, "CMS vs. Nasdaq symbology") and as LSE
-/// lists the stock in its `nasdaq` (`BRK.B`, captured), so it is asked of
-/// LSE by its ticker and streamed under it. LSE takes a renamed ticker for
-/// the days it was listed (LSE's docs, "Symbols"); its catalogue lists some
-/// tickers more than once, a delisted listing beside a later one (`BRKH`,
+/// symbol is its ticker as Nautilus' Databento client writes it, a class
+/// after a space (`BRK B.XNAS`), since a dot separates symbol and venue
+/// (Nautilus' Databento guide, `share_class_space`, on by default, as IB's
+/// adapter spells a class). Its ticker at LSE is Nasdaq's, the class after
+/// a dot, as Databento's raw symbols of `XNAS.ITCH` are (Databento's
+/// symbology standard, "CMS vs. Nasdaq symbology") and as LSE lists the
+/// stock in its `nasdaq` (`BRK.B`, captured), so it is asked of LSE by that
+/// ticker and streamed under it. LSE takes a renamed ticker for the days it
+/// was listed (LSE's docs, "Symbols"); its catalogue lists some tickers
+/// more than once, a delisted listing beside a later one (`BRKH`,
 /// captured), as Databento's ids name a ticker, not a listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NasdaqStock {
+    /// Nasdaq's ticker, a class after a dot, as LSE lists it.
     ticker: String,
 }
 
@@ -383,31 +387,38 @@ impl NasdaqStock {
     /// # Errors
     ///
     /// Returns an error naming `id` if it is not on `XNAS`, or if its
-    /// symbol is no ticker in capitals, as Databento and LSE write one: a
-    /// ticker in lower case, which LSE would match, would make a second id
-    /// of one stock.
+    /// symbol is no ticker in capitals, its class after one space, as
+    /// Nautilus' Databento client writes one: a ticker in lower case, which
+    /// LSE would match, or a class after a dot, Nasdaq's spelling, would
+    /// make a second id of one stock.
     pub fn from_instrument_id(id: InstrumentId) -> anyhow::Result<Self> {
         ensure!(
             id.venue == *XNAS_VENUE,
             "{id} is not a Nasdaq TotalView stock, under XNAS"
         );
-        let ticker = id.symbol.as_str();
+        let symbol = id.symbol.as_str();
         ensure!(
-            !ticker
-                .chars()
-                .any(|c| c.is_ascii_lowercase() || c.is_whitespace()),
-            "{id} is not a Nasdaq ticker in capitals, as NVDA.XNAS or BRK.B.XNAS, as Databento \
-             and LSE write it"
+            symbol.split(' ').all(|part| {
+                !part.is_empty()
+                    && !part
+                        .chars()
+                        .any(|c| c.is_ascii_lowercase() || c.is_whitespace() || c == '.')
+            }),
+            "{id} is not a Nasdaq ticker in capitals, its class after a space, as NVDA.XNAS or \
+             BRK B.XNAS, as Nautilus' Databento client writes it"
         );
         Ok(Self {
-            ticker: ticker.to_owned(),
+            ticker: symbol.replace(' ', "."),
         })
     }
 
-    /// The stock's id, its ticker under `XNAS`.
+    /// The stock's id, its ticker under `XNAS`, its class after a space.
     #[must_use]
     pub fn instrument_id(&self) -> InstrumentId {
-        InstrumentId::new(Symbol::from(self.ticker.as_str()), *XNAS_VENUE)
+        InstrumentId::new(
+            Symbol::from(self.ticker.replace('.', " ").as_str()),
+            *XNAS_VENUE,
+        )
     }
 
     /// The stock's ticker, as LSE lists and streams it.
@@ -873,10 +884,11 @@ mod tests {
 
     /// Databento's raw symbols of `XNAS.ITCH` are Nasdaq's tickers, a class
     /// after a dot ("CMS vs. Nasdaq symbology": `BRK.B`), and so is LSE's
-    /// symbol of each in its `nasdaq`.
+    /// symbol of each in its `nasdaq`; Nautilus' id spells the class after
+    /// a space.
     #[rstest]
     #[case::common_stock("NVDA.XNAS", "NVDA")]
-    #[case::class_b("BRK.B.XNAS", "BRK.B")]
+    #[case::class_b("BRK B.XNAS", "BRK.B")]
     fn an_xnas_stock_is_its_ticker_at_lse_and_back(#[case] id: &str, #[case] ticker: &str) {
         let stock = NasdaqStock::from_instrument_id(InstrumentId::from(id)).unwrap();
 
@@ -888,7 +900,7 @@ mod tests {
     /// there under that symbol.
     #[rstest]
     #[case::common_stock("NVDA.XNAS", PAIRS_NASDAQ_NVDA)]
-    #[case::class_b("BRK.B.XNAS", PAIRS_NASDAQ_BRK)]
+    #[case::class_b("BRK B.XNAS", PAIRS_NASDAQ_BRK)]
     fn an_xnas_stock_s_ticker_is_the_symbol_lse_lists_it_under(
         #[case] id: &str,
         #[case] answer: &str,
@@ -906,12 +918,14 @@ mod tests {
         );
     }
 
-    /// A ticker in lower case, which LSE would match, would make a second
-    /// id of one stock; CMS's convention, a space before the class, is not
-    /// Databento's of `XNAS.ITCH`; and another venue's id.
+    /// A ticker in lower case, which LSE would match, or a class after a
+    /// dot, Nasdaq's spelling, which Nautilus' Databento client turns into
+    /// a space, would make a second id of one stock; and another venue's
+    /// id.
     #[rstest]
     #[case::lower_case("nvda.XNAS")]
-    #[case::cms_class("BRK B.XNAS")]
+    #[case::dotted_class("BRK.B.XNAS")]
+    #[case::two_spaces("BRK  B.XNAS")]
     #[case::another_venue("NVDA.XNYS")]
     fn an_id_that_is_no_nasdaq_ticker_under_xnas_is_refused_naming_it(#[case] id: &str) {
         let err = NasdaqStock::from_instrument_id(InstrumentId::from(id))
