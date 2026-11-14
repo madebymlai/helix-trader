@@ -67,6 +67,7 @@ use nautilus_common::{
     timer::TimeEvent,
 };
 use nautilus_model::{
+    accounts::Account,
     enums::{OrderSide, OrderStatus},
     identifiers::{AccountId, ClientOrderId, InstrumentId, Venue},
     instruments::{Instrument, InstrumentAny},
@@ -80,7 +81,7 @@ use rust_decimal::{Decimal, prelude::ToPrimitive};
 use ustr::Ustr;
 
 use super::{conversions::Rates, risk::Stake};
-use crate::venues;
+use crate::venues::{self, EquitySource};
 
 /// The prefix of a trade's time alert, followed by its entry's client
 /// order id.
@@ -223,10 +224,11 @@ impl Trade {
     /// size at that stake of that equity (`size`), its entry tagged with
     /// its R in money and the stake's multiple (`entry_risk`).
     ///
-    /// The equity is the account's (`Portfolio::equity`), the account
-    /// Nautilus' risk engine checks the orders against (`routed_account`):
-    /// its balance and the open P&L of its positions on the instrument's
-    /// venue, converted into the instrument's P&L currency at `rates`, the
+    /// The equity is the account's, the account Nautilus' risk engine
+    /// checks the orders against (`routed_account`), read as its broker
+    /// reports it (`equity`): its balance and the open P&L of its positions
+    /// on the instrument's venue, IB's net liquidation holding both,
+    /// converted into the instrument's P&L currency at `rates`, the
     /// strategy's (`Rates::convert`); its R stays in the P&L currency.
     /// Positions the account holds on its broker's other venues are left
     /// out, as are those of other processes, which this cache does not hold
@@ -254,10 +256,10 @@ impl Trade {
         let instrument = linear(strategy, instrument_id)?;
         let currency = instrument.cost_currency();
         let account = routed_account(strategy, venue);
-        let held = strategy.portfolio().equity(&venue, account.as_ref());
-        let converted = rates.convert(&strategy.cache_ref(), held.values().copied(), currency);
+        let held = equity(strategy, venue, account);
+        let converted = rates.convert(&strategy.cache_ref(), held.iter().copied(), currency);
         let Some(equity) = converted? else {
-            let held: Vec<String> = held.values().map(ToString::to_string).collect();
+            let held: Vec<String> = held.iter().map(ToString::to_string).collect();
             log::error!(
                 "not sending the {} of {instrument_id} at a stake of {stake}: the account {} \
                  holds [{}], not converted into {currency}, the currency of its P&L, at {rates}",
@@ -531,6 +533,37 @@ where
         .client_id_for_venue(&venue)
         .and_then(|client| cache.account_id_for_client(client))
         .copied()
+}
+
+/// The equity of `account`, the account an order on `venue` is checked
+/// against (`routed_account`), per currency, from the source its broker
+/// names (`venues::equity_source`): `Portfolio::equity`, its balance totals
+/// and the open P&L of its positions on `venue`; or, for a broker whose
+/// balance holds that P&L already, IB's net liquidation, its balance totals
+/// alone. Those are read only while the account is as its broker reports
+/// it: one whose state Nautilus calculates from its fills
+/// (`Account::calculated_account_state`), a backtest's simulated account,
+/// holds no open P&L in its balance whatever its broker, and is read from
+/// `Portfolio::equity`, as is the account issued under `venue` when none
+/// is routed.
+fn equity<S>(strategy: &S, venue: Venue, account: Option<AccountId>) -> Vec<Money>
+where
+    S: Strategy + StrategyNative + DataActorNative,
+{
+    if venues::equity_source(venue) == EquitySource::BalanceTotals {
+        let cache = strategy.cache_ref();
+        if let Some(reported) = account
+            .and_then(|id| cache.account(&id))
+            .filter(|account| !account.calculated_account_state())
+        {
+            return reported.balances_total().into_values().collect();
+        }
+    }
+    strategy
+        .portfolio()
+        .equity(&venue, account.as_ref())
+        .into_values()
+        .collect()
 }
 
 /// The instrument `instrument_id` from `strategy`'s cache.

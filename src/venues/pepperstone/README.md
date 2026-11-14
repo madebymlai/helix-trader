@@ -19,5 +19,6 @@ The demo tests in `tests/live/ctrader_*.rs` run on the broker `NAUTILUS_CTRADER_
 ```sh
 NAUTILUS_CTRADER_RUN=pepperstone cargo test --test live ctrader_demo:: -- --nocapture
 NAUTILUS_CTRADER_RUN=pepperstone cargo test --test live ctrader_live_demo:: -- --nocapture
+NAUTILUS_CTRADER_RUN=pepperstone cargo test --test live ctrader_conversions_demo:: -- --nocapture
 NAUTILUS_CTRADER_RUN=pepperstone cargo test --test live ctrader_orders_demo:: -- --nocapture
 ```

@@ -281,7 +281,9 @@ pub struct ModelHandle {
     /// ATR the handle trades on.
     warmup: Rc<Warmup>,
     /// Subscribes the features' ticks, on the contract standing for each
-    /// root, and the requirements' tick series of the traded instrument.
+    /// root, and every other tick series of the requirements: the traded
+    /// instrument's, and the quotes of the pairs of `[trade] conversions`,
+    /// which the warmup does not read.
     roller: Roller,
 }
 
@@ -321,11 +323,7 @@ impl ModelHandle {
         let (rule, target) = (blueprint.config().decision, &blueprint.config().target);
         let traded = target.instrument_id;
         let mut ticks = features.ticks();
-        for tick in requirements
-            .ticks
-            .iter()
-            .filter(|tick| tick.instrument_id == traded)
-        {
+        for tick in &requirements.ticks {
             if !ticks.contains(tick) {
                 ticks.push(tick.clone());
             }
@@ -392,11 +390,13 @@ impl ModelHandle {
     /// starts the strategy's warmup
     /// (`Warmup::start`), holding the live ticks while it is pending, live
     /// requesting the history of the bars and of the features' ticks, then
-    /// the roller, which subscribes the features' ticks and the traded
-    /// instrument's from now, where the warmup ends, a root's on the
-    /// contract standing for it; starts the target's ATR, if it has one (in
-    /// a dataset run the targets', and collects the rows they settle); then
-    /// starts the decision cadence, `warmup::bar_build_delay` late.
+    /// the roller, which subscribes the features' ticks and every other
+    /// tick series of the requirements, the traded instrument's and the
+    /// conversion pairs' quotes, from now, where the warmup ends, a root's
+    /// on the contract standing for it; starts the target's ATR, if it has
+    /// one (in a dataset run the targets', and collects the rows they
+    /// settle); then starts the decision cadence, `warmup::bar_build_delay`
+    /// late.
     ///
     /// # Errors
     ///
@@ -2673,6 +2673,36 @@ mod tests {
         let sent = sent_commands();
         handle.start(&mut probe).unwrap();
         sent.take()
+    }
+
+    /// The quotes of IC's EURUSD, a pair of `[trade] conversions`: the
+    /// data requirements hold them beside the strategy's own series.
+    fn eurusd_quotes() -> TickSeries {
+        TickSeries {
+            data: NautilusDataType::QuoteTick,
+            instrument_id: InstrumentId::from("EURUSD.ICMARKETS"),
+        }
+    }
+
+    /// A conversion pair's quotes, of no feature and not of the traded
+    /// AUD/USD: the start subscribes to them from now, so that the cache
+    /// holds a rate when a trade is sized, and asks nothing of them, no
+    /// history and no definition, the broker's client loading the pair at
+    /// connect.
+    #[test]
+    fn a_live_start_subscribes_to_a_conversion_pairs_quotes_from_now_with_no_warmup() {
+        let sent = started_live(features(), vec![], vec![aud_quotes(), eurusd_quotes()]);
+
+        assert_sent(
+            &sent,
+            &["subscribe quotes [EURUSD.ICMARKETS] from Some(2026-08-10T14:30:00Z)"],
+        );
+        assert!(
+            !sent
+                .iter()
+                .any(|line| line.starts_with("request") && line.contains("EURUSD")),
+            "{sent:#?}"
+        );
     }
 
     /// Custom data of the traded AUD/USD, which no feature reads as a tick
