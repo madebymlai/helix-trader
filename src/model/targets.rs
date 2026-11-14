@@ -487,8 +487,10 @@ pub enum NoTarget {
     ExitOnPrice(Price),
     /// The dataset balance, `balance`, has no rate into `pnl`, the
     /// instrument's P&L currency, at `rates`, the target's: no pair reaches
-    /// its currency, or none is quoted yet (`Rates::convert`). Its trades
-    /// would be sized at no reference stake.
+    /// its currency, or none of the pairs' quotes or bars is cached yet, a
+    /// cTrader pair being read as its quotes and an IB pair as its BID and
+    /// ASK bars (`Rates::convert`). Its trades would be sized at no
+    /// reference stake.
     NoRate {
         balance: Money,
         pnl: Currency,
