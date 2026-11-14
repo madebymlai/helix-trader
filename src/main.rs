@@ -383,8 +383,8 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
 }
 
 /// The visitor backtesting a strategy: `backtest` builds its `Backtest`
-/// of its data requirements and the pairs of its `[trade] conversions`; a
-/// model strategy's dataset runs log as
+/// of its data requirements and the pairs of its `[trade] conversions` it
+/// does not trade; a model strategy's dataset runs log as
 /// `dataset_logging` says (`backtest_on_models`).
 struct Backtesting<'a, B> {
     args: &'a BacktestArgs,
@@ -397,8 +397,7 @@ impl<B: FnOnce(DataRequirements, &[InstrumentId]) -> Backtest> Visitor for Backt
 
     fn plain<S: PlainStrategy>(self) -> Self::Output {
         let config = load_config::<S::Params>(&self.args.run.config)?;
-        let backtest =
-            (self.backtest)(config.data_requirements(), config.trade.conversions.pairs());
+        let backtest = (self.backtest)(config.data_requirements(), &config.trade.untraded_pairs());
         backtest.refuse_balance(&config.trade)?;
         let outcome = backtest.run(S::backtest(config)?)?;
         print!("{}", backtest::report(&outcome));
@@ -411,8 +410,8 @@ impl<B: FnOnce(DataRequirements, &[InstrumentId]) -> Backtest> Visitor for Backt
 }
 
 /// The backtest of `args` of the model strategy `S`, its `Backtest` of
-/// its data requirements and the pairs of its `[trade] conversions`
-/// `backtest`: retrained on its schedule first
+/// its data requirements and the pairs of its `[trade] conversions` it
+/// does not trade `backtest`: retrained on its schedule first
 /// (`WalkForward::prepare`), then run, its results printed and the
 /// out-of-sample scores of its models after them. The dataset build, each
 /// train and the run are one after another in this process, a train as the
@@ -429,7 +428,7 @@ fn backtest_on_models<S: ModelStrategy>(
 ) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     let config = load_config::<S::Params>(&args.run.config)?;
-    let backtest = backtest(config.data_requirements(), config.trade.conversions.pairs());
+    let backtest = backtest(config.data_requirements(), &config.trade.untraded_pairs());
     backtest.refuse_balance(&config.trade)?;
     let (catalog, models) = (&args.run.catalog, &args.models);
     let run = DatasetRun {
@@ -653,7 +652,7 @@ impl DatasetRun {
             end,
             commission: venue.commission,
             latency: venue.latency,
-            pairs: config.trade.conversions.pairs().to_vec(),
+            pairs: config.trade.untraded_pairs(),
             balance: venue.balance,
             venue_oms: |_| OmsType::Hedging,
             logging: self.logging.clone(),

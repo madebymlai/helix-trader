@@ -81,9 +81,11 @@ pub struct Backtest {
     /// from (`Latency::model`): each order command reaches the venue that
     /// long after it is sent. None, each reaches it as it is sent.
     pub latency: Option<Latency>,
-    /// The FX pairs the strategy converts through (`[trade] conversions`),
-    /// read through the bar types or the ticks: they decide no venue's
-    /// money (see `balance`).
+    /// The FX pairs the strategy converts through and does not trade
+    /// (`TradeConfig::untraded_pairs`), read through the bar types or the
+    /// ticks: they decide no venue's money (see `balance`). A pair it trades
+    /// is one of its instruments, funding its venue as any instrument
+    /// traded.
     pub pairs: Vec<InstrumentId>,
     /// The starting balance of the account of each venue a broker trades;
     /// a venue only read, which no broker trades (`venues::has_broker`),
@@ -185,7 +187,8 @@ impl Backtest {
 
     /// Whether the simulated `venue` starts with the balance: a broker
     /// trades it (`venues::has_broker`) and the strategy reads an
-    /// instrument on it besides the pairs, IDEALPRO's EUR/USD for gold on
+    /// instrument on it besides the pairs it does not trade (`pairs`):
+    /// EURUSD traded on IC funds IC, IDEALPRO's EUR/USD for gold on
     /// GLBX leaving IDEALPRO with nothing, as a venue only read.
     fn funds(&self, venue: Venue) -> bool {
         venues::has_broker(venue)

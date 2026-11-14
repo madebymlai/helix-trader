@@ -654,6 +654,20 @@ impl TradeConfig {
             .collect()
     }
 
+    /// The pairs of `conversions` not traded, in the config's order: those
+    /// the strategy reads only to convert through. A pair it trades is
+    /// one of its instruments as well.
+    #[must_use]
+    pub fn untraded_pairs(&self) -> Vec<InstrumentId> {
+        let traded = self.instrument_ids();
+        self.conversions
+            .pairs()
+            .iter()
+            .filter(|pair| !traded.contains(pair))
+            .copied()
+            .collect()
+    }
+
     /// Pushes the violations of `[trade]`, whatever the strategy: not
     /// `count` instruments listed; an instrument a futures root of the
     /// roll calendar (`rolls::Transition`), since an order goes to a

@@ -177,10 +177,10 @@ fn the_account_books_its_margin_commissions_and_pnl_in_the_balances_currency() {
     assert_eq!(margin.maintenance, Money::from("13373.83 EUR"));
 }
 
-/// The backtest command running the EMA crossover on the gold's hour
-/// bars of the catalog at `catalog`, from 09:00 to 12:00, at a stake of
-/// 1%, converting through IC's EURUSD, on `balance`: its output.
-fn backtest_command(catalog: &Path, balance: &str) -> std::process::Output {
+/// The backtest command running the EMA crossover trading `traded` on its
+/// hour bars of the catalog at `catalog`, from 09:00 to 12:00, at a stake
+/// of 1%, converting through IC's EURUSD, on `balance`: its output.
+fn backtest_command(catalog: &Path, traded: &str, balance: &str) -> std::process::Output {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("ema.toml");
     std::fs::write(
@@ -189,7 +189,7 @@ fn backtest_command(catalog: &Path, balance: &str) -> std::process::Output {
             r#"
             [data]
             series = [
-                {{ data = "bars", instrument_id = "{gold}", bar_spec = {{ step = 1, aggregation = "HOUR", price_type = "MID" }} }},
+                {{ data = "bars", instrument_id = "{traded}", bar_spec = {{ step = 1, aggregation = "HOUR", price_type = "MID" }} }},
             ]
             warmup = "1h"
 
@@ -198,11 +198,10 @@ fn backtest_command(catalog: &Path, balance: &str) -> std::process::Output {
             slow = {{ period = 2 }}
 
             [trade]
-            instruments = [{{ instrument_id = "{gold}" }}]
+            instruments = [{{ instrument_id = "{traded}" }}]
             risk = "1%"
             conversions = ["{eurusd}"]
             "#,
-            gold = ic::INSTRUMENT_ID,
             eurusd = ic::EURUSD,
         ),
     )
@@ -237,7 +236,7 @@ fn catalog_with_eurusd() -> tempfile::TempDir {
 fn a_backtest_runs_on_a_balance_its_conversions_reach_the_pnl_currency_from() {
     let catalog = catalog_with_eurusd();
 
-    let output = backtest_command(catalog.path(), "100000 EUR");
+    let output = backtest_command(catalog.path(), ic::INSTRUMENT_ID, "100000 EUR");
 
     let (stdout, stderr) = (
         String::from_utf8_lossy(&output.stdout),
@@ -256,7 +255,7 @@ fn a_backtest_runs_on_a_balance_its_conversions_reach_the_pnl_currency_from() {
 fn a_backtest_on_a_balance_its_conversions_do_not_reach_the_pnl_currency_from_is_refused() {
     let catalog = catalog_with_eurusd();
 
-    let output = backtest_command(catalog.path(), "15000000 JPY");
+    let output = backtest_command(catalog.path(), ic::INSTRUMENT_ID, "15000000 JPY");
 
     let (stdout, stderr) = (
         String::from_utf8_lossy(&output.stdout),
@@ -270,4 +269,26 @@ fn a_backtest_on_a_balance_its_conversions_do_not_reach_the_pnl_currency_from_is
         "{stderr}"
     );
     assert!(!stdout.contains("Orders:"), "{stdout}");
+}
+
+/// EURUSD traded on a balance in EUR, its P&L in USD, converts through
+/// itself: it is one of the strategy's instruments, so IC, the venue it
+/// trades on, starts with the balance, not with nothing, as a venue read
+/// for its pairs alone does. Its quotes, flat, cross no average: nothing
+/// is traded, and the balance ends as it starts.
+#[test]
+fn a_venue_trading_one_of_its_pairs_starts_with_the_balance() {
+    let catalog = catalog_with_eurusd();
+
+    let output = backtest_command(catalog.path(), ic::EURUSD, "100000 EUR");
+
+    let (stdout, stderr) = (
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(output.status.success(), "{stdout}{stderr}");
+    assert!(
+        stdout.contains("account.ICMARKETS.balance.EUR.total: 100000.00 EUR"),
+        "{stdout}"
+    );
 }

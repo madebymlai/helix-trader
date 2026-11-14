@@ -110,7 +110,7 @@ fn rows() -> Vec<TargetRow> {
         end: ic::at("13:00:00"),
         commission: venue.commission,
         latency: venue.latency,
-        pairs: config.trade.conversions.pairs().to_vec(),
+        pairs: config.trade.untraded_pairs(),
         balance: venue.balance,
         venue_oms: |_| OmsType::Hedging,
         ..ic::backtest(&catalog)
