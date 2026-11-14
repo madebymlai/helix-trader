@@ -30,7 +30,7 @@ const CANDLE_WIDTHS: [(BarAggregation, char, &[usize]); 3] = [
 
 /// What an export's rows are, and the parameter that selects them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Rows {
+pub enum Rows {
     /// The tick slice of a derived market or of US options, `time, price,
     /// size, kind` (`timeframe=tick`): its trades, or an index's values, of
     /// no size.
@@ -110,7 +110,7 @@ impl fmt::Display for Selection {
 /// so a bar of those widths is declared from a shorter LSE candle, which
 /// Nautilus aggregates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CandleWidth(BarSpecification);
+pub struct CandleWidth(BarSpecification);
 
 impl CandleWidth {
     /// The candles of `bar_type`: external bars, of the last price, LSE's
@@ -121,7 +121,7 @@ impl CandleWidth {
     /// Returns an error naming `bar_type` if its bars are not those of
     /// LSE's candles; for daily, weekly and monthly bars, saying why and
     /// that the bar is declared from a shorter LSE candle instead.
-    pub(crate) fn of(bar_type: BarType) -> anyhow::Result<Self> {
+    pub fn of(bar_type: BarType) -> anyhow::Result<Self> {
         let spec = bar_type.spec();
         ensure!(
             bar_type.aggregation_source() == AggregationSource::External,
@@ -157,7 +157,7 @@ impl CandleWidth {
     /// to the last one's close; none if no candle closes in it. A candle
     /// opens on a multiple of its width from 1970, which divides a day, as
     /// LSE stamps them.
-    pub(crate) fn candles_closing(
+    pub fn candles_closing(
         self,
         start: Timestamp,
         end: Timestamp,
@@ -195,7 +195,7 @@ impl fmt::Display for CandleWidth {
 /// The file format of an export.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum ExportFormat {
+pub enum ExportFormat {
     Parquet,
 }
 
@@ -203,7 +203,7 @@ pub(crate) enum ExportFormat {
 /// the second excluded, at prices as published: LSE adjusts them for splits
 /// unless told not to (`adjusted=0`), and the adapter adjusts nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct ExportQuery {
+pub struct ExportQuery {
     market: String,
     #[serde(flatten)]
     instrument: Selection,
@@ -218,7 +218,7 @@ pub(crate) struct ExportQuery {
 impl ExportQuery {
     /// The `rows` of `series`, a derived market's, over `[from, to)`, as
     /// Parquet.
-    pub(crate) fn series(series: &LseSymbol, rows: Rows, from: Timestamp, to: Timestamp) -> Self {
+    pub fn series(series: &LseSymbol, rows: Rows, from: Timestamp, to: Timestamp) -> Self {
         Self::new(
             series.market(),
             Selection::Symbol(series.symbol().to_owned()),
@@ -231,12 +231,7 @@ impl ExportQuery {
     /// The `rows` of the US option `contract` over `[from, to)`, as
     /// Parquet: of LSE's `us_options`, by its OSI symbol, which names one
     /// contract.
-    pub(crate) fn option(
-        contract: &OpraContract,
-        rows: Rows,
-        from: Timestamp,
-        to: Timestamp,
-    ) -> Self {
+    pub fn option(contract: &OpraContract, rows: Rows, from: Timestamp, to: Timestamp) -> Self {
         Self::new(
             US_OPTIONS_MARKET,
             Selection::Symbol(contract.osi().to_owned()),
@@ -248,7 +243,7 @@ impl ExportQuery {
 
     /// The `rows` of the Nasdaq TotalView `stock` over `[from, to)`, as
     /// Parquet: of LSE's `nasdaq`, by its ticker.
-    pub(crate) fn stock(stock: &NasdaqStock, rows: Rows, from: Timestamp, to: Timestamp) -> Self {
+    pub fn stock(stock: &NasdaqStock, rows: Rows, from: Timestamp, to: Timestamp) -> Self {
         Self::new(
             NASDAQ_MARKET,
             Selection::Symbol(stock.ticker().to_owned()),
@@ -260,13 +255,7 @@ impl ExportQuery {
 
     /// The `rows` of LSE's listing `pair_id` in `market` over `[from,
     /// to)`, as Parquet.
-    pub(crate) fn listing(
-        market: &str,
-        pair_id: u64,
-        rows: Rows,
-        from: Timestamp,
-        to: Timestamp,
-    ) -> Self {
+    pub fn listing(market: &str, pair_id: u64, rows: Rows, from: Timestamp, to: Timestamp) -> Self {
         Self::new(market, Selection::PairId(pair_id), rows, from, to)
     }
 
@@ -289,7 +278,7 @@ impl ExportQuery {
     }
 
     /// The span the export selects, `[from, to)`.
-    pub(crate) fn window(&self) -> (Timestamp, Timestamp) {
+    pub fn window(&self) -> (Timestamp, Timestamp) {
         (self.from, self.to)
     }
 
@@ -298,7 +287,7 @@ impl ExportQuery {
     /// LSE's docs ask of a busy contract ("The market: cme": ESZ6's book of
     /// the minute from 14:30 on 5 November 2026 held 99,104 rows, 33 MB as
     /// CSV, and of that whole day 10.8 GB), a UTC day of every other.
-    pub(crate) fn longest_span(&self) -> SignedDuration {
+    pub fn longest_span(&self) -> SignedDuration {
         match self.rows {
             Rows::Book | Rows::Orders => SignedDuration::from_hours(1),
             _ => SignedDuration::from_hours(24),
@@ -306,7 +295,7 @@ impl ExportQuery {
     }
 
     /// The export's selection over `[from, to)`.
-    pub(crate) fn over(&self, from: Timestamp, to: Timestamp) -> Self {
+    pub fn over(&self, from: Timestamp, to: Timestamp) -> Self {
         Self {
             from,
             to,
@@ -321,7 +310,7 @@ impl ExportQuery {
     /// would not get past a refusal. An export of candles is split between
     /// the two candles nearest its middle, as LSE folds a candle from the
     /// rows inside the export alone, and one of a candle is not split.
-    pub(crate) fn halves(&self) -> Option<(Self, Self)> {
+    pub fn halves(&self) -> Option<(Self, Self)> {
         let span = self.to.duration_since(self.from);
         let middle = match self.rows {
             Rows::Candles(width) => width.floor(self.from + span / 2),
@@ -357,10 +346,10 @@ impl fmt::Display for ExportQuery {
 /// collection keyed by dates, and selects a day's rows by its date either
 /// way. With no first date, the series is asked from its first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub(crate) struct Dates {
+pub struct Dates {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) from: Option<Date>,
-    pub(crate) to: Date,
+    pub from: Option<Date>,
+    pub to: Date,
 }
 
 impl fmt::Display for Dates {
@@ -375,7 +364,7 @@ impl fmt::Display for Dates {
 /// An export of the rows of `symbol` in LSE's reference collection
 /// `dataset` over its `dates`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct ReferenceQuery {
+pub struct ReferenceQuery {
     dataset: String,
     symbol: String,
     #[serde(flatten)]
@@ -385,7 +374,7 @@ pub(crate) struct ReferenceQuery {
 
 impl ReferenceQuery {
     /// The rows of `symbol` in `dataset` over `dates`, as Parquet.
-    pub(crate) fn new(dataset: &str, symbol: &str, dates: Dates) -> Self {
+    pub fn new(dataset: &str, symbol: &str, dates: Dates) -> Self {
         Self {
             dataset: dataset.to_owned(),
             symbol: symbol.to_owned(),
@@ -413,7 +402,7 @@ impl fmt::Display for ReferenceQuery {
 /// An export of LSE's macro series `code` of the kind `kind` (`release`,
 /// `yield`) over its `dates` (`/v3/macro/export`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct MacroQuery {
+pub struct MacroQuery {
     kind: &'static str,
     code: String,
     #[serde(flatten)]
@@ -423,7 +412,7 @@ pub(crate) struct MacroQuery {
 
 impl MacroQuery {
     /// The rows of the series `code` of `kind` over `dates`, as Parquet.
-    pub(crate) fn new(kind: &'static str, code: &str, dates: Dates) -> Self {
+    pub fn new(kind: &'static str, code: &str, dates: Dates) -> Self {
         Self {
             kind,
             code: code.to_owned(),
@@ -445,14 +434,14 @@ impl fmt::Display for MacroQuery {
 /// A call of an instrument's splits and dividends (`/v3/factors`), by its
 /// market and its symbol in it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct FactorsQuery {
+pub struct FactorsQuery {
     market: String,
     symbol: String,
 }
 
 impl FactorsQuery {
     /// The factors of `symbol` in LSE's `market`.
-    pub(crate) fn new(market: &str, symbol: &str) -> Self {
+    pub fn new(market: &str, symbol: &str) -> Self {
         Self {
             market: market.to_owned(),
             symbol: symbol.to_owned(),
@@ -473,14 +462,14 @@ impl fmt::Display for FactorsQuery {
 /// A lookup of LSE's catalogue (`/v3/pairs`): the listings of one symbol,
 /// exactly, in one market. A symbol names a few listings, one page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct PairsQuery {
+pub struct PairsQuery {
     market: String,
     symbol: String,
 }
 
 impl PairsQuery {
     /// The listings of `symbol` in LSE's `market`.
-    pub(crate) fn new(market: &str, symbol: &str) -> Self {
+    pub fn new(market: &str, symbol: &str) -> Self {
         Self {
             market: market.to_owned(),
             symbol: symbol.to_owned(),

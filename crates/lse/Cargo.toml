@@ -56,6 +56,9 @@ tokio = { workspace = true, features = ["sync"] }
 tungstenite = { version = "0.30", optional = true }
 
 [dev-dependencies]
+# The crate itself with its test support, the mock LSE peers and their
+# captured payloads, for its tests of its public boundaries (`tests/`).
+lse = { path = ".", features = ["test-support"] }
 # The data tester's: the key from `.env`, the node's catalog (registered
 # through nautilus-live's `streaming`) and Nautilus' `DataTester`, which
 # the tests drive the data client with on a node too.

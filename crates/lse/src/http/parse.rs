@@ -47,7 +47,7 @@ const TRADE: &str = "trade";
 /// Returns an error if the file is no tick slice, if a row is not a trade,
 /// or if a price or a size has more decimals than `price_precision` or
 /// `size_precision`, the instrument's, or is not positive.
-pub(crate) fn parse_trade_slice(
+pub fn parse_trade_slice(
     file: Bytes,
     instrument_id: InstrumentId,
     price_precision: u8,
@@ -102,7 +102,7 @@ pub(crate) fn parse_trade_slice(
 /// Returns an error if the file is no tick slice, if a row is not of kind
 /// trade, or if a value has more decimals than `price_precision`, the
 /// instrument's.
-pub(crate) fn parse_index_quotes(
+pub fn parse_index_quotes(
     file: Bytes,
     instrument_id: InstrumentId,
     price_precision: u8,
@@ -152,7 +152,7 @@ pub(crate) fn parse_index_quotes(
 /// Returns an error if the file holds no quotes, or if a price or a size
 /// has more decimals than `price_precision` or `size_precision`, the
 /// instrument's.
-pub(crate) fn parse_quotes(
+pub fn parse_quotes(
     file: Bytes,
     instrument_id: InstrumentId,
     price_precision: u8,
@@ -222,7 +222,7 @@ pub(crate) fn parse_quotes(
 /// Returns an error if the file holds no book, if a level with a price has
 /// no size or orders, or if a price or a size has more decimals than
 /// `price_precision` or `size_precision`, the instrument's.
-pub(crate) fn parse_book(
+pub fn parse_book(
     file: Bytes,
     instrument_id: InstrumentId,
     price_precision: u8,
@@ -287,7 +287,7 @@ pub(crate) fn parse_book(
 /// alone, among them, LSE's docs not saying whether its orders open a day
 /// with a book; if an order has no price; or if a price or a size has more
 /// decimals than `price_precision` or `size_precision`, the instrument's.
-pub(crate) fn parse_orders(
+pub fn parse_orders(
     file: Bytes,
     instrument_id: InstrumentId,
     price_precision: u8,
@@ -470,7 +470,7 @@ fn end_events<T>(
 /// has more decimals than `price_precision` or `size_precision`, the
 /// instrument's, if a volume is negative, or if a candle's prices are not
 /// a bar's (its high below another price, its low above one).
-pub(crate) fn parse_candles(
+pub fn parse_candles(
     file: Bytes,
     bar_type: BarType,
     price_precision: u8,
@@ -534,17 +534,17 @@ const PERIOD: &str = "period";
 /// A source's rows read from LSE's answer: each keyed and stamped, and the
 /// rows left out as known at no time, each named with why.
 #[derive(Debug, Default)]
-pub(crate) struct Parsed {
-    pub(crate) rows: Vec<Keyed>,
-    pub(crate) refused: Vec<String>,
+pub struct Parsed {
+    pub rows: Vec<Keyed>,
+    pub refused: Vec<String>,
 }
 
 /// A row and its key, the time of the column LSE's export selects it by, a
 /// date at its start.
 #[derive(Debug)]
-pub(crate) struct Keyed {
-    pub(crate) key: Timestamp,
-    pub(crate) row: LseRow,
+pub struct Keyed {
+    pub key: Timestamp,
+    pub row: LseRow,
 }
 
 /// A row read, its stamp still to settle: the time it is known at, or why
@@ -571,7 +571,7 @@ struct Pending {
 /// missing, holds an empty row or a time before 1970, or is not of `stamp`:
 /// dates for a source keyed by date, times for one keyed by time; or if a
 /// column of a release `stamp` reads is missing or not of its kind.
-pub(crate) fn parse_rows(
+pub fn parse_rows(
     file: Bytes,
     source: &str,
     symbol: &str,
@@ -854,7 +854,7 @@ fn time(times: &TimestampNanosecondArray, row: usize) -> anyhow::Result<u64> {
 
 /// `value`, a double, as the decimal it is written as at its shortest,
 /// which must have at most `precision` decimals.
-pub(crate) fn decimal(value: f64, precision: u8, what: &str) -> anyhow::Result<Decimal> {
+pub fn decimal(value: f64, precision: u8, what: &str) -> anyhow::Result<Decimal> {
     ensure!(value.is_finite(), "a {what} of {value}");
     let decimal = Decimal::from_str(&value.to_string())
         .with_context(|| format!("a {what} of {value}"))?
@@ -877,7 +877,7 @@ const FNV_PRIME: u64 = 0x0100_0000_01b3;
 /// price and size came before it, so that trades alike keep ids apart and
 /// the same trades always get the same ids (`trade_id`).
 #[derive(Debug, Default)]
-pub(crate) struct TradeIds {
+pub struct TradeIds {
     /// The trades met so far at the time of the last, by price and size.
     same: HashMap<(Price, Quantity), u32>,
     last_time: Option<UnixNanos>,
@@ -886,7 +886,7 @@ pub(crate) struct TradeIds {
 impl TradeIds {
     /// The id of the next trade, of `instrument_id` at `time`, of `price`
     /// and `size`, a time no earlier than the last's.
-    pub(crate) fn next(
+    pub fn next(
         &mut self,
         instrument_id: InstrumentId,
         time: UnixNanos,
@@ -967,7 +967,7 @@ mod tests {
 
     /// The captured second, as pyarrow reads the file: two trades alike at
     /// .619501, three at .690600 at three prices, one at .901218.
-    #[test]
+    #[rstest]
     fn a_tick_slice_is_its_trades_at_the_instrument_s_precision_with_no_aggressor() {
         let trades = parse_trade_slice(Bytes::from_static(GOLD_TRADES), gold(), 1, 0).unwrap();
 
@@ -998,7 +998,7 @@ mod tests {
         assert!(trades.iter().all(|t| t.instrument_id == gold()));
     }
 
-    #[test]
+    #[rstest]
     fn every_trade_gets_an_id_of_its_own_and_the_same_one_each_time() {
         let parse = || parse_trade_slice(Bytes::from_static(GOLD_TRADES), gold(), 1, 0).unwrap();
         let ids: Vec<TradeId> = parse().iter().map(|t| t.trade_id).collect();
@@ -1562,7 +1562,7 @@ mod tests {
 
     /// A definition too coarse for the prices LSE sends: refused, not
     /// rounded.
-    #[test]
+    #[rstest]
     fn a_price_finer_than_the_instrument_s_precision_is_refused() {
         let err = parse_trade_slice(Bytes::from_static(GOLD_TRADES), gold(), 0, 0).unwrap_err();
 
@@ -1571,7 +1571,7 @@ mod tests {
 
     /// The captured four hours, as pyarrow reads the file: candles LSE
     /// stamps at 00:00, 04:00 and 08:00, their open.
-    #[test]
+    #[rstest]
     fn candles_are_bars_stamped_at_their_close_at_the_instrument_s_precision() {
         let bar_type = BarType::from("GOLD-FUTURES.LSEDGE-4-HOUR-LAST-EXTERNAL");
 
@@ -1609,7 +1609,7 @@ mod tests {
 
     /// A malformed input: a tick slice, a real file of LSE's, read as
     /// candles.
-    #[test]
+    #[rstest]
     fn a_file_of_no_candles_is_refused_naming_the_column_it_lacks() {
         let bar_type = BarType::from("GOLD-FUTURES.LSEDGE-1-MINUTE-LAST-EXTERNAL");
 
@@ -1618,7 +1618,7 @@ mod tests {
         assert!(err.to_string().contains("no column open"), "{err:#}");
     }
 
-    #[test]
+    #[rstest]
     fn a_candle_price_finer_than_the_instrument_s_precision_is_refused() {
         let bar_type = BarType::from("XAU/USD-COMMODITIES.LSEDGE-1-MINUTE-LAST-EXTERNAL");
 
@@ -1639,7 +1639,7 @@ mod tests {
     /// The captured second of GCZ6's quotes, as pyarrow reads the file: 636
     /// quotes, its first and last two below, at Databento's precision of
     /// GCZ26.GLBX, two decimals.
-    #[test]
+    #[rstest]
     fn quotes_are_quote_ticks_with_lse_s_sizes_at_the_instrument_s_precision() {
         let quotes = parse_quotes(Bytes::from_static(GCZ26_QUOTES), gcz26(), 2, 0).unwrap();
 
@@ -1687,7 +1687,7 @@ mod tests {
 
     /// The captured second of GCZ6's trades, LSE's `data=trades`, read as a
     /// tick slice is: 38 trades, three of them at one time and three prices.
-    #[test]
+    #[rstest]
     fn a_cme_contract_s_trades_are_read_as_a_tick_slice_is() {
         let trades = parse_trade_slice(Bytes::from_static(GCZ26_TRADES), gcz26(), 2, 0).unwrap();
 
@@ -1763,7 +1763,7 @@ mod tests {
     /// Each row of the book is the book after its event, ten levels a side,
     /// a snapshot at the row's time and sequence, as Nautilus' Databento
     /// decoder makes one of an MBP-10 record (`decode_mbp10_msg`).
-    #[test]
+    #[rstest]
     fn a_book_export_is_a_depth_snapshot_a_row_at_the_instrument_s_precision() {
         let depths = parse_book(Bytes::from_static(GCZ26_BOOK), gcz26(), 2, 0).unwrap();
 
@@ -1800,7 +1800,7 @@ mod tests {
 
     /// The last row's book holds eight asks: its two last ask levels have
     /// no price.
-    #[test]
+    #[rstest]
     fn an_empty_level_of_the_book_is_no_level_of_the_snapshot() {
         let depths = parse_book(Bytes::from_static(GCZ26_BOOK), gcz26(), 2, 0).unwrap();
 
@@ -1814,7 +1814,7 @@ mod tests {
     /// LSE gives no event boundary: the rows of one time are one event, its
     /// last row ending it (`F_LAST`), as Nautilus' Tardis loader frames
     /// rows of one timestamp. The second and third rows share a time.
-    #[test]
+    #[rstest]
     fn the_last_row_of_each_time_of_the_book_ends_its_event() {
         let depths = parse_book(Bytes::from_static(GCZ26_BOOK), gcz26(), 2, 0).unwrap();
 
@@ -1823,7 +1823,7 @@ mod tests {
         assert_eq!(flags, [last, 0, last, last]);
     }
 
-    #[test]
+    #[rstest]
     fn a_book_price_finer_than_the_instrument_s_precision_is_refused() {
         let err = parse_book(Bytes::from_static(GCZ26_BOOK), gcz26(), 0, 0).unwrap_err();
 
@@ -1840,7 +1840,7 @@ mod tests {
     /// gives none, as Nautilus' Databento decoder gives none of an MBO
     /// record of no action (`decode_mbo_msg`). Its last row is N: the delta
     /// before it, of the same time, ends the event.
-    #[test]
+    #[rstest]
     fn an_orders_export_is_the_deltas_of_its_orders() {
         let deltas = parse_orders(Bytes::from_static(GCZ26_ORDERS), gcz26(), 2, 0).unwrap();
 
@@ -1964,7 +1964,7 @@ mod tests {
         assert!(err.to_string().contains(&format!("{action:?}")), "{err:#}");
     }
 
-    #[test]
+    #[rstest]
     fn an_order_price_finer_than_the_instrument_s_precision_is_refused() {
         let err = parse_orders(Bytes::from_static(GCZ26_ORDERS), gcz26(), 0, 0).unwrap_err();
 
@@ -1976,7 +1976,7 @@ mod tests {
     }
 
     /// A malformed input: a file of quotes, LSE's, read as a book.
-    #[test]
+    #[rstest]
     fn a_file_of_no_book_is_refused_naming_the_column_it_lacks() {
         let err = parse_book(Bytes::from_static(GCZ26_QUOTES), gcz26(), 2, 0).unwrap_err();
 
@@ -1987,7 +1987,7 @@ mod tests {
     /// are nullable) and no capture holds: built here, not captured. As
     /// Nautilus' Databento decoder gives no quote of an MBP-1 record with
     /// an undefined side (`decode_mbp1_msg`), the row gives none.
-    #[test]
+    #[rstest]
     fn a_quote_with_an_empty_side_gives_no_quote_tick() {
         let schema = Arc::new(Schema::new(vec![
             Field::new(

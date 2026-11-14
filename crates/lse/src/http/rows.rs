@@ -57,7 +57,7 @@ const DAY: SignedDuration = SignedDuration::from_hours(24);
 /// A source of LSE's rows that are not prices, and the series of it, as a
 /// data type names them (`LseRow::data_type`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RowSource {
+pub struct RowSource {
     source: String,
     symbol: String,
     call: Call,
@@ -135,12 +135,12 @@ impl Factor {
 
 /// What LSE holds of a source's rows known over a window.
 #[derive(Debug)]
-pub(crate) struct Fetched {
+pub struct Fetched {
     /// The rows known over the window, in the order they are known.
-    pub(crate) rows: Vec<LseRow>,
+    pub rows: Vec<LseRow>,
     /// Where the span LSE may not have loaded yet starts, if the window
     /// reaches into it: from there, LSE may hold rows it does not yet.
-    pub(crate) unloaded_from: Option<Timestamp>,
+    pub unloaded_from: Option<Timestamp>,
 }
 
 impl RowSource {
@@ -160,7 +160,7 @@ impl RowSource {
     /// of its period, not when it came out; for a reference collection the client has not classified,
     /// whose rows may be known at any time; for factors of a symbol naming
     /// no market.
-    pub(crate) fn of(source: &str, symbol: &str) -> anyhow::Result<Self> {
+    pub fn of(source: &str, symbol: &str) -> anyhow::Result<Self> {
         let call = match source {
             OPTIONS_CHAIN => bail!(
                 "LSE serves no history of its {OPTIONS_CHAIN}: /v3/options/chain answers the \
@@ -247,7 +247,7 @@ impl fmt::Display for RowSource {
 /// LSE's catalogue does not list; a file not read (see `parse_rows`); or a
 /// window from before the oldest of an instrument's dividends LSE cut to
 /// their newest.
-pub(crate) async fn fetch(
+pub async fn fetch(
     http: &LseHttpClient,
     source: &RowSource,
     start: Timestamp,

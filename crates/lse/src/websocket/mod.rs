@@ -4,10 +4,10 @@
 //! Globex's and Nasdaq TotalView's, sockets of a protocol of their own
 //! (`exchange`). Both clients reconnect and disconnect alike.
 
-pub(crate) mod client;
-pub(crate) mod exchange;
-pub(crate) mod messages;
-pub(crate) mod parse;
+pub mod client;
+pub mod exchange;
+pub mod messages;
+pub mod parse;
 
 use nautilus_common::live::dst::time::Duration;
 use nautilus_live::task::{TaskJoinOutcome, TaskSlot, finish_task};

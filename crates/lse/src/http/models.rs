@@ -38,20 +38,20 @@ const QUOTAS: &[&str] = &["allowance-exhausted", "rows-exhausted"];
 /// "Answers and refusals" and "Refusal codes"). LSE's codes are an open
 /// set, kept as they come.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub(crate) struct LseRefusal {
-    pub(crate) code: String,
-    pub(crate) message: String,
+pub struct LseRefusal {
+    pub code: String,
+    pub message: String,
     /// The cheapest tier on sale that serves the call, for a plan, a
     /// market or a level the key lacks.
     #[serde(default)]
-    pub(crate) required_plan: Option<RequiredPlan>,
+    pub required_plan: Option<RequiredPlan>,
 }
 
 /// A page of LSE's catalogue of a market's instruments (`/v3/pairs`), of
 /// which the listings are kept.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub(crate) struct LsePairs {
-    pub(crate) pairs: Vec<LsePair>,
+pub struct LsePairs {
+    pub pairs: Vec<LsePair>,
 }
 
 /// A listing in LSE's catalogue: its number, which always names one
@@ -61,12 +61,12 @@ pub(crate) struct LsePairs {
 /// the contracts delisted (LSE's docs, "The market: cme", and `test_data/`);
 /// some listings delisted have none (`BRKD` of `nasdaq`, captured).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub(crate) struct LsePair {
-    pub(crate) pair_id: u64,
-    pub(crate) symbol: String,
-    pub(crate) name: Option<String>,
-    pub(crate) listed_date: Option<Date>,
-    pub(crate) delisted_date: Option<Date>,
+pub struct LsePair {
+    pub pair_id: u64,
+    pub symbol: String,
+    pub name: Option<String>,
+    pub listed_date: Option<Date>,
+    pub delisted_date: Option<Date>,
 }
 
 impl fmt::Display for LsePair {
@@ -88,24 +88,24 @@ impl fmt::Display for LsePair {
 
 /// A plan LSE names in a refusal, of which its name is kept.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub(crate) struct RequiredPlan {
-    pub(crate) name: String,
+pub struct RequiredPlan {
+    pub name: String,
 }
 
 /// LSE's catalogue of its reference collections (`/v3/reference`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub(crate) struct ReferenceCatalogue {
-    pub(crate) datasets: Vec<ReferenceCollection>,
+pub struct ReferenceCatalogue {
+    pub datasets: Vec<ReferenceCollection>,
 }
 
 /// A reference collection, as LSE's catalogue lists it: its name, the
 /// column holding its rows' time, a date or a time, and the last of them
 /// LSE holds, if any (`last`: `2026-11-11`, `2026-11-12 23:29:00`).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub(crate) struct ReferenceCollection {
-    pub(crate) dataset: String,
-    pub(crate) time_column: String,
-    pub(crate) last: Option<String>,
+pub struct ReferenceCollection {
+    pub dataset: String,
+    pub time_column: String,
+    pub last: Option<String>,
 }
 
 impl ReferenceCollection {
@@ -117,7 +117,7 @@ impl ReferenceCollection {
     ///
     /// Returns an error naming the collection if `last` is neither a date
     /// nor a time.
-    pub(crate) fn last_key(&self) -> anyhow::Result<Option<Timestamp>> {
+    pub fn last_key(&self) -> anyhow::Result<Option<Timestamp>> {
         self.last
             .as_deref()
             .map(|last| {
@@ -139,22 +139,22 @@ impl ReferenceCollection {
 /// them, a split's day its `date`, a dividend's its `ex_date`. An
 /// instrument of a market of no dividends (`futures`) has none.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub(crate) struct LseFactors {
+pub struct LseFactors {
     #[serde(default)]
-    pub(crate) splits: Vec<Map<String, Value>>,
+    pub splits: Vec<Map<String, Value>>,
     #[serde(default)]
-    pub(crate) dividends: Option<LseDividends>,
+    pub dividends: Option<LseDividends>,
 }
 
 /// An instrument's dividends, newest first, their amounts in `unit` (`USD`,
 /// or `GBX`, pence), LSE giving the 500 newest alone of more, `truncated`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub(crate) struct LseDividends {
-    pub(crate) rows: Vec<Map<String, Value>>,
-    pub(crate) unit: Option<String>,
+pub struct LseDividends {
+    pub rows: Vec<Map<String, Value>>,
+    pub unit: Option<String>,
     #[serde(default)]
-    pub(crate) truncated: bool,
-    pub(crate) count: Option<u64>,
+    pub truncated: bool,
+    pub count: Option<u64>,
 }
 
 /// A UTC day.
@@ -166,7 +166,7 @@ const DAY: SignedDuration = SignedDuration::from_hours(24);
 /// `time_column`), or a column of its release. A row is never stamped
 /// before its values are all known, so that no reader sees one early.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Stamp {
+pub enum Stamp {
     /// At the end of its key, a date, 00:00 UTC of the next: a day's close,
     /// an ex-date or a report date.
     DateEnd,
@@ -266,7 +266,7 @@ const COLLECTIONS: &[(&str, Stamp)] = &[
 impl Stamp {
     /// When the rows of LSE's reference collection `dataset` are known, or
     /// `None` if it is none the client has classified.
-    pub(crate) fn of_collection(dataset: &str) -> Option<Self> {
+    pub fn of_collection(dataset: &str) -> Option<Self> {
         COLLECTIONS
             .iter()
             .find(|(name, _)| *name == dataset)
@@ -274,7 +274,7 @@ impl Stamp {
     }
 
     /// Whether its key is a date, not a time.
-    pub(crate) fn keyed_by_date(self) -> bool {
+    pub fn keyed_by_date(self) -> bool {
         !matches!(self, Self::Close(_) | Self::Key)
     }
 
@@ -282,7 +282,7 @@ impl Stamp {
     /// date's end, at its date's time in its zone, at its interval's close
     /// or at its key. `None` for a row known at a time of another column,
     /// which may be any time after its key.
-    pub(crate) fn known(self, key: Timestamp) -> Option<Timestamp> {
+    pub fn known(self, key: Timestamp) -> Option<Timestamp> {
         match self {
             Self::DateEnd => Some(key + DAY),
             Self::DateAt(time, zone) => Some(
@@ -304,7 +304,7 @@ impl Stamp {
     /// from the key of its start to the key of its end, a date's at its
     /// start. `None` for a row known at a time of another column, of which
     /// the rows known over a window may be keyed any time before it.
-    pub(crate) fn key(self, at: Timestamp) -> Option<Timestamp> {
+    pub fn key(self, at: Timestamp) -> Option<Timestamp> {
         match self {
             Self::DateEnd => Some(at - DAY),
             Self::DateAt(time, zone) => {
@@ -338,19 +338,19 @@ fn time_zone(name: &str) -> TimeZone {
 
 impl LseRefusal {
     /// Whether the refusal says LSE holds no row of the selection.
-    pub(crate) fn is_no_rows(&self) -> bool {
+    pub fn is_no_rows(&self) -> bool {
         self.code == DATE_NOT_TRADING
             || (self.code == DATA_UNAVAILABLE && self.message.starts_with(EMPTY_SELECTION))
     }
 
     /// Whether the refusal says the export selects too many rows.
-    pub(crate) fn is_too_wide(&self) -> bool {
+    pub fn is_too_wide(&self) -> bool {
         self.code == TOO_WIDE
     }
 
     /// Whether the refusal is a quota of the free plan, past which every
     /// export is refused until it resets.
-    pub(crate) fn is_quota(&self) -> bool {
+    pub fn is_quota(&self) -> bool {
         QUOTAS.contains(&self.code.as_str())
     }
 }
@@ -397,7 +397,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_refusal_reads_as_its_code_message_and_required_plan() {
         assert_eq!(
             refusal(PLAN_REQUIRED).to_string(),
@@ -405,7 +405,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn no_stored_row_and_no_session_are_no_rows() {
         assert!(refusal(DATA_UNAVAILABLE).is_no_rows());
         assert!(refusal(DATA_UNAVAILABLE_TODAY).is_no_rows());
@@ -581,7 +581,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn the_rows_a_day_are_a_quota_and_a_plan_is_not() {
         assert!(refusal(ROWS_EXHAUSTED).is_quota());
         assert!(refusal(ALLOWANCE_EXHAUSTED).is_quota());

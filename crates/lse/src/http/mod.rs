@@ -6,11 +6,11 @@
 //! file into Nautilus data (`parse`), and the rows of LSE's sources that are
 //! not prices over any window (`rows`).
 
-pub(crate) mod client;
-pub(crate) mod error;
-pub(crate) mod export;
-pub(crate) mod listing;
-pub(crate) mod models;
-pub(crate) mod parse;
-pub(crate) mod query;
-pub(crate) mod rows;
+pub mod client;
+pub mod error;
+pub mod export;
+pub mod listing;
+pub mod models;
+pub mod parse;
+pub mod query;
+pub mod rows;

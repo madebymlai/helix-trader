@@ -25,7 +25,7 @@ use crate::http::parse::{TradeIds, decimal};
 ///
 /// Returns an error if the tick has no bid or ask, if either has more
 /// decimals than `price_precision`, or if its time is no timestamp.
-pub(crate) fn parse_quote(
+pub fn parse_quote(
     tick: &LseTick,
     instrument_id: InstrumentId,
     price_precision: u8,
@@ -62,7 +62,7 @@ pub(crate) fn parse_quote(
 /// Returns an error if the tick has no price, no volume or a volume of 0,
 /// a quote's, if its price or volume has more decimals than its precision,
 /// or if its time is no timestamp.
-pub(crate) fn parse_trade(
+pub fn parse_trade(
     tick: &LseTick,
     instrument_id: InstrumentId,
     price_precision: u8,

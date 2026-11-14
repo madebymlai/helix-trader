@@ -11,7 +11,7 @@ use serde_json::{Map, Value};
 /// A frame the client sends, tagged by its `action`.
 #[derive(Debug, Serialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
-pub(crate) enum LseWsAction<'a> {
+pub enum LseWsAction<'a> {
     /// The key, answering the socket's welcome.
     Auth { api_key: &'a str },
     /// The ticks of a symbol, from now on.
@@ -29,7 +29,7 @@ pub(crate) enum LseWsAction<'a> {
 
 impl LseWsAction<'_> {
     /// The frame's text.
-    pub(crate) fn to_json(&self) -> String {
+    pub fn to_json(&self) -> String {
         serde_json::to_string(self).expect("an action serializes")
     }
 }
@@ -37,7 +37,7 @@ impl LseWsAction<'_> {
 /// A frame LSE sends, tagged by its `type`.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum LseWsFrame {
+pub enum LseWsFrame {
     /// The socket's first frame, before the key.
     Welcome,
     /// The key accepted: what the socket streams to it.
@@ -69,18 +69,18 @@ pub(crate) enum LseWsFrame {
 
 /// What the socket streams to the key it accepted.
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct LseWsAuthenticated {
+pub struct LseWsAuthenticated {
     /// The symbols the socket streams, as it spells them. LSE accepts a
     /// subscription to a symbol it does not list, and sends nothing.
-    pub(crate) symbols: Vec<LseWsListed>,
+    pub symbols: Vec<LseWsListed>,
     /// The symbols one connection of the key may stream at once.
-    pub(crate) max_subscriptions: Option<usize>,
+    pub max_subscriptions: Option<usize>,
 }
 
 /// A symbol the socket lists.
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct LseWsListed {
-    pub(crate) symbol: String,
+pub struct LseWsListed {
+    pub symbol: String,
 }
 
 /// A tick: its symbol as the socket spells it, LSE's time of it, its
@@ -90,24 +90,24 @@ pub(crate) struct LseWsListed {
 /// its bid (LSE's captures). An option contract's is read as a trade, of
 /// its price and volume, the US options feed carrying trades alone.
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct LseTick {
-    pub(crate) symbol: String,
+pub struct LseTick {
+    pub symbol: String,
     /// The source time in UTC, in a form that differs by feed.
-    pub(crate) ts: String,
-    pub(crate) price: Option<f64>,
-    pub(crate) bid: Option<f64>,
-    pub(crate) ask: Option<f64>,
-    pub(crate) volume: Option<f64>,
+    pub ts: String,
+    pub price: Option<f64>,
+    pub bid: Option<f64>,
+    pub ask: Option<f64>,
+    pub volume: Option<f64>,
 }
 
 /// LSE's refusal: its code, its message, and what else it gives, such as
 /// `max_connections`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-pub(crate) struct LseWsRefusal {
-    pub(crate) code: String,
-    pub(crate) message: String,
+pub struct LseWsRefusal {
+    pub code: String,
+    pub message: String,
     #[serde(flatten)]
-    pub(crate) details: Map<String, Value>,
+    pub details: Map<String, Value>,
 }
 
 impl fmt::Display for LseWsRefusal {

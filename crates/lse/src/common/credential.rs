@@ -13,7 +13,7 @@ use super::consts::{LSE_API_KEY, LSE_CME_API_KEY, LSE_NASDAQ_API_KEY};
 /// `product`, `global` for an LSE key, else the exchange), so each market
 /// is asked with its product's key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum LseProduct {
+pub enum LseProduct {
     /// LSE's own markets, the derived ones and US options, an included
     /// market: the LSE key, `LSE_API_KEY`.
     Global,
@@ -26,10 +26,10 @@ pub(crate) enum LseProduct {
 
 impl LseProduct {
     /// Every product, in the order a missing key's error names them.
-    pub(crate) const ALL: [Self; 3] = [Self::Global, Self::Cme, Self::Nasdaq];
+    pub const ALL: [Self; 3] = [Self::Global, Self::Cme, Self::Nasdaq];
 
     /// The variable holding the product's key.
-    pub(crate) const fn api_key_var(self) -> &'static str {
+    pub const fn api_key_var(self) -> &'static str {
         match self {
             Self::Global => LSE_API_KEY,
             Self::Cme => LSE_CME_API_KEY,
@@ -50,7 +50,7 @@ impl fmt::Display for LseProduct {
 
 /// An LSE key. Its `Debug` shows `<redacted>`, the key's own.
 #[derive(Debug, Clone)]
-pub(crate) struct LseCredential {
+pub struct LseCredential {
     api_key: SecretString,
 }
 
@@ -58,7 +58,7 @@ impl LseCredential {
     /// The key `api_key` of `product`, or, if none is given, the one `var`
     /// reads from the product's variable; none if neither holds one, an
     /// empty key being none.
-    pub(crate) fn resolve(
+    pub fn resolve(
         product: LseProduct,
         api_key: Option<SecretString>,
         var: impl Fn(&str) -> Option<String>,
@@ -70,7 +70,7 @@ impl LseCredential {
     }
 
     /// The key, for the header that carries it.
-    pub(crate) fn api_key(&self) -> &str {
+    pub fn api_key(&self) -> &str {
         self.api_key.expose_secret()
     }
 }

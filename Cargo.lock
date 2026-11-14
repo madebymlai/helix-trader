@@ -3044,6 +3044,7 @@ dependencies = [
  "dotenvy",
  "jiff",
  "log",
+ "lse",
  "nautilus-common",
  "nautilus-core",
  "nautilus-databento",
