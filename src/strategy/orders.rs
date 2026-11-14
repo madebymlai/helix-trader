@@ -60,7 +60,6 @@ use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::{DataActor, DataActorNative},
     cache::CacheApi,
-    component::ComponentAccessError,
     timer::TimeEvent,
 };
 use nautilus_model::{
@@ -220,9 +219,9 @@ impl Trade {
     /// other processes, which this cache does not hold anyway, one process
     /// running one strategy.
     ///
-    /// It sends nothing, and logs why, if the account cannot be read, holds
-    /// no equity in the P&L currency (equity is not converted), or if its
-    /// size rounds down to none. Nautilus' risk engine judges what it sends: a
+    /// It sends nothing, and logs why, if the account holds no equity in the
+    /// P&L currency (equity is not converted), or if its size rounds down
+    /// to none. Nautilus' risk engine judges what it sends: a
     /// quantity below the instrument's minimum, or a margin beyond the
     /// free balance, is denied.
     ///
@@ -240,17 +239,7 @@ impl Trade {
         let venue = instrument_id.venue;
         let instrument = linear(strategy, instrument_id)?;
         let currency = instrument.cost_currency();
-        let account = match routed_account(strategy, venue) {
-            Ok(account) => account,
-            Err(e) => {
-                log::error!(
-                    "not sending the {} of {instrument_id} at a stake of {stake}: its account \
-                     cannot be read: {e}",
-                    self.side
-                );
-                return Ok(());
-            }
-        };
+        let account = routed_account(strategy, venue);
         let held = strategy.portfolio().equity(&venue, account.as_ref());
         let Some(&equity) = held.get(&currency) else {
             let held: Vec<String> = held.values().map(ToString::to_string).collect();
@@ -497,28 +486,24 @@ impl Trade {
 
 /// The account an order on `venue` is checked against, as Nautilus' risk
 /// engine selects it (`docs/concepts/execution/index.md`, "Account
-/// selection", rules 4 and 5): the account the cache registers for the
-/// execution client the live node routes the venue to
-/// (`venues::exec_client_id`), or, with none registered for it, none here,
-/// the account issued under `venue` (`Portfolio::equity` without one), as
-/// in a backtest, whose simulated venue is the instrument's own. IB's
-/// account is issued under IB, not under the exchanges its instruments
-/// name. Read from the native cache (`try_cache_ref`): the strategy's cache
-/// facade holds no client's account.
-///
-/// # Errors
-///
-/// Returns Nautilus' error if the cache cannot be read: mutably borrowed
-/// or not registered.
-fn routed_account<S>(strategy: &S, venue: Venue) -> Result<Option<AccountId>, ComponentAccessError>
+/// selection", rules 4 and 5; `RiskEngine::order_account_id`): the account
+/// the cache registers for the execution client routed for the venue, else
+/// for the default client (`Cache::client_id_for_venue`), the routes the
+/// node registered, a live node's by its clients' `RoutingConfig` (IB the
+/// default, its account issued under IB, not under the exchanges its
+/// instruments name), a backtest's each simulated venue to its own client;
+/// or, with none, none here, the account issued under `venue`
+/// (`Portfolio::equity` without one). Read from the native cache
+/// (`cache_ref`): the strategy's cache facade holds no client's account.
+fn routed_account<S>(strategy: &S, venue: Venue) -> Option<AccountId>
 where
     S: DataActorNative,
 {
-    let client = venues::exec_client_id(venue);
-    Ok(strategy
-        .try_cache_ref()?
-        .account_id_for_client(&client)
-        .copied())
+    let cache = strategy.cache_ref();
+    cache
+        .client_id_for_venue(&venue)
+        .and_then(|client| cache.account_id_for_client(client))
+        .copied()
 }
 
 /// The instrument `instrument_id` from `strategy`'s cache.
@@ -569,17 +554,19 @@ where
 
 /// Checks that `instrument` is linear: Nautilus' fixed-risk sizer
 /// (`calculate_fixed_risk_position_size`) reads a trade's P&L as a
-/// multiple of a distance in price, which an inverse instrument's is not.
+/// multiple of a distance in price, which an inverse instrument's is not,
+/// nor are the worths of distances on it (`worth`), a model target's unit
+/// and payoff among them.
 ///
 /// # Errors
 ///
 /// Returns an error if it is inverse.
-fn ensure_linear(instrument: &InstrumentAny) -> anyhow::Result<()> {
+pub(crate) fn ensure_linear(instrument: &InstrumentAny) -> anyhow::Result<()> {
     ensure!(
         !instrument.is_inverse(),
-        "{} is inverse: a trade on it cannot be sized at a stake, Nautilus' fixed-risk sizer \
-         reading its P&L as a multiple of a distance in price, which an inverse instrument's \
-         is not",
+        "{} is inverse: a trade on it can neither be sized at a stake nor have its R in money, \
+         a model target's unit, worked out, Nautilus' fixed-risk sizer reading its P&L as a \
+         multiple of a distance in price, which an inverse instrument's is not",
         instrument.id()
     );
     Ok(())

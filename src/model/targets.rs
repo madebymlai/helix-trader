@@ -1254,18 +1254,18 @@ impl TargetSetter {
     }
 
     /// Checks that the target's payoff on `instrument` has a worth: the
-    /// instrument linear (`ensure_linear`), the commission charged in its
-    /// P&L currency, its cost currency, which Nautilus nets a position's
-    /// realised P&L of alone, and the balance its trades are sized on in
-    /// it: a commission or a balance in another currency is not converted
-    /// (Nautilus' sizer reads the equity as given).
+    /// instrument linear (`orders::ensure_linear`), the commission charged
+    /// in its P&L currency, its cost currency, which Nautilus nets a
+    /// position's realised P&L of alone, and the balance its trades are
+    /// sized on in it: a commission or a balance in another currency is not
+    /// converted (Nautilus' sizer reads the equity as given).
     ///
     /// # Errors
     ///
     /// Returns an error if `instrument` is inverse, or the commission is
     /// charged or the balance held in another currency.
     fn ensure_payable(&self, instrument: &InstrumentAny) -> anyhow::Result<()> {
-        ensure_linear(instrument)?;
+        orders::ensure_linear(instrument)?;
         let (charged, pnl) = (
             self.commission.currency(instrument),
             instrument.cost_currency(),
@@ -1295,23 +1295,6 @@ impl Debug for TargetSetter {
             .field("spec", &self.spec)
             .finish_non_exhaustive()
     }
-}
-
-/// Checks that a target's unit and payoff on `instrument` have a worth
-/// (`orders::worth`): an inverse instrument's P&L is no multiple of a
-/// distance, as Nautilus' notional value on one divides by its price.
-///
-/// # Errors
-///
-/// Returns an error if `instrument` is inverse.
-fn ensure_linear(instrument: &InstrumentAny) -> anyhow::Result<()> {
-    ensure!(
-        !instrument.is_inverse(),
-        "{} is inverse: a target's unit and payoff on it, the worth of a stop's distance, an \
-         ATR's or a spread's, are no multiple of a distance in price",
-        instrument.id()
-    );
-    Ok(())
 }
 
 /// Nautilus' side of the ATR: it reads the bars of its bar type alone.

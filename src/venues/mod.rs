@@ -6,11 +6,10 @@
 //! live runner for its node's clients (`live_clients`), a backtest for how a
 //! venue keeps positions (`oms_type`, its broker's answer), a trade whether
 //! its orders may be reduce-only and post-only
-//! (`takes_reduce_only_and_post_only`, its broker's answer) and which
-//! execution client's account it is sized on (`exec_client_id`); venue
-//! code checks its own instruments against the table. The settings each
-//! command takes of the venues are composed here, `LiveVenueArgs` for live
-//! and `HistoryVenueArgs` for fill-catalog, which the commands flatten.
+//! (`takes_reduce_only_and_post_only`, its broker's answer); venue code checks
+//! its own instruments against the table. The settings each command takes of
+//! the venues are composed here, `LiveVenueArgs` for live and
+//! `HistoryVenueArgs` for fill-catalog, which the commands flatten.
 //!
 //! The cTrader brokers are one kind (`CTraderBroker`), which both dispatches
 //! loop over: each one's module names its venue and account, and its row of
@@ -38,15 +37,13 @@ use ctrader::{
     CTraderExecutionClientConfig, CTraderExecutionClientFactory,
 };
 use jiff::Timestamp;
-use nautilus_common::factories::ExecutionClientFactory;
-use nautilus_interactive_brokers::factories::InteractiveBrokersExecutionClientFactory;
 use nautilus_live::config::RoutingConfig;
 use nautilus_model::{
     data::NautilusDataType,
     enums::OmsType,
-    identifiers::{ClientId, InstrumentId, Venue},
+    identifiers::{InstrumentId, Venue},
 };
-use nautilus_okx::{common::consts::OKX_VENUE, factories::OKXExecutionClientFactory};
+use nautilus_okx::common::consts::OKX_VENUE;
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use rust_decimal::Decimal;
 
@@ -173,20 +170,6 @@ impl LiveBroker {
             Self::Ib => false,
         }
     }
-
-    /// The id the live node registers the broker's execution client under,
-    /// its factory's name, as `live_clients` hands the node its factories
-    /// unnamed (`LiveNodeBuilder::add_exec_client_with_routing`): a cTrader
-    /// broker's is its venue (`CTraderExecutionClientConfig::new`). Each
-    /// broker's is pinned by a test creating its client.
-    #[must_use]
-    pub(crate) fn client_id(self) -> ClientId {
-        match self {
-            Self::Okx => ClientId::new(OKXExecutionClientFactory::new().name()),
-            Self::CTrader(broker) => ClientId::new(broker.venue),
-            Self::Ib => ClientId::new(InteractiveBrokersExecutionClientFactory::new().name()),
-        }
-    }
 }
 
 /// The routing table's row of `venue`: its history source and its live
@@ -225,16 +208,6 @@ pub fn oms_type(venue: Venue) -> OmsType {
 #[must_use]
 pub fn takes_reduce_only_and_post_only(venue: Venue) -> bool {
     row(venue).1.takes_reduce_only_and_post_only()
-}
-
-/// The id of the execution client the live node routes the orders of
-/// `venue` to: its live broker's (`LiveBroker::client_id`), so every venue
-/// without a row of its own IB's. The cache registers the account of each
-/// client the node runs under its id, which Nautilus' risk engine checks
-/// the venue's orders against.
-#[must_use]
-pub(crate) fn exec_client_id(venue: Venue) -> ClientId {
-    row(venue).1.client_id()
 }
 
 /// The venues' settings of a live node, the live command's flags, each
@@ -500,7 +473,6 @@ mod tests {
     use jiff::SignedDuration;
     use nautilus_common::{
         cache::Cache,
-        clients::ExecutionClient,
         clock::VirtualClock,
         live::runner::{replace_data_event_sender, replace_exec_event_sender},
     };
@@ -764,10 +736,9 @@ mod tests {
         );
     }
 
-    /// The execution client of `clients`, created as the node creates it,
-    /// under its factory's name, from the config the node gets, connecting
-    /// to nothing.
-    pub(in crate::venues) fn created(clients: Clients) -> Box<dyn ExecutionClient> {
+    /// How the execution client of `clients` keeps positions, created as the
+    /// node creates it, from the config the node gets, connecting to nothing.
+    pub(in crate::venues) fn created_oms_type(clients: Clients) -> OmsType {
         let (exec_tx, _exec_events) = tokio::sync::mpsc::unbounded_channel();
         replace_exec_event_sender(exec_tx);
         let (factory, config) = clients.exec.unwrap();
@@ -781,12 +752,7 @@ mod tests {
             )
             .unwrap();
         assert!(!client.is_connected());
-        client
-    }
-
-    /// How the execution client of `clients` keeps positions (`created`).
-    pub(in crate::venues) fn created_oms_type(clients: Clients) -> OmsType {
-        created(clients).oms_type()
+        client.oms_type()
     }
 
     /// Against the adapter's client: the broker's answer is our copy of it.
@@ -802,19 +768,6 @@ mod tests {
                 LiveBroker::CTrader(broker).oms_type(),
                 "{broker:?}"
             );
-        }
-    }
-
-    /// Against the adapter's client: the node registers it under the id the
-    /// routing table gives the broker.
-    #[test]
-    fn each_ctrader_broker_s_execution_client_is_registered_under_the_brokers_client_id() {
-        for &broker in CTRADER_BROKERS {
-            let id = InstrumentId::from(format!("XAUUSD.{}", broker.venue).as_str());
-
-            let client = created(ctrader_clients(demo_connection(broker), vec![id]));
-
-            assert_eq!(client.client_id(), exec_client_id(id.venue), "{broker:?}");
         }
     }
 

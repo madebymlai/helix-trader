@@ -131,9 +131,10 @@ pub fn features() -> Rc<FeatureSet> {
     last_mid(InstrumentId::from(AUD)).build().unwrap()
 }
 
-/// Hourly decisions on a time-only target of 1 hour of 1000 AUD/USD, its
-/// unit the worth of its ATR of one hourly bar of the mids, the long traded
-/// from an expected net P&L of nought, the baseline learner.
+/// Hourly decisions on a time-only target of 1 hour of AUD/USD at a risk
+/// of 0.5%, its unit the worth of its ATR of one hourly bar of the mids on
+/// its size at the reference stake, the long traded from an expected net R
+/// of nought, the baseline learner.
 pub fn config() -> ModelConfig {
     ModelConfig::builder()
         .decision(DecisionRule::Every(SignedDuration::from_hours(1)))

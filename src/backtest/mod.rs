@@ -24,7 +24,7 @@ use nautilus_model::{
     data::{BarType, NautilusDataType},
     enums::{ContinuousFutureAdjustmentType, OmsType},
     identifiers::{InstrumentId, Venue},
-    instruments::Instrument,
+    instruments::{Instrument, InstrumentAny},
     types::Money,
 };
 use nautilus_persistence::{
@@ -123,17 +123,18 @@ impl Backtest {
     }
 
     /// Refuses the run unless its balance is in the P&L currency of each
-    /// instrument of `traded`, those the strategy trades
-    /// (`refuse_balance`): a trade sent at a stake is sized on the equity in
+    /// instrument of `traded`, those the strategy trades, as its catalog
+    /// defines them (`traded_instruments`, `refuse_balance`): a trade sent
+    /// at a stake is sized on the equity in
     /// its P&L currency alone, which is not converted
     /// (`strategy::orders::Trade::send`), so on a balance in another it
     /// would send nothing.
     ///
     /// # Errors
     ///
-    /// As `refuse_balance`.
+    /// Returns an error as `traded_instruments` and `refuse_balance` do.
     pub fn refuse_balance(&self, traded: &[InstrumentId]) -> anyhow::Result<()> {
-        refuse_balance(&self.catalog, self.balance, traded)
+        refuse_balance(self.balance, &traded_instruments(&self.catalog, traded)?)
     }
 
     /// The continuous bars of the bar types on roots over the run,
@@ -269,40 +270,59 @@ impl Backtest {
     }
 }
 
-/// Refuses `balance` unless it is in the P&L currency
-/// (`Instrument::cost_currency`) of each instrument of `traded`, as the
-/// catalog at `catalog` defines them: the equity a trade is sized on, by
-/// Nautilus' fixed-risk sizer, which reads it as given, is not converted.
+/// The instruments of `traded`, those a strategy trades, as the catalog at
+/// `catalog` defines them. The catalog is opened through Nautilus'
+/// `ParquetDataCatalog::from_uri`, whose error a missing directory is,
+/// where `ParquetDataCatalog::new` panics.
 ///
 /// # Errors
 ///
-/// Returns an error if an instrument of `traded` is not in the catalog or
-/// its P&L is in another currency than the balance.
-pub fn refuse_balance(
+/// Returns an error if the catalog cannot be opened or read, or an
+/// instrument of `traded` is not in it.
+pub fn traded_instruments(
     catalog: &Path,
-    balance: Money,
     traded: &[InstrumentId],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<InstrumentAny>> {
     let ids: Vec<String> = traded.iter().map(ToString::to_string).collect();
-    let defined = ParquetDataCatalog::new(catalog, None, None, None, None)
+    let defined = ParquetDataCatalog::from_uri(&catalog.to_string_lossy(), None, None, None, None)
+        .with_context(|| format!("opening the catalog {}", catalog.display()))?
         .instruments(Some(&ids), None, None)
         .with_context(|| format!("reading {} from the catalog", ids.join(", ")))?;
-    for &id in traded {
-        let instrument = defined
-            .iter()
-            .find(|instrument| instrument.id() == id)
-            .with_context(|| {
-                format!(
-                    "the traded instrument {id} is not in the catalog {}",
-                    catalog.display()
-                )
-            })?;
+    traded
+        .iter()
+        .map(|&id| {
+            defined
+                .iter()
+                .find(|instrument| instrument.id() == id)
+                .cloned()
+                .with_context(|| {
+                    format!(
+                        "the traded instrument {id} is not in the catalog {}",
+                        catalog.display()
+                    )
+                })
+        })
+        .collect()
+}
+
+/// Refuses `balance` unless it is in the P&L currency
+/// (`Instrument::cost_currency`) of each instrument of `traded`: the
+/// equity a trade is sized on, by Nautilus' fixed-risk sizer, which reads
+/// it as given, is not converted.
+///
+/// # Errors
+///
+/// Returns an error if the P&L of an instrument of `traded` is in another
+/// currency than the balance.
+pub fn refuse_balance(balance: Money, traded: &[InstrumentAny]) -> anyhow::Result<()> {
+    for instrument in traded {
         let pnl = instrument.cost_currency();
         ensure!(
             pnl == balance.currency,
-            "the balance {balance} is in {}, the P&L of {id}, which the strategy trades, in \
+            "the balance {balance} is in {}, the P&L of {}, which the strategy trades, in \
              {pnl}: a trade is sized on the equity in its P&L currency, which is not converted",
-            balance.currency
+            balance.currency,
+            instrument.id()
         );
     }
     Ok(())

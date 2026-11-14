@@ -593,9 +593,10 @@ fn a_trade_without_equity_in_its_pnl_currency_sends_nothing_and_logs_why() {
 
 /// IB's account is issued under IB, not under IDEALPRO, the venue of the
 /// AUD/USD it trades, and the cache registers it for IB's execution client,
-/// the one the live node routes IDEALPRO's orders to, as Nautilus' risk
-/// engine picks an order's account: the trade is sized on its 200,000 USD,
-/// 0.5% of it, 1,000 USD, over one R of 0.00500, 200,000 AUD/USD.
+/// the default client the live node routes IDEALPRO's orders to, as
+/// Nautilus' risk engine picks an order's account: the trade is sized on
+/// its 200,000 USD, 0.5% of it, 1,000 USD, over one R of 0.00500, 200,000
+/// AUD/USD.
 #[test]
 fn a_trade_is_sized_on_the_account_of_the_client_its_venue_routes_to() {
     let cache = Rc::new(RefCell::new(Cache::default()));
@@ -609,6 +610,7 @@ fn a_trade_is_sized_on_the_account_of_the_client_its_venue_routes_to() {
             .add_account(margin_account(account, "200000 USD"))
             .unwrap();
         cache.add_client_account(ClientId::from("IB"), account);
+        cache.set_default_client(ClientId::from("IB"));
     }
     let (mut probe, _) = registered_on(&cache, STRATEGY, NOW);
     let trade = Trade {
