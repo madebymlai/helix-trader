@@ -17,8 +17,8 @@ lse-data's docs/ is copied as its main branch holds it, file for file.
 A page or a file added is copied, and the copy of one removed is deleted.
 Everything is read before any copy is written or deleted.
 
-Usage: python3 crates/lse/upstream/fetch.py
-Then `git diff crates/lse/upstream/` shows what LSE changed since the copies
+Usage: python3 crates/lse/docs-snapshot/fetch.py
+Then `git diff crates/lse/docs-snapshot/` shows what LSE changed since the copies
 committed last (see the crate's README, "LSE's documentation").
 """
 import json
