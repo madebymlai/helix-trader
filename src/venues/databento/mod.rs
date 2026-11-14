@@ -5,12 +5,13 @@
 //! (`DatabentoDataClient`), whose answers the data engine writes back to
 //! the catalog, each contract under its own id; their history is LSE's
 //! (see `lse`). What stays here is what Nautilus' client does not do: each
-//! dataset's end, checked before the node starts. See `README.md`.
+//! definition asked within its dataset's end, which Databento refuses a
+//! request past, read before the node starts. See `README.md`.
 
 use std::{collections::BTreeMap, path::PathBuf};
 
 use anyhow::{Context, ensure};
-use jiff::Timestamp;
+use jiff::{SignedDuration, Timestamp, tz::TimeZone};
 use nautilus_core::time::get_atomic_clock_realtime;
 use nautilus_databento::{
     common::Credential,
@@ -89,20 +90,23 @@ impl DatabentoHistory {
         })
     }
 
-    /// Checks `requests` (see `catalog::missing`), definitions of `GLBX`,
-    /// `XNAS` and `OPRA` instruments, against the end of the dataset of
-    /// each one's venue, the one Nautilus' client asks (`GLBX.MDP3`,
-    /// `XNAS.ITCH`, `OPRA.PILLAR`), before any is asked for.
+    /// `requests` (see `catalog::missing`), definitions of `GLBX`, `XNAS`
+    /// and `OPRA` instruments, each within the data of the dataset of its
+    /// venue, the one Nautilus' client asks (`GLBX.MDP3`, `XNAS.ITCH`,
+    /// `OPRA.PILLAR`), whose end is read once a dataset before any is asked
+    /// for: Databento refuses a request past it, which a fill ending today
+    /// makes (see `within`).
     ///
     /// # Errors
     ///
     /// Returns an error if a request is not a definition of an instrument
     /// Databento defines in its row of the routing table (before any
-    /// request), if one ends at or past the data its dataset has (a
-    /// request over it would fail), or if a metadata request fails.
-    pub async fn check(&self, requests: &[FillRequest]) -> anyhow::Result<()> {
-        // The latest end asked of each dataset.
-        let mut ends: BTreeMap<String, Timestamp> = BTreeMap::new();
+    /// request), or if a metadata request fails.
+    pub async fn within_datasets(
+        &self,
+        requests: &[FillRequest],
+    ) -> anyhow::Result<Vec<FillRequest>> {
+        let mut datasets = Vec::new();
         for request in requests {
             let venue = request.instrument_id.venue;
             ensure!(
@@ -115,18 +119,28 @@ impl DatabentoHistory {
                 .datasets
                 .get_dataset_for_venue(&venue)
                 .with_context(|| format!("Databento has no dataset of {venue}"))?;
-            let end = ends.entry(dataset.to_string()).or_insert(request.to);
-            *end = (*end).max(request.to);
+            datasets.push(dataset.to_string());
         }
-        for (dataset, end) in ends {
-            let available = self
-                .metadata
-                .get_dataset_range(&dataset)
-                .await
-                .with_context(|| format!("requesting the range of {dataset}"))?;
-            ensure_available(&dataset, end, end_of(&dataset, &available)?)?;
+        // The end of each dataset, read once.
+        let mut ends: BTreeMap<String, Timestamp> = BTreeMap::new();
+        let mut within_ends = Vec::new();
+        for (request, dataset) in requests.iter().zip(datasets) {
+            let end = match ends.get(&dataset) {
+                Some(&end) => end,
+                None => {
+                    let available = self
+                        .metadata
+                        .get_dataset_range(&dataset)
+                        .await
+                        .with_context(|| format!("requesting the range of {dataset}"))?;
+                    let end = end_of(&dataset, &available)?;
+                    ends.insert(dataset, end);
+                    end
+                }
+            };
+            within_ends.push(within(*request, end));
         }
-        Ok(())
+        Ok(within_ends)
     }
 
     /// The node's data client: Nautilus' Databento client, on no venue, so
@@ -171,14 +185,35 @@ fn end_of(dataset: &str, range: &DatasetRange) -> anyhow::Result<Timestamp> {
         .with_context(|| format!("reading the end of {dataset}, {}", range.end))
 }
 
-/// Refuses an `end` Databento has no data of `dataset` up to yet: a
-/// request over it would fail.
-fn ensure_available(dataset: &str, end: Timestamp, available_end: Timestamp) -> anyhow::Result<()> {
-    ensure!(
-        end < available_end,
-        "{dataset} has data up to {available_end} only, not up to {end}"
-    );
-    Ok(())
+/// `request`, a definition's, within its dataset's data, up to
+/// `available_end`, exclusive: unchanged if it ends before; else asked up
+/// to it, holding at least the last whole UTC day before it. Databento's
+/// historical API gives a snapshot of every definition active at each UTC
+/// midnight, Monday to Friday, for its publishers that do not send them
+/// daily, so that "any request for definitions for a 24-hour period
+/// beginning at UTC midnight is guaranteed to include definitions for all
+/// instruments active during that time period" (Databento's docs,
+/// "Instrument definitions", "Snapshots"). A definition holds over its
+/// contract's life, so one asked before the window's end defines the
+/// contract over all of it.
+fn within(request: FillRequest, available_end: Timestamp) -> FillRequest {
+    if request.to < available_end {
+        return request;
+    }
+    // The window is closed, which Nautilus' client asks up to an instant
+    // past its end.
+    let to = available_end - SignedDuration::from_nanos(1);
+    let last_day = available_end
+        .to_zoned(TimeZone::UTC)
+        .start_of_day()
+        .and_then(|midnight| midnight.yesterday())
+        .expect("a dataset's days are within jiff's range")
+        .timestamp();
+    FillRequest {
+        from: request.from.min(last_day),
+        to,
+        ..request
+    }
 }
 
 #[cfg(test)]
@@ -209,15 +244,52 @@ mod tests {
         (dir, catalog)
     }
 
+    fn definition(from: &str, to: &str) -> FillRequest {
+        FillRequest {
+            data: FillData::Instrument,
+            instrument_id: InstrumentId::from("GCZ26.GLBX"),
+            from: ts(from),
+            to: ts(to),
+        }
+    }
+
+    /// GLBX.MDP3's end as captured on 13 November 2026: a window before it
+    /// is asked as it is; one reaching past it is asked up to it, from the
+    /// window's start if it holds the last whole UTC day before the end, 12
+    /// November, Databento's day of every definition active, else from
+    /// that day's midnight; one starting past the end too is asked so.
     #[test]
-    fn an_end_databento_has_no_data_up_to_is_refused() {
-        let monday = ts("2026-10-26T00:00:00Z");
-        let before = monday - SignedDuration::from_nanos(1);
-        assert!(ensure_available("GLBX.MDP3", before, monday).is_ok());
-        let err = ensure_available("GLBX.MDP3", monday, monday)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("2026-10-26"), "{err}");
+    fn a_definition_is_asked_within_its_dataset_s_end() {
+        let end = ts("2026-11-13T09:31:40.093383Z");
+        let up_to_end = "2026-11-13T09:31:40.093382999Z";
+        for ((from, to), (within_from, within_to)) in [
+            (
+                ("2026-11-12T00:00:00Z", "2026-11-12T23:59:59.999999999Z"),
+                ("2026-11-12T00:00:00Z", "2026-11-12T23:59:59.999999999Z"),
+            ),
+            (
+                ("2026-11-12T00:00:00Z", "2026-11-13T23:59:59.999999999Z"),
+                ("2026-11-12T00:00:00Z", up_to_end),
+            ),
+            (
+                ("2026-11-12T12:00:00Z", "2026-11-13T23:59:59.999999999Z"),
+                ("2026-11-12T00:00:00Z", up_to_end),
+            ),
+            (
+                ("2026-11-13T09:00:00Z", "2026-11-13T09:59:59.999999999Z"),
+                ("2026-11-12T00:00:00Z", up_to_end),
+            ),
+            (
+                ("2026-11-13T12:00:00Z", "2026-11-13T12:59:59.999999999Z"),
+                ("2026-11-12T00:00:00Z", up_to_end),
+            ),
+        ] {
+            assert_eq!(
+                within(definition(from, to), end),
+                definition(within_from, within_to),
+                "{from} to {to}"
+            );
+        }
     }
 
     /// The ends Nautilus' client gives, as Databento's `time` crate writes
@@ -256,7 +328,7 @@ mod tests {
             to: ts("2026-10-26T12:00:00Z"),
         };
 
-        let err = history.check(&[request]).await.unwrap_err();
+        let err = history.within_datasets(&[request]).await.unwrap_err();
 
         assert!(
             err.to_string().contains("the trades of GCZ26.GLBX"),
@@ -274,7 +346,7 @@ mod tests {
             to: ts("2026-10-26T12:00:00Z"),
         };
 
-        let err = history.check(&[request]).await.unwrap_err();
+        let err = history.within_datasets(&[request]).await.unwrap_err();
 
         assert!(err.to_string().contains("GCZ26.XCEC"), "{err}");
     }
@@ -290,7 +362,7 @@ mod tests {
             to: ts("2026-10-26T12:00:00Z"),
         };
 
-        let err = history.check(&[request]).await.unwrap_err();
+        let err = history.within_datasets(&[request]).await.unwrap_err();
 
         assert!(err.to_string().contains("GCZ26.XCEC"), "{err}");
     }

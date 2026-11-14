@@ -51,9 +51,9 @@ const DAY: SignedDuration = SignedDuration::from_hours(24);
 /// LSE's rows (`lse::LseRow`) over `[start, end]` (see
 /// `catalog::missing_custom`): first each contract's definition, asked of
 /// its row's definitions source, Databento's client, which `databento`
-/// makes only if Databento has a definition to give, checked against its
-/// dataset's end, for the contracts Databento defines, and LSE's for the
-/// others, the data engine answering them from the catalog before the
+/// makes only if Databento has a definition to give, within its dataset's
+/// end (`DatabentoHistory::within_datasets`), for the contracts Databento
+/// defines, and LSE's for the others, the data engine answering them from the catalog before the
 /// client, which fails a definition the catalog lacks, naming the
 /// instrument, before LSE is asked; then the series and the rows, asked of
 /// the LSE client `config` configures, its keys read only when the node
@@ -65,7 +65,7 @@ const DAY: SignedDuration = SignedDuration::from_hours(24);
 ///
 /// Returns an error if a series is not one the node fills (see `missing`),
 /// if a custom series has no identifier, if the catalog cannot be read, or
-/// as `databento` and `DatabentoHistory::check`.
+/// as `databento` and `DatabentoHistory::within_datasets`.
 #[expect(clippy::too_many_arguments, reason = "a fill's parts")]
 pub(super) async fn add_fill(
     node: &mut NodeFill,
@@ -85,9 +85,9 @@ pub(super) async fn add_fill(
     let custom = missing_custom(catalog, custom, start, end)?;
     if !definitions.is_empty() {
         let databento = databento()?;
-        databento.check(&definitions).await?;
+        let definitions = databento.within_datasets(&definitions).await?;
         node.add(databento.node_client(), &definitions, |data| {
-            unreachable!("Databento's check passes definitions alone, not {data}")
+            unreachable!("Databento is asked definitions alone, not {data}")
         });
     }
     node.add_with_custom(node_client(config), &requests, &custom, period);
@@ -154,13 +154,14 @@ mod tests {
         LseRow,
         testing::{
             AAPL_CALL, AAPL_CALL_MINUTES, AAPL_CALL_TRADES, AAPL_FACTORS, AAPL_TRADES,
-            ALLOWANCE_EXHAUSTED, API_KEY, BTCUSDT_TRADES, CME_API_KEY, DATA_UNAVAILABLE_TODAY,
-            DATE_NOT_TRADING, EUR_USD_MINUTES, GCZ26, GCZ26_BOOK, GCZ26_ORDERS, GCZ26_QUOTES,
-            GCZ26_TRADES, GOLD_FUTURES, GOLD_SPOT, GOLD_SPOT_MINUTES, GOLD_TRADES, MockLse,
-            NASDAQ_API_KEY, NVDA, NVDA_BOOK, NVDA_ORDERS, NVDA_QUOTES, NVDA_TRADES, PAIRS_GCZ6,
-            PLAN_REQUIRED, REFERENCE_CATALOGUE, REFERENCE_DATA_UNAVAILABLE, ROWS_EXHAUSTED,
-            RY_TRADES, Reply, SPX_MINUTES, SPX_TICKS, SYMBOL_UNKNOWN, US_CORE_CPI_CALENDAR,
-            US_CORE_CPI_RELEASES, US10Y_BOND_YIELDS, VOD_TRADES, ZN_COT, gold_futures, gold_spot,
+            ALLOWANCE_EXHAUSTED, API_KEY, BTCUSDT_TRADES, CME_API_KEY, DATA_UNAVAILABLE,
+            DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING, EUR_USD_MINUTES, GCZ26, GCZ26_BOOK,
+            GCZ26_ORDERS, GCZ26_QUOTES, GCZ26_TRADES, GOLD_FUTURES, GOLD_SPOT, GOLD_SPOT_MINUTES,
+            GOLD_TRADES, MockLse, NASDAQ_API_KEY, NVDA, NVDA_BOOK, NVDA_ORDERS, NVDA_QUOTES,
+            NVDA_TRADES, PAIRS_GCZ6, PLAN_REQUIRED, REFERENCE_CATALOGUE,
+            REFERENCE_DATA_UNAVAILABLE, ROWS_EXHAUSTED, RY_TRADES, Reply, SPX_MINUTES, SPX_TICKS,
+            SYMBOL_UNKNOWN, US_CORE_CPI_CALENDAR, US_CORE_CPI_RELEASES, US10Y_BOND_YIELDS,
+            VOD_TRADES, ZN_COT, gold_futures, gold_spot,
         },
     };
     use jiff::Timestamp;
@@ -1346,6 +1347,69 @@ mod tests {
                 call("/v3/export", "4000000002", Some("trades")),
                 call("/v3/export", "4000000002", Some("quotes")),
             ]
+        );
+    }
+
+    /// A window reaching past the end of Databento's `GLBX.MDP3`, captured
+    /// at 09:31:40.093383 on 13 November 2026, as a fill ending today
+    /// does: the definition is asked up to that end, from the midnight of
+    /// the last whole UTC day before it, a day Databento defines every
+    /// instrument active in, and the fill goes on, LSE answering no rows of
+    /// the day yet.
+    #[test]
+    fn a_glbx_fill_past_databento_s_dataset_end_asks_its_definition_up_to_that_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let lse = MockLse::start(vec![
+            Reply::json(PAIRS_GCZ6),
+            Reply::refusal(404, DATA_UNAVAILABLE),
+        ]);
+        let databento = MockDatabento::start();
+        let requirements = DataRequirements {
+            bar_types: vec![],
+            ticks: vec![TickSeries {
+                data: NautilusDataType::TradeTick,
+                instrument_id: InstrumentId::from(GCZ26),
+            }],
+            custom: vec![],
+            warmup: SignedDuration::ZERO,
+        };
+
+        fill_from(
+            dir.path(),
+            &lse,
+            Some(&databento),
+            &requirements,
+            vec![],
+            (
+                "2026-11-13T09:00:00Z".parse().unwrap(),
+                "2026-11-13T09:59:59.999999999Z".parse().unwrap(),
+            ),
+        )
+        .unwrap();
+
+        let calls = databento.calls();
+        let definition = calls
+            .iter()
+            .find(|call| call.param("schema") == Some("definition"))
+            .unwrap();
+        // In nanoseconds, the end exclusive, as Nautilus' client asks.
+        let asked = |param: &str| {
+            Timestamp::from_nanosecond(definition.param(param).unwrap().parse().unwrap()).unwrap()
+        };
+        assert_eq!(
+            (asked("start"), asked("end")),
+            (
+                "2026-11-12T00:00:00Z".parse().unwrap(),
+                "2026-11-13T09:31:40.093383Z".parse().unwrap()
+            )
+        );
+        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        assert_eq!(
+            catalog
+                .instruments(Some(&[GCZ26.to_string()]), None, None)
+                .unwrap()
+                .len(),
+            1
         );
     }
 

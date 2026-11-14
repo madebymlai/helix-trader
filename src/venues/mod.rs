@@ -486,8 +486,8 @@ fn of_definitions_source(slices: &[SeriesSlice], source: DefinitionsSource) -> V
 /// (`DefinitionsSource`): the cTrader brokers and IB ask the definition of
 /// each contract they fill the series of; OKX writes the definitions it
 /// gives before the node starts; GLBX's, XNAS's and OPRA's are asked of
-/// Databento's data client in LSE's fill, after a check against the end of
-/// each one's dataset; LSEDGE's are the catalog's alone, which the data
+/// Databento's data client in LSE's fill, each within the end of its
+/// dataset; LSEDGE's are the catalog's alone, which the data
 /// engine answers LSE's client's definition requests from.
 /// The cTrader brokers, LSE and IB refuse a series they do not serve. A
 /// source with nothing missing reads no credential, IB's connection aside.
@@ -498,8 +498,8 @@ fn of_definitions_source(slices: &[SeriesSlice], source: DefinitionsSource) -> V
 /// fills, before anything connects, if the catalog cannot be read, if
 /// `DATABENTO_API_KEY` is missing while Databento has a definition to give,
 /// or as `add_ctrader_fill`, `OkxHistory::write_definitions`,
-/// `lse::add_fill` (`DatabentoHistory::new` and `DatabentoHistory::check`
-/// among them), `NodeFill::run` (`LSE_API_KEY`, `LSE_CME_API_KEY` or
+/// `lse::add_fill` (`DatabentoHistory::new` and
+/// `DatabentoHistory::within_datasets` among them), `NodeFill::run` (`LSE_API_KEY`, `LSE_CME_API_KEY` or
 /// `LSE_NASDAQ_API_KEY` missing while LSE has something to fill of its
 /// market among them), `IbHistory::connect` and `IbHistory::fill`.
 pub async fn fill_history(
