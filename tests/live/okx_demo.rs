@@ -1,7 +1,8 @@
 //! End to end on OKX's demo trading (EEA region): a live run on the BTC
 //! X-Perp checks the real demo account (the credentials set, net position
-//! mode) and is refused at a leverage no account has, naming the account's,
-//! before any node is built. It needs the demo key (`OKX_API_KEY`,
+//! mode) and is refused for a catalog defining it at a leverage no account
+//! has, a margin of 1 / 1000, naming the account's, before any node is
+//! built. It needs the demo key (`OKX_API_KEY`,
 //! `OKX_API_SECRET`, `OKX_API_PASSPHRASE`) and `OKX_ENVIRONMENT=demo` from
 //! the environment or `.env` (any other environment fails the test before
 //! any request): another failing check would fail the test with its own
@@ -20,7 +21,12 @@ use helix_trader::{
     strategy::ema::{EmaCross, EmaCrossConfig},
 };
 use nautilus_common::logging::logger::LoggerConfig;
-use nautilus_model::identifiers::TraderId;
+use nautilus_model::{
+    identifiers::{InstrumentId, Symbol, TraderId},
+    instruments::{InstrumentAny, stubs::crypto_future_btcusdt},
+    types::{Price, Quantity},
+};
+use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use rust_decimal::Decimal;
 
 /// Whether the run is opted in: from the shell, before `.env` is read, so
@@ -75,19 +81,25 @@ async fn an_okx_run_passes_the_account_checks_then_is_refused_at_another_leverag
         Ok("demo"),
         "the OKX end to end test runs on the demo only: set OKX_ENVIRONMENT=demo"
     );
-    // Above OKX's highest leverage, 125.
-    let leverage = Decimal::from(1000);
     let config = x_perp_ema_cross();
     let requirements = config.data_requirements();
-    // An empty catalog of its own, which `Live` takes: the run is refused
-    // before any node is built, so nothing reads it.
+    // A catalog of its own defining the X-Perp at a margin of 1 / 1000,
+    // above OKX's highest leverage, 125: the run is refused before any node
+    // is built, so nothing else reads it.
     let catalog = tempfile::tempdir().unwrap();
+    let mut xperp = crypto_future_btcusdt(2, 6, Price::from("0.01"), Quantity::from("0.000001"));
+    xperp.id = InstrumentId::from("BTC-USD_UM_XPERP-310328.OKX");
+    xperp.raw_symbol = Symbol::from("BTC-USD_UM_XPERP-310328");
+    xperp.margin_init = Decimal::ONE / Decimal::from(1000);
+    xperp.margin_maint = xperp.margin_init;
+    ParquetDataCatalog::new(catalog.path(), None, None, None, None)
+        .write_instruments(vec![InstrumentAny::CryptoFuture(xperp)])
+        .unwrap();
     // Outside the catalog, as `Live` requires.
     let staging = tempfile::tempdir().unwrap();
     let live = Live {
         trader_id: TraderId::from("HELIXTEST-001"),
         venues: crate::venues(&[]),
-        leverage,
         logging: LoggerConfig::default(),
         catalog: catalog.path().to_path_buf(),
         recording: crate::recording(staging.path()),
@@ -100,6 +112,6 @@ async fn an_okx_run_passes_the_account_checks_then_is_refused_at_another_leverag
         .unwrap_err()
         .to_string();
 
-    assert!(err.contains("not 1000"), "{err}");
+    assert!(err.contains("catalog defines it at leverage 1000"), "{err}");
     assert!(err.contains("BTC-USD_UM_XPERP-310328"), "{err}");
 }

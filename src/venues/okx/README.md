@@ -4,13 +4,13 @@ OKX serves `OKX` instruments, history and live (see the [routing table](../mod.r
 
 ## History
 
-`fill-catalog` fills swaps and X-Perps through the node with Nautilus' OKX data client, on public endpoints without a key: the strategy's source series and each instrument's funding, over what the catalog lacks, funding before the other series of an instrument. Bars are requested a day at a time. The data engine writes back only the windows the client reports complete; the fill counts a window answered without that report, writes nothing for it, and asks for it again on the next run. A series the client does not serve fails the fill. Definitions are not requested through the node, whose OKX client defines instruments with margins of 0 (see [Funding and margins](#funding-and-margins)): they are read from OKX's public API, given margins of 1 and written before the node starts. Dated futures are refused.
+`fill-catalog` fills swaps and X-Perps through the node with Nautilus' OKX data client, on public endpoints without a key: the strategy's source series and each instrument's funding, over what the catalog lacks, funding before the other series of an instrument. Bars are requested a day at a time. The data engine writes back only the windows the client reports complete; the fill counts a window answered without that report, writes nothing for it, and asks for it again on the next run. A series the client does not serve fails the fill. Definitions are not requested through the node, whose OKX client defines instruments with margins of 0 (see [Funding and margins](#funding-and-margins)): they are read from OKX's public API, given the account's margins and written before the node starts. Writing a definition the catalog lacks reads the account's leverage for it, so it needs the key and environment of [Account setup](#account-setup); a fill whose definitions are all stored needs no key. Dated futures are refused.
 
 ### Funding and margins
 
 Funding is requested two weeks at a time from OKX's funding history, which keeps about three months (an observation, not a guarantee); older funding is absent from the catalog. The first update of each request has no preceding interval, so a backtest does not settle it. Check funding depth for the full backtest window; see [backtest](../../backtest/README.md).
 
-Both instrument margin rates are set to 1: account leverage is chosen separately for the backtest. OKX liquidation and maintenance rules are not simulated by that choice.
+Both instrument margin rates are the account's: 1 / the leverage the account trades the instrument at in cross margin when its definition is written (a signed `GET /api/v5/account/leverage-info`, which the adapter does not make), as IC's definitions hold IC's margins. Backtests run unleveraged on them, so an OKX position locks notional / leverage, as OKX does. A definition is written once: after changing an instrument's leverage on OKX, fill a fresh catalog, whose definition holds the new margin; `live` refuses an account whose leverage differs from the catalog's. OKX liquidation and tiered maintenance rules are not simulated.
 
 Catalogs filled with the old order-book-derived quotes need a fresh directory for candles; existing quotes are not removed or extended.
 
@@ -18,7 +18,7 @@ Catalogs filled with the old order-book-derived quotes need a fresh directory fo
 
 1. Set `OKX_ENVIRONMENT` to `demo` or `live` and provide `OKX_API_KEY`, `OKX_API_SECRET` and `OKX_API_PASSPHRASE` in the environment or `.env`. Keys are specific to both region and environment. The clients use the EEA region; EEA retail accounts trade X-Perps rather than global USDT swaps.
 2. Set the account to one-way (net) position mode. Startup refuses long/short mode and does not change the account.
-3. Set each instrument's leverage manually in cross margin to the run's `--leverage`. Startup checks it and refuses a mismatch; it does not set leverage. Orders use cross margin.
+3. Set each instrument's leverage manually in cross margin before filling its definition, which holds it as the instrument's margin (see [Funding and margins](#funding-and-margins)). Live startup reads the definition from `--catalog`, refusing a missing one, checks the account's leverage against it and refuses a mismatch; it does not set leverage. Orders use cross margin.
 4. Disable hyphens in client order IDs in the strategy config; OKX refuses them:
 
    ```toml

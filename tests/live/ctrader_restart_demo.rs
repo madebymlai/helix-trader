@@ -50,7 +50,6 @@ use nautilus_trading::{
     nautilus_strategy,
     strategy::{Strategy, StrategyConfig, StrategyCore},
 };
-use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -161,7 +160,6 @@ async fn phase() {
     let live = Live {
         trader_id: TraderId::from(std::env::var(TRADER).unwrap().as_str()),
         venues: crate::venues(&[]),
-        leverage: Decimal::ONE,
         logging: LoggerConfig::default(),
         catalog: catalog.path().to_path_buf(),
         recording: crate::recording(staging.path()),

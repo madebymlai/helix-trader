@@ -468,7 +468,6 @@ fn gold_backtest(catalog: PathBuf) -> Backtest {
         end: ic::at("12:30:00"),
         commission: Commission::Rate(Decimal::new(3, 5)),
         balance: Money::from("10000000 USD"),
-        leverage: Decimal::ONE,
         venue_oms: |_| OmsType::Hedging,
         logging: LoggerConfig::default(),
     }

@@ -39,7 +39,6 @@ use nautilus_trading::{
     nautilus_strategy,
     strategy::{StrategyConfig, StrategyCore},
 };
-use rust_decimal::Decimal;
 
 const TRADER: &str = "HELIXTEST-046";
 const WARMUP: SignedDuration = SignedDuration::from_hours(72);
@@ -131,7 +130,6 @@ async fn a_warmup_of_days_holds_every_minute_bar_of_ibs_history_and_builds_each_
     let live = Live {
         trader_id: TraderId::from(TRADER),
         venues: crate::venues(&["--account", &account.to_string(), "--client-id", "46"]),
-        leverage: Decimal::ONE,
         logging: LoggerConfig::default(),
         catalog: catalog.path().to_path_buf(),
         recording: crate::recording(staging.path()),

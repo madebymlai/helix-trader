@@ -50,7 +50,6 @@ use nautilus_trading::{
     nautilus_strategy,
     strategy::{StrategyConfig, StrategyCore},
 };
-use rust_decimal::Decimal;
 
 /// The hour bars of the instrument, built from IB's minute bars.
 fn composite() -> BarType {
@@ -210,7 +209,6 @@ async fn the_live_minute_bars_follow_the_warmup_with_no_gap_and_no_duplicate() {
     let live = Live {
         trader_id: TraderId::from(TRADER),
         venues: crate::venues(&["--account", &account.to_string(), "--client-id", "46"]),
-        leverage: Decimal::ONE,
         logging: LoggerConfig::default(),
         catalog: catalog.path().to_path_buf(),
         recording: crate::recording(staging.path()),

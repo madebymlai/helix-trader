@@ -353,8 +353,6 @@ pub fn backtest(catalog: &Path, from: Timestamp, to: Timestamp) -> Backtest {
         end: to,
         commission: venue().commission,
         balance: venue().balance,
-        // Read by no dataset run, whose accounts margin nothing.
-        leverage: Decimal::ONE,
         venue_oms: |_| OmsType::Hedging,
         logging: LoggerConfig::default(),
     }

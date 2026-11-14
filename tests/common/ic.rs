@@ -166,8 +166,8 @@ fn store_defined(
 
 /// A backtest of the hour bars over `[09:00, 12:00]` on the venue as IC
 /// keeps positions (`venues::oms_type`: hedging), charged IC's Raw
-/// commission of 30 USD per million USD traded, unleveraged: IC's leverage
-/// is in the instrument's margin.
+/// commission of 30 USD per million USD traded, unleveraged as every
+/// backtest: IC's leverage is in the instrument's margin.
 pub fn backtest(catalog: &TempDir) -> Backtest {
     Backtest {
         catalog: catalog.path().to_path_buf(),
@@ -178,7 +178,6 @@ pub fn backtest(catalog: &TempDir) -> Backtest {
         custom: vec![],
         commission: Commission::Rate(Decimal::new(3, 5)),
         balance: Money::from("2000000 USD"),
-        leverage: Decimal::ONE,
         venue_oms: venues::oms_type,
         logging: LoggerConfig::default(),
     }

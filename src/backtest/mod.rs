@@ -9,11 +9,7 @@ mod costs;
 mod node;
 mod report;
 
-use std::{
-    collections::BTreeSet,
-    fmt::Debug,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeSet, fmt::Debug, path::PathBuf};
 
 use anyhow::{Context, ensure};
 use jiff::{SignedDuration, Timestamp};
@@ -31,7 +27,6 @@ use nautilus_persistence::{
     backend::parquet::catalog::ParquetDataCatalog, catalog::types::data_path_prefix,
 };
 use nautilus_trading::strategy::{Strategy, StrategyNative};
-use rust_decimal::Decimal;
 
 pub use self::{
     costs::Commission,
@@ -81,12 +76,6 @@ pub struct Backtest {
     /// a venue only read, which no broker trades (`venues::has_broker`),
     /// starts with nothing in its currency, so that it adds no money.
     pub balance: Money,
-    /// The leverage of each venue's account on every instrument in a
-    /// backtest (`run`), positive: a position locks its value / leverage
-    /// times the instrument's margin (Nautilus' default margin model). 1 is
-    /// no leverage. A dataset run's accounts (`run_dataset`) margin
-    /// nothing, whatever it is.
-    pub leverage: Decimal,
     /// How each simulated venue keeps positions: a normal run passes the
     /// real venue's, `venues::oms_type`, and a dataset run hedging on every
     /// venue. A strategy leaving its `oms_type` unset follows it, as it
@@ -103,7 +92,7 @@ impl Backtest {
     /// # Errors
     ///
     /// Returns an error if the inputs are inconsistent (no instruments,
-    /// `start` not before `end`, a leverage not positive), if the node
+    /// `start` not before `end`), if the node
     /// fails to build or run (Nautilus' own errors: none of a data
     /// config's instruments in the catalog, say; a series without data it
     /// only warns of), or if a fill of an instrument with quotes has none before it.
@@ -138,7 +127,7 @@ impl Backtest {
 
     /// Refuses the run unless its balance is in the P&L currency of each
     /// instrument of `traded`, those the strategy trades, as its catalog
-    /// defines them (`traded_instruments`, `refuse_balance`): a trade sent
+    /// defines them (`catalog::traded_instruments`, `refuse_balance`): a trade sent
     /// at a stake is sized on the equity in
     /// its P&L currency alone, which is not converted
     /// (`strategy::orders::Trade::send`), so on a balance in another it
@@ -146,9 +135,12 @@ impl Backtest {
     ///
     /// # Errors
     ///
-    /// Returns an error as `traded_instruments` and `refuse_balance` do.
+    /// Returns an error as `catalog::traded_instruments` and `refuse_balance` do.
     pub fn refuse_balance(&self, traded: &[InstrumentId]) -> anyhow::Result<()> {
-        refuse_balance(self.balance, &traded_instruments(&self.catalog, traded)?)
+        refuse_balance(
+            self.balance,
+            &crate::catalog::traded_instruments(&self.catalog, traded)?,
+        )
     }
 
     /// The continuous bars of the bar types on roots over the run,
@@ -286,41 +278,6 @@ impl Backtest {
     }
 }
 
-/// The instruments of `traded`, those a strategy trades, as the catalog at
-/// `catalog` defines them. The catalog is opened through Nautilus'
-/// `ParquetDataCatalog::from_uri`, whose error a missing directory is,
-/// where `ParquetDataCatalog::new` panics.
-///
-/// # Errors
-///
-/// Returns an error if the catalog cannot be opened or read, or an
-/// instrument of `traded` is not in it.
-pub fn traded_instruments(
-    catalog: &Path,
-    traded: &[InstrumentId],
-) -> anyhow::Result<Vec<InstrumentAny>> {
-    let ids: Vec<String> = traded.iter().map(ToString::to_string).collect();
-    let defined = ParquetDataCatalog::from_uri(&catalog.to_string_lossy(), None, None, None, None)
-        .with_context(|| format!("opening the catalog {}", catalog.display()))?
-        .instruments(Some(&ids), None, None)
-        .with_context(|| format!("reading {} from the catalog", ids.join(", ")))?;
-    traded
-        .iter()
-        .map(|&id| {
-            defined
-                .iter()
-                .find(|instrument| instrument.id() == id)
-                .cloned()
-                .with_context(|| {
-                    format!(
-                        "the traded instrument {id} is not in the catalog {}",
-                        catalog.display()
-                    )
-                })
-        })
-        .collect()
-}
-
 /// Refuses `balance` unless it is in the P&L currency
 /// (`Instrument::cost_currency`) of each instrument of `traded`: the
 /// equity a trade is sized on, by Nautilus' fixed-risk sizer, which reads
@@ -352,6 +309,7 @@ mod tests {
         data::{FundingRateUpdate, QuoteTick, stubs::stub_depth10},
         types::{Money, Price, Quantity},
     };
+    use rust_decimal::Decimal;
 
     use super::*;
     use crate::rolls::Slice;
@@ -379,7 +337,6 @@ mod tests {
             custom: vec![],
             commission: Commission::Rate(Decimal::ZERO),
             balance: Money::from("10000 USDT"),
-            leverage: Decimal::ONE,
             venue_oms: crate::venues::oms_type,
             logging: LoggerConfig::default(),
         }
