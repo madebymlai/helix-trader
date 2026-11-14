@@ -25,15 +25,15 @@
 //! request of LSE's options chain fails, LSE serving it as it stands
 //! alone. Live, it streams the quotes of the `LSEDGE` series
 //! its config names, on their sockets, the trades of its `OPRA` contracts,
-//! through one subscription of each underlying's chain on data-ws, and the
-//! quotes and trades of its `GLBX` contracts, CME Globex's Level 1, on
-//! LSE's CME stream with the CME key (see `streams` and `cme`). Every other
-//! request and
-//! subscription is left to Nautilus' defaults: a request fails as
-//! unsupported, a subscription is logged as not implemented. A request is
-//! answered from a task, in one completed response envelope, the data
-//! engine writing it back to the catalog if asked (`update_catalog`); a
-//! failure is the envelope's, LSE's refusal with its code, message and
+//! through one subscription of each underlying's chain on data-ws, and, of
+//! its `GLBX` contracts, the quotes and trades, CME Globex's Level 1, the
+//! book depth, Level 2, and the book deltas, Level 3, on LSE's CME stream
+//! with the CME key, a connection a level (see `streams` and `cme`). Every
+//! other request and subscription is left to Nautilus' defaults: a request
+//! fails as unsupported, a subscription is logged as not implemented. A
+//! request is answered from a task, in one completed response envelope, the
+//! data engine writing it back to the catalog if asked (`update_catalog`);
+//! a failure is the envelope's, LSE's refusal with its code, message and
 //! required plan. A request reaching into the span LSE has not loaded yet,
 //! the current UTC day and the day before until LSE holds rows of it, is
 //! answered with what LSE holds in a plain response, which completes the
@@ -62,8 +62,10 @@ use nautilus_common::{
         data::{
             BarsResponse, BookDeltasResponse, BookDepthResponse, CustomDataResponse,
             DataResponseEnvelope, QuotesResponse, RequestBars, RequestBookDeltas, RequestBookDepth,
-            RequestCustomData, RequestInstrument, RequestQuotes, RequestTrades, SubscribeQuotes,
-            SubscribeTrades, TradesResponse, UnsubscribeQuotes, UnsubscribeTrades,
+            RequestCustomData, RequestInstrument, RequestQuotes, RequestTrades,
+            SubscribeBookDeltas, SubscribeBookDepth, SubscribeQuotes, SubscribeTrades,
+            TradesResponse, UnsubscribeBookDeltas, UnsubscribeBookDepth, UnsubscribeQuotes,
+            UnsubscribeTrades,
         },
     },
 };
@@ -534,6 +536,79 @@ impl DataClient for LseDataClient {
     fn unsubscribe_trades(&mut self, cmd: &UnsubscribeTrades) -> anyhow::Result<()> {
         execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
             self.streams.unsubscribe_trades(id)
+        })
+    }
+
+    /// Streams the book depth of each instrument, a `GLBX` contract's ten
+    /// levels a side, at the price precision of its definition in the
+    /// cache, from LSE's CME stream at Level 2, opening with its last ten
+    /// levels (see `LseStreams`). The first depth subscription opens the
+    /// level's connection; LSE's refusal of it, such as of a key whose plan
+    /// lacks Level 2, is logged as an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming it if the depth asked is not ten, the levels
+    /// LSE streams, as Nautilus' Databento client serves MBP-10's alone, or
+    /// naming an instrument that is no `GLBX` contract, that the client does
+    /// not stream, or that the cache does not define.
+    fn subscribe_book_depth(&mut self, cmd: SubscribeBookDepth) -> anyhow::Result<()> {
+        if let Some(depth) = cmd.depth.filter(|depth| depth.get() != DEPTH10_LEN) {
+            bail!(
+                "{}: LSE's CME stream holds ten levels a side at Level 2, not a depth of {depth}",
+                cmd.instrument_ids
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
+            self.streams.subscribe_book_depth(id, &self.cache)
+        })
+    }
+
+    /// Ends the book depth of each instrument.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming an instrument that is no `GLBX` contract, or
+    /// that is not subscribed.
+    fn unsubscribe_book_depth(&mut self, cmd: &UnsubscribeBookDepth) -> anyhow::Result<()> {
+        execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
+            self.streams.unsubscribe_book_depth(id)
+        })
+    }
+
+    /// Streams the book deltas of each instrument, a `GLBX` contract's
+    /// order events, at the price precision of its definition in the cache,
+    /// from LSE's CME stream at Level 3, which opens with no book, so its
+    /// deltas start at its first order event, each exchange message's
+    /// ending `F_LAST` (see `LseStreams`). The first deltas subscription
+    /// opens the level's connection; LSE's refusal of it, such as of a key
+    /// whose plan lacks Level 3, is logged as an error. The book type asked
+    /// is not read: LSE's orders are Level 3, as Nautilus' Databento client
+    /// serves MBO for any.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming an instrument that is no `GLBX` contract,
+    /// that the client does not stream, or that the cache does not define.
+    fn subscribe_book_deltas(&mut self, cmd: SubscribeBookDeltas) -> anyhow::Result<()> {
+        execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
+            self.streams.subscribe_book_deltas(id, &self.cache)
+        })
+    }
+
+    /// Ends the book deltas of each instrument.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming an instrument that is no `GLBX` contract, or
+    /// that is not subscribed.
+    fn unsubscribe_book_deltas(&mut self, cmd: &UnsubscribeBookDeltas) -> anyhow::Result<()> {
+        execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
+            self.streams.unsubscribe_book_deltas(id)
         })
     }
 

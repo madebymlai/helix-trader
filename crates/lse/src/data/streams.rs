@@ -1,6 +1,7 @@
 //! The data client's live data: the sockets of the instruments it streams,
 //! the quotes of `LSEDGE` series and the trades of `OPRA` contracts, and
-//! LSE's CME stream of the `GLBX` contracts it streams (see `cme`).
+//! LSE's CME stream of the `GLBX` contracts it streams, their quotes,
+//! trades, book depth and book deltas (see `cme`).
 //!
 //! `open` connects to the socket each instrument streams on (see
 //! `LseSymbol::stream` and `OpraContract::stream`), one connection a socket
@@ -367,7 +368,7 @@ impl LseStreams {
     /// publishes none, and its prices are read at the definition's
     /// precision.
     pub(super) fn subscribe_quotes(
-        &self,
+        &mut self,
         id: InstrumentId,
         cache: &CacheView,
     ) -> anyhow::Result<()> {
@@ -468,6 +469,62 @@ impl LseStreams {
         Ok(())
     }
 
+    /// Subscribes to the book depth of `id`, a `GLBX` contract's ten levels
+    /// a side on LSE's CME stream at Level 2, at the price precision of its
+    /// definition in `cache` (see `CmeStreams::subscribe`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming it if it is no `GLBX` contract, or as
+    /// `CmeStreams::subscribe`.
+    pub(super) fn subscribe_book_depth(
+        &mut self,
+        id: InstrumentId,
+        cache: &CacheView,
+    ) -> anyhow::Result<()> {
+        booked(id)?;
+        self.cme.subscribe(id, CmeKind::Depth, cache)
+    }
+
+    /// Ends the book depth of `id`, which the CME stream carries on.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming it if it is no `GLBX` contract, or is not
+    /// subscribed.
+    pub(super) fn unsubscribe_book_depth(&self, id: InstrumentId) -> anyhow::Result<()> {
+        booked(id)?;
+        self.cme.unsubscribe(id, CmeKind::Depth)
+    }
+
+    /// Subscribes to the book deltas of `id`, a `GLBX` contract's order
+    /// events on LSE's CME stream at Level 3, at the price precision of its
+    /// definition in `cache` (see `CmeStreams::subscribe`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming it if it is no `GLBX` contract, or as
+    /// `CmeStreams::subscribe`.
+    pub(super) fn subscribe_book_deltas(
+        &mut self,
+        id: InstrumentId,
+        cache: &CacheView,
+    ) -> anyhow::Result<()> {
+        booked(id)?;
+        self.cme.subscribe(id, CmeKind::Deltas, cache)
+    }
+
+    /// Ends the book deltas of `id`, which the CME stream carries on.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming it if it is no `GLBX` contract, or is not
+    /// subscribed.
+    pub(super) fn unsubscribe_book_deltas(&self, id: InstrumentId) -> anyhow::Result<()> {
+        booked(id)?;
+        self.cme.unsubscribe(id, CmeKind::Deltas)
+    }
+
     /// The socket of `id` and its symbol there.
     fn streamed_as(&self, id: InstrumentId) -> anyhow::Result<(LseSocket, &str)> {
         match self.streamed.iter().find(|(of, _, _)| *of == id) {
@@ -532,6 +589,23 @@ impl LseStreams {
         stopped.map_err(|e| anyhow::anyhow!("stopping the LSE tick tasks: {e}"))?;
         cme
     }
+}
+
+/// Checks that LSE streams a book of `id`: a `GLBX` contract's, LSE's
+/// sockets streaming a series' ticks alone.
+///
+/// # Errors
+///
+/// Returns an error naming it if it is no `GLBX` contract.
+fn booked(id: InstrumentId) -> anyhow::Result<()> {
+    if id.venue != Venue::GLBX() {
+        bail!(
+            "LSE streams no book of {id}: its sockets stream a series' ticks alone; it streams \
+             the book of CME Globex contracts, under GLBX, Level 2's ten levels a side as depth \
+             and Level 3's orders as deltas"
+        );
+    }
+    Ok(())
 }
 
 /// `id` with the precisions of its definition in `cache`.

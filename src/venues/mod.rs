@@ -160,7 +160,7 @@ pub(crate) enum LiveDataSource {
     /// A cTrader broker's data client.
     CTrader(CTraderBroker),
     /// The LSE adapter's data client, streaming LSE's quotes, CME Globex's
-    /// Level 1 and US options' trades.
+    /// Levels 1 to 3 and US options' trades.
     Lse,
     /// Interactive Brokers' data client, on the gateway.
     Ib,

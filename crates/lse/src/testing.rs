@@ -24,7 +24,8 @@ use sha2::{Digest, Sha256};
 
 pub use self::{
     cme::{
-        CME_ESZ6_DOCUMENTED, CME_GCZ6_GCG7, CME_GCZ6_JSON, CME_KEY_UNKNOWN, CME_SYMBOL_UNAVAILABLE,
+        CME_ESZ6_DOCUMENTED, CME_GCZ6_GCG7, CME_GCZ6_JSON, CME_GCZ6_L2_DOCUMENTED,
+        CME_GCZ6_L3_DOCUMENTED, CME_KEY_UNKNOWN, CME_LEVEL_REQUIRED, CME_SYMBOL_UNAVAILABLE,
         CmeAction, CmeFrame, ESZ26, MockCmeStream, dbn_frame, dbn_frames, frames, held, sent,
     },
     socket::{MockLseSocket, SocketAction, data_ws_answer, socket_answer},
