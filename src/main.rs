@@ -49,7 +49,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Fills the Nautilus catalog with the strategy's history from OKX
-    /// (OKX instruments), LSE (LSEDGE instruments, and GLBX and OPRA
+    /// (OKX instruments), LSE (LSEDGE instruments, and GLBX, XNAS and OPRA
     /// instruments, defined by Databento), cTrader (IC Markets' and
     /// Pepperstone's instruments) or Interactive Brokers (the others).
     FillCatalog(FillCatalogArgs),

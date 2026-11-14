@@ -1,8 +1,10 @@
 //! LSE's names and addresses, and the adapter's.
 
-use std::{num::NonZeroU32, sync::LazyLock};
+use std::{fmt, num::NonZeroU32, sync::LazyLock};
 
 use nautilus_model::identifiers::Venue;
+
+use super::credential::LseProduct;
 
 /// The venue of LSE's own derived series, one instrument each: `LSEDGE`,
 /// not `LSE`, which is IB's London Stock Exchange.
@@ -14,6 +16,9 @@ pub const LSE_API_KEY: &str = "LSE_API_KEY";
 /// The variable holding a CME Group plan's key, for CME Globex.
 pub const LSE_CME_API_KEY: &str = "LSE_CME_API_KEY";
 
+/// The variable holding a Nasdaq plan's key, for Nasdaq TotalView.
+pub const LSE_NASDAQ_API_KEY: &str = "LSE_NASDAQ_API_KEY";
+
 /// The name of the data client, and of its factory.
 pub(crate) const LSE_CLIENT: &str = "LSE";
 
@@ -24,10 +29,12 @@ pub(crate) const LSE_HTTP_BASE_URL: &str = "https://download.londonstrategicedge
 /// docs, "Calls a minute").
 pub(crate) const FREE_CALLS_PER_MINUTE: NonZeroU32 = NonZeroU32::new(60).expect("not zero");
 
-/// The calls a minute of CME Group Lite, the fewest of the CME Group plans
-/// (LSE's docs, "Calls a minute": Lite, Lite+, Standard, Standard+ and
-/// Ultimate allow 200, 300, 500, 1,000 and 5,000).
-pub(crate) const CME_LITE_CALLS_PER_MINUTE: NonZeroU32 = NonZeroU32::new(200).expect("not zero");
+/// The calls a minute of an exchange plan's Lite, CME Group's or Nasdaq's,
+/// the fewest of its plans (LSE's docs, "Calls a minute": CME Group and
+/// Nasdaq, Lite, Lite+, Standard, Standard+ and Ultimate allow 200, 300,
+/// 500, 1,000 and 5,000).
+pub(crate) const EXCHANGE_LITE_CALLS_PER_MINUTE: NonZeroU32 =
+    NonZeroU32::new(200).expect("not zero");
 
 /// LSE's name of CME Globex, its market's folder.
 pub(crate) const CME_MARKET: &str = "cme";
@@ -35,6 +42,72 @@ pub(crate) const CME_MARKET: &str = "cme";
 /// LSE's CME Globex stream, a socket of its own protocol for a CME Group
 /// plan's key (LSE's WebSocket documentation, "The CME Group stream").
 pub(crate) const CME_STREAM_URL: &str = "wss://cme.londonstrategicedge.com/v1/stream";
+
+/// LSE's name of Nasdaq TotalView, its market's folder.
+pub(crate) const NASDAQ_MARKET: &str = "nasdaq";
+
+/// LSE's Nasdaq TotalView stream, for a Nasdaq plan's key, which "sends
+/// the same messages for stocks" as the CME stream (LSE's WebSocket
+/// documentation, "The CME Group stream").
+pub(crate) const NASDAQ_STREAM_URL: &str = "wss://nasdaq.londonstrategicedge.com/v1/stream";
+
+/// The venue of Nasdaq TotalView's stocks, XNAS, as Databento names the
+/// listings of Nasdaq's TotalView-ITCH feed (`XNAS.ITCH`, whose
+/// definitions its publisher `XNAS` sends) and Nautilus' IB adapter maps
+/// them, to IB's NASDAQ.
+pub(crate) static XNAS_VENUE: LazyLock<Venue> = LazyLock::new(|| Venue::new("XNAS"));
+
+/// An exchange plan's market: CME Globex or Nasdaq TotalView, its rows
+/// asked with the plan's key and its listings streamed live on a socket of
+/// its own, both of one protocol (LSE's WebSocket documentation, "The CME
+/// Group stream": the Nasdaq stream "sends the same messages for stocks"),
+/// under the venue Databento gives them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum LseExchange {
+    /// CME Globex (`cme`), its contracts under `GLBX`.
+    Cme,
+    /// Nasdaq TotalView (`nasdaq`), its stocks under `XNAS`.
+    Nasdaq,
+}
+
+impl LseExchange {
+    /// The exchange whose listings are on `venue`, if one's are.
+    pub(crate) fn of_venue(venue: Venue) -> Option<Self> {
+        if venue == Venue::GLBX() {
+            Some(Self::Cme)
+        } else if venue == *XNAS_VENUE {
+            Some(Self::Nasdaq)
+        } else {
+            None
+        }
+    }
+
+    /// The product whose key opens the market.
+    pub(crate) const fn product(self) -> LseProduct {
+        match self {
+            Self::Cme => LseProduct::Cme,
+            Self::Nasdaq => LseProduct::Nasdaq,
+        }
+    }
+
+    /// The market's stream.
+    pub(crate) const fn stream_url(self) -> &'static str {
+        match self {
+            Self::Cme => CME_STREAM_URL,
+            Self::Nasdaq => NASDAQ_STREAM_URL,
+        }
+    }
+}
+
+/// The exchange's name, as LSE names its stream.
+impl fmt::Display for LseExchange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Cme => "CME",
+            Self::Nasdaq => "Nasdaq",
+        })
+    }
+}
 
 /// LSE's name of US options, its market's folder: every listed US option
 /// contract, as OPRA reports it.

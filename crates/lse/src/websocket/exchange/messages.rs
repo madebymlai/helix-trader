@@ -1,5 +1,7 @@
-//! The messages of LSE's CME Globex stream (LSE's WebSocket documentation,
-//! "The CME Group stream"): the one subscription a connection sends, at
+//! The messages of LSE's exchange streams, CME Globex's and Nasdaq
+//! TotalView's, which are one protocol (LSE's WebSocket documentation, "The
+//! CME Group stream": the Nasdaq stream "sends the same messages for
+//! stocks"): the one subscription a connection sends, at
 //! one level, the text frames LSE answers with (`hello`, then each
 //! contract's `snapshot_begin` and `snapshot_end`), and the binary frame of
 //! a record in the `dbn` encoding, LSE's 24-byte header then the record in
@@ -27,11 +29,11 @@ const HEADER_LEN: usize = 24;
 const SNAPSHOT: u8 = 1;
 const LIVE: u8 = 2;
 
-/// A level of LSE's CME stream, which a connection's subscription names:
-/// its records are Databento's of one schema ("to change the contracts or
-/// the level, open another connection").
+/// A level of an LSE exchange stream, which a connection's subscription
+/// names: its records are Databento's of one schema ("to change the
+/// contracts or the level, open another connection").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum CmeLevel {
+pub(crate) enum ExchangeLevel {
     /// Level 1: every trade and the best bid and offer (`mbp1`), each
     /// contract opening with its last best bid and offer.
     Mbp1,
@@ -42,7 +44,7 @@ pub(crate) enum CmeLevel {
     Mbo,
 }
 
-impl CmeLevel {
+impl ExchangeLevel {
     /// LSE's number of the level.
     const fn number(self) -> u8 {
         match self {
@@ -62,7 +64,7 @@ impl CmeLevel {
     }
 }
 
-impl fmt::Display for CmeLevel {
+impl fmt::Display for ExchangeLevel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Level {}", self.number())
     }
@@ -71,16 +73,16 @@ impl fmt::Display for CmeLevel {
 /// The one message a connection sends, within five seconds of opening: the
 /// contracts by their names at LSE, at one level, in the `dbn` encoding.
 #[derive(Debug, Serialize)]
-pub(crate) struct CmeSubscription<'a> {
+pub(crate) struct ExchangeSubscription<'a> {
     op: &'static str,
     symbols: &'a [String],
     level: u8,
     encoding: &'static str,
 }
 
-impl<'a> CmeSubscription<'a> {
+impl<'a> ExchangeSubscription<'a> {
     /// The subscription of `symbols`, each named once, at `level`.
-    pub(crate) fn new(level: CmeLevel, symbols: &'a [String]) -> Self {
+    pub(crate) fn new(level: ExchangeLevel, symbols: &'a [String]) -> Self {
         Self {
             op: "subscribe",
             symbols,
@@ -98,7 +100,7 @@ impl<'a> CmeSubscription<'a> {
 /// read.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum CmeText {
+pub(crate) enum ExchangeText {
     /// First on a connection: the feed's `epoch`, which every later message
     /// repeats; a new one after the feed's reset, its contracts' sequences
     /// starting again.
@@ -117,7 +119,7 @@ pub(crate) enum CmeText {
 
 /// A record of the stream, Databento's of its connection's level.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CmeRecord {
+pub(crate) enum ExchangeRecord {
     Mbp1(Mbp1Msg),
     Mbp10(Box<Mbp10Msg>),
     Mbo(MboMsg),
@@ -125,7 +127,7 @@ pub(crate) enum CmeRecord {
 
 /// A binary frame of the stream: one record of a contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CmeRecordFrame {
+pub(crate) struct ExchangeRecordFrame {
     /// Whether it is the contract's opening, its last best bid and offer or
     /// ten levels, rather than a live record.
     pub(crate) snapshot: bool,
@@ -133,10 +135,10 @@ pub(crate) struct CmeRecordFrame {
     pub(crate) sequence: u64,
     /// The stream's number of the contract.
     pub(crate) instrument_id: u32,
-    pub(crate) record: CmeRecord,
+    pub(crate) record: ExchangeRecord,
 }
 
-impl CmeRecordFrame {
+impl ExchangeRecordFrame {
     /// The record `frame` holds, of a connection at `level`: LSE's header,
     /// `L3DB`, version 1, the kind, 1 in a snapshot and 2 live, two unused
     /// bytes, the sequence, the contract's number and the count of records,
@@ -147,7 +149,7 @@ impl CmeRecordFrame {
     ///
     /// Returns an error if `frame` is not such a frame of one record of
     /// `level`.
-    pub(crate) fn parse(frame: &[u8], level: CmeLevel) -> anyhow::Result<Self> {
+    pub(crate) fn parse(frame: &[u8], level: ExchangeLevel) -> anyhow::Result<Self> {
         ensure!(
             frame.len() >= HEADER_LEN,
             "{} bytes, short of LSE's {HEADER_LEN}-byte header",
@@ -171,9 +173,11 @@ impl CmeRecordFrame {
             level.record_len()
         );
         let record = match level {
-            CmeLevel::Mbp1 => CmeRecord::Mbp1(decode::<Mbp1Msg>(records, level)?),
-            CmeLevel::Mbp10 => CmeRecord::Mbp10(Box::new(decode::<Mbp10Msg>(records, level)?)),
-            CmeLevel::Mbo => CmeRecord::Mbo(decode::<MboMsg>(records, level)?),
+            ExchangeLevel::Mbp1 => ExchangeRecord::Mbp1(decode::<Mbp1Msg>(records, level)?),
+            ExchangeLevel::Mbp10 => {
+                ExchangeRecord::Mbp10(Box::new(decode::<Mbp10Msg>(records, level)?))
+            }
+            ExchangeLevel::Mbo => ExchangeRecord::Mbo(decode::<MboMsg>(records, level)?),
         };
         Ok(Self {
             snapshot,
@@ -185,7 +189,7 @@ impl CmeRecordFrame {
 }
 
 /// The one record of type `R` in `records`, a record of `level`.
-fn decode<R: HasRType + Clone>(records: &[u8], level: CmeLevel) -> anyhow::Result<R> {
+fn decode<R: HasRType + Clone>(records: &[u8], level: ExchangeLevel) -> anyhow::Result<R> {
     Ok(RecordDecoder::new(records)
         .decode_record::<R>()
         .with_context(|| format!("a {level} record"))?
@@ -200,13 +204,14 @@ mod tests {
 
     use super::*;
     use crate::testing::{
-        CME_GCZ6_GCG7, CME_GCZ6_L2_DOCUMENTED, CME_GCZ6_L3_DOCUMENTED, CmeFrame, dbn_frames, frames,
+        CME_GCZ6_GCG7, CME_GCZ6_L2_DOCUMENTED, CME_GCZ6_L3_DOCUMENTED, StreamFrame, dbn_frames,
+        frames,
     };
 
-    fn binary(frame: &CmeFrame) -> Option<&[u8]> {
+    fn binary(frame: &StreamFrame) -> Option<&[u8]> {
         match frame {
-            CmeFrame::Binary(bytes) => Some(bytes),
-            CmeFrame::Text(_) => None,
+            StreamFrame::Binary(bytes) => Some(bytes),
+            StreamFrame::Text(_) => None,
         }
     }
 
@@ -216,9 +221,10 @@ mod tests {
     #[rstest]
     fn a_frame_is_lse_s_header_then_the_contract_s_level_1_record() {
         let captured = frames(CME_GCZ6_GCG7);
-        let frame = CmeRecordFrame::parse(binary(&captured[2]).unwrap(), CmeLevel::Mbp1).unwrap();
+        let frame =
+            ExchangeRecordFrame::parse(binary(&captured[2]).unwrap(), ExchangeLevel::Mbp1).unwrap();
 
-        let CmeRecord::Mbp1(record) = &frame.record else {
+        let ExchangeRecord::Mbp1(record) = &frame.record else {
             panic!("not a Level 1 record: {:?}", frame.record)
         };
         let level = &record.levels[0];
@@ -256,7 +262,8 @@ mod tests {
     #[rstest]
     fn each_frame_names_its_contract_and_its_sequence() {
         let captured = frames(CME_GCZ6_GCG7);
-        let frame = CmeRecordFrame::parse(binary(&captured[5]).unwrap(), CmeLevel::Mbp1).unwrap();
+        let frame =
+            ExchangeRecordFrame::parse(binary(&captured[5]).unwrap(), ExchangeLevel::Mbp1).unwrap();
 
         assert_eq!(
             (frame.snapshot, frame.sequence, frame.instrument_id),
@@ -277,38 +284,38 @@ mod tests {
         let mut frame = binary(&captured[2]).unwrap().to_vec();
         mangle(&mut frame);
 
-        assert!(CmeRecordFrame::parse(&frame, CmeLevel::Mbp1).is_err());
+        assert!(ExchangeRecordFrame::parse(&frame, ExchangeLevel::Mbp1).is_err());
     }
 
     #[rstest]
     fn the_text_frames_are_read_by_their_type() {
         let captured = frames(CME_GCZ6_GCG7);
-        let texts: Vec<CmeText> = captured
+        let texts: Vec<ExchangeText> = captured
             .iter()
             .filter_map(|frame| match frame {
-                CmeFrame::Text(text) => Some(serde_json::from_str(text).unwrap()),
-                CmeFrame::Binary(_) => None,
+                StreamFrame::Text(text) => Some(serde_json::from_str(text).unwrap()),
+                StreamFrame::Binary(_) => None,
             })
             .collect();
 
         assert_eq!(
             texts,
             [
-                CmeText::Hello { epoch: 2 },
-                CmeText::SnapshotBegin {
+                ExchangeText::Hello { epoch: 2 },
+                ExchangeText::SnapshotBegin {
                     symbol: "GCZ6".into(),
                     instrument_id: 1_496_506_229,
                     sequence: 1794
                 },
-                CmeText::SnapshotEnd {
+                ExchangeText::SnapshotEnd {
                     symbol: "GCZ6".into()
                 },
-                CmeText::SnapshotBegin {
+                ExchangeText::SnapshotBegin {
                     symbol: "GCG7".into(),
                     instrument_id: 3_648_859_809,
                     sequence: 58
                 },
-                CmeText::SnapshotEnd {
+                ExchangeText::SnapshotEnd {
                     symbol: "GCG7".into()
                 },
             ]
@@ -318,17 +325,17 @@ mod tests {
     /// LSE's documented subscription, asking the `dbn` encoding, at each
     /// level a connection may carry.
     #[rstest]
-    #[case::level_1(CmeLevel::Mbp1, 1)]
-    #[case::level_2(CmeLevel::Mbp10, 2)]
-    #[case::level_3(CmeLevel::Mbo, 3)]
+    #[case::level_1(ExchangeLevel::Mbp1, 1)]
+    #[case::level_2(ExchangeLevel::Mbp10, 2)]
+    #[case::level_3(ExchangeLevel::Mbo, 3)]
     fn the_subscription_names_the_contracts_at_its_level_in_dbn(
-        #[case] level: CmeLevel,
+        #[case] level: ExchangeLevel,
         #[case] number: u8,
     ) {
         let symbols = ["GCZ6".to_string(), "GCG7".to_string()];
 
         let sent: serde_json::Value =
-            serde_json::from_str(&CmeSubscription::new(level, &symbols).to_json()).unwrap();
+            serde_json::from_str(&ExchangeSubscription::new(level, &symbols).to_json()).unwrap();
 
         assert_eq!(
             sent,
@@ -342,9 +349,10 @@ mod tests {
     fn a_level_2_frame_is_lse_s_header_then_the_contract_s_ten_levels_a_side() {
         let session = dbn_frames(CME_GCZ6_L2_DOCUMENTED);
 
-        let frame = CmeRecordFrame::parse(binary(&session[2]).unwrap(), CmeLevel::Mbp10).unwrap();
+        let frame =
+            ExchangeRecordFrame::parse(binary(&session[2]).unwrap(), ExchangeLevel::Mbp10).unwrap();
 
-        let CmeRecord::Mbp10(record) = &frame.record else {
+        let ExchangeRecord::Mbp10(record) = &frame.record else {
             panic!("not a Level 2 record: {:?}", frame.record)
         };
         assert_eq!(
@@ -382,9 +390,10 @@ mod tests {
     fn a_level_3_frame_is_lse_s_header_then_one_order_event() {
         let session = dbn_frames(CME_GCZ6_L3_DOCUMENTED);
 
-        let frame = CmeRecordFrame::parse(binary(&session[3]).unwrap(), CmeLevel::Mbo).unwrap();
+        let frame =
+            ExchangeRecordFrame::parse(binary(&session[3]).unwrap(), ExchangeLevel::Mbo).unwrap();
 
-        let CmeRecord::Mbo(record) = &frame.record else {
+        let ExchangeRecord::Mbo(record) = &frame.record else {
             panic!("not a Level 3 record: {:?}", frame.record)
         };
         assert_eq!(
@@ -407,13 +416,13 @@ mod tests {
     /// A connection carries one level: a record of another is no record of
     /// it.
     #[rstest]
-    #[case::level_1_at_level_2(CME_GCZ6_GCG7, 2, CmeLevel::Mbp10)]
-    #[case::level_2_at_level_1(CME_GCZ6_L2_DOCUMENTED, 2, CmeLevel::Mbp1)]
-    #[case::level_3_at_level_2(CME_GCZ6_L3_DOCUMENTED, 3, CmeLevel::Mbp10)]
+    #[case::level_1_at_level_2(CME_GCZ6_GCG7, 2, ExchangeLevel::Mbp10)]
+    #[case::level_2_at_level_1(CME_GCZ6_L2_DOCUMENTED, 2, ExchangeLevel::Mbp1)]
+    #[case::level_3_at_level_2(CME_GCZ6_L3_DOCUMENTED, 3, ExchangeLevel::Mbp10)]
     fn a_frame_of_another_level_s_record_is_refused(
         #[case] session: &str,
         #[case] at: usize,
-        #[case] level: CmeLevel,
+        #[case] level: ExchangeLevel,
     ) {
         let session = if session == CME_GCZ6_GCG7 {
             frames(session)
@@ -421,32 +430,32 @@ mod tests {
             dbn_frames(session)
         };
 
-        assert!(CmeRecordFrame::parse(binary(&session[at]).unwrap(), level).is_err());
+        assert!(ExchangeRecordFrame::parse(binary(&session[at]).unwrap(), level).is_err());
     }
 
     /// At Level 3 a contract opens with no record: `snapshot_begin`, of a
     /// count of 0, then `snapshot_end`.
     #[rstest]
     fn a_level_3_opening_is_its_markers_alone() {
-        let texts: Vec<CmeText> = dbn_frames(CME_GCZ6_L3_DOCUMENTED)
+        let texts: Vec<ExchangeText> = dbn_frames(CME_GCZ6_L3_DOCUMENTED)
             .iter()
             .take(3)
             .map(|frame| match frame {
-                CmeFrame::Text(text) => serde_json::from_str(text).unwrap(),
-                CmeFrame::Binary(_) => panic!("a record in the opening"),
+                StreamFrame::Text(text) => serde_json::from_str(text).unwrap(),
+                StreamFrame::Binary(_) => panic!("a record in the opening"),
             })
             .collect();
 
         assert_eq!(
             texts,
             [
-                CmeText::Hello { epoch: 2 },
-                CmeText::SnapshotBegin {
+                ExchangeText::Hello { epoch: 2 },
+                ExchangeText::SnapshotBegin {
                     symbol: "GCZ6".into(),
                     instrument_id: 1_496_506_229,
                     sequence: 7311
                 },
-                CmeText::SnapshotEnd {
+                ExchangeText::SnapshotEnd {
                     symbol: "GCZ6".into()
                 },
             ]

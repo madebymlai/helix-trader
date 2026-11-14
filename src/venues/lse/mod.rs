@@ -6,19 +6,22 @@
 //! `futures`), trades, from LSE's tick slices, and bars, from its candles,
 //! each stamped at its close; of `GLBX` contracts, CME Globex's Levels 1
 //! to 3 under the ids Databento gives them (`GCZ26.GLBX`), trades, quotes,
-//! book depths and book deltas; and of `OPRA` contracts, US options under
-//! the ids Databento gives them, their OSI symbols
+//! book depths and book deltas; of `XNAS` stocks, Nasdaq TotalView's
+//! Levels 1 to 3 under the ids Databento gives them, their tickers
+//! (`NVDA.XNAS`), the same; and of `OPRA` contracts, US options under the
+//! ids Databento gives them, their OSI symbols
 //! (`AAPL  261120C00355000.OPRA`), trades and bars, as an `LSEDGE`
 //! series'. Live, the client streams the quotes of `LSEDGE` instruments,
-//! the Levels 1 to 3 of `GLBX` contracts, quotes and trades, book depths
-//! and book deltas, and the trades of `OPRA` contracts, through one
-//! subscription of each underlying's chain, on the live node, routed their
-//! venues (`live_clients`), IB's execution client taking `GLBX`'s and
-//! `OPRA`'s orders. Each contract's definition
-//! is its row's definitions source's: `LSEDGE`'s the catalog's alone,
-//! written there by hand, LSE publishing none, the data engine answering a
-//! definition request from the catalog before asking the client; `GLBX`'s
-//! and `OPRA`'s Databento's, asked of Nautilus' Databento client. The
+//! the Levels 1 to 3 of `GLBX` contracts and `XNAS` stocks, quotes and
+//! trades, book depths and book deltas, and the trades of `OPRA`
+//! contracts, through one subscription of each underlying's chain, on the
+//! live node, routed their venues (`live_clients`), IB's execution client
+//! taking `GLBX`'s, `XNAS`'s and `OPRA`'s orders. Each contract's
+//! definition is its row's definitions source's: `LSEDGE`'s the catalog's
+//! alone, written there by hand, LSE publishing none, the data engine
+//! answering a definition request from the catalog before asking the
+//! client; `GLBX`'s, `XNAS`'s and `OPRA`'s Databento's, asked of Nautilus'
+//! Databento client. The
 //! client converts LSE's prices at the definition's precision. LSE's
 //! reference series, the rows of its reference collections, of its macro
 //! series of releases and of yields and of an instrument's splits and
@@ -107,10 +110,11 @@ fn node_client(config: LseDataClientConfig) -> NodeClient {
 }
 
 /// The live node's clients of `instrument_ids`, `LSEDGE` series, `GLBX`
-/// contracts and `OPRA` contracts: the LSE adapter's data client streaming
-/// them, its keys read when the node creates it, the LSE key for `LSEDGE`
-/// and `OPRA` and the CME key for `GLBX`, and no execution client, LSE
-/// trading nothing, `GLBX`'s and `OPRA`'s orders going to IB's. The client
+/// contracts, `XNAS` stocks and `OPRA` contracts: the LSE adapter's data
+/// client streaming them, its keys read when the node creates it, the LSE
+/// key for `LSEDGE` and `OPRA`, the CME key for `GLBX` and the Nasdaq key
+/// for `XNAS`, and no execution client, LSE trading nothing, `GLBX`'s,
+/// `XNAS`'s and `OPRA`'s orders going to IB's. The client
 /// is on no venue, so it takes the routes of theirs (`RoutingConfig::venues`);
 /// no data client is the default (see `live::node::Clients`).
 pub(super) fn live_clients(instrument_ids: &[InstrumentId]) -> Clients {
@@ -153,10 +157,10 @@ mod tests {
             ALLOWANCE_EXHAUSTED, API_KEY, BTCUSDT_TRADES, CME_API_KEY, DATA_UNAVAILABLE_TODAY,
             DATE_NOT_TRADING, EUR_USD_MINUTES, GCZ26, GCZ26_BOOK, GCZ26_ORDERS, GCZ26_QUOTES,
             GCZ26_TRADES, GOLD_FUTURES, GOLD_SPOT, GOLD_SPOT_MINUTES, GOLD_TRADES, MockLse,
-            PAIRS_GCZ6, PLAN_REQUIRED, REFERENCE_CATALOGUE, REFERENCE_DATA_UNAVAILABLE,
-            ROWS_EXHAUSTED, RY_TRADES, Reply, SPX_MINUTES, SPX_TICKS, SYMBOL_UNKNOWN,
-            US_CORE_CPI_CALENDAR, US_CORE_CPI_RELEASES, US10Y_BOND_YIELDS, VOD_TRADES, ZN_COT,
-            gold_futures, gold_spot,
+            NASDAQ_API_KEY, NVDA, NVDA_BOOK, NVDA_ORDERS, NVDA_QUOTES, NVDA_TRADES, PAIRS_GCZ6,
+            PLAN_REQUIRED, REFERENCE_CATALOGUE, REFERENCE_DATA_UNAVAILABLE, ROWS_EXHAUSTED,
+            RY_TRADES, Reply, SPX_MINUTES, SPX_TICKS, SYMBOL_UNKNOWN, US_CORE_CPI_CALENDAR,
+            US_CORE_CPI_RELEASES, US10Y_BOND_YIELDS, VOD_TRADES, ZN_COT, gold_futures, gold_spot,
         },
     };
     use jiff::Timestamp;
@@ -265,6 +269,7 @@ mod tests {
         let config = LseDataClientConfig::builder()
             .api_key(SecretString::from(API_KEY))
             .cme_api_key(SecretString::from(CME_API_KEY))
+            .nasdaq_api_key(SecretString::from(NASDAQ_API_KEY))
             .base_url_http(lse.url().to_string())
             .build();
         let databento = || {
@@ -1554,5 +1559,154 @@ mod tests {
             .map(ToString::to_string)
         };
         assert_eq!(asked_of_lse, [export("1m"), export("tick")]);
+    }
+
+    /// NVDA over the second its documented exports hold: its definition is
+    /// Databento's, of `XNAS.ITCH`, asked of Databento's client, which the
+    /// mock Databento peer answers with Databento's records of NVDA, and its
+    /// trades, quotes, book depths and book deltas LSE's, asked of LSE's
+    /// client by NVDA's ticker in LSE's `nasdaq` with the Nasdaq key, each
+    /// written back to the catalog under `NVDA.XNAS`, each delta event
+    /// ending `F_LAST`.
+    #[test]
+    fn an_xnas_fill_takes_its_definition_from_databento_and_its_data_from_lse() {
+        let dir = tempfile::tempdir().unwrap();
+        let lse = MockLse::start(vec![
+            Reply::file(NVDA_TRADES),
+            Reply::file(NVDA_QUOTES),
+            Reply::file(NVDA_BOOK),
+            Reply::file(NVDA_ORDERS),
+        ]);
+        let databento = MockDatabento::start();
+        let second = (november("12T14:30:00"), november("12T14:30:00.999999999"));
+        let requirements = DataRequirements {
+            bar_types: vec![],
+            ticks: [
+                NautilusDataType::TradeTick,
+                NautilusDataType::QuoteTick,
+                NautilusDataType::OrderBookDepth,
+                NautilusDataType::OrderBookDelta,
+            ]
+            .map(|data| TickSeries {
+                data,
+                instrument_id: InstrumentId::from(NVDA),
+            })
+            .to_vec(),
+            custom: vec![],
+            warmup: SignedDuration::ZERO,
+        };
+
+        fill_from(
+            dir.path(),
+            &lse,
+            Some(&databento),
+            &requirements,
+            vec![],
+            second,
+        )
+        .unwrap();
+
+        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let [InstrumentAny::Equity(definition)] = &catalog
+            .instruments(Some(&[NVDA.to_string()]), None, None)
+            .unwrap()[..]
+        else {
+            panic!("not one equity");
+        };
+        assert_eq!(
+            (
+                definition.raw_symbol.as_str(),
+                definition.price_precision,
+                definition.price_increment,
+                definition.lot_size,
+            ),
+            ("NVDA", 2, Price::from("0.01"), Some(Quantity::from(100)))
+        );
+        let trades = catalog
+            .trade_ticks(Some(vec![NVDA.to_string()]), None, None)
+            .unwrap();
+        assert_eq!(
+            trades
+                .iter()
+                .map(|trade| (trade.price, trade.size))
+                .collect::<Vec<_>>(),
+            [
+                ("211.15", 100),
+                ("211.15", 100),
+                ("211.14", 200),
+                ("211.17", 50)
+            ]
+            .map(|(price, size)| (Price::from(price), Quantity::from(size)))
+        );
+        let quotes = catalog
+            .quote_ticks(Some(vec![NVDA.to_string()]), None, None)
+            .unwrap();
+        assert_eq!(quotes.len(), 4);
+        let depths = catalog
+            .order_book_depths(Some(vec![NVDA.to_string()]), None, None)
+            .unwrap();
+        assert_eq!(depths.len(), 4);
+        assert_eq!(
+            (depths[0].bids[0].price, depths[0].asks[0].price),
+            (Price::from("211.15"), Price::from("211.17"))
+        );
+        let deltas = catalog
+            .order_book_deltas(Some(vec![NVDA.to_string()]), None, None)
+            .unwrap();
+        assert_eq!(deltas.len(), 4);
+        assert!(RecordFlag::F_LAST.matches(deltas[3].flags));
+        let asked_of_databento: Vec<_> = databento
+            .calls()
+            .iter()
+            .map(|call| {
+                (
+                    call.path.clone(),
+                    call.param("dataset").map(ToString::to_string),
+                    call.param("symbols").map(ToString::to_string),
+                )
+            })
+            .collect();
+        assert_eq!(
+            asked_of_databento,
+            [
+                (
+                    "/v0/metadata.get_dataset_range".to_string(),
+                    Some("XNAS.ITCH".to_string()),
+                    None
+                ),
+                (
+                    "/v0/timeseries.get_range".to_string(),
+                    Some("XNAS.ITCH".to_string()),
+                    Some("NVDA".to_string())
+                ),
+            ]
+        );
+        let mut asked_of_lse: Vec<_> = lse
+            .calls()
+            .iter()
+            .map(|call| {
+                [
+                    call.path.as_str(),
+                    call.param("market").unwrap_or_default(),
+                    call.param("symbol").unwrap_or_default(),
+                    call.param("data").unwrap_or_default(),
+                    call.api_key.as_deref().unwrap_or_default(),
+                ]
+                .map(ToString::to_string)
+            })
+            .collect();
+        asked_of_lse.sort();
+        let export = |data: &str| {
+            ["/v3/export", "nasdaq", "NVDA", data, NASDAQ_API_KEY].map(ToString::to_string)
+        };
+        assert_eq!(
+            asked_of_lse,
+            [
+                export("book"),
+                export("orders"),
+                export("quotes"),
+                export("trades")
+            ]
+        );
     }
 }

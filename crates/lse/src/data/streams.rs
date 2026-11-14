@@ -1,7 +1,8 @@
 //! The data client's live data: the sockets of the instruments it streams,
 //! the quotes of `LSEDGE` series and the trades of `OPRA` contracts, and
-//! LSE's CME stream of the `GLBX` contracts it streams, their quotes,
-//! trades, book depth and book deltas (see `cme`).
+//! LSE's exchange streams, its CME stream of the `GLBX` contracts and its
+//! Nasdaq stream of the `XNAS` stocks it streams, their quotes, trades,
+//! book depth and book deltas (see `exchange`).
 //!
 //! `open` connects to the socket each instrument streams on (see
 //! `LseSymbol::stream` and `OpraContract::stream`), one connection a socket
@@ -35,16 +36,12 @@ use nautilus_common::{
 };
 use nautilus_core::{collections::AtomicMap, time::AtomicTime};
 use nautilus_live::task::TaskGroup;
-use nautilus_model::{
-    data::Data,
-    identifiers::{InstrumentId, Venue},
-    instruments::Instrument,
-};
+use nautilus_model::{data::Data, identifiers::InstrumentId, instruments::Instrument};
 
-use super::cme::{CmeAccess, CmeKind, CmeStreams};
+use super::exchange::{ExchangeAccess, ExchangeInstrument, ExchangeStreams, StreamKind};
 use crate::{
     common::{
-        consts::{LSE_API_KEY, LseSocket, OPRA_VENUE},
+        consts::{LSE_API_KEY, LseExchange, LseSocket, OPRA_VENUE},
         credential::LseCredential,
         symbol::{LseInstrument, OpraContract},
     },
@@ -99,26 +96,30 @@ pub(super) struct LseStreams {
     /// The tasks turning each socket's ticks into quotes and trades.
     tasks: TaskGroup,
     /// The `GLBX` contracts, on LSE's CME stream.
-    cme: CmeStreams,
+    cme: ExchangeStreams,
+    /// The `XNAS` stocks, on LSE's Nasdaq stream.
+    nasdaq: ExchangeStreams,
     data_sender: EventSender<DataEvent>,
     clock: &'static AtomicTime,
 }
 
 impl LseStreams {
     /// The streams of the instruments `config` streams: `LSEDGE` series and
-    /// `OPRA` contracts on the key of `credential`, the LSE key, and `GLBX`
-    /// contracts on `cme`, the CME key, looked up in `listings`; none open.
+    /// `OPRA` contracts on the key of `credential`, the LSE key, `GLBX`
+    /// contracts on `cme`, the CME key, looked up in `listings`, and `XNAS`
+    /// stocks on `nasdaq`, the Nasdaq key; none open.
     ///
     /// # Errors
     ///
     /// Returns an error naming it if an instrument is neither an `LSEDGE`
-    /// series, an `OPRA` contract nor a `GLBX` contract, or is a series of a
-    /// market streamed on no socket here, and naming the variable of the
-    /// key if an instrument is streamed with no key of its product.
+    /// series, an `OPRA` contract, a `GLBX` contract nor an `XNAS` stock, or
+    /// is a series of a market streamed on no socket here, and naming the
+    /// variable of the key if an instrument is streamed with no key of its
+    /// product.
     pub(super) fn new(
         config: &LseDataClientConfig,
         credential: Option<LseCredential>,
-        cme: Option<CmeAccess>,
+        (cme, nasdaq): (Option<ExchangeAccess>, Option<ExchangeAccess>),
         listings: Arc<CmeListings>,
         data_sender: EventSender<DataEvent>,
         clock: &'static AtomicTime,
@@ -126,7 +127,8 @@ impl LseStreams {
         let year = Timestamp::from(clock.get_time_ns())
             .to_zoned(TimeZone::UTC)
             .year();
-        let (mut streamed, mut options, mut contracts) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut streamed, mut options) = (Vec::new(), Vec::new());
+        let (mut contracts, mut stocks) = (Vec::new(), Vec::new());
         for &id in &config.stream_ids {
             match LseInstrument::from_instrument_id(id, year)? {
                 LseInstrument::Series(series) => {
@@ -135,17 +137,23 @@ impl LseStreams {
                     streamed.push((id, socket, symbol));
                 }
                 LseInstrument::Opra(contract) => options.push((id, contract)),
-                LseInstrument::Cme(contract) => contracts.push(contract),
+                LseInstrument::Cme(contract) => contracts.push(ExchangeInstrument::Cme(contract)),
+                LseInstrument::Nasdaq(stock) => stocks.push(ExchangeInstrument::Nasdaq(stock)),
             }
         }
-        let cme = CmeStreams::new(
-            contracts,
-            cme,
-            listings,
-            config.cme_stream_url().to_owned(),
-            data_sender.clone(),
-            clock,
-        )?;
+        let exchange_streams = |exchange, streamed, access| {
+            ExchangeStreams::new(
+                exchange,
+                streamed,
+                access,
+                Arc::clone(&listings),
+                config.exchange_stream_url(exchange).to_owned(),
+                data_sender.clone(),
+                clock,
+            )
+        };
+        let cme = exchange_streams(LseExchange::Cme, contracts, cme)?;
+        let nasdaq = exchange_streams(LseExchange::Nasdaq, stocks, nasdaq)?;
         if credential.is_none() && !(streamed.is_empty() && options.is_empty()) {
             bail!(
                 "streaming {} needs the LSE key: set {LSE_API_KEY}, or give the config's",
@@ -179,6 +187,7 @@ impl LseStreams {
             chains: AHashMap::new(),
             tasks: TaskGroup::new(),
             cme,
+            nasdaq,
             data_sender,
             clock,
         })
@@ -188,15 +197,16 @@ impl LseStreams {
     /// socket lists every series to the key and allows the subscriptions of
     /// them all on one connection, a symbol each series and a chain each
     /// underlying of the contracts; starts turning their ticks into quotes
-    /// and trades. Then opens the CME stream of the contracts streamed (see
-    /// `CmeStreams::open`). Nothing to do if none is streamed.
+    /// and trades. Then opens the CME stream of the contracts and the
+    /// Nasdaq stream of the stocks streamed (see `ExchangeStreams::open`).
+    /// Nothing to do if none is streamed.
     ///
     /// # Errors
     ///
     /// Returns an error if a connection fails or LSE refuses the key (see
     /// `LseWebSocketClient::connect`), naming the series a socket does not
     /// list, or naming the limit if the subscriptions of a socket exceed
-    /// it, or as `CmeStreams::open`; then no socket is left open.
+    /// it, or as `ExchangeStreams::open`; then no socket is left open.
     pub(super) async fn open(&mut self) -> anyhow::Result<()> {
         if !self.tasks.is_open() {
             self.close().await?;
@@ -210,9 +220,11 @@ impl LseStreams {
                 return Err(e);
             }
         }
-        if let Err(e) = self.cme.open().await {
-            self.close().await?;
-            return Err(e);
+        for exchange in [LseExchange::Cme, LseExchange::Nasdaq] {
+            if let Err(e) = self.exchange_mut(exchange).open().await {
+                self.close().await?;
+                return Err(e);
+            }
         }
         Ok(())
     }
@@ -358,8 +370,9 @@ impl LseStreams {
     }
 
     /// Subscribes to the quotes of `id`, at the precision of its definition
-    /// in `cache`: a `GLBX` contract's on the CME stream (see
-    /// `CmeStreams::subscribe`), an `LSEDGE` series' on its socket.
+    /// in `cache`: a `GLBX` contract's on the CME stream and an `XNAS`
+    /// stock's on the Nasdaq stream (see `ExchangeStreams::subscribe`), an
+    /// `LSEDGE` series' on its socket.
     ///
     /// # Errors
     ///
@@ -372,8 +385,10 @@ impl LseStreams {
         id: InstrumentId,
         cache: &CacheView,
     ) -> anyhow::Result<()> {
-        if id.venue == Venue::GLBX() {
-            return self.cme.subscribe(id, CmeKind::Quotes, cache);
+        if let Some(exchange) = LseExchange::of_venue(id.venue) {
+            return self
+                .exchange_mut(exchange)
+                .subscribe(id, StreamKind::Quotes, cache);
         }
         let (socket, symbol) = self.streamed_as(id)?;
         let client = self.socket(socket)?;
@@ -390,8 +405,8 @@ impl LseStreams {
     /// Returns an error naming it if the client does not stream it, or if
     /// its socket is not open.
     pub(super) fn unsubscribe_quotes(&self, id: InstrumentId) -> anyhow::Result<()> {
-        if id.venue == Venue::GLBX() {
-            return self.cme.unsubscribe(id, CmeKind::Quotes);
+        if let Some(exchange) = LseExchange::of_venue(id.venue) {
+            return self.exchange(exchange).unsubscribe(id, StreamKind::Quotes);
         }
         let (socket, symbol) = self.streamed_as(id)?;
         self.quoted.remove(&(socket, symbol.to_ascii_uppercase()));
@@ -399,25 +414,26 @@ impl LseStreams {
     }
 
     /// Subscribes to the trades of `id`, at the precision of its definition
-    /// in `cache`: a `GLBX` contract's on the CME stream (see
-    /// `CmeStreams::subscribe`); an `OPRA` contract's on its socket,
-    /// subscribing its underlying's chain unless a contract of it is
-    /// subscribed already; nothing to do
-    /// if its trades are.
+    /// in `cache`: a `GLBX` contract's on the CME stream and an `XNAS`
+    /// stock's on the Nasdaq stream (see `ExchangeStreams::subscribe`); an
+    /// `OPRA` contract's on its socket, subscribing its underlying's chain
+    /// unless a contract of it is subscribed already; nothing to do if its
+    /// trades are.
     ///
     /// # Errors
     ///
-    /// Returns an error naming it if it is no `OPRA` contract, LSE's
-    /// sockets streaming a series' ticks as quotes, if the client does not
-    /// stream it, if its socket is not open, or if `cache` has no definition
-    /// of it.
+    /// Returns an error naming it if it is none of those, LSE's sockets
+    /// streaming a series' ticks as quotes, if the client does not stream
+    /// it, if its socket is not open, or if `cache` has no definition of it.
     pub(super) fn subscribe_trades(
         &mut self,
         id: InstrumentId,
         cache: &CacheView,
     ) -> anyhow::Result<()> {
-        if id.venue == Venue::GLBX() {
-            return self.cme.subscribe(id, CmeKind::Trades, cache);
+        if let Some(exchange) = LseExchange::of_venue(id.venue) {
+            return self
+                .exchange_mut(exchange)
+                .subscribe(id, StreamKind::Trades, cache);
         }
         let contract = self.contract(id)?;
         let (socket, name) = contract.stream();
@@ -436,18 +452,18 @@ impl LseStreams {
         Ok(())
     }
 
-    /// Ends the trades of `id`: a `GLBX` contract's, which the CME stream
-    /// carries on; an `OPRA` contract's, and its underlying's chain with the
-    /// trades of its last contract subscribed, nothing to do if its trades
-    /// are not subscribed.
+    /// Ends the trades of `id`: a `GLBX` contract's or an `XNAS` stock's,
+    /// which its exchange's stream carries on; an `OPRA` contract's, and
+    /// its underlying's chain with the trades of its last contract
+    /// subscribed, nothing to do if its trades are not subscribed.
     ///
     /// # Errors
     ///
-    /// Returns an error naming it if it is no `OPRA` contract, if the client
-    /// does not stream it, or if its socket is not open.
+    /// Returns an error naming it if it is none of those, if the client does
+    /// not stream it, or if its socket is not open.
     pub(super) fn unsubscribe_trades(&mut self, id: InstrumentId) -> anyhow::Result<()> {
-        if id.venue == Venue::GLBX() {
-            return self.cme.unsubscribe(id, CmeKind::Trades);
+        if let Some(exchange) = LseExchange::of_venue(id.venue) {
+            return self.exchange(exchange).unsubscribe(id, StreamKind::Trades);
         }
         let contract = self.contract(id)?;
         let (socket, name) = contract.stream();
@@ -469,60 +485,80 @@ impl LseStreams {
         Ok(())
     }
 
-    /// Subscribes to the book depth of `id`, a `GLBX` contract's ten levels
-    /// a side on LSE's CME stream at Level 2, at the price precision of its
-    /// definition in `cache` (see `CmeStreams::subscribe`).
+    /// Subscribes to the book depth of `id`, a `GLBX` contract's or an
+    /// `XNAS` stock's ten levels a side on its exchange's stream at Level
+    /// 2, at the price precision of its definition in `cache` (see
+    /// `ExchangeStreams::subscribe`).
     ///
     /// # Errors
     ///
-    /// Returns an error naming it if it is no `GLBX` contract, or as
-    /// `CmeStreams::subscribe`.
+    /// Returns an error naming it if it is neither, or as
+    /// `ExchangeStreams::subscribe`.
     pub(super) fn subscribe_book_depth(
         &mut self,
         id: InstrumentId,
         cache: &CacheView,
     ) -> anyhow::Result<()> {
-        booked(id)?;
-        self.cme.subscribe(id, CmeKind::Depth, cache)
+        let exchange = booked(id)?;
+        self.exchange_mut(exchange)
+            .subscribe(id, StreamKind::Depth, cache)
     }
 
-    /// Ends the book depth of `id`, which the CME stream carries on.
+    /// Ends the book depth of `id`, which its exchange's stream carries on.
     ///
     /// # Errors
     ///
-    /// Returns an error naming it if it is no `GLBX` contract, or is not
-    /// subscribed.
+    /// Returns an error naming it if it is neither a `GLBX` contract nor an
+    /// `XNAS` stock, or is not subscribed.
     pub(super) fn unsubscribe_book_depth(&self, id: InstrumentId) -> anyhow::Result<()> {
-        booked(id)?;
-        self.cme.unsubscribe(id, CmeKind::Depth)
+        self.exchange(booked(id)?)
+            .unsubscribe(id, StreamKind::Depth)
     }
 
-    /// Subscribes to the book deltas of `id`, a `GLBX` contract's order
-    /// events on LSE's CME stream at Level 3, at the price precision of its
-    /// definition in `cache` (see `CmeStreams::subscribe`).
+    /// Subscribes to the book deltas of `id`, a `GLBX` contract's or an
+    /// `XNAS` stock's order events on its exchange's stream at Level 3, at
+    /// the price precision of its definition in `cache` (see
+    /// `ExchangeStreams::subscribe`).
     ///
     /// # Errors
     ///
-    /// Returns an error naming it if it is no `GLBX` contract, or as
-    /// `CmeStreams::subscribe`.
+    /// Returns an error naming it if it is neither, or as
+    /// `ExchangeStreams::subscribe`.
     pub(super) fn subscribe_book_deltas(
         &mut self,
         id: InstrumentId,
         cache: &CacheView,
     ) -> anyhow::Result<()> {
-        booked(id)?;
-        self.cme.subscribe(id, CmeKind::Deltas, cache)
+        let exchange = booked(id)?;
+        self.exchange_mut(exchange)
+            .subscribe(id, StreamKind::Deltas, cache)
     }
 
-    /// Ends the book deltas of `id`, which the CME stream carries on.
+    /// Ends the book deltas of `id`, which its exchange's stream carries
+    /// on.
     ///
     /// # Errors
     ///
-    /// Returns an error naming it if it is no `GLBX` contract, or is not
-    /// subscribed.
+    /// Returns an error naming it if it is neither a `GLBX` contract nor an
+    /// `XNAS` stock, or is not subscribed.
     pub(super) fn unsubscribe_book_deltas(&self, id: InstrumentId) -> anyhow::Result<()> {
-        booked(id)?;
-        self.cme.unsubscribe(id, CmeKind::Deltas)
+        self.exchange(booked(id)?)
+            .unsubscribe(id, StreamKind::Deltas)
+    }
+
+    /// The streams of `exchange`'s contracts.
+    fn exchange(&self, exchange: LseExchange) -> &ExchangeStreams {
+        match exchange {
+            LseExchange::Cme => &self.cme,
+            LseExchange::Nasdaq => &self.nasdaq,
+        }
+    }
+
+    fn exchange_mut(&mut self, exchange: LseExchange) -> &mut ExchangeStreams {
+        match exchange {
+            LseExchange::Cme => &mut self.cme,
+            LseExchange::Nasdaq => &mut self.nasdaq,
+        }
     }
 
     /// The socket of `id` and its symbol there.
@@ -542,7 +578,8 @@ impl LseStreams {
             bail!(
                 "LSE streams no trades of {id}: its sockets' ticks of a series are quotes (a \
                  futures tick's price is its bid); it streams the trades of US option \
-                 contracts, under OPRA, and of CME Globex contracts, under GLBX"
+                 contracts, under OPRA, of CME Globex contracts, under GLBX, and of Nasdaq \
+                 TotalView stocks, under XNAS"
             );
         }
         match self.options.iter().find(|(of, _)| *of == id) {
@@ -566,19 +603,21 @@ impl LseStreams {
     pub(super) fn begin_shutdown(&self) {
         self.tasks.begin_shutdown();
         self.cme.begin_shutdown();
+        self.nasdaq.begin_shutdown();
     }
 
     /// Stops the tick and record tasks and disconnects every socket and
-    /// the CME stream.
+    /// the exchange streams.
     ///
     /// # Errors
     ///
     /// Returns an error if the tasks do not stop.
     pub(super) async fn close(&mut self) -> anyhow::Result<()> {
         self.tasks.begin_shutdown();
-        let (stopped, cme) = tokio::join!(
+        let (stopped, cme, nasdaq) = tokio::join!(
             self.tasks.finish_shutdown(TASK_GRACE, TASK_FORCE),
-            self.cme.close()
+            self.cme.close(),
+            self.nasdaq.close()
         );
         for (_, client) in self.sockets.drain() {
             client.disconnect().await;
@@ -587,25 +626,25 @@ impl LseStreams {
         self.traded.rcu(|traded| traded.clear());
         self.chains.clear();
         stopped.map_err(|e| anyhow::anyhow!("stopping the LSE tick tasks: {e}"))?;
-        cme
+        cme.and(nasdaq)
     }
 }
 
-/// Checks that LSE streams a book of `id`: a `GLBX` contract's, LSE's
-/// sockets streaming a series' ticks alone.
+/// The exchange whose stream carries the book of `id`: a `GLBX`
+/// contract's or an `XNAS` stock's, LSE's sockets streaming a series'
+/// ticks alone.
 ///
 /// # Errors
 ///
-/// Returns an error naming it if it is no `GLBX` contract.
-fn booked(id: InstrumentId) -> anyhow::Result<()> {
-    if id.venue != Venue::GLBX() {
-        bail!(
+/// Returns an error naming it if it is neither.
+fn booked(id: InstrumentId) -> anyhow::Result<LseExchange> {
+    LseExchange::of_venue(id.venue).with_context(|| {
+        format!(
             "LSE streams no book of {id}: its sockets stream a series' ticks alone; it streams \
-             the book of CME Globex contracts, under GLBX, Level 2's ten levels a side as depth \
-             and Level 3's orders as deltas"
-        );
-    }
-    Ok(())
+             the book of CME Globex contracts, under GLBX, and of Nasdaq TotalView stocks, under \
+             XNAS, Level 2's ten levels a side as depth and Level 3's orders as deltas"
+        )
+    })
 }
 
 /// `id` with the precisions of its definition in `cache`.

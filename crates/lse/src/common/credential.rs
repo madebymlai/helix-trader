@@ -6,7 +6,7 @@ use std::fmt;
 
 use nautilus_core::string::secret::SecretString;
 
-use super::consts::{LSE_API_KEY, LSE_CME_API_KEY};
+use super::consts::{LSE_API_KEY, LSE_CME_API_KEY, LSE_NASDAQ_API_KEY};
 
 /// What an LSE key opens. An exchange plan issues a key of its own, which
 /// authenticates only where its market is carried (LSE's `/v3/usage`:
@@ -19,17 +19,21 @@ pub(crate) enum LseProduct {
     Global,
     /// CME Globex (`cme`): a CME Group plan's key, `LSE_CME_API_KEY`.
     Cme,
+    /// Nasdaq TotalView (`nasdaq`): a Nasdaq plan's key,
+    /// `LSE_NASDAQ_API_KEY`.
+    Nasdaq,
 }
 
 impl LseProduct {
     /// Every product, in the order a missing key's error names them.
-    pub(crate) const ALL: [Self; 2] = [Self::Global, Self::Cme];
+    pub(crate) const ALL: [Self; 3] = [Self::Global, Self::Cme, Self::Nasdaq];
 
     /// The variable holding the product's key.
     pub(crate) const fn api_key_var(self) -> &'static str {
         match self {
             Self::Global => LSE_API_KEY,
             Self::Cme => LSE_CME_API_KEY,
+            Self::Nasdaq => LSE_NASDAQ_API_KEY,
         }
     }
 }
@@ -39,6 +43,7 @@ impl fmt::Display for LseProduct {
         f.write_str(match self {
             Self::Global => "LSE",
             Self::Cme => "CME Group",
+            Self::Nasdaq => "Nasdaq",
         })
     }
 }
@@ -86,6 +91,7 @@ mod tests {
     #[rstest]
     #[case::lse(LseProduct::Global)]
     #[case::cme(LseProduct::Cme)]
+    #[case::nasdaq(LseProduct::Nasdaq)]
     fn a_key_given_is_used_whatever_the_product_s_variable_holds(#[case] product: LseProduct) {
         let credential = LseCredential::resolve(
             product,
@@ -100,6 +106,7 @@ mod tests {
     #[rstest]
     #[case::lse(LseProduct::Global, "LSE_API_KEY")]
     #[case::cme(LseProduct::Cme, "LSE_CME_API_KEY")]
+    #[case::nasdaq(LseProduct::Nasdaq, "LSE_NASDAQ_API_KEY")]
     fn with_no_key_given_the_product_s_variable_is_read(
         #[case] product: LseProduct,
         #[case] variable: &'static str,
@@ -112,14 +119,14 @@ mod tests {
         );
     }
 
-    /// The CME key opens CME Globex alone, so it is no LSE key.
+    /// An exchange plan's key opens its market alone: the CME key is no
+    /// LSE key, nor a Nasdaq key.
     #[rstest]
-    fn another_product_s_key_is_none() {
-        let credential = LseCredential::resolve(
-            LseProduct::Global,
-            None,
-            environment(LSE_CME_API_KEY, Some(KEY)),
-        );
+    #[case::lse(LseProduct::Global)]
+    #[case::nasdaq(LseProduct::Nasdaq)]
+    fn another_product_s_key_is_none(#[case] product: LseProduct) {
+        let credential =
+            LseCredential::resolve(product, None, environment(LSE_CME_API_KEY, Some(KEY)));
 
         assert!(credential.is_none());
     }

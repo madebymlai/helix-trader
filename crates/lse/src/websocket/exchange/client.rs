@@ -1,6 +1,10 @@
-//! The client of LSE's CME Globex stream: an outer client and the handler
-//! task that owns Nautilus' `WebSocketClient`, as Nautilus' adapter guide
-//! lays one out ("WebSocket client patterns").
+//! The client of an LSE exchange stream, CME Globex's or Nasdaq
+//! TotalView's, which speak one protocol (LSE's WebSocket documentation,
+//! "The CME Group stream": the Nasdaq stream "sends the same messages for
+//! stocks"): an outer client and the handler task that owns Nautilus'
+//! `WebSocketClient`, as Nautilus' adapter guide lays one out ("WebSocket
+//! client patterns"). Its contracts are the stream's instruments, a CME
+//! contract or a Nasdaq stock.
 //!
 //! A connection carries one subscription, of one level: the contracts by
 //! their names at LSE at Level 1, 2 or 3, which the handler sends first on
@@ -9,8 +13,9 @@
 //! the names). The handler connects once it carries a contract, those it
 //! was started with or the first subscribed, and its first subscription
 //! names every contract subscribed by then; no subscription overtakes the
-//! connection, each waiting in the handler's commands. The CME key goes in
-//! the `X-API-Key` header of the opening request, a reconnect's too. LSE
+//! connection, each waiting in the handler's commands. The key of the
+//! exchange's plan goes in the `X-API-Key` header of the opening request, a
+//! reconnect's too. LSE
 //! answers with `hello`, then opens each contract, with its last best bid
 //! and offer at Level 1, its last ten levels at Level 2 and no record at
 //! Level 3, and streams its records; it refuses a subscription by closing
@@ -58,8 +63,10 @@ use nautilus_network::{
     },
 };
 
-use super::messages::{CmeLevel, CmeRecord, CmeRecordFrame, CmeSubscription, CmeText};
-use crate::common::credential::LseCredential;
+use super::messages::{
+    ExchangeLevel, ExchangeRecord, ExchangeRecordFrame, ExchangeSubscription, ExchangeText,
+};
+use crate::common::{consts::LseExchange, credential::LseCredential};
 
 /// How long LSE may take to answer the subscription.
 pub(crate) const OPEN_TIMEOUT: Duration = Duration::from_secs(30);
@@ -93,14 +100,14 @@ const API_KEY_HEADER: &str = "X-API-Key";
 
 /// What the client passes on.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CmeWsMessage {
+pub(crate) enum ExchangeWsMessage {
     /// A record of the contract `symbol`, of the connection's level, at its
     /// `sequence`; `opening` if it opens the contract, LSE's last best bid
     /// and offer or ten levels, and so carries no event of its own.
     Record {
         symbol: String,
         sequence: u64,
-        record: CmeRecord,
+        record: ExchangeRecord,
         opening: bool,
     },
     /// The records of `symbol` from `from` to `to`, both included, did not
@@ -115,7 +122,7 @@ pub(crate) enum CmeWsMessage {
 /// The answer to a connection's first subscription: `Ok` once LSE says
 /// `hello`, or why it did not, LSE's refusal with its close's code and
 /// reason among them.
-pub(crate) type CmeOpening = tokio::sync::oneshot::Receiver<Result<(), String>>;
+pub(crate) type ExchangeOpening = tokio::sync::oneshot::Receiver<Result<(), String>>;
 
 /// What the transport passes the handler: a frame of a connection, or the
 /// close of one, with its code and reason if LSE gave them.
@@ -124,10 +131,11 @@ enum Inbound {
     Closed(Option<(u16, String)>),
 }
 
-/// A connection to LSE's CME stream at one level, carrying the contracts
-/// subscribed.
+/// A connection to an LSE exchange stream at one level, carrying the
+/// contracts subscribed.
 #[derive(Debug)]
-pub(crate) struct CmeStreamClient {
+pub(crate) struct ExchangeStreamClient {
+    exchange: LseExchange,
     cmd_tx: tokio::sync::mpsc::UnboundedSender<HandlerCommand>,
     /// The handler task, explicitly singular: `disconnect` joins it.
     handler: TaskSlot<()>,
@@ -135,16 +143,17 @@ pub(crate) struct CmeStreamClient {
 
 /// Subscribes contracts on a connection: cloned to whoever subscribes.
 #[derive(Debug, Clone)]
-pub(crate) struct CmeSubscriber {
+pub(crate) struct ExchangeSubscriber {
+    exchange: LseExchange,
     cmd_tx: tokio::sync::mpsc::UnboundedSender<HandlerCommand>,
 }
 
-impl CmeStreamClient {
-    /// Starts the client of the stream at `url` with the CME key of
+impl ExchangeStreamClient {
+    /// Starts the client of `exchange`'s stream at `url` with the key of
     /// `credential`, carrying the contracts `symbols`, by their names at
     /// LSE, at `level`, and passing their records and gaps to `out`: its
     /// handler connects once it carries a contract, `symbols` or the first
-    /// subscribed (`CmeSubscriber::subscribe`), and subscribes every
+    /// subscribed (`ExchangeSubscriber::subscribe`), and subscribes every
     /// contract it carries by then. The opening returned gets LSE's answer.
     ///
     /// # Errors
@@ -152,12 +161,13 @@ impl CmeStreamClient {
     /// Returns an error if the transport's config is refused or the handler
     /// does not start.
     pub(crate) fn start(
+        exchange: LseExchange,
         url: &str,
         credential: &LseCredential,
-        level: CmeLevel,
+        level: ExchangeLevel,
         symbols: &[String],
-        out: tokio::sync::mpsc::UnboundedSender<CmeWsMessage>,
-    ) -> anyhow::Result<(Self, CmeOpening)> {
+        out: tokio::sync::mpsc::UnboundedSender<ExchangeWsMessage>,
+    ) -> anyhow::Result<(Self, ExchangeOpening)> {
         let (raw_tx, raw_rx) = tokio::sync::mpsc::unbounded_channel::<Inbound>();
         let closes = raw_tx.clone();
         let messages: EpochMessageHandler = Arc::new(move |epoch, message| {
@@ -184,14 +194,15 @@ impl CmeStreamClient {
             .reconnect_backoff_factor(RECONNECT_BACKOFF_FACTOR)
             .reconnect_jitter_ms(RECONNECT_JITTER_MS)
             .build()
-            .context("the config of LSE's CME stream")?;
+            .with_context(|| format!("the config of LSE's {exchange} stream"))?;
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
         let subscriptions = SubscriptionState::new(TOPIC_DELIMITER);
         for symbol in symbols {
             subscriptions.mark_subscribe(symbol);
         }
         let (opened_tx, opened_rx) = tokio::sync::oneshot::channel();
-        let handler = CmeHandler {
+        let handler = ExchangeHandler {
+            exchange,
             level,
             transport: Some(Transport {
                 config,
@@ -211,9 +222,10 @@ impl CmeStreamClient {
         };
         let mut task = TaskSlot::new();
         task.spawn(handler.run())
-            .map_err(|e| anyhow::anyhow!("starting the handler of LSE's CME stream: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("starting the handler of LSE's {exchange} stream: {e}"))?;
         Ok((
             Self {
+                exchange,
                 cmd_tx,
                 handler: task,
             },
@@ -221,9 +233,9 @@ impl CmeStreamClient {
         ))
     }
 
-    /// Connects to the stream at `url` with the CME key of `credential`,
-    /// subscribing the contracts `symbols`, by their names at LSE, at
-    /// `level`, and passing their records and gaps to `out`.
+    /// Connects to `exchange`'s stream at `url` with the key of
+    /// `credential`, subscribing the contracts `symbols`, by their names at
+    /// LSE, at `level`, and passing their records and gaps to `out`.
     ///
     /// # Errors
     ///
@@ -232,20 +244,23 @@ impl CmeStreamClient {
     /// its close's code and reason, or does not answer it within
     /// `OPEN_TIMEOUT`.
     pub(crate) async fn connect(
+        exchange: LseExchange,
         url: &str,
         credential: &LseCredential,
-        level: CmeLevel,
+        level: ExchangeLevel,
         symbols: &[String],
-        out: tokio::sync::mpsc::UnboundedSender<CmeWsMessage>,
+        out: tokio::sync::mpsc::UnboundedSender<ExchangeWsMessage>,
     ) -> anyhow::Result<Self> {
-        let (connected, opening) = Self::start(url, credential, level, symbols, out)?;
+        let (connected, opening) = Self::start(exchange, url, credential, level, symbols, out)?;
         let refused = match time::timeout(OPEN_TIMEOUT, opening).await {
             Ok(Ok(Ok(()))) => return Ok(connected),
             Ok(Ok(Err(refused))) => refused,
-            Ok(Err(_)) => "LSE's CME stream stopped before answering the subscription".to_string(),
+            Ok(Err(_)) => {
+                format!("LSE's {exchange} stream stopped before answering the subscription")
+            }
             Err(_) => format!(
-                "LSE's CME stream did not answer the {level} subscription of {symbols:?} within \
-                 {OPEN_TIMEOUT:?}"
+                "LSE's {exchange} stream did not answer the {level} subscription of {symbols:?} \
+                 within {OPEN_TIMEOUT:?}"
             ),
         };
         connected.disconnect().await;
@@ -253,8 +268,9 @@ impl CmeStreamClient {
     }
 
     /// Who subscribes contracts on the connection.
-    pub(crate) fn subscriber(&self) -> CmeSubscriber {
-        CmeSubscriber {
+    pub(crate) fn subscriber(&self) -> ExchangeSubscriber {
+        ExchangeSubscriber {
+            exchange: self.exchange,
             cmd_tx: self.cmd_tx.clone(),
         }
     }
@@ -271,25 +287,26 @@ impl CmeStreamClient {
     pub(crate) async fn disconnect(mut self) {
         // The handler is gone once it has stopped.
         let _ = self.cmd_tx.send(HandlerCommand::Disconnect);
+        let exchange = self.exchange;
         match finish_task(&mut self.handler, DISCONNECT_TIMEOUT, ABORT_TIMEOUT).await {
             None | Some(TaskJoinOutcome::Completed(())) => {}
             Some(TaskJoinOutcome::Aborted) => {
-                log::warn!("the handler of LSE's CME stream did not stop in time: aborted");
+                log::warn!("the handler of LSE's {exchange} stream did not stop in time: aborted");
             }
             Some(TaskJoinOutcome::Failed(e)) => {
-                log::error!("the handler of LSE's CME stream failed: {e}");
+                log::error!("the handler of LSE's {exchange} stream failed: {e}");
             }
             Some(TaskJoinOutcome::Incomplete) => {
-                log::error!("the handler of LSE's CME stream did not stop after its abort");
+                log::error!("the handler of LSE's {exchange} stream did not stop after its abort");
             }
         }
     }
 }
 
-impl CmeSubscriber {
+impl ExchangeSubscriber {
     /// Has the connection carry the contract `symbol`, its name at LSE: if
     /// it carries it already and `reopen`, the new subscriber is passed on
-    /// (`CmeWsMessage::Reopen`); if not, the connection's first
+    /// (`ExchangeWsMessage::Reopen`); if not, the connection's first
     /// subscription names it, if not sent yet, or a new connection carries
     /// it, opening it.
     ///
@@ -304,7 +321,7 @@ impl CmeSubscriber {
                 reopen,
             })
             .ok()
-            .context("the connection to LSE's CME stream is closed")
+            .with_context(|| format!("the connection to LSE's {} stream is closed", self.exchange))
     }
 }
 
@@ -322,15 +339,17 @@ struct Transport {
 }
 
 /// The handler task: the one owner of the `WebSocketClient`.
-struct CmeHandler {
+struct ExchangeHandler {
+    /// The exchange whose stream it is.
+    exchange: LseExchange,
     /// The level the connection's subscription asks.
-    level: CmeLevel,
+    level: ExchangeLevel,
     /// What the transport connects with, until it does.
     transport: Option<Transport>,
     client: Option<WebSocketClient>,
     cmd_rx: tokio::sync::mpsc::UnboundedReceiver<HandlerCommand>,
     raw_rx: tokio::sync::mpsc::UnboundedReceiver<Inbound>,
-    out: tokio::sync::mpsc::UnboundedSender<CmeWsMessage>,
+    out: tokio::sync::mpsc::UnboundedSender<ExchangeWsMessage>,
     /// Where the first `hello`, or the refusal of the first subscription,
     /// goes, until it comes.
     opening: Option<tokio::sync::oneshot::Sender<Result<(), String>>>,
@@ -347,7 +366,7 @@ struct CmeHandler {
     names: AHashMap<u32, String>,
 }
 
-impl CmeHandler {
+impl ExchangeHandler {
     /// Runs until disconnected, the outer client dropped, or a close a new
     /// connection would not lift.
     async fn run(mut self) {
@@ -405,7 +424,8 @@ impl CmeHandler {
         match connected {
             Ok(client) => self.client = Some(client),
             Err(e) => {
-                let failed = anyhow::Error::from(e).context("connecting to LSE's CME stream");
+                let failed = anyhow::Error::from(e)
+                    .context(format!("connecting to LSE's {} stream", self.exchange));
                 if let Some(opening) = self.opening.take() {
                     let _ = opening.send(Err(format!("{failed:#}")));
                 }
@@ -435,18 +455,20 @@ impl CmeHandler {
         }
         match message {
             Message::Text(text) if &text[..] == RECONNECTED.as_bytes() => {}
-            Message::Text(text) => match serde_json::from_slice::<CmeText>(&text) {
+            Message::Text(text) => match serde_json::from_slice::<ExchangeText>(&text) {
                 Ok(text) => self.text(text),
                 // A type the client does not read.
                 Err(e) => log::debug!(
-                    "a frame of LSE's CME stream not read ({} bytes): {e}",
+                    "a frame of LSE's {} stream not read ({} bytes): {e}",
+                    self.exchange,
                     text.len()
                 ),
             },
-            Message::Binary(bytes) => match CmeRecordFrame::parse(&bytes, self.level) {
+            Message::Binary(bytes) => match ExchangeRecordFrame::parse(&bytes, self.level) {
                 Ok(frame) => self.record(frame),
                 Err(e) => log::warn!(
-                    "a record of LSE's CME stream not read ({} bytes): {e:#}",
+                    "a record of LSE's {} stream not read ({} bytes): {e:#}",
+                    self.exchange,
                     bytes.len()
                 ),
             },
@@ -454,15 +476,16 @@ impl CmeHandler {
         }
     }
 
-    fn text(&mut self, text: CmeText) {
+    fn text(&mut self, text: ExchangeText) {
         match text {
-            CmeText::Hello { epoch } => {
+            ExchangeText::Hello { epoch } => {
                 if let Some(feed) = self.feed
                     && feed != epoch
                 {
                     log::warn!(
-                        "LSE's CME feed was reset (epoch {feed}, now {epoch}): its sequences \
-                         start again, and what came between is a gap left as it is"
+                        "LSE's {} feed was reset (epoch {feed}, now {epoch}): its sequences \
+                         start again, and what came between is a gap left as it is",
+                        self.exchange
                     );
                     self.sequences.clear();
                 }
@@ -471,23 +494,24 @@ impl CmeHandler {
                     let _ = opening.send(Ok(()));
                 }
             }
-            CmeText::SnapshotBegin {
+            ExchangeText::SnapshotBegin {
                 symbol,
                 instrument_id,
                 ..
             } => {
                 self.names.insert(instrument_id, symbol);
             }
-            CmeText::SnapshotEnd { symbol } => self.subscriptions.confirm_subscribe(&symbol),
+            ExchangeText::SnapshotEnd { symbol } => self.subscriptions.confirm_subscribe(&symbol),
         }
     }
 
     /// Passes `frame`'s record on, if it is beyond its contract's last,
     /// and the gap before it, if one.
-    fn record(&mut self, frame: CmeRecordFrame) {
+    fn record(&mut self, frame: ExchangeRecordFrame) {
         let Some(symbol) = self.names.get(&frame.instrument_id).cloned() else {
             log::warn!(
-                "a record of LSE's CME stream of a contract not opened ({}) passed over",
+                "a record of LSE's {} stream of a contract not opened ({}) passed over",
+                self.exchange,
                 frame.instrument_id
             );
             return;
@@ -496,8 +520,9 @@ impl CmeHandler {
             if frame.sequence <= last {
                 if !frame.snapshot {
                     log::debug!(
-                        "a record of {symbol} of LSE's CME stream at {}, not beyond {last}, \
+                        "a record of {symbol} of LSE's {} stream at {}, not beyond {last}, \
                          passed over",
+                        self.exchange,
                         frame.sequence
                     );
                 }
@@ -511,7 +536,7 @@ impl CmeHandler {
                 frame.sequence - 1
             };
             if to > last {
-                let _ = self.out.send(CmeWsMessage::Gap {
+                let _ = self.out.send(ExchangeWsMessage::Gap {
                     symbol: symbol.clone(),
                     from: last + 1,
                     to,
@@ -519,7 +544,7 @@ impl CmeHandler {
             }
         }
         self.sequences.insert(symbol.clone(), frame.sequence);
-        let _ = self.out.send(CmeWsMessage::Record {
+        let _ = self.out.send(ExchangeWsMessage::Record {
             symbol,
             sequence: frame.sequence,
             record: frame.record,
@@ -532,8 +557,9 @@ impl CmeHandler {
     fn subscribe(&mut self, symbol: String, reopen: bool) {
         if self.subscriptions.try_mark_subscribe(&symbol) {
             log::info!(
-                "LSE's CME stream carries {symbol} from its next connection, one subscription a \
-                 connection: reconnecting"
+                "LSE's {} stream carries {symbol} from its next connection, one subscription a \
+                 connection: reconnecting",
+                self.exchange
             );
             if let Some(client) = &self.client {
                 let _ = client.request_reconnect();
@@ -541,14 +567,17 @@ impl CmeHandler {
             return;
         }
         if reopen {
-            let _ = self.out.send(CmeWsMessage::Reopen { symbol });
+            let _ = self.out.send(ExchangeWsMessage::Reopen { symbol });
         }
     }
 
     /// The transport replaced the connection with that of `epoch`, a later
     /// one: the subscription is sent on it.
     async fn reconnected(&mut self, epoch: u64) {
-        log::warn!("LSE's CME stream reconnected: subscribing again");
+        log::warn!(
+            "LSE's {} stream reconnected: subscribing again",
+            self.exchange
+        );
         self.epoch = epoch;
         let symbols = self.subscriptions.reset_after_reconnect();
         self.send_subscription(symbols).await;
@@ -570,18 +599,20 @@ impl CmeHandler {
             let mut symbols = self.subscriptions.all_topics();
             symbols.sort();
             let _ = opening.send(Err(format!(
-                "LSE's CME stream refused the {} subscription of {symbols:?}: {described}",
-                self.level
+                "LSE's {} stream refused the {} subscription of {symbols:?}: {described}",
+                self.exchange, self.level
             )));
         } else if terminal {
             log::error!(
-                "LSE's CME stream closed the {} connection ({described}): not reconnecting, so \
+                "LSE's {} stream closed the {} connection ({described}): not reconnecting, so \
                  none of its contracts streams at that level",
+                self.exchange,
                 self.level
             );
         } else {
             log::warn!(
-                "LSE's CME stream closed the {} connection ({described}): reconnecting",
+                "LSE's {} stream closed the {} connection ({described}): reconnecting",
+                self.exchange,
                 self.level
             );
         }
@@ -596,12 +627,15 @@ impl CmeHandler {
             return;
         };
         symbols.sort();
-        let frame = CmeSubscription::new(self.level, &symbols).to_json();
+        let frame = ExchangeSubscription::new(self.level, &symbols).to_json();
         if let Err(e) = client
             .send_text_on_connection(frame, None, self.epoch)
             .await
         {
-            log::debug!("the subscription not sent to LSE's CME stream: {e}");
+            log::debug!(
+                "the subscription not sent to LSE's {} stream: {e}",
+                self.exchange
+            );
         }
     }
 }
@@ -617,32 +651,33 @@ mod tests {
         common::credential::LseProduct,
         testing::{
             CME_API_KEY, CME_ESZ6_DOCUMENTED, CME_GCZ6_GCG7, CME_GCZ6_L2_DOCUMENTED,
-            CME_GCZ6_L3_DOCUMENTED, CME_LEVEL_REQUIRED, CME_SYMBOL_UNAVAILABLE, CmeAction,
-            MockCmeStream, dbn_frames, frames, sent,
+            CME_GCZ6_L3_DOCUMENTED, CME_LEVEL_REQUIRED, CME_SYMBOL_UNAVAILABLE, MockExchangeStream,
+            StreamAction, dbn_frames, frames, sent,
         },
     };
 
-    type Out = tokio::sync::mpsc::UnboundedReceiver<CmeWsMessage>;
+    type Out = tokio::sync::mpsc::UnboundedReceiver<ExchangeWsMessage>;
 
     fn credential(key: &str) -> LseCredential {
         LseCredential::resolve(LseProduct::Cme, Some(SecretString::from(key)), |_| None).unwrap()
     }
 
     async fn connect(
-        peer: &MockCmeStream,
+        peer: &MockExchangeStream,
         symbols: &[&str],
-    ) -> anyhow::Result<(CmeStreamClient, Out)> {
-        connect_at(peer, CmeLevel::Mbp1, symbols).await
+    ) -> anyhow::Result<(ExchangeStreamClient, Out)> {
+        connect_at(peer, ExchangeLevel::Mbp1, symbols).await
     }
 
     async fn connect_at(
-        peer: &MockCmeStream,
-        level: CmeLevel,
+        peer: &MockExchangeStream,
+        level: ExchangeLevel,
         symbols: &[&str],
-    ) -> anyhow::Result<(CmeStreamClient, Out)> {
+    ) -> anyhow::Result<(ExchangeStreamClient, Out)> {
         let (out_tx, out) = tokio::sync::mpsc::unbounded_channel();
         let symbols: Vec<String> = symbols.iter().map(ToString::to_string).collect();
-        let client = CmeStreamClient::connect(
+        let client = ExchangeStreamClient::connect(
+            LseExchange::Cme,
             peer.url(),
             &credential(CME_API_KEY),
             level,
@@ -655,15 +690,15 @@ mod tests {
 
     /// LSE's captured close of a subscription at a level the key's plan
     /// lacks, as a script's answer.
-    fn level_required() -> Vec<CmeAction> {
+    fn level_required() -> Vec<StreamAction> {
         let close: Value = serde_json::from_str(CME_LEVEL_REQUIRED).unwrap();
-        vec![CmeAction::Close(
+        vec![StreamAction::Close(
             u16::try_from(close["code"].as_u64().unwrap()).unwrap(),
             close["reason"].as_str().unwrap().to_string(),
         )]
     }
 
-    async fn next(out: &mut Out) -> CmeWsMessage {
+    async fn next(out: &mut Out) -> ExchangeWsMessage {
         tokio::time::timeout(std::time::Duration::from_secs(10), out.recv())
             .await
             .expect("nothing passed on within 10 s")
@@ -672,8 +707,8 @@ mod tests {
 
     /// A record passed on: its contract, sequence, whether it opens the
     /// contract, and its action.
-    fn record(message: &CmeWsMessage) -> (&str, u64, bool, u8) {
-        let CmeWsMessage::Record {
+    fn record(message: &ExchangeWsMessage) -> (&str, u64, bool, u8) {
+        let ExchangeWsMessage::Record {
             symbol,
             sequence,
             record,
@@ -683,9 +718,9 @@ mod tests {
             panic!("not a record: {message:?}")
         };
         let action = match record {
-            CmeRecord::Mbp1(record) => record.action,
-            CmeRecord::Mbp10(record) => record.action,
-            CmeRecord::Mbo(record) => record.action,
+            ExchangeRecord::Mbp1(record) => record.action,
+            ExchangeRecord::Mbp10(record) => record.action,
+            ExchangeRecord::Mbo(record) => record.action,
         };
         (symbol, *sequence, *opening, action as u8)
     }
@@ -701,7 +736,7 @@ mod tests {
     /// The captured opening of GCZ6 and GCG7 at CME's Friday close.
     #[tokio::test]
     async fn the_key_goes_in_the_header_and_each_contract_opens_with_its_best_bid_and_offer() {
-        let peer = MockCmeStream::start(|_, _| sent(frames(CME_GCZ6_GCG7)));
+        let peer = MockExchangeStream::cme(|_, _| sent(frames(CME_GCZ6_GCG7)));
 
         let (_client, mut out) = connect(&peer, &["GCZ6", "GCG7"]).await.unwrap();
 
@@ -715,7 +750,7 @@ mod tests {
     /// offer and a trade.
     #[tokio::test]
     async fn a_contract_s_live_records_follow_its_opening_in_sequence() {
-        let peer = MockCmeStream::start(|_, _| sent(dbn_frames(CME_ESZ6_DOCUMENTED)));
+        let peer = MockExchangeStream::cme(|_, _| sent(dbn_frames(CME_ESZ6_DOCUMENTED)));
 
         let (_client, mut out) = connect(&peer, &["ESZ6"]).await.unwrap();
 
@@ -738,7 +773,7 @@ mod tests {
     /// reader that fell behind misses it.
     #[tokio::test]
     async fn a_jump_of_a_contract_s_sequence_is_passed_on_as_a_gap() {
-        let peer = MockCmeStream::start(|_, _| {
+        let peer = MockExchangeStream::cme(|_, _| {
             let mut frames = dbn_frames(CME_ESZ6_DOCUMENTED);
             frames.remove(4);
             sent(frames)
@@ -749,7 +784,7 @@ mod tests {
         assert_eq!(record(&next(&mut out).await), ("ESZ6", 554, true, b'M'));
         assert_eq!(
             next(&mut out).await,
-            CmeWsMessage::Gap {
+            ExchangeWsMessage::Gap {
                 symbol: "ESZ6".into(),
                 from: 555,
                 to: 555
@@ -767,7 +802,8 @@ mod tests {
             u16::try_from(close["code"].as_u64().unwrap()).unwrap(),
             close["reason"].as_str().unwrap().to_string(),
         );
-        let peer = MockCmeStream::start(move |_, _| vec![CmeAction::Close(code, reason.clone())]);
+        let peer =
+            MockExchangeStream::cme(move |_, _| vec![StreamAction::Close(code, reason.clone())]);
 
         let err = connect(&peer, &["GCZ6", "NGZ6"])
             .await
@@ -780,14 +816,15 @@ mod tests {
     /// LSE answers a key that is no CME Group key with HTTP 401.
     #[tokio::test]
     async fn a_key_lse_does_not_take_fails_the_connect_without_showing_the_key() {
-        let peer = MockCmeStream::start(|_, _| sent(frames(CME_GCZ6_GCG7)));
+        let peer = MockExchangeStream::cme(|_, _| sent(frames(CME_GCZ6_GCG7)));
         let (out_tx, _out) = tokio::sync::mpsc::unbounded_channel();
         let other = "lse-other-test-key-0123456789";
 
-        let err = CmeStreamClient::connect(
+        let err = ExchangeStreamClient::connect(
+            LseExchange::Cme,
             peer.url(),
             &credential(other),
-            CmeLevel::Mbp1,
+            ExchangeLevel::Mbp1,
             &["GCZ6".to_string()],
             out_tx,
         )
@@ -803,7 +840,7 @@ mod tests {
     /// GCZ6's opening there brings nothing new.
     #[tokio::test]
     async fn a_contract_not_carried_yet_is_carried_from_a_new_connection() {
-        let peer = MockCmeStream::start(|_, subscription| {
+        let peer = MockExchangeStream::cme(|_, subscription| {
             let carried: Vec<&str> = subscription["symbols"]
                 .as_array()
                 .unwrap()
@@ -838,7 +875,7 @@ mod tests {
     /// On the same connection, after the records passed on before it.
     #[tokio::test]
     async fn a_new_subscriber_of_a_contract_carried_is_passed_on_after_its_records() {
-        let peer = MockCmeStream::start(|_, _| sent(dbn_frames(CME_ESZ6_DOCUMENTED)));
+        let peer = MockExchangeStream::cme(|_, _| sent(dbn_frames(CME_ESZ6_DOCUMENTED)));
         let (client, mut out) = connect(&peer, &["ESZ6"]).await.unwrap();
         for _ in 0..3 {
             next(&mut out).await;
@@ -848,7 +885,7 @@ mod tests {
 
         assert_eq!(
             next(&mut out).await,
-            CmeWsMessage::Reopen {
+            ExchangeWsMessage::Reopen {
                 symbol: "ESZ6".into()
             }
         );
@@ -860,11 +897,11 @@ mod tests {
     /// only the trade 556 is new.
     #[tokio::test]
     async fn a_dropped_connection_subscribes_again_and_passes_on_only_what_is_new() {
-        let peer = MockCmeStream::start(|connection, _| {
+        let peer = MockExchangeStream::cme(|connection, _| {
             let mut frames = sent(dbn_frames(CME_ESZ6_DOCUMENTED));
             if connection == 0 {
                 frames.truncate(5);
-                frames.push(CmeAction::Close(1001, "going away".to_string()));
+                frames.push(StreamAction::Close(1001, "going away".to_string()));
             }
             frames
         });
@@ -894,9 +931,11 @@ mod tests {
     /// opening, its last ten levels, then three changes of its book.
     #[tokio::test]
     async fn a_level_2_contract_opens_with_its_ten_levels_then_streams_its_book_s_changes() {
-        let peer = MockCmeStream::start(|_, _| sent(dbn_frames(CME_GCZ6_L2_DOCUMENTED)));
+        let peer = MockExchangeStream::cme(|_, _| sent(dbn_frames(CME_GCZ6_L2_DOCUMENTED)));
 
-        let (_client, mut out) = connect_at(&peer, CmeLevel::Mbp10, &["GCZ6"]).await.unwrap();
+        let (_client, mut out) = connect_at(&peer, ExchangeLevel::Mbp10, &["GCZ6"])
+            .await
+            .unwrap();
 
         let mut passed = Vec::new();
         for _ in 0..4 {
@@ -918,9 +957,11 @@ mod tests {
     /// order events and no opening book"), so its order events come first.
     #[tokio::test]
     async fn a_level_3_contract_opens_with_no_book_and_streams_its_order_events() {
-        let peer = MockCmeStream::start(|_, _| sent(dbn_frames(CME_GCZ6_L3_DOCUMENTED)));
+        let peer = MockExchangeStream::cme(|_, _| sent(dbn_frames(CME_GCZ6_L3_DOCUMENTED)));
 
-        let (_client, mut out) = connect_at(&peer, CmeLevel::Mbo, &["GCZ6"]).await.unwrap();
+        let (_client, mut out) = connect_at(&peer, ExchangeLevel::Mbo, &["GCZ6"])
+            .await
+            .unwrap();
 
         let mut passed = Vec::new();
         for _ in 0..5 {
@@ -942,13 +983,13 @@ mod tests {
     /// LSE's captured close of a Level 2 and of a Level 3 subscription on
     /// the CME Group Lite+ key, which holds Level 1 alone.
     #[rstest::rstest]
-    #[case::level_2(CmeLevel::Mbp10)]
-    #[case::level_3(CmeLevel::Mbo)]
+    #[case::level_2(ExchangeLevel::Mbp10)]
+    #[case::level_3(ExchangeLevel::Mbo)]
     #[tokio::test]
     async fn lse_s_refusal_of_a_level_the_key_s_plan_lacks_fails_the_connect_with_its_reason(
-        #[case] level: CmeLevel,
+        #[case] level: ExchangeLevel,
     ) {
-        let peer = MockCmeStream::start(|_, _| level_required());
+        let peer = MockExchangeStream::cme(|_, _| level_required());
 
         let err = connect_at(&peer, level, &["GCZ6"])
             .await
@@ -966,12 +1007,13 @@ mod tests {
     /// subscription; another made before the connection opened joins it.
     #[tokio::test]
     async fn a_client_started_with_no_contract_connects_with_those_subscribed_by_then() {
-        let peer = MockCmeStream::start(|_, _| sent(frames(CME_GCZ6_GCG7)));
+        let peer = MockExchangeStream::cme(|_, _| sent(frames(CME_GCZ6_GCG7)));
         let (out_tx, mut out) = tokio::sync::mpsc::unbounded_channel();
-        let (client, opening) = CmeStreamClient::start(
+        let (client, opening) = ExchangeStreamClient::start(
+            LseExchange::Cme,
             peer.url(),
             &credential(CME_API_KEY),
-            CmeLevel::Mbp1,
+            ExchangeLevel::Mbp1,
             &[],
             out_tx,
         )
@@ -991,12 +1033,13 @@ mod tests {
     /// and stops: a later subscription fails, the connection being closed.
     #[tokio::test]
     async fn a_client_whose_first_subscription_lse_refuses_stops() {
-        let peer = MockCmeStream::start(|_, _| level_required());
+        let peer = MockExchangeStream::cme(|_, _| level_required());
         let (out_tx, _out) = tokio::sync::mpsc::unbounded_channel();
-        let (client, opening) = CmeStreamClient::start(
+        let (client, opening) = ExchangeStreamClient::start(
+            LseExchange::Cme,
             peer.url(),
             &credential(CME_API_KEY),
-            CmeLevel::Mbp10,
+            ExchangeLevel::Mbp10,
             &["GCZ6".to_string()],
             out_tx,
         )
@@ -1025,18 +1068,19 @@ mod tests {
     #[tokio::test]
     async fn a_client_whose_first_subscription_is_closed_for_now_carries_it_from_its_next_connection()
      {
-        let peer = MockCmeStream::start(|connection, _| {
+        let peer = MockExchangeStream::cme(|connection, _| {
             if connection == 0 {
-                vec![CmeAction::Close(1013, "GCZ6 not ready".to_string())]
+                vec![StreamAction::Close(1013, "GCZ6 not ready".to_string())]
             } else {
                 sent(frames(CME_GCZ6_GCG7)[..4].to_vec())
             }
         });
         let (out_tx, mut out) = tokio::sync::mpsc::unbounded_channel();
-        let (_client, opening) = CmeStreamClient::start(
+        let (_client, opening) = ExchangeStreamClient::start(
+            LseExchange::Cme,
             peer.url(),
             &credential(CME_API_KEY),
-            CmeLevel::Mbp1,
+            ExchangeLevel::Mbp1,
             &["GCZ6".to_string()],
             out_tx,
         )

@@ -1523,7 +1523,7 @@ struct GlbxStreaming {
     core: DataActorCore,
     warmup: Rc<Warmup>,
     roller: Roller,
-    stream: Rc<lse::testing::MockCmeStream>,
+    stream: Rc<lse::testing::MockExchangeStream>,
     seen: Rc<RefCell<GlbxSeen>>,
 }
 
@@ -1572,7 +1572,7 @@ impl DataActor for GlbxStreaming {
 #[test]
 fn glbx_data_comes_from_lse_s_cme_stream_routed_glbx_beside_another_client() {
     let dir = tempfile::tempdir().unwrap();
-    let stream = Rc::new(lse::testing::MockCmeStream::start(|_, _| {
+    let stream = Rc::new(lse::testing::MockExchangeStream::cme(|_, _| {
         lse::testing::held(
             lse::testing::dbn_frames(lse::testing::CME_ESZ6_DOCUMENTED),
             4,

@@ -1,5 +1,6 @@
-//! Databento definitions of `GLBX` instruments (CME Globex, `GLBX.MDP3`)
-//! and `OPRA` ones (US options, `OPRA.PILLAR`), filled through the node
+//! Databento definitions of `GLBX` instruments (CME Globex, `GLBX.MDP3`),
+//! `XNAS` ones (Nasdaq TotalView, `XNAS.ITCH`) and `OPRA` ones (US
+//! options, `OPRA.PILLAR`), filled through the node
 //! (see `catalog::NodeFill`) by Nautilus' Databento data client
 //! (`DatabentoDataClient`), whose answers the data engine writes back to
 //! the catalog, each contract under its own id; their history is LSE's
@@ -33,8 +34,8 @@ const PUBLISHERS: &str = concat!(
     "/src/venues/databento/publishers.json"
 );
 
-/// Databento's historical API, for the definitions of `GLBX` and `OPRA`
-/// instruments.
+/// Databento's historical API, for the definitions of `GLBX`, `XNAS` and
+/// `OPRA` instruments.
 #[derive(Debug)]
 pub struct DatabentoHistory {
     /// Nautilus' historical client, for each dataset's end.
@@ -88,10 +89,10 @@ impl DatabentoHistory {
         })
     }
 
-    /// Checks `requests` (see `catalog::missing`), definitions of `GLBX`
-    /// and `OPRA` instruments, against the end of the dataset of each one's
-    /// venue, the one Nautilus' client asks (`GLBX.MDP3`, `OPRA.PILLAR`),
-    /// before any is asked for.
+    /// Checks `requests` (see `catalog::missing`), definitions of `GLBX`,
+    /// `XNAS` and `OPRA` instruments, against the end of the dataset of
+    /// each one's venue, the one Nautilus' client asks (`GLBX.MDP3`,
+    /// `XNAS.ITCH`, `OPRA.PILLAR`), before any is asked for.
     ///
     /// # Errors
     ///
@@ -107,7 +108,8 @@ impl DatabentoHistory {
             ensure!(
                 request.data == FillData::Instrument
                     && Row::of(venue).definitions == DefinitionsSource::Databento,
-                "Databento gives the definitions of GLBX and OPRA instruments here, not {request}"
+                "Databento gives the definitions of GLBX, XNAS and OPRA instruments here, not \
+                 {request}"
             );
             let dataset = self
                 .datasets
@@ -147,9 +149,10 @@ fn config(api_key: &str) -> DatabentoDataClientConfig {
 }
 
 /// Nautilus' map of venues to the datasets its data client asks their
-/// instruments of, from the publishers' map: `OPRA` to `OPRA.PILLAR`, the
-/// venue of its consolidated publisher, and `GLBX` to `GLBX.MDP3`, among
-/// the defaults Nautilus adds.
+/// instruments of, from the publishers' map: `XNAS` to `XNAS.ITCH`, the
+/// first publisher of the venue there, `OPRA` to `OPRA.PILLAR`, the venue
+/// of its consolidated publisher, and `GLBX` to `GLBX.MDP3`, among the
+/// defaults Nautilus adds.
 ///
 /// # Errors
 ///
