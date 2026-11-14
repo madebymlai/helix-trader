@@ -1,7 +1,7 @@
-//! End to end on the Docker IB Gateway: the history and the live node
-//! start or reuse Nautilus' paper container, wait for its login and work
-//! through it. They need Docker (`DOCKER_HOST` for podman), the paper login
-//! (`TWS_USERNAME`, `TWS_PASSWORD`) and a paper account
+//! End to end on the Docker IB Gateway: the history, fill-catalog and the
+//! live node start or reuse Nautilus' paper container, wait for its login
+//! and work through it. They need Docker (`DOCKER_HOST` for podman), the
+//! paper login (`TWS_USERNAME`, `TWS_PASSWORD`) and a paper account
 //! (`NAUTILUS_IB_ACCOUNT_ID`, for example DU1234567), from the environment
 //! or `.env`, and nothing else on port 4002: the container takes it, and
 //! its login ends any other session of the same user.
@@ -19,24 +19,39 @@
 //! The live node keeps its cache in Redis (`live::redis`)
 //! under the test's trader, `HELIXTEST-043`, whose records the test deletes
 //! once the node has stopped cleanly. The gateway container is left
-//! running: the next run reuses it. Client ids 40, 41 and 43, apart from
+//! running: the next run reuses it. Client ids 40 to 43, apart from
 //! `fill-catalog`'s 10 and `live`'s 1.
 
 use crate::common;
 
 use std::{
+    collections::BTreeMap,
     process::Command,
     time::{Duration, Instant},
 };
 
+use clap::{Args, FromArgMatches};
 use helix_trader::{
     live::Live,
-    strategy::ema::{EmaCross, EmaCrossConfig},
-    venues::ib::{IbAccount, IbHistory},
+    strategy::{
+        DataRequirements,
+        ema::{EmaCross, EmaCrossConfig},
+    },
+    venues::{
+        HistoryVenueArgs, fill_history,
+        ib::{IbAccount, IbHistory},
+    },
 };
-use jiff::Timestamp;
+use jiff::{SignedDuration, Timestamp};
 use nautilus_common::logging::logger::LoggerConfig;
-use nautilus_model::identifiers::{InstrumentId, TraderId};
+use nautilus_core::UnixNanos;
+use nautilus_model::{
+    data::{BarType, NautilusDataType},
+    identifiers::{InstrumentId, TraderId},
+    instruments::Instrument,
+    types::{Currency, Price},
+};
+use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use tokio::sync::Mutex;
 
 /// One test at a time: the adapter's start is not safe against another
@@ -89,6 +104,103 @@ async fn history_starts_or_reuses_the_paper_gateway_and_a_second_connection_reus
         started.elapsed()
     );
     assert_eq!(second.instruments(&[sxr8()]).await.unwrap().len(), 1);
+}
+
+/// EUR/USD on IDEALPRO, IB's cash FX pair, which IB serves no TRADES bars
+/// of: its history is its 1-MINUTE BID and ASK bars.
+const EUR_USD: &str = "EUR/USD.IDEALPRO";
+
+/// The venues' settings of fill-catalog, on client id 42.
+fn history_venues() -> HistoryVenueArgs {
+    let matches = HistoryVenueArgs::augment_args(clap::Command::new("fill-catalog"))
+        .try_get_matches_from(["fill-catalog", "--client-id", "42"])
+        .unwrap();
+    HistoryVenueArgs::from_arg_matches(&matches).unwrap()
+}
+
+/// fill-catalog fills the pair's definition and its BID and ASK minute
+/// bars over an hour FX trades through, Thursday 12 November 2026 from
+/// 10:00 UTC, as a strategy converting through the pair asks for them.
+#[tokio::test(flavor = "multi_thread")]
+async fn fill_catalog_fills_an_idealpro_pairs_bid_and_ask_minute_bars() {
+    if !opted_in("fill_catalog_fills_an_idealpro_pairs_bid_and_ask_minute_bars") {
+        return;
+    }
+    let _gateway = GATEWAY.lock().await;
+    load_env();
+    let [bid, ask] = ["BID", "ASK"]
+        .map(|price| BarType::from(format!("{EUR_USD}-1-MINUTE-{price}-EXTERNAL").as_str()));
+    let requirements = DataRequirements {
+        bar_types: vec![bid, ask],
+        ticks: vec![],
+        custom: vec![],
+        warmup: SignedDuration::ZERO,
+    };
+    let start: Timestamp = "2026-11-12T10:00:00Z".parse().unwrap();
+    let end = start + SignedDuration::from_hours(1);
+    let dir = tempfile::tempdir().unwrap();
+
+    fill_history(&requirements, start, end, &history_venues(), dir.path())
+        .await
+        .unwrap();
+
+    let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+    let defined = catalog
+        .instruments(Some(&[EUR_USD.to_string()]), None, None)
+        .unwrap();
+    assert_eq!(defined.len(), 1, "{EUR_USD} is not defined once");
+    // A pair Nautilus' exchange rates read: one with a base currency.
+    assert_eq!(defined[0].base_currency(), Some(Currency::EUR()));
+    let (from, to) = (UnixNanos::from(start), UnixNanos::from(end));
+    let [bids, asks] = [bid, ask].map(|bar_type| {
+        let identifier = bar_type.to_string();
+        let bars = catalog
+            .bars(Some(vec![identifier.clone()]), None, None)
+            .unwrap();
+        println!("{identifier}: {} bars", bars.len());
+        assert!(!bars.is_empty(), "{identifier}: no bars");
+        assert!(
+            bars.iter().all(|bar| bar.bar_type == bar_type
+                && (from..=to).contains(&bar.ts_event)
+                && bar.ts_event.as_u64() % 60_000_000_000 == 0),
+            "{identifier}: a bar of another type, outside the hour or off the minute"
+        );
+        // IB gives BID and ASK bars no volume.
+        assert!(
+            bars.iter().all(|bar| bar.volume.is_zero()),
+            "{identifier}: a bar with a volume"
+        );
+        let lacking = catalog
+            .get_missing_intervals_for_request(
+                from.as_u64(),
+                to.as_u64(),
+                &NautilusDataType::Bar.into(),
+                Some(&identifier),
+            )
+            .unwrap();
+        assert_eq!(lacking, [], "{identifier}");
+        bars.iter()
+            .map(|bar| (bar.ts_event, bar.close))
+            .collect::<BTreeMap<UnixNanos, Price>>()
+    });
+    // The BID bars are the bid's and the ASK bars the ask's: in each minute
+    // both close, the bid closes at or below the ask, and below it in some.
+    let closes: Vec<(Price, Price)> = bids
+        .iter()
+        .filter_map(|(ts, bid)| asks.get(ts).map(|ask| (*bid, *ask)))
+        .collect();
+    assert!(
+        !closes.is_empty(),
+        "no minute closing both a BID and an ASK bar"
+    );
+    assert!(
+        closes.iter().all(|(bid, ask)| bid <= ask),
+        "a bid closing above its minute's ask: {closes:?}"
+    );
+    assert!(
+        closes.iter().any(|(bid, ask)| bid < ask),
+        "no spread in the hour: the BID and ASK bars are one series"
+    );
 }
 
 /// The EMA crossover on SXR8.IBIS hour bars of IB's minute bars, warmed

@@ -1,11 +1,11 @@
 //! Interactive Brokers: the account, the gateway (see `gateway`) and the
 //! data client config its history and its live clients share, instruments
 //! and bars for `fill_catalog`, which asks for series of any data type: IB
-//! serves its 1-MINUTE TRADES bars only (see `IbHistory::data`), and the
-//! live node's clients (see `live`), and the tag linking a bracket's exits
-//! in an OCA group (`bracket_exits_tag`); the client id each command
-//! connects with, and live's account, are its flags (`IbHistoryArgs`,
-//! `live::IbLiveArgs`). See `README.md`.
+//! serves its 1-MINUTE TRADES, BID and ASK bars only (see
+//! `IbHistory::data`), and the live node's clients (see `live`), and the
+//! tag linking a bracket's exits in an OCA group (`bracket_exits_tag`); the
+//! client id each command connects with, and live's account, are its flags
+//! (`IbHistoryArgs`, `live::IbLiveArgs`). See `README.md`.
 //!
 //! IB's fill (`IbHistory::fill`) is temporary: IB's data client answers
 //! without a `DataResponseEnvelope`, so Nautilus writes none of its answers
@@ -139,13 +139,13 @@ impl IbHistory {
 
     /// The latest end of a window IB can serve closed bars over at `now`:
     /// one bar before `now`, the bar still in progress until then (see
-    /// `served_spec`).
+    /// `served_spec`, a bar as long at every price).
     ///
     /// # Errors
     ///
     /// Returns an error if that end is out of range.
     pub fn latest_end(now: Timestamp) -> anyhow::Result<Timestamp> {
-        Ok(now.checked_sub(served_spec().timedelta())?)
+        Ok(now.checked_sub(served_spec(PriceType::Last).timedelta())?)
     }
 
     /// The instruments of `ids`, as IB defines them. A future IB does not
@@ -186,8 +186,8 @@ impl IbHistory {
     ///
     /// # Errors
     ///
-    /// Returns an error if a slice is not IB's 1-MINUTE TRADES bars
-    /// (before any request), or as `instruments` and `fill_slices`.
+    /// Returns an error if a slice is not IB's 1-MINUTE TRADES, BID or ASK
+    /// bars (before any request), or as `instruments` and `fill_slices`.
     pub async fn fill(
         &self,
         catalog: &mut ParquetDataCatalog,
@@ -222,8 +222,8 @@ impl IbHistory {
     ///
     /// # Errors
     ///
-    /// Returns an error if the series is not IB's 1-MINUTE TRADES bars of
-    /// an instrument (see `served_bar_type`), or as `bars`.
+    /// Returns an error if the series is not IB's 1-MINUTE TRADES, BID or
+    /// ASK bars of an instrument (see `served_bar_type`), or as `bars`.
     pub async fn data(
         &self,
         data_type: &NautilusDataType,
@@ -268,8 +268,8 @@ impl IbHistory {
 }
 
 /// The bar type of the series of `data_type` and `identifier`, which must
-/// be bars IB serves: its own (`EXTERNAL`) 1-MINUTE TRADES bars (see
-/// `served_spec`).
+/// be bars IB serves: its own (`EXTERNAL`) 1-MINUTE TRADES, BID or ASK
+/// bars (see `served_spec`).
 fn served_bar_type(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<BarType> {
     ensure!(
         *data_type == NautilusDataType::Bar,
@@ -277,18 +277,25 @@ fn served_bar_type(data_type: &NautilusDataType, identifier: &str) -> anyhow::Re
     );
     let bar_type = BarType::from_str(identifier)?;
     ensure!(
-        bar_type.is_externally_aggregated() && bar_type.spec() == served_spec(),
-        "IB's history serves its own 1-MINUTE-LAST bars, not {identifier}"
+        bar_type.is_externally_aggregated()
+            && SERVED_PRICES.map(served_spec).contains(&bar_type.spec()),
+        "IB's history serves its own 1-MINUTE-LAST, 1-MINUTE-BID and 1-MINUTE-ASK bars, \
+         not {identifier}"
     );
     Ok(bar_type)
 }
 
-/// The spec of the bars IB's history serves: 1-MINUTE, the finest bars IB
-/// paces softly, priced LAST, IB's TRADES bars, the only ones with a
-/// volume. Its string (`1-MINUTE-LAST`) is IB's bar spec string, which the
-/// adapter requests as TRADES.
-fn served_spec() -> BarSpecification {
-    BarSpecification::new(1, BarAggregation::Minute, PriceType::Last)
+/// The prices of the bars IB's history serves: LAST, IB's TRADES bars, the
+/// only ones with a volume, and BID and ASK, IB's BID and ASK bars, the
+/// history of an IDEALPRO pair, which has no TRADES.
+const SERVED_PRICES: [PriceType; 3] = [PriceType::Last, PriceType::Bid, PriceType::Ask];
+
+/// The spec of the bars IB's history serves priced at `price_type`, one of
+/// `SERVED_PRICES`: 1-MINUTE, the finest bars IB paces softly. Its string
+/// (`1-MINUTE-LAST`) is IB's bar spec string, which the adapter requests as
+/// IB's bars of the price (TRADES for LAST, BID and ASK as they are).
+fn served_spec(price_type: PriceType) -> BarSpecification {
+    BarSpecification::new(1, BarAggregation::Minute, price_type)
 }
 
 /// The IB duration of one bar request: within IB's maximum duration for
@@ -604,15 +611,59 @@ mod tests {
         }
     }
 
+    /// An IDEALPRO pair, which IB serves no TRADES bars of, has its own
+    /// 1-MINUTE BID and ASK bars.
+    #[test]
+    fn ib_serves_its_own_one_minute_bid_and_ask_bars() {
+        for (identifier, spec) in [
+            ("EUR/USD.IDEALPRO-1-MINUTE-BID-EXTERNAL", "1-MINUTE-BID"),
+            ("EUR/USD.IDEALPRO-1-MINUTE-ASK-EXTERNAL", "1-MINUTE-ASK"),
+            ("SXR8.IBIS-1-MINUTE-BID-EXTERNAL", "1-MINUTE-BID"),
+        ] {
+            let served = served_bar_type(&NautilusDataType::Bar, identifier).unwrap();
+            assert_eq!(served, bar_type(identifier));
+            // IB's bar spec string, as `bars` requests it.
+            assert_eq!(served.spec().to_string(), spec);
+        }
+    }
+
     #[test]
     fn ib_serves_no_other_series() {
         for (data_type, identifier) in [
             (NautilusDataType::QuoteTick, "SXR8.IBIS"),
+            (NautilusDataType::QuoteTick, "EUR/USD.IDEALPRO"),
             (NautilusDataType::Bar, "SXR8.IBIS-1-MINUTE-MID-EXTERNAL"),
-            (NautilusDataType::Bar, "SXR8.IBIS-1-MINUTE-BID-EXTERNAL"),
+            (
+                NautilusDataType::Bar,
+                "EUR/USD.IDEALPRO-1-MINUTE-MID-EXTERNAL",
+            ),
+            (
+                NautilusDataType::Bar,
+                "EUR/USD.IDEALPRO-1-MINUTE-MARK-EXTERNAL",
+            ),
             (NautilusDataType::Bar, "SXR8.IBIS-1-HOUR-LAST-EXTERNAL"),
             (NautilusDataType::Bar, "SXR8.IBIS-5-MINUTE-LAST-EXTERNAL"),
+            (
+                NautilusDataType::Bar,
+                "EUR/USD.IDEALPRO-1-HOUR-BID-EXTERNAL",
+            ),
+            (
+                NautilusDataType::Bar,
+                "EUR/USD.IDEALPRO-5-MINUTE-ASK-EXTERNAL",
+            ),
+            (
+                NautilusDataType::Bar,
+                "EUR/USD.IDEALPRO-1-SECOND-BID-EXTERNAL",
+            ),
             (NautilusDataType::Bar, "SXR8.IBIS-1-MINUTE-LAST-INTERNAL"),
+            (
+                NautilusDataType::Bar,
+                "EUR/USD.IDEALPRO-1-MINUTE-BID-INTERNAL",
+            ),
+            (
+                NautilusDataType::Bar,
+                "EUR/USD.IDEALPRO-1-MINUTE-ASK-INTERNAL",
+            ),
             (NautilusDataType::OrderBookDelta, "SXR8.IBIS"),
             (
                 NautilusDataType::Custom {
