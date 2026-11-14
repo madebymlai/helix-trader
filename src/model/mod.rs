@@ -10,7 +10,7 @@
 //! `learner` is the model port, its learners fitting and loading the
 //! models that predict; `calibration` turns a pair's predictions of R into
 //! each side's expected R, and a meta's into its expected R; `payoff` is the
-//! side a decision trades on its expected net P&L;
+//! side a decision trades on its expected R;
 //! `config` is the model section of a strategy's config; `blueprint` is
 //! what its config alone determines about its model, validated, the dataset,
 //! the stores, the training, the walk-forward and the handle built of it;
@@ -410,7 +410,8 @@ mod tests {
             {tables}
 
             [trade]
-            instruments = [{{ instrument_id = "XAUUSD.ICMARKETS", trade_size = "1" }}]
+            instruments = [{{ instrument_id = "XAUUSD.ICMARKETS" }}]
+            risk = "0.5%"
 
             [model]
             decision = {{ every = "1h" }}
@@ -418,8 +419,8 @@ mod tests {
             retrain = "24h"
             window = "48h"
             holdout = "12h"
-            margins = {{ long = 0.5, short = 0.5 }}
-            min_pnl = 0.5
+            margins = {{ long = "0.5R", short = "0.5R" }}
+            min_pnl = "0.5R"
             min_trades = 30
             learner = {{ kind = "baseline" }}
             "#,

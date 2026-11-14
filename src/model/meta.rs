@@ -1,10 +1,11 @@
 //! Meta-labeling: the side models pick the side of a trade, and a meta
-//! model decides whether to take it, the trade of the target's size.
+//! model decides whether to take it, the trade as the target sets it,
+//! staked by the strategy.
 //!
 //! The side picked is the one the decision picks (`deciding`) among the
-//! side models of a `ModelConfig` with a meta section, on the expected net
-//! P&L of each side, its calibrated expected R of the pair times its unit
-//! (`store::Pair::expect`, `payoff::pick`). The meta model decides only
+//! side models of a `ModelConfig` with a meta section, on the expected R of
+//! each side, its calibrated expected R of the pair (`store::Pair::expect`,
+//! `payoff::pick`). The meta model decides only
 //! when a side is picked, on the decision's features, the strategy's
 //! without either side's payoff features, with the side picked and the
 //! decision's calibrated level and side call after them (`PICKED_FEATURES`),
@@ -13,9 +14,9 @@
 //! over its unit, read from its row as the side models read their trades
 //! (`dataset::DatasetRow`): a dataset row opens a long and a short at every
 //! decision, so the row has the trade of either side, and the meta's rows
-//! need no replay of their own. It takes the trade when the net P&L it
-//! expects of it, its calibrated expected R times the side's unit, clears
-//! its margin, in money (`holdout::MetaMargin`).
+//! need no replay of their own. It takes the trade when the net R it
+//! expects of it, its calibrated expected R, clears its margin, in R
+//! (`holdout::MetaMargin`).
 //!
 //! The sides' rows are their dataset's, each decided by the pair of the
 //! sides in use at it through the code a strategy decides through
@@ -23,8 +24,8 @@
 //! (`store::ModelSet`) as its stores are when the rows are made, listed
 //! once, a read error failing them: the latest valid then, trained on
 //! rows settled by its valid-from, so every decision is out of sample; each
-//! side's row, its payoff features and the worth of its stop, is the row's
-//! own (`dataset::DatasetRow::sides`).
+//! side's row, its payoff features, is the row's own
+//! (`dataset::DatasetRow::sides`).
 //! A row before the sides' first pair has no decision: the meta's rows
 //! start there at the earliest, and with no pair of the sides before a
 //! train the meta waits (`schedule::Schedule::plan`). Never retrained, with

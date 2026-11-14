@@ -420,12 +420,13 @@ mod tests {
 
     use super::*;
     use crate::{
+        log_capture,
         model::{
             holdout::{Earnings, Holdout, Refusal},
             score::ExpectedScore,
             train::{Kept, Outcome},
         },
-        strategy::TickSeries,
+        strategy::{TickSeries, risk::R},
     };
 
     fn at(time: &str) -> Timestamp {
@@ -503,14 +504,14 @@ mod tests {
     fn a_failing_child_is_kept_with_the_error_it_printed_last() {
         let launcher = shell(
             "echo 'ERROR a log line of the replay' >&2; \
-             echo 'Error: kept the current model: holdout net P&L per trade taken 0.48 below the minimum 0.55' >&2; \
+             echo 'Error: kept the current model: holdout net P&L per trade taken 0.480000R below the minimum 0.55R' >&2; \
              exit 1",
         );
 
         assert_eq!(
             launcher.launch(at("2026-10-22T00:00:00Z")).wait(),
             Retrained::Kept(
-                "kept the current model: holdout net P&L per trade taken 0.48 below the minimum 0.55".to_string()
+                "kept the current model: holdout net P&L per trade taken 0.480000R below the minimum 0.55R".to_string()
             )
         );
     }
@@ -623,7 +624,7 @@ mod tests {
             Outcome::Kept(Kept::Refused {
                 why: Refusal::MinPnl {
                     pnl: 0.25,
-                    min_pnl: 0.5,
+                    min_pnl: R::new(0.5),
                 },
                 holdout: Box::new(holdout()),
             })
@@ -930,58 +931,6 @@ mod tests {
         assert_eq!(second, at("2026-10-22T13:00:00Z"));
     }
 
-    /// Every log record of the process, its level and its message.
-    struct Captured(Mutex<Vec<String>>);
-
-    impl log::Log for Captured {
-        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
-            true
-        }
-
-        fn log(&self, record: &log::Record<'_>) {
-            let line = format!("{} {}", record.level(), record.args());
-            self.0.lock().unwrap().push(line);
-        }
-
-        fn flush(&self) {}
-    }
-
-    static CAPTURED: Captured = Captured(Mutex::new(Vec::new()));
-
-    /// Set in the process a test runs itself in (`alone`).
-    const ALONE: &str = "HELIX_TRADER_TEST_ALONE";
-
-    /// Whether this is the process the test `name` of this module runs
-    /// itself in, alone, so that the logger it installs is the process's:
-    /// the test binary's own process holds Nautilus' logger, which the
-    /// first node of a test installs, and which a logger installed before
-    /// would make it refuse. Else runs it so, and checks that it ran and
-    /// passed.
-    fn alone(name: &str) -> bool {
-        if std::env::var_os(ALONE).is_some() {
-            return true;
-        }
-        // The test's path in the binary: its module's, the crate left out.
-        let (_, module) = module_path!().split_once("::").unwrap();
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args([
-                format!("{module}::{name}").as_str(),
-                "--exact",
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .env(ALONE, "1")
-            .output()
-            .unwrap();
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(
-            output.status.success() && stdout.contains("1 passed"),
-            "{stdout}{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        false
-    }
-
     /// Two retrain actors, each fired once at midnight and then left
     /// alone, no decision nor firing after: the train that published logs
     /// its success as info, and the child that kept the current model,
@@ -989,17 +938,19 @@ mod tests {
     /// error, each as its train ends.
     #[test]
     fn a_finished_retrain_logs_its_outcome_as_it_ends() {
-        if !alone("a_finished_retrain_logs_its_outcome_as_it_ends") {
+        if !log_capture::alone(
+            module_path!(),
+            "a_finished_retrain_logs_its_outcome_as_it_ends",
+        ) {
             return;
         }
-        log::set_logger(&CAPTURED).unwrap();
-        log::set_max_level(log::LevelFilter::Info);
+        log_capture::capture(log::LevelFilter::Info);
         let dir = tempfile::tempdir().unwrap();
         let mut succeeding = daily(&dir, Launcher::in_process(published));
         let mut refused = daily_on(
             dir.path(),
             shell(
-                "echo 'Error: kept the current model: holdout net P&L per trade taken 0.48 below the minimum 0.55' >&2; \
+                "echo 'Error: kept the current model: holdout net P&L per trade taken 0.480000R below the minimum 0.55R' >&2; \
                  exit 1",
             ),
         );
@@ -1014,11 +965,11 @@ mod tests {
         let outcomes = [
             "INFO the retrain at 2026-10-22T00:00:00Z succeeded, its models published or in use",
             "ERROR the retrain at 2026-10-22T00:00:00Z: kept the current model: holdout net P&L \
-             per trade taken 0.48 below the minimum 0.55",
+             per trade taken 0.480000R below the minimum 0.55R",
         ];
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
-            let logged = CAPTURED.0.lock().unwrap().clone();
+            let logged = log_capture::lines();
             if outcomes
                 .iter()
                 .all(|outcome| logged.iter().any(|line| line == outcome))

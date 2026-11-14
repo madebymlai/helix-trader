@@ -40,6 +40,7 @@
 mod indicators;
 mod kind;
 pub mod orders;
+pub mod risk;
 mod session;
 mod standard;
 pub mod warmup;

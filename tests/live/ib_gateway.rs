@@ -108,7 +108,8 @@ fn never_trading_ema_cross() -> EmaCrossConfig {
         slow = { period = 30 }
 
         [trade]
-        instruments = [{ instrument_id = "SXR8.IBIS", trade_size = "1" }]
+        instruments = [{ instrument_id = "SXR8.IBIS" }]
+        risk = "0.5%"
         "#,
     )
     .unwrap()

@@ -360,7 +360,8 @@ mod tests {
         level = 100.5
 
         [trade]
-        instruments = [{ instrument_id = "ESM24.CME", trade_size = "1" }]
+        instruments = [{ instrument_id = "ESM24.CME" }]
+        risk = "0.5%"
     "#;
 
     fn load(toml: &str) -> anyhow::Result<StandardConfig<Trend>> {

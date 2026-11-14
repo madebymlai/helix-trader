@@ -4,7 +4,9 @@
 //! the shared order module (`strategy::orders`): a Nautilus bracket, its
 //! take profit and stop loss 100 and 50 bps from the close of the bar it
 //! decided on (`TAKE_PROFIT_BPS`, `STOP_LOSS_BPS`), held 4 hours (`HOLD`)
-//! from its send unless either ends it first. It hands the module its time
+//! from its send unless either ends it first, sent at the config's stake:
+//! sized to risk `[trade] risk` of equity over its stop's distance, its one
+//! R (`orders::Trade::send`). It hands the module its time
 //! events, which close a trade at its time, and the module sets the time of
 //! the trades still open again at start. Trades may overlap: on a hedging
 //! venue each is a position of its own, on a netting venue they add into
@@ -35,7 +37,6 @@ use nautilus_model::{
     data::{Bar, BarType},
     enums::OrderSide,
     identifiers::{InstrumentId, StrategyId},
-    types::Quantity,
 };
 use nautilus_trading::{
     nautilus_strategy,
@@ -144,12 +145,6 @@ impl EmaCrossConfig {
         self.trade.instruments[0].instrument_id
     }
 
-    /// The size of each trade.
-    #[must_use]
-    pub fn trade_size(&self) -> Quantity {
-        self.trade.instruments[0].trade_size
-    }
-
     /// The fast EMA, `[indicators.fast]`, built.
     ///
     /// # Panics
@@ -242,13 +237,11 @@ impl EmaCross {
         Rc::clone(&self.warmup)
     }
 
-    /// The trade on `side` decided on `bar`: `trade_size` of the traded
-    /// instrument, its take profit and stop loss at their distances from
-    /// the bar's close, each on the instrument's nearest tick, a tie away
-    /// from the close (`orders::nearest_tick`), held `HOLD`.
-    /// The module rounds the size to the instrument's sizes: one rounding
-    /// to zero, as a trade size off that grid leaves, is an error and no
-    /// order, logged by Nautilus.
+    /// The trade on `side` decided on `bar`, of the traded instrument, set
+    /// from the bar's close: its take profit and stop loss at their
+    /// distances from the close, each on the instrument's nearest tick, a
+    /// tie away from the close (`orders::nearest_tick`), held `HOLD`, its
+    /// one R the distance from the close to the stop loss.
     fn trade(&self, bar: &Bar, side: OrderSide) -> anyhow::Result<Trade> {
         let instrument_id = self.config.trade_instrument_id();
         let instrument = self
@@ -259,18 +252,20 @@ impl EmaCross {
         let (take_profit, stop_loss) = exit_prices(close, side);
         let on_tick =
             |exit: Decimal| orders::nearest_tick(&instrument, exit, (exit - close).signum());
-        Ok(Trade {
+        let stop_loss = on_tick(stop_loss)?;
+        Ok(Trade::new(
             instrument_id,
             side,
-            quantity: self.config.trade_size(),
-            exits: Exits {
+            bar.close,
+            (close - stop_loss.as_decimal()).abs(),
+            Exits {
                 bracket: Some(Bracket {
                     take_profit: on_tick(take_profit)?,
-                    stop_loss: on_tick(stop_loss)?,
+                    stop_loss,
                 }),
                 time_limit: Some(HOLD),
             },
-        })
+        ))
     }
 }
 
@@ -314,11 +309,13 @@ impl PlainStrategy for EmaCross {
 nautilus_strategy!(EmaCross);
 
 impl DataActor for EmaCross {
-    /// Sets the time of each trade still open again, as after a restart
-    /// (`orders::arm_open_trades`), registers the signal for the traded
-    /// instrument's bars, then subscribes to the bars, live after
-    /// requesting the warmup.
+    /// Refuses the traded instrument if a stake cannot size a trade on it
+    /// (`orders::refuse_inverse`), sets the time of each trade still open
+    /// again, as after a restart (`orders::arm_open_trades`), registers the
+    /// signal for the traded instrument's bars, then subscribes to the
+    /// bars, live after requesting the warmup.
     fn on_start(&mut self) -> anyhow::Result<()> {
+        orders::refuse_inverse(self, self.config.trade_instrument_id())?;
         orders::arm_open_trades(self)?;
         let bar_type = self.config.trade_bar_type();
         let signal = Rc::clone(&self.signal) as SharedActorIndicator;
@@ -340,7 +337,7 @@ impl DataActor for EmaCross {
             return Ok(());
         }
         match self.signal.cross(bar) {
-            Some(side) => self.trade(bar, side)?.send(self),
+            Some(side) => self.trade(bar, side)?.send(self, self.config.stake()),
             None => Ok(()),
         }
     }

@@ -33,7 +33,7 @@ use crate::{
         },
         targets::{DEFAULT_ATR, Side, Target, TargetConfig},
     },
-    strategy::{AtrArgs, DataRequirements, TickSeries},
+    strategy::{AtrArgs, DataRequirements, TickSeries, risk::R},
 };
 
 /// The holdout of the models of the tests, as a train publishes it: a
@@ -131,16 +131,17 @@ pub fn features() -> Rc<FeatureSet> {
     last_mid(InstrumentId::from(AUD)).build().unwrap()
 }
 
-/// Hourly decisions on a time-only target of 1 hour of 1000 AUD/USD, its
-/// unit the worth of its ATR of one hourly bar of the mids, the long traded
-/// from an expected net P&L of nought, the baseline learner.
+/// Hourly decisions on a time-only target of 1 hour of AUD/USD at a risk
+/// of 0.5%, its unit the worth of its ATR of one hourly bar of the mids on
+/// its size at the reference stake, the long traded from an expected net R
+/// of nought, the baseline learner.
 pub fn config() -> ModelConfig {
     ModelConfig::builder()
         .decision(DecisionRule::Every(SignedDuration::from_hours(1)))
         .target(
             TargetConfig::builder()
                 .instrument_id(InstrumentId::from(AUD))
-                .quantity(Quantity::from(1000))
+                .risk("0.5%".parse().unwrap())
                 .spec(
                     Target::builder()
                         .limit(SignedDuration::from_hours(1))
@@ -156,10 +157,10 @@ pub fn config() -> ModelConfig {
         .window(SignedDuration::from_hours(48))
         .holdout(SignedDuration::from_hours(12))
         .margins(Margins {
-            long: Some(0.0),
+            long: Some(R::new(0.0)),
             short: None,
         })
-        .min_pnl(0.0)
+        .min_pnl(R::new(0.0))
         .min_trades(1)
         .learner(LearnerConfig::Baseline {})
         .build()
@@ -169,20 +170,20 @@ pub fn config() -> ModelConfig {
 pub fn both_sides() -> ModelConfig {
     ModelConfig {
         margins: Margins {
-            long: Some(0.0),
-            short: Some(0.0),
+            long: Some(R::new(0.0)),
+            short: Some(R::new(0.0)),
         },
         ..config()
     }
 }
 
-/// The meta model taking a trade from an expected net P&L of 0.15 USD.
+/// The meta model taking a trade from an expected net R of 0.15.
 pub fn meta() -> MetaConfig {
     MetaConfig {
         window: SignedDuration::from_hours(48),
         holdout: SignedDuration::from_hours(12),
-        margin: 0.15,
-        min_pnl: 0.0,
+        margin: R::new(0.15),
+        min_pnl: R::new(0.0),
         min_trades: 1,
         learner: LearnerConfig::Baseline {},
     }

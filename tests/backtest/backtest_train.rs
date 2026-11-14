@@ -28,7 +28,7 @@ use helix_trader::{
         targets::Side,
         train::{Kept, Outcome, Trained, Training},
     },
-    strategy::{Declared, IndicatorArgs},
+    strategy::{Declared, IndicatorArgs, risk::R},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_indicators::indicator::Indicator;
@@ -39,6 +39,14 @@ use tempfile::TempDir;
 /// it.
 const BOTTOM: f64 = 4000.0;
 const RISE: f64 = 4.0;
+
+/// The worth of each trade's stop, 3.00 from its decision's mid, on an
+/// ounce: one R, in USD.
+const UNIT: f64 = 3.0;
+
+/// The minimum net P&L per trade the models publish from, which the
+/// trades picked clear.
+const MINIMUM: R = R::new(0.5);
 
 /// IC's gold's quotes over `[from, to)`, one every 45 s, the ask 0.20
 /// above the bid: over each even hour of the day the bid rises from
@@ -132,9 +140,9 @@ fn features() -> Rc<FeatureSet> {
 /// The probe's decisions on `cheap`, learning the R of each side of the
 /// bracket by LightGBM, on leaves of 20 rows, on a window of 70 hours, the
 /// last 12 held out and the 12 before them calibrated on, so that the 46
-/// hours fitted on split; each side traded from an expected net P&L of
-/// nought, published from `min_pnl` USD per trade over 5 trades.
-fn config(min_pnl: f64) -> ModelConfig {
+/// hours fitted on split; each side traded from an expected net R of
+/// nought, published from `min_pnl` per trade over 5 trades.
+fn config(min_pnl: R) -> ModelConfig {
     ModelConfig::builder()
         .decision(rule())
         .target(target())
@@ -142,8 +150,8 @@ fn config(min_pnl: f64) -> ModelConfig {
         .window(SignedDuration::from_hours(70))
         .holdout(SignedDuration::from_hours(12))
         .margins(Margins {
-            long: Some(0.0),
-            short: Some(0.0),
+            long: Some(R::new(0.0)),
+            short: Some(R::new(0.0)),
         })
         .min_pnl(min_pnl)
         .min_trades(5)
@@ -153,7 +161,7 @@ fn config(min_pnl: f64) -> ModelConfig {
         .build()
 }
 
-fn training(catalog: &TempDir, models: &Path, min_pnl: f64) -> Training {
+fn training(catalog: &TempDir, models: &Path, min_pnl: R) -> Training {
     blueprint(features(), config(min_pnl))
         .training(catalog.path(), models, &venue())
         .unwrap()
@@ -161,7 +169,7 @@ fn training(catalog: &TempDir, models: &Path, min_pnl: f64) -> Training {
 
 /// The store under `models` of the `side` models of a training of
 /// `min_pnl`, as `training` keys it.
-fn store(models: &Path, min_pnl: f64, side: Side) -> ModelStore {
+fn store(models: &Path, min_pnl: R, side: Side) -> ModelStore {
     blueprint(features(), config(min_pnl))
         .model_set(models, &venue())
         .unwrap()
@@ -202,7 +210,8 @@ fn published(outcome: Option<Outcome>) -> Holdout {
 }
 
 /// Worked by hand. A decision at the bottom, mid 4000.10, sets each exit
-/// 3.00 away (7.5 bps, on the cent): the long enters at the ask, 4000.20,
+/// 3.00 away (7.5 bps, on the cent), a stop worth 3.00 USD on the ounce,
+/// the trade's unit, one R (`UNIT`): the long enters at the ask, 4000.20,
 /// and its take profit, a sell limit at 4003.10, fills when the bid
 /// reaches it, +2.90 less two fees of 0.12, 2.66 USD; the short enters at
 /// the bid, 4000.00, and its stop at 4003.10 fills when the ask reaches
@@ -211,10 +220,10 @@ fn published(outcome: Option<Outcome>) -> Holdout {
 /// row settling at 46:30 past it. Held out, the decisions of 12:00 to 23:00
 /// of the 22nd, the last settled at 23:46:30, before the train: six at the
 /// bottom, six at the top. Each row picks the side that wins it, the long at
-/// the bottom and the short at the top: 12 trades of 2.66, beside every trade,
-/// a win and a loss of each row, (12 x 2.66 - 12 x 3.34) / 24. Both sides hold
-/// those earnings. At 1.5 times the commission of 0.24 each trade makes 0.12
-/// less. Each side's expected R is nearer its R than its training mean is:
+/// the bottom and the short at the top: 12 trades of 2.66 / 3 R, beside every
+/// trade, a win and a loss of each row, (12 x 2.66 - 12 x 3.34) / 24 / 3 R.
+/// Both sides hold those earnings. At 1.5 times the commission of 0.24 each
+/// trade makes 0.12 / 3 R less. Each side's expected R is nearer its R than its training mean is:
 /// a skill above nought. Both manifests hold the pair's one calibration,
 /// naming it, and each side's model, reloaded by its learner, predicts its
 /// probes to the bit.
@@ -223,7 +232,7 @@ fn train_at_t_publishes_each_side_earning_on_the_edge_whose_probes_reload_to_ide
 {
     let catalog = catalog();
     let models = tempfile::tempdir().unwrap();
-    let training = training(&catalog, models.path(), 1.0);
+    let training = training(&catalog, models.path(), MINIMUM);
 
     let trained = training.train_at(t(), |from, to| replay_on(&catalog, features(), from, to));
 
@@ -236,30 +245,31 @@ fn train_at_t_publishes_each_side_earning_on_the_edge_whose_probes_reload_to_ide
             (12, 24),
             "{holdout:?}"
         );
-        close(earnings.taken.expectancy, 2.66);
+        close(earnings.taken.expectancy, 2.66 / UNIT);
         close(earnings.taken.win_rate, 1.0);
         close(
             earnings.every.expectancy,
-            (12.0 * 2.66 - 12.0 * 3.34) / 24.0,
+            (12.0 * 2.66 - 12.0 * 3.34) / 24.0 / UNIT,
         );
-        close(earnings.taken_stressed.expectancy, 2.54);
+        close(earnings.taken_stressed.expectancy, 2.54 / UNIT);
         close(
             earnings.every_stressed.expectancy,
-            (12.0 * 2.54 - 12.0 * 3.46) / 24.0,
+            (12.0 * 2.54 - 12.0 * 3.46) / 24.0 / UNIT,
         );
         assert!(
             holdout.score.skill.is_some_and(|skill| skill > 0.0),
             "{holdout:?}"
         );
     }
-    let fingerprint = blueprint(features(), config(1.0))
+    let fingerprint = blueprint(features(), config(MINIMUM))
         .fingerprint(&venue())
         .unwrap()
         .to_string();
     // A side's model reads the strategy's features, then the bracket's payoff
     // features, the names the decision checks it against.
     let names = side_names(features().names(), &target().payoff_names());
-    let [long, short] = Side::BOTH.map(|side| store(models.path(), 1.0, side).read(t()).unwrap());
+    let [long, short] =
+        Side::BOTH.map(|side| store(models.path(), MINIMUM, side).read(t()).unwrap());
     assert_eq!(long.manifest.calibration, short.manifest.calibration);
     let ModelCalibration::Pair(calibration) = &long.manifest.calibration else {
         panic!("{:?}", long.manifest.calibration);
@@ -291,7 +301,8 @@ fn train_at_t_publishes_each_side_earning_on_the_edge_whose_probes_reload_to_ide
 }
 
 /// An hour later the holdout is the decisions of 13:00 to 00:00: each
-/// row picks the side that wins it, 2.66 USD each, short of a minimum of 3.
+/// row picks the side that wins it, 2.66 / 3 R each, short of a minimum of
+/// 1R, however far above it their money is.
 #[test]
 fn a_minimum_above_what_the_holdout_earns_keeps_each_current_model() {
     let catalog = catalog();
@@ -299,7 +310,7 @@ fn a_minimum_above_what_the_holdout_earns_keeps_each_current_model() {
     let first = std::thread::scope(|scope| {
         scope
             .spawn(|| {
-                training(&catalog, models.path(), 1.0)
+                training(&catalog, models.path(), MINIMUM)
                     .train_at(t(), |from, to| replay_on(&catalog, features(), from, to))
             })
             .join()
@@ -310,10 +321,12 @@ fn a_minimum_above_what_the_holdout_earns_keeps_each_current_model() {
     }
     // The minimums key the store: the stricter one holds the models as if
     // it had published them.
-    let stricter = training(&catalog, models.path(), 3.0);
+    let stricter = training(&catalog, models.path(), R::new(1.0));
     for side in Side::BOTH {
-        let current = store(models.path(), 1.0, side).read(t()).unwrap();
-        store(models.path(), 3.0, side).publish(&current).unwrap();
+        let current = store(models.path(), MINIMUM, side).read(t()).unwrap();
+        store(models.path(), R::new(1.0), side)
+            .publish(&current)
+            .unwrap();
     }
 
     let trained = stricter.train_at(t() + SignedDuration::from_hours(1), |from, to| {
@@ -327,12 +340,14 @@ fn a_minimum_above_what_the_holdout_earns_keeps_each_current_model() {
         let Refusal::MinPnl { pnl, min_pnl } = why else {
             panic!("{why:?}");
         };
-        close(Some(pnl), 2.66);
-        assert_eq!(min_pnl, 3.0);
+        close(Some(pnl), 2.66 / UNIT);
+        assert_eq!(min_pnl, R::new(1.0));
     }
     for side in Side::BOTH {
         assert_eq!(
-            store(models.path(), 3.0, side).valid_froms().unwrap(),
+            store(models.path(), R::new(1.0), side)
+                .valid_froms()
+                .unwrap(),
             [t()]
         );
     }

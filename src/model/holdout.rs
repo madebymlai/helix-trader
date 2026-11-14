@@ -6,9 +6,11 @@
 //! the walk-forward's scores both read (`train`, `walk`); a meta model's
 //! (`MetaMargin`), the trades of the side picked its margin takes.
 //! What the trades earned (`Earnings`) is Nautilus' `Expectancy` and `WinRate`
-//! of their net P&Ls (`calculate_from_realized_pnls`), as the backtest
-//! report reads them, beside the same of every trade of the rows, which
-//! taking them all would earn; and both again at 1.5 times the
+//! of their net P&Ls in R (`calculate_from_realized_pnls`), each trade's net
+//! P&L over its unit, the money one R of it is, as its model learns it
+//! (`Example::realised`), so that the same figures judge a model whatever
+//! its trades' size or instrument; beside the same of every trade of the
+//! rows, which taking them all would earn; and both again at 1.5 times the
 //! commission (`STRESS`), reported only. Nautilus' `Expectancy` is the
 //! mean win times the win rate plus the mean loss times the loss rate,
 //! the rates among the trades that gained or lost: a trade at nought,
@@ -24,7 +26,7 @@
 //! A model is published (`Holdout::refusal` none) when, on its holdout, its
 //! skill is above nought (`Holdout::score_refusal`), and the trades taken, at
 //! least the minimum count (`Minimums`), earned per trade at least the
-//! minimum net P&L and more than every trade of the rows did. A side's model
+//! minimum net P&L, in R, and more than every trade of the rows did. A side's model
 //! is published only with the other sides of its pair, each of a skill above
 //! nought, on the earnings of the pair's picks (`train`); a meta's alone, on
 //! the trades its margin takes. The slope and the gap are reported, never
@@ -39,40 +41,41 @@ use nautilus_analysis::{
 use nautilus_core::UnixNanos;
 use serde::{Deserialize, Serialize};
 
-use super::{dataset::DatasetRow, deciding::SideRow, score::ExpectedScore, targets::Side};
+use super::{dataset::DatasetRow, score::ExpectedScore, targets::Side};
+use crate::strategy::risk::R;
 
 /// The multiple of the commission the stressed earnings are at.
 pub const STRESS: f64 = 1.5;
 
-/// A row's trade: its net P&L and the commission it is net of, in the
+/// A row's trade: its net P&L and the commission it is net of, and its
+/// unit, the money one R of it is (`targets::SideTarget::unit`), all in the
 /// target's P&L currency.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Trade {
     pub pnl: f64,
     pub commission: f64,
+    pub unit: f64,
 }
 
 /// A row as a model is fitted and judged on it: its features, the trade it
-/// is of and the unit of that trade's payoff, whose realised value the model
-/// learns (`realised`), the decision's time and when its target settled.
+/// is of, whose realised R the model learns (`realised`), the decision's
+/// time and when its target settled.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Example {
     pub features: Vec<f64>,
     /// The trade of the row: of a side model's side, or of the side picked
     /// for a meta.
     pub trade: Trade,
-    /// The unit of the trade's payoff in the row (`DatasetRow::side`).
-    pub unit: f64,
     pub ts_event: UnixNanos,
     pub settled_at: UnixNanos,
 }
 
 /// What trades earned: their count, and Nautilus' `Expectancy` and
-/// `WinRate` of their net P&Ls, none without a trade.
+/// `WinRate` of their net P&Ls in R, none without a trade.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Trades {
     pub count: usize,
-    /// The net P&L per trade.
+    /// The net P&L per trade, in R.
     pub expectancy: Option<f64>,
     pub win_rate: Option<f64>,
 }
@@ -105,10 +108,10 @@ pub struct Holdout {
 }
 
 /// The least a model's holdout is published with: the net P&L per trade taken,
-/// in the target's P&L currency, over at least a count of trades.
+/// in R, over at least a count of trades.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Minimums {
-    pub min_pnl: f64,
+    pub min_pnl: R,
     pub min_trades: usize,
 }
 
@@ -119,59 +122,60 @@ pub enum Refusal {
     Skill { skill: Option<f64> },
     /// Fewer trades were taken than the minimum.
     Trades { trades: usize, min_trades: usize },
-    /// The net P&L per trade taken is below the minimum.
-    MinPnl { pnl: f64, min_pnl: f64 },
-    /// The net P&L per trade taken is not above every trade's.
+    /// The net P&L per trade taken, in R, is below the minimum.
+    MinPnl { pnl: f64, min_pnl: R },
+    /// The net P&L per trade taken, in R, is not above every trade's.
     Every { pnl: f64, every: f64 },
 }
 
 /// A meta model's decision rule: the trade of the side picked taken when the
-/// net P&L the meta expects of it, its calibrated expected R times the
-/// trade's unit, in the target's P&L currency, is at least the margin
-/// (`takes`, `MetaConfig::margin`), in a decision as in a holdout.
+/// net R the meta expects of it, its calibrated expected R, is at least the
+/// margin, in R (`takes`, `MetaConfig::margin`), in a decision as in a
+/// holdout.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct MetaMargin(pub f64);
+pub struct MetaMargin(pub R);
 
 impl MetaMargin {
-    /// Whether a meta model expecting `expected_pnl` of the trade takes it:
-    /// at or above the margin, so NaN does not.
+    /// Whether a meta model expecting `expected_r` of the trade takes it: at
+    /// or above the margin.
     #[must_use]
-    pub fn takes(self, expected_pnl: f64) -> bool {
-        expected_pnl >= self.0
+    pub fn takes(self, expected_r: R) -> bool {
+        expected_r >= self.0
     }
 }
 
 impl Trade {
-    /// Its net P&L had the commission been `factor` times what it was.
-    fn pnl_at(self, factor: f64) -> f64 {
-        (1.0 - factor).mul_add(self.commission, self.pnl)
+    /// Its net P&L in R had the commission been `factor` times what it was.
+    fn r_at(self, factor: f64) -> f64 {
+        (1.0 - factor).mul_add(self.commission, self.pnl) / self.unit
     }
 }
 
 impl Trades {
-    /// What trades of net P&Ls `pnls` earned.
+    /// What trades of net P&Ls `rs`, in R, earned.
     #[must_use]
-    pub fn of(pnls: &[f64]) -> Self {
+    pub fn of(rs: &[f64]) -> Self {
         let some = |value: Option<f64>| value.filter(|value| !value.is_nan());
         Self {
-            count: pnls.len(),
-            expectancy: some(Expectancy {}.calculate_from_realized_pnls(pnls)),
-            win_rate: some(WinRate {}.calculate_from_realized_pnls(pnls)),
+            count: rs.len(),
+            expectancy: some(Expectancy {}.calculate_from_realized_pnls(rs)),
+            win_rate: some(WinRate {}.calculate_from_realized_pnls(rs)),
         }
     }
 }
 
 impl Earnings {
-    /// The earnings of `rows`, each whether the decision took it and its trade.
+    /// The earnings of `rows`, each whether the decision took it and its trade:
+    /// of each trade's net P&L in R.
     #[must_use]
     pub fn of(rows: &[(bool, Trade)]) -> Self {
         let trades = |taken_only: bool, factor: f64| {
-            let pnls: Vec<f64> = rows
+            let rs: Vec<f64> = rows
                 .iter()
                 .filter(|(taken, _)| *taken || !taken_only)
-                .map(|(_, trade)| trade.pnl_at(factor))
+                .map(|(_, trade)| trade.r_at(factor))
                 .collect();
-            Trades::of(&pnls)
+            Trades::of(&rs)
         };
         Self {
             taken: trades(true, 1.0),
@@ -199,7 +203,7 @@ impl Holdout {
             });
         }
         let pnl = taken.expectancy.unwrap_or(f64::NAN);
-        if pnl.is_nan() || pnl < minimums.min_pnl {
+        if !minimums.min_pnl.reached_by(pnl) {
             return Some(Refusal::MinPnl {
                 pnl,
                 min_pnl: minimums.min_pnl,
@@ -223,19 +227,17 @@ impl Example {
     /// The example of `row` on `side`'s trade: the side's row
     /// (`DatasetRow::side`), the trade and its payoff's unit.
     pub(super) fn of_side(row: &DatasetRow, side: Side) -> Self {
-        let SideRow { features, unit } = row.side(side);
         Self {
-            features,
+            features: row.side(side).features,
             trade: row.trade(side),
-            unit,
             ts_event: row.ts_event,
             settled_at: row.settled_at,
         }
     }
 
-    /// The realised value of its trade: its net P&L over its unit.
+    /// The realised value of its trade: its net P&L over its unit, in R.
     pub(super) fn realised(&self) -> f64 {
-        self.trade.pnl / self.unit
+        self.trade.r_at(1.0)
     }
 }
 
@@ -244,13 +246,18 @@ fn value(value: Option<f64>) -> String {
     value.map_or_else(|| "n/a".to_string(), |value| format!("{value:.6}"))
 }
 
+/// `r`, a value in R, to six places with its suffix, or n/a.
+pub(super) fn in_r(r: Option<f64>) -> String {
+    r.map_or_else(|| "n/a".to_string(), |r| format!("{r:.6}R"))
+}
+
 impl fmt::Display for Trades {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
             "{} trades, net P&L per trade {}, win rate {}",
             self.count,
-            value(self.expectancy),
+            in_r(self.expectancy),
             value(self.win_rate)
         )
     }
@@ -270,8 +277,8 @@ impl fmt::Display for Holdout {
             "taken {taken}; every trade {every}; at {STRESS}x the commission, taken {}, \
              every trade {}; skill {}, mean R - E' {}, calibration slope {}, top-decile gap {} \
              over {} rows",
-            value(taken_stressed.expectancy),
-            value(every_stressed.expectancy),
+            in_r(taken_stressed.expectancy),
+            in_r(every_stressed.expectancy),
             value(score.skill),
             value(score.mean_error),
             value(score.slope),
@@ -293,11 +300,11 @@ impl fmt::Display for Refusal {
             ),
             Self::MinPnl { pnl, min_pnl } => write!(
                 f,
-                "holdout net P&L per trade taken {pnl:.6} below the minimum {min_pnl}"
+                "holdout net P&L per trade taken {pnl:.6}R below the minimum {min_pnl}"
             ),
             Self::Every { pnl, every } => write!(
                 f,
-                "holdout net P&L per trade taken {pnl:.6} not above every trade's {every:.6}"
+                "holdout net P&L per trade taken {pnl:.6}R not above every trade's {every:.6}R"
             ),
         }
     }
@@ -312,52 +319,58 @@ mod tests {
         assert!((actual - expected).abs() < 1e-9, "{actual} != {expected}");
     }
 
-    fn trade(pnl: f64) -> Trade {
+    /// A trade of `pnl` net of 0.3 of commission, one R of it worth `unit`.
+    fn trade(pnl: f64, unit: f64) -> Trade {
         Trade {
             pnl,
             commission: 0.3,
+            unit,
         }
     }
 
-    /// A margin of 0.25 USD, and one below nought, which a trade expected to
+    /// A margin of 0.25R, and one below nought, which a trade expected to
     /// lose a little clears.
     #[test]
-    fn a_meta_margin_takes_an_expected_pnl_at_or_above_it_and_not_nan() {
-        let margin = MetaMargin(0.25);
-        let below_nought = MetaMargin(-0.5);
+    fn a_meta_margin_takes_an_expected_r_at_or_above_it() {
+        let margin = MetaMargin(R::new(0.25));
+        let below_nought = MetaMargin(R::new(-0.5));
 
-        assert!(margin.takes(0.25));
-        assert!(margin.takes(0.26));
-        assert!(!margin.takes(0.24));
-        assert!(!margin.takes(f64::NAN));
-        assert!(below_nought.takes(-0.5));
-        assert!(!below_nought.takes(-0.75));
+        assert!(margin.takes(R::new(0.25)));
+        assert!(margin.takes(R::new(0.26)));
+        assert!(!margin.takes(R::new(0.24)));
+        assert!(below_nought.takes(R::new(-0.5)));
+        assert!(!below_nought.takes(R::new(-0.75)));
     }
 
-    /// Taken, wins of 3 and a loss of 2: 3 times 2/3 less 2 times 1/3,
-    /// 4/3. Every trade, besides a win of 0.5 and a loss of 2: the mean
-    /// win 13/6 three times in five, the loss 2 twice, 0.5. At 1.5 times
-    /// the commission of 0.3 each loses 0.15 more: 7/6 and 0.35.
+    /// Taken, wins of 3 over units of 2, 1.5R twice, and a loss of 2 over a
+    /// unit of 4, -0.5R: no trade at nought, so their mean, 5/6R, where
+    /// their money would make 4/3. Every trade, besides a win of 0.5 over a
+    /// unit of 1, 0.5R, and a loss of 2 over a unit of 2, -1R: 0.4R, of a
+    /// win rate of 3/5. At 1.5 times the commission of 0.3 each loses 0.15
+    /// more, 0.15 of its unit's R: the trades taken 0.075R, 0.0375R and
+    /// 0.075R, 0.0625R a trade; every trade 0.15R and 0.075R besides,
+    /// 0.0825R a trade.
     #[test]
-    fn the_earnings_are_nautilus_expectancy_and_win_rate_of_the_trades_taken_and_of_every_trade() {
+    fn the_earnings_are_nautilus_expectancy_and_win_rate_of_the_r_of_the_trades_taken_and_of_every_trade()
+     {
         let rows = [
-            (true, trade(3.0)),
-            (true, trade(-2.0)),
-            (true, trade(3.0)),
-            (false, trade(0.5)),
-            (false, trade(-2.0)),
+            (true, trade(3.0, 2.0)),
+            (true, trade(-2.0, 4.0)),
+            (true, trade(3.0, 2.0)),
+            (false, trade(0.5, 1.0)),
+            (false, trade(-2.0, 2.0)),
         ];
 
         let earnings = Earnings::of(&rows);
 
         assert_eq!(earnings.taken.count, 3);
-        close(earnings.taken.expectancy, 4.0 / 3.0);
+        close(earnings.taken.expectancy, 5.0 / 6.0);
         close(earnings.taken.win_rate, 2.0 / 3.0);
         assert_eq!(earnings.every.count, 5);
-        close(earnings.every.expectancy, 0.5);
+        close(earnings.every.expectancy, 0.4);
         close(earnings.every.win_rate, 0.6);
-        close(earnings.taken_stressed.expectancy, 4.0 / 3.0 - 0.15);
-        close(earnings.every_stressed.expectancy, 0.35);
+        close(earnings.taken_stressed.expectancy, 5.0 / 6.0 - 0.0625);
+        close(earnings.every_stressed.expectancy, 0.4 - 0.0825);
     }
 
     /// A trade at nought is neither a win nor a loss in Nautilus'
@@ -382,8 +395,8 @@ mod tests {
         );
     }
 
-    /// A holdout whose decision took 3 trades of 1.2 each, every trade's
-    /// 0.4, its skill 0.1.
+    /// A holdout whose decision took 3 trades of 1.2R each, every trade's
+    /// 0.4R, its skill 0.1.
     fn holdout() -> Holdout {
         let trades = |count, expectancy| Trades {
             count,
@@ -410,7 +423,7 @@ mod tests {
     }
 
     const MINIMUMS: Minimums = Minimums {
-        min_pnl: 1.0,
+        min_pnl: R::new(1.0),
         min_trades: 3,
     };
 
@@ -419,7 +432,7 @@ mod tests {
      {
         assert_eq!(holdout().refusal(MINIMUMS), None);
         let at_the_minimum = Minimums {
-            min_pnl: 1.2,
+            min_pnl: R::new(1.2),
             ..MINIMUMS
         };
         assert_eq!(holdout().refusal(at_the_minimum), None);
@@ -462,7 +475,7 @@ mod tests {
     #[test]
     fn a_net_pnl_per_trade_below_the_minimum_is_refused() {
         let minimums = Minimums {
-            min_pnl: 1.5,
+            min_pnl: R::new(1.5),
             ..MINIMUMS
         };
 
@@ -470,9 +483,91 @@ mod tests {
             holdout().refusal(minimums),
             Some(Refusal::MinPnl {
                 pnl: 1.2,
-                min_pnl: 1.5
+                min_pnl: R::new(1.5)
             })
         );
+    }
+
+    /// A holdout of skill 0.1 whose trades are `rows`.
+    fn earning(rows: &[(bool, Trade)]) -> Holdout {
+        Holdout {
+            earnings: Earnings::of(rows),
+            ..holdout()
+        }
+    }
+
+    /// The trades taken win 3 each, over units of 4: 0.75R a trade, below a
+    /// minimum of 1R, however far above 1 their money is.
+    #[test]
+    fn a_net_r_per_trade_below_the_minimum_is_refused_whatever_its_money() {
+        let wins = earning(&[(true, trade(3.0, 4.0)), (true, trade(3.0, 4.0))]);
+        let minimums = Minimums {
+            min_pnl: R::new(1.0),
+            min_trades: 2,
+        };
+
+        assert_eq!(
+            wins.refusal(minimums),
+            Some(Refusal::MinPnl {
+                pnl: 0.75,
+                min_pnl: R::new(1.0)
+            })
+        );
+    }
+
+    /// The trade taken wins 3 over a unit of 4, 0.75R; the trade left, 1
+    /// over a unit of 1, 1R: every trade's 0.875R is above the trade taken,
+    /// whose money, 3 a trade, is above every trade's, 2.
+    #[test]
+    fn a_net_r_per_trade_not_above_every_trades_is_refused_whatever_its_money() {
+        let taken_less = earning(&[(true, trade(3.0, 4.0)), (false, trade(1.0, 1.0))]);
+        let minimums = Minimums {
+            min_pnl: R::new(0.5),
+            min_trades: 1,
+        };
+
+        assert_eq!(
+            taken_less.refusal(minimums),
+            Some(Refusal::Every {
+                pnl: 0.75,
+                every: 0.875
+            })
+        );
+    }
+
+    /// A refusal gives its figures in R, as the holdout it reports does: of
+    /// the trades of `a_net_r_per_trade_not_above_every_trades_is_refused…`,
+    /// 0.75R taken and 0.875R every trade, and at 1.5 times the commission,
+    /// 2.85 over 4, 0.7125R, beside 0.85 over 1, 0.78125R a trade.
+    #[test]
+    fn a_refusal_and_a_holdout_say_their_figures_in_r() {
+        let below = Refusal::MinPnl {
+            pnl: 0.75,
+            min_pnl: R::new(1.0),
+        };
+        let not_above = Refusal::Every {
+            pnl: 0.75,
+            every: 0.875,
+        };
+        let reported = earning(&[(true, trade(3.0, 4.0)), (false, trade(1.0, 1.0))]);
+
+        let (below, not_above, reported) = (
+            below.to_string(),
+            not_above.to_string(),
+            reported.to_string(),
+        );
+
+        assert!(
+            below.contains("0.750000R") && below.contains("minimum 1R"),
+            "{below}"
+        );
+        assert!(
+            not_above.contains("0.750000R") && not_above.contains("0.875000R"),
+            "{not_above}"
+        );
+        for r in ["0.750000R", "0.875000R", "0.712500R", "0.781250R"] {
+            assert!(reported.contains(r), "{r}: {reported}");
+        }
     }
 
     /// No trade taken has no net P&L per trade: below any minimum.

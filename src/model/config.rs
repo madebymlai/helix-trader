@@ -1,9 +1,9 @@
 //! The model section of a strategy's TOML: when the strategy decides, the
 //! target of its decisions, which its model learns, how often a model is
 //! retrained, if ever, and the window it is trained on, the least its
-//! holdout earns to be published, the margins its expected P&L must clear
-//! to trade a side, and its learner; and, optionally, the meta model
-//! filtering its trades.
+//! holdout earns to be published, in R, the margins in R its expected R
+//! must clear to trade a side, and its learner; and, optionally, the meta
+//! model filtering its trades.
 //!
 //! A strategy has at most two levels of models: the side models of a
 //! `ModelConfig`, and one meta model (`MetaConfig`) deciding whether to
@@ -22,7 +22,10 @@ use super::{
     schedule::Retrain,
     targets::{Side, Target, TargetConfig},
 };
-use crate::strategy::{DataRequirements, TradedInstrument};
+use crate::strategy::{
+    DataRequirements, TradedInstrument,
+    risk::{R, Risk},
+};
 
 /// A strategy's model, loaded from TOML, such as
 ///
@@ -33,8 +36,8 @@ use crate::strategy::{DataRequirements, TradedInstrument};
 /// retrain = "168h"
 /// window = "720h"
 /// holdout = "120h"
-/// margins = { long = 0.5, short = 0.5 }
-/// min_pnl = 1.0
+/// margins = { long = "0.5R", short = "0.5R" }
+/// min_pnl = "0.1R"
 /// min_trades = 30
 /// learner = { kind = "lightgbm" }
 /// ```
@@ -62,12 +65,12 @@ pub struct ModelConfig<T = TargetConfig> {
     /// The last part of the window the model is scored on and not fitted
     /// on, such as `"120h"`.
     pub holdout: SignedDuration,
-    /// The sides traded, each with the expected net P&L it trades from.
+    /// The sides traded, each with the expected net R it trades from.
     pub margins: Margins,
-    /// The least net P&L per trade the trades picked between the sides earn
-    /// on the holdout for the sides' models to be published, in the target's
-    /// P&L currency (`holdout`, `train`).
-    pub min_pnl: f64,
+    /// The least net P&L per trade, in R, the trades picked between the
+    /// sides earn on the holdout for the sides' models to be published
+    /// (`holdout`, `train`).
+    pub min_pnl: R,
     /// The fewest trades picked between the sides on the holdout for the
     /// sides' models to be published.
     pub min_trades: usize,
@@ -98,14 +101,13 @@ pub struct MetaConfig {
     /// The last part of the window the model is scored on and not fitted
     /// on.
     pub holdout: SignedDuration,
-    /// The net P&L the meta expects of the trade of the side picked, its
-    /// calibrated expected R times the trade's unit, in the target's P&L
-    /// currency, from which the trade is taken (`holdout::MetaMargin`).
-    pub margin: f64,
-    /// The least net P&L per trade the meta's decisions earn on the
-    /// holdout for its model to be published, in the target's P&L
-    /// currency (`holdout`).
-    pub min_pnl: f64,
+    /// The net R the meta expects of the trade of the side picked, its
+    /// calibrated expected R, from which the trade is taken
+    /// (`holdout::MetaMargin`).
+    pub margin: R,
+    /// The least net P&L per trade, in R, the meta's decisions earn on the
+    /// holdout for its model to be published (`holdout`).
+    pub min_pnl: R,
     /// The fewest trades the meta's decisions take on the holdout for its
     /// model to be published.
     pub min_trades: usize,
@@ -121,8 +123,8 @@ pub struct MetaConfig {
 struct MetaFields {
     window: SignedDuration,
     holdout: SignedDuration,
-    margin: Option<f64>,
-    min_pnl: f64,
+    margin: Option<R>,
+    min_pnl: R,
     min_trades: usize,
     learner: LearnerConfig,
     threshold: Option<IgnoredAny>,
@@ -146,15 +148,14 @@ impl TryFrom<MetaFields> for MetaConfig {
         if threshold.is_some() {
             return Err(
                 "a meta has no probability `threshold`: it takes the trade of the side \
-                 picked from `margin`, the net P&L it expects of the trade, its expected R \
-                 times the trade's unit, in the target's P&L currency"
+                 picked from `margin`, the net R it expects of the trade, such as \"0.2R\""
                     .to_string(),
             );
         }
         if size.is_some() {
             return Err(
-                "a meta has no `size`: the trade it takes is of the target's size, the \
-                 instrument's `trade_size` in `[trade]`"
+                "a meta has no `size`: it takes or leaves the decision's trade, which the \
+                 strategy sends at its stake, `[trade] risk` times the multiple it picks"
                     .to_string(),
             );
         }
@@ -169,23 +170,22 @@ impl TryFrom<MetaFields> for MetaConfig {
     }
 }
 
-/// The sides a strategy trades, each with its margin: the expected
-/// net P&L of a trade, in the target's P&L currency per trade of its
-/// quantity, from which the side is traded (`payoff`), such as
-/// `margins = { long = 0.5, short = 0.5 }`. A side without one has no
-/// model, trained, stored, scored nor traded: `{ long = 0.5 }` is a
-/// long-only model.
+/// The sides a strategy trades, each with its margin: the expected net R
+/// of a trade, its calibrated expected R, from which the side is traded
+/// (`payoff`), such as `margins = { long = "0.5R", short = "0.5R" }`. A
+/// side without one has no model, trained, stored, scored nor traded:
+/// `{ long = "0.5R" }` is a long-only model.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Margins {
-    pub long: Option<f64>,
-    pub short: Option<f64>,
+    pub long: Option<R>,
+    pub short: Option<R>,
 }
 
 impl Margins {
     /// The margin of `side`, if it is traded.
     #[must_use]
-    pub const fn of(&self, side: Side) -> Option<f64> {
+    pub const fn of(&self, side: Side) -> Option<R> {
         match side {
             Side::Long => self.long,
             Side::Short => self.short,
@@ -193,7 +193,7 @@ impl Margins {
     }
 
     /// The sides traded, the long first, each with its margin.
-    pub fn sides(&self) -> impl Iterator<Item = (Side, f64)> {
+    pub fn sides(&self) -> impl Iterator<Item = (Side, R)> {
         Side::BOTH
             .into_iter()
             .filter_map(|side| self.of(side).map(|margin| (side, margin)))
@@ -205,9 +205,10 @@ impl Margins {
 pub type ModelSection = ModelConfig<Target>;
 
 impl ModelSection {
-    /// The section, its target trading `traded` (`Target::trading`).
+    /// The section, its target trading `traded` at `risk`, the config's,
+    /// its reference stake (`Target::trading`).
     #[must_use]
-    pub fn trading(self, traded: &TradedInstrument) -> ModelConfig {
+    pub fn trading(self, traded: &TradedInstrument, risk: Risk) -> ModelConfig {
         let Self {
             decision,
             target,
@@ -222,7 +223,7 @@ impl ModelSection {
         } = self;
         ModelConfig {
             decision,
-            target: target.trading(traded),
+            target: target.trading(traded, risk),
             retrain,
             window,
             holdout,
@@ -251,7 +252,7 @@ impl ModelConfig {
     /// `TargetConfig::atr_bars`) or warming over longer than its warmup,
     /// the target's limit not shorter than the window, the holdout not
     /// positive or leaving no fitted row (see `validate_window`), the
-    /// margins naming no side or one not finite, the minimums invalid (see
+    /// margins naming no side, the minimums invalid (see
     /// `validate_minimums`), the meta model invalid (see
     /// `MetaConfig::validate`), or the target's limit not shorter than the
     /// decision cadence (see `validate_cadence`).
@@ -277,15 +278,6 @@ impl ModelConfig {
             self.margins.sides().next().is_some(),
             ConfigError::invalid_value("model.margins", "the margins name no side to trade"),
         );
-        for (side, margin) in self.margins.sides() {
-            errors.check(
-                margin.is_finite(),
-                ConfigError::invalid_value(
-                    format!("model.margins.{}", side.name()),
-                    format!("the {} margin {margin} is not a number", side.name()),
-                ),
-            );
-        }
         validate_minimums(self.minimums(), "model", &mut errors);
         if let Some(meta) = &self.meta {
             meta.validate(&self.target, &mut errors);
@@ -328,8 +320,8 @@ impl MetaConfig {
     /// sides' `target`, each under its field of `[model.meta]`
     /// (`model.meta.…`): the learner invalid (see
     /// `LearnerConfig::validate`), the target's limit not shorter than the
-    /// window, the holdout not positive or leaving no fitted row, the margin
-    /// not a number, or the minimums invalid (see `validate_minimums`).
+    /// window, the holdout not positive or leaving no fitted row, or the
+    /// minimums invalid (see `validate_minimums`).
     pub fn validate(&self, target: &TargetConfig, errors: &mut ConfigErrorCollector) {
         errors.collect(learner(&self.learner, "model.meta.learner"));
         validate_window(
@@ -339,13 +331,6 @@ impl MetaConfig {
             "model.meta",
             "model.meta.window",
             errors,
-        );
-        errors.check(
-            self.margin.is_finite(),
-            ConfigError::invalid_value(
-                "model.meta.margin",
-                format!("the meta margin {} is not a number", self.margin),
-            ),
         );
         validate_minimums(self.minimums(), "model.meta", errors);
     }
@@ -440,19 +425,9 @@ fn validate_window(
 }
 
 /// Pushes onto `errors`, under `section` (`model` or `model.meta`), the
-/// violations of the minimum net P&L of `minimums` not a number and their
-/// minimum count of trades below one.
+/// violation of the minimum count of trades of `minimums` below one; their
+/// minimum net P&L, an R, is a finite number as it is parsed.
 fn validate_minimums(minimums: Minimums, section: &str, errors: &mut ConfigErrorCollector) {
-    errors.check(
-        minimums.min_pnl.is_finite(),
-        ConfigError::invalid_value(
-            format!("{section}.min_pnl"),
-            format!(
-                "the minimum net P&L per trade {} is not a number",
-                minimums.min_pnl
-            ),
-        ),
-    );
     errors.check(
         minimums.min_trades >= 1,
         ConfigError::invalid_value(
@@ -467,7 +442,7 @@ fn validate_minimums(minimums: Minimums, section: &str, errors: &mut ConfigError
 
 #[cfg(test)]
 mod tests {
-    use nautilus_model::{data::BarType, identifiers::InstrumentId, types::Quantity};
+    use nautilus_model::{data::BarType, identifiers::InstrumentId};
     use rust_decimal::Decimal;
 
     use super::*;
@@ -489,8 +464,8 @@ mod tests {
         retrain = "24h"
         window = "48h"
         holdout = "12h"
-        margins = { long = 0.5, short = 0.5 }
-        min_pnl = 1.0
+        margins = { long = "0.5R", short = "0.5R" }
+        min_pnl = "1R"
         min_trades = 30
         learner = { kind = "fake" }
     "#;
@@ -519,17 +494,16 @@ mod tests {
         }
     }
 
-    /// What every test's strategy trades: an ounce of gold.
+    /// What every test's strategy trades: gold.
     fn gold() -> TradedInstrument {
         TradedInstrument {
             instrument_id: InstrumentId::from(GOLD),
-            trade_size: Quantity::from(1),
         }
     }
 
     /// The section of `toml`, trading gold.
     fn parse(toml: &str) -> anyhow::Result<ModelConfig> {
-        Ok(toml::from_str::<ModelSection>(toml)?.trading(&gold()))
+        Ok(toml::from_str::<ModelSection>(toml)?.trading(&gold(), "0.5%".parse().unwrap()))
     }
 
     /// The error of loading `toml` for a strategy reading gold, if any.
@@ -600,14 +574,14 @@ mod tests {
         assert_eq!(
             config.margins,
             Margins {
-                long: Some(0.5),
-                short: Some(0.5)
+                long: Some(R::new(0.5)),
+                short: Some(R::new(0.5))
             }
         );
         assert_eq!(
             config.minimums(),
             Minimums {
-                min_pnl: 1.0,
+                min_pnl: R::new(1.0),
                 min_trades: 30
             }
         );
@@ -797,33 +771,96 @@ mod tests {
         assert!(load(&section(r#"holdout = "23h""#)).is_ok());
     }
 
+    /// A margin is in R: a bare number, a margin in money say, is refused as
+    /// the section is parsed, at its field, saying so.
     #[test]
-    fn margins_naming_no_side_or_not_a_number_are_refused() {
-        for margins in ["{}", "{ long = nan }", "{ long = 0.5, short = inf }"] {
-            let toml = section(&format!("margins = {margins}"));
-            assert!(refused(&toml).contains("margin"), "{margins}");
+    fn a_bare_number_margin_is_refused_at_parsing_saying_it_is_in_r() {
+        for (margins, field) in [
+            (r#"{ long = 0.5, short = "0.5R" }"#, "long = 0.5"),
+            (r#"{ long = "0.5R", short = 1 }"#, "short = 1"),
+        ] {
+            let err = refused_parsing(&section(&format!("margins = {margins}")));
+
+            assert!(err.contains(field) && err.contains("in R"), "{err}");
         }
-        assert!(refused(&section("margins = { both = 0.5 }")).contains("both"));
     }
 
-    /// `{ long = 0.5 }` is a long-only model: the short is not traded.
+    #[test]
+    fn a_bare_number_meta_margin_is_refused_at_parsing_saying_it_is_in_r() {
+        let meta = META.replace(r#"margin = "0.25R""#, "margin = 0.25");
+
+        let err = refused_parsing(&format!("{SECTION}\n{meta}"));
+
+        assert!(
+            err.contains("margin = 0.25") && err.contains("in R"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn margins_naming_no_side_are_refused() {
+        assert_eq!(refused_fields(&section("margins = {}")), ["model.margins"]);
+        assert!(refused(&section(r#"margins = { both = "0.5R" }"#)).contains("both"));
+    }
+
+    /// An R is a finite number: a margin of NaN or infinity is refused as the
+    /// section is parsed.
+    #[test]
+    fn a_margin_not_a_finite_number_of_r_is_refused_at_parsing() {
+        for margins in [
+            r#"{ long = "nanR" }"#,
+            r#"{ long = "0.5R", short = "infR" }"#,
+        ] {
+            let err = refused_parsing(&section(&format!("margins = {margins}")));
+
+            assert!(err.contains("not a finite number of R"), "{err}");
+        }
+    }
+
+    /// `{ long = "0.5R" }` is a long-only model: the short is not traded.
     #[test]
     fn margins_of_one_side_trade_that_side_alone() {
-        let config = load(&section("margins = { long = 0.5 }")).unwrap();
+        let config = load(&section(r#"margins = { long = "0.5R" }"#)).unwrap();
 
         assert_eq!(
             config.margins.sides().collect::<Vec<_>>(),
-            [(Side::Long, 0.5)]
+            [(Side::Long, R::new(0.5))]
         );
         assert_eq!(config.margins.of(Side::Short), None);
     }
 
+    /// The minimum net P&L per trade is in R: a bare number, a minimum in
+    /// money say, is refused as the section is parsed, at its field, saying
+    /// so.
     #[test]
-    fn a_minimum_net_pnl_not_a_number_or_no_minimum_trade_is_refused() {
-        for line in ["min_pnl = nan", "min_pnl = -inf", "min_trades = 0"] {
-            assert!(refused(&section(line)).contains("minimum"), "{line}");
+    fn a_bare_number_minimum_net_pnl_is_refused_at_parsing_saying_it_is_in_r() {
+        for line in ["min_pnl = 1.0", "min_pnl = 1"] {
+            let err = refused_parsing(&section(line));
+
+            assert!(err.contains(line) && err.contains("in R"), "{err}");
         }
-        assert!(load(&section("min_pnl = -0.5")).is_ok());
+    }
+
+    #[test]
+    fn a_minimum_net_pnl_not_a_finite_number_of_r_is_refused_at_parsing() {
+        for line in [r#"min_pnl = "nanR""#, r#"min_pnl = "-infR""#] {
+            let err = refused_parsing(&section(line));
+
+            assert!(err.contains("not a finite number of R"), "{err}");
+        }
+    }
+
+    /// A minimum below nought publishes a model expected to lose a little.
+    #[test]
+    fn a_minimum_net_pnl_below_nought_loads_and_no_minimum_trade_is_refused() {
+        assert_eq!(
+            load(&section(r#"min_pnl = "-0.5R""#)).unwrap().min_pnl,
+            R::new(-0.5)
+        );
+        assert_eq!(
+            refused_fields(&section("min_trades = 0")),
+            ["model.min_trades"]
+        );
     }
 
     #[test]
@@ -1064,8 +1101,8 @@ mod tests {
         [meta]
         window = "36h"
         holdout = "12h"
-        margin = 0.25
-        min_pnl = 0.5
+        margin = "0.25R"
+        min_pnl = "0.5R"
         min_trades = 20
         learner = { kind = "baseline" }
     "#;
@@ -1077,11 +1114,11 @@ mod tests {
         let meta = config.meta.unwrap();
         assert_eq!(meta.window, SignedDuration::from_hours(36));
         assert_eq!(meta.holdout, SignedDuration::from_hours(12));
-        assert_eq!(meta.margin, 0.25);
+        assert_eq!(meta.margin, R::new(0.25));
         assert_eq!(
             meta.minimums(),
             Minimums {
-                min_pnl: 0.5,
+                min_pnl: R::new(0.5),
                 min_trades: 20
             }
         );
@@ -1114,14 +1151,14 @@ mod tests {
         assert!(config.meta.is_some());
     }
 
-    /// A meta takes a trade from a margin in money, not from a probability:
+    /// A meta takes a trade from a margin in R, not from a probability:
     /// a threshold, alone as a section of probabilities has it or beside a
     /// margin, is refused as the section is parsed, saying that the margin
     /// takes its place, not as any unknown field.
     #[test]
     fn a_meta_threshold_is_refused_at_parsing_naming_the_margin() {
         for meta in [
-            META.replace("margin = 0.25", "threshold = 0.55"),
+            META.replace(r#"margin = "0.25R""#, "threshold = 0.55"),
             format!("{META}\nthreshold = 0.55"),
         ] {
             let err = refused_parsing(&format!("{SECTION}\n{meta}"));
@@ -1136,25 +1173,27 @@ mod tests {
 
     #[test]
     fn a_meta_without_a_margin_is_refused_at_parsing() {
-        let meta = META.replace("margin = 0.25", "");
+        let meta = META.replace(r#"margin = "0.25R""#, "");
 
         let err = refused_parsing(&format!("{SECTION}\n{meta}"));
 
         assert!(err.contains("missing field `margin`"), "{err}");
     }
 
-    /// A meta takes or leaves a trade of the target's size: a size is
-    /// refused as the section is parsed, naming the size the trade is of.
+    /// A meta takes or leaves a decision's trade, which the strategy sizes
+    /// by its stake: a size is refused as the section is parsed, pointing
+    /// to the stake, `[trade] risk` and the strategy's multiple of it.
     #[test]
-    fn a_meta_size_is_refused_at_parsing_naming_the_size_of_the_trade() {
+    fn a_meta_size_is_refused_at_parsing_pointing_to_the_stake() {
         let toml = format!("{SECTION}\n{META}\nsize = {{ min = 0.5, max = 2 }}");
 
         let err = refused_parsing(&toml);
 
         assert!(
-            err.contains("`size`") && err.contains("trade_size"),
+            err.contains("`size`") && err.contains("stake") && err.contains("risk"),
             "{err}"
         );
+        assert!(!err.contains("trade_size"), "{err}");
     }
 
     /// The refusal of the section with `META`, `line` added to it or, if
@@ -1188,10 +1227,24 @@ mod tests {
     }
 
     #[test]
-    fn a_meta_margin_not_a_number_is_refused() {
-        let err = meta_refused("margin = nan");
+    fn a_meta_margin_not_a_finite_number_of_r_is_refused_at_parsing() {
+        let meta = META.replace(r#"margin = "0.25R""#, r#"margin = "nanR""#);
 
-        assert!(err.contains("model.meta.margin"), "{err}");
+        let err = refused_parsing(&format!("{SECTION}\n{meta}"));
+
+        assert!(err.contains("not a finite number of R"), "{err}");
+    }
+
+    #[test]
+    fn a_bare_number_meta_minimum_net_pnl_is_refused_at_parsing_saying_it_is_in_r() {
+        let meta = META.replace(r#"min_pnl = "0.5R""#, "min_pnl = 0.5");
+
+        let err = refused_parsing(&format!("{SECTION}\n{meta}"));
+
+        assert!(
+            err.contains("min_pnl = 0.5") && err.contains("in R"),
+            "{err}"
+        );
     }
 
     #[test]

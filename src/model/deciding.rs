@@ -6,10 +6,9 @@
 //!
 //! A caller resolves first what a decision reads: the time, the decision's
 //! features, which a meta reads, and each side's row (`SideRow`), the row its
-//! model reads, those features then the side's payoff features, with its
-//! unit, the worth of its stop with exits and without them of a stop as far
-//! as the target's ATR, by which its expected R makes its expected net P&L
-//! (`pick_among`). The handle builds them from the target it sets at the
+//! model reads, those features then the side's payoff features, each in R of
+//! the side's trade at the reference stake. The
+//! handle builds them from the target it sets at the
 //! decision (`targets::TargetSetter`), the meta's examples and a train's from
 //! each dataset row (`dataset::DatasetRow::sides`), each through
 //! `SideRow::new`, so a side's row is the same whoever builds it.
@@ -31,14 +30,14 @@
 //! pair already in hand, which a train's gate also judges its pair by, being
 //! in no store yet: the pair's calibrated expectation of the decision, its
 //! level `C'` and side call `D'` (`store::Pair::expect`), each side's `E'`
-//! times its row's unit its expected net P&L, picked on by `payoff::pick`.
-//! `decide` takes the side picked if the meta model valid then, on the
-//! features with that side and the decision's `C'` and `D'`
-//! (`features::meta_row`), expects of its trade a net P&L, its calibrated
-//! expected R times the side's unit, of at least its margin
-//! (`holdout::MetaMargin`), the trade of the target's size whatever the meta
+//! held to its margin in R and picked on by `payoff::pick`. `decide` takes
+//! the side picked if the meta model valid then, on the features with that
+//! side and the decision's `C'` and `D'` (`features::meta_row`), expects of
+//! its trade a net R, its calibrated expected R, of at least its margin in R
+//! (`holdout::MetaMargin`), the trade as the target sets it whatever the meta
 //! expects. The meta's model is read only once a side is picked, and no meta
-//! model valid yet is no trade.
+//! model valid yet is no trade. An expected R that is not finite, of a
+//! model predicting NaN say, clears no margin.
 
 use jiff::Timestamp;
 
@@ -51,6 +50,7 @@ use super::{
     store::{LoadedModel, ModelSet, Pair, Swap},
     targets::{PerSide, Side},
 };
+use crate::strategy::risk::R;
 
 /// A strategy's models as they decide: its model set's stores as last listed,
 /// and the sides' pair and the meta's model swapped in so far.
@@ -74,22 +74,19 @@ struct MetaSwap {
 }
 
 /// What a decision reads of a side: the row its model reads, the decision's
-/// features then the side's payoff features (`features::side_row`), and the
-/// worth of the unit its payoff is weighed by.
+/// features then the side's payoff features (`features::side_row`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SideRow {
     pub features: Vec<f64>,
-    pub unit: f64,
 }
 
 impl SideRow {
-    /// The row of a side of a decision of `features`, its target's `payoff`
-    /// features and its unit worth `unit`.
+    /// The row of a side of a decision of `features` and its target's
+    /// `payoff` features.
     #[must_use]
-    pub fn new(features: &[f64], payoff: &[f64], unit: f64) -> Self {
+    pub fn new(features: &[f64], payoff: &[f64]) -> Self {
         Self {
             features: side_row(features, payoff),
-            unit,
         }
     }
 }
@@ -98,9 +95,8 @@ impl SideRow {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Picked {
     pub side: Side,
-    /// The net P&L the pair expects of its trade, in money: its `E'` times
-    /// its row's unit.
-    pub expected_pnl: f64,
+    /// The net R the pair expects of its trade, its `E'`.
+    pub expected_r: R,
     /// The decision's calibrated level and side call.
     pub expected: Expected,
 }
@@ -109,12 +105,12 @@ pub struct Picked {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Taken {
     pub side: Side,
-    /// The net P&L the pair expects of the trade, in money.
-    pub expected_pnl: f64,
+    /// The net R the pair expects of the trade, its `E'`.
+    pub expected_r: R,
     /// The decision's calibrated level and side call.
     pub expected: Expected,
     /// The meta model's calibrated expected R of the trade, if one took it.
-    pub meta_expected_r: Option<f64>,
+    pub meta_expected_r: Option<R>,
 }
 
 impl DecidingModels {
@@ -172,9 +168,9 @@ impl DecidingModels {
     /// row `sides`: the side picked (`pick`), if there is no meta; with one,
     /// taken if the meta model valid then, swapped in, on the features with
     /// that side and the decision's level and side call, expects of it a net
-    /// P&L, its calibrated expected R times the side's unit, of at least its
-    /// margin, at the meta model's expected R. None if no side is picked, no
-    /// meta model is valid yet or the margin is not met.
+    /// R, its calibrated expected R, of at least its margin, at the meta
+    /// model's expected R. None if no side is picked, no meta model is valid
+    /// yet or the margin is not met.
     ///
     /// # Errors
     ///
@@ -190,7 +186,7 @@ impl DecidingModels {
         };
         let taken = |meta_expected_r| Taken {
             side: picked.side,
-            expected_pnl: picked.expected_pnl,
+            expected_r: picked.expected_r,
             expected: picked.expected,
             meta_expected_r,
         };
@@ -205,38 +201,37 @@ impl DecidingModels {
             picked.side.order_side(),
             picked.expected,
         ))?;
-        let expected_pnl = expected_r * sides.of(picked.side).unit;
-        Ok(meta
-            .margin
-            .takes(expected_pnl)
-            .then(|| taken(Some(expected_r))))
+        Ok(R::finite(expected_r)
+            .filter(|&expected_r| meta.margin.takes(expected_r))
+            .map(|expected_r| taken(Some(expected_r))))
     }
 
     /// The side picked by `pair` on each side's row `sides`, each side
     /// traded held to its margin of `margins`: of the sides whose expected
-    /// net P&L, their `E'` of the pair's calibrated expectation
-    /// (`Pair::expect`) times their row's unit, clears their margin, the one
-    /// expected the most; none if none clears it, or two tie
-    /// (`payoff::pick`).
+    /// R, their `E'` of the pair's calibrated expectation (`Pair::expect`),
+    /// is finite and clears their margin, the one expected the most; none if
+    /// none clears it, or two tie (`payoff::pick`).
     ///
     /// # Errors
     ///
     /// Returns an error if a model fails to predict.
     pub fn pick_among(
         pair: &Pair,
-        margins: impl IntoIterator<Item = (Side, f64)>,
+        margins: impl IntoIterator<Item = (Side, R)>,
         sides: &PerSide<SideRow>,
     ) -> anyhow::Result<Option<Picked>> {
         let expected = pair.expect(sides)?;
-        Ok(payoff::pick(margins.into_iter().map(|(side, margin)| {
-            let expected_pnl = expected.of(side) * sides.of(side).unit;
-            let picked = Picked {
-                side,
-                expected_pnl,
-                expected,
-            };
-            (picked, expected_pnl, margin)
-        })))
+        Ok(payoff::pick(margins.into_iter().filter_map(
+            |(side, margin)| {
+                let expected_r = R::finite(expected.of(side))?;
+                let picked = Picked {
+                    side,
+                    expected_r,
+                    expected,
+                };
+                Some((picked, expected_r, margin))
+            },
+        )))
     }
 }
 

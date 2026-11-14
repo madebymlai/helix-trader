@@ -175,8 +175,21 @@ pub fn catalog_without_quotes() -> TempDir {
 /// A new temporary catalog holding the instrument and `quotes`, stored
 /// over `[from, to]` as a fill over that window stores them.
 pub fn catalog(quotes: &[QuoteTick], from: Timestamp, to: Timestamp) -> TempDir {
-    let dir = catalog_without_quotes();
+    catalog_of(instrument(), quotes, from, to)
+}
+
+/// A new temporary catalog holding `instrument`, a definition of the
+/// instrument, and `quotes`, stored over `[from, to]` as `catalog` stores
+/// them.
+pub fn catalog_of(
+    instrument: InstrumentAny,
+    quotes: &[QuoteTick],
+    from: Timestamp,
+    to: Timestamp,
+) -> TempDir {
+    let dir = tempfile::tempdir().unwrap();
     let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+    catalog.write_instruments(vec![instrument]).unwrap();
     catalog
         .write_to_parquet(quotes, Some(from.into()), Some(to.into()), None)
         .unwrap();
@@ -219,15 +232,22 @@ pub fn session() -> Session {
     }
 }
 
+/// The risk of the EMA configs: 0.32% of equity. Over the stops of the
+/// crossover's trades on these quotes, 50 bps from closes about 600 EUR,
+/// 2.97 to 3.10 EUR a share, on the 9,700 to 10,100 EUR the account
+/// holds as they are sent, it buys 10 shares, rounded down, the size the
+/// EMA backtests are worked out at (32 EUR over 3.10 EUR, 10.3 shares).
+pub const RISK: &str = "0.32%";
+
 /// The warmup of the EMA configs: a live node requests it, a backtest
 /// requests none.
 pub const LIVE_WARMUP: SignedDuration = SignedDuration::from_hours(1);
 
 /// The config of the EMA crossover reading and trading the instrument on
-/// its 1-hour MID bars: `fast` against `slow` bars, trades of 10 shares,
-/// inside `session` if given. Its exits are its code's: a stop loss 50 bps
-/// and a take profit 100 bps from the close of the bar decided on, both
-/// rounded to the cent, and a hold of 4 hours.
+/// its 1-hour MID bars: `fast` against `slow` bars, inside `session` if
+/// given, each trade risking `RISK` of equity over its stop. Its exits are
+/// its code's: a stop loss 50 bps and a take profit 100 bps from the close
+/// of the bar decided on, both rounded to the cent, and a hold of 4 hours.
 pub fn ema_config(fast: usize, slow: usize, session: Option<Session>) -> EmaCrossConfig {
     let instrument_id = InstrumentId::from(INSTRUMENT_ID);
     EmaCrossConfig {
@@ -249,10 +269,8 @@ pub fn ema_config(fast: usize, slow: usize, session: Option<Session>) -> EmaCros
             },
         ))),
         trade: TradeConfig {
-            instruments: vec![TradedInstrument {
-                instrument_id,
-                trade_size: Quantity::from(10),
-            }],
+            instruments: vec![TradedInstrument { instrument_id }],
+            risk: Some(RISK.parse().unwrap()),
         },
         model: None,
         own: EmaParams {},

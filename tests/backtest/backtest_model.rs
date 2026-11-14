@@ -26,12 +26,15 @@ use crate::{
         ic,
     },
 };
-use helix_trader::model::{
-    config::{Margins, ModelConfig},
-    dataset::DatasetRow,
-    learner::{LearnerConfig, LightGbmConfig, TrainingSet},
-    store::{ModelStore, Probe},
-    targets::{BracketSpec, Distance, Side, Target, TargetConfig},
+use helix_trader::{
+    model::{
+        config::{Margins, ModelConfig},
+        dataset::DatasetRow,
+        learner::{LearnerConfig, LightGbmConfig, TrainingSet},
+        store::{ModelStore, Probe},
+        targets::{BracketSpec, Distance, Side, Target, TargetConfig},
+    },
+    strategy::risk::R,
 };
 use jiff::SignedDuration;
 use nautilus_core::UnixNanos;
@@ -63,7 +66,7 @@ fn each_decision_uses_the_latest_model_valid_at_or_before_it() {
     let config = ModelConfig {
         learner: LearnerConfig::Baseline {},
         margins: Margins {
-            long: Some(0.0),
+            long: Some(R::new(0.0)),
             short: None,
         },
         ..config()
@@ -147,7 +150,7 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
         window: SignedDuration::from_hours(72),
         // Every decision a long, to record its prediction.
         margins: Margins {
-            long: Some(f64::MIN),
+            long: Some(R::new(f64::MIN)),
             short: None,
         },
         ..config()
@@ -245,7 +248,7 @@ fn a_decision_reads_each_sides_row_as_its_dataset_row_holds_it() {
         window: SignedDuration::from_hours(72),
         // Every decision a long, to record its prediction.
         margins: Margins {
-            long: Some(f64::MIN),
+            long: Some(R::new(f64::MIN)),
             short: None,
         },
         ..config()
@@ -312,11 +315,12 @@ fn a_decision_reads_each_sides_row_as_its_dataset_row_holds_it() {
 }
 
 /// The hand-worked targets' bracket (`backtest_targets`): 7.5 bps of the
-/// decision's mid away on both sides, 3.00 USD on one ounce of gold,
+/// decision's mid away on both sides, 3.00 USD on the one ounce of gold the
+/// reference stake buys (`common::dataset::RISK`),
 /// closed after 45 minutes, inside the hourly cadence; trading `side` alone
 /// at every decision.
-fn hand_worked(side: Side) -> ModelConfig {
-    let traded = Some(f64::MIN);
+pub(crate) fn hand_worked(side: Side) -> ModelConfig {
+    let traded = Some(R::new(f64::MIN));
     let margins = match side {
         Side::Long => Margins {
             long: traded,

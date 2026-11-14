@@ -30,22 +30,13 @@ const NOON: &str = "2026-10-22T12:00:00Z";
 /// The decision's features: the mid of 0.7, which a baseline does not read.
 const ROW: [f64; 1] = [0.7];
 
-/// Each side's row of `ROW` on the tests' time-only target, its unit worth
-/// `units`' of its side: the mid, then the side's entry cost, 0.23R.
-fn rows(units: PerSide<f64>) -> PerSide<SideRow> {
-    units.map(|unit| SideRow::new(&ROW, &[0.23], unit))
-}
-
-/// Units worth 1 USD a side, at which a side's expected R is its expected
-/// net P&L.
-const UNITS_OF_ONE: PerSide<f64> = PerSide {
-    long: 1.0,
-    short: 1.0,
-};
-
-/// The rows of `ROW` at `UNITS_OF_ONE`.
+/// Each side's row of `ROW` on the tests' time-only target: the mid, then
+/// the side's entry cost, 0.23R.
 fn rows_of_one() -> PerSide<SideRow> {
-    rows(UNITS_OF_ONE)
+    PerSide {
+        long: SideRow::new(&ROW, &[0.23]),
+        short: SideRow::new(&ROW, &[0.23]),
+    }
 }
 
 /// The models of `config` under `models`, listed now.
@@ -71,15 +62,14 @@ fn listed_with(
     listed(models, config)
 }
 
-/// What `models` decide at `time` on `ROW`, at `UNITS_OF_ONE`.
+/// What `models` decide at `time` on `ROW`.
 fn decided(models: &mut DecidingModels, time: &str) -> Option<Taken> {
     models.decide(at(time), &ROW, &rows_of_one()).unwrap()
 }
 
-/// The net P&L the trade `decided` decides expects, in USD: at a unit of
-/// one, its expected R.
+/// The net R the trade `decided` decides expects.
 fn expected(models: &mut DecidingModels, time: &str) -> Option<f64> {
-    decided(models, time).map(|taken| taken.expected_pnl)
+    decided(models, time).map(|taken| taken.expected_r.as_f64())
 }
 
 /// `actual` is `expected`, up to the rounding of a pair's calibration, which
@@ -92,10 +82,10 @@ fn near(actual: Option<f64>, expected: Option<f64>) {
     assert!(near, "{actual:?} != {expected:?}");
 }
 
-/// The side `models` pick at noon on `ROW`, the units being `units`.
-fn side_picked(models: &mut DecidingModels, units: PerSide<f64>) -> Option<Side> {
+/// The side `models` pick at noon on `ROW`.
+fn side_picked(models: &mut DecidingModels) -> Option<Side> {
     models
-        .pick(at(NOON), &rows(units))
+        .pick(at(NOON), &rows_of_one())
         .unwrap()
         .map(|picked| picked.side)
 }
@@ -396,7 +386,7 @@ fn a_failed_listing_of_the_meta_keeps_the_sides_previous_lists() {
 
     let picked = models.pick(at(NOON), &rows_of_one()).unwrap().unwrap();
     assert!(listing.is_err());
-    assert_eq!(picked.expected_pnl, r(7));
+    assert_eq!(picked.expected_r, R::new(r(7)));
 }
 
 #[test]
@@ -484,10 +474,10 @@ fn a_side_model_without_its_pairs_calibration_is_refused_and_the_current_kept() 
     kept_over(refused);
 }
 
-/// A long expecting 0.1R, 0.1 USD at a unit of one, clearing its margin of
-/// nought; the short is not traded. One side has no side call.
+/// A long expecting 0.1R, clearing its margin of nought; the short is not
+/// traded. One side has no side call.
 #[test]
-fn a_side_expected_to_clear_its_margin_is_picked_with_its_expected_pnl_level_and_side_call() {
+fn a_side_expected_to_clear_its_margin_is_picked_with_its_expected_r_level_and_side_call() {
     let root = tempfile::tempdir().unwrap();
     let mut models = listed_with(root.path(), &config(), (Some(6), None));
 
@@ -495,7 +485,7 @@ fn a_side_expected_to_clear_its_margin_is_picked_with_its_expected_pnl_level_and
         models.pick(at(NOON), &rows_of_one()).unwrap(),
         Some(Picked {
             side: Side::Long,
-            expected_pnl: 0.1,
+            expected_r: R::new(0.1),
             expected: Expected {
                 level: 0.1,
                 side_call: 0.0
@@ -504,7 +494,7 @@ fn a_side_expected_to_clear_its_margin_is_picked_with_its_expected_pnl_level_and
     );
 }
 
-/// The long expects 0.2 USD, the short 0.3: both clear nought, the short
+/// The long expects 0.2R, the short 0.3R: both clear nought, the short
 /// the more.
 #[test]
 fn of_two_sides_clearing_their_margins_the_one_expected_the_more_trades() {
@@ -514,7 +504,7 @@ fn of_two_sides_clearing_their_margins_the_one_expected_the_more_trades() {
     let taken = decided(&mut models, NOON).unwrap();
 
     assert_eq!(taken.side, Side::Short);
-    near(Some(taken.expected_pnl), Some(r(8)));
+    near(Some(taken.expected_r.as_f64()), Some(r(8)));
 }
 
 #[test]
@@ -525,15 +515,15 @@ fn two_sides_expected_alike_trade_neither() {
     assert_eq!(decided(&mut models, NOON), None);
 }
 
-/// The long expects 0.2 USD, short of its margin of 0.5 USD; the short
-/// expects to lose.
+/// The long expects 0.2R, short of its margin of 0.5R; the short expects
+/// to lose.
 #[test]
 fn no_side_clearing_its_margin_gives_no_trade() {
     let root = tempfile::tempdir().unwrap();
     let config = ModelConfig {
         margins: Margins {
-            long: Some(0.5),
-            short: Some(0.5),
+            long: Some(R::new(0.5)),
+            short: Some(R::new(0.5)),
         },
         ..config()
     };
@@ -542,59 +532,50 @@ fn no_side_clearing_its_margin_gives_no_trade() {
     assert_eq!(decided(&mut models, NOON), None);
 }
 
-/// A short model in the store expecting 0.4 USD, which a model of both
-/// sides would sell on: a long-only model never reads it.
+/// A short model in the store expecting 0.4R, which a model of both sides
+/// would sell on: a long-only model never reads it.
 #[test]
 fn a_long_only_model_never_sells() {
     let root = tempfile::tempdir().unwrap();
     let mut both = listed_with(root.path(), &both_sides(), (Some(3), Some(9)));
     let mut long = listed(root.path(), &config());
 
-    assert_eq!(side_picked(&mut both, UNITS_OF_ONE), Some(Side::Short));
-    assert_eq!(side_picked(&mut long, UNITS_OF_ONE), None);
+    assert_eq!(side_picked(&mut both), Some(Side::Short));
+    assert_eq!(side_picked(&mut long), None);
 }
 
-/// Worked by hand. The long expects 0.4R, at either unit. A stop worth 0.90
-/// USD: 0.36 USD expected, above the margin of 0.30; a stop worth 0.70 USD:
-/// 0.28 USD, below it.
+/// Worked by hand. The long expects 0.4R, above its margin of 0.3R: the
+/// margin is in R, a side's row holding no money, its payoff features in R
+/// at the reference stake.
 #[test]
-fn an_expected_r_is_weighed_by_the_unit_of_the_side() {
+fn a_side_clears_its_margin_in_r() {
     let root = tempfile::tempdir().unwrap();
     let config = ModelConfig {
         margins: Margins {
-            long: Some(0.3),
+            long: Some(R::new(0.3)),
             short: None,
         },
         ..config()
     };
     let mut models = listed_with(root.path(), &config, (Some(9), None));
-    let worth = |long| PerSide { long, short: 1.0 };
 
-    let picked = models.pick(at(NOON), &rows(worth(0.90))).unwrap().unwrap();
+    let picked = models.pick(at(NOON), &rows_of_one()).unwrap();
 
-    assert!((picked.expected_pnl - 0.36).abs() < 1e-12, "{picked:?}");
-    assert_eq!(side_picked(&mut models, worth(0.70)), None);
+    let expected = picked.map(|picked| (picked.side, picked.expected_r.as_f64()));
+    assert!(
+        expected.is_some_and(|(side, r)| side == Side::Long && (r - 0.4).abs() < 1e-12),
+        "{expected:?}"
+    );
 }
 
-/// Worked by hand. The long expects 0.2R and the short 0.1R: at a unit of 1
-/// the long is picked, and at the short's unit of 3, worth 0.3 USD, the
-/// short.
+/// Worked by hand. The long expects 0.2R and the short 0.1R: the long is
+/// picked, on R, whatever either is worth in money.
 #[test]
-fn each_side_is_weighed_by_its_own_unit() {
+fn the_side_expected_the_more_r_is_picked() {
     let root = tempfile::tempdir().unwrap();
     let mut models = listed_with(root.path(), &both_sides(), (Some(7), Some(6)));
 
-    assert_eq!(side_picked(&mut models, UNITS_OF_ONE), Some(Side::Long));
-    assert_eq!(
-        side_picked(
-            &mut models,
-            PerSide {
-                long: 1.0,
-                short: 3.0
-            }
-        ),
-        Some(Side::Short)
-    );
+    assert_eq!(side_picked(&mut models), Some(Side::Long));
 }
 
 /// A side's model predicting an R of `r(tenths)`, in no store.
@@ -621,14 +602,14 @@ fn pair_in_hand() -> Pair {
     .unwrap()
 }
 
-/// Worked by hand on `pair_in_hand`, each side's unit one: of a pair in no
-/// store, the short, expecting 0.3 USD, the more, its pick carrying the
-/// decision's level and side call.
+/// Worked by hand on `pair_in_hand`: of a pair in no store, the short,
+/// expecting 0.3R, the more, its pick carrying the decision's level and side
+/// call.
 #[test]
 fn a_pair_in_hand_is_picked_among_on_its_calibrated_expectation() {
     let picked = DecidingModels::pick_among(
         &pair_in_hand(),
-        [(Side::Long, 0.0), (Side::Short, 0.0)],
+        [(Side::Long, R::new(0.0)), (Side::Short, R::new(0.0))],
         &rows_of_one(),
     )
     .unwrap()
@@ -636,7 +617,7 @@ fn a_pair_in_hand_is_picked_among_on_its_calibrated_expectation() {
 
     assert_eq!(picked.side, Side::Short);
     for (actual, expected) in [
-        (picked.expected_pnl, 0.3),
+        (picked.expected_r.as_f64(), 0.3),
         (picked.expected.level, 0.225),
         (picked.expected.side_call, -0.15),
     ] {
@@ -644,13 +625,13 @@ fn a_pair_in_hand_is_picked_among_on_its_calibrated_expectation() {
     }
 }
 
-/// The short expects 0.3 USD, the more, short of its own margin of 0.35: the
-/// long, expecting 0.15 and clearing its margin of nought, is picked.
+/// The short expects 0.3R, the more, short of its own margin of 0.35R: the
+/// long, expecting 0.15R and clearing its margin of nought, is picked.
 #[test]
 fn a_side_of_a_pair_in_hand_is_held_to_its_own_margin() {
     let picked = DecidingModels::pick_among(
         &pair_in_hand(),
-        [(Side::Long, 0.0), (Side::Short, 0.35)],
+        [(Side::Long, R::new(0.0)), (Side::Short, R::new(0.35))],
         &rows_of_one(),
     )
     .unwrap();
@@ -686,7 +667,7 @@ fn a_calibration_of_other_sides_than_its_models_is_no_pair() {
 }
 
 /// `listed`, as `config` says, its long a model of 6 tenths from midnight
-/// (expecting 0.1 USD, above its margin of nought) and its meta model
+/// (expecting 0.1R, above its margin of nought) and its meta model
 /// predicting an R of `r(tenths)`, if any, from midnight too.
 fn with_meta_of(models: &Path, config: &ModelConfig, tenths: Option<usize>) -> DecidingModels {
     let features = features();
@@ -716,8 +697,8 @@ fn published_with(
 }
 
 /// Worked by hand: the meta predicting an R of 0.3, its level line `0.1 +
-/// 0.5 E` expecting 0.25R, 0.25 USD on the unit of one, at or above its
-/// margin of 0.15 USD, takes the long picked, at its calibrated expected R.
+/// 0.5 E` expecting 0.25R, at or above its margin of 0.15R, takes the long
+/// picked, at its calibrated expected R.
 #[test]
 fn a_meta_model_from_its_margin_takes_the_side_picked_at_its_expected_r() {
     let root = tempfile::tempdir().unwrap();
@@ -728,47 +709,24 @@ fn a_meta_model_from_its_margin_takes_the_side_picked_at_its_expected_r() {
         Some(Taken {
             side: Side::Long,
             // The side's, its long of 6 tenths.
-            expected_pnl: 0.1,
+            expected_r: R::new(0.1),
             expected: Expected {
                 level: 0.1,
                 side_call: 0.0
             },
-            meta_expected_r: Some(0.25),
+            meta_expected_r: Some(R::new(0.25)),
         })
     );
 }
 
-/// The meta predicting nought expects 0.1R, 0.1 USD on the unit of one,
-/// below its margin of 0.15 USD.
+/// The meta predicting nought expects 0.1R, below its margin of 0.15R:
+/// the margin is in R, as the meta's expectation is.
 #[test]
 fn a_meta_model_below_its_margin_takes_no_trade() {
     let root = tempfile::tempdir().unwrap();
     let mut models = with_meta_of(root.path(), &with_meta(meta()), Some(5));
 
     assert_eq!(decided(&mut models, NOON), None);
-}
-
-/// Worked by hand: the meta expecting 0.1R leaves the long on a unit worth 1
-/// USD, 0.1 USD below its margin of 0.15, and takes it on one worth 2 USD,
-/// 0.2 USD.
-#[test]
-fn a_meta_models_expected_r_is_weighed_by_the_unit_of_the_side_picked() {
-    let root = tempfile::tempdir().unwrap();
-    let mut models = with_meta_of(root.path(), &with_meta(meta()), Some(5));
-    let mut decided_at = |long| {
-        models
-            .decide(at(NOON), &ROW, &rows(PerSide { long, short: 1.0 }))
-            .unwrap()
-    };
-
-    let at_one = decided_at(1.0);
-    let at_two = decided_at(2.0).unwrap();
-
-    assert_eq!(at_one, None);
-    assert_eq!(
-        (at_two.side, at_two.meta_expected_r),
-        (Side::Long, Some(0.1))
-    );
 }
 
 #[test]
@@ -786,10 +744,10 @@ fn a_pick_is_the_side_before_any_meta() {
     let root = tempfile::tempdir().unwrap();
     let mut models = with_meta_of(root.path(), &with_meta(meta()), Some(5));
 
-    assert_eq!(side_picked(&mut models, UNITS_OF_ONE), Some(Side::Long));
+    assert_eq!(side_picked(&mut models), Some(Side::Long));
 }
 
-/// The meta model taking a trade from 0.15 USD, learned by LightGBM at its
+/// The meta model taking a trade from 0.15R, learned by LightGBM at its
 /// defaults.
 fn lightgbm_meta() -> MetaConfig {
     MetaConfig {
@@ -806,7 +764,7 @@ fn lightgbm_meta() -> MetaConfig {
 /// each side call from 0.20 to 0.79 by 0.01, at least 300 rows on each side
 /// of a split where LightGBM's leaves need 200, so that it predicts near 1R on
 /// those buys and near -1R elsewhere, near 0.6R and -0.4R calibrated
-/// (`CALIBRATION`), either side of the margin of 0.15 USD on a unit of one.
+/// (`CALIBRATION`), either side of the margin of 0.15R.
 fn learned_meta(config: &ModelConfig) -> StoredModel {
     let (mut rows, mut labels) = (vec![], vec![]);
     for side in [1.0, -1.0] {
@@ -832,7 +790,7 @@ fn learned_meta(config: &ModelConfig) -> StoredModel {
 }
 
 /// The decision at noon on a pair whose `side` predicts `tenths` and the
-/// other 2, expecting a loss, its trade taken from 0.15 USD by the meta model
+/// other 2, expecting a loss, its trade taken from 0.15R by the meta model
 /// LightGBM learned (`learned_meta`): the side call is the long's R less the
 /// short's, `r(tenths)` less -0.3 picking the long.
 fn learned_meta_decision(side: Side, tenths: usize) -> Option<Taken> {

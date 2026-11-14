@@ -12,7 +12,6 @@ use std::{
     fs,
     path::{Path, PathBuf},
     pin::Pin,
-    rc::Rc,
     str::FromStr,
 };
 
@@ -36,7 +35,11 @@ use nautilus_common::logging::{
     bridge::init_tracing, init_logging, logger::LoggerConfig, writer::FileWriterConfig,
 };
 use nautilus_core::{UUID4, UnixNanos};
-use nautilus_model::{enums::OmsType, identifiers::TraderId, types::Money};
+use nautilus_model::{
+    enums::OmsType,
+    identifiers::{InstrumentId, TraderId},
+    types::Money,
+};
 use rust_decimal::Decimal;
 
 #[derive(Debug, Parser)]
@@ -125,9 +128,11 @@ struct BacktestArgs {
     #[arg(long, default_value = "models")]
     models: PathBuf,
     /// Starting balance of the account of the dataset runs that build a
-    /// model strategy's dataset before the backtest, large enough that no
-    /// target is denied, for example "10000000 USD"; required for a
-    /// strategy trading on a model.
+    /// model strategy's dataset before the backtest, the equity its
+    /// targets are sized on at `[trade] risk`, in the traded instrument's
+    /// P&L currency and large enough that no target is denied, which fails
+    /// the build, for example "10000000 USD"; required for a strategy
+    /// trading on a model.
     #[arg(long, value_parser = parse_money)]
     dataset_balance: Option<Money>,
 }
@@ -152,8 +157,10 @@ struct TrainArgs {
     /// The costs of the dataset run, whose targets are net of them.
     #[command(flatten)]
     commission: CommissionArgs,
-    /// Starting balance of the dataset run's account, large enough that
-    /// no target is denied, for example "10000000 USD".
+    /// Starting balance of the dataset run's account, the equity its
+    /// targets are sized on at `[trade] risk`, in the traded instrument's
+    /// P&L currency and large enough that no target is denied, which fails
+    /// the train, for example "10000000 USD".
     #[arg(long, value_parser = parse_money)]
     balance: Money,
     /// The dataset run's leverage, as a backtest's.
@@ -257,7 +264,9 @@ struct LiveArgs {
     trader_id: TraderId,
     /// The catalog directory, fill-catalog's and the backtests': the warmup
     /// is read from it first, and a cTrader broker's history is written
-    /// back to it.
+    /// back to it. A strategy trading on a model requires it to exist and
+    /// hold the instruments it trades, which its models and retrains are
+    /// built from.
     #[arg(long, default_value = "catalog")]
     catalog: PathBuf,
     /// The directory the node stages the data it streams into the
@@ -303,8 +312,10 @@ struct RetrainCosts {
     /// retrain, for example "0.035 USD".
     #[arg(long, value_parser = parse_commission_per_quantity)]
     retrain_commission_per_quantity: Option<Commission>,
-    /// Starting balance of a retrain's dataset run, large enough that no
-    /// target is denied, for example "10000000 USD".
+    /// Starting balance of a retrain's dataset run, the equity its targets
+    /// and the live decisions' payoff features are sized on at `[trade]
+    /// risk`, in the traded instrument's P&L currency and large enough that
+    /// no target is denied, for example "10000000 USD".
     #[arg(long, value_parser = parse_money)]
     retrain_balance: Option<Money>,
 }
@@ -483,7 +494,9 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
 }
 
 /// Builds the strategy from its config, runs it over the window of the
-/// catalog and prints the results to stdout. A strategy trading on a
+/// catalog and prints the results to stdout, refusing first a balance in
+/// another currency than a traded instrument's P&L
+/// (`Backtest::refuse_balance`). A strategy trading on a
 /// model is first trained on its schedule (`model::walk`): its dataset
 /// built over the span and its models trained at each train time the
 /// store lacks one, in this process, on the backtest's catalog, store
@@ -529,7 +542,9 @@ impl<B: FnOnce(DataRequirements) -> Backtest> Visitor for Backtesting<'_, B> {
 
     fn plain<S: PlainStrategy>(self) -> Self::Output {
         let config = load_config::<S::Params>(&self.args.run.config)?;
-        let outcome = (self.backtest)(config.data_requirements()).run(S::backtest(config)?)?;
+        let backtest = (self.backtest)(config.data_requirements());
+        backtest.refuse_balance(&config.trade.instrument_ids())?;
+        let outcome = backtest.run(S::backtest(config)?)?;
         print!("{}", backtest::report(&outcome));
         Ok(())
     }
@@ -557,18 +572,19 @@ fn backtest_on_models<S: ModelStrategy>(
 ) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     let config = load_config::<S::Params>(&args.run.config)?;
+    let backtest = backtest(config.data_requirements());
+    backtest.refuse_balance(&config.trade.instrument_ids())?;
     let venue = args.dataset_venue()?;
     let (catalog, models) = (&args.run.catalog, &args.models);
+    let run = DatasetRun {
+        catalog: catalog.clone(),
+        venue: venue.clone(),
+        logging,
+    };
+    run.refuse_balance(&config.trade.instrument_ids())?;
     let walk = S::walk_forward(&config, catalog, models, &venue)?;
     let dataset = S::dataset(&config, catalog, &venue)?;
     let training = S::training(&config, catalog, models, &venue)?;
-    let run = DatasetRun {
-        catalog: catalog.clone(),
-        commission: venue.commission,
-        balance: venue.balance,
-        leverage: venue.leverage,
-        logging,
-    };
     let replay = |from, to| run.replay::<S>(&config, from, to);
     walk.prepare(
         start,
@@ -595,7 +611,7 @@ fn backtest_on_models<S: ModelStrategy>(
         models: models.clone(),
         venue,
     };
-    let outcome = backtest(config.data_requirements()).run(S::new(config, mode)?)?;
+    let outcome = backtest.run(S::new(config, mode)?)?;
     print!("{}", backtest::report(&outcome));
     print!("{}", walk.scores(start, end)?);
     Ok(())
@@ -714,11 +730,25 @@ impl<'a> Visitor for Running<'a> {
 /// Runs the model strategy `S` of `args` on `live` until Ctrl-C, on the
 /// models of the store its dataset costs key, beside the actor of its
 /// retrains if it is retrained (`RetrainActor`), each retrain in a child
-/// process (`Children::of_live`) on the node's catalog.
+/// process (`Children::of_live`) on the node's catalog. Refuses first,
+/// before any node is built, a catalog without the traded instruments, which
+/// its models and retrains are built from (`backtest::traded_instruments`),
+/// and a retrain balance in another currency than a traded instrument's
+/// P&L (`backtest::refuse_balance`), as `backtest` and `train` refuse
+/// their dataset balance.
 async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyhow::Result<()> {
     let config = load_config::<S::Params>(&args.config)?;
     let program = std::env::current_exe().context("finding this binary to retrain")?;
     let children = Children::of_live(args)?;
+    let traded = backtest::traded_instruments(&args.catalog, &config.trade.instrument_ids())
+        .context(
+            "a model strategy runs live only on a --catalog holding the instruments it trades, \
+             which its models and retrains are built from",
+        )?;
+    backtest::refuse_balance(children.venue.balance, &traded).context(
+        "the retrains' dataset balance (--retrain-balance), which a model's targets and the \
+         decisions' payoff features are sized at",
+    )?;
     let requirements = config.data_requirements();
     let retraining = RetrainActor::new(
         config.strategy_id(),
@@ -737,20 +767,41 @@ async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyho
 }
 
 /// The dataset runs of a process: the strategy over the catalog in
-/// `Mode::Dataset`, on hedging venues (`model::targets`), with the
-/// commission, balance and leverage given, the commission the venues' and
-/// the targets'; each replay a node of its own, disposed at its end.
+/// `Mode::Dataset`, on hedging venues (`model::targets`), on `venue`: its
+/// commission the venues' and the targets', its balance the account's and
+/// the equity the targets' reference stake is of, and its leverage; each
+/// replay a node of its own, disposed at its end.
 struct DatasetRun {
     catalog: PathBuf,
-    commission: Commission,
-    balance: Money,
-    leverage: Decimal,
+    venue: dataset::DatasetVenue,
     logging: LoggerConfig,
 }
 
 impl DatasetRun {
+    /// Refuses the runs, before any, unless their balance is in the P&L
+    /// currency of each instrument of `traded`, as their catalog defines
+    /// them (`backtest::traded_instruments`, `backtest::refuse_balance`): a
+    /// target's trades are sized on it, which is not converted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the catalog cannot be read, an instrument of
+    /// `traded` is not in it or its P&L is in another currency than the
+    /// balance.
+    fn refuse_balance(&self, traded: &[InstrumentId]) -> anyhow::Result<()> {
+        let traded = backtest::traded_instruments(&self.catalog, traded)?;
+        backtest::refuse_balance(self.venue.balance, &traded)
+            .context("the dataset balance, which a model's targets are sized at")
+    }
+
     /// The rows the model strategy `S` of `config` settles over `[start,
     /// end]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the strategy cannot be built or the run fails,
+    /// or a target's order was denied, which fails it
+    /// (`SettledRows::take`).
     fn replay<S: ModelStrategy>(
         &self,
         config: &StandardConfig<S::Params>,
@@ -760,8 +811,8 @@ impl DatasetRun {
         let requirements = config.data_requirements();
         let rows = SettledRows::default();
         let mode = Mode::Dataset {
-            rows: Rc::clone(&rows),
-            commission: self.commission,
+            rows: rows.clone(),
+            venue: self.venue.clone(),
         };
         let backtest = Backtest {
             catalog: self.catalog.clone(),
@@ -769,14 +820,14 @@ impl DatasetRun {
             ticks: requirements.ticks,
             start,
             end,
-            commission: self.commission,
-            balance: self.balance,
-            leverage: self.leverage,
+            commission: self.venue.commission,
+            balance: self.venue.balance,
+            leverage: self.venue.leverage,
             venue_oms: |_| OmsType::Hedging,
             logging: self.logging.clone(),
         };
         backtest.run_dataset(S::new(config.clone(), mode)?)?;
-        Ok(rows.take())
+        rows.take()
     }
 }
 
@@ -800,9 +851,7 @@ fn reported(trained: &Trained) -> anyhow::Result<()> {
 fn run_train(args: TrainArgs) -> anyhow::Result<()> {
     let run = DatasetRun {
         catalog: args.catalog.clone(),
-        commission: args.commission.commission(),
-        balance: args.balance,
-        leverage: args.leverage,
+        venue: args.commission.venue(args.balance, args.leverage),
         logging: logger_config(std::env::var("NAUTILUS_LOG"))?,
     };
     let outcome = args.strategy.visit(Training {
@@ -837,11 +886,12 @@ impl Visitor for Training<'_> {
 }
 
 /// Trains the model of the model strategy `S` of `args` at `--at`, the
-/// days its dataset lacks replayed by `run`.
+/// days its dataset lacks replayed by `run`, its balance refused first if it
+/// is in another currency than the traded instrument's P&L.
 fn train<S: ModelStrategy>(args: &TrainArgs, run: &DatasetRun) -> anyhow::Result<Trained> {
     let config = load_config::<S::Params>(&args.config)?;
-    let venue = args.commission.venue(args.balance, args.leverage);
-    let training = S::training(&config, &args.catalog, &args.models, &venue)?;
+    run.refuse_balance(&config.trade.instrument_ids())?;
+    let training = S::training(&config, &args.catalog, &args.models, &run.venue)?;
     Ok(training.train_at(args.at, |start, end| run.replay::<S>(&config, start, end)))
 }
 
@@ -855,7 +905,7 @@ mod tests {
             score::ExpectedScore,
             train::{Kept, Outcome},
         },
-        strategy::ema::EmaParams,
+        strategy::{ema::EmaParams, risk::R},
     };
     use jiff::SignedDuration;
 
@@ -1122,7 +1172,8 @@ mod tests {
             warmup = "720h"
 
             [trade]
-            instruments = [{ instrument_id = "ESM24.CME", trade_size = "1" }]
+            instruments = [{ instrument_id = "ESM24.CME" }]
+            risk = "0.5%"
             "#,
         )
         .unwrap();
@@ -1222,7 +1273,7 @@ mod tests {
         let kept = Outcome::Kept(Kept::Refused {
             why: Refusal::MinPnl {
                 pnl: 0.48,
-                min_pnl: 0.55,
+                min_pnl: R::new(0.55),
             },
             holdout: holdout.clone(),
         });

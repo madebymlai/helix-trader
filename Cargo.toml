@@ -94,6 +94,8 @@ nautilus-model.workspace = true
 nautilus-network.workspace = true
 nautilus-okx.workspace = true
 nautilus-persistence.workspace = true
+# Nautilus' fixed-risk position sizer, which sizes a trade from its stake.
+nautilus-risk.workspace = true
 # Nautilus' custom data registry and arrow encoding, to store the dataset rows
 # in the catalog.
 nautilus-serialization = { workspace = true, features = ["arrow"] }

@@ -43,12 +43,19 @@ period = 10
 period = 30
 
 [trade]
-# The one instrument traded, whose target the model learns, and the size
-# of each trade.
-instruments = [{ instrument_id = "XAUUSD.ICMARKETS", trade_size = "1" }]
+# The one instrument traded, whose target the model learns, by its id
+# alone: a model's trades are sized at a stake of the risk.
+instruments = [{ instrument_id = "XAUUSD.ICMARKETS" }]
+# The fraction of equity a trade sent at the config's stake risks over its
+# one R (see config/ema.toml): each decision's trade is sent at it, of the
+# account's equity. It is the reference stake too, of the dataset balance
+# (--dataset-balance, --balance of train, --retrain-balance live), which the
+# model's targets, its dataset's rows and its decisions' payoff features,
+# are priced at: changing it, or that balance, retrains the model.
+risk = "0.5%"
 
 # The model, of a strategy trading on one: its target trades [trade]'s
-# instrument, of its trade_size.
+# instrument at its risk.
 [model]
 # A decision every hour, on the hour's bars.
 decision = { every = "1h" }
@@ -64,11 +71,14 @@ target = { bracket = { take_profit = { atr = 2.0 }, stop = { atr = 1.0 }, atr = 
 retrain = "168h"
 window = "720h"
 holdout = "120h"
-# Both sides traded, each from an expected net P&L of 0.5 USD a trade.
-margins = { long = 0.5, short = 0.5 }
+# Both sides traded, each from an expected net 0.03R a trade, R the money
+# its stop risks: 3% of that, whatever the trade's size. A margin is in R,
+# written with its suffix.
+margins = { long = "0.03R", short = "0.03R" }
 # The sides' models are published together if the trades picked between them
-# earn at least 1 USD a trade over at least 30 trades of the holdout.
-min_pnl = 1.0
+# earn at least a net 0.07R a trade over at least 30 trades of the holdout.
+# Like a margin, it is in R, written with its suffix.
+min_pnl = "0.07R"
 min_trades = 30
 # LightGBM, its trees of up to 31 leaves of 20 rows at least, over 100
 # rounds at a rate of 0.1: each side's model is fitted on the window less

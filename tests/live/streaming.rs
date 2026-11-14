@@ -338,8 +338,8 @@ fn streamed_dataset() {
             let requirements = config.data_requirements();
             let rows = SettledRows::default();
             let mode = Mode::Dataset {
-                rows: Rc::clone(&rows),
-                commission: venue.commission,
+                rows: rows.clone(),
+                venue: venue.clone(),
             };
             Backtest {
                 catalog: catalog.clone(),
@@ -354,7 +354,7 @@ fn streamed_dataset() {
                 logging: LoggerConfig::default(),
             }
             .run_dataset(ModelEma::new(config.clone(), mode)?)?;
-            Ok(rows.take())
+            rows.take()
         })
         .unwrap();
 
@@ -600,7 +600,8 @@ const EMA_CONFIG: &str = r#"
     slow = { period = 30 }
 
     [trade]
-    instruments = [{ instrument_id = "AUD/USD.SIM", trade_size = "1" }]
+    instruments = [{ instrument_id = "AUD/USD.SIM" }]
+    risk = "0.5%"
 "#;
 
 /// The binary's backtest of the EMA crossover (`EMA_CONFIG`) over
@@ -637,7 +638,8 @@ const MODEL_EMA_CONFIG: &str = r#"
     period = 30
 
     [trade]
-    instruments = [{ instrument_id = "AUD/USD.SIM", trade_size = "1" }]
+    instruments = [{ instrument_id = "AUD/USD.SIM" }]
+    risk = "0.5%"
 
     [model]
     decision = { every = "2s" }
@@ -645,8 +647,8 @@ const MODEL_EMA_CONFIG: &str = r#"
     retrain = "24h"
     window = "46h"
     holdout = "12h"
-    margins = { long = 0.0, short = 0.0 }
-    min_pnl = 0.0
+    margins = { long = "0R", short = "0R" }
+    min_pnl = "0R"
     min_trades = 1
     learner = { kind = "fake" }
 "#;

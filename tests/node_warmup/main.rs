@@ -21,6 +21,7 @@ use std::{
 use helix_trader::{
     backtest::Commission,
     model::{
+        dataset::DatasetVenue,
         decide::DecisionRule,
         targets::{SideTarget, Target, TargetConfig, TargetSetter},
     },
@@ -71,6 +72,7 @@ use nautilus_model::{
 use nautilus_persistence::{
     backend::parquet::catalog::ParquetDataCatalog, config::DataCatalogConfig,
 };
+use rust_decimal::Decimal;
 
 const GCZ26: &str = "GCZ26.GLBX";
 /// Hour bars built from the venue's minute bars.
@@ -970,13 +972,18 @@ fn bracket_of(bar_types: Vec<BarType>, ticks: Vec<TickSeries>) -> SideTarget {
     .unwrap();
     let target = TargetConfig {
         instrument_id: InstrumentId::from(GCZ26),
-        quantity: Quantity::from(1),
+        risk: "0.5%".parse().unwrap(),
         spec,
     };
     let hourly = DecisionRule::Every(SignedDuration::from_hours(1));
     // No order is sent: nothing is charged.
     let commission = Commission::PerOrder(Money::from("0 USD"));
-    let traded = Rc::new(TargetSetter::new(&target, hourly, &requirements, commission).unwrap());
+    let dataset = DatasetVenue {
+        commission,
+        balance: Money::from("100000 USD"),
+        leverage: Decimal::ONE,
+    };
+    let traded = Rc::new(TargetSetter::new(&target, hourly, &requirements, &dataset).unwrap());
     let warmup = traded.warmed(Warmup::live(&requirements));
     let (failure, exits) = run(
         dir.path(),

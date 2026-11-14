@@ -51,12 +51,13 @@
 //! calibrated on (`baseline`), refuses the pair; its mean `R - E'`, its
 //! calibration slope and its top-decile gap are reported. The earnings are
 //! judged on the trades picked over the holdout's rows
-//! (`deciding::DecidingModels::pick_among`), each side's `E'` times its unit,
-//! on each side's row, among the pair's own sides alone. A row where both
-//! sides clear their margins counts one trade, the side expected the most; a
-//! tie, none. The minimums (`ModelConfig::min_pnl`, `ModelConfig::min_trades`,
+//! (`deciding::DecidingModels::pick_among`), each side's `E'` held to its
+//! margin in R, on each side's row, among the pair's own sides alone. A row
+//! where both sides clear their margins counts one trade, the side expected
+//! the most; a tie, none. The minimums (`ModelConfig::min_pnl`, `ModelConfig::min_trades`,
 //! `Holdout::refusal`) read those picks, beside every trade of the pair's
-//! sides on the rows.
+//! sides on the rows, each trade's net P&L in R, over its unit, as the
+//! sides learn it (`holdout::Earnings`).
 //!
 //! The pair is refused for the first reason found, a side's skill, the
 //! long's first, then the picks' minimums: every side reports it beside its
@@ -86,8 +87,8 @@
 //! calibrated by its level line alone (`calibration::Ksplit` of one side) on
 //! its own calibration's rows, and is judged alone, on its own holdout, by
 //! its skill, as a side is, and by the trades of the side picked its margin
-//! takes (`MetaConfig::margin`, `holdout::MetaMargin`), its calibrated
-//! expected R times the trade's unit, and published in its own store.
+//! takes (`MetaConfig::margin`, `holdout::MetaMargin`), in R, and published
+//! in its own store.
 //!
 //! A train never errors: what goes wrong is an outcome, the current model
 //! kept with the reason (`Kept`), for each model trained. It succeeds when
@@ -116,6 +117,7 @@ use super::{
     },
     targets::{Side, TargetConfig, TargetRow},
 };
+use crate::strategy::risk::R;
 
 /// The most rows of the holdout a published model is probed on.
 const PROBES: usize = 16;
@@ -393,7 +395,7 @@ impl Training {
     /// Returns an error if a side's fit fails, naming the side, or there is
     /// no row to calibrate on or to judge on, or a model fails to predict.
     fn pair(&self, at: Timestamp, rows: Vec<&DatasetRow>) -> anyhow::Result<Vec<(Side, Outcome)>> {
-        let margins: Vec<(Side, f64)> = self
+        let margins: Vec<(Side, R)> = self
             .models
             .sides()
             .map(|traded| (traded.side(), traded.margin()))
@@ -545,8 +547,8 @@ impl Training {
 
     /// Fits the meta model of `level` as of `at` on the examples of `rows`, in
     /// time order, and publishes it, or keeps the current one with the reason,
-    /// the trades of the side picked taken by `margin` on the net P&L the
-    /// meta expects of each, its calibrated expected R times the trade's unit.
+    /// the trades of the side picked taken by `margin` on the net R the meta
+    /// expects of each, its calibrated expected R.
     fn fit_meta(
         &self,
         level: &Level,
@@ -564,7 +566,10 @@ impl Training {
         let trades: Vec<_> = held_out
             .iter()
             .zip(&expected)
-            .map(|(row, &expected)| (margin.takes(expected * row.unit), row.trade))
+            .map(|(row, &expected)| {
+                let taken = R::finite(expected).is_some_and(|expected| margin.takes(expected));
+                (taken, row.trade)
+            })
             .collect();
         let holdout = Holdout {
             earnings: Earnings::of(&trades),
@@ -770,8 +775,8 @@ fn fit_side<'a>(
     })
 }
 
-/// What the decision earns on the holdout rows `held_out` of `pair`: on each
-/// row the side picked among its sides alone, each held to its margin of
+/// What the decision earns on the holdout rows `held_out` of `pair`, in R: on
+/// each row the side picked among its sides alone, each held to its margin of
 /// `margins`, on each side's row, beside every trade of its sides.
 ///
 /// # Errors
@@ -779,7 +784,7 @@ fn fit_side<'a>(
 /// Returns an error if a model fails to predict.
 fn earned(
     pair: &Pair,
-    margins: &[(Side, f64)],
+    margins: &[(Side, R)],
     held_out: &[&DatasetRow],
 ) -> anyhow::Result<Earnings> {
     let mut trades = vec![];
@@ -902,10 +907,7 @@ mod tests {
     use std::{path::Path, rc::Rc};
 
     use jiff::SignedDuration;
-    use nautilus_model::{
-        identifiers::InstrumentId,
-        types::{Money, Quantity},
-    };
+    use nautilus_model::{identifiers::InstrumentId, types::Money};
     use rust_decimal::Decimal;
 
     use super::*;
@@ -950,16 +952,19 @@ mod tests {
     }
 
     /// The fake learner on hourly decisions of one AUD/USD, learning a
-    /// bracket closed after 2 hours on both sides, trading each from an
-    /// expected 0.5 USD, on a window of 24 hours, the last 6 held out and the 6 before them calibrated on,
-    /// published from 1 USD per trade over a trade.
+    /// bracket closed after 2 hours on both sides, trading the long from an
+    /// expected 1R and the short from 0.5R, on a window of 24 hours, the last
+    /// 6 held out and the 6 before them calibrated on, published from 0.25R
+    /// per trade over a trade. The fake expects alike of both sides, which
+    /// tie wherever both clear their margins: one side clears alone between
+    /// 0.5R and 1R.
     fn config() -> ModelConfig {
         ModelConfig::builder()
             .decision(DecisionRule::Every(SignedDuration::from_hours(1)))
             .target(
                 TargetConfig::builder()
                     .instrument_id(InstrumentId::from(AUD))
-                    .quantity(Quantity::from(1))
+                    .risk("0.5%".parse().unwrap())
                     .spec(
                         Target::builder()
                             .bracket(BracketSpec {
@@ -976,10 +981,10 @@ mod tests {
             .window(SignedDuration::from_hours(24))
             .holdout(SignedDuration::from_hours(6))
             .margins(Margins {
-                long: Some(0.5),
-                short: Some(0.5),
+                long: Some(R::new(1.0)),
+                short: Some(R::new(0.5)),
             })
-            .min_pnl(1.0)
+            .min_pnl(R::new(0.25))
             .min_trades(1)
             .learner(LearnerConfig::Fake {})
             .build()
@@ -1073,7 +1078,7 @@ mod tests {
                 pnl: Money::from(pnl),
                 commission: Money::from("0.2 USD"),
                 exit,
-                unit: 2.0,
+                unit: Money::from("2 USD"),
             }
         };
         TargetRow {
@@ -1150,9 +1155,9 @@ mod tests {
         ];
         let outcomes = &mut rows[4].outcomes;
         for outcome in [&mut outcomes.long, &mut outcomes.short] {
-            outcome.unit = 4.0;
+            outcome.unit = Money::from("4 USD");
         }
-        rows[7].outcomes.short.unit = 4.0;
+        rows[7].outcomes.short.unit = Money::from("4 USD");
         rows
     }
 
@@ -1238,13 +1243,15 @@ mod tests {
     }
 
     /// Worked by hand on `rows`'s holdout, each side expecting 0.95R at 0.8
-    /// and 0.2R at 0.3 (`LINES`), trading from 0.5 USD. At 19:00 the long
-    /// expects 1.9 USD on its stop worth 2 USD and the short 3.8 on its stop
-    /// worth 4: both clear, and the short alone is picked, a win of 3 USD; at
-    /// 20:00 each expects 0.4 USD, neither clearing. One trade of 3 USD; every
-    /// trade the four of the two sides on the two rows, two wins of 3 and two
-    /// losses of 2, 0.5 per trade; at 1.5 times the commission of 0.2 each
-    /// makes 0.1 less. Both sides hold those earnings beside their own score,
+    /// and 0.2R at 0.3 (`LINES`), the long trading from 1R and the short from
+    /// 0.5R. At 19:00 the short alone clears, and is picked, a win of 3 USD
+    /// on its stop worth 4, 0.75R; at 20:00 neither clears. One trade of
+    /// 0.75R; every trade the four of the two sides on the two rows, the
+    /// long's win of 1.5R, the short's 0.75R and two losses of 1R, 0.0625R
+    /// per trade. At 1.5 times the commission of 0.2 each makes 0.1 USD less,
+    /// 0.025R on a stop worth 4 and 0.05R on one worth 2: 0.725R taken, and
+    /// 0.0625R less 0.175R / 4 every trade.
+    /// Both sides hold those earnings beside their own score,
     /// the baseline each side's mean R on the rows fitted and calibrated on,
     /// 0.375. The long's R, 1.5 and -1: errors 0.55 and -1.2, squared 1.7425,
     /// the baseline's 1.265625 + 1.890625 = 3.15625, a skill of 1 - 1.7425 /
@@ -1275,12 +1282,12 @@ mod tests {
                 every_stressed,
             } = holdout.earnings;
             assert_eq!((taken.count, every.count), (1, 4), "{holdout:?}");
-            close_to(taken.expectancy, 3.0);
+            close_to(taken.expectancy, 0.75);
             close_to(taken.win_rate, 1.0);
-            close_to(every.expectancy, 0.5);
+            close_to(every.expectancy, 0.0625);
             close_to(every.win_rate, 0.5);
-            close_to(taken_stressed.expectancy, 2.9);
-            close_to(every_stressed.expectancy, 0.4);
+            close_to(taken_stressed.expectancy, 0.725);
+            close_to(every_stressed.expectancy, 0.0625 - 0.175 / 4.0);
             let score = holdout.score;
             assert_eq!(score.rows, 2);
             close_to(score.skill, skill);
@@ -1290,36 +1297,47 @@ mod tests {
         }
     }
 
-    /// Worked by hand on `rows`'s holdout, as
-    /// `the_sides_are_judged_on_the_trades_picked_on_the_holdout` works it,
-    /// from an expected 0.1 USD: at 19:00 the long expects 1.9 USD and the
-    /// short 3.8, both clearing, and only the short is picked, winning 3 USD;
-    /// the long's win is taken by no decision. At 20:00 both expect 0.4 USD,
-    /// both clearing, and tie: neither is picked. One trade of 3 USD; every
-    /// trade the four of the two rows, 0.5 per trade.
+    /// A side model of `config()`, in no store, predicting an R of `r` on
+    /// every row.
+    fn in_hand(r: f64) -> SideModel {
+        let width = side_names(features().names(), &config().target.payoff_names()).len();
+        let set = TrainingSet::new(width, vec![0.5; width], vec![r]).unwrap();
+        SideModel::new(LearnerConfig::Baseline {}.fit(&set).unwrap(), r)
+    }
+
+    /// Worked by hand, by a pair in no store whose long expects 0.2R and
+    /// short 0.3R on every row, its calibration leaving them as they are: on
+    /// two rows where the long loses 2 USD and the short wins 3, both sides
+    /// clear margins of 0.1R, and the short alone is picked on each, its
+    /// win; the long's losses are taken by no decision. Each stop worth 2 USD,
+    /// two trades of 1.5R; every trade the four of the two rows, 0.25R per
+    /// trade.
     #[test]
     fn a_row_where_both_sides_clear_counts_one_trade() {
-        let dir = tempfile::tempdir().unwrap();
-        let from_a_tenth = ModelConfig {
-            margins: Margins {
-                long: Some(0.1),
-                short: Some(0.1),
+        let pair = Pair::new(
+            vec![(Side::Long, in_hand(0.2)), (Side::Short, in_hand(0.3))],
+            Ksplit {
+                level: Line {
+                    alpha: 0.0,
+                    beta: 1.0,
+                },
+                side_call: Some(1.0),
             },
-            ..config()
-        };
+        )
+        .unwrap();
+        let rows = [
+            row("2026-01-06T19:00:00Z", vec![0.8], false, hour()),
+            row("2026-01-06T20:00:00Z", vec![0.3], false, hour()),
+        ]
+        .map(|row| DatasetRow::of(&row));
+        let margins = [(Side::Long, R::new(0.1)), (Side::Short, R::new(0.1))];
 
-        let trained = training(dir.path(), from_a_tenth)
-            .train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(rows()));
+        let Earnings { taken, every, .. } =
+            earned(&pair, &margins, &rows.iter().collect::<Vec<_>>()).unwrap();
 
-        for outcome in [&trained.long, &trained.short] {
-            let Some(Outcome::Published { holdout, .. }) = outcome else {
-                panic!("{trained:?}");
-            };
-            let Earnings { taken, every, .. } = holdout.earnings;
-            assert_eq!((taken.count, every.count), (1, 4), "{holdout:?}");
-            close_to(taken.expectancy, 3.0);
-            close_to(every.expectancy, 0.5);
-        }
+        assert_eq!((taken.count, every.count), (2, 4));
+        close_to(taken.expectancy, 1.5);
+        close_to(every.expectancy, 0.25);
     }
 
     /// Worked by hand: two baselines, each side's training mean whatever the
@@ -1328,7 +1346,7 @@ mod tests {
     /// is -0.375 and `D` 1.25 on every row. Calibrated on the long winning
     /// beside the short losing, 2.5R apart, then both winning: a side call
     /// that never varies has no slope, each side's `E'` the level, the sides'
-    /// mean R, 0.875, or 1.75 USD on stops worth 2 USD, and the sides tie on
+    /// mean R, 0.875, clearing either's margin of 0.5R, and the sides tie on
     /// every row of the holdout, which picks no trade. Each side's R there,
     /// 1.5 and -1 in either order, has a mean of 0.25: its mean `R - E'` is
     /// -0.625. A slope fitted on the calibration's means alone, 3.125 /
@@ -1339,6 +1357,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let baselines = ModelConfig {
             learner: LearnerConfig::Baseline {},
+            margins: Margins {
+                long: Some(R::new(0.5)),
+                short: Some(R::new(0.5)),
+            },
             ..config()
         };
         let rows = [
@@ -1372,7 +1394,7 @@ mod tests {
     fn short_showing_no_skill() -> Vec<TargetRow> {
         let mut rows = rows();
         rows[7] = row_of("2026-01-06T19:00:00Z", vec![0.8], (true, false), hour());
-        rows[7].outcomes.short.unit = 4.0;
+        rows[7].outcomes.short.unit = Money::from("4 USD");
         rows[8] = row_of("2026-01-06T20:00:00Z", vec![0.3], (false, true), hour());
         rows
     }
@@ -1380,9 +1402,9 @@ mod tests {
     /// The short fails its skill (`short_showing_no_skill`), beside the pair
     /// of the 5th, whose short, of nought, is never picked. The holdout's
     /// picks are the train's own sides': at 19:00 the fitted short, expecting
-    /// 3.8 USD on its stop worth 4, and its loss of 2; so -2 USD per trade, of
+    /// 0.95R, and its loss of 2 on its stop worth 4; so -0.5R per trade, of
     /// every trade's four, where the long beside the 5th's short would have
-    /// taken its win alone, 3 USD. Neither side publishes, refused for the
+    /// taken its win alone, 1.5R. Neither side publishes, refused for the
     /// short's skill, and the pair of the 5th stays the current one.
     #[test]
     fn a_side_refused_on_its_skill_refuses_the_pair_judged_on_the_trains_own_picks() {
@@ -1404,7 +1426,7 @@ mod tests {
             assert!(matches!(why, Refusal::Skill { .. }), "{why:?}");
             let Earnings { taken, every, .. } = holdout.earnings;
             assert_eq!((taken.count, every.count), (1, 4), "{holdout:?}");
-            close_to(taken.expectancy, -2.0);
+            close_to(taken.expectancy, -0.5);
         }
         for side in Side::BOTH {
             assert_eq!(
@@ -1415,23 +1437,37 @@ mod tests {
         }
     }
 
-    /// `rows` with the long's stop at 20:00 worth 4 USD and its trade there a
-    /// win of 0.1 USD: the long expects 0.8 USD there, the short 0.4, and the
-    /// long is picked. Its pick alone would earn 0.1 USD, below the minimum of
-    /// 1, the short's 3; together 1.55 USD per trade, above every trade's,
-    /// the long's 3 and 0.1, the short's 3 and -2, a win rate of 3/4 of a mean
-    /// win of 6.1 / 3 and a loss of 2, 1.025. Each side's skill is above
-    /// nought: the long's R, 1.5 and 0.025, errs by 0.55 and -0.175 against
-    /// the baseline's 1.125 and -0.35.
+    /// `config` trading the long from 1R and the short from 0.1R: of `rows`'s
+    /// holdout, expecting 0.95R and 0.2R of either side, the short alone
+    /// clears, and is picked on both rows.
+    fn short_from_a_tenth() -> ModelConfig {
+        ModelConfig {
+            margins: Margins {
+                long: Some(R::new(1.0)),
+                short: Some(R::new(0.1)),
+            },
+            ..config()
+        }
+    }
+
+    /// `rows` with the short's trade at 20:00 a win of 0.1 USD, the short
+    /// picked on both rows of the holdout (`short_from_a_tenth`). Its pick at
+    /// 20:00 alone would earn 0.1 USD on its stop worth 2, 0.05R, below the
+    /// minimum of 0.25R, the one at 19:00 3 on its stop worth 4, 0.75R;
+    /// together 0.4R per trade, above every trade's, the long's 1.5R and -1R,
+    /// the short's 0.75R and 0.05R, a win rate of 3/4 of a mean win of 2.3 / 3
+    /// and a loss of 1, 0.325R. Each side's skill is above nought: the
+    /// short's R, 0.75 and 0.05, errs by -0.2 and -0.15 against the
+    /// baseline's 0.375 and -0.325.
     #[test]
     fn the_sides_publish_together_on_what_their_picks_earned() {
         let dir = tempfile::tempdir().unwrap();
         let t = at("2026-01-07T00:00:00Z");
         let mut rows = rows();
-        rows[8].outcomes.long.unit = 4.0;
-        rows[8].outcomes.long.pnl = Money::from("0.1 USD");
+        rows[8].outcomes.short.pnl = Money::from("0.1 USD");
+        let config = short_from_a_tenth();
 
-        let trained = training(dir.path(), config()).train_at(t, |_, _| Ok(rows));
+        let trained = training(dir.path(), config.clone()).train_at(t, |_, _| Ok(rows));
 
         for outcome in [&trained.long, &trained.short] {
             assert!(
@@ -1440,32 +1476,35 @@ mod tests {
             );
         }
         for side in Side::BOTH {
-            let Earnings { taken, every, .. } = store(dir.path(), &config(), side)
+            let Earnings { taken, every, .. } = store(dir.path(), &config, side)
                 .read(t)
                 .unwrap()
                 .manifest
                 .holdout
                 .earnings;
             assert_eq!(taken.count, 2, "{side:?}");
-            close_to(taken.expectancy, 1.55);
-            close_to(every.expectancy, 1.025);
+            close_to(taken.expectancy, 0.4);
+            close_to(every.expectancy, 0.325);
         }
     }
 
-    /// `rows` with the long's stop at 20:00 worth 4 USD: the long expects 0.8
-    /// USD there and is picked, its loss of 2. The short's own trade earns, a
-    /// win of 3 at 19:00; the picks earn 0.5 USD per trade, below the minimum
-    /// of 1, each side's skill above nought (the long's R, 1.5 and -0.5,
-    /// errs by 0.55 and -0.7 against the baseline's 1.125 and -0.875), and the
-    /// profitable side is refused with the losing one.
+    /// `rows` with the long's trade at 20:00 a win, the short picked on both
+    /// rows of the holdout (`short_from_a_tenth`), a win of 3 USD at 19:00 on
+    /// its stop worth 4 USD, 0.75R, and a loss of 2 at 20:00 on its stop
+    /// worth 2, -1R: the picks earn -0.125R per trade, below the minimum of
+    /// 0.25R. The long, never picked, wins 3 USD on both. Each side's
+    /// skill is above nought (the long's R, 1.5 twice, errs by 0.55 and 1.3
+    /// against the baseline's 1.125 twice), and the profitable side is
+    /// refused with the losing one.
     #[test]
     fn a_profitable_side_paired_with_a_losing_one_is_refused_with_it() {
         let dir = tempfile::tempdir().unwrap();
         let mut rows = rows();
-        rows[8].outcomes.long.unit = 4.0;
+        rows[8] = row_of("2026-01-06T20:00:00Z", vec![0.3], (true, false), hour());
+        let config = short_from_a_tenth();
 
-        let trained =
-            training(dir.path(), config()).train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(rows));
+        let trained = training(dir.path(), config.clone())
+            .train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(rows));
 
         for (side, outcome) in [(Side::Long, &trained.long), (Side::Short, &trained.short)] {
             let Some(Outcome::Kept(Kept::Refused { why, .. })) = outcome else {
@@ -1474,10 +1513,10 @@ mod tests {
             let Refusal::MinPnl { pnl, min_pnl } = why else {
                 panic!("{why:?}");
             };
-            close(*pnl, 0.5);
-            assert_eq!(*min_pnl, 1.0);
+            close(*pnl, -0.125);
+            assert_eq!(*min_pnl, R::new(0.25));
             assert!(
-                store(dir.path(), &config(), side)
+                store(dir.path(), &config, side)
                     .valid_froms()
                     .unwrap()
                     .is_empty(),
@@ -1525,15 +1564,16 @@ mod tests {
     /// 5.4925 against 3.15625; the short's, -0.5 and 1.5, 3.7925 against
     /// 2.03125. The pair is refused for the long's, the first, and each side
     /// reports its own skill. The pair's picks are still judged: the short at
-    /// 19:00, expecting 3.8 USD, its loss of 2, beside every trade, two wins of
-    /// 3 and two losses of 2, 0.5 per trade.
+    /// 19:00, expecting 0.95R, its loss of 2 on its stop worth 4, -0.5R,
+    /// beside every trade, two wins of 1.5R and the long's loss of 1R and the
+    /// short's, 0.375R per trade.
     #[test]
     fn with_both_sides_failing_their_skill_each_reports_its_own_and_the_pairs_earnings() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), config());
         let mut rows = rows();
         rows[7] = row_of("2026-01-06T19:00:00Z", vec![0.8], (false, false), hour());
-        rows[7].outcomes.short.unit = 4.0;
+        rows[7].outcomes.short.unit = Money::from("4 USD");
         rows[8] = row_of("2026-01-06T20:00:00Z", vec![0.3], (true, true), hour());
 
         let trained = training.train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(rows));
@@ -1553,8 +1593,8 @@ mod tests {
             close_to(holdout.score.skill, own);
             let Earnings { taken, every, .. } = holdout.earnings;
             assert_eq!((taken.count, every.count), (1, 4), "{holdout:?}");
-            close_to(taken.expectancy, -2.0);
-            close_to(every.expectancy, 0.5);
+            close_to(taken.expectancy, -0.5);
+            close_to(every.expectancy, 0.375);
         }
     }
 
@@ -1570,7 +1610,7 @@ mod tests {
             publish_baseline(&store(dir.path(), &config(), side), side, sixth, 0.0);
         }
         let mut rows = rows();
-        rows[1].outcomes.short.unit = 0.0;
+        rows[1].outcomes.short.unit = Money::from("0 USD");
 
         let trained =
             training(dir.path(), config()).train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(rows));
@@ -1646,16 +1686,16 @@ mod tests {
 
     /// A one-sided strategy has no pick between sides, and the test it has
     /// always had: taking every trade of the holdout, the long's win of 3 USD
-    /// and loss of 2, earns no more than every trade, so a margin no trade
-    /// falls short of is refused.
+    /// and loss of 2 on stops worth 2, 1.5R and -1R, 0.25R a trade, earns no
+    /// more than every trade, so a margin no trade falls short of is refused.
     #[test]
     fn a_one_sided_strategy_taking_every_trade_of_the_holdout_is_refused() {
         let takes_all = ModelConfig {
             margins: Margins {
-                long: Some(-10.0),
+                long: Some(R::new(-10.0)),
                 short: None,
             },
-            min_pnl: -10.0,
+            min_pnl: R::new(-10.0),
             ..config()
         };
         let dir = tempfile::tempdir().unwrap();
@@ -1669,8 +1709,8 @@ mod tests {
         let Refusal::Every { pnl, every } = why else {
             panic!("{why:?}");
         };
-        close(pnl, 0.5);
-        close(every, 0.5);
+        close(pnl, 0.25);
+        close(every, 0.25);
     }
 
     /// A one-sided strategy's calibration is the level line alone, on its
@@ -1682,7 +1722,7 @@ mod tests {
     fn a_one_sided_strategy_calibrates_its_level_line_alone_on_its_sides_r() {
         let long_only = ModelConfig {
             margins: Margins {
-                long: Some(0.5),
+                long: Some(R::new(0.5)),
                 short: None,
             },
             ..config()
@@ -1979,7 +2019,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let long_only = ModelConfig {
             margins: Margins {
-                long: Some(0.5),
+                long: Some(R::new(0.5)),
                 short: None,
             },
             ..config()
@@ -2000,8 +2040,9 @@ mod tests {
     /// as `the_sides_are_judged_on_the_trades_picked_on_the_holdout` works
     /// it, is above nought. Each side reports the short's skill as the pair's
     /// refusal, beside its own holdout: its own skill, and the earnings of the
-    /// pair's picks, the short's loss of 2 USD at 19:00, beside every trade of
-    /// both sides, 0.5 per trade. Neither publishes.
+    /// pair's picks, the short's loss of 2 USD at 19:00 on its stop worth 4,
+    /// -0.5R, beside every trade of both sides, the long's 1.5R and -1R and
+    /// the short's -0.5R and 1.5R, 0.375R per trade. Neither publishes.
     #[test]
     fn a_side_refused_on_its_skill_refuses_the_other_reporting_it_beside_its_own_holdout() {
         let dir = tempfile::tempdir().unwrap();
@@ -2026,8 +2067,8 @@ mod tests {
             close_to(holdout.score.skill, own);
             let Earnings { taken, every, .. } = holdout.earnings;
             assert_eq!((taken.count, every.count), (1, 4), "{holdout:?}");
-            close_to(taken.expectancy, -2.0);
-            close_to(every.expectancy, 0.5);
+            close_to(taken.expectancy, -0.5);
+            close_to(every.expectancy, 0.375);
             assert!(
                 store(dir.path(), &config(), side)
                     .valid_froms()
@@ -2062,14 +2103,15 @@ mod tests {
     }
 
     /// The loss at 0.3 removed, the long's holdout, of a long-only strategy,
-    /// is a win at 0.8, taken: no calibration slope on one row, and no more
-    /// earned than taking every trade.
+    /// is a win at 0.8, 3 USD on its stop worth 2, 1.5R, taken: no
+    /// calibration slope on one row, and no more earned than taking every
+    /// trade.
     #[test]
     fn a_holdout_of_one_row_has_no_slope_and_is_judged_on_its_trades() {
         let dir = tempfile::tempdir().unwrap();
         let long_only = ModelConfig {
             margins: Margins {
-                long: Some(0.5),
+                long: Some(R::new(0.5)),
                 short: None,
             },
             ..config()
@@ -2089,8 +2131,8 @@ mod tests {
         assert_eq!(
             why,
             Refusal::Every {
-                pnl: 3.0,
-                every: 3.0
+                pnl: 1.5,
+                every: 1.5
             }
         );
     }
@@ -2139,8 +2181,8 @@ mod tests {
         );
     }
 
-    /// A side's holdout taking 3 trades of 1.25 USD each, besides 8 of 0.4
-    /// USD; at 1.5 times the commission 1.125 and 0.3; its skill 0.61, its mean
+    /// A side's holdout taking 3 trades of 1.25R each, besides 8 of 0.4R; at
+    /// 1.5 times the commission 1.125R and 0.3R; its skill 0.61, its mean
     /// R - E' -0.69, its calibration slope 0.9 and its top-decile gap 0.625.
     fn holdout() -> Holdout {
         let trades = |count, expectancy| Trades {
@@ -2166,7 +2208,7 @@ mod tests {
     }
 
     /// What a train reports of a side's holdout, published or not: its
-    /// trades, net P&L per trade taken and per trade of every trade, at the
+    /// trades, net P&L per trade taken and per trade of every trade, in R, at the
     /// commission and at 1.5 times it, its skill, its mean R - E', its
     /// calibration slope and its top-decile gap.
     #[test]
@@ -2178,7 +2220,7 @@ mod tests {
         let below = Outcome::Kept(Kept::Refused {
             why: Refusal::MinPnl {
                 pnl: 1.25,
-                min_pnl: 1.5,
+                min_pnl: R::new(1.5),
             },
             holdout: Box::new(holdout()),
         });
@@ -2186,7 +2228,7 @@ mod tests {
         assert!(published.to_string().contains("published"), "{published}");
         assert!(below.to_string().contains("kept"), "{below}");
         assert!(
-            below.to_string().contains("below the minimum 1.5"),
+            below.to_string().contains("below the minimum 1.5R"),
             "{below}"
         );
         for text in [published.to_string(), below.to_string()] {
@@ -2209,9 +2251,15 @@ mod tests {
 
     /// The section of `config` with a meta model on the fake learner, on a
     /// window of `window` hours, the last 6 held out, taking a trade from an
-    /// expected 1 USD, published from 0 USD per trade over a trade.
+    /// expected 0.5R, published from 0R per trade over a trade; each side
+    /// traded from 0.5R, which the sides of `publish_baselines` clear, each
+    /// expecting 0.6R, the other -0.6R.
     fn with_meta(window: i64) -> ModelConfig {
         ModelConfig {
+            margins: Margins {
+                long: Some(R::new(0.5)),
+                short: Some(R::new(0.5)),
+            },
             meta: Some(meta(window)),
             ..config()
         }
@@ -2221,8 +2269,8 @@ mod tests {
         MetaConfig::builder()
             .window(SignedDuration::from_hours(window))
             .holdout(SignedDuration::from_hours(6))
-            .margin(1.0)
-            .min_pnl(0.0)
+            .margin(R::new(0.5))
+            .min_pnl(R::new(0.0))
             .min_trades(1)
             .learner(LearnerConfig::Fake {})
             .build()
@@ -2375,12 +2423,13 @@ mod tests {
     /// the baseline's 1.5625 twice, 3.125: a skill of 1 - 1.325 / 3.125; a
     /// mean R - E' of -0.15; deviations from the means 0.4 and 0.25 of -0.45
     /// and 0.45 against -1.25 and 1.25, a slope of 1.125 / 0.405; the top
-    /// decile, the row expected 0.85R, a gap of 0.65. Its margin of 1 USD
-    /// takes the trade at 20:00, 0.85R of 2 USD, 1.7 USD, a win of 3 USD, and
-    /// leaves the one at 19:00, -0.1 USD: one trade of 3 beside every trade's
-    /// 0.5, and at 1.5 times the commission of 0.2 each makes 0.1 less.
+    /// decile, the row expected 0.85R, a gap of 0.65. Its margin of 0.5R
+    /// takes the trade at 20:00, expected 0.85R, a win of 3 USD, 1.5R, and
+    /// leaves the one at 19:00, expected -0.05R, a loss of 1R: one trade of
+    /// 1.5R beside every trade's 0.25R, and at 1.5 times the commission of
+    /// 0.2 each makes 0.1 USD less, 0.05R.
     #[test]
-    fn a_meta_model_is_judged_by_its_skill_and_the_trades_its_margin_takes_in_money() {
+    fn a_meta_model_is_judged_by_its_skill_and_the_trades_its_margin_takes() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), with_meta(24));
         publish_baselines(dir.path(), &with_meta(24));
@@ -2395,16 +2444,37 @@ mod tests {
             every_stressed,
         } = holdout.earnings;
         assert_eq!((taken.count, every.count), (1, 2), "{holdout:?}");
-        close_to(taken.expectancy, 3.0);
-        close_to(every.expectancy, 0.5);
-        close_to(taken_stressed.expectancy, 2.9);
-        close_to(every_stressed.expectancy, 0.4);
+        close_to(taken.expectancy, 1.5);
+        close_to(every.expectancy, 0.25);
+        close_to(taken_stressed.expectancy, 1.45);
+        close_to(every_stressed.expectancy, 0.2);
         let score = holdout.score;
         assert_eq!(score.rows, 2);
         close_to(score.skill, 1.0 - 1.325 / 3.125);
         close_to(score.mean_error, -0.15);
         close_to(score.slope, 1.125 / 0.405);
         close_to(score.top_decile_gap, 0.65);
+    }
+
+    /// The meta's margin is in R: one of 0.9R leaves the trade at 20:00 of
+    /// `meta_rows`'s holdout, expected 0.85R, though on its stop worth 2 USD
+    /// it expects 1.7 USD, and the one at 19:00, so no trade is taken.
+    #[test]
+    fn a_meta_models_margin_in_r_leaves_a_trade_expected_less_whatever_its_unit() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = ModelConfig {
+            meta: Some(MetaConfig {
+                margin: R::new(0.9),
+                ..meta(24)
+            }),
+            ..with_meta(24)
+        };
+        let training = training(dir.path(), config.clone());
+        publish_baselines(dir.path(), &config);
+
+        let trained = training.train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(meta_rows()));
+
+        assert_eq!(holdout_of(trained.meta).earnings.taken.count, 0);
     }
 
     /// `meta_rows` with the holdout's features swapped: the meta expects
@@ -2441,7 +2511,7 @@ mod tests {
     }
 
     /// A meta of a skill above nought whose margin takes one trade of
-    /// `meta_rows`'s holdout (`a_meta_model_is_judged_by_its_skill_and_the_trades_its_margin_takes_in_money`)
+    /// `meta_rows`'s holdout (`a_meta_model_is_judged_by_its_skill_and_the_trades_its_margin_takes`)
     /// is refused under a minimum of two trades.
     #[test]
     fn a_meta_model_whose_trades_taken_miss_the_minimums_is_refused() {
@@ -2451,7 +2521,7 @@ mod tests {
                 min_trades: 2,
                 ..meta(24)
             }),
-            ..config()
+            ..with_meta(24)
         };
         let training = training(dir.path(), two.clone());
         publish_baselines(dir.path(), &two);
@@ -2505,7 +2575,7 @@ mod tests {
     fn at_their_time(rows: Vec<TargetRow>) -> Vec<TargetRow> {
         let at_its_time = |outcome| TargetOutcome {
             exit: Exit::Time,
-            unit: 1.0,
+            unit: Money::from("1 USD"),
             ..outcome
         };
         rows.into_iter()
@@ -2526,23 +2596,17 @@ mod tests {
     /// A meta model learns the R of the trade of the side picked, on a target
     /// with no exits too. `meta_rows` with the long's loss at 10:00 a win,
     /// each closed at its time, of a unit of 1 USD, a win 3R and a loss -2R:
-    /// the long picked at each of the four morning rows expects 0.6 USD,
-    /// above its margin of 0.5; so the meta is fitted on the wins at 08:00
-    /// and 10:00 and calibrated on the loss at 13:00 and the win at 15:00, a
-    /// mean R of 1.75. Its calibration, a slope of 1.25 / 0.125 clipped to
-    /// 1.5, and `alpha` 0.5 - 0.75, expects 1.1R of the short at 20:00, 1.1
-    /// USD, which its margin of 0.5 USD takes, a win of 3, and 0.2R of the one
-    /// at 19:00, which it leaves.
+    /// the long picked at each of the four morning rows expects 0.6R, above
+    /// its margin of 0.5R; so the meta is fitted on the wins at 08:00 and
+    /// 10:00 and calibrated on the loss at 13:00 and the win at 15:00, a mean
+    /// R of 1.75. Its calibration, a slope of 1.25 / 0.125 clipped to 1.5, and
+    /// `alpha` 0.5 - 0.75, expects 1.1R of the short at 20:00, which its
+    /// margin of 0.5R takes, a win of 3, and 0.2R of the one at 19:00, which
+    /// it leaves.
     #[test]
     fn a_meta_model_on_a_time_only_target_learns_from_its_trades() {
         let dir = tempfile::tempdir().unwrap();
-        let mut config = ModelConfig {
-            meta: Some(MetaConfig {
-                margin: 0.5,
-                ..meta(24)
-            }),
-            ..config()
-        };
+        let mut config = with_meta(24);
         config.target.spec = Target::builder()
             .limit(SignedDuration::from_hours(1))
             .atr(crate::model::targets::DEFAULT_ATR)
@@ -2579,7 +2643,7 @@ mod tests {
         let rows: Vec<DatasetRow> = meta_rows()
             .into_iter()
             .map(|mut row| {
-                row.outcomes.short.unit = 4.0;
+                row.outcomes.short.unit = Money::from("4 USD");
                 DatasetRow::of(&row)
             })
             .collect();
@@ -2592,7 +2656,7 @@ mod tests {
 
         let sides_and_units: Vec<(f64, f64)> = examples
             .iter()
-            .map(|example| (example.features[1], example.unit))
+            .map(|example| (example.features[1], example.trade.unit))
             .collect();
         assert_eq!(
             sides_and_units,
@@ -2624,15 +2688,14 @@ mod tests {
 
     /// Margins of the long alone: the short's models are never asked, and
     /// the meta's rows are the long's trades, the holdout's a loss at 0.3 and
-    /// a win at 0.7, which the meta, taking the win, 0.55R on a stop worth 2
-    /// USD, publishes on, each of the level of the long of 17:00, 0.2R, and
-    /// no side call.
+    /// a win at 0.7, which the meta, taking the win, expected 0.55R, publishes
+    /// on, each of the level of the long of 17:00, 0.2R, and no side call.
     #[test]
     fn a_long_only_strategy_gives_its_meta_model_buys_alone() {
         let dir = tempfile::tempdir().unwrap();
         let long_only = ModelConfig {
             margins: Margins {
-                long: Some(0.0),
+                long: Some(R::new(0.0)),
                 short: None,
             },
             ..with_meta(24)
@@ -2771,10 +2834,13 @@ mod tests {
         }
     }
 
-    /// `with_meta` on a meta window of 24 hours, never retrained.
+    /// `with_meta` on a meta window of 24 hours, never retrained, its sides
+    /// traded from `config`'s margins, so that the sides it fits on `rows`
+    /// pick one trade of their holdout.
     fn never_with_meta() -> ModelConfig {
         ModelConfig {
             retrain: Retrain::Never,
+            margins: config().margins,
             ..with_meta(24)
         }
     }
@@ -2782,32 +2848,24 @@ mod tests {
     /// The decisions of the 7th, of the sides as `rows` of the 6th fit them
     /// (`a_train_fits_calibrates_and_judges_each_side_on_its_part_of_the_window`):
     /// each side expecting `-0.25 + 1.5p` R on the feature `p` (`LINES`),
-    /// trading from an expected 0.5 USD, the side whose stop is worth more
-    /// picked, its stop worth 4 USD unless said, the other's 2. Fitted on, two
-    /// shorts at 0.5 (2 USD expected), a win and a loss (0.75R and -0.5R);
-    /// calibrated on, a short at 0.25 on a stop worth 8 USD (1 USD) losing
-    /// (-0.25R) and a long at 0.75 (3.5 USD) winning (0.75R), the meta's fake
-    /// predicting their first feature, its line `-0.5 + 1.5p`; held out, a
-    /// short at 0.3 (0.8 USD) losing (-0.5R) and a long at 0.7 (3.2 USD)
-    /// winning (0.75R), of the levels 0.2 and 0.8 and no side call, the meta
-    /// expecting -0.05R and 0.55R, -0.2 and 2.2 USD, its margin of 1 USD
-    /// taking the long.
+    /// alike, so that the short, from 0.5R, is picked alone below 1R, the
+    /// long's margin; each side's stop worth 2 USD, a win 1.5R and a loss
+    /// -1R. Fitted on, shorts at 0.6 (0.65R expected), a win and a loss;
+    /// calibrated on, a short at 0.55 (0.575R) losing and one at 0.65
+    /// (0.725R) winning, the meta's fake predicting their first feature, a
+    /// slope of 0.125 / 0.005 clipped to 1.5 and `alpha` 0.25 - 1.5 x 0.6,
+    /// its line `-0.65 + 1.5p`; held out, a short at 0.55 (0.575R) losing and
+    /// one at 0.8 (0.95R) winning, of those levels and no side call, the meta
+    /// expecting 0.175R and 0.55R, its margin of 0.5R taking the win.
     fn decisions_of_the_seventh() -> Vec<TargetRow> {
-        let picked = |time, p, side, unit, wins| {
-            let mut row = row_of(time, vec![p], (wins, wins), hour());
-            match side {
-                Side::Long => row.outcomes.long.unit = unit,
-                Side::Short => row.outcomes.short.unit = unit,
-            }
-            row
-        };
+        let short = |time, p, wins| row_of(time, vec![p], (wins, wins), hour());
         vec![
-            picked("2026-01-07T08:00:00Z", 0.5, Side::Short, 4.0, true),
-            picked("2026-01-07T10:00:00Z", 0.5, Side::Short, 4.0, false),
-            picked("2026-01-07T13:00:00Z", 0.25, Side::Short, 8.0, false),
-            picked("2026-01-07T15:00:00Z", 0.75, Side::Long, 4.0, true),
-            picked("2026-01-07T19:00:00Z", 0.3, Side::Short, 4.0, false),
-            picked("2026-01-07T20:00:00Z", 0.7, Side::Long, 4.0, true),
+            short("2026-01-07T08:00:00Z", 0.6, true),
+            short("2026-01-07T10:00:00Z", 0.6, false),
+            short("2026-01-07T13:00:00Z", 0.55, false),
+            short("2026-01-07T15:00:00Z", 0.65, true),
+            short("2026-01-07T19:00:00Z", 0.55, false),
+            short("2026-01-07T20:00:00Z", 0.8, true),
         ]
     }
 
@@ -2899,9 +2957,9 @@ mod tests {
     }
 
     /// The meta at the 8th learns from the decisions of the sides just
-    /// published over its window, the 7th: held out, the short's at 0.3 and
-    /// the long's at 0.7, each decision's level `-0.25 + 1.5p`, 0.2 and 0.8,
-    /// and no side call.
+    /// published over its window, the 7th: held out, the shorts at 0.55 and
+    /// 0.8, each decision's level `-0.25 + 1.5p`, 0.575 and 0.95, and no side
+    /// call.
     #[test]
     fn a_two_time_trains_meta_learns_from_the_sides_decisions_over_its_window() {
         let dir = tempfile::tempdir().unwrap();
@@ -2915,13 +2973,13 @@ mod tests {
             .unwrap();
 
         let probes: Vec<&Vec<f64>> = meta.manifest.probes.iter().map(|p| &p.row).collect();
-        let [short, long] = probes[..] else {
+        let [first, second] = probes[..] else {
             panic!("{probes:?}");
         };
-        assert_eq!((short[0], short[1], short[3]), (0.3, -1.0, 0.0));
-        close(short[2], 0.2);
-        assert_eq!((long[0], long[1], long[3]), (0.7, 1.0, 0.0));
-        close(long[2], 0.8);
+        assert_eq!((first[0], first[1], first[3]), (0.55, -1.0, 0.0));
+        close(first[2], 0.575);
+        assert_eq!((second[0], second[1], second[3]), (0.8, -1.0, 0.0));
+        close(second[2], 0.95);
     }
 
     /// One replay serves both: from the sides' window back from the 7th,
