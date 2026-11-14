@@ -604,10 +604,10 @@ impl ExchangeStreams {
             .map_err(|e| anyhow::anyhow!("looking up {id} to stream it: {e}"))
     }
 
-    /// Ends `kind` of the contract `id`. If it takes no data of `kind`'s
-    /// level then, the level's connection carries it no longer from its
-    /// next connection (see `ExchangeSubscriber::unsubscribe`): the stream
-    /// carries it on until then.
+    /// Ends `kind` of the contract `id`. Each level's connection it takes no
+    /// data at then, `kind`'s or another, carries it no longer from its next
+    /// connection (see `ExchangeSubscriber::unsubscribe`): the stream carries
+    /// it on until then.
     ///
     /// # Errors
     ///
@@ -622,13 +622,11 @@ impl ExchangeStreams {
                 of.set(kind, false);
             }
         });
-        let level = kind.level();
-        let taken = self
-            .subscribed
-            .get_cloned(&symbol)
-            .is_some_and(|of| of.takes_at(level));
-        if !taken && let Some(client) = self.clients.get(&level) {
-            client.subscriber().unsubscribe(&symbol);
+        let of = self.subscribed.get_cloned(&symbol);
+        for (level, client) in &self.clients {
+            if !of.is_some_and(|of| of.takes_at(*level)) {
+                client.subscriber().unsubscribe(&symbol);
+            }
         }
         Ok(())
     }
