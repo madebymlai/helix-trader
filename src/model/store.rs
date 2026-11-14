@@ -779,7 +779,7 @@ fn dataset_directory(root: &Path, strategy_id: StrategyId, fingerprint: Fingerpr
 /// of the store `version` (`VERSION`): its dataset's, then the side
 /// models' training settings, the learner and its settings, the retrain
 /// interval, the window, the holdout and the minimums of its
-/// holdout, the minimum net P&L in its R text, and the version.
+/// holdout, the least expectancy in its R text, and the version.
 fn training_directory(
     root: &Path,
     strategy_id: StrategyId,
@@ -792,7 +792,7 @@ fn training_directory(
         .with(retrain_setting(config.retrain).as_bytes())
         .with(&config.window.as_nanos().to_le_bytes())
         .with(&config.holdout.as_nanos().to_le_bytes())
-        .with(config.min_pnl.to_string().as_bytes())
+        .with(config.min_expectancy.to_string().as_bytes())
         .with(&config.min_trades.to_le_bytes())
         .with(format!("store version {version}").as_bytes());
     Ok(dataset_directory(root, strategy_id, fingerprint).join(settings.to_string()))
@@ -832,7 +832,7 @@ fn meta_settings(meta: &MetaConfig) -> anyhow::Result<Fingerprint> {
         .with(&meta.window.as_nanos().to_le_bytes())
         .with(&meta.holdout.as_nanos().to_le_bytes())
         .with(meta.margin.to_string().as_bytes())
-        .with(meta.min_pnl.to_string().as_bytes())
+        .with(meta.min_expectancy.to_string().as_bytes())
         .with(&meta.min_trades.to_le_bytes()))
 }
 
@@ -1019,7 +1019,7 @@ mod tests {
                 long: Some(R::new(0.5)),
                 short: Some(R::new(0.5)),
             })
-            .min_pnl(R::new(1.0))
+            .min_expectancy(R::new(1.0))
             .min_trades(30)
             .learner(LearnerConfig::Fake {})
             .build()
@@ -1274,7 +1274,7 @@ mod tests {
         }
         let held_to_more = [
             ModelConfig {
-                min_pnl: R::new(2.0),
+                min_expectancy: R::new(2.0),
                 ..config()
             },
             ModelConfig {
@@ -1321,7 +1321,7 @@ mod tests {
 
     /// The directory of a fixed strategy's long store under a models root,
     /// as a literal: its id, its dataset's fingerprint, its training
-    /// settings, its minimum net P&L in R, `1R`, among them, with the store
+    /// settings, its least expectancy in R, `1R`, among them, with the store
     /// `VERSION`, its side, and the margins of both sides in R, `long 0.5R
     /// short 0.5R`, so that no model published under a margin or a minimum
     /// of another unit is listed. A change that rekeyed every store, leaving the models
@@ -1347,7 +1347,7 @@ mod tests {
 
     /// The directory of the fixed strategy's meta store (`meta_config`), as
     /// a literal: under its sides' training settings, the meta's own, its
-    /// margin and its minimum net P&L in R, `0.55R` and `1R`, among them,
+    /// margin and its least expectancy in R, `0.55R` and `1R`, among them,
     /// and the sides' margins in R.
     #[test]
     fn a_fixed_strategys_meta_store_keeps_its_directory() {
@@ -1445,12 +1445,12 @@ mod tests {
     #[test]
     fn a_meta_model_of_another_margin_minimums_or_sides_margins_is_not_listed() {
         let dir = tempfile::tempdir().unwrap();
-        let meta = |margin, min_pnl| {
+        let meta = |margin, min_expectancy| {
             MetaConfig::builder()
                 .window(SignedDuration::from_hours(48))
                 .holdout(SignedDuration::from_hours(12))
                 .margin(margin)
-                .min_pnl(min_pnl)
+                .min_expectancy(min_expectancy)
                 .min_trades(20)
                 .learner(LearnerConfig::Fake {})
                 .build()
@@ -1488,7 +1488,7 @@ mod tests {
             .window(SignedDuration::from_hours(48))
             .holdout(SignedDuration::from_hours(12))
             .margin(R::new(0.55))
-            .min_pnl(R::new(1.0))
+            .min_expectancy(R::new(1.0))
             .min_trades(20)
             .learner(LearnerConfig::Fake {})
             .build()

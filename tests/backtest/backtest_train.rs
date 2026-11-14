@@ -44,7 +44,7 @@ const RISE: f64 = 4.0;
 /// ounce: one R, in USD.
 const UNIT: f64 = 3.0;
 
-/// The minimum net P&L per trade the models publish from, which the
+/// The least expectancy the models publish from, which the
 /// trades picked clear.
 const MINIMUM: R = R::new(0.5);
 
@@ -141,8 +141,8 @@ fn features() -> Rc<FeatureSet> {
 /// bracket by LightGBM, on leaves of 20 rows, on a window of 70 hours, the
 /// last 12 held out and the 12 before them calibrated on, so that the 46
 /// hours fitted on split; each side traded from an expected net R of
-/// nought, published from `min_pnl` per trade over 5 trades.
-fn config(min_pnl: R) -> ModelConfig {
+/// nought, published from `min_expectancy` per trade over 5 trades.
+fn config(min_expectancy: R) -> ModelConfig {
     ModelConfig::builder()
         .decision(rule())
         .target(target())
@@ -153,7 +153,7 @@ fn config(min_pnl: R) -> ModelConfig {
             long: Some(R::new(0.0)),
             short: Some(R::new(0.0)),
         })
-        .min_pnl(min_pnl)
+        .min_expectancy(min_expectancy)
         .min_trades(5)
         .learner(LearnerConfig::LightGbm(
             LightGbmConfig::builder().min_data_in_leaf(20).build(),
@@ -161,16 +161,16 @@ fn config(min_pnl: R) -> ModelConfig {
         .build()
 }
 
-fn training(catalog: &TempDir, models: &Path, min_pnl: R) -> Training {
-    blueprint(features(), config(min_pnl))
+fn training(catalog: &TempDir, models: &Path, min_expectancy: R) -> Training {
+    blueprint(features(), config(min_expectancy))
         .training(catalog.path(), models, &venue())
         .unwrap()
 }
 
 /// The store under `models` of the `side` models of a training of
-/// `min_pnl`, as `training` keys it.
-fn store(models: &Path, min_pnl: R, side: Side) -> ModelStore {
-    blueprint(features(), config(min_pnl))
+/// `min_expectancy`, as `training` keys it.
+fn store(models: &Path, min_expectancy: R, side: Side) -> ModelStore {
+    blueprint(features(), config(min_expectancy))
         .model_set(models, &venue())
         .unwrap()
         .side(side)
@@ -337,11 +337,15 @@ fn a_minimum_above_what_the_holdout_earns_keeps_each_current_model() {
         let Some(Outcome::Kept(Kept::Refused { why, .. })) = outcome else {
             panic!("{outcome:?}");
         };
-        let Refusal::MinPnl { pnl, min_pnl } = why else {
+        let Refusal::MinExpectancy {
+            expectancy,
+            min_expectancy,
+        } = why
+        else {
             panic!("{why:?}");
         };
-        close(Some(pnl), 2.66 / UNIT);
-        assert_eq!(min_pnl, R::new(1.0));
+        close(Some(expectancy), 2.66 / UNIT);
+        assert_eq!(min_expectancy, R::new(1.0));
     }
     for side in Side::BOTH {
         assert_eq!(

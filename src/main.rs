@@ -1237,9 +1237,9 @@ mod tests {
             },
         });
         let kept = Outcome::Kept(Kept::Refused {
-            why: Refusal::MinPnl {
-                pnl: 0.48,
-                min_pnl: R::new(0.55),
+            why: Refusal::MinExpectancy {
+                expectancy: 0.48,
+                min_expectancy: R::new(0.55),
             },
             holdout: holdout.clone(),
         });

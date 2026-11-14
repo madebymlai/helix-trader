@@ -383,7 +383,7 @@ fn lines(f: &mut fmt::Formatter<'_>, score: ExpectedScore) -> fmt::Result {
 
 /// The lines of `earnings`: the trades taken, a side's those picked for it,
 /// every trade of the rows the model decided, and both at `STRESS` times the
-/// commission, the net P&L per trade in R.
+/// commission, the expectancy in R.
 fn earned(f: &mut fmt::Formatter<'_>, earnings: &Earnings) -> fmt::Result {
     let value = |value: Option<f64>| value.map_or_else(|| "n/a".to_string(), |v| format!("{v:.6}"));
     let Earnings {
@@ -393,23 +393,23 @@ fn earned(f: &mut fmt::Formatter<'_>, earnings: &Earnings) -> fmt::Result {
         every_stressed,
     } = earnings;
     writeln!(f, "  Trades taken: {}", taken.count)?;
-    writeln!(f, "  Net P&L per trade taken: {}", in_r(taken.expectancy))?;
-    writeln!(f, "  Win rate of trades taken: {}", value(taken.win_rate))?;
-    writeln!(f, "  Every trade: {}", every.count)?;
     writeln!(
         f,
-        "  Net P&L per trade, every trade: {}",
-        in_r(every.expectancy)
+        "  Expectancy of the trades taken: {}",
+        in_r(taken.expectancy)
     )?;
+    writeln!(f, "  Win rate of trades taken: {}", value(taken.win_rate))?;
+    writeln!(f, "  Every trade: {}", every.count)?;
+    writeln!(f, "  Expectancy of every trade: {}", in_r(every.expectancy))?;
     writeln!(f, "  Win rate, every trade: {}", value(every.win_rate))?;
     writeln!(
         f,
-        "  Net P&L per trade taken at {STRESS}x the commission: {}",
+        "  Expectancy of the trades taken at {STRESS}x the commission: {}",
         in_r(taken_stressed.expectancy)
     )?;
     writeln!(
         f,
-        "  Net P&L per trade, every trade, at {STRESS}x the commission: {}",
+        "  Expectancy of every trade at {STRESS}x the commission: {}",
         in_r(every_stressed.expectancy)
     )
 }
@@ -481,7 +481,7 @@ mod tests {
                 long: Some(R::new(0.0)),
                 short: Some(R::new(0.0)),
             })
-            .min_pnl(R::new(0.0))
+            .min_expectancy(R::new(0.0))
             .min_trades(1)
             .learner(LearnerConfig::Fake {})
             .build()
@@ -931,7 +931,7 @@ mod tests {
             .unwrap()
     }
 
-    /// `trades` are `count` trades of `expectancy` net P&L per trade, in R.
+    /// `trades` are `count` trades of expectancy `expectancy`, in R.
     fn trades_are(trades: Trades, count: usize, expectancy: f64) {
         assert_eq!(trades.count, count, "{trades:?}");
         close(trades.expectancy, expectancy);
@@ -1412,13 +1412,13 @@ Short model scores, out of sample, from 2026-01-07T00:00:00Z to 2026-01-08T00:00
   Top-decile gap: 0.500000
   Rows: 3
   Trades taken: 2
-  Net P&L per trade taken: 0.500000R
+  Expectancy of the trades taken: 0.500000R
   Win rate of trades taken: 0.500000
   Every trade: 3
-  Net P&L per trade, every trade: -0.250000R
+  Expectancy of every trade: -0.250000R
   Win rate, every trade: 0.500000
-  Net P&L per trade taken at 1.5x the commission: 0.450000R
-  Net P&L per trade, every trade, at 1.5x the commission: -0.300000R
+  Expectancy of the trades taken at 1.5x the commission: 0.450000R
+  Expectancy of every trade at 1.5x the commission: -0.300000R
 
 Short model scores, out of sample, over the span
   Skill: n/a
@@ -1427,13 +1427,13 @@ Short model scores, out of sample, over the span
   Top-decile gap: n/a
   Rows: 0
   Trades taken: 0
-  Net P&L per trade taken: n/a
+  Expectancy of the trades taken: n/a
   Win rate of trades taken: n/a
   Every trade: 0
-  Net P&L per trade, every trade: n/a
+  Expectancy of every trade: n/a
   Win rate, every trade: n/a
-  Net P&L per trade taken at 1.5x the commission: n/a
-  Net P&L per trade, every trade, at 1.5x the commission: n/a
+  Expectancy of the trades taken at 1.5x the commission: n/a
+  Expectancy of every trade at 1.5x the commission: n/a
 
 Meta model scores, out of sample, over the span
   Skill: 0.250000
@@ -1442,13 +1442,13 @@ Meta model scores, out of sample, over the span
   Top-decile gap: n/a
   Rows: 2
   Trades taken: 0
-  Net P&L per trade taken: n/a
+  Expectancy of the trades taken: n/a
   Win rate of trades taken: n/a
   Every trade: 0
-  Net P&L per trade, every trade: n/a
+  Expectancy of every trade: n/a
   Win rate, every trade: n/a
-  Net P&L per trade taken at 1.5x the commission: n/a
-  Net P&L per trade, every trade, at 1.5x the commission: n/a
+  Expectancy of the trades taken at 1.5x the commission: n/a
+  Expectancy of every trade at 1.5x the commission: n/a
 "
         );
     }
@@ -1461,7 +1461,7 @@ Meta model scores, out of sample, over the span
                 .window(SignedDuration::from_hours(48))
                 .holdout(SignedDuration::from_hours(6))
                 .margin(R::new(0.3))
-                .min_pnl(R::new(0.0))
+                .min_expectancy(R::new(0.0))
                 .min_trades(1)
                 .learner(LearnerConfig::Fake {})
                 .build(),
