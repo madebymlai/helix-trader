@@ -26,14 +26,23 @@
 //!   (`nautilus_common::xrate::get_exchange_rate`), each pair at a rate of
 //!   1 under the key `BASE/QUOTE` of its base and quote currencies, as the
 //!   cache keys a pair's quotes for it, a pair without a base currency
-//!   left out, as the cache leaves it out: wherever this finds a path, a
+//!   refused, as the cache leaves it out: wherever this finds a path, a
 //!   run's lookup finds a rate once the pairs are quoted.
+//!
+//! A config whose pairs could never convert is refused at load
+//! (`Conversions::validate`): pairs on more than one venue, or off the
+//! venue of an instrument traded whose broker's account has a base
+//! currency.
 
 use std::fmt;
 
 use ahash::AHashMap;
 use anyhow::Context;
-use nautilus_common::{cache::Cache, xrate::get_exchange_rate};
+use nautilus_common::{
+    cache::Cache,
+    config::{ConfigError, ConfigErrorCollector},
+    xrate::get_exchange_rate,
+};
 use nautilus_model::{
     data::NautilusDataType,
     enums::PriceType,
@@ -46,6 +55,7 @@ use serde::Deserialize;
 use ustr::Ustr;
 
 use super::TickSeries;
+use crate::venues;
 
 /// `[trade] conversions`: the FX pairs a strategy converts equity through,
 /// each by its instrument id, `["EURUSD.ICMARKETS"]`, all on one venue;
@@ -67,6 +77,52 @@ impl Conversions {
         &self.0
     }
 
+    /// Pushes onto `errors` the violations of the pairs of a strategy
+    /// trading `traded`: pairs on more than one venue, under
+    /// `trade.conversions`, naming the venues, since its rates are Nautilus'
+    /// on one venue (`rates`); and each pair off the venue of an instrument
+    /// of `traded` whose broker's account has a base currency
+    /// (`venues::has_base_currency`), under its field, naming the pair and
+    /// the instrument, since Nautilus converts such an account's margins,
+    /// commissions and P&L into its base currency only through rates on the
+    /// traded instrument's venue. For an account without one only the
+    /// sizer converts, at the pairs' rates, so their venue may be any.
+    pub(super) fn validate(&self, traded: &[InstrumentId], errors: &mut ConfigErrorCollector) {
+        let mut on: Vec<Venue> = vec![];
+        for pair in &self.0 {
+            if !on.contains(&pair.venue) {
+                on.push(pair.venue);
+            }
+        }
+        if let [_, _, ..] = on.as_slice() {
+            let named: Vec<String> = on.iter().map(ToString::to_string).collect();
+            errors.push(ConfigError::invalid_value(
+                "trade.conversions",
+                format!(
+                    "lists pairs on {}: a strategy converts at Nautilus' cached rates on one \
+                     venue, its pairs'",
+                    named.join(", ")
+                ),
+            ));
+        }
+        for (i, pair) in self.0.iter().enumerate() {
+            let based_elsewhere = traded.iter().find(|instrument| {
+                instrument.venue != pair.venue && venues::has_base_currency(instrument.venue)
+            });
+            if let Some(instrument) = based_elsewhere {
+                errors.push(ConfigError::invalid_value(
+                    format!("trade.conversions[{i}]"),
+                    format!(
+                        "{pair} is not on {venue}, the venue of {instrument}, whose broker's \
+                         account has a base currency: Nautilus converts its margins, \
+                         commissions and P&L into it only through rates on {venue}",
+                        venue = instrument.venue
+                    ),
+                ));
+            }
+        }
+    }
+
     /// The quotes of each pair, the series its rates are read from: the
     /// data a cTrader broker serves, history and live.
     pub(super) fn quotes(&self) -> impl Iterator<Item = TickSeries> + '_ {
@@ -77,7 +133,8 @@ impl Conversions {
     }
 
     /// The rates an equity is converted at: Nautilus' cached rates on the
-    /// pairs' venue, the first pair's; with no pair, none.
+    /// pairs' venue, one for all of them in a config loaded (`validate`);
+    /// with no pair, none.
     #[must_use]
     pub fn rates(&self) -> Rates {
         Rates {
@@ -150,23 +207,32 @@ impl fmt::Display for Rates {
 
 /// Whether `from` reaches `to` through `pairs`, the definitions of a
 /// config's pairs: by Nautilus' exchange-rate path search
-/// (`get_exchange_rate`), each pair with a base currency at a rate of 1
-/// under its `BASE/QUOTE` key, as Nautilus' cache keys its quotes; a
-/// currency reaches itself through no pair.
+/// (`get_exchange_rate`), each pair at a rate of 1 under its `BASE/QUOTE`
+/// key, as Nautilus' cache keys its quotes; a currency reaches itself
+/// through no pair.
 ///
 /// # Errors
 ///
-/// Returns an error as `get_exchange_rate` does, which it does not on
-/// rates of 1.
+/// Returns an error naming a pair of `pairs` whose definition has no base
+/// currency, whatever `from` and `to`: Nautilus' cache leaves such an
+/// instrument out of its rates, so it would give none. Otherwise as
+/// `get_exchange_rate` does, which it does not on rates of 1.
 pub fn reaches(pairs: &[InstrumentAny], from: Currency, to: Currency) -> anyhow::Result<bool> {
-    let keys: AHashMap<Ustr, Decimal> = pairs
+    let keys = pairs
         .iter()
-        .filter_map(|pair| {
-            let base = pair.base_currency()?;
+        .map(|pair| {
+            let base = pair.base_currency().with_context(|| {
+                format!(
+                    "{} has no base currency in its definition: Nautilus' exchange rates read \
+                     a pair by its base and quote currencies and leave out an instrument \
+                     without a base, so it gives no rate; [trade] conversions lists FX pairs",
+                    pair.id()
+                )
+            })?;
             let key = format!("{}/{}", base.code, pair.quote_currency().code);
-            Some((Ustr::from(&key), Decimal::ONE))
+            Ok((Ustr::from(&key), Decimal::ONE))
         })
-        .collect();
+        .collect::<anyhow::Result<AHashMap<Ustr, Decimal>>>()?;
     // Nautilus' search refuses empty quote maps.
     if keys.is_empty() {
         return Ok(from == to);
