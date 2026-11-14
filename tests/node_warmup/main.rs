@@ -752,26 +752,46 @@ fn one_every(bars: &[Bar], step: u64) -> bool {
         .all(|pair| close_of(&pair[1]) == close_of(&pair[0]) + step)
 }
 
-/// A warmup of 72 hours is asked of the venue one window at a time, none
-/// holding more than a day, each starting 1 ns after the one before, from
-/// the start of the warmup to its end: no time is asked twice or left out.
+/// A warmup of 72 hours is asked of the venue one window at a time, each
+/// starting 1 ns after the one before, from the start of the warmup to its
+/// end: no time is asked twice or left out.
 #[test]
-fn a_long_warmup_is_asked_in_windows_under_a_day_covering_it_all() {
+fn a_long_warmup_is_asked_in_windows_covering_it_all() {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::Envelope);
 
     warm(dir.path(), &venue, COMPOSITE, WARMUP);
 
     let asked = venue.borrow().asked.clone();
-    let day = 24 * HOUR_NS;
     assert_eq!(asked.len(), 4, "{asked:?}");
-    assert!(asked.iter().all(|&(from, to)| to - from < day), "{asked:?}");
     assert!(
         asked.windows(2).all(|pair| pair[1].0 == pair[0].1 + 1),
         "{asked:?}"
     );
     let (first, last) = (asked[0].0, asked[3].1);
     assert_eq!(last - first, 72 * HOUR_NS, "{asked:?}");
+}
+
+/// Each window, with the source bar before its start, which IB's client
+/// asks too to keep the bar opening before the start, spans at most a day:
+/// ibapi asks such a span in seconds, up to 86,400, and a longer one in
+/// sessions, one more than the days it spans, so that a window of a day
+/// and a minute fetches three sessions to keep one day's bars.
+#[test]
+fn each_window_with_the_bar_before_it_spans_at_most_a_day() {
+    let dir = tempfile::tempdir().unwrap();
+    let venue = FakeVenue::new(Answer::Envelope);
+
+    warm(dir.path(), &venue, COMPOSITE, WARMUP);
+
+    let asked = venue.borrow().asked.clone();
+    assert!(!asked.is_empty());
+    assert!(
+        asked
+            .iter()
+            .all(|&(from, to)| to - from + MINUTE_NS <= DAY_NS),
+        "{asked:?}"
+    );
 }
 
 /// Nautilus builds a composite bar type's bars from the source bars of every

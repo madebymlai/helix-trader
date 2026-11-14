@@ -197,13 +197,14 @@ mod hold;
 
 use hold::{Hold, Tick};
 
-/// The window a warmup is asked in (see `time_range`): under a day. IB's
-/// client asks a window as one request between its bounds, from a bar
-/// before its start, keeping the bars within it (nautilus_trader#5621),
-/// and ibapi sends a span of up to a day in seconds, a longer one in whole
-/// days plus one, which IB counts in sessions: a day's window would go as
-/// `3 D`, three sessions fetched to keep one day's bars. Venues page within
-/// a window.
+/// The window a warmup is asked in (see `time_range`): under a day by more
+/// than a bar. IB's client asks a window as one request between its bounds,
+/// from a bar before its start, keeping the bars within it
+/// (nautilus_trader#5621), and ibapi sends a span of up to a day in
+/// seconds, a longer one in whole days plus one, which IB counts in
+/// sessions: 23 hours of 1-minute bars go as `82860 S` at most, a day's
+/// window as `3 D`, three sessions fetched to keep one day's bars. Venues
+/// page within a window.
 const WINDOW: SignedDuration = SignedDuration::from_hours(23);
 
 /// The data client a warmup's request of custom data names: no data client
@@ -1659,7 +1660,8 @@ mod tests {
     }
 
     /// A day of every series is asked in windows of 23 hours, the two a day
-    /// can hold: under a day, so that IB counts no sessions.
+    /// can hold: under a day by more than a bar, so that IB is asked each in
+    /// seconds (see `WINDOW`).
     #[test]
     fn every_series_is_asked_in_windows_under_a_day() {
         let warmup = Warmup::live(&reading(&[
