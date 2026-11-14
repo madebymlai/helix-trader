@@ -734,13 +734,13 @@ mod tests {
 
         let listed: Vec<_> = pairs
             .iter()
-            .map(|pair| (pair.pair_id, pair.name.as_str()))
+            .map(|pair| (pair.pair_id, pair.name.as_deref()))
             .collect();
         assert_eq!(
             listed,
             [
-                (4_000_000_001, "ES futures 2026-12"),
-                (4_000_658_762, "ES futures 2016-12")
+                (4_000_000_001, Some("ES futures 2026-12")),
+                (4_000_658_762, Some("ES futures 2016-12"))
             ]
         );
         let [call] = &lse.calls()[..] else {

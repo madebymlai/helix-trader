@@ -51,22 +51,27 @@ pub(crate) struct LsePairs {
 }
 
 /// A listing in LSE's catalogue: its number, which always names one
-/// instrument, its symbol, its name and, where LSE knows them, the days it
-/// was listed and delisted. A CME contract's name says its month, as in
+/// instrument, its symbol and, where LSE knows them, its name and the days
+/// it was listed and delisted. A CME contract's name says its month, as in
 /// `GC futures 2026-12`, or is its symbol alone, as in `GCZ4`, for some of
-/// the contracts delisted (LSE's docs, "The market: cme", and `test_data/`).
+/// the contracts delisted (LSE's docs, "The market: cme", and `test_data/`);
+/// some listings delisted have none (`BRKD` of `nasdaq`, captured).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub(crate) struct LsePair {
     pub(crate) pair_id: u64,
     pub(crate) symbol: String,
-    pub(crate) name: String,
+    pub(crate) name: Option<String>,
     pub(crate) listed_date: Option<Date>,
     pub(crate) delisted_date: Option<Date>,
 }
 
 impl fmt::Display for LsePair {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} ({}, pair {}", self.symbol, self.name, self.pair_id)?;
+        write!(f, "{} (", self.symbol)?;
+        if let Some(name) = &self.name {
+            write!(f, "{name}, ")?;
+        }
+        write!(f, "pair {}", self.pair_id)?;
         if let Some(listed) = self.listed_date {
             write!(f, ", listed {listed}")?;
         }
@@ -283,11 +288,29 @@ mod tests {
     use super::*;
     use crate::testing::{
         ALLOWANCE_EXHAUSTED, DATA_UNAVAILABLE, DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING,
-        EXPORT_TOO_WIDE, PLAN_REQUIRED, REFERENCE_CATALOGUE, ROWS_EXHAUSTED, TICKS_NOT_STORED,
+        EXPORT_TOO_WIDE, PAIRS_NASDAQ_BRK, PLAN_REQUIRED, REFERENCE_CATALOGUE, ROWS_EXHAUSTED,
+        TICKS_NOT_STORED,
     };
 
     fn refusal(body: &str) -> LseRefusal {
         serde_json::from_str(body).unwrap()
+    }
+
+    /// LSE's catalogue gives some delisted listings no name: `BRKD` of
+    /// `nasdaq`, delisted on 16 April 2026, captured.
+    #[rstest]
+    fn a_listing_of_no_name_is_read() {
+        let listed: LsePairs = serde_json::from_str(PAIRS_NASDAQ_BRK).unwrap();
+
+        let brkd = listed
+            .pairs
+            .iter()
+            .find(|pair| pair.symbol == "BRKD")
+            .unwrap();
+        assert_eq!(
+            (brkd.name.as_deref(), brkd.delisted_date),
+            (None, Some(jiff::civil::date(2026, 4, 16)))
+        );
     }
 
     #[test]

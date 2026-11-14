@@ -364,9 +364,10 @@ impl CmeContract {
     }
 
     /// Whether `pair` is the contract's listing: by the month its name
-    /// says, or, its name saying none, by the day it was delisted.
+    /// says, or, its name saying none or LSE giving none, by the day it was
+    /// delisted.
     fn is_listed_as(&self, pair: &LsePair) -> bool {
-        match named_month(&pair.name) {
+        match pair.name.as_deref().and_then(named_month) {
             Some(month) => month == self.month,
             None => pair.delisted_date.is_some_and(|delisted| {
                 self.month - 3.months() <= delisted && delisted < self.month + 1.month()
@@ -799,6 +800,18 @@ mod tests {
         assert_eq!(listed(id, PAIRS_GCZ4), Some(pair_id));
     }
 
+    /// LSE's catalogue gives some delisted listings no name (captured on
+    /// `nasdaq`): GCZ4 of 2024 so named is found by its delisting too.
+    #[rstest]
+    fn a_listing_of_no_name_is_found_by_its_delisting() {
+        let mut unnamed = pairs(PAIRS_GCZ4);
+        unnamed[0].name = None;
+
+        let listing = cme("GCZ24.GLBX").unwrap().listing(&unnamed).unwrap();
+
+        assert_eq!(listing.map(|pair| pair.pair_id), Some(4_000_402_563));
+    }
+
     /// LSE's NGZ6 is the contract of 2016 alone; 2026's is NGZ26.
     #[rstest]
     fn a_contract_none_of_a_name_s_listings_is_has_no_listing_there() {
@@ -894,8 +907,7 @@ mod tests {
     }
 
     /// LSE's catalogue of `nasdaq`, captured: each ticker names a listing
-    /// there under that symbol. Some of its listings have no name, which
-    /// the CME listings' model does not take.
+    /// there under that symbol.
     #[rstest]
     #[case::common_stock("NVDA.XNAS", PAIRS_NASDAQ_NVDA)]
     #[case::class_b("BRK.B.XNAS", PAIRS_NASDAQ_BRK)]
