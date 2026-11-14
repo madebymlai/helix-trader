@@ -101,21 +101,6 @@ impl LseSymbol {
             .map_err(|e| anyhow::anyhow!("{id} is not an LSEDGE series: {e}"))
     }
 
-    /// The `LSEDGE` instrument the series is: its symbol, a hyphen and its
-    /// market in capitals.
-    #[must_use]
-    pub fn instrument_id(&self) -> InstrumentId {
-        InstrumentId::from(
-            format!(
-                "{}-{}.{}",
-                self.symbol,
-                self.market.to_ascii_uppercase(),
-                *LSEDGE_VENUE
-            )
-            .as_str(),
-        )
-    }
-
     /// LSE's name of the market, its folder.
     #[must_use]
     pub fn market(&self) -> &str {
@@ -130,7 +115,7 @@ impl LseSymbol {
 
     /// Whether the series is an index, which has no trades: its ticks are
     /// its values, of no size, which LSE's tick slice and its socket send.
-    pub(crate) fn is_index(&self) -> bool {
+    pub fn is_index(&self) -> bool {
         self.market == "indices"
     }
 
@@ -149,7 +134,7 @@ impl LseSymbol {
     /// Returns an error naming the market if its series stream on no
     /// socket, or naming a crypto symbol not quoted in Tether, as LSE's
     /// crypto symbols are.
-    pub(crate) fn stream(&self) -> anyhow::Result<(LseSocket, String)> {
+    pub fn stream(&self) -> anyhow::Result<(LseSocket, String)> {
         let symbol = &self.symbol;
         Ok(match self.market.as_str() {
             "us_stocks" | "commodities" => (LseSocket::Data, symbol.clone()),
@@ -191,7 +176,7 @@ fn hyphenated(symbol: &str) -> String {
 /// ticker; or a US option contract under `OPRA`, asked with the LSE key,
 /// which opens LSE's `us_options`, by its OSI symbol.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum LseInstrument {
+pub enum LseInstrument {
     Series(LseSymbol),
     Cme(CmeContract),
     Nasdaq(NasdaqStock),
@@ -208,10 +193,7 @@ impl LseInstrument {
     /// an instrument of its venue (see `LseSymbol::from_instrument_id`,
     /// `CmeContract::from_instrument_id`, `NasdaqStock::from_instrument_id`
     /// and `OpraContract::from_instrument_id`).
-    pub(crate) fn from_instrument_id(
-        id: InstrumentId,
-        reference_year: i16,
-    ) -> anyhow::Result<Self> {
+    pub fn from_instrument_id(id: InstrumentId, reference_year: i16) -> anyhow::Result<Self> {
         if id.venue == *LSEDGE_VENUE {
             LseSymbol::from_instrument_id(id).map(Self::Series)
         } else if id.venue == Venue::GLBX() {
@@ -230,7 +212,7 @@ impl LseInstrument {
     }
 
     /// The product whose key asks LSE for the instrument.
-    pub(crate) const fn product(&self) -> LseProduct {
+    pub const fn product(&self) -> LseProduct {
         match self {
             Self::Series(_) | Self::Opra(_) => LseProduct::Global,
             Self::Cme(_) => LseProduct::Cme,
@@ -252,7 +234,7 @@ impl LseInstrument {
 /// its listing's number, the listing found among those of its exchange
 /// names (`listing`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CmeContract {
+pub struct CmeContract {
     root: String,
     month_code: char,
     /// The first day of the contract's month.
@@ -269,10 +251,7 @@ impl CmeContract {
     /// Returns an error naming `id` if it is not on `GLBX`, or not a
     /// futures contract's symbol with a two-digit year, a one-digit year
     /// standing for contracts ten years apart.
-    pub(crate) fn from_instrument_id(
-        id: InstrumentId,
-        reference_year: i16,
-    ) -> anyhow::Result<Self> {
+    pub fn from_instrument_id(id: InstrumentId, reference_year: i16) -> anyhow::Result<Self> {
         ensure!(
             id.venue == Venue::GLBX(),
             "{id} is not a CME Globex contract, under GLBX"
@@ -306,7 +285,7 @@ impl CmeContract {
 
     /// The contract's id, under `GLBX`, in Nautilus' two-digit year.
     #[must_use]
-    pub(crate) fn instrument_id(&self) -> InstrumentId {
+    pub fn instrument_id(&self) -> InstrumentId {
         InstrumentId::new(Symbol::from(self.name(2).as_str()), Venue::GLBX())
     }
 
@@ -316,7 +295,7 @@ impl CmeContract {
     /// "The market: cme": "read a name from the catalogue instead of
     /// building it").
     #[must_use]
-    pub(crate) fn exchange_names(&self) -> [String; 2] {
+    pub fn exchange_names(&self) -> [String; 2] {
         [self.name(1), self.name(2)]
     }
 
@@ -343,7 +322,7 @@ impl CmeContract {
     ///
     /// Returns an error naming them if more than one listing is the
     /// contract's.
-    pub(crate) fn listing<'a>(&self, pairs: &'a [LsePair]) -> anyhow::Result<Option<&'a LsePair>> {
+    pub fn listing<'a>(&self, pairs: &'a [LsePair]) -> anyhow::Result<Option<&'a LsePair>> {
         let listings: Vec<&LsePair> = pairs
             .iter()
             .filter(|pair| self.is_listed_as(pair))
@@ -364,9 +343,10 @@ impl CmeContract {
     }
 
     /// Whether `pair` is the contract's listing: by the month its name
-    /// says, or, its name saying none, by the day it was delisted.
+    /// says, or, its name saying none or LSE giving none, by the day it was
+    /// delisted.
     fn is_listed_as(&self, pair: &LsePair) -> bool {
-        match named_month(&pair.name) {
+        match pair.name.as_deref().and_then(named_month) {
             Some(month) => month == self.month,
             None => pair.delisted_date.is_some_and(|delisted| {
                 self.month - 3.months() <= delisted && delisted < self.month + 1.month()
@@ -393,7 +373,7 @@ fn named_month(name: &str) -> Option<Date> {
 /// tickers more than once, a delisted listing beside a later one (`BRKH`,
 /// captured), as Databento's ids name a ticker, not a listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NasdaqStock {
+pub struct NasdaqStock {
     ticker: String,
 }
 
@@ -406,7 +386,7 @@ impl NasdaqStock {
     /// symbol is no ticker in capitals, as Databento and LSE write one: a
     /// ticker in lower case, which LSE would match, would make a second id
     /// of one stock.
-    pub(crate) fn from_instrument_id(id: InstrumentId) -> anyhow::Result<Self> {
+    pub fn from_instrument_id(id: InstrumentId) -> anyhow::Result<Self> {
         ensure!(
             id.venue == *XNAS_VENUE,
             "{id} is not a Nasdaq TotalView stock, under XNAS"
@@ -426,13 +406,13 @@ impl NasdaqStock {
 
     /// The stock's id, its ticker under `XNAS`.
     #[must_use]
-    pub(crate) fn instrument_id(&self) -> InstrumentId {
+    pub fn instrument_id(&self) -> InstrumentId {
         InstrumentId::new(Symbol::from(self.ticker.as_str()), *XNAS_VENUE)
     }
 
     /// The stock's ticker, as LSE lists and streams it.
     #[must_use]
-    pub(crate) fn ticker(&self) -> &str {
+    pub fn ticker(&self) -> &str {
         &self.ticker
     }
 }
@@ -455,7 +435,7 @@ impl fmt::Display for NasdaqStock {
 /// the root padded to six characters"), and a symbol names one contract,
 /// so it is asked by it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OpraContract {
+pub struct OpraContract {
     osi: String,
 }
 
@@ -468,7 +448,7 @@ impl OpraContract {
     /// symbol is not an OSI symbol as Databento and LSE write it: padded,
     /// its root in capitals, as Nautilus' OSI function writes one
     /// (`osi_option_symbol`), not as LSE's sockets do, unpadded.
-    pub(crate) fn from_instrument_id(id: InstrumentId) -> anyhow::Result<Self> {
+    pub fn from_instrument_id(id: InstrumentId) -> anyhow::Result<Self> {
         ensure!(
             id.venue == *OPRA_VENUE,
             "{id} is not a US option contract, under OPRA"
@@ -487,13 +467,13 @@ impl OpraContract {
 
     /// The contract's id, its OSI symbol under `OPRA`.
     #[must_use]
-    pub(crate) fn instrument_id(&self) -> InstrumentId {
+    pub fn instrument_id(&self) -> InstrumentId {
         InstrumentId::new(Symbol::from(self.osi.as_str()), *OPRA_VENUE)
     }
 
     /// The contract's OSI symbol, padded, as LSE lists it.
     #[must_use]
-    pub(crate) fn osi(&self) -> &str {
+    pub fn osi(&self) -> &str {
         &self.osi
     }
 
@@ -501,7 +481,7 @@ impl OpraContract {
     /// OSI symbol without spaces (LSE's socket documentation, "Option
     /// chains": `AAPL261120C00100000`), in the chain of its root (`root`).
     #[must_use]
-    pub(crate) fn stream(&self) -> (LseSocket, String) {
+    pub fn stream(&self) -> (LseSocket, String) {
         (LseSocket::Data, self.osi.replace(' ', ""))
     }
 
@@ -509,7 +489,7 @@ impl OpraContract {
     /// whose chain LSE streams it in (`subscribe_options`), as LSE's
     /// options chain names a root its underlying.
     #[must_use]
-    pub(crate) fn root(&self) -> &str {
+    pub fn root(&self) -> &str {
         self.osi[..6].trim_end_matches(' ')
     }
 }
@@ -577,7 +557,7 @@ mod tests {
         LseSymbol::from_instrument_id(InstrumentId::from(id))
     }
 
-    #[test]
+    #[rstest]
     fn an_lsedge_id_is_its_symbol_in_the_market_after_its_last_hyphen() {
         for (id, market, symbol) in [
             ("GOLD-FUTURES.LSEDGE", "futures", "GOLD"),
@@ -592,8 +572,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_series_round_trips_through_its_instrument_id() {
+    #[rstest]
+    fn an_instrument_id_is_the_series_of_its_symbol_and_market() {
         for (market, symbol, id) in [
             ("futures", "GOLD", "GOLD-FUTURES.LSEDGE"),
             ("us_stocks", "BRK-B", "BRK-B-US_STOCKS.LSEDGE"),
@@ -601,14 +581,13 @@ mod tests {
         ] {
             let series = LseSymbol::new(market, symbol).unwrap();
 
-            assert_eq!(series.instrument_id(), InstrumentId::from(id));
             assert_eq!(of(id).unwrap(), series, "{id}");
         }
     }
 
     /// No hyphen, an empty symbol or market, or a market in lower case,
     /// which would make a second id of one series.
-    #[test]
+    #[rstest]
     fn an_id_without_its_market_in_capitals_is_refused_naming_it() {
         for id in [
             "GOLD.LSEDGE",
@@ -623,7 +602,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn an_id_of_another_venue_is_refused_naming_it() {
         let err = of("GOLD-FUTURES.GLBX").unwrap_err().to_string();
 
@@ -698,7 +677,7 @@ mod tests {
     }
 
     /// Their listings take Databento's ids.
-    #[test]
+    #[rstest]
     fn an_exchange_market_is_no_lsedge_series() {
         for id in [
             "ESZ6-CME.LSEDGE",
@@ -799,6 +778,18 @@ mod tests {
         assert_eq!(listed(id, PAIRS_GCZ4), Some(pair_id));
     }
 
+    /// LSE's catalogue gives some delisted listings no name (captured on
+    /// `nasdaq`): GCZ4 of 2024 so named is found by its delisting too.
+    #[rstest]
+    fn a_listing_of_no_name_is_found_by_its_delisting() {
+        let mut unnamed = pairs(PAIRS_GCZ4);
+        unnamed[0].name = None;
+
+        let listing = cme("GCZ24.GLBX").unwrap().listing(&unnamed).unwrap();
+
+        assert_eq!(listing.map(|pair| pair.pair_id), Some(4_000_402_563));
+    }
+
     /// LSE's NGZ6 is the contract of 2016 alone; 2026's is NGZ26.
     #[rstest]
     fn a_contract_none_of_a_name_s_listings_is_has_no_listing_there() {
@@ -894,8 +885,7 @@ mod tests {
     }
 
     /// LSE's catalogue of `nasdaq`, captured: each ticker names a listing
-    /// there under that symbol. Some of its listings have no name, which
-    /// the CME listings' model does not take.
+    /// there under that symbol.
     #[rstest]
     #[case::common_stock("NVDA.XNAS", PAIRS_NASDAQ_NVDA)]
     #[case::class_b("BRK.B.XNAS", PAIRS_NASDAQ_BRK)]

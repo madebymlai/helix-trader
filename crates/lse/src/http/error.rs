@@ -8,7 +8,7 @@ use super::models::LseRefusal;
 
 /// How a call to LSE failed.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum LseHttpError {
+pub enum LseHttpError {
     /// LSE was not reached, or did not answer in time.
     #[error("{0}")]
     Transport(#[from] HttpClientError),
@@ -54,7 +54,7 @@ impl LseHttpError {
     /// file whose SHA-256 is not LSE's is no transient failure: LSE builds
     /// the file before sending it, so that its checksum is exact (LSE's
     /// docs, "Files").
-    pub(crate) fn is_transient(&self) -> bool {
+    pub fn is_transient(&self) -> bool {
         match self {
             Self::Transport(e) => matches!(
                 e,
@@ -72,12 +72,12 @@ impl LseHttpError {
 
     /// Whether LSE refused the export as too wide: shorter dates may be
     /// served.
-    pub(crate) fn is_too_wide(&self) -> bool {
+    pub fn is_too_wide(&self) -> bool {
         matches!(self, Self::Refusal { refusal, .. } if refusal.is_too_wide())
     }
 
     /// How long LSE asked to wait before asking again (`Retry-After`).
-    pub(crate) fn retry_after(&self) -> Option<Duration> {
+    pub fn retry_after(&self) -> Option<Duration> {
         match self {
             Self::Refusal { retry_after, .. } => *retry_after,
             _ => None,

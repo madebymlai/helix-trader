@@ -27,7 +27,9 @@ bytes = "1"
 # The records of LSE's CME stream, Databento's, at the version Nautilus'
 # Databento decoders take.
 dbn = { version = "0.71", default-features = false }
-jiff.workspace = true
+# The tz database bundled, so that an insider trade is stamped in New York
+# time whatever the host holds.
+jiff = { workspace = true, features = ["tzdb-bundle-always"] }
 log.workspace = true
 nautilus-common = { workspace = true, features = ["live"] }
 nautilus-core.workspace = true
@@ -54,6 +56,9 @@ tokio = { workspace = true, features = ["sync"] }
 tungstenite = { version = "0.30", optional = true }
 
 [dev-dependencies]
+# The crate itself with its test support, the mock LSE peers and their
+# captured payloads, for its tests of its public boundaries (`tests/`).
+lse = { path = ".", features = ["test-support"] }
 # The data tester's: the key from `.env`, the node's catalog (registered
 # through nautilus-live's `streaming`) and Nautilus' `DataTester`, which
 # the tests drive the data client with on a node too.

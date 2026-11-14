@@ -6,16 +6,19 @@
 //! rows known over a window, and whether LSE may not have loaded them all
 //! yet.
 //!
-//! A row known a fixed time after its key, the column LSE's export selects
-//! rows by (`Stamp::lag`), is asked by the dates of the keys of the rows
-//! known in the window; one known at a time of another column, which may
-//! be any time after its key, is asked of the whole series up to the
-//! window's last date, so that none known in the window is missed. The
-//! rows outside the window are left out. LSE stores a date the morning
-//! after it (see `export`): the window's last key date may not be loaded,
-//! the current UTC day, or the day before while LSE holds no row of it
-//! (`export::loaded`). A release LSE has not filled yet is a row of no
-//! actual: a window of releases holding one, past, is not loaded either.
+//! A row known at a time its key, the column LSE's export selects rows by,
+//! says (`Stamp::known`), is asked by the dates of the keys of the rows
+//! known in the window (`Stamp::key`); one known at a time of another
+//! column, which may be any time after its key, is asked of the whole
+//! series up to the window's last date, so that none known in the window
+//! is missed. The rows outside the window are left out. LSE stores a date
+//! the morning after it (see `export`): the window's last key date may not
+//! be loaded, the current UTC day, or the day before while LSE holds no row
+//! of it (`export::loaded`); nor, of a reference collection, any after the
+//! last key LSE's catalogue says it holds (`last`), which LSE loads later:
+//! on 13 November 2026 the catalogue held insider trades filed up to 13
+//! October. A release LSE has not filled yet is a row of no actual: a
+//! window of releases holding one, past, is not loaded either.
 
 use std::fmt;
 
@@ -54,7 +57,7 @@ const DAY: SignedDuration = SignedDuration::from_hours(24);
 /// A source of LSE's rows that are not prices, and the series of it, as a
 /// data type names them (`LseRow::data_type`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RowSource {
+pub struct RowSource {
     source: String,
     symbol: String,
     call: Call,
@@ -132,12 +135,12 @@ impl Factor {
 
 /// What LSE holds of a source's rows known over a window.
 #[derive(Debug)]
-pub(crate) struct Fetched {
+pub struct Fetched {
     /// The rows known over the window, in the order they are known.
-    pub(crate) rows: Vec<LseRow>,
+    pub rows: Vec<LseRow>,
     /// Where the span LSE may not have loaded yet starts, if the window
     /// reaches into it: from there, LSE may hold rows it does not yet.
-    pub(crate) unloaded_from: Option<Timestamp>,
+    pub unloaded_from: Option<Timestamp>,
 }
 
 impl RowSource {
@@ -157,7 +160,7 @@ impl RowSource {
     /// of its period, not when it came out; for a reference collection the client has not classified,
     /// whose rows may be known at any time; for factors of a symbol naming
     /// no market.
-    pub(crate) fn of(source: &str, symbol: &str) -> anyhow::Result<Self> {
+    pub fn of(source: &str, symbol: &str) -> anyhow::Result<Self> {
         let call = match source {
             OPTIONS_CHAIN => bail!(
                 "LSE serves no history of its {OPTIONS_CHAIN}: /v3/options/chain answers the \
@@ -244,7 +247,7 @@ impl fmt::Display for RowSource {
 /// LSE's catalogue does not list; a file not read (see `parse_rows`); or a
 /// window from before the oldest of an instrument's dividends LSE cut to
 /// their newest.
-pub(crate) async fn fetch(
+pub async fn fetch(
     http: &LseHttpClient,
     source: &RowSource,
     start: Timestamp,
@@ -258,7 +261,8 @@ pub(crate) async fn fetch(
         symbol,
         call,
     } = source;
-    let parsed = match call {
+    // The key of the last rows LSE holds, as its reference catalogue says.
+    let (parsed, held) = match call {
         Call::Reference(_) => {
             let collection = http
                 .reference_collections()
@@ -269,12 +273,15 @@ pub(crate) async fn fetch(
                 .with_context(|| format!("LSE lists no reference collection {name}"))?;
             let query = ReferenceQuery::new(name, symbol, dates);
             let file = http.reference_export(&query).await;
-            read(file, &query, source, &collection.time_column, stamp)?
+            (
+                read(file, &query, source, &collection.time_column, stamp)?,
+                collection.last_key()?,
+            )
         }
         Call::Macro(kind) => {
             let query = MacroQuery::new(kind.name(), symbol, dates);
             let file = http.macro_export(&query).await;
-            read(file, &query, source, kind.time_column(), stamp)?
+            (read(file, &query, source, kind.time_column(), stamp)?, None)
         }
         Call::Factors {
             factor,
@@ -286,8 +293,11 @@ pub(crate) async fn fetch(
                 .factors(&query)
                 .await
                 .with_context(|| format!("asking for {query}"))?;
-            factor_rows(factors, *factor, name, symbol, start)
-                .with_context(|| format!("reading {query}"))?
+            (
+                factor_rows(factors, *factor, name, symbol, start)
+                    .with_context(|| format!("reading {query}"))?,
+                None,
+            )
         }
     };
     if !parsed.refused.is_empty() {
@@ -298,13 +308,18 @@ pub(crate) async fn fetch(
         );
     }
     // The window's last key date, the one LSE may not have loaded yet.
-    let lag = stamp.lag().unwrap_or(SignedDuration::ZERO);
-    let last = end - lag;
+    let last = stamp.key(end).unwrap_or(end);
     let rows_of_last = parsed
         .rows
         .iter()
         .any(|keyed| midnight(keyed.key) == midnight(last));
-    let mut unloaded_from = (!loaded(last, rows_of_last, now)).then(|| midnight(last) + lag);
+    let known = |key: Timestamp| stamp.known(key).unwrap_or(key);
+    let unloaded_day = (!loaded(last, rows_of_last, now)).then(|| known(midnight(last)));
+    // LSE loads a day whole, so its catalogue's last says which day.
+    let unloaded_after_held = held
+        .filter(|&held| midnight(last) > midnight(held))
+        .map(|held| known(midnight(held) + DAY));
+    let mut unloaded_from = unloaded_day.into_iter().chain(unloaded_after_held).min();
     let window = UnixNanos::from(start)..=UnixNanos::from(end);
     let mut rows: Vec<LseRow> = parsed
         .rows
@@ -350,16 +365,17 @@ fn read(
 }
 
 /// The dates of the keys of the rows stamped as `stamp` known over
-/// `[start, end]`: those of the window, `stamp`'s lag before, or, for rows
-/// known at another column's time, every date up to the window's last.
+/// `[start, end]`: from the key of its start to the key of its end (see
+/// `Stamp::key`), or, for rows known at another column's time, every date
+/// up to the window's last.
 fn dates(stamp: Stamp, start: Timestamp, end: Timestamp) -> Dates {
     let date = |at: Timestamp| at.to_zoned(TimeZone::UTC).date();
-    match stamp.lag() {
-        Some(lag) => Dates {
-            from: Some(date(start - lag)),
-            to: date(end - lag),
+    match (stamp.key(start), stamp.key(end)) {
+        (Some(from), Some(to)) => Dates {
+            from: Some(date(from)),
+            to: date(to),
         },
-        None => Dates {
+        _ => Dates {
             from: None,
             to: date(end),
         },

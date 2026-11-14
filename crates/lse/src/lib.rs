@@ -19,24 +19,25 @@
 //! its messages and its client),
 //! `config` (the data client's config), `data` (the data client),
 //! `factories`, and `types`, the custom data type of LSE's rows that are
-//! not prices (`LseRow`).
+//! not prices (`LseRow`). `common`, `http` and `websocket` are public, as
+//! Nautilus' adapters make theirs, so that the tests of the clients'
+//! boundaries (`tests/`) drive them as a caller does; `testing`, the mock
+//! LSE peers and their captured payloads, comes with `test-support`.
 
 pub use self::{
-    common::{
-        consts::{LSE_API_KEY, LSE_CME_API_KEY, LSE_NASDAQ_API_KEY, LSEDGE_VENUE},
-        symbol::LseSymbol,
-    },
+    common::consts::{LSE_API_KEY, LSE_CME_API_KEY, LSE_NASDAQ_API_KEY, LSEDGE_VENUE},
     config::LseDataClientConfig,
+    data::check_streamed,
     factories::LseDataClientFactory,
     types::LseRow,
 };
 
-mod common;
+pub mod common;
 mod config;
 mod data;
 mod factories;
-mod http;
+pub mod http;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 mod types;
-mod websocket;
+pub mod websocket;

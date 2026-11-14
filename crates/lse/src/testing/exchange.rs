@@ -541,12 +541,14 @@ pub fn held(frames: Vec<StreamFrame>, opened: usize) -> Vec<StreamAction> {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
     /// LSE's documentation describes the `dbn` encoding of a record; the
     /// same opening of GCZ6, captured in both encodings, holds it to the
     /// byte.
-    #[test]
+    #[rstest]
     fn a_record_of_the_json_encoding_is_the_binary_frame_lse_sends_in_the_dbn_encoding() {
         let snapshot_book = CME_GCZ6_JSON
             .lines()

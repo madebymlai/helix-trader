@@ -128,9 +128,11 @@ impl ClientConfig for LseDataClientConfig {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
-    #[test]
+    #[rstest]
     fn lse_s_own_api_unless_told_otherwise() {
         let mock = LseDataClientConfig::builder()
             .base_url_http("http://127.0.0.1:9".to_string())
@@ -145,7 +147,7 @@ mod tests {
 
     /// LSE's addresses, as its socket documentation gives them ("The
     /// sockets").
-    #[test]
+    #[rstest]
     fn each_socket_is_lse_s_own_unless_told_otherwise() {
         let mock = LseDataClientConfig::builder()
             .base_url_ws_london("ws://127.0.0.1:9".to_string())
@@ -172,7 +174,7 @@ mod tests {
 
     /// LSE's addresses, as its socket documentation gives them ("The CME
     /// Group stream").
-    #[test]
+    #[rstest]
     fn each_exchange_s_stream_is_lse_s_own_unless_told_otherwise() {
         let mock = LseDataClientConfig::builder()
             .base_url_ws_nasdaq("ws://127.0.0.1:9/v1/stream".to_string())
@@ -197,12 +199,12 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn the_free_plan_s_60_calls_a_minute_unless_told_otherwise() {
         assert_eq!(LseDataClientConfig::default().calls_per_minute.get(), 60);
     }
 
-    #[test]
+    #[rstest]
     fn each_exchange_plan_s_lite_200_calls_a_minute_on_its_key_unless_told_otherwise() {
         let config = LseDataClientConfig::default();
 
@@ -215,7 +217,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn the_keys_are_not_in_the_config_s_debug() {
         let config = LseDataClientConfig::builder()
             .api_key(SecretString::from("lse-test-key-0123456789"))

@@ -486,8 +486,8 @@ fn of_definitions_source(slices: &[SeriesSlice], source: DefinitionsSource) -> V
 /// (`DefinitionsSource`): the cTrader brokers and IB ask the definition of
 /// each contract they fill the series of; OKX writes the definitions it
 /// gives before the node starts; GLBX's, XNAS's and OPRA's are asked of
-/// Databento's data client in LSE's fill, after a check against the end of
-/// each one's dataset; LSEDGE's are the catalog's alone, which the data
+/// Databento's data client in LSE's fill, each within the end of its
+/// dataset; LSEDGE's are the catalog's alone, which the data
 /// engine answers LSE's client's definition requests from.
 /// The cTrader brokers, LSE and IB refuse a series they do not serve. A
 /// source with nothing missing reads no credential, IB's connection aside.
@@ -498,8 +498,8 @@ fn of_definitions_source(slices: &[SeriesSlice], source: DefinitionsSource) -> V
 /// fills, before anything connects, if the catalog cannot be read, if
 /// `DATABENTO_API_KEY` is missing while Databento has a definition to give,
 /// or as `add_ctrader_fill`, `OkxHistory::write_definitions`,
-/// `lse::add_fill` (`DatabentoHistory::new` and `DatabentoHistory::check`
-/// among them), `NodeFill::run` (`LSE_API_KEY`, `LSE_CME_API_KEY` or
+/// `lse::add_fill` (`DatabentoHistory::new` and
+/// `DatabentoHistory::within_datasets` among them), `NodeFill::run` (`LSE_API_KEY`, `LSE_CME_API_KEY` or
 /// `LSE_NASDAQ_API_KEY` missing while LSE has something to fill of its
 /// market among them), `IbHistory::connect` and `IbHistory::fill`.
 pub async fn fill_history(
@@ -674,12 +674,17 @@ impl LiveRoutes {
 /// client is routed the venues whose live data is IB's, and its execution
 /// client takes the default route of orders, every order but OKX's and the
 /// cTrader brokers'. So every venue the run reads has a route of its data,
-/// and no data client is the default: Nautilus makes the first data client
-/// on no venue it registers the default, LSE's or IB's in no set order, and
-/// would refuse IB's made the default after LSE's (see
-/// `live::node::Clients`). No source streams custom data of no
+/// and helix makes no data client the default: Nautilus makes the first
+/// data client on no venue it registers the default itself, LSE's or IB's
+/// in no set order, and would refuse IB's made the default after LSE's
+/// (see `live::node::Clients`); nothing depends on which, every venue read
+/// having a route. No source streams custom data of no
 /// instrument, LSE's rows, so a run reading any is refused before anything
-/// connects. The cTrader brokers' bar types are checked and their
+/// connects, and so is one reading a series of LSE's venues LSE's client
+/// does not stream (`lse::check_streamed`): external bars, LSE streaming no
+/// candles, a GLBX or XNAS contract's among them, which IB streamed before
+/// LSE took their live data; an LSEDGE series' trades; an OPRA contract's
+/// quotes. The cTrader brokers' bar types are checked and their
 /// environments and credential read before anything connects; OKX's
 /// clients are set up at `leverage`, the run's, IB's trading the IB account
 /// of `venues` with its client id.
@@ -687,9 +692,10 @@ impl LiveRoutes {
 /// # Errors
 ///
 /// Returns an error naming them if `requirements` reads custom data of no
-/// instrument, if a cTrader broker's bar type is not built from quotes or
-/// its environment or credential is missing (see `ctrader_read`, checked
-/// before anything connects), if OKX's clients cannot be set up or the OKX
+/// instrument or a series LSE's client does not stream of a venue whose
+/// live data is LSE's, if a cTrader broker's bar type is not built from
+/// quotes or its environment or credential is missing (see `ctrader_read`,
+/// checked before anything connects), if OKX's clients cannot be set up or the OKX
 /// account does not suit the run (see `okx::clients`), if cTrader is
 /// unreachable or a broker's account is not hedging or not the
 /// credential's (see
@@ -719,7 +725,15 @@ pub(crate) async fn live_clients(
             .collect::<Vec<_>>()
             .join(", ")
     );
-    // Read before anything connects.
+    // Read before anything connects: what LSE's client is to stream, of
+    // the instruments read, a rolled root's among them, whose contracts it
+    // streams.
+    let lse_read: Vec<InstrumentId> = requirements
+        .instrument_ids()
+        .into_iter()
+        .filter(|id| Row::of(id.venue).live_data == LiveDataSource::Lse)
+        .collect();
+    ::lse::check_streamed(&requirements.of_instruments(&lse_read).catalog_series())?;
     let ctrader = ctrader_brokers_present(&ctrader_ids)
         .into_iter()
         .map(|(broker, ids)| ctrader_read(requirements, &ids, broker.venue, || broker.connection()))
@@ -1536,7 +1550,10 @@ mod tests {
             broker: Some(Broker::CTrader(broker)),
         };
         // An exchange's listings, under the ids Databento gives them, CME
-        // Globex's, Nasdaq TotalView's and US options', streamed from LSE.
+        // Globex's, Nasdaq TotalView's and US options', streamed from LSE;
+        // a row is its venue's, so a GLBX root and a Databento continuous
+        // symbol take GLBX's too, which LSE's client refuses the latter of,
+        // serving dated contracts alone.
         let exchange = Row {
             definitions: DefinitionsSource::Databento,
             history: HistorySource::Lse,
@@ -1856,9 +1873,9 @@ mod tests {
         assert_eq!(Row::of(*LSEDGE_VENUE).history, HistorySource::Lse);
     }
 
-    /// LSE's data client alone, on the route of LSEDGE, the default left to
-    /// IB; its key is read when the node creates it, so nothing is read or
-    /// connected here.
+    /// LSE's data client alone, on the route of LSEDGE, not made the
+    /// default; its key is read when the node creates it, so nothing is read
+    /// or connected here.
     #[tokio::test]
     async fn a_run_reading_lsedge_instruments_streams_them_from_lse_routed_lsedge_with_no_broker() {
         let requirements = ticks(&[
@@ -1922,6 +1939,80 @@ mod tests {
         }
         let lse = lse::live_clients(&[InstrumentId::from("GOLD-FUTURES.LSEDGE")]);
         assert_eq!(lse.data_factory.name(), "LSE");
+    }
+
+    /// LSE streams none of them: each refused naming it before anything
+    /// connects, OKX's clients among them, which would fail on its missing
+    /// environment. A GLBX contract's external bars, which IB streamed
+    /// before LSE took GLBX's live data, an LSEDGE series' trades, LSE's
+    /// sockets giving quotes, an option's quotes, LSE streaming its trades
+    /// alone, an LSEDGE series' book, and custom data of a rolled root, read
+    /// on the contracts the run loads.
+    #[tokio::test]
+    async fn a_run_reading_a_series_lse_does_not_stream_is_refused_naming_it_before_anything_connects()
+     {
+        let gc_imbalances = TickSeries {
+            data: NautilusDataType::Custom {
+                type_name: "Imbalance".to_string(),
+            },
+            instrument_id: InstrumentId::from("GC.GLBX"),
+        };
+        for (read, series) in [
+            (
+                reading(&["GCZ26.GLBX-1-MINUTE-LAST-EXTERNAL"]),
+                "GCZ26.GLBX-1-MINUTE-LAST-EXTERNAL",
+            ),
+            (
+                ticks(&[(NautilusDataType::TradeTick, "GOLD-FUTURES.LSEDGE")]),
+                "GOLD-FUTURES.LSEDGE",
+            ),
+            (
+                reading(&["GOLD-FUTURES.LSEDGE-1-MINUTE-LAST-INTERNAL"]),
+                "GOLD-FUTURES.LSEDGE",
+            ),
+            (
+                ticks(&[(NautilusDataType::QuoteTick, "AAPL  261120C00355000.OPRA")]),
+                "AAPL  261120C00355000.OPRA",
+            ),
+            (
+                ticks(&[(NautilusDataType::OrderBookDepth, "GOLD-FUTURES.LSEDGE")]),
+                "GOLD-FUTURES.LSEDGE",
+            ),
+            (
+                DataRequirements {
+                    ticks: vec![gc_imbalances],
+                    ..ticks(&[])
+                },
+                "GC.GLBX",
+            ),
+        ] {
+            let requirements = DataRequirements {
+                ticks: [
+                    read.ticks,
+                    ticks(&[(NautilusDataType::QuoteTick, SWAP)]).ticks,
+                ]
+                .concat(),
+                ..read
+            };
+            let loaded = [
+                InstrumentId::from(SWAP),
+                InstrumentId::from("GCZ26.GLBX"),
+                InstrumentId::from("GCG27.GLBX"),
+                InstrumentId::from("GOLD-FUTURES.LSEDGE"),
+                InstrumentId::from("AAPL  261120C00355000.OPRA"),
+            ];
+
+            let Err(err) = live_clients(&requirements, &loaded, &live_args(), Decimal::ONE).await
+            else {
+                panic!("set up clients for {series}");
+            };
+
+            let err = format!("{err:#}");
+            assert!(
+                err.contains(series) && err.contains("LSE streams no"),
+                "{series}: {err}"
+            );
+        }
     }
 
     /// LSE streams none yet: refused before anything connects, OKX's

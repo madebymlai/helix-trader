@@ -2,5 +2,5 @@
 //! one protocol of their own: its messages (`messages`) and the client of
 //! one connection (`client`).
 
-pub(crate) mod client;
-pub(crate) mod messages;
+pub mod client;
+pub mod messages;

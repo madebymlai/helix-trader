@@ -33,7 +33,7 @@ const LIVE: u8 = 2;
 /// names: its records are Databento's of one schema ("to change the
 /// contracts or the level, open another connection").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum ExchangeLevel {
+pub enum ExchangeLevel {
     /// Level 1: every trade and the best bid and offer (`mbp1`), each
     /// contract opening with its last best bid and offer.
     Mbp1,
@@ -73,7 +73,7 @@ impl fmt::Display for ExchangeLevel {
 /// The one message a connection sends, within five seconds of opening: the
 /// contracts by their names at LSE, at one level, in the `dbn` encoding.
 #[derive(Debug, Serialize)]
-pub(crate) struct ExchangeSubscription<'a> {
+pub struct ExchangeSubscription<'a> {
     op: &'static str,
     symbols: &'a [String],
     level: u8,
@@ -82,7 +82,7 @@ pub(crate) struct ExchangeSubscription<'a> {
 
 impl<'a> ExchangeSubscription<'a> {
     /// The subscription of `symbols`, each named once, at `level`.
-    pub(crate) fn new(level: ExchangeLevel, symbols: &'a [String]) -> Self {
+    pub fn new(level: ExchangeLevel, symbols: &'a [String]) -> Self {
         Self {
             op: "subscribe",
             symbols,
@@ -91,7 +91,7 @@ impl<'a> ExchangeSubscription<'a> {
         }
     }
 
-    pub(crate) fn to_json(&self) -> String {
+    pub fn to_json(&self) -> String {
         serde_json::to_string(self).expect("a subscription serializes")
     }
 }
@@ -100,7 +100,7 @@ impl<'a> ExchangeSubscription<'a> {
 /// read.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum ExchangeText {
+pub enum ExchangeText {
     /// First on a connection: the feed's `epoch`, which every later message
     /// repeats; a new one after the feed's reset, its contracts' sequences
     /// starting again.
@@ -119,7 +119,7 @@ pub(crate) enum ExchangeText {
 
 /// A record of the stream, Databento's of its connection's level.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ExchangeRecord {
+pub enum ExchangeRecord {
     Mbp1(Mbp1Msg),
     Mbp10(Box<Mbp10Msg>),
     Mbo(MboMsg),
@@ -127,15 +127,15 @@ pub(crate) enum ExchangeRecord {
 
 /// A binary frame of the stream: one record of a contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ExchangeRecordFrame {
+pub struct ExchangeRecordFrame {
     /// Whether it is the contract's opening, its last best bid and offer or
     /// ten levels, rather than a live record.
-    pub(crate) snapshot: bool,
+    pub snapshot: bool,
     /// The contract's sequence of the record, one more than the last.
-    pub(crate) sequence: u64,
+    pub sequence: u64,
     /// The stream's number of the contract.
-    pub(crate) instrument_id: u32,
-    pub(crate) record: ExchangeRecord,
+    pub instrument_id: u32,
+    pub record: ExchangeRecord,
 }
 
 impl ExchangeRecordFrame {
@@ -149,7 +149,7 @@ impl ExchangeRecordFrame {
     ///
     /// Returns an error if `frame` is not such a frame of one record of
     /// `level`.
-    pub(crate) fn parse(frame: &[u8], level: ExchangeLevel) -> anyhow::Result<Self> {
+    pub fn parse(frame: &[u8], level: ExchangeLevel) -> anyhow::Result<Self> {
         ensure!(
             frame.len() >= HEADER_LEN,
             "{} bytes, short of LSE's {HEADER_LEN}-byte header",

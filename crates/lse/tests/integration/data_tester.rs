@@ -49,7 +49,7 @@ use nautilus_testkit::testers::{DataTester, DataTesterConfig};
 use rstest::rstest;
 use serde_json::json;
 
-use crate::{
+use lse::{
     LseDataClientConfig, LseDataClientFactory,
     testing::{
         AAPL_CALL, API_KEY, CME_API_KEY, CME_ESZ6_DOCUMENTED, CME_GCZ6_GCG7,
