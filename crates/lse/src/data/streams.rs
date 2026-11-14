@@ -24,7 +24,7 @@
 //! chain ends with its last contract's subscription. LSE's refusal of a
 //! subscription is logged as an error, a reconnect's gap as a warning.
 
-use std::sync::Arc;
+use std::{str::FromStr, sync::Arc};
 
 use ahash::AHashMap;
 use anyhow::{Context, bail};
@@ -36,12 +36,16 @@ use nautilus_common::{
 };
 use nautilus_core::{collections::AtomicMap, time::AtomicTime};
 use nautilus_live::task::TaskGroup;
-use nautilus_model::{data::Data, identifiers::InstrumentId, instruments::Instrument};
+use nautilus_model::{
+    data::{Data, NautilusDataType},
+    identifiers::InstrumentId,
+    instruments::Instrument,
+};
 
 use super::exchange::{ExchangeAccess, ExchangeInstrument, ExchangeStreams, StreamKind};
 use crate::{
     common::{
-        consts::{LSE_API_KEY, LseExchange, LseSocket, OPRA_VENUE},
+        consts::{LSE_API_KEY, LSEDGE_VENUE, LseExchange, LseSocket, OPRA_VENUE},
         credential::LseCredential,
         symbol::{LseInstrument, OpraContract},
     },
@@ -390,6 +394,7 @@ impl LseStreams {
                 .exchange_mut(exchange)
                 .subscribe(id, StreamKind::Quotes, cache);
         }
+        check_stream(&NautilusDataType::QuoteTick, id)?;
         let (socket, symbol) = self.streamed_as(id)?;
         let client = self.socket(socket)?;
         let quoted = defined(id, cache)?;
@@ -499,7 +504,7 @@ impl LseStreams {
         id: InstrumentId,
         cache: &CacheView,
     ) -> anyhow::Result<()> {
-        let exchange = booked(id)?;
+        let exchange = booked(id, &NautilusDataType::OrderBookDepth)?;
         self.exchange_mut(exchange)
             .subscribe(id, StreamKind::Depth, cache)
     }
@@ -511,7 +516,7 @@ impl LseStreams {
     /// Returns an error naming it if it is neither a `GLBX` contract nor an
     /// `XNAS` stock, or is not subscribed.
     pub(super) fn unsubscribe_book_depth(&self, id: InstrumentId) -> anyhow::Result<()> {
-        self.exchange(booked(id)?)
+        self.exchange(booked(id, &NautilusDataType::OrderBookDepth)?)
             .unsubscribe(id, StreamKind::Depth)
     }
 
@@ -529,7 +534,7 @@ impl LseStreams {
         id: InstrumentId,
         cache: &CacheView,
     ) -> anyhow::Result<()> {
-        let exchange = booked(id)?;
+        let exchange = booked(id, &NautilusDataType::OrderBookDelta)?;
         self.exchange_mut(exchange)
             .subscribe(id, StreamKind::Deltas, cache)
     }
@@ -542,7 +547,7 @@ impl LseStreams {
     /// Returns an error naming it if it is neither a `GLBX` contract nor an
     /// `XNAS` stock, or is not subscribed.
     pub(super) fn unsubscribe_book_deltas(&self, id: InstrumentId) -> anyhow::Result<()> {
-        self.exchange(booked(id)?)
+        self.exchange(booked(id, &NautilusDataType::OrderBookDelta)?)
             .unsubscribe(id, StreamKind::Deltas)
     }
 
@@ -574,14 +579,7 @@ impl LseStreams {
 
     /// The contract `id` is, an `OPRA` contract the client streams.
     fn contract(&self, id: InstrumentId) -> anyhow::Result<&OpraContract> {
-        if id.venue != *OPRA_VENUE {
-            bail!(
-                "LSE streams no trades of {id}: its sockets' ticks of a series are quotes (a \
-                 futures tick's price is its bid); it streams the trades of US option \
-                 contracts, under OPRA, of CME Globex contracts, under GLBX, and of Nasdaq \
-                 TotalView stocks, under XNAS"
-            );
-        }
+        check_stream(&NautilusDataType::TradeTick, id)?;
         match self.options.iter().find(|(of, _)| *of == id) {
             Some((_, contract)) => Ok(contract),
             None => bail!(
@@ -630,21 +628,99 @@ impl LseStreams {
     }
 }
 
-/// The exchange whose stream carries the book of `id`: a `GLBX`
-/// contract's or an `XNAS` stock's, LSE's sockets streaming a series'
-/// ticks alone.
+/// Checks that the client streams each of `series`, a Nautilus data type
+/// and its catalog identifier, an instrument id, or a bar type for bars:
+/// an `LSEDGE` series' quotes, on its socket; an `OPRA` contract's trades,
+/// through its underlying's chain; a `GLBX` contract's or an `XNAS` stock's
+/// quotes, trades, book depth and book deltas, on its exchange's stream,
+/// a rolled root's on its contracts. A live run checks what it reads before
+/// anything connects, rather than have a subscription the client cannot
+/// serve fail, or be logged as not implemented, after the node started.
 ///
 /// # Errors
 ///
-/// Returns an error naming it if it is neither.
-fn booked(id: InstrumentId) -> anyhow::Result<LseExchange> {
-    LseExchange::of_venue(id.venue).with_context(|| {
-        format!(
-            "LSE streams no book of {id}: its sockets stream a series' ticks alone; it streams \
-             the book of CME Globex contracts, under GLBX, and of Nasdaq TotalView stocks, under \
-             XNAS, Level 2's ten levels a side as depth and Level 3's orders as deltas"
-        )
-    })
+/// Returns an error naming the first series the client does not stream,
+/// saying what LSE streams instead: bars, LSE streaming no candles, to be
+/// built from the instrument's quotes or trades (`INTERNAL`); an `LSEDGE`
+/// series' trades, its sockets' ticks being quotes; an `OPRA` contract's
+/// quotes, LSE's US options feed carrying trades alone; the book of either;
+/// any other data, custom data among them; or an instrument of another
+/// venue, or no instrument id.
+pub fn check_streamed(series: &[(NautilusDataType, String)]) -> anyhow::Result<()> {
+    for (data, identifier) in series {
+        if *data == NautilusDataType::Bar {
+            bail!(
+                "LSE streams no bars {identifier}: its candles are history alone; declare the \
+                 bars built (INTERNAL) from the instrument's quotes or trades LSE streams"
+            );
+        }
+        let id = InstrumentId::from_str(identifier)
+            .with_context(|| format!("the {data} of {identifier}, no instrument id"))?;
+        check_stream(data, id)?;
+    }
+    Ok(())
+}
+
+/// Checks that the client streams `data` of `id` (see `check_streamed`),
+/// by its venue alone.
+///
+/// # Errors
+///
+/// Returns an error naming it and saying what LSE streams instead if not.
+fn check_stream(data: &NautilusDataType, id: InstrumentId) -> anyhow::Result<()> {
+    use NautilusDataType as D;
+    let venue = id.venue;
+    let exchange = LseExchange::of_venue(venue).is_some();
+    match data {
+        D::QuoteTick | D::TradeTick | D::OrderBookDepth | D::OrderBookDelta if exchange => Ok(()),
+        D::QuoteTick if venue == *LSEDGE_VENUE => Ok(()),
+        D::TradeTick if venue == *OPRA_VENUE => Ok(()),
+        D::TradeTick if venue == *LSEDGE_VENUE => bail!(
+            "LSE streams no trades of {id}: its sockets' ticks of a series are quotes (a \
+             futures tick's price is its bid); read its quotes, or bars built from them, priced \
+             BID, ASK or MID; it streams the trades of US option contracts, under OPRA, of CME \
+             Globex contracts, under GLBX, and of Nasdaq TotalView stocks, under XNAS"
+        ),
+        D::QuoteTick if venue == *OPRA_VENUE => bail!(
+            "LSE streams no quotes of {id}: its US options feed carries trades alone; read its \
+             trades, or bars built from them, priced LAST"
+        ),
+        D::OrderBookDepth | D::OrderBookDelta if venue == *LSEDGE_VENUE || venue == *OPRA_VENUE => {
+            bail!(
+                "LSE streams no book of {id}: its sockets stream a series' ticks alone; it \
+                 streams the book of CME Globex contracts, under GLBX, and of Nasdaq TotalView \
+                 stocks, under XNAS, Level 2's ten levels a side as depth and Level 3's orders \
+                 as deltas"
+            )
+        }
+        _ if exchange || venue == *LSEDGE_VENUE || venue == *OPRA_VENUE => bail!(
+            "LSE streams no {data} of {id}: of {venue} it streams {}",
+            if exchange {
+                "quotes, trades, book depth and book deltas"
+            } else if venue == *LSEDGE_VENUE {
+                "quotes"
+            } else {
+                "trades"
+            }
+        ),
+        _ => bail!(
+            "LSE streams nothing of {id}: {venue} is none of the venues it streams, {LSEDGE}, \
+             GLBX, XNAS and OPRA",
+            LSEDGE = *LSEDGE_VENUE
+        ),
+    }
+}
+
+/// The exchange whose stream carries the book of `id`, its `data`: a
+/// `GLBX` contract's or an `XNAS` stock's, LSE's sockets streaming a
+/// series' ticks alone.
+///
+/// # Errors
+///
+/// Returns an error naming it if it is neither (see `check_stream`).
+fn booked(id: InstrumentId, data: &NautilusDataType) -> anyhow::Result<LseExchange> {
+    check_stream(data, id)?;
+    Ok(LseExchange::of_venue(id.venue).expect("LSE streams a book of an exchange's alone"))
 }
 
 /// `id` with the precisions of its definition in `cache`.
@@ -672,5 +748,60 @@ fn defined(id: InstrumentId, cache: &CacheView) -> anyhow::Result<Subscribed> {
 fn send(sender: &EventSender<DataEvent>, event: DataEvent) {
     if let Err(e) = sender.send(event) {
         log::warn!("data event not sent: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use nautilus_model::data::NautilusDataType as Data;
+    use rstest::rstest;
+
+    use super::*;
+
+    fn series(data: Data, identifier: &str) -> Vec<(Data, String)> {
+        vec![(data, identifier.to_string())]
+    }
+
+    /// An `LSEDGE` series' quotes, an `OPRA` contract's trades, and a
+    /// `GLBX` contract's or an `XNAS` stock's Levels 1 to 3, a rolled
+    /// root's on its contracts.
+    #[rstest]
+    #[case::a_series_quotes(Data::QuoteTick, "GOLD-FUTURES.LSEDGE")]
+    #[case::an_option_s_trades(Data::TradeTick, "AAPL  261120C00355000.OPRA")]
+    #[case::a_contract_s_quotes(Data::QuoteTick, "GCZ26.GLBX")]
+    #[case::a_contract_s_trades(Data::TradeTick, "GCZ26.GLBX")]
+    #[case::a_contract_s_depth(Data::OrderBookDepth, "GCZ26.GLBX")]
+    #[case::a_contract_s_deltas(Data::OrderBookDelta, "GCZ26.GLBX")]
+    #[case::a_root_s_trades(Data::TradeTick, "GC.GLBX")]
+    #[case::a_stock_s_quotes(Data::QuoteTick, "NVDA.XNAS")]
+    #[case::a_stock_s_deltas(Data::OrderBookDelta, "NVDA.XNAS")]
+    fn a_series_lse_streams_passes(#[case] data: Data, #[case] identifier: &str) {
+        check_streamed(&series(data, identifier)).unwrap();
+    }
+
+    /// Each refused naming the series and saying what LSE streams instead.
+    #[rstest]
+    #[case::a_contract_s_bars(Data::Bar, "GCZ26.GLBX-1-MINUTE-LAST-EXTERNAL", "INTERNAL")]
+    #[case::a_series_bars(Data::Bar, "GOLD-FUTURES.LSEDGE-1-MINUTE-LAST-EXTERNAL", "INTERNAL")]
+    #[case::a_series_trades(Data::TradeTick, "GOLD-FUTURES.LSEDGE", "quotes")]
+    #[case::an_option_s_quotes(Data::QuoteTick, "AAPL  261120C00355000.OPRA", "trades")]
+    #[case::a_series_book(Data::OrderBookDepth, "GOLD-FUTURES.LSEDGE", "GLBX")]
+    #[case::an_option_s_book(Data::OrderBookDelta, "AAPL  261120C00355000.OPRA", "GLBX")]
+    #[case::custom_data_of_a_contract(
+        Data::Custom { type_name: "Imbalance".to_string() },
+        "GCZ26.GLBX",
+        "Custom:Imbalance"
+    )]
+    #[case::another_venue(Data::QuoteTick, "SXR8.IBIS", "IBIS")]
+    fn a_series_lse_does_not_stream_is_refused_naming_it(
+        #[case] data: Data,
+        #[case] identifier: &str,
+        #[case] instead: &str,
+    ) {
+        let err = check_streamed(&series(data, identifier))
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains(identifier) && err.contains(instead), "{err}");
     }
 }

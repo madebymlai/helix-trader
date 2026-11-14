@@ -27,6 +27,7 @@ pub use self::{
         symbol::LseSymbol,
     },
     config::LseDataClientConfig,
+    data::check_streamed,
     factories::LseDataClientFactory,
     types::LseRow,
 };

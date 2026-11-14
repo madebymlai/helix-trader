@@ -85,6 +85,7 @@ use nautilus_model::{
     instruments::Instrument,
 };
 
+pub use self::streams::check_streamed;
 use self::{exchange::ExchangeAccess, streams::LseStreams};
 use crate::{
     common::{

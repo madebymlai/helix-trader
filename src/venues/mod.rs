@@ -679,7 +679,11 @@ impl LiveRoutes {
 /// would refuse IB's made the default after LSE's (see
 /// `live::node::Clients`). No source streams custom data of no
 /// instrument, LSE's rows, so a run reading any is refused before anything
-/// connects. The cTrader brokers' bar types are checked and their
+/// connects, and so is one reading a series of LSE's venues LSE's client
+/// does not stream (`lse::check_streamed`): external bars, LSE streaming no
+/// candles, a GLBX or XNAS contract's among them, which IB streamed before
+/// LSE took their live data; an LSEDGE series' trades; an OPRA contract's
+/// quotes. The cTrader brokers' bar types are checked and their
 /// environments and credential read before anything connects; OKX's
 /// clients are set up at `leverage`, the run's, IB's trading the IB account
 /// of `venues` with its client id.
@@ -687,9 +691,10 @@ impl LiveRoutes {
 /// # Errors
 ///
 /// Returns an error naming them if `requirements` reads custom data of no
-/// instrument, if a cTrader broker's bar type is not built from quotes or
-/// its environment or credential is missing (see `ctrader_read`, checked
-/// before anything connects), if OKX's clients cannot be set up or the OKX
+/// instrument or a series LSE's client does not stream of a venue whose
+/// live data is LSE's, if a cTrader broker's bar type is not built from
+/// quotes or its environment or credential is missing (see `ctrader_read`,
+/// checked before anything connects), if OKX's clients cannot be set up or the OKX
 /// account does not suit the run (see `okx::clients`), if cTrader is
 /// unreachable or a broker's account is not hedging or not the
 /// credential's (see
@@ -719,7 +724,15 @@ pub(crate) async fn live_clients(
             .collect::<Vec<_>>()
             .join(", ")
     );
-    // Read before anything connects.
+    // Read before anything connects: what LSE's client is to stream, of
+    // the instruments read, a rolled root's among them, whose contracts it
+    // streams.
+    let lse_read: Vec<InstrumentId> = requirements
+        .instrument_ids()
+        .into_iter()
+        .filter(|id| Row::of(id.venue).live_data == LiveDataSource::Lse)
+        .collect();
+    ::lse::check_streamed(&requirements.of_instruments(&lse_read).catalog_series())?;
     let ctrader = ctrader_brokers_present(&ctrader_ids)
         .into_iter()
         .map(|(broker, ids)| ctrader_read(requirements, &ids, broker.venue, || broker.connection()))
@@ -1922,6 +1935,80 @@ mod tests {
         }
         let lse = lse::live_clients(&[InstrumentId::from("GOLD-FUTURES.LSEDGE")]);
         assert_eq!(lse.data_factory.name(), "LSE");
+    }
+
+    /// LSE streams none of them: each refused naming it before anything
+    /// connects, OKX's clients among them, which would fail on its missing
+    /// environment. A GLBX contract's external bars, which IB streamed
+    /// before LSE took GLBX's live data, an LSEDGE series' trades, LSE's
+    /// sockets giving quotes, an option's quotes, LSE streaming its trades
+    /// alone, an LSEDGE series' book, and custom data of a rolled root, read
+    /// on the contracts the run loads.
+    #[tokio::test]
+    async fn a_run_reading_a_series_lse_does_not_stream_is_refused_naming_it_before_anything_connects()
+     {
+        let gc_imbalances = TickSeries {
+            data: NautilusDataType::Custom {
+                type_name: "Imbalance".to_string(),
+            },
+            instrument_id: InstrumentId::from("GC.GLBX"),
+        };
+        for (read, series) in [
+            (
+                reading(&["GCZ26.GLBX-1-MINUTE-LAST-EXTERNAL"]),
+                "GCZ26.GLBX-1-MINUTE-LAST-EXTERNAL",
+            ),
+            (
+                ticks(&[(NautilusDataType::TradeTick, "GOLD-FUTURES.LSEDGE")]),
+                "GOLD-FUTURES.LSEDGE",
+            ),
+            (
+                reading(&["GOLD-FUTURES.LSEDGE-1-MINUTE-LAST-INTERNAL"]),
+                "GOLD-FUTURES.LSEDGE",
+            ),
+            (
+                ticks(&[(NautilusDataType::QuoteTick, "AAPL  261120C00355000.OPRA")]),
+                "AAPL  261120C00355000.OPRA",
+            ),
+            (
+                ticks(&[(NautilusDataType::OrderBookDepth, "GOLD-FUTURES.LSEDGE")]),
+                "GOLD-FUTURES.LSEDGE",
+            ),
+            (
+                DataRequirements {
+                    ticks: vec![gc_imbalances],
+                    ..ticks(&[])
+                },
+                "GC.GLBX",
+            ),
+        ] {
+            let requirements = DataRequirements {
+                ticks: [
+                    read.ticks,
+                    ticks(&[(NautilusDataType::QuoteTick, SWAP)]).ticks,
+                ]
+                .concat(),
+                ..read
+            };
+            let loaded = [
+                InstrumentId::from(SWAP),
+                InstrumentId::from("GCZ26.GLBX"),
+                InstrumentId::from("GCG27.GLBX"),
+                InstrumentId::from("GOLD-FUTURES.LSEDGE"),
+                InstrumentId::from("AAPL  261120C00355000.OPRA"),
+            ];
+
+            let Err(err) = live_clients(&requirements, &loaded, &live_args(), Decimal::ONE).await
+            else {
+                panic!("set up clients for {series}");
+            };
+
+            let err = format!("{err:#}");
+            assert!(
+                err.contains(series) && err.contains("LSE streams no"),
+                "{series}: {err}"
+            );
+        }
     }
 
     /// LSE streams none yet: refused before anything connects, OKX's
