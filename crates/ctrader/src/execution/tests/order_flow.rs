@@ -702,6 +702,58 @@ async fn a_lookup_of_an_order_on_a_symbol_the_run_did_not_load_fails() {
     node.client.disconnect().await.unwrap();
 }
 
+/// The broker holds PROBE-1, the captured filled market order, its deal
+/// stating no commission (Nautilus' `spec_exec_testing.md`, TC-E88): the
+/// lookup fails rather than report the order without its fill's commission.
+#[tokio::test]
+async fn a_lookup_of_an_order_whose_deal_states_no_commission_fails() {
+    let filled = execution(EXECUTION_MARKET_FILLED);
+    let mut deal = filled.deal.unwrap();
+    deal.commission = None;
+    let held = filled.order.unwrap();
+    let mut node = Node::start(move |request| match request.payload_type {
+        t if t == ProtoOaOrderListReq::TYPE => vec![reply(
+            request,
+            &ProtoOaOrderListRes {
+                ctid_trader_account_id: ACCOUNT_ID,
+                order: vec![held.clone()],
+                has_more: false,
+                ..Default::default()
+            },
+        )],
+        t if t == ProtoOaOrderDetailsReq::TYPE => vec![reply(
+            request,
+            &ProtoOaOrderDetailsRes {
+                ctid_trader_account_id: ACCOUNT_ID,
+                order: held.clone(),
+                deal: vec![deal],
+                ..Default::default()
+            },
+        )],
+        _ => vec![],
+    })
+    .await;
+    node.add(&[&market("PROBE-1", OrderSide::Buy, 1)]);
+
+    let lookup = node
+        .client
+        .generate_order_status_report(&GenerateOrderStatusReport::new(
+            UUID4::new(),
+            node.client.now(),
+            Some(InstrumentId::from(XAUUSD)),
+            Some(ClientOrderId::from("PROBE-1")),
+            None,
+            None,
+            None,
+        ))
+        .await;
+
+    let error = format!("{:#}", lookup.unwrap_err());
+    assert!(error.contains("cTrader deal 953555124"), "{error}");
+    assert!(error.contains("no commission"), "{error}");
+    node.client.disconnect().await.unwrap();
+}
+
 /// A lookup naming no client order id, its order not open: the client has
 /// no window to look for it in, so it fails rather than answer that the
 /// broker holds no such order.

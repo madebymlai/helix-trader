@@ -16,7 +16,8 @@
 //!   `orderId`, with the position it opens into or closes, if any.
 //! - **Deals** (`ProtoOADeal`, filled): a `FillReport` each, by `dealId`,
 //!   of order `orderId` and position `positionId`, the commission the
-//!   charge cTrader states (a negative amount) as a positive cost.
+//!   charge cTrader states (a negative amount) as a positive cost. A deal
+//!   stating no charge fails its report, and the request that wanted it.
 //!
 //! Prices travel as IEEE-754 doubles: an order's or a deal's price, a stop
 //! loss and a take profit are on the instrument's tick, so they are read at
@@ -559,16 +560,20 @@ pub(super) fn open_volumes(positions: &[ProtoOaPosition]) -> HashMap<i64, i64> {
 
 /// The commission cTrader charged on `deal` (a negative amount in the
 /// deposit currency `currency`, at its `moneyDigits`) as Nautilus' positive
-/// cost.
+/// cost. A deal that states none has no commission to book: zero would be
+/// one cTrader did not report, so it fails, as Nautilus' OKX and
+/// Interactive Brokers adapters fail a fill without its fee
+/// (`developer_guide/adapters.md`, "Commission failure handling").
 ///
 /// # Errors
 ///
-/// Returns an error if the amount does not fit `currency`.
+/// Returns an error if the deal states no commission, or the amount does
+/// not fit `currency`.
 pub(super) fn commission(deal: &ProtoOaDeal, currency: Currency) -> anyhow::Result<Money> {
-    let charged = Decimal::new(
-        deal.commission.unwrap_or_default(),
-        deal.money_digits.unwrap_or(2),
-    );
+    let charged = deal
+        .commission
+        .context("the deal states no commission, which is not booked as zero")?;
+    let charged = Decimal::new(charged, deal.money_digits.unwrap_or(2));
     Money::from_decimal(-charged, currency).map_err(|e| anyhow::anyhow!("commission: {e}"))
 }
 

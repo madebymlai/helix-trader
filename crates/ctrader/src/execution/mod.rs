@@ -15,12 +15,13 @@
 //! whole, or adds to it. A modification amends a pending order, or moves a
 //! protection (`ProtoOAAmendPositionSLTPReq`, both prices, cTrader dropping
 //! one left out, the other as last asked); a cancel cancels a pending
-//! order, or removes a protection. A new order or a close the session
-//! never sent is rejected, a modify or cancel denied; one sent but
-//! unanswered stays in flight
-//! (`retain_unresolved_submissions`) until its events, a query or
-//! reconciliation resolve it; a query finding no such order at the broker
-//! rejects it.
+//! order, or removes a protection. A failed request takes Nautilus' policy
+//! for its `CommandFailure` class (see `failure`): a new order or a close
+//! the session never sent is rejected, a modify or cancel denied; one
+//! cTrader refused is rejected; one sent but unanswered, or of unknown
+//! outcome, stays in flight (`retain_unresolved_submissions`) until its
+//! events, a query or reconciliation resolve it; a query finding no such
+//! order at the broker rejects it.
 //!
 //! Reconciliation reads the reconcile request (open positions, their stop
 //! loss and take profit, pending orders), the deal list (fills), the
@@ -54,7 +55,9 @@ use nautilus_core::{
     DurationNanos, Params, UUID4, UnixNanos,
     time::{AtomicTime, get_atomic_clock_realtime},
 };
-use nautilus_live::{ExecutionClientCore, ExecutionEventEmitter, task::TaskGroup};
+use nautilus_live::{
+    ExecutionClientCore, ExecutionEventEmitter, execution::failure::CommandFailure, task::TaskGroup,
+};
 use nautilus_model::{
     accounts::AccountAny,
     enums::{AccountType, ContingencyType, OmsType, OrderType},
@@ -81,10 +84,11 @@ use super::{
     },
     config::{CTraderConnection, CTraderCredential},
     session::CTraderSession,
-    websocket::{HEARTBEAT_INTERVAL, TradeSent},
+    websocket::HEARTBEAT_INTERVAL,
 };
 
 mod dispatch;
+mod failure;
 mod orders;
 mod reports;
 
@@ -513,8 +517,8 @@ impl CTraderExecutionClient {
 
     /// Sends `request` under `tag`, for `commands`, each order's modify or
     /// cancel it carries with its command's id (none for a new order or a
-    /// close); if the session never sends it, the commands are refused (see
-    /// `Dispatch::unsent`).
+    /// close); what became of its frame, if it failed, takes Nautilus'
+    /// policy for its class (see `failure::sending`, `Dispatch::sending`).
     fn send<Req: TradeRequest>(
         &self,
         session: &Session,
@@ -523,49 +527,28 @@ impl CTraderExecutionClient {
         commands: Vec<(ClientOrderId, UUID4)>,
     ) {
         let sent = session.ctrader.trade(request, tag.to_string());
-        self.refuse_unsent(session, tag, commands, sent);
-    }
-
-    fn refuse_unsent(
-        &self,
-        session: &Session,
-        tag: Tag,
-        commands: Vec<(ClientOrderId, UUID4)>,
-        sent: TradeSent,
-    ) {
         let dispatch = Arc::clone(&session.dispatch);
         let emitter = self.emitter.clone();
         let (clock, venue) = (self.clock, self.core.venue);
         self.spawn_command("trade request", async move {
-            let refused = match sent.await {
-                Ok(Ok(())) => {
-                    dispatch
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .sent(tag);
-                    return Ok(());
-                }
-                Ok(Err(e)) => format!("not sent to {venue}: {e}"),
-                Err(_) => format!("not sent to {venue}: the session closed"),
-            };
-            log::warn!("{tag} {refused}");
+            let sending = failure::sending(sent.await, venue);
             let outputs = dispatch
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .unsent(tag, &commands, &refused, clock.get_time_ns());
+                .sending(tag, &commands, sending, clock.get_time_ns());
             emit(&emitter, outputs);
             Ok(())
         });
     }
 
-    /// Refuses `tag`, the request of the command `command_id` of the order
-    /// `tag` names, at once: it was never sent.
-    fn refuse_now(&self, session: &Session, tag: Tag, command_id: UUID4, reason: &str) {
-        log::warn!("{tag} not sent: {reason}");
+    /// Fails `tag`, the request of the command `command_id` of the order
+    /// `tag` names, at once: it could not be made, so it was never sent.
+    fn fail_now(&self, session: &Session, tag: Tag, command_id: UUID4, reason: String) {
         let commands = [(tag.client_order_id(), command_id)];
-        let outputs = session
-            .dispatch()
-            .unsent(tag, &commands, reason, self.now());
+        let outputs =
+            session
+                .dispatch()
+                .fail(tag, &commands, CommandFailure::NotSent(reason), self.now());
         emit(&self.emitter, outputs);
     }
 
@@ -881,7 +864,7 @@ impl CTraderExecutionClient {
                 Ok::<_, String>(())
             })();
             if let Err(reason) = outcome {
-                self.refuse_now(session, Tag::Cancel(id), command_id, &reason);
+                self.fail_now(session, Tag::Cancel(id), command_id, reason);
             }
         }
         for (position, legs) in protections {
@@ -2384,6 +2367,42 @@ mod tests {
         assert_eq!(asked[0].from_timestamp, Some(T0));
         assert_eq!(mass_status.lookback_start(), Some(ns(T0)));
         assert!(mass_status.reports_complete());
+    }
+
+    /// A deal cTrader states no commission for (Nautilus'
+    /// `spec_exec_testing.md`, TC-E88): the fill reports and the mass status
+    /// fail, naming it, rather than book it at zero or leave it out.
+    #[tokio::test]
+    async fn a_deal_without_its_commission_fails_the_fill_reports_and_the_mass_status() {
+        let mut deals = gold_deals();
+        deals[0].commission = None;
+        let venue = Script {
+            deals: Some(deals),
+            ..gold_venue()
+        };
+        let (mut client, cache, mut events, _received, _tokens) = started(venue);
+        connect(&mut client, &mut events, &cache).await;
+
+        let fills = client
+            .generate_fill_reports(GenerateFillReports::new(
+                UUID4::new(),
+                client.now(),
+                None,
+                None,
+                Some(ns(T0)),
+                None,
+                None,
+                None,
+            ))
+            .await;
+        let mass_status = client.generate_mass_status(None).await;
+        client.disconnect().await.unwrap();
+
+        let fills = format!("{:#}", fills.unwrap_err());
+        assert!(fills.contains("cTrader deal 1"), "{fills}");
+        assert!(fills.contains("no commission"), "{fills}");
+        let mass_status = format!("{:#}", mass_status.unwrap_err());
+        assert!(mass_status.contains("cTrader deal 1"), "{mass_status}");
     }
 
     #[tokio::test]
