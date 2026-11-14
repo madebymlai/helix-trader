@@ -4,7 +4,7 @@ IB serves every venue without a row of its own in the [routing table](../mod.rs)
 
 ## History
 
-IB fills instrument definitions and external 1-minute LAST bars from IB TRADES through the direct writer; it does not supply quotes, other bar sizes or BID/ASK/MID bars to the catalog. Some instruments, including IDEALPRO forex and spot metals, have no TRADES bars and need another source.
+IB fills instrument definitions and its own 1-minute bars through the direct writer: `1-MINUTE-LAST-EXTERNAL` bars from IB TRADES, and `1-MINUTE-BID-EXTERNAL` and `1-MINUTE-ASK-EXTERNAL` bars from IB's BID and ASK, which Nautilus' IB client requests by the bar type's price. It does not supply quotes, other bar sizes, MID bars or internal bars to the catalog, and a fill asking for one fails before any request. Some instruments, including IDEALPRO forex and spot metals, have no TRADES bars: an IDEALPRO pair such as `EUR/USD.IDEALPRO` is filled as its BID and ASK bars, which carry no volume (IB gives none, and Nautilus' IB client stores zero).
 
 History starts or reuses the Docker paper gateway, even for a live account. Set `TWS_USERNAME` and `TWS_PASSWORD`; the exchange's Level 1 real-time subscription with Market Data API access must be shared with the paper account, even for historical requests. The fill uses a separate client ID so it can run alongside a live node.
 
