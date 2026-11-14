@@ -10,10 +10,12 @@
 //! the live data), a backtest for how a venue keeps positions (`oms_type`,
 //! its broker's answer), whether it has money (`has_broker`: a venue no
 //! broker trades has none) and whether its account has a base currency
-//! (`has_base_currency`, its broker's answer), a trade whether its orders
-//! may be reduce-only and post-only (`takes_reduce_only_and_post_only`,
-//! its broker's answer) and the tag linking a bracket's exits at its broker
-//! (`bracket_exits_tag`, IB's OCA group); venue code checks its own
+//! (`has_base_currency`, its broker's answer), a trade where it reads its
+//! account's equity (`equity_source`, its broker's answer), whether its
+//! orders may be reduce-only and post-only
+//! (`takes_reduce_only_and_post_only`, its broker's answer) and the tag
+//! linking a bracket's exits at its broker (`bracket_exits_tag`, IB's OCA
+//! group); venue code checks its own
 //! instruments against the table. Custom data of no instrument has no venue
 //! and no row: its type names its source, LSE's rows LSE (`fill_history`).
 //! The settings each command takes of the venues are composed here,
@@ -181,6 +183,18 @@ pub(crate) enum Broker {
     Ib,
 }
 
+/// Where a trade reads the equity of an account as its broker reports it
+/// (`Broker::equity_source`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EquitySource {
+    /// Nautilus' `Portfolio::equity`: the account's balance totals and its
+    /// open positions' P&L, for a broker whose balance leaves them out.
+    Portfolio,
+    /// The account's balance totals alone (`Account::balances_total`), for
+    /// a broker whose balance holds its open positions' P&L already.
+    BalanceTotals,
+}
+
 impl Broker {
     /// How the broker's accounts keep positions. Nautilus answers this only
     /// on an execution client it has built, so this is a copy of its answer,
@@ -193,6 +207,26 @@ impl Broker {
         match self {
             Self::CTrader(_) => OmsType::Hedging,
             Self::Okx | Self::Ib => OmsType::Netting,
+        }
+    }
+
+    /// Where a trade reads the equity of the broker's account as its
+    /// execution client reports it. A copy of the adapters: the cTrader
+    /// adapter reports an account's balance, its deposits and realized P&L
+    /// (`ctrader`'s execution client, `account_state`), and OKX's its cash
+    /// (`parse_account_state`), leaving open positions out, so their equity
+    /// is Nautilus' `Portfolio::equity`, which adds the open positions'
+    /// P&L. IB's adapter reports IB's net liquidation as the balance's
+    /// total (`execution/account.rs`, `AccountSummaryBalance`), which holds
+    /// that P&L already, so its equity is the account's balance totals
+    /// alone: `Portfolio::equity` adds a reported margin account's open P&L
+    /// to them again, as Nautilus documents it, and will not change
+    /// (nautilus_trader#3565, closed as not planned).
+    #[must_use]
+    pub(crate) fn equity_source(self) -> EquitySource {
+        match self {
+            Self::CTrader(_) | Self::Okx => EquitySource::Portfolio,
+            Self::Ib => EquitySource::BalanceTotals,
         }
     }
 
@@ -406,6 +440,17 @@ pub fn has_broker(venue: Venue) -> bool {
 #[must_use]
 pub fn has_base_currency(venue: Venue) -> bool {
     Row::of(venue).broker.is_some_and(Broker::has_base_currency)
+}
+
+/// Where a trade on `venue` reads the equity of its broker's account as the
+/// broker reports it (`Broker::equity_source`), so every venue without a
+/// row of its own as IB; a venue no broker trades, whose account is
+/// Nautilus' alone, from `Portfolio::equity`.
+#[must_use]
+pub fn equity_source(venue: Venue) -> EquitySource {
+    Row::of(venue)
+        .broker
+        .map_or(EquitySource::Portfolio, Broker::equity_source)
 }
 
 /// The data client a live node asks the definition of an instrument of
@@ -1564,6 +1609,26 @@ mod tests {
             ("LSEDGE", OmsType::Unspecified),
         ] {
             assert_eq!(oms_type(Venue::new(venue)), kept, "{venue}");
+        }
+    }
+
+    /// IB's adapter reports IB's net liquidation as its account's balance,
+    /// holding its open positions' P&L, GLBX's and every venue's without a
+    /// row of its own; a cTrader broker's balance and OKX's cash leave
+    /// them out; LSEDGE, which no broker trades, has no account of a
+    /// broker.
+    #[test]
+    fn each_venue_reads_its_equity_as_its_live_broker_reports_it() {
+        for (venue, source) in [
+            ("ICMARKETS", EquitySource::Portfolio),
+            ("PEPPERSTONE", EquitySource::Portfolio),
+            ("OKX", EquitySource::Portfolio),
+            ("GLBX", EquitySource::BalanceTotals),
+            ("IBIS", EquitySource::BalanceTotals),
+            ("IDEALPRO", EquitySource::BalanceTotals),
+            ("LSEDGE", EquitySource::Portfolio),
+        ] {
+            assert_eq!(equity_source(Venue::new(venue)), source, "{venue}");
         }
     }
 
