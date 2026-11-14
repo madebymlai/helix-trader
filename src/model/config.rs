@@ -83,11 +83,11 @@ pub struct ModelConfig<T = TargetConfig> {
     pub meta: Option<MetaConfig>,
     /// The venue its dataset runs are made at, such as `{ commission = {
     /// per_quantity = "0.035 USD" }, balance = "10000 USD" }`: the
-    /// commission their targets are net of and the balance their reference
-    /// stake is of. It keys the dataset and the stores
-    /// (`dataset::fingerprint`), so `train`, a backtest's retrains and a live
-    /// node all read the one store of the config, whatever a backtest's own
-    /// commission and balance.
+    /// commission their targets are net of, the balance their reference
+    /// stake is of and, optionally, their latency (`latency = "150ms"`). It
+    /// keys the dataset and the stores (`dataset::fingerprint`), so `train`,
+    /// a backtest's retrains and a live node all read the one store of the
+    /// config, whatever a backtest's own commission, balance and latency.
     pub dataset: DatasetVenue,
 }
 
@@ -459,7 +459,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        backtest::Commission,
+        backtest::{Commission, Latency},
         model::{
             dataset::DatasetVenue,
             learner::LightGbmConfig,
@@ -845,8 +845,8 @@ mod tests {
         assert_eq!(config.margins.of(Side::Short), None);
     }
 
-    /// The section's dataset venue: the commission and balance its dataset
-    /// runs are made at.
+    /// The section's dataset venue: the commission, balance and latency
+    /// its dataset runs are made at.
     fn dataset_of(line: &str) -> anyhow::Result<DatasetVenue> {
         Ok(load(&section(line))?.dataset)
     }
@@ -860,6 +860,7 @@ mod tests {
             DatasetVenue {
                 commission: Commission::PerQuantity(exact),
                 balance: Money::from("10000 USD"),
+                latency: None,
             }
         );
     }
@@ -944,6 +945,40 @@ mod tests {
             );
             let err = format!("{:#}", dataset_of(&line).unwrap_err());
             assert!(err.contains("balance"), "{balance}: {err}");
+        }
+    }
+
+    /// 150 ms, as jiff reads a config's durations: each command of its
+    /// dataset runs reaches their venues 150 ms after it is sent.
+    #[test]
+    fn a_dataset_venue_may_declare_the_latency_of_its_runs() {
+        let at_150ms = Latency::try_from(SignedDuration::from_millis(150)).unwrap();
+        for latency in ["150ms", "0.15s", "PT0.15S"] {
+            let line = format!(
+                r#"dataset = {{ commission = {{ rate = "0.0005" }}, balance = "1000 USD", latency = "{latency}" }}"#
+            );
+            assert_eq!(
+                dataset_of(&line).unwrap().latency,
+                Some(at_150ms),
+                "{latency}"
+            );
+        }
+    }
+
+    /// Nautilus' default: each command reaches the venue as it is sent.
+    #[test]
+    fn a_dataset_venue_without_a_latency_has_none() {
+        assert_eq!(load(SECTION).unwrap().dataset.latency, None);
+    }
+
+    /// None is left out, not a latency of nothing.
+    #[test]
+    fn a_dataset_latency_that_is_no_positive_duration_is_refused_at_parsing() {
+        for latency in [r#""-1s""#, r#""0s""#, r#""150""#, "150"] {
+            let line = format!(
+                r#"dataset = {{ commission = {{ rate = "0.0005" }}, balance = "1000 USD", latency = {latency} }}"#
+            );
+            assert!(dataset_of(&line).is_err(), "{latency}");
         }
     }
 

@@ -18,7 +18,7 @@ use std::{
 use anyhow::{Context, bail, ensure};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use helix_trader::{
-    backtest::{self, Backtest, Commission},
+    backtest::{self, Backtest, Commission, Latency},
     catalog,
     live::{Live, Recording},
     model::{
@@ -112,6 +112,13 @@ struct BacktestArgs {
     /// (`[model] dataset`).
     #[arg(long, value_parser = parse_money)]
     balance: Money,
+    /// The latency of the simulated account's venues, a duration such as
+    /// "150ms": each order command reaches a venue that long after it is
+    /// sent, and a market order fills on the first quote from then on. Left
+    /// out, none. A model strategy's dataset runs are at its config's
+    /// (`[model] dataset`).
+    #[arg(long, value_parser = Latency::from_str)]
+    latency: Option<Latency>,
     /// The model store a strategy trading on a model reads its models
     /// from: at each decision, the latest valid then. The backtest first
     /// trains at each retrain time of its span the models the store lacks;
@@ -216,8 +223,8 @@ struct LiveArgs {
 impl LiveArgs {
     /// The arguments of the `train` of the node's retrains but its `--at`,
     /// which the launcher gives (`Launcher::process`): the node's strategy,
-    /// config, catalog and store, the train reading the commission and
-    /// balance of its dataset runs from the config (`[model] dataset`). A
+    /// config, catalog and store, the train reading the commission, balance
+    /// and latency of its dataset runs from the config (`[model] dataset`). A
     /// live node is the one node of its process while it runs, and a train
     /// replays the dataset days it lacks through a node of its own, so each
     /// retrain is a process.
@@ -340,9 +347,9 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
 /// model is first trained on its schedule (`model::walk`): its dataset
 /// built over the span and its models trained at each train time the
 /// store lacks one, in this process, on the backtest's catalog and store,
-/// at the commission and balance of the config's `[model] dataset`; the
-/// out-of-sample scores of its models follow the results, after the costs
-/// of the run and of its models' dataset runs.
+/// at the commission, balance and latency of the config's `[model]
+/// dataset`; the out-of-sample scores of its models follow the results,
+/// after the costs of the run and of its models' dataset runs.
 fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     // The node installs Nautilus' logger from its engine config: pass the
@@ -358,6 +365,7 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
         ticks: requirements.ticks,
         custom: requirements.custom,
         commission: args.commission.commission(),
+        latency: args.latency,
         balance: args.balance,
         venue_oms: venues::oms_type,
         logging,
@@ -452,11 +460,16 @@ fn backtest_on_models<S: ModelStrategy>(
     let trained_at = config.model().dataset;
     let outcome = backtest.run(S::new(config, mode)?)?;
     print!("{}", backtest::report(&outcome));
-    println!(
-        "Run at: commission {}, balance {} (--commission, --balance)",
-        args.commission.commission(),
-        args.balance
-    );
+    let (commission, balance) = (args.commission.commission(), args.balance);
+    match args.latency {
+        None => {
+            println!("Run at: commission {commission}, balance {balance} (--commission, --balance)")
+        }
+        Some(latency) => println!(
+            "Run at: commission {commission}, balance {balance}, latency {latency} (--commission, \
+             --balance, --latency)"
+        ),
+    }
     println!("Models trained at: {trained_at} ([model] dataset)");
     print!("{}", walk.scores(start, end)?);
     Ok(())
@@ -560,8 +573,8 @@ const DATASET_BALANCE: &str = "the dataset balance ([model] dataset), which a mo
 /// config declares (`[model] dataset`): its commission the venues' and the
 /// targets', its balance the account's and the equity the targets'
 /// reference stake is of, which the runs' trades leave whole, margining
-/// nothing (`Backtest::run_dataset`); each replay a node of its own,
-/// disposed at its end.
+/// nothing (`Backtest::run_dataset`), and its latency, if any, the venues';
+/// each replay a node of its own, disposed at its end.
 struct DatasetRun {
     catalog: PathBuf,
     logging: LoggerConfig,
@@ -612,6 +625,7 @@ impl DatasetRun {
             start,
             end,
             commission: venue.commission,
+            latency: venue.latency,
             balance: venue.balance,
             venue_oms: |_| OmsType::Hedging,
             logging: self.logging.clone(),
@@ -871,6 +885,43 @@ mod tests {
                 let err = parse_backtest(&argv).unwrap_err().to_string();
                 assert!(err.contains(flag), "{money}: {err}");
             }
+        }
+    }
+
+    /// 150 ms, as jiff reads a duration: each command reaches the
+    /// simulated account's venues 150 ms after it is sent.
+    #[test]
+    fn a_backtest_takes_the_latency_of_its_venues_as_a_duration() {
+        let mut argv = backtest_required();
+        argv.extend(["--latency", "150ms"]);
+        let at_150ms = Latency::try_from(SignedDuration::from_millis(150)).unwrap();
+
+        assert_eq!(parse_backtest(&argv).unwrap().latency, Some(at_150ms));
+        let last = argv.len() - 1;
+        argv[last] = "PT0.15S";
+        assert_eq!(parse_backtest(&argv).unwrap().latency, Some(at_150ms));
+    }
+
+    /// Nautilus' default: each command reaches the venue as it is sent.
+    #[test]
+    fn a_backtest_without_a_latency_has_none() {
+        assert_eq!(parse_backtest(&backtest_required()).unwrap().latency, None);
+    }
+
+    /// Each value joined to its flag, so that clap reads `-1s` as the
+    /// value; none is left out, not a latency of nothing.
+    #[test]
+    fn rejects_a_latency_that_is_no_positive_duration() {
+        for latency in ["-1s", "0s", "150", "fast"] {
+            let mut argv = backtest_required();
+            let flag = format!("--latency={latency}");
+            argv.push(&flag);
+            let err = parse_backtest(&argv).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{latency}: {err}"
+            );
         }
     }
 

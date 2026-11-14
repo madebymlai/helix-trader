@@ -177,6 +177,7 @@ pub fn backtest(catalog: &TempDir) -> Backtest {
         ticks: vec![],
         custom: vec![],
         commission: Commission::Rate(Decimal::new(3, 5)),
+        latency: None,
         balance: Money::from("2000000 USD"),
         venue_oms: venues::oms_type,
         logging: LoggerConfig::default(),

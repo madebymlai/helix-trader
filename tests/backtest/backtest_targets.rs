@@ -209,6 +209,7 @@ impl TargetProbe {
                 &DatasetVenue {
                     commission: backtest.commission,
                     balance: backtest.balance,
+                    latency: backtest.latency,
                 },
             )
             .unwrap(),
@@ -467,6 +468,7 @@ fn gold_backtest(catalog: PathBuf) -> Backtest {
         start: ic::at("08:30:00"),
         end: ic::at("12:30:00"),
         commission: Commission::Rate(Decimal::new(3, 5)),
+        latency: None,
         balance: Money::from("10000000 USD"),
         venue_oms: |_| OmsType::Hedging,
         logging: LoggerConfig::default(),

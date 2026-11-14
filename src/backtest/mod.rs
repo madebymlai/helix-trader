@@ -6,6 +6,7 @@
 //! Generic over the strategy: any Nautilus strategy runs, none is named here.
 
 mod costs;
+mod latency;
 mod node;
 mod report;
 
@@ -30,6 +31,7 @@ use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 pub use self::{
     costs::Commission,
+    latency::Latency,
     report::{Outcome, report},
 };
 use crate::{
@@ -72,6 +74,10 @@ pub struct Backtest {
     /// The commission, which the fee model of each venue is made from
     /// (`Commission::fee_model`).
     pub commission: Commission,
+    /// The latency of each venue, if any, which its latency model is made
+    /// from (`Latency::model`): each order command reaches the venue that
+    /// long after it is sent. None, each reaches it as it is sent.
+    pub latency: Option<Latency>,
     /// The starting balance of the account of each venue a broker trades;
     /// a venue only read, which no broker trades (`venues::has_broker`),
     /// starts with nothing in its currency, so that it adds no money.
@@ -336,6 +342,7 @@ mod tests {
             ticks: vec![],
             custom: vec![],
             commission: Commission::Rate(Decimal::ZERO),
+            latency: None,
             balance: Money::from("10000 USDT"),
             venue_oms: crate::venues::oms_type,
             logging: LoggerConfig::default(),
