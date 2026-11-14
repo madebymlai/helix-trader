@@ -25,6 +25,7 @@ mod backtest_composite_bars;
 mod backtest_continuous_bars;
 mod backtest_custom_series;
 mod backtest_dataset;
+mod backtest_dataset_conversions;
 mod backtest_ema_entries;
 mod backtest_ema_exits;
 mod backtest_ema_overlap;

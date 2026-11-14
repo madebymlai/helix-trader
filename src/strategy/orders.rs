@@ -272,8 +272,9 @@ impl Trade {
 
     /// Sends the trade from `strategy` at `stake` of `equity`, as `send`
     /// does but for a fixed equity in place of the account's, its orders
-    /// named `ids`: a dataset run's, at its balance, which a target's row
-    /// is priced at whatever the run's P&L (`model::targets`).
+    /// named `ids`: a dataset run's, at its balance converted into the P&L
+    /// currency at the decision's rate, which a target's row is priced at
+    /// whatever the run's P&L (`model::targets`).
     ///
     /// # Errors
     ///

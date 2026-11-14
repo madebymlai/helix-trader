@@ -149,7 +149,7 @@ use super::{
     decide::{self, DecisionRule},
     deciding::{DecidingModels, SideRow},
     features::FeatureSet,
-    targets::{TargetRow, TargetSetter, Targets},
+    targets::{NoTarget, TargetRow, TargetSetter, Targets},
 };
 use crate::{
     rolls::Roller,
@@ -632,10 +632,13 @@ macro_rules! model_data_hooks {
 impl Deciding {
     /// The decision of `strategy` at `now` on the decision's `features`: the
     /// stores listed again, a failure logged and the previous lists kept; the
-    /// target set once for both sides, no target no decision; and the trade
-    /// its sides' rows decide (`DecidingModels::decide`), each the features
-    /// then its target's payoff features, as a dataset row gives them
-    /// (`SideRow::new`), on the target as set on the side.
+    /// target set once for both sides, its payoff features priced at the
+    /// reference stake of the dataset balance converted at the rate cached
+    /// now (`TargetSetter::at`), no target no decision, logged if for want
+    /// of that rate; and the trade its sides' rows decide
+    /// (`DecidingModels::decide`), each the features then its target's
+    /// payoff features, as a dataset row gives them (`SideRow::new`), on the
+    /// target as set on the side.
     fn decide<S>(
         &self,
         strategy: &S,
@@ -649,8 +652,22 @@ impl Deciding {
         if let Err(e) = models.list() {
             log::error!("listing the models at {now}: {e:#}; the previous lists kept");
         }
-        let Ok(targets) = self.target.at(strategy)? else {
-            return Ok(None);
+        let targets = match self.target.at(strategy)? {
+            Ok(targets) => targets,
+            Err(NoTarget::NoRate {
+                balance,
+                pnl,
+                rates,
+            }) => {
+                log::warn!(
+                    "No decision at {now}: the dataset balance {balance}, which the payoff \
+                     features are priced at, has no rate into {pnl}, the currency of the P&L of \
+                     {}, at {rates}",
+                    self.instrument_id
+                );
+                return Ok(None);
+            }
+            Err(_) => return Ok(None),
         };
         let sides = targets
             .as_ref()
@@ -692,12 +709,12 @@ mod tests {
     use nautilus_model::{
         data::{Bar, BarType, NautilusDataType, QuoteTick, TradeTick},
         enums::AggressorSide,
-        identifiers::{ClientId, InstrumentId, TradeId, TraderId},
+        identifiers::{ClientId, InstrumentId, Symbol, TradeId, TraderId, Venue},
         instruments::{
             Instrument, InstrumentAny,
-            stubs::{audusd_sim, btcusd_bybit},
+            stubs::{audusd_sim, btcusd_bybit, default_fx_ccy},
         },
-        types::{Price, Quantity},
+        types::{Money, Price, Quantity},
     };
     use nautilus_portfolio::portfolio::Portfolio;
     use nautilus_trading::{
@@ -706,6 +723,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::log_capture;
     use crate::model::{
         config::{Margins, ModelConfig},
         decide::FeatureRow,
@@ -720,6 +738,7 @@ mod tests {
     };
     use crate::strategy::{
         AtrArgs, DataRequirements, Declared, EmaArgs, IndicatorsConfig, TickSeries,
+        conversions::Conversions,
         orders::{Bracket, Exits},
         risk::R,
     };
@@ -1071,6 +1090,88 @@ mod tests {
                 0.0,
                 None
             )
+        );
+    }
+
+    /// EUR/USD on AUD/USD's venue, which `in_euros` converts through.
+    const EURUSD: &str = "EUR/USD.SIM";
+
+    /// `config`, its dataset balance 10M EUR, converted into USD, AUD/USD's
+    /// P&L currency, through EUR/USD.
+    fn in_euros() -> ModelConfig {
+        let mut config = config();
+        config.target.conversions = Conversions::new(vec![InstrumentId::from(EURUSD)]);
+        config.dataset.balance = Money::from("10000000 EUR");
+        config
+    }
+
+    /// `probe` holding EUR/USD, quoted at `[bid, ask]` if given.
+    fn holding_eurusd(probe: &Decider, quote: Option<[&str; 2]>) {
+        let cache = probe.cache_rc();
+        let mut cache = cache.borrow_mut();
+        cache
+            .add_instrument(InstrumentAny::CurrencyPair(default_fx_ccy(
+                Symbol::from("EUR/USD"),
+                Some(Venue::from("SIM")),
+            )))
+            .unwrap();
+        if let Some([bid, ask]) = quote {
+            let now = probe.clock().timestamp_ns();
+            cache
+                .add_quote(QuoteTick::new(
+                    InstrumentId::from(EURUSD),
+                    Price::from(bid),
+                    Price::from(ask),
+                    Quantity::from(1),
+                    Quantity::from(1),
+                    now,
+                    now,
+                ))
+                .unwrap();
+        }
+    }
+
+    /// The dataset balance in EUR, EUR/USD quoted: the payoff features are
+    /// priced at the reference stake of the balance converted into USD, and
+    /// the long of 0.1R decides.
+    #[test]
+    fn a_dataset_balance_in_another_currency_decides_at_the_live_rate() {
+        let models = tempfile::tempdir().unwrap();
+        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+        holding_eurusd(&probe, Some(["1.24990", "1.25010"]));
+        let handle = sides_handle(&probe, models.path(), &in_euros(), (Some(6), None));
+        started(&handle, &mut probe);
+
+        let decision = handle.decide(&mut probe).unwrap();
+
+        assert_eq!(level(decision), Some(r(6)));
+    }
+
+    /// The dataset balance in EUR, no quote of EUR/USD yet: no rate into
+    /// USD, so no decision, the reason logged, naming the balance and the
+    /// currency it has no rate into.
+    #[test]
+    fn a_decision_with_no_rate_of_the_dataset_balance_is_not_made_and_logs_why() {
+        let name = "a_decision_with_no_rate_of_the_dataset_balance_is_not_made_and_logs_why";
+        if !log_capture::alone(module_path!(), name) {
+            return;
+        }
+        log_capture::capture(log::LevelFilter::Info);
+        let models = tempfile::tempdir().unwrap();
+        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+        holding_eurusd(&probe, None);
+        let handle = sides_handle(&probe, models.path(), &in_euros(), (Some(6), None));
+        started(&handle, &mut probe);
+
+        let decision = handle.decide(&mut probe).unwrap();
+
+        assert_eq!(decision, None);
+        let lines = log_capture::lines();
+        assert!(
+            lines.iter().any(|line| line.starts_with("WARN")
+                && line.contains("10000000.00 EUR")
+                && line.contains("no rate into USD")),
+            "{lines:#?}"
         );
     }
 

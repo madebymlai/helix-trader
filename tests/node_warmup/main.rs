@@ -996,11 +996,11 @@ fn bracket_of(bar_types: Vec<BarType>, ticks: Vec<TickSeries>) -> SideTarget {
         "#,
     )
     .unwrap();
-    let target = TargetConfig {
-        instrument_id: InstrumentId::from(GCZ26),
-        risk: "0.5%".parse().unwrap(),
-        spec,
-    };
+    let target = TargetConfig::builder()
+        .instrument_id(InstrumentId::from(GCZ26))
+        .risk("0.5%".parse().unwrap())
+        .spec(spec)
+        .build();
     let hourly = DecisionRule::Every(SignedDuration::from_hours(1));
     // No order is sent: nothing is charged.
     let commission = Commission::PerOrder(Money::from("0 USD"));

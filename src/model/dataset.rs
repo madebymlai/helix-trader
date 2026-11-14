@@ -786,7 +786,7 @@ mod tests {
             learner::LearnerConfig,
             targets::{BracketSpec, Distance, Exit, Outcome, Outcomes, Target},
         },
-        strategy::{Declared, EmaArgs, IndicatorsConfig, risk::R},
+        strategy::{Declared, EmaArgs, IndicatorsConfig, conversions::Conversions, risk::R},
     };
 
     const GOLD: &str = "XAUUSD.ICMARKETS";
@@ -1643,6 +1643,65 @@ mod tests {
 
         assert_ne!(of(None), of(Some(latency(150))));
         assert_ne!(of(Some(latency(150))), of(Some(latency(200))));
+    }
+
+    /// The fingerprint of the blueprint converting its dataset balance
+    /// through `pairs` (`[trade] conversions`), whose quotes it reads beside
+    /// gold's, as a strategy's data requirements carry them.
+    fn converting(pairs: &[&str]) -> Fingerprint {
+        let pairs: Vec<InstrumentId> = pairs.iter().map(|&pair| InstrumentId::from(pair)).collect();
+        let mut requirements = requirements();
+        requirements.ticks.extend(
+            pairs
+                .iter()
+                .map(|&instrument_id| crate::strategy::TickSeries {
+                    data: nautilus_model::data::NautilusDataType::QuoteTick,
+                    instrument_id,
+                }),
+        );
+        let target = TargetConfig {
+            conversions: Conversions::new(pairs),
+            ..target()
+        };
+        blueprint(
+            STRATEGY,
+            features(1),
+            DecisionRule::Every(SignedDuration::from_hours(1)),
+            target,
+            requirements,
+        )
+        .fingerprint()
+        .unwrap()
+    }
+
+    /// The pairs a dataset balance is converted through set the rate each
+    /// row's reference stake is of, so they key the dataset when declared:
+    /// declaring them, or other pairs, is another fingerprint. Declaring
+    /// none keeps the fingerprint the config had before it could declare
+    /// any (`a_fixed_strategys_dataset_keeps_its_identifier`).
+    #[test]
+    fn the_conversions_key_the_dataset_only_when_declared() {
+        let none = converting(&[]);
+        let eurusd = converting(&["EURUSD.ICMARKETS"]);
+
+        assert_eq!(
+            none,
+            blueprint(
+                STRATEGY,
+                features(1),
+                DecisionRule::Every(SignedDuration::from_hours(1)),
+                target(),
+                requirements()
+            )
+            .fingerprint()
+            .unwrap()
+        );
+        assert_ne!(none, eurusd);
+        assert_ne!(eurusd, converting(&["GBPUSD.ICMARKETS"]));
+        assert_ne!(
+            eurusd,
+            converting(&["EURUSD.ICMARKETS", "USDJPY.ICMARKETS"])
+        );
     }
 
     #[test]

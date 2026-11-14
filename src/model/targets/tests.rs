@@ -10,10 +10,10 @@ use nautilus_indicators::average::MovingAverageType;
 use nautilus_model::{
     data::NautilusDataType,
     enums::AggressorSide,
-    identifiers::{Symbol, TradeId, TraderId},
+    identifiers::{Symbol, TradeId, TraderId, Venue},
     instruments::{
         CryptoPerpetual, InstrumentAny,
-        stubs::{audusd_sim, btcusd_bybit},
+        stubs::{audusd_sim, btcusd_bybit, default_fx_ccy},
     },
     types::Currency,
 };
@@ -575,18 +575,21 @@ fn a_table_naming_an_instrument_or_a_quantity_is_refused() {
     }
 }
 
-/// The table trades the instrument it is given at the risk it is given.
+/// The table trades the instrument it is given at the risk it is given,
+/// through the conversions it is given.
 #[test]
 fn a_table_trades_the_instrument_and_risk_it_is_given() {
     let table = toml::from_str::<Target>("limit = \"1h\"").unwrap();
     let traded = TradedInstrument {
         instrument_id: InstrumentId::from("EURUSD.ICMARKETS"),
     };
+    let conversions = Conversions::new(vec![InstrumentId::from("GBPUSD.ICMARKETS")]);
 
-    let target = table.trading(&traded, risk());
+    let target = table.trading(&traded, risk(), conversions.clone());
 
     assert_eq!(target.instrument_id, traded.instrument_id);
     assert_eq!(target.risk, risk());
+    assert_eq!(target.conversions, conversions);
     assert_eq!(target.settles_within(), SignedDuration::from_hours(1));
 }
 
@@ -1031,6 +1034,105 @@ fn a_dataset_balance_in_another_currency_than_the_targets_pnl_is_refused_as_the_
     let err = format!("{:#}", targets.start(&mut probe).unwrap_err());
 
     assert!(err.contains("EUR") && err.contains("balance"), "{err}");
+}
+
+/// EUR/USD on the simulated venue, AUD/USD's: the pair a target on
+/// AUD/USD converts a dataset balance in EUR through.
+const EURUSD: &str = "EUR/USD.SIM";
+
+/// `on_aud(in_bps(20, 10))` converting through EUR/USD.
+fn converting_through_eurusd() -> TargetConfig {
+    TargetConfig {
+        conversions: Conversions::new(vec![InstrumentId::from(EURUSD)]),
+        ..on_aud(in_bps(20, 10))
+    }
+}
+
+/// The venue of the tests' dataset runs holding `balance`.
+fn holding(balance: &str) -> DatasetVenue {
+    DatasetVenue {
+        balance: Money::from(balance),
+        ..venue_of(commission())
+    }
+}
+
+/// The probe holding AUD/USD and EUR/USD.
+fn holding_eurusd() -> Probe {
+    let probe = Probe::holding(aud());
+    probe
+        .cache_rc()
+        .borrow_mut()
+        .add_instrument(InstrumentAny::CurrencyPair(default_fx_ccy(
+            Symbol::from("EUR/USD"),
+            Some(Venue::from("SIM")),
+        )))
+        .unwrap();
+    probe
+}
+
+/// On 100,000 EUR, EUR/USD at 1.24990 / 1.25010, its mid 1.25000 USD per
+/// EUR: the reference stake is of 125,000 USD, 0.3% of it 375 USD, over
+/// one R of 0.0007 on one AUD/USD 535,714.29, rounded down, 535,714, its
+/// stop worth 374.9998 USD, the unit. Unconverted, 100,000 taken as USD,
+/// it would be 428,571; at the rate swapped, 80,000 USD, 342,857.
+#[test]
+fn the_reference_stake_is_of_the_dataset_balance_converted_at_the_decisions_rate() {
+    let probe = holding_eurusd();
+    probe.quoted(InstrumentId::from(AUD), "0.70000");
+    probe.quoted_at(InstrumentId::from(EURUSD), "1.24990", "1.25010");
+
+    let set = setter_on(&converting_through_eurusd(), &holding("100000 EUR"))
+        .at(&probe)
+        .unwrap()
+        .unwrap();
+
+    for side in [&set.long, &set.short] {
+        assert_eq!(side.equity, Money::from("125000 USD"));
+        assert_eq!(side.unit, Money::from_str_exact("374.9998 USD").unwrap());
+    }
+}
+
+/// No quote of EUR/USD is cached yet: the dataset balance has no rate into
+/// USD, and no target is set, saying so.
+#[test]
+fn a_decision_with_no_rate_of_the_dataset_balance_sets_no_target() {
+    let probe = holding_eurusd();
+    probe.quoted(InstrumentId::from(AUD), "0.70000");
+    let config = converting_through_eurusd();
+
+    let set = setter_on(&config, &holding("100000 EUR"))
+        .at(&probe)
+        .unwrap();
+
+    assert_eq!(
+        set,
+        Err(NoTarget::NoRate {
+            balance: Money::from("100000 EUR"),
+            pnl: Currency::USD(),
+            rates: config.conversions.rates(),
+        })
+    );
+}
+
+/// EUR reaches USD, AUD/USD's P&L currency, through EUR/USD as the cache
+/// defines it: the targets start on a dataset balance in EUR, and refuse
+/// one in JPY, which EUR/USD does not reach, naming it.
+#[test]
+fn a_dataset_balance_the_pairs_reach_the_pnl_from_starts_the_targets_and_another_is_refused() {
+    let targets_on = |balance| {
+        let config = converting_through_eurusd();
+        let requirements = reading_its_quotes(&config);
+        Targets::new(config, rule(), &requirements, &holding(balance)).unwrap()
+    };
+    let mut probe = holding_eurusd();
+
+    targets_on("100000 EUR").start(&mut probe).unwrap();
+    let err = format!(
+        "{:#}",
+        targets_on("15000000 JPY").start(&mut probe).unwrap_err()
+    );
+
+    assert!(err.contains("JPY") && err.contains(EURUSD), "{err}");
 }
 
 /// A strategy registered without a node, as the handle's tests do.

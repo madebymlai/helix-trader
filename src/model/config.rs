@@ -25,6 +25,7 @@ use super::{
 };
 use crate::strategy::{
     DataRequirements, TradedInstrument,
+    conversions::Conversions,
     risk::{R, Risk},
 };
 
@@ -216,9 +217,15 @@ pub type ModelSection = ModelConfig<Target>;
 
 impl ModelSection {
     /// The section, its target trading `traded` at `risk`, the config's,
-    /// its reference stake (`Target::trading`).
+    /// its reference stake, through `conversions`, the pairs of its
+    /// `[trade]` (`Target::trading`).
     #[must_use]
-    pub fn trading(self, traded: &TradedInstrument, risk: Risk) -> ModelConfig {
+    pub fn trading(
+        self,
+        traded: &TradedInstrument,
+        risk: Risk,
+        conversions: Conversions,
+    ) -> ModelConfig {
         let Self {
             decision,
             target,
@@ -234,7 +241,7 @@ impl ModelSection {
         } = self;
         ModelConfig {
             decision,
-            target: target.trading(traded, risk),
+            target: target.trading(traded, risk, conversions),
             retrain,
             window,
             holdout,
@@ -553,7 +560,11 @@ mod tests {
 
     /// The section of `toml`, trading gold.
     fn parse(toml: &str) -> anyhow::Result<ModelConfig> {
-        Ok(toml::from_str::<ModelSection>(toml)?.trading(&gold(), "0.5%".parse().unwrap()))
+        Ok(toml::from_str::<ModelSection>(toml)?.trading(
+            &gold(),
+            "0.5%".parse().unwrap(),
+            Conversions::default(),
+        ))
     }
 
     /// The error of loading `toml` for a strategy reading gold, if any.

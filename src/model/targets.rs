@@ -16,7 +16,10 @@
 //!
 //! Every target is sized at the reference stake: the config's risk
 //! (`[trade] risk`), multiple 1, of the dataset runs' balance held as a
-//! constant equity, by Nautilus' fixed-risk sizer through the order module
+//! constant equity, converted into the instrument's P&L currency at the
+//! rates of the config's pairs (`[trade] conversions`) cached at the
+//! decision (`Rates::convert`, as a strategy's send converts the account's
+//! equity), by Nautilus' fixed-risk sizer through the order module
 //! (`orders::Trade::size`), as a strategy's send sizes its trades. A side's
 //! one R is its stop's distance, or a time-only target's ATR; its unit, the
 //! money one R is worth on that size (`orders::Trade::risk`), and its payoff
@@ -109,15 +112,19 @@
 //!
 //! One function sets a target, `TargetSetter::at`, for a dataset run's
 //! decisions and for those of a strategy trading on a model of the target; it
-//! says why it set none, which a dataset run logs and a trading decision does
-//! not need. `Targets` adds only sending the orders and settling. Every target
-//! reads its instrument, its unit the worth of a distance on it and its payoff
-//! features costing its fills, so one missing from the cache is the setter's
-//! error, before any order. A unit and a payoff have a worth only on a linear
+//! says why it set none, which a dataset run logs and a trading decision logs
+//! only for want of a rate. `Targets` adds only sending the orders and
+//! settling. Every target reads its instrument, its unit the worth of a
+//! distance on it and its payoff features costing its fills, so one missing
+//! from the cache is the setter's error, before any order. A unit and a payoff have a worth only on a linear
 //! instrument, through its multiplier, at a commission charged in the
 //! instrument's P&L currency, which is not converted: `Targets::start`
 //! refuses an inverse instrument and a commission in another currency, on
-//! every target; live, the setter errors at each decision.
+//! every target; live, the setter errors at each decision. The balance is
+//! converted: `Targets::start` refuses one the pairs, as the cache defines
+//! them, do not reach the P&L currency from, by the check of a backtest's
+//! balance, and a decision with no rate of it sets no target
+//! (`NoTarget::NoRate`).
 //!
 //! A quote at the same nanosecond as a time alert reaches the venue first,
 //! so an exit hit at the time limit counts as inside the window. On bars
@@ -131,7 +138,7 @@ use std::{
     any::Any,
     cell::RefCell,
     collections::BTreeMap,
-    fmt::{self, Debug, Display},
+    fmt::{self, Debug, Display, Write as _},
     rc::Rc,
     sync::Arc,
 };
@@ -158,7 +165,7 @@ use nautilus_model::{
     identifiers::{ClientOrderId, InstrumentId, StrategyId},
     instruments::{Instrument, InstrumentAny},
     orders::Order,
-    types::{Money, Price, Quantity},
+    types::{Currency, Money, Price, Quantity},
 };
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
@@ -172,9 +179,10 @@ use super::{
     handle::SettledRows,
 };
 use crate::{
-    backtest::Commission,
+    backtest::{self, Commission},
     strategy::{
         AtrArgs, DataRequirements, IndicatorArgs, TradedInstrument,
+        conversions::{Conversions, Rates},
         orders::{self, Bracket, Exits, OrderIds, Trade, worth},
         risk::{Risk, Stake},
         warmup::{self, Warmup},
@@ -183,8 +191,8 @@ use crate::{
 
 /// The target of each decision, from the strategy's config: on one
 /// instrument, at the reference stake. The strategy's TOML has the target
-/// alone (`Target`), on the instrument and at the risk of its `[trade]`
-/// table (`Target::trading`).
+/// alone (`Target`), on the instrument, at the risk and through the
+/// conversions of its `[trade]` table (`Target::trading`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, bon::Builder)]
 #[serde(deny_unknown_fields)]
 pub struct TargetConfig {
@@ -194,6 +202,13 @@ pub struct TargetConfig {
     /// are sized at, multiple 1, of the dataset balance
     /// (`TargetSetter::at`).
     pub risk: Risk,
+    /// The config's pairs, `[trade] conversions`, through which the dataset
+    /// balance is converted into the instrument's P&L currency at the rate
+    /// cached at each decision (`TargetSetter::at`); none if it lists none.
+    /// Left out of a manifest when none, as before the config had them.
+    #[serde(default, skip_serializing_if = "Conversions::is_empty")]
+    #[builder(default)]
+    pub conversions: Conversions,
     /// How its trades end.
     pub spec: Target,
 }
@@ -414,16 +429,18 @@ impl<T> PerSide<T> {
 /// price it is set from, its exits on the instrument's ticks if it has
 /// them, when it ends after its send, the distance in price one R of its
 /// trade spans, its stop's, or without exits the target's ATR at the
-/// decision; what that R is worth in money on the trade's size at the
-/// reference stake, the unit of its side's payoff (`orders::Trade::risk`);
-/// and its payoff features at that size, in the order of the target's
-/// (`TargetConfig::payoff_names`).
+/// decision; the equity the reference stake is of, the dataset balance in
+/// the instrument's P&L currency at the decision's rate; what that R is
+/// worth in money on the trade's size at the reference stake, the unit of
+/// its side's payoff (`orders::Trade::risk`); and its payoff features at
+/// that size, in the order of the target's (`TargetConfig::payoff_names`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SideTarget {
     pub reference: Price,
     pub bracket: Option<Bracket>,
     pub time_limit: SignedDuration,
     pub one_r: Decimal,
+    pub equity: Money,
     pub unit: Money,
     pub payoff: Vec<f64>,
 }
@@ -468,6 +485,15 @@ pub enum NoTarget {
     /// An exit is on the decision's price, this one: no distance, a stop worth
     /// nothing, a P&L in R of none.
     ExitOnPrice(Price),
+    /// The dataset balance, `balance`, has no rate into `pnl`, the
+    /// instrument's P&L currency, at `rates`, the target's: no pair reaches
+    /// its currency, or none is quoted yet (`Rates::convert`). Its trades
+    /// would be sized at no reference stake.
+    NoRate {
+        balance: Money,
+        pnl: Currency,
+        rates: Rates,
+    },
     /// The reference stake buys none of the instrument on this side: its
     /// one R, this distance, is worth more than the stake on its size
     /// increment, so its size rounds down to zero, and so would its unit.
@@ -657,7 +683,9 @@ impl TargetConfig {
 
     /// The config as the fingerprint reads it, its ATR `atr` as it runs:
     /// Nautilus' ATR as built, its arguments given or Nautilus' defaults,
-    /// and its bars, whose source changes the rows.
+    /// and its bars, whose source changes the rows; then its pairs, only if
+    /// it has any, so that a config of none keeps the datasets and stores
+    /// it was keyed by before a config could list them.
     fn fingerprint_part(&self, atr: Option<AtrBars>) -> anyhow::Result<String> {
         let atr = atr
             .map(|atr| anyhow::Ok(format!("{} on bars of {}", atr.args.build()?, atr.bar_type)))
@@ -666,12 +694,22 @@ impl TargetConfig {
             .spec
             .bracket
             .map(|bracket| format!("take profit {} stop {}", bracket.take_profit, bracket.stop));
-        Ok(format!(
+        let mut part = format!(
             "{} risk {} exits {exits:?} limit {} ns atr {atr:?}",
             self.instrument_id,
             self.risk,
             self.spec.limit.as_nanos()
-        ))
+        );
+        if !self.conversions.is_empty() {
+            let pairs: Vec<String> = self
+                .conversions
+                .pairs()
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            write!(part, " conversions [{}]", pairs.join(", "))?;
+        }
+        Ok(part)
     }
 
     /// The names of its payoff features (`PayoffFeature::name`), in the
@@ -729,13 +767,20 @@ impl TargetConfig {
 }
 
 impl Target {
-    /// The target trading `traded` at `risk`, the config's: its
-    /// instrument, its reference stake.
+    /// The target trading `traded` at `risk` through `conversions`, the
+    /// config's: its instrument, its reference stake and the pairs its
+    /// dataset balance is converted through.
     #[must_use]
-    pub fn trading(self, traded: &TradedInstrument, risk: Risk) -> TargetConfig {
+    pub fn trading(
+        self,
+        traded: &TradedInstrument,
+        risk: Risk,
+        conversions: Conversions,
+    ) -> TargetConfig {
         TargetConfig {
             instrument_id: traded.instrument_id,
             risk,
+            conversions,
             spec: self,
         }
     }
@@ -1016,13 +1061,17 @@ impl Debug for BracketWidth {
 /// (`PayoffFeature`). It holds the venue of the dataset runs: their
 /// commission, what a fill of the target costs (`Commission::cost`), the
 /// one their fills are charged, and their balance, the equity the reference
-/// stake is of.
+/// stake is of once converted into the instrument's P&L currency at the
+/// rates of the target's pairs.
 pub struct TargetSetter {
     instrument_id: InstrumentId,
     /// The reference stake: the config's risk, multiple 1.
     stake: Stake,
     /// The dataset runs' balance, the reference stake's constant equity.
     balance: Money,
+    /// The rates the balance is converted at into the instrument's P&L
+    /// currency, of the target's pairs (`TargetConfig::conversions`).
+    rates: Rates,
     spec: Target,
     atr: Option<Rc<TargetAtr>>,
     commission: Commission,
@@ -1077,6 +1126,7 @@ impl TargetSetter {
             instrument_id: config.instrument_id,
             stake: Stake::new(config.risk),
             balance: venue.balance,
+            rates: config.conversions.rates(),
             spec: config.spec,
             atr,
             commission: venue.commission,
@@ -1121,22 +1171,26 @@ impl TargetSetter {
 
     /// The target of each side at a decision of `strategy` now, or why none
     /// is set: the ATR not yet initialized or nought, no price of the
-    /// instrument yet, an exit on the decision's price, or a size of none at
-    /// the reference stake (`NoTarget`). Every target reads the instrument,
-    /// its unit worth a distance on it and its payoff features costing its
-    /// fills (`payoff`): its one R is, with exits, the stop's distance; time
-    /// only, the ATR. Each side's trade is sized at the reference stake, the
-    /// config's risk, multiple 1, of the dataset balance, a constant equity
-    /// (`orders::Trade::size`, Nautilus' fixed-risk sizer, as a strategy's
-    /// send sizes it), whatever any account holds; its unit is its R in
-    /// money on that size (`orders::Trade::risk`).
+    /// instrument yet, an exit on the decision's price, no rate of the
+    /// dataset balance into the instrument's P&L currency, or a size of none
+    /// at the reference stake (`NoTarget`). Every target reads the
+    /// instrument, its unit worth a distance on it and its payoff features
+    /// costing its fills (`payoff`): its one R is, with exits, the stop's
+    /// distance; time only, the ATR. Each side's trade is sized at the
+    /// reference stake, the config's risk, multiple 1, of the dataset
+    /// balance, a constant equity, converted into the instrument's P&L
+    /// currency at the rates of the target's pairs cached now
+    /// (`Rates::convert`, as a strategy's send converts the account's
+    /// equity), whatever any account holds (`orders::Trade::size`, Nautilus'
+    /// fixed-risk sizer, as a strategy's send sizes it); its unit is its R
+    /// in money on that size (`orders::Trade::risk`), in the P&L currency.
     ///
     /// # Errors
     ///
     /// Returns an error if the instrument is not in the cache, or its payoff
     /// has no worth (`ensure_payable`: an inverse instrument, or the
-    /// commission or the balance in another currency than its P&L's), or an
-    /// exit or a stop is outside its prices.
+    /// commission in another currency than its P&L's), or the balance
+    /// converted overflows, or an exit or a stop is outside its prices.
     ///
     /// # Panics
     ///
@@ -1171,6 +1225,17 @@ impl TargetSetter {
                 None => return Ok(Err(NoTarget::ExitOnPrice(reference))),
             },
         };
+        let pnl = instrument.cost_currency();
+        let converted = self
+            .rates
+            .convert(&strategy.cache_ref(), [self.balance], pnl)?;
+        let Some(equity) = converted else {
+            return Ok(Err(NoTarget::NoRate {
+                balance: self.balance,
+                pnl,
+                rates: self.rates,
+            }));
+        };
         let target = |side: Side| -> anyhow::Result<Result<SideTarget, NoTarget>> {
             let bracket = exits.map(|exits| *exits.of(side));
             let one_r = match bracket {
@@ -1183,11 +1248,12 @@ impl TargetSetter {
                 bracket,
                 time_limit: self.spec.limit,
                 one_r,
-                unit: Money::zero(instrument.cost_currency()),
+                equity,
+                unit: Money::zero(pnl),
                 payoff: vec![],
             };
             let trade = target.trade(instrument_id, side);
-            let quantity = trade.size(&instrument, self.stake, self.balance)?;
+            let quantity = trade.size(&instrument, self.stake, equity)?;
             if quantity.is_zero() {
                 return Ok(Err(NoTarget::NoSize { side, one_r }));
             }
@@ -1255,16 +1321,16 @@ impl TargetSetter {
     }
 
     /// Checks that the target's payoff on `instrument` has a worth: the
-    /// instrument linear (`orders::ensure_linear`), the commission charged
-    /// in its P&L currency, its cost currency, which Nautilus nets a
-    /// position's realised P&L of alone, and the balance its trades are
-    /// sized on in it: a commission or a balance in another currency is not
-    /// converted (Nautilus' sizer reads the equity as given).
+    /// instrument linear (`orders::ensure_linear`) and the commission
+    /// charged in its P&L currency, its cost currency, which Nautilus nets a
+    /// position's realised P&L of alone: a commission in another currency is
+    /// not converted. The balance its trades are sized on is converted at
+    /// each decision (`at`).
     ///
     /// # Errors
     ///
     /// Returns an error if `instrument` is inverse, or the commission is
-    /// charged or the balance held in another currency.
+    /// charged in another currency.
     fn ensure_payable(&self, instrument: &InstrumentAny) -> anyhow::Result<()> {
         orders::ensure_linear(instrument)?;
         let (charged, pnl) = (
@@ -1276,14 +1342,6 @@ impl TargetSetter {
             "the commission {} is charged in {charged}, not in {pnl}, the currency of the P&L \
              of {}: a target's costs are not converted",
             self.commission.normalized(),
-            instrument.id()
-        );
-        ensure!(
-            self.balance.currency == pnl,
-            "the dataset balance {} is in {}, not in {pnl}, the currency of the P&L of {}: a \
-             target's trades are sized on it, which is not converted",
-            self.balance,
-            self.balance.currency,
             instrument.id()
         );
         Ok(())
@@ -1431,9 +1489,12 @@ impl Targets {
     }
 
     /// Starts the targets on `actor`, from its `on_start`: refuses a target
-    /// whose payoff has no worth, on an inverse instrument, at a commission
-    /// charged or on a balance held in another currency than its P&L's
-    /// (`TargetSetter::ensure_payable`), then starts the target's ATR, if any
+    /// whose payoff has no worth, on an inverse instrument or at a
+    /// commission charged in another currency than its P&L's
+    /// (`TargetSetter::ensure_payable`), or whose dataset balance the
+    /// target's pairs, as the cache defines them, do not reach its P&L
+    /// currency from, by the check of a backtest's balance
+    /// (`backtest::refuse_balance`), then starts the target's ATR, if any
     /// (`TargetSetter::start`). The refusal is here because a failed
     /// `on_start` ends the node's run with its error, while an error at a
     /// decision is only logged by Nautilus and would leave an empty dataset.
@@ -1443,14 +1504,26 @@ impl Targets {
     /// # Errors
     ///
     /// Returns an error if the target's instrument in the cache is inverse,
-    /// or the commission is charged or the balance held in another currency
-    /// than its P&L's.
+    /// or the commission is charged in another currency than its P&L's, or
+    /// the pairs do not reach its P&L currency from the balance's.
     pub fn start<A>(&self, actor: &mut A) -> anyhow::Result<()>
     where
         A: DataActor + DataActorNative + Debug + 'static,
     {
-        if let Some(instrument) = actor.cache().instrument(&self.config.instrument_id) {
-            self.setter.ensure_payable(&instrument)?;
+        {
+            let cache = actor.cache();
+            if let Some(instrument) = cache.instrument(&self.config.instrument_id) {
+                self.setter.ensure_payable(&instrument)?;
+                let pairs: Vec<InstrumentAny> = self
+                    .config
+                    .conversions
+                    .pairs()
+                    .iter()
+                    .filter_map(|pair| cache.instrument(pair))
+                    .collect();
+                backtest::refuse_balance(self.setter.balance, &[instrument], &pairs)
+                    .context("the dataset balance, which the targets are sized at")?;
+            }
         }
         self.setter.start(actor);
         Ok(())
@@ -1468,7 +1541,8 @@ impl Targets {
     /// reference stake of the dataset balance, and its time alert. With no
     /// price of the instrument yet, the decision is unsettled, its number
     /// taken; with the target's ATR not yet initialized or nought, an exit of
-    /// the target on the decision's price, or a size of none at the
+    /// the target on the decision's price, no rate of the dataset balance
+    /// into the instrument's P&L currency, or a size of none at the
     /// reference stake, it opens nothing and takes no number, as a decision
     /// on cold features is none.
     ///
@@ -1515,6 +1589,17 @@ impl Targets {
                 );
                 return Ok(());
             }
+            Err(NoTarget::NoRate {
+                balance,
+                pnl,
+                rates,
+            }) => {
+                log::warn!(
+                    "decision at {time}: the dataset balance {balance} has no rate into {pnl}, \
+                     the currency of the P&L of {instrument_id}, at {rates}; no targets"
+                );
+                return Ok(());
+            }
             Err(NoTarget::NoSize { side, one_r }) => {
                 log::warn!(
                     "decision at {time}: at the reference stake of {} of {}, the {} of \
@@ -1540,7 +1625,8 @@ impl Targets {
     }
 
     /// Sends the trades of `decision`, the long then the short, on `targets`,
-    /// at the reference stake of the dataset balance (`orders::Trade::send_at`),
+    /// at the reference stake of the equity each was set at, the dataset
+    /// balance converted at the decision's rate (`orders::Trade::send_at`),
     /// the size the setter priced them at, each side named by its ids.
     fn send<S>(
         &self,
@@ -1551,11 +1637,12 @@ impl Targets {
     where
         S: Strategy + StrategyNative + DataActor + DataActorNative,
     {
-        let (stake, balance) = (self.setter.stake, self.setter.balance);
+        let stake = self.setter.stake;
         for side in Side::BOTH {
-            let trade = targets.of(side).trade(self.config.instrument_id, side);
+            let target = targets.of(side);
+            let trade = target.trade(self.config.instrument_id, side);
             let ids = DecisionSide { decision, side }.order_ids();
-            trade.send_at(strategy, stake, balance, ids)?;
+            trade.send_at(strategy, stake, target.equity, ids)?;
         }
         Ok(())
     }

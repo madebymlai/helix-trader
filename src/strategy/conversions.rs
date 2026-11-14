@@ -48,7 +48,7 @@ use nautilus_model::{
     types::{Currency, Money},
 };
 use rust_decimal::Decimal;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use ustr::Ustr;
 
 use super::TickSeries;
@@ -57,7 +57,7 @@ use crate::venues;
 /// `[trade] conversions`: the FX pairs a strategy converts equity through,
 /// each by its instrument id, `["EURUSD.ICMARKETS"]`, all on one venue;
 /// none if the config lists none.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Conversions(Vec<InstrumentId>);
 
@@ -72,6 +72,12 @@ impl Conversions {
     #[must_use]
     pub fn pairs(&self) -> &[InstrumentId] {
         &self.0
+    }
+
+    /// Whether the config lists no pair.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 
     /// Pushes onto `errors` the violations of the pairs of a strategy
