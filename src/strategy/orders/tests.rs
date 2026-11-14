@@ -999,6 +999,98 @@ fn a_trade_on_ibs_simulated_account_is_sized_on_its_balance_and_its_open_pnl() {
     assert_eq!(quantity, Quantity::from(220_000));
 }
 
+/// IB's EUR/USD on IDEALPRO, the pair a config on IB converts EUR through
+/// into USD: Nautilus' FX pair, of EUR.
+const IB_EURUSD: &str = "EUR/USD.IDEALPRO";
+
+/// The rates of a config converting through IB's EUR/USD.
+fn through_ib_eurusd() -> Rates {
+    Conversions::new(vec![InstrumentId::from(IB_EURUSD)]).rates()
+}
+
+/// `cache` defining IB's EUR/USD too, none of its quotes or bars cached.
+fn defining_ib_eurusd(cache: &Rc<RefCell<Cache>>) {
+    let mut pair = audusd_sim();
+    pair.id = InstrumentId::from(IB_EURUSD);
+    pair.base_currency = Currency::EUR();
+    cache
+        .borrow_mut()
+        .add_instrument(InstrumentAny::CurrencyPair(pair))
+        .unwrap();
+}
+
+/// An account without a base currency holds each currency apart: 100,000
+/// EUR, and the open long's 20,000 USD of P&L. IB's EUR/USD quoted 1.24990
+/// / 1.25010, its mid 1.25, the trade is sized on both, converted and
+/// summed: 145,000 USD, 0.5% of it, 725 USD, over one R of 0.00500,
+/// 145,000 AUD/USD. On the EUR alone it would be 125,000, on the P&L alone
+/// 20,000.
+#[test]
+fn a_trade_on_an_account_without_a_base_currency_is_sized_on_each_currency_converted_and_summed() {
+    let account = margin_account(AccountId::from("IDEALPRO-001"), "100000 EUR");
+    let cache = holding_open_pnl(ib_aud(), "IDEALPRO", account);
+    defining_ib_eurusd(&cache);
+    cache
+        .borrow_mut()
+        .add_quote(QuoteTick::new(
+            InstrumentId::from(IB_EURUSD),
+            Price::from("1.24990"),
+            Price::from("1.25010"),
+            Quantity::from(1),
+            Quantity::from(1),
+            UnixNanos::from(NOW),
+            UnixNanos::from(NOW),
+        ))
+        .unwrap();
+    let (mut probe, _) = registered_on(&cache, STRATEGY, NOW);
+    let trade = Trade {
+        instrument_id: InstrumentId::from(IB_AUD),
+        ..buy(held(1))
+    };
+
+    trade
+        .send(&mut probe, stake(), through_ib_eurusd())
+        .unwrap();
+
+    assert_eq!(entry_quantity(&probe), Quantity::from(145_000));
+}
+
+/// IB's EUR/USD is read as its BID and ASK bars, none of which is cached
+/// yet: the account's 100,000 EUR are not converted into USD, and the
+/// trade sends nothing, no order and no time alert, and says why, naming
+/// the currencies and the venue whose rates it lacks.
+#[test]
+fn a_trade_converting_through_an_ib_pair_before_its_first_bars_sends_nothing_and_logs_why() {
+    let name =
+        "a_trade_converting_through_an_ib_pair_before_its_first_bars_sends_nothing_and_logs_why";
+    if !log_capture::alone(module_path!(), name) {
+        return;
+    }
+    log_capture::capture(log::LevelFilter::Info);
+    let cache = cache_holding("100000 EUR");
+    defining_ib_eurusd(&cache);
+    let (mut probe, clock) = registered_on(&cache, STRATEGY, NOW);
+    let trade = Trade {
+        instrument_id: InstrumentId::from(IB_AUD),
+        ..buy(bracket(4))
+    };
+
+    trade
+        .send(&mut probe, stake(), through_ib_eurusd())
+        .unwrap();
+
+    assert_eq!(orders(&probe), []);
+    assert_eq!(clock.borrow().timer_names(), Vec::<&str>::new());
+    let lines = log_capture::lines();
+    let line = lines
+        .iter()
+        .find(|line| line.starts_with("ERROR") && line.contains(IB_AUD))
+        .unwrap_or_else(|| panic!("{lines:#?}"));
+    for named in ["EUR", "USD", "IDEALPRO"] {
+        assert!(line.contains(named), "{named}: {line}");
+    }
+}
+
 /// Nautilus' sizer is linear: an inverse instrument's P&L is no multiple
 /// of a distance in price.
 #[test]

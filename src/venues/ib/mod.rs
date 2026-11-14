@@ -35,7 +35,7 @@ use nautilus_interactive_brokers::{
 };
 use nautilus_model::{
     data::{Bar, BarSpecification, BarType, Data, NautilusDataType},
-    enums::{BarAggregation, PriceType},
+    enums::{AggregationSource, BarAggregation, PriceType},
     identifiers::{ClientOrderId, InstrumentId},
     instruments::{Instrument, InstrumentAny},
 };
@@ -296,6 +296,14 @@ const SERVED_PRICES: [PriceType; 3] = [PriceType::Last, PriceType::Bid, PriceTyp
 /// IB's bars of the price (TRADES for LAST, BID and ASK as they are).
 fn served_spec(price_type: PriceType) -> BarSpecification {
     BarSpecification::new(1, BarAggregation::Minute, price_type)
+}
+
+/// The bars of `pair`, an FX pair, IB's history serves for its rates: its
+/// own 1-MINUTE BID and ASK bars (`served_spec`), IB serving no TRADES of
+/// a pair.
+pub(crate) fn pair_bars(pair: InstrumentId) -> [BarType; 2] {
+    [PriceType::Bid, PriceType::Ask]
+        .map(|price_type| BarType::new(pair, served_spec(price_type), AggregationSource::External))
 }
 
 /// The IB duration of one bar request: within IB's maximum duration for

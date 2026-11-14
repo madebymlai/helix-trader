@@ -4,7 +4,8 @@
 //! quotes. Here a few snapshots and trades on Wednesday 21 October 2026,
 //! the day of `common::ic`; and its book deltas, as Databento's MBO fills
 //! the catalog with them, and custom data of it, `Imbalance`, a type of
-//! the tests'.
+//! the tests'; and, apart, its quotes, as LSE streams CME Globex's Level
+//! 1, for a run trading it.
 
 use std::{path::Path, sync::Arc};
 
@@ -13,7 +14,7 @@ use nautilus_core::UnixNanos;
 use nautilus_model::{
     custom_data,
     data::{
-        BookOrder, CustomData, DataType, OrderBookDelta, OrderBookDepth, TradeTick,
+        BookOrder, CustomData, DataType, OrderBookDelta, OrderBookDepth, QuoteTick, TradeTick,
         stubs::stub_depth10,
     },
     enums::{AggressorSide, BookAction, OrderSide, RecordFlag},
@@ -83,6 +84,31 @@ pub fn store(dir: &Path) {
             Some(at("12:00:00").into()),
             None,
         )
+        .unwrap();
+}
+
+/// A quote of the contract at `time`, as LSE streams CME Globex's Level
+/// 1, sized 10,000 contracts a side.
+pub fn quote(time: Timestamp, bid: &str, ask: &str) -> QuoteTick {
+    let size = Quantity::from(10_000);
+    QuoteTick::new(
+        InstrumentId::from(INSTRUMENT_ID),
+        Price::from(bid),
+        Price::from(ask),
+        size,
+        size,
+        time.into(),
+        time.into(),
+    )
+}
+
+/// Writes gold and `quotes` into the catalog in `dir`, stored over `[from,
+/// to]`: no book.
+pub fn store_quotes(dir: &Path, quotes: &[QuoteTick], from: Timestamp, to: Timestamp) {
+    let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
+    catalog.write_instruments(vec![instrument()]).unwrap();
+    catalog
+        .write_to_parquet(quotes, Some(from.into()), Some(to.into()), None)
         .unwrap();
 }
 

@@ -6,21 +6,28 @@
 //! instrument's P&L currency (`orders::Trade::send`), and an account's
 //! money may be in another currency: an IC Markets account in EUR trading
 //! gold quoted in USD. The config lists the pairs to convert through, all
-//! on one venue, `conversions = ["EURUSD.ICMARKETS"]`, and the strategy
-//! reads their quotes (`StandardConfig::data_requirements`): fill-catalog
-//! fills them, a backtest replays them, a live strategy subscribes to them
-//! from its start, with no warmup (`rolls::Roller`), and Nautilus' data
-//! engine caches each quote it processes, which its exchange rates are read
-//! from. Before a pair's first quote there is no rate through it, and a
-//! trade sends nothing, logged (`orders::Trade::send`).
+//! on one venue, `conversions = ["EURUSD.ICMARKETS"]` or
+//! `["EUR/USD.IDEALPRO"]`, and the strategy reads each in the form its
+//! venue's history serves (`venues::rate_series`,
+//! `StandardConfig::data_requirements`), a cTrader broker's quotes, IB's
+//! 1-minute BID and ASK bars: fill-catalog fills them, a backtest replays
+//! them, a live strategy subscribes to them from its start, a cTrader
+//! pair's quotes with no warmup (`rolls::Roller`), an IB pair's bars as
+//! any bar type it warms up on, and Nautilus' data engine caches each
+//! quote and bar it processes, which its exchange rates are read from, a
+//! pair's quotes before its bars. Before a pair's first quote or bars
+//! there is no rate through it, and a trade sends nothing, logged
+//! (`orders::Trade::send`).
 //!
 //! Both answers are Nautilus':
 //!
 //! - `Rates::convert`: an equity per currency into one currency, each
-//!   amount at Nautilus' cached rate on the pairs' venue
+//!   amount but zero at Nautilus' cached rate on the pairs' venue
 //!   (`Cache::get_xrate`, at the mid, as Nautilus' portfolio converts),
-//!   the amounts summed. `get_xrate(from, to)` gives `to` per `from`: an
-//!   amount in `from` times it is in `to`.
+//!   the amounts summed: an account without a base currency, OKX's, holds
+//!   its balance and its positions' open P&L each in its own currency.
+//!   `get_xrate(from, to)` gives `to` per `from`: an amount in `from` times
+//!   it is in `to`.
 //! - `reaches`: whether a currency reaches another through the pairs as
 //!   their definitions give them, by Nautilus' exchange-rate path search
 //!   (`nautilus_common::xrate::get_exchange_rate`), each pair at a rate of
@@ -44,7 +51,6 @@ use nautilus_common::{
     xrate::get_exchange_rate,
 };
 use nautilus_model::{
-    data::NautilusDataType,
     enums::PriceType,
     identifiers::{InstrumentId, Venue},
     instruments::{Instrument, InstrumentAny},
@@ -54,7 +60,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use ustr::Ustr;
 
-use super::TickSeries;
+use super::Series;
 use crate::venues;
 
 /// `[trade] conversions`: the FX pairs a strategy converts equity through,
@@ -129,13 +135,11 @@ impl Conversions {
         }
     }
 
-    /// The quotes of each pair, the series its rates are read from: the
-    /// data a cTrader broker serves, history and live.
-    pub(super) fn quotes(&self) -> impl Iterator<Item = TickSeries> + '_ {
-        self.0.iter().map(|&instrument_id| TickSeries {
-            data: NautilusDataType::QuoteTick,
-            instrument_id,
-        })
+    /// The series each pair's rates are read from, in order: those its
+    /// venue's history serves (`venues::rate_series`), a cTrader broker's
+    /// quotes, IB's 1-minute BID and ASK bars.
+    pub(super) fn series(&self) -> impl Iterator<Item = Series> + '_ {
+        self.0.iter().flat_map(|&pair| venues::rate_series(pair))
     }
 
     /// The rates an equity is converted at: Nautilus' cached rates on the
@@ -204,7 +208,7 @@ impl fmt::Display for Rates {
             Some(venue) => write!(
                 f,
                 "the exchange rates Nautilus caches on {venue}: a currency no pair reaches, or \
-                 no quote of the pairs yet"
+                 no quote or bar of the pairs yet"
             ),
             None => f.write_str("no rate: [trade] conversions lists no pair"),
         }
@@ -244,4 +248,165 @@ pub fn reaches(pairs: &[InstrumentAny], from: Currency, to: Currency) -> anyhow:
         return Ok(from == to);
     }
     Ok(get_exchange_rate(from.code, to.code, PriceType::Mid, keys.clone(), keys)?.is_some())
+}
+
+#[cfg(test)]
+mod tests {
+    use nautilus_core::UnixNanos;
+    use nautilus_model::{
+        data::{Bar, BarSpecification, BarType, QuoteTick},
+        enums::{AggregationSource, BarAggregation},
+        instruments::stubs::default_fx_ccy,
+        types::{Price, Quantity},
+    };
+
+    use super::*;
+
+    /// IB's euro in US dollars.
+    const EURUSD: &str = "EUR/USD.IDEALPRO";
+    /// IB's US dollar in yen.
+    const USDJPY: &str = "USD/JPY.IDEALPRO";
+
+    /// The rates of a config converting through `pairs`, all on IDEALPRO.
+    fn through(pairs: &[&str]) -> Rates {
+        Conversions::new(pairs.iter().map(|&pair| InstrumentId::from(pair)).collect()).rates()
+    }
+
+    /// A cache defining the pairs `pairs`, Nautilus' FX pairs, none quoted.
+    fn defining(pairs: &[&str]) -> Cache {
+        let mut cache = Cache::default();
+        for pair in pairs {
+            let id = InstrumentId::from(*pair);
+            let pair = default_fx_ccy(id.symbol, Some(id.venue));
+            cache
+                .add_instrument(InstrumentAny::CurrencyPair(pair))
+                .unwrap();
+        }
+        cache
+    }
+
+    /// `pair` quoted at `bid` and `ask`.
+    fn quote(pair: &str, bid: &str, ask: &str) -> QuoteTick {
+        let size = Quantity::from(1_000_000);
+        QuoteTick::new(
+            InstrumentId::from(pair),
+            Price::from(bid),
+            Price::from(ask),
+            size,
+            size,
+            UnixNanos::default(),
+            UnixNanos::default(),
+        )
+    }
+
+    /// A cache of EUR/USD quoted 1.24990 / 1.25010, its mid 1.25 USD per
+    /// EUR, and USD/JPY quoted 149.990 / 150.010, its mid 150 JPY per USD.
+    fn quoted() -> Cache {
+        let mut cache = defining(&[EURUSD, USDJPY]);
+        cache
+            .add_quote(quote(EURUSD, "1.24990", "1.25010"))
+            .unwrap();
+        cache
+            .add_quote(quote(USDJPY, "149.990", "150.010"))
+            .unwrap();
+        cache
+    }
+
+    fn money(amounts: &[&str]) -> Vec<Money> {
+        amounts.iter().map(|&amount| Money::from(amount)).collect()
+    }
+
+    /// An account without a base currency holds each currency apart: 100,000
+    /// EUR are 125,000 USD, a loss of 2,000 USD is itself, 150,000 JPY are
+    /// 1,000 USD. Their sum, 124,000 USD, is the equity in USD; any one
+    /// left out, or taken alone, gives another.
+    #[test]
+    fn an_equity_in_several_currencies_is_the_sum_of_each_converted() {
+        let equity = money(&["100000 EUR", "-2000 USD", "150000 JPY"]);
+
+        let converted = through(&[EURUSD, USDJPY])
+            .convert(&quoted(), equity, Currency::USD())
+            .unwrap();
+
+        assert_eq!(converted, Some(Money::from("124000 USD")));
+    }
+
+    /// No pair reaches GBP, but none of it is held: the equity is the EUR's
+    /// alone, converted.
+    #[test]
+    fn an_amount_of_zero_needs_no_rate() {
+        let equity = money(&["100000 EUR", "0 GBP"]);
+
+        let converted = through(&[EURUSD])
+            .convert(&quoted(), equity, Currency::USD())
+            .unwrap();
+
+        assert_eq!(converted, Some(Money::from("125000 USD")));
+    }
+
+    /// No pair reaches GBP, and 5 GBP are held: the equity is not
+    /// converted, rather than converted without them.
+    #[test]
+    fn an_amount_no_pair_reaches_converts_nothing() {
+        let equity = money(&["100000 EUR", "5 GBP"]);
+
+        let converted = through(&[EURUSD])
+            .convert(&quoted(), equity, Currency::USD())
+            .unwrap();
+
+        assert_eq!(converted, None);
+    }
+
+    /// An amount of a currency with a pair but no rate cached yet converts
+    /// nothing either.
+    #[test]
+    fn an_amount_of_a_pair_not_quoted_yet_converts_nothing() {
+        let equity = money(&["100000 EUR"]);
+
+        let converted = through(&[EURUSD])
+            .convert(&defining(&[EURUSD]), equity, Currency::USD())
+            .unwrap();
+
+        assert_eq!(converted, None);
+    }
+
+    /// The 1-minute `price_type` bar of `pair` closing at `close`, flat.
+    fn bar(pair: &str, price_type: PriceType, close: &str) -> Bar {
+        let bar_type = BarType::new(
+            InstrumentId::from(pair),
+            BarSpecification::new(1, BarAggregation::Minute, price_type),
+            AggregationSource::External,
+        );
+        let close = Price::from(close);
+        Bar::new(
+            bar_type,
+            close,
+            close,
+            close,
+            close,
+            Quantity::from(0),
+            UnixNanos::default(),
+            UnixNanos::default(),
+        )
+    }
+
+    /// IB serves an FX pair's history as BID and ASK bars, not quotes:
+    /// Nautilus reads a pair no quote of which is cached at the closes of
+    /// its BID and ASK bars, 1.24990 and 1.25010, the mid 1.25 USD per EUR.
+    #[test]
+    fn a_pair_without_quotes_is_read_at_its_bid_and_ask_bars() {
+        let mut cache = defining(&[EURUSD]);
+        cache
+            .add_bar(bar(EURUSD, PriceType::Bid, "1.24990"))
+            .unwrap();
+        cache
+            .add_bar(bar(EURUSD, PriceType::Ask, "1.25010"))
+            .unwrap();
+
+        let converted = through(&[EURUSD])
+            .convert(&cache, money(&["100000 EUR"]), Currency::USD())
+            .unwrap();
+
+        assert_eq!(converted, Some(Money::from("125000 USD")));
+    }
 }

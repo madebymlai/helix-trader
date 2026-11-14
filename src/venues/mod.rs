@@ -15,7 +15,9 @@
 //! orders may be reduce-only and post-only
 //! (`takes_reduce_only_and_post_only`, its broker's answer) and the tag
 //! linking a bracket's exits at its broker (`bracket_exits_tag`, IB's OCA
-//! group); venue code checks its own
+//! group), a strategy the series an FX pair it converts through is read in
+//! (`rate_series`, its history's answer: quotes, or IB's BID and ASK
+//! bars); venue code checks its own
 //! instruments against the table. Custom data of no instrument has no venue
 //! and no row: its type names its source, LSE's rows LSE (`fill_history`).
 //! The settings each command takes of the venues are composed here,
@@ -68,7 +70,7 @@ use self::{databento::DatabentoHistory, ib::IbHistory, okx::OkxHistory};
 use crate::{
     catalog::{NodeClient, NodeFill, missing},
     live::node::{Clients, ExecClient},
-    strategy::{DataRequirements, SeriesSlice},
+    strategy::{DataRequirements, Series, SeriesSlice, TickSeries},
 };
 
 /// A cTrader broker: the venue of its instruments, which names its clients
@@ -155,6 +157,24 @@ pub(crate) enum HistorySource {
     Lse,
     /// Interactive Brokers' historical bars.
     Ib,
+}
+
+impl HistorySource {
+    /// The series of `pair`, an FX pair whose history the source serves,
+    /// its rates are read from: of IB's, its own 1-minute BID and ASK bars
+    /// (`ib::pair_bars`), IB serving no quotes of history and no trades of
+    /// a pair, and Nautilus reading a pair with no quote cached at the
+    /// closes of its latest BID and ASK bars (`Cache::get_xrate`); of
+    /// another source's, a cTrader broker's, its quotes.
+    fn rate_series(self, pair: InstrumentId) -> Vec<Series> {
+        match self {
+            Self::Ib => ib::pair_bars(pair).map(Series::Bars).to_vec(),
+            Self::Okx | Self::CTrader(_) | Self::Lse => vec![Series::Ticks(TickSeries {
+                data: NautilusDataType::QuoteTick,
+                instrument_id: pair,
+            })],
+        }
+    }
 }
 
 /// The source of a venue's live data on the live node: a data client.
@@ -440,6 +460,19 @@ pub fn has_broker(venue: Venue) -> bool {
 #[must_use]
 pub fn has_base_currency(venue: Venue) -> bool {
     Row::of(venue).broker.is_some_and(Broker::has_base_currency)
+}
+
+/// The series the rates of `pair`, an FX pair a strategy converts equity
+/// through (`[trade] conversions`), are read from: those its venue's
+/// history serves (`HistorySource::rate_series`), so every venue without
+/// a row of its own as IB's. The strategy's data requirements carry them
+/// (`StandardConfig::data_requirements`), so that fill-catalog fills them
+/// and a backtest replays them as any series of the pair's venue, and the
+/// rates are read from one form of the pair, the same in a backtest as
+/// live: Nautilus reads a pair's quotes before its bars, however old.
+#[must_use]
+pub fn rate_series(pair: InstrumentId) -> Vec<Series> {
+    Row::of(pair.venue).history.rate_series(pair)
 }
 
 /// Where a trade on `venue` reads the equity of its broker's account as the
@@ -899,10 +932,7 @@ mod tests {
     use nautilus_okx::common::consts::OKX_VENUE;
 
     use super::*;
-    use crate::{
-        catalog::{FillData, FillRequest},
-        strategy::TickSeries,
-    };
+    use crate::catalog::{FillData, FillRequest};
 
     /// A demo account of `broker`, through its account's variables, beside
     /// the login's credential.
@@ -1701,6 +1731,32 @@ mod tests {
             ("LSEDGE", false),
         ] {
             assert_eq!(has_base_currency(Venue::new(venue)), based, "{venue}");
+        }
+    }
+
+    /// A pair's rates are read as its venue's history serves it: a cTrader
+    /// broker's as its quotes; IB's, an IDEALPRO pair's, IDEALPRO having no
+    /// row of its own, as its 1-minute BID and ASK bars, IB serving no
+    /// quotes of history and no trades of a pair.
+    #[test]
+    fn each_venue_s_pairs_are_read_in_the_series_its_history_serves() {
+        let quotes = |pair: &str| {
+            vec![Series::Ticks(TickSeries {
+                data: NautilusDataType::QuoteTick,
+                instrument_id: InstrumentId::from(pair),
+            })]
+        };
+        let bars = |pair: &str| {
+            ["BID", "ASK"]
+                .map(|side| Series::Bars(BarType::from(format!("{pair}-1-MINUTE-{side}-EXTERNAL"))))
+                .to_vec()
+        };
+        for (pair, read) in [
+            ("EURUSD.ICMARKETS", quotes("EURUSD.ICMARKETS")),
+            ("EURUSD.PEPPERSTONE", quotes("EURUSD.PEPPERSTONE")),
+            ("EUR/USD.IDEALPRO", bars("EUR/USD.IDEALPRO")),
+        ] {
+            assert_eq!(rate_series(InstrumentId::from(pair)), read, "{pair}");
         }
     }
 
