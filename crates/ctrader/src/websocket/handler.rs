@@ -101,15 +101,6 @@ pub(super) type Reply = oneshot::Sender<Result<ProtoMessage, CTraderError>>;
 /// it), an error if it never was.
 pub(super) type Sent = oneshot::Sender<Result<(), CTraderError>>;
 
-/// Why a frame was not sent.
-enum Unsent {
-    /// The connection it is bound to is gone, or going: it waits for the
-    /// new one.
-    ConnectionChanged,
-    /// The transport refused it.
-    Failed(CTraderError),
-}
-
 /// Commands from the outer client to the handler.
 pub(super) enum HandlerCommand {
     /// The connected client; the first command, queued before the command
@@ -402,23 +393,22 @@ impl CTraderWsHandler {
     }
 
     /// Sends one frame on the session's connection (see the module docs).
-    async fn send(&self, frame: Vec<u8>) -> Result<(), Unsent> {
+    async fn send(&self, frame: Vec<u8>) -> Result<(), SendError> {
         self.send_on(frame, self.connection).await
     }
 
     /// Sends one frame on the connection of epoch `connection`, or not at
-    /// all. No frame content is logged: auth frames hold the secret and the
-    /// token. The transport takes the frame; its copies are out of the
-    /// adapter's reach.
-    async fn send_on(&self, frame: Vec<u8>, connection: u64) -> Result<(), Unsent> {
-        let client = self
-            .client
-            .as_ref()
-            .ok_or_else(|| Unsent::Failed(CTraderError::Transport("no connection".to_owned())))?;
+    /// all: the transport's `SendError` if never written, its
+    /// `ConnectionChanged` if that connection is gone or going (the frame
+    /// waits for the new one). No frame content is logged: auth frames hold
+    /// the secret and the token. The transport takes the frame; its copies
+    /// are out of the adapter's reach.
+    async fn send_on(&self, frame: Vec<u8>, connection: u64) -> Result<(), SendError> {
+        let client = self.client.as_ref().ok_or(SendError::Closed)?;
         // Refused at once rather than held in the transport until a
         // connection is up, which is not the frame's.
         if client.connection_mode().is_reconnect() {
-            return Err(Unsent::ConnectionChanged);
+            return Err(SendError::ConnectionChanged);
         }
         client
             .send_bytes_on_connection(frame, None, connection)
@@ -436,8 +426,8 @@ impl CTraderWsHandler {
         };
         let heartbeat = frame(&ProtoHeartbeatEvent::default(), None);
         match self.send_on(heartbeat, client.connection_epoch()).await {
-            Ok(()) | Err(Unsent::ConnectionChanged) => {}
-            Err(Unsent::Failed(e)) => log::warn!("cTrader heartbeat not sent: {e}"),
+            Ok(()) | Err(SendError::ConnectionChanged) => {}
+            Err(e) => log::warn!("cTrader heartbeat not sent: {e}"),
         }
     }
 
@@ -472,8 +462,8 @@ impl CTraderWsHandler {
         request.client_secret.zeroize();
         match self.send(frame).await {
             Ok(()) => self.session = Session::ApplicationAuth(id),
-            Err(Unsent::ConnectionChanged) => self.await_connection("application auth"),
-            Err(Unsent::Failed(e)) => {
+            Err(SendError::ConnectionChanged) => self.await_connection("application auth"),
+            Err(e) => {
                 self.fail_session(format!("sending the application auth: {e}"));
             }
         }
@@ -552,8 +542,8 @@ impl CTraderWsHandler {
                 self.wake = Some(deadline);
             }
             // The new connection's application auth renews the token if due.
-            Err(Unsent::ConnectionChanged) => self.await_connection("token renewal"),
-            Err(Unsent::Failed(e)) => self.fail_session(format!("sending the token renewal: {e}")),
+            Err(SendError::ConnectionChanged) => self.await_connection("token renewal"),
+            Err(e) => self.fail_session(format!("sending the token renewal: {e}")),
         }
     }
 
@@ -621,8 +611,8 @@ impl CTraderWsHandler {
         request.access_token.zeroize();
         match self.send(frame).await {
             Ok(()) => self.session = Session::AccountAuth(id),
-            Err(Unsent::ConnectionChanged) => self.await_connection("account auth"),
-            Err(Unsent::Failed(e)) => self.fail_session(format!("sending the account auth: {e}")),
+            Err(SendError::ConnectionChanged) => self.await_connection("account auth"),
+            Err(e) => self.fail_session(format!("sending the account auth: {e}")),
         }
     }
 
@@ -777,12 +767,12 @@ impl CTraderWsHandler {
                     },
                 );
             }
-            Err(Unsent::ConnectionChanged) => {
+            Err(SendError::ConnectionChanged) => {
                 log::debug!(
                     "cTrader spot change of {symbol_ids:?} not sent: the connection changed"
                 );
             }
-            Err(Unsent::Failed(e)) => {
+            Err(e) => {
                 log::error!("cTrader spot subscription of {symbol_ids:?} not sent: {e}");
                 if subscribe {
                     for symbol_id in &symbol_ids {
@@ -824,7 +814,7 @@ impl CTraderWsHandler {
         .encode_to_vec();
         match self.send(frame).await {
             Ok(()) => {}
-            Err(Unsent::ConnectionChanged) => {
+            Err(SendError::ConnectionChanged) => {
                 log::debug!(
                     "cTrader {} held for the new session",
                     payload_name(request.payload_type)
@@ -832,8 +822,10 @@ impl CTraderWsHandler {
                 self.queued.push(request);
                 return;
             }
-            Err(Unsent::Failed(e)) => {
-                request.awaiting.fail(e);
+            Err(e) => {
+                request
+                    .awaiting
+                    .fail(CTraderError::Transport(e.to_string()));
                 return;
             }
         }
@@ -1136,21 +1128,21 @@ fn renewal_failure(error: &CTraderError, names: &CTraderSettingNames) -> String 
 
 /// A frame whose send failed with `error`: sent, as far as the session can
 /// tell, if its write may have begun, its outcome left to cTrader's answer
-/// or the reconciliation; else unsent. A write that timed out
-/// (`WriteTimeout`) or failed (`BrokenPipe`) may have begun, and Nautilus
-/// then reconnects; `BrokenPipe` also stands for the writer gone, with the
-/// frame or before it, which is no proof that it was never sent.
-fn failed_send(error: SendError) -> Result<(), Unsent> {
+/// or the reconciliation; else unsent, `error` saying why. A write that
+/// timed out (`WriteTimeout`) or failed (`BrokenPipe`) may have begun, and
+/// Nautilus then reconnects; `BrokenPipe` also stands for the writer gone,
+/// with the frame or before it, which is no proof that it was never sent.
+fn failed_send(error: SendError) -> Result<(), SendError> {
     match error {
         SendError::WriteTimeout | SendError::BrokenPipe(_) => {
             log::warn!("cTrader frame write failed ({error}): cTrader may have it");
             Ok(())
         }
-        SendError::ConnectionChanged => Err(Unsent::ConnectionChanged),
-        SendError::InvalidInput(_)
+        SendError::ConnectionChanged
+        | SendError::InvalidInput(_)
         | SendError::BufferFull
         | SendError::Closed
-        | SendError::Timeout => Err(Unsent::Failed(CTraderError::Transport(error.to_string()))),
+        | SendError::Timeout => Err(error),
     }
 }
 
@@ -1196,7 +1188,8 @@ mod tests {
         assert!(failed_send(SendError::WriteTimeout).is_ok());
     }
 
-    /// Refused before its write began: never sent.
+    /// Refused before its write began, or its connection changed: never
+    /// sent, for the transport's reason.
     #[test]
     fn a_frame_refused_before_its_write_is_unsent() {
         for refused in [
@@ -1204,12 +1197,15 @@ mod tests {
             SendError::BufferFull,
             SendError::Closed,
             SendError::Timeout,
+            SendError::ConnectionChanged,
         ] {
-            assert!(matches!(failed_send(refused), Err(Unsent::Failed(_))));
+            let unsent = failed_send(refused.clone());
+            assert!(
+                unsent
+                    .as_ref()
+                    .is_err_and(|e| std::mem::discriminant(e) == std::mem::discriminant(&refused)),
+                "{refused:?}: {unsent:?}"
+            );
         }
-        assert!(matches!(
-            failed_send(SendError::ConnectionChanged),
-            Err(Unsent::ConnectionChanged)
-        ));
     }
 }

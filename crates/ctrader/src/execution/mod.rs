@@ -71,7 +71,7 @@ use nautilus_model::{
 };
 
 use self::{
-    dispatch::{Command, Denial, Dispatch, Output, Role, Want},
+    dispatch::{Dispatch, Output, Role, Want},
     orders::{Leg, Placement, Protection, Tag, parse_protection_id},
     reports::{Reports, explained, open_volumes},
 };
@@ -981,31 +981,6 @@ fn emit(emitter: &ExecutionEventEmitter, outputs: Vec<Output>) {
         match output {
             Output::Event(event) => emitter.send_order_event(event),
             Output::Report(report) => emitter.send_execution_report(report),
-            Output::Denied(Denial {
-                command,
-                strategy_id,
-                instrument_id,
-                client_order_id,
-                venue_order_id,
-                reason,
-                ts_event,
-                command_id,
-            }) => {
-                let emit_denied = match command {
-                    Command::Modify => ExecutionEventEmitter::emit_order_modify_denied_event,
-                    Command::Cancel => ExecutionEventEmitter::emit_order_cancel_denied_event,
-                };
-                emit_denied(
-                    emitter,
-                    strategy_id,
-                    instrument_id,
-                    client_order_id,
-                    venue_order_id,
-                    &reason,
-                    ts_event,
-                    Some(command_id),
-                );
-            }
         }
     }
 }

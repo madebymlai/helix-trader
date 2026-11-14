@@ -56,12 +56,11 @@ use nautilus_live::execution::{context::OrderIdentity, failure::CommandFailure};
 use nautilus_model::{
     enums::LiquiditySide,
     events::{
-        OrderAccepted, OrderCancelRejected, OrderCanceled, OrderEventAny, OrderExpired,
-        OrderFilled, OrderModifyRejected, OrderRejected, OrderUpdated,
+        OrderAccepted, OrderCancelDenied, OrderCancelRejected, OrderCanceled, OrderEventAny,
+        OrderExpired, OrderFilled, OrderModifyDenied, OrderModifyRejected, OrderRejected,
+        OrderUpdated,
     },
-    identifiers::{
-        AccountId, ClientOrderId, InstrumentId, StrategyId, TradeId, TraderId, VenueOrderId,
-    },
+    identifiers::{AccountId, ClientOrderId, TradeId, TraderId, VenueOrderId},
     instruments::{Instrument, InstrumentAny},
     orders::{Order, OrderAny},
     reports::{FillReport, OrderStatusReport},
@@ -94,28 +93,6 @@ const DEALS_REMEMBERED: usize = 10_000;
 pub(super) enum Output {
     Event(OrderEventAny),
     Report(ExecutionReport),
-    Denied(Denial),
-}
-
-/// A modify or cancel of an order refused before it was sent: Nautilus'
-/// `OrderModifyDenied` or `OrderCancelDenied`, caused by `command_id`.
-#[derive(Debug, Clone, PartialEq)]
-pub(super) struct Denial {
-    pub(super) command: Command,
-    pub(super) strategy_id: StrategyId,
-    pub(super) instrument_id: InstrumentId,
-    pub(super) client_order_id: ClientOrderId,
-    pub(super) venue_order_id: Option<VenueOrderId>,
-    pub(super) reason: Ustr,
-    pub(super) ts_event: UnixNanos,
-    pub(super) command_id: UUID4,
-}
-
-/// The kind of command a denial refuses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Command {
-    Modify,
-    Cancel,
 }
 
 /// An order this client sent: its identity (Nautilus' `OrderIdentity`),
@@ -401,11 +378,8 @@ impl Dispatch {
                 log::warn!("{tag} not sent: {reason}");
                 match tag {
                     Tag::New(_) | Tag::Close(_) => self.rejections(tag, reason, ts),
-                    Tag::Amend(_) | Tag::Protect(_) => {
-                        self.denials(Command::Modify, commands, reason, ts)
-                    }
-                    Tag::Cancel(_) | Tag::Unprotect(_) => {
-                        self.denials(Command::Cancel, commands, reason, ts)
+                    Tag::Amend(_) | Tag::Protect(_) | Tag::Cancel(_) | Tag::Unprotect(_) => {
+                        self.denials(tag, commands, reason, ts)
                     }
                 }
             }
@@ -441,30 +415,60 @@ impl Dispatch {
         }
     }
 
-    /// The denials of `command` for `commands` (see `fail`), of each order
-    /// still open, its wanted change forgotten.
+    /// The denials, each caused by its command, of the modify (an
+    /// amendment) or cancel (a cancellation, a removal of protections) the
+    /// request `tag` carries for `commands` (see `fail`): Nautilus'
+    /// `OrderModifyDenied` or `OrderCancelDenied` of each order still open,
+    /// its wanted change forgotten.
     fn denials(
         &mut self,
-        command: Command,
+        tag: Tag,
         commands: &[(ClientOrderId, UUID4)],
         reason: Ustr,
         ts: UnixNanos,
     ) -> Vec<Output> {
+        let modify = matches!(tag, Tag::Amend(_) | Tag::Protect(_));
+        let (trader_id, account_id) = (self.trader_id, Some(self.account_id));
         commands
             .iter()
             .filter_map(|&(id, command_id)| {
                 let tracked = self.orders.get_mut(&id).filter(|t| !t.closed)?;
                 tracked.want = None;
-                Some(Output::Denied(Denial {
-                    command,
-                    strategy_id: tracked.identity.strategy_id,
-                    instrument_id: tracked.identity.instrument_id,
-                    client_order_id: id,
-                    venue_order_id: tracked.venue_order_id,
-                    reason,
-                    ts_event: ts,
-                    command_id,
-                }))
+                let (strategy_id, instrument_id) =
+                    (tracked.identity.strategy_id, tracked.identity.instrument_id);
+                let venue = tracked.venue_order_id;
+                let event = if modify {
+                    let mut denied = OrderModifyDenied::new(
+                        trader_id,
+                        strategy_id,
+                        instrument_id,
+                        id,
+                        reason,
+                        UUID4::new(),
+                        ts,
+                        ts,
+                        venue,
+                        account_id,
+                    );
+                    denied.causation_id = Some(command_id);
+                    OrderEventAny::ModifyDenied(denied)
+                } else {
+                    let mut denied = OrderCancelDenied::new(
+                        trader_id,
+                        strategy_id,
+                        instrument_id,
+                        id,
+                        reason,
+                        UUID4::new(),
+                        ts,
+                        ts,
+                        venue,
+                        account_id,
+                    );
+                    denied.causation_id = Some(command_id);
+                    OrderEventAny::CancelDenied(denied)
+                };
+                Some(Output::Event(event))
             })
             .collect()
     }
@@ -1351,17 +1355,12 @@ mod tests {
                         OrderEventAny::Filled(_) => "filled",
                         OrderEventAny::Rejected(_) => "rejected",
                         OrderEventAny::ModifyRejected(_) => "modify rejected",
+                        OrderEventAny::ModifyDenied(_) => "modify denied",
                         OrderEventAny::CancelRejected(_) => "cancel rejected",
+                        OrderEventAny::CancelDenied(_) => "cancel denied",
                         OrderEventAny::Canceled(_) => "canceled",
                         OrderEventAny::Updated(_) => "updated",
                         _ => "other event",
-                    },
-                ),
-                Output::Denied(denial) => (
-                    denial.client_order_id.to_string(),
-                    match denial.command {
-                        Command::Modify => "modify denied",
-                        Command::Cancel => "cancel denied",
                     },
                 ),
                 Output::Report(report) => (
@@ -1387,7 +1386,8 @@ mod tests {
             [Output::Event(OrderEventAny::Rejected(e))] => e.reason.to_string(),
             [Output::Event(OrderEventAny::ModifyRejected(e))] => e.reason.to_string(),
             [Output::Event(OrderEventAny::CancelRejected(e))] => e.reason.to_string(),
-            [Output::Denied(denial)] => denial.reason.to_string(),
+            [Output::Event(OrderEventAny::ModifyDenied(e))] => e.reason.to_string(),
+            [Output::Event(OrderEventAny::CancelDenied(e))] => e.reason.to_string(),
             other => panic!("not one rejection: {:?}", kinds(other)),
         }
     }
@@ -1595,12 +1595,11 @@ mod tests {
             ts(),
         );
 
-        let [Output::Denied(denial)] = &out[..] else {
-            panic!("not one denial: {:?}", kinds(&out));
+        let [Output::Event(OrderEventAny::ModifyDenied(denial))] = &out[..] else {
+            panic!("not one modify denial: {:?}", kinds(&out));
         };
-        assert_eq!(denial.command, Command::Modify);
         assert_eq!(denial.client_order_id, id("PROBE-2"));
-        assert_eq!(denial.command_id, command);
+        assert_eq!(denial.causation_id, Some(command));
         assert_eq!(
             denial.reason.as_str(),
             "not sent to ACMEFX: the cTrader connection was lost"
@@ -1625,18 +1624,20 @@ mod tests {
             ts(),
         );
 
-        let denied: Vec<(ClientOrderId, Command, UUID4)> = out
+        let denied: Vec<(ClientOrderId, Option<UUID4>)> = out
             .iter()
             .map(|o| match o {
-                Output::Denied(d) => (d.client_order_id, d.command, d.command_id),
-                _ => panic!("not a denial: {:?}", kinds(&out)),
+                Output::Event(OrderEventAny::CancelDenied(d)) => {
+                    (d.client_order_id, d.causation_id)
+                }
+                _ => panic!("not a cancel denial: {:?}", kinds(&out)),
             })
             .collect();
         assert_eq!(
             denied,
             [
-                (commands[0].0, Command::Cancel, commands[0].1),
-                (commands[1].0, Command::Cancel, commands[1].1)
+                (commands[0].0, Some(commands[0].1)),
+                (commands[1].0, Some(commands[1].1))
             ]
         );
     }
