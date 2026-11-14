@@ -288,11 +288,12 @@ fn ensure_bars_closed(end: Timestamp, now: Timestamp) -> anyhow::Result<()> {
 /// older than its cursor. Returns the bars sorted by `ts_init`, unique.
 ///
 /// One request per cursor, each ending where the previous answer starts,
-/// so no hole opens between requests: the adapter's own split of a window
-/// into a days segment and a seconds remainder loses bars, because IB
-/// counts days in trading sessions (nautilus_trader#5384; helix-trader
-/// issue #6, <https://github.com/madebymlai/helix-trader/issues/6>). Temporary, as IB's fill, the one thing it serves:
-/// it goes with it, whatever becomes of the split (helix-trader issue #4).
+/// so no hole opens between requests, and each one IB answers within the
+/// request timeout: a request by start over the whole window, which the
+/// adapter sends as one request between its bounds
+/// (nautilus_trader#5621), took 1,164 s for a year of minute bars, against
+/// 60 s (measured 2026-11-08). Temporary, as IB's fill, the one thing it
+/// serves: it goes with it (helix-trader issue #4).
 async fn walk_back(
     start: Timestamp,
     end: Timestamp,

@@ -197,11 +197,13 @@ mod hold;
 
 use hold::{Hold, Tick};
 
-/// The window a warmup is asked in (see `time_range`): under a day, as IB's
-/// client asks a duration of a day or more in days and IB counts those as
-/// sessions, the current one included, so that 72 hours started in a session
-/// lost the oldest of them (841 of 2,791 bars of SXR8, measured 2026-11-04).
-/// Under a day it asks in seconds. Venues page within a window.
+/// The window a warmup is asked in (see `time_range`): under a day. IB's
+/// client asks a window as one request between its bounds, from a bar
+/// before its start, keeping the bars within it (nautilus_trader#5621),
+/// and ibapi sends a span of up to a day in seconds, a longer one in whole
+/// days plus one, which IB counts in sessions: a day's window would go as
+/// `3 D`, three sessions fetched to keep one day's bars. Venues page within
+/// a window.
 const WINDOW: SignedDuration = SignedDuration::from_hours(23);
 
 /// The data client a warmup's request of custom data names: no data client

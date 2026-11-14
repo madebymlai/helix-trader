@@ -1,11 +1,9 @@
 //! A warmup of days on IB, end to end on the Docker paper gateway, with an
-//! empty catalog, so that IB answers all of it. IB counts a duration of days
-//! in sessions, the current one included, so 72 hours asked at once within a
-//! session lose the oldest of them (841 of 2,791 minute bars of SXR8 for the
-//! 72 hours to 2026-10-29T08:00Z): the warmup asks in windows under a day,
-//! which IB's client asks in seconds, and gets every minute bar IB's history
-//! holds over them, as read a page at a time, and builds each hour bar from
-//! them once.
+//! empty catalog, so that IB answers all of it: the warmup asks in windows
+//! under a day, each of which IB's client asks as one request between its
+//! bounds, in seconds (see `strategy::warmup`'s `WINDOW`), and gets every
+//! minute bar IB's history holds over them, as read a page at a time, and
+//! builds each hour bar from them once.
 //!
 //! Gated as `ib_gateway.rs`: it returns at once, saying it was skipped,
 //! unless `NAUTILUS_IB_RUN=1` is set in the shell. It places no order. It
