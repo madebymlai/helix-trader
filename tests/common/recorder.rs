@@ -4,7 +4,8 @@
 //! it gets, every fill, and on stop the adjustments of its positions
 //! (funding), its orders, the orders denied and its account's margins, and
 //! can send market orders of its choosing on the first bars, or trades at
-//! stakes of its choosing (`strategy::orders::Trade`), close its positions
+//! stakes of its choosing (`strategy::orders::Trade`), on equity converted
+//! at rates of its choosing (`strategy::conversions`), close its positions
 //! by their ids on given bars, and on stop its positions. It leaves its
 //! `oms_type` unset, so it keeps positions as the venue does. For the tests
 //! that need what the EMA crossover cannot show: the bars' open, high and
@@ -15,6 +16,7 @@ use std::{cell::RefCell, rc::Rc};
 use helix_trader::{
     rolls::ContinuousBars,
     strategy::{
+        conversions::{Conversions, Rates},
         orders::{Exits, Trade},
         risk::Stake,
         warmup,
@@ -70,6 +72,9 @@ pub struct Recorder {
     /// one R from the bar's close, and its stake. Without exits, a market
     /// entry.
     staked: Vec<(OrderSide, Decimal, Stake)>,
+    /// The rates its trades convert equity at: none unless it converts
+    /// (`converting`).
+    rates: Rates,
     /// The bars, by index, on which it closes its open positions
     /// (`close_position`), before any market order of the bar.
     close_on: Vec<usize>,
@@ -90,6 +95,7 @@ impl Recorder {
             continuous: ContinuousBars::default(),
             market: vec![],
             staked: vec![],
+            rates: Conversions::default().rates(),
             close_on: vec![],
             record: Rc::clone(&record),
         };
@@ -137,6 +143,11 @@ impl Recorder {
     /// (`close_position`), on the bars of `close_on`.
     pub fn closing_on(self, close_on: Vec<usize>) -> Self {
         Self { close_on, ..self }
+    }
+
+    /// The recorder sizing its trades on equity converted at `rates`.
+    pub fn converting(self, rates: Rates) -> Self {
+        Self { rates, ..self }
     }
 }
 
@@ -217,7 +228,7 @@ impl DataActor for Recorder {
                 time_limit: None,
             };
             Trade::new(bar.bar_type.instrument_id(), side, bar.close, one_r, exits)
-                .send(self, stake)?;
+                .send(self, stake, self.rates)?;
         }
         Ok(())
     }

@@ -12,7 +12,7 @@ mod report;
 
 use std::{collections::BTreeSet, fmt::Debug, path::PathBuf};
 
-use anyhow::{Context, ensure};
+use anyhow::{Context, bail};
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::DataActorNative, component::Component, logging::logger::LoggerConfig,
@@ -36,7 +36,7 @@ pub use self::{
 };
 use crate::{
     rolls::ContinuousBars,
-    strategy::{DataRequirements, SeriesSlice, TickSeries},
+    strategy::{DataRequirements, SeriesSlice, TickSeries, TradeConfig, conversions},
 };
 
 /// One backtest: a window of the catalog, the bar types whose source data
@@ -131,22 +131,23 @@ impl Backtest {
         node::run_dataset(config, node::custom_data(self)?, strategy)
     }
 
-    /// Refuses the run unless its balance is in the P&L currency of each
-    /// instrument of `traded`, those the strategy trades, as its catalog
-    /// defines them (`catalog::traded_instruments`, `refuse_balance`): a trade sent
-    /// at a stake is sized on the equity in
-    /// its P&L currency alone, which is not converted
-    /// (`strategy::orders::Trade::send`), so on a balance in another it
-    /// would send nothing.
+    /// Refuses the run unless its balance's currency reaches the P&L
+    /// currency of each instrument `trade` trades through the pairs it
+    /// converts through (`[trade] conversions`), all as its catalog defines
+    /// them (`catalog::instruments`, `refuse_balance`): a trade sent at a
+    /// stake is sized on the account's equity converted into its P&L
+    /// currency at the pairs' rates (`strategy::orders::Trade::send`), so
+    /// on a balance they do not convert it would send nothing.
     ///
     /// # Errors
     ///
-    /// Returns an error as `catalog::traded_instruments` and `refuse_balance` do.
-    pub fn refuse_balance(&self, traded: &[InstrumentId]) -> anyhow::Result<()> {
-        refuse_balance(
-            self.balance,
-            &crate::catalog::traded_instruments(&self.catalog, traded)?,
-        )
+    /// Returns an error as `catalog::instruments` and `refuse_balance` do.
+    pub fn refuse_balance(&self, trade: &TradeConfig) -> anyhow::Result<()> {
+        let traded = crate::catalog::instruments(&self.catalog, &trade.instrument_ids())
+            .context("reading the instruments traded")?;
+        let pairs = crate::catalog::instruments(&self.catalog, trade.conversions.pairs())
+            .context("reading the pairs of [trade] conversions")?;
+        refuse_balance(self.balance, &traded, &pairs)
     }
 
     /// The continuous bars of the bar types on roots over the run,
@@ -284,22 +285,39 @@ impl Backtest {
     }
 }
 
-/// Refuses `balance` unless it is in the P&L currency
-/// (`Instrument::cost_currency`) of each instrument of `traded`: the
-/// equity a trade is sized on, by Nautilus' fixed-risk sizer, which reads
-/// it as given, is not converted.
+/// Refuses `balance` unless its currency reaches the P&L currency
+/// (`Instrument::cost_currency`) of each instrument of `traded` through
+/// `pairs`, the definitions of the pairs a strategy converts through
+/// (`conversions::reaches`, Nautilus' own path search): the equity a trade
+/// is sized on, by Nautilus' fixed-risk sizer, which reads it as given, is
+/// converted into its P&L currency at the pairs' rates, and a currency
+/// they do not reach is not converted. Without pairs, the balance is in
+/// each P&L currency or refused.
 ///
 /// # Errors
 ///
-/// Returns an error if the P&L of an instrument of `traded` is in another
-/// currency than the balance.
-pub fn refuse_balance(balance: Money, traded: &[InstrumentAny]) -> anyhow::Result<()> {
+/// Returns an error naming both currencies if the pairs do not reach the
+/// P&L currency of an instrument of `traded` from the balance's.
+pub fn refuse_balance(
+    balance: Money,
+    traded: &[InstrumentAny],
+    pairs: &[InstrumentAny],
+) -> anyhow::Result<()> {
     for instrument in traded {
         let pnl = instrument.cost_currency();
-        ensure!(
-            pnl == balance.currency,
-            "the balance {balance} is in {}, the P&L of {}, which the strategy trades, in \
-             {pnl}: a trade is sized on the equity in its P&L currency, which is not converted",
+        if conversions::reaches(pairs, balance.currency, pnl)? {
+            continue;
+        }
+        let through = if pairs.is_empty() {
+            "no pair".to_string()
+        } else {
+            let ids: Vec<String> = pairs.iter().map(|pair| pair.id().to_string()).collect();
+            format!("none of the pairs [{}]", ids.join(", "))
+        };
+        bail!(
+            "the balance {balance} is in {}, which {through} converts into {pnl}, the P&L \
+             currency of {}, which the strategy trades: a trade is sized on the equity \
+             converted into its P&L currency through the pairs of [trade] conversions",
             balance.currency,
             instrument.id()
         );

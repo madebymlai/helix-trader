@@ -31,6 +31,7 @@ use helix_trader::{
     },
     strategy::{
         DataRequirements, Declared, IndicatorArgs, IndicatorsConfig, TickSeries,
+        conversions::Conversions,
         orders::{self, EntryRisk},
         risk::{R, Stake},
     },
@@ -139,7 +140,8 @@ impl DataActor for ModelProbe {
             if let Some(decision) = Rc::clone(&self.model).decide(self)? {
                 let now = self.clock().timestamp_ns();
                 self.record.borrow_mut().trades.push((now, decision));
-                decision.trade().send(self, self.stake)?;
+                let unconverted = Conversions::default().rates();
+                decision.trade().send(self, self.stake, unconverted)?;
             }
             return Ok(());
         }

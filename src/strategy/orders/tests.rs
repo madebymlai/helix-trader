@@ -35,7 +35,7 @@ use nautilus_trading::{
 };
 
 use super::*;
-use crate::log_capture;
+use crate::{log_capture, strategy::conversions::Conversions};
 
 const STRATEGY: &str = "ORDERS-001";
 /// AUD/USD at Pepperstone, whose live broker takes reduce-only and
@@ -196,6 +196,12 @@ fn decimal(s: &str) -> Decimal {
 /// 500 USD of the accounts' 100,000.
 fn stake() -> Stake {
     Stake::new("0.5%".parse().unwrap())
+}
+
+/// The rates of a config converting through no pair, which the trades are
+/// sent at unless a test says.
+fn unconverted() -> Rates {
+    Conversions::default().rates()
 }
 
 /// The equity of the accounts of `cache`, which a trade named by its ids
@@ -481,7 +487,9 @@ fn exits(probe: &Probe) -> Vec<OrderAny> {
 fn a_trade_on_ib_links_its_exits_in_one_oca_group_each_reducing_the_other() {
     let (mut probe, _) = registered();
 
-    on_ib(buy(bracket(4))).send(&mut probe, stake()).unwrap();
+    on_ib(buy(bracket(4)))
+        .send(&mut probe, stake(), unconverted())
+        .unwrap();
 
     let exits: Vec<(String, OcaType)> = exits(&probe).iter().map(oca_at_ib).collect();
     let [take_profit, stop_loss] = exits.as_slice() else {
@@ -510,8 +518,8 @@ fn two_trades_on_ib_link_their_exits_in_two_groups() {
     let (mut probe, _) = registered();
     let trade = on_ib(buy(bracket(4)));
 
-    trade.send(&mut probe, stake()).unwrap();
-    trade.send(&mut probe, stake()).unwrap();
+    trade.send(&mut probe, stake(), unconverted()).unwrap();
+    trade.send(&mut probe, stake(), unconverted()).unwrap();
 
     let groups: BTreeSet<String> = exits(&probe).iter().map(|exit| oca_at_ib(exit).0).collect();
     assert_eq!(groups.len(), 2, "{groups:?}");
@@ -572,7 +580,9 @@ fn a_trade_at_ic_tags_its_exits_as_nautilus_does() {
 fn a_trade_without_exits_is_one_market_entry() {
     let (mut probe, _) = registered();
 
-    buy(held(1)).send(&mut probe, stake()).unwrap();
+    buy(held(1))
+        .send(&mut probe, stake(), unconverted())
+        .unwrap();
 
     let cache = probe.cache();
     let orders = cache.orders(None, None, None, None, None);
@@ -626,7 +636,7 @@ fn a_trade_risks_its_stake_of_equity_over_its_one_r_rounded_down_to_its_size() {
         held(1),
     );
 
-    trade.send(&mut probe, stake()).unwrap();
+    trade.send(&mut probe, stake(), unconverted()).unwrap();
 
     assert_eq!(entry_quantity(&probe), Quantity::from(138_888));
 }
@@ -648,7 +658,7 @@ fn a_trade_is_sized_at_its_stop_on_the_tick_away_from_its_price() {
             held(1),
         );
 
-        trade.send(&mut probe, stake()).unwrap();
+        trade.send(&mut probe, stake(), unconverted()).unwrap();
 
         assert_eq!(entry_quantity(&probe), Quantity::from(115_473), "{side}");
     }
@@ -659,7 +669,7 @@ fn a_trade_at_twice_the_stake_is_twice_the_size() {
     let (mut probe, _) = registered();
 
     let twice = stake().times(decimal("2")).unwrap();
-    buy(held(1)).send(&mut probe, twice).unwrap();
+    buy(held(1)).send(&mut probe, twice, unconverted()).unwrap();
 
     assert_eq!(entry_quantity(&probe), Quantity::from(200_000));
 }
@@ -691,7 +701,7 @@ fn a_trades_entry_at_a_multiple_of_the_stake_is_tagged_with_it() {
     let (mut probe, _) = registered();
 
     let twice = stake().times(decimal("2")).unwrap();
-    buy(held(1)).send(&mut probe, twice).unwrap();
+    buy(held(1)).send(&mut probe, twice, unconverted()).unwrap();
 
     let orders = orders(&probe);
     assert_eq!(
@@ -715,7 +725,9 @@ fn a_trade_whose_size_rounds_to_none_sends_nothing_and_logs_why() {
     log_capture::capture(log::LevelFilter::Info);
     let (mut probe, clock) = registered_on(&cache_holding("0.50 USD"), STRATEGY, NOW);
 
-    buy(bracket(4)).send(&mut probe, stake()).unwrap();
+    buy(bracket(4))
+        .send(&mut probe, stake(), unconverted())
+        .unwrap();
 
     assert_eq!(orders(&probe), []);
     assert_eq!(clock.borrow().timer_names(), Vec::<&str>::new());
@@ -740,7 +752,9 @@ fn a_trade_without_equity_in_its_pnl_currency_sends_nothing_and_logs_why() {
     log_capture::capture(log::LevelFilter::Info);
     let (mut probe, clock) = registered_on(&cache_holding("100000 EUR"), STRATEGY, NOW);
 
-    buy(bracket(4)).send(&mut probe, stake()).unwrap();
+    buy(bracket(4))
+        .send(&mut probe, stake(), unconverted())
+        .unwrap();
 
     assert_eq!(orders(&probe), []);
     assert_eq!(clock.borrow().timer_names(), Vec::<&str>::new());
@@ -778,7 +792,7 @@ fn a_trade_is_sized_on_the_account_of_the_client_its_venue_routes_to() {
         ..buy(held(1))
     };
 
-    trade.send(&mut probe, stake()).unwrap();
+    trade.send(&mut probe, stake(), unconverted()).unwrap();
 
     assert_eq!(entry_quantity(&probe), Quantity::from(200_000));
 }

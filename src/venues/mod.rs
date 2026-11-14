@@ -7,10 +7,11 @@
 //! its fill (`fill_history`: the definitions and history), the live runner for
 //! its node's clients (`live_clients`: the live data), a live warmup for the
 //! client it asks a definition of (`live_definitions_client`: the broker, or
-//! the live data), a backtest for how a
-//! venue keeps positions (`oms_type`, its broker's answer) and whether it has
-//! money (`has_broker`: a venue no broker trades has none), a trade whether its
-//! orders may be reduce-only and post-only (`takes_reduce_only_and_post_only`,
+//! the live data), a backtest for how a venue keeps positions (`oms_type`,
+//! its broker's answer), whether it has money (`has_broker`: a venue no
+//! broker trades has none) and whether its account has a base currency
+//! (`has_base_currency`, its broker's answer), a trade whether its orders
+//! may be reduce-only and post-only (`takes_reduce_only_and_post_only`,
 //! its broker's answer) and the tag linking a bracket's exits at its broker
 //! (`bracket_exits_tag`, IB's OCA group); venue code checks its own
 //! instruments against the table. Custom data of no instrument has no venue
@@ -192,6 +193,24 @@ impl Broker {
         match self {
             Self::CTrader(_) => OmsType::Hedging,
             Self::Okx | Self::Ib => OmsType::Netting,
+        }
+    }
+
+    /// Whether the broker's accounts have a base currency, one currency
+    /// Nautilus books their margins, commissions and P&L in, converting
+    /// through the rates of the traded instrument's venue. Nautilus answers
+    /// this only in an account state the execution client reports once
+    /// connected, so this is a copy of the adapters: the cTrader adapter's
+    /// account state carries the account's deposit currency
+    /// (`ctrader`'s execution client, `account_state`); OKX's adapter
+    /// reports none (`parse_account_state`), its accounts holding each
+    /// currency apart, nor does IB's execution client, whose config sets
+    /// none (`ib::live`).
+    #[must_use]
+    pub(crate) fn has_base_currency(self) -> bool {
+        match self {
+            Self::CTrader(_) => true,
+            Self::Okx | Self::Ib => false,
         }
     }
 
@@ -377,6 +396,16 @@ pub fn oms_type(venue: Venue) -> OmsType {
 #[must_use]
 pub fn has_broker(venue: Venue) -> bool {
     Row::of(venue).broker.is_some()
+}
+
+/// Whether the account of `venue`'s broker has a base currency
+/// (`Broker::has_base_currency`), so every venue without a row of its own
+/// as IB's has none; a venue no broker trades has none. A backtest's
+/// simulated account of the venue takes the balance's currency as its base
+/// if so, as the live account keeps its own.
+#[must_use]
+pub fn has_base_currency(venue: Venue) -> bool {
+    Row::of(venue).broker.is_some_and(Broker::has_base_currency)
 }
 
 /// The data client a live node asks the definition of an instrument of
@@ -1535,6 +1564,26 @@ mod tests {
             ("LSEDGE", OmsType::Unspecified),
         ] {
             assert_eq!(oms_type(Venue::new(venue)), kept, "{venue}");
+        }
+    }
+
+    /// A cTrader account's state carries its deposit currency as its base
+    /// (`ctrader`'s execution client); OKX's adapter reports none, nor does
+    /// IB's execution client as helix configures it, GLBX's and every
+    /// venue's without a row of its own; LSEDGE, which no broker trades,
+    /// has no account of a broker.
+    #[test]
+    fn each_venue_has_a_base_currency_as_the_account_of_its_live_broker_has() {
+        for (venue, based) in [
+            ("ICMARKETS", true),
+            ("PEPPERSTONE", true),
+            ("OKX", false),
+            ("GLBX", false),
+            ("IBIS", false),
+            ("IDEALPRO", false),
+            ("LSEDGE", false),
+        ] {
+            assert_eq!(has_base_currency(Venue::new(venue)), based, "{venue}");
         }
     }
 

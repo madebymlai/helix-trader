@@ -69,7 +69,7 @@ pub(crate) async fn clients(
     instrument_ids: &[InstrumentId],
     catalog: &Path,
 ) -> anyhow::Result<OkxClients> {
-    let defined = catalog::traded_instruments(catalog, instrument_ids).context(
+    let defined = catalog::instruments(catalog, instrument_ids).context(
         "an OKX instrument's definition in the catalog holds the account's margin, which \
          backtests run at: fill the catalog before trading it live",
     )?;

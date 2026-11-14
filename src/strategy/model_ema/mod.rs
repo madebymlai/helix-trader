@@ -4,7 +4,7 @@
 //! `[indicators.fast]` and `[indicators.slow]` (`features.rs`), and a
 //! side expected to clear its margin is a decision
 //! (`handle::Decision`), whose trade it sends at the config's stake through
-//! the shared order module (`decision.trade().send(self, stake)`,
+//! the shared order module (`decision.trade().send(self, stake, rates)`,
 //! `strategy::orders`): the target its model learned, as a dataset run sets
 //! it at the decision on that side, a bracket or a market entry, closed at
 //! the target's limit from the send, sized at `[trade] risk` of the
@@ -54,7 +54,8 @@ use crate::{
         handle::{Mode, ModelHandle},
     },
     strategy::{
-        Declaration, Part, Series, StandardConfig, Visitor, orders, risk::Stake, warmup::Warmup,
+        Declaration, Part, Series, StandardConfig, Visitor, conversions::Rates, orders,
+        risk::Stake, warmup::Warmup,
     },
 };
 
@@ -114,6 +115,8 @@ pub struct ModelEma {
     model: Rc<ModelHandle>,
     /// The stake its decisions' trades are sent at, the config's.
     stake: Stake,
+    /// The rates their equity is converted at, the config's.
+    rates: Rates,
 }
 
 impl ModelStrategy for ModelEma {
@@ -138,6 +141,7 @@ impl ModelStrategy for ModelEma {
             core: StrategyCore::new_checked(config.base.clone())?,
             model,
             stake: config.stake(),
+            rates: config.rates(),
         })
     }
 
@@ -187,7 +191,7 @@ impl DataActor for ModelEma {
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {
         if decide::is_decision(event) {
             return match Rc::clone(&self.model).decide(self)? {
-                Some(decision) => decision.trade().send(self, self.stake),
+                Some(decision) => decision.trade().send(self, self.stake, self.rates),
                 None => Ok(()),
             };
         }

@@ -453,11 +453,11 @@ fn a_restart_sets_the_time_of_its_open_trade_again() {
         UnixNanos::from(sent),
         UnixNanos::from(sent),
     );
-    let stake = before.config.stake();
+    let (stake, rates) = (before.config.stake(), before.config.rates());
     before
         .trade(&bar, OrderSide::Buy)
         .unwrap()
-        .send(&mut before, stake)
+        .send(&mut before, stake, rates)
         .unwrap();
     let entry = cache
         .borrow()

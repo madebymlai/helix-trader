@@ -15,6 +15,7 @@ use serde::{
 
 use super::{
     DataRequirements, Declaration, IndicatorsConfig, TickSeries,
+    conversions::{Conversions, Rates},
     risk::{Risk, Stake},
     session::Session,
     tick_data,
@@ -39,7 +40,8 @@ use crate::{
 /// - `[trade]`: what it trades and, of a strategy sizing its trades by
 ///   risk (`Part::SIZES_BY_RISK`), how much each risks, its `risk` (see
 ///   `TradeConfig`); required of such a strategy, and a key `[trade]` takes
-///   of no other.
+///   of no other; and the pairs its equity converts through, its
+///   `conversions`, if any.
 /// - `[model]`: the model of a strategy trading on one
 ///   (`Part::TAKES_MODEL`), whose target trades `[trade]`'s instrument (see
 ///   `ModelSection`, `model`); required of such a strategy, and a key no
@@ -250,6 +252,14 @@ impl<P: Part> StandardConfig<P> {
         Stake::new(self.risk())
     }
 
+    /// The rates the strategy's trades convert equity at into their P&L
+    /// currency: Nautilus' cached rates of the pairs of `[trade]
+    /// conversions` (`Conversions::rates`).
+    #[must_use]
+    pub fn rates(&self) -> Rates {
+        self.trade.conversions.rates()
+    }
+
     /// `[trade] risk`.
     ///
     /// # Panics
@@ -264,10 +274,12 @@ impl<P: Part> StandardConfig<P> {
 
     /// What the strategy needs from data: the bars and the ticks of its
     /// series, then the quotes of each instrument traded that no series
-    /// prices (`TradeConfig::quotes_unpriced_by`), and the warmup.
+    /// prices (`TradeConfig::quotes_unpriced_by`), then those of each pair
+    /// of `[trade] conversions` not read yet, which its rates are read from
+    /// (`Conversions::quotes`), and the warmup.
     #[must_use]
     pub fn data_requirements(&self) -> DataRequirements {
-        let ticks = self
+        let mut ticks: Vec<TickSeries> = self
             .data
             .series
             .iter()
@@ -277,6 +289,11 @@ impl<P: Part> StandardConfig<P> {
             })
             .chain(self.trade.quotes_unpriced_by(&self.data))
             .collect();
+        for quotes in self.trade.conversions.quotes() {
+            if !ticks.contains(&quotes) {
+                ticks.push(quotes);
+            }
+        }
         DataRequirements {
             bar_types: self.data.bar_types().collect(),
             ticks,
@@ -593,9 +610,11 @@ pub struct CompositeSource {
 }
 
 /// `[trade]`: what the strategy trades and, if it sizes its trades by risk
-/// (`Part::SIZES_BY_RISK`), how much each trade risks.
+/// (`Part::SIZES_BY_RISK`), how much each trade risks, and the FX pairs the
+/// equity a trade is sized from is converted through.
 /// The execution data of an instrument traded comes from it: its quotes,
-/// when no series of `[data]` prices it (`quotes_unpriced_by`).
+/// when no series of `[data]` prices it (`quotes_unpriced_by`); so do the
+/// pairs' quotes (`Conversions::quotes`).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TradeConfig {
@@ -608,6 +627,11 @@ pub struct TradeConfig {
     /// stakes is sized from it, whatever its instrument, a model's targets
     /// at the reference stake.
     pub risk: Option<Risk>,
+    /// The FX pairs the equity a trade is sized from is converted through
+    /// into its instrument's P&L currency (`StandardConfig::rates`), each
+    /// by its id, all on one venue; none if left out.
+    #[serde(default)]
+    pub conversions: Conversions,
 }
 
 impl TradeConfig {
@@ -1523,6 +1547,74 @@ mod tests {
             load(TOML).unwrap().data_requirements().ticks,
             [TickSeries {
                 data: NautilusDataType::TradeTick,
+                instrument_id: InstrumentId::from("ESH24.CME"),
+            }]
+        );
+    }
+
+    /// `TOML` converting through `pairs`, its `[trade] conversions`.
+    fn converting(pairs: &str) -> String {
+        let toml = TOML.replace(
+            "risk = \"0.5%\"",
+            &format!("risk = \"0.5%\"\nconversions = {pairs}"),
+        );
+        assert_ne!(toml, TOML);
+        toml
+    }
+
+    /// A config lists the FX pairs it converts through as their ids, in
+    /// order; one without lists none.
+    #[test]
+    fn the_conversions_are_the_pairs_listed_and_none_without() {
+        let config = load(&converting(r#"["EURUSD.ICMARKETS", "USDJPY.ICMARKETS"]"#)).unwrap();
+
+        assert_eq!(
+            config.trade.conversions.pairs(),
+            [
+                InstrumentId::from("EURUSD.ICMARKETS"),
+                InstrumentId::from("USDJPY.ICMARKETS"),
+            ]
+        );
+        assert_eq!(load(TOML).unwrap().trade.conversions.pairs(), []);
+    }
+
+    /// Their rates come from data: each pair's quotes are read, after the
+    /// series' ticks, so that a backtest replays them and fill-catalog
+    /// fills them; the series stay as listed.
+    #[test]
+    fn the_pairs_converted_through_load_their_quotes_into_the_requirements() {
+        let config = load(&converting(r#"["EURUSD.ICMARKETS", "USDJPY.ICMARKETS"]"#)).unwrap();
+
+        let quotes = |id: &str| TickSeries {
+            data: NautilusDataType::QuoteTick,
+            instrument_id: InstrumentId::from(id),
+        };
+        assert_eq!(
+            config.data_requirements().ticks,
+            [
+                TickSeries {
+                    data: NautilusDataType::TradeTick,
+                    instrument_id: InstrumentId::from("ESH24.CME"),
+                },
+                quotes("EURUSD.ICMARKETS"),
+                quotes("USDJPY.ICMARKETS"),
+            ]
+        );
+        assert_eq!(config.data.series.len(), 3);
+    }
+
+    /// A pair whose quotes a series already reads is read once.
+    #[test]
+    fn a_pair_whose_quotes_a_series_reads_is_read_once() {
+        let toml = converting(r#"["ESH24.CME"]"#).replace(
+            r#"{ data = "trades", instrument_id = "ESH24.CME" }"#,
+            r#"{ data = "quotes", instrument_id = "ESH24.CME" }"#,
+        );
+
+        assert_eq!(
+            load(&toml).unwrap().data_requirements().ticks,
+            [TickSeries {
+                data: NautilusDataType::QuoteTick,
                 instrument_id: InstrumentId::from("ESH24.CME"),
             }]
         );
