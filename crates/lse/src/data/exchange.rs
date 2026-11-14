@@ -228,10 +228,26 @@ impl ExchangeInstrument {
     ///
     /// # Errors
     ///
-    /// As `CmeListings::listing`.
+    /// Returns an error naming a CME contract whose listing LSE delisted:
+    /// its symbol names a contract every ten years, so the stream would
+    /// carry the later one's records under its id (`ESZ16.GLBX`, delisted
+    /// in 2016, is `ESZ6`, which names 2026's contract). Or as
+    /// `CmeListings::listing`.
     async fn name(&self, listings: &CmeListings, http: &LseHttpClient) -> anyhow::Result<String> {
         match self {
-            Self::Cme(contract) => Ok(listings.listing(http, contract).await?.symbol),
+            Self::Cme(contract) => {
+                let listing = listings.listing(http, contract).await?;
+                if listing.delisted_date.is_some() {
+                    bail!(
+                        "{contract} is LSE's listing {listing}, delisted: LSE's CME stream takes \
+                         a contract by its listing's symbol, {}, which names a contract every ten \
+                         years, so it would stream a later contract's records as {contract}'s; \
+                         its history is asked by its listing's number",
+                        listing.symbol
+                    );
+                }
+                Ok(listing.symbol)
+            }
             Self::Nasdaq(stock) => Ok(stock.ticker().to_owned()),
         }
     }
@@ -1146,6 +1162,25 @@ mod tests {
 
         let err = format!("{:#}", connected.unwrap_err());
         assert!(err.contains("1008 symbol unavailable: NGZ6"), "{err}");
+    }
+
+    /// ESZ6 of 2016, delisted on 16 December 2016 (`PAIRS_ESZ6`): LSE's
+    /// CME stream takes a contract by its listing's symbol, ESZ6, which
+    /// carries 2026's contract now, so streaming it would pass 2026's
+    /// records on as 2016's.
+    #[tokio::test]
+    async fn a_delisted_contract_is_refused_for_streaming_naming_it() {
+        let lse = MockLse::start(vec![Reply::json(PAIRS_ESZ6)]);
+        let stream = MockExchangeStream::cme(|_, _| sent(dbn_frames(CME_ESZ6_DOCUMENTED)));
+
+        let (_client, connected, _) = streaming(&lse, &stream, &["ESZ16.GLBX"], vec![]).await;
+
+        let err = format!("{:#}", connected.unwrap_err());
+        assert!(
+            err.contains("ESZ16.GLBX") && err.contains("delisted 2016-12-16"),
+            "{err}"
+        );
+        assert_eq!(stream.received(), []);
     }
 
     /// LSE's sockets stream quotes alone.
