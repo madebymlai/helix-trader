@@ -8,7 +8,8 @@
 //! answers in full. The definitions are not asked of the node, for their
 //! margins (see `README.md`): `OkxHistory` writes them, from OKX's public
 //! REST API through the adapter's `OKXRawHttpClient` and
-//! `parse_instrument_any`, with margins of 1 (see `instrument_from`).
+//! `parse_instrument_any`, with the account's margins, 1 / the leverage it
+//! trades each at (see `instrument_from`, `account`).
 
 use anyhow::{Context, bail, ensure};
 use jiff::SignedDuration;
@@ -35,12 +36,14 @@ use nautilus_okx::{
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use rust_decimal::Decimal;
 
+use self::account::Account;
 use super::{HistorySource, Row};
 use crate::{
     catalog::{FillData, FillRequest, NodeClient, missing},
     strategy::SeriesSlice,
 };
 
+mod account;
 mod live;
 pub(crate) use live::clients;
 
@@ -55,7 +58,8 @@ const FUNDING_PERIOD: SignedDuration = SignedDuration::from_hours(14 * 24);
 const DAY: SignedDuration = SignedDuration::from_hours(24);
 
 /// OKX's public REST API, through the adapter's default client (no key),
-/// for the definitions of OKX instruments.
+/// for the definitions of OKX instruments, and the account, through its
+/// key, for the leverage it trades each at (`account::Account`).
 #[derive(Debug, Default)]
 pub struct OkxHistory {
     client: OKXHttpClient,
@@ -63,23 +67,43 @@ pub struct OkxHistory {
 
 impl OkxHistory {
     /// Writes into `catalog` the definition of each instrument of `slices`
-    /// it lacks, as OKX's API defines it now (see `instrument_from`).
+    /// it lacks, as OKX's API defines it now, with the account's margins at
+    /// the leverage it trades it at now (see `instrument_from`): the
+    /// account, of the environment's key, is read only if a definition is
+    /// lacking.
     ///
     /// # Errors
     ///
     /// Returns an error if an instrument is not an OKX swap or X-Perp, if
-    /// OKX does not define it, or if the catalog cannot be read or written.
+    /// OKX does not define it, if the account cannot be read (its
+    /// environment or key missing, OKX unreachable or refusing it, no
+    /// leverage listed), or if the catalog cannot be read or written.
     pub async fn write_definitions(
         &self,
         catalog: &mut ParquetDataCatalog,
         slices: &[SeriesSlice],
     ) -> anyhow::Result<()> {
-        write_definitions(catalog, slices, async |id| self.instrument(id).await).await
+        let mut account: Option<Account> = None;
+        write_definitions(catalog, slices, async |id| {
+            if account.is_none() {
+                account = Some(Account::of_environment().context(
+                    "an OKX definition holds the account's margin, read from the leverage it \
+                     trades the instrument at",
+                )?);
+            }
+            let leverage = account.as_ref().expect("read above").leverage(id).await?;
+            self.instrument(id, leverage).await
+        })
+        .await
     }
 
-    /// The instrument of `id`, an OKX swap or X-Perp (see
-    /// `instrument_from`).
-    async fn instrument(&self, id: InstrumentId) -> anyhow::Result<InstrumentAny> {
+    /// The instrument of `id`, an OKX swap or X-Perp, with the account's
+    /// margins at `leverage` (see `instrument_from`).
+    async fn instrument(
+        &self,
+        id: InstrumentId,
+        leverage: Decimal,
+    ) -> anyhow::Result<InstrumentAny> {
         let contract = Contract::of(id)?;
         let raw = self
             .client
@@ -94,7 +118,7 @@ impl OkxHistory {
         let [raw] = raw.as_slice() else {
             bail!("OKX returned {} instruments for {id}, not one", raw.len());
         };
-        instrument_from(raw, get_atomic_clock_realtime().get_time_ns())
+        instrument_from(raw, leverage, get_atomic_clock_realtime().get_time_ns())
     }
 }
 
@@ -205,14 +229,34 @@ fn selection(
     Ok((instrument_types, families))
 }
 
+/// The margin of a position on an account trading it at `leverage`, as a
+/// fraction of its notional: 1 / `leverage`, which OKX locks.
+///
+/// # Errors
+///
+/// Returns an error if `leverage` is not positive.
+fn margin_at(leverage: Decimal) -> anyhow::Result<Decimal> {
+    ensure!(
+        leverage > Decimal::ZERO,
+        "an OKX leverage must be positive, was {leverage}"
+    );
+    Ok(Decimal::ONE / leverage)
+}
+
 /// The instrument of `raw`, an OKX swap or X-Perp (a future whose rule
 /// type is `xperp`), through the adapter's `parse_instrument_any`, with
-/// initial and maintenance margins of 1; a dated future is refused. OKX
-/// locks notional / leverage on a position, which is Nautilus' default
-/// margin model (notional / leverage x the instrument's margin) with
-/// margins of 1 and the account's leverage. The adapter would leave them at
-/// 0, which locks nothing.
-fn instrument_from(raw: &OKXInstrument, ts_init: UnixNanos) -> anyhow::Result<InstrumentAny> {
+/// the initial and maintenance margins of an account trading it at
+/// `leverage` (`margin_at`); a dated future is refused. OKX locks notional
+/// / leverage on a position, which is Nautilus' default margin model
+/// (notional / leverage x the instrument's margin) at a backtest's
+/// leverage of 1, so the catalog holds the account's margin, as IC's
+/// definitions hold IC's. The adapter would leave them at 0, which locks
+/// nothing.
+fn instrument_from(
+    raw: &OKXInstrument,
+    leverage: Decimal,
+    ts_init: UnixNanos,
+) -> anyhow::Result<InstrumentAny> {
     let id = raw.inst_id;
     if raw.inst_type == OKXInstrumentType::Futures {
         ensure!(
@@ -221,7 +265,8 @@ fn instrument_from(raw: &OKXInstrument, ts_init: UnixNanos) -> anyhow::Result<In
             raw.rule_type
         );
     }
-    parse_instrument_any(raw, Some(Decimal::ONE), Some(Decimal::ONE), ts_init)?
+    let margin = margin_at(leverage)?;
+    parse_instrument_any(raw, Some(margin), Some(margin), ts_init)?
         .with_context(|| format!("{id} is not an instrument Nautilus supports"))
 }
 
@@ -279,9 +324,10 @@ mod tests {
         serde_json::from_str(INSTRUMENT).unwrap()
     }
 
-    /// BTC-USDT-SWAP.OKX as OKX's public API defined it on 2026-10-21.
+    /// BTC-USDT-SWAP.OKX as OKX's public API defined it on 2026-10-21, on
+    /// an account trading it at leverage 10.
     fn btc_instrument() -> InstrumentAny {
-        instrument_from(&raw_instrument(), UnixNanos::default()).unwrap()
+        instrument_from(&raw_instrument(), Decimal::TEN, UnixNanos::default()).unwrap()
     }
 
     const XPERP_INSTRUMENT: &str = include_str!("testdata/BTC-USD_UM_XPERP-310404-instrument.json");
@@ -291,40 +337,52 @@ mod tests {
     }
 
     /// BTC-USD_UM_XPERP-310404.OKX as OKX's public API defined it on
-    /// 2026-10-22.
+    /// 2026-10-22, on an account trading it at leverage 25.
     fn xperp_instrument() -> InstrumentAny {
-        instrument_from(&raw_xperp(), UnixNanos::default()).unwrap()
+        instrument_from(&raw_xperp(), Decimal::from(25), UnixNanos::default()).unwrap()
     }
 
+    /// The account's margin of a position, a tenth of its notional at
+    /// leverage 10, as IC's definitions hold the account's.
     #[test]
-    fn an_okx_swap_is_a_crypto_perpetual_with_margins_of_one() {
+    fn an_okx_swap_is_a_crypto_perpetual_with_the_account_s_margins() {
         let InstrumentAny::CryptoPerpetual(btc) = btc_instrument() else {
             panic!("not a CryptoPerpetual");
         };
         assert_eq!((btc.price_precision, btc.size_precision), (1, 2));
-        assert_eq!(
-            (btc.margin_init, btc.margin_maint),
-            (Decimal::ONE, Decimal::ONE)
-        );
+        let tenth = Decimal::new(1, 1);
+        assert_eq!((btc.margin_init, btc.margin_maint), (tenth, tenth));
     }
 
+    /// At leverage 25, 4% of the notional.
     #[test]
-    fn an_okx_x_perp_is_a_crypto_future_with_margins_of_one() {
+    fn an_okx_x_perp_is_a_crypto_future_with_the_account_s_margins() {
         let InstrumentAny::CryptoFuture(btc) = xperp_instrument() else {
             panic!("not a CryptoFuture");
         };
         assert_eq!((btc.price_precision, btc.size_precision), (1, 0));
+        let four_percent = Decimal::new(4, 2);
         assert_eq!(
             (btc.margin_init, btc.margin_maint),
-            (Decimal::ONE, Decimal::ONE)
+            (four_percent, four_percent)
         );
+    }
+
+    #[test]
+    fn a_leverage_not_positive_is_refused() {
+        for leverage in [Decimal::ZERO, Decimal::NEGATIVE_ONE] {
+            let err = instrument_from(&raw_instrument(), leverage, UnixNanos::default())
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("leverage"), "{leverage}: {err}");
+        }
     }
 
     #[test]
     fn a_dated_future_is_refused() {
         let mut dated = raw_xperp();
         dated.rule_type = "normal".to_string();
-        let err = instrument_from(&dated, UnixNanos::default())
+        let err = instrument_from(&dated, Decimal::TEN, UnixNanos::default())
             .unwrap_err()
             .to_string();
         assert!(err.contains("X-Perp"), "{err}");

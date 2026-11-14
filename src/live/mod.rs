@@ -31,7 +31,6 @@ use nautilus_common::{
 };
 use nautilus_model::identifiers::{InstrumentId, TraderId};
 use nautilus_trading::strategy::{Strategy, StrategyNative};
-use rust_decimal::Decimal;
 
 use crate::{
     catalog::catalog_config,
@@ -45,8 +44,8 @@ use crate::{
 };
 
 /// One live run: the strategy trades each instrument on its live broker,
-/// with the venues' settings `venues`, at `leverage`; on bars the node
-/// builds, warmed up from the venues.
+/// with the venues' settings `venues`; on bars the node builds, warmed up
+/// from the venues.
 #[derive(Debug, Clone)]
 pub struct Live {
     /// The node's trader. The node's cache in Redis is the trader's, so a
@@ -56,15 +55,12 @@ pub struct Live {
     /// handed to the venues module with the instruments (see
     /// `venues::live_clients`).
     pub venues: LiveVenueArgs,
-    /// The leverage the run expects, as in a backtest, handed to the venues
-    /// module with the instruments: a venue applying the account's refuses
-    /// an instrument at another one (see `venues::live_clients`).
-    pub leverage: Decimal,
     /// The Nautilus logger, installed for the start and kept by the node.
     pub logging: LoggerConfig,
     /// The catalog directory, fill-catalog's and the backtests': it serves
-    /// the warmup, and keeps the history the venues certify complete (see
-    /// `node::run`). Created if missing.
+    /// the warmup, keeps the history the venues certify complete (see
+    /// `node::run`), and holds the definitions a venue checks its account
+    /// against (see `venues::live_clients`). Created if missing.
     pub catalog: PathBuf,
     /// Where the node stages the data it streams into the catalog, which it
     /// promotes there daily; also keeps the trader's instance id.
@@ -127,7 +123,7 @@ impl Live {
         )?;
         init_tracing()?;
         let clients =
-            venues::live_clients(requirements, &instrument_ids, &self.venues, self.leverage)
+            venues::live_clients(requirements, &instrument_ids, &self.venues, &self.catalog)
                 .await?;
         let cache_database = redis::start().await?;
         // Built first, which promotes what the last run left staged: the

@@ -19,7 +19,13 @@ pub use node_fill::{
 use std::path::Path;
 
 use anyhow::Context;
-use nautilus_persistence::config::DataCatalogConfig;
+use nautilus_model::{
+    identifiers::InstrumentId,
+    instruments::{Instrument, InstrumentAny},
+};
+use nautilus_persistence::{
+    backend::parquet::catalog::ParquetDataCatalog, config::DataCatalogConfig,
+};
 
 /// The config a node takes of the catalog in directory `dir`, by its path
 /// as given: Nautilus resolves a relative one against the working
@@ -33,4 +39,39 @@ pub(crate) fn catalog_config(dir: &Path) -> anyhow::Result<DataCatalogConfig> {
         .to_str()
         .with_context(|| format!("catalog path {} is not UTF-8", dir.display()))?;
     Ok(DataCatalogConfig::new(path.to_owned(), None, None))
+}
+
+/// The instruments of `traded`, those a strategy trades, as the catalog at
+/// `catalog` defines them. The catalog is opened through Nautilus'
+/// `ParquetDataCatalog::from_uri`, whose error a missing directory is,
+/// where `ParquetDataCatalog::new` panics.
+///
+/// # Errors
+///
+/// Returns an error if the catalog cannot be opened or read, or an
+/// instrument of `traded` is not in it.
+pub fn traded_instruments(
+    catalog: &Path,
+    traded: &[InstrumentId],
+) -> anyhow::Result<Vec<InstrumentAny>> {
+    let ids: Vec<String> = traded.iter().map(ToString::to_string).collect();
+    let defined = ParquetDataCatalog::from_uri(&catalog.to_string_lossy(), None, None, None, None)
+        .with_context(|| format!("opening the catalog {}", catalog.display()))?
+        .instruments(Some(&ids), None, None)
+        .with_context(|| format!("reading {} from the catalog", ids.join(", ")))?;
+    traded
+        .iter()
+        .map(|&id| {
+            defined
+                .iter()
+                .find(|instrument| instrument.id() == id)
+                .cloned()
+                .with_context(|| {
+                    format!(
+                        "the traded instrument {id} is not in the catalog {}",
+                        catalog.display()
+                    )
+                })
+        })
+        .collect()
 }

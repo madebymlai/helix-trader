@@ -83,8 +83,8 @@ const DATASET_LEVERAGE: Decimal = Decimal::MAX;
 /// What a run is for, which its node is configured by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Run {
-    /// A backtest of the strategy: each venue's account at the run's
-    /// leverage, its balance moving with the run's P&L.
+    /// A backtest of the strategy: each venue's account unleveraged, its
+    /// margins its instruments', its balance moving with the run's P&L.
     Backtest,
     /// A dataset run (`Backtest::run_dataset`): each venue's account
     /// frozen at the run's balance and margining nothing
@@ -97,8 +97,7 @@ enum Run {
 /// The run config of `backtest`: one simulated venue per venue of the
 /// instruments, named after it, keeping positions as `backtest.venue_oms`
 /// says of it, each with the run's balance, or nothing if no broker trades
-/// it, its leverage (Nautilus' default margin model: the notional /
-/// leverage times the instrument's margin) and fee model, which fills
+/// it, and its fee model, which fills
 /// orders on the replayed data and settles funding, the series of the
 /// window from the catalog (the only data replayed: the data engine builds
 /// the strategy's bars from them and keeps the books the strategy
@@ -184,7 +183,11 @@ fn config(backtest: &Backtest, run: Run) -> anyhow::Result<BacktestRunConfig> {
 /// the book on Nautilus' default fill model: a market order fills at the
 /// quote (a buy at the ask, a sell at the bid), or on bars at the last
 /// price, with no slippage, and a limit order whenever touched. A
-/// backtest's account is at the run's leverage. A dataset run's is frozen,
+/// backtest's account is unleveraged: under Nautilus' default margin model,
+/// the notional / leverage times the instrument's margin, a position locks
+/// its instrument's margin, which holds the account's (IC's definitions
+/// the broker's, OKX's the account's leverage: `venues::okx`; IB's lock
+/// nothing). A dataset run's is frozen,
 /// Nautilus' `frozen_account`: the simulated exchange adjusts none of its
 /// balances (`adjust_account_balance`, backtest/src/exchange.rs) and the
 /// portfolio locks no margin of an account that does not calculate its
@@ -201,7 +204,7 @@ fn venue_config(
         Money::zero(backtest.balance.currency)
     };
     let leverage = match run {
-        Run::Backtest => backtest.leverage,
+        Run::Backtest => Decimal::ONE,
         Run::Dataset => DATASET_LEVERAGE,
     };
     Ok(BacktestVenueConfig::builder()
@@ -469,7 +472,6 @@ mod tests {
             custom: vec![],
             commission: Commission::PerOrder(Money::from("3 EUR")),
             balance: Money::from("10000 EUR"),
-            leverage: Decimal::ONE,
             venue_oms: |_| OmsType::Netting,
             logging: LoggerConfig {
                 print_config: true,
@@ -516,30 +518,15 @@ mod tests {
         assert_eq!(hedging.venues()[0].oms_type(), OmsType::Hedging);
     }
 
+    /// A backtest's margins are its instruments', each holding its
+    /// account's, under Nautilus' default margin model, unleveraged.
     #[test]
-    fn margins_follow_nautilus_default_model_at_the_leverage_of_the_run() {
+    fn a_backtests_venues_are_unleveraged_under_nautilus_default_margin_model() {
         let dir = tempfile::tempdir().unwrap();
-        let backtest = Backtest {
-            leverage: Decimal::TEN,
-            ..backtest(dir.path())
-        };
-        let config = run_config(&backtest).unwrap();
+        let config = run_config(&backtest(dir.path())).unwrap();
         let venue = &config.venues()[0];
         assert!(venue.margin_model().is_none(), "{:?}", venue.margin_model());
-        assert_eq!(venue.default_leverage(), Some(Decimal::TEN));
-    }
-
-    #[test]
-    fn rejects_a_leverage_not_positive() {
-        let dir = tempfile::tempdir().unwrap();
-        for leverage in [Decimal::ZERO, Decimal::NEGATIVE_ONE] {
-            let backtest = Backtest {
-                leverage,
-                ..backtest(dir.path())
-            };
-            let err = run_config(&backtest).unwrap_err();
-            assert!(err.to_string().contains("default_leverage"), "{err}");
-        }
+        assert_eq!(venue.default_leverage(), Some(Decimal::ONE));
     }
 
     /// The venue matches as Nautilus does by default, which the backtest

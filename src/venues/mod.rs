@@ -25,7 +25,7 @@
 //!
 //! No trait stands for a venue: Nautilus' factories, configs and
 //! `RoutingConfig` are already the seam, and the venues' needs differ too much
-//! for a trait to hide them. OKX needs a leverage, IB an account, a client id
+//! for a trait to hide them. OKX needs its account's leverage, IB an account, a client id
 //! and its fill after the node's, Databento an API key and its own check,
 //! LSE a key per market and, for its own series, definitions written into
 //! the catalog by hand.
@@ -57,7 +57,6 @@ use nautilus_model::{
 };
 use nautilus_okx::factories::OKXDataClientFactory;
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
-use rust_decimal::Decimal;
 
 use self::{databento::DatabentoHistory, ib::IbHistory, okx::OkxHistory};
 use crate::{
@@ -686,7 +685,8 @@ impl LiveRoutes {
 /// LSE took their live data; an LSEDGE series' trades; an OPRA contract's
 /// quotes. The cTrader brokers' bar types are checked and their
 /// environments and credential read before anything connects; OKX's
-/// clients are set up at `leverage`, the run's, IB's trading the IB account
+/// clients are set up once its account trades each instrument at the
+/// leverage its definition in `catalog` holds, IB's trading the IB account
 /// of `venues` with its client id.
 ///
 /// # Errors
@@ -706,7 +706,7 @@ pub(crate) async fn live_clients(
     requirements: &DataRequirements,
     instrument_ids: &[InstrumentId],
     venues: &LiveVenueArgs,
-    leverage: Decimal,
+    catalog: &Path,
 ) -> anyhow::Result<Vec<Clients>> {
     let LiveRoutes {
         okx: okx_ids,
@@ -740,7 +740,7 @@ pub(crate) async fn live_clients(
         .collect::<anyhow::Result<Vec<_>>>()?;
     let mut clients = Vec::new();
     if !okx_ids.is_empty() {
-        let okx = okx::clients(&okx_ids, leverage).await?;
+        let okx = okx::clients(&okx_ids, catalog).await?;
         clients.push(okx.into_node_clients());
     }
     for (connection, ids) in ctrader {
@@ -763,6 +763,7 @@ pub(crate) async fn live_clients(
 
 #[cfg(test)]
 mod tests {
+    use rust_decimal::Decimal;
     use std::{
         cell::RefCell,
         collections::{HashMap, HashSet},
@@ -1036,7 +1037,7 @@ mod tests {
             &requirements,
             &[InstrumentId::from("SXR8.IBIS")],
             &venues,
-            Decimal::ONE,
+            Path::new("catalog"),
         )
         .await
         else {
@@ -1477,7 +1478,8 @@ mod tests {
             InstrumentId::from("XAUUSD.ICMARKETS"),
         ];
 
-        let Err(err) = live_clients(&requirements, &ids, &live_args(), Decimal::ONE).await else {
+        let Err(err) = live_clients(&requirements, &ids, &live_args(), Path::new("catalog")).await
+        else {
             panic!("set up clients for bars cTrader does not serve");
         };
 
@@ -1643,7 +1645,7 @@ mod tests {
             &requirements,
             &requirements.instrument_ids(),
             &live_args(),
-            Decimal::ONE,
+            Path::new("catalog"),
         )
         .await
         else {
@@ -1691,7 +1693,7 @@ mod tests {
             &requirements,
             &requirements.instrument_ids(),
             &live_args(),
-            Decimal::ONE,
+            Path::new("catalog"),
         )
         .await
         else {
@@ -1887,7 +1889,7 @@ mod tests {
             &requirements,
             &requirements.instrument_ids(),
             &live_args(),
-            Decimal::ONE,
+            Path::new("catalog"),
         )
         .await
         .unwrap();
@@ -2002,7 +2004,8 @@ mod tests {
                 InstrumentId::from("AAPL  261120C00355000.OPRA"),
             ];
 
-            let Err(err) = live_clients(&requirements, &loaded, &live_args(), Decimal::ONE).await
+            let Err(err) =
+                live_clients(&requirements, &loaded, &live_args(), Path::new("catalog")).await
             else {
                 panic!("set up clients for {series}");
             };
@@ -2030,7 +2033,7 @@ mod tests {
             &requirements,
             &requirements.instrument_ids(),
             &live_args(),
-            Decimal::ONE,
+            Path::new("catalog"),
         )
         .await
         else {

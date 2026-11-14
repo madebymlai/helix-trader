@@ -41,7 +41,6 @@ use nautilus_trading::{
     nautilus_strategy,
     strategy::{StrategyConfig, StrategyCore},
 };
-use rust_decimal::Decimal;
 
 use crate::demo_broker::opted_in;
 
@@ -157,7 +156,6 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
     let live = Live {
         trader_id: TraderId::from("HELIXTEST-101"),
         venues: crate::venues(&[]),
-        leverage: Decimal::ONE,
         logging: LoggerConfig::default(),
         catalog: catalog.path().to_path_buf(),
         recording: crate::recording(staging.path()),

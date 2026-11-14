@@ -71,7 +71,6 @@ use nautilus_model::{
 use nautilus_persistence::{
     backend::parquet::catalog::ParquetDataCatalog, config::DataCatalogConfig,
 };
-use rust_decimal::Decimal;
 
 const INSTRUMENT_ID: &str = "AUD/USD.SIM";
 /// The bars the actor subscribes to, which Nautilus builds from the trades.
@@ -349,8 +348,6 @@ fn streamed_dataset() {
                 end: to,
                 commission: venue.commission,
                 balance: venue.balance,
-                // Read by no dataset run, whose accounts margin nothing.
-                leverage: Decimal::ONE,
                 venue_oms: |_| OmsType::Hedging,
                 logging: LoggerConfig::default(),
             }

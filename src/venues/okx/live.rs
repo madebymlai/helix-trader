@@ -9,13 +9,10 @@
 //! `OKX_API_SECRET` and `OKX_API_PASSPHRASE`; this module only checks they
 //! are set.
 //!
-//! Before the node starts, the account is checked: net position mode,
-//! read through the adapter (`get_account_configuration`), and each
-//! instrument's leverage equal to the run's. The adapter does not read
-//! leverage, so that is our signed `GET /api/v5/account/leverage-info`,
-//! signed with the adapter's `Credential`; to be removed if Nautilus gains
-//! it. OKX sets the leverage, by hand on the account; this module never
-//! changes the account.
+//! Before the node starts, the account is checked (`account::Account`):
+//! net position mode, and each instrument's leverage the one its
+//! definition in the catalog holds, as its margin, which backtests run at
+//! (see `instrument_from`). This module never changes the account.
 //!
 //! The strategy trades OKX instruments on bars built from OKX's 1-minute
 //! candles (a composite bar type): the data client serves their warmup
@@ -23,38 +20,28 @@
 //! channel. OKX serves no quote history (the data client does not
 //! implement `request_quotes`), so bars built from quotes get no warmup.
 
-use std::collections::HashMap;
+use std::path::Path;
 
 use anyhow::{Context, ensure};
 use nautilus_common::factories::{ClientConfig, DataClientFactory, ExecutionClientFactory};
-use nautilus_core::time::get_atomic_clock_realtime;
 use nautilus_live::config::RoutingConfig;
-use nautilus_model::identifiers::InstrumentId;
-use nautilus_network::http::{HttpClient, HttpRedirectPolicy};
+use nautilus_model::{identifiers::InstrumentId, instruments::Instrument};
 use nautilus_okx::{
     OKXPositionMode,
-    common::{
-        credential::Credential,
-        enums::{OKXEnvironment, OKXMarginMode, OKXRegion},
-    },
+    common::enums::OKXEnvironment,
     config::{OKXDataClientConfig, OKXExecutionClientConfig},
     factories::{OKXDataClientFactory, OKXExecutionClientFactory},
-    http::OKXHttpClient,
 };
 use rust_decimal::Decimal;
-use serde::Deserialize;
 
-use super::selection;
-use crate::live::node::{Clients, ExecClient};
-
-/// The variable naming the OKX environment of the run, `demo` or `live`.
-const ENVIRONMENT_VAR: &str = "OKX_ENVIRONMENT";
-
-/// The region of an account opened on my.okx.com, which trades X-Perps.
-const REGION: OKXRegion = OKXRegion::Eea;
-
-/// Cross margin: the account's whole balance backs every position.
-const MARGIN_MODE: OKXMarginMode = OKXMarginMode::Cross;
+use super::{
+    account::{Account, ENVIRONMENT_VAR, MARGIN_MODE, REGION, environment_of},
+    margin_at, selection,
+};
+use crate::{
+    catalog,
+    live::node::{Clients, ExecClient},
+};
 
 /// The OKX data and execution client configs of a node trading OKX swaps
 /// or X-Perps.
@@ -64,45 +51,37 @@ pub(crate) struct OkxClients {
     pub(super) exec: OKXExecutionClientConfig,
 }
 
-/// Reads the environment (see `environment_of`), builds the client configs
-/// of `instrument_ids` on it (see `configs`), checks the credentials are
-/// set, then checks the account: net position mode, and the leverage of
-/// each instrument equal to `leverage`.
+/// Reads the definitions of `instrument_ids` in `catalog` and the
+/// environment (see `environment_of`), builds the client configs of the
+/// instruments on it (see `configs`), checks the credentials are set, then
+/// checks the account: net position mode, and each instrument's leverage
+/// the one its definition holds as its margin, which backtests run at.
 ///
 /// # Errors
 ///
-/// Returns an error if `OKX_ENVIRONMENT` is not `demo` or `live`, if an id
-/// is not an OKX swap or X-Perp, if a credential is not set (all checked
-/// before any request), if OKX cannot be reached or
-/// refuses the key, if the account is not in net position mode, or if an
-/// instrument's leverage is not `leverage` (or OKX does not list it).
+/// Returns an error if the catalog cannot be read or lacks an
+/// instrument's definition, if `OKX_ENVIRONMENT` is not `demo` or `live`,
+/// if an id is not an OKX swap or X-Perp, if a credential is not set (all
+/// checked before any request), if OKX cannot be reached or refuses the
+/// key, if the account is not in net position mode, or if an instrument's
+/// leverage is not its definition's (or OKX does not list it).
 pub(crate) async fn clients(
     instrument_ids: &[InstrumentId],
-    leverage: Decimal,
+    catalog: &Path,
 ) -> anyhow::Result<OkxClients> {
+    let defined = catalog::traded_instruments(catalog, instrument_ids).context(
+        "an OKX instrument's definition in the catalog holds the account's margin, which \
+         backtests run at: fill the catalog before trading it live",
+    )?;
     let environment = environment_of(std::env::var(ENVIRONMENT_VAR).ok().as_deref())?;
     let clients = configs(instrument_ids, environment)?;
     let account = Account::connect(&clients.exec)?;
     ensure_net_mode(account.position_mode().await?)?;
-    for &id in instrument_ids {
-        ensure_leverage(id, account.leverage(id).await?, leverage)?;
+    for instrument in &defined {
+        let id = instrument.id();
+        ensure_leverage(id, account.leverage(id).await?, instrument.margin_init())?;
     }
     Ok(clients)
-}
-
-/// The OKX environment `value` of `OKX_ENVIRONMENT` names: `demo` or
-/// `live`, exactly, as Nautilus' serde names them. No default: a missing,
-/// empty or other value is an error naming both.
-fn environment_of(value: Option<&str>) -> anyhow::Result<OKXEnvironment> {
-    let refused = || {
-        anyhow::anyhow!(
-            "{ENVIRONMENT_VAR} must be `demo` or `live` (got {value:?}): set it \
-             in .env to the environment of the OKX key, `demo` for a demo \
-             trading key, `live` for a real one (see .env.example)"
-        )
-    };
-    let value = value.ok_or_else(refused)?;
-    serde_json::from_value(serde_json::Value::from(value)).map_err(|_| refused())
 }
 
 /// The client configs of `instrument_ids`, OKX swaps or X-Perps: their
@@ -167,179 +146,29 @@ fn ensure_net_mode(mode: OKXPositionMode) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Fails unless `account`, the leverage OKX applies to `id`, is `wanted`.
-fn ensure_leverage(id: InstrumentId, account: Decimal, wanted: Decimal) -> anyhow::Result<()> {
-    ensure!(
-        account == wanted,
-        "the OKX account trades {id} at leverage {account}, not {wanted}: \
-         set {wanted}x for {} in cross margin on OKX, or run with --leverage {account}",
+/// Fails unless `margin`, the margin of `id` its definition in the catalog
+/// holds, is the account's at `leverage`, the leverage OKX applies to `id`
+/// (`margin_at`): the catalog was filled at another, which backtests ran
+/// at.
+fn ensure_leverage(id: InstrumentId, leverage: Decimal, margin: Decimal) -> anyhow::Result<()> {
+    if margin_at(leverage)? == margin {
+        return Ok(());
+    }
+    let defined = (Decimal::ONE / margin).round_dp(6).normalize();
+    anyhow::bail!(
+        "the OKX account trades {id} at leverage {leverage}, but the catalog defines it at \
+         leverage {defined}, which backtests run at: set {defined}x for {} in cross margin \
+         on OKX, or fill a fresh catalog at {leverage}x",
         id.symbol
-    );
-    Ok(())
-}
-
-/// The OKX account of the clients, read before the node starts.
-struct Account {
-    /// The adapter's client, for what it reads.
-    okx: OKXHttpClient,
-    /// Ours, for the leverage the adapter does not read.
-    http: HttpClient,
-    base_url: String,
-    credential: Credential,
-}
-
-impl Account {
-    /// Clients on the endpoints of `exec`, with the credentials from the
-    /// environment.
-    fn connect(exec: &OKXExecutionClientConfig) -> anyhow::Result<Self> {
-        let credential = Credential::resolve(None, None, None).context(
-            "OKX credentials missing: set OKX_API_KEY, OKX_API_SECRET and \
-             OKX_API_PASSPHRASE (see .env.example)",
-        )?;
-        let base_url = exec.http_base_url();
-        let okx = OKXHttpClient::with_credentials(
-            None,
-            None,
-            None,
-            Some(base_url.clone()),
-            exec.http_timeout_secs,
-            exec.max_retries,
-            exec.retry_delay_initial_ms,
-            exec.retry_delay_max_ms,
-            exec.environment,
-            None,
-        )
-        .context("building the OKX HTTP client")?;
-        let mut headers = HashMap::new();
-        if exec.environment == OKXEnvironment::Demo {
-            headers.insert("x-simulated-trading".to_string(), "1".to_string());
-        }
-        let http = HttpClient::builder()
-            .headers(headers)
-            .redirect_policy(HttpRedirectPolicy::Reject)
-            .timeout_secs(exec.http_timeout_secs)
-            .build()
-            .context("building the OKX account client")?;
-        Ok(Self {
-            okx,
-            http,
-            base_url,
-            credential,
-        })
-    }
-
-    /// The account's position mode.
-    async fn position_mode(&self) -> anyhow::Result<OKXPositionMode> {
-        let configs = self
-            .okx
-            .raw_client()
-            .get_account_configuration()
-            .await
-            .context("reading the OKX account configuration")?;
-        let config = configs
-            .first()
-            .context("OKX returned no account configuration")?;
-        Ok(config.position_mode)
-    }
-
-    /// The leverage OKX applies to `id` in `MARGIN_MODE`.
-    async fn leverage(&self, id: InstrumentId) -> anyhow::Result<Decimal> {
-        let mode = serde_json::to_value(MARGIN_MODE)?;
-        let mode = mode.as_str().context("a margin mode is a string")?;
-        let path = format!(
-            "/api/v5/account/leverage-info?instId={}&mgnMode={mode}",
-            id.symbol
-        );
-        // As the adapter signs: an ISO 8601 time to the millisecond.
-        let timestamp = format!(
-            "{:.3}",
-            get_atomic_clock_realtime().get_time_ns().to_datetime_utc()
-        );
-        let signature = self.credential.sign(&timestamp, "GET", &path, "");
-        let headers = HashMap::from([
-            (
-                "OK-ACCESS-KEY".to_string(),
-                self.credential.api_key().to_string(),
-            ),
-            (
-                "OK-ACCESS-PASSPHRASE".to_string(),
-                self.credential.api_passphrase().to_string(),
-            ),
-            ("OK-ACCESS-TIMESTAMP".to_string(), timestamp),
-            ("OK-ACCESS-SIGN".to_string(), signature),
-        ]);
-        let response = self
-            .http
-            .get(
-                format!("{}{path}", self.base_url),
-                None,
-                Some(headers),
-                None,
-                None,
-            )
-            .await
-            .with_context(|| format!("asking OKX the leverage of {id}"))?;
-        ensure!(
-            response.status.is_success(),
-            "OKX answered HTTP {} for the leverage of {id}",
-            response.status.as_u16()
-        );
-        leverage_of(id, &response.body)
-    }
-}
-
-/// OKX's answer to a leverage request.
-#[derive(Debug, Deserialize)]
-struct LeverageAnswer {
-    code: String,
-    msg: String,
-    data: Vec<LeverageInfo>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LeverageInfo {
-    inst_id: String,
-    lever: Decimal,
-}
-
-/// The leverage of `id` in `body`, OKX's answer to a leverage request: the
-/// one of all its rows (one in net mode); an error if OKX refused the
-/// request, listed another instrument or none, or rows disagree.
-fn leverage_of(id: InstrumentId, body: &[u8]) -> anyhow::Result<Decimal> {
-    let answer: LeverageAnswer =
-        serde_json::from_slice(body).with_context(|| format!("parsing OKX's leverage of {id}"))?;
-    ensure!(
-        answer.code == "0",
-        "OKX refused the leverage of {id}: code {}, {}",
-        answer.code,
-        answer.msg
-    );
-    let symbol = id.symbol.as_str();
-    let mut levers = answer.data.iter().map(|info| {
-        ensure!(
-            info.inst_id == symbol,
-            "OKX answered the leverage of {} for {id}",
-            info.inst_id
-        );
-        Ok(info.lever)
-    });
-    let lever = levers
-        .next()
-        .with_context(|| format!("OKX listed no leverage for {id}"))??;
-    for other in levers {
-        let other = other?;
-        ensure!(
-            other == lever,
-            "OKX lists leverages {lever} and {other} for {id}"
-        );
-    }
-    Ok(lever)
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use nautilus_okx::OKXInstrumentType;
+    use nautilus_okx::{
+        OKXInstrumentType,
+        common::enums::{OKXMarginMode, OKXRegion},
+    };
 
     use super::*;
     use crate::venues::{Broker, tests::created_oms_type};
@@ -368,21 +197,6 @@ mod tests {
             let created = created_oms_type(clients.into_node_clients());
 
             assert_eq!(created, Broker::Okx.oms_type(), "{ids:?}");
-        }
-    }
-
-    #[test]
-    fn the_environment_is_demo_or_live_by_its_lowercase_name() {
-        assert_eq!(environment_of(Some("demo")).unwrap(), OKXEnvironment::Demo);
-        assert_eq!(environment_of(Some("live")).unwrap(), OKXEnvironment::Live);
-    }
-
-    #[test]
-    fn a_missing_empty_or_other_environment_is_refused_naming_the_variable_and_values() {
-        for value in [None, Some(""), Some("Demo"), Some("real"), Some(" demo")] {
-            let err = environment_of(value).unwrap_err().to_string();
-            assert!(err.contains("OKX_ENVIRONMENT"), "{value:?}: {err}");
-            assert!(err.contains("`demo` or `live`"), "{value:?}: {err}");
         }
     }
 
@@ -467,36 +281,16 @@ mod tests {
         assert!(err.contains("net mode"), "{err}");
     }
 
+    /// The catalog's definition holds a margin of 0.2, leverage 5, which
+    /// backtests ran at: an account at leverage 10 is refused, naming both.
     #[test]
-    fn a_leverage_other_than_the_runs_is_refused_naming_both() {
-        ensure_leverage(xperp(), Decimal::TEN, Decimal::from(10)).unwrap();
-        let err = ensure_leverage(xperp(), Decimal::TEN, Decimal::ONE)
+    fn a_leverage_other_than_the_catalogs_is_refused_naming_both() {
+        ensure_leverage(xperp(), Decimal::TEN, Decimal::new(1, 1)).unwrap();
+        let err = ensure_leverage(xperp(), Decimal::TEN, Decimal::new(2, 1))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("leverage 10, not 1"), "{err}");
+        assert!(err.contains("at leverage 10"), "{err}");
+        assert!(err.contains("at leverage 5,"), "{err}");
         assert!(err.contains("BTC-USD_UM_XPERP-310328"), "{err}");
-    }
-
-    #[test]
-    fn the_leverage_is_read_from_okxs_answer() {
-        let body = br#"{"code":"0","msg":"","data":[{"ccy":"","instId":"BTC-USD_UM_XPERP-310328","lever":"3","mgnMode":"cross","posSide":"net"}]}"#;
-        assert_eq!(leverage_of(xperp(), body).unwrap(), Decimal::from(3));
-    }
-
-    #[test]
-    fn a_refused_empty_or_foreign_leverage_answer_is_an_error() {
-        let error = |body: &[u8]| leverage_of(xperp(), body).unwrap_err().to_string();
-        let refused = br#"{"code":"51001","msg":"Instrument ID doesn't exist","data":[]}"#;
-        let err = error(refused);
-        assert!(err.contains("51001"), "{err}");
-        let empty = br#"{"code":"0","msg":"","data":[]}"#;
-        let err = error(empty);
-        assert!(err.contains("no leverage"), "{err}");
-        let foreign = br#"{"code":"0","msg":"","data":[{"ccy":"","instId":"BTC-USDT-SWAP","lever":"3","mgnMode":"cross","posSide":"net"}]}"#;
-        let err = error(foreign);
-        assert!(err.contains("BTC-USDT-SWAP"), "{err}");
-        let split = br#"{"code":"0","msg":"","data":[{"ccy":"","instId":"BTC-USD_UM_XPERP-310328","lever":"3","mgnMode":"cross","posSide":"net"},{"ccy":"","instId":"BTC-USD_UM_XPERP-310328","lever":"5","mgnMode":"cross","posSide":"net"}]}"#;
-        let err = error(split);
-        assert!(err.contains("3 and 5"), "{err}");
     }
 }

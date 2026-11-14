@@ -139,7 +139,6 @@ fn backtest(dir: &Path) -> Backtest {
         custom: vec![],
         commission: Commission::Rate(Decimal::new(5, 4)),
         balance: Money::from("10000 USDT"),
-        leverage: Decimal::ONE,
         venue_oms: venues::oms_type,
         logging: LoggerConfig::default(),
     }

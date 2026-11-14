@@ -173,7 +173,6 @@ fn backtest(catalog: &tempfile::TempDir, ticks: Vec<TickSeries>) -> Backtest {
         end: wednesday("01:00:00"),
         commission: Commission::Rate(Decimal::ZERO),
         balance: Money::from("1000000 USD"),
-        leverage: Decimal::ONE,
         venue_oms: venues::oms_type,
         logging: LoggerConfig::default(),
     }

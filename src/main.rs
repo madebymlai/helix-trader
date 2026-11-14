@@ -19,6 +19,7 @@ use anyhow::{Context, bail, ensure};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use helix_trader::{
     backtest::{self, Backtest, Commission},
+    catalog,
     live::{Live, Recording},
     model::{
         ModelStrategy, dataset,
@@ -40,7 +41,6 @@ use nautilus_model::{
     identifiers::{InstrumentId, TraderId},
     types::Money,
 };
-use rust_decimal::Decimal;
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -114,12 +114,6 @@ struct BacktestArgs {
     /// Starting balance of the account, for example "10000 EUR".
     #[arg(long, value_parser = parse_money)]
     balance: Money,
-    /// The account's leverage, for example 10: a position locks its value
-    /// divided by it, times the instrument's margin. 1 is no leverage. For
-    /// venues whose instruments carry margins of 1 (OKX); the cTrader
-    /// brokers' carry the broker's own margin, so their backtests keep 1.
-    #[arg(long, default_value = "1")]
-    leverage: Decimal,
     /// The model store a strategy trading on a model reads its models
     /// from: at each decision, the latest valid then. The backtest first
     /// trains at each retrain time of its span the models the store lacks;
@@ -229,11 +223,6 @@ struct LiveArgs {
     /// The venues' flags of a live node, each venue's own.
     #[command(flatten)]
     venues: LiveVenueArgs,
-    /// The leverage the run expects, as in a backtest. OKX applies the
-    /// account's, set by hand per instrument: the start refuses an OKX
-    /// instrument at another one.
-    #[arg(long, default_value = "1")]
-    leverage: Decimal,
     /// The node's trader: its cache in Redis is the trader's, which each run
     /// loads. Live processes running at once each need their own, and on
     /// one venue account their own tag, the part after the last hyphen:
@@ -499,7 +488,6 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
         custom: requirements.custom,
         commission: args.commission.commission(),
         balance: args.balance,
-        leverage: args.leverage,
         venue_oms: venues::oms_type,
         logging,
     };
@@ -659,7 +647,6 @@ async fn run_live(args: LiveArgs) -> anyhow::Result<()> {
     let live = Live {
         trader_id: args.trader_id,
         venues: args.venues.clone(),
-        leverage: args.leverage,
         logging: logger_config(std::env::var("NAUTILUS_LOG"))?,
         catalog: args.catalog.clone(),
         recording: args.recording(),
@@ -703,7 +690,7 @@ impl<'a> Visitor for Running<'a> {
 /// retrains if it is retrained (`RetrainActor`), each retrain in a child
 /// process (`Children::of_live`) on the node's catalog. Refuses first,
 /// before any node is built, a catalog without the traded instruments, which
-/// its models and retrains are built from (`backtest::traded_instruments`),
+/// its models and retrains are built from (`catalog::traded_instruments`),
 /// and a retrain balance in another currency than a traded instrument's
 /// P&L (`backtest::refuse_balance`), as `backtest` and `train` refuse
 /// their dataset balance.
@@ -711,7 +698,7 @@ async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyho
     let config = load_config::<S::Params>(&args.config)?;
     let program = std::env::current_exe().context("finding this binary to retrain")?;
     let children = Children::of_live(args)?;
-    let traded = backtest::traded_instruments(&args.catalog, &config.trade.instrument_ids())
+    let traded = catalog::traded_instruments(&args.catalog, &config.trade.instrument_ids())
         .context(
             "a model strategy runs live only on a --catalog holding the instruments it trades, \
              which its models and retrains are built from",
@@ -752,7 +739,7 @@ struct DatasetRun {
 impl DatasetRun {
     /// Refuses the runs, before any, unless their balance is in the P&L
     /// currency of each instrument of `traded`, as their catalog defines
-    /// them (`backtest::traded_instruments`, `backtest::refuse_balance`): a
+    /// them (`catalog::traded_instruments`, `backtest::refuse_balance`): a
     /// target's trades are sized on it, which is not converted.
     ///
     /// # Errors
@@ -761,7 +748,7 @@ impl DatasetRun {
     /// `traded` is not in it or its P&L is in another currency than the
     /// balance.
     fn refuse_balance(&self, traded: &[InstrumentId]) -> anyhow::Result<()> {
-        let traded = backtest::traded_instruments(&self.catalog, traded)?;
+        let traded = catalog::traded_instruments(&self.catalog, traded)?;
         backtest::refuse_balance(self.venue.balance, &traded)
             .context("the dataset balance, which a model's targets are sized at")
     }
@@ -795,8 +782,6 @@ impl DatasetRun {
             end,
             commission: self.venue.commission,
             balance: self.venue.balance,
-            // Read by no dataset run, whose accounts margin nothing.
-            leverage: Decimal::ONE,
             venue_oms: |_| OmsType::Hedging,
             logging: self.logging.clone(),
         };
@@ -871,6 +856,8 @@ fn train<S: ModelStrategy>(args: &TrainArgs, run: &DatasetRun) -> anyhow::Result
 
 #[cfg(test)]
 mod tests {
+    use rust_decimal::Decimal;
+
     use super::*;
     use helix_trader::{
         model::{
@@ -1058,19 +1045,15 @@ mod tests {
         }
     }
 
+    /// A backtest's margins are its instruments', each holding its
+    /// account's (an OKX definition the account's leverage), so it takes no
+    /// leverage.
     #[test]
-    fn a_backtest_is_unleveraged_unless_given_a_leverage() {
-        assert_eq!(
-            parse_backtest(&backtest_required()).unwrap().leverage,
-            Decimal::ONE
-        );
+    fn a_backtest_takes_no_leverage() {
         let mut argv = backtest_required();
         argv.extend(["--leverage", "10"]);
-        assert_eq!(parse_backtest(&argv).unwrap().leverage, Decimal::TEN);
-        let mut argv = backtest_required();
-        argv.extend(["--leverage", "ten"]);
-        let err = parse_backtest(&argv).unwrap_err().to_string();
-        assert!(err.contains("--leverage"), "{err}");
+        let err = parse_backtest(&argv).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument, "{err}");
     }
 
     fn parse_live(args: &[&str]) -> Result<LiveArgs, clap::Error> {
@@ -1104,12 +1087,12 @@ mod tests {
         assert_eq!(args.catalog, PathBuf::from("catalog"));
     }
 
+    /// Live checks each OKX account's leverage against its instruments'
+    /// definitions in the catalog, so it takes no leverage.
     #[test]
-    fn live_is_unleveraged_unless_given_a_leverage() {
-        let args = parse_live(&["ema", "--config", "ema.toml"]).unwrap();
-        assert_eq!(args.leverage, Decimal::ONE);
-        let args = parse_live(&["ema", "--config", "ema.toml", "--leverage", "10"]).unwrap();
-        assert_eq!(args.leverage, Decimal::TEN);
+    fn live_takes_no_leverage() {
+        let err = parse_live(&["ema", "--config", "ema.toml", "--leverage", "10"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument, "{err}");
     }
 
     #[test]
@@ -1352,13 +1335,11 @@ mod tests {
     }
 
     /// A live node's retrain is a `train` on the node's strategy, config,
-    /// catalog and store, at the retrains' commission and balance; the
-    /// node's leverage is not its dataset runs', which margin nothing.
+    /// catalog and store, at the retrains' commission and balance.
     #[test]
     fn a_live_nodes_retrain_parses_as_train_on_its_files_store_and_costs() {
         let mut argv = LIVE_RETRAINING.to_vec();
         argv.extend(["--catalog", "/data/catalog", "--models", "/data/models"]);
-        argv.extend(["--leverage", "2"]);
 
         let children = Children::of_live(&parse_live(&argv).unwrap()).unwrap();
         let train = started_train(&children);
