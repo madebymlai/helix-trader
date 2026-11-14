@@ -6,7 +6,12 @@
 //! definitions, written by hand as LSE publishes none, and that day's row
 //! of LSE's daily 10-year US bond yield, custom data of no instrument
 //! (`lse::LseRow`) known at the day's end, through the node from LSE's
-//! exports; five minutes of that day of the S&P 500's values as quotes,
+//! exports; of LSE's other sources of rows, each stamped when it is known,
+//! US core inflation's release of October 2026 in the economic calendar and
+//! in the macro releases, three days of the 10-year macro yield, ZN's
+//! Commitments of Traders of September 2025 and of September 2026, AAPL's
+//! financial reports of the first half of 2026, and its dividends and
+//! splits from LSE's factors; five minutes of that day of the S&P 500's values as quotes,
 //! `SPX-INDICES.LSEDGE`, from its tick slice; of the trades and quotes of
 //! GCZ6 of 2026, `GCZ26.GLBX`, from LSE's CME Globex, its definition from
 //! Databento; and of the trades and 1-minute bars of AAPL's 355 call of 20
@@ -470,4 +475,235 @@ async fn a_day_of_an_option_s_trades_and_bars_fills_from_lse_its_definition_from
             .unwrap();
         assert_eq!(lacking, [], "{data}");
     }
+}
+
+/// fill-catalog's fill of `data_type`, custom data of no instrument, over
+/// `[start, end]` from LSE into the catalog in `dir`, and the rows it then
+/// holds, as Nautilus decodes them; the window must be stored whole.
+async fn filled_rows(
+    dir: &std::path::Path,
+    data_type: &nautilus_model::data::DataType,
+    (start, end): (&str, &str),
+) -> Vec<LseRow> {
+    let (start, end): (Timestamp, Timestamp) = (start.parse().unwrap(), end.parse().unwrap());
+    let requirements = DataRequirements {
+        bar_types: vec![],
+        ticks: vec![],
+        custom: vec![data_type.clone()],
+        warmup: SignedDuration::ZERO,
+    };
+    fill_history(&requirements, start, end, &history_venues(), dir)
+        .await
+        .unwrap();
+    LseRow::register();
+    let mut catalog = ParquetDataCatalog::new(dir, None, None, None, None);
+    let identifier = data_type.identifier().unwrap().to_string();
+    let rows: Vec<LseRow> = catalog
+        .query_custom_data_dynamic(
+            data_type.type_name(),
+            Some(std::slice::from_ref(&identifier)),
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .unwrap()
+        .iter()
+        .map(|data| {
+            let Data::Custom(custom) = data else {
+                panic!("not custom data: {data:?}");
+            };
+            custom
+                .data
+                .as_any()
+                .downcast_ref::<LseRow>()
+                .unwrap()
+                .clone()
+        })
+        .collect();
+    println!("{data_type}: {} rows", rows.len());
+    let lacking = catalog
+        .get_missing_intervals_for_request(
+            UnixNanos::from(start).as_u64(),
+            UnixNanos::from(end).as_u64(),
+            &NautilusDataType::Custom {
+                type_name: data_type.type_name().to_string(),
+            }
+            .into(),
+            Some(&identifier),
+        )
+        .unwrap();
+    assert_eq!(lacking, [], "{data_type}");
+    rows
+}
+
+fn utc(time: &str) -> UnixNanos {
+    UnixNanos::from(time.parse::<Timestamp>().unwrap())
+}
+
+/// US core inflation's release of 14 October 2026, in the economic
+/// calendar and in the macro series of releases, each stamped when it came
+/// out, with its actual; and US10Y's yields of 9 to 12 November in the
+/// macro series of yields, each known at its day's end.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_release_and_a_yield_fill_from_lse_at_the_times_they_are_known() {
+    if !opted_in("a_release_and_a_yield_fill_from_lse_at_the_times_they_are_known") {
+        return;
+    }
+    dotenvy::dotenv().ok();
+    let october = ("2026-10-01T00:00:00Z", "2026-10-31T00:00:00Z");
+    for source in ["economic_calendar", "macro_release"] {
+        let dir = tempfile::tempdir().unwrap();
+        let data_type = LseRow::data_type(source, "US.Core Inflation Rate YoY");
+
+        let rows = filled_rows(dir.path(), &data_type, october).await;
+
+        let released: Vec<_> = rows
+            .iter()
+            .map(|row| (row.ts_init, row.fields["actual"].as_str()))
+            .collect();
+        assert_eq!(
+            released,
+            [(utc("2026-10-14T12:30:00Z"), Some("2.6%"))],
+            "{source}"
+        );
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let yields = LseRow::data_type("macro_yield", "US10Y");
+
+    let rows = filled_rows(
+        dir.path(),
+        &yields,
+        ("2026-11-10T00:00:00Z", "2026-11-13T00:00:00Z"),
+    )
+    .await;
+
+    let closes: Vec<_> = rows
+        .iter()
+        .map(|row| (row.ts_init, row.fields["close"].as_f64()))
+        .collect();
+    assert_eq!(
+        closes,
+        [
+            (utc("2026-11-10T00:00:00Z"), Some(4.884)),
+            (utc("2026-11-11T00:00:00Z"), Some(5.0)),
+            (utc("2026-11-13T00:00:00Z"), Some(5.133)),
+        ]
+    );
+}
+
+/// ZN's reports known in September 2025, stamped at their release date's
+/// end, a Saturday's 00:00, and in September 2026, of no release date,
+/// when LSE ingested them, a Friday evening: four or five each.
+#[tokio::test(flavor = "multi_thread")]
+async fn commitments_of_traders_fill_from_lse_at_their_release() {
+    if !opted_in("commitments_of_traders_fill_from_lse_at_their_release") {
+        return;
+    }
+    dotenvy::dotenv().ok();
+    let cot = LseRow::data_type("cot", "ZN");
+    for (window, released) in [
+        (("2025-09-01T00:00:00Z", "2025-10-01T00:00:00Z"), true),
+        (("2026-09-01T00:00:00Z", "2026-10-01T00:00:00Z"), false),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+
+        let rows = filled_rows(dir.path(), &cot, window).await;
+
+        assert!((4..=5).contains(&rows.len()), "{window:?}: {rows:?}");
+        for row in &rows {
+            let at = jiff::Timestamp::from(row.ts_init).to_zoned(jiff::tz::TimeZone::UTC);
+            let weekday = if released {
+                jiff::civil::Weekday::Saturday
+            } else {
+                jiff::civil::Weekday::Friday
+            };
+            assert_eq!(at.weekday(), weekday, "{at}: {row:?}");
+            assert_eq!(at.hour() == 0, released, "{at}: {row:?}");
+            assert_eq!(row.fields["release_date"].is_null(), !released, "{row:?}");
+        }
+    }
+}
+
+/// AAPL's financial reports known in the first half of 2026: its quarters
+/// to December 2025 and to March 2026, each row, statement or derived, at
+/// the SEC's acceptance of the quarter's 10-Q.
+#[tokio::test(flavor = "multi_thread")]
+async fn financial_reports_fill_from_lse_when_their_statements_were_accepted() {
+    if !opted_in("financial_reports_fill_from_lse_when_their_statements_were_accepted") {
+        return;
+    }
+    dotenvy::dotenv().ok();
+    let dir = tempfile::tempdir().unwrap();
+    let reports = LseRow::data_type("financial_reports", "AAPL");
+
+    let rows = filled_rows(
+        dir.path(),
+        &reports,
+        ("2026-01-01T00:00:00Z", "2026-06-30T00:00:00Z"),
+    )
+    .await;
+
+    let mut accepted: Vec<_> = rows.iter().map(|row| row.ts_init).collect();
+    accepted.dedup();
+    assert_eq!(
+        accepted,
+        [utc("2026-01-30T11:01:32Z"), utc("2026-05-01T14:01:00Z")]
+    );
+    for kind in [
+        "income", "balance", "cashflow", "metrics", "ratios", "growth",
+    ] {
+        assert!(
+            rows.iter().any(|row| row.fields["report_type"] == kind),
+            "no {kind}"
+        );
+    }
+}
+
+/// AAPL's dividends with an ex-date in 2026 to October, from its factors,
+/// each known at its ex-date's end, in dollars; and its splits since 2000.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_instrument_s_factors_fill_from_lse_at_their_days_ends() {
+    if !opted_in("an_instrument_s_factors_fill_from_lse_at_their_days_ends") {
+        return;
+    }
+    dotenvy::dotenv().ok();
+    let dir = tempfile::tempdir().unwrap();
+    let dividends = LseRow::data_type("factors_dividends", "AAPL-US_STOCKS");
+
+    let rows = filled_rows(
+        dir.path(),
+        &dividends,
+        ("2026-01-01T00:00:00Z", "2026-10-31T00:00:00Z"),
+    )
+    .await;
+
+    let paid: Vec<_> = rows
+        .iter()
+        .map(|row| (row.ts_init, row.fields["unit"].as_str()))
+        .collect();
+    assert_eq!(
+        paid,
+        [
+            (utc("2026-02-10T00:00:00Z"), Some("USD")),
+            (utc("2026-05-12T00:00:00Z"), Some("USD")),
+            (utc("2026-08-11T00:00:00Z"), Some("USD")),
+        ]
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let splits = LseRow::data_type("factors_splits", "AAPL-US_STOCKS");
+
+    let rows = filled_rows(
+        dir.path(),
+        &splits,
+        ("2000-01-01T00:00:00Z", "2026-10-31T00:00:00Z"),
+    )
+    .await;
+
+    let factors: Vec<_> = rows
+        .iter()
+        .map(|row| row.fields["volume_factor"].as_f64())
+        .collect();
+    assert_eq!(factors, [Some(2.0), Some(2.0), Some(7.0), Some(4.0)]);
 }

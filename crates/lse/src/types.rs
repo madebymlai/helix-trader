@@ -15,17 +15,18 @@ use serde_json::{Map, Value, json};
 pub(crate) const SOURCE: &str = "source";
 pub(crate) const SYMBOL: &str = "symbol";
 
-/// A row LSE serves that is not a price: its source, the collection it
-/// is of (`bond_yields`), its symbol (`US10Y`), stamped at the time of the
-/// column LSE names its time (`time_column` in LSE's catalogue), both
-/// `ts_event` and `ts_init`, and the row's other fields as LSE sends them.
+/// A row LSE serves that is not a price: its source, the collection, macro
+/// series or factors it is of (`bond_yields`), its symbol (`US10Y`),
+/// stamped when its values are known, both `ts_event` and `ts_init`, and
+/// the row's other fields as LSE sends them.
 #[arrow_custom_data]
 #[custom_data]
 pub struct LseRow {
     pub source: String,
     pub symbol: String,
-    /// The row's fields but its symbol and time, by LSE's column names,
-    /// as JSON: numbers, strings, `null`, and dates and times in ISO 8601.
+    /// The row's fields but its symbol and the time LSE selects it by, by
+    /// LSE's column names, as JSON: numbers, strings, `null`, and dates and
+    /// times in ISO 8601.
     #[custom_data_field(serde)]
     pub fields: Map<String, Value>,
     pub ts_event: UnixNanos,

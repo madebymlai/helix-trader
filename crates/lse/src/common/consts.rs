@@ -58,7 +58,10 @@ pub(crate) static OPRA_VENUE: LazyLock<Venue> = LazyLock::new(|| Venue::new("OPR
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum LseSocket {
     /// data-ws: US stocks and ETFs, US option contracts, forex,
-    /// commodities, futures, indices and US bond yields.
+    /// commodities, futures and indices. The four "US bond yields" it lists
+    /// (`USB02Y/USD` to `USB30Y/USD`) tick the notes' prices, not yields
+    /// (`USB10Y/USD` at 105.36 when the 10-year yield closed at 5.133), and
+    /// belong to no market of LSE's HTTP API, so none is streamed.
     Data,
     /// london-ws: UK stocks, and crypto since 8 November 2026.
     London,

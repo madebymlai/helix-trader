@@ -1,11 +1,13 @@
-//! LSE's answers in JSON, as LSE sends them: its refusals and its
-//! catalogue's listings.
+//! LSE's answers in JSON, as LSE sends them: its refusals, its catalogue's
+//! listings, its reference catalogue and an instrument's factors; and when
+//! the rows of each of LSE's reference collections are known (`Stamp`).
 
 use std::fmt;
 
 use jiff::SignedDuration;
 use jiff::civil::Date;
 use serde::Deserialize;
+use serde_json::{Map, Value};
 
 /// The code of an export of no session in its dates. Its answer is no rows.
 const DATE_NOT_TRADING: &str = "date-not-trading";
@@ -98,50 +100,150 @@ pub(crate) struct ReferenceCollection {
     pub(crate) time_column: String,
 }
 
-/// LSE's reference collections of a row an interval, each keyed by the
-/// open of its interval (`ts`), and the interval's width: the bond yields
-/// at 1, 5, 15 and 30 minutes, an hour (`bond_yields_hourly`, and
-/// `bond_yields_intraday`, LSE's "Hourly bond yields") and 4 hours (LSE's
-/// catalogue, `/v3/reference`; `test_data/README.md`: a 4-hour row of
-/// 20:00 closes at the day's close).
-const INTERVALS: &[(&str, SignedDuration)] = &[
-    ("bond_yields_minute", SignedDuration::from_mins(1)),
-    ("bond_yields_five_minute", SignedDuration::from_mins(5)),
-    ("bond_yields_fifteen_minute", SignedDuration::from_mins(15)),
-    ("bond_yields_thirty_minute", SignedDuration::from_mins(30)),
-    ("bond_yields_hourly", SignedDuration::from_hours(1)),
-    ("bond_yields_intraday", SignedDuration::from_hours(1)),
-    ("bond_yields_four_hour", SignedDuration::from_hours(4)),
+/// An instrument's splits and dividends, as LSE's `/v3/factors` answers
+/// them, whole: each split and each dividend a row of fields as LSE sends
+/// them, a split's day its `date`, a dividend's its `ex_date`. An
+/// instrument of a market of no dividends (`futures`) has none.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct LseFactors {
+    #[serde(default)]
+    pub(crate) splits: Vec<Map<String, Value>>,
+    #[serde(default)]
+    pub(crate) dividends: Option<LseDividends>,
+}
+
+/// An instrument's dividends, newest first, their amounts in `unit` (`USD`,
+/// or `GBX`, pence), LSE giving the 500 newest alone of more, `truncated`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct LseDividends {
+    pub(crate) rows: Vec<Map<String, Value>>,
+    pub(crate) unit: Option<String>,
+    #[serde(default)]
+    pub(crate) truncated: bool,
+    pub(crate) count: Option<u64>,
+}
+
+/// A UTC day.
+const DAY: SignedDuration = SignedDuration::from_hours(24);
+
+/// When a row of a source is known, so what it is stamped at, both
+/// `ts_event` and `ts_init`, read from its columns: its key, the column
+/// LSE's export selects its rows by (a reference collection's
+/// `time_column`), or a column of its release. A row is never stamped
+/// before its values are all known, so that no reader sees one early.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stamp {
+    /// At the end of its key, a date, 00:00 UTC of the next: a day's close,
+    /// a filing's day, an ex-date or a report date.
+    DateEnd,
+    /// At the close of its interval of the width, its key the interval's
+    /// open, as a candle is.
+    Close(SignedDuration),
+    /// At its key, a time: when a snapshot was updated or a release came
+    /// out.
+    Key,
+    /// At the time in the column, its release, its key a date.
+    At(&'static str),
+    /// COT's: at the end of its `release_date`, the Friday a report of a
+    /// Tuesday comes out, or at its `created_at`, LSE's ingest of the
+    /// report about an hour after it came out, where LSE gives no release
+    /// date (its rows since 28 April 2026); its key the report's Tuesday.
+    Release,
+    /// Financial reports': a statement's (`income`, `balance`, `cashflow`)
+    /// at its `accepted_date`, when the SEC accepted its filing; a row
+    /// derived from the statements (`metrics`, `ratios`, `growth`) at the
+    /// latest `accepted_date` of the statements of its period, its key and
+    /// `period` (`FY`, `Q3`); its key the end of its fiscal period.
+    Filing,
+}
+
+/// LSE's reference collections, all 21 its catalogue lists (`/v3/reference`,
+/// `test_data/README.md`), each with when its rows are known: a closed
+/// table, so that a collection LSE adds is refused until it is classified,
+/// rather than stamped at its key's end, which a row published after its
+/// key would reach a reader early at.
+const COLLECTIONS: &[(&str, Stamp)] = &[
+    // A day's close; an interval's close, LSE stamping an interval at its
+    // open (a 4-hour row of 20:00 closes at the day's close).
+    ("bond_yields", Stamp::DateEnd),
+    (
+        "bond_yields_minute",
+        Stamp::Close(SignedDuration::from_mins(1)),
+    ),
+    (
+        "bond_yields_five_minute",
+        Stamp::Close(SignedDuration::from_mins(5)),
+    ),
+    (
+        "bond_yields_fifteen_minute",
+        Stamp::Close(SignedDuration::from_mins(15)),
+    ),
+    (
+        "bond_yields_thirty_minute",
+        Stamp::Close(SignedDuration::from_mins(30)),
+    ),
+    (
+        "bond_yields_hourly",
+        Stamp::Close(SignedDuration::from_hours(1)),
+    ),
+    (
+        "bond_yields_intraday",
+        Stamp::Close(SignedDuration::from_hours(1)),
+    ),
+    (
+        "bond_yields_four_hour",
+        Stamp::Close(SignedDuration::from_hours(4)),
+    ),
+    // A day's market values, a row a field (`symbol, bucket, date, field,
+    // value`): bid, ask and their day's range, yields, spreads.
+    ("sovereign_yields", Stamp::DateEnd),
+    ("corporate_bonds", Stamp::DateEnd),
+    ("credit_indices", Stamp::DateEnd),
+    ("fx_derivatives", Stamp::DateEnd),
+    // Keyed by the day of its publication, an SEC filing's.
+    ("insider_trades", Stamp::DateEnd),
+    // Keyed by the report date, LSE giving no report time; its figures as
+    // LSE holds them today, restated (split-adjusted).
+    ("earnings_calendar", Stamp::DateEnd),
+    // Keyed by the ex-date or the effective date, the day an instrument's
+    // price takes them.
+    ("dividends", Stamp::DateEnd),
+    ("stock_splits", Stamp::DateEnd),
+    // One snapshot of each company, keyed by when LSE updated it.
+    ("company_profiles", Stamp::Key),
+    ("stock_fundamentals", Stamp::Key),
+    // Keyed by the day of a release, which `datetime` times, in UTC.
+    ("economic_calendar", Stamp::At("datetime")),
+    ("cot", Stamp::Release),
+    ("financial_reports", Stamp::Filing),
 ];
 
-/// What a reference collection keys its rows by, its time column: a date,
-/// a row of each, or the open of an interval of a width.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RowKey {
-    Date,
-    Open(SignedDuration),
-}
-
-impl RowKey {
-    /// How long after its key a row's values are all known: a date's day,
-    /// an interval's width. A row is stamped then, as a candle is at its
-    /// close, so that no reader sees a value before it is known.
-    pub(crate) fn span(self) -> SignedDuration {
-        match self {
-            Self::Date => SignedDuration::from_hours(24),
-            Self::Open(width) => width,
-        }
-    }
-}
-
-impl ReferenceCollection {
-    /// What the collection keys its rows by: the open of its interval for
-    /// LSE's interval collections (`INTERVALS`), a date for every other.
-    pub(crate) fn key(&self) -> RowKey {
-        INTERVALS
+impl Stamp {
+    /// When the rows of LSE's reference collection `dataset` are known, or
+    /// `None` if it is none the client has classified.
+    pub(crate) fn of_collection(dataset: &str) -> Option<Self> {
+        COLLECTIONS
             .iter()
-            .find(|(dataset, _)| *dataset == self.dataset)
-            .map_or(RowKey::Date, |&(_, width)| RowKey::Open(width))
+            .find(|(name, _)| *name == dataset)
+            .map(|&(_, stamp)| stamp)
+    }
+
+    /// Whether its key is a date, not a time.
+    pub(crate) fn keyed_by_date(self) -> bool {
+        !matches!(self, Self::Close(_) | Self::Key)
+    }
+
+    /// How long after its key a row is known, if always as long: then the
+    /// rows known over a window are those keyed over it, that long before.
+    /// `None` for a row known at a time of another column, of which the
+    /// rows known over a window may be keyed any time before it.
+    pub(crate) fn lag(self) -> Option<SignedDuration> {
+        match self {
+            Self::DateEnd => Some(DAY),
+            Self::Close(width) => Some(width),
+            Self::Key => Some(SignedDuration::ZERO),
+            Self::At(_) | Self::Release | Self::Filing => None,
+        }
     }
 }
 
@@ -181,7 +283,7 @@ mod tests {
     use super::*;
     use crate::testing::{
         ALLOWANCE_EXHAUSTED, DATA_UNAVAILABLE, DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING,
-        EXPORT_TOO_WIDE, PLAN_REQUIRED, ROWS_EXHAUSTED, TICKS_NOT_STORED,
+        EXPORT_TOO_WIDE, PLAN_REQUIRED, REFERENCE_CATALOGUE, ROWS_EXHAUSTED, TICKS_NOT_STORED,
     };
 
     fn refusal(body: &str) -> LseRefusal {
@@ -217,37 +319,81 @@ mod tests {
         assert!(!refusal(ROWS_EXHAUSTED).is_too_wide());
     }
 
-    fn collection(dataset: &str) -> ReferenceCollection {
-        ReferenceCollection {
-            dataset: dataset.to_string(),
-            time_column: "date".to_string(),
+    /// Each collection LSE's catalogue lists, captured on 13 November 2026,
+    /// is classified: none is refused as unknown.
+    #[rstest]
+    fn every_collection_of_lse_s_catalogue_is_classified() {
+        let catalogue: ReferenceCatalogue = serde_json::from_str(REFERENCE_CATALOGUE).unwrap();
+
+        let unclassified: Vec<_> = catalogue
+            .datasets
+            .iter()
+            .filter(|collection| Stamp::of_collection(&collection.dataset).is_none())
+            .map(|collection| collection.dataset.as_str())
+            .collect();
+
+        assert_eq!(catalogue.datasets.len(), 21);
+        assert_eq!(unclassified, Vec::<&str>::new());
+    }
+
+    /// A collection's key is its catalogue's time column: a date for those
+    /// LSE keys by date, a time for its intervals and snapshots.
+    #[rstest]
+    fn a_collection_keyed_by_a_time_in_lse_s_catalogue_is_classified_as_keyed_by_a_time() {
+        let catalogue: ReferenceCatalogue = serde_json::from_str(REFERENCE_CATALOGUE).unwrap();
+        let keyed_by_time = ["ts", "updated_at"];
+
+        for collection in catalogue.datasets {
+            let stamp = Stamp::of_collection(&collection.dataset).unwrap();
+            assert_eq!(
+                stamp.keyed_by_date(),
+                !keyed_by_time.contains(&collection.time_column.as_str()),
+                "{collection:?}"
+            );
         }
     }
 
-    /// LSE's catalogue lists the bond yields at every interval beside the
-    /// daily ones; its other collections key their rows by date.
     #[rstest]
-    #[case::daily("bond_yields", RowKey::Date)]
-    #[case::four_hours("bond_yields_four_hour", RowKey::Open(SignedDuration::from_hours(4)))]
-    #[case::hourly("bond_yields_intraday", RowKey::Open(SignedDuration::from_hours(1)))]
-    #[case::a_minute("bond_yields_minute", RowKey::Open(SignedDuration::from_mins(1)))]
-    #[case::cot("cot", RowKey::Date)]
-    fn a_collection_keys_its_rows_by_date_or_by_the_open_of_its_interval(
+    #[case::daily("bond_yields", Stamp::DateEnd)]
+    #[case::four_hours("bond_yields_four_hour", Stamp::Close(SignedDuration::from_hours(4)))]
+    #[case::hourly("bond_yields_intraday", Stamp::Close(SignedDuration::from_hours(1)))]
+    #[case::a_minute("bond_yields_minute", Stamp::Close(SignedDuration::from_mins(1)))]
+    #[case::market_values("sovereign_yields", Stamp::DateEnd)]
+    #[case::a_filing_s_day("insider_trades", Stamp::DateEnd)]
+    #[case::a_snapshot("company_profiles", Stamp::Key)]
+    #[case::a_release_s_time("economic_calendar", Stamp::At("datetime"))]
+    #[case::cot("cot", Stamp::Release)]
+    #[case::financial_reports("financial_reports", Stamp::Filing)]
+    fn a_collection_s_rows_are_stamped_when_they_are_known(
         #[case] dataset: &str,
-        #[case] key: RowKey,
+        #[case] stamp: Stamp,
     ) {
-        assert_eq!(collection(dataset).key(), key);
+        assert_eq!(Stamp::of_collection(dataset), Some(stamp));
     }
 
-    /// A row of a date is known at the date's end, one of an interval at
-    /// its close.
     #[rstest]
-    fn a_row_is_known_a_day_or_an_interval_after_its_key() {
-        assert_eq!(RowKey::Date.span(), SignedDuration::from_hours(24));
-        assert_eq!(
-            RowKey::Open(SignedDuration::from_hours(4)).span(),
-            SignedDuration::from_hours(4)
-        );
+    fn a_collection_not_classified_is_none() {
+        assert_eq!(Stamp::of_collection("no_such_collection"), None);
+    }
+
+    /// A row of a date is known a day after its key, one of an interval an
+    /// interval after, a snapshot at its key; one released at another
+    /// column's time any time after.
+    #[rstest]
+    #[case::a_date(Stamp::DateEnd, Some(SignedDuration::from_hours(24)))]
+    #[case::an_interval(
+        Stamp::Close(SignedDuration::from_hours(4)),
+        Some(SignedDuration::from_hours(4))
+    )]
+    #[case::a_snapshot(Stamp::Key, Some(SignedDuration::ZERO))]
+    #[case::a_release(Stamp::At("datetime"), None)]
+    #[case::cot(Stamp::Release, None)]
+    #[case::a_filing(Stamp::Filing, None)]
+    fn a_row_is_known_its_lag_after_its_key(
+        #[case] stamp: Stamp,
+        #[case] lag: Option<SignedDuration>,
+    ) {
+        assert_eq!(stamp.lag(), lag);
     }
 
     #[test]

@@ -12,10 +12,11 @@
 //! whatever LSE answers; the day before is once LSE answers rows of it;
 //! and an earlier day LSE holds no row of had none. A day's export that
 //! takes the next day's first instant (see `pieces`) reaches into that
-//! day too, LSE answering no rows of it apart. The data client holds a
-//! reference collection's dates to the same rule (`loaded`): LSE stores
-//! them the morning after too (its catalogue, read on 13 November 2026:
-//! the bond yields of the 12th, as of the 13th's 01:34 UTC).
+//! day too, LSE answering no rows of it apart. The data client holds the
+//! dates of the rows of LSE's other sources to the same rule (`loaded`,
+//! see `rows`): LSE stores them the morning after too (its catalogue, read
+//! on 13 November 2026: the bond yields of the 12th, as of the 13th's 01:34
+//! UTC).
 
 use std::cmp::Ordering;
 
@@ -136,7 +137,7 @@ fn pieces(query: &ExportQuery, unit: SignedDuration) -> Vec<ExportQuery> {
 
 /// Whether LSE has loaded the UTC day of `time` as of `now`, given whether
 /// it answered rows of the day (see the module's doc): the rule of a market
-/// export's days and of a reference collection's dates alike.
+/// export's days and of the dates of the rows of LSE's other sources alike.
 pub(crate) fn loaded(time: Timestamp, rows: bool, now: Timestamp) -> bool {
     match midnight(time).cmp(&(midnight(now) - DAY)) {
         Ordering::Less => true,
