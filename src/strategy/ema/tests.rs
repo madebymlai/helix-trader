@@ -3,6 +3,8 @@ use std::{cell::RefCell, rc::Rc};
 use nautilus_common::{
     cache::Cache,
     clock::{Clock, VirtualClock},
+    messages::data::{DataCommand, SubscribeCommand},
+    msgbus::{self, MessagingSwitchboard, stubs::get_typed_into_message_saving_handler},
     timer::TimeEventCallback,
 };
 use nautilus_core::{UUID4, UnixNanos};
@@ -386,7 +388,17 @@ fn registered(
     now: u64,
     config: &str,
 ) -> (EmaCross, Rc<RefCell<VirtualClock>>) {
-    let mut strategy = EmaCross::new(EmaCrossConfig::load(config).unwrap()).unwrap();
+    let strategy = EmaCross::new(EmaCrossConfig::load(config).unwrap()).unwrap();
+    register(strategy, cache, now)
+}
+
+/// `strategy` registered without a node on `cache` at `now`, and its
+/// clock.
+fn register(
+    mut strategy: EmaCross,
+    cache: &Rc<RefCell<Cache>>,
+    now: u64,
+) -> (EmaCross, Rc<RefCell<VirtualClock>>) {
     let clock = Rc::new(RefCell::new(VirtualClock::new()));
     clock.borrow_mut().advance_time(UnixNanos::from(now), true);
     clock
@@ -580,4 +592,62 @@ fn trading_an_inverse_instrument_it_refuses_to_start() {
     let err = DataActor::on_start(&mut strategy).unwrap_err();
 
     assert!(err.to_string().contains("inverse"), "{err}");
+}
+
+/// IC's AUD/USD, a pair priced and sized as Nautilus' AUD/USD.
+fn ic_aud() -> InstrumentAny {
+    let mut pair = audusd_sim();
+    pair.id = InstrumentId::from("AUDUSD.ICMARKETS");
+    InstrumentAny::CurrencyPair(pair)
+}
+
+/// The crossover on IC's AUD/USD, its equity converted through IC's EURUSD.
+fn converting() -> EmaCrossConfig {
+    let toml = CONFIG.replace("AUD/USD.SIM", "AUDUSD.ICMARKETS").replace(
+        "risk = \"0.5%\"",
+        "risk = \"0.5%\"\n    conversions = [\"EURUSD.ICMARKETS\"]",
+    );
+    EmaCrossConfig::load(&toml).unwrap()
+}
+
+/// Live, the crossover subscribes at its start to the quotes of its
+/// conversion pair, IC's EURUSD, from now, so that the cache holds a rate
+/// when it sizes a trade, and asks nothing of them, no history and no
+/// definition, the broker's client loading the pair at connect.
+#[test]
+fn live_it_subscribes_to_its_conversion_pairs_quotes_from_its_start_with_no_warmup() {
+    let (handler, sent) = get_typed_into_message_saving_handler::<DataCommand>(None);
+    msgbus::register_data_command_endpoint(
+        MessagingSwitchboard::data_engine_queue_execute(),
+        handler,
+    );
+    let eurusd = InstrumentId::from("EURUSD.ICMARKETS");
+    let (mut strategy, _) = register(
+        EmaCross::live(converting()).unwrap(),
+        &holding(ic_aud()),
+        NOW,
+    );
+
+    DataActor::on_start(&mut strategy).unwrap();
+
+    let sent = sent.get_messages();
+    let subscribed_from: Vec<Option<u64>> = sent
+        .iter()
+        .filter_map(|command| match command {
+            DataCommand::Subscribe(SubscribeCommand::Quotes(quotes))
+                if quotes.instrument_ids == [eurusd] =>
+            {
+                Some(quotes.params.as_ref().and_then(|p| p.get_u64("start_ns")))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(subscribed_from, [Some(NOW)]);
+    let asked: Vec<String> = sent
+        .iter()
+        .filter(|command| matches!(command, DataCommand::Request(_)))
+        .map(|request| format!("{request:?}"))
+        .filter(|request| request.contains("EURUSD"))
+        .collect();
+    assert!(asked.is_empty(), "{asked:#?}");
 }

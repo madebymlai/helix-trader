@@ -8,8 +8,11 @@
 //! gold quoted in USD. The config lists the pairs to convert through, all
 //! on one venue, `conversions = ["EURUSD.ICMARKETS"]`, and the strategy
 //! reads their quotes (`StandardConfig::data_requirements`): fill-catalog
-//! fills them, a backtest replays them, and Nautilus' data engine caches
-//! each quote it processes, which its exchange rates are read from.
+//! fills them, a backtest replays them, a live strategy subscribes to them
+//! from its start, with no warmup (`rolls::Roller`), and Nautilus' data
+//! engine caches each quote it processes, which its exchange rates are read
+//! from. Before a pair's first quote there is no rate through it, and a
+//! trade sends nothing, logged (`orders::Trade::send`).
 //!
 //! Both answers are Nautilus':
 //!

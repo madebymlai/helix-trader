@@ -27,7 +27,7 @@ use nautilus_model::{
         stubs::{audusd_sim, btcusd_bybit},
     },
     orders::{builder::OrderTestBuilder, stubs::TestOrderEventStubs},
-    types::{AccountBalance, Money},
+    types::{AccountBalance, Currency, Money},
 };
 use nautilus_portfolio::portfolio::Portfolio;
 use nautilus_trading::{
@@ -781,6 +781,86 @@ fn a_trade_without_equity_in_its_pnl_currency_sends_nothing_and_logs_why() {
             .any(|line| line.starts_with("ERROR") && line.contains(AUD) && line.contains("USD")),
         "{lines:#?}"
     );
+}
+
+/// EUR/USD at Pepperstone, the pair a config converts EUR through into
+/// USD, the P&L currency of AUD/USD: a CFD as AUD/USD at Pepperstone is,
+/// of EUR.
+const EURUSD: &str = "EURUSD.PEPPERSTONE";
+
+/// A cache as `cache_holding("100000 EUR")`, defining Pepperstone's
+/// EUR/USD too, of which it holds no quote yet.
+fn cache_converting() -> Rc<RefCell<Cache>> {
+    let cache = cache_holding("100000 EUR");
+    let InstrumentAny::Cfd(mut eurusd) = aud(InstrumentId::from(EURUSD)) else {
+        panic!("Pepperstone's pairs are CFDs")
+    };
+    eurusd.base_currency = Some(Currency::EUR());
+    cache
+        .borrow_mut()
+        .add_instrument(InstrumentAny::Cfd(eurusd))
+        .unwrap();
+    cache
+}
+
+/// The rates of a config converting through Pepperstone's EUR/USD.
+fn through_eurusd() -> Rates {
+    Conversions::new(vec![InstrumentId::from(EURUSD)]).rates()
+}
+
+/// Pepperstone's account holds 100,000 EUR, converted into USD through
+/// EUR/USD, whose first quote has not come yet, as at a live start: there
+/// is no rate, and the trade sends nothing, no order and no time alert,
+/// and says why.
+#[test]
+fn a_trade_sent_before_its_pairs_first_quote_sends_nothing_and_logs_why() {
+    let name = "a_trade_sent_before_its_pairs_first_quote_sends_nothing_and_logs_why";
+    if !log_capture::alone(module_path!(), name) {
+        return;
+    }
+    log_capture::capture(log::LevelFilter::Info);
+    let (mut probe, clock) = registered_on(&cache_converting(), STRATEGY, NOW);
+
+    buy(bracket(4))
+        .send(&mut probe, stake(), through_eurusd())
+        .unwrap();
+
+    assert_eq!(orders(&probe), []);
+    assert_eq!(clock.borrow().timer_names(), Vec::<&str>::new());
+    let lines = log_capture::lines();
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("ERROR") && line.contains(AUD) && line.contains("quote")),
+        "{lines:#?}"
+    );
+}
+
+/// Once EUR/USD's first quote is cached, 1.24990 / 1.25010, its mid 1.25:
+/// the same trade is sized on 125,000 USD, 0.5% of it, 625 USD, over one
+/// R of 0.00500, 125,000 AUD/USD.
+#[test]
+fn a_trade_sent_after_its_pairs_first_quote_is_sized_on_the_equity_converted() {
+    let cache = cache_converting();
+    cache
+        .borrow_mut()
+        .add_quote(QuoteTick::new(
+            InstrumentId::from(EURUSD),
+            Price::from("1.24990"),
+            Price::from("1.25010"),
+            Quantity::from(1),
+            Quantity::from(1),
+            UnixNanos::from(NOW),
+            UnixNanos::from(NOW),
+        ))
+        .unwrap();
+    let (mut probe, _) = registered_on(&cache, STRATEGY, NOW);
+
+    buy(held(4))
+        .send(&mut probe, stake(), through_eurusd())
+        .unwrap();
+
+    assert_eq!(entry_quantity(&probe), Quantity::from(125_000));
 }
 
 /// IB's account is issued under IB, not under IDEALPRO, the venue of the
