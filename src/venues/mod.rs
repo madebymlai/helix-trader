@@ -1582,7 +1582,7 @@ mod tests {
             ("GC.GLBX", exchange),
             ("GC.v.0.GLBX", exchange),
             ("NVDA.XNAS", exchange),
-            ("BRK.B.XNAS", exchange),
+            ("BRK B.XNAS", exchange),
             ("AAPL  261120C00355000.OPRA", exchange),
             ("SXR8.IBIS", ib),
             ("ESZ26.CME", ib),

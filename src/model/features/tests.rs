@@ -390,7 +390,6 @@ fn an_update_of_a_kind_no_feature_reads_is_a_no_op() {
     features.handle_trade(&trade(AUD, 0.7)).unwrap();
     features.handle_depth(&stub_depth10());
     features.handle_deltas(&deltas(AUD));
-    features.handle_data(&level(AUD, 1.0));
 
     assert_eq!(features.values(), None);
 }
@@ -478,18 +477,34 @@ fn the_values_wait_for_every_feature() {
     assert!(ActorIndicator::initialized(&*features).unwrap());
 }
 
+/// `data` cached as Nautilus' data engine caches the custom data it
+/// processes, live or replayed, before the strategy's handlers run.
+fn cached(probe: &Probe, data: CustomData) {
+    probe.cache_rc().borrow_mut().add_custom_data(data);
+}
+
+/// Cold before the set is registered, whatever the cache holds; then the
+/// latest level of AUD/USD the cache holds, another instrument's not read.
 #[test]
-fn a_raw_feature_holds_the_last_value_read_from_its_data_type() {
+fn a_raw_feature_reads_the_latest_point_of_its_data_type_in_the_cache() {
+    let mut probe = registered();
     let features = FeatureSet::builder()
         .data("Level", id(AUD), "level", read_level)
         .build()
         .unwrap();
+    cached(&probe, level(AUD, 0.5));
 
-    features.handle_data(&level(GBP, 9.0));
-    assert_eq!(features.values(), None);
+    let unregistered = features.values();
+    features.register(&mut probe);
+    let on_register = features.values();
+    cached(&probe, level(GBP, 9.0));
+    let after_gbp = features.values();
+    cached(&probe, level(AUD, 1.5));
+    cached(&probe, level(AUD, 2.5));
 
-    features.handle_data(&level(AUD, 1.5));
-    features.handle_data(&level(AUD, 2.5));
+    assert_eq!(unregistered, None);
+    assert_eq!(on_register, Some(vec![0.5]));
+    assert_eq!(after_gbp, Some(vec![0.5]));
     assert_eq!(features.values(), Some(vec![2.5]));
 }
 
@@ -536,9 +551,11 @@ fn an_update_no_feature_reads_and_custom_data_are_no_update_of_an_instrument() {
         .build()
         .unwrap();
 
+    let mut probe = registered();
+    features.register(&mut probe);
     features.handle_quote(&at!(quote(GBP, 1.3), 10)).unwrap();
     features.handle_trade(&at!(trade(AUD, 0.7), 20)).unwrap();
-    features.handle_data(&level(AUD, 1.0));
+    cached(&probe, level(AUD, 1.0));
 
     assert_eq!(features.last_update(id(GBP)), None);
     assert_eq!(features.last_update(id(AUD)), None);
