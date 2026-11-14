@@ -57,9 +57,7 @@ pub(crate) fn parse_trade_slice(
         .context("reading LSE's Parquet file")?
         .build()?;
     let mut trades = Vec::new();
-    // The rows met so far at the time of the last row, by price and size.
-    let mut same: HashMap<(Price, Quantity), u32> = HashMap::new();
-    let mut last_time = None;
+    let mut ids = TradeIds::default();
     for batch in reader {
         let batch = batch.context("reading LSE's Parquet file")?;
         let times = times(&batch)?;
@@ -78,13 +76,7 @@ pub(crate) fn parse_trade_slice(
                 decimal(sizes.value(row), size_precision, "size")?,
                 size_precision,
             )?;
-            if last_time != Some(time) {
-                same.clear();
-                last_time = Some(time);
-            }
-            let occurrence = same.entry((price, size)).or_default();
-            let trade_id = trade_id(instrument_id, time, price, size, *occurrence);
-            *occurrence += 1;
+            let trade_id = ids.next(instrument_id, time, price, size);
             trades.push(TradeTick::new_checked(
                 instrument_id,
                 price,
@@ -874,10 +866,42 @@ pub(crate) fn decimal(value: f64, precision: u8, what: &str) -> anyhow::Result<D
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0100_0000_01b3;
 
+/// The ids of an instrument's trades, which LSE gives none, in the order
+/// they come, a file's or a stream's: each a hash of the trade's
+/// instrument, time, price and size, and of how many trades of that time,
+/// price and size came before it, so that trades alike keep ids apart and
+/// the same trades always get the same ids (`trade_id`).
+#[derive(Debug, Default)]
+pub(crate) struct TradeIds {
+    /// The trades met so far at the time of the last, by price and size.
+    same: HashMap<(Price, Quantity), u32>,
+    last_time: Option<UnixNanos>,
+}
+
+impl TradeIds {
+    /// The id of the next trade, of `instrument_id` at `time`, of `price`
+    /// and `size`, a time no earlier than the last's.
+    pub(crate) fn next(
+        &mut self,
+        instrument_id: InstrumentId,
+        time: UnixNanos,
+        price: Price,
+        size: Quantity,
+    ) -> TradeId {
+        if self.last_time != Some(time) {
+            self.same.clear();
+            self.last_time = Some(time);
+        }
+        let occurrence = self.same.entry((price, size)).or_default();
+        let id = trade_id(instrument_id, time, price, size, *occurrence);
+        *occurrence += 1;
+        id
+    }
+}
+
 /// The id of a trade LSE gives none: a hash of its instrument, time,
 /// price and size, and of how many trades of that time, price and size
-/// came before it in the file, so that trades alike keep ids apart and the
-/// same rows always get the same ids.
+/// came before it.
 fn trade_id(
     instrument_id: InstrumentId,
     time: UnixNanos,

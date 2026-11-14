@@ -7,11 +7,13 @@
 //! symbols the socket lists to the key and the subscriptions it allows a
 //! connection, or fails with LSE's refusal (`INVALID_KEY`,
 //! `TOO_MANY_CONNECTIONS`, ...). The handler tracks the subscriptions in
-//! Nautilus' `SubscriptionState` (topics: the symbols as the socket spells
-//! them), sends each once the connection is authenticated, has LSE's
-//! acknowledgement confirm it, and passes LSE's refusal of one on with its
-//! symbol: LSE answers subscriptions and unsubscriptions in turn, and its
-//! error names no symbol. Ticks are passed on as they come.
+//! Nautilus' `SubscriptionState`, a symbol's ticks, as the socket spells
+//! the symbol, or an underlying's chain's, every listed contract of its
+//! options in one subscription (`Topic`), sends each once the connection is
+//! authenticated, has LSE's acknowledgement confirm it, and passes LSE's
+//! refusal of one on with its symbol or underlying: LSE answers
+//! subscriptions and unsubscriptions in turn, and its error names neither.
+//! Ticks are passed on as they come.
 //!
 //! Nautilus' transport reconnects a dropped connection with backoff; on
 //! the new one the handler authenticates again, sends every subscription
@@ -82,8 +84,12 @@ const TERMINAL: [&str; 4] = [
 ];
 
 /// The delimiter of the subscription state's topics, which no LSE symbol
-/// holds: a topic is one symbol.
+/// holds: a symbol's topic is the symbol, a chain's the channel `options`
+/// and its underlying (`Topic`).
 const TOPIC_DELIMITER: char = ':';
+
+/// The channel of the chains' topics.
+const OPTIONS_CHANNEL: &str = "options";
 
 /// What the client passes on.
 #[derive(Debug, Clone)]
@@ -92,6 +98,11 @@ pub(crate) enum LseWsMessage {
     /// LSE refused the subscription of `symbol`.
     Refused {
         symbol: String,
+        refusal: LseWsRefusal,
+    },
+    /// LSE refused the subscription of the chain of `underlying`.
+    OptionsRefused {
+        underlying: String,
         refusal: LseWsRefusal,
     },
     /// The connection dropped and its replacement is authenticated, its
@@ -248,7 +259,7 @@ impl LseWebSocketClient {
     ///
     /// Returns an error if the client is disconnected.
     pub(crate) fn subscribe(&self, symbol: &str) -> anyhow::Result<()> {
-        self.command(HandlerCommand::Subscribe(symbol.to_owned()))
+        self.command(HandlerCommand::Subscribe(Topic::Symbol(symbol.to_owned())))
     }
 
     /// Ends the subscription of `symbol`. LSE may still send a tick or
@@ -258,7 +269,35 @@ impl LseWebSocketClient {
     ///
     /// Returns an error if the client is disconnected.
     pub(crate) fn unsubscribe(&self, symbol: &str) -> anyhow::Result<()> {
-        self.command(HandlerCommand::Unsubscribe(symbol.to_owned()))
+        self.command(HandlerCommand::Unsubscribe(Topic::Symbol(
+            symbol.to_owned(),
+        )))
+    }
+
+    /// Subscribes to the ticks of every listed contract of `underlying`'s
+    /// options, its chain, in one subscription, for the rest of the
+    /// connection, reconnects included. LSE sends no last prices of a
+    /// chain: its first ticks are its contracts' next trades. Its refusal
+    /// is passed on (`OptionsRefused`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the client is disconnected.
+    pub(crate) fn subscribe_options(&self, underlying: &str) -> anyhow::Result<()> {
+        self.command(HandlerCommand::Subscribe(Topic::Options(
+            underlying.to_owned(),
+        )))
+    }
+
+    /// Ends the subscription of `underlying`'s chain.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the client is disconnected.
+    pub(crate) fn unsubscribe_options(&self, underlying: &str) -> anyhow::Result<()> {
+        self.command(HandlerCommand::Unsubscribe(Topic::Options(
+            underlying.to_owned(),
+        )))
     }
 
     fn command(&self, command: HandlerCommand) -> anyhow::Result<()> {
@@ -294,15 +333,57 @@ enum HandlerCommand {
     /// The connected client; the first command, queued before the command
     /// sender is shared, so no subscription can overtake it.
     SetClient(WebSocketClient),
-    Subscribe(String),
-    Unsubscribe(String),
+    Subscribe(Topic),
+    Unsubscribe(Topic),
     Disconnect,
+}
+
+/// A subscription of a connection: the ticks of a symbol, as the socket
+/// spells it, or of an underlying's chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Topic {
+    Symbol(String),
+    Options(String),
+}
+
+impl Topic {
+    /// The topic `topic` of the subscription state names.
+    fn of(topic: &str) -> Self {
+        match topic.split_once(TOPIC_DELIMITER) {
+            Some((OPTIONS_CHANNEL, underlying)) => Self::Options(underlying.to_owned()),
+            _ => Self::Symbol(topic.to_owned()),
+        }
+    }
+
+    /// Its topic in the subscription state.
+    fn topic(&self) -> String {
+        match self {
+            Self::Symbol(symbol) => symbol.clone(),
+            Self::Options(underlying) => format!("{OPTIONS_CHANNEL}{TOPIC_DELIMITER}{underlying}"),
+        }
+    }
+
+    /// The frame subscribing it.
+    fn subscribe(&self) -> String {
+        match self {
+            Self::Symbol(symbol) => LseWsAction::Subscribe { symbol }.to_json(),
+            Self::Options(underlying) => LseWsAction::SubscribeOptions { underlying }.to_json(),
+        }
+    }
+
+    /// The frame ending it.
+    fn unsubscribe(&self) -> String {
+        match self {
+            Self::Symbol(symbol) => LseWsAction::Unsubscribe { symbol }.to_json(),
+            Self::Options(underlying) => LseWsAction::UnsubscribeOptions { underlying }.to_json(),
+        }
+    }
 }
 
 /// A subscription or unsubscription sent and not answered yet.
 enum Unanswered {
-    Subscribe(String),
-    Unsubscribe(String),
+    Subscribe(Topic),
+    Unsubscribe(Topic),
 }
 
 /// The handler task: the one owner of the `WebSocketClient`.
@@ -338,19 +419,16 @@ impl LseWsHandler {
                 biased;
                 command = self.cmd_rx.recv() => match command {
                     Some(HandlerCommand::SetClient(client)) => self.client = Some(client),
-                    Some(HandlerCommand::Subscribe(symbol)) => {
-                        self.subscriptions.mark_subscribe(&symbol);
+                    Some(HandlerCommand::Subscribe(topic)) => {
+                        self.subscriptions.mark_subscribe(&topic.topic());
                         if self.authenticated {
-                            self.send_subscribe(symbol).await;
+                            self.send_subscribe(topic).await;
                         }
                     }
-                    Some(HandlerCommand::Unsubscribe(symbol)) => {
-                        self.subscriptions.mark_unsubscribe(&symbol);
-                        if self.authenticated {
-                            let frame = LseWsAction::Unsubscribe { symbol: &symbol }.to_json();
-                            if self.send(frame).await {
-                                self.unanswered.push_back(Unanswered::Unsubscribe(symbol));
-                            }
+                    Some(HandlerCommand::Unsubscribe(topic)) => {
+                        self.subscriptions.mark_unsubscribe(&topic.topic());
+                        if self.authenticated && self.send(topic.unsubscribe()).await {
+                            self.unanswered.push_back(Unanswered::Unsubscribe(topic));
                         }
                     }
                     Some(HandlerCommand::Disconnect) | None => break,
@@ -409,6 +487,16 @@ impl LseWsHandler {
                 self.unanswered.pop_front();
                 self.subscriptions.confirm_unsubscribe(&symbol);
             }
+            LseWsFrame::OptionsSubscribed { underlying } => {
+                self.unanswered.pop_front();
+                self.subscriptions
+                    .confirm_subscribe(&Topic::Options(underlying).topic());
+            }
+            LseWsFrame::OptionsUnsubscribed { underlying } => {
+                self.unanswered.pop_front();
+                self.subscriptions
+                    .confirm_unsubscribe(&Topic::Options(underlying).topic());
+            }
             LseWsFrame::Tick(tick) => self.pass(LseWsMessage::Tick(tick)),
             LseWsFrame::Pong | LseWsFrame::Symbols => {}
             LseWsFrame::Error(refusal) => self.refused(refusal),
@@ -429,8 +517,8 @@ impl LseWsHandler {
                 at: get_atomic_clock_realtime().get_time_ns(),
             });
         }
-        for symbol in self.subscriptions.reset_after_reconnect() {
-            self.send_subscribe(symbol).await;
+        for topic in self.subscriptions.reset_after_reconnect() {
+            self.send_subscribe(Topic::of(&topic)).await;
         }
     }
 
@@ -448,14 +536,23 @@ impl LseWsHandler {
             return;
         }
         match self.unanswered.pop_front() {
-            Some(Unanswered::Subscribe(symbol)) => {
+            Some(Unanswered::Subscribe(topic)) => {
                 // Kept for the next connection.
-                self.subscriptions.mark_failure(&symbol);
-                self.pass(LseWsMessage::Refused { symbol, refusal });
+                self.subscriptions.mark_failure(&topic.topic());
+                self.pass(match topic {
+                    Topic::Symbol(symbol) => LseWsMessage::Refused { symbol, refusal },
+                    Topic::Options(underlying) => LseWsMessage::OptionsRefused {
+                        underlying,
+                        refusal,
+                    },
+                });
             }
-            Some(Unanswered::Unsubscribe(symbol)) => {
-                self.subscriptions.confirm_unsubscribe(&symbol);
-                log::warn!("LSE's {name} refused the unsubscription of {symbol}: {refusal}");
+            Some(Unanswered::Unsubscribe(topic)) => {
+                self.subscriptions.confirm_unsubscribe(&topic.topic());
+                log::warn!(
+                    "LSE's {name} refused the unsubscription of {}: {refusal}",
+                    topic.topic()
+                );
             }
             None => log::error!("LSE's {name} refused: {refusal}"),
         }
@@ -476,10 +573,9 @@ impl LseWsHandler {
         }
     }
 
-    async fn send_subscribe(&mut self, symbol: String) {
-        let frame = LseWsAction::Subscribe { symbol: &symbol }.to_json();
-        if self.send(frame).await {
-            self.unanswered.push_back(Unanswered::Subscribe(symbol));
+    async fn send_subscribe(&mut self, topic: Topic) {
+        if self.send(topic.subscribe()).await {
+            self.unanswered.push_back(Unanswered::Subscribe(topic));
         }
     }
 
@@ -518,8 +614,8 @@ mod tests {
     use crate::{
         common::credential::LseProduct,
         testing::{
-            API_KEY, MockLseSocket, SocketAction, WS_INVALID_KEY, WS_LIMIT_REACHED, WS_TICKS_GOLD,
-            WS_TOO_MANY_CONNECTIONS, data_ws_answer,
+            API_KEY, MockLseSocket, SocketAction, WS_INVALID_KEY, WS_INVALID_UNDERLYING,
+            WS_LIMIT_REACHED, WS_TICKS_GOLD, WS_TOO_MANY_CONNECTIONS, data_ws_answer,
         },
     };
 
@@ -575,6 +671,10 @@ mod tests {
 
     fn subscribe(symbol: &str) -> Value {
         json!({"action": "subscribe", "symbol": symbol})
+    }
+
+    fn subscribe_options(underlying: &str) -> Value {
+        json!({"action": "subscribe_options", "underlying": underlying})
     }
 
     fn send(text: &str) -> SocketAction {
@@ -708,6 +808,110 @@ mod tests {
             refusal.to_string(),
             "LIMIT_REACHED: Max 16 symbols on this key."
         );
+    }
+
+    /// LSE's documented chain of AAPL: one subscription, then the ticks of
+    /// its contracts, each under its OSI symbol without spaces.
+    #[tokio::test]
+    async fn a_chain_s_subscription_brings_the_ticks_of_its_contracts() {
+        let peer = MockLseSocket::start(|_, frame| data_ws_answer(frame));
+        let (client, mut out) = connect(&peer).await.unwrap();
+
+        client.subscribe_options("AAPL").unwrap();
+
+        let mut symbols = Vec::new();
+        for _ in 0..5 {
+            let LseWsMessage::Tick(tick) = next(&mut out).await else {
+                panic!("not a tick")
+            };
+            symbols.push(tick.symbol);
+        }
+        assert_eq!(
+            symbols,
+            [
+                "AAPL261120C00355000",
+                "AAPL261120C00355000",
+                "AAPL261113C00360000",
+                "AAPL261118C00360000",
+                "AAPL270917P00325000",
+            ]
+        );
+        assert_eq!(
+            peer.received(),
+            [(0, auth()), (0, subscribe_options("AAPL"))]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_chain_s_unsubscription_goes_to_lse() {
+        let peer = MockLseSocket::start(|_, frame| data_ws_answer(frame));
+        let (client, _) = connect(&peer).await.unwrap();
+        client.subscribe_options("AAPL").unwrap();
+
+        client.unsubscribe_options("AAPL").unwrap();
+
+        let received = peer.wait_until(|received| received.len() == 3).await;
+        assert_eq!(
+            received[2],
+            (
+                0,
+                json!({"action": "unsubscribe_options", "underlying": "AAPL"})
+            )
+        );
+    }
+
+    /// LSE's error names no underlying: it answers the oldest subscription
+    /// not answered yet, here the chain's after a symbol's.
+    #[tokio::test]
+    async fn lse_s_refusal_of_a_chain_is_passed_on_with_its_underlying_code_and_message() {
+        let peer = MockLseSocket::start(|_, frame| match frame["underlying"].as_str() {
+            Some("NOSUCHX") => vec![send(WS_INVALID_UNDERLYING)],
+            _ => data_ws_answer(frame),
+        });
+        let (client, mut out) = connect(&peer).await.unwrap();
+        client.subscribe("SILVER.F").unwrap();
+
+        client.subscribe_options("NOSUCHX").unwrap();
+
+        let LseWsMessage::OptionsRefused {
+            underlying,
+            refusal,
+        } = next(&mut out).await
+        else {
+            panic!("not a chain's refusal")
+        };
+        assert_eq!(underlying, "NOSUCHX");
+        assert_eq!(
+            refusal.to_string(),
+            "INVALID_UNDERLYING: No options available for NOSUCHX"
+        );
+    }
+
+    /// The peer drops the first connection after AAPL's chain's first
+    /// tick: the new connection subscribes the chain again.
+    #[tokio::test]
+    async fn a_dropped_connection_subscribes_its_chains_again() {
+        let peer = MockLseSocket::start(|connection, frame| {
+            let mut answer = data_ws_answer(frame);
+            if connection == 0 && frame["action"] == "subscribe_options" {
+                answer.truncate(2);
+                answer.push(SocketAction::Close(1001, "going away".to_string()));
+            }
+            answer
+        });
+        let (client, mut out) = connect(&peer).await.unwrap();
+
+        client.subscribe_options("AAPL").unwrap();
+
+        assert!(matches!(next(&mut out).await, LseWsMessage::Tick(_)));
+        assert!(matches!(
+            next(&mut out).await,
+            LseWsMessage::Reconnected { .. }
+        ));
+        assert!(matches!(next(&mut out).await, LseWsMessage::Tick(_)));
+        let received = peer.received();
+        assert_eq!(frames_of(&received, 1), [auth(), subscribe_options("AAPL")]);
+        client.disconnect().await;
     }
 
     /// The peer drops the first connection after `GOLD.F`'s first tick.

@@ -9,19 +9,21 @@
 //! book depths and book deltas; and of `OPRA` contracts, US options under
 //! the ids Databento gives them, their OSI symbols
 //! (`AAPL  261120C00355000.OPRA`), trades and bars, as an `LSEDGE`
-//! series'. Live, the client streams the quotes of `LSEDGE` instruments on
-//! the live node, routed their venue (`live_clients`). Each contract's
-//! definition is its row's definitions source's: `LSEDGE`'s the catalog's
-//! alone, written there by hand, LSE publishing none, the data engine
-//! answering a definition request from the catalog before asking the
-//! client; `GLBX`'s and `OPRA`'s Databento's, asked of Nautilus' Databento
-//! client. The client converts
-//! LSE's prices at the definition's precision. LSE's reference series, the
-//! rows of its reference collections, of its macro series of releases and
-//! of yields and of an instrument's splits and dividends, are custom data
-//! of no instrument (`lse::LseRow`), filled by the same client with no
-//! definition, each row stamped when its values are known. See
-//! `README.md`.
+//! series'. Live, the client streams the quotes of `LSEDGE` instruments and
+//! the Level 1 of `GLBX` contracts, quotes and trades, and the trades of
+//! `OPRA` contracts, through one subscription of each underlying's chain,
+//! on the live node, routed their venues (`live_clients`), IB's execution
+//! client taking `GLBX`'s and `OPRA`'s orders. Each contract's definition
+//! is its row's definitions source's: `LSEDGE`'s the catalog's alone,
+//! written there by hand, LSE publishing none, the data engine answering a
+//! definition request from the catalog before asking the client; `GLBX`'s
+//! and `OPRA`'s Databento's, asked of Nautilus' Databento client. The
+//! client converts LSE's prices at the definition's precision. LSE's
+//! reference series, the rows of its reference collections, of its macro
+//! series of releases and of yields and of an instrument's splits and
+//! dividends, are custom data of no instrument (`lse::LseRow`), filled by
+//! the same client with no definition, each row stamped when its values
+//! are known. See `README.md`.
 
 use ::lse::{LseDataClientConfig, LseDataClientFactory};
 use jiff::{SignedDuration, Timestamp};
@@ -103,12 +105,13 @@ fn node_client(config: LseDataClientConfig) -> NodeClient {
     }
 }
 
-/// The live node's clients of `instrument_ids`, `LSEDGE` instruments: the
-/// LSE adapter's data client streaming them, its key read when the node
-/// creates it, and no execution client, LSE trading nothing. The client is
-/// on no venue, so it takes the route of theirs (`RoutingConfig::venues`)
-/// and not the default, which IB keeps for the venues without a client of
-/// their own.
+/// The live node's clients of `instrument_ids`, `LSEDGE` series, `GLBX`
+/// contracts and `OPRA` contracts: the LSE adapter's data client streaming
+/// them, its keys read when the node creates it, the LSE key for `LSEDGE`
+/// and `OPRA` and the CME key for `GLBX`, and no execution client, LSE
+/// trading nothing, `GLBX`'s and `OPRA`'s orders going to IB's. The client
+/// is on no venue, so it takes the routes of theirs (`RoutingConfig::venues`);
+/// no data client is the default (see `live::node::Clients`).
 pub(super) fn live_clients(instrument_ids: &[InstrumentId]) -> Clients {
     clients(
         LseDataClientConfig::builder()
@@ -119,7 +122,7 @@ pub(super) fn live_clients(instrument_ids: &[InstrumentId]) -> Clients {
 
 /// The live node's clients on `config`, routed the venues of the
 /// instruments it streams.
-fn clients(config: LseDataClientConfig) -> Clients {
+pub(super) fn clients(config: LseDataClientConfig) -> Clients {
     let mut venues: Vec<String> = Vec::new();
     for id in &config.stream_ids {
         let venue = id.venue.to_string();
@@ -130,11 +133,11 @@ fn clients(config: LseDataClientConfig) -> Clients {
     Clients {
         data_factory: Box::new(LseDataClientFactory::new()),
         data_config: Box::new(config),
-        exec: None,
-        routing: RoutingConfig {
+        data_routing: RoutingConfig {
             default: false,
             venues: Some(venues),
         },
+        exec: None,
     }
 }
 

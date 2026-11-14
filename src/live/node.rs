@@ -38,12 +38,27 @@ use nautilus_trading::strategy::{Strategy, StrategyNative};
 use super::recording::promote_staged;
 use crate::model::launcher::RetrainActor;
 
-/// One adapter's data client factory and config, its execution client's if
-/// the node trades there, and how Nautilus routes data and orders to them.
+/// One adapter's clients on the node: its data client's factory and config
+/// and how Nautilus routes data to it, and its execution client, if the node
+/// trades there. Data and orders are routed apart: Nautilus' data engine
+/// makes the first data client on no venue it registers the default
+/// (`DataEngine::register_client`, crates/data/src/engine/registry.rs:44),
+/// in the node builder's `HashMap` order of them (crates/live/src/node/
+/// builder.rs:94, :642), and then refuses another made the default
+/// (`set_default_client`, registry.rs:101); its execution engine makes none
+/// so.
 pub struct Clients {
     pub data_factory: Box<dyn DataClientFactory>,
     pub data_config: Box<dyn ClientConfig>,
-    pub exec: Option<(Box<dyn ExecutionClientFactory>, Box<dyn ClientConfig>)>,
+    pub data_routing: RoutingConfig,
+    pub exec: Option<ExecClient>,
+}
+
+/// An adapter's execution client on the node: its factory and config, and
+/// how Nautilus routes orders to it.
+pub struct ExecClient {
+    pub factory: Box<dyn ExecutionClientFactory>,
+    pub config: Box<dyn ClientConfig>,
     pub routing: RoutingConfig,
 }
 
@@ -98,23 +113,7 @@ pub fn build(
     if let Some(cache_database) = cache_database {
         builder = builder.with_cache_database_factory(cache_database);
     }
-    for clients in clients {
-        builder = builder.add_data_client_with_routing(
-            None,
-            clients.data_factory,
-            clients.data_config,
-            clients.routing.clone(),
-        )?;
-        if let Some((exec_factory, exec_config)) = clients.exec {
-            builder = builder.add_exec_client_with_routing(
-                None,
-                exec_factory,
-                exec_config,
-                clients.routing,
-            )?;
-        }
-    }
-    let mut node = builder.build()?;
+    let mut node = add_clients(builder, clients)?.build()?;
     match promote_staged(&mut node) {
         Ok(()) => Ok(node),
         Err(e) => {
@@ -122,6 +121,36 @@ pub fn build(
             Err(e)
         }
     }
+}
+
+/// `builder` with the data client and, if one, the execution client of each
+/// adapter in `clients`, each routed as its `Clients` says.
+///
+/// # Errors
+///
+/// Returns an error if two clients take one name (see
+/// `LiveNodeBuilder::add_data_client_with_routing`).
+pub(crate) fn add_clients(
+    mut builder: LiveNodeBuilder,
+    clients: Vec<Clients>,
+) -> anyhow::Result<LiveNodeBuilder> {
+    for clients in clients {
+        builder = builder.add_data_client_with_routing(
+            None,
+            clients.data_factory,
+            clients.data_config,
+            clients.data_routing,
+        )?;
+        if let Some(exec) = clients.exec {
+            builder = builder.add_exec_client_with_routing(
+                None,
+                exec.factory,
+                exec.config,
+                exec.routing,
+            )?;
+        }
+    }
+    Ok(builder)
 }
 
 /// Adds `retraining`, the actor of the retrains of `strategy` if it is

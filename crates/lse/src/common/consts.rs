@@ -32,9 +32,18 @@ pub(crate) const CME_LITE_CALLS_PER_MINUTE: NonZeroU32 = NonZeroU32::new(200).ex
 /// LSE's name of CME Globex, its market's folder.
 pub(crate) const CME_MARKET: &str = "cme";
 
+/// LSE's CME Globex stream, a socket of its own protocol for a CME Group
+/// plan's key (LSE's WebSocket documentation, "The CME Group stream").
+pub(crate) const CME_STREAM_URL: &str = "wss://cme.londonstrategicedge.com/v1/stream";
+
 /// LSE's name of US options, its market's folder: every listed US option
 /// contract, as OPRA reports it.
 pub(crate) const US_OPTIONS_MARKET: &str = "us_options";
+
+/// The source an `LseRow` data type names LSE's options chain by
+/// (`/v3/options/chain`): the listed contracts of an underlying as they
+/// stand, the call taking no dates, so it has no history.
+pub(crate) const OPTIONS_CHAIN: &str = "options_chain";
 
 /// The venue of US option contracts, OPRA, as Databento names the
 /// consolidated feed's listings (`OPRA.PILLAR`, publisher `OPRA`) and

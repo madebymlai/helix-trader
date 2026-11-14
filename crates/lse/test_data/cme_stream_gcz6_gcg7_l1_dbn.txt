@@ -1,0 +1,7 @@
+{"dataset":"GLBX.RITHMIC","encoding":"dbn","epoch":2,"level":1,"protocol":"L3DB/1","type":"hello"}
+{"count":1,"epoch":2,"instrument_id":1496506229,"level":1,"sequence":1794,"symbol":"GCZ6","type":"snapshot_begin"}
+4c33444201010000020700000000000075df3259010000001401000075df3259f0e75c8abdb9e718ffffffffffffff7f000000004d4e800038bd57a4bdb9e718000000000000000000acf90d85030000005f1a758b030000020000000a0000000000000000000000
+{"epoch":2,"sequence":1794,"symbol":"GCZ6","type":"snapshot_end"}
+{"count":1,"epoch":2,"instrument_id":3648859809,"level":1,"sequence":58,"symbol":"GCG7","type":"snapshot_begin"}
+4c334442010100003a00000000000000a12e7dd90100000014010000a12e7dd9f0e75c8abdb9e718ffffffffffffff7f000000004d4e8000887d9da3bdb9e7180000000000000000007411b6890300000098767d9303000001000000010000000000000000000000
+{"epoch":2,"sequence":58,"symbol":"GCG7","type":"snapshot_end"}

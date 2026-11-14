@@ -24,10 +24,16 @@ async-trait.workspace = true
 bon.workspace = true
 # The body of Nautilus' HTTP responses.
 bytes = "1"
+# The records of LSE's CME stream, Databento's, at the version Nautilus'
+# Databento decoders take.
+dbn = { version = "0.71", default-features = false }
 jiff.workspace = true
 log.workspace = true
 nautilus-common = { workspace = true, features = ["live"] }
 nautilus-core.workspace = true
+# Nautilus' Databento decoders, which turn the CME stream's records into
+# quotes and trades.
+nautilus-databento.workspace = true
 nautilus-live.workspace = true
 nautilus-model.workspace = true
 nautilus-network.workspace = true

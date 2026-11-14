@@ -1,0 +1,4 @@
+{"dataset":"GLBX.RITHMIC","encoding":"json","epoch":2,"level":1,"protocol":"L3DB/1","type":"hello"}
+{"count":1,"epoch":2,"instrument_id":1496506229,"level":1,"sequence":1794,"symbol":"GCZ6","type":"snapshot_begin"}
+{"epoch":2,"record":{"action":"M","depth":0,"flags":128,"instrument_id":1496506229,"length":20,"levels":[{"ask_ct":0,"ask_px":"3897500000000","ask_sz":10,"bid_ct":0,"bid_px":"3870000000000","bid_sz":2}],"price":"9223372036854775807","publisher_id":0,"rtype":1,"sequence":0,"side":"N","size":0,"ts_event":"1794607200251734000","ts_in_delta":0,"ts_recv":"1794607200687603000"},"sequence":1794,"symbol":"GCZ6","type":"snapshot_book"}
+{"epoch":2,"sequence":1794,"symbol":"GCZ6","type":"snapshot_end"}

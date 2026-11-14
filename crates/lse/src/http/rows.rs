@@ -33,7 +33,7 @@ use super::{
     parse::{Keyed, Parsed, parse_rows},
     query::{Dates, FactorsQuery, MacroQuery, ReferenceQuery},
 };
-use crate::types::LseRow;
+use crate::{common::consts::OPTIONS_CHAIN, types::LseRow};
 
 /// The sources of LSE's macro series, by the kind of its rows: its
 /// releases, its yields, and its observations, which are refused.
@@ -151,13 +151,18 @@ impl RowSource {
     ///
     /// # Errors
     ///
-    /// Returns an error, before LSE is asked: for a macro series of
-    /// observations, each keyed by the day of its period, not when it came
-    /// out; for a reference collection the client has not classified,
+    /// Returns an error, before LSE is asked: for LSE's options chain
+    /// (`options_chain`), which LSE serves as it stands alone, with no
+    /// history; for a macro series of observations, each keyed by the day
+    /// of its period, not when it came out; for a reference collection the client has not classified,
     /// whose rows may be known at any time; for factors of a symbol naming
     /// no market.
     pub(crate) fn of(source: &str, symbol: &str) -> anyhow::Result<Self> {
         let call = match source {
+            OPTIONS_CHAIN => bail!(
+                "LSE serves no history of its {OPTIONS_CHAIN}: /v3/options/chain answers the \
+                 chain as it stands, a current snapshot, and takes no dates"
+            ),
             MACRO_OBSERVATION => bail!(
                 "LSE's {source} {symbol} is refused: an observation is keyed by the day of its \
                  period, not when it came out (US core inflation's September at 1 September, out \

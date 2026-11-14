@@ -62,7 +62,7 @@ use rust_decimal::Decimal;
 use self::{databento::DatabentoHistory, ib::IbHistory, okx::OkxHistory};
 use crate::{
     catalog::{NodeClient, NodeFill, missing},
-    live::node::Clients,
+    live::node::{Clients, ExecClient},
     strategy::{DataRequirements, SeriesSlice, catalog_series},
 };
 
@@ -159,7 +159,8 @@ pub(crate) enum LiveDataSource {
     Okx,
     /// A cTrader broker's data client.
     CTrader(CTraderBroker),
-    /// The LSE adapter's data client, streaming LSE's quotes.
+    /// The LSE adapter's data client, streaming LSE's quotes, CME Globex's
+    /// Level 1 and US options' trades.
     Lse,
     /// Interactive Brokers' data client, on the gateway.
     Ib,
@@ -263,10 +264,10 @@ impl Row {
     /// The row of `venue`. A venue of `CTRADER_BROKERS` takes everything
     /// from its broker, and OKX from OKX. GLBX, CME Globex as Databento
     /// names it, takes its definitions from Databento, LSE publishing
-    /// none, its history from LSE's CME Globex, and its live data and
-    /// orders from IB, the LSE adapter streaming no CME data yet; OPRA, US
-    /// options as Databento names them, the same, its history from LSE's
-    /// US options, the adapter streaming no options yet. LSEDGE,
+    /// none, its history and live data from LSE's CME Globex, and its
+    /// orders from IB; OPRA, US options as Databento names them, its
+    /// definitions from Databento, its history and live data from LSE's US
+    /// options, and its orders from IB. LSEDGE,
     /// LSE's own series, takes its definitions from the catalog alone, its
     /// history and live data from LSE, and has no broker: LSE trades
     /// nothing. Every venue without a row of its own takes everything from
@@ -282,8 +283,8 @@ impl Row {
         match venue.as_str() {
             //                    definitions   history       live data  broker
             "OKX"    => Self::new(D::Okx,       H::Okx,       L::Okx,    Some(B::Okx)),
-            "GLBX"   => Self::new(D::Databento, H::Lse,       L::Ib,     Some(B::Ib)),
-            "OPRA"   => Self::new(D::Databento, H::Lse,       L::Ib,     Some(B::Ib)),
+            "GLBX"   => Self::new(D::Databento, H::Lse,       L::Lse,    Some(B::Ib)),
+            "OPRA"   => Self::new(D::Databento, H::Lse,       L::Lse,    Some(B::Ib)),
             "LSEDGE" => Self::new(D::Catalog,   H::Lse,       L::Lse,    None),
             _        => Self::new(D::Ib,        H::Ib,        L::Ib,     Some(B::Ib)),
         }
@@ -582,11 +583,12 @@ fn ctrader_clients(connection: CTraderConnection, instrument_ids: Vec<Instrument
     Clients {
         data_factory: Box::new(CTraderDataClientFactory::new(&data)),
         data_config: Box::new(data),
-        exec: Some((
-            Box::new(CTraderExecutionClientFactory::new(&exec)),
-            Box::new(exec),
-        )),
-        routing: RoutingConfig::default(),
+        data_routing: RoutingConfig::default(),
+        exec: Some(ExecClient {
+            factory: Box::new(CTraderExecutionClientFactory::new(&exec)),
+            config: Box::new(exec),
+            routing: RoutingConfig::default(),
+        }),
     }
 }
 
@@ -613,15 +615,64 @@ fn ctrader_read(
     Ok((connection()?, instrument_ids))
 }
 
-/// The live node's clients of `instrument_ids`, those of each one's live
-/// data source (`Row::of`, `LiveDataSource`), for the instruments
-/// `requirements` reads: OKX's, each cTrader broker's
+/// The instruments of each adapter's clients on the live node, and the
+/// venues IB's data client is routed.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct LiveRoutes {
+    okx: Vec<InstrumentId>,
+    ctrader: Vec<(CTraderBroker, InstrumentId)>,
+    lse: Vec<InstrumentId>,
+    ib: Vec<InstrumentId>,
+    ib_data_venues: Vec<Venue>,
+}
+
+impl LiveRoutes {
+    /// Each of `instrument_ids` to the clients of its row's live data
+    /// source, and to IB's too if IB is its broker: IB's clients come as a
+    /// pair, the data client, which loads the instruments it is given
+    /// (`load_ids`), and the execution client, which resolves the
+    /// instruments of the orders it takes from them; so GLBX and OPRA, whose
+    /// live data is LSE's and whose orders go to IB, are given to both. IB's
+    /// data client is routed the venues whose live data is IB's, each once.
+    /// OKX's and the cTrader brokers' rows take their live data from their
+    /// broker.
+    fn of(instrument_ids: &[InstrumentId]) -> Self {
+        let mut routes = Self::default();
+        for &id in instrument_ids {
+            let row = Row::of(id.venue);
+            match row.live_data {
+                LiveDataSource::Okx => routes.okx.push(id),
+                LiveDataSource::CTrader(broker) => routes.ctrader.push((broker, id)),
+                LiveDataSource::Lse => routes.lse.push(id),
+                LiveDataSource::Ib => {
+                    if !routes.ib_data_venues.contains(&id.venue) {
+                        routes.ib_data_venues.push(id.venue);
+                    }
+                }
+            }
+            if row.live_data == LiveDataSource::Ib || row.broker == Some(Broker::Ib) {
+                routes.ib.push(id);
+            }
+        }
+        routes
+    }
+}
+
+/// The live node's clients of `instrument_ids` (see `LiveRoutes`), for the
+/// instruments `requirements` reads: OKX's, each cTrader broker's
 /// (`ctrader_brokers_present`), LSE's, then IB's. OKX's, the cTrader
 /// brokers' and IB's are each a data client with the execution client of
-/// the same adapter on its connection, each of those rows taking its live
-/// data from its broker (`Broker`); LSE's is a data client alone, routed
-/// LSEDGE, which no broker trades (see `lse::live_clients`), its key read
-/// when the node creates it. No source streams custom data of no
+/// the same adapter on its connection; LSE's is a data client alone, routed
+/// the venues of its instruments, LSEDGE, which no broker trades, and GLBX
+/// and OPRA, whose orders go to IB's execution client (see
+/// `lse::live_clients`), its keys read when the node creates it. IB's data
+/// client is routed the venues whose live data is IB's, and its execution
+/// client takes the default route of orders, every order but OKX's and the
+/// cTrader brokers'. So every venue the run reads has a route of its data,
+/// and no data client is the default: Nautilus makes the first data client
+/// on no venue it registers the default, LSE's or IB's in no set order, and
+/// would refuse IB's made the default after LSE's (see
+/// `live::node::Clients`). No source streams custom data of no
 /// instrument, LSE's rows, so a run reading any is refused before anything
 /// connects. The cTrader brokers' bar types are checked and their
 /// environments and credential read before anything connects; OKX's
@@ -646,16 +697,13 @@ pub(crate) async fn live_clients(
     venues: &LiveVenueArgs,
     leverage: Decimal,
 ) -> anyhow::Result<Vec<Clients>> {
-    let (mut okx_ids, mut ctrader_ids, mut lse_ids, mut ib_ids) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    for &id in instrument_ids {
-        match Row::of(id.venue).live_data {
-            LiveDataSource::Okx => okx_ids.push(id),
-            LiveDataSource::CTrader(broker) => ctrader_ids.push((broker, id)),
-            LiveDataSource::Lse => lse_ids.push(id),
-            LiveDataSource::Ib => ib_ids.push(id),
-        }
-    }
+    let LiveRoutes {
+        okx: okx_ids,
+        ctrader: ctrader_ids,
+        lse: lse_ids,
+        ib: ib_ids,
+        ib_data_venues,
+    } = LiveRoutes::of(instrument_ids);
     ensure!(
         requirements.custom.is_empty(),
         "no source streams custom data of no instrument live yet: {}",
@@ -689,14 +737,20 @@ pub(crate) async fn live_clients(
              (--account or NAUTILUS_IB_ACCOUNT_ID)",
         )?;
         let ib = ib::clients(account, venues.ib.client_id, &ib_ids).await?;
-        clients.push(ib.into_node_clients());
+        clients.push(ib.into_node_clients(&ib_data_venues));
     }
     Ok(clients)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, collections::HashMap, ffi::OsStr, os::unix::ffi::OsStrExt, rc::Rc};
+    use std::{
+        cell::RefCell,
+        collections::{HashMap, HashSet},
+        ffi::OsStr,
+        os::unix::ffi::OsStrExt,
+        rc::Rc,
+    };
 
     use ::lse::LSEDGE_VENUE;
     use clap::{Command, FromArgMatches};
@@ -705,13 +759,17 @@ mod tests {
     use nautilus_common::{
         cache::Cache,
         clock::VirtualClock,
+        enums::Environment,
         live::runner::{replace_data_event_sender, replace_exec_event_sender},
     };
+    use nautilus_core::string::secret::SecretString;
+    use nautilus_live::{builder::LiveNodeBuilder, config::LiveNodeConfig, node::LiveNode};
     use nautilus_model::{
         data::{BarType, DataType, FundingRateUpdate, QuoteTick, TradeTick},
-        enums::AggressorSide,
+        enums::{AggressorSide, OrderSide, OrderType},
         identifiers::{AccountId, ClientId, TradeId, TraderId},
         instruments::{InstrumentAny, stubs::crypto_perpetual_ethusdt},
+        orders::OrderTestBuilder,
         types::{Price, Quantity},
     };
     use nautilus_okx::common::consts::OKX_VENUE;
@@ -870,7 +928,11 @@ mod tests {
         assert_eq!(data.client_id(), ClientId::from("PEPPERSTONE"));
         assert_eq!(data.venue(), Some(Venue::new("PEPPERSTONE")));
         assert!(data.is_disconnected());
-        let (exec_factory, exec_config) = clients.exec.unwrap();
+        let ExecClient {
+            factory: exec_factory,
+            config: exec_config,
+            ..
+        } = clients.exec.unwrap();
         let exec = exec_factory
             .create(
                 TraderId::from("HELIX-001"),
@@ -975,7 +1037,9 @@ mod tests {
     pub(in crate::venues) fn created_oms_type(clients: Clients) -> OmsType {
         let (exec_tx, _exec_events) = tokio::sync::mpsc::unbounded_channel();
         replace_exec_event_sender(exec_tx);
-        let (factory, config) = clients.exec.unwrap();
+        let ExecClient {
+            factory, config, ..
+        } = clients.exec.unwrap();
         let client = factory
             .create(
                 TraderId::from("HELIX-001"),
@@ -1447,11 +1511,11 @@ mod tests {
         }
     }
 
-    /// GLBX and OPRA take their definitions from Databento, their history
-    /// from LSE and their live data and orders from IB; OKX and each cTrader
-    /// broker take all four from themselves; LSEDGE its definitions from
-    /// the catalog and its history and live data from LSE, with no broker;
-    /// and every other venue all four from IB.
+    /// GLBX takes its definitions from Databento, its history and live data
+    /// from LSE and its orders from IB, and OPRA the same; OKX and each
+    /// cTrader broker take all four from themselves; LSEDGE its definitions
+    /// from the catalog and its history and live data from LSE, with no
+    /// broker; and every other venue all four from IB.
     #[test]
     fn each_instrument_routes_to_the_row_of_its_venue() {
         let okx = Row {
@@ -1466,11 +1530,12 @@ mod tests {
             live_data: LiveDataSource::CTrader(broker),
             broker: Some(Broker::CTrader(broker)),
         };
-        // An exchange's listings, under the ids Databento gives them.
+        // An exchange's listings, under the ids Databento gives them, CME
+        // Globex's and US options', streamed from LSE.
         let exchange = Row {
             definitions: DefinitionsSource::Databento,
             history: HistorySource::Lse,
-            live_data: LiveDataSource::Ib,
+            live_data: LiveDataSource::Lse,
             broker: Some(Broker::Ib),
         };
         let ib = Row {
@@ -1504,6 +1569,261 @@ mod tests {
             let id = InstrumentId::from(id);
             assert_eq!(Row::of(id.venue), row, "{id}");
         }
+    }
+
+    /// GLBX's and OPRA's data from LSE's client and their orders through
+    /// IB's, which loads their contracts; LSEDGE's data from LSE's alone;
+    /// every other venue's from its broker's, IB's routed its venues alone.
+    #[test]
+    fn each_instrument_goes_to_the_clients_of_its_live_data_and_of_its_broker() {
+        let routes = LiveRoutes::of(&[
+            InstrumentId::from("GCZ26.GLBX"),
+            InstrumentId::from("GOLD-FUTURES.LSEDGE"),
+            InstrumentId::from("SXR8.IBIS"),
+            InstrumentId::from("AAPL  261120C00355000.OPRA"),
+            InstrumentId::from("BTC-USDT-SWAP.OKX"),
+            InstrumentId::from("XAUUSD.ICMARKETS"),
+        ]);
+
+        assert_eq!(
+            routes,
+            LiveRoutes {
+                okx: vec![InstrumentId::from("BTC-USDT-SWAP.OKX")],
+                ctrader: vec![(ic::BROKER, InstrumentId::from("XAUUSD.ICMARKETS"))],
+                lse: vec![
+                    InstrumentId::from("GCZ26.GLBX"),
+                    InstrumentId::from("GOLD-FUTURES.LSEDGE"),
+                    InstrumentId::from("AAPL  261120C00355000.OPRA")
+                ],
+                ib: vec![
+                    InstrumentId::from("GCZ26.GLBX"),
+                    InstrumentId::from("SXR8.IBIS"),
+                    InstrumentId::from("AAPL  261120C00355000.OPRA")
+                ],
+                ib_data_venues: vec![Venue::new("IBIS")],
+            }
+        );
+    }
+
+    /// Its data is LSE's, but its orders IB's: refused before anything
+    /// connects, as an IB instrument's run is.
+    #[tokio::test]
+    async fn a_run_reading_glbx_needs_the_ib_account_its_orders_go_to() {
+        let requirements = ticks(&[(NautilusDataType::QuoteTick, "GCZ26.GLBX")]);
+
+        let Err(err) = live_clients(
+            &requirements,
+            &requirements.instrument_ids(),
+            &live_args(),
+            Decimal::ONE,
+        )
+        .await
+        else {
+            panic!("set up GLBX's clients without IB's account");
+        };
+
+        assert!(err.to_string().contains("IB account"), "{err:#}");
+    }
+
+    /// LSE's data client, routed GLBX, streams the contract.
+    #[test]
+    fn lse_s_client_streams_glbx_contracts_routed_glbx_with_no_execution_client() {
+        let clients = lse::live_clients(&[
+            InstrumentId::from("GCZ26.GLBX"),
+            InstrumentId::from("GCG27.GLBX"),
+        ]);
+
+        assert_eq!(clients.data_factory.name(), "LSE");
+        assert!(clients.exec.is_none());
+        assert_eq!(
+            (clients.data_routing.default, clients.data_routing.venues),
+            (false, Some(vec!["GLBX".to_string()]))
+        );
+        let config = clients
+            .data_config
+            .as_any()
+            .downcast_ref::<LseDataClientConfig>()
+            .unwrap();
+        assert_eq!(
+            config.stream_ids,
+            [
+                InstrumentId::from("GCZ26.GLBX"),
+                InstrumentId::from("GCG27.GLBX")
+            ]
+        );
+    }
+
+    /// Its data is LSE's, but its orders IB's: refused before anything
+    /// connects, as an IB instrument's run is.
+    #[tokio::test]
+    async fn a_run_reading_an_option_needs_the_ib_account_its_orders_go_to() {
+        let requirements = ticks(&[(NautilusDataType::TradeTick, "AAPL  261120C00355000.OPRA")]);
+
+        let Err(err) = live_clients(
+            &requirements,
+            &requirements.instrument_ids(),
+            &live_args(),
+            Decimal::ONE,
+        )
+        .await
+        else {
+            panic!("set up OPRA's clients without IB's account");
+        };
+
+        assert!(err.to_string().contains("IB account"), "{err:#}");
+    }
+
+    /// LSE's data client, routed OPRA, streams the contracts, the trades of
+    /// each through its underlying's chain.
+    #[test]
+    fn lse_s_client_streams_option_contracts_routed_opra_with_no_execution_client() {
+        let clients = lse::live_clients(&[
+            InstrumentId::from("AAPL  261120C00355000.OPRA"),
+            InstrumentId::from("AAPL  261120P00355000.OPRA"),
+        ]);
+
+        assert_eq!(clients.data_factory.name(), "LSE");
+        assert!(clients.exec.is_none());
+        assert_eq!(
+            (clients.data_routing.default, clients.data_routing.venues),
+            (false, Some(vec!["OPRA".to_string()]))
+        );
+        let config = clients
+            .data_config
+            .as_any()
+            .downcast_ref::<LseDataClientConfig>()
+            .unwrap();
+        assert_eq!(
+            config.stream_ids,
+            [
+                InstrumentId::from("AAPL  261120C00355000.OPRA"),
+                InstrumentId::from("AAPL  261120P00355000.OPRA")
+            ]
+        );
+    }
+
+    /// A live node with `clients`, added as `Live` adds them
+    /// (`live::node::add_clients`), on Nautilus' defaults otherwise: no
+    /// streaming, whose writer drops through Nautilus' runtime when a test's
+    /// thread ends.
+    fn live_node(clients: Vec<Clients>) -> anyhow::Result<LiveNode> {
+        let config = LiveNodeConfig {
+            environment: Environment::Live,
+            trader_id: TraderId::from("HELIX-001"),
+            ..Default::default()
+        };
+        crate::live::node::add_clients(LiveNodeBuilder::from_config(config)?, clients)?.build()
+    }
+
+    /// The clients `live_clients` sets up for a run reading `ids`, LSE's and
+    /// IB's, IB's on a gateway that is not started and LSE's given the test
+    /// keys a run reads from the environment: created, they connect to
+    /// nothing.
+    fn lse_and_ib_clients(ids: &[InstrumentId]) -> Vec<Clients> {
+        let routes = LiveRoutes::of(ids);
+        let mut lse = lse::live_clients(&routes.lse);
+        let streamed = lse
+            .data_config
+            .as_any()
+            .downcast_ref::<LseDataClientConfig>()
+            .unwrap()
+            .clone();
+        lse.data_config = Box::new(LseDataClientConfig {
+            api_key: Some(SecretString::from(::lse::testing::API_KEY)),
+            cme_api_key: Some(SecretString::from(::lse::testing::CME_API_KEY)),
+            ..streamed
+        });
+        vec![
+            lse,
+            ib::offline_clients(&routes.ib).into_node_clients(&routes.ib_data_venues),
+        ]
+    }
+
+    /// The client the node routes `venue`'s data to, and the one it takes
+    /// for the default.
+    fn data_clients(node: &LiveNode, venue: &str) -> (Option<ClientId>, Option<ClientId>) {
+        let mut engine = node.kernel().data_engine.borrow_mut();
+        (
+            engine
+                .get_client(None, Some(&Venue::new(venue)))
+                .map(|client| client.client_id),
+            engine.get_client(None, None).map(|client| client.client_id),
+        )
+    }
+
+    /// The client the node sends an order of `instrument_id` to.
+    fn order_client(node: &LiveNode, instrument_id: &str) -> Vec<ClientId> {
+        let order = OrderTestBuilder::new(OrderType::Market)
+            .instrument_id(InstrumentId::from(instrument_id))
+            .side(OrderSide::Buy)
+            .quantity(Quantity::from(1))
+            .build();
+        node.kernel()
+            .exec_engine()
+            .borrow()
+            .get_clients_for_orders(&[order])
+            .iter()
+            .map(|client| client.client_id())
+            .collect()
+    }
+
+    /// Builds the live node of a run reading `ids`, LSE's and IB's clients
+    /// among its own, until Nautilus' builder has registered each of the
+    /// two first, which it does in no set order (`LiveNodeBuilder`'s clients
+    /// are a `HashMap`): each build must succeed and route each venue's
+    /// data and orders as `routed` says, a venue and the client of its data
+    /// and of its orders. The first client on no venue the builder
+    /// registers becomes the default (Nautilus' `DataEngine::register_client`),
+    /// and LSE's and IB's are both on no venue.
+    fn assert_routed_whichever_registers_first(ids: &[&str], routed: &[(&str, &str, &str, &str)]) {
+        let ids: Vec<InstrumentId> = ids.iter().map(|&id| InstrumentId::from(id)).collect();
+        let mut first = HashSet::new();
+        for _ in 0..64 {
+            let mut node = live_node(lse_and_ib_clients(&ids))
+                .unwrap_or_else(|e| panic!("the node of {ids:?} not built: {e:#}"));
+            for &(venue, instrument_id, data, orders) in routed {
+                let (client, default) = data_clients(&node, venue);
+                assert_eq!(client, Some(ClientId::from(data)), "{venue}'s data");
+                assert_eq!(
+                    order_client(&node, instrument_id),
+                    [ClientId::from(orders)],
+                    "{venue}'s orders"
+                );
+                first.extend(default);
+            }
+            node.dispose();
+            if first.len() == 2 {
+                return;
+            }
+        }
+        panic!("one client registered first in 64 builds: {first:?}");
+    }
+
+    /// GLBX's and OPRA's data from LSE's client, their orders through IB's.
+    #[tokio::test]
+    async fn an_exchange_run_s_node_routes_its_data_to_lse_and_its_orders_to_ib_whichever_registers_first()
+     {
+        assert_routed_whichever_registers_first(
+            &["GCZ26.GLBX", "GCG27.GLBX", "AAPL  261120C00355000.OPRA"],
+            &[
+                ("GLBX", "GCZ26.GLBX", "LSE", "IB"),
+                ("OPRA", "AAPL  261120C00355000.OPRA", "LSE", "IB"),
+            ],
+        );
+    }
+
+    /// LSEDGE's data from LSE's client, an IB venue's data and orders from
+    /// IB's.
+    #[tokio::test]
+    async fn an_lsedge_and_ib_run_s_node_routes_each_venue_to_its_client_whichever_registers_first()
+    {
+        assert_routed_whichever_registers_first(
+            &["GOLD-FUTURES.LSEDGE", "SXR8.IBIS"],
+            &[
+                ("LSEDGE", "GOLD-FUTURES.LSEDGE", "LSE", "IB"),
+                ("IBIS", "SXR8.IBIS", "IB", "IB"),
+            ],
+        );
     }
 
     /// The table names its venues as their adapters do.
@@ -1541,7 +1861,7 @@ mod tests {
         assert_eq!(clients.data_factory.name(), "LSE");
         assert!(clients.exec.is_none());
         assert_eq!(
-            (clients.routing.default, clients.routing.venues),
+            (clients.data_routing.default, clients.data_routing.venues),
             (false, Some(vec!["LSEDGE".to_string()]))
         );
         let config = clients

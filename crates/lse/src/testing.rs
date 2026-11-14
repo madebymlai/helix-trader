@@ -22,8 +22,15 @@ use nautilus_model::{
 use nautilus_network::http::Url;
 use sha2::{Digest, Sha256};
 
-pub use self::socket::{MockLseSocket, SocketAction, data_ws_answer, socket_answer};
+pub use self::{
+    cme::{
+        CME_ESZ6_DOCUMENTED, CME_GCZ6_GCG7, CME_GCZ6_JSON, CME_KEY_UNKNOWN, CME_SYMBOL_UNAVAILABLE,
+        CmeAction, CmeFrame, ESZ26, MockCmeStream, dbn_frame, dbn_frames, frames, held, sent,
+    },
+    socket::{MockLseSocket, SocketAction, data_ws_answer, socket_answer},
+};
 
+mod cme;
 mod socket;
 
 /// The trade slice of LSE's gold futures series (`GOLD` in `futures`) over
@@ -183,6 +190,10 @@ pub const PAIRS_GCZ4: &str = include_str!("../test_data/pairs_cme_gcz4.json");
 pub const PAIRS_NGZ6: &str = include_str!("../test_data/pairs_cme_ngz6.json");
 pub const PAIRS_NGZ26: &str = include_str!("../test_data/pairs_cme_ngz26.json");
 pub const PAIRS_ESZ26: &str = include_str!("../test_data/pairs_cme_esz26.json");
+/// LSE's catalogue of GCG7, captured the same way: the contracts of 2017
+/// and of 2027 (4000000192), the second the next GC contract after GCZ6 of
+/// 2026 that LSE's CME stream carries (`CME_GCZ6_GCG7`).
+pub const PAIRS_GCG7: &str = include_str!("../test_data/pairs_cme_gcg7.json");
 
 /// The pair id LSE gives GCZ6 of 2026, `GCZ26.GLBX`.
 pub const GCZ26_PAIR_ID: u64 = 4_000_000_002;
@@ -256,6 +267,28 @@ pub const WS_AUTHENTICATED_LONDON: &str = include_str!("../test_data/ws_authenti
 pub const WS_TICKS_LONDON: &str = include_str!("../test_data/ws_ticks_london.jsonl");
 pub const WS_AUTHENTICATED_TSX: &str = include_str!("../test_data/ws_authenticated_tsx.json");
 pub const WS_TICKS_TSX: &str = include_str!("../test_data/ws_ticks_tsx.jsonl");
+
+/// LSE's data-ws frames of an option chain (`test_data/README.md`): its
+/// acknowledgements of AAPL's chain, subscribed and unsubscribed, and its
+/// refusal of an underlying with no listed options, `NOSUCHX`, captured
+/// with the free key on 13 November 2026, US options closed; and five
+/// option ticks, not captured, as LSE's WebSocket documentation gives an
+/// option contract's tick, each a trade of AAPL's chain of 12 November 2026
+/// from 14:30:00 UTC as LSE exported it to the free key: two of
+/// `AAPL_CALL`, then one each of the 360 calls of 13 and 18 November 2026,
+/// then one of the 325 put of 17 September 2027 (`AAPL_PUT_2027`).
+pub const WS_OPTIONS_SUBSCRIBED_AAPL: &str =
+    include_str!("../test_data/ws_options_subscribed_aapl.json");
+pub const WS_OPTIONS_UNSUBSCRIBED_AAPL: &str =
+    include_str!("../test_data/ws_options_unsubscribed_aapl.json");
+pub const WS_INVALID_UNDERLYING: &str =
+    include_str!("../test_data/ws_error_invalid_underlying.json");
+pub const WS_TICKS_AAPL_OPTIONS: &str =
+    include_str!("../test_data/ws_ticks_aapl_options_documented.jsonl");
+
+/// The 325 put of 17 September 2027 of AAPL, whose trade
+/// `WS_TICKS_AAPL_OPTIONS` ends with, under the id Databento gives it.
+pub const AAPL_PUT_2027: &str = "AAPL  270917P00325000.OPRA";
 
 /// The export id LSE sends with a file (`x-export-id`), the one it gave
 /// `GOLD_TRADES`; the peer sends it with every file.
@@ -340,6 +373,36 @@ pub fn gcz26() -> InstrumentAny {
     )
 }
 
+/// A definition of ESZ6 of 2026, `ESZ26.GLBX`, the contract of
+/// `CME_ESZ6_DOCUMENTED`, as one is written for a test: the E-mini S&P 500,
+/// $50 a point, priced in USD to two decimals in ticks of a quarter, listed
+/// on 17 September 2021 as LSE's catalogue lists it (`PAIRS_ESZ6`), its
+/// trading ending on the third Friday of December 2026 at 09:30 New York.
+#[must_use]
+pub fn esz26() -> InstrumentAny {
+    let at = |time: &str| UnixNanos::from(time.parse::<jiff::Timestamp>().expect("a time"));
+    InstrumentAny::FuturesContract(
+        FuturesContract::builder()
+            .instrument_id(InstrumentId::from(ESZ26))
+            .raw_symbol(Symbol::from("ESZ6"))
+            .asset_class(AssetClass::Index)
+            .exchange("XCME".into())
+            .underlying("ES".into())
+            .activation_ns(at("2021-09-17T00:00:00Z"))
+            .expiration_ns(at("2026-12-18T14:30:00Z"))
+            .currency(Currency::USD())
+            .price_precision(2)
+            .price_increment(Price::from("0.25"))
+            .multiplier(Quantity::from(50))
+            .lot_size(Quantity::from(1))
+            .min_quantity(Quantity::from(1))
+            .ts_event(at("2021-09-17T00:00:00Z"))
+            .ts_init(at("2021-09-17T00:00:00Z"))
+            .build()
+            .expect("a valid futures contract"),
+    )
+}
+
 /// AAPL's 355 call of 20 November 2026 as Nautilus' Databento decoder
 /// gives Databento's definition of it of 12 November 2026
 /// (`decode_option_contract`), `AAPL_CALL`: an equity option in USD,
@@ -369,6 +432,25 @@ pub fn aapl_call() -> InstrumentAny {
             .build()
             .expect("a valid option contract"),
     )
+}
+
+/// AAPL's 325 put of 17 September 2027, `AAPL_PUT_2027`, defined as
+/// `aapl_call` is, its kind, strike and expiry, 16:00 New York, its own.
+#[must_use]
+pub fn aapl_put_2027() -> InstrumentAny {
+    let InstrumentAny::OptionContract(mut put) = aapl_call() else {
+        unreachable!("an option contract")
+    };
+    put.id = InstrumentId::from(AAPL_PUT_2027);
+    put.raw_symbol = Symbol::from("AAPL  270917P00325000");
+    put.option_kind = OptionKind::Put;
+    put.strike_price = Price::from("325.00");
+    put.expiration_ns = UnixNanos::from(
+        "2027-09-17T20:00:00Z"
+            .parse::<jiff::Timestamp>()
+            .expect("a time"),
+    );
+    InstrumentAny::OptionContract(put)
 }
 
 /// An answer of the peer.

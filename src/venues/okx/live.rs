@@ -45,7 +45,7 @@ use rust_decimal::Decimal;
 use serde::Deserialize;
 
 use super::selection;
-use crate::live::node::Clients;
+use crate::live::node::{Clients, ExecClient};
 
 /// The variable naming the OKX environment of the run, `demo` or `live`.
 const ENVIRONMENT_VAR: &str = "OKX_ENVIRONMENT";
@@ -145,8 +145,12 @@ impl OkxClients {
         Clients {
             data_factory,
             data_config,
-            exec: Some((exec_factory, exec_config)),
-            routing: RoutingConfig::default(),
+            data_routing: RoutingConfig::default(),
+            exec: Some(ExecClient {
+                factory: exec_factory,
+                config: exec_config,
+                routing: RoutingConfig::default(),
+            }),
         }
     }
 }
