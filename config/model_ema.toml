@@ -1,8 +1,10 @@
 # Model EMA (`src/strategy/model_ema/`), read into `ModelEmaConfig`: an
 # example strategy trading on a learned model, whose features are a fast
 # and a slow EMA of each bars series it reads, set in [indicators]:
-#   cargo run --release -- train model_ema --config config/model_ema.toml ...
+#   cargo run --release -- train model_ema --config config/model_ema.toml --at ...
 #   cargo run --release -- backtest model_ema --config config/model_ema.toml ...
+# Its models are trained at the commission and balance of [model] dataset,
+# whatever a backtest's own --commission and --balance.
 # Every field is described in `src/strategy/README.md`.
 #
 # Its trades are its model's decisions, sent as given: the target its
@@ -49,9 +51,9 @@ instruments = [{ instrument_id = "XAUUSD.ICMARKETS" }]
 # The fraction of equity a trade sent at the config's stake risks over its
 # one R (see config/ema.toml): each decision's trade is sent at it, of the
 # account's equity. It is the reference stake too, of the dataset balance
-# (--balance of backtest and of train, --retrain-balance live), which the
-# model's targets, its dataset's rows and its decisions' payoff features,
-# are priced at: changing it, or that balance, retrains the model.
+# ([model] dataset), which the model's targets, its dataset's rows and its
+# decisions' payoff features, are priced at: changing it, or that balance,
+# retrains the model.
 risk = "0.5%"
 
 # The model, of a strategy trading on one: its target trades [trade]'s
@@ -86,3 +88,10 @@ min_trades = 30
 # or 15 are weekdays, 320 to 345 hourly decisions, too few for the
 # learner's default leaves of 200 rows to split.
 learner = { kind = "lightgbm", num_iterations = 100, learning_rate = 0.1, num_leaves = 31, min_data_in_leaf = 20 }
+# The commission and balance its dataset runs are made at: their targets are
+# net of the commission and sized at [trade] risk of the balance, in the
+# traded instrument's P&L currency. They key the model store, so train, a
+# backtest's retrains and live all read the one store of this config,
+# whatever a backtest's own --commission and --balance: changing either
+# retrains the model. IC's Raw account charges 30 USD per million a side.
+dataset = { commission = { rate = "0.00003" }, balance = "10000 USD" }

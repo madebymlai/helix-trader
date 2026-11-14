@@ -147,6 +147,7 @@ fn config(min_expectancy: R) -> ModelConfig {
         .decision(rule())
         .target(target())
         .retrain(SignedDuration::from_hours(24))
+        .dataset(venue())
         .window(SignedDuration::from_hours(70))
         .holdout(SignedDuration::from_hours(12))
         .margins(Margins {
@@ -163,7 +164,7 @@ fn config(min_expectancy: R) -> ModelConfig {
 
 fn training(catalog: &TempDir, models: &Path, min_expectancy: R) -> Training {
     blueprint(features(), config(min_expectancy))
-        .training(catalog.path(), models, &venue())
+        .training(catalog.path(), models)
         .unwrap()
 }
 
@@ -171,7 +172,7 @@ fn training(catalog: &TempDir, models: &Path, min_expectancy: R) -> Training {
 /// `min_expectancy`, as `training` keys it.
 fn store(models: &Path, min_expectancy: R, side: Side) -> ModelStore {
     blueprint(features(), config(min_expectancy))
-        .model_set(models, &venue())
+        .model_set(models)
         .unwrap()
         .side(side)
         .unwrap()
@@ -262,7 +263,7 @@ fn train_at_t_publishes_each_side_earning_on_the_edge_whose_probes_reload_to_ide
         );
     }
     let fingerprint = blueprint(features(), config(MINIMUM))
-        .fingerprint(&venue())
+        .fingerprint()
         .unwrap()
         .to_string();
     // A side's model reads the strategy's features, then the bracket's payoff

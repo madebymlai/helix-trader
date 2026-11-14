@@ -6,17 +6,18 @@
 //! nothing built of it checks them again.
 //!
 //! Everything of a strategy's model is built of its blueprint, which is
-//! the one caller of the dataset fingerprint (`dataset::fingerprint`),
-//! given the venue of the dataset runs. On one venue its dataset, its
-//! model set and its schedule are built together (`OnVenue`), the
-//! fingerprint computed once and keying the dataset and every store, and
+//! the one caller of the dataset fingerprint (`dataset::fingerprint`), of
+//! the venue of the dataset runs its config declares (`ModelConfig::dataset`).
+//! Its dataset, its model set and its schedule are built together
+//! (`Stored`), the fingerprint computed once and keying the dataset and
+//! every store, and
 //! the training and the walk-forward are each built of them; a dataset
 //! alone, for a dataset build, and a model set alone, for a handle, which
 //! has no catalog, are built of the blueprint as well. The strategy's
 //! model handle (`handle::ModelHandle`) is built of it and a mode, and
 //! registers the very feature set the dataset and the stores are
-//! fingerprinted from. The venue and the paths are not the blueprint's: a
-//! handle in a dataset run has a commission and no venue.
+//! fingerprinted from. The paths are not the blueprint's: a handle has no
+//! catalog.
 
 use std::{path::Path, rc::Rc};
 
@@ -24,7 +25,7 @@ use nautilus_model::identifiers::StrategyId;
 
 use super::{
     config::ModelConfig,
-    dataset::{self, Dataset, DatasetVenue},
+    dataset::{self, Dataset},
     features::{FeatureSet, Fingerprint},
     schedule::Schedule,
     store::ModelSet,
@@ -44,11 +45,11 @@ pub struct ModelBlueprint {
     requirements: DataRequirements,
 }
 
-/// A strategy's model on the venue of its dataset runs: its dataset in a
-/// catalog and its model set under a models root, both of the one
-/// fingerprint of its blueprint on that venue, and its schedule.
+/// A strategy's model stored: its dataset in a catalog and its model set
+/// under a models root, both of the one fingerprint of its blueprint, and
+/// its schedule.
 #[derive(Debug)]
-pub(super) struct OnVenue<'a> {
+pub(super) struct Stored<'a> {
     /// The blueprint it is the model of.
     pub(super) blueprint: &'a ModelBlueprint,
     pub(super) dataset: Dataset,
@@ -81,87 +82,72 @@ impl ModelBlueprint {
         })
     }
 
-    /// The fingerprint of its dataset run on `venue`
-    /// (`dataset::fingerprint`), which keys its dataset and its stores.
+    /// The fingerprint of its dataset runs (`dataset::fingerprint`), on the
+    /// venue its config declares, which keys its dataset and its stores.
     ///
     /// # Errors
     ///
     /// Returns an error as `dataset::fingerprint` does.
-    pub fn fingerprint(&self, venue: &DatasetVenue) -> anyhow::Result<Fingerprint> {
+    pub fn fingerprint(&self) -> anyhow::Result<Fingerprint> {
         dataset::fingerprint(
             &self.features,
             self.config.decision,
             &self.config.target,
             &self.requirements,
-            venue,
+            &self.config.dataset,
         )
     }
 
-    /// Its dataset, run on `venue`, in the catalog at `catalog`.
+    /// Its dataset in the catalog at `catalog`.
     ///
     /// # Errors
     ///
     /// Returns an error as `fingerprint` does.
-    pub fn dataset(&self, catalog: &Path, venue: &DatasetVenue) -> anyhow::Result<Dataset> {
-        Ok(Dataset::new(catalog, self, self.fingerprint(venue)?))
+    pub fn dataset(&self, catalog: &Path) -> anyhow::Result<Dataset> {
+        Ok(Dataset::new(catalog, self, self.fingerprint()?))
     }
 
-    /// Its models under `models`, of its dataset run on `venue`.
+    /// Its models under `models`.
     ///
     /// # Errors
     ///
     /// Returns an error as `fingerprint` does, or if a learner cannot be
     /// written as JSON (`ModelSet::new`).
-    pub fn model_set(&self, models: &Path, venue: &DatasetVenue) -> anyhow::Result<ModelSet> {
-        ModelSet::new(models, self, self.fingerprint(venue)?)
+    pub fn model_set(&self, models: &Path) -> anyhow::Result<ModelSet> {
+        ModelSet::new(models, self, self.fingerprint()?)
     }
 
-    /// The training of its models, on its dataset run on `venue`, in the
-    /// catalog at `catalog`, and its models in the store under `models`.
+    /// The training of its models, on its dataset in the catalog at
+    /// `catalog`, and its models in the store under `models`.
     ///
     /// # Errors
     ///
     /// Returns an error as `model_set` does.
-    pub fn training(
-        &self,
-        catalog: &Path,
-        models: &Path,
-        venue: &DatasetVenue,
-    ) -> anyhow::Result<Training> {
-        Ok(Training::new(self.on_venue(catalog, models, venue)?))
+    pub fn training(&self, catalog: &Path, models: &Path) -> anyhow::Result<Training> {
+        Ok(Training::new(self.stored(catalog, models)?))
     }
 
-    /// The backtests of its models, on its dataset run on `venue`, in the
-    /// catalog at `catalog`, and its models in the store under `models`:
-    /// their retrains and their scores.
+    /// The backtests of its models, on its dataset in the catalog at
+    /// `catalog`, and its models in the store under `models`: their
+    /// retrains and their scores.
     ///
     /// # Errors
     ///
     /// Returns an error as `model_set` does.
-    pub fn walk_forward(
-        &self,
-        catalog: &Path,
-        models: &Path,
-        venue: &DatasetVenue,
-    ) -> anyhow::Result<WalkForward> {
-        Ok(WalkForward::new(self.on_venue(catalog, models, venue)?))
+    pub fn walk_forward(&self, catalog: &Path, models: &Path) -> anyhow::Result<WalkForward> {
+        Ok(WalkForward::new(self.stored(catalog, models)?))
     }
 
-    /// Its model on `venue`: its dataset in the catalog at `catalog` and
-    /// its models under `models`, of the fingerprint computed once, and its
-    /// schedule (`Schedule::of_model`).
+    /// Its dataset in the catalog at `catalog` and its models under
+    /// `models`, of the fingerprint computed once, and its schedule
+    /// (`Schedule::of_model`).
     ///
     /// # Errors
     ///
     /// Returns an error as `model_set` does.
-    pub(super) fn on_venue(
-        &self,
-        catalog: &Path,
-        models: &Path,
-        venue: &DatasetVenue,
-    ) -> anyhow::Result<OnVenue<'_>> {
-        let fingerprint = self.fingerprint(venue)?;
-        Ok(OnVenue {
+    pub(super) fn stored(&self, catalog: &Path, models: &Path) -> anyhow::Result<Stored<'_>> {
+        let fingerprint = self.fingerprint()?;
+        Ok(Stored {
             blueprint: self,
             models: ModelSet::new(models, self, fingerprint)?,
             dataset: Dataset::new(catalog, self, fingerprint),
@@ -195,7 +181,7 @@ mod tests {
     use super::*;
     use crate::model::{
         decide::DecisionRule,
-        deciding::testing::{STRATEGY, at, baseline, config, features, requirements, venue},
+        deciding::testing::{STRATEGY, at, baseline, config, features, requirements},
         targets::Side,
     };
 
@@ -243,19 +229,15 @@ mod tests {
         );
     }
 
-    /// The dataset and the model set of a model on a venue carry one
+    /// The dataset and the model set of a model stored carry one
     /// fingerprint: a model published under the dataset's, as a train
     /// publishes it, is the one the model set swaps in.
     #[test]
-    fn the_dataset_and_the_model_set_on_a_venue_carry_one_fingerprint() {
+    fn the_dataset_and_the_model_set_of_a_model_stored_carry_one_fingerprint() {
         let dir = tempfile::tempdir().unwrap();
         let blueprint = blueprint(config()).unwrap();
         let model = blueprint
-            .on_venue(
-                &dir.path().join("catalog"),
-                &dir.path().join("models"),
-                &venue(),
-            )
+            .stored(&dir.path().join("catalog"), &dir.path().join("models"))
             .unwrap();
         let mut published = baseline("2026-10-22T00:00:00Z", 8);
         published.manifest.fingerprint = model.dataset.fingerprint().to_string();

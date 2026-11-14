@@ -36,11 +36,7 @@ use nautilus_common::logging::{
     bridge::init_tracing, init_logging, logger::LoggerConfig, writer::FileWriterConfig,
 };
 use nautilus_core::{UUID4, UnixNanos};
-use nautilus_model::{
-    enums::OmsType,
-    identifiers::{InstrumentId, TraderId},
-    types::Money,
-};
+use nautilus_model::{enums::OmsType, identifiers::TraderId, types::Money};
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -111,7 +107,9 @@ struct BacktestArgs {
     run: RunArgs,
     #[command(flatten)]
     commission: CommissionArgs,
-    /// Starting balance of the account, for example "10000 EUR".
+    /// Starting balance of the simulated account, for example "10000 EUR";
+    /// a model strategy's dataset runs are at its config's
+    /// (`[model] dataset`).
     #[arg(long, value_parser = parse_money)]
     balance: Money,
     /// The model store a strategy trading on a model reads its models
@@ -140,24 +138,6 @@ struct TrainArgs {
     /// The model store the model is published in.
     #[arg(long, default_value = "models")]
     models: PathBuf,
-    /// The costs of the dataset run, whose targets are net of them.
-    #[command(flatten)]
-    commission: CommissionArgs,
-    /// Balance of the dataset run's account, the equity its targets are
-    /// sized on at `[trade] risk`, in the traded instrument's P&L
-    /// currency: the account the model is trained for, for example "10000
-    /// USD". The run's trades leave it whole and it margins nothing.
-    #[arg(long, value_parser = parse_money)]
-    balance: Money,
-}
-
-impl BacktestArgs {
-    /// The venue of the dataset runs of the backtest of a strategy trading
-    /// on a model: the backtest's commission and balance, so that the model
-    /// is trained for the account backtested.
-    fn dataset_venue(&self) -> dataset::DatasetVenue {
-        self.commission.venue(self.balance)
-    }
 }
 
 /// The commission of a run: exactly one of the flags.
@@ -179,8 +159,10 @@ struct CommissionArgs {
 }
 
 impl CommissionArgs {
-    /// The commission of the one flag given: the one source of the run's
-    /// costs, its fee model and its targets' (`backtest::Commission`).
+    /// The commission of the one flag given: the one source of the
+    /// simulated venue's costs, its fee model (`backtest::Commission`); a
+    /// model strategy's dataset runs are at its config's
+    /// (`[model] dataset`).
     fn commission(&self) -> Commission {
         [
             self.commission,
@@ -192,25 +174,6 @@ impl CommissionArgs {
         .next()
         .expect("clap requires one commission flag")
     }
-
-    /// The venue of a dataset run at this commission and `balance`.
-    fn venue(&self, balance: Money) -> dataset::DatasetVenue {
-        dataset::DatasetVenue {
-            commission: self.commission(),
-            balance,
-        }
-    }
-}
-
-/// The flag of `commission` and its value normalized
-/// (`Commission::normalized`), as `train` takes them.
-fn commission_args(commission: &Commission) -> [String; 2] {
-    let flag = match commission {
-        Commission::PerOrder(_) => "--commission",
-        Commission::Rate(_) => "--commission-rate",
-        Commission::PerQuantity(_) => "--commission-per-quantity",
-    };
-    [flag.to_string(), commission.normalized()]
 }
 
 #[derive(Debug, Args)]
@@ -245,50 +208,9 @@ struct LiveArgs {
     staging: PathBuf,
     /// The model store a strategy trading on a model reads its models
     /// from, at each decision the latest valid then, and its retrains
-    /// publish in.
+    /// publish in: the store of its config, whose `[model] dataset` keys it.
     #[arg(long, default_value = "models")]
     models: PathBuf,
-    /// The costs of the dataset runs of the retrains, for a strategy
-    /// trading on a model, retrained or not: they key the model store.
-    #[command(flatten)]
-    retrain: RetrainCosts,
-}
-
-/// The costs of the dataset runs of a live node's retrains, as `train`
-/// takes them (its `--commission`, `--commission-rate` or
-/// `--commission-per-quantity`, and `--balance`).
-/// Checked as `train` checks them, for the `train` the node starts
-/// (`Children::of_live`). Required of a
-/// strategy never retrained too: they key the store its models are read
-/// from (`dataset::fingerprint`), and the commission is its targets'.
-#[derive(Debug, Args)]
-struct RetrainCosts {
-    /// Commission charged once per order in a retrain, for example "3 USD".
-    #[arg(
-        long,
-        value_parser = parse_commission,
-        conflicts_with_all = ["retrain_commission_rate", "retrain_commission_per_quantity"]
-    )]
-    retrain_commission: Option<Commission>,
-    /// Commission rate on the value of each fill in a retrain, for example
-    /// 0.00003.
-    #[arg(
-        long,
-        value_parser = parse_commission_rate,
-        conflicts_with = "retrain_commission_per_quantity"
-    )]
-    retrain_commission_rate: Option<Commission>,
-    /// Commission charged on each unit of the quantity of each fill in a
-    /// retrain, for example "0.035 USD".
-    #[arg(long, value_parser = parse_commission_per_quantity)]
-    retrain_commission_per_quantity: Option<Commission>,
-    /// Balance of a retrain's dataset run, the equity its targets and the
-    /// live decisions' payoff features are sized on at `[trade] risk`, in
-    /// the traded instrument's P&L currency: the account the model is
-    /// trained for, for example "10000 USD". The run's trades leave it
-    /// whole and it margins nothing.
-    #[arg(long, value_parser = parse_money)]
-    retrain_balance: Option<Money>,
 }
 
 impl LiveArgs {
@@ -297,53 +219,6 @@ impl LiveArgs {
         Recording {
             staging: self.staging.clone(),
         }
-    }
-}
-
-impl RetrainCosts {
-    /// The commission of the retrains.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if no commission flag was given.
-    fn commission(&self) -> anyhow::Result<Commission> {
-        [
-            self.retrain_commission,
-            self.retrain_commission_rate,
-            self.retrain_commission_per_quantity,
-        ]
-        .into_iter()
-        .flatten()
-        .next()
-        .context(
-            "the costs of a model strategy's dataset runs key the model store it reads its \
-             models from: give their commission (--retrain-commission, \
-             --retrain-commission-rate or --retrain-commission-per-quantity)",
-        )
-    }
-
-    /// The starting balance of the retrains' dataset runs.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if it was not given.
-    fn balance(&self) -> anyhow::Result<Money> {
-        self.retrain_balance.context(
-            "the costs of a model strategy's dataset runs key the model store it reads its \
-             models from: give their starting balance (--retrain-balance)",
-        )
-    }
-
-    /// The venue of the retrains' dataset runs.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the commission or the balance was not given.
-    fn venue(&self) -> anyhow::Result<dataset::DatasetVenue> {
-        Ok(dataset::DatasetVenue {
-            commission: self.commission()?,
-            balance: self.balance()?,
-        })
     }
 }
 
@@ -361,32 +236,19 @@ fn parse_money(s: &str) -> Result<Money, String> {
     s.parse()
 }
 
-/// A commission per order: an amount and a currency code, not negative,
-/// rounded to the currency's precision.
+/// A commission per order (`Commission::per_order`).
 fn parse_commission(s: &str) -> anyhow::Result<Commission> {
-    checked(Commission::PerOrder(
-        parse_money(s).map_err(anyhow::Error::msg)?,
-    ))
+    Commission::per_order(s)
 }
 
-/// A commission rate: a decimal, not negative.
+/// A commission rate (`Commission::rate`).
 fn parse_commission_rate(s: &str) -> anyhow::Result<Commission> {
-    checked(Commission::Rate(s.parse()?))
+    Commission::rate(s)
 }
 
-/// A commission per unit of quantity: an amount and a currency code, not
-/// negative, exact rather than rounded to the currency's precision, so
-/// that "0.035 USD" charges 3.50 USD on 100 units.
+/// A commission per unit of quantity (`Commission::per_quantity`).
 fn parse_commission_per_quantity(s: &str) -> anyhow::Result<Commission> {
-    checked(Commission::PerQuantity(
-        Money::from_str_exact(s).map_err(anyhow::Error::msg)?,
-    ))
-}
-
-/// `commission`, if it has a fee model: not negative.
-fn checked(commission: Commission) -> anyhow::Result<Commission> {
-    commission.fee_model()?;
-    Ok(commission)
+    Commission::per_quantity(s)
 }
 
 /// Reads the config of the strategy of part `P` from `path` and validates
@@ -544,16 +406,15 @@ fn backtest_on_models<S: ModelStrategy>(
     let config = load_config::<S::Params>(&args.run.config)?;
     let backtest = backtest(config.data_requirements());
     backtest.refuse_balance(&config.trade.instrument_ids())?;
-    let venue = args.dataset_venue();
     let (catalog, models) = (&args.run.catalog, &args.models);
     let run = DatasetRun {
         catalog: catalog.clone(),
-        venue: venue.clone(),
         logging,
     };
-    let walk = S::walk_forward(&config, catalog, models, &venue)?;
-    let dataset = S::dataset(&config, catalog, &venue)?;
-    let training = S::training(&config, catalog, models, &venue)?;
+    run.refuse_balance::<S>(&config)?;
+    let walk = S::walk_forward(&config, catalog, models)?;
+    let dataset = S::dataset(&config, catalog)?;
+    let training = S::training(&config, catalog, models)?;
     let replay = |from, to| run.replay::<S>(&config, from, to);
     walk.prepare(
         start,
@@ -578,17 +439,19 @@ fn backtest_on_models<S: ModelStrategy>(
     )?;
     let mode = Mode::Backtest {
         models: models.clone(),
-        venue,
     };
+    let trained_at = config.model().dataset;
     let outcome = backtest.run(S::new(config, mode)?)?;
     print!("{}", backtest::report(&outcome));
+    println!("Models trained at: {trained_at} ([model] dataset)");
     print!("{}", walk.scores(start, end)?);
     Ok(())
 }
 
 /// The child processes of a live node whose strategy trades on a model:
 /// its retrains, this binary's `train` on the node's strategy, config,
-/// catalog and store, at the retrains' costs (`Launcher::process`). A live node is the one node of its process
+/// catalog and store (`Launcher::process`), at the commission and balance
+/// the config declares (`[model] dataset`). A live node is the one node of its process
 /// while it runs, and a train replays the dataset days it lacks through a
 /// node of its own, so each retrain is a process.
 struct Children {
@@ -596,31 +459,21 @@ struct Children {
     config: PathBuf,
     catalog: PathBuf,
     models: PathBuf,
-    /// The venue of the retrains' dataset runs: the retrain costs.
-    venue: dataset::DatasetVenue,
 }
 
 impl Children {
-    /// The children of the live node of `args`: its retrains, at their
-    /// costs.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the commission or the balance of the retrains is
-    /// missing.
-    fn of_live(args: &LiveArgs) -> anyhow::Result<Self> {
-        Ok(Self {
+    /// The children of the live node of `args`: its retrains.
+    fn of_live(args: &LiveArgs) -> Self {
+        Self {
             strategy: args.strategy,
             config: args.config.clone(),
             catalog: args.catalog.clone(),
             models: args.models.clone(),
-            venue: args.retrain.venue()?,
-        })
+        }
     }
 
     /// The arguments of `train` but its `--at`, which the launcher gives:
-    /// the strategy, config, catalog and store, and the dataset runs'
-    /// commission and balance.
+    /// the strategy, config, catalog and store.
     fn train_args(&self) -> Vec<OsString> {
         let strategy = self
             .strategy
@@ -633,8 +486,6 @@ impl Children {
             "--catalog".into(),
             self.catalog.clone().into_os_string(),
         ]);
-        args.extend(commission_args(&self.venue.commission).map(OsString::from));
-        args.extend(["--balance".into(), self.venue.balance.to_string().into()]);
         args.extend(["--models".into(), self.models.clone().into_os_string()]);
         args
     }
@@ -686,27 +537,34 @@ impl<'a> Visitor for Running<'a> {
 }
 
 /// Runs the model strategy `S` of `args` on `live` until Ctrl-C, on the
-/// models of the store its dataset costs key, beside the actor of its
+/// models of the store its config keys, beside the actor of its
 /// retrains if it is retrained (`RetrainActor`), each retrain in a child
 /// process (`Children::of_live`) on the node's catalog. Refuses first,
 /// before any node is built, a catalog without the traded instruments, which
 /// its models and retrains are built from (`catalog::traded_instruments`),
-/// and a retrain balance in another currency than a traded instrument's
-/// P&L (`backtest::refuse_balance`), as `backtest` and `train` refuse
-/// their dataset balance.
+/// and a dataset balance (`[model] dataset`) in another currency than a
+/// traded instrument's P&L (`backtest::refuse_balance`), as `backtest`
+/// and `train` refuse it. Warns, naming the store, when it holds no model
+/// to trade on yet (`ModelSet::trades_by`): the strategy then makes no
+/// trade until one is published there.
 async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyhow::Result<()> {
     let config = load_config::<S::Params>(&args.config)?;
     let program = std::env::current_exe().context("finding this binary to retrain")?;
-    let children = Children::of_live(args)?;
+    let children = Children::of_live(args);
     let traded = catalog::traded_instruments(&args.catalog, &config.trade.instrument_ids())
         .context(
             "a model strategy runs live only on a --catalog holding the instruments it trades, \
              which its models and retrains are built from",
         )?;
-    backtest::refuse_balance(children.venue.balance, &traded).context(
-        "the retrains' dataset balance (--retrain-balance), which a model's targets and the \
-         decisions' payoff features are sized at",
-    )?;
+    backtest::refuse_balance(config.model().dataset.balance, &traded).context(DATASET_BALANCE)?;
+    let models = S::blueprint(&config)?.model_set(&args.models)?;
+    if !models.trades_by(Timestamp::now())? {
+        eprintln!(
+            "warning: no model to trade on yet in {}: the strategy makes no trade until one is \
+             published there, by `train` or by a retrain",
+            models.directory().display()
+        );
+    }
     let requirements = config.data_requirements();
     let retraining = RetrainActor::new(
         config.strategy_id(),
@@ -717,40 +575,45 @@ async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyho
     );
     let mode = Mode::Live {
         models: args.models.clone(),
-        venue: children.venue,
     };
     let strategy = S::new(config, mode)?;
     live.run(&requirements, &strategy.warmup(), strategy, retraining)
         .await
 }
 
+/// What a refused dataset balance is.
+const DATASET_BALANCE: &str = "the dataset balance ([model] dataset), which a model's targets and \
+                               the decisions' payoff features are sized at";
+
 /// The dataset runs of a process: the strategy over the catalog in
-/// `Mode::Dataset`, on hedging venues (`model::targets`), on `venue`: its
-/// commission the venues' and the targets', its balance the account's and
-/// the equity the targets' reference stake is of, which the runs' trades
-/// leave whole, margining nothing (`Backtest::run_dataset`); each replay a
-/// node of its own, disposed at its end.
+/// `Mode::Dataset`, on hedging venues (`model::targets`), on the venue its
+/// config declares (`[model] dataset`): its commission the venues' and the
+/// targets', its balance the account's and the equity the targets'
+/// reference stake is of, which the runs' trades leave whole, margining
+/// nothing (`Backtest::run_dataset`); each replay a node of its own,
+/// disposed at its end.
 struct DatasetRun {
     catalog: PathBuf,
-    venue: dataset::DatasetVenue,
     logging: LoggerConfig,
 }
 
 impl DatasetRun {
-    /// Refuses the runs, before any, unless their balance is in the P&L
-    /// currency of each instrument of `traded`, as their catalog defines
-    /// them (`catalog::traded_instruments`, `backtest::refuse_balance`): a
+    /// Refuses the runs of the strategy `config` describes, before any,
+    /// unless their balance is in the P&L currency of each instrument it
+    /// trades, as their catalog defines them
+    /// (`catalog::traded_instruments`, `backtest::refuse_balance`): a
     /// target's trades are sized on it, which is not converted.
     ///
     /// # Errors
     ///
-    /// Returns an error if the catalog cannot be read, an instrument of
-    /// `traded` is not in it or its P&L is in another currency than the
-    /// balance.
-    fn refuse_balance(&self, traded: &[InstrumentId]) -> anyhow::Result<()> {
-        let traded = catalog::traded_instruments(&self.catalog, traded)?;
-        backtest::refuse_balance(self.venue.balance, &traded)
-            .context("the dataset balance, which a model's targets are sized at")
+    /// Returns an error if the catalog cannot be read, a traded instrument
+    /// is not in it or its P&L is in another currency than the balance.
+    fn refuse_balance<S: ModelStrategy>(
+        &self,
+        config: &StandardConfig<S::Params>,
+    ) -> anyhow::Result<()> {
+        let traded = catalog::traded_instruments(&self.catalog, &config.trade.instrument_ids())?;
+        backtest::refuse_balance(config.model().dataset.balance, &traded).context(DATASET_BALANCE)
     }
 
     /// The rows the model strategy `S` of `config` settles over `[start,
@@ -769,10 +632,8 @@ impl DatasetRun {
     ) -> anyhow::Result<Vec<TargetRow>> {
         let requirements = config.data_requirements();
         let rows = SettledRows::default();
-        let mode = Mode::Dataset {
-            rows: rows.clone(),
-            venue: self.venue.clone(),
-        };
+        let mode = Mode::Dataset { rows: rows.clone() };
+        let venue = config.model().dataset;
         let backtest = Backtest {
             catalog: self.catalog.clone(),
             bar_types: requirements.bar_types,
@@ -780,8 +641,8 @@ impl DatasetRun {
             custom: requirements.custom,
             start,
             end,
-            commission: self.venue.commission,
-            balance: self.venue.balance,
+            commission: venue.commission,
+            balance: venue.balance,
             venue_oms: |_| OmsType::Hedging,
             logging: self.logging.clone(),
         };
@@ -810,7 +671,6 @@ fn reported(trained: &Trained) -> anyhow::Result<()> {
 fn run_train(args: TrainArgs) -> anyhow::Result<()> {
     let run = DatasetRun {
         catalog: args.catalog.clone(),
-        venue: args.commission.venue(args.balance),
         logging: logger_config(std::env::var("NAUTILUS_LOG"))?,
     };
     let outcome = args.strategy.visit(Training {
@@ -845,18 +705,17 @@ impl Visitor for Training<'_> {
 }
 
 /// Trains the model of the model strategy `S` of `args` at `--at`, the
-/// days its dataset lacks replayed by `run`, its balance refused first if it
-/// is in another currency than the traded instrument's P&L.
+/// days its dataset lacks replayed by `run`, its dataset balance refused
+/// first if it is in another currency than the traded instrument's P&L.
 fn train<S: ModelStrategy>(args: &TrainArgs, run: &DatasetRun) -> anyhow::Result<Trained> {
     let config = load_config::<S::Params>(&args.config)?;
-    run.refuse_balance(&config.trade.instrument_ids())?;
-    let training = S::training(&config, &args.catalog, &args.models, &run.venue)?;
+    run.refuse_balance::<S>(&config)?;
+    let training = S::training(&config, &args.catalog, &args.models)?;
     Ok(training.train_at(args.at, |start, end| run.replay::<S>(&config, start, end)))
 }
 
 #[cfg(test)]
 mod tests {
-    use rust_decimal::Decimal;
 
     use super::*;
     use helix_trader::{
@@ -1161,20 +1020,16 @@ mod tests {
     }
 
     /// The arguments a train requires.
-    const TRAIN: [&str; 9] = [
+    const TRAIN: [&str; 5] = [
         "model_ema",
         "--config",
         "model_ema.toml",
         "--at",
         "2026-10-23",
-        "--commission-rate",
-        "0.00003",
-        "--balance",
-        "10000000 USD",
     ];
 
     #[test]
-    fn parses_a_train_at_a_time_with_its_costs_into_the_models_store() {
+    fn parses_a_train_at_a_time_into_the_models_store() {
         let args = parse_train(&TRAIN).unwrap();
         assert_eq!(args.strategy, StrategyName::ModelEma);
         assert_eq!(args.config, PathBuf::from("model_ema.toml"));
@@ -1184,11 +1039,6 @@ mod tests {
         );
         assert_eq!(args.catalog, PathBuf::from("catalog"));
         assert_eq!(args.models, PathBuf::from("models"));
-        assert_eq!(
-            args.commission.commission(),
-            Commission::Rate(Decimal::new(3, 5))
-        );
-        assert_eq!(args.balance, Money::from("10000000 USD"));
     }
 
     /// A train's dataset runs margin nothing, so it takes no leverage.
@@ -1200,14 +1050,33 @@ mod tests {
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument, "{err}");
     }
 
+    /// The commission and balance of a train's dataset runs are its
+    /// config's (`[model] dataset`), so it takes none.
     #[test]
-    fn a_train_requires_its_time_and_its_costs() {
-        for flag in ["--at", "--commission-rate", "--balance"] {
-            let at = TRAIN.iter().position(|&arg| arg == flag).unwrap();
-            let argv = [&TRAIN[..at], &TRAIN[at + 2..]].concat();
-            let err = parse_train(&argv).unwrap_err().to_string();
-            assert!(err.contains(flag), "{err}");
+    fn a_train_takes_no_commission_or_balance() {
+        for flags in [
+            ["--commission", "3 EUR"],
+            ["--commission-rate", "0.00003"],
+            ["--commission-per-quantity", "0.035 USD"],
+            ["--balance", "10000 USD"],
+        ] {
+            let mut argv = TRAIN.to_vec();
+            argv.extend(flags);
+            let err = parse_train(&argv).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "{flags:?}: {err}"
+            );
         }
+    }
+
+    #[test]
+    fn a_train_requires_its_time() {
+        let at = TRAIN.iter().position(|&arg| arg == "--at").unwrap();
+        let argv = [&TRAIN[..at], &TRAIN[at + 2..]].concat();
+        let err = parse_train(&argv).unwrap_err().to_string();
+        assert!(err.contains("--at"), "{err}");
     }
 
     #[test]
@@ -1307,17 +1176,8 @@ mod tests {
         assert!(err.contains("waiting for the sides' decisions"), "{err}");
     }
 
-    /// The arguments of a `model_ema` live node retraining at a commission
-    /// rate.
-    const LIVE_RETRAINING: [&str; 7] = [
-        "model_ema",
-        "--config",
-        "model_ema.toml",
-        "--retrain-commission-rate",
-        "0.00003",
-        "--retrain-balance",
-        "10000000 USD",
-    ];
+    /// The arguments of a `model_ema` live node.
+    const LIVE: [&str; 3] = ["model_ema", "--config", "model_ema.toml"];
 
     /// The `train` `children` start, given its `--at`, parsed as this
     /// binary parses it.
@@ -1335,127 +1195,41 @@ mod tests {
     }
 
     /// A live node's retrain is a `train` on the node's strategy, config,
-    /// catalog and store, at the retrains' commission and balance.
+    /// catalog and store, which reads its dataset runs' commission and
+    /// balance from the config.
     #[test]
-    fn a_live_nodes_retrain_parses_as_train_on_its_files_store_and_costs() {
-        let mut argv = LIVE_RETRAINING.to_vec();
+    fn a_live_nodes_retrain_parses_as_train_on_its_files_and_store() {
+        let mut argv = LIVE.to_vec();
         argv.extend(["--catalog", "/data/catalog", "--models", "/data/models"]);
 
-        let children = Children::of_live(&parse_live(&argv).unwrap()).unwrap();
-        let train = started_train(&children);
+        let train = started_train(&Children::of_live(&parse_live(&argv).unwrap()));
 
         assert_eq!(train.strategy, StrategyName::ModelEma);
         assert_eq!(train.config, PathBuf::from("model_ema.toml"));
         assert_eq!(train.catalog, PathBuf::from("/data/catalog"));
         assert_eq!(train.models, PathBuf::from("/data/models"));
-        assert_eq!(
-            train.commission.venue(train.balance),
-            dataset::DatasetVenue {
-                commission: Commission::Rate(Decimal::new(3, 5)),
-                balance: Money::from("10000000 USD"),
-            }
-        );
-        assert_eq!(children.venue, train.commission.venue(train.balance));
     }
 
+    /// The commission and balance of a live node's dataset runs, which key
+    /// the store it reads and its retrains train at, are its config's
+    /// (`[model] dataset`), so it takes none.
     #[test]
-    fn a_live_nodes_retrain_parses_at_a_commission_per_order_or_per_quantity_too() {
-        for (flag, amount, commission) in [
-            (
-                "--retrain-commission",
-                "3 USD",
-                Commission::PerOrder(Money::from("3 USD")),
-            ),
-            (
-                "--retrain-commission-per-quantity",
-                "0.035 USD",
-                Commission::PerQuantity(Money::from_str_exact("0.035 USD").unwrap()),
-            ),
+    fn live_takes_no_retrain_commission_or_balance() {
+        for flags in [
+            ["--retrain-commission", "3 USD"],
+            ["--retrain-commission-rate", "0.00003"],
+            ["--retrain-commission-per-quantity", "0.035 USD"],
+            ["--retrain-balance", "10000 USD"],
         ] {
-            let mut argv = LIVE_RETRAINING.to_vec();
-            argv.splice(3..5, [flag, amount]);
-
-            let train = started_train(&Children::of_live(&parse_live(&argv).unwrap()).unwrap());
-
-            assert_eq!(train.commission.commission(), commission, "{flag}");
-        }
-    }
-
-    #[test]
-    fn live_retraining_without_its_costs_is_refused_naming_them() {
-        for missing in [3, 5] {
-            let argv = [&LIVE_RETRAINING[..missing], &LIVE_RETRAINING[missing + 2..]].concat();
-            let err = Children::of_live(&parse_live(&argv).unwrap())
-                .err()
-                .unwrap()
-                .to_string();
-            assert!(err.contains(LIVE_RETRAINING[missing]), "{err}");
-        }
-    }
-
-    /// A strategy never retrained reads its models from the store keyed by
-    /// the costs of its dataset runs as well: the live node asks for them
-    /// as it builds its venue, saying so.
-    #[test]
-    fn live_without_its_dataset_costs_is_refused_saying_they_key_the_model_store() {
-        for missing in [3, 5] {
-            let argv = [&LIVE_RETRAINING[..missing], &LIVE_RETRAINING[missing + 2..]].concat();
-            let err = parse_live(&argv)
-                .unwrap()
-                .retrain
-                .venue()
-                .unwrap_err()
-                .to_string();
-            assert!(err.contains("model store"), "{err}");
-            assert!(err.contains(LIVE_RETRAINING[missing]), "{err}");
-        }
-    }
-
-    /// Each value joined to its flag, so that clap reads `-0.1` as the
-    /// value, not as a flag of its own.
-    #[test]
-    fn live_refuses_retrain_costs_it_cannot_read() {
-        for cost in [
-            "--retrain-commission-rate=-0.1",
-            "--retrain-commission=3",
-            "--retrain-balance=lots",
-        ] {
-            let argv = ["model_ema", "--config", "model_ema.toml", cost];
+            let mut argv = LIVE.to_vec();
+            argv.extend(flags);
             let err = parse_live(&argv).unwrap_err();
             assert_eq!(
                 err.kind(),
-                clap::error::ErrorKind::ValueValidation,
-                "{cost}: {err}"
+                clap::error::ErrorKind::UnknownArgument,
+                "{flags:?}: {err}"
             );
         }
-        for other in [
-            ["--retrain-commission", "3 USD"],
-            ["--retrain-commission-per-quantity", "0.035 USD"],
-        ] {
-            let mut both = LIVE_RETRAINING.to_vec();
-            both.extend(other);
-            let err = parse_live(&both).unwrap_err();
-            assert_eq!(
-                err.kind(),
-                clap::error::ErrorKind::ArgumentConflict,
-                "{other:?}: {err}"
-            );
-        }
-        let per_order_and_quantity = [
-            "model_ema",
-            "--config",
-            "model_ema.toml",
-            "--retrain-commission",
-            "3 USD",
-            "--retrain-commission-per-quantity",
-            "0.035 USD",
-        ];
-        let err = parse_live(&per_order_and_quantity).unwrap_err();
-        assert_eq!(
-            err.kind(),
-            clap::error::ErrorKind::ArgumentConflict,
-            "{err}"
-        );
     }
 
     #[test]
@@ -1466,29 +1240,9 @@ mod tests {
         assert!(err.to_string().contains("no model"), "{err}");
     }
 
-    /// A live node's retrain is handed its commission normalized.
+    /// Two spellings of one commission are one commission.
     #[test]
-    fn a_commission_is_handed_to_a_train_normalized() {
-        for (given, handed) in [
-            (["--commission", "3.00 EUR"], ["--commission", "3 EUR"]),
-            (
-                ["--commission-rate", "0.000030"],
-                ["--commission-rate", "0.00003"],
-            ),
-            (
-                ["--commission-per-quantity", "0.0350 USD"],
-                ["--commission-per-quantity", "0.035 USD"],
-            ),
-        ] {
-            let args = parse_backtest(&backtest_with(&given)).unwrap();
-            assert_eq!(commission_args(&args.commission.commission()), handed);
-        }
-    }
-
-    /// The commission keys the dataset and its models: two spellings of
-    /// one commission are one key, handed on to a train as such.
-    #[test]
-    fn two_spellings_of_a_commission_are_one_key() {
+    fn two_spellings_of_a_commission_are_one() {
         for (one, other) in [
             (["--commission", "3 EUR"], ["--commission", "3.00 EUR"]),
             (
@@ -1500,53 +1254,20 @@ mod tests {
                 ["--commission-per-quantity", "0.0350 USD"],
             ),
         ] {
-            let key = |flags: [&'static str; 2]| {
-                let commission = parse_backtest(&backtest_with(&flags))
+            let commission = |flags: [&'static str; 2]| {
+                parse_backtest(&backtest_with(&flags))
                     .unwrap()
                     .commission
-                    .commission();
-                (commission, commission_args(&commission))
+                    .commission()
             };
-            assert_eq!(key(one), key(other), "{one:?} {other:?}");
-            let (_, handed) = key(other);
-            let reparsed = parse_backtest(&backtest_with(&[&handed[0], &handed[1]])).unwrap();
-            assert_eq!(reparsed.commission.commission(), key(one).0);
+            assert_eq!(commission(one), commission(other), "{one:?} {other:?}");
         }
     }
 
-    /// A live node's retrains are keyed as `train` keys them.
-    #[test]
-    fn two_spellings_of_a_retrain_commission_are_one_key() {
-        let retrain = |rate: &str| {
-            parse_live(&[
-                "model_ema",
-                "--config",
-                "model_ema.toml",
-                "--retrain-commission-rate",
-                rate,
-            ])
-            .unwrap()
-            .retrain
-            .commission()
-            .unwrap()
-        };
-        assert_eq!(retrain("0.000030"), retrain("0.00003"));
-        let backtest = parse_backtest(&backtest_with(&["--commission-rate", "0.00003"])).unwrap();
-        assert_eq!(retrain("0.000030"), backtest.commission.commission());
-    }
-
-    /// A model backtest's dataset runs are at its own commission and
+    /// A model backtest's dataset runs are at its config's commission and
     /// balance: it takes no balance of theirs.
     #[test]
-    fn a_backtests_dataset_runs_are_at_its_commission_and_balance() {
-        let args = parse_backtest(&backtest_required()).unwrap();
-        assert_eq!(
-            args.dataset_venue(),
-            dataset::DatasetVenue {
-                commission: Commission::PerOrder(Money::from("3 EUR")),
-                balance: Money::from("10000 EUR"),
-            }
-        );
+    fn a_backtest_takes_no_dataset_balance() {
         let mut argv = backtest_required();
         argv.extend(["--dataset-balance", "10000000 EUR"]);
         let err = parse_backtest(&argv).unwrap_err();

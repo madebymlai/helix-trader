@@ -120,6 +120,8 @@ pub struct ModelStore {
 /// dataset, and the swaps that use them.
 #[derive(Debug, Clone)]
 pub struct ModelSet {
+    /// The directory of its training settings, its stores under it.
+    directory: PathBuf,
     /// Each side traded, the long first.
     sides: Vec<SideLevel>,
     meta: Option<MetaLevel>,
@@ -432,7 +434,32 @@ impl ModelSet {
                 })
             })
             .transpose()?;
-        Ok(Self { sides, meta })
+        Ok(Self {
+            directory: training,
+            sides,
+            meta,
+        })
+    }
+
+    /// The directory its stores are under: of its dataset's fingerprint and
+    /// its training settings.
+    #[must_use]
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+
+    /// Whether its stores hold models a strategy trades on by `now`: a pair
+    /// of its sides valid by then (`Models::pairs`), and, with a meta
+    /// section, a meta model valid by then too. A model valid by then may
+    /// still fail its checks as it is read.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a store cannot be read.
+    pub fn trades_by(&self, now: Timestamp) -> anyhow::Result<bool> {
+        let valid_froms = self.valid_froms()?;
+        let by_now = |times: &[Timestamp]| times.first().is_some_and(|&first| first <= now);
+        Ok(by_now(&valid_froms.pairs()) && valid_froms.meta.as_deref().is_none_or(by_now))
     }
 
     /// Each side the margins trade, the long first.
@@ -1013,6 +1040,7 @@ mod tests {
                     .build(),
             )
             .retrain(SignedDuration::from_hours(24))
+            .dataset(venue())
             .window(SignedDuration::from_hours(48))
             .holdout(SignedDuration::from_hours(12))
             .margins(Margins {
@@ -1026,11 +1054,7 @@ mod tests {
     }
 
     fn store(root: &Path, config: &ModelConfig) -> ModelStore {
-        store_net_of(root, config, &venue())
-    }
-
-    fn store_net_of(root: &Path, config: &ModelConfig, venue: &DatasetVenue) -> ModelStore {
-        side_store(root, config, venue, Side::Long)
+        side_store(root, config, Side::Long)
     }
 
     /// The model of `config`.
@@ -1044,23 +1068,14 @@ mod tests {
         .unwrap()
     }
 
-    /// The models under `root` of `config`, run on `venue`.
-    fn models(root: &Path, config: &ModelConfig, venue: &DatasetVenue) -> ModelSet {
-        blueprint(config).model_set(root, venue).unwrap()
+    /// The models under `root` of `config`.
+    fn models(root: &Path, config: &ModelConfig) -> ModelSet {
+        blueprint(config).model_set(root).unwrap()
     }
 
-    /// The store of the `side` models of `config`, run on `venue`.
-    fn side_store(
-        root: &Path,
-        config: &ModelConfig,
-        venue: &DatasetVenue,
-        side: Side,
-    ) -> ModelStore {
-        models(root, config, venue)
-            .side(side)
-            .unwrap()
-            .store()
-            .clone()
+    /// The store of the `side` models of `config`.
+    fn side_store(root: &Path, config: &ModelConfig, side: Side) -> ModelStore {
+        models(root, config).side(side).unwrap().store().clone()
     }
 
     /// What the strategy reads: the quotes of gold.
@@ -1304,7 +1319,7 @@ mod tests {
     #[test]
     fn bumping_the_store_version_keys_another_store() {
         let config = config();
-        let fingerprint = blueprint(&config).fingerprint(&venue()).unwrap();
+        let fingerprint = blueprint(&config).fingerprint().unwrap();
         let at = |version| {
             training_directory(
                 Path::new("models"),
@@ -1332,7 +1347,7 @@ mod tests {
     /// (`dataset::tests::a_fixed_strategys_dataset_keeps_its_identifier`).
     #[test]
     fn a_fixed_strategys_side_store_keeps_its_directory() {
-        let store = side_store(Path::new("models"), &config(), &venue(), Side::Long);
+        let store = side_store(Path::new("models"), &config(), Side::Long);
 
         assert_eq!(
             store.directory,
@@ -1371,26 +1386,29 @@ mod tests {
     #[test]
     fn a_model_is_listed_only_at_the_risk_and_dataset_balance_it_was_trained_at() {
         let dir = tempfile::tempdir().unwrap();
-        side_store(dir.path(), &config(), &venue(), Side::Long)
+        side_store(dir.path(), &config(), Side::Long)
             .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
             .unwrap();
         let mut riskier = config();
         riskier.target.risk = "1%".parse().unwrap();
-        let richer = DatasetVenue {
-            balance: Money::from("20000000 USD"),
-            ..venue()
+        let richer = ModelConfig {
+            dataset: DatasetVenue {
+                balance: Money::from("20000000 USD"),
+                ..venue()
+            },
+            ..config()
         };
 
-        let listed = |config: &ModelConfig, venue: &DatasetVenue| {
-            side_store(dir.path(), config, venue, Side::Long)
+        let listed = |config: &ModelConfig| {
+            side_store(dir.path(), config, Side::Long)
                 .valid_froms()
                 .unwrap()
                 .len()
         };
 
-        assert_eq!(listed(&config(), &venue()), 1);
-        assert_eq!(listed(&riskier, &venue()), 0);
-        assert_eq!(listed(&config(), &richer), 0);
+        assert_eq!(listed(&config()), 1);
+        assert_eq!(listed(&riskier), 0);
+        assert_eq!(listed(&richer), 0);
     }
 
     /// One side's margin changes which side is picked on a row, so what the
@@ -1400,7 +1418,7 @@ mod tests {
     fn either_sides_margin_keys_both_sides_stores() {
         let dir = tempfile::tempdir().unwrap();
         for side in Side::BOTH {
-            side_store(dir.path(), &config(), &venue(), side)
+            side_store(dir.path(), &config(), side)
                 .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
                 .unwrap();
         }
@@ -1416,7 +1434,7 @@ mod tests {
             (Side::Short, margins(None, Some(R::new(0.5)))),
         ] {
             assert!(
-                side_store(dir.path(), &other, &venue(), side)
+                side_store(dir.path(), &other, side)
                     .valid_froms()
                     .unwrap()
                     .is_empty(),
@@ -1432,11 +1450,7 @@ mod tests {
             meta: Some(meta.clone()),
             ..config.clone()
         };
-        models(root, &config, &venue())
-            .meta()
-            .unwrap()
-            .store()
-            .clone()
+        models(root, &config).meta().unwrap().store().clone()
     }
 
     /// A meta model published under one margin and minimums may fall
@@ -1576,14 +1590,65 @@ mod tests {
         }
     }
 
+    /// A strategy trades on a pair of its sides' models valid by then, and
+    /// with a meta section on a meta model valid by then too: a store
+    /// holding one side's model alone, a pair valid later, or no meta model
+    /// beside the pair has none to trade on yet.
+    #[test]
+    fn a_model_set_has_models_to_trade_on_from_its_pair_and_its_meta() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = |time: &str| time.parse::<Timestamp>().unwrap();
+        let (valid_from, before) = ("2026-10-22T00:00:00Z", "2026-10-21T23:59:59Z");
+        let with_meta = ModelConfig {
+            meta: Some(meta_config()),
+            ..config()
+        };
+        let trades = |config: &ModelConfig, now: &str| {
+            models(dir.path(), config).trades_by(at(now)).unwrap()
+        };
+
+        assert!(!trades(&config(), valid_from));
+        side_store(dir.path(), &config(), Side::Long)
+            .publish(&model(valid_from, &[vec![0.5]]))
+            .unwrap();
+        assert!(!trades(&config(), valid_from));
+        side_store(dir.path(), &config(), Side::Short)
+            .publish(&model(valid_from, &[vec![0.5]]))
+            .unwrap();
+        assert!(trades(&config(), valid_from));
+        assert!(!trades(&config(), before));
+        assert!(!trades(&with_meta, valid_from));
+        let mut meta = model(valid_from, &[vec![0.5]]);
+        meta.manifest.side = None;
+        meta_store(dir.path(), &config(), &meta_config())
+            .publish(&meta)
+            .unwrap();
+        assert!(trades(&with_meta, valid_from));
+    }
+
+    /// Where a model set's stores are, which a live start names: the
+    /// directory of its training settings, its sides' and its meta's
+    /// stores under it (`a_fixed_strategys_side_store_keeps_its_directory`).
+    #[test]
+    fn a_fixed_strategys_model_set_is_in_the_directory_of_its_training_settings() {
+        assert_eq!(
+            models(Path::new("models"), &config()).directory(),
+            Path::new(
+                "models/STORE-001/\
+                 0614a0ef7ecea9c6cf17bdf7a38ab2ab47a955646cf2257595b30158aa9e35c9/\
+                 4fde0b9e20b35edde95fe4d35678d1548497a87b9da66b8387ad828b2da940f1"
+            )
+        );
+    }
+
     #[test]
     fn the_long_and_the_short_models_are_listed_apart() {
         let dir = tempfile::tempdir().unwrap();
-        side_store(dir.path(), &config(), &venue(), Side::Long)
+        side_store(dir.path(), &config(), Side::Long)
             .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
             .unwrap();
 
-        let short = side_store(dir.path(), &config(), &venue(), Side::Short);
+        let short = side_store(dir.path(), &config(), Side::Short);
 
         assert!(short.valid_froms().unwrap().is_empty());
     }
@@ -1634,11 +1699,8 @@ mod tests {
     #[test]
     fn a_pair_expects_each_sides_r_through_its_calibration() {
         let dir = tempfile::tempdir().unwrap();
-        let models = models(dir.path(), &config(), &venue());
-        let fingerprint = blueprint(&config())
-            .fingerprint(&venue())
-            .unwrap()
-            .to_string();
+        let models = models(dir.path(), &config());
+        let fingerprint = blueprint(&config()).fingerprint().unwrap().to_string();
         let names = models.side(Side::Long).unwrap().feature_names().to_vec();
         for side in Side::BOTH {
             let mut stored = model("2026-10-22T00:00:00Z", &[]);
@@ -1732,12 +1794,14 @@ mod tests {
             Commission::PerQuantity(Money::from_str_exact("0.00003 USD").unwrap()),
         ] {
             assert!(
-                store_net_of(
+                store(
                     dir.path(),
-                    &config(),
-                    &DatasetVenue {
-                        commission: other,
-                        ..venue()
+                    &ModelConfig {
+                        dataset: DatasetVenue {
+                            commission: other,
+                            ..venue()
+                        },
+                        ..config()
                     }
                 )
                 .valid_froms()

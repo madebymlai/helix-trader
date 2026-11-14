@@ -68,12 +68,8 @@ use nautilus_common::{actor::DataActorNative, component::Component, config::Conf
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use self::{
-    blueprint::ModelBlueprint,
-    dataset::{Dataset, DatasetVenue},
-    features::FeatureSet,
-    handle::Mode,
-    train::Training,
-    walk::WalkForward,
+    blueprint::ModelBlueprint, dataset::Dataset, features::FeatureSet, handle::Mode,
+    train::Training, walk::WalkForward,
 };
 use crate::strategy::{Part, Series, StandardConfig, catalog_series, warmup::Warmup};
 
@@ -201,24 +197,19 @@ pub trait ModelStrategy:
         )
     }
 
-    /// The dataset of the strategy `config` describes, run on `venue`, in
-    /// the catalog at `catalog`; its replay runs the strategy in
-    /// `Mode::Dataset`.
+    /// The dataset of the strategy `config` describes, in the catalog at
+    /// `catalog`; its replay runs the strategy in `Mode::Dataset`.
     ///
     /// # Errors
     ///
     /// Returns an error as `blueprint` and `ModelBlueprint::dataset` do.
-    fn dataset(
-        config: &StandardConfig<Self::Params>,
-        catalog: &Path,
-        venue: &DatasetVenue,
-    ) -> anyhow::Result<Dataset> {
-        Self::blueprint(config)?.dataset(catalog, venue)
+    fn dataset(config: &StandardConfig<Self::Params>, catalog: &Path) -> anyhow::Result<Dataset> {
+        Self::blueprint(config)?.dataset(catalog)
     }
 
     /// The training of the model of the strategy `config` describes, on
-    /// its dataset, run on `venue`, in the catalog at `catalog`, and its
-    /// models in the store under `models`.
+    /// its dataset in the catalog at `catalog`, and its models in the store
+    /// under `models`.
     ///
     /// # Errors
     ///
@@ -227,15 +218,13 @@ pub trait ModelStrategy:
         config: &StandardConfig<Self::Params>,
         catalog: &Path,
         models: &Path,
-        venue: &DatasetVenue,
     ) -> anyhow::Result<Training> {
-        Self::blueprint(config)?.training(catalog, models, venue)
+        Self::blueprint(config)?.training(catalog, models)
     }
 
     /// The backtests of the model of the strategy `config` describes, on
-    /// its dataset, run on `venue`, in the catalog at `catalog`, and its
-    /// models in the store under `models`: their retrains and their
-    /// scores.
+    /// its dataset in the catalog at `catalog`, and its models in the store
+    /// under `models`: their retrains and their scores.
     ///
     /// # Errors
     ///
@@ -245,9 +234,8 @@ pub trait ModelStrategy:
         config: &StandardConfig<Self::Params>,
         catalog: &Path,
         models: &Path,
-        venue: &DatasetVenue,
     ) -> anyhow::Result<WalkForward> {
-        Self::blueprint(config)?.walk_forward(catalog, models, venue)
+        Self::blueprint(config)?.walk_forward(catalog, models)
     }
 }
 
@@ -414,6 +402,7 @@ mod tests {
             risk = "0.5%"
 
             [model]
+            dataset = {{ commission = {{ rate = "0.00003" }}, balance = "10000000 USD" }}
             decision = {{ every = "1h" }}
             target = {target}
             retrain = "24h"

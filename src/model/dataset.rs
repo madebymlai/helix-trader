@@ -207,10 +207,30 @@ pub struct Manifest {
 /// trade of the run moves. Its accounts margin nothing (`backtest::node`),
 /// so no leverage is among them. Part of the dataset's fingerprint,
 /// normalized, so neither rows nor models of other settings are ever read.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Declared in a model's config (`ModelConfig::dataset`), such as `{
+/// commission = { per_quantity = "0.035 USD" }, balance = "10000 USD" }`,
+/// its balance positive.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DatasetVenue {
     pub commission: Commission,
+    #[serde(deserialize_with = "positive_balance")]
     pub balance: Money,
+}
+
+/// A balance as TOML writes it, an amount and a currency code, such as
+/// `"10000 USD"`, refused unless positive: a reference stake of none sizes
+/// no target.
+fn positive_balance<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Money, D::Error> {
+    let text = String::deserialize(deserializer)?;
+    let balance: Money = text.parse().map_err(serde::de::Error::custom)?;
+    if balance.is_positive() {
+        Ok(balance)
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "a dataset balance must be positive, not {balance}"
+        )))
+    }
 }
 
 impl DatasetVenue {
@@ -219,12 +239,21 @@ impl DatasetVenue {
     /// balance without trailing zeros, so that every spelling of one is one
     /// key.
     fn fingerprint_part(&self) -> String {
+        self.to_string()
+    }
+}
+
+/// The settings as the fingerprint reads them (`fingerprint_part`), such as
+/// `commission rate 0.00003, balance 10000 USD`.
+impl fmt::Display for DatasetVenue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let kind = match self.commission {
             Commission::PerOrder(_) => "per order",
             Commission::Rate(_) => "rate",
             Commission::PerQuantity(_) => "per quantity",
         };
-        format!(
+        write!(
+            f,
             "commission {kind} {}, balance {} {}",
             self.commission.normalized(),
             self.balance.as_decimal().normalize(),
@@ -815,9 +844,22 @@ mod tests {
         target: TargetConfig,
         requirements: DataRequirements,
     ) -> ModelBlueprint {
+        blueprint_on(strategy, features, rule, target, requirements, venue())
+    }
+
+    /// `blueprint`, its dataset runs on `venue`.
+    fn blueprint_on(
+        strategy: &str,
+        features: Rc<FeatureSet>,
+        rule: DecisionRule,
+        target: TargetConfig,
+        requirements: DataRequirements,
+        venue: DatasetVenue,
+    ) -> ModelBlueprint {
         let config = ModelConfig::builder()
             .decision(rule)
             .target(target)
+            .dataset(venue)
             .window(SignedDuration::from_hours(24))
             .holdout(SignedDuration::from_hours(6))
             .margins(Margins {
@@ -839,7 +881,7 @@ mod tests {
             target(),
             requirements(),
         )
-        .dataset(catalog, &venue())
+        .dataset(catalog)
         .unwrap()
     }
 
@@ -1220,15 +1262,19 @@ mod tests {
             .write(&[row("2026-01-05T09:00:00Z", vec![1.0], "1")], from, to)
             .unwrap();
         let changed = |rule, target, commission| {
-            blueprint(STRATEGY, features(1), rule, target, requirements())
-                .dataset(
-                    dir.path(),
-                    &DatasetVenue {
-                        commission,
-                        ..venue()
-                    },
-                )
-                .unwrap()
+            blueprint_on(
+                STRATEGY,
+                features(1),
+                rule,
+                target,
+                requirements(),
+                DatasetVenue {
+                    commission,
+                    ..venue()
+                },
+            )
+            .dataset(dir.path())
+            .unwrap()
         };
         let hourly = DecisionRule::Every(SignedDuration::from_hours(1));
         let changed = [
@@ -1334,7 +1380,7 @@ mod tests {
             .unwrap()
         };
         let current = blueprint(STRATEGY, features(1), rule, target(), requirements())
-            .fingerprint(&venue())
+            .fingerprint()
             .unwrap();
 
         assert_ne!(current, at(VERSION + 1));
@@ -1374,7 +1420,7 @@ mod tests {
                 target(),
                 requirements.clone(),
             )
-            .fingerprint(&venue())
+            .fingerprint()
             .unwrap()
         };
         let composite = DataRequirements {
@@ -1393,14 +1439,15 @@ mod tests {
     #[test]
     fn another_balance_of_the_dataset_run_is_another_fingerprint() {
         let of = |venue: DatasetVenue| {
-            blueprint(
+            blueprint_on(
                 STRATEGY,
                 features(1),
                 DecisionRule::Every(SignedDuration::from_hours(1)),
                 target(),
                 requirements(),
+                venue,
             )
-            .fingerprint(&venue)
+            .fingerprint()
             .unwrap()
         };
 
@@ -1507,7 +1554,7 @@ mod tests {
             target(),
             requirements(),
         )
-        .dataset(catalog, &venue())
+        .dataset(catalog)
         .unwrap()
     }
 

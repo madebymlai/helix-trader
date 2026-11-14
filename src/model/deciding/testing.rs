@@ -154,6 +154,7 @@ pub fn config() -> ModelConfig {
                 .build(),
         )
         .retrain(SignedDuration::from_hours(24))
+        .dataset(venue())
         .window(SignedDuration::from_hours(48))
         .holdout(SignedDuration::from_hours(12))
         .margins(Margins {
@@ -238,7 +239,7 @@ pub fn blueprint_of(
 /// The models of `features` and `config` under `models`.
 pub fn model_set(models: &Path, features: &Rc<FeatureSet>, config: &ModelConfig) -> ModelSet {
     blueprint_of(features, config, requirements())
-        .model_set(models, &venue())
+        .model_set(models)
         .unwrap()
 }
 
@@ -303,7 +304,7 @@ pub fn baseline_for(
                     ..requirements()
                 },
             )
-            .fingerprint(&venue())
+            .fingerprint()
             .unwrap()
             .to_string(),
             feature_names: names,

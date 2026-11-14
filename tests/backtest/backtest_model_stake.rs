@@ -17,9 +17,7 @@ use crate::{
     backtest_model::hand_worked,
     backtest_targets::hand_worked_quotes,
     common::{
-        dataset::{
-            Account, Record, baseline_of, blueprint, features, replay_of, trade_staking, venue,
-        },
+        dataset::{Account, Record, baseline_of, blueprint, features, replay_of, trade_staking},
         ic,
     },
 };
@@ -69,7 +67,7 @@ fn traded(config: &ModelConfig, models: &Path, account: Account) -> Record {
     thread::spawn(move || {
         let (from, to) = window();
         blueprint(features(), config.clone())
-            .model_set(&models, &venue())
+            .model_set(&models)
             .unwrap()
             .side(Side::Long)
             .unwrap()

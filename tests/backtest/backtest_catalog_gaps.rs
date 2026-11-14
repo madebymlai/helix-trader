@@ -105,7 +105,7 @@ fn a_dataset_build_replays_through_a_sliver_between_promoted_files() {
     }
     let day = Date::constant(2026, 10, 21);
     let dataset = dataset::blueprint(dataset::features(), dataset::config())
-        .dataset(dir.path(), &dataset::venue())
+        .dataset(dir.path())
         .unwrap();
 
     let built = dataset

@@ -21,7 +21,7 @@ use std::{path::Path, rc::Rc};
 
 use crate::common::{
     dataset::{
-        baseline_of, blueprint, config, meta_baseline_of, missing, replay_on, trade_on, venue, walk,
+        baseline_of, blueprint, config, meta_baseline_of, missing, replay_on, trade_on, walk,
     },
     ic,
 };
@@ -122,7 +122,7 @@ fn expects(store: &ModelStore, at: Timestamp, row: &[f64]) -> f64 {
 fn predicts(store: &ModelStore, features: Rc<FeatureSet>, at: Timestamp, row: &[f64]) -> f64 {
     let stored = store.read(at).unwrap();
     let fingerprint = blueprint(features, long_only())
-        .fingerprint(&venue())
+        .fingerprint()
         .unwrap()
         .to_string();
     stored
@@ -142,15 +142,14 @@ fn prepare_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> 
     let (start, end) = span();
     let mut trained = vec![];
     blueprint(features(), long_only())
-        .walk_forward(catalog.path(), models, &venue())
+        .walk_forward(catalog.path(), models)
         .unwrap()
         .prepare(
             start,
             end,
             |from, to| {
                 on_thread(|| {
-                    let dataset =
-                        blueprint(features(), long_only()).dataset(catalog.path(), &venue())?;
+                    let dataset = blueprint(features(), long_only()).dataset(catalog.path())?;
                     let (first, last) = dataset::days(from, to);
                     dataset.build(first, last, |from, to| {
                         replay_on(catalog, features(), from, to)
@@ -161,7 +160,7 @@ fn prepare_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> 
             |at| {
                 let outcome = on_thread(|| {
                     blueprint(features(), long_only())
-                        .training(catalog.path(), models, &venue())
+                        .training(catalog.path(), models)
                         .unwrap()
                         .train_at(at, |from, to| replay_on(catalog, features(), from, to))
                 });
@@ -183,7 +182,7 @@ fn prepare_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> 
 /// The models of `long_only` under `models`.
 fn model_set(models: &Path) -> ModelSet {
     blueprint(features(), long_only())
-        .model_set(models, &venue())
+        .model_set(models)
         .unwrap()
 }
 

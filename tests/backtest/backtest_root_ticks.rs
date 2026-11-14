@@ -124,7 +124,6 @@ fn rows(features: Rc<FeatureSet>) -> Vec<(Timestamp, Vec<f64>)> {
         &requirements,
         Mode::Dataset {
             rows: SettledRows::default(),
-            venue: dataset::venue(),
         },
     );
     let backtest = helix_trader::backtest::Backtest {

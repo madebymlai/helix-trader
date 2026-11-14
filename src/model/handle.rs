@@ -146,7 +146,6 @@ use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use super::{
     blueprint::ModelBlueprint,
-    dataset::DatasetVenue,
     decide::{self, DecisionRule},
     deciding::{DecidingModels, SideRow},
     features::FeatureSet,
@@ -165,31 +164,22 @@ use crate::{
 #[derive(Debug, Clone)]
 pub enum Mode {
     /// Trades in a backtest on the models of the store under `models`
-    /// whose target is that of its dataset runs, on `venue`, the target at
-    /// its commission.
-    Backtest {
-        models: PathBuf,
-        venue: DatasetVenue,
-    },
+    /// whose target is that of its dataset runs, on the venue its config
+    /// declares (`ModelConfig::dataset`), the target at its commission.
+    Backtest { models: PathBuf },
     /// Trades live on the models of the store under `models` whose target
-    /// is that of the dataset runs of its trains, on `venue`, the target at
-    /// its commission, deciding
+    /// is that of the dataset runs of its trains, on the venue its config
+    /// declares, the target at its commission, deciding
     /// the live node's bar build delay late, as a backtest does; apart from
     /// `Backtest` for its warmup, which requests the history up to now
     /// (`Warmup::live`), and its roller, which loads each post contract
     /// before its roll (`Roller::live`). Its retrains, if any, are the
     /// node's retrain actor's (`launcher::RetrainActor`).
-    Live {
-        models: PathBuf,
-        venue: DatasetVenue,
-    },
-    /// Opens each decision's target, for a dataset run on `venue`, at its
-    /// commission and at the reference stake of its balance, and collects
-    /// the rows it settles in `rows`.
-    Dataset {
-        rows: SettledRows,
-        venue: DatasetVenue,
-    },
+    Live { models: PathBuf },
+    /// Opens each decision's target, for a dataset run on the venue its
+    /// config declares, at its commission and at the reference stake of its
+    /// balance, and collects the rows it settles in `rows`.
+    Dataset { rows: SettledRows },
 }
 
 /// What a dataset run settles, shared with its caller: the rows its
@@ -354,26 +344,26 @@ impl ModelHandle {
         };
         let delay = warmup::bar_build_delay(&requirements.bar_types);
         let serving = match mode {
-            Mode::Backtest { models, venue } | Mode::Live { models, venue } => {
-                let models = blueprint.model_set(&models, &venue)?;
+            Mode::Backtest { models } | Mode::Live { models } => {
+                let models = blueprint.model_set(&models)?;
                 Serving::Deciding(Box::new(Deciding {
                     models: RefCell::new(DecidingModels::new(&models)?),
                     target: TargetSetter::sharing(
                         target,
                         rule,
                         requirements,
-                        &venue,
+                        &blueprint.config().dataset,
                         features.bracket_width(),
                     )?,
                     instrument_id: target.instrument_id,
                 }))
             }
-            Mode::Dataset { rows, venue } => Serving::Dataset {
+            Mode::Dataset { rows } => Serving::Dataset {
                 targets: Targets::sharing(
                     target.clone(),
                     rule,
                     requirements,
-                    &venue,
+                    &blueprint.config().dataset,
                     features.bracket_width(),
                 )?,
                 rows,
@@ -722,7 +712,7 @@ mod tests {
         deciding::testing::{
             AUD, GOLD, STRATEGY, at, baseline, baseline_for, blueprint_of, both_sides, config,
             features, gold, meta, meta_baseline, model_set, r, requirements, side_store, store,
-            venue, with_meta,
+            with_meta,
         },
         features::testing::{last_mid, mid_over},
         schedule::Retrain,
@@ -879,7 +869,6 @@ mod tests {
             &blueprint_of(&features, &config(), requirements()),
             Mode::Backtest {
                 models: models.to_path_buf(),
-                venue: venue(),
             },
         )
         .unwrap()
@@ -902,7 +891,6 @@ mod tests {
             &blueprint_of(&features(), &config(), requirements()),
             Mode::Backtest {
                 models: models.path().to_path_buf(),
-                venue: venue(),
             },
         )
         .unwrap();
@@ -958,7 +946,6 @@ mod tests {
             &blueprint_of(&features, &config(), requirements()),
             Mode::Backtest {
                 models: models.path().to_path_buf(),
-                venue: venue(),
             },
         )
         .unwrap();
@@ -993,7 +980,6 @@ mod tests {
             &blueprint_of(&features, &config(), requirements),
             Mode::Backtest {
                 models: models.path().to_path_buf(),
-                venue: venue(),
             },
         )
         .unwrap();
@@ -1026,7 +1012,6 @@ mod tests {
     ) -> Rc<ModelHandle> {
         let mode = Mode::Backtest {
             models: models.to_path_buf(),
-            venue: venue(),
         };
         sides_handle_in(mode, probe, models, config, sides)
     }
@@ -1515,7 +1500,6 @@ mod tests {
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
         let backtest = Mode::Backtest {
             models: models.path().to_path_buf(),
-            venue: venue(),
         };
         let handle = sides_handle_in(
             backtest,
@@ -1556,7 +1540,6 @@ mod tests {
             &blueprint_of(&features, &config(), requirements()),
             Mode::Backtest {
                 models: models.path().to_path_buf(),
-                venue: venue(),
             },
         )
         .unwrap();
@@ -1720,7 +1703,6 @@ mod tests {
             &blueprint_of(&features, &config(), requirements),
             Mode::Backtest {
                 models: models.path().to_path_buf(),
-                venue: venue(),
             },
         )
         .unwrap();
@@ -1789,7 +1771,6 @@ mod tests {
         let models = models.path().to_path_buf();
         let backtest = Mode::Backtest {
             models: models.clone(),
-            venue: venue(),
         };
         let live = live(models);
 
@@ -1864,7 +1845,6 @@ mod tests {
             &blueprint_of(&features, &config, requirements()),
             Mode::Backtest {
                 models: models.path().to_path_buf(),
-                venue: venue(),
             },
         )
         .unwrap();
@@ -1920,7 +1900,6 @@ mod tests {
             &blueprint_of(&features, &config, requirements()),
             Mode::Dataset {
                 rows: SettledRows::default(),
-                venue: venue(),
             },
         )
         .unwrap();
@@ -1936,7 +1915,6 @@ mod tests {
     fn a_dataset_runs_cadence_waits_for_composite_bars() {
         let dataset = Mode::Dataset {
             rows: SettledRows::default(),
-            venue: venue(),
         };
 
         assert_eq!(
@@ -1956,14 +1934,12 @@ mod tests {
                 "backtest",
                 Mode::Backtest {
                     models: models.clone(),
-                    venue: venue(),
                 },
             ),
             (
                 "dataset",
                 Mode::Dataset {
                     rows: SettledRows::default(),
-                    venue: venue(),
                 },
             ),
             ("live", live(models)),
@@ -2022,10 +1998,7 @@ mod tests {
 
     /// Live trading on the models under `models`.
     fn live(models: PathBuf) -> Mode {
-        Mode::Live {
-            models,
-            venue: venue(),
-        }
+        Mode::Live { models }
     }
 
     /// The probe's handle trading live on the models under `models`,
@@ -2153,7 +2126,6 @@ mod tests {
             &blueprint_of(&features, config, requirements()),
             Mode::Backtest {
                 models: models.to_path_buf(),
-                venue: venue(),
             },
         )
         .unwrap()
@@ -2199,10 +2171,7 @@ mod tests {
 
         let built = ModelHandle::new(
             &blueprint_of(&features(), &config(), requirements()),
-            Mode::Backtest {
-                models: file,
-                venue: venue(),
-            },
+            Mode::Backtest { models: file },
         );
 
         assert!(built.is_err());
@@ -2225,7 +2194,6 @@ mod tests {
             &blueprint_of(&features(), &config, requirements()),
             Mode::Dataset {
                 rows: SettledRows::default(),
-                venue: venue(),
             },
         )
         .unwrap();
@@ -2255,7 +2223,6 @@ mod tests {
             &blueprint_of(&features(), &config, requirements()),
             Mode::Backtest {
                 models: models.path().to_path_buf(),
-                venue: venue(),
             },
         )
         .unwrap();
@@ -2304,7 +2271,6 @@ mod tests {
             &blueprint_of(&features, config, reading_eur(eur)),
             Mode::Backtest {
                 models: models.to_path_buf(),
-                venue: venue(),
             },
         )
         .unwrap()
@@ -2339,7 +2305,7 @@ mod tests {
         let features = last_mid(eur).build().unwrap();
         // The target's ATR, on the quotes of EUR/USD, keys its store.
         blueprint_of(&features, &config, reading_eur(eur))
-            .model_set(models.path(), &venue())
+            .model_set(models.path())
             .unwrap()
             .side(Side::Long)
             .unwrap()
@@ -2890,7 +2856,6 @@ mod tests {
             &blueprint_of(&features, &config(), requirements),
             Mode::Backtest {
                 models: models.path().to_path_buf(),
-                venue: venue(),
             },
         )
         .unwrap();

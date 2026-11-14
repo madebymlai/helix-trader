@@ -97,22 +97,23 @@ fn no_model_in_the_store_gives_no_trade() {
     assert_eq!(decided(&mut listed(models.path(), &config()), NOON), None);
 }
 
-/// A model learned targets net of its dataset runs' commission: a
-/// backtest of other costs does not trade on it.
+/// A model learned targets net of its dataset runs' commission: a config
+/// declaring another does not trade on it.
 #[test]
 fn a_model_of_another_commission_gives_no_trade() {
     let models = tempfile::tempdir().unwrap();
     store(models.path())
         .publish(&baseline(MIDNIGHT, 8))
         .unwrap();
-    let other_costs = blueprint_of(&features(), &config(), requirements())
-        .model_set(
-            models.path(),
-            &DatasetVenue {
-                commission: Commission::PerOrder(Money::from("3 USD")),
-                ..venue()
-            },
-        )
+    let other_costs = ModelConfig {
+        dataset: DatasetVenue {
+            commission: Commission::PerOrder(Money::from("3 USD")),
+            ..venue()
+        },
+        ..config()
+    };
+    let other_costs = blueprint_of(&features(), &other_costs, requirements())
+        .model_set(models.path())
         .unwrap();
 
     assert_eq!(

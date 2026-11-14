@@ -16,6 +16,7 @@ use nautilus_common::config::{ConfigError, ConfigErrorCollector, ConfigResult};
 use serde::{Deserialize, de::IgnoredAny};
 
 use super::{
+    dataset::DatasetVenue,
     decide::DecisionRule,
     holdout::Minimums,
     learner::LearnerConfig,
@@ -79,6 +80,14 @@ pub struct ModelConfig<T = TargetConfig> {
     /// The meta model deciding whether to take each trade of this one, a
     /// `[model.meta]` table; none takes every trade.
     pub meta: Option<MetaConfig>,
+    /// The venue its dataset runs are made at, such as `{ commission = {
+    /// per_quantity = "0.035 USD" }, balance = "10000 USD" }`: the
+    /// commission their targets are net of and the balance their reference
+    /// stake is of. It keys the dataset and the stores
+    /// (`dataset::fingerprint`), so `train`, a backtest's retrains and a live
+    /// node all read the one store of the config, whatever a backtest's own
+    /// commission and balance.
+    pub dataset: DatasetVenue,
 }
 
 /// A meta model: on each decision that picks a side, the realised net R of
@@ -220,6 +229,7 @@ impl ModelSection {
             min_trades,
             learner,
             meta,
+            dataset,
         } = self;
         ModelConfig {
             decision,
@@ -232,6 +242,7 @@ impl ModelSection {
             min_trades,
             learner,
             meta,
+            dataset,
         }
     }
 }
@@ -442,12 +453,14 @@ fn validate_minimums(minimums: Minimums, section: &str, errors: &mut ConfigError
 
 #[cfg(test)]
 mod tests {
-    use nautilus_model::{data::BarType, identifiers::InstrumentId};
+    use nautilus_model::{data::BarType, identifiers::InstrumentId, types::Money};
     use rust_decimal::Decimal;
 
     use super::*;
     use crate::{
+        backtest::Commission,
         model::{
+            dataset::DatasetVenue,
             learner::LightGbmConfig,
             targets::{BracketSpec, DEFAULT_ATR, Distance},
         },
@@ -468,6 +481,7 @@ mod tests {
         min_expectancy = "1R"
         min_trades = 30
         learner = { kind = "fake" }
+        dataset = { commission = { per_quantity = "0.035 USD" }, balance = "10000 USD" }
     "#;
 
     /// The section with `line` added or, if its key is there, replacing it.
@@ -832,6 +846,116 @@ mod tests {
 
     /// The name the least expectancy had, before it was read as Nautilus'
     /// expectancy in R: spelled so that a rename of the key leaves it.
+    /// The section's dataset venue: the commission and balance its dataset
+    /// runs are made at.
+    fn dataset_of(line: &str) -> anyhow::Result<DatasetVenue> {
+        Ok(load(&section(line))?.dataset)
+    }
+
+    #[test]
+    fn a_section_declares_the_commission_and_balance_of_its_dataset_runs() {
+        let exact = Money::from_str_exact("0.035 USD").unwrap();
+        assert_ne!(exact, Money::from("0.04 USD"));
+        assert_eq!(
+            load(SECTION).unwrap().dataset,
+            DatasetVenue {
+                commission: Commission::PerQuantity(exact),
+                balance: Money::from("10000 USD"),
+            }
+        );
+    }
+
+    #[test]
+    fn a_dataset_commission_is_per_order_a_rate_or_per_quantity() {
+        let at = |commission: &str| {
+            dataset_of(&format!(
+                r#"dataset = {{ commission = {{ {commission} }}, balance = "1000 EUR" }}"#
+            ))
+            .unwrap()
+            .commission
+        };
+        assert_eq!(
+            at(r#"per_order = "3 EUR""#),
+            Commission::PerOrder(Money::from("3 EUR"))
+        );
+        assert_eq!(
+            at(r#"rate = "0.0005""#),
+            Commission::Rate(Decimal::new(5, 4))
+        );
+        assert_eq!(
+            at(r#"per_quantity = "0.035 EUR""#),
+            Commission::PerQuantity(Money::from_str_exact("0.035 EUR").unwrap())
+        );
+    }
+
+    #[test]
+    fn a_section_without_a_dataset_venue_is_refused_at_parsing_naming_it() {
+        let without: String = SECTION
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("dataset"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let err = refused_parsing(&without);
+        assert!(err.contains("dataset"), "{err}");
+    }
+
+    #[test]
+    fn a_dataset_commission_of_no_kind_or_two_is_refused_at_parsing() {
+        for commission in ["", r#"rate = "0.0005", per_order = "3 USD""#] {
+            let line =
+                format!(r#"dataset = {{ commission = {{ {commission} }}, balance = "1000 USD" }}"#);
+            assert!(dataset_of(&line).is_err(), "{commission}");
+        }
+    }
+
+    #[test]
+    fn a_negative_dataset_commission_is_refused_at_parsing() {
+        for commission in [
+            r#"per_order = "-3 USD""#,
+            r#"rate = "-0.0005""#,
+            r#"per_quantity = "-0.035 USD""#,
+        ] {
+            let line =
+                format!(r#"dataset = {{ commission = {{ {commission} }}, balance = "1000 USD" }}"#);
+            assert!(dataset_of(&line).is_err(), "{commission}");
+        }
+    }
+
+    #[test]
+    fn a_dataset_commission_or_balance_that_is_no_amount_is_refused_at_parsing() {
+        for dataset in [
+            r#"{ commission = { rate = 0.0005 }, balance = "1000 USD" }"#,
+            r#"{ commission = { per_quantity = "0.035" }, balance = "1000 USD" }"#,
+            r#"{ commission = { per_order = "3 XYZ" }, balance = "1000 USD" }"#,
+            r#"{ commission = { rate = "0.0005" }, balance = "1000" }"#,
+            r#"{ commission = { rate = "0.0005" }, balance = 1000 }"#,
+        ] {
+            assert!(
+                dataset_of(&format!("dataset = {dataset}")).is_err(),
+                "{dataset}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dataset_balance_not_positive_is_refused_at_parsing() {
+        for balance in ["0 USD", "-1000 USD"] {
+            let line = format!(
+                r#"dataset = {{ commission = {{ rate = "0.0005" }}, balance = "{balance}" }}"#
+            );
+            let err = format!("{:#}", dataset_of(&line).unwrap_err());
+            assert!(err.contains("balance"), "{balance}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_dataset_venue_refuses_an_unknown_field() {
+        let line =
+            r#"dataset = { commission = { rate = "0.0005" }, balance = "1000 USD", leverage = 1 }"#;
+        let err = format!("{:#}", dataset_of(line).unwrap_err());
+        assert!(err.contains("leverage"), "{err}");
+    }
+
     const OLD_MINIMUM: &str = concat!("min_", "pnl");
 
     /// The least expectancy is `min_expectancy`: a section of its old name

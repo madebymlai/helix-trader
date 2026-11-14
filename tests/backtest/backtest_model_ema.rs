@@ -20,7 +20,7 @@ use std::{
 };
 
 use crate::common::{
-    dataset::{baseline_stored, r, venue, walk},
+    dataset::{baseline_stored, r, walk},
     ic,
 };
 use helix_trader::{
@@ -73,6 +73,7 @@ const CONFIG: &str = r#"
     min_expectancy = "0R"
     min_trades = 1
     learner = { kind = "fake" }
+    dataset = { commission = { rate = "0.00003" }, balance = "10000000 USD" }
 "#;
 
 /// Midnight of the 23rd: the window starts at 02:00 of the 21st, its
@@ -95,7 +96,6 @@ fn train_refused(config: &Path, catalog: &Path, models: &Path, at: Timestamp) ->
         .arg("--models")
         .arg(models)
         .args(["--at", &at.to_string()])
-        .args(["--commission-rate", "0.00003", "--balance", "10000000 USD"])
         .output()
         .unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
@@ -132,7 +132,7 @@ fn kept_with_its_figures(text: &str) -> bool {
 /// `catalog` names them.
 fn publish(catalog: &TempDir, models: &Path, at: Timestamp) {
     let config = ModelEmaConfig::load(CONFIG).unwrap();
-    let dataset = ModelEma::dataset(&config, catalog.path(), &venue())
+    let dataset = ModelEma::dataset(&config, catalog.path())
         .unwrap()
         .manifest()
         .unwrap();
@@ -149,7 +149,7 @@ fn publish(catalog: &TempDir, models: &Path, at: Timestamp) {
     );
     ModelEma::blueprint(&config)
         .unwrap()
-        .model_set(models, &venue())
+        .model_set(models)
         .unwrap()
         .side(Side::Long)
         .unwrap()
@@ -219,14 +219,7 @@ fn traded_from(catalog: &TempDir, models: PathBuf, start: Timestamp) -> (usize, 
         balance: Money::from("100000 USD"),
         ..ic::backtest(catalog)
     };
-    let strategy = ModelEma::new(
-        config,
-        Mode::Backtest {
-            models,
-            venue: venue(),
-        },
-    )
-    .unwrap();
+    let strategy = ModelEma::new(config, Mode::Backtest { models }).unwrap();
     let outcome = backtest.run(strategy).unwrap();
     (outcome.result.total_orders, outcome.result.total_positions)
 }
@@ -240,7 +233,7 @@ fn a_live_retrain_through_the_train_subcommand_keeping_the_model_is_kept_with_it
     let dir = tempfile::tempdir().unwrap();
     let (config_path, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
     std::fs::write(&config_path, CONFIG).unwrap();
-    // As a live node starts it (`Children::train_args`), with the fixture's costs.
+    // As a live node starts it (`Children::train_args`).
     let args = [
         "train".as_ref(),
         "model_ema".as_ref(),
@@ -250,10 +243,6 @@ fn a_live_retrain_through_the_train_subcommand_keeping_the_model_is_kept_with_it
         catalog.path().as_os_str(),
         "--models".as_ref(),
         models.as_os_str(),
-        "--commission-rate".as_ref(),
-        "0.00003".as_ref(),
-        "--balance".as_ref(),
-        "10000000 USD".as_ref(),
     ]
     .map(OsStr::to_os_string);
     let launcher = Launcher::process(env!("CARGO_BIN_EXE_helix-trader").into(), args.to_vec());
@@ -268,15 +257,28 @@ fn a_live_retrain_through_the_train_subcommand_keeping_the_model_is_kept_with_it
 }
 
 /// The binary's `backtest` of the strategy of `config` over `[start,
-/// end]`, retraining into the store under `models`, on the balance of the
-/// fixture's dataset runs (`venue`), which its own dataset runs take; its
-/// stdout and its stderr.
+/// end]`, retraining into the store under `models`, its simulated account
+/// at the commission and balance of the config's dataset runs; its stdout
+/// and its stderr.
 fn backtest(
     config: &Path,
     catalog: &Path,
     models: &Path,
     start: Timestamp,
     end: Timestamp,
+) -> (String, String) {
+    let costs = ["--commission-rate", "0.00003", "--balance", "10000000 USD"];
+    backtest_at(config, catalog, models, (start, end), &costs)
+}
+
+/// `backtest` over `span`, its simulated account at `costs`, its commission
+/// and balance flags.
+fn backtest_at(
+    config: &Path,
+    catalog: &Path,
+    models: &Path,
+    (start, end): (Timestamp, Timestamp),
+    costs: &[&str],
 ) -> (String, String) {
     let output = Command::new(env!("CARGO_BIN_EXE_helix-trader"))
         .arg("backtest")
@@ -288,7 +290,7 @@ fn backtest(
         .arg("--models")
         .arg(models)
         .args(["--start", &start.to_string(), "--end", &end.to_string()])
-        .args(["--commission-rate", "0.00003", "--balance", "10000000 USD"])
+        .args(costs)
         .output()
         .unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
@@ -340,8 +342,10 @@ fn a_retrain_keeping_the_model_does_not_fail_the_binarys_backtest() {
 
 /// With a model in the store at each retrain time of the span, published
 /// straight once the dataset is built, a backtest builds and retrains
-/// nothing, and its report is followed by the scores
-/// of both periods, each of its model.
+/// nothing, whatever its own commission and balance, which are its
+/// simulated account's alone: its models are the config's
+/// (`[model] dataset`), whose costs it reports, followed by the scores of
+/// both periods, each of its model.
 #[test]
 fn the_binarys_backtest_on_a_store_holding_each_retrains_model_builds_and_trains_nothing() {
     let catalog = walk(
@@ -357,12 +361,23 @@ fn the_binarys_backtest_on_a_store_holding_each_retrains_model_builds_and_trains
     for at in [t(), next] {
         publish(&catalog, &models, at);
     }
+    let other_costs = ["--commission-rate", "0.0001", "--balance", "100000 USD"];
 
-    let (stdout, stderr) = backtest(&config_path, catalog.path(), &models, start, end);
+    let (stdout, stderr) = backtest_at(
+        &config_path,
+        catalog.path(),
+        &models,
+        (start, end),
+        &other_costs,
+    );
 
     assert!(!stdout.contains("days of the dataset"), "{stdout}");
     assert!(!stdout.contains("the dataset holds every day"), "{stdout}");
     assert!(!stderr.contains("the retrain at"), "{stderr}");
+    assert!(
+        stdout.contains("Models trained at: commission rate 0.00003, balance 10000000 USD"),
+        "{stdout}"
+    );
     let scores = stdout.find("Long model scores").expect(&stdout);
     assert!(stdout.find("Final balances").unwrap() < scores, "{stdout}");
     for (from, to) in [(t(), next), (next, end)] {
@@ -406,81 +421,59 @@ fn refused(
     (stdout, stderr)
 }
 
-/// A balance in EUR, where IC's gold's P&L is in USD: the model's targets,
-/// its dataset's rows, would be sized on it unconverted, so the backtest,
-/// whose dataset runs take its balance, refuses it before building any day
-/// of the dataset, and `train` before replaying any, no node started,
-/// naming both currencies, and `train` the dataset balance.
+/// The fixture's config, its dataset balance (`[model] dataset`) in EUR,
+/// where IC's gold's P&L is in USD.
+fn eur_config() -> String {
+    let (usd, eur) = (r#"balance = "10000000 USD""#, r#"balance = "10000000 EUR""#);
+    assert!(CONFIG.contains(usd));
+    CONFIG.replace(usd, eur)
+}
+
+/// A dataset balance in EUR, where IC's gold's P&L is in USD: the model's
+/// targets, sized on it, would be unconverted, so a backtest, whose own
+/// account is in USD, refuses it before building any day of the dataset,
+/// and `train` before replaying any, no node started, naming the dataset
+/// balance and both currencies.
 #[test]
 fn a_dataset_balance_in_another_currency_than_the_pnl_is_refused_before_any_build() {
     let catalog = walk(ic::at("00:00:00"), ic::at("06:00:00"));
     let dir = tempfile::tempdir().unwrap();
     let (config, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
-    std::fs::write(&config, CONFIG).unwrap();
-    let span = [
-        "--start".to_string(),
-        ic::at("03:00:00").to_string(),
-        "--end".to_string(),
-        ic::at("05:00:00").to_string(),
-    ];
-    let costs = ["--commission-rate", "0.00003"].map(String::from);
-    let backtest: Vec<String> = span
-        .into_iter()
-        .chain(costs.clone())
-        .chain(["--balance", "10000000 EUR"].map(String::from))
-        .collect();
-    let train: Vec<String> = ["--at".to_string(), ic::at("05:00:00").to_string()]
-        .into_iter()
-        .chain(costs)
-        .chain(["--balance", "10000000 EUR"].map(String::from))
-        .collect();
+    std::fs::write(&config, eur_config()).unwrap();
 
-    for (subcommand, args, named) in [
-        (
-            "backtest",
-            backtest,
-            ["EUR", "USD", ic::INSTRUMENT_ID].as_slice(),
-        ),
-        (
-            "train",
-            train,
-            ["dataset balance", "EUR", "USD", ic::INSTRUMENT_ID].as_slice(),
-        ),
-    ] {
+    for subcommand in ["backtest", "train"] {
+        let args = usd_args(subcommand, dir.path());
+
         let (stdout, stderr) = refused(subcommand, &config, catalog.path(), &models, &args);
 
         assert!(
-            named.iter().all(|named| stderr.contains(named)),
+            ["dataset balance", "EUR", "USD", ic::INSTRUMENT_ID]
+                .iter()
+                .all(|named| stderr.contains(named)),
             "{subcommand}: {stderr}"
         );
         assert!(!stdout.contains("BacktestEngine"), "{subcommand}: {stdout}");
     }
 }
 
-/// A live node whose retrains' dataset balance is in EUR, where IC's
-/// gold's P&L is in USD: the decisions' payoff features would be sized on
-/// it unconverted, so the start refuses it before any node is built, its
+/// A live node whose config's dataset balance is in EUR, where IC's gold's
+/// P&L is in USD: the decisions' payoff features would be sized on it
+/// unconverted, so the start refuses it before any node is built, its
 /// staging untouched, naming the dataset balance and both currencies.
 #[test]
-fn a_live_retrain_balance_in_another_currency_than_the_pnl_is_refused_before_any_node() {
+fn a_live_dataset_balance_in_another_currency_than_the_pnl_is_refused_before_any_node() {
     let catalog = walk(ic::at("00:00:00"), ic::at("06:00:00"));
     let dir = tempfile::tempdir().unwrap();
     let (config, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
-    let staging = dir.path().join("staging");
-    std::fs::write(&config, CONFIG).unwrap();
-    let live: Vec<String> = [
-        "--retrain-commission-rate",
-        "0.00003",
-        "--retrain-balance",
-        "10000000 EUR",
-        "--staging",
-    ]
-    .map(String::from)
-    .into_iter()
-    .chain([staging.display().to_string()])
-    .collect();
+    std::fs::write(&config, eur_config()).unwrap();
 
-    let (_, stderr) = refused("live", &config, catalog.path(), &models, &live);
+    let (_, stderr) = refused(
+        "live",
+        &config,
+        catalog.path(),
+        &models,
+        &usd_args("live", dir.path()),
+    );
 
     assert!(
         ["dataset balance", "EUR", "USD", ic::INSTRUMENT_ID]
@@ -488,12 +481,13 @@ fn a_live_retrain_balance_in_another_currency_than_the_pnl_is_refused_before_any
             .all(|named| stderr.contains(named)),
         "{stderr}"
     );
-    assert!(!staging.exists());
+    assert!(!dir.path().join("staging").exists());
 }
 
 /// The arguments of `subcommand` of `refused` beyond its config, catalog
-/// and store: a window and costs, a balance in USD, IC's gold's P&L
-/// currency, and for `live` a staging directory under `dir`.
+/// and store: for `backtest` a window and its simulated account's costs, a
+/// balance in USD, IC's gold's P&L currency; for `train` its time; for
+/// `live` a staging directory under `dir`.
 fn usd_args(subcommand: &str, dir: &Path) -> Vec<String> {
     let args: Vec<&str> = match subcommand {
         "backtest" => vec![
@@ -506,21 +500,8 @@ fn usd_args(subcommand: &str, dir: &Path) -> Vec<String> {
             "--balance",
             "10000000 USD",
         ],
-        "train" => vec![
-            "--at",
-            "2026-07-21T05:00:00Z",
-            "--commission-rate",
-            "0.00003",
-            "--balance",
-            "10000000 USD",
-        ],
-        "live" => vec![
-            "--retrain-commission-rate",
-            "0.00003",
-            "--retrain-balance",
-            "10000000 USD",
-            "--staging",
-        ],
+        "train" => vec!["--at", "2026-07-21T05:00:00Z"],
+        "live" => vec!["--staging"],
         _ => unreachable!("{subcommand}"),
     };
     let staging = (subcommand == "live").then(|| dir.join("staging").display().to_string());
@@ -552,7 +533,7 @@ fn a_missing_catalog_is_refused_with_an_error_not_a_panic() {
 /// A live node of a model strategy on a catalog without IC's gold, which
 /// it trades: its models and retrains are built from the catalog, so the
 /// start refuses it before any node is built, naming `--catalog` and the
-/// instrument, not the retrains' balance, which is in its P&L currency.
+/// instrument, not the dataset balance, which is in its P&L currency.
 #[test]
 fn a_live_model_strategy_on_a_catalog_without_its_traded_instrument_is_refused() {
     let dir = tempfile::tempdir().unwrap();
@@ -573,6 +554,6 @@ fn a_live_model_strategy_on_a_catalog_without_its_traded_instrument_is_refused()
         stderr.contains("--catalog") && stderr.contains(ic::INSTRUMENT_ID),
         "{stderr}"
     );
-    assert!(!stderr.contains("--retrain-balance"), "{stderr}");
+    assert!(!stderr.contains("dataset balance"), "{stderr}");
     assert!(!dir.path().join("staging").exists());
 }
