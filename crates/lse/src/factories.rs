@@ -35,7 +35,8 @@ impl DataClientFactory for LseDataClientFactory {
     /// # Errors
     ///
     /// Returns an error if `config` is not an `LseDataClientConfig`, if no
-    /// key is given or in `LSE_API_KEY` or `LSE_CME_API_KEY`, or if an HTTP
+    /// key is given or in `LSE_API_KEY`, `LSE_CME_API_KEY` or
+    /// `LSE_NASDAQ_API_KEY`, or if an HTTP
     /// client cannot be built.
     fn create(
         &self,

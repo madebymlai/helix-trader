@@ -8,7 +8,7 @@ use nautilus_model::identifiers::InstrumentId;
 
 use crate::common::{
     consts::{
-        CME_LITE_CALLS_PER_MINUTE, CME_STREAM_URL, FREE_CALLS_PER_MINUTE, LSE_HTTP_BASE_URL,
+        EXCHANGE_LITE_CALLS_PER_MINUTE, FREE_CALLS_PER_MINUTE, LSE_HTTP_BASE_URL, LseExchange,
         LseSocket,
     },
     credential::LseProduct,
@@ -25,6 +25,9 @@ pub struct LseDataClientConfig {
     /// A CME Group plan's key, for CME Globex; the one in
     /// `LSE_CME_API_KEY` if none, read when the client is created.
     pub cme_api_key: Option<SecretString>,
+    /// A Nasdaq plan's key, for Nasdaq TotalView; the one in
+    /// `LSE_NASDAQ_API_KEY` if none, read when the client is created.
+    pub nasdaq_api_key: Option<SecretString>,
     /// LSE's REST API; LSE's own if none.
     pub base_url_http: Option<String>,
     /// LSE's data-ws; LSE's own if none.
@@ -35,6 +38,8 @@ pub struct LseDataClientConfig {
     pub base_url_ws_tsx: Option<String>,
     /// LSE's CME Globex stream; LSE's own if none.
     pub base_url_ws_cme: Option<String>,
+    /// LSE's Nasdaq TotalView stream; LSE's own if none.
+    pub base_url_ws_nasdaq: Option<String>,
     /// The calls a minute the client keeps within on the LSE key: the free
     /// plan's, the fewest of any plan, unless the key's plan allows more
     /// (LSE's `/v3/usage`, `calls_per_minute`).
@@ -43,14 +48,21 @@ pub struct LseDataClientConfig {
     /// The calls a minute the client keeps within on the CME key: CME
     /// Group Lite's, the fewest of its plans, unless the key's plan allows
     /// more. Each key counts its own calls.
-    #[builder(default = CME_LITE_CALLS_PER_MINUTE)]
+    #[builder(default = EXCHANGE_LITE_CALLS_PER_MINUTE)]
     pub cme_calls_per_minute: NonZeroU32,
+    /// The calls a minute the client keeps within on the Nasdaq key:
+    /// Nasdaq Lite's, the fewest of its plans, unless the key's plan allows
+    /// more.
+    #[builder(default = EXCHANGE_LITE_CALLS_PER_MINUTE)]
+    pub nasdaq_calls_per_minute: NonZeroU32,
     /// The instruments the client streams, on a live node: `connect` opens
     /// the socket each one's market streams on, authenticates the key, and
     /// fails unless each socket lists its instruments and allows them all
     /// on its one connection; for `GLBX` contracts, LSE's CME stream, with
     /// the CME key, subscribing them all, and fails with LSE's refusal of
-    /// the subscription. None on a fill's node, which opens no socket.
+    /// the subscription; and for `XNAS` stocks, LSE's Nasdaq TotalView
+    /// stream, with the Nasdaq key, alike. None on a fill's node, which
+    /// opens no socket.
     #[builder(default)]
     pub stream_ids: Vec<InstrumentId>,
 }
@@ -79,9 +91,14 @@ impl LseDataClientConfig {
         url.as_deref().unwrap_or(socket.url())
     }
 
-    /// The address of LSE's CME Globex stream: the override, or LSE's own.
-    pub(crate) fn cme_stream_url(&self) -> &str {
-        self.base_url_ws_cme.as_deref().unwrap_or(CME_STREAM_URL)
+    /// The address of the stream of `exchange`'s market: the override, or
+    /// LSE's own.
+    pub(crate) fn exchange_stream_url(&self, exchange: LseExchange) -> &str {
+        let url = match exchange {
+            LseExchange::Cme => &self.base_url_ws_cme,
+            LseExchange::Nasdaq => &self.base_url_ws_nasdaq,
+        };
+        url.as_deref().unwrap_or(exchange.stream_url())
     }
 
     /// The key of `product` the config gives, if it gives one.
@@ -89,6 +106,7 @@ impl LseDataClientConfig {
         match product {
             LseProduct::Global => self.api_key.clone(),
             LseProduct::Cme => self.cme_api_key.clone(),
+            LseProduct::Nasdaq => self.nasdaq_api_key.clone(),
         }
     }
 
@@ -97,6 +115,7 @@ impl LseDataClientConfig {
         match product {
             LseProduct::Global => self.calls_per_minute,
             LseProduct::Cme => self.cme_calls_per_minute,
+            LseProduct::Nasdaq => self.nasdaq_calls_per_minute,
         }
     }
 }
@@ -151,19 +170,31 @@ mod tests {
         );
     }
 
-    /// LSE's address, as its socket documentation gives it ("The CME Group
-    /// stream").
+    /// LSE's addresses, as its socket documentation gives them ("The CME
+    /// Group stream").
     #[test]
-    fn the_cme_stream_is_lse_s_own_unless_told_otherwise() {
+    fn each_exchange_s_stream_is_lse_s_own_unless_told_otherwise() {
         let mock = LseDataClientConfig::builder()
-            .base_url_ws_cme("ws://127.0.0.1:9/v1/stream".to_string())
+            .base_url_ws_nasdaq("ws://127.0.0.1:9/v1/stream".to_string())
             .build();
+        let own = LseDataClientConfig::default();
 
         assert_eq!(
-            LseDataClientConfig::default().cme_stream_url(),
-            "wss://cme.londonstrategicedge.com/v1/stream"
+            [LseExchange::Cme, LseExchange::Nasdaq]
+                .map(|exchange| own.exchange_stream_url(exchange)),
+            [
+                "wss://cme.londonstrategicedge.com/v1/stream",
+                "wss://nasdaq.londonstrategicedge.com/v1/stream",
+            ]
         );
-        assert_eq!(mock.cme_stream_url(), "ws://127.0.0.1:9/v1/stream");
+        assert_eq!(
+            [LseExchange::Cme, LseExchange::Nasdaq]
+                .map(|exchange| mock.exchange_stream_url(exchange)),
+            [
+                "wss://cme.londonstrategicedge.com/v1/stream",
+                "ws://127.0.0.1:9/v1/stream",
+            ]
+        );
     }
 
     #[test]
@@ -172,10 +203,15 @@ mod tests {
     }
 
     #[test]
-    fn cme_group_lite_s_200_calls_a_minute_on_the_cme_key_unless_told_otherwise() {
+    fn each_exchange_plan_s_lite_200_calls_a_minute_on_its_key_unless_told_otherwise() {
+        let config = LseDataClientConfig::default();
+
         assert_eq!(
-            LseDataClientConfig::default().cme_calls_per_minute.get(),
-            200
+            (
+                config.cme_calls_per_minute.get(),
+                config.nasdaq_calls_per_minute.get()
+            ),
+            (200, 200)
         );
     }
 
@@ -184,10 +220,12 @@ mod tests {
         let config = LseDataClientConfig::builder()
             .api_key(SecretString::from("lse-test-key-0123456789"))
             .cme_api_key(SecretString::from("lse-cme-test-key-0123456789"))
+            .nasdaq_api_key(SecretString::from("lse-nasdaq-test-key-0123456789"))
             .build();
 
         let debug = format!("{config:?}");
         assert!(!debug.contains("lse-test-key-0123456789"), "{debug}");
         assert!(!debug.contains("lse-cme-test-key-0123456789"), "{debug}");
+        assert!(!debug.contains("lse-nasdaq-test-key-0123456789"), "{debug}");
     }
 }

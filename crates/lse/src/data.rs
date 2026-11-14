@@ -7,7 +7,9 @@
 //! contract's trades and quotes, CME Globex's Level 1, its book depth, ten
 //! levels a side, Level 2, and its book deltas, Level 3, by the number of
 //! its listing, looked up once in LSE's catalogue (see `http::listing`),
-//! with the CME key; and an `OPRA` contract's trades, its tick slices, and
+//! with the CME key; an `XNAS` stock's, Nasdaq TotalView's Levels 1 to 3
+//! alike, by its ticker, with the Nasdaq key; and an `OPRA` contract's
+//! trades, its tick slices, and
 //! bars, its candles, as an `LSEDGE` series', by its OSI symbol, in LSE's
 //! US options, with the LSE key. An `LSEDGE` series' or an `OPRA`
 //! contract's quotes are asked too, and LSE refuses them, serving their
@@ -26,9 +28,11 @@
 //! alone. Live, it streams the quotes of the `LSEDGE` series
 //! its config names, on their sockets, the trades of its `OPRA` contracts,
 //! through one subscription of each underlying's chain on data-ws, and, of
-//! its `GLBX` contracts, the quotes and trades, CME Globex's Level 1, the
-//! book depth, Level 2, and the book deltas, Level 3, on LSE's CME stream
-//! with the CME key, a connection a level (see `streams` and `cme`). Every
+//! its `GLBX` contracts and `XNAS` stocks, the quotes and trades, Level 1,
+//! the book depth, Level 2, and the book deltas, Level 3, on LSE's CME
+//! stream with the CME key and on its Nasdaq stream with the Nasdaq key,
+//! which speak one protocol, a connection a level (see `streams` and
+//! `exchange`). Every
 //! other request and subscription is left to Nautilus' defaults: a request
 //! fails as unsupported, a subscription is logged as not implemented. A
 //! request is answered from a task, in one completed response envelope, the
@@ -42,9 +46,9 @@
 //! for catalog write-back"), as Nautilus' OKX client answers a window it
 //! cannot confirm, so that a fill asks for it again; the span is logged.
 
-mod cme;
 #[cfg(test)]
 mod data_tester;
+mod exchange;
 mod streams;
 
 use std::{collections::HashMap, future::Future, num::NonZeroUsize, sync::Arc};
@@ -81,10 +85,10 @@ use nautilus_model::{
     instruments::Instrument,
 };
 
-use self::{cme::CmeAccess, streams::LseStreams};
+use self::{exchange::ExchangeAccess, streams::LseStreams};
 use crate::{
     common::{
-        consts::CME_MARKET,
+        consts::{CME_MARKET, LseExchange},
         credential::{LseCredential, LseProduct},
         symbol::LseInstrument,
     },
@@ -133,7 +137,8 @@ pub(crate) struct LseDataClient {
 impl LseDataClient {
     /// The client `client_id` on the keys, API and sockets of `config`,
     /// each key given or, if none is, read by `var` from its variable,
-    /// `LSE_API_KEY` and `LSE_CME_API_KEY`, streaming the instruments it
+    /// `LSE_API_KEY`, `LSE_CME_API_KEY` and `LSE_NASDAQ_API_KEY`, streaming
+    /// the instruments it
     /// names on the LSE key; not connected.
     ///
     /// # Errors
@@ -181,14 +186,18 @@ impl LseDataClient {
         let data_sender = get_data_event_sender();
         let clock = get_atomic_clock_realtime();
         let listings = Arc::<CmeListings>::default();
-        let cme = credentials
-            .remove(&LseProduct::Cme)
-            .zip(http.get(&LseProduct::Cme).cloned())
-            .map(|(credential, http)| CmeAccess { credential, http });
+        let mut access = |exchange: LseExchange| {
+            let product = exchange.product();
+            credentials
+                .remove(&product)
+                .zip(http.get(&product).cloned())
+                .map(|(credential, http)| ExchangeAccess { credential, http })
+        };
+        let exchanges = (access(LseExchange::Cme), access(LseExchange::Nasdaq));
         let streams = LseStreams::new(
             config,
             credentials.remove(&LseProduct::Global),
-            cme,
+            exchanges,
             Arc::clone(&listings),
             data_sender.clone(),
             clock,
@@ -265,8 +274,8 @@ impl LseDataClient {
     /// them at the precisions of `id`'s definition (see `answer_export`),
     /// the export asked of the instrument's market with its product's key:
     /// a derived series' by its symbol, a CME contract's by its listing's
-    /// number, looked up first (see `http::listing`), a US option's by its
-    /// OSI symbol. A failure is the envelope's, with no rows: an instrument
+    /// number, looked up first (see `http::listing`), a Nasdaq stock's by
+    /// its ticker, a US option's by its OSI symbol. A failure is the envelope's, with no rows: an instrument
     /// LSE does not serve, one whose rows `select` refuses, no key of its
     /// product, no definition in the cache or no start, before LSE is
     /// asked; LSE's refusal of the lookup, or as `answer_export`.
@@ -308,6 +317,7 @@ impl LseDataClient {
                     let pair_id = listings.pair_id(&lookup, &contract).await?;
                     ExportQuery::listing(CME_MARKET, pair_id, rows, start, to)
                 }
+                LseInstrument::Nasdaq(stock) => ExportQuery::stock(&stock, rows, start, to),
                 LseInstrument::Opra(contract) => ExportQuery::option(&contract, rows, start, to),
             }))
         };
@@ -485,8 +495,9 @@ impl DataClient for LseDataClient {
 
     /// Streams the quotes of each instrument, of those it streams, at the
     /// precision of its definition in the cache: an `LSEDGE` series' bid
-    /// and ask with no sizes, a `GLBX` contract's best bid and offer with
-    /// LSE's sizes, opening with its latest (see `LseStreams`).
+    /// and ask with no sizes, a `GLBX` contract's or an `XNAS` stock's best
+    /// bid and offer with LSE's sizes, opening with its latest (see
+    /// `LseStreams`).
     ///
     /// # Errors
     ///
@@ -511,15 +522,16 @@ impl DataClient for LseDataClient {
 
     /// Streams the trades of each instrument, of those it streams, at the
     /// precision of its definition in the cache, with no aggressor side: a
-    /// `GLBX` contract's on LSE's CME stream, an `OPRA` contract's through
+    /// `GLBX` contract's on LSE's CME stream, an `XNAS` stock's on its
+    /// Nasdaq stream, an `OPRA` contract's through
     /// one subscription of its underlying's chain, every listed contract of
     /// the underlying (see `LseStreams`).
     ///
     /// # Errors
     ///
-    /// Returns an error naming an instrument that is neither, LSE's sockets
-    /// streaming a series' ticks as quotes, that it does not stream, or that
-    /// the cache does not define.
+    /// Returns an error naming an instrument that is none of them, LSE's
+    /// sockets streaming a series' ticks as quotes, that it does not stream,
+    /// or that the cache does not define.
     fn subscribe_trades(&mut self, cmd: SubscribeTrades) -> anyhow::Result<()> {
         execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
             self.streams.subscribe_trades(id, &self.cache)
@@ -532,17 +544,17 @@ impl DataClient for LseDataClient {
     /// # Errors
     ///
     /// Returns an error naming an instrument that is neither a `GLBX` nor an
-    /// `OPRA` contract, or that it does not stream.
+    /// `OPRA` contract nor an `XNAS` stock, or that it does not stream.
     fn unsubscribe_trades(&mut self, cmd: &UnsubscribeTrades) -> anyhow::Result<()> {
         execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
             self.streams.unsubscribe_trades(id)
         })
     }
 
-    /// Streams the book depth of each instrument, a `GLBX` contract's ten
-    /// levels a side, at the price precision of its definition in the
-    /// cache, from LSE's CME stream at Level 2, opening with its last ten
-    /// levels (see `LseStreams`). The first depth subscription opens the
+    /// Streams the book depth of each instrument, a `GLBX` contract's or an
+    /// `XNAS` stock's ten levels a side, at the price precision of its
+    /// definition in the cache, from its exchange's stream at Level 2,
+    /// opening with its last ten levels (see `LseStreams`). The first depth subscription opens the
     /// level's connection; LSE's refusal of it, such as of a key whose plan
     /// lacks Level 2, is logged as an error.
     ///
@@ -550,12 +562,13 @@ impl DataClient for LseDataClient {
     ///
     /// Returns an error naming it if the depth asked is not ten, the levels
     /// LSE streams, as Nautilus' Databento client serves MBP-10's alone, or
-    /// naming an instrument that is no `GLBX` contract, that the client does
-    /// not stream, or that the cache does not define.
+    /// naming an instrument that is neither, that the client does not
+    /// stream, or that the cache does not define.
     fn subscribe_book_depth(&mut self, cmd: SubscribeBookDepth) -> anyhow::Result<()> {
         if let Some(depth) = cmd.depth.filter(|depth| depth.get() != DEPTH10_LEN) {
             bail!(
-                "{}: LSE's CME stream holds ten levels a side at Level 2, not a depth of {depth}",
+                "{}: LSE's exchange streams hold ten levels a side at Level 2, not a depth of \
+                 {depth}",
                 cmd.instrument_ids
                     .iter()
                     .map(ToString::to_string)
@@ -572,17 +585,18 @@ impl DataClient for LseDataClient {
     ///
     /// # Errors
     ///
-    /// Returns an error naming an instrument that is no `GLBX` contract, or
-    /// that is not subscribed.
+    /// Returns an error naming an instrument that is neither a `GLBX`
+    /// contract nor an `XNAS` stock, or that is not subscribed.
     fn unsubscribe_book_depth(&mut self, cmd: &UnsubscribeBookDepth) -> anyhow::Result<()> {
         execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
             self.streams.unsubscribe_book_depth(id)
         })
     }
 
-    /// Streams the book deltas of each instrument, a `GLBX` contract's
-    /// order events, at the price precision of its definition in the cache,
-    /// from LSE's CME stream at Level 3, which opens with no book, so its
+    /// Streams the book deltas of each instrument, a `GLBX` contract's or an
+    /// `XNAS` stock's order events, at the price precision of its definition
+    /// in the cache, from its exchange's stream at Level 3, which opens with
+    /// no book, so its
     /// deltas start at its first order event, each exchange message's
     /// ending `F_LAST` (see `LseStreams`). The first deltas subscription
     /// opens the level's connection; LSE's refusal of it, such as of a key
@@ -592,8 +606,9 @@ impl DataClient for LseDataClient {
     ///
     /// # Errors
     ///
-    /// Returns an error naming an instrument that is no `GLBX` contract,
-    /// that the client does not stream, or that the cache does not define.
+    /// Returns an error naming an instrument that is neither a `GLBX`
+    /// contract nor an `XNAS` stock, that the client does not stream, or that
+    /// the cache does not define.
     fn subscribe_book_deltas(&mut self, cmd: SubscribeBookDeltas) -> anyhow::Result<()> {
         execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
             self.streams.subscribe_book_deltas(id, &self.cache)
@@ -604,8 +619,8 @@ impl DataClient for LseDataClient {
     ///
     /// # Errors
     ///
-    /// Returns an error naming an instrument that is no `GLBX` contract, or
-    /// that is not subscribed.
+    /// Returns an error naming an instrument that is neither a `GLBX`
+    /// contract nor an `XNAS` stock, or that is not subscribed.
     fn unsubscribe_book_deltas(&mut self, cmd: &UnsubscribeBookDeltas) -> anyhow::Result<()> {
         execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
             self.streams.unsubscribe_book_deltas(id)
@@ -633,8 +648,8 @@ impl DataClient for LseDataClient {
 
     /// Answers with the trades over `[start, end]` (end: now if none), the
     /// newest `limit` if one is given (see `answer_rows`): an `LSEDGE`
-    /// series' or an `OPRA` contract's tick slices, a `GLBX` contract's
-    /// trades, each with no aggressor side, LSE sending none. An index's
+    /// series' or an `OPRA` contract's tick slices, a `GLBX` contract's or an
+    /// `XNAS` stock's trades, each with no aggressor side, LSE sending none. An index's
     /// fail naming it before LSE is asked: an index has no trades, its
     /// ticks being its values, served as quotes.
     ///
@@ -662,7 +677,9 @@ impl DataClient for LseDataClient {
                 LseInstrument::Series(_) | LseInstrument::Opra(_) => {
                     Ok((Rows::TradeSlice, parse_trade_slice))
                 }
-                LseInstrument::Cme(_) => Ok((Rows::Trades, parse_trade_slice)),
+                LseInstrument::Cme(_) | LseInstrument::Nasdaq(_) => {
+                    Ok((Rows::Trades, parse_trade_slice))
+                }
             },
             move |trades, ts_init| {
                 DataResponse::Trades(TradesResponse::new(
@@ -675,7 +692,8 @@ impl DataClient for LseDataClient {
 
     /// Answers with the quotes over `[start, end]` (end: now if none), the
     /// newest `limit` if one is given (see `answer_rows`), with the sizes
-    /// LSE sends: a `GLBX` contract's, CME Globex's best bid and offer. LSE
+    /// LSE sends: a `GLBX` contract's or an `XNAS` stock's best bid and
+    /// offer, CME Globex's or Nasdaq TotalView's. LSE
     /// refuses an `LSEDGE` series' and an `OPRA` contract's (`400
     /// data-unavailable`), serving their past as timeframes alone, but for
     /// an index, whose quotes are the values of its tick slice, each a quote
@@ -717,7 +735,8 @@ impl DataClient for LseDataClient {
 
     /// Answers with the depth snapshots over `[start, end]` (end: now if
     /// none), the newest `limit` if one is given (see `answer_rows`), ten
-    /// levels a side: a `GLBX` contract's book, CME Globex's Level 2, each
+    /// levels a side: a `GLBX` contract's or an `XNAS` stock's book, CME
+    /// Globex's or Nasdaq TotalView's Level 2, each
     /// row of it the book after its event, the last of each time ending
     /// the event (`http::parse::parse_book`), asked a UTC hour an export. A
     /// depth other than ten, the levels of LSE's book, fails naming it
@@ -760,7 +779,8 @@ impl DataClient for LseDataClient {
 
     /// Answers with the book deltas over `[start, end]` (end: now if none),
     /// the newest `limit` if one is given (see `answer_rows`): a `GLBX`
-    /// contract's orders, CME Globex's Level 3, each order added, changed or
+    /// contract's or an `XNAS` stock's orders, CME Globex's or Nasdaq
+    /// TotalView's Level 3, each order added, changed or
     /// removed a delta, the last of each time ending the event
     /// (`http::parse::parse_orders`), asked a UTC hour an export. LSE
     /// refuses a key whose plan does not sell Level 3 (`level-required`)
@@ -940,6 +960,10 @@ impl DataClient for LseDataClient {
                     "{bar_type}: the client asks LSE for the candles of LSEDGE series and OPRA \
                      contracts, not of {contract}"
                 ),
+                LseInstrument::Nasdaq(stock) => bail!(
+                    "{bar_type}: the client asks LSE for the candles of LSEDGE series and OPRA \
+                     contracts, not of {stock}, a Nasdaq TotalView stock"
+                ),
             };
             let precisions = self.precisions(id)?;
             let http = self.http(LseProduct::Global)?;
@@ -1004,7 +1028,7 @@ mod tests {
         data::{
             BarType, CustomData, CustomDataTrait, Data, DataType, HasTsInit, QuoteTick, TradeTick,
         },
-        enums::{AggressorSide, BookAction},
+        enums::{AggressorSide, BookAction, RecordFlag},
         identifiers::{InstrumentId, Symbol},
         instruments::{IndexInstrument, InstrumentAny},
         types::{Currency, Price, Quantity},
@@ -1023,12 +1047,13 @@ mod tests {
             DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING, EXPORT_TOO_WIDE, GCZ26, GCZ26_BOOK,
             GCZ26_ORDERS, GCZ26_QUOTES, GCZ26_TRADES, GOLD_FACTORS, GOLD_FUTURES, GOLD_FUTURES_4H,
             GOLD_SPOT_MINUTES, GOLD_TRADES, HISTORY_LIMIT, LEVEL_REQUIRED_BOOK,
-            LEVEL_REQUIRED_ORDERS, MockLse, MockLseSocket, PAIRS_GCZ6, PLAN_REQUIRED,
+            LEVEL_REQUIRED_ORDERS, MockLse, MockLseSocket, NASDAQ_API_KEY, NVDA, NVDA_BOOK,
+            NVDA_ORDERS, NVDA_QUOTES, NVDA_TRADES, PAIRS_GCZ6, PLAN_REQUIRED, PLAN_REQUIRED_NASDAQ,
             REFERENCE_CATALOGUE, REFERENCE_DATA_UNAVAILABLE, Reply, SPX_TICKS, SYMBOL_UNKNOWN,
             TEAM_INSIDER_TRADES, US_CORE_CPI_CALENDAR, US_CORE_CPI_RELEASES, US10Y_BOND_YIELDS,
             US10Y_BOND_YIELDS_MINUTE, US10Y_YIELDS, WS_AUTHENTICATED_DATA, WS_AUTHENTICATED_LONDON,
             WS_AUTHENTICATED_TSX, WS_TICKS_DATA, WS_TICKS_LONDON, WS_TICKS_TSX, ZN_COT, aapl_call,
-            aapl_put_2027, data_ws_answer, gcz26, gold_futures, gold_spot, socket_answer,
+            aapl_put_2027, data_ws_answer, gcz26, gold_futures, gold_spot, nvda, socket_answer,
         },
     };
 
@@ -1615,18 +1640,21 @@ mod tests {
         assert_eq!(subscribed(&tsx), ["NVDA.TO"]);
     }
 
-    /// A config of the client on `lse` with both keys, calls unthrottled.
+    /// A config of the client on `lse` with every key, calls unthrottled.
     fn config(lse: &MockLse) -> LseDataClientConfig {
         LseDataClientConfig {
             api_key: Some(SecretString::from(API_KEY)),
             cme_api_key: Some(SecretString::from(CME_API_KEY)),
+            nasdaq_api_key: Some(SecretString::from(NASDAQ_API_KEY)),
             base_url_http: Some(lse.url().to_string()),
             base_url_ws_data: None,
             base_url_ws_london: None,
             base_url_ws_tsx: None,
             base_url_ws_cme: None,
+            base_url_ws_nasdaq: None,
             calls_per_minute: NonZeroU32::new(6000).unwrap(),
             cme_calls_per_minute: NonZeroU32::new(6000).unwrap(),
+            nasdaq_calls_per_minute: NonZeroU32::new(6000).unwrap(),
             stream_ids: vec![],
         }
     }
@@ -3074,22 +3102,31 @@ mod tests {
         );
     }
 
+    /// A request of an instrument's rows over a window, as the data engine
+    /// makes one.
+    type WindowRequest<R> = fn(
+        InstrumentId,
+        Option<Timestamp>,
+        Option<Timestamp>,
+        Option<std::num::NonZeroUsize>,
+        Option<ClientId>,
+        UUID4,
+        UnixNanos,
+        Option<nautilus_core::Params>,
+    ) -> R;
+
     /// The captured second of GCZ6 of 2026, as the data engine asks for a
     /// window, naming no client.
-    fn gcz26_second<R>(
-        request: impl FnOnce(
-            InstrumentId,
-            Option<Timestamp>,
-            Option<Timestamp>,
-            Option<std::num::NonZeroUsize>,
-            Option<ClientId>,
-            UUID4,
-            UnixNanos,
-            Option<nautilus_core::Params>,
-        ) -> R,
-    ) -> R {
+    fn gcz26_second<R>(request: WindowRequest<R>) -> R {
+        second_of(GCZ26, request)
+    }
+
+    /// `id`'s rows over the captured second of GCZ6 of 2026, `[14:30:00,
+    /// 14:30:01)` of 12 November 2026, as the data engine asks for a
+    /// window, naming no client.
+    fn second_of<R>(id: &str, request: WindowRequest<R>) -> R {
         request(
-            InstrumentId::from(GCZ26),
+            InstrumentId::from(id),
             Some(at("2026-11-12T14:30:00Z")),
             Some(at("2026-11-12T14:30:00.999999999Z")),
             None,
@@ -3271,11 +3308,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_client_with_no_key_at_all_is_not_created_naming_both_variables() {
+    async fn a_client_with_no_key_at_all_is_not_created_naming_every_variable() {
         let lse = MockLse::start(vec![]);
         let config = LseDataClientConfig {
             api_key: None,
             cme_api_key: None,
+            nasdaq_api_key: None,
             ..config(&lse)
         };
 
@@ -3283,10 +3321,9 @@ mod tests {
             .unwrap_err()
             .to_string();
 
-        assert!(
-            err.contains("LSE_API_KEY") && err.contains("LSE_CME_API_KEY"),
-            "{err}"
-        );
+        for variable in ["LSE_API_KEY", "LSE_CME_API_KEY", "LSE_NASDAQ_API_KEY"] {
+            assert!(err.contains(variable), "{variable}: {err}");
+        }
     }
 
     /// The book depth of GCZ6 of 2026 over `[from, to]`, `depth` levels a
@@ -3825,5 +3862,341 @@ mod tests {
             )]
         );
         assert_eq!(markets(&lse), [Some("us_options".to_string())]);
+    }
+
+    /// The client with NVDA's definition, as Databento gives it, in its
+    /// cache.
+    async fn defining_nvda(lse: &MockLse) -> (Box<dyn DataClient>, Events) {
+        connected_with(config(lse), vec![nvda()]).await
+    }
+
+    /// 12 November 2026 at `time`, UTC.
+    fn on_the_12th(time: &str) -> UnixNanos {
+        UnixNanos::from(at(&format!("2026-11-12T{time}Z")))
+    }
+
+    /// NVDA's trades over the second, as LSE's docs record a paid market's
+    /// trades (`test_data/README.md`): asked of LSE's `nasdaq` by NVDA's
+    /// ticker with the Nasdaq key, no catalogue lookup between, a ticker
+    /// naming its stock; four trades at a cent, in shares, with no aggressor
+    /// side, the two alike told apart by their ids.
+    #[tokio::test]
+    async fn an_xnas_stock_s_trades_are_asked_of_lse_s_nasdaq_by_its_ticker_with_the_nasdaq_key() {
+        let lse = MockLse::start(vec![Reply::file(NVDA_TRADES)]);
+        let (client, mut events) = defining_nvda(&lse).await;
+
+        client
+            .request_trades(second_of(NVDA, RequestTrades::new))
+            .unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        assert_eq!(envelope.failure_reason(), None);
+        let response = trades_of(&envelope);
+        let trades: Vec<_> = response
+            .data
+            .iter()
+            .map(|trade| {
+                (
+                    trade.instrument_id,
+                    trade.ts_event,
+                    trade.price,
+                    trade.size,
+                    trade.aggressor_side,
+                )
+            })
+            .collect();
+        let trade = |time: &str, price: &str, size: u64| {
+            (
+                InstrumentId::from(NVDA),
+                on_the_12th(time),
+                Price::from(price),
+                Quantity::from(size),
+                AggressorSide::NoAggressor,
+            )
+        };
+        assert_eq!(
+            trades,
+            [
+                trade("14:30:00.001418191", "211.15", 100),
+                trade("14:30:00.001418191", "211.15", 100),
+                trade("14:30:00.027098067", "211.14", 200),
+                trade("14:30:00.998844133", "211.17", 50),
+            ]
+        );
+        assert_ne!(response.data[0].trade_id, response.data[1].trade_id);
+        assert_eq!(
+            asked(&lse),
+            [call("/v3/export", "NVDA", Some("trades"), NASDAQ_API_KEY)]
+        );
+        assert_eq!(markets(&lse), [Some("nasdaq".to_string())]);
+    }
+
+    /// NVDA's quotes over the second, as LSE's docs record a paid market's
+    /// quotes: its best bid and offer, with the sizes LSE sends, in shares.
+    #[tokio::test]
+    async fn an_xnas_stock_s_quotes_are_its_best_bid_and_offer_with_lse_s_sizes() {
+        let lse = MockLse::start(vec![Reply::file(NVDA_QUOTES)]);
+        let (client, mut events) = defining_nvda(&lse).await;
+
+        client
+            .request_quotes(second_of(NVDA, RequestQuotes::new))
+            .unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        assert_eq!(envelope.failure_reason(), None);
+        let Some(DataResponse::Quotes(response)) = envelope.response() else {
+            panic!("not a quotes response: {:?}", envelope.response());
+        };
+        let quotes: Vec<_> = response
+            .data
+            .iter()
+            .map(|quote| {
+                (
+                    quote.ts_event,
+                    quote.bid_price,
+                    quote.ask_price,
+                    quote.bid_size,
+                    quote.ask_size,
+                )
+            })
+            .collect();
+        let quote = |time: &str, bid: &str, ask: &str, bid_size: u64, ask_size: u64| {
+            (
+                on_the_12th(time),
+                Price::from(bid),
+                Price::from(ask),
+                Quantity::from(bid_size),
+                Quantity::from(ask_size),
+            )
+        };
+        assert_eq!(
+            quotes,
+            [
+                quote("14:30:00.000184205", "211.15", "211.17", 200, 900),
+                quote("14:30:00.001418191", "211.15", "211.17", 100, 900),
+                quote("14:30:00.001444877", "211.13", "211.17", 500, 900),
+                quote("14:30:00.001576125", "211.13", "211.17", 500, 800),
+            ]
+        );
+        assert_eq!(
+            asked(&lse),
+            [call("/v3/export", "NVDA", Some("quotes"), NASDAQ_API_KEY)]
+        );
+    }
+
+    /// NVDA's book over the second, as LSE's docs record a book export:
+    /// four snapshots of ten levels a side, each level with its count of
+    /// orders, the last of eight asks, its last two levels empty; Nasdaq
+    /// TotalView's Level 2, asked by NVDA's ticker with the Nasdaq key.
+    #[tokio::test]
+    async fn an_xnas_stock_s_book_is_its_depth_snapshots_asked_by_its_ticker_with_the_nasdaq_key() {
+        let lse = MockLse::start(vec![Reply::file(NVDA_BOOK)]);
+        let (client, mut events) = defining_nvda(&lse).await;
+        let request = RequestBookDepth::new(
+            InstrumentId::from(NVDA),
+            Some(at("2026-11-12T14:30:00Z")),
+            Some(at("2026-11-12T14:30:00.999999999Z")),
+            None,
+            std::num::NonZeroUsize::new(10),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+        );
+
+        client.request_book_depth(request).unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        assert_eq!(envelope.failure_reason(), None);
+        let Some(DataResponse::BookDepth(response)) = envelope.response() else {
+            panic!("not a book depth response: {:?}", envelope.response());
+        };
+        let depths: Vec<_> = response
+            .data
+            .iter()
+            .map(|depth| {
+                (
+                    depth.ts_event,
+                    (depth.bids[0].price, depth.bids[0].size, depth.bid_counts[0]),
+                    (depth.asks[0].price, depth.asks[0].size, depth.ask_counts[0]),
+                    depth.asks.iter().filter(|ask| ask.side.is_some()).count(),
+                )
+            })
+            .collect();
+        let level = |price: &str, size: u64, orders: u32| {
+            (Price::from(price), Quantity::from(size), orders)
+        };
+        assert_eq!(
+            depths,
+            [
+                (
+                    on_the_12th("14:30:00.000184205"),
+                    level("211.15", 200, 1),
+                    level("211.17", 900, 4),
+                    10
+                ),
+                (
+                    on_the_12th("14:30:00.001418191"),
+                    level("211.15", 100, 1),
+                    level("211.17", 900, 4),
+                    10
+                ),
+                (
+                    on_the_12th("14:30:00.001418191"),
+                    level("211.15", 100, 1),
+                    level("211.17", 1100, 5),
+                    10
+                ),
+                (
+                    on_the_12th("14:30:00.998844133"),
+                    level("211.15", 100, 1),
+                    level("211.17", 1100, 5),
+                    8
+                ),
+            ]
+        );
+        assert_eq!(
+            asked(&lse),
+            [call("/v3/export", "NVDA", Some("book"), NASDAQ_API_KEY)]
+        );
+    }
+
+    /// NVDA's orders over the second, as LSE's docs record an orders
+    /// export: the two orders added at one time, a change of one and the
+    /// removal of the other, each a delta of its order, and an event of no
+    /// action, which gives none, the last of each time ending it; Nasdaq
+    /// TotalView's Level 3, asked by NVDA's ticker with the Nasdaq key.
+    #[tokio::test]
+    async fn an_xnas_stock_s_orders_are_its_book_deltas_asked_by_its_ticker_with_the_nasdaq_key() {
+        let lse = MockLse::start(vec![Reply::file(NVDA_ORDERS)]);
+        let (client, mut events) = defining_nvda(&lse).await;
+
+        client
+            .request_book_deltas(second_of(NVDA, RequestBookDeltas::new))
+            .unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        assert_eq!(envelope.failure_reason(), None);
+        let Some(DataResponse::BookDeltas(response)) = envelope.response() else {
+            panic!("not a book deltas response: {:?}", envelope.response());
+        };
+        let deltas: Vec<_> = response
+            .data
+            .iter()
+            .map(|delta| {
+                (
+                    delta.action,
+                    delta.order.order_id,
+                    delta.order.price,
+                    delta.order.size,
+                    RecordFlag::F_LAST.matches(delta.flags),
+                )
+            })
+            .collect();
+        assert_eq!(
+            deltas,
+            [
+                (
+                    BookAction::Add,
+                    382_910_001,
+                    Price::from("211.15"),
+                    Quantity::from(100),
+                    false
+                ),
+                (
+                    BookAction::Add,
+                    382_910_002,
+                    Price::from("211.17"),
+                    Quantity::from(200),
+                    true
+                ),
+                (
+                    BookAction::Update,
+                    382_910_001,
+                    Price::from("211.15"),
+                    Quantity::from(300),
+                    true
+                ),
+                (
+                    BookAction::Delete,
+                    382_910_002,
+                    Price::from("211.17"),
+                    Quantity::from(200),
+                    true
+                ),
+            ]
+        );
+        assert_eq!(
+            asked(&lse),
+            [call("/v3/export", "NVDA", Some("orders"), NASDAQ_API_KEY)]
+        );
+    }
+
+    /// LSE's refusal of Nasdaq TotalView to the keys helix holds, the free
+    /// key and the CME Group Lite+ key, captured alike.
+    #[tokio::test]
+    async fn lse_s_refusal_of_a_key_of_no_nasdaq_plan_is_the_request_s_failure_naming_nasdaq_lite()
+    {
+        let lse = MockLse::start(vec![Reply::refusal(403, PLAN_REQUIRED_NASDAQ)]);
+        let (client, mut events) = defining_nvda(&lse).await;
+
+        client
+            .request_trades(second_of(NVDA, RequestTrades::new))
+            .unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        assert!(envelope.response().is_none());
+        let reason = envelope.failure_reason().expect("a failure");
+        for part in ["403", "plan-required", "required plan: Nasdaq Lite"] {
+            assert!(reason.contains(part), "{part}: {reason}");
+        }
+    }
+
+    /// The client holds the LSE and CME keys, and the environment none.
+    #[tokio::test]
+    async fn an_xnas_stock_asked_with_no_nasdaq_key_fails_naming_its_variable_unasked() {
+        let lse = MockLse::start(vec![Reply::file(NVDA_TRADES)]);
+        let mut events = events();
+        let config = LseDataClientConfig {
+            nasdaq_api_key: None,
+            ..config(&lse)
+        };
+        let client = LseDataClient::new(
+            ClientId::from("LSE"),
+            &config,
+            cache_of(vec![nvda()]),
+            |_| None,
+        )
+        .unwrap();
+
+        client
+            .request_trades(second_of(NVDA, RequestTrades::new))
+            .unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        let reason = envelope.failure_reason().expect("a failure");
+        assert!(reason.contains("LSE_NASDAQ_API_KEY"), "{reason}");
+        assert!(lse.calls().is_empty(), "{:?}", lse.calls());
+    }
+
+    /// The client serves the bars of LSEDGE series and OPRA contracts alone.
+    #[tokio::test]
+    async fn an_xnas_stock_s_bars_fail_naming_them_unasked() {
+        let lse = MockLse::start(vec![]);
+        let (client, mut events) = defining_nvda(&lse).await;
+        let bar_type = format!("{NVDA}-1-MINUTE-LAST-EXTERNAL");
+
+        client
+            .request_bars(bars(
+                &bar_type,
+                "2026-11-12T14:31:00Z",
+                "2026-11-12T14:35:00Z",
+            ))
+            .unwrap();
+
+        let envelope = next_envelope(&mut events).await;
+        let reason = envelope.failure_reason().expect("a failure");
+        assert!(reason.contains(&bar_type), "{reason}");
+        assert!(lse.calls().is_empty(), "{:?}", lse.calls());
     }
 }

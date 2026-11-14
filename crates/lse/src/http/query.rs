@@ -16,8 +16,8 @@ use nautilus_model::{
 use serde::{Serialize, Serializer, ser::SerializeMap};
 
 use crate::common::{
-    consts::US_OPTIONS_MARKET,
-    symbol::{LseSymbol, OpraContract},
+    consts::{NASDAQ_MARKET, US_OPTIONS_MARKET},
+    symbol::{LseSymbol, NasdaqStock, OpraContract},
 };
 
 /// The candle widths LSE serves below a day, by unit: its letter, and the
@@ -251,6 +251,18 @@ impl ExportQuery {
         Self::new(
             US_OPTIONS_MARKET,
             Selection::Symbol(contract.osi().to_owned()),
+            rows,
+            from,
+            to,
+        )
+    }
+
+    /// The `rows` of the Nasdaq TotalView `stock` over `[from, to)`, as
+    /// Parquet: of LSE's `nasdaq`, by its ticker.
+    pub(crate) fn stock(stock: &NasdaqStock, rows: Rows, from: Timestamp, to: Timestamp) -> Self {
+        Self::new(
+            NASDAQ_MARKET,
+            Selection::Symbol(stock.ticker().to_owned()),
             rows,
             from,
             to,

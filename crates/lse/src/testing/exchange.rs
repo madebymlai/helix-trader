@@ -1,9 +1,11 @@
-//! LSE's CME Globex stream for the tests: its frames, captured with the CME
-//! Group Lite+ key or as LSE's documentation gives them (`test_data/`, see
-//! its `README.md`), and a mock of the stream (`MockCmeStream`): a WebSocket
-//! server on 127.0.0.1 that takes a connection only with the CME key in its
-//! `X-API-Key` header, as LSE does, answers its subscription with what a
-//! script says, and records each subscription and key it receives.
+//! LSE's exchange streams for the tests, CME Globex's and Nasdaq
+//! TotalView's, of one protocol: their frames, captured with the CME Group
+//! Lite+ key or as LSE's documentation gives them (`test_data/`, see its
+//! `README.md`), and a mock of a stream (`MockExchangeStream`): a WebSocket
+//! server on 127.0.0.1 that takes a connection only with the key of the
+//! stream's plan in its `X-API-Key` header, as LSE does, answers its
+//! subscription with what a script says, and records each subscription and
+//! key it receives.
 
 use std::{
     ffi::c_char,
@@ -24,7 +26,7 @@ use tungstenite::{
     protocol::{CloseFrame, frame::coding::CloseCode},
 };
 
-use super::CME_API_KEY;
+use super::{CME_API_KEY, NASDAQ_API_KEY};
 
 /// LSE's CME stream at Level 1 in the `dbn` encoding, captured on 13
 /// November 2026 after CME's Friday close: one connection subscribing GCZ6
@@ -78,9 +80,32 @@ pub const CME_SYMBOL_UNAVAILABLE: &str =
 /// `CME_ESZ6_DOCUMENTED`.
 pub const ESZ26: &str = "ESZ26.GLBX";
 
+/// NVDA's sessions of Nasdaq TotalView at Levels 1, 2 and 3 in the `json`
+/// encoding, built from LSE's WebSocket documentation, which says the
+/// Nasdaq stream "sends the same messages for stocks" as the CME stream,
+/// no key of helix's holding a Nasdaq plan (`test_data/README.md`): each as
+/// GCZ6's or ESZ6's session of its level, NVDA's records at a cent. Level
+/// 1: `hello`, NVDA's opening with its best bid and offer, a change of it
+/// and a trade; Level 2: its opening with its last ten levels a side, then
+/// three changes of its book, the levels after each those of
+/// `NVDA_BOOK`'s rows; Level 3: its opening with no book, then five order
+/// events, the orders of `NVDA_ORDERS`, the last of each exchange message
+/// flagged 128.
+pub const NASDAQ_NVDA_L1_DOCUMENTED: &str =
+    include_str!("../../test_data/nasdaq_stream_nvda_l1_json_documented.txt");
+pub const NASDAQ_NVDA_L2_DOCUMENTED: &str =
+    include_str!("../../test_data/nasdaq_stream_nvda_l2_json_documented.txt");
+pub const NASDAQ_NVDA_L3_DOCUMENTED: &str =
+    include_str!("../../test_data/nasdaq_stream_nvda_l3_json_documented.txt");
+
+/// LSE's answer to a Nasdaq stream connection with a key of no Nasdaq
+/// plan, HTTP 401, captured with the free key and with the CME Group Lite+
+/// key, which LSE answered alike.
+pub const NASDAQ_KEY_UNKNOWN: &str = include_str!("../../test_data/nasdaq_stream_key_unknown.json");
+
 /// A frame of the stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CmeFrame {
+pub enum StreamFrame {
     Text(String),
     Binary(Vec<u8>),
 }
@@ -92,15 +117,15 @@ pub enum CmeFrame {
 ///
 /// Panics on a line that is neither.
 #[must_use]
-pub fn frames(captured: &str) -> Vec<CmeFrame> {
+pub fn frames(captured: &str) -> Vec<StreamFrame> {
     captured
         .lines()
         .filter(|line| !line.is_empty())
         .map(|line| {
             if line.starts_with('{') {
-                CmeFrame::Text(line.to_string())
+                StreamFrame::Text(line.to_string())
             } else {
-                CmeFrame::Binary(
+                StreamFrame::Binary(
                     (0..line.len())
                         .step_by(2)
                         .map(|at| u8::from_str_radix(&line[at..at + 2], 16).expect("hex"))
@@ -122,7 +147,7 @@ pub fn frames(captured: &str) -> Vec<CmeFrame> {
 /// Panics on a message that is not JSON, or a record `dbn_frame` cannot
 /// write.
 #[must_use]
-pub fn dbn_frames(json_encoded: &str) -> Vec<CmeFrame> {
+pub fn dbn_frames(json_encoded: &str) -> Vec<StreamFrame> {
     json_encoded
         .lines()
         .filter(|line| !line.is_empty())
@@ -131,12 +156,12 @@ pub fn dbn_frames(json_encoded: &str) -> Vec<CmeFrame> {
             match message["type"].as_str() {
                 Some("hello") => {
                     message["encoding"] = Value::from("dbn");
-                    CmeFrame::Text(message.to_string())
+                    StreamFrame::Text(message.to_string())
                 }
                 Some("snapshot_book" | "mbp1" | "mbp10" | "mbo") => {
-                    CmeFrame::Binary(dbn_frame(line))
+                    StreamFrame::Binary(dbn_frame(line))
                 }
-                _ => CmeFrame::Text(line.to_string()),
+                _ => StreamFrame::Text(line.to_string()),
             }
         })
         .collect()
@@ -275,13 +300,13 @@ fn level(level: &Value) -> BidAskPair {
 
 /// What the mock stream does after a connection's subscription.
 #[derive(Debug, Clone)]
-pub enum CmeAction {
+pub enum StreamAction {
     /// Sends this frame.
-    Send(CmeFrame),
+    Send(StreamFrame),
     /// Closes the connection with this code and reason.
     Close(u16, String),
     /// Sends nothing more until the test releases the stream
-    /// (`MockCmeStream::release`).
+    /// (`MockExchangeStream::release`).
     Hold,
 }
 
@@ -295,25 +320,49 @@ type Received = Arc<Mutex<Vec<(usize, Value)>>>;
 /// The mock stream: its address, the frames it received and the key of
 /// each connection that offered one.
 #[derive(Debug)]
-pub struct MockCmeStream {
+pub struct MockExchangeStream {
     url: String,
     received: Received,
     keys: Arc<Mutex<Vec<Option<String>>>>,
     released: Released,
 }
 
-impl MockCmeStream {
-    /// Starts a stream answering each connection's subscription with
-    /// `script` of the connection's number and the subscription, each
-    /// connection on its own thread. A connection without `CME_API_KEY` in
-    /// its `X-API-Key` header is refused with LSE's 401 (`CME_KEY_UNKNOWN`),
-    /// as LSE refuses a key that is not a CME Group key.
+impl MockExchangeStream {
+    /// LSE's CME stream answering each connection's subscription with
+    /// `script` (see `start`), taking `CME_API_KEY` and refusing any other
+    /// key with LSE's 401 (`CME_KEY_UNKNOWN`), as LSE refuses a key that is
+    /// not a CME Group key.
     ///
     /// # Panics
     ///
     /// Panics if no port of 127.0.0.1 is free.
     #[must_use]
-    pub fn start(script: impl FnMut(usize, &Value) -> Vec<CmeAction> + Send + 'static) -> Self {
+    pub fn cme(script: impl FnMut(usize, &Value) -> Vec<StreamAction> + Send + 'static) -> Self {
+        Self::start(CME_API_KEY, CME_KEY_UNKNOWN, script)
+    }
+
+    /// LSE's Nasdaq stream answering each connection's subscription with
+    /// `script` (see `start`), taking `NASDAQ_API_KEY` and refusing any
+    /// other key with LSE's 401 (`NASDAQ_KEY_UNKNOWN`), as LSE refuses a key
+    /// of no Nasdaq plan.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no port of 127.0.0.1 is free.
+    #[must_use]
+    pub fn nasdaq(script: impl FnMut(usize, &Value) -> Vec<StreamAction> + Send + 'static) -> Self {
+        Self::start(NASDAQ_API_KEY, NASDAQ_KEY_UNKNOWN, script)
+    }
+
+    /// Starts a stream answering each connection's subscription with
+    /// `script` of the connection's number and the subscription, each
+    /// connection on its own thread. A connection without `api_key` in its
+    /// `X-API-Key` header is refused with HTTP 401 and `refusal`, LSE's.
+    fn start(
+        api_key: &'static str,
+        refusal: &'static str,
+        script: impl FnMut(usize, &Value) -> Vec<StreamAction> + Send + 'static,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("a free port");
         let url = format!(
             "ws://{}/v1/stream",
@@ -349,14 +398,14 @@ impl MockCmeStream {
                             .get("x-api-key")
                             .and_then(|key| key.to_str().ok())
                             .map(ToString::to_string);
-                        let known = key.as_deref() == Some(CME_API_KEY);
+                        let known = key.as_deref() == Some(api_key);
                         key_log.lock().expect("not poisoned").push(key);
                         if known {
                             Ok(response)
                         } else {
-                            let mut refusal = ErrorResponse::new(Some(CME_KEY_UNKNOWN.to_string()));
-                            *refusal.status_mut() = StatusCode::UNAUTHORIZED;
-                            Err(refusal)
+                            let mut refused = ErrorResponse::new(Some(refusal.to_string()));
+                            *refused.status_mut() = StatusCode::UNAUTHORIZED;
+                            Err(refused)
                         }
                     });
                 let Ok(mut socket) = accepted else {
@@ -383,13 +432,13 @@ impl MockCmeStream {
                         let actions = (script.lock().expect("not poisoned"))(this, &frame);
                         for action in actions {
                             let sent = match action {
-                                CmeAction::Send(CmeFrame::Text(text)) => {
+                                StreamAction::Send(StreamFrame::Text(text)) => {
                                     socket.send(Message::text(text))
                                 }
-                                CmeAction::Send(CmeFrame::Binary(bytes)) => {
+                                StreamAction::Send(StreamFrame::Binary(bytes)) => {
                                     socket.send(Message::binary(bytes))
                                 }
-                                CmeAction::Hold => {
+                                StreamAction::Hold => {
                                     let (released, signal) = &*release;
                                     let guard = released.lock().expect("not poisoned");
                                     drop(
@@ -399,7 +448,7 @@ impl MockCmeStream {
                                     );
                                     Ok(())
                                 }
-                                CmeAction::Close(code, reason) => {
+                                StreamAction::Close(code, reason) => {
                                     let _ = socket.close(Some(CloseFrame {
                                         code: CloseCode::from(code),
                                         reason: reason.into(),
@@ -426,14 +475,15 @@ impl MockCmeStream {
         }
     }
 
-    /// Lets every connection held (`CmeAction::Hold`) go on.
+    /// Lets every connection held (`StreamAction::Hold`) go on.
     pub fn release(&self) {
         let (released, signal) = &*self.released;
         *released.lock().expect("not poisoned") = true;
         signal.notify_all();
     }
 
-    /// The stream's address, the adapter's CME stream address.
+    /// The stream's address, the adapter's address of the exchange's
+    /// stream.
     #[must_use]
     pub fn url(&self) -> &str {
         &self.url
@@ -475,17 +525,17 @@ impl MockCmeStream {
 
 /// `frames` sent, as a script's answer.
 #[must_use]
-pub fn sent(frames: Vec<CmeFrame>) -> Vec<CmeAction> {
-    frames.into_iter().map(CmeAction::Send).collect()
+pub fn sent(frames: Vec<StreamFrame>) -> Vec<StreamAction> {
+    frames.into_iter().map(StreamAction::Send).collect()
 }
 
 /// `frames` sent, held after the first `opened` until the test releases
 /// the stream, as a script's answer: a connection's opening, then its
 /// live records once the test is ready for them.
 #[must_use]
-pub fn held(frames: Vec<CmeFrame>, opened: usize) -> Vec<CmeAction> {
+pub fn held(frames: Vec<StreamFrame>, opened: usize) -> Vec<StreamAction> {
     let mut actions = sent(frames);
-    actions.insert(opened, CmeAction::Hold);
+    actions.insert(opened, StreamAction::Hold);
     actions
 }
 
@@ -505,8 +555,8 @@ mod tests {
         let captured = frames(CME_GCZ6_GCG7)
             .into_iter()
             .find_map(|frame| match frame {
-                CmeFrame::Binary(bytes) => Some(bytes),
-                CmeFrame::Text(_) => None,
+                StreamFrame::Binary(bytes) => Some(bytes),
+                StreamFrame::Text(_) => None,
             })
             .unwrap();
 

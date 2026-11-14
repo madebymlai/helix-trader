@@ -2,9 +2,11 @@
 //! (`LseInstrument`), converted both ways here only: an `LSEDGE` id and the
 //! LSE market and symbol of a derived series (`LseSymbol`), with the socket
 //! the series streams on and its name there, a `GLBX` id and the CME
-//! contract LSE lists (`CmeContract`), and an `OPRA` id and the OSI symbol
-//! LSE lists a US option under (`OpraContract`), with its name on data-ws
-//! and the root of the chain it streams in.
+//! contract LSE lists (`CmeContract`), an `XNAS` id and the ticker LSE
+//! lists a Nasdaq TotalView stock under and streams it by (`NasdaqStock`),
+//! and an `OPRA` id and the OSI symbol LSE lists a US option under
+//! (`OpraContract`), with its name on data-ws and the root of the chain it
+//! streams in.
 //!
 //! A derived market's series is one instrument under `LSEDGE`, its LSE
 //! market the suffix of its symbol, as Bybit's product suffix (Nautilus'
@@ -16,8 +18,9 @@
 //! LSE lists it. An exchange market's listings take Databento's ids, so
 //! none is an `LSEDGE` instrument: a CME Globex contract is Databento's
 //! `GLBX` id, found among LSE's listings of its exchange name (see
-//! `CmeContract`), and a US option Databento's `OPRA` id, its OSI symbol,
-//! which LSE lists too (see `OpraContract`).
+//! `CmeContract`), a Nasdaq stock Databento's `XNAS` id, its ticker, which
+//! LSE lists too (see `NasdaqStock`), and a US option Databento's `OPRA`
+//! id, its OSI symbol, which LSE lists too (see `OpraContract`).
 
 use std::fmt;
 
@@ -37,7 +40,7 @@ use nautilus_model::{
 use rust_decimal::Decimal;
 
 use super::{
-    consts::{EXCHANGE_MARKETS, LSEDGE_VENUE, LseSocket, OPRA_VENUE},
+    consts::{EXCHANGE_MARKETS, LSEDGE_VENUE, LseSocket, OPRA_VENUE, XNAS_VENUE},
     credential::LseProduct,
 };
 use crate::http::models::LsePair;
@@ -184,12 +187,14 @@ fn hyphenated(symbol: &str) -> String {
 /// What an instrument stands for at LSE, by its venue: a series of a
 /// derived market under `LSEDGE`, asked with the LSE key by its symbol; a
 /// CME Globex contract under `GLBX`, asked with the CME key by its listing;
-/// or a US option contract under `OPRA`, asked with the LSE key, which
-/// opens LSE's `us_options`, by its OSI symbol.
+/// a Nasdaq TotalView stock under `XNAS`, asked with the Nasdaq key by its
+/// ticker; or a US option contract under `OPRA`, asked with the LSE key,
+/// which opens LSE's `us_options`, by its OSI symbol.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LseInstrument {
     Series(LseSymbol),
     Cme(CmeContract),
+    Nasdaq(NasdaqStock),
     Opra(OpraContract),
 }
 
@@ -201,8 +206,8 @@ impl LseInstrument {
     ///
     /// Returns an error naming `id` if it is on none of the venues, or not
     /// an instrument of its venue (see `LseSymbol::from_instrument_id`,
-    /// `CmeContract::from_instrument_id` and
-    /// `OpraContract::from_instrument_id`).
+    /// `CmeContract::from_instrument_id`, `NasdaqStock::from_instrument_id`
+    /// and `OpraContract::from_instrument_id`).
     pub(crate) fn from_instrument_id(
         id: InstrumentId,
         reference_year: i16,
@@ -211,12 +216,14 @@ impl LseInstrument {
             LseSymbol::from_instrument_id(id).map(Self::Series)
         } else if id.venue == Venue::GLBX() {
             CmeContract::from_instrument_id(id, reference_year).map(Self::Cme)
+        } else if id.venue == *XNAS_VENUE {
+            NasdaqStock::from_instrument_id(id).map(Self::Nasdaq)
         } else if id.venue == *OPRA_VENUE {
             OpraContract::from_instrument_id(id).map(Self::Opra)
         } else {
             bail!(
                 "{id} is on {}, which LSE does not serve: LSE serves LSEDGE, its own series, \
-                 GLBX, CME Globex, and OPRA, US options",
+                 GLBX, CME Globex, XNAS, Nasdaq TotalView, and OPRA, US options",
                 id.venue
             )
         }
@@ -227,6 +234,7 @@ impl LseInstrument {
         match self {
             Self::Series(_) | Self::Opra(_) => LseProduct::Global,
             Self::Cme(_) => LseProduct::Cme,
+            Self::Nasdaq(_) => LseProduct::Nasdaq,
         }
     }
 }
@@ -373,6 +381,68 @@ fn named_month(name: &str) -> Option<Date> {
     Date::strptime("%Y-%m-%d", format!("{month}-01")).ok()
 }
 
+/// A Nasdaq TotalView stock under `XNAS`, the venue Databento gives the
+/// listings of Nasdaq's TotalView-ITCH feed (`XNAS.ITCH`) and Nautilus' IB
+/// adapter maps to IB's NASDAQ: `NVDA.XNAS` is NVIDIA's common stock. Its
+/// symbol is its ticker in Nasdaq's convention, a class after a dot
+/// (`BRK.B.XNAS`), as Databento's raw symbols of `XNAS.ITCH` are
+/// (Databento's symbology standard, "CMS vs. Nasdaq symbology") and as LSE
+/// lists the stock in its `nasdaq` (`BRK.B`, captured), so it is asked of
+/// LSE by its ticker and streamed under it. LSE takes a renamed ticker for
+/// the days it was listed (LSE's docs, "Symbols"); its catalogue lists some
+/// tickers more than once, a delisted listing beside a later one (`BRKH`,
+/// captured), as Databento's ids name a ticker, not a listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NasdaqStock {
+    ticker: String,
+}
+
+impl NasdaqStock {
+    /// The stock `id` stands for.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming `id` if it is not on `XNAS`, or if its
+    /// symbol is no ticker in capitals, as Databento and LSE write one: a
+    /// ticker in lower case, which LSE would match, would make a second id
+    /// of one stock.
+    pub(crate) fn from_instrument_id(id: InstrumentId) -> anyhow::Result<Self> {
+        ensure!(
+            id.venue == *XNAS_VENUE,
+            "{id} is not a Nasdaq TotalView stock, under XNAS"
+        );
+        let ticker = id.symbol.as_str();
+        ensure!(
+            !ticker
+                .chars()
+                .any(|c| c.is_ascii_lowercase() || c.is_whitespace()),
+            "{id} is not a Nasdaq ticker in capitals, as NVDA.XNAS or BRK.B.XNAS, as Databento \
+             and LSE write it"
+        );
+        Ok(Self {
+            ticker: ticker.to_owned(),
+        })
+    }
+
+    /// The stock's id, its ticker under `XNAS`.
+    #[must_use]
+    pub(crate) fn instrument_id(&self) -> InstrumentId {
+        InstrumentId::new(Symbol::from(self.ticker.as_str()), *XNAS_VENUE)
+    }
+
+    /// The stock's ticker, as LSE lists and streams it.
+    #[must_use]
+    pub(crate) fn ticker(&self) -> &str {
+        &self.ticker
+    }
+}
+
+impl fmt::Display for NasdaqStock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.instrument_id())
+    }
+}
+
 /// A US option contract under `OPRA`, the venue Databento gives the
 /// listings of OPRA's consolidated feed (`OPRA.PILLAR`, whose definitions
 /// its publisher `OPRA` sends) and Nautilus' IB adapter maps, its symbol
@@ -497,7 +567,10 @@ mod tests {
     use super::*;
     use crate::{
         http::models::LsePairs,
-        testing::{PAIRS_ESZ6, PAIRS_ESZ26, PAIRS_GCZ4, PAIRS_NGZ6, PAIRS_NGZ26},
+        testing::{
+            PAIRS_ESZ6, PAIRS_ESZ26, PAIRS_GCZ4, PAIRS_NASDAQ_BRK, PAIRS_NASDAQ_NVDA, PAIRS_NGZ6,
+            PAIRS_NGZ26,
+        },
     };
 
     fn of(id: &str) -> anyhow::Result<LseSymbol> {
@@ -807,9 +880,61 @@ mod tests {
         assert_eq!(contract.root(), root);
     }
 
+    /// Databento's raw symbols of `XNAS.ITCH` are Nasdaq's tickers, a class
+    /// after a dot ("CMS vs. Nasdaq symbology": `BRK.B`), and so is LSE's
+    /// symbol of each in its `nasdaq`.
+    #[rstest]
+    #[case::common_stock("NVDA.XNAS", "NVDA")]
+    #[case::class_b("BRK.B.XNAS", "BRK.B")]
+    fn an_xnas_stock_is_its_ticker_at_lse_and_back(#[case] id: &str, #[case] ticker: &str) {
+        let stock = NasdaqStock::from_instrument_id(InstrumentId::from(id)).unwrap();
+
+        assert_eq!(stock.ticker(), ticker);
+        assert_eq!(stock.instrument_id(), InstrumentId::from(id));
+    }
+
+    /// LSE's catalogue of `nasdaq`, captured: each ticker names a listing
+    /// there under that symbol. Some of its listings have no name, which
+    /// the CME listings' model does not take.
+    #[rstest]
+    #[case::common_stock("NVDA.XNAS", PAIRS_NASDAQ_NVDA)]
+    #[case::class_b("BRK.B.XNAS", PAIRS_NASDAQ_BRK)]
+    fn an_xnas_stock_s_ticker_is_the_symbol_lse_lists_it_under(
+        #[case] id: &str,
+        #[case] answer: &str,
+    ) {
+        let stock = NasdaqStock::from_instrument_id(InstrumentId::from(id)).unwrap();
+        let listed: serde_json::Value = serde_json::from_str(answer).unwrap();
+
+        assert!(
+            listed["pairs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|pair| pair["symbol"] == stock.ticker()),
+            "{id}"
+        );
+    }
+
+    /// A ticker in lower case, which LSE would match, would make a second
+    /// id of one stock; CMS's convention, a space before the class, is not
+    /// Databento's of `XNAS.ITCH`; and another venue's id.
+    #[rstest]
+    #[case::lower_case("nvda.XNAS")]
+    #[case::cms_class("BRK B.XNAS")]
+    #[case::another_venue("NVDA.XNYS")]
+    fn an_id_that_is_no_nasdaq_ticker_under_xnas_is_refused_naming_it(#[case] id: &str) {
+        let err = NasdaqStock::from_instrument_id(InstrumentId::from(id))
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains(id), "{id}: {err}");
+    }
+
     #[rstest]
     #[case::series("GOLD-FUTURES.LSEDGE", LseProduct::Global)]
     #[case::cme_contract("GCZ26.GLBX", LseProduct::Cme)]
+    #[case::nasdaq_stock("NVDA.XNAS", LseProduct::Nasdaq)]
     #[case::us_option("AAPL  261120C00355000.OPRA", LseProduct::Global)]
     fn each_venue_s_instruments_are_asked_with_its_product_s_key(
         #[case] id: &str,

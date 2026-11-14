@@ -9,19 +9,21 @@
 //! sockets and the variables of the keys, the keys by the product each
 //! opens, and the symbol boundary between an instrument id and what LSE is
 //! asked for, a derived market's symbol, its name on a socket, a CME
-//! contract's listing, or a US option's OSI symbol and chain), `http` (the HTTP client, its typed queries, an
+//! contract's listing, a Nasdaq stock's ticker, or a US option's OSI symbol
+//! and chain), `http` (the HTTP client, its typed queries, an
 //! export over any span, the listings of CME contracts, LSE's answers and
 //! refusals, the parsing of an export's Parquet file, and the rows of its
 //! sources that are not prices over any window), `websocket` (the frames of
 //! LSE's sockets, the client of one, and the parsing of a tick; and LSE's
-//! CME Globex stream, its messages and its client),
+//! exchange streams, CME Globex's and Nasdaq TotalView's, of one protocol,
+//! its messages and its client),
 //! `config` (the data client's config), `data` (the data client),
 //! `factories`, and `types`, the custom data type of LSE's rows that are
 //! not prices (`LseRow`).
 
 pub use self::{
     common::{
-        consts::{LSE_API_KEY, LSE_CME_API_KEY, LSEDGE_VENUE},
+        consts::{LSE_API_KEY, LSE_CME_API_KEY, LSE_NASDAQ_API_KEY, LSEDGE_VENUE},
         symbol::LseSymbol,
     },
     config::LseDataClientConfig,

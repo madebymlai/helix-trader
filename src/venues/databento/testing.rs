@@ -4,9 +4,9 @@
 //! they ask, and recording each call it receives.
 //!
 //! - `metadata.get_dataset_range`: the range of `GLBX.MDP3`, captured on
-//!   2026-11-13 (its end 2026-11-13T09:31:29.885311Z), and of
-//!   `OPRA.PILLAR`, captured on 2026-11-13 (its end
-//!   2026-11-13T14:30:00Z).
+//!   2026-11-13 (its end 2026-11-13T09:31:29.885311Z), of `OPRA.PILLAR`,
+//!   captured on 2026-11-13 (its end 2026-11-13T14:30:00Z), and of
+//!   `XNAS.ITCH`, captured on 2026-11-14 (its end 2026-11-13T05:00:00Z).
 //! - `timeseries.get_range`: GCZ6's definition records of 12 November 2026
 //!   (`schema=definition`, `symbols=GCZ6`, `stype_in=raw_symbol`, DBN
 //!   compressed with zstd, as Databento's client asks), captured on
@@ -14,7 +14,11 @@
 //!   of AAPL's 355 call of 20 November 2026 of 12 November 2026
 //!   (`symbols=AAPL  261120C00355000`, otherwise as GCZ6's, and so as
 //!   Databento's client asks), captured on 2026-11-13 for $0.0000017, the
-//!   cost Databento's `metadata.get_cost` gave before: DBN version 1, as
+//!   cost Databento's `metadata.get_cost` gave before; and of `XNAS.ITCH`,
+//!   NVDA's three definition records of 12 November 2026 (`symbols=NVDA`,
+//!   otherwise as GCZ6's), captured on 2026-11-14 for $0.000016093, the
+//!   cost `metadata.get_cost` gave before, Nautilus' Databento client
+//!   answering with the last, in round lots of 100: each DBN version 1, as
 //!   Databento sent it, which Databento's client upgrades as it decodes.
 
 use std::{
@@ -24,10 +28,10 @@ use std::{
 };
 
 /// Databento's answers of each dataset: its range, and its definition of
-/// a contract, GCZ6 of 2026, `GCZ26.GLBX`, of `GLBX.MDP3`, and AAPL's 355
+/// an instrument, GCZ6 of 2026, `GCZ26.GLBX`, of `GLBX.MDP3`, AAPL's 355
 /// call of 20 November 2026, `AAPL  261120C00355000.OPRA`, of
-/// `OPRA.PILLAR`.
-const DATASETS: [(&str, &[u8], &[u8]); 2] = [
+/// `OPRA.PILLAR`, and NVDA, `NVDA.XNAS`, of `XNAS.ITCH`.
+const DATASETS: [(&str, &[u8], &[u8]); 3] = [
     (
         "GLBX.MDP3",
         include_bytes!("testdata/dataset_range_glbx.json"),
@@ -37,6 +41,11 @@ const DATASETS: [(&str, &[u8], &[u8]); 2] = [
         "OPRA.PILLAR",
         include_bytes!("testdata/dataset_range_opra.json"),
         include_bytes!("testdata/definition_aapl_call.dbn.zst"),
+    ),
+    (
+        "XNAS.ITCH",
+        include_bytes!("testdata/dataset_range_xnas.json"),
+        include_bytes!("testdata/definition_nvda.dbn.zst"),
     ),
 ];
 

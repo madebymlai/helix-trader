@@ -16,22 +16,24 @@ use nautilus_core::UnixNanos;
 use nautilus_model::{
     enums::{AssetClass, OptionKind},
     identifiers::{InstrumentId, Symbol},
-    instruments::{FuturesContract, IndexInstrument, InstrumentAny, OptionContract},
+    instruments::{Equity, FuturesContract, IndexInstrument, InstrumentAny, OptionContract},
     types::{Currency, Price, Quantity},
 };
 use nautilus_network::http::Url;
 use sha2::{Digest, Sha256};
 
 pub use self::{
-    cme::{
+    exchange::{
         CME_ESZ6_DOCUMENTED, CME_GCZ6_GCG7, CME_GCZ6_JSON, CME_GCZ6_L2_DOCUMENTED,
-        CME_GCZ6_L3_DOCUMENTED, CME_KEY_UNKNOWN, CME_LEVEL_REQUIRED, CME_SYMBOL_UNAVAILABLE,
-        CmeAction, CmeFrame, ESZ26, MockCmeStream, dbn_frame, dbn_frames, frames, held, sent,
+        CME_GCZ6_L3_DOCUMENTED, CME_KEY_UNKNOWN, CME_LEVEL_REQUIRED, CME_SYMBOL_UNAVAILABLE, ESZ26,
+        MockExchangeStream, NASDAQ_KEY_UNKNOWN, NASDAQ_NVDA_L1_DOCUMENTED,
+        NASDAQ_NVDA_L2_DOCUMENTED, NASDAQ_NVDA_L3_DOCUMENTED, StreamAction, StreamFrame, dbn_frame,
+        dbn_frames, frames, held, sent,
     },
     socket::{MockLseSocket, SocketAction, data_ws_answer, socket_answer},
 };
 
-mod cme;
+mod exchange;
 mod socket;
 
 /// The trade slice of LSE's gold futures series (`GOLD` in `futures`) over
@@ -234,6 +236,39 @@ pub const AAPL_CALL: &str = "AAPL  261120C00355000.OPRA";
 /// The CME key the tests give the adapter, which the peer records.
 pub const CME_API_KEY: &str = "lse-cme-test-key-0123456789";
 
+/// LSE's catalogue of Nasdaq TotalView (`/v3/pairs?market=nasdaq`),
+/// captured on 14 November 2026 with the free key, which reads any
+/// market's catalogue: NVDA's listing (`symbol=NVDA`), 2000008377, the
+/// number of NVDA in `us_stocks` too, and the 21 listings LSE finds for
+/// `q=BRK`, Berkshire Hathaway's class B among them as `BRK.B`, and `BRKH`
+/// twice, delisted on 18 December 2024 and listed now.
+pub const PAIRS_NASDAQ_NVDA: &str = include_str!("../test_data/pairs_nasdaq_nvda.json");
+pub const PAIRS_NASDAQ_BRK: &str = include_str!("../test_data/pairs_nasdaq_brk.json");
+
+/// LSE's refusal of Nasdaq TotalView's rows to a key of no Nasdaq plan,
+/// captured on 14 November 2026 with the free key and with the CME Group
+/// Lite+ key, which LSE answered alike: `403 plan-required`, Nasdaq Lite.
+pub const PLAN_REQUIRED_NASDAQ: &str =
+    include_str!("../test_data/refusal_plan_required_nasdaq.json");
+
+/// NVDA's trades, quotes, book and orders in Nasdaq TotalView over
+/// `[2026-11-12T14:30:00Z, 2026-11-12T14:30:01Z)`, as LSE's docs record
+/// the files, built, not captured: no key of helix's holds a Nasdaq plan
+/// (`test_data/README.md`). Four trades, two alike; four quotes; four rows
+/// of the book, ten levels a side but the last, of eight asks; five
+/// orders, one of no action.
+pub const NVDA_TRADES: &[u8] = include_bytes!("../test_data/export_nvda_trades.parquet");
+pub const NVDA_QUOTES: &[u8] = include_bytes!("../test_data/export_nvda_quotes.parquet");
+pub const NVDA_BOOK: &[u8] = include_bytes!("../test_data/export_nvda_book.parquet");
+pub const NVDA_ORDERS: &[u8] = include_bytes!("../test_data/export_nvda_orders.parquet");
+
+/// NVIDIA's common stock under the id Databento gives it, its ticker under
+/// `XNAS`, the stock of `NVDA_TRADES`.
+pub const NVDA: &str = "NVDA.XNAS";
+
+/// The Nasdaq key the tests give the adapter, which the peers record.
+pub const NASDAQ_API_KEY: &str = "lse-nasdaq-test-key-0123456789";
+
 /// LSE's data-ws frames, captured with the free key on 13 November 2026
 /// (`test_data/README.md`): its welcome; its authenticated frame, trimmed
 /// to the futures it lists; the subscription and unsubscription of
@@ -401,6 +436,28 @@ pub fn esz26() -> InstrumentAny {
             .ts_init(at("2021-09-17T00:00:00Z"))
             .build()
             .expect("a valid futures contract"),
+    )
+}
+
+/// NVDA as Nautilus' Databento decoder gives Databento's last definition
+/// of it of 12 November 2026 in `XNAS.ITCH` (`decode_equity`), `NVDA`, the
+/// one Nautilus' Databento client answers a request of it with: an equity
+/// in USD, priced to a cent, in round lots of 100 shares, stamped when
+/// Databento received it.
+#[must_use]
+pub fn nvda() -> InstrumentAny {
+    InstrumentAny::Equity(
+        Equity::builder()
+            .instrument_id(InstrumentId::from(NVDA))
+            .raw_symbol(Symbol::from("NVDA"))
+            .currency(Currency::USD())
+            .price_precision(2)
+            .price_increment(Price::from("0.01"))
+            .lot_size(Quantity::from(100))
+            .ts_event(UnixNanos::from(1_794_470_692_980_137_640))
+            .ts_init(UnixNanos::from(1_794_470_692_980_137_640))
+            .build()
+            .expect("a valid equity"),
     )
 }
 
