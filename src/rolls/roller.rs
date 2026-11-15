@@ -20,7 +20,8 @@ use nautilus_model::identifiers::InstrumentId;
 use super::Transition;
 use crate::venues;
 
-/// The prefix of an instrument's roll alert, followed by its id.
+/// The prefix of an instrument's roll alert, followed by its id, `@` and
+/// the time of the roll the alert is armed for (see `alert_name`).
 const ROLL_ALERT: &str = "ROLL:";
 
 /// The request param that sends an instrument request past the node's
@@ -120,9 +121,14 @@ impl Roller {
 
     /// If `event` is an instrument's roll alert, sets the alert of its next
     /// roll, live requesting its post contract, and returns the roll the
-    /// alert is of, from its pre to its post contract, which the strategy
-    /// hands its subscriptions (`Subscriptions::roll`). `None` for any other
-    /// event, which is the strategy's own.
+    /// alert was armed for, from its pre to its post contract, which the
+    /// strategy hands its subscriptions (`Subscriptions::roll`). `None` for
+    /// any other event, which is the strategy's own. The roll is the one
+    /// the alert's name holds, not one worked out from the event's time:
+    /// Nautilus fires an alert set in the past at once, at the clock's time
+    /// (`validate_and_prepare_time_alert`), so an alert armed after its roll,
+    /// at a live start just before it, comes at or after the roll's time,
+    /// when the next roll is the one after it.
     ///
     /// The alert is at the last nanosecond of the pre contract's slice,
     /// not at the transition: the backtest engine delivers the data of a
@@ -143,15 +149,13 @@ impl Roller {
     where
         A: DataActor + DataActorNative + Debug + 'static,
     {
-        let Some(&instrument_id) = self
+        let Some((instrument_id, roll)) = self
             .instrument_ids
             .iter()
-            .find(|&&instrument_id| event.name.as_str() == alert_name(instrument_id))
+            .find_map(|&instrument_id| Some((instrument_id, armed(event, instrument_id)?)))
         else {
             return Ok(None);
         };
-        let roll = Transition::after(instrument_id, event.ts_event.into())
-            .expect("an instrument with a roll alert rolls");
         if let Some(next) = Transition::after(instrument_id, roll.time) {
             self.arm(actor, instrument_id, next)?;
         }
@@ -187,9 +191,25 @@ pub fn front(instrument_id: InstrumentId, time: Timestamp) -> InstrumentId {
     Transition::after(instrument_id, time).map_or(instrument_id, |next| next.pre)
 }
 
-/// The name of the roll alert of `instrument_id`.
-fn alert_name(instrument_id: InstrumentId) -> String {
-    format!("{ROLL_ALERT}{instrument_id}")
+/// The name of the roll alert of `instrument_id` for `roll`: its prefix,
+/// the instrument and the roll's time, from which `armed` reads the roll
+/// back.
+fn alert_name(instrument_id: InstrumentId, roll: Transition) -> String {
+    format!("{ROLL_ALERT}{instrument_id}@{}", roll.time)
+}
+
+/// The roll of `instrument_id` that `event` is the alert of, if it is
+/// one: the roll at the time its name holds (see `alert_name`).
+fn armed(event: &TimeEvent, instrument_id: InstrumentId) -> Option<Transition> {
+    let time: Timestamp = event
+        .name
+        .as_str()
+        .strip_prefix(&format!("{ROLL_ALERT}{instrument_id}@"))?
+        .parse()
+        .ok()?;
+    let roll = Transition::after(instrument_id, time - SignedDuration::from_nanos(1))
+        .expect("an instrument with a roll alert rolls");
+    Some(roll)
 }
 
 /// Sets the roll alert of `instrument_id` for `next`, at the last
@@ -202,7 +222,7 @@ where
     let at: Timestamp = next.time - SignedDuration::from_nanos(1);
     actor
         .clock()
-        .set_time_alert(&alert_name(instrument_id), at, None, None)
+        .set_time_alert(&alert_name(instrument_id, next), at, None, None)
 }
 
 #[cfg(test)]
@@ -389,6 +409,36 @@ mod tests {
         );
         assert_eq!(rolls.len(), 2);
         assert_eq!(sent, []);
+    }
+
+    /// A live start a minute before GC rolls from GCZ26 into GCG27, at
+    /// 00:00 UTC on 2026-11-26: the strategy subscribes on GCZ26 from the
+    /// warmup's `now`, 23:59, and the clock has passed the roll by the time
+    /// the roller arms it, so Nautilus fires its alert at once, at the
+    /// clock's time (`validate_and_prepare_time_alert`). The roll the
+    /// roller returns is the one it armed, out of GCZ26, the contract
+    /// subscribed, not the next one after the alert's time.
+    #[test]
+    fn a_roll_armed_after_its_time_is_the_one_out_of_the_contract_standing_at_the_start() {
+        let roller = Roller::live(vec![id("GC.GLBX")]);
+        let (mut probe, clock, _) = registered("2026-11-25T23:59:00Z");
+        clock
+            .borrow_mut()
+            .advance_time(at("2026-11-26T00:00:01Z"), true);
+
+        roller
+            .start(&mut probe, "2026-11-25T23:59:00Z".parse().unwrap())
+            .unwrap();
+        let events = clock
+            .borrow_mut()
+            .advance_time(at("2026-11-26T00:00:02Z"), true);
+        let rolls: Vec<(InstrumentId, InstrumentId)> = events
+            .iter()
+            .filter_map(|event| roller.on_time_event(&mut probe, event).unwrap())
+            .map(|roll| (roll.pre, roll.post))
+            .collect();
+
+        assert_eq!(rolls, [(id("GCZ26.GLBX"), id("GCG27.GLBX"))]);
     }
 
     #[test]
