@@ -148,9 +148,10 @@ impl Live {
 /// The instruments the node loads at its start, at `now`: each one
 /// `requirements` reads, a root replaced by the contracts of its next roll
 /// (see `rolls::Transition::after`), the one standing for it now and the
-/// one it rolls into, so the strategy's `Roller` subscribes to a loaded
-/// contract even if that roll passes before the strategy starts or while
-/// the roller's request for its post contract is in flight; the roller
+/// one it rolls into, so the strategy subscribes to a loaded contract
+/// (`strategy::subscriptions`) even if that roll passes before the strategy
+/// starts or while the roller's request for its post contract is in
+/// flight; the roller
 /// requests the post contract of each later roll (see
 /// `rolls::Roller::live`). A plain instrument stands for itself. Each
 /// once, in order.
@@ -234,8 +235,8 @@ mod tests {
     }
 
     /// A start just before a roll loads the roll's post contract too, so
-    /// the roller subscribes to it even if the roll passes before the
-    /// strategy starts or its request for it is still in flight.
+    /// the strategy subscribes to it even if the roll passes before it
+    /// starts or the roller's request for it is still in flight.
     #[test]
     fn a_root_loads_just_before_its_roll_the_pre_and_post_contracts() {
         let requirements = ticks(NautilusDataType::OrderBookDepth, &["GC.GLBX"]);

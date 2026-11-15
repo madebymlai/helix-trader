@@ -25,9 +25,9 @@ use helix_trader::{
         decide::DecisionRule,
         targets::{SideTarget, Target, TargetConfig, TargetSetter},
     },
-    rolls::Roller,
     strategy::{
         requirements::{DataRequirements, TickSeries},
+        subscriptions::Subscriptions,
         warmup::{self, BookIndicator, Warmup},
     },
 };
@@ -588,9 +588,11 @@ impl ActorIndicator for Fed {
 struct Warming {
     core: DataActorCore,
     warmup: Rc<Warmup>,
-    /// The roller of the tick series the warmup's features read, started
-    /// after the warmup, as a model handle starts it.
-    roller: Option<Roller>,
+    /// The subscriptions to the bars of the requirements and of the
+    /// target's ATR and to the tick series the features read, started from
+    /// where the warmup ends, as a model handle starts them; none of the
+    /// series rolls.
+    subscriptions: Subscriptions,
     /// The target, started as a model handle does, and read for the long
     /// side when the warmup ends.
     traded: Option<Rc<TargetSetter>>,
@@ -604,10 +606,8 @@ impl DataActor for Warming {
     fn on_start(&mut self) -> anyhow::Result<()> {
         self.cache_rc().borrow_mut().add_instrument(gcz26())?;
         self.cache_rc().borrow_mut().add_instrument(esz26())?;
-        Rc::clone(&self.warmup).start(self)?;
-        if let Some(roller) = self.roller.clone() {
-            roller.start(self)?;
-        }
+        let now = Rc::clone(&self.warmup).start(self)?;
+        self.subscriptions.clone().start(self, now);
         if let Some(traded) = self.traded.clone() {
             traded.start(self);
         }
@@ -680,24 +680,29 @@ fn warm(
     };
     let fed = Rc::new(Fed::default());
     let warmup = Warmup::live(&requirements).feeding(Rc::clone(&fed) as SharedActorIndicator);
-    let (failure, _) = run(dir, venue, &requirements, warmup, None, None);
+    let (failure, _) = run(dir, venue, &requirements, warmup, vec![], None);
     Warmed {
         bars: fed.bars.borrow().clone(),
         failure,
     }
 }
 
-/// Runs `warmup`, `roller` and `traded` of a strategy of `requirements` on a
-/// node with the catalog in `dir`, its history asked of `venue`: why it
-/// failed, if it did, and the long side's target when it ended.
+/// Runs `warmup`, the subscriptions to the bars of `requirements` and of
+/// `traded`'s ATR and to `ticks`, and `traded` of a strategy of
+/// `requirements` on a node with the catalog in `dir`, its history asked of
+/// `venue`: why it failed, if it did, and the long side's target when it
+/// ended.
 fn run(
     dir: &Path,
     venue: &Rc<RefCell<FakeVenue>>,
     requirements: &DataRequirements,
     warmup: Warmup,
-    roller: Option<Roller>,
+    ticks: Vec<TickSeries>,
     traded: Option<Rc<TargetSetter>>,
 ) -> (Option<String>, Option<SideTarget>) {
+    let atr_bars = traded.as_ref().and_then(|traded| traded.atr_bar_type());
+    let bar_types = requirements.bar_types.iter().copied().chain(atr_bars);
+    let subscriptions = Subscriptions::new(bar_types.collect(), ticks);
     let warmup = Rc::new(warmup);
     let config = LiveNodeConfig {
         environment: Environment::Live,
@@ -739,7 +744,7 @@ fn run(
         node.add_actor(Warming {
             core: DataActorCore::new(DataActorConfig::default()),
             warmup,
-            roller,
+            subscriptions,
             traded,
             exits: Rc::clone(&exits),
             failure: Rc::clone(&failure),
@@ -1027,7 +1032,7 @@ fn bracket_of(bar_types: Vec<BarType>, ticks: Vec<TickSeries>) -> SideTarget {
         &venue,
         &requirements,
         warmup,
-        None,
+        vec![],
         Some(traded),
     );
     assert_eq!(failure, None);
@@ -1079,9 +1084,9 @@ fn of_gcz26(data: NautilusDataType) -> TickSeries {
 
 /// Runs a live warmup of `length` of `series` on a node with the catalog in
 /// `dir`, its history asked of `venue`, as a model handle starts one: the
-/// warmup hands features its ticks, of the history and live, and the roller
-/// subscribes to the series after the warmup's start. The features, once the
-/// warmup has ended.
+/// warmup hands features its ticks, of the history and live, and the
+/// subscriptions start on the series from where the warmup ends. The
+/// features, once the warmup has ended.
 fn read_live(
     dir: &Path,
     venue: &Rc<RefCell<FakeVenue>>,
@@ -1097,8 +1102,7 @@ fn read_live(
     let features = Rc::new(Fed::default());
     let warmup =
         Warmup::live(&requirements).feeding_ticks(Rc::clone(&features) as SharedActorIndicator);
-    let roller = Roller::live(vec![series]);
-    let (failure, _) = run(dir, venue, &requirements, warmup, Some(roller), None);
+    let (failure, _) = run(dir, venue, &requirements, warmup, vec![series], None);
     assert_eq!(failure, None);
     features
 }
@@ -1282,7 +1286,7 @@ fn warm_deltas(dir: &Path) -> (Rc<Books>, Vec<(u64, u64)>) {
     });
     let warmup =
         Warmup::live(&requirements).feeding_books(Rc::clone(&books) as Rc<dyn BookIndicator>);
-    let (failure, _) = run(dir, &venue, &requirements, warmup, None, None);
+    let (failure, _) = run(dir, &venue, &requirements, warmup, vec![], None);
     assert_eq!(failure, None);
     let asked = venue.borrow().asked.clone();
     (books, asked)
@@ -1349,14 +1353,15 @@ struct Streamed {
     gcz26: Option<InstrumentAny>,
 }
 
-/// Starts a warmup and its roller as a model handle does, GCZ26's
-/// definition in the cache as its broker's client puts it there; stops the
-/// node on LSE's first quote of its gold series.
+/// Starts a warmup and its subscriptions as a model handle does, none of
+/// the series rolling, GCZ26's definition in the cache as its broker's
+/// client puts it there; stops the node on LSE's first quote of its gold
+/// series.
 #[derive(Debug)]
 struct Streaming {
     core: DataActorCore,
     warmup: Rc<Warmup>,
-    roller: Roller,
+    subscriptions: Subscriptions,
     streamed: Rc<RefCell<Option<Streamed>>>,
     failure: Rc<RefCell<Option<String>>>,
 }
@@ -1366,8 +1371,9 @@ nautilus_actor!(Streaming);
 impl DataActor for Streaming {
     fn on_start(&mut self) -> anyhow::Result<()> {
         self.cache_rc().borrow_mut().add_instrument(gcz26())?;
-        Rc::clone(&self.warmup).start(self)?;
-        self.roller.clone().start(self)
+        let now = Rc::clone(&self.warmup).start(self)?;
+        self.subscriptions.clone().start(self, now);
+        Ok(())
     }
 
     fn on_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
@@ -1402,7 +1408,7 @@ impl DataActor for Streaming {
 /// against the mock LSE socket and routed LSEDGE as the live node routes
 /// it, beside a venue's routed GLBX. The warmup asks the gold series'
 /// definition, which the catalog answers and the data engine caches before
-/// the roller's subscription reaches the LSE client: that reads the
+/// the strategy's subscription reaches the LSE client: that reads the
 /// definition's precision, and LSE's quote streams at it, bid and ask with
 /// no sizes. GCZ26's, which the cache holds, is not asked, so the broker's
 /// stays. LSE serves no quotes of the gold series' past: LSE's mock peer
@@ -1498,8 +1504,8 @@ fn an_lsedge_definition_the_cache_lacks_comes_from_the_catalog_before_lse_stream
             .unwrap();
         node.add_actor(Streaming {
             core: DataActorCore::new(DataActorConfig::default()),
+            subscriptions: Subscriptions::new(requirements.bar_types.clone(), ticks),
             warmup,
-            roller: Roller::live(ticks),
             streamed: Rc::clone(&streamed),
             failure: Rc::clone(&failure),
         })
@@ -1554,15 +1560,15 @@ struct GlbxSeen {
     trades: Vec<TradeTick>,
 }
 
-/// Starts a warmup and its roller of ESZ26's quotes and trades, as a model
-/// handle does, ESZ26's definition in the cache as its broker's client puts
-/// it there; lets the mock CME stream send its live records once the first
-/// quote came, and stops the node on the first trade.
+/// Starts a warmup and its subscriptions to ESZ26's quotes and trades, as a
+/// model handle does, ESZ26's definition in the cache as its broker's client
+/// puts it there; lets the mock CME stream send its live records once the
+/// first quote came, and stops the node on the first trade.
 #[derive(Debug)]
 struct GlbxStreaming {
     core: DataActorCore,
     warmup: Rc<Warmup>,
-    roller: Roller,
+    subscriptions: Subscriptions,
     stream: Rc<lse::testing::MockExchangeStream>,
     seen: Rc<RefCell<GlbxSeen>>,
 }
@@ -1574,8 +1580,9 @@ impl DataActor for GlbxStreaming {
         self.cache_rc()
             .borrow_mut()
             .add_instrument(lse::testing::esz26())?;
-        Rc::clone(&self.warmup).start(self)?;
-        self.roller.clone().start(self)
+        let now = Rc::clone(&self.warmup).start(self)?;
+        self.subscriptions.clone().start(self, now);
+        Ok(())
     }
 
     fn on_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
@@ -1600,7 +1607,7 @@ impl DataActor for GlbxStreaming {
 /// A live start reading ESZ26's quotes and trades, `GLBX`, as the live node
 /// routes them: LSE's client routed GLBX, against the mock LSE peer and the
 /// mock CME stream replaying LSE's documented ESZ6, beside another client
-/// on no venue, as IB's is. The roller's subscriptions reach LSE's client,
+/// on no venue, as IB's is. The strategy's subscriptions reach LSE's client,
 /// which streams the contract's opening best bid and offer, then its
 /// records: LSE's quotes and trade, not the other client's. The warmup's
 /// two days of the contract's history are asked of LSE too, which answers
@@ -1697,8 +1704,8 @@ fn glbx_data_comes_from_lse_s_cme_stream_routed_glbx_beside_another_client() {
             .unwrap();
         node.add_actor(GlbxStreaming {
             core: DataActorCore::new(DataActorConfig::default()),
+            subscriptions: Subscriptions::new(requirements.bar_types.clone(), ticks),
             warmup,
-            roller: Roller::live(ticks),
             stream: Rc::clone(&stream),
             seen: Rc::clone(&seen),
         })

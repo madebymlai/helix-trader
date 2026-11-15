@@ -20,8 +20,8 @@
 //! client its fill asks, so that a fill and a warmup agree on what history
 //! there is), a live start whether a venue's live data streams a series
 //! (`streams`, its live data source's answer, each a copy of the
-//! subscriptions its data client implements), the roller, a live warmup and
-//! a fill the format of a venue's book, the book type of its deltas and the
+//! subscriptions its data client implements), a strategy's subscriptions, a
+//! live warmup and a fill the format of a venue's book, the book type of its deltas and the
 //! levels of its depth (`book_format`, its live data source's answer, the
 //! one format of the venue's book in the catalog), and a strategy the series an
 //! FX pair it converts through is read in (`rate_series`: the first form
@@ -556,8 +556,8 @@ pub(crate) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
 /// (`lse::streams`); IB's quotes, trades, time bars and book deltas
 /// (`ib::streams`). A book is checked as a run subscribes to it, in its
 /// venue's format (`book_format`). Custom data of an instrument is streamed by no client:
-/// none implements a subscription of custom data, the roller's names no
-/// client, so Nautilus subscribes it to the message bus alone
+/// none implements a subscription of custom data, a strategy's names no
+/// client (`strategy::subscriptions`), so Nautilus subscribes it to the message bus alone
 /// (`DataActorCore::subscribe_data`), and nothing in helix publishes any
 /// keyed by an instrument. A live start checks every series it
 /// subscribes to here before anything connects (`live_clients`): a
@@ -594,8 +594,8 @@ pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
 /// venue's book, which its live stream records into, its history fills
 /// and a backtest and a warmup replay, so a history serving a book serves
 /// it in that format: LSE's, the one history serving a book (`serves`), is
-/// the live data of each of its rows. So the roller subscribes to a book
-/// at it (`rolls::Roller`), a live warmup requests the history of its
+/// the live data of each of its rows. So a strategy subscribes to a book
+/// at it (`strategy::subscriptions`), a live warmup requests the history of its
 /// deltas at its book type, onto which Nautilus replays them
 /// (`strategy::warmup`), and a fill asks its depth at its levels
 /// (`catalog::NodeFill`).
@@ -2480,7 +2480,7 @@ mod tests {
 
     /// A subscription of each kind a strategy makes, of `id`, its bars
     /// `id`'s 1-minute LAST bars, as a run subscribes to it
-    /// (`rolls::Roller`, `strategy::warmup`): its book in its venue's
+    /// (`strategy::subscriptions`): its book in its venue's
     /// format (`book_format`), its deltas at its book type, its depth at
     /// its levels of an L2_MBP book, a venue with no book's at L2_MBP and
     /// no levels, its client subscribing to no book of any; its custom

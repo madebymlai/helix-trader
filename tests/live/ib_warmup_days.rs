@@ -22,7 +22,7 @@ use std::{cell::RefCell, collections::BTreeSet, rc::Rc, time::Duration};
 
 use helix_trader::{
     live::Live,
-    strategy::{requirements::DataRequirements, warmup::Warmup},
+    strategy::{requirements::DataRequirements, subscriptions::Subscriptions, warmup::Warmup},
     venues::ib::{IbAccount, IbHistory},
 };
 use jiff::{SignedDuration, Timestamp};
@@ -58,11 +58,13 @@ struct Record {
     failure: Option<String>,
 }
 
-/// Warms up as a strategy does and stops the node when the warmup ends.
+/// Warms up and subscribes to its bars from where the warmup ends as a
+/// strategy does, and stops the node when the warmup ends.
 #[derive(Debug)]
 struct Probe {
     core: StrategyCore,
     warmup: Rc<Warmup>,
+    subscriptions: Subscriptions,
     record: Rc<RefCell<Record>>,
 }
 
@@ -71,7 +73,9 @@ nautilus_strategy!(Probe);
 impl DataActor for Probe {
     fn on_start(&mut self) -> anyhow::Result<()> {
         self.record.borrow_mut().started = Some(self.clock().utc_now());
-        Rc::clone(&self.warmup).start(self)
+        let now = Rc::clone(&self.warmup).start(self)?;
+        self.subscriptions.clone().start(self, now);
+        Ok(())
     }
 
     fn on_historical_bars(&mut self, bars: &[Bar]) -> anyhow::Result<()> {
@@ -121,6 +125,7 @@ async fn a_warmup_of_days_holds_every_minute_bar_of_ibs_history_and_builds_each_
             ..Default::default()
         }),
         warmup: Rc::clone(&warmup),
+        subscriptions: Subscriptions::new(requirements.bar_types.clone(), vec![]),
         record: Rc::clone(&record),
     };
     // An empty catalog of its own: IB answers the whole warmup.

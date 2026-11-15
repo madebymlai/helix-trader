@@ -1,8 +1,8 @@
 //! A strategy declaring a rolled root (`common::rolls`: GC.GLBX, rolling
 //! from GCQ26.GLBX to GCZ26.GLBX at 00:00 UTC on 29 July 2026) over a run
 //! from 23:00 to 01:00 across the roll: the run replays each contract's
-//! series over its slice only, and a `Roller` switches the strategy's
-//! subscriptions from one contract to the next at the roll and tells it.
+//! series over its slice only, and a `Roller` tells the strategy of the
+//! roll, at which its `Subscriptions` switch from one contract to the next.
 //! One node per thread, so one run per test.
 
 use std::{cell::RefCell, num::NonZeroUsize, path::Path, rc::Rc, sync::Arc};
@@ -14,7 +14,7 @@ use crate::common::{
 use helix_trader::{
     backtest::{Backtest, Commission},
     rolls::{Roller, Transition},
-    strategy::requirements::TickSeries,
+    strategy::{requirements::TickSeries, subscriptions::Subscriptions},
     venues,
 };
 use nautilus_common::{actor::DataActor, logging::logger::LoggerConfig, timer::TimeEvent};
@@ -49,8 +49,9 @@ enum Got {
 /// How the probe subscribes.
 #[derive(Debug)]
 enum Subscribe {
-    /// Through a roller of the declared series.
-    Roller(Roller),
+    /// Through subscriptions to the declared series and a roller of their
+    /// instruments, as a strategy does.
+    Rolled(Roller, Subscriptions),
     /// To the trades and book depth of both contracts, directly.
     Contracts,
 }
@@ -74,7 +75,12 @@ impl RollProbe {
 impl DataActor for RollProbe {
     fn on_start(&mut self) -> anyhow::Result<()> {
         match &self.subscribe {
-            Subscribe::Roller(roller) => roller.clone().start(self)?,
+            Subscribe::Rolled(roller, subscriptions) => {
+                let (roller, subscriptions) = (roller.clone(), subscriptions.clone());
+                let now = self.clock().utc_now();
+                subscriptions.start(self, now);
+                roller.start(self, now)?;
+            }
             Subscribe::Contracts => {
                 for id in [PRE, POST].map(InstrumentId::from) {
                     self.subscribe_trades(id, None, None);
@@ -101,11 +107,13 @@ impl DataActor for RollProbe {
     }
 
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {
-        if let Subscribe::Roller(roller) = &self.subscribe
-            && let Some(roll) = roller.clone().on_time_event(self, event)?
-        {
-            let now = self.clock().timestamp_ns();
-            self.record(Got::Roll(roll, now));
+        if let Subscribe::Rolled(roller, subscriptions) = &self.subscribe {
+            let (roller, subscriptions) = (roller.clone(), subscriptions.clone());
+            if let Some(roll) = roller.on_time_event(self, event)? {
+                subscriptions.roll(self, &roll);
+                let now = self.clock().timestamp_ns();
+                self.record(Got::Roll(roll, now));
+            }
         }
         Ok(())
     }
@@ -159,6 +167,16 @@ fn ticks(instrument_id: &str) -> Vec<TickSeries> {
         instrument_id: InstrumentId::from(instrument_id),
     })
     .to_vec()
+}
+
+/// The probe's subscriptions to `ticks`, rolled by a replayed roller of
+/// their instruments.
+fn rolled(ticks: Vec<TickSeries>) -> Subscribe {
+    let instrument_ids = ticks.iter().map(|tick| tick.instrument_id).collect();
+    Subscribe::Rolled(
+        Roller::replayed(instrument_ids),
+        Subscriptions::new(vec![], ticks),
+    )
 }
 
 /// A backtest over `[23:00 Tuesday, 01:00 Wednesday]` on `catalog`,
@@ -236,11 +254,11 @@ fn a_rolled_root_replays_each_contract_only_within_its_slice() {
 }
 
 #[test]
-fn the_roller_switches_the_subscriptions_at_the_roll_and_tells_the_strategy() {
+fn the_roller_tells_the_strategy_of_the_roll_at_which_its_subscriptions_switch() {
     let catalog = rolls::catalog();
     let backtest = backtest(&catalog, ticks(ROOT));
 
-    let got = run(&backtest, Subscribe::Roller(Roller::replayed(ticks(ROOT))));
+    let got = run(&backtest, rolled(ticks(ROOT)));
 
     // The roll is told after August's last tick, at its slice's last
     // nanosecond, and before December's first, at the roll.
@@ -267,13 +285,13 @@ fn the_roller_switches_the_subscriptions_at_the_roll_and_tells_the_strategy() {
 }
 
 #[test]
-fn the_roller_alone_keeps_the_strategy_on_the_contract_standing_for_the_root() {
+fn the_subscriptions_alone_keep_the_strategy_on_the_contract_standing_for_the_root() {
     let catalog = rolls::catalog();
     // Both contracts declared as themselves: each replayed over the whole
-    // run, so what reaches the probe is what the roller subscribes to.
+    // run, so what reaches the probe is what its subscriptions subscribe to.
     let backtest = backtest(&catalog, [ticks(PRE), ticks(POST)].concat());
 
-    let got = run(&backtest, Subscribe::Roller(Roller::replayed(ticks(ROOT))));
+    let got = run(&backtest, rolled(ticks(ROOT)));
 
     // Not August's trade at the roll nor its ticks after it, not
     // December's trade at 23:15 nor its snapshot at 23:50.
@@ -300,11 +318,11 @@ fn the_roller_alone_keeps_the_strategy_on_the_contract_standing_for_the_root() {
 }
 
 #[test]
-fn the_roller_of_a_plain_instrument_subscribes_once_and_sets_no_alert() {
+fn a_plain_instrument_is_subscribed_once_and_gets_no_roll_alert() {
     let catalog = rolls::catalog();
     let backtest = backtest(&catalog, ticks(POST));
 
-    let got = run(&backtest, Subscribe::Roller(Roller::replayed(ticks(POST))));
+    let got = run(&backtest, rolled(ticks(POST)));
 
     // December's contract named as itself: all its ticks of the run, no
     // roll.
@@ -357,12 +375,12 @@ fn a_contract_declared_beside_its_root_is_replayed_once() {
 }
 
 #[test]
-fn the_roller_keeps_a_contract_declared_beside_its_root_after_the_root_rolls_off_it() {
+fn the_subscriptions_keep_a_contract_declared_beside_its_root_after_the_root_rolls_off_it() {
     let catalog = rolls::catalog();
     let declared = [ticks(ROOT), ticks(PRE)].concat();
     let backtest = backtest(&catalog, declared.clone());
 
-    let got = run(&backtest, Subscribe::Roller(Roller::replayed(declared)));
+    let got = run(&backtest, rolled(declared));
 
     // The root rolls from August's contract to December's; August's,
     // declared as itself, keeps arriving after the roll.
@@ -432,7 +450,7 @@ fn store_deltas_and_imbalances(
 }
 
 #[test]
-fn the_roller_rolls_book_deltas_and_custom_data_keyed_by_the_contract() {
+fn the_subscriptions_roll_book_deltas_and_custom_data_keyed_by_the_contract() {
     let catalog = rolls::catalog();
     store_deltas_and_imbalances(
         catalog.path(),
@@ -447,14 +465,11 @@ fn the_roller_rolls_book_deltas_and_custom_data_keyed_by_the_contract() {
         &["thu 23:37:00", "00:17:00"],
     );
     // Both contracts declared as themselves: each replayed over the whole
-    // run, so what reaches the probe is what the roller subscribes to.
+    // run, so what reaches the probe is what its subscriptions subscribe to.
     let declared = [deltas_and_imbalances(PRE), deltas_and_imbalances(POST)].concat();
     let backtest = backtest(&catalog, declared);
 
-    let got = run(
-        &backtest,
-        Subscribe::Roller(Roller::replayed(deltas_and_imbalances(ROOT))),
-    );
+    let got = run(&backtest, rolled(deltas_and_imbalances(ROOT)));
 
     // August's before the roll, December's after.
     assert_eq!(

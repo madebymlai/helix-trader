@@ -53,7 +53,9 @@
 //! type built from them. A backtest replays a source bar stamped at its
 //! close before the timer closing the bar of the cadence at that instant,
 //! so that bar holds it. The setter owns the ATR, and `TargetSetter::start`
-//! registers it and subscribes to its bars, which no strategy declares. A
+//! registers it for its bars, which no strategy declares: the strategy
+//! subscribes to them beside its own (`TargetSetter::atr_bar_type`,
+//! `strategy::subscriptions`). A
 //! decision at which that ATR is not yet initialized opens no target, as a
 //! decision on cold features is none. Each exit is on the instrument's
 //! nearest tick (Nautilus' tick grid), a tie away from the decision's
@@ -966,18 +968,16 @@ impl TargetAtr {
         indicator.initialized.then_some(indicator.value)
     }
 
-    /// Registers it with `actor`'s Nautilus indicators for its bars and
-    /// subscribes the actor to them (see `TargetSetter::start`).
+    /// Registers it with `actor`'s Nautilus indicators for its bars (see
+    /// `TargetSetter::start`).
     fn start<A>(self: &Rc<Self>, actor: &mut A)
     where
         A: DataActor + DataActorNative + Debug + 'static,
     {
         let shared = Rc::clone(self) as SharedActorIndicator;
-        let bar_type = self.bars.bar_type;
         actor
             .core_mut()
-            .register_indicator_for_bars(bar_type, shared);
-        actor.subscribe_bars(bar_type, None, None);
+            .register_indicator_for_bars(self.bars.bar_type, shared);
     }
 
     /// `warmup` building its bars and handing them to it (see
@@ -1138,12 +1138,14 @@ impl TargetSetter {
 
     /// Starts the target's average true range, if any, on `actor`, from
     /// its `on_start`: registers it with the actor's Nautilus indicators
-    /// for its bars and subscribes the actor to them, so the data engine
+    /// for its bars, which the actor subscribes to in the same `on_start`
+    /// (`atr_bar_type`, `strategy::subscriptions`), so the data engine
     /// builds them, from the quotes, the trades or the source bars, and
-    /// hands it each before the actor's own handler. Nautilus registers
-    /// an indicator once per bar type and keeps one subscription per bar
-    /// type and actor, so starting again, on a restart, or a strategy
-    /// subscribing to the same bars, feeds it each bar once.
+    /// hands it each before the actor's own handler, the first once the
+    /// start is over. Nautilus registers an indicator once per bar type and
+    /// keeps one subscription per bar type and actor, so starting again, on
+    /// a restart, or a strategy reading the same bars, feeds it each bar
+    /// once.
     pub fn start<A>(&self, actor: &mut A)
     where
         A: DataActor + DataActorNative + Debug + 'static,
@@ -1158,6 +1160,14 @@ impl TargetSetter {
     #[must_use]
     pub fn initialized(&self) -> bool {
         self.atr.as_ref().is_none_or(|atr| atr.value().is_some())
+    }
+
+    /// The bar type of the target's average true range, if any: the
+    /// strategy subscribes to its bars beside its own
+    /// (`strategy::subscriptions`), no strategy declaring them.
+    #[must_use]
+    pub fn atr_bar_type(&self) -> Option<BarType> {
+        self.atr.as_ref().map(|atr| atr.bars.bar_type)
     }
 
     /// `warmup` building the bars of the target's ATR, if any, and handing
@@ -1537,6 +1547,13 @@ impl Targets {
     #[must_use]
     pub fn initialized(&self) -> bool {
         self.setter.initialized()
+    }
+
+    /// The bar type of the targets' average true range, if any
+    /// (`TargetSetter::atr_bar_type`).
+    #[must_use]
+    pub fn atr_bar_type(&self) -> Option<BarType> {
+        self.setter.atr_bar_type()
     }
 
     /// Opens the target of the decision of `row`, as the setter sets it

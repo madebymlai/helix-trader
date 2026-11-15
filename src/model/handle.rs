@@ -69,20 +69,25 @@
 //! error, a side's with its pair, and the current one kept; it is not read
 //! again (`store::Swap`).
 //!
-//! The handle owns a `rolls::Roller` of the features' tick series
-//! (`FeatureSet::ticks`, custom data among them) and of the tick series of
-//! the traded instrument its data requirements hold, which the harness
-//! reads for the decisions' freshness, its quotes among them when no
-//! series of the strategy reads it (`StandardConfig::data_requirements`,
-//! the decision's reference price, the venue's fills and the target's
-//! ATR then coming from them): `start` subscribes each
-//! on the contract standing for it, a plain instrument once, a root on its
-//! front contract with its roll alert, and the strategy hands the handle
-//! its time events (after `strategy::orders::on_time_event`), for the
-//! roller. At a roll the root's features move to the post contract and
-//! restart (`FeatureSet::roll`), so decisions wait on the strategy's
-//! initialized gate until they refill. The same code runs in a backtest
-//! and a dataset run, on the catalog's contract slices
+//! The handle owns the strategy's subscriptions
+//! (`strategy::subscriptions::Subscriptions`) to the bars of its
+//! requirements and of its target's ATR (`TargetSetter::atr_bar_type`), a
+//! dataset run's targets' (`Targets::atr_bar_type`), which no strategy
+//! declares, to the features' tick series (`FeatureSet::ticks`, custom data
+//! among them) and to every other tick series of its data requirements,
+//! those of the traded instrument, which the harness reads for the
+//! decisions' freshness, its quotes among them when no series of the
+//! strategy reads it (`StandardConfig::data_requirements`, the decision's
+//! reference price, the venue's fills and the target's ATR then coming from
+//! them), and a `rolls::Roller` of their instruments: `start` subscribes
+//! each series on the contract standing for its instrument, a plain
+//! instrument once, a root on its front contract, and sets each root's
+//! roll alert; the strategy hands the handle its time events (after
+//! `strategy::orders::on_time_event`), for the roller. At a roll the
+//! root's series move to the post contract (`Subscriptions::roll`), and
+//! its features too, restarting (`FeatureSet::roll`), so decisions wait on
+//! the strategy's initialized gate until they refill. The same code runs in
+//! a backtest and a dataset run, on the catalog's contract slices
 //! (`DataRequirements::slices`), and live, where the roller loads each
 //! post contract before its roll (`Roller::live`).
 //!
@@ -105,8 +110,8 @@
 //! every tick series of the requirements its venue's history serves, a
 //! root's on the contract standing for it, custom data from the catalog
 //! alone, added to the cache the features read it from
-//! (`FeatureSet::data`), and the roller's subscriptions continue from its
-//! end, so the first decision after a start is warm. A series no feature
+//! (`FeatureSet::data`), and the subscriptions continue from its end, so
+//! the first decision after a start is warm. A series no feature
 //! reads, the traded instrument's or a conversion pair's, is warmed up
 //! too, so that the cache holds its latest price at the start, and its
 //! ticks, of the history and live, reach no feature, each reading those of
@@ -158,6 +163,7 @@ use crate::{
     strategy::{
         orders::{self, Trade},
         risk::R,
+        subscriptions::Subscriptions,
         warmup::{self, BookIndicator, Warmup},
     },
 };
@@ -282,10 +288,14 @@ pub struct ModelHandle {
     /// The strategy's warmup, which feeds the features and the target's
     /// ATR the handle trades on.
     warmup: Rc<Warmup>,
-    /// Subscribes the features' ticks, on the contract standing for each
-    /// root, and every other tick series of the requirements: the traded
-    /// instrument's, and the quotes of the pairs of `[trade] conversions`,
-    /// which the warmup requests too but no feature reads.
+    /// The strategy's subscriptions: to the bars of its requirements and of
+    /// its target's ATR, to the features' ticks, on the contract standing
+    /// for each root, and to every other tick series of the requirements,
+    /// the traded instrument's and the quotes of the pairs of
+    /// `[trade] conversions`, which the warmup requests too but no feature
+    /// reads.
+    subscriptions: Subscriptions,
+    /// Rolls the instruments of those ticks.
     roller: Roller,
 }
 
@@ -337,9 +347,10 @@ impl ModelHandle {
         .feeding(Rc::clone(features) as SharedActorIndicator)
         .feeding_ticks(Rc::clone(features) as SharedActorIndicator)
         .feeding_books(Rc::clone(features) as Rc<dyn BookIndicator>);
+        let instrument_ids = ticks.iter().map(|tick| tick.instrument_id).collect();
         let roller = match mode {
-            Mode::Live { .. } => Roller::live(ticks),
-            Mode::Backtest { .. } | Mode::Dataset { .. } => Roller::replayed(ticks),
+            Mode::Live { .. } => Roller::live(instrument_ids),
+            Mode::Backtest { .. } | Mode::Dataset { .. } => Roller::replayed(instrument_ids),
         };
         let delay = warmup::bar_build_delay(&requirements.bar_types);
         let serving = match mode {
@@ -373,6 +384,13 @@ impl ModelHandle {
             Serving::Deciding(deciding) => deciding.target.warmed(warmup),
             Serving::Dataset { .. } => warmup,
         };
+        // The target's ATR's bars, which Nautilus subscribes once if the
+        // strategy reads them too (`DataActorCore::subscribe_bars`).
+        let atr_bars = match &serving {
+            Serving::Deciding(deciding) => deciding.target.atr_bar_type(),
+            Serving::Dataset { targets, .. } => targets.atr_bar_type(),
+        };
+        let bar_types = requirements.bar_types.iter().copied().chain(atr_bars);
         Ok(Rc::new(Self {
             strategy_id: blueprint.strategy_id(),
             features: Rc::clone(features),
@@ -380,6 +398,7 @@ impl ModelHandle {
             delay,
             traded,
             serving,
+            subscriptions: Subscriptions::new(bar_types.collect(), ticks),
             warmup: Rc::new(warmup),
             roller,
         }))
@@ -391,14 +410,14 @@ impl ModelHandle {
     /// starts the strategy's warmup
     /// (`Warmup::start`), holding the live ticks while it is pending, live
     /// requesting the history of the bars and of the requirements' ticks,
-    /// then
-    /// the roller, which subscribes the features' ticks and every other
-    /// tick series of the requirements, the traded instrument's and the
-    /// conversion pairs' quotes, from now, where the warmup ends, a root's
-    /// on the contract standing for it; starts the target's ATR, if it has
-    /// one (in a dataset run the targets', and collects the rows they
-    /// settle); then starts the decision cadence, `warmup::bar_build_delay`
-    /// late.
+    /// then the subscriptions (`Subscriptions::start`) to the bars, the
+    /// target's ATR's among them, the features' ticks and every other tick
+    /// series of the requirements, the traded instrument's and the
+    /// conversion pairs' quotes, from where the warmup ends, a root's on the
+    /// contract standing for it then, and the roller, which sets each root's roll alert; starts the target's
+    /// ATR, if it has one, registering it for its bars (in a dataset run the
+    /// targets', and collects the rows they settle); then starts the
+    /// decision cadence, `warmup::bar_build_delay` late.
     ///
     /// # Errors
     ///
@@ -414,8 +433,9 @@ impl ModelHandle {
         // Registered first: it sets the contract each feature reads, which
         // the warmup's responses are read against.
         self.features.register(strategy);
-        self.warmup.start(strategy)?;
-        self.roller.start(strategy)?;
+        let now = self.warmup.start(strategy)?;
+        self.subscriptions.start(strategy, now);
+        self.roller.start(strategy, now)?;
         match &self.serving {
             Serving::Deciding(deciding) => deciding.target.start(strategy),
             Serving::Dataset { targets, rows } => {
@@ -489,9 +509,10 @@ impl ModelHandle {
         }
     }
 
-    /// Hands `event` of `strategy` to the roller: at a roll alert
-    /// it switches the root's subscriptions to the post contract, and the
-    /// features reading the root move there and restart (`FeatureSet::roll`),
+    /// Hands `event` of `strategy` to the roller: at a roll alert the
+    /// root's subscriptions move to the post contract
+    /// (`Subscriptions::roll`), and the features reading the root move
+    /// there and restart (`FeatureSet::roll`),
     /// the decisions waiting until they are initialized again; any other
     /// event is not the handle's. A trade's time alert is the strategy's
     /// (`strategy::orders::on_time_event`).
@@ -504,6 +525,7 @@ impl ModelHandle {
         S: DataActor + DataActorNative + Debug + 'static,
     {
         if let Some(roll) = self.roller.on_time_event(strategy, event)? {
+            self.subscriptions.roll(strategy, &roll);
             self.features.roll(strategy, &roll);
         }
         Ok(())
@@ -2606,6 +2628,15 @@ mod tests {
                         ids(&s.instrument_ids),
                         start_ns(s.params.as_ref())
                     ),
+                    DataCommand::Subscribe(SubscribeCommand::Bars(s)) => format!(
+                        "subscribe bars [{}] from {:?}",
+                        s.bar_types
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(","),
+                        start_ns(s.params.as_ref())
+                    ),
                     DataCommand::Request(RequestCommand::Data(r)) => format!(
                         "request data {} of {:?} from {} {:?}..{:?}",
                         r.data_type.type_name(),
@@ -2766,6 +2797,105 @@ mod tests {
         let sent = sent_commands();
         handle.start(&mut probe).unwrap();
         sent.take()
+    }
+
+    /// The bar subscriptions the start of a handle in `mode` sends at 12:00,
+    /// on `config()`, whose target's ATR is on AUD/USD's hourly mids, for a
+    /// strategy reading `bar_types` and AUD/USD's quotes: each its bar types
+    /// and the time its stream starts.
+    fn bars_subscribed_at_start(mode: Mode, bar_types: &[&str]) -> Vec<String> {
+        let requirements = DataRequirements {
+            bar_types: bar_types
+                .iter()
+                .map(|&bar_type| BarType::from(bar_type))
+                .collect(),
+            ..requirements()
+        };
+        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+        let handle =
+            ModelHandle::new(&blueprint_of(&features(), &config(), requirements), mode).unwrap();
+        let sent = sent_commands();
+
+        handle.start(&mut probe).unwrap();
+
+        sent.take()
+            .into_iter()
+            .filter(|line| line.starts_with("subscribe bars"))
+            .collect()
+    }
+
+    /// The target's ATR's bars, which no strategy declares, are subscribed
+    /// from the start in a backtest, as the strategy's own are.
+    #[test]
+    fn a_backtests_start_subscribes_the_targets_atr_bars_from_its_start() {
+        let models = tempfile::tempdir().unwrap();
+
+        let subscribed = bars_subscribed_at_start(
+            Mode::Backtest {
+                models: models.path().to_path_buf(),
+            },
+            &[],
+        );
+
+        assert_eq!(
+            subscribed,
+            ["subscribe bars [AUD/USD.SIM-1-HOUR-MID-INTERNAL] from Some(2026-10-22T12:00:00Z)"]
+        );
+    }
+
+    /// A dataset run's targets' ATR's bars are subscribed from the start.
+    #[test]
+    fn a_dataset_runs_start_subscribes_the_targets_atr_bars_from_its_start() {
+        let subscribed = bars_subscribed_at_start(
+            Mode::Dataset {
+                rows: SettledRows::default(),
+            },
+            &[],
+        );
+
+        assert_eq!(
+            subscribed,
+            ["subscribe bars [AUD/USD.SIM-1-HOUR-MID-INTERNAL] from Some(2026-10-22T12:00:00Z)"]
+        );
+    }
+
+    /// Live, the target's ATR's bars, which the warmup builds, are
+    /// subscribed from where the warmup ends, now.
+    #[test]
+    fn a_live_start_subscribes_the_targets_atr_bars_from_where_the_warmup_ends() {
+        let models = tempfile::tempdir().unwrap();
+
+        let subscribed = bars_subscribed_at_start(live(models.path().to_path_buf()), &[]);
+
+        assert_eq!(
+            subscribed,
+            ["subscribe bars [AUD/USD.SIM-1-HOUR-MID-INTERNAL] from Some(2026-10-22T12:00:00Z)"]
+        );
+    }
+
+    /// The target's ATR's bars the strategy reads too are subscribed once,
+    /// beside the strategy's other bars of their venue.
+    #[test]
+    fn the_targets_atr_bars_the_strategy_reads_too_are_subscribed_once() {
+        let models = tempfile::tempdir().unwrap();
+
+        let subscribed = bars_subscribed_at_start(
+            Mode::Backtest {
+                models: models.path().to_path_buf(),
+            },
+            &[
+                "AUD/USD.SIM-1-HOUR-MID-INTERNAL",
+                "AUD/USD.SIM-4-HOUR-MID-INTERNAL",
+            ],
+        );
+
+        assert_eq!(
+            subscribed,
+            [
+                "subscribe bars [AUD/USD.SIM-1-HOUR-MID-INTERNAL,AUD/USD.SIM-4-HOUR-MID-INTERNAL] \
+                 from Some(2026-10-22T12:00:00Z)"
+            ]
+        );
     }
 
     /// The quotes of IC's EURUSD, a pair of `[trade] conversions`: the

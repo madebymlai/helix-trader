@@ -1,5 +1,5 @@
 //! A recording strategy: it subscribes to its bars through
-//! `strategy::warmup` as a real strategy does in a backtest, on a plain
+//! `strategy::subscriptions` as a real strategy does in a backtest, on a plain
 //! instrument or, given its continuous bars, on a root, records every bar
 //! it gets, every fill, and on stop the adjustments of its positions
 //! (funding), its orders, the orders denied and its account's margins, and
@@ -19,7 +19,7 @@ use helix_trader::{
         conversions::{Conversions, Rates},
         orders::{Exits, Trade},
         risk::Stake,
-        warmup,
+        subscriptions::Subscriptions,
     },
 };
 use nautilus_common::actor::DataActor;
@@ -169,7 +169,10 @@ nautilus_strategy!(Recorder, {
 
 impl DataActor for Recorder {
     fn on_start(&mut self) -> anyhow::Result<()> {
-        warmup::subscribe(self, &[self.bar_type], &self.continuous.clone());
+        let now = self.clock().utc_now();
+        Subscriptions::new(vec![self.bar_type], vec![])
+            .continuous(self.continuous.clone())
+            .start(self, now);
         Ok(())
     }
 

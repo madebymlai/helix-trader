@@ -508,7 +508,7 @@ fn an_update_no_feature_reads_and_custom_data_are_no_update_of_an_instrument() {
     assert_eq!(features.last_update(id(AUD)), None);
 }
 
-/// A roller subscribes these and a live warmup requests them: each kind of
+/// A strategy subscribes these and a live warmup requests them: each kind of
 /// tick or custom data of each instrument once, in the order declared, and
 /// no bars.
 #[test]

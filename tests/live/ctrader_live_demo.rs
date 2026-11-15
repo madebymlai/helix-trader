@@ -24,7 +24,7 @@ use std::{cell::RefCell, process::Command, rc::Rc, time::Duration};
 
 use helix_trader::{
     live::Live,
-    strategy::{requirements::DataRequirements, warmup::Warmup},
+    strategy::{requirements::DataRequirements, subscriptions::Subscriptions, warmup::Warmup},
 };
 use jiff::SignedDuration;
 use nautilus_common::{
@@ -57,8 +57,9 @@ struct Record {
     quotes: Vec<QuoteTick>,
 }
 
-/// Warms up its bars through a `Warmup`, as a real strategy does,
-/// subscribes to the quotes, and records both. It sends no order.
+/// Warms up its bars through a `Warmup` and subscribes to them from where
+/// it ends through `Subscriptions`, as a real strategy does, subscribes to
+/// the quotes, and records both. It sends no order.
 #[derive(Debug)]
 struct Recorder {
     core: StrategyCore,
@@ -71,7 +72,8 @@ nautilus_strategy!(Recorder);
 
 impl DataActor for Recorder {
     fn on_start(&mut self) -> anyhow::Result<()> {
-        Rc::clone(&self.warmup).start(self)?;
+        let now = Rc::clone(&self.warmup).start(self)?;
+        Subscriptions::new(vec![self.bar_type], vec![]).start(self, now);
         self.subscribe_quotes(self.bar_type.instrument_id(), None, None);
         Ok(())
     }

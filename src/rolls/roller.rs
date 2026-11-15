@@ -1,7 +1,11 @@
-//! The roller: keeps a strategy subscribed to the tick series it reads on
-//! the contract standing for each of their instruments, switching at each
-//! roll, with the plain Nautilus clock and subscription API, as Nautilus'
-//! own (crate-private) roller of continuous bars does.
+//! The roller: tells a strategy when the contract standing for each
+//! instrument it reads changes, with the plain Nautilus clock, as Nautilus'
+//! own (crate-private) roller of continuous bars does: an alert before each
+//! roll, at which it returns the roll, and, live, the post contract loaded
+//! before it. It subscribes to nothing: the strategy hands each roll to its
+//! subscriptions (`strategy::subscriptions`), which move the rolled
+//! instrument's series to the post contract, and to whatever else reads the
+//! contract, a model strategy's features.
 
 use std::fmt::Debug;
 
@@ -10,18 +14,11 @@ use nautilus_common::{
     actor::{DataActor, DataActorNative},
     timer::TimeEvent,
 };
-use nautilus_core::{Params, UnixNanos};
-use nautilus_model::{
-    data::{DataType, NautilusDataType},
-    enums::BookType,
-    identifiers::InstrumentId,
-};
+use nautilus_core::Params;
+use nautilus_model::identifiers::InstrumentId;
 
 use super::Transition;
-use crate::{
-    strategy::{requirements::TickSeries, warmup::subscription_params},
-    venues,
-};
+use crate::venues;
 
 /// The prefix of an instrument's roll alert, followed by its id.
 const ROLL_ALERT: &str = "ROLL:";
@@ -31,15 +28,12 @@ const ROLL_ALERT: &str = "ROLL:";
 /// Nautilus' data engine), which loads the instrument as it answers.
 const FORCE_INSTRUMENT_UPDATE: &str = "force_instrument_update";
 
-/// Subscribes a strategy to its tick series, each on the contract standing
-/// for its instrument (see `Transition::after`), and rolls them: owned by
-/// the strategy, started in its `on_start` and handed its time events in
-/// `on_time_event`, which return the roll they made, if any. An instrument
-/// that does not roll is subscribed once, with no alert. A book is
-/// subscribed to in the format its venue's live data streams
-/// (`venues::book_format`), live as in a backtest or a dataset run, whose
-/// replay of the catalog's book reads neither the book type nor the levels
-/// of a subscription that manages no book (see `subscribe`).
+/// Rolls a strategy's instruments, each from the contract standing for it
+/// (see `Transition::after`) to the next: owned by the strategy, started in
+/// its `on_start` and handed its time events in `on_time_event`, which
+/// returns the roll it made, if any, for the strategy to hand its
+/// subscriptions (`Subscriptions::roll`). An instrument that does not roll
+/// gets no alert.
 ///
 /// A live roller loads each post contract when it sets its roll alert, so
 /// a node rolls any number of times: it requests the instrument from the
@@ -47,16 +41,18 @@ const FORCE_INSTRUMENT_UPDATE: &str = "force_instrument_update";
 /// nothing: a backtest or dataset run registers every contract of its
 /// slices up front.
 ///
-/// It subscribes through the strategy that owns it, so the strategy calls
-/// it on a clone (`self.roller.clone().start(self)`): it holds the series
-/// only, and works out the contracts from the clock.
+/// It sets its alerts and requests through the strategy that owns it, so
+/// the strategy calls it on a clone (`self.roller.clone().start(self, now)`):
+/// it holds the instruments only, and works out the contracts from the time
+/// it starts at and the time of each alert.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Roller {
-    ticks: Vec<TickSeries>,
+    /// The instruments, roots or plain, each once.
+    instrument_ids: Vec<InstrumentId>,
     loading: Loading,
 }
 
-/// How the node comes to hold the contracts a roller subscribes to.
+/// How the node comes to hold the contracts a roller rolls into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Loading {
     /// The run registered them all before it started.
@@ -73,42 +69,48 @@ enum Loading {
 }
 
 impl Roller {
-    /// A live roller of `ticks`, their instruments roots or plain
-    /// instruments: it requests each post contract before its roll.
+    /// A live roller of `instrument_ids`, roots or plain instruments: it
+    /// requests each post contract before its roll.
     #[must_use]
-    pub fn live(ticks: Vec<TickSeries>) -> Self {
+    pub fn live(instrument_ids: Vec<InstrumentId>) -> Self {
+        Self::of(instrument_ids, Loading::Requested)
+    }
+
+    /// A roller of `instrument_ids` in a backtest or a dataset run, which
+    /// register every contract up front: it requests nothing.
+    #[must_use]
+    pub fn replayed(instrument_ids: Vec<InstrumentId>) -> Self {
+        Self::of(instrument_ids, Loading::Registered)
+    }
+
+    fn of(instrument_ids: Vec<InstrumentId>, loading: Loading) -> Self {
+        let mut ids: Vec<InstrumentId> = Vec::new();
+        for instrument_id in instrument_ids {
+            if !ids.contains(&instrument_id) {
+                ids.push(instrument_id);
+            }
+        }
         Self {
-            ticks,
-            loading: Loading::Requested,
+            instrument_ids: ids,
+            loading,
         }
     }
 
-    /// A roller of `ticks` in a backtest or a dataset run, which register
-    /// every contract up front: it requests nothing.
-    #[must_use]
-    pub fn replayed(ticks: Vec<TickSeries>) -> Self {
-        Self {
-            ticks,
-            loading: Loading::Registered,
-        }
-    }
-
-    /// Subscribes `actor` to each series on the contract standing for its
-    /// instrument now, and sets the alert of each instrument's next roll,
-    /// if it rolls (see `on_time_event`), live requesting its post
-    /// contract.
+    /// Sets the alert of each instrument's next roll after `now`, if it
+    /// rolls (see `on_time_event`), live requesting its post contract.
+    /// `now` is the time the strategy's subscriptions start from
+    /// (`Subscriptions::start`), so the alert is of the roll out of the
+    /// contract they subscribe to (`front`).
     ///
     /// # Errors
     ///
     /// Returns an error if the clock refuses an alert or Nautilus a
     /// request.
-    pub fn start<A>(&self, actor: &mut A) -> anyhow::Result<()>
+    pub fn start<A>(&self, actor: &mut A, now: Timestamp) -> anyhow::Result<()>
     where
         A: DataActor + DataActorNative + Debug + 'static,
     {
-        let now = actor.clock().utc_now();
-        for instrument_id in self.instrument_ids() {
-            self.subscribe(actor, instrument_id, front(instrument_id, now));
+        for &instrument_id in &self.instrument_ids {
             if let Some(next) = Transition::after(instrument_id, now) {
                 self.arm(actor, instrument_id, next)?;
             }
@@ -116,13 +118,11 @@ impl Roller {
         Ok(())
     }
 
-    /// If `event` is an instrument's roll alert, rolls its series: from
-    /// the pre contract to the post contract of its transition, and sets
-    /// the alert of the next one, live requesting its post contract;
-    /// returns the transition made. `None` for any
-    /// other event, which is the strategy's own. A series of the pre
-    /// contract that another of the instruments still stands on after the
-    /// roll (the contract itself, read beside its root) stays subscribed.
+    /// If `event` is an instrument's roll alert, sets the alert of its next
+    /// roll, live requesting its post contract, and returns the roll the
+    /// alert is of, from its pre to its post contract, which the strategy
+    /// hands its subscriptions (`Subscriptions::roll`). `None` for any other
+    /// event, which is the strategy's own.
     ///
     /// The alert is at the last nanosecond of the pre contract's slice,
     /// not at the transition: the backtest engine delivers the data of a
@@ -143,17 +143,15 @@ impl Roller {
     where
         A: DataActor + DataActorNative + Debug + 'static,
     {
-        let Some(instrument_id) = self
-            .instrument_ids()
-            .into_iter()
-            .find(|&instrument_id| event.name.as_str() == alert_name(instrument_id))
+        let Some(&instrument_id) = self
+            .instrument_ids
+            .iter()
+            .find(|&&instrument_id| event.name.as_str() == alert_name(instrument_id))
         else {
             return Ok(None);
         };
         let roll = Transition::after(instrument_id, event.ts_event.into())
             .expect("an instrument with a roll alert rolls");
-        self.unsubscribe(actor, instrument_id, roll.pre, roll.time);
-        self.subscribe(actor, instrument_id, roll.post);
         if let Some(next) = Transition::after(instrument_id, roll.time) {
             self.arm(actor, instrument_id, next)?;
         }
@@ -179,116 +177,11 @@ impl Roller {
         }
         Ok(())
     }
-
-    /// The instruments of the series, each once, in order.
-    fn instrument_ids(&self) -> Vec<InstrumentId> {
-        let mut ids: Vec<InstrumentId> = Vec::new();
-        for tick in &self.ticks {
-            if !ids.contains(&tick.instrument_id) {
-                ids.push(tick.instrument_id);
-            }
-        }
-        ids
-    }
-
-    /// The kinds of the series of `instrument_id`.
-    fn data_of(&self, instrument_id: InstrumentId) -> impl Iterator<Item = &NautilusDataType> + '_ {
-        self.ticks
-            .iter()
-            .filter(move |tick| tick.instrument_id == instrument_id)
-            .map(|tick| &tick.data)
-    }
-
-    /// Subscribes `actor` to the series of `instrument_id` on `contract`,
-    /// streaming from now: live, where the warmup, requested up to now,
-    /// ends (`strategy::warmup`). Its book in the format of its venue's
-    /// live data (`venues::book_format`): its deltas at the format's book
-    /// type, asking no depth, so each client streams the whole book it
-    /// gives, and its depth at the format's levels, snapshots of price
-    /// levels (L2_MBP). A venue whose live data streams no book, a cTrader
-    /// broker's, has its deltas subscribed as L2_MBP, and one streaming no
-    /// depth, IB, its depth with no levels: a live start refuses such a
-    /// book before anything connects (`venues::streams`), so only a replay
-    /// subscribes to it, which reads neither value of a subscription that
-    /// manages no book.
-    fn subscribe<A>(&self, actor: &mut A, instrument_id: InstrumentId, contract: InstrumentId)
-    where
-        A: DataActor + DataActorNative + Debug + 'static,
-    {
-        let now = UnixNanos::from(actor.clock().utc_now());
-        let book = venues::book_format(contract.venue);
-        for data in self.data_of(instrument_id) {
-            let params = Some(subscription_params(now, []));
-            match data {
-                NautilusDataType::QuoteTick => actor.subscribe_quotes(contract, None, params),
-                NautilusDataType::TradeTick => actor.subscribe_trades(contract, None, params),
-                NautilusDataType::OrderBookDepth => actor.subscribe_book_depth(
-                    contract,
-                    BookType::L2_MBP,
-                    book.and_then(|book| book.depth),
-                    None,
-                    false,
-                    params,
-                ),
-                NautilusDataType::OrderBookDelta => actor.subscribe_book_deltas(
-                    contract,
-                    book.map_or(BookType::L2_MBP, |book| book.deltas),
-                    None,
-                    None,
-                    false,
-                    params,
-                ),
-                NautilusDataType::Custom { type_name } => {
-                    let data_type = DataType::new(type_name, None, Some(contract.to_string()));
-                    actor.subscribe_data(data_type, None, params);
-                }
-                other => unreachable!("{other} is not a tick series (see `TickSeries`)"),
-            }
-        }
-    }
-
-    /// Unsubscribes `actor` from the series of `instrument_id` on
-    /// `contract`, but for the kinds an instrument of the roller still
-    /// reads on `contract` at `time`, the contract standing for it then.
-    fn unsubscribe<A>(
-        &self,
-        actor: &mut A,
-        instrument_id: InstrumentId,
-        contract: InstrumentId,
-        time: Timestamp,
-    ) where
-        A: DataActor + DataActorNative + Debug + 'static,
-    {
-        for data in self.data_of(instrument_id) {
-            let still_read = self
-                .ticks
-                .iter()
-                .any(|tick| tick.data == *data && front(tick.instrument_id, time) == contract);
-            if still_read {
-                continue;
-            }
-            match data {
-                NautilusDataType::QuoteTick => actor.unsubscribe_quotes(contract, None, None),
-                NautilusDataType::TradeTick => actor.unsubscribe_trades(contract, None, None),
-                NautilusDataType::OrderBookDepth => {
-                    actor.unsubscribe_book_depth(contract, None, None);
-                }
-                NautilusDataType::OrderBookDelta => {
-                    actor.unsubscribe_book_deltas(contract, None, None);
-                }
-                NautilusDataType::Custom { type_name } => {
-                    let data_type = DataType::new(type_name, None, Some(contract.to_string()));
-                    actor.unsubscribe_data(data_type, None, None);
-                }
-                other => unreachable!("{other} is not a tick series (see `TickSeries`)"),
-            }
-        }
-    }
 }
 
 /// The contract standing for `instrument_id` at `time`: the pre contract
-/// of its next roll, or itself if it does not roll. What a roller
-/// subscribes to at its start.
+/// of its next roll, or itself if it does not roll. What a strategy
+/// subscribes to at its start (`Subscriptions::start`).
 #[must_use]
 pub fn front(instrument_id: InstrumentId, time: Timestamp) -> InstrumentId {
     Transition::after(instrument_id, time).map_or(instrument_id, |next| next.pre)
@@ -314,12 +207,12 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, num::NonZeroUsize, rc::Rc};
+    use std::{cell::RefCell, rc::Rc};
 
     use nautilus_common::{
         cache::Cache,
         clock::{Clock, VirtualClock},
-        messages::data::{DataCommand, RequestCommand, SubscribeCommand},
+        messages::data::{DataCommand, RequestCommand},
         msgbus::{
             self, MessagingSwitchboard, stubs::TypedIntoMessageSavingHandler,
             stubs::get_typed_into_message_saving_handler,
@@ -345,7 +238,8 @@ mod tests {
 
     impl DataActor for Probe {}
 
-    /// What the probe sent the data engine about an instrument.
+    /// What the probe sent the data engine about an instrument: a roller
+    /// sends requests alone, so a subscription shows as a regression.
     #[derive(Debug, PartialEq, Eq)]
     enum Sent {
         Subscribe(InstrumentId),
@@ -439,7 +333,7 @@ mod tests {
     /// and the rolls the roller made.
     fn run(roller: &Roller, start: &str, end: &str) -> (Vec<Sent>, Vec<Transition>) {
         let (mut probe, clock, commands) = registered(start);
-        roller.start(&mut probe).unwrap();
+        roller.start(&mut probe, start.parse().unwrap()).unwrap();
         let end: Timestamp = end.parse().unwrap();
         let mut now: Timestamp = start.parse().unwrap();
         let mut rolls = Vec::new();
@@ -453,13 +347,6 @@ mod tests {
         (sent(&commands), rolls)
     }
 
-    fn gc_trades() -> Vec<TickSeries> {
-        vec![TickSeries {
-            data: NautilusDataType::TradeTick,
-            instrument_id: id("GC.GLBX"),
-        }]
-    }
-
     /// GC rolls into GCG27 at 00:00 UTC on 2026-11-26 and into GCJ27 on
     /// 2027-01-27, two business days before the last business day of the
     /// month before delivery (`calendar.toml`); GCJ27 rolls into GCM27.
@@ -469,7 +356,7 @@ mod tests {
     #[test]
     fn a_live_roller_rolls_twice_requesting_each_post_contract_before_its_roll() {
         let (sent, rolls) = run(
-            &Roller::live(gc_trades()),
+            &Roller::live(vec![id("GC.GLBX")]),
             "2026-08-10T14:30:00Z",
             "2027-02-01T00:00:00Z",
         );
@@ -486,13 +373,8 @@ mod tests {
         assert_eq!(
             sent,
             [
-                Sent::Subscribe(id("GCZ26.GLBX")),
                 Sent::Request(id("GCG27.GLBX"), true, Some(ClientId::from("IB"))),
-                Sent::Unsubscribe(id("GCZ26.GLBX")),
-                Sent::Subscribe(id("GCG27.GLBX")),
                 Sent::Request(id("GCJ27.GLBX"), true, Some(ClientId::from("IB"))),
-                Sent::Unsubscribe(id("GCG27.GLBX")),
-                Sent::Subscribe(id("GCJ27.GLBX")),
                 Sent::Request(id("GCM27.GLBX"), true, Some(ClientId::from("IB"))),
             ]
         );
@@ -501,146 +383,22 @@ mod tests {
     #[test]
     fn a_replayed_roller_rolls_twice_requesting_nothing() {
         let (sent, rolls) = run(
-            &Roller::replayed(gc_trades()),
+            &Roller::replayed(vec![id("GC.GLBX")]),
             "2026-08-10T14:30:00Z",
             "2027-02-01T00:00:00Z",
         );
         assert_eq!(rolls.len(), 2);
-        assert_eq!(
-            sent,
-            [
-                Sent::Subscribe(id("GCZ26.GLBX")),
-                Sent::Unsubscribe(id("GCZ26.GLBX")),
-                Sent::Subscribe(id("GCG27.GLBX")),
-                Sent::Unsubscribe(id("GCG27.GLBX")),
-                Sent::Subscribe(id("GCJ27.GLBX")),
-            ]
-        );
-    }
-
-    /// The book subscriptions of `commands`: each its instrument, its
-    /// kind, its book type and its depth.
-    fn books_subscribed(
-        commands: &TypedIntoMessageSavingHandler<DataCommand>,
-    ) -> Vec<(
-        InstrumentId,
-        NautilusDataType,
-        BookType,
-        Option<NonZeroUsize>,
-    )> {
-        commands
-            .get_messages()
-            .into_iter()
-            .filter_map(|command| match command {
-                DataCommand::Subscribe(SubscribeCommand::BookDeltas(cmd)) => Some((
-                    cmd.instrument_ids[0],
-                    NautilusDataType::OrderBookDelta,
-                    cmd.book_type,
-                    cmd.depth,
-                )),
-                DataCommand::Subscribe(SubscribeCommand::BookDepth(cmd)) => Some((
-                    cmd.instrument_ids[0],
-                    NautilusDataType::OrderBookDepth,
-                    cmd.book_type,
-                    cmd.depth,
-                )),
-                _ => None,
-            })
-            .collect()
-    }
-
-    fn ticks(series: &[(NautilusDataType, &str)]) -> Vec<TickSeries> {
-        series
-            .iter()
-            .map(|(data, instrument_id)| TickSeries {
-                data: data.clone(),
-                instrument_id: id(instrument_id),
-            })
-            .collect()
-    }
-
-    /// Each book in the format its venue's live data streams: a GLBX
-    /// contract's, LSE's, its deltas as orders (L3_MBO) and its depth ten
-    /// levels a side; a CME contract's, IB's, its deltas as rows of IB's
-    /// market depth (L2_MBP); an OKX swap's its deltas as price levels
-    /// (L2_MBP) and its depth five levels a side. Deltas of the whole book each client streams,
-    /// no depth asked; depth snapshots of price levels.
-    #[test]
-    fn a_roller_subscribes_each_book_in_its_venue_s_format() {
-        use NautilusDataType as D;
-        let swap = "BTC-USDT-SWAP.OKX";
-        let roller = Roller::live(ticks(&[
-            (D::OrderBookDelta, "GCZ26.GLBX"),
-            (D::OrderBookDepth, "GCZ26.GLBX"),
-            (D::OrderBookDelta, "ESZ26.CME"),
-            (D::OrderBookDelta, swap),
-            (D::OrderBookDepth, swap),
-        ]));
-        let (mut probe, _, commands) = registered("2026-08-10T14:30:00Z");
-
-        roller.start(&mut probe).unwrap();
-
-        let levels = NonZeroUsize::new;
-        assert_eq!(
-            books_subscribed(&commands),
-            [
-                (id("GCZ26.GLBX"), D::OrderBookDelta, BookType::L3_MBO, None),
-                (
-                    id("GCZ26.GLBX"),
-                    D::OrderBookDepth,
-                    BookType::L2_MBP,
-                    levels(10)
-                ),
-                (id("ESZ26.CME"), D::OrderBookDelta, BookType::L2_MBP, None),
-                (id(swap), D::OrderBookDelta, BookType::L2_MBP, None),
-                (id(swap), D::OrderBookDepth, BookType::L2_MBP, levels(5)),
-            ]
-        );
-    }
-
-    /// A book its venue's live data streams none of, a cTrader broker's
-    /// deltas, its venue having no book, and an IB instrument's depth,
-    /// IB's having none: a live start refuses it first
-    /// (`venues::streams`), so only a replay subscribes to it, which reads
-    /// neither the book type nor the levels, and it replays as declared.
-    /// Deltas as L2_MBP, depth with no levels.
-    #[test]
-    fn a_replayed_roller_subscribes_a_book_its_venue_streams_none_of() {
-        use NautilusDataType as D;
-        let roller = Roller::replayed(ticks(&[
-            (D::OrderBookDelta, "XAUUSD.ICMARKETS"),
-            (D::OrderBookDepth, "SXR8.IBIS"),
-        ]));
-        let (mut probe, _, commands) = registered("2026-08-10T14:30:00Z");
-
-        roller.start(&mut probe).unwrap();
-
-        assert_eq!(
-            books_subscribed(&commands),
-            [
-                (
-                    id("XAUUSD.ICMARKETS"),
-                    D::OrderBookDelta,
-                    BookType::L2_MBP,
-                    None
-                ),
-                (id("SXR8.IBIS"), D::OrderBookDepth, BookType::L2_MBP, None),
-            ]
-        );
+        assert_eq!(sent, []);
     }
 
     #[test]
     fn a_live_roller_requests_nothing_for_a_plain_instrument() {
-        let ticks = vec![TickSeries {
-            data: NautilusDataType::TradeTick,
-            instrument_id: id("GCZ26.GLBX"),
-        }];
         let (sent, rolls) = run(
-            &Roller::live(ticks),
+            &Roller::live(vec![id("GCZ26.GLBX")]),
             "2026-08-10T14:30:00Z",
             "2027-02-01T00:00:00Z",
         );
         assert!(rolls.is_empty());
-        assert_eq!(sent, [Sent::Subscribe(id("GCZ26.GLBX"))]);
+        assert_eq!(sent, []);
     }
 }

@@ -42,8 +42,9 @@ pub struct DataRequirements {
     /// source serves an instrument's custom data), and replayed in a
     /// backtest as declared. Their instruments are read too: live sets up
     /// their clients, which load them, but subscribes to none of the ticks:
-    /// the strategy subscribes to each from its start through its roller
-    /// (`rolls::Roller`, a model strategy's handle's), a live start
+    /// the strategy subscribes to each from its start through its
+    /// subscriptions (`strategy::subscriptions`, a model strategy's
+    /// handle's), a live start
     /// refusing one its venue's live data does not stream
     /// (`venues::streams`), and warms up on each its venue's history serves
     /// (`warmup::Warmup`), custom data from the catalog alone.
