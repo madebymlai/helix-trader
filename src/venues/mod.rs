@@ -1038,31 +1038,40 @@ mod tests {
     use ctrader::CTraderEnvironment;
     use jiff::SignedDuration;
     use nautilus_common::{
+        actor::DataActor,
         cache::Cache,
         clients::DataClient,
         clock::VirtualClock,
         enums::Environment,
         live::runner::{replace_data_event_sender, replace_exec_event_sender},
         messages::data::{
-            RequestBars, RequestBookDeltas, RequestBookDepth, RequestCommand, RequestQuotes,
-            RequestTrades, SubscribeBars, SubscribeBookDeltas, SubscribeBookDepth,
-            SubscribeCommand, SubscribeCustomData, SubscribeQuotes, SubscribeTrades,
+            DataCommand, RequestBars, RequestBookDeltas, RequestBookDepth, RequestCommand,
+            RequestQuotes, RequestTrades, SubscribeCommand,
         },
+        msgbus::{self, MessagingSwitchboard, stubs::get_typed_into_message_saving_handler},
     };
     use nautilus_core::{UUID4, UnixNanos, string::secret::SecretString};
     use nautilus_live::{builder::LiveNodeBuilder, config::LiveNodeConfig, node::LiveNode};
     use nautilus_model::{
         data::{BarType, DataType, FundingRateUpdate, QuoteTick, TradeTick},
         enums::{AggressorSide, BookType, OrderSide, OrderType},
-        identifiers::{AccountId, ClientId, TradeId, TraderId},
+        identifiers::{AccountId, ClientId, StrategyId, TradeId, TraderId},
         instruments::{InstrumentAny, stubs::crypto_perpetual_ethusdt},
         orders::OrderTestBuilder,
         types::{Price, Quantity},
     };
     use nautilus_okx::common::consts::OKX_VENUE;
+    use nautilus_portfolio::portfolio::Portfolio;
+    use nautilus_trading::{
+        nautilus_strategy,
+        strategy::{StrategyConfig, StrategyCore},
+    };
 
     use super::*;
-    use crate::catalog::{FillData, FillRequest};
+    use crate::{
+        catalog::{FillData, FillRequest},
+        strategy::subscriptions::Subscriptions,
+    };
 
     /// A demo account of `broker`, through its account's variables, beside
     /// the login's credential.
@@ -2482,114 +2491,105 @@ mod tests {
         assert_eq!(drift, Vec::<String>::new());
     }
 
-    /// A subscription of each kind a strategy makes, of `id`, its bars
-    /// `id`'s 1-minute LAST bars, as a run subscribes to it
-    /// (`strategy::subscriptions`): its book in its venue's
-    /// format (`book_format`), its deltas at its book type, its depth at
-    /// its levels of an L2_MBP book, a venue with no book's at L2_MBP and
-    /// no levels, its client subscribing to no book of any; its custom
+    /// A strategy registered without a node at `FILL_START`, to subscribe
+    /// through.
+    #[derive(Debug)]
+    struct Subscriber {
+        core: StrategyCore,
+    }
+
+    nautilus_strategy!(Subscriber);
+
+    impl DataActor for Subscriber {}
+
+    /// The subscription of each kind a strategy makes, of `id`, as a run
+    /// makes it: through `strategy::subscriptions::Subscriptions`, started on
+    /// a strategy registered without a node, the commands it sends the data
+    /// engine captured. Its bars are `id`'s 1-minute LAST bars, its custom
     /// data `Custom:Imbalance` of it. The kind's name, the series it
-    /// subscribes to and the command.
-    fn subscriptions_of(id: InstrumentId) -> Vec<(&'static str, CatalogSeries, SubscribeCommand)> {
+    /// subscribes to and the command, none for custom data, whose
+    /// subscription, naming no client, Nautilus puts on the message bus alone
+    /// (`DataActorCore::subscribe_data`), so no client is asked it.
+    fn subscriptions_of(
+        id: InstrumentId,
+    ) -> Vec<(&'static str, CatalogSeries, Option<SubscribeCommand>)> {
         use NautilusDataType as D;
         let bars = BarType::from(format!("{id}-1-MINUTE-LAST-EXTERNAL").as_str());
-        let ticks = |data| {
-            CatalogSeries::Ticks(TickSeries {
-                data,
-                instrument_id: id,
-            })
+        let ticks = |data| TickSeries {
+            data,
+            instrument_id: id,
         };
-        let (venue, ts) = (Some(id.venue), UnixNanos::from(at(FILL_START)));
-        let book = book_format(id.venue).unwrap_or(BookFormat {
-            deltas: BookType::L2_MBP,
-            depth: None,
-        });
-        vec![
-            (
-                "quotes",
-                ticks(D::QuoteTick),
-                SubscribeCommand::Quotes(SubscribeQuotes::new(
-                    id,
-                    None,
-                    venue,
-                    UUID4::new(),
-                    ts,
-                    None,
-                    None,
-                )),
-            ),
-            (
-                "trades",
-                ticks(D::TradeTick),
-                SubscribeCommand::Trades(SubscribeTrades::new(
-                    id,
-                    None,
-                    venue,
-                    UUID4::new(),
-                    ts,
-                    None,
-                    None,
-                )),
-            ),
-            (
-                "bars",
-                CatalogSeries::Bars(bars),
-                SubscribeCommand::Bars(SubscribeBars::new(
-                    bars,
-                    None,
-                    venue,
-                    UUID4::new(),
-                    ts,
-                    None,
-                    None,
-                )),
-            ),
-            (
-                "book deltas",
-                ticks(D::OrderBookDelta),
-                SubscribeCommand::BookDeltas(SubscribeBookDeltas::new(
-                    id,
-                    book.deltas,
-                    None,
-                    venue,
-                    UUID4::new(),
-                    ts,
-                    None,
-                    false,
-                    None,
-                    None,
-                )),
-            ),
-            (
-                "book depth",
-                ticks(D::OrderBookDepth),
-                SubscribeCommand::BookDepth(SubscribeBookDepth::new(
-                    id,
-                    BookType::L2_MBP,
-                    None,
-                    venue,
-                    UUID4::new(),
-                    ts,
-                    book.depth,
-                    false,
-                    None,
-                    None,
-                )),
-            ),
-            (
-                "custom data",
-                ticks(imbalance()),
-                SubscribeCommand::Data(SubscribeCustomData::new(
-                    None,
-                    venue,
-                    DataType::new("Imbalance", None, Some(id.to_string())),
-                    UUID4::new(),
-                    ts,
-                    None,
-                    None,
-                )),
-            ),
-        ]
+        let kinds = [
+            ("quotes", D::QuoteTick),
+            ("trades", D::TradeTick),
+            ("book deltas", D::OrderBookDelta),
+            ("book depth", D::OrderBookDepth),
+            ("custom data", imbalance()),
+        ];
+        let (handler, sent) = get_typed_into_message_saving_handler::<DataCommand>(None);
+        msgbus::register_data_command_endpoint(
+            MessagingSwitchboard::data_engine_queue_execute(),
+            handler,
+        );
+        let mut subscriber = Subscriber {
+            core: StrategyCore::new(StrategyConfig {
+                strategy_id: Some(StrategyId::from("SUBSCRIBER-001")),
+                order_id_tag: Some("001".to_string()),
+                ..Default::default()
+            }),
+        };
+        let clock = Rc::new(RefCell::new(VirtualClock::new()));
+        clock
+            .borrow_mut()
+            .advance_time(UnixNanos::from(at(FILL_START)), true);
+        let cache = Rc::new(RefCell::new(Cache::default()));
+        let portfolio = Rc::new(RefCell::new(Portfolio::new(
+            clock.clone(),
+            cache.clone(),
+            None,
+        )));
+        subscriber
+            .core
+            .register(TraderId::from("HELIX-001"), clock, cache, portfolio)
+            .unwrap();
+        Subscriptions::new(
+            vec![bars],
+            kinds.iter().map(|(_, data)| ticks(data.clone())).collect(),
+        )
+        .start(&mut subscriber, at(FILL_START));
+        let mut sent: Vec<SubscribeCommand> = sent
+            .get_messages()
+            .into_iter()
+            .map(|command| match command {
+                DataCommand::Subscribe(subscription) => subscription,
+                other => panic!("no subscription: {other:?}"),
+            })
+            .collect();
+        let mut take = |of: fn(&SubscribeCommand) -> bool| {
+            let at = sent.iter().position(of)?;
+            Some(sent.remove(at))
+        };
+        let mut subscriptions = vec![(
+            "bars",
+            CatalogSeries::Bars(bars),
+            take(|command| matches!(command, SubscribeCommand::Bars(_))),
+        )];
+        for (kind, data) in kinds {
+            let command = match data {
+                D::QuoteTick => take(|command| matches!(command, SubscribeCommand::Quotes(_))),
+                D::TradeTick => take(|command| matches!(command, SubscribeCommand::Trades(_))),
+                D::OrderBookDelta => {
+                    take(|command| matches!(command, SubscribeCommand::BookDeltas(_)))
+                }
+                D::OrderBookDepth => {
+                    take(|command| matches!(command, SubscribeCommand::BookDepth(_)))
+                }
+                _ => take(|command| matches!(command, SubscribeCommand::Data(_))),
+            };
+            subscriptions.push((kind, CatalogSeries::Ticks(ticks(data)), command));
+        }
+        assert_eq!(sent, [], "a subscription of no kind tried");
+        subscriptions
     }
 
     /// Whether `client`, unconnected, streams nothing of `subscription` by
@@ -2597,8 +2597,12 @@ mod tests {
     /// have logged "Handler not implemented", and as a client answers a
     /// subscription it refuses by logging, IB's of L3_MBO book deltas. A
     /// subscription a client implements fails unconnected, its connection
-    /// or the instrument's definition missing.
-    fn streams_none(client: &mut dyn DataClient, subscription: SubscribeCommand) -> bool {
+    /// or the instrument's definition missing. A subscription the data engine
+    /// is not sent reaches no client, which streams nothing of it.
+    fn streams_none(client: &mut dyn DataClient, subscription: Option<SubscribeCommand>) -> bool {
+        let Some(subscription) = subscription else {
+            return true;
+        };
         let answer = match subscription {
             SubscribeCommand::Quotes(cmd) => client.subscribe_quotes(cmd),
             SubscribeCommand::Trades(cmd) => client.subscribe_trades(cmd),
@@ -2618,7 +2622,7 @@ mod tests {
     /// tried (see `streams_none`); of a kind it fails unconnected, `streams`
     /// takes one of them. Each kind is tried on the 1-minute LAST bars of
     /// each instrument, its quotes, its trades, its book and its custom
-    /// data; a series of a kind a client takes but `streams` refuses (a
+    /// data, each subscription as a run sends it (`subscriptions_of`); a series of a kind a client takes but `streams` refuses (a
     /// width, a currency pair's trades) is not checked here. OKX's client
     /// gives no such answer: unconnected, it answers its quotes, trades and
     /// bars `Ok`, their subscriptions spawned, as Nautilus' defaults answer.
