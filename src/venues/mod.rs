@@ -26,7 +26,11 @@
 //! one format of the venue's book in the catalog), and a strategy the series an
 //! FX pair it converts through is read in (`rate_series`: the first form
 //! `serves` takes, the pair's 1-minute BID and ASK bars, then its quotes);
-//! venue code checks its own instruments against the table. Custom data of
+//! venue code checks its own instruments against the table. `serves`,
+//! `streams` and `book_format` answer what a venue's client does for any
+//! account, not what one account is entitled to: an account's market data
+//! permissions and limits (a market data subscription, IB's depth slots)
+//! are left to the venue, whose refusal the client logs. Custom data of
 //! no instrument has no venue and no row: its type names its source, LSE's
 //! rows LSE (`fill_history`).
 //! The settings each command takes of the venues are composed here,
