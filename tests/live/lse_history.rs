@@ -4,7 +4,7 @@
 //! candles as 1-minute bars, `XAU/USD-COMMODITIES.LSEDGE`, a series LSE
 //! serves only as candles, into a temporary catalog holding their
 //! definitions, written by hand as LSE publishes none, and that day's row
-//! of LSE's daily 10-year US bond yield, custom data of no instrument
+//! of LSE's daily 10-year US bond yield, a custom series
 //! (`lse::LseRow`) known at the day's end, through the node from LSE's
 //! exports; of LSE's other sources of rows, each stamped when it is known,
 //! US core inflation's release of October 2026 in the economic calendar and

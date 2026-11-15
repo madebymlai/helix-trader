@@ -25,7 +25,7 @@
 //! client converts LSE's prices at the definition's precision. LSE's
 //! reference series, the rows of its reference collections, of its macro
 //! series of releases and of yields and of an instrument's splits and
-//! dividends, are custom data of no instrument (`lse::LseRow`), filled by
+//! dividends, are custom series (`lse::LseRow`), filled by
 //! the same client with no definition, each row stamped when its values
 //! are known. See `README.md`.
 
