@@ -195,7 +195,8 @@ pub struct EmaCross {
     /// Its warmup, which feeds the signal.
     warmup: Rc<Warmup>,
     /// Its subscriptions to its bars and to the ticks of its data
-    /// requirements, its cTrader conversion pairs' quotes.
+    /// requirements: the quotes of each conversion pair read as quotes
+    /// (`venues::rate_series`).
     subscriptions: Subscriptions,
 }
 
