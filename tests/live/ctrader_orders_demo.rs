@@ -104,6 +104,12 @@ impl BracketOnce {
 }
 
 nautilus_strategy!(BracketOnce, {
+    /// The instruments its config claims, which the live node registers
+    /// as it adds it.
+    fn external_order_instrument_ids(&self) -> Option<Vec<InstrumentId>> {
+        self.config().external_order_instrument_ids.clone()
+    }
+
     fn on_order_accepted(&mut self, event: OrderAccepted) {
         self.note(
             event.client_order_id,
@@ -226,6 +232,7 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
         core: StrategyCore::new(StrategyConfig {
             strategy_id: Some(StrategyId::from("BRACKET-001")),
             order_id_tag: Some("001".to_string()),
+            external_order_instrument_ids: Some(vec![gold]),
             ..Default::default()
         }),
         gold,
@@ -264,13 +271,7 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
 
     let ran = tokio::time::timeout(
         DEADLINE + Duration::from_secs(90),
-        live.run(
-            &requirements,
-            &[gold],
-            &Warmup::live(&requirements),
-            strategy,
-            None,
-        ),
+        live.run(&requirements, &Warmup::live(&requirements), strategy, None),
     )
     .await;
 

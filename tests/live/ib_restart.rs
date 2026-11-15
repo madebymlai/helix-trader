@@ -127,13 +127,7 @@ async fn phase() {
     let probe = Probe::new(step, PathBuf::from(std::env::var(STATE).unwrap()));
     let ran = tokio::time::timeout(
         Duration::from_secs(300),
-        live.run(
-            &requirements,
-            &[InstrumentId::from(INSTRUMENT)],
-            &Warmup::live(&requirements),
-            probe,
-            None,
-        ),
+        live.run(&requirements, &Warmup::live(&requirements), probe, None),
     )
     .await;
     ran.expect("the node stops within 5 minutes").unwrap();
@@ -419,6 +413,7 @@ impl Probe {
             core: StrategyCore::new(StrategyConfig {
                 strategy_id: Some(StrategyId::from("RESTART_PROBE-001")),
                 order_id_tag: Some("001".to_string()),
+                external_order_instrument_ids: Some(vec![InstrumentId::from(INSTRUMENT)]),
                 ..Default::default()
             }),
             instrument_id: InstrumentId::from(INSTRUMENT),
@@ -702,6 +697,12 @@ fn interrupt() {
 }
 
 nautilus_strategy!(Probe, {
+    /// The instruments its config claims, which the live node registers
+    /// as it adds it.
+    fn external_order_instrument_ids(&self) -> Option<Vec<InstrumentId>> {
+        self.config().external_order_instrument_ids.clone()
+    }
+
     /// In `Crash`, aborts once the order is submitted, after long enough
     /// for Redis to receive it (its writer runs on another thread) but
     /// with the node thread held, so IB's acknowledgement is not processed.

@@ -36,7 +36,7 @@ use nautilus_common::{
 };
 use nautilus_model::{
     events::{OrderCanceled, OrderDenied, OrderRejected, PositionClosed},
-    identifiers::StrategyId,
+    identifiers::{InstrumentId, StrategyId},
 };
 use nautilus_trading::{
     nautilus_strategy,
@@ -159,6 +159,12 @@ pub fn visit<V: Visitor>(visitor: V) -> V::Output {
 }
 
 nautilus_strategy!(ModelEma, {
+    /// The instruments it trades, which its config claims (see
+    /// `StandardConfig`): the live node registers them as it adds it.
+    fn external_order_instrument_ids(&self) -> Option<Vec<InstrumentId>> {
+        self.config().external_order_instrument_ids.clone()
+    }
+
     fn on_order_canceled(&mut self, event: &OrderCanceled) {
         self.model.on_order_canceled(self, event);
     }
@@ -230,6 +236,7 @@ mod tests {
         types::{Money, Price},
     };
     use nautilus_portfolio::portfolio::Portfolio;
+    use nautilus_trading::strategy::Strategy;
     use rust_decimal::Decimal;
 
     use super::*;
@@ -463,6 +470,23 @@ mod tests {
         assert_eq!(base.strategy_id, Some(StrategyId::from("MODEL_EMA-001")));
         assert_eq!(base.order_id_tag, None);
         assert_eq!(base.oms_type, None);
+    }
+
+    /// It claims the external orders of the instrument it trades, as its
+    /// config does: the live node registers them as it adds it.
+    #[test]
+    fn claims_the_external_orders_of_the_instrument_it_trades() {
+        let models = tempfile::tempdir().unwrap();
+        let mode = Mode::Backtest {
+            models: models.path().to_path_buf(),
+        };
+
+        let strategy = ModelEma::new(ModelEmaConfig::load(CONFIG).unwrap(), mode).unwrap();
+
+        assert_eq!(
+            strategy.external_order_instrument_ids(),
+            Some(vec![InstrumentId::from("AUD/USD.SIM")])
+        );
     }
 
     /// 2026-10-26T10:00:00Z, the time of the restart.

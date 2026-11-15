@@ -80,7 +80,13 @@ struct Recorder {
     record: Rc<RefCell<Record>>,
 }
 
-nautilus_strategy!(Recorder);
+nautilus_strategy!(Recorder, {
+    /// The instruments its config claims, which the live node registers
+    /// as it adds it.
+    fn external_order_instrument_ids(&self) -> Option<Vec<InstrumentId>> {
+        self.config().external_order_instrument_ids.clone()
+    }
+});
 
 impl DataActor for Recorder {
     fn on_start(&mut self) -> anyhow::Result<()> {
@@ -166,6 +172,7 @@ async fn a_live_run_caches_its_conversion_pairs_quotes_after_its_start() {
         core: StrategyCore::new(StrategyConfig {
             strategy_id: Some(StrategyId::from("RECORDER-001")),
             order_id_tag: Some("001".to_string()),
+            external_order_instrument_ids: Some(config.trade.instrument_ids()),
             ..Default::default()
         }),
         warmup: Rc::clone(&warmup),
@@ -197,13 +204,7 @@ async fn a_live_run_caches_its_conversion_pairs_quotes_after_its_start() {
 
     let ran = tokio::time::timeout(
         LIVE_RUN + Duration::from_secs(60),
-        live.run(
-            &requirements,
-            &config.trade.instrument_ids(),
-            &warmup,
-            recorder,
-            None,
-        ),
+        live.run(&requirements, &warmup, recorder, None),
     )
     .await;
 

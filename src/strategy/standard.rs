@@ -30,7 +30,8 @@ use crate::{
 /// names and types, and the strategy's own part `P` (see `Part`).
 ///
 /// - `[base]`: Nautilus' `StrategyConfig` as is, `P::default_base` without
-///   one.
+///   one, claiming the external orders of the instruments `[trade]` trades
+///   too (see `claiming`).
 /// - `[data]`: what the strategy reads (see `DataConfig`), its series
 ///   those its part answers it reads (`Part::reads`), each once, and no
 ///   other.
@@ -820,11 +821,12 @@ impl<'de, P: Part> Visitor<'de> for Keys<P> {
         let own = toml::Value::Table(own)
             .try_into()
             .map_err(de::Error::custom)?;
+        let trade = trade.ok_or_else(|| de::Error::missing_field("trade"))?;
         Ok(StandardConfig {
-            base: base.unwrap_or_else(P::default_base),
+            base: claiming(base.unwrap_or_else(P::default_base), &trade),
             data: data.ok_or_else(|| de::Error::missing_field("data"))?,
             indicators: indicators.unwrap_or_default(),
-            trade: trade.ok_or_else(|| de::Error::missing_field("trade"))?,
+            trade,
             model: match model {
                 None if P::TAKES_MODEL => return Err(de::Error::missing_field("model")),
                 model => model,
@@ -832,6 +834,28 @@ impl<'de, P: Part> Visitor<'de> for Keys<P> {
             own,
         })
     }
+}
+
+/// `base` claiming the external orders of the instruments `trade` trades
+/// too (`external_order_instrument_ids`), each once, after those it claims
+/// already: a live node registers a strategy's claims as it adds it
+/// (`LiveNode::add_strategy`), so the orders and positions of those
+/// instruments on the account, placed by hand or before a restart, are the
+/// strategy's. No other instrument is claimed: the pairs `trade` converts
+/// through and the instruments the features read are not traded, so their
+/// orders and positions on the account are not the strategy's.
+fn claiming(mut base: StrategyConfig, trade: &TradeConfig) -> StrategyConfig {
+    let mut claimed = base
+        .external_order_instrument_ids
+        .take()
+        .unwrap_or_default();
+    for instrument_id in trade.instrument_ids() {
+        if !claimed.contains(&instrument_id) {
+            claimed.push(instrument_id);
+        }
+    }
+    base.external_order_instrument_ids = Some(claimed);
+    base
 }
 
 /// Reads `[trade]` with the keys the strategy's part `P` takes: its
