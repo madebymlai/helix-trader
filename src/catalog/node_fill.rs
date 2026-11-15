@@ -78,9 +78,9 @@ pub enum FillData {
 impl FillData {
     /// The series of `data_type` keyed by `identifier`, as the catalog
     /// keys it (see `strategy::requirements::catalog_keys`): the bar type of bars, the
-    /// instrument id of anything else; an error for custom data of an
-    /// instrument, which no node source serves here (custom data of no
-    /// instrument is asked by `missing_custom`).
+    /// instrument id of anything else; an error for any other data type,
+    /// which no series slice holds (a custom series is asked by
+    /// `missing_custom`).
     fn of(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<Self> {
         Ok(match data_type {
             NautilusDataType::QuoteTick => Self::Quotes,
@@ -1079,24 +1079,5 @@ mod tests {
                 },
             ]
         );
-    }
-
-    #[test]
-    fn custom_data_of_an_instrument_is_refused_naming_its_type_and_instrument() {
-        let dir = tempfile::tempdir().unwrap();
-        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        let slices = [slice(
-            NautilusDataType::Custom {
-                type_name: "Imbalance".to_string(),
-            },
-            "GCZ26.GLBX",
-            "2026-10-21T00:00:00Z",
-            "2026-10-22T00:00:00Z",
-        )];
-
-        let err = format!("{:#}", missing(&catalog, &slices).unwrap_err());
-
-        assert!(err.contains("Imbalance"), "{err}");
-        assert!(err.contains("GCZ26.GLBX"), "{err}");
     }
 }

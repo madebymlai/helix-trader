@@ -1,9 +1,10 @@
-//! A strategy declaring book deltas and custom data as tick series, beside
-//! IC's gold quotes (`common::ic`): the run replays CME gold's deltas and
-//! its `Imbalance`s (`common::glbx`) from the catalog to the probe's
-//! handlers, in time order with the quotes, and nothing else the catalog
-//! stores. The probe subscribes to the quotes of IC's gold, the deltas of
-//! CME gold and its imbalances, keyed by its id, and records each it gets.
+//! A strategy declaring book deltas as a tick series and custom data as a
+//! custom series, beside IC's gold quotes (`common::ic`): the run replays
+//! CME gold's deltas and its `Imbalance`s (`common::glbx`), the custom
+//! series under its id, from the catalog to the probe's handlers, in time
+//! order with the quotes, and nothing else the catalog stores. The probe
+//! subscribes to the quotes of IC's gold, the deltas of CME gold and its
+//! imbalances, keyed by its id, and records each it gets.
 //! A raw feature on the imbalances reads each from Nautilus' cache, where
 //! the data engine puts it before the strategy's handler runs. One node per
 //! thread, so one run per test.
@@ -12,7 +13,9 @@ use std::{cell::RefCell, rc::Rc};
 
 use crate::common::{glbx, ic};
 use helix_trader::{
-    backtest::Backtest, model::features::FeatureSet, strategy::requirements::TickSeries,
+    backtest::Backtest,
+    model::features::FeatureSet,
+    strategy::requirements::{CustomSeries, TickSeries},
 };
 use nautilus_common::actor::DataActor;
 use nautilus_core::UnixNanos;
@@ -120,9 +123,9 @@ fn catalog() -> tempfile::TempDir {
     dir
 }
 
-/// Runs the probe over `[09:00, 12:00]` on `catalog`, declaring `ticks`
-/// and no bar types, and returns what it got, in order.
-fn run(catalog: &tempfile::TempDir, ticks: Vec<TickSeries>) -> Vec<Got> {
+/// Runs the probe over `[09:00, 12:00]` on `catalog`, declaring `ticks`,
+/// `custom` and no bar types, and returns what it got, in order.
+fn run(catalog: &tempfile::TempDir, ticks: Vec<TickSeries>, custom: Vec<CustomSeries>) -> Vec<Got> {
     let got = Rc::new(RefCell::new(Vec::new()));
     let probe = Probe {
         core: StrategyCore::new(StrategyConfig {
@@ -135,6 +138,7 @@ fn run(catalog: &tempfile::TempDir, ticks: Vec<TickSeries>) -> Vec<Got> {
     let backtest = Backtest {
         bar_types: vec![],
         ticks,
+        custom,
         ..ic::backtest(catalog)
     };
     backtest.run(probe).unwrap();
@@ -148,10 +152,9 @@ fn tick(data: NautilusDataType, instrument_id: &str) -> TickSeries {
     }
 }
 
-fn imbalances() -> NautilusDataType {
-    NautilusDataType::Custom {
-        type_name: glbx::IMBALANCE.to_string(),
-    }
+/// CME gold's imbalances, a custom series under its id.
+fn imbalances() -> CustomSeries {
+    CustomSeries::new(glbx::IMBALANCE, glbx::INSTRUMENT_ID.to_string(), None).unwrap()
 }
 
 fn at(time: &str) -> UnixNanos {
@@ -175,8 +178,8 @@ fn declared_deltas_and_custom_data_of_the_run_reach_the_handlers_in_time_order()
         vec![
             tick(NautilusDataType::QuoteTick, ic::INSTRUMENT_ID),
             tick(NautilusDataType::OrderBookDelta, glbx::INSTRUMENT_ID),
-            tick(imbalances(), glbx::INSTRUMENT_ID),
         ],
+        vec![imbalances()],
     );
 
     // The run's window only: not the event of 08:40 nor the imbalance of
@@ -203,6 +206,7 @@ fn deltas_and_custom_data_the_strategy_does_not_declare_are_not_replayed() {
     let got = run(
         &catalog,
         vec![tick(NautilusDataType::QuoteTick, ic::INSTRUMENT_ID)],
+        vec![],
     );
 
     assert_eq!(unquoted(&got), []);
@@ -215,17 +219,12 @@ fn deltas_and_custom_data_the_strategy_does_not_declare_are_not_replayed() {
 fn a_raw_feature_reads_each_replayed_imbalance_from_the_cache() {
     let catalog = catalog();
     let features = FeatureSet::builder()
-        .data(
-            glbx::IMBALANCE,
-            InstrumentId::from(glbx::INSTRUMENT_ID),
-            "imbalance",
-            |data| {
-                data.data
-                    .as_any()
-                    .downcast_ref::<glbx::Imbalance>()
-                    .map_or(f64::NAN, |imbalance| imbalance.value)
-            },
-        )
+        .custom(&imbalances(), "imbalance", |data| {
+            data.data
+                .as_any()
+                .downcast_ref::<glbx::Imbalance>()
+                .map_or(f64::NAN, |imbalance| imbalance.value)
+        })
         .build()
         .unwrap();
     let read = Rc::new(RefCell::new(Vec::new()));
@@ -240,10 +239,8 @@ fn a_raw_feature_reads_each_replayed_imbalance_from_the_cache() {
     };
     let backtest = Backtest {
         bar_types: vec![],
-        ticks: vec![
-            tick(NautilusDataType::QuoteTick, ic::INSTRUMENT_ID),
-            tick(imbalances(), glbx::INSTRUMENT_ID),
-        ],
+        ticks: vec![tick(NautilusDataType::QuoteTick, ic::INSTRUMENT_ID)],
+        custom: vec![imbalances()],
         ..ic::backtest(&catalog)
     };
 

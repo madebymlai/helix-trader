@@ -115,10 +115,11 @@ enum Run {
 /// hour without quotes and builds time bars as late after their close as a
 /// live node does, by the backtest's bar types
 /// (`warmup::data_engine_config`). The data is streamed `CHUNK_SIZE` points
-/// at a time, unless the run replays custom data, which
-/// `BacktestDataConfig` refuses: then the custom series are left out (see
-/// `custom_data`) and the data is loaded at once. Build and run errors are
-/// raised, not only logged; the engine outlives the run (see `run`).
+/// at a time, unless the run replays a custom series, which
+/// `BacktestDataConfig` refuses: then the custom series are read apart
+/// (see `custom_data`) and the data is loaded at once. Build and run
+/// errors are raised, not only logged; the engine outlives the run (see
+/// `run`).
 pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfig> {
     config(backtest, Run::Backtest)
 }
@@ -147,9 +148,8 @@ fn config(backtest: &Backtest, run: Run) -> anyhow::Result<BacktestRunConfig> {
         .into_iter()
         .map(|venue| venue_config(backtest, venue, run))
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let (custom, series): (Vec<SeriesSlice>, Vec<SeriesSlice>) =
-        backtest.series()?.into_iter().partition(is_custom);
-    let data = series
+    let data = backtest
+        .series()?
         .into_iter()
         .map(|series| data_config(&catalog, series))
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -176,7 +176,7 @@ fn config(backtest: &Backtest, run: Run) -> anyhow::Result<BacktestRunConfig> {
         .engine(engine_config)
         .start(UnixNanos::from(start))
         .end(UnixNanos::from(end))
-        .maybe_chunk_size((custom.is_empty() && backtest.custom.is_empty()).then_some(CHUNK_SIZE))
+        .maybe_chunk_size(backtest.custom.is_empty().then_some(CHUNK_SIZE))
         .raise_exception(true)
         .dispose_on_completion(false)
         .build()?)
@@ -273,14 +273,8 @@ fn data_config(
     Ok(config?)
 }
 
-/// Whether `series` is of custom data, which `BacktestDataConfig` refuses.
-fn is_custom(series: &SeriesSlice) -> bool {
-    matches!(series.series.0, NautilusDataType::Custom { .. })
-}
-
-/// The custom data `backtest` replays, read from its catalog: that of its
-/// instruments (see `Backtest::series`), each series over its slice, and
-/// its custom series (`Backtest::custom`), each keyed by its data type's
+/// The custom data `backtest` replays, read from its catalog: its custom
+/// series (`Backtest::custom`), each keyed by its data type's
 /// identifier, over its slices of the run's window, both ends included, a
 /// root's contract by contract, each contract's series over the slice it
 /// stands for the root (`DataRequirements::custom_slices`), whether its
@@ -342,27 +336,6 @@ pub(super) fn custom_data(backtest: &Backtest) -> anyhow::Result<Vec<Data>> {
                  filled as, or fill them under another identifier"
             );
         }
-        data.extend(read);
-    }
-    for series in backtest.series()?.into_iter().filter(is_custom) {
-        let SeriesSlice {
-            series: (data_type, identifier),
-            slice,
-        } = series;
-        let NautilusDataType::Custom { type_name } = &data_type else {
-            unreachable!("a custom series");
-        };
-        let read = catalog
-            .query_custom_data_dynamic(
-                type_name,
-                Some(std::slice::from_ref(&identifier)),
-                Some(UnixNanos::from(slice.from)),
-                Some(UnixNanos::from(slice.to)),
-                None,
-                None,
-                true,
-            )
-            .with_context(|| format!("reading the {data_type} of {identifier}"))?;
         data.extend(read);
     }
     Ok(data)
@@ -837,16 +810,14 @@ mod tests {
         assert_eq!(config.chunk_size(), Some(100_000));
     }
 
+    /// SXR8's imbalances, a custom series under its id: the run reads them
+    /// apart (`custom_data`) and loads the series of its data configs, the
+    /// quotes of its bars, at once.
     #[test]
-    fn a_run_of_custom_data_loads_the_other_series_at_once() {
+    fn a_run_of_a_custom_series_loads_the_other_series_at_once() {
         let dir = tempfile::tempdir().unwrap();
         let backtest = Backtest {
-            ticks: vec![crate::strategy::requirements::TickSeries {
-                data: NautilusDataType::Custom {
-                    type_name: "Imbalance".to_string(),
-                },
-                instrument_id: InstrumentId::from("SXR8.IBIS"),
-            }],
+            custom: vec![CustomSeries::new("Imbalance", "SXR8.IBIS".to_string(), None).unwrap()],
             ..backtest(dir.path())
         };
         let config = run_config(&backtest).unwrap();

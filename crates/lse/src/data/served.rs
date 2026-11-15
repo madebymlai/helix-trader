@@ -1,6 +1,6 @@
 //! What the client serves of the past, as a fill or a warmup asks before
-//! it requests: the series of an instrument (`serves`) and custom data of
-//! none (`serves_custom`), the twins of what it streams
+//! it requests: the series of an instrument (`serves`) and its custom
+//! data, its rows (`serves_custom`), the twins of what it streams
 //! (`streams::streams`, `streams::streams_custom`).
 
 use std::str::FromStr;
@@ -28,9 +28,8 @@ use crate::{
 /// `request_trades`, `request_book_depth`, `request_book_deltas`), but the
 /// trades of an `LSEDGE` index, which has none, its ticks being quotes; and
 /// the bars of LSE's candles (`CandleWidth::of`) of an `LSEDGE` series or
-/// an `OPRA` contract (`request_bars`). It serves no custom data of an
-/// instrument, its custom data being its rows of none (`serves_custom`).
-/// What LSE refuses once asked is its own answer, not checked here: the
+/// an `OPRA` contract (`request_bars`). Its custom data is its rows,
+/// judged apart (`serves_custom`). What LSE refuses once asked is its own answer, not checked here: the
 /// quotes of an `LSEDGE` series but an index's and of an `OPRA` contract,
 /// and the book of either.
 ///
@@ -71,10 +70,6 @@ pub fn serves(series: &(NautilusDataType, String)) -> anyhow::Result<()> {
         | NautilusDataType::TradeTick
         | NautilusDataType::OrderBookDepth
         | NautilusDataType::OrderBookDelta => Ok(()),
-        NautilusDataType::Custom { .. } => bail!(
-            "LSE's history serves no custom data of an instrument, so not the {data} of {id}: \
-             its custom data is its rows, of no instrument"
-        ),
         other => bail!(
             "LSE's history serves no {other} of {id}: an instrument's quotes, trades, book \
              depths and book deltas, and its candles as bars"
@@ -196,27 +191,25 @@ mod tests {
 
         assert!(err.contains(why), "{err}");
     }
-
-    /// The client asks LSE for no custom data of an instrument, of any of
-    /// its venues: each refused naming LSE's history and the series.
+    /// The client asks LSE for no other data of an instrument, of any of
+    /// its venues, a contract's funding say: each refused naming LSE's
+    /// history and the series.
     #[rstest]
     #[case::of_an_lsedge_series("GOLD-FUTURES.LSEDGE")]
     #[case::of_an_lsedge_index("SPX-INDICES.LSEDGE")]
     #[case::of_a_cme_globex_contract("GCZ26.GLBX")]
     #[case::of_a_nasdaq_stock("NVDA.XNAS")]
     #[case::of_an_option_contract("AAPL  261120C00355000.OPRA")]
-    fn an_instrument_s_custom_data_is_refused_naming_lse_s_history(#[case] identifier: &str) {
-        let imbalance = NautilusDataType::Custom {
-            type_name: "Imbalance".to_string(),
-        };
+    fn other_data_of_an_instrument_is_refused_naming_lse_s_history(#[case] identifier: &str) {
+        let funding = NautilusDataType::FundingRateUpdate;
 
-        let err = serves(&(imbalance, identifier.to_string()))
+        let err = serves(&(funding, identifier.to_string()))
             .unwrap_err()
             .to_string();
 
         assert!(
             err.contains("LSE's history")
-                && err.contains("no custom data of an instrument")
+                && err.contains("FundingRateUpdate")
                 && err.contains(identifier),
             "{err}"
         );

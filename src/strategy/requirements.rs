@@ -36,23 +36,19 @@ pub struct DataRequirements {
     /// their warmup (see `warmup::Warmup::cache_config`).
     pub bar_types: Vec<BarType>,
     /// The tick series the strategy reads as they are, beside or instead
-    /// of bars, book deltas and custom data among them (see
-    /// `TickSeries`), those of its harness among them (a traded
-    /// instrument's quotes when no series prices it,
-    /// `StandardConfig::data_requirements`), and the quotes of a
-    /// `[trade] conversions` pair read as quotes (a cTrader pair's,
+    /// of bars, book deltas among them (see `TickSeries`), those of its
+    /// harness among them (a traded instrument's quotes when no series
+    /// prices it, `StandardConfig::data_requirements`), and the quotes of
+    /// a `[trade] conversions` pair read as quotes (a cTrader pair's,
     /// `venues::rate_series`): fetched by fill-catalog from their
-    /// instrument's source, which must serve them (`venues::serves`; no
-    /// source serves an instrument's custom data), and replayed in a
-    /// backtest as declared. Their instruments are read too: live sets up
-    /// their clients, which load them, but subscribes to none of the ticks:
-    /// the strategy subscribes to each from its start through its
-    /// subscriptions (`strategy::subscriptions`, a model strategy's
-    /// handle's), a live start
-    /// refusing one its venue's live data does not stream
-    /// (`venues::streams`), and warms up on each its venue's history serves
-    /// (`warmup::Warmup`), and on custom data its venue's history does not
-    /// serve, from the catalog alone.
+    /// instrument's source, which must serve them (`venues::serves`), and
+    /// replayed in a backtest as declared. Their instruments are read too:
+    /// live sets up their clients, which load them, but subscribes to none
+    /// of the ticks: the strategy subscribes to each from its start
+    /// through its subscriptions (`strategy::subscriptions`, a model
+    /// strategy's handle's), a live start refusing one its venue's live
+    /// data does not stream (`venues::streams`), and warms up on each its
+    /// venue's history serves (`warmup::Warmup`).
     pub ticks: Vec<TickSeries>,
     /// The custom series the strategy reads (see `CustomSeries`), a
     /// reference series such as LSE's daily bond yields among them, each
@@ -68,9 +64,8 @@ pub struct DataRequirements {
     /// live data does not stream is refused (`venues::streams_custom`),
     /// none streaming any yet, nor anything the catalog's. Under a root's
     /// id, each rolls contract by contract, as the root's other series do;
-    /// any other stands for itself. They bring no instrument. Custom data
-    /// of an instrument written with an `instrument_id` is a tick series
-    /// still, keyed by the instrument and rolled with it.
+    /// any other stands for itself, an instrument's id among them. They
+    /// bring no instrument.
     pub custom: Vec<CustomSeries>,
     /// How far back before a live start the warmup history starts: a
     /// backtest requests none.
@@ -82,11 +77,9 @@ pub struct DataRequirements {
 /// `{ data = "quotes", instrument_id = "XAUUSD.ICMARKETS" }` in a TOML
 /// config. `data` is a name Nautilus parses (`NautilusDataType::from_str`)
 /// of quotes (`"quotes"`), trades (`"trades"`), book depth snapshots
-/// (`"order_book_depths"`), book deltas (`"order_book_deltas"`) or custom
-/// data (`"Custom:<type name>"`): custom data of the instrument, keyed in
-/// the catalog and on the message bus by the instrument id, as Nautilus'
-/// Databento client keys its own (`DataType::new(type_name, None,
-/// Some(instrument_id))`).
+/// (`"order_book_depths"`) or book deltas (`"order_book_deltas"`). Custom
+/// data is no tick series, an instrument's included: it is a custom
+/// series (`CustomSeries`), keyed by its identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TickSeries {
@@ -109,11 +102,10 @@ pub(super) fn tick_data(name: &str) -> Result<NautilusDataType, String> {
         NautilusDataType::QuoteTick
         | NautilusDataType::TradeTick
         | NautilusDataType::OrderBookDepth
-        | NautilusDataType::OrderBookDelta
-        | NautilusDataType::Custom { .. } => Ok(data),
+        | NautilusDataType::OrderBookDelta => Ok(data),
         _ => Err(format!(
             "{name} is not a series a strategy reads as it is: \
-             quotes, trades, order_book_depths, order_book_deltas or Custom:<type name>"
+             quotes, trades, order_book_depths or order_book_deltas"
         )),
     }
 }
@@ -221,9 +213,10 @@ impl CustomSeries {
 
     /// The series of `contract`: its type and metadata under the
     /// contract's id, which keys it in the catalog, on the message bus
-    /// and in the cache, as Nautilus' Databento client keys an
-    /// instrument's custom data. The metadata passed `new` already, and a
-    /// contract of the roll calendar keys a folder of its own.
+    /// and in the cache, as Nautilus' Databento client keys its custom
+    /// data of a contract (`custom_data_for_instrument`). The metadata
+    /// passed `new` already, and a contract of the roll calendar keys a
+    /// folder of its own.
     pub(crate) fn on(&self, contract: InstrumentId) -> Self {
         Self(DataType::new(
             self.type_name(),
@@ -493,7 +486,7 @@ impl fmt::Display for TickSeries {
 
 impl TickSeries {
     /// The catalog series of these ticks: their Nautilus data type, keyed
-    /// by the instrument id (custom data too: see `TickSeries`).
+    /// by the instrument id.
     #[must_use]
     pub fn catalog_key(&self) -> (NautilusDataType, String) {
         (self.data.clone(), self.instrument_id.to_string())
@@ -747,55 +740,41 @@ mod tests {
         assert_eq!(config.ticks, gold().ticks);
     }
 
+    /// Bars are no tick series, and neither is custom data, an
+    /// instrument's included: it is a custom series, keyed by its
+    /// identifier (see `CustomSeries`).
     #[test]
     fn rejects_an_unknown_tick_data_type() {
-        let err = toml::from_str::<TickSeries>(
-            r#"data = "bars"
+        for data in ["bars", "Custom:Imbalance"] {
+            let err = toml::from_str::<TickSeries>(&format!(
+                r#"data = "{data}"
+                instrument_id = "GC.v.0.GLBX""#
+            ))
+            .unwrap_err();
+            assert!(err.to_string().contains(data), "{err}");
+        }
+    }
+
+    #[test]
+    fn book_deltas_load_from_toml_as_a_nautilus_data_type() {
+        let ticks: TickSeries = toml::from_str(
+            r#"data = "order_book_deltas"
             instrument_id = "GC.v.0.GLBX""#,
         )
-        .unwrap_err();
-        assert!(err.to_string().contains("bars"), "{err}");
-    }
-
-    #[test]
-    fn book_deltas_and_custom_data_load_from_toml_as_nautilus_data_types() {
-        #[derive(Deserialize)]
-        struct Config {
-            ticks: Vec<TickSeries>,
-        }
-        let config: Config = toml::from_str(
-            r#"ticks = [
-                { data = "order_book_deltas", instrument_id = "GC.v.0.GLBX" },
-                { data = "Custom:Imbalance", instrument_id = "GC.v.0.GLBX" },
-            ]"#,
-        )
         .unwrap();
-        assert_eq!(
-            config.ticks,
-            [
-                tick(NautilusDataType::OrderBookDelta, "GC.v.0.GLBX"),
-                tick(
-                    NautilusDataType::Custom {
-                        type_name: "Imbalance".to_string()
-                    },
-                    "GC.v.0.GLBX"
-                ),
-            ]
-        );
+        assert_eq!(ticks, tick(NautilusDataType::OrderBookDelta, "GC.v.0.GLBX"));
     }
 
+    /// The book deltas of one gold contract and the imbalances of
+    /// another, a custom series under its id: the deltas are a catalog
+    /// series of their instrument, the imbalances neither bring their
+    /// contract nor are a catalog series of it.
     #[test]
-    fn book_deltas_and_custom_data_are_series_of_the_requirements_keyed_by_their_instrument() {
-        let imbalance = NautilusDataType::Custom {
-            type_name: "Imbalance".to_string(),
-        };
+    fn a_custom_series_under_an_instruments_id_brings_no_instrument_and_no_catalog_series() {
         let requirements = DataRequirements {
             bar_types: vec![],
-            ticks: vec![
-                tick(NautilusDataType::OrderBookDelta, "GC.v.0.GLBX"),
-                tick(imbalance.clone(), "GC.v.0.GLBX"),
-            ],
-            custom: vec![],
+            ticks: vec![tick(NautilusDataType::OrderBookDelta, "GC.v.0.GLBX")],
+            custom: vec![imbalances("GCZ26.GLBX")],
             warmup: SignedDuration::ZERO,
         };
         assert_eq!(
@@ -804,10 +783,7 @@ mod tests {
         );
         assert_eq!(
             requirements.catalog_keys(),
-            [
-                (NautilusDataType::OrderBookDelta, "GC.v.0.GLBX".to_string()),
-                (imbalance, "GC.v.0.GLBX".to_string()),
-            ]
+            [(NautilusDataType::OrderBookDelta, "GC.v.0.GLBX".to_string())]
         );
     }
 

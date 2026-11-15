@@ -171,9 +171,9 @@ const KEPT_UP_TO_DATE: SignedDuration = SignedDuration::from_secs(5);
 /// pair's LAST bars aside, IB having no TRADES of them; and its book
 /// deltas, which a run subscribes to in IB's format (`BOOK`, through
 /// `venues::book_format`), of an L2_MBP book. It subscribes to no book
-/// depth, `BOOK` having none, and no custom data: Nautilus' `DataClient`
-/// defaults log "Handler not implemented" and stream nothing
-/// (`common/src/clients/data.rs:130-133`, `:171-174`).
+/// depth, `BOOK` having none: Nautilus' `DataClient` default logs
+/// "Handler not implemented" and streams nothing
+/// (`common/src/clients/data.rs:171-174`).
 ///
 /// # Errors
 ///

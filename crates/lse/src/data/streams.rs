@@ -652,8 +652,7 @@ impl LseStreams {
 /// built from the instrument's quotes or trades (`INTERNAL`); an `LSEDGE`
 /// series' trades, its sockets' ticks being quotes; an `OPRA` contract's
 /// quotes, LSE's US options feed carrying trades alone; the book of either;
-/// any other data, custom data among them; or an instrument of another
-/// venue, or no instrument id.
+/// any other data; or an instrument of another venue, or no instrument id.
 pub fn streams(series: &(NautilusDataType, String)) -> anyhow::Result<()> {
     let (data, identifier) = series;
     if *data == NautilusDataType::Bar {
@@ -667,8 +666,8 @@ pub fn streams(series: &(NautilusDataType, String)) -> anyhow::Result<()> {
     check_stream(data, id)
 }
 
-/// Checks that the client streams `data_type`, custom data of no
-/// instrument: it streams none, LSE's rows being history alone, which no
+/// Checks that the client streams `data_type`, its custom data: it
+/// streams none, LSE's rows being history alone, which no
 /// socket carries, and it implements no subscription of custom data,
 /// Nautilus' default logging one as not implemented. A live run checks
 /// what it reads before anything connects, as with `streams`.
@@ -795,10 +794,10 @@ mod tests {
     #[case::an_option_s_quotes(Data::QuoteTick, "AAPL  261120C00355000.OPRA", "trades")]
     #[case::a_series_book(Data::OrderBookDepth, "GOLD-FUTURES.LSEDGE", "GLBX")]
     #[case::an_option_s_book(Data::OrderBookDelta, "AAPL  261120C00355000.OPRA", "GLBX")]
-    #[case::custom_data_of_a_contract(
-        Data::Custom { type_name: "Imbalance".to_string() },
+    #[case::a_contract_s_mark_prices(
+        Data::MarkPriceUpdate,
         "GCZ26.GLBX",
-        "Custom:Imbalance"
+        "quotes, trades, book depth and book deltas"
     )]
     #[case::another_venue(Data::QuoteTick, "SXR8.IBIS", "IBIS")]
     fn a_series_lse_does_not_stream_is_refused_naming_it(

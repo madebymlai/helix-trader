@@ -148,14 +148,16 @@ impl nautilus_model::data::CustomDataTrait for Level {
     }
 }
 
-/// The data type of the levels of `instrument`, keyed by its id.
-fn level_type(instrument: &str) -> DataType {
-    DataType::new("Level", None, Some(instrument.to_string()))
+/// The levels of `instrument`, a custom series of no metadata under its
+/// id, as Nautilus' Databento client keys its custom data of an
+/// instrument.
+fn level_series(instrument: &str) -> CustomSeries {
+    CustomSeries::new("Level", instrument.to_string(), None).unwrap()
 }
 
-/// A level of `instrument`.
+/// A level of `instrument`, under its id.
 fn level(instrument: &str, level: f64) -> CustomData {
-    point(&level_type(instrument), level)
+    point(level_series(instrument).data_type(), level)
 }
 
 /// The custom series of the levels from `source`, under `identifier`, as
@@ -254,7 +256,7 @@ fn the_names_keep_the_order_of_their_declaration() {
 
     let features = FeatureSet::builder()
         .bars(BarType::from(AUD_BARS), TWO, &tables)
-        .data("Level", id(AUD), "level", read_level)
+        .custom(&level_series(AUD), "level", read_level)
         .quotes(id(AUD), LAST, &tables)
         .build()
         .unwrap();
@@ -449,12 +451,13 @@ fn cached(probe: &Probe, data: CustomData) {
 }
 
 /// Cold before the set is registered, whatever the cache holds; then the
-/// latest level of AUD/USD the cache holds, another instrument's not read.
+/// latest level under AUD/USD's id the cache holds, from one cached before
+/// the registration on, another instrument's not read.
 #[test]
 fn a_raw_feature_reads_the_latest_point_of_its_data_type_in_the_cache() {
     let mut probe = registered();
     let features = FeatureSet::builder()
-        .data("Level", id(AUD), "level", read_level)
+        .custom(&level_series(AUD), "level", read_level)
         .build()
         .unwrap();
     cached(&probe, level(AUD, 0.5));
@@ -589,11 +592,13 @@ fn an_instruments_last_update_is_the_latest_a_feature_read_of_any_kind() {
     );
 }
 
+/// A custom series under an instrument's id is no update of the
+/// instrument: it brings none.
 #[test]
 fn an_update_no_feature_reads_and_custom_data_are_no_update_of_an_instrument() {
     let features = FeatureSet::builder()
         .quotes(id(AUD), LAST, &tables())
-        .data("Level", id(AUD), "level", read_level)
+        .custom(&level_series(AUD), "level", read_level)
         .build()
         .unwrap();
 
@@ -608,16 +613,16 @@ fn an_update_no_feature_reads_and_custom_data_are_no_update_of_an_instrument() {
 }
 
 /// A strategy subscribes these and a live warmup requests them: each kind of
-/// tick or custom data of each instrument once, in the order declared, and
-/// no bars.
+/// tick of each instrument once, in the order declared, and no bars, nor
+/// the custom series under an instrument's id a raw feature reads.
 #[test]
-fn a_sets_ticks_are_those_of_its_tick_and_raw_features_each_once() {
+fn a_sets_ticks_are_those_of_its_tick_features_each_once() {
     let tables = tables();
     let features = FeatureSet::builder()
         .bars(BarType::from(AUD_BARS), LAST, &tables)
         .trades(id(GBP), LAST, &tables)
         .quotes(id(AUD), LAST, &tables)
-        .data("Level", id(AUD), "level", read_level)
+        .custom(&level_series(AUD), "level", read_level)
         .quotes(id(AUD), TWO, &tables)
         .depth(id(AUD), BOOK, &tables)
         .deltas(id(GBP), BOOK, &tables)
@@ -633,12 +638,6 @@ fn a_sets_ticks_are_those_of_its_tick_and_raw_features_each_once() {
         [
             tick(NautilusDataType::TradeTick, GBP),
             tick(NautilusDataType::QuoteTick, AUD),
-            tick(
-                NautilusDataType::Custom {
-                    type_name: "Level".to_string()
-                },
-                AUD
-            ),
             tick(NautilusDataType::OrderBookDepth, AUD),
             tick(NautilusDataType::OrderBookDelta, GBP),
         ]
@@ -646,29 +645,25 @@ fn a_sets_ticks_are_those_of_its_tick_and_raw_features_each_once() {
 }
 
 /// A model strategy reads these (`model::reads`): each custom series a raw
-/// feature reads once, in the order declared; none is a tick series, which
-/// is of an instrument.
+/// feature reads once, in the order declared, one under an instrument's
+/// id among them; none is a tick series.
 #[test]
 fn a_sets_custom_series_are_those_of_its_raw_features_each_once() {
-    let (us10y, us2y) = (levels("yields", "US10Y"), levels("yields", "US2Y"));
+    let (us10y, us2y, aud) = (
+        levels("yields", "US10Y"),
+        levels("yields", "US2Y"),
+        level_series(AUD),
+    );
     let features = FeatureSet::builder()
         .custom(&us2y, "2y", read_level)
-        .data("Level", id(AUD), "aud", read_level)
+        .custom(&aud, "aud", read_level)
         .custom(&us10y, "10y", read_level)
         .custom(&us2y, "2y again", read_level)
         .build()
         .unwrap();
 
-    assert_eq!(features.custom(), [us2y, us10y]);
-    assert_eq!(
-        features.ticks(),
-        [TickSeries {
-            data: NautilusDataType::Custom {
-                type_name: "Level".to_string()
-            },
-            instrument_id: id(AUD),
-        }]
-    );
+    assert_eq!(features.custom(), [us2y, aud, us10y]);
+    assert_eq!(features.ticks(), []);
 }
 
 /// The bars of AUD's mids read by two features, its bids by one: each bar
@@ -738,8 +733,8 @@ fn a_negative_warmup_is_an_error() {
 /// feature has no table, so its name and the series it reads are in it.
 fn fingerprint(names: [&str; 2], version: u32) -> Fingerprint {
     FeatureSet::builder()
-        .data("Level", id(AUD), names[0], read_level)
-        .data("Level", id(GBP), names[1], read_level)
+        .custom(&level_series(AUD), names[0], read_level)
+        .custom(&level_series(GBP), names[1], read_level)
         .version(version)
         .build()
         .unwrap()
@@ -760,22 +755,6 @@ fn the_fingerprint_changes_with_a_name_their_order_or_the_version() {
     assert_ne!(base, fingerprint(["a", "b"], 2));
     // Names are told apart from each other, not only concatenated.
     assert_ne!(fingerprint(["ab", "c"], 1), fingerprint(["a", "bc"], 1));
-}
-
-/// A raw feature's name is the strategy's: what it reads is in the
-/// fingerprint besides, the type name and the instrument of its data.
-#[test]
-fn the_fingerprint_changes_with_the_custom_data_a_raw_feature_reads() {
-    let reading = |type_name: &str, instrument: &str| {
-        FeatureSet::builder()
-            .data(type_name, id(instrument), "level", read_level)
-            .build()
-            .unwrap()
-            .fingerprint()
-    };
-
-    assert_ne!(reading("Level", GBP), reading("Level", AUD));
-    assert_ne!(reading("Depth", AUD), reading("Level", AUD));
 }
 
 /// Pointed at another series, a raw feature of a custom series rebuilds
@@ -802,8 +781,8 @@ fn the_fingerprint_changes_with_the_custom_series_a_raw_feature_reads() {
 #[test]
 fn a_set_without_a_version_is_of_version_nought() {
     let unversioned = FeatureSet::builder()
-        .data("Level", id(AUD), "a", read_level)
-        .data("Level", id(GBP), "b", read_level)
+        .custom(&level_series(AUD), "a", read_level)
+        .custom(&level_series(GBP), "b", read_level)
         .build()
         .unwrap()
         .fingerprint();

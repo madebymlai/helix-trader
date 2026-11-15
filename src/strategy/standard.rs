@@ -364,11 +364,11 @@ impl DataConfig {
 
     /// Whether a series prices `instrument_id` as Nautilus prices a market
     /// order and the top of a simulated L1 book: its bars, its quotes or
-    /// its trades. Its depth, book deltas and custom data do not, nor does
-    /// a custom series, which brings no instrument: the risk engine prices a market
-    /// order from the cache's bid or ask, last trade or external bar
-    /// (`Cache::price` reads quotes and trades alone), and an L1 book
-    /// ignores deltas.
+    /// its trades. Its depth and book deltas do not, nor does a custom
+    /// series, under its id or not, which brings no instrument: the risk
+    /// engine prices a market order from the cache's bid or ask, last
+    /// trade or external bar (`Cache::price` reads quotes and trades
+    /// alone), and an L1 book ignores deltas.
     #[must_use]
     pub fn prices(&self, instrument_id: InstrumentId) -> bool {
         self.series.iter().any(|series| match series {
@@ -566,8 +566,9 @@ impl DataConfig {
 ///   instrument; under a root's id, it rolls as the root's other series
 ///   do (`CustomSeries::root`).
 /// - Any other, of an instrument, is ticks the strategy reads as they are
-///   (see `TickSeries`), `Custom:<type name>` with an `instrument_id`
-///   among them, the instrument's custom data.
+///   (see `TickSeries`). Custom data is keyed by its identifier alone, an
+///   instrument's by its id: `Custom:<type name>` with an `instrument_id`
+///   is refused, pointing at the identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "SeriesFields")]
 pub enum Series {
@@ -612,10 +613,11 @@ struct SeriesFields {
 impl TryFrom<SeriesFields> for Series {
     type Error = String;
 
-    /// A custom series needs an `identifier`, takes `metadata` and nothing
-    /// of an instrument, and is built as `CustomSeries::new` builds it;
-    /// any other series takes neither and needs an `instrument_id`. Bars
-    /// need a `bar_spec` and take a `from`, which Nautilus checks in
+    /// A custom series needs an `identifier`, an instrument's id keying an
+    /// instrument's custom data, takes `metadata` and nothing of an
+    /// instrument, and is built as `CustomSeries::new` builds it; any
+    /// other series takes neither and needs an `instrument_id`. Bars need
+    /// a `bar_spec` and take a `from`, which Nautilus checks in
     /// `BarType::new_composite_checked`; ticks take neither.
     fn try_from(fields: SeriesFields) -> Result<Self, String> {
         let SeriesFields {
@@ -626,36 +628,35 @@ impl TryFrom<SeriesFields> for Series {
             bar_spec,
             from,
         } = fields;
-        let custom = match NautilusDataType::from_str(&data) {
-            Ok(NautilusDataType::Custom { type_name }) => Some(type_name),
-            _ => None,
-        };
-        if let (Some(type_name), Some(identifier)) = (&custom, identifier.clone()) {
+        if let Ok(NautilusDataType::Custom { type_name }) = NautilusDataType::from_str(&data) {
+            let Some(identifier) = identifier else {
+                return Err(match instrument_id {
+                    Some(instrument_id) => format!(
+                        "the {data} is keyed by an identifier, an instrument's custom data by \
+                         its id, not by an instrument_id: write identifier = \"{instrument_id}\""
+                    ),
+                    None => format!(
+                        "the {data} needs an identifier, which keys a custom series in the catalog"
+                    ),
+                });
+            };
             if instrument_id.is_some() || bar_spec.is_some() || from.is_some() {
                 return Err(format!(
                     "the {data} under the identifier {identifier:?} is keyed by its identifier: \
                      it takes no instrument_id, bar_spec or from"
                 ));
             }
-            return CustomSeries::new(type_name, identifier, metadata)
+            return CustomSeries::new(&type_name, identifier, metadata)
                 .map(Self::Custom)
                 .map_err(|e| format!("{e:#}"));
         }
-        let unkeyed =
-            || format!("the {data} needs an identifier, which keys a custom series in the catalog");
         if identifier.is_some() || metadata.is_some() {
-            return Err(if custom.is_some() {
-                unkeyed()
-            } else {
-                format!("identifier and metadata are of a custom series, not of the {data}")
-            });
+            return Err(format!(
+                "identifier and metadata are of a custom series, not of the {data}"
+            ));
         }
         let Some(instrument_id) = instrument_id else {
-            return Err(if custom.is_some() {
-                unkeyed()
-            } else {
-                format!("the {data} needs an instrument_id")
-            });
+            return Err(format!("the {data} needs an instrument_id"));
         };
         if NautilusDataType::from_str(&data).ok() != Some(NautilusDataType::Bar) {
             if bar_spec.is_some() || from.is_some() {
@@ -789,11 +790,12 @@ impl TradeConfig {
     /// prices (`DataConfig::prices`), in order: its prices for the
     /// strategy's orders and their fills, and for a model harness'
     /// decisions, whatever the strategy; a series pricing it gives them
-    /// otherwise. Without them, an instrument read only through its depth,
-    /// book deltas or custom data has its market orders denied for want of
-    /// a price, and one read only through custom data is not even loaded
-    /// into a backtest. They are not series of `[data]`: the strategy's
-    /// data requirements add them (`StandardConfig::data_requirements`).
+    /// otherwise. Without them, an instrument read only through its depth
+    /// or book deltas has its market orders denied for want of a price,
+    /// and one read only through a custom series under its id, which
+    /// brings no instrument, is not even loaded into a backtest. They are
+    /// not series of `[data]`: the strategy's data requirements add them
+    /// (`StandardConfig::data_requirements`).
     fn quotes_unpriced_by<'a>(
         &'a self,
         data: &'a DataConfig,
@@ -1694,6 +1696,21 @@ mod tests {
         );
     }
 
+    /// Custom data has one spelling: an instrument's is keyed by its id as
+    /// an identifier, as any custom series is, so an entry naming its
+    /// instrument_id instead is refused, pointing at the identifier.
+    #[test]
+    fn a_custom_series_naming_an_instrument_in_place_of_an_identifier_is_refused_pointing_at_it() {
+        let toml = with_custom(&[r#"{ data = "Custom:Imbalance", instrument_id = "ESM24.CME" }"#]);
+
+        let err = shape_message(&toml);
+
+        assert!(
+            err.contains("instrument_id") && err.contains(r#"identifier = "ESM24.CME""#),
+            "{err}"
+        );
+    }
+
     /// An identifier and metadata are custom data's alone.
     #[test]
     fn a_series_of_ticks_or_bars_naming_an_identifier_or_metadata_is_refused_naming_it() {
@@ -1964,13 +1981,13 @@ mod tests {
         assert_eq!(config.data.series.len(), 3);
     }
 
-    /// Depth, book deltas and custom data of an instrument traded give
-    /// Nautilus no price of it for a market order, and the latter two move
-    /// no L1 book: an instrument traded that only they read adds its
-    /// quotes, after the series' ticks.
+    /// Depth and book deltas of an instrument traded give Nautilus no
+    /// price of it for a market order, and deltas move no L1 book: an
+    /// instrument traded that only they read adds its quotes, after the
+    /// series' ticks.
     #[test]
-    fn a_traded_instrument_read_only_through_depth_deltas_or_custom_data_loads_its_quotes() {
-        for data in ["order_book_depths", "order_book_deltas", "Custom:Imbalance"] {
+    fn a_traded_instrument_read_only_through_depth_or_deltas_loads_its_quotes() {
+        for data in ["order_book_depths", "order_book_deltas"] {
             let toml = TOML.replace(
                 r#"{ data = "bars", instrument_id = "ESM24.CME", bar_spec = { step = 5, aggregation = "MINUTE", price_type = "BID" } },"#,
                 &format!(r#"{{ data = "{data}", instrument_id = "ESM24.CME" }},"#),
@@ -1990,6 +2007,37 @@ mod tests {
                 "{data}"
             );
         }
+    }
+
+    /// A custom series under an instrument traded's id, its custom data,
+    /// gives Nautilus no price of it either, and brings no instrument: an
+    /// instrument traded that only it reads adds its quotes, after the
+    /// series' ticks.
+    #[test]
+    fn a_traded_instrument_read_only_through_a_custom_series_under_its_id_loads_its_quotes() {
+        nautilus_serialization::ensure_custom_data_registered::<Signal>();
+        let toml = TOML.replace(
+            r#"{ data = "bars", instrument_id = "ESM24.CME", bar_spec = { step = 5, aggregation = "MINUTE", price_type = "BID" } },"#,
+            r#"{ data = "Custom:Signal", identifier = "ESM24.CME" },"#,
+        );
+
+        let requirements = load(&toml).unwrap().data_requirements();
+
+        let es = |data, instrument_id: &str| TickSeries {
+            data,
+            instrument_id: InstrumentId::from(instrument_id),
+        };
+        assert_eq!(
+            requirements.ticks,
+            [
+                es(NautilusDataType::TradeTick, "ESH24.CME"),
+                es(NautilusDataType::QuoteTick, "ESM24.CME"),
+            ]
+        );
+        assert_eq!(
+            requirements.custom,
+            [CustomSeries::new("Signal", "ESM24.CME".to_string(), None).unwrap()]
+        );
     }
 
     /// Each instrument traded is read by a series, its bars or its
