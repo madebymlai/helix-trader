@@ -46,7 +46,7 @@ pub struct DataRequirements {
     /// (`rolls::Roller`, a model strategy's handle's), a live start
     /// refusing one its venue's live data does not stream
     /// (`venues::streams`), and warms up on each its venue's history serves
-    /// (`warmup::Warmup`).
+    /// (`warmup::Warmup`), custom data from the catalog alone.
     pub ticks: Vec<TickSeries>,
     /// The custom data the strategy reads that is of no instrument, a
     /// reference series such as LSE's daily bond yields: each series a

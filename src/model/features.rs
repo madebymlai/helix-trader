@@ -39,10 +39,10 @@
 //! engine caches each point it processes, live or replayed, before the
 //! strategy's handlers run, one history per data type, and the feature's
 //! value is its `read` of the latest point of its data type
-//! (`Cache::custom_data`), read as the set's values are. A live run reads
-//! no custom data of an instrument, which no live client streams
-//! (`venues::streams`), so a raw feature is a replay's. It is cold until
-//! the cache holds a point of its data type.
+//! (`Cache::custom_data`), read as the set's values are. The data engine
+//! does not cache a request's response, so a live warmup adds its own
+//! (`Warmup::on_historical_data`). A raw feature is cold until the cache
+//! holds a point of its data type.
 //!
 //! A feature on the ticks or custom data of a futures root (`GC.GLBX`, see
 //! `rolls`) reads the contract standing for it: `register` sets it from

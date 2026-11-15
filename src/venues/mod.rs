@@ -511,8 +511,8 @@ pub fn rate_series(pair: InstrumentId) -> anyhow::Result<Vec<Series>> {
 /// fills here before anything connects, and a live warmup requests the
 /// history of a series only if served (`strategy::warmup`), so the two
 /// agree; a conversion pair is read in a form served (`rate_series`).
-/// Custom data of an instrument is served by no source: a fill fills it
-/// from none, and a live run reading it is refused (`streams`).
+/// Custom data of an instrument is the catalog's: a fill fills it from no
+/// source, and a warmup asks the catalog alone.
 ///
 /// # Errors
 ///
