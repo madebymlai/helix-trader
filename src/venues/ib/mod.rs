@@ -74,7 +74,7 @@ use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use ustr::Ustr;
 
 use crate::{
-    catalog::fill_slices,
+    catalog::{fill_slices, resumed},
     strategy::requirements::{CatalogSeries, SeriesSlice},
 };
 
@@ -636,7 +636,9 @@ pub(crate) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
 
 /// What IB's history is asked for the series of `data_type` and
 /// `identifier`, as Nautilus' IB clients serve it: IB's own (`EXTERNAL`)
-/// time bars of a size IB has (Nautilus' `bar_type_to_ib_bar_size`),
+/// time bars of a size IB has (Nautilus' `bar_type_to_ib_bar_size`) but a
+/// month, which Nautilus' IB history client reads no bars of (its
+/// `request_bars` parses seconds, minutes, hours, days and weeks alone),
 /// priced at one of `BAR_PRICES`, and an instrument's quotes and trades,
 /// IB's historical ticks (the requests of the historical client's
 /// `request_ticks`, the live client's `request_quotes` and
@@ -655,13 +657,16 @@ fn served(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<Serv
     match data_type {
         NautilusDataType::Bar => {
             let bar_type = BarType::from_str(identifier)?;
+            let spec = bar_type.spec();
             ensure!(
                 bar_type.is_externally_aggregated()
-                    && BAR_PRICES.contains(&bar_type.spec().price_type)
-                    && bar_type_to_ib_bar_size(&bar_type).is_ok(),
-                "IB's history serves its own (EXTERNAL) time bars of a size IB has, 1, 5, 10, \
-                 15 or 30 seconds, 1, 2, 3, 5, 10, 15, 20 or 30 minutes, 1, 2, 3, 4 or 8 hours, \
-                 a day, a week or a month, priced LAST, BID, ASK or MID, not {identifier}"
+                    && BAR_PRICES.contains(&spec.price_type)
+                    && bar_type_to_ib_bar_size(&bar_type).is_ok()
+                    && spec.aggregation != BarAggregation::Month,
+                "IB's history serves its own (EXTERNAL) time bars of a size IB has and \
+                 Nautilus' IB history client reads, 1, 5, 15 or 30 seconds, 1, 2, 3, 5, 10, \
+                 15, 20 or 30 minutes, 1, 2, 3, 4 or 8 hours, a day or a week, priced LAST, \
+                 BID, ASK or MID, not {identifier}"
             );
             ensure!(
                 !(bar_type.spec().price_type == PriceType::Last
@@ -723,10 +728,10 @@ const BAR_PRICES: [PriceType; 4] = [
 /// longest IB's step-size table admits the size in (TWS API, "Historical
 /// Data Limitations", "Step Sizes"), so that IB serves it and a request
 /// holds a few thousand bars at most: `1800 S` of 1-second bars, `3600 S`
-/// of 5-second bars, `14400 S` of 10- and 15-second bars, `28800 S` of
-/// 30-second bars, a day of 1-minute bars, two of 2-minute bars, a week of
-/// 3- to 20-minute bars, a month of 30-minute and hour bars and a year of
-/// daily, weekly and monthly bars. A day of 1-minute bars is asked as
+/// of 5-second bars, `14400 S` of 15-second bars, `28800 S` of 30-second
+/// bars, a day of 1-minute bars, two of 2-minute bars, a week of 3- to
+/// 20-minute bars, a month of 30-minute and hour bars and a year of daily
+/// and weekly bars. A day of 1-minute bars is asked as
 /// `86400 S`: `D` counts whole trading days, so a `1 D` request ending in
 /// a session's first minute answers that one bar, and the walk back would
 /// end there (see `walk_back`); the longer durations end there with a
@@ -735,8 +740,8 @@ fn request_duration(spec: BarSpecification) -> &'static str {
     use BarAggregation as A;
     match (spec.aggregation, spec.step.get()) {
         (A::Second, 1) => "1800 S",
-        (A::Second, 2..=5) => "3600 S",
-        (A::Second, 6..=15) => "14400 S",
+        (A::Second, 5) => "3600 S",
+        (A::Second, 15) => "14400 S",
         (A::Second, _) => "28800 S",
         (A::Minute, 1) => "86400 S",
         (A::Minute, 2) => "2 D",
@@ -828,17 +833,26 @@ impl SmallBarPacing {
     }
 }
 
-/// Checks that IB's history holds `slices` at `now`: IB holds no bars of
-/// 30 seconds or less older than six months (TWS API, "Historical Data
-/// Limitations"), so a slice of them starts within six months of `now`,
-/// rather than the fill storing its older windows empty.
+/// Checks that IB's history holds what a fill of `slices` into `catalog`
+/// asks of it at `now`: IB holds no bars of 30 seconds or less older than
+/// six months (TWS API, "Historical Data Limitations"), so the writer asks
+/// a slice of them from within six months of `now`, rather than storing its
+/// older windows empty. The writer asks a slice from where it resumes it
+/// (`catalog::resumed`): from its start if the catalog stores none of its
+/// series, else 1 ns after their stored end, and nothing if that is past
+/// the slice, so a fill run again over a window whose bars are stored is
+/// held as far as it asks IB for more.
 ///
 /// # Errors
 ///
 /// Returns an error naming the bars and the oldest start IB holds if a
-/// slice of them starts earlier, or naming a slice of bars keyed by no bar
-/// type.
-pub(crate) fn check_held(slices: &[SeriesSlice], now: Timestamp) -> anyhow::Result<()> {
+/// slice of them would be asked from earlier, naming a slice of bars keyed
+/// by no bar type, or as `catalog::resumed`.
+pub(crate) fn check_held(
+    catalog: &ParquetDataCatalog,
+    slices: &[SeriesSlice],
+    now: Timestamp,
+) -> anyhow::Result<()> {
     let oldest = now
         .to_zoned(TimeZone::UTC)
         .checked_sub(6.months())?
@@ -852,12 +866,13 @@ pub(crate) fn check_held(slices: &[SeriesSlice], now: Timestamp) -> anyhow::Resu
             continue;
         }
         let bar_type = BarType::from_str(identifier)?;
-        if bar_type.spec().aggregation == BarAggregation::Second {
+        if bar_type.spec().aggregation == BarAggregation::Second
+            && let (Some(from), _) = resumed(catalog, data_type, identifier, slice.from, slice.to)?
+        {
             ensure!(
-                slice.from >= oldest,
-                "IB holds no bars of 30 seconds or less older than six months: {bar_type} from \
-                 {} reaches before {oldest}",
-                slice.from
+                from >= oldest,
+                "IB holds no bars of 30 seconds or less older than six months: {bar_type}, \
+                 asked from {from}, reaches before {oldest}"
             );
         }
     }
@@ -1461,7 +1476,8 @@ mod tests {
     }
 
     /// A price IB's adapter would ask TRADES for, a size IB has not,
-    /// bars Nautilus builds, and books and custom data, which Nautilus' IB
+    /// monthly bars, which Nautilus' IB history client parses none of, bars
+    /// Nautilus builds, and books and custom data, which Nautilus' IB
     /// clients request none of.
     #[test]
     fn ib_serves_no_other_series() {
@@ -1472,7 +1488,9 @@ mod tests {
             ),
             (NautilusDataType::Bar, "SXR8.IBIS-4-MINUTE-LAST-EXTERNAL"),
             (NautilusDataType::Bar, "SXR8.IBIS-2-SECOND-LAST-EXTERNAL"),
+            (NautilusDataType::Bar, "SXR8.IBIS-10-SECOND-LAST-EXTERNAL"),
             (NautilusDataType::Bar, "SXR8.IBIS-6-HOUR-LAST-EXTERNAL"),
+            (NautilusDataType::Bar, "SXR8.IBIS-1-MONTH-LAST-EXTERNAL"),
             (NautilusDataType::Bar, "SXR8.IBIS-1-MINUTE-LAST-INTERNAL"),
             (
                 NautilusDataType::Bar,
@@ -1504,7 +1522,6 @@ mod tests {
         for (bars, duration) in [
             ("1-SECOND", "1800 S"),
             ("5-SECOND", "3600 S"),
-            ("10-SECOND", "14400 S"),
             ("15-SECOND", "14400 S"),
             ("30-SECOND", "28800 S"),
             ("1-MINUTE", "86400 S"),
@@ -1522,7 +1539,6 @@ mod tests {
             ("8-HOUR", "1 M"),
             ("1-DAY", "1 Y"),
             ("1-WEEK", "1 Y"),
-            ("1-MONTH", "1 Y"),
         ] {
             let spec = bar_type(&format!("SXR8.IBIS-{bars}-LAST-EXTERNAL")).spec();
             assert_eq!(request_duration(spec), duration, "{bars}");
@@ -1635,8 +1651,11 @@ mod tests {
     fn small_bars_older_than_six_months_are_refused_naming_the_oldest_ib_holds() {
         let now = at("2026-11-15T12:00:00Z");
         let small_bars = "SXR8.IBIS-30-SECOND-LAST-EXTERNAL";
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
         let held = |from| {
             check_held(
+                &catalog,
                 &slices_of(&[(NautilusDataType::Bar, small_bars, "SXR8.IBIS")], from),
                 now,
             )
@@ -1649,6 +1668,7 @@ mod tests {
             "{err}"
         );
         check_held(
+            &catalog,
             &slices_of(
                 &[
                     (
@@ -1663,6 +1683,93 @@ mod tests {
             now,
         )
         .unwrap();
+    }
+
+    /// Stores 5-second LAST bars of SXR8 at `from` and `to` in `catalog`,
+    /// over `[from, to]`.
+    fn store_small_bars(catalog: &ParquetDataCatalog, from: &str, to: &str) {
+        use nautilus_model::types::{Price, Quantity};
+        let price = Price::from("100.00");
+        let bars: Vec<Bar> = [from, to]
+            .map(|time| {
+                let ts = UnixNanos::from(at(time));
+                Bar::new(
+                    bar_type("SXR8.IBIS-5-SECOND-LAST-EXTERNAL"),
+                    price,
+                    price,
+                    price,
+                    price,
+                    Quantity::from(1),
+                    ts,
+                    ts,
+                )
+            })
+            .to_vec();
+        catalog
+            .write_to_parquet(&bars, Some(at(from).into()), Some(at(to).into()), None)
+            .unwrap();
+    }
+
+    /// A fill of stored bars asks IB from 1 ns after their stored end, the
+    /// writer's resume (`catalog::fill_catalog`), whatever its slice's
+    /// start. On 30 November 2026 IB holds small bars from 30 May on: 5-second
+    /// bars stored over 20 May to 20 June are filled again from 20 June,
+    /// held, though the slice starts on 20 May; stored over 1 April to 1
+    /// May, they would be filled again from 1 May, refused, naming them,
+    /// though the slice starts on 15 June.
+    #[test]
+    fn small_bars_stored_are_held_from_where_the_writer_resumes_them() {
+        let now = at("2026-11-30T12:00:00Z");
+        let small_bars = "SXR8.IBIS-5-SECOND-LAST-EXTERNAL";
+        let held = |stored: [&str; 2], from: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+            store_small_bars(&catalog, stored[0], stored[1]);
+            check_held(
+                &catalog,
+                &slices_of(&[(NautilusDataType::Bar, small_bars, "SXR8.IBIS")], from),
+                now,
+            )
+        };
+
+        held(
+            ["2026-05-20T00:00:00Z", "2026-06-20T00:00:00Z"],
+            "2026-05-20T00:00:00Z",
+        )
+        .unwrap();
+        let err = held(
+            ["2026-04-01T00:00:00Z", "2026-05-01T00:00:00Z"],
+            "2026-06-15T00:00:00Z",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(small_bars), "{err}");
+    }
+
+    /// A fill over a window whose small bars the catalog stores to its end
+    /// asks IB nothing, the writer resuming past the window
+    /// (`catalog::resumed`): 5-second bars stored over 1 April to 1 May 2026,
+    /// filled again over the same window on 30 November, are held, though
+    /// the window is all before 30 May, the oldest IB holds.
+    #[test]
+    fn small_bars_stored_over_the_whole_window_are_held_whenever() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let (from, to) = ("2026-04-01T00:00:00Z", "2026-05-01T00:00:00Z");
+        store_small_bars(&catalog, from, to);
+        let slice = SeriesSlice {
+            series: (
+                NautilusDataType::Bar,
+                "SXR8.IBIS-5-SECOND-LAST-EXTERNAL".to_string(),
+            ),
+            slice: crate::rolls::Slice {
+                instrument_id: InstrumentId::from("SXR8.IBIS"),
+                from: at(from),
+                to: at(to),
+            },
+        };
+
+        check_held(&catalog, &[slice], at("2026-11-30T12:00:00Z")).unwrap();
     }
 
     #[test]

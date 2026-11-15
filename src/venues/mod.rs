@@ -527,7 +527,7 @@ pub fn rate_series(pair: InstrumentId) -> anyhow::Result<Vec<Series>> {
 /// without a row of its own as IB's), each a copy of what the data client
 /// its fill asks requests: a cTrader broker's quotes alone
 /// (`ctrader::quoted`); OKX's trades and candles (`okx::serves`); the
-/// series LSE's client asks LSE for (`lse::check_served`); IB's time bars,
+/// series LSE's client asks LSE for (`lse::serves`); IB's time bars,
 /// quotes and trades (`ib::serves`). fill-catalog checks every series it
 /// fills here before anything connects, and a live warmup requests the
 /// history of a series only if served (`strategy::warmup`), so the two
@@ -545,7 +545,7 @@ pub(crate) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
             ctrader::quoted(Venue::new(broker.venue), &[source.key()]).map(drop)
         }
         HistorySource::Okx => okx::serves(source),
-        HistorySource::Lse => ::lse::check_served(&source.key()),
+        HistorySource::Lse => ::lse::serves(&source.key()),
         HistorySource::Ib => ib::serves(source),
     }
 }
@@ -800,8 +800,8 @@ pub async fn fill_history(
     // root's series contract by contract, each over its slice.
     let slices = requirements.slices(start, end);
     let ib_slices = of_source(&slices, HistorySource::Ib);
-    ib::check_held(&ib_slices, Timestamp::now())?;
     let mut catalog = ParquetDataCatalog::new(catalog_dir, None, None, None, None);
+    ib::check_held(&catalog, &ib_slices, Timestamp::now())?;
     let (mut okx_ids, mut ctrader_ids, mut lse_ids, mut ib_ids) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for id in requirements.instrument_ids() {
@@ -1994,7 +1994,7 @@ mod tests {
     /// instrument of its venues, but an index's trades, which it has none
     /// of, and for its candles of an LSEDGE series and an OPRA contract
     /// alone, EXTERNAL bars of the LAST price below a day wide
-    /// (`lse::check_served`).
+    /// (`lse::serves`).
     #[test]
     fn lse_s_history_serves_what_its_client_asks_lse_for() {
         use NautilusDataType as D;
@@ -2021,8 +2021,9 @@ mod tests {
         );
     }
 
-    /// Nautilus' IB client serves IB's own time bars of every size IB has,
-    /// priced LAST, BID, ASK or MID (its TRADES, BID, ASK and MIDPOINT),
+    /// Nautilus' IB client serves IB's own time bars of every size IB has
+    /// but a month's, which its history client parses none of, priced
+    /// LAST, BID, ASK or MID (its TRADES, BID, ASK and MIDPOINT),
     /// and IB's historical ticks, BID_ASK as quotes and TRADES as trades,
     /// every venue without a row of its own; no book, no other price and
     /// no size IB has not.
@@ -2042,7 +2043,6 @@ mod tests {
                 bars_of("ESZ26.CME-8-HOUR-LAST-EXTERNAL"),
                 bars_of("SXR8.IBIS-1-DAY-LAST-EXTERNAL"),
                 bars_of("SXR8.IBIS-1-WEEK-LAST-EXTERNAL"),
-                bars_of("SXR8.IBIS-1-MONTH-LAST-EXTERNAL"),
                 ticks_of(D::QuoteTick, "SXR8.IBIS"),
                 ticks_of(D::QuoteTick, "EUR/USD.IDEALPRO"),
                 ticks_of(D::TradeTick, "ESZ26.CME"),
@@ -2051,6 +2051,7 @@ mod tests {
                 bars_of("SXR8.IBIS-1-MINUTE-MARK-EXTERNAL"),
                 bars_of("SXR8.IBIS-4-MINUTE-LAST-EXTERNAL"),
                 bars_of("SXR8.IBIS-2-SECOND-LAST-EXTERNAL"),
+                bars_of("SXR8.IBIS-1-MONTH-LAST-EXTERNAL"),
                 bars_of("SXR8.IBIS-1-MINUTE-LAST-INTERNAL"),
                 bars_of("SXR8.IBIS-100-TICK-LAST-EXTERNAL"),
                 ticks_of(D::OrderBookDepth, "SXR8.IBIS"),
