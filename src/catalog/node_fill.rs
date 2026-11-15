@@ -7,8 +7,8 @@
 //! (`get_missing_intervals_for_request`): per contract its definitions, then
 //! each series' missing windows, the slivers between a live node's promoted
 //! files among them, each asked once and closed by its write-back.
-//! `missing_custom` does the same for custom data of no instrument, keyed by
-//! its data type's identifier, with no definition. A `NodeFill` gathers each
+//! `missing_custom` does the same for custom series, keyed by their data
+//! type's identifier, with no definition. A `NodeFill` gathers each
 //! source's data client with its requests and the source's period, and `run`
 //! builds a live node with those clients and the catalog, and an actor asking
 //! for one request at a time, naming the client it was added with, which the
@@ -48,7 +48,10 @@ use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use serde_json::json;
 
 use super::catalog_config;
-use crate::{strategy::requirements::SeriesSlice, time_range, venues};
+use crate::{
+    strategy::requirements::{CustomSeries, SeriesSlice},
+    time_range, venues,
+};
 
 /// What a fill asks a source for: an instrument's definition, or one of
 /// its series.
@@ -203,10 +206,10 @@ pub fn missing(
         .collect())
 }
 
-/// A request of a fill of custom data of no instrument (see
-/// `strategy::requirements::DataRequirements::custom`): the rows of `data_type` over the
-/// closed window `[from, to]`, as the catalog stores intervals, stored under
-/// its type and identifier.
+/// A request of a fill of a custom series (see
+/// `strategy::requirements::CustomSeries`): the rows of its `data_type`
+/// over the closed window `[from, to]`, as the catalog stores intervals,
+/// stored under its type and identifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomFillRequest {
     pub data_type: DataType,
@@ -224,40 +227,36 @@ impl fmt::Display for CustomFillRequest {
     }
 }
 
-/// What `catalog` lacks of each of `custom`, custom data of no instrument,
-/// over `[from, to]`: its missing windows (Nautilus'
-/// `get_missing_intervals_for_request`, of its type and identifier), in time
-/// order, the series in the order given; a config lists each once
-/// (`StandardConfig::validate`). No definition: it is of no instrument.
+/// What `catalog` lacks of each of `custom`, custom series, over `[from,
+/// to]`: its missing windows (Nautilus' `get_missing_intervals_for_request`,
+/// of its type and identifier), in time order, the series in the order
+/// given; a config lists each once (`StandardConfig::validate`). No
+/// definition: a custom series brings no instrument.
 ///
 /// # Errors
 ///
-/// Returns an error if a data type has no identifier, which keys a custom
-/// series in the catalog, or if the catalog cannot be read.
+/// Returns an error if the catalog cannot be read.
 pub fn missing_custom(
     catalog: &ParquetDataCatalog,
-    custom: &[DataType],
+    custom: &[CustomSeries],
     from: Timestamp,
     to: Timestamp,
 ) -> anyhow::Result<Vec<CustomFillRequest>> {
     let mut requests = Vec::new();
-    for data_type in custom {
-        let identifier = data_type.identifier().with_context(|| {
-            format!("{data_type:?} has no identifier, which keys custom data in the catalog")
-        })?;
+    for series in custom {
         let stored = NautilusDataType::Custom {
-            type_name: data_type.type_name().to_string(),
+            type_name: series.type_name().to_string(),
         };
         let gaps = catalog
             .get_missing_intervals_for_request(
                 nanos(from),
                 nanos(to),
                 &stored.into(),
-                Some(identifier),
+                Some(series.identifier()),
             )
-            .with_context(|| format!("reading the stored {data_type}"))?;
+            .with_context(|| format!("reading the stored {series}"))?;
         requests.extend(gaps.into_iter().map(|(from, to)| CustomFillRequest {
-            data_type: data_type.clone(),
+            data_type: series.data_type().clone(),
             from: at(from),
             to: at(to),
         }));
@@ -300,7 +299,7 @@ struct Asked {
 }
 
 /// What a request of the fill asks: an instrument's definition or one of
-/// its series, or custom data of no instrument.
+/// its series, or a custom series.
 #[derive(Debug, Clone)]
 enum Request {
     Series(FillRequest),
@@ -340,7 +339,7 @@ impl NodeFill {
     }
 
     /// Adds `requests` as `add` does, then `custom` (see `missing_custom`),
-    /// custom data of no instrument, asked of the same client, each whole:
+    /// of custom series, asked of the same client, each whole:
     /// Nautilus' time-range pipeline windows no custom data request
     /// (`data/src/engine/time_range.rs`, `is_time_range_pipeline_variant`).
     /// No request of either kind leaves the client out of the node.
@@ -1003,55 +1002,37 @@ mod tests {
         );
     }
 
-    fn bond_yields() -> DataType {
-        DataType::new(
-            "LseRow",
-            Some(Params::new(
-                [("source".to_string(), json!("bond_yields"))].into(),
-            )),
-            Some("US10Y".to_string()),
-        )
+    fn bond_yields_metadata() -> Params {
+        Params::new([("source".to_string(), json!("bond_yields"))].into())
     }
 
-    /// No definition: the series is of no instrument.
+    /// No definition: a custom series brings no instrument. Asked by its
+    /// data type as Nautilus builds it.
     #[test]
-    fn custom_data_of_no_instrument_is_lacking_over_its_window_alone() {
+    fn a_custom_series_is_lacking_over_its_window_alone() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
         let (from, to) = (
             ts("2026-11-09T00:00:00Z"),
             ts("2026-11-12T23:59:59.999999999Z"),
         );
+        let bond_yields =
+            CustomSeries::new("LseRow", "US10Y".to_string(), Some(bond_yields_metadata())).unwrap();
 
-        let asked = missing_custom(&catalog, &[bond_yields()], from, to).unwrap();
+        let asked = missing_custom(&catalog, &[bond_yields], from, to).unwrap();
 
         assert_eq!(
             asked,
             [CustomFillRequest {
-                data_type: bond_yields(),
+                data_type: DataType::new(
+                    "LseRow",
+                    Some(bond_yields_metadata()),
+                    Some("US10Y".to_string())
+                ),
                 from,
                 to,
             }]
         );
-    }
-
-    /// Nautilus would store it under its type alone, beside every other
-    /// series of the type.
-    #[test]
-    fn custom_data_with_no_identifier_is_refused_naming_its_type() {
-        let dir = tempfile::tempdir().unwrap();
-        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        let unkeyed = DataType::new("LseRow", None, None);
-
-        let err = missing_custom(
-            &catalog,
-            &[unkeyed],
-            ts("2026-11-09T00:00:00Z"),
-            ts("2026-11-12T23:59:59.999999999Z"),
-        )
-        .unwrap_err();
-
-        assert!(err.to_string().contains("LseRow"), "{err:#}");
     }
 
     #[test]

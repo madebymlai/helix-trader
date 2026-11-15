@@ -64,11 +64,7 @@ pub mod walk;
 
 use std::{fmt::Debug, path::Path, rc::Rc};
 
-use nautilus_common::{
-    actor::DataActorNative,
-    component::Component,
-    config::{ConfigError, ConfigErrorCollector, ConfigResult},
-};
+use nautilus_common::{actor::DataActorNative, component::Component, config::ConfigResult};
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
 use self::{
@@ -98,41 +94,26 @@ pub trait ModelPart: Part {
 
 /// What a strategy trading on a model reads (`Part::reads`, its part's
 /// answer): the series its features read (`ModelPart::features`), their
-/// bar types (`FeatureSet::bar_types`) and their tick series
-/// (`FeatureSet::ticks`), then each series `[data]` lists that the
-/// target's ATR, if it has one, reads, its bars or the ticks they are built
-/// from (`catalog_keys`). The ATR is built of what the strategy reads of
-/// the traded instrument (`TargetConfig::atr_bars`), so it reads a series of
-/// `[data]` if one serves it, and needs none listed.
-///
-/// The custom data of no instrument the features read
-/// (`FeatureSet::custom`) is no series: `[data].custom` lists each such
-/// data type, whole, as the cache keys its points, and may list more, which
-/// the strategy reads itself.
+/// bar types (`FeatureSet::bar_types`), their tick series
+/// (`FeatureSet::ticks`) and their custom series (`FeatureSet::custom`),
+/// each whole, as the cache keys its points, then each series `[data]`
+/// lists that the target's ATR, if it has one, reads, its bars or the
+/// ticks they are built from (`catalog_keys`). The ATR is built of what
+/// the strategy reads of the traded instrument (`TargetConfig::atr_bars`),
+/// so it reads a series of `[data]` if one serves it, and needs none
+/// listed.
 ///
 /// # Errors
 ///
-/// Returns the part's errors building the features, or else, under
-/// `data.custom`, each data type of no instrument they read that
-/// `[data].custom` does not list, naming it.
+/// Returns the part's errors building the features.
 pub fn reads<P: ModelPart>(config: &StandardConfig<P>) -> ConfigResult<Vec<Series>> {
     let features = P::features(config)?;
-    let mut unlisted = ConfigErrorCollector::new();
-    for data_type in features.custom() {
-        unlisted.check(
-            config.data.custom.contains(&data_type),
-            ConfigError::invalid_value(
-                "data.custom",
-                format!("the features read {data_type}, which is not listed"),
-            ),
-        );
-    }
-    unlisted.into_result()?;
     let mut read: Vec<Series> = features
         .bar_types()
         .into_iter()
         .map(Series::Bars)
         .chain(features.ticks().into_iter().map(Series::Ticks))
+        .chain(features.custom().into_iter().map(Series::Custom))
         .collect();
     let model = config.model();
     // An ATR without bars is the target's violation (`ModelConfig::validate`).
@@ -144,6 +125,7 @@ pub fn reads<P: ModelPart>(config: &StandardConfig<P>) -> ConfigResult<Vec<Serie
         let atr_reads = |series: &Series| match series {
             Series::Bars(bar_type) => *bar_type == atr.bar_type,
             Series::Ticks(ticks) => built_of.contains(&ticks.catalog_key()),
+            Series::Custom(_) => false,
         };
         let by_atr: Vec<Series> = config
             .data
@@ -266,10 +248,7 @@ mod tests {
     use jiff::SignedDuration;
     use nautilus_common::config::ConfigError;
     use nautilus_indicators::indicator::Indicator;
-    use nautilus_model::{
-        data::{DataType, NautilusDataType},
-        identifiers::StrategyId,
-    };
+    use nautilus_model::{data::NautilusDataType, identifiers::StrategyId};
     use nautilus_trading::strategy::StrategyConfig;
     use serde::{Deserialize, Serialize};
 
@@ -331,15 +310,12 @@ mod tests {
 
     /// The part of a strategy trading on a model whose features read the
     /// series its own `features` lists, its span on each, a custom
-    /// data's last value, and the custom data of no instrument its own
-    /// `custom` lists, none unless it lists any; its filter is its own
+    /// data's or a custom series' last value; its filter is its own
     /// logic's.
     #[derive(Debug, Clone, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct ProbeParams {
         features: Vec<Series>,
-        #[serde(default)]
-        custom: Vec<DataType>,
     }
 
     impl Part for ProbeParams {
@@ -378,15 +354,9 @@ mod tests {
                         }
                         data => panic!("the probe reads no {data}"),
                     },
+                    Series::Custom(custom) => builder.custom(custom, &i.to_string(), |_| 0.0),
                 },
             );
-            let builder = config
-                .own
-                .custom
-                .iter()
-                .fold(builder, |builder, data_type| {
-                    builder.custom(data_type, &data_type.to_string(), |_| 0.0)
-                });
             builder
                 .build()
                 .map_err(|e| ConfigError::invalid_value("features", format!("{e:#}")))
@@ -685,61 +655,62 @@ mod tests {
     }
 
     /// LSE's daily 10-year US yield, under the identifier `TREASURY-10Y`.
-    const US10Y: &str = r#"{ type_name = "LseRow", identifier = "TREASURY-10Y", metadata = { source = "bond_yields", symbol = "US10Y" } }"#;
+    const US10Y: &str = r#"{ data = "Custom:LseRow", identifier = "TREASURY-10Y", metadata = { source = "bond_yields", symbol = "US10Y" } }"#;
     /// LSE's daily 2-year US yield, under the identifier `TREASURY-2Y`.
-    const US2Y: &str = r#"{ type_name = "LseRow", identifier = "TREASURY-2Y", metadata = { source = "bond_yields", symbol = "US2Y" } }"#;
+    const US2Y: &str = r#"{ data = "Custom:LseRow", identifier = "TREASURY-2Y", metadata = { source = "bond_yields", symbol = "US2Y" } }"#;
 
-    /// The probe's features on gold's bars and on the custom data of no
-    /// instrument `read`, its `[data]` listing gold's bars and the custom
-    /// data `listed`, as `load` has it otherwise.
-    fn load_custom(read: &[&str], listed: &[&str]) -> anyhow::Result<StandardConfig<ProbeParams>> {
-        let toml = toml_of(&[GOLD_BARS], &[GOLD_BARS], TIME_ONLY, TABLES)
-            .replace(
-                "[data]",
-                &format!("custom = [{}]\n\n[data]", read.join(", ")),
-            )
-            .replace(
-                r#"warmup = "14h""#,
-                &format!("warmup = \"14h\"\ncustom = [{}]", listed.join(", ")),
-            );
-        StandardConfig::load(&toml)
+    /// Features on gold's bars and the 10-year yields, which `[data]`
+    /// lists beside the bars.
+    #[test]
+    fn features_reading_a_custom_series_data_lists_load() {
+        load(&[GOLD_BARS, US10Y], &[GOLD_BARS, US10Y], TIME_ONLY).unwrap();
     }
 
     /// The features read the 2-year yields, which `[data]` does not list
     /// beside the 10-year: refused, naming them by their identifier.
     #[test]
-    fn custom_data_the_features_read_that_data_does_not_list_is_refused_naming_it() {
-        let err = load_custom(&[US10Y, US2Y], &[US10Y]).unwrap_err();
-
-        let [(field, message)] = &refusals_of(&err)[..] else {
-            panic!("not one refusal: {err}");
+    fn a_custom_series_the_features_read_that_data_does_not_list_is_refused_naming_it() {
+        let [(field, message)] =
+            &refusals(&[GOLD_BARS, US10Y, US2Y], &[GOLD_BARS, US10Y], TIME_ONLY)[..]
+        else {
+            panic!("not one refusal");
         };
-        assert_eq!(field, "data.custom");
+
+        assert_eq!(field, "data.series");
         assert!(message.contains("TREASURY-2Y"), "{message}");
         assert!(!message.contains("TREASURY-10Y"), "{message}");
     }
 
-    /// The strategy reads custom data `[data]` lists beside its features'
-    /// in its `on_data`.
+    /// The 2-year yields `[data]` lists beside the 10-year the features
+    /// read: refused as any series read by none, a strategy reading custom
+    /// data in its `on_data` declaring it in what it reads.
     #[test]
-    fn custom_data_listed_beside_what_the_features_read_loads() {
-        load_custom(&[US10Y], &[US2Y, US10Y]).unwrap();
+    fn a_custom_series_data_lists_that_no_feature_reads_is_refused_naming_it() {
+        let [(field, message)] =
+            &refusals(&[GOLD_BARS, US10Y], &[GOLD_BARS, US2Y, US10Y], TIME_ONLY)[..]
+        else {
+            panic!("not one refusal");
+        };
+
+        assert_eq!(field, "data.series[1]");
+        assert!(message.contains("TREASURY-2Y"), "{message}");
     }
 
     /// The 2-year yields listed under the 10-year's identifier are another
     /// data type than the 10-year's the features read there: the cache keys
-    /// a point by its whole data type.
+    /// a point by its whole data type, so each is refused, the one listed
+    /// as read by no feature, the one read as not listed.
     #[test]
-    fn custom_data_listed_under_its_identifier_with_other_metadata_is_refused() {
+    fn a_custom_series_listed_under_its_identifier_with_other_metadata_is_refused_both_ways() {
         let under_10y = US2Y.replace("TREASURY-2Y", "TREASURY-10Y");
 
-        let err = load_custom(&[US10Y], &[&under_10y]).unwrap_err();
+        let fields: Vec<String> =
+            refusals(&[GOLD_BARS, US10Y], &[GOLD_BARS, &under_10y], TIME_ONLY)
+                .into_iter()
+                .map(|(field, _)| field)
+                .collect();
 
-        let fields: Vec<String> = refusals_of(&err)
-            .into_iter()
-            .map(|(field, _)| field)
-            .collect();
-        assert_eq!(fields, ["data.custom"]);
+        assert_eq!(fields, ["data.series[1]", "data.series"]);
     }
 
     /// The probe's features on gold's bars, of the tables `tables`, as its

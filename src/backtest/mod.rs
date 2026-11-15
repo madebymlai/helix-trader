@@ -18,7 +18,7 @@ use nautilus_common::{
     actor::DataActorNative, component::Component, logging::logger::LoggerConfig,
 };
 use nautilus_model::{
-    data::{BarType, DataType, NautilusDataType},
+    data::{BarType, NautilusDataType},
     enums::{ContinuousFutureAdjustmentType, OmsType},
     identifiers::{InstrumentId, Venue},
     instruments::{Instrument, InstrumentAny},
@@ -38,7 +38,7 @@ use crate::{
     rolls::ContinuousBars,
     strategy::{
         TradeConfig, conversions,
-        requirements::{DataRequirements, SeriesSlice, TickSeries},
+        requirements::{CustomSeries, DataRequirements, SeriesSlice, TickSeries},
     },
     venues,
 };
@@ -68,13 +68,14 @@ pub struct Backtest {
     /// contracts' over their slices (see `series`). Their instruments
     /// are read too, each a simulated venue of the run as well.
     pub ticks: Vec<TickSeries>,
-    /// The custom data of no instrument the strategy reads (see
-    /// `strategy::requirements::DataRequirements::custom`): each series replayed over the
-    /// window, beside the others, each row when it is known (`lse::LseRow`:
-    /// a date's at its end). The run registers the types the venues'
-    /// sources serve with Nautilus, which decodes custom data by its type's
-    /// name (`venues::register_custom_data`).
-    pub custom: Vec<DataType>,
+    /// The custom series the strategy reads (see
+    /// `strategy::requirements::DataRequirements::custom`): each replayed
+    /// over the window by its data type, beside the others, each row when
+    /// it is known (`lse::LseRow`: a date's at its end). They bring no
+    /// instrument. The run registers the types the venues' sources serve
+    /// with Nautilus, which decodes custom data by its type's name
+    /// (`venues::register_custom_data`).
+    pub custom: Vec<CustomSeries>,
     pub start: Timestamp,
     pub end: Timestamp,
     /// The commission, which the fee model of each venue is made from
@@ -207,7 +208,7 @@ impl Backtest {
         self.requirements().instrument_ids().into_iter().collect()
     }
 
-    /// The bar types, the ticks and the custom data as data requirements,
+    /// The bar types, the ticks and the custom series as data requirements,
     /// which expand the first two into the contracts standing for their
     /// instruments. A backtest requests no warmup: none.
     fn requirements(&self) -> DataRequirements {

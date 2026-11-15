@@ -277,8 +277,8 @@ fn is_custom(series: &SeriesSlice) -> bool {
 
 /// The custom data `backtest` replays, read from its catalog: that of its
 /// instruments (see `Backtest::series`), each series over its slice, and
-/// that of no instrument (`Backtest::custom`), each keyed by its data
-/// type's identifier, over the run's window, both ends included: the data
+/// its custom series (`Backtest::custom`), each keyed by its data type's
+/// identifier, over the run's window, both ends included: the data
 /// the node cannot load (see `run_config`). Nautilus decodes each type by
 /// its name, so each must be registered with Nautilus before the run
 /// (`nautilus_serialization::ensure_custom_data_registered`): the run
@@ -290,7 +290,7 @@ fn is_custom(series: &SeriesSlice) -> bool {
 ///
 /// Returns an error if the series cannot be worked out, or if the catalog
 /// cannot be read or a stored type is not registered, naming the series;
-/// or naming both if a row of `Backtest::custom` is stored under its
+/// or naming both if a row of a custom series is stored under its
 /// identifier as another data type, of other metadata: Nautilus decodes
 /// each row as the data type stored beside it and publishes it on that
 /// data type's topic, so the strategy, subscribed to its own, would get
@@ -300,12 +300,12 @@ pub(super) fn custom_data(backtest: &Backtest) -> anyhow::Result<Vec<Data>> {
     venues::register_custom_data();
     let mut catalog = ParquetDataCatalog::new(&backtest.catalog, None, None, None, None);
     let mut data = Vec::new();
-    for data_type in &backtest.custom {
-        let identifiers = data_type.identifier().map(|id| vec![id.to_string()]);
+    for series in &backtest.custom {
+        let data_type = series.data_type();
         let read = catalog
             .query_custom_data_dynamic(
-                data_type.type_name(),
-                identifiers.as_deref(),
+                series.type_name(),
+                Some(&[series.identifier().to_string()]),
                 Some(UnixNanos::from(backtest.start)),
                 Some(UnixNanos::from(backtest.end)),
                 None,

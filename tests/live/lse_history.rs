@@ -33,7 +33,7 @@
 
 use clap::{Args, Command, FromArgMatches};
 use helix_trader::{
-    strategy::requirements::{DataRequirements, TickSeries},
+    strategy::requirements::{CustomSeries, DataRequirements, TickSeries},
     venues::{HistoryVenueArgs, fill_history},
 };
 use jiff::{SignedDuration, Timestamp};
@@ -55,10 +55,9 @@ const SPX: &str = "SPX-INDICES.LSEDGE";
 const GCZ26: &str = "GCZ26.GLBX";
 const AAPL_CALL: &str = "AAPL  261120C00355000.OPRA";
 
-/// The data type of the rows of `symbol` in LSE's `source`, custom data of
-/// no instrument: both in its metadata, under an identifier of the
-/// config's, here the symbol.
-fn lse_rows(source: &str, symbol: &str) -> nautilus_model::data::DataType {
+/// The custom series of the rows of `symbol` in LSE's `source`: both in
+/// its metadata, under an identifier of the config's, here the symbol.
+fn lse_rows(source: &str, symbol: &str) -> CustomSeries {
     let metadata = nautilus_core::Params::new(
         [
             ("source".to_string(), serde_json::json!(source)),
@@ -66,7 +65,7 @@ fn lse_rows(source: &str, symbol: &str) -> nautilus_model::data::DataType {
         ]
         .into(),
     );
-    nautilus_model::data::DataType::new("LseRow", Some(metadata), Some(symbol.to_string()))
+    CustomSeries::new("LseRow", symbol.to_string(), Some(metadata)).unwrap()
 }
 
 /// Whether the run is opted in: from the shell, before `.env` is read, so
@@ -305,7 +304,7 @@ async fn a_day_of_bond_yields_fills_from_lse_as_custom_data() {
 
     LseRow::register();
     let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-    let identifier = us10y.identifier().unwrap().to_string();
+    let identifier = us10y.identifier().to_string();
     let stored = catalog
         .query_custom_data_dynamic(
             us10y.type_name(),
@@ -325,7 +324,7 @@ async fn a_day_of_bond_yields_fills_from_lse_as_custom_data() {
             let Data::Custom(custom) = data else {
                 panic!("not custom data: {data:?}");
             };
-            assert_eq!(custom.data_type, us10y);
+            assert_eq!(&custom.data_type, us10y.data_type());
             custom.data.as_any().downcast_ref::<LseRow>().unwrap()
         })
         .collect();
@@ -491,12 +490,12 @@ async fn a_day_of_an_option_s_trades_and_bars_fills_from_lse_its_definition_from
     }
 }
 
-/// fill-catalog's fill of `data_type`, custom data of no instrument, over
-/// `[start, end]` from LSE into the catalog in `dir`, and the rows it then
-/// holds, as Nautilus decodes them; the window must be stored whole.
+/// fill-catalog's fill of `data_type`, a custom series, over `[start,
+/// end]` from LSE into the catalog in `dir`, and the rows it then holds, as
+/// Nautilus decodes them; the window must be stored whole.
 async fn filled_rows(
     dir: &std::path::Path,
-    data_type: &nautilus_model::data::DataType,
+    data_type: &CustomSeries,
     (start, end): (&str, &str),
 ) -> Vec<LseRow> {
     let (start, end): (Timestamp, Timestamp) = (start.parse().unwrap(), end.parse().unwrap());
@@ -511,7 +510,7 @@ async fn filled_rows(
         .unwrap();
     LseRow::register();
     let mut catalog = ParquetDataCatalog::new(dir, None, None, None, None);
-    let identifier = data_type.identifier().unwrap().to_string();
+    let identifier = data_type.identifier().to_string();
     let rows: Vec<LseRow> = catalog
         .query_custom_data_dynamic(
             data_type.type_name(),

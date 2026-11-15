@@ -1,8 +1,8 @@
-//! A strategy's live subscriptions, bars, ticks and custom data of no
-//! instrument: what the data engine streams to it, live as in a backtest
-//! or a dataset run, through the plain Nautilus subscription API. A
-//! strategy holds a `Subscriptions` of the bar types, tick series and
-//! custom data it reads, a model strategy's `ModelHandle` building
+//! A strategy's live subscriptions, bars, ticks and custom series: what
+//! the data engine streams to it, live as in a backtest or a dataset run,
+//! through the plain Nautilus subscription API. A strategy holds a
+//! `Subscriptions` of the bar types, tick series and custom series it
+//! reads, a model strategy's `ModelHandle` building
 //! and owning it, starts it from `on_start` after its warmup's start
 //! (`strategy::warmup::Warmup::start`) and hands it each roll its roller
 //! returns (`rolls::Roller::on_time_event`). The roller tells when the
@@ -47,14 +47,13 @@
 //! start refuses such a book before anything connects (`venues::streams`),
 //! so only a replay subscribes to it.
 //!
-//! Custom data of no instrument (`DataRequirements::custom`, a config's
-//! `[data].custom`), which no `Part::reads` answers, is subscribed at the
-//! start by its data type, naming no client, as an instrument's custom data
-//! is: Nautilus subscribes the message bus alone
-//! (`DataActorCore::subscribe_data`), where a replay's rows arrive, and a
-//! live run reading any is refused at its start (`venues::live_clients`).
-//! No roll moves it. A strategy's `on_data` gets its rows: the strategy
-//! subscribes to none itself.
+//! Each custom series (`DataRequirements::custom`, a custom series of a
+//! config's `[data] series`) is subscribed at the start by its data type,
+//! naming no client, as an instrument's custom data is: Nautilus
+//! subscribes the message bus alone (`DataActorCore::subscribe_data`),
+//! where a replay's rows arrive, and a live run reading any is refused at
+//! its start (`venues::live_clients`). No roll moves it. A strategy's
+//! `on_data` gets its rows: the strategy subscribes to none itself.
 
 use std::{collections::BTreeMap, fmt::Debug};
 
@@ -70,12 +69,12 @@ use serde_json::{Value, json};
 
 use crate::{
     rolls::{ContinuousBars, Transition, front},
-    strategy::requirements::TickSeries,
+    strategy::requirements::{CustomSeries, TickSeries},
     venues,
 };
 
 /// A strategy's subscriptions to the bar types, the tick series and the
-/// custom data of no instrument it reads (see the module): `start` from
+/// custom series it reads (see the module): `start` from
 /// its `on_start`, after its warmup's start, from the time that returns,
 /// and `roll` at each roll its roller returns. It holds the series alone
 /// and works the contracts out from the time and the roll, so a strategy
@@ -89,17 +88,17 @@ pub struct Subscriptions {
     continuous: ContinuousBars,
     /// The tick series, of roots or plain instruments.
     ticks: Vec<TickSeries>,
-    /// The custom data of no instrument, each series its data type.
-    custom: Vec<DataType>,
+    /// The custom series.
+    custom: Vec<CustomSeries>,
 }
 
 impl Subscriptions {
     /// The subscriptions to `bar_types`, of plain instruments, to `ticks`,
-    /// of roots or plain instruments, and to `custom`, custom data of no
-    /// instrument (`DataRequirements::custom`): a bar type given twice is
-    /// subscribed once (see the module).
+    /// of roots or plain instruments, and to `custom`, custom series
+    /// (`DataRequirements::custom`): a bar type given twice is subscribed
+    /// once (see the module).
     #[must_use]
-    pub fn new(bar_types: Vec<BarType>, ticks: Vec<TickSeries>, custom: Vec<DataType>) -> Self {
+    pub fn new(bar_types: Vec<BarType>, ticks: Vec<TickSeries>, custom: Vec<CustomSeries>) -> Self {
         Self {
             bar_types,
             continuous: ContinuousBars::default(),
@@ -119,7 +118,7 @@ impl Subscriptions {
 
     /// Subscribes `actor` to the bars, then to each tick series on the
     /// contract standing for its instrument at `now` (`rolls::front`), then
-    /// to the custom data of no instrument, naming no client, all from
+    /// to each custom series by its data type, naming no client, all from
     /// `now`: the time the strategy's warmup's start returns
     /// (`Warmup::start`), where a live warmup's requests end.
     pub fn start<A>(&self, actor: &mut A, now: Timestamp)
@@ -131,8 +130,9 @@ impl Subscriptions {
         for instrument_id in self.instrument_ids() {
             self.subscribe(actor, instrument_id, front(instrument_id, now), from);
         }
-        for data_type in &self.custom {
-            actor.subscribe_data(data_type.clone(), None, Some(subscription_params(from, [])));
+        for series in &self.custom {
+            let params = Some(subscription_params(from, []));
+            actor.subscribe_data(series.data_type().clone(), None, params);
         }
     }
 
@@ -595,19 +595,20 @@ mod tests {
         assert_eq!((started, rolled), ([1, 0], [0, 1]));
     }
 
-    /// Custom data of no instrument, each series a data type keyed by its
-    /// identifier, here the 10-year and the 2-year US yields, is subscribed
-    /// at the start by its data type, naming no data client: on the
-    /// message bus alone, sending the data engine nothing.
+    /// Custom series, each a data type keyed by its identifier, here the
+    /// 10-year and the 2-year US yields, are subscribed at the start by
+    /// their data type, naming no data client: on the message bus alone,
+    /// sending the data engine nothing.
     #[test]
-    fn custom_data_of_no_instrument_is_subscribed_at_the_start() {
-        let yields = |symbol: &str| DataType::new("Yield", None, Some(symbol.to_string()));
+    fn custom_series_are_subscribed_at_the_start_naming_no_client() {
+        let yields = |symbol: &str| CustomSeries::new("Yield", symbol.to_string(), None).unwrap();
         let subscriptions =
             Subscriptions::new(vec![], vec![], vec![yields("US10Y"), yields("US02Y")]);
         let (mut probe, _, commands) = registered(at("2026-08-10T14:30:00Z"));
 
         subscriptions.start(&mut probe, at("2026-08-10T14:30:00Z"));
 
+        let yields = |symbol: &str| DataType::new("Yield", None, Some(symbol.to_string()));
         assert_eq!(
             [subscribers(&yields("US10Y")), subscribers(&yields("US02Y"))],
             [1, 1]
