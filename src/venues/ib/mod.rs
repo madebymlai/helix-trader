@@ -82,6 +82,7 @@ mod gateway;
 pub use gateway::IbAccount;
 use gateway::IbGateway;
 mod live;
+pub(in crate::venues) use live::BOOK;
 #[cfg(test)]
 pub(in crate::venues) use live::offline_clients;
 pub(crate) use live::{IbLiveArgs, clients, streams};

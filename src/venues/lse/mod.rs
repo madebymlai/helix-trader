@@ -29,13 +29,19 @@
 //! the same client with no definition, each row stamped when its values
 //! are known. See `README.md`.
 
+use std::num::NonZeroUsize;
+
 use ::lse::{LseDataClientConfig, LseDataClientFactory};
 use jiff::{SignedDuration, Timestamp};
 use nautilus_live::config::RoutingConfig;
-use nautilus_model::{data::DataType, identifiers::InstrumentId};
+use nautilus_model::{
+    data::{DEPTH10_LEN, DataType},
+    enums::BookType,
+    identifiers::InstrumentId,
+};
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 
-use super::{DefinitionsSource, Row, databento::DatabentoHistory};
+use super::{BookFormat, DefinitionsSource, Row, databento::DatabentoHistory};
 use crate::{
     catalog::{FillData, NodeClient, NodeFill, missing, missing_custom},
     live::node::Clients,
@@ -45,6 +51,20 @@ use crate::{
 /// The window of one request of a series: a day, as Databento's. The
 /// client asks LSE a UTC day an export whatever the window.
 const DAY: SignedDuration = SignedDuration::from_hours(24);
+
+/// LSE's book as the LSE adapter's data client streams and serves it, of
+/// a `GLBX` contract or an `XNAS` stock (`venues::book_format`): its
+/// deltas of an L3_MBO book, CME Globex's or Nasdaq TotalView's orders at
+/// Level 3, each by its id, whatever book type a subscription names
+/// (`subscribe_book_deltas`, `crates/lse/src/data.rs:601-605`, reading
+/// none; `request_book_deltas`, `:781`), and its depth snapshots of ten
+/// levels a side, Level 2, the one depth the client streams and serves, a
+/// subscription or a request of another failing naming it
+/// (`subscribe_book_depth`, `:556-566`; `request_book_depth`, `:739-746`).
+pub(super) const BOOK: BookFormat = BookFormat {
+    deltas: BookType::L3_MBO,
+    depth: NonZeroUsize::new(DEPTH10_LEN),
+};
 
 /// Adds to `node` the fill of what the catalog lacks of `slices`, series
 /// LSE gives the history of (see `catalog::missing`), and of `custom`,

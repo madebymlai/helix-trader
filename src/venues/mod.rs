@@ -20,7 +20,10 @@
 //! client its fill asks, so that a fill and a warmup agree on what history
 //! there is), a live start whether a venue's live data streams a series
 //! (`streams`, its live data source's answer, each a copy of the
-//! subscriptions its data client implements), and a strategy the series an
+//! subscriptions its data client implements), the roller, a live warmup and
+//! a fill the format of a venue's book, the book type of its deltas and the
+//! levels of its depth (`book_format`, its live data source's answer, the
+//! one format of the venue's book in the catalog), and a strategy the series an
 //! FX pair it converts through is read in (`rate_series`: the first form
 //! `serves` takes, the pair's 1-minute BID and ASK bars, then its quotes);
 //! venue code checks its own instruments against the table. Custom data of
@@ -50,7 +53,7 @@ pub mod lse;
 pub mod okx;
 pub mod pepperstone;
 
-use std::path::Path;
+use std::{num::NonZeroUsize, path::Path};
 
 use ::lse::{LseDataClientConfig, LseDataClientFactory, LseRow};
 use anyhow::{Context, bail, ensure};
@@ -65,7 +68,7 @@ use nautilus_interactive_brokers::factories::InteractiveBrokersDataClientFactory
 use nautilus_live::config::RoutingConfig;
 use nautilus_model::{
     data::{BarSpecification, BarType, CustomDataTrait, DataType, NautilusDataType},
-    enums::{AggregationSource, BarAggregation, OmsType, PriceType},
+    enums::{AggregationSource, BarAggregation, BookType, OmsType, PriceType},
     identifiers::{ClientId, ClientOrderId, InstrumentId, Venue},
 };
 use nautilus_okx::factories::OKXDataClientFactory;
@@ -180,6 +183,19 @@ pub(crate) enum LiveDataSource {
     Lse,
     /// Interactive Brokers' data client, on the gateway.
     Ib,
+}
+
+/// The format of a venue's book as its live data streams it
+/// (`book_format`): the book type of its deltas, L3_MBO if each is an
+/// order, by its id, L2_MBP if each is a price level, and the levels a
+/// side of its depth snapshots, if it streams any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BookFormat {
+    /// The book type of its deltas.
+    pub(crate) deltas: BookType,
+    /// The levels a side of its depth snapshots; none if it streams no
+    /// depth.
+    pub(crate) depth: Option<NonZeroUsize>,
 }
 
 /// The broker trading a venue's instruments: its execution client on the
@@ -534,10 +550,11 @@ pub(crate) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
 /// (`Row::of`, so every venue without a row of its own as IB's), each a
 /// copy of the subscriptions its data client implements: a cTrader
 /// broker's quotes alone (`ctrader::quoted`), the adapter's one rule of
-/// its history and its spots; OKX's quotes, trades and candles
+/// its history and its spots; OKX's quotes, trades, candles and book
 /// (`okx::streams`); the series LSE's client streams
-/// (`lse::check_streamed`); IB's quotes, trades and time bars
-/// (`ib::streams`). Custom data of an instrument is streamed by no client:
+/// (`lse::check_streamed`); IB's quotes, trades, time bars and book deltas
+/// (`ib::streams`). A book is checked as a run subscribes to it, in its
+/// venue's format (`book_format`). Custom data of an instrument is streamed by no client:
 /// none implements a subscription of custom data, the roller's names no
 /// client, so Nautilus subscribes it to the message bus alone
 /// (`DataActorCore::subscribe_data`), and nothing in helix publishes any
@@ -561,6 +578,32 @@ pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
         LiveDataSource::Okx => okx::streams(source),
         LiveDataSource::Lse => ::lse::check_streamed(&[source.key()]),
         LiveDataSource::Ib => ib::streams(source),
+    }
+}
+
+/// The format of the book of `venue`'s instruments, as its row's live data
+/// source streams it (`Row::of`, so every venue without a row of its own
+/// as IB's), each a copy of its data client: LSE's orders and depth of ten
+/// levels a side (`lse::BOOK`); IB's price levels and no depth
+/// (`ib::BOOK`); OKX's price levels and depth of five levels a side
+/// (`okx::BOOK`); none of a cTrader broker's, whose client streams its
+/// quotes alone (`ctrader::quoted`). A venue has one format, its live
+/// data's: a subscription names it, each client streaming its own alone
+/// (`streams` takes a book at it), and the catalog keeps one series of a
+/// venue's book, which its live stream records into, its history fills
+/// and a backtest and a warmup replay, so a history serving a book serves
+/// it in that format: LSE's, the one history serving a book (`serves`), is
+/// the live data of each of its rows. So the roller subscribes to a book
+/// at it (`rolls::Roller`), a live warmup requests the history of its
+/// deltas at its book type, onto which Nautilus replays them
+/// (`strategy::warmup`), and a fill asks its depth at its levels
+/// (`catalog::NodeFill`).
+pub(crate) fn book_format(venue: Venue) -> Option<BookFormat> {
+    match Row::of(venue).live_data {
+        LiveDataSource::CTrader(_) => None,
+        LiveDataSource::Okx => Some(okx::BOOK),
+        LiveDataSource::Lse => Some(lse::BOOK),
+        LiveDataSource::Ib => Some(ib::BOOK),
     }
 }
 
@@ -2077,20 +2120,22 @@ mod tests {
     /// 5-second bars as IB's real-time bars, and the other sizes IB has as
     /// its historical bars kept up to date, which IB keeps of 5 seconds or
     /// more, priced LAST, BID, ASK or MID, a crypto
-    /// pair's LAST from IB's AGGTRADES, every venue without a row of its
+    /// pair's LAST from IB's AGGTRADES, and its book deltas, of an L2_MBP
+    /// book (`subscribe_book_deltas`), every venue without a row of its
     /// own. No trades of a currency pair, which its `subscribe_trades`
     /// logs as unsupported, no TRADES bars of a forex pair, which IB has
-    /// none of, no book deltas as a run subscribes to them, L3_MBO, which
-    /// IB publishes none of, and no book depth or custom data, which it
-    /// does not subscribe to.
+    /// none of, and no book depth or custom data, which it does not
+    /// subscribe to.
     #[test]
-    fn ib_s_client_streams_its_quotes_trades_and_bars() {
+    fn ib_s_client_streams_its_quotes_trades_bars_and_book_deltas() {
         use NautilusDataType as D;
         assert_streams(
             &[
                 ticks_of(D::QuoteTick, "SXR8.IBIS"),
                 ticks_of(D::QuoteTick, "EUR/USD.IDEALPRO"),
                 ticks_of(D::TradeTick, "ESZ26.CME"),
+                ticks_of(D::OrderBookDelta, "ESZ26.CME"),
+                ticks_of(D::OrderBookDelta, "EUR/USD.IDEALPRO"),
                 bars_of("SXR8.IBIS-1-MINUTE-LAST-EXTERNAL"),
                 bars_of("SXR8.IBIS-5-SECOND-LAST-EXTERNAL"),
                 bars_of("SXR8.IBIS-30-SECOND-BID-EXTERNAL"),
@@ -2104,7 +2149,6 @@ mod tests {
                 ticks_of(D::TradeTick, "EUR/USD.IDEALPRO"),
                 ticks_of(D::TradeTick, "BTC/USD.PAXOS"),
                 ticks_of(D::TradeTick, "BTC/USD.ZEROHASH"),
-                ticks_of(D::OrderBookDelta, "ESZ26.CME"),
                 ticks_of(D::OrderBookDepth, "SXR8.IBIS"),
                 ticks_of(imbalance(), "SXR8.IBIS"),
                 bars_of("EUR/USD.IDEALPRO-1-MINUTE-LAST-EXTERNAL"),
@@ -2119,31 +2163,69 @@ mod tests {
 
     /// Nautilus' OKX data client streams quotes, trades and candles
     /// (`subscribe_quotes`, `subscribe_trades`, `subscribe_bars`, the
-    /// candles of `bar_spec_as_okx_channel`, trade-priced); no book deltas
-    /// as a run subscribes to them, L3_MBO, OKX's books being L2_MBP, no
-    /// book depth of the ten levels a run subscribes to, its client's
-    /// snapshots holding five, and no custom data, which it does not
-    /// subscribe to.
+    /// candles of `bar_spec_as_okx_channel`, trade-priced), and its book,
+    /// deltas of an L2_MBP book and depth of five levels a side
+    /// (`subscribe_book_deltas`, `subscribe_book_depth`); no custom data,
+    /// which it does not subscribe to.
     #[test]
-    fn okx_s_client_streams_its_quotes_trades_and_candles() {
+    fn okx_s_client_streams_its_quotes_trades_candles_and_book() {
         use NautilusDataType as D;
         assert_streams(
             &[
                 ticks_of(D::QuoteTick, SWAP),
                 ticks_of(D::TradeTick, SWAP),
+                ticks_of(D::OrderBookDelta, SWAP),
+                ticks_of(D::OrderBookDepth, SWAP),
                 bars_of("BTC-USDT-SWAP.OKX-1-SECOND-LAST-EXTERNAL"),
                 bars_of("BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL"),
                 bars_of("BTC-USDT-SWAP.OKX-4-HOUR-LAST-EXTERNAL"),
             ],
             &[
-                ticks_of(D::OrderBookDelta, SWAP),
-                ticks_of(D::OrderBookDepth, SWAP),
                 ticks_of(imbalance(), SWAP),
                 bars_of("BTC-USDT-SWAP.OKX-1-MINUTE-MID-EXTERNAL"),
                 bars_of("BTC-USDT-SWAP.OKX-4-MINUTE-LAST-EXTERNAL"),
                 bars_of("BTC-USDT-SWAP.OKX-1-MINUTE-LAST-INTERNAL"),
             ],
         );
+    }
+
+    /// Each venue's book as its live data's client streams it: LSE's, of
+    /// GLBX, XNAS, OPRA and LSEDGE, orders (L3_MBO) and ten levels a side
+    /// of depth, the one depth its client streams and serves; IB's, of
+    /// every venue without a row of its own, price levels (L2_MBP), its
+    /// client publishing no L3_MBO book, and no depth, which it does not
+    /// subscribe to; OKX's price levels (L2_MBP), the one book type its
+    /// client takes, and five levels a side of depth, the most it takes; a
+    /// cTrader broker's none, its client streaming quotes alone.
+    #[test]
+    fn each_venue_s_book_is_in_the_format_its_live_data_client_streams() {
+        let lse = Some(BookFormat {
+            deltas: BookType::L3_MBO,
+            depth: NonZeroUsize::new(10),
+        });
+        let ib = Some(BookFormat {
+            deltas: BookType::L2_MBP,
+            depth: None,
+        });
+        let okx = Some(BookFormat {
+            deltas: BookType::L2_MBP,
+            depth: NonZeroUsize::new(5),
+        });
+        for (venue, format) in [
+            ("GLBX", lse),
+            ("XNAS", lse),
+            ("OPRA", lse),
+            ("LSEDGE", lse),
+            ("IBIS", ib),
+            ("CME", ib),
+            ("IDEALPRO", ib),
+            ("NASDAQ", ib),
+            ("OKX", okx),
+            ("ICMARKETS", None),
+            ("PEPPERSTONE", None),
+        ] {
+            assert_eq!(book_format(Venue::new(venue)), format, "{venue}");
+        }
     }
 
     /// Custom data of an instrument, as a strategy's config names it
@@ -2347,10 +2429,12 @@ mod tests {
 
     /// A subscription of each kind a strategy makes, of `id`, its bars
     /// `id`'s 1-minute LAST bars, as a run subscribes to it
-    /// (`rolls::Roller`, `strategy::warmup`): its book deltas as L3_MBO
-    /// (`rolls::DELTAS_BOOK_TYPE`), its depth ten levels a side of an
-    /// L2_MBP book, its custom data `Custom:Imbalance` of it. The kind's
-    /// name, the series it subscribes to and the command.
+    /// (`rolls::Roller`, `strategy::warmup`): its book in its venue's
+    /// format (`book_format`), its deltas at its book type, its depth at
+    /// its levels of an L2_MBP book, a venue with no book's at L2_MBP and
+    /// no levels, its client subscribing to no book of any; its custom
+    /// data `Custom:Imbalance` of it. The kind's name, the series it
+    /// subscribes to and the command.
     fn subscriptions_of(id: InstrumentId) -> Vec<(&'static str, CatalogSeries, SubscribeCommand)> {
         use NautilusDataType as D;
         let bars = BarType::from(format!("{id}-1-MINUTE-LAST-EXTERNAL").as_str());
@@ -2361,7 +2445,10 @@ mod tests {
             })
         };
         let (venue, ts) = (Some(id.venue), UnixNanos::from(at(FILL_START)));
-        let depth = NonZeroUsize::new(10);
+        let book = book_format(id.venue).unwrap_or(BookFormat {
+            deltas: BookType::L2_MBP,
+            depth: None,
+        });
         vec![
             (
                 "quotes",
@@ -2407,7 +2494,7 @@ mod tests {
                 ticks(D::OrderBookDelta),
                 SubscribeCommand::BookDeltas(SubscribeBookDeltas::new(
                     id,
-                    crate::rolls::DELTAS_BOOK_TYPE,
+                    book.deltas,
                     None,
                     venue,
                     UUID4::new(),
@@ -2428,7 +2515,7 @@ mod tests {
                     venue,
                     UUID4::new(),
                     ts,
-                    depth,
+                    book.depth,
                     false,
                     None,
                     None,
@@ -3066,20 +3153,18 @@ mod tests {
 
     /// IB's and OKX's clients stream none of them: each refused naming it
     /// before anything connects, OKX's clients among them, which would fail
-    /// on its missing environment. An IB instrument's book depth, its book
-    /// deltas, which a run subscribes to as L3_MBO, its custom data, a
-    /// forex pair's trades and the bars built from them, and the 1-second
-    /// bars a composite bar type is built from, which IB keeps up to date
-    /// at 5 seconds or more; an OKX swap's book and custom data, and the
-    /// mid-priced 1-minute bars a composite bar type is built from, OKX's
-    /// candles being of trades.
+    /// on its missing environment. An IB instrument's book depth, its
+    /// custom data, a forex pair's trades and the bars built from them,
+    /// and the 1-second bars a composite bar type is built from, which IB
+    /// keeps up to date at 5 seconds or more; an OKX swap's custom data,
+    /// and the mid-priced 1-minute bars a composite bar type is built
+    /// from, OKX's candles being of trades.
     #[tokio::test]
     async fn a_run_reading_a_series_ib_or_okx_does_not_stream_is_refused_naming_it_before_anything_connects()
      {
         use NautilusDataType as D;
         for (read, series) in [
             (ticks(&[(D::OrderBookDepth, "SXR8.IBIS")]), "SXR8.IBIS"),
-            (ticks(&[(D::OrderBookDelta, "ESZ26.CME")]), "ESZ26.CME"),
             (ticks(&[(imbalance(), "SXR8.IBIS")]), "SXR8.IBIS"),
             (
                 ticks(&[(D::TradeTick, "EUR/USD.IDEALPRO")]),
@@ -3093,8 +3178,6 @@ mod tests {
                 reading(&["SXR8.IBIS-1-MINUTE-LAST-INTERNAL@1-SECOND-EXTERNAL"]),
                 "SXR8.IBIS-1-SECOND-LAST-EXTERNAL",
             ),
-            (ticks(&[(D::OrderBookDelta, SWAP)]), SWAP),
-            (ticks(&[(D::OrderBookDepth, SWAP)]), SWAP),
             (ticks(&[(imbalance(), SWAP)]), SWAP),
             (
                 reading(&["BTC-USDT-SWAP.OKX-1-HOUR-MID-INTERNAL@1-MINUTE-EXTERNAL"]),
@@ -3108,6 +3191,28 @@ mod tests {
                 "{series}: {err}"
             );
         }
+    }
+
+    /// IB's clients stream an IB instrument's book deltas, and OKX's an
+    /// OKX swap's deltas and depth, each in its venue's format
+    /// (`book_format`): a run reading them gets past the check to set up
+    /// OKX's clients, which fail, the catalog holding no definition of the
+    /// swap.
+    #[tokio::test]
+    async fn a_run_reading_ib_s_book_deltas_and_okx_s_book_gets_past_the_streams_check() {
+        use NautilusDataType as D;
+
+        let err = refused_at_start(ticks(&[
+            (D::OrderBookDelta, "ESZ26.CME"),
+            (D::OrderBookDelta, SWAP),
+            (D::OrderBookDepth, SWAP),
+        ]))
+        .await;
+
+        assert!(
+            err.contains("fill the catalog before trading it live"),
+            "{err}"
+        );
     }
 
     /// LSE streams none yet: refused before anything connects, OKX's

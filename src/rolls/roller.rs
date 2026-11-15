@@ -3,8 +3,9 @@
 //! roll, with the plain Nautilus clock and subscription API, as Nautilus'
 //! own (crate-private) roller of continuous bars does.
 
-use std::{fmt::Debug, num::NonZeroUsize};
+use std::fmt::Debug;
 
+use anyhow::Context;
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::{DataActor, DataActorNative},
@@ -31,18 +32,15 @@ const ROLL_ALERT: &str = "ROLL:";
 /// Nautilus' data engine), which loads the instrument as it answers.
 const FORCE_INSTRUMENT_UPDATE: &str = "force_instrument_update";
 
-/// The levels a side of an `OrderBookDepth10` snapshot.
-const DEPTH: NonZeroUsize = NonZeroUsize::new(10).unwrap();
-
-/// The book type of the book deltas a roller subscribes to, and a warmup
-/// requests.
-pub const DELTAS_BOOK_TYPE: BookType = BookType::L3_MBO;
-
 /// Subscribes a strategy to its tick series, each on the contract standing
 /// for its instrument (see `Transition::after`), and rolls them: owned by
 /// the strategy, started in its `on_start` and handed its time events in
 /// `on_time_event`, which return the roll they made, if any. An instrument
-/// that does not roll is subscribed once, with no alert.
+/// that does not roll is subscribed once, with no alert. A book is
+/// subscribed to in the format its venue's live data streams
+/// (`venues::book_format`), live as in a backtest or a dataset run, whose
+/// replay of the catalog's book reads neither the book type nor the levels
+/// of a subscription that manages no book.
 ///
 /// A live roller loads each post contract when it sets its roll alert, so
 /// a node rolls any number of times: it requests the instrument from the
@@ -104,14 +102,15 @@ impl Roller {
     /// # Errors
     ///
     /// Returns an error if the clock refuses an alert or Nautilus a
-    /// request.
+    /// request, or naming a book its venue's live data streams none of
+    /// (see `subscribe`).
     pub fn start<A>(&self, actor: &mut A) -> anyhow::Result<()>
     where
         A: DataActor + DataActorNative + Debug + 'static,
     {
         let now = actor.clock().utc_now();
         for instrument_id in self.instrument_ids() {
-            self.subscribe(actor, instrument_id, front(instrument_id, now));
+            self.subscribe(actor, instrument_id, front(instrument_id, now))?;
             if let Some(next) = Transition::after(instrument_id, now) {
                 self.arm(actor, instrument_id, next)?;
             }
@@ -137,7 +136,7 @@ impl Roller {
     /// # Errors
     ///
     /// Returns an error if the clock refuses the next alert or Nautilus
-    /// the request.
+    /// the request, or as `subscribe`.
     pub fn on_time_event<A>(
         &self,
         actor: &mut A,
@@ -156,7 +155,7 @@ impl Roller {
         let roll = Transition::after(instrument_id, event.ts_event.into())
             .expect("an instrument with a roll alert rolls");
         self.unsubscribe(actor, instrument_id, roll.pre, roll.time);
-        self.subscribe(actor, instrument_id, roll.post);
+        self.subscribe(actor, instrument_id, roll.post)?;
         if let Some(next) = Transition::after(instrument_id, roll.time) {
             self.arm(actor, instrument_id, next)?;
         }
@@ -204,33 +203,61 @@ impl Roller {
 
     /// Subscribes `actor` to the series of `instrument_id` on `contract`,
     /// streaming from now: live, where the warmup, requested up to now,
-    /// ends (`strategy::warmup`).
-    fn subscribe<A>(&self, actor: &mut A, instrument_id: InstrumentId, contract: InstrumentId)
+    /// ends (`strategy::warmup`). Its book in the format of its venue's
+    /// live data (`venues::book_format`): its deltas at the format's book
+    /// type, asking no depth, so each client streams the whole book it
+    /// gives, and its depth at the format's levels, snapshots of price
+    /// levels (L2_MBP).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming `contract` if the series are of a book, or
+    /// of a depth, its venue's live data streams none of: a live start
+    /// refuses such a series first (`venues::streams`), and no source
+    /// fills it.
+    fn subscribe<A>(
+        &self,
+        actor: &mut A,
+        instrument_id: InstrumentId,
+        contract: InstrumentId,
+    ) -> anyhow::Result<()>
     where
         A: DataActor + DataActorNative + Debug + 'static,
     {
         let now = UnixNanos::from(actor.clock().utc_now());
+        let book = || {
+            venues::book_format(contract.venue).with_context(|| {
+                format!(
+                    "the live data of {} streams no book, so none of {contract} is subscribed to",
+                    contract.venue
+                )
+            })
+        };
         for data in self.data_of(instrument_id) {
             let params = Some(subscription_params(now, []));
             match data {
                 NautilusDataType::QuoteTick => actor.subscribe_quotes(contract, None, params),
                 NautilusDataType::TradeTick => actor.subscribe_trades(contract, None, params),
-                NautilusDataType::OrderBookDepth => actor.subscribe_book_depth(
-                    contract,
-                    BookType::L2_MBP,
-                    Some(DEPTH),
-                    None,
-                    false,
-                    params,
-                ),
-                NautilusDataType::OrderBookDelta => actor.subscribe_book_deltas(
-                    contract,
-                    DELTAS_BOOK_TYPE,
-                    None,
-                    None,
-                    false,
-                    params,
-                ),
+                NautilusDataType::OrderBookDepth => {
+                    let levels = book()?.depth.with_context(|| {
+                        format!(
+                            "the live data of {} streams no book depth, so none of {contract} is \
+                             subscribed to",
+                            contract.venue
+                        )
+                    })?;
+                    actor.subscribe_book_depth(
+                        contract,
+                        BookType::L2_MBP,
+                        Some(levels),
+                        None,
+                        false,
+                        params,
+                    );
+                }
+                NautilusDataType::OrderBookDelta => {
+                    actor.subscribe_book_deltas(contract, book()?.deltas, None, None, false, params)
+                }
                 NautilusDataType::Custom { type_name } => {
                     let data_type = DataType::new(type_name, None, Some(contract.to_string()));
                     actor.subscribe_data(data_type, None, params);
@@ -238,6 +265,7 @@ impl Roller {
                 other => unreachable!("{other} is not a tick series (see `TickSeries`)"),
             }
         }
+        Ok(())
     }
 
     /// Unsubscribes `actor` from the series of `instrument_id` on
@@ -307,12 +335,12 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, rc::Rc};
+    use std::{cell::RefCell, num::NonZeroUsize, rc::Rc};
 
     use nautilus_common::{
         cache::Cache,
         clock::{Clock, VirtualClock},
-        messages::data::{DataCommand, RequestCommand},
+        messages::data::{DataCommand, RequestCommand, SubscribeCommand},
         msgbus::{
             self, MessagingSwitchboard, stubs::TypedIntoMessageSavingHandler,
             stubs::get_typed_into_message_saving_handler,
@@ -509,6 +537,109 @@ mod tests {
                 Sent::Subscribe(id("GCJ27.GLBX")),
             ]
         );
+    }
+
+    /// The book subscriptions of `commands`: each its instrument, its
+    /// kind, its book type and its depth.
+    fn books_subscribed(
+        commands: &TypedIntoMessageSavingHandler<DataCommand>,
+    ) -> Vec<(
+        InstrumentId,
+        NautilusDataType,
+        BookType,
+        Option<NonZeroUsize>,
+    )> {
+        commands
+            .get_messages()
+            .into_iter()
+            .filter_map(|command| match command {
+                DataCommand::Subscribe(SubscribeCommand::BookDeltas(cmd)) => Some((
+                    cmd.instrument_ids[0],
+                    NautilusDataType::OrderBookDelta,
+                    cmd.book_type,
+                    cmd.depth,
+                )),
+                DataCommand::Subscribe(SubscribeCommand::BookDepth(cmd)) => Some((
+                    cmd.instrument_ids[0],
+                    NautilusDataType::OrderBookDepth,
+                    cmd.book_type,
+                    cmd.depth,
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn ticks(series: &[(NautilusDataType, &str)]) -> Vec<TickSeries> {
+        series
+            .iter()
+            .map(|(data, instrument_id)| TickSeries {
+                data: data.clone(),
+                instrument_id: id(instrument_id),
+            })
+            .collect()
+    }
+
+    /// Each book in the format its venue's live data streams: a GLBX
+    /// contract's, LSE's, its deltas as orders (L3_MBO) and its depth ten
+    /// levels a side; a CME contract's, IB's, its deltas as price levels
+    /// (L2_MBP); an OKX swap's its deltas as price levels and its depth
+    /// five levels a side. Deltas of the whole book each client streams,
+    /// no depth asked; depth snapshots of price levels.
+    #[test]
+    fn a_roller_subscribes_each_book_in_its_venue_s_format() {
+        use NautilusDataType as D;
+        let swap = "BTC-USDT-SWAP.OKX";
+        let roller = Roller::live(ticks(&[
+            (D::OrderBookDelta, "GCZ26.GLBX"),
+            (D::OrderBookDepth, "GCZ26.GLBX"),
+            (D::OrderBookDelta, "ESZ26.CME"),
+            (D::OrderBookDelta, swap),
+            (D::OrderBookDepth, swap),
+        ]));
+        let (mut probe, _, commands) = registered("2026-08-10T14:30:00Z");
+
+        roller.start(&mut probe).unwrap();
+
+        let levels = NonZeroUsize::new;
+        assert_eq!(
+            books_subscribed(&commands),
+            [
+                (id("GCZ26.GLBX"), D::OrderBookDelta, BookType::L3_MBO, None),
+                (
+                    id("GCZ26.GLBX"),
+                    D::OrderBookDepth,
+                    BookType::L2_MBP,
+                    levels(10)
+                ),
+                (id("ESZ26.CME"), D::OrderBookDelta, BookType::L2_MBP, None),
+                (id(swap), D::OrderBookDelta, BookType::L2_MBP, None),
+                (id(swap), D::OrderBookDepth, BookType::L2_MBP, levels(5)),
+            ]
+        );
+    }
+
+    /// A book its venue's live data streams none of, which a live start
+    /// refuses before (`venues::streams`) and no source fills: a cTrader
+    /// broker's deltas, its venue having no book, and an IB instrument's
+    /// depth, IB's having none. Each refused naming it.
+    #[test]
+    fn a_roller_refuses_a_book_its_venue_streams_none_of_naming_it() {
+        use NautilusDataType as D;
+        for (data, instrument_id) in [
+            (D::OrderBookDelta, "XAUUSD.ICMARKETS"),
+            (D::OrderBookDepth, "SXR8.IBIS"),
+        ] {
+            let roller = Roller::replayed(ticks(&[(data.clone(), instrument_id)]));
+            let (mut probe, _, _) = registered("2026-08-10T14:30:00Z");
+
+            let err = roller.start(&mut probe).unwrap_err();
+
+            assert!(
+                format!("{err:#}").contains(instrument_id),
+                "{data} of {instrument_id}: {err:#}"
+            );
+        }
     }
 
     #[test]

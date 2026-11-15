@@ -21,7 +21,7 @@ use nautilus_interactive_brokers::{
 use nautilus_live::config::RoutingConfig;
 use nautilus_model::{
     data::NautilusDataType,
-    enums::PriceType,
+    enums::{BookType, PriceType},
     identifiers::{InstrumentId, Venue},
 };
 
@@ -31,6 +31,7 @@ use super::{
 use crate::{
     live::node::{Clients, ExecClient},
     strategy::requirements::{CatalogSeries, TickSeries},
+    venues::BookFormat,
 };
 
 /// IB's settings of a live node, the live command's flags: the account
@@ -133,6 +134,22 @@ impl IbClients {
     }
 }
 
+/// IB's book as Nautilus' IB data client streams it
+/// (`venues::book_format`): its deltas of an L2_MBP book, the rows of IB's
+/// market depth, each a price level by its position, and by the exchange
+/// posting it on IB's SMART depth, the client's default
+/// (`subscribe_book_deltas`, `data/core.rs:1249`, `:1301-1306`;
+/// `data/streams.rs:1952-2027`), the client logging an L3_MBO
+/// subscription as unpublished by IB and streaming nothing
+/// (`core.rs:1262-1268`); no depth snapshots, which it does not subscribe
+/// to (Nautilus' `DataClient` default, `common/src/clients/data.rs:171-174`).
+/// A deltas subscription of no depth asks IB for 20 rows a side
+/// (`core.rs:1299`).
+pub(in crate::venues) const BOOK: BookFormat = BookFormat {
+    deltas: BookType::L2_MBP,
+    depth: None,
+};
+
 /// The narrowest bars IB keeps up to date: its historical bars streamed
 /// with `keepUpToDate`, "only ... with bar sizes 5 seconds or greater"
 /// (TWS API, "Historical Bar Data"), and its real-time bars, 5 seconds
@@ -151,14 +168,12 @@ const KEPT_UP_TO_DATE: SignedDuration = SignedDuration::from_secs(5);
 /// bars (`:1166`), the others as its historical bars kept up to date
 /// (`data/streams.rs:817-821`), which IB keeps only at 5 seconds or more
 /// (`KEPT_UP_TO_DATE`), each priced at one of `BAR_PRICES`, a forex
-/// pair's LAST bars aside, IB having no TRADES of them. The client
-/// streams book deltas of L1_MBP and L2_MBP books alone, logging an L3_MBO
-/// subscription as unpublished by IB and streaming nothing
-/// (`subscribe_book_deltas`, `:1249`, `:1262-1268`), and a run subscribes
-/// to book deltas as L3_MBO (`rolls::DELTAS_BOOK_TYPE`), so it streams
-/// none of a run's. It subscribes to no book depth and no custom
-/// data: Nautilus' `DataClient` defaults log "Handler not implemented"
-/// and stream nothing (`common/src/clients/data.rs:130-133`, `:171-174`).
+/// pair's LAST bars aside, IB having no TRADES of them; and its book
+/// deltas, which a run subscribes to in IB's format (`BOOK`, through
+/// `venues::book_format`), of an L2_MBP book. It subscribes to no book
+/// depth, `BOOK` having none, and no custom data: Nautilus' `DataClient`
+/// defaults log "Handler not implemented" and stream nothing
+/// (`common/src/clients/data.rs:130-133`, `:171-174`).
 ///
 /// # Errors
 ///
@@ -185,7 +200,8 @@ pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
             );
         }
         CatalogSeries::Ticks(TickSeries {
-            data: D::QuoteTick, ..
+            data: D::QuoteTick | D::OrderBookDelta,
+            ..
         }) => {}
         CatalogSeries::Ticks(TickSeries {
             data: D::TradeTick,
@@ -196,14 +212,17 @@ pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
              of {instrument_id}: read its quotes"
         ),
         CatalogSeries::Ticks(TickSeries {
-            data: D::OrderBookDelta,
+            data: D::OrderBookDepth,
             instrument_id,
-        }) => bail!(
-            "IB streams no book deltas of {instrument_id} as a run subscribes to them, L3_MBO: \
-             IB publishes L1_MBP and L2_MBP books alone"
+        }) => ensure!(
+            BOOK.depth.is_some(),
+            "Nautilus' IB client streams no book depth, so IB streams none of {instrument_id}: \
+             read its book deltas"
         ),
         CatalogSeries::Ticks(ticks) => {
-            bail!("Nautilus' IB client streams quotes, trades and bars, not the {ticks}")
+            bail!(
+                "Nautilus' IB client streams quotes, trades, bars and book deltas, not the {ticks}"
+            )
         }
     }
     Ok(())

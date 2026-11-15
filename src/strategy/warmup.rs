@@ -119,10 +119,10 @@
 //! and a traded instrument's quotes no series prices. Each is requested
 //! catalog first with `update_catalog`, a root's on the contract standing
 //! for it at the start (`rolls::front`) alone: `request_quotes`, `request_trades`, `request_book_depth` and
-//! `request_book_deltas` (with the book type the roller subscribes to,
-//! `rolls::DELTAS_BOOK_TYPE`, onto which Nautilus replays the deltas from
-//! the day's start into the snapshot a window opens with). A series
-//! some bars are built from is requested once, building them.
+//! `request_book_deltas` (with the book type of its venue's book, which the
+//! roller subscribes to, `venues::book_format`, onto which Nautilus replays
+//! the deltas from the day's start into the snapshot a window opens with).
+//! A series some bars are built from is requested once, building them.
 //!
 //! A series, bars' source or tick series, is requested only if its venue's
 //! history serves it (`venues::serves`), the rule fill-catalog fills by:
@@ -216,7 +216,7 @@ use nautilus_model::{
 use serde_json::{Value, json};
 
 use crate::{
-    rolls::{ContinuousBars, DELTAS_BOOK_TYPE, front},
+    rolls::{ContinuousBars, front},
     strategy::requirements::{CatalogSeries, DataRequirements, TickSeries, bar_sources},
     time_range, venues,
 };
@@ -787,23 +787,34 @@ where
                     None,
                     params,
                 )?,
-                // The book type the roller subscribes to: Nautilus replays
-                // the deltas before the start onto a book of it, into the
-                // snapshot the response starts with.
-                NautilusDataType::OrderBookDelta => actor.request_book_deltas(
-                    tick.instrument_id,
-                    Some(start),
-                    Some(now),
-                    None,
-                    None,
-                    Some(request_params(
-                        built.iter(),
-                        windows.iter().cloned().chain([(
-                            "book_type".to_string(),
-                            json!(DELTAS_BOOK_TYPE.to_string()),
-                        )]),
-                    )),
-                )?,
+                // The book type of its venue's book, which the roller
+                // subscribes to: Nautilus replays the deltas before the
+                // start onto a book of it, into the snapshot the response
+                // starts with.
+                NautilusDataType::OrderBookDelta => {
+                    let id = tick.instrument_id;
+                    let book = venues::book_format(id.venue).with_context(|| {
+                        format!(
+                            "the live data of {} streams no book, so no deltas of {id} are \
+                             requested",
+                            id.venue
+                        )
+                    })?;
+                    actor.request_book_deltas(
+                        id,
+                        Some(start),
+                        Some(now),
+                        None,
+                        None,
+                        Some(request_params(
+                            built.iter(),
+                            windows
+                                .iter()
+                                .cloned()
+                                .chain([("book_type".to_string(), json!(book.deltas.to_string()))]),
+                        )),
+                    )?
+                }
                 // From the catalog alone (see `CATALOG`), with no params:
                 // no client answers to write back, no bars built from it.
                 NautilusDataType::Custom { type_name } => actor.request_data(
@@ -1439,6 +1450,32 @@ mod tests {
             ticks,
             ..reading(bar_types)
         }
+    }
+
+    /// A contract's deltas are requested at the book type of its venue's
+    /// book, onto which Nautilus replays them into the snapshot a window
+    /// opens with: a GLBX contract's, LSE's orders, as L3_MBO, as the
+    /// roller subscribes to them (`venues::book_format`).
+    #[test]
+    fn a_live_warmup_requests_deltas_at_the_book_type_of_their_venue() {
+        let deltas = tick(NautilusDataType::OrderBookDelta, "GCZ26.GLBX");
+        let warmup = Warmup::live(&reading_ticks(&[], vec![deltas.clone()]));
+        let (mut probe, commands) = registered();
+
+        warmup.start(&mut probe).unwrap();
+
+        let book_types: Vec<(CatalogSeries, Option<String>)> = sent_requests(&commands)
+            .into_iter()
+            .map(|(source, _, params)| {
+                let book_type =
+                    params.and_then(|params| params.get_str("book_type").map(str::to_string));
+                (source, book_type)
+            })
+            .collect();
+        assert_eq!(
+            book_types,
+            [(CatalogSeries::Ticks(deltas), Some("L3_MBO".to_string()))]
+        );
     }
 
     /// A live start requests the history of the ticks of the requirements

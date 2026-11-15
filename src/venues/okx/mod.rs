@@ -45,6 +45,7 @@ use crate::{
 
 mod account;
 mod live;
+pub(in crate::venues) use live::BOOK;
 pub(crate) use live::{clients, streams};
 
 /// The window one funding request holds at most: two weeks, 336 funding

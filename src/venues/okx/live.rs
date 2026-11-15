@@ -21,15 +21,17 @@
 //! implement `request_quotes`), so bars built from quotes get no warmup,
 //! which requests no series a venue's history does not serve
 //! (`venues::serves`), and start at the live quotes. A live start refuses
-//! a series the data client does not stream (`streams`), OKX's books as a
-//! run subscribes to them among them.
+//! a series the data client does not stream (`streams`); it streams an
+//! instrument's book in OKX's format (`BOOK`), which a run subscribes to.
 
-use std::path::Path;
+use std::{num::NonZeroUsize, path::Path};
 
 use anyhow::{Context, bail, ensure};
 use nautilus_common::factories::{ClientConfig, DataClientFactory, ExecutionClientFactory};
 use nautilus_live::config::RoutingConfig;
-use nautilus_model::{data::NautilusDataType, identifiers::InstrumentId, instruments::Instrument};
+use nautilus_model::{
+    data::NautilusDataType, enums::BookType, identifiers::InstrumentId, instruments::Instrument,
+};
 use nautilus_okx::{
     OKXPositionMode,
     common::enums::OKXEnvironment,
@@ -46,6 +48,25 @@ use crate::{
     catalog,
     live::node::{Clients, ExecClient},
     strategy::requirements::{CatalogSeries, TickSeries},
+    venues::BookFormat,
+};
+
+/// OKX's book as Nautilus' OKX data client streams it
+/// (`venues::book_format`): its deltas of an L2_MBP book, OKX's price
+/// levels, the client failing a subscription of any other book type
+/// (`subscribe_book_deltas`, `data.rs:2136-2142`), and its depth snapshots
+/// of five levels a side, OKX's `books5`, the most the client subscribes
+/// to, failing more (`subscribe_book_depth`, `:2159-2172`,
+/// `BOOK_SNAPSHOT_DEPTH`, `:112`). A deltas subscription of no depth takes
+/// OKX's book 400 levels deep, the client keeping no depth as 0
+/// (`book_channel`, `:354-382`; `resolve_book_depth`,
+/// `common/consts.rs:525-531`), which subscribes OKX's `books` channel, or
+/// `books-l2-tbt`, tick by tick, on an account of VIP level 4 or more
+/// (`select_book_channel`, `:533-540`); a depth of 1 to 50 would take
+/// `books50-l2-tbt` there instead, 50 levels deep.
+pub(in crate::venues) const BOOK: BookFormat = BookFormat {
+    deltas: BookType::L2_MBP,
+    depth: NonZeroUsize::new(5),
 };
 
 /// Checks that Nautilus' OKX data client, the live node's, streams
@@ -54,17 +75,11 @@ use crate::{
 /// (`subscribe_trades`, `:2244`) and its candles (`subscribe_bars`,
 /// `:2314`, whose task subscribes the channel of
 /// `bar_spec_as_okx_channel`, `websocket/client.rs:1709-1715`, failing any
-/// other bar type: see `is_candle`). The client streams L2_MBP books alone
-/// (`subscribe_book_deltas`, `data.rs:2139-2142`), and a run subscribes to
-/// book deltas as L3_MBO (`rolls::DELTAS_BOOK_TYPE`), so it streams none
-/// of a run's; and depth snapshots of five levels a side at most, OKX's
-/// `books5` (`subscribe_book_depth`, `:2166-2172`, `BOOK_SNAPSHOT_DEPTH`,
-/// `:112`), and a run subscribes to all ten of an `OrderBookDepth10`
-/// (`rolls::Roller`), so it streams none of a run's either. Both refusals
-/// fail the subscription, which Nautilus' data engine logs alone. It
-/// subscribes to no custom data: Nautilus' `DataClient` default logs
-/// "Handler not implemented" and streams nothing
-/// (`common/src/clients/data.rs:130-133`).
+/// other bar type: see `is_candle`); and its book, which a run subscribes
+/// to in OKX's format (`BOOK`, through `venues::book_format`), its deltas
+/// of an L2_MBP book and its depth five levels a side. It subscribes to no
+/// custom data: Nautilus' `DataClient` default logs "Handler not
+/// implemented" and streams nothing (`common/src/clients/data.rs:130-133`).
 ///
 /// # Errors
 ///
@@ -77,28 +92,22 @@ pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
             is_candle(bar_type),
             "OKX streams its candles, EXTERNAL bars of the LAST price 1, 3, 5, 15 or 30 minutes, \
              1, 2, 4, 6 or 12 hours, 1, 2, 3 or 5 days, a week or 1, 3, 6 or 12 months wide, or \
-             1 second, its quotes and its trades, not {bar_type}"
+             1 second, its quotes, its trades and its book, not {bar_type}"
         ),
         CatalogSeries::Ticks(TickSeries {
-            data: D::QuoteTick | D::TradeTick,
+            data: D::QuoteTick | D::TradeTick | D::OrderBookDelta,
             ..
         }) => {}
         CatalogSeries::Ticks(TickSeries {
-            data: D::OrderBookDelta,
-            instrument_id,
-        }) => bail!(
-            "OKX streams no book deltas of {instrument_id} as a run subscribes to them, L3_MBO: \
-             Nautilus' OKX client streams L2_MBP books alone"
-        ),
-        CatalogSeries::Ticks(TickSeries {
             data: D::OrderBookDepth,
             instrument_id,
-        }) => bail!(
-            "OKX streams no book depth of {instrument_id} as a run subscribes to it, ten levels a \
-             side: Nautilus' OKX client streams snapshots of five at most"
+        }) => ensure!(
+            BOOK.depth.is_some(),
+            "Nautilus' OKX client streams no book depth, so OKX streams none of {instrument_id}: \
+             read its book deltas"
         ),
         CatalogSeries::Ticks(ticks) => {
-            bail!("OKX streams its quotes, its trades and its candles, not the {ticks}")
+            bail!("OKX streams its quotes, its trades, its candles and its book, not the {ticks}")
         }
     }
     Ok(())
@@ -226,6 +235,16 @@ fn ensure_leverage(id: InstrumentId, leverage: Decimal, margin: Decimal) -> anyh
 
 #[cfg(test)]
 mod tests {
+    use std::{cell::RefCell, rc::Rc};
+
+    use nautilus_common::{
+        cache::Cache,
+        clients::DataClient,
+        clock::VirtualClock,
+        live::runner::replace_data_event_sender,
+        messages::data::{SubscribeBookDeltas, SubscribeBookDepth},
+    };
+    use nautilus_core::{UUID4, UnixNanos};
     use nautilus_okx::{
         OKXInstrumentType,
         common::enums::{OKXMarginMode, OKXRegion},
@@ -259,6 +278,69 @@ mod tests {
 
             assert_eq!(created, Broker::Okx.oms_type(), "{ids:?}");
         }
+    }
+
+    /// The node's OKX data client of a swap, created as the node creates
+    /// it, unconnected.
+    fn data_client() -> Box<dyn DataClient> {
+        let (data_tx, _data_events) = tokio::sync::mpsc::unbounded_channel();
+        replace_data_event_sender(data_tx);
+        let clients = configs(&[swap()], OKXEnvironment::Demo)
+            .unwrap()
+            .into_node_clients();
+        clients
+            .data_factory
+            .create(
+                clients.data_factory.name(),
+                clients.data_config.as_ref(),
+                Rc::new(RefCell::new(Cache::default())).into(),
+                Rc::new(RefCell::new(VirtualClock::new())),
+            )
+            .unwrap()
+    }
+
+    /// Against the adapter's data client: unconnected, it takes a swap's
+    /// book subscribed in OKX's format (`BOOK`), its deltas and its depth,
+    /// and fails a subscription of deltas of another book type or of depth
+    /// a level deeper before anything connects, so `BOOK` is the one
+    /// format it streams, its depth the deepest. Each subscription on a
+    /// client of its own.
+    #[tokio::test]
+    async fn the_data_client_takes_a_book_in_okx_s_format_alone() {
+        let (venue, ts) = (Some(swap().venue), UnixNanos::default());
+        let deltas = |book_type| {
+            data_client().subscribe_book_deltas(SubscribeBookDeltas::new(
+                swap(),
+                book_type,
+                None,
+                venue,
+                UUID4::new(),
+                ts,
+                None,
+                false,
+                None,
+                None,
+            ))
+        };
+        let depth = |levels| {
+            data_client().subscribe_book_depth(SubscribeBookDepth::new(
+                swap(),
+                BookType::L2_MBP,
+                None,
+                venue,
+                UUID4::new(),
+                ts,
+                levels,
+                false,
+                None,
+                None,
+            ))
+        };
+
+        deltas(BOOK.deltas).unwrap();
+        depth(BOOK.depth).unwrap();
+        assert!(deltas(BookType::L3_MBO).is_err());
+        assert!(depth(BOOK.depth.map(|levels| levels.saturating_add(1))).is_err());
     }
 
     #[test]
