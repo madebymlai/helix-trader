@@ -55,7 +55,7 @@ const ACTUAL: &str = "actual";
 const DAY: SignedDuration = SignedDuration::from_hours(24);
 
 /// A source of LSE's rows that are not prices, and the series of it, as a
-/// data type names them (`LseRow::data_type`).
+/// data type names them in its metadata (`data::served::row_source`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RowSource {
     source: String,

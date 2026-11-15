@@ -37,7 +37,7 @@ use nautilus_common::{cache::CacheView, live::sender::EventSender, messages::Dat
 use nautilus_core::{collections::AtomicMap, time::AtomicTime};
 use nautilus_live::task::TaskGroup;
 use nautilus_model::{
-    data::{Data, NautilusDataType},
+    data::{Data, DataType, NautilusDataType},
     identifiers::InstrumentId,
 };
 
@@ -667,6 +667,22 @@ pub fn streams(series: &(NautilusDataType, String)) -> anyhow::Result<()> {
     check_stream(data, id)
 }
 
+/// Checks that the client streams `data_type`, custom data of no
+/// instrument: it streams none, LSE's rows being history alone, which no
+/// socket carries, and it implements no subscription of custom data,
+/// Nautilus' default logging one as not implemented. A live run checks
+/// what it reads before anything connects, as with `streams`.
+///
+/// # Errors
+///
+/// Returns an error naming the data type, whatever it is.
+pub fn streams_custom(data_type: &DataType) -> anyhow::Result<()> {
+    bail!(
+        "LSE streams no custom data, {data_type}: its rows are history alone, asked of its HTTP \
+         API, which no socket carries"
+    )
+}
+
 /// Checks that the client streams `data` of `id` (see `streams`),
 /// by its venue alone.
 ///
@@ -793,5 +809,22 @@ mod tests {
         let err = streams(&series(data, identifier)).unwrap_err().to_string();
 
         assert!(err.contains(identifier) && err.contains(instead), "{err}");
+    }
+
+    /// LSE's rows are history alone: the client subscribes to none.
+    #[test]
+    fn lse_s_rows_are_refused_naming_them() {
+        let metadata = nautilus_core::Params::new(
+            [
+                ("source".to_string(), serde_json::json!("bond_yields")),
+                ("symbol".to_string(), serde_json::json!("US10Y")),
+            ]
+            .into(),
+        );
+        let rows = DataType::new("LseRow", Some(metadata), Some("US10Y".into()));
+
+        let err = streams_custom(&rows).unwrap_err().to_string();
+
+        assert!(err.contains(&rows.to_string()), "{err}");
     }
 }

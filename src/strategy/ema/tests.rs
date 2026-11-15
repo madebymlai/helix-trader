@@ -666,14 +666,22 @@ fn its_start_subscribes_the_custom_data_of_no_instrument_of_its_config() {
     let config = CONFIG.replace(
         r#"warmup = "1h""#,
         r#"warmup = "1h"
-    custom = [{ data = "Custom:LseRow", metadata = { source = "bond_yields", symbol = "US10Y" } }]"#,
+    custom = [{ type_name = "LseRow", identifier = "US10Y", metadata = { source = "bond_yields", symbol = "US10Y" } }]"#,
     );
     let cache = holding(InstrumentAny::CurrencyPair(audusd_sim()));
     let (mut strategy, _) = registered(&cache, NOW, &config);
 
     DataActor::on_start(&mut strategy).unwrap();
 
-    let us10y = ::lse::LseRow::data_type("bond_yields", "US10Y");
+    let metadata = nautilus_core::Params::new(
+        [
+            ("source".to_string(), serde_json::json!("bond_yields")),
+            ("symbol".to_string(), serde_json::json!("US10Y")),
+        ]
+        .into(),
+    );
+    let us10y =
+        nautilus_model::data::DataType::new("LseRow", Some(metadata), Some("US10Y".to_string()));
     assert_eq!(
         msgbus::subscriptions_count_any(msgbus::switchboard::get_custom_topic(&us10y)).unwrap(),
         1

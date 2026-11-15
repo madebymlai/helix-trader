@@ -1009,7 +1009,7 @@ mod tests {
             Some(Params::new(
                 [("source".to_string(), json!("bond_yields"))].into(),
             )),
-            Some("US10Y-BOND_YIELDS".to_string()),
+            Some("US10Y".to_string()),
         )
     }
 

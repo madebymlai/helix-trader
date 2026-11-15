@@ -1082,10 +1082,28 @@ async fn lse_s_refusal_is_the_request_s_failure_with_its_code_message_and_requir
     }
 }
 
+/// The data type of the rows of `symbol` in LSE's `source`, as a caller
+/// asks for them: both in its metadata, under an identifier of the
+/// caller's, here the symbol.
+fn lse_rows(source: &str, symbol: &str) -> DataType {
+    let metadata = Params::new(
+        [
+            ("source".to_string(), json!(source)),
+            ("symbol".to_string(), json!(symbol)),
+        ]
+        .into(),
+    );
+    DataType::new(
+        LseRow::type_name_static(),
+        Some(metadata),
+        Some(symbol.to_string()),
+    )
+}
+
 /// US10Y's daily bond yields over `[from, to]`, as the data engine asks
 /// for them, naming the client.
 fn bond_yields(from: &str, to: &str) -> RequestCustomData {
-    rows_of(LseRow::data_type("bond_yields", "US10Y"), from, to)
+    rows_of(lse_rows("bond_yields", "US10Y"), from, to)
 }
 
 /// The custom data of `data_type` over `[from, to]`.
@@ -1143,7 +1161,7 @@ async fn a_custom_data_request_is_answered_with_lse_s_rows_in_one_complete_envel
     let response = rows_in(&envelope);
     assert_eq!(response.correlation_id, id);
     assert_eq!(response.params, Some(params));
-    let data_type = LseRow::data_type("bond_yields", "US10Y");
+    let data_type = lse_rows("bond_yields", "US10Y");
     assert_eq!(response.data_type, data_type);
     let rows = custom_data(&response);
     assert!(rows.iter().all(|row| row.data_type == data_type));
@@ -1171,6 +1189,38 @@ async fn a_custom_data_request_is_answered_with_lse_s_rows_in_one_complete_envel
             Some("2026-11-12")
         )
     );
+}
+
+/// The identifier is the caller's: the client answers with the data type
+/// as asked, so the data engine writes the rows back under it.
+#[tokio::test]
+async fn a_custom_data_request_is_answered_under_the_identifier_it_names() {
+    let lse = MockLse::start(vec![
+        Reply::json(REFERENCE_CATALOGUE),
+        Reply::file(US10Y_BOND_YIELDS),
+    ]);
+    let (client, mut events) = connected(&lse, false).await;
+    let metadata = lse_rows("bond_yields", "US10Y").metadata().cloned();
+    let treasury = DataType::new(
+        LseRow::type_name_static(),
+        metadata,
+        Some("TREASURY-10Y".to_string()),
+    );
+
+    client
+        .request_data(rows_of(
+            treasury,
+            "2026-11-10T00:00:00Z",
+            "2026-11-13T00:00:00Z",
+        ))
+        .unwrap();
+
+    let response = rows_in(&next_envelope(&mut events).await);
+    let identifiers: Vec<_> = std::iter::once(&response.data_type)
+        .chain(custom_data(&response).iter().map(|row| &row.data_type))
+        .map(|data_type| data_type.identifier().map(String::from))
+        .collect();
+    assert_eq!(identifiers, vec![Some("TREASURY-10Y".to_string()); 4]);
 }
 
 /// The 11th's window is the 10th's date: its export, which the mock
@@ -1265,7 +1315,7 @@ async fn a_window_keyed_after_the_last_lse_s_catalogue_holds_is_answered_unwritt
     let (client, mut events) = connected(&lse, false).await;
 
     client
-        .request_data(rows_of(LseRow::data_type(dataset, symbol), from, to))
+        .request_data(rows_of(lse_rows(dataset, symbol), from, to))
         .unwrap();
 
     let event = next_event(&mut events).await;
@@ -1331,7 +1381,7 @@ async fn a_source_the_client_knows_no_stamp_of_fails_naming_it_unasked() {
 
     client
         .request_data(rows_of(
-            LseRow::data_type("no_such_collection", "US10Y"),
+            lse_rows("no_such_collection", "US10Y"),
             "2026-11-09T00:00:00Z",
             "2026-11-12T23:59:59.999999999Z",
         ))
@@ -1413,7 +1463,7 @@ async fn a_collection_s_rows_known_over_the_window_are_asked_by_the_dates_of_the
     let (client, mut events) = connected(&lse, false).await;
 
     client
-        .request_data(rows_of(LseRow::data_type(dataset, symbol), from, to))
+        .request_data(rows_of(lse_rows(dataset, symbol), from, to))
         .unwrap();
 
     let envelope = next_envelope(&mut events).await;
@@ -1458,7 +1508,7 @@ async fn an_insider_trade_is_known_at_22_00_new_york_time_of_its_filing_s_day() 
 
     client
         .request_data(rows_of(
-            LseRow::data_type("insider_trades", "TEAM"),
+            lse_rows("insider_trades", "TEAM"),
             "2026-10-14T00:00:00Z",
             "2026-10-14T23:59:59Z",
         ))
@@ -1503,7 +1553,7 @@ async fn a_series_of_rows_known_at_another_column_s_time_is_asked_whole_up_to_th
     let (client, mut events) = connected(&lse, false).await;
 
     client
-        .request_data(rows_of(LseRow::data_type(dataset, symbol), from, to))
+        .request_data(rows_of(lse_rows(dataset, symbol), from, to))
         .unwrap();
 
     let envelope = next_envelope(&mut events).await;
@@ -1521,7 +1571,7 @@ async fn a_series_of_rows_known_at_another_column_s_time_is_asked_whole_up_to_th
 
 fn core_cpi_calendar(from: &str, to: &str) -> RequestCustomData {
     rows_of(
-        LseRow::data_type("economic_calendar", "US.Core Inflation Rate YoY"),
+        lse_rows("economic_calendar", "US.Core Inflation Rate YoY"),
         from,
         to,
     )
@@ -1591,7 +1641,7 @@ async fn a_window_of_releases_one_of_which_lse_has_not_filled_is_answered_unwrit
 }
 
 fn macro_series(source: &str, code: &str, from: &str, to: &str) -> RequestCustomData {
-    rows_of(LseRow::data_type(source, code), from, to)
+    rows_of(lse_rows(source, code), from, to)
 }
 
 /// The releases of March to October 2026, each with its actual, asked
@@ -1676,7 +1726,7 @@ async fn a_macro_observation_is_refused_unasked_naming_the_releases() {
 }
 
 fn factors(source: &str, symbol: &str, from: &str, to: &str) -> RequestCustomData {
-    rows_of(LseRow::data_type(source, symbol), from, to)
+    rows_of(lse_rows(source, symbol), from, to)
 }
 
 /// AAPL's splits from 2000, of its five, each known at its day's end,
@@ -1868,7 +1918,7 @@ async fn an_options_chain_s_history_is_refused_by_name_unasked_lse_serving_it_no
 
     client
         .request_data(rows_of(
-            LseRow::data_type("options_chain", "AAPL"),
+            lse_rows("options_chain", "AAPL"),
             "2026-11-09T00:00:00Z",
             "2026-11-12T23:59:59.999999999Z",
         ))

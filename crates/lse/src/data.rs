@@ -79,13 +79,16 @@ use nautilus_core::{
 };
 use nautilus_live::task::TaskGroup;
 use nautilus_model::{
-    data::{CustomData, CustomDataTrait, DEPTH10_LEN},
+    data::{CustomData, DEPTH10_LEN},
     identifiers::{ClientId, InstrumentId, Venue},
     instruments::Instrument,
 };
 
 use self::{exchange::ExchangeAccess, streams::LseStreams};
-pub use self::{served::serves, streams::streams};
+pub use self::{
+    served::{serves, serves_custom},
+    streams::{streams, streams_custom},
+};
 use crate::{
     common::{
         consts::{CME_MARKET, LseExchange},
@@ -102,9 +105,9 @@ use crate::{
             parse_trade_slice,
         },
         query::{CandleWidth, ExportQuery, Rows},
-        rows::{self, Fetched, RowSource},
+        rows::{self, Fetched},
     },
-    types::{LseRow, SOURCE, SYMBOL},
+    types::LseRow,
 };
 
 /// How long the client's tasks get to finish at a close, then to abort:
@@ -802,38 +805,26 @@ impl DataClient for LseDataClient {
     }
 
     /// Answers with the rows of the source and the series the request's
-    /// data type names (`LseRow::data_type`: `source` and `symbol` in its
-    /// metadata) known over `[start, end]` (end: now if none), each stamped
-    /// when its values are known, the newest `limit` if one is given, each
-    /// an `LseRow` of that data type, in one completed response envelope;
-    /// or in a plain response, logging the span, if LSE may not have loaded
-    /// them all yet (see `http::rows`). Its sources are LSE's reference
-    /// collections, its macro series of releases and of yields, and an
-    /// instrument's splits and dividends, LSE's factors. A failure, the
-    /// data type not `LseRow`'s or naming no source or symbol, a source the
+    /// data type names (`source` and `symbol` in its metadata, see
+    /// `served::row_source`) known over `[start, end]` (end: now if none),
+    /// each stamped when its values are known, the newest `limit` if one is
+    /// given, each an `LseRow` of that data type as asked, its identifier
+    /// the caller's, in one completed response envelope, which the data
+    /// engine writes back under that identifier; or in a plain response,
+    /// logging the span, if LSE may not have loaded them all yet (see
+    /// `http::rows`). Its sources are LSE's reference collections, its
+    /// macro series of releases and of yields, and an instrument's splits
+    /// and dividends, LSE's factors. A failure, the data type not
+    /// `LseRow`'s, naming no source or symbol or another key, a source the
     /// client does not stamp, LSE's macro observations or its options chain
     /// (`options_chain`), which LSE serves as it stands alone, with no
-    /// history, refused before LSE is asked, or LSE's refusal of a call, is
-    /// the envelope's, with no rows: LSE's refusal carries its code,
-    /// message and required plan.
+    /// history, refused before LSE is asked (`serves_custom` checks the
+    /// same), or LSE's refusal of a call, is the envelope's, with no rows:
+    /// LSE's refusal carries its code, message and required plan.
     fn request_data(&self, request: RequestCustomData) -> anyhow::Result<()> {
         let data_type = request.data_type.clone();
         let checked = (|| {
-            let rows = LseRow::type_name_static();
-            if data_type.type_name() != rows {
-                bail!(
-                    "{} serves no custom data {}: only {rows}",
-                    self.client_id,
-                    data_type.type_name()
-                );
-            }
-            let named = |key| {
-                data_type
-                    .metadata()
-                    .and_then(|metadata| metadata.get_str(key))
-                    .with_context(|| format!("{data_type:?} names no {key} in its metadata"))
-            };
-            let source = RowSource::of(named(SOURCE)?, named(SYMBOL)?)?;
+            let source = served::row_source(&data_type)?;
             let start = request
                 .start
                 .with_context(|| format!("a request of {data_type} needs a start"))?;

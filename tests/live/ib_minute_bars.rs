@@ -103,6 +103,7 @@ impl DataActor for Probe {
             now,
             &[composite],
             &[],
+            &[],
             WARMUP,
             &ContinuousBars::default(),
             self.warmup,

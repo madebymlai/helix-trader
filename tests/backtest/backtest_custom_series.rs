@@ -1,14 +1,16 @@
 //! A strategy reading LSE's daily bond yields, custom data of no instrument
-//! (`lse::LseRow`), filled into the catalog through fill-catalog's node
-//! fill from a mock LSE peer replaying a captured export (`lse::testing`):
-//! US10Y's rows of 9, 10 and 12 November 2026, each stamped at its date's
-//! end, when its close is known. The backtest declares the series by its
-//! data type, beside IC's gold (`common::ic`), the run's venue, and
-//! replays the rows of its window to the strategy, each of the data type
-//! it is subscribed to, when it is known: to a probe subscribing itself,
-//! and to one whose subscriptions (`strategy::subscriptions`) subscribe
-//! it, as a strategy's do. The fill and the run each on a thread of its
-//! own, one node per thread.
+//! (`lse::LseRow`), declared in its config's `[data].custom` under the
+//! identifier `US10Y`, which it chooses, and filled into the catalog under
+//! it through fill-catalog's node fill from a mock LSE peer replaying a
+//! captured export (`lse::testing`): US10Y's rows of 9, 10 and 12 November
+//! 2026, each stamped at its date's end, when its close is known. The
+//! backtest declares the series by the config's data type, unchanged,
+//! beside IC's gold (`common::ic`), the run's venue, and replays the rows
+//! of its window to the strategy, each of the data type it is subscribed
+//! to, when it is known: to a probe subscribing itself, and to one whose
+//! subscriptions (`strategy::subscriptions`) subscribe it, as a
+//! strategy's do. The fill and the run each on a thread of its own, one
+//! node per thread.
 
 use std::{cell::RefCell, path::Path, rc::Rc};
 
@@ -16,17 +18,17 @@ use crate::common::ic;
 use helix_trader::{
     backtest::Backtest,
     catalog::{NodeClient, NodeFill, missing_custom},
-    strategy::subscriptions::Subscriptions,
+    strategy::{Part, Series, StandardConfig, subscriptions::Subscriptions},
 };
 use jiff::Timestamp;
 use lse::{
     LseDataClientConfig, LseDataClientFactory, LseRow,
     testing::{API_KEY, MockLse, REFERENCE_CATALOGUE, Reply, US10Y_BOND_YIELDS},
 };
-use nautilus_common::actor::DataActor;
+use nautilus_common::{actor::DataActor, config::ConfigResult};
 use nautilus_core::{UnixNanos, string::secret::SecretString};
 use nautilus_model::{
-    data::{CustomData, DataType},
+    data::{CustomData, CustomDataTrait, Data, DataType},
     identifiers::StrategyId,
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
@@ -34,15 +36,53 @@ use nautilus_trading::{
     nautilus_strategy,
     strategy::{StrategyConfig, StrategyCore},
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 fn november(time: &str) -> Timestamp {
     format!("2026-11-{time}Z").parse().unwrap()
 }
 
-/// US10Y's daily bond yields.
+/// A part reading every series its config lists, trading one instrument.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Reader {}
+
+impl Part for Reader {
+    const INSTRUMENTS: usize = 1;
+
+    fn default_base() -> StrategyConfig {
+        StrategyConfig {
+            strategy_id: Some(StrategyId::from("READER-001")),
+            order_id_tag: Some("001".to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn reads(config: &StandardConfig<Self>) -> ConfigResult<Vec<Series>> {
+        Ok(config.data.series.clone())
+    }
+}
+
+/// US10Y's daily bond yields as a config declares them, under the
+/// identifier `US10Y`: the one data type of its `[data].custom`.
 fn us10y() -> DataType {
-    LseRow::data_type("bond_yields", "US10Y")
+    let config: StandardConfig<Reader> = StandardConfig::load(&format!(
+        r#"
+        [data]
+        series = [{{ data = "quotes", instrument_id = "{gold}" }}]
+        custom = [{{ type_name = "LseRow", identifier = "US10Y", metadata = {{ source = "bond_yields", symbol = "US10Y" }} }}]
+        warmup = "1h"
+
+        [trade]
+        instruments = [{{ instrument_id = "{gold}" }}]
+        risk = "0.5%"
+        "#,
+        gold = ic::INSTRUMENT_ID,
+    ))
+    .unwrap();
+    let [data_type] = <[DataType; 1]>::try_from(config.data_requirements().custom).unwrap();
+    data_type
 }
 
 /// Fills the catalog in `dir` with `us10y()` over the rows of the
@@ -157,6 +197,45 @@ impl DataActor for Subscribed {
         self.got.borrow_mut().push(got);
         Ok(())
     }
+}
+
+/// The fill stores the rows under the identifier the config chose, each
+/// of the config's data type, unchanged.
+#[test]
+fn a_fill_stores_the_rows_under_the_identifier_the_config_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let filled = dir.path().to_path_buf();
+    std::thread::spawn(move || fill_bond_yields(&filled))
+        .join()
+        .unwrap();
+
+    LseRow::register();
+    let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+    let stored = catalog
+        .query_custom_data_dynamic(
+            LseRow::type_name_static(),
+            Some(&["US10Y".to_string()]),
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+    let closes: Vec<(DataType, Value)> = stored
+        .iter()
+        .map(|data| {
+            let Data::Custom(custom) = data else {
+                panic!("not custom data: {data:?}");
+            };
+            let row = custom.data.as_any().downcast_ref::<LseRow>().unwrap();
+            (custom.data_type.clone(), row.fields["close"].clone())
+        })
+        .collect();
+    assert_eq!(
+        closes,
+        [json!(4.884), json!(5.0), json!(5.133)].map(|close| (us10y(), close))
+    );
 }
 
 /// The catalog filled with `us10y()` (`fill_bond_yields`) and a backtest

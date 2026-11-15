@@ -183,6 +183,20 @@
 //! reaches this request today: it is the warmup half of such a run, kept
 //! for when a live source of an instrument's custom data exists.
 //!
+//! Custom data of no instrument of the requirements (`[data].custom`, an
+//! LSE reference series) is requested in the same group over the same
+//! window with `request_data` of its data type as the config gives it,
+//! naming its source's data client on the node, its row's live data
+//! source's (`venues::custom_data_client`), LSE's for LSE's rows, with
+//! `update_catalog`: the data engine answers what the catalog holds and
+//! asks the client for the rest, writing its answers back. Its response
+//! reaches the cache as an instrument's custom data does
+//! (`Warmup::on_historical_data`). No source's live client streams custom
+//! data of no instrument yet, LSE's streaming none, so a live start
+//! refuses a run reading it (`venues::streams_custom`) and no run reaches
+//! this request today: it is the warmup half of such a run, kept for when
+//! a source streams it.
+//!
 //! A strategy holds a `Warmup`, which runs these calls, and delegates its
 //! hooks to it; a model strategy's `ModelHandle` builds and owns it, and
 //! `model_data_hooks!` writes the model strategy's hooks. The functions are
@@ -304,6 +318,9 @@ pub struct Warmup {
     /// The tick series of the requirements, of roots or plain instruments,
     /// warmed as they are if served.
     ticks: Vec<TickSeries>,
+    /// The custom data of no instrument of the requirements, warmed by its
+    /// data type.
+    custom: Vec<DataType>,
     /// What the warmup's bars are handed to.
     indicators: Vec<SharedActorIndicator>,
     /// What hands the quotes and trades, of the warmup and live, to the
@@ -349,6 +366,7 @@ impl Warmup {
             bar_types: requirements.bar_types.clone(),
             harness: Vec::new(),
             ticks: requirements.ticks.clone(),
+            custom: requirements.custom.clone(),
             indicators: Vec::new(),
             hold: Hold::default(),
             group: Cell::new(UUID4::new()),
@@ -422,6 +440,7 @@ impl Warmup {
                 now,
                 &self.built(),
                 &self.ticks,
+                &self.custom,
                 self.length,
                 &ContinuousBars::default(),
                 self.group.get(),
@@ -558,7 +577,8 @@ impl Warmup {
     }
 
     /// Adds the custom data of `response`, a response to the warmup's
-    /// request, to `actor`'s cache, oldest first, from the actor's
+    /// request of custom data, of an instrument or of none, to `actor`'s
+    /// cache, oldest first, from the actor's
     /// `on_historical_data`: the data engine caches the custom data it
     /// processes, not a response (see the module). The cache keeps a data
     /// type's points in the order added, the latest added first, so a
@@ -670,7 +690,7 @@ impl Debug for Warmup {
     }
 }
 
-/// Requests the warmup of `bar_types` and of `ticks`, over
+/// Requests the warmup of `bar_types`, of `ticks` and of `custom`, over
 /// `[now - warmup, now]` as the request group `group`; the strategy
 /// subscribes to them from `now` (`strategy::subscriptions`). The bars on a
 /// root with continuous bars in `continuous` are
@@ -681,7 +701,10 @@ impl Debug for Warmup {
 /// the instrument of internal BID, ASK and MID bars; an external bar type
 /// is requested as it is, building nothing; each tick series is requested on
 /// the contract standing for its instrument now, once with the bars built
-/// from it if any, custom data from the catalog alone (see `CATALOG`). A
+/// from it if any, custom data from the catalog alone (see `CATALOG`);
+/// each data type of `custom`, custom data of no instrument, is requested
+/// of its source's data client (`venues::custom_data_client`), catalog
+/// first and written back. A
 /// series its venue's history does not serve (`venues::serves`) is
 /// requested no history, logged as a warning, its instrument's definition
 /// asked all the same. The
@@ -691,21 +714,25 @@ impl Debug for Warmup {
 /// `on_historical_data`; the end of each request and of the group in
 /// `on_data_response`, where `finished` tells the group's. `group` is the
 /// caller's, stored before the call: a group whose requests are all answered
-/// at once ends before this returns. No bar types and no ticks make no
-/// request and no group, which `DataActor::request_group` refuses empty.
+/// at once ends before this returns. No bar types, no ticks and no custom
+/// data make no request and no group, which `DataActor::request_group`
+/// refuses empty.
 /// Returns each request's id with the bar types it builds, none for a
 /// continuous future's, read once the group ended (`continuous_bars`).
 ///
 /// # Errors
 ///
-/// Returns an error if a request fails. A composite bar type's source bars
-/// are external, as the config's load requires (see
+/// Returns an error if a request fails, or if no source serves a data type
+/// of `custom` (see `venues::custom_data_client`). A composite bar type's
+/// source bars are external, as the config's load requires (see
 /// `strategy::DataConfig`): they are requested, not built.
+#[expect(clippy::too_many_arguments, reason = "a warmup's parts")]
 pub fn start<A>(
     actor: &mut A,
     now: Timestamp,
     bar_types: &[BarType],
     ticks: &[TickSeries],
+    custom: &[DataType],
     warmup: SignedDuration,
     continuous: &ContinuousBars,
     group: UUID4,
@@ -835,6 +862,22 @@ where
             },
         };
         requested.push((id, built));
+    }
+    // Of its source's data client, catalog first and written back, building
+    // nothing: Nautilus takes no windows on custom data.
+    for data_type in custom {
+        let client = venues::custom_data_client(data_type)?;
+        let id = actor.request_data(
+            data_type.clone(),
+            client,
+            Some(start),
+            Some(now),
+            None,
+            Some(Params::new(
+                [("update_catalog".to_string(), json!(true))].into(),
+            )),
+        )?;
+        requested.push((id, vec![]));
     }
     if !requested.is_empty() {
         let ids = requested.iter().map(|(id, _)| *id).collect();
@@ -1617,6 +1660,123 @@ mod tests {
         warmup.start(&mut probe).unwrap();
 
         assert_eq!(definitions_asked(&commands), []);
+    }
+
+    /// LSE's daily 10-year US yields, custom data of no instrument, under
+    /// the identifier `US10Y`.
+    fn us10y() -> DataType {
+        let metadata = Params::new(
+            [
+                ("source".to_string(), json!("bond_yields")),
+                ("symbol".to_string(), json!("US10Y")),
+            ]
+            .into(),
+        );
+        DataType::new("LseRow", Some(metadata), Some("US10Y".to_string()))
+    }
+
+    /// The requirements of a strategy reading `us10y()` alone over a day.
+    fn reading_us10y() -> DataRequirements {
+        DataRequirements {
+            custom: vec![us10y()],
+            ..reading(&[])
+        }
+    }
+
+    /// The custom data requests of `commands`, in order.
+    fn custom_requests(
+        commands: &TypedIntoMessageSavingHandler<DataCommand>,
+    ) -> Vec<RequestCustomData> {
+        commands
+            .get_messages()
+            .into_iter()
+            .filter_map(|command| match command {
+                DataCommand::Request(RequestCommand::Data(request)) => Some(request),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Live on 2026-08-10 at 14:30, custom data of no instrument is
+    /// requested of its source's data client on the node, LSE's for LSE's
+    /// rows, over the day of warmup ending now, as its data type is,
+    /// catalog first and written back: the data engine answers what the
+    /// catalog holds and asks the client for the rest.
+    #[test]
+    fn a_live_warmup_requests_custom_data_of_no_instrument_of_its_source_s_client_over_the_window()
+    {
+        let warmup = Warmup::live(&reading_us10y());
+        let (mut probe, commands) = registered();
+
+        warmup.start(&mut probe).unwrap();
+
+        let requests = custom_requests(&commands);
+        let [request] = requests.as_slice() else {
+            panic!("{} custom data requests", requests.len())
+        };
+        let at = |time: &str| -> Timestamp { time.parse().unwrap() };
+        assert_eq!(
+            (
+                &request.data_type,
+                request.client_id,
+                request.start,
+                request.end
+            ),
+            (
+                &us10y(),
+                ClientId::from("LSE"),
+                Some(at("2026-08-09T14:30:00Z")),
+                Some(at("2026-08-10T14:30:00Z"))
+            )
+        );
+        let update_catalog = request
+            .params
+            .as_ref()
+            .and_then(|params| params.get_bool("update_catalog"));
+        assert_eq!(update_catalog, Some(true));
+    }
+
+    /// Its request is of the warmup's group, which goes on until it is
+    /// answered: a warmup of it alone is warming once started.
+    #[test]
+    fn a_live_warmup_of_custom_data_of_no_instrument_alone_goes_on_until_its_group_ends() {
+        let warmup = Warmup::live(&reading_us10y());
+        let (mut probe, _commands) = registered();
+
+        warmup.start(&mut probe).unwrap();
+
+        assert!(warmup.is_warming());
+    }
+
+    /// The response's rows reach the cache, where the data engine puts no
+    /// response's: the latest of `us10y()` is its newest.
+    #[test]
+    fn the_rows_of_a_warmup_s_custom_data_of_no_instrument_land_in_the_cache() {
+        let warmup = Warmup::live(&reading_us10y());
+        let (mut probe, _commands) = registered();
+        warmup.start(&mut probe).unwrap();
+        let row = |day: &str, close: f64| {
+            let ts = UnixNanos::from(
+                format!("2026-08-{day}T00:00:00Z")
+                    .parse::<Timestamp>()
+                    .unwrap(),
+            );
+            let fields = [("close".to_string(), json!(close))].into_iter().collect();
+            let row = ::lse::LseRow::new("bond_yields".into(), "US10Y".into(), fields, ts, ts);
+            CustomData::new(Arc::new(row), us10y())
+        };
+
+        warmup.on_historical_data(&probe, &vec![row("09", 4.25), row("10", 4.5)]);
+
+        let cache = probe.cache();
+        let latest = cache.custom_data(&us10y()).expect("a row of US10Y");
+        let close = &latest
+            .data
+            .as_any()
+            .downcast_ref::<::lse::LseRow>()
+            .unwrap()
+            .fields["close"];
+        assert_eq!(close, &json!(4.5));
     }
 
     /// What a warmup hands books to, recording them.
