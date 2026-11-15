@@ -318,7 +318,13 @@ impl PlainStrategy for EmaCross {
     }
 }
 
-nautilus_strategy!(EmaCross);
+nautilus_strategy!(EmaCross, {
+    /// The instruments it trades, which its config claims (see
+    /// `StandardConfig`): the live node registers them as it adds it.
+    fn external_order_instrument_ids(&self) -> Option<Vec<InstrumentId>> {
+        self.config().external_order_instrument_ids.clone()
+    }
+});
 
 impl DataActor for EmaCross {
     /// Refuses the traded instrument if a stake cannot size a trade on it

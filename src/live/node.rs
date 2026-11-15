@@ -16,7 +16,6 @@
 
 use std::fmt::Debug;
 
-use anyhow::Context;
 use nautilus_common::{
     actor::DataActorNative,
     cache::{CacheConfig, database::CacheDatabaseFactory},
@@ -31,7 +30,7 @@ use nautilus_live::{
     config::{LiveDataEngineConfig, LiveExecutionEngineConfig, LiveNodeConfig, RoutingConfig},
     node::LiveNode,
 };
-use nautilus_model::identifiers::{InstrumentId, TraderId};
+use nautilus_model::identifiers::TraderId;
 use nautilus_persistence::config::{DataCatalogConfig, StreamingConfig};
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 
@@ -155,12 +154,13 @@ pub(crate) fn add_clients(
 }
 
 /// Adds `retraining`, the actor of the retrains of `strategy` if it is
-/// retrained, then `strategy` to `node` claiming the external orders of
-/// `traded`, the instruments it trades (`[trade] instruments`), and runs it
-/// until SIGINT or SIGTERM, then disposes it, as it does when any of that
-/// fails. The other instruments the node loads, the pairs it converts
-/// through and those its features read, are not claimed: their orders and
-/// positions on the account are not the strategy's.
+/// retrained, then `strategy` to `node`, which registers the external
+/// order claims of its config (`external_order_instrument_ids`, the
+/// instruments it trades, see `StandardConfig`), and runs it until SIGINT
+/// or SIGTERM, then disposes it, as it does when any of that fails. The
+/// other instruments the node loads, the pairs it converts through and
+/// those its features read, are not claimed: their orders and positions on
+/// the account are not the strategy's.
 ///
 /// # Errors
 ///
@@ -170,14 +170,13 @@ pub(crate) fn add_clients(
 /// unresolved after the post-stop delay included).
 pub(super) async fn run<S>(
     mut node: LiveNode,
-    traded: &[InstrumentId],
     strategy: S,
     retraining: Option<RetrainActor>,
 ) -> anyhow::Result<()>
 where
     S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
 {
-    let result = match add(&mut node, traded, strategy, retraining) {
+    let result = match add(&mut node, strategy, retraining) {
         Ok(()) => node.run().await,
         Err(e) => Err(e),
     };
@@ -186,32 +185,16 @@ where
     result
 }
 
-/// Adds `retraining`, if any, then `strategy` to `node`, claiming the
-/// external orders of `traded` (see `run`).
-fn add<S>(
-    node: &mut LiveNode,
-    traded: &[InstrumentId],
-    strategy: S,
-    retraining: Option<RetrainActor>,
-) -> anyhow::Result<()>
+/// Adds `retraining`, if any, then `strategy` to `node`, which registers
+/// the claims of its config (see `run`).
+fn add<S>(node: &mut LiveNode, strategy: S, retraining: Option<RetrainActor>) -> anyhow::Result<()>
 where
     S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
 {
-    let strategy_id = strategy
-        .strategy_id()
-        .context("the strategy has no id to claim its instruments with")?;
-    // Its config may claim some already; `add_strategy` registers those.
-    let claimed = strategy.external_order_instrument_ids().unwrap_or_default();
-    let unclaimed: Vec<InstrumentId> = traded
-        .iter()
-        .filter(|id| !claimed.contains(id))
-        .copied()
-        .collect();
     if let Some(retraining) = retraining {
         node.add_actor(retraining)?;
     }
-    node.add_strategy(strategy)?;
-    node.register_external_order_claims(strategy_id, &unclaimed)
+    node.add_strategy(strategy)
 }
 
 /// How often Nautilus purges the cache of closed orders, closed positions
@@ -263,26 +246,15 @@ fn config(
 #[cfg(test)]
 mod tests {
     use ahash::AHashSet;
-    use nautilus_common::actor::DataActor;
-    use nautilus_model::identifiers::StrategyId;
-    use nautilus_trading::{
-        nautilus_strategy,
-        strategy::{StrategyConfig, StrategyCore},
-    };
+    use nautilus_model::identifiers::InstrumentId;
 
     use super::*;
-    use crate::live::Recording;
+    use crate::{
+        live::Recording,
+        strategy::ema::{EmaCross, EmaCrossConfig},
+    };
 
     const INSTANCE_ID: &str = "2d89666b-1a1e-4a75-b193-4eb3b454c757";
-
-    #[derive(Debug)]
-    struct Probe {
-        core: StrategyCore,
-    }
-
-    nautilus_strategy!(Probe);
-
-    impl DataActor for Probe {}
 
     /// A live node on no client, Nautilus' defaults otherwise: built, it
     /// connects to nothing.
@@ -298,24 +270,36 @@ mod tests {
             .unwrap()
     }
 
-    /// A strategy trading IC's gold converts through IC's EUR/USD, which
-    /// the node loads too: it is handed the instruments it trades, and
-    /// claims the external orders of the gold alone, so that an order or a
-    /// position on the account's EUR/USD is not taken for its own.
+    /// The EMA crossover of a config trading IC's gold and converting
+    /// through IC's EUR/USD, which the node loads too: added, it claims the
+    /// external orders of the gold alone, so that an order or a position on
+    /// the account's EUR/USD is not taken for its own.
     #[tokio::test]
     async fn a_strategy_claims_the_external_orders_of_the_instruments_it_trades_alone() {
+        let config = EmaCrossConfig::load(
+            r#"
+            [data]
+            series = [
+                { data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
+            ]
+            warmup = "1h"
+
+            [indicators]
+            fast = { period = 1 }
+            slow = { period = 2 }
+
+            [trade]
+            instruments = [{ instrument_id = "XAUUSD.ICMARKETS" }]
+            risk = "1%"
+            conversions = ["EURUSD.ICMARKETS"]
+            "#,
+        )
+        .unwrap();
         let mut node = offline_node();
-        let strategy_id = StrategyId::from("PROBE-001");
-        let probe = Probe {
-            core: StrategyCore::new(StrategyConfig {
-                strategy_id: Some(strategy_id),
-                order_id_tag: Some("001".to_string()),
-                ..Default::default()
-            }),
-        };
+        let strategy = EmaCross::live(config).unwrap();
         let gold = InstrumentId::from("XAUUSD.ICMARKETS");
 
-        add(&mut node, &[gold], probe, None).unwrap();
+        add(&mut node, strategy, None).unwrap();
 
         let claimed = node
             .kernel()

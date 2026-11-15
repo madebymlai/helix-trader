@@ -70,9 +70,9 @@ pub struct Live {
 impl Live {
     /// Sets up the clients of the instruments of `requirements` (see
     /// `venues::live_clients`), then runs `strategy` on a live node until
-    /// SIGINT or SIGTERM, claiming the external orders of `traded`, the
-    /// instruments it trades (`[trade] instruments`) and no other it reads
-    /// (see `node::run`), beside `retraining`, the actor of its retrains if
+    /// SIGINT or SIGTERM, claiming the external orders its config claims,
+    /// the instruments it trades (`[trade] instruments`) and no other it
+    /// reads (see `node::run`), beside `retraining`, the actor of its retrains if
     /// it is retrained (`RetrainActor`), its cache sized for `warmup`, the
     /// strategy's (see `Warmup::cache_config`). The strategy's warmup
     /// requests go to the data clients. A root's instruments are its
@@ -96,7 +96,6 @@ impl Live {
     pub async fn run<S>(
         &self,
         requirements: &DataRequirements,
-        traded: &[InstrumentId],
         warmup: &Warmup,
         strategy: S,
         retraining: Option<RetrainActor>,
@@ -142,7 +141,7 @@ impl Live {
             Some(Box::new(cache_database)),
             clients,
         )?;
-        node::run(node, traded, strategy, retraining).await
+        node::run(node, strategy, retraining).await
     }
 }
 
