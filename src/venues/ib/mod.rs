@@ -397,19 +397,44 @@ fn served(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<Serv
                  15 or 30 seconds, 1, 2, 3, 5, 10, 15, 20 or 30 minutes, 1, 2, 3, 4 or 8 hours, \
                  a day, a week or a month, priced LAST, BID, ASK or MID, not {identifier}"
             );
+            ensure!(
+                !(bar_type.spec().price_type == PriceType::Last
+                    && bar_type.instrument_id().venue.as_str() == FOREX_VENUE),
+                "IB has no TRADES bars of a forex pair, so its history serves no {identifier}: \
+                 read its BID, ASK or MID bars"
+            );
             Ok(Served::Bars(bar_type))
         }
         NautilusDataType::QuoteTick => {
             Ok(Served::Ticks(IbHistoricalTickType::BidAsk, instrument()?))
         }
         NautilusDataType::TradeTick => {
-            Ok(Served::Ticks(IbHistoricalTickType::Trades, instrument()?))
+            let instrument_id = instrument()?;
+            ensure!(
+                !CURRENCY_PAIR_VENUES.contains(&instrument_id.venue.as_str()),
+                "Nautilus' IB client serves no trades of a currency pair, so IB's history \
+                 serves no trades of {identifier}: read its quotes"
+            );
+            Ok(Served::Ticks(IbHistoricalTickType::Trades, instrument_id))
         }
         other => {
             bail!("IB's history serves bars, quotes and trades, not the {other} of {identifier}")
         }
     }
 }
+
+/// IB's forex venue, whose pairs IB has no TRADES of, bars or ticks.
+const FOREX_VENUE: &str = "IDEALPRO";
+
+/// The venues of the instruments Nautilus' IB client defines as currency
+/// pairs, IB's forex (CASH) and crypto (CRYPTO) contracts
+/// (`providers/parse.rs`, `parse_forex_contract` and
+/// `parse_crypto_contract`, at the pin): its `request_trades` refuses a
+/// currency pair's trades by logging an error and answering nothing
+/// (`data/core.rs`, `request_trades`), so a warmup asking for them would
+/// never end. A venue is known before any definition is, as `serves` is
+/// asked: IB routes crypto to PAXOS and ZEROHASH (`common/symbology.rs`).
+const CURRENCY_PAIR_VENUES: [&str; 3] = [FOREX_VENUE, "PAXOS", "ZEROHASH"];
 
 /// The prices of the bars IB's history serves, as Nautilus' IB clients ask
 /// IB for them (`price_type_to_ib_what_to_show`): LAST, IB's TRADES bars,
@@ -908,6 +933,39 @@ mod tests {
             served(&NautilusDataType::TradeTick, "SXR8.IBIS").unwrap(),
             Served::Ticks(IbHistoricalTickType::Trades, sxr8)
         );
+    }
+
+    /// The trades of an instrument Nautilus' IB client defines as a
+    /// currency pair, a forex pair of IDEALPRO's or a crypto pair of
+    /// PAXOS's or ZEROHASH's, which its `request_trades` refuses without
+    /// an answer, and the TRADES bars of an IDEALPRO pair, which IB has
+    /// none of; a crypto pair's trade-price bars are served (IB's
+    /// AGGTRADES), as are other instruments' trades.
+    #[test]
+    fn ib_serves_no_trades_of_a_currency_pair_and_no_trades_bars_of_a_forex_pair() {
+        for (data_type, identifier) in [
+            (NautilusDataType::TradeTick, "EUR/USD.IDEALPRO"),
+            (NautilusDataType::TradeTick, "BTC/USD.PAXOS"),
+            (NautilusDataType::TradeTick, "BTC/USD.ZEROHASH"),
+            (
+                NautilusDataType::Bar,
+                "EUR/USD.IDEALPRO-1-MINUTE-LAST-EXTERNAL",
+            ),
+        ] {
+            let err = served(&data_type, identifier).unwrap_err();
+            assert!(err.to_string().contains(identifier), "{err}");
+        }
+        for (data_type, identifier) in [
+            (
+                NautilusDataType::Bar,
+                "BTC/USD.PAXOS-1-MINUTE-LAST-EXTERNAL",
+            ),
+            (NautilusDataType::QuoteTick, "EUR/USD.IDEALPRO"),
+            (NautilusDataType::QuoteTick, "BTC/USD.ZEROHASH"),
+            (NautilusDataType::TradeTick, "ESZ26.CME"),
+        ] {
+            served(&data_type, identifier).unwrap();
+        }
     }
 
     /// A price IB's adapter would ask TRADES for, a size IB has not,
