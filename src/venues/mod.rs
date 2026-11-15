@@ -11,7 +11,9 @@
 //! its fill (`fill_history`: the definitions and history), the live runner for
 //! its node's clients (`live_clients`: the live data), a live warmup for the
 //! client it asks a definition of (`live_definitions_client`: the broker, or
-//! the live data), a backtest for how a venue keeps positions (`oms_type`,
+//! the live data) and the one it asks an instrument's custom data its
+//! venue's history serves of (`live_data_client`: the live data), a
+//! backtest for how a venue keeps positions (`oms_type`,
 //! its broker's answer), whether it has money (`has_broker`: a venue no
 //! broker trades has none) and whether its account has a base currency
 //! (`has_base_currency`, its broker's answer), a trade where it reads its
@@ -625,8 +627,10 @@ pub fn rate_series(pair: InstrumentId) -> anyhow::Result<Vec<Series>> {
 /// fills here before anything connects, and a live warmup requests the
 /// history of a series only if served (`strategy::warmup`), so the two
 /// agree; a conversion pair is read in a form served (`rate_series`).
-/// Custom data of an instrument is the catalog's: a fill fills it from no
-/// source, and a warmup asks the catalog alone.
+/// Each source answers an instrument's custom data too, and none serves
+/// any yet, each saying so: a fill fills it from no source, and a live
+/// warmup asks the venue's live data client of it if served, the catalog
+/// alone if not (`strategy::warmup`).
 ///
 /// # Errors
 ///
@@ -725,6 +729,16 @@ pub fn live_definitions_client(venue: Venue) -> ClientId {
     let row = Row::of(venue);
     row.broker
         .map_or_else(|| row.live_data.client(), Broker::data_client)
+}
+
+/// The data client of `venue`'s live data on a live node, its row's live
+/// data source's (`Row::of`, so every venue without a row of its own as
+/// IB's), whoever its broker is: GLBX's LSE, not IB. A live warmup asks it
+/// the history of an instrument's custom data its venue's history serves
+/// (`serves`, see `strategy::warmup`), the node's catalog answering first.
+#[must_use]
+pub(crate) fn live_data_client(venue: Venue) -> ClientId {
+    Row::of(venue).live_data.client()
 }
 
 /// Whether the broker of `venue` takes reduce-only and post-only orders
@@ -2192,6 +2206,43 @@ mod tests {
         );
     }
 
+    /// Every history source answers an instrument's custom data, and none
+    /// serves any: each refuses it naming itself and the series, saying it
+    /// serves no custom data of an instrument, a cTrader broker's
+    /// (`ctrader::quoted`), OKX's, LSE's for each of its venues, and IB's
+    /// for every venue without a row of its own.
+    #[test]
+    fn no_history_source_serves_an_instrument_s_custom_data() {
+        let imbalance = || NautilusDataType::Custom {
+            type_name: "Imbalance".to_string(),
+        };
+        for (instrument_id, source) in [
+            ("XAUUSD.ICMARKETS", "ICMARKETS serves"),
+            ("EURUSD.PEPPERSTONE", "PEPPERSTONE serves"),
+            (SWAP, "OKX's history"),
+            ("GCZ26.GLBX", "LSE's history"),
+            ("NVDA.XNAS", "LSE's history"),
+            ("AAPL  261120C00355000.OPRA", "LSE's history"),
+            ("GOLD-FUTURES.LSEDGE", "LSE's history"),
+            ("SXR8.IBIS", "IB's history"),
+            ("ESZ26.CME", "IB's history"),
+        ] {
+            let series = ticks_of(imbalance(), instrument_id);
+
+            let Err(err) = serves(&series) else {
+                panic!("{series} served");
+            };
+
+            let err = format!("{err:#}");
+            assert!(
+                err.contains(source)
+                    && err.contains("no custom data of an instrument")
+                    && err.contains(instrument_id),
+                "{series}: {err}"
+            );
+        }
+    }
+
     /// Asserts each of `streamed` is streamed and each of `refused`
     /// refused, the error naming it.
     fn assert_streams(streamed: &[CatalogSeries], refused: &[CatalogSeries]) {
@@ -3267,6 +3318,28 @@ mod tests {
         }
         let lse = lse::live_clients(&[InstrumentId::from("GOLD-FUTURES.LSEDGE")]);
         assert_eq!(lse.data_factory.name(), "LSE");
+    }
+
+    /// A venue's live data client is its row's live data source's, whoever
+    /// its broker is: LSE's of GLBX, XNAS and OPRA, which IB trades, and of
+    /// LSEDGE; IB's of every venue without a row of its own. Each by the
+    /// name its factory gives the client, which the node registers it under.
+    #[test]
+    fn a_venue_s_live_data_client_is_its_live_data_source_s() {
+        for (id, client) in [
+            ("BTC-USDT-SWAP.OKX", "OKX"),
+            ("XAUUSD.ICMARKETS", "ICMARKETS"),
+            ("XAUUSD.PEPPERSTONE", "PEPPERSTONE"),
+            ("GCZ26.GLBX", "LSE"),
+            ("NVDA.XNAS", "LSE"),
+            ("AAPL  261120C00355000.OPRA", "LSE"),
+            ("GOLD-FUTURES.LSEDGE", "LSE"),
+            ("SXR8.IBIS", "IB"),
+        ] {
+            let id = InstrumentId::from(id);
+
+            assert_eq!(live_data_client(id.venue), ClientId::from(client), "{id}");
+        }
     }
 
     /// LSE streams none of them: each refused naming it before anything
