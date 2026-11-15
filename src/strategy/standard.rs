@@ -2,13 +2,12 @@ use std::{fmt, marker::PhantomData, str::FromStr};
 
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::config::{ConfigError, ConfigErrorCollector, ConfigResult};
-use nautilus_core::{Params, correctness::check_valid_string_utf8};
+use nautilus_core::Params;
 use nautilus_model::{
-    data::{BarSpecification, BarType, DataType, NautilusDataType},
+    data::{BarSpecification, BarType, NautilusDataType, get_arrow_schema},
     enums::{AggregationSource, BarAggregation, PriceType},
     identifiers::{InstrumentId, StrategyId},
 };
-use nautilus_persistence::common::paths::urisafe_instrument_id;
 use nautilus_trading::strategy::StrategyConfig;
 use serde::{
     Deserialize, Deserializer,
@@ -18,7 +17,7 @@ use serde::{
 use super::{
     Declaration, IndicatorsConfig,
     conversions::{Conversions, Rates},
-    requirements::{DataRequirements, TickSeries, tick_data},
+    requirements::{CustomSeries, DataRequirements, TickSeries, tick_data},
     risk::{Risk, Stake},
     session::Session,
 };
@@ -283,7 +282,8 @@ impl<P: Part> StandardConfig<P> {
     /// pair of `[trade] conversions` its rates are read from, as its venue's
     /// history serves them (`Conversions::series`), those not read yet: a
     /// cTrader pair's quotes after the ticks, an IB pair's 1-minute BID and
-    /// ASK bars after the bar types. And the warmup.
+    /// ASK bars after the bar types. Its custom series, in order. And the
+    /// warmup.
     #[must_use]
     pub fn data_requirements(&self) -> DataRequirements {
         let mut ticks: Vec<TickSeries> = self
@@ -291,8 +291,8 @@ impl<P: Part> StandardConfig<P> {
             .series
             .iter()
             .filter_map(|series| match series {
-                Series::Bars(_) => None,
                 Series::Ticks(ticks) => Some(ticks.clone()),
+                Series::Bars(_) | Series::Custom(_) => None,
             })
             .chain(self.trade.quotes_unpriced_by(&self.data))
             .collect();
@@ -302,12 +302,19 @@ impl<P: Part> StandardConfig<P> {
                 Series::Bars(bars) if !bar_types.contains(&bars) => bar_types.push(bars),
                 Series::Ticks(read) if !ticks.contains(&read) => ticks.push(read),
                 Series::Bars(_) | Series::Ticks(_) => {}
+                Series::Custom(custom) => {
+                    unreachable!("a pair's rates are read from its bars or quotes, not {custom}")
+                }
             }
         }
         DataRequirements {
             bar_types,
             ticks,
-            custom: self.data.custom.clone(),
+            custom: self
+                .data
+                .custom()
+                .map(|(_, custom)| custom.clone())
+                .collect(),
             warmup: self.data.warmup,
         }
     }
@@ -317,26 +324,15 @@ impl<P: Part> StandardConfig<P> {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DataConfig {
-    /// The series read, bars and ticks (see `Series`): those the
-    /// strategy's part answers it reads (`Part::reads`), each once, and no
-    /// other.
+    /// The series read, bars, ticks and custom series (see `Series`):
+    /// those the strategy's part answers it reads (`Part::reads`), each
+    /// once, and no other, custom data among them, an LSE reference series
+    /// or the catalog's own (`DataRequirements::custom`), each of a type
+    /// Nautilus holds a schema of, served by its type's row's history
+    /// source or else the catalog's (`venues::serves_custom`), under a
+    /// catalog folder no other of its type takes, a root's series taking
+    /// those of the contracts standing for it.
     pub series: Vec<Series>,
-    /// The custom data of no instrument read, an LSE reference series
-    /// among them (`DataRequirements::custom`): each a Nautilus data type,
-    /// its type's name, the identifier keying its series in the catalog,
-    /// and the metadata its source asks it by (see `CustomFields`), `{
-    /// type_name = "LseRow", identifier = "US10Y", metadata = { source =
-    /// "bond_yields", symbol = "US10Y" } }` in a TOML config; each of a
-    /// type its source serves (`venues::serves_custom`), under an
-    /// identifier no other of its type takes. Fetched by fill-catalog and
-    /// replayed in a backtest, to the strategy, whose subscriptions
-    /// subscribe to its data type (`strategy::subscriptions`); a live run
-    /// reading any its source does not stream is refused
-    /// (`venues::streams_custom`). No part answers it reads one; a model
-    /// strategy's load requires each its features read listed
-    /// (`model::reads`). None by default.
-    #[serde(default, deserialize_with = "custom_data")]
-    pub custom: Vec<DataType>,
     /// How far back the warmup history a live node requests at start
     /// starts; a backtest requests none, its strategy warming on the
     /// replay.
@@ -347,63 +343,30 @@ pub struct DataConfig {
     pub session: Option<Session>,
 }
 
-/// The keys of custom data of no instrument as the TOML has them, those
-/// of Nautilus' `DataType::try_new`: its type's name, its identifier,
-/// required, as without one every series of the type would be stored under
-/// one catalog path, and its metadata. No other: Nautilus' own `DataType`
-/// deserializer would ignore an unknown key and take a `topic`, which sets
-/// the topic the data is subscribed and published under.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CustomFields {
-    type_name: String,
-    identifier: String,
-    metadata: Params,
-}
-
-/// The custom data of no instrument read, each the Nautilus data type its
-/// keys make (see `CustomFields`), refused if its metadata holds the key
-/// Nautilus reserves for the identifier.
-fn custom_data<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<DataType>, D::Error> {
-    Vec::<CustomFields>::deserialize(deserializer)?
-        .into_iter()
-        .map(
-            |CustomFields {
-                 type_name,
-                 identifier,
-                 metadata,
-             }| {
-                DataType::try_new(&type_name, Some(metadata), Some(identifier))
-                    .map_err(|e| de::Error::custom(format!("{e:#}")))
-            },
-        )
-        .collect()
-}
-
-/// The folder Nautilus' catalog stores the series of custom data keyed by
-/// `identifier` under, below its type's folder, and reads it back from
-/// (`ParquetDataCatalog::make_path_custom_data`, `filter_identifier_files`):
-/// the identifier made URI-safe (`urisafe_instrument_id`: `/` removed, `^`
-/// made `_`); empty for the type's folder itself. So for an identifier
-/// holding no backslash alone: the write makes a backslash a folder
-/// separator and the read keeps it, so the two disagree on such an
-/// identifier, which `DataConfig::validate` refuses.
-fn catalog_folder(identifier: &str) -> String {
-    urisafe_instrument_id(identifier)
-}
-
 impl DataConfig {
     /// The bar types of the bars series, in order.
     pub fn bar_types(&self) -> impl Iterator<Item = BarType> + '_ {
         self.series.iter().filter_map(|series| match series {
             Series::Bars(bar_type) => Some(*bar_type),
-            Series::Ticks(_) => None,
+            Series::Ticks(_) | Series::Custom(_) => None,
         })
+    }
+
+    /// The custom series, each with its index, in order.
+    fn custom(&self) -> impl Iterator<Item = (usize, &CustomSeries)> + '_ {
+        self.series
+            .iter()
+            .enumerate()
+            .filter_map(|(i, series)| match series {
+                Series::Custom(custom) => Some((i, custom)),
+                Series::Bars(_) | Series::Ticks(_) => None,
+            })
     }
 
     /// Whether a series prices `instrument_id` as Nautilus prices a market
     /// order and the top of a simulated L1 book: its bars, its quotes or
-    /// its trades. Its depth, book deltas and custom data do not: the risk
+    /// its trades. Its depth and book deltas do not, nor does a custom
+    /// series, under its id or not, which brings no instrument: the risk
     /// engine prices a market order from the cache's bid or ask, last
     /// trade or external bar (`Cache::price` reads quotes and trades
     /// alone), and an L1 book ignores deltas.
@@ -418,6 +381,7 @@ impl DataConfig {
                         NautilusDataType::QuoteTick | NautilusDataType::TradeTick
                     )
             }
+            Series::Custom(_) => false,
         })
     }
 
@@ -430,17 +394,19 @@ impl DataConfig {
     }
 
     /// Pushes the violations of `[data]`: no series; a series listed
-    /// again, under each listing after its first, naming it; custom data
-    /// of an identifier holding a backslash (see `catalog_folder`), or
-    /// whose catalog folder Nautilus finds no string of meaning in, empty
-    /// or blank (`check_valid_string_utf8`), each under
-    /// `data.custom[i].identifier`, an empty folder the folder of its type
-    /// alone, as none keys; custom
-    /// data of a type and a catalog folder listed already, under
-    /// `data.custom[i]` naming it, whatever its metadata, the two series
-    /// stored under one folder; custom data its source does not serve, or of a type no source
-    /// serves, under `data.custom[i]`, saying why
-    /// (`venues::serves_custom`); a bars series not aggregated on time
+    /// again, under each listing after its first, naming it; a custom
+    /// series of a type and a catalog folder (`CustomSeries::
+    /// catalog_folder`) listed already, under `data.series[i]` naming it,
+    /// whatever its metadata, the two series stored under one folder, or
+    /// sharing a folder with one listed already through a root
+    /// (`CustomSeries::contract_folder_shared_with`: a root's and its
+    /// contract's of other metadata), so too; a custom series of a type
+    /// Nautilus holds no schema of
+    /// (`get_arrow_schema`; helix registers each type it compiles as it
+    /// starts, `venues::register_custom_data`), or one its type's history
+    /// source does not serve (`venues::serves_custom`), under
+    /// `data.series[i]`, saying why: one of a type with no row, or with no
+    /// history source, is the catalog's; a bars series not aggregated on time
     /// (the session needs the bar's span), built from ticks but priced
     /// MARK (Nautilus builds bars from quotes or
     /// trades alone), on a venue other than the first bars', built from
@@ -465,39 +431,53 @@ impl DataConfig {
                 Some(series.to_string()),
             ));
         }
-        for (i, data_type) in self.custom.iter().enumerate() {
-            let field = format!("data.custom[{i}]");
-            let identifier = data_type.identifier().unwrap_or_default();
-            let folder = catalog_folder(identifier);
-            let stored_alike = |listed: &DataType| {
-                listed.type_name() == data_type.type_name()
-                    && catalog_folder(listed.identifier().unwrap_or_default()) == folder
-            };
-            if identifier.contains('\\') {
-                errors.push(ConfigError::invalid_value(
-                    format!("{field}.identifier"),
-                    format!(
-                        "{identifier:?} holds a backslash, which Nautilus' catalog writes as a \
-                         folder separator and reads back as a character, so its series would \
-                         be stored where no read finds it"
-                    ),
-                ));
-            } else if let Err(e) = check_valid_string_utf8(&folder, "identifier") {
-                errors.push(ConfigError::invalid_value(
-                    format!("{field}.identifier"),
-                    format!("{identifier:?} keys the catalog folder {folder:?}: {e}"),
-                ));
-            } else if let Some(j) = self.custom[..i].iter().position(stored_alike) {
+        for (i, custom) in self.custom() {
+            // Listed again whole: one violation, its repeat's.
+            if self.series[..i].contains(&self.series[i]) {
+                continue;
+            }
+            let field = format!("data.series[{i}]");
+            let folder = custom.catalog_folder();
+            let before = || self.custom().take_while(|&(j, _)| j < i);
+            if let Some((j, _)) = before().find(|(_, listed)| {
+                listed.type_name() == custom.type_name() && listed.catalog_folder() == folder
+            }) {
                 errors.push(ConfigError::duplicate(
                     field.clone(),
                     Some(format!(
-                        "{data_type}, stored under the catalog folder {folder} of {} as \
-                         data.custom[{j}] is",
-                        data_type.type_name()
+                        "{custom}, stored under the catalog folder {folder} of {} as \
+                         data.series[{j}] is",
+                        custom.type_name()
+                    )),
+                ));
+            } else if let Some((j, listed, contract)) = before().find_map(|(j, listed)| {
+                custom
+                    .contract_folder_shared_with(listed)
+                    .map(|contract| (j, listed, contract))
+            }) {
+                errors.push(ConfigError::duplicate(
+                    field.clone(),
+                    Some(format!(
+                        "{custom}, stored under the catalog folder {contract} of {} as \
+                         data.series[{j}], {listed}, is while {contract} stands for its root: a \
+                         contract's series is read beside its root's only as the root's on it, \
+                         of the root's metadata, else under an identifier of its own",
+                        custom.type_name()
                     )),
                 ));
             }
-            if let Err(e) = venues::serves_custom(data_type) {
+            if get_arrow_schema(custom.type_name()).is_none() {
+                errors.push(ConfigError::invalid_value(
+                    field.clone(),
+                    format!(
+                        "Nautilus has no custom data type {} registered, so it reads none of \
+                         {custom}: it decodes custom data by its type's registered schema, and \
+                         helix registers each type it compiles as it starts",
+                        custom.type_name()
+                    ),
+                ));
+            }
+            if let Err(e) = venues::serves_custom(custom) {
                 errors.push(ConfigError::invalid_value(field, format!("{e:#}")));
             }
         }
@@ -584,9 +564,9 @@ impl DataConfig {
     }
 }
 
-/// A series the strategy reads, `{ data, instrument_id, ... }` in
-/// `[data] series`, `data` a Nautilus data type by the name Nautilus
-/// parses (`NautilusDataType::from_str`).
+/// A series the strategy reads, `{ data, instrument_id, ... }` or `{
+/// data, identifier, ... }` in `[data] series`, `data` a Nautilus data
+/// type by the name Nautilus parses (`NautilusDataType::from_str`).
 ///
 /// - `bars`, with `bar_spec` in Nautilus' `BarSpecification` fields, are
 ///   bars Nautilus builds of the instrument: from the ticks their price
@@ -596,31 +576,50 @@ impl DataConfig {
 ///   = "MINUTE", aggregation_source = "EXTERNAL" }` of a `1-HOUR` `LAST`
 ///   bar spec makes `<instrument>-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`,
 ///   as OKX's 1-minute candles are.
-/// - Any other is ticks the strategy reads as they are (see `TickSeries`).
+/// - `Custom:<type name>` with an `identifier`, and `metadata` if its
+///   type's source asks for any, is a custom series, the custom data of
+///   that Nautilus data type (see `CustomSeries`), bringing no
+///   instrument; under a root's id, it rolls as the root's other series
+///   do (`CustomSeries::root`).
+/// - Any other, of an instrument, is ticks the strategy reads as they are
+///   (see `TickSeries`). Custom data is keyed by its identifier alone, an
+///   instrument's by its id: `Custom:<type name>` with an `instrument_id`
+///   is refused, pointing at the identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "SeriesFields")]
 pub enum Series {
     Bars(BarType),
     Ticks(TickSeries),
+    Custom(CustomSeries),
 }
 
 /// A series by its bar type, `bars XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL`,
-/// or as its ticks (see `TickSeries`).
+/// as its ticks (see `TickSeries`), or by its data type (see
+/// `CustomSeries`).
 impl fmt::Display for Series {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Bars(bar_type) => write!(f, "bars {bar_type}"),
             Self::Ticks(ticks) => write!(f, "{ticks}"),
+            Self::Custom(custom) => write!(f, "{custom}"),
         }
     }
 }
 
-/// The keys of a series as the TOML has them.
+/// The keys of a series as the TOML has them: those of Nautilus'
+/// `DataType::try_new` beside the others for a custom series, and no
+/// other, Nautilus' own `DataType` deserializer taking a `topic`, which
+/// sets the topic the data is subscribed and published under.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SeriesFields {
     data: String,
-    instrument_id: InstrumentId,
+    #[serde(default)]
+    instrument_id: Option<InstrumentId>,
+    #[serde(default)]
+    identifier: Option<String>,
+    #[serde(default)]
+    metadata: Option<Params>,
     #[serde(default)]
     bar_spec: Option<BarSpecification>,
     #[serde(default)]
@@ -630,15 +629,51 @@ struct SeriesFields {
 impl TryFrom<SeriesFields> for Series {
     type Error = String;
 
-    /// Bars need a `bar_spec` and take a `from`, which Nautilus checks in
+    /// A custom series needs an `identifier`, an instrument's id keying an
+    /// instrument's custom data, takes `metadata` and nothing of an
+    /// instrument, and is built as `CustomSeries::new` builds it; any
+    /// other series takes neither and needs an `instrument_id`. Bars need
+    /// a `bar_spec` and take a `from`, which Nautilus checks in
     /// `BarType::new_composite_checked`; ticks take neither.
     fn try_from(fields: SeriesFields) -> Result<Self, String> {
         let SeriesFields {
             data,
             instrument_id,
+            identifier,
+            metadata,
             bar_spec,
             from,
         } = fields;
+        if let Ok(NautilusDataType::Custom { type_name }) = NautilusDataType::from_str(&data) {
+            let Some(identifier) = identifier else {
+                return Err(match instrument_id {
+                    Some(instrument_id) => format!(
+                        "the {data} is keyed by an identifier, an instrument's custom data by \
+                         its id, not by an instrument_id: write identifier = \"{instrument_id}\""
+                    ),
+                    None => format!(
+                        "the {data} needs an identifier, which keys a custom series in the catalog"
+                    ),
+                });
+            };
+            if instrument_id.is_some() || bar_spec.is_some() || from.is_some() {
+                return Err(format!(
+                    "the {data} under the identifier {identifier:?} is keyed by its identifier: \
+                     it takes no instrument_id, bar_spec or from"
+                ));
+            }
+            return CustomSeries::new(&type_name, identifier, metadata)
+                .map(Self::Custom)
+                .map_err(|e| format!("{e:#}"));
+        }
+        if identifier.is_some() || metadata.is_some() {
+            return Err(format!(
+                "identifier and metadata are of a custom series, not of the {data}"
+            ));
+        }
+        let Some(instrument_id) = instrument_id else {
+            return Err(format!("the {data} needs an instrument_id"));
+        };
         if NautilusDataType::from_str(&data).ok() != Some(NautilusDataType::Bar) {
             if bar_spec.is_some() || from.is_some() {
                 return Err(format!(
@@ -771,11 +806,12 @@ impl TradeConfig {
     /// prices (`DataConfig::prices`), in order: its prices for the
     /// strategy's orders and their fills, and for a model harness'
     /// decisions, whatever the strategy; a series pricing it gives them
-    /// otherwise. Without them, an instrument read only through its depth,
-    /// book deltas or custom data has its market orders denied for want of
-    /// a price, and one read only through custom data is not even loaded
-    /// into a backtest. They are not series of `[data]`: the strategy's
-    /// data requirements add them (`StandardConfig::data_requirements`).
+    /// otherwise. Without them, an instrument read only through its depth
+    /// or book deltas has its market orders denied for want of a price,
+    /// and one read only through a custom series under its id, which
+    /// brings no instrument, is not even loaded into a backtest. They are
+    /// not series of `[data]`: the strategy's data requirements add them
+    /// (`StandardConfig::data_requirements`).
     fn quotes_unpriced_by<'a>(
         &'a self,
         data: &'a DataConfig,
@@ -946,6 +982,7 @@ impl<'de, P: Part> DeserializeSeed<'de> for TradeKeys<P> {
 
 #[cfg(test)]
 mod tests {
+    use nautilus_model::data::DataType;
     use rust_decimal::Decimal;
 
     use super::*;
@@ -1006,7 +1043,10 @@ mod tests {
         risk = "0.5%"
     "#;
 
+    /// The config `toml` holds, loaded after registering the custom data
+    /// types helix compiles, as the process does at its start.
     fn load(toml: &str) -> anyhow::Result<StandardConfig<Pairs>> {
+        venues::register_custom_data();
         StandardConfig::load(toml)
     }
 
@@ -1507,16 +1547,20 @@ mod tests {
         }
     }
 
-    /// `TOML` with `custom`, the TOML of `[data] custom`, after its warmup.
-    fn with_custom(custom: &str) -> String {
-        TOML.replace(
-            "warmup = \"720h\"",
-            &format!("warmup = \"720h\"\n        custom = {custom}"),
-        )
+    /// `TOML` with `entries`, the TOML of custom series, listed after its
+    /// other series.
+    fn with_custom(entries: &[&str]) -> String {
+        let trades = r#"{ data = "trades", instrument_id = "ESH24.CME" },"#;
+        let toml = TOML.replace(
+            trades,
+            &format!("{trades}\n            {}", entries.join(",\n            ")),
+        );
+        assert_ne!(toml, TOML);
+        toml
     }
 
     /// LSE's daily 10-year US yield, under the identifier `US10Y`.
-    const US10Y: &str = r#"{ type_name = "LseRow", identifier = "US10Y", metadata = { source = "bond_yields", symbol = "US10Y" } }"#;
+    const US10Y: &str = r#"{ data = "Custom:LseRow", identifier = "US10Y", metadata = { source = "bond_yields", symbol = "US10Y" } }"#;
 
     /// The data type of the rows of `symbol` in LSE's daily bond yields
     /// under `identifier`, as Nautilus builds one.
@@ -1529,6 +1573,16 @@ mod tests {
             .into(),
         );
         DataType::new("LseRow", Some(metadata), Some(identifier.to_string()))
+    }
+
+    /// The data types of the custom series of `config`'s requirements.
+    fn custom_of(config: &StandardConfig<Pairs>) -> Vec<DataType> {
+        config
+            .data_requirements()
+            .custom
+            .iter()
+            .map(|series| series.data_type().clone())
+            .collect()
     }
 
     /// The message of the error refusing `toml`, which is serde's on the
@@ -1552,49 +1606,148 @@ mod tests {
         reason.clone()
     }
 
-    /// Read by no part: the config declares it, beside the series its part
-    /// reads, as the Nautilus data type its entry gives, under the
-    /// identifier it names.
+    /// Read by the part, which reads every series listed: the config lists
+    /// it beside its other series, as the Nautilus data type its entry
+    /// gives, under the identifier it names.
     #[test]
-    fn custom_data_of_no_instrument_loads_as_the_data_type_its_entry_gives() {
-        let config = load(&with_custom(&format!("[{US10Y}]"))).unwrap();
+    fn a_custom_series_loads_as_the_data_type_its_entry_gives() {
+        let config = load(&with_custom(&[US10Y])).unwrap();
 
-        assert_eq!(
-            config.data_requirements().custom,
-            [bond_yields("US10Y", "US10Y")]
-        );
+        assert_eq!(custom_of(&config), [bond_yields("US10Y", "US10Y")]);
     }
 
     /// The identifier is the config's to choose: nothing derives it.
     #[test]
-    fn custom_data_of_no_instrument_is_keyed_by_the_identifier_its_entry_names() {
-        let config = load(&with_custom(&format!(
-            "[{}]",
-            US10Y.replace(r#"identifier = "US10Y""#, r#"identifier = "TREASURY-10Y""#)
-        )))
-        .unwrap();
+    fn a_custom_series_is_keyed_by_the_identifier_its_entry_names() {
+        let config =
+            load(&with_custom(&[&US10Y.replace(
+                r#"identifier = "US10Y""#,
+                r#"identifier = "TREASURY-10Y""#,
+            )]))
+            .unwrap();
 
-        let custom = config.data_requirements().custom;
-        assert_eq!(custom, [bond_yields("US10Y", "TREASURY-10Y")]);
-        assert_eq!(custom[0].identifier(), Some("TREASURY-10Y"));
+        assert_eq!(custom_of(&config), [bond_yields("US10Y", "TREASURY-10Y")]);
     }
 
     #[test]
-    fn a_config_with_no_custom_data_reads_none() {
-        assert_eq!(load(TOML).unwrap().data_requirements().custom, []);
+    fn a_config_with_no_custom_series_reads_none() {
+        assert_eq!(custom_of(&load(TOML).unwrap()), []);
+    }
+
+    /// Custom data is a series of `[data] series` alone.
+    #[test]
+    fn a_custom_table_of_data_is_refused_as_an_unknown_key() {
+        let toml = TOML.replace(
+            "warmup = \"720h\"",
+            "warmup = \"720h\"\n        custom = []",
+        );
+
+        let err = shape_message(&toml);
+
+        assert!(err.contains("`custom`"), "{err}");
+    }
+
+    /// Metadata is optional, and empty metadata is none: Nautilus' data
+    /// type of either has one topic, which keys its points in the cache.
+    #[test]
+    fn a_custom_series_with_empty_metadata_is_the_one_with_none() {
+        let series = |metadata: &str| {
+            toml::from_str::<Series>(&format!(
+                "data = \"Custom:Imbalance\"\nidentifier = \"GCZ26.GLBX\"\n{metadata}"
+            ))
+            .unwrap()
+        };
+
+        let (empty, none) = (series("metadata = {}"), series(""));
+
+        let Series::Custom(custom) = &none else {
+            panic!("not a custom series: {none:?}");
+        };
+        assert_eq!(
+            custom.data_type(),
+            &DataType::new("Imbalance", None, Some("GCZ26.GLBX".to_string()))
+        );
+        assert_eq!(custom.data_type().metadata(), None);
+        assert_eq!(empty, none);
+        let Series::Custom(empty) = empty else {
+            panic!("not a custom series");
+        };
+        assert_eq!(empty.data_type().metadata(), None);
+    }
+
+    /// LSE's rows need their metadata, which LSE's answer names, not the
+    /// shape of the entry.
+    #[test]
+    fn lse_s_rows_naming_no_metadata_are_refused_by_lse_s_answer_under_their_entry() {
+        let toml = with_custom(&[r#"{ data = "Custom:LseRow", identifier = "US10Y" }"#]);
+
+        let reason = invalid_value(&toml, "data.series[3]");
+
+        assert!(reason.contains("source"), "{reason}");
     }
 
     /// Without one, every series of its type would share one catalog path.
     #[test]
-    fn custom_data_naming_no_identifier_is_refused_naming_the_key() {
-        let toml = with_custom(&format!(
-            "[{}]",
-            US10Y.replace(r#"identifier = "US10Y", "#, "")
-        ));
+    fn a_custom_series_naming_no_identifier_is_refused_naming_the_key() {
+        let toml = with_custom(&[&US10Y.replace(r#"identifier = "US10Y", "#, "")]);
 
         let err = shape_message(&toml);
 
         assert!(err.contains("identifier"), "{err}");
+    }
+
+    /// A custom series is keyed by its identifier, not by an instrument.
+    #[test]
+    fn a_custom_series_naming_an_instrument_beside_its_identifier_is_refused_naming_both() {
+        let toml = with_custom(&[&US10Y.replace(
+            r#"identifier = "US10Y","#,
+            r#"identifier = "US10Y", instrument_id = "ESH24.CME","#,
+        )]);
+
+        let err = shape_message(&toml);
+
+        assert!(
+            err.contains("instrument_id") && err.contains("identifier"),
+            "{err}"
+        );
+    }
+
+    /// Custom data has one spelling: an instrument's is keyed by its id as
+    /// an identifier, as any custom series is, so an entry naming its
+    /// instrument_id instead is refused, pointing at the identifier.
+    #[test]
+    fn a_custom_series_naming_an_instrument_in_place_of_an_identifier_is_refused_pointing_at_it() {
+        let toml = with_custom(&[r#"{ data = "Custom:Imbalance", instrument_id = "ESM24.CME" }"#]);
+
+        let err = shape_message(&toml);
+
+        assert!(
+            err.contains("instrument_id") && err.contains(r#"identifier = "ESM24.CME""#),
+            "{err}"
+        );
+    }
+
+    /// An identifier and metadata are custom data's alone.
+    #[test]
+    fn a_series_of_ticks_or_bars_naming_an_identifier_or_metadata_is_refused_naming_it() {
+        for (series, key) in [
+            (
+                r#"{ data = "trades", instrument_id = "ESH24.CME", identifier = "ES" }"#,
+                "identifier",
+            ),
+            (
+                r#"{ data = "quotes", instrument_id = "ESH24.CME", metadata = { a = 1 } }"#,
+                "metadata",
+            ),
+            (
+                r#"{ data = "bars", instrument_id = "ESH24.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" }, identifier = "ES" }"#,
+                "identifier",
+            ),
+        ] {
+            let err = shape_message(&with_custom(&[series]));
+
+            assert!(err.contains(key), "{series}: {err}");
+        }
     }
 
     /// The catalog stores a series under its type's folder, then its
@@ -1602,20 +1755,18 @@ mod tests {
     /// so keys the folder of its type alone, as none does; a blank one
     /// names nothing either.
     #[test]
-    fn custom_data_of_an_identifier_naming_no_catalog_folder_is_refused_under_its_identifier() {
+    fn a_custom_series_of_an_identifier_naming_no_catalog_folder_is_refused_naming_it() {
         for identifier in ["", "  ", "/", "//"] {
-            let toml = with_custom(&format!(
-                "[{}]",
-                US10Y.replace(
-                    r#"identifier = "US10Y""#,
-                    &format!(r#"identifier = "{identifier}""#)
-                )
-            ));
+            let toml = with_custom(&[&US10Y.replace(
+                r#"identifier = "US10Y""#,
+                &format!(r#"identifier = "{identifier}""#),
+            )]);
 
-            assert_eq!(
-                error_fields(&toml),
-                ["data.custom[0].identifier"],
-                "{identifier:?}"
+            let err = shape_message(&toml);
+
+            assert!(
+                err.contains(&format!("identifier {identifier:?}")),
+                "{identifier:?}: {err}"
             );
         }
     }
@@ -1624,35 +1775,35 @@ mod tests {
     /// separator there, and reads it back under `US\10Y`, keeping it: a
     /// fill would find nothing missing and a backtest read nothing.
     #[test]
-    fn custom_data_of_an_identifier_holding_a_backslash_is_refused_under_its_identifier_naming_it()
-    {
+    fn a_custom_series_of_an_identifier_holding_a_backslash_is_refused_naming_it() {
         // As TOML basic strings: a backslash is written escaped.
-        for identifier in [r"US\\10Y", r"\\US10Y", r"\\"] {
-            let toml = with_custom(&format!(
-                "[{}]",
-                US10Y.replace(
-                    r#"identifier = "US10Y""#,
-                    &format!(r#"identifier = "{identifier}""#)
-                )
-            ));
+        for (written, identifier) in [
+            (r"US\\10Y", r"US\10Y"),
+            (r"\\US10Y", r"\US10Y"),
+            (r"\\", r"\"),
+        ] {
+            let toml = with_custom(&[&US10Y.replace(
+                r#"identifier = "US10Y""#,
+                &format!(r#"identifier = "{written}""#),
+            )]);
 
-            let reason = invalid_value(&toml, "data.custom[0].identifier");
+            let err = shape_message(&toml);
 
-            assert!(reason.contains("backslash"), "{identifier}: {reason}");
+            assert!(
+                err.contains("backslash") && err.contains(&format!("{identifier:?}")),
+                "{identifier}: {err}"
+            );
         }
     }
 
     /// Nautilus' own `DataType` deserializer would take a `topic` and set
     /// the data type's topic by it; an entry takes none.
     #[test]
-    fn custom_data_with_an_unknown_key_is_refused_naming_it() {
-        let toml = with_custom(&format!(
-            "[{}]",
-            US10Y.replace(
-                r#"identifier = "US10Y","#,
-                r#"identifier = "US10Y", topic = "LseRow.US10Y","#
-            )
-        ));
+    fn a_custom_series_with_an_unknown_key_is_refused_naming_it() {
+        let toml = with_custom(&[&US10Y.replace(
+            r#"identifier = "US10Y","#,
+            r#"identifier = "US10Y", topic = "LseRow.US10Y","#,
+        )]);
 
         let err = shape_message(&toml);
 
@@ -1661,53 +1812,104 @@ mod tests {
 
     /// Nautilus reserves the key for the identifier.
     #[test]
-    fn custom_data_naming_an_identifier_in_its_metadata_is_refused_naming_it() {
-        let toml = with_custom(&format!(
-            "[{}]",
-            US10Y.replace(
-                r#"symbol = "US10Y""#,
-                r#"symbol = "US10Y", identifier = "X""#
-            )
-        ));
+    fn a_custom_series_naming_an_identifier_in_its_metadata_is_refused_naming_it() {
+        let toml = with_custom(&[&US10Y.replace(
+            r#"symbol = "US10Y""#,
+            r#"symbol = "US10Y", identifier = "X""#,
+        )]);
 
         let err = shape_message(&toml);
 
         assert!(err.contains("reserved"), "{err}");
     }
 
-    /// No source fills it.
+    /// Custom data of the tests' own, of a type no row of the routing
+    /// table routes, as a strategy author writes into the catalog by hand.
+    #[nautilus_serialization::arrow_custom_data]
+    #[nautilus_model::custom_data]
+    pub struct Signal {
+        pub value: f64,
+        pub ts_event: nautilus_core::UnixNanos,
+        pub ts_init: nautilus_core::UnixNanos,
+    }
+
+    /// The catalog's, registered by the test: no source serves it, and it
+    /// loads under its identifier, with metadata or without.
     #[test]
-    fn custom_data_of_no_instrument_of_a_type_no_source_serves_is_refused_under_its_entry_naming_it()
+    fn a_custom_series_of_a_registered_type_no_row_routes_loads_as_the_catalog_s() {
+        nautilus_serialization::ensure_custom_data_registered::<Signal>();
+        let toml = with_custom(&[
+            r#"{ data = "Custom:Signal", identifier = "GOLD-SIGNAL" }"#,
+            r#"{ data = "Custom:Signal", identifier = "GOLD-SIGNAL-FAST", metadata = { window = "5m" } }"#,
+        ]);
+
+        let config = load(&toml).unwrap();
+
+        let window = Params::new([("window".to_string(), serde_json::json!("5m"))].into());
+        assert_eq!(
+            custom_of(&config),
+            [
+                DataType::new("Signal", None, Some("GOLD-SIGNAL".to_string())),
+                DataType::new("Signal", Some(window), Some("GOLD-SIGNAL-FAST".to_string())),
+            ]
+        );
+    }
+
+    /// Nautilus decodes custom data by its type's registered schema, and
+    /// has none of a type of that name: a typo of LSE's rows' type.
+    #[test]
+    fn a_custom_series_of_a_type_nautilus_has_no_registration_of_is_refused_under_its_entry_naming_it()
      {
-        let toml = with_custom(&format!(
-            "[{US10Y}, {}]",
-            US10Y.replace("LseRow", "Imbalance")
-        ));
+        let toml = with_custom(&[US10Y, &US10Y.replace("LseRow", "LseRows")]);
 
-        let reason = invalid_value(&toml, "data.custom[1]");
+        let reason = invalid_value(&toml, "data.series[4]");
 
-        assert!(reason.contains("Imbalance"), "{reason}");
+        assert!(
+            reason.contains("LseRows") && reason.contains("registered"),
+            "{reason}"
+        );
+    }
+
+    /// Nautilus' Databento adapter is compiled in, its imbalances and
+    /// statistics with it, so helix registers both: no row routes them,
+    /// so each is the catalog's.
+    #[test]
+    fn databento_s_custom_series_load_as_the_catalog_s() {
+        let toml = with_custom(&[
+            r#"{ data = "Custom:DatabentoImbalance", identifier = "GC.GLBX" }"#,
+            r#"{ data = "Custom:DatabentoStatistics", identifier = "GC.GLBX" }"#,
+        ]);
+
+        let config = load(&toml).unwrap();
+
+        assert_eq!(
+            custom_of(&config),
+            [
+                DataType::new("DatabentoImbalance", None, Some("GC.GLBX".to_string())),
+                DataType::new("DatabentoStatistics", None, Some("GC.GLBX".to_string())),
+            ]
+        );
     }
 
     /// LSE's client asks LSE for a source's symbol.
     #[test]
     fn lse_s_rows_naming_no_symbol_are_refused_under_their_entry_naming_it() {
-        let toml = with_custom(&format!("[{}]", US10Y.replace(r#", symbol = "US10Y""#, "")));
+        let toml = with_custom(&[&US10Y.replace(r#", symbol = "US10Y""#, "")]);
 
-        let reason = invalid_value(&toml, "data.custom[0]");
+        let reason = invalid_value(&toml, "data.series[3]");
 
         assert!(reason.contains("symbol"), "{reason}");
     }
 
     /// The 10-year and the 2-year US yields, each under its own identifier.
     #[test]
-    fn series_of_one_type_under_identifiers_of_their_own_load() {
+    fn custom_series_of_one_type_under_identifiers_of_their_own_load() {
         let us02y = US10Y.replace("US10Y", "US02Y");
 
-        let config = load(&with_custom(&format!("[{US10Y}, {us02y}]"))).unwrap();
+        let config = load(&with_custom(&[US10Y, &us02y])).unwrap();
 
         assert_eq!(
-            config.data_requirements().custom,
+            custom_of(&config),
             [bond_yields("US10Y", "US10Y"), bond_yields("US02Y", "US02Y")]
         );
     }
@@ -1715,13 +1917,13 @@ mod tests {
     /// The 2-year yield under the 10-year's identifier: both would be
     /// stored under one catalog path, whatever their metadata.
     #[test]
-    fn custom_data_of_a_type_under_an_identifier_listed_again_is_refused_under_its_later_listing_naming_it()
+    fn a_custom_series_of_a_type_under_an_identifier_listed_again_is_refused_under_its_later_listing_naming_it()
      {
         let us02y = US10Y.replace(r#"symbol = "US10Y""#, r#"symbol = "US02Y""#);
 
-        let err = load(&with_custom(&format!("[{US10Y}, {us02y}]"))).unwrap_err();
+        let err = load(&with_custom(&[US10Y, &us02y])).unwrap_err();
 
-        assert_eq!(fields_of(&err), ["data.custom[1]"]);
+        assert_eq!(fields_of(&err), ["data.series[4]"]);
         let [
             ConfigError::Duplicate {
                 value: Some(value), ..
@@ -1739,7 +1941,7 @@ mod tests {
     /// `US/10Y` is stored under `US10Y`'s folder, and `US^10Y` under
     /// `US_10Y`'s: Nautilus removes `/` and makes `^` `_`.
     #[test]
-    fn custom_data_of_an_identifier_stored_under_the_folder_of_one_listed_already_is_refused_under_its_later_listing()
+    fn a_custom_series_of_an_identifier_stored_under_the_folder_of_one_listed_already_is_refused_under_its_later_listing()
      {
         for (listed, again) in [("US10Y", "US/10Y"), ("US_10Y", "US^10Y")] {
             let keyed = |identifier: &str| {
@@ -1748,10 +1950,64 @@ mod tests {
                     &format!(r#"identifier = "{identifier}""#),
                 )
             };
-            let toml = with_custom(&format!("[{}, {}]", keyed(listed), keyed(again)));
+            let toml = with_custom(&[&keyed(listed), &keyed(again)]);
 
-            assert_eq!(error_fields(&toml), ["data.custom[1]"], "{again}");
+            assert_eq!(error_fields(&toml), ["data.series[4]"], "{again}");
         }
+    }
+
+    /// GC.GLBX's series is stored on GCZ26.GLBX under GCZ26.GLBX's folder
+    /// while GCZ26 stands for the root, as the series of GCZ26.GLBX listed
+    /// beside it of other metadata is, whichever comes first.
+    #[test]
+    fn a_root_s_custom_series_and_its_contract_s_of_other_metadata_are_refused_under_the_later_naming_both()
+     {
+        nautilus_serialization::ensure_custom_data_registered::<Signal>();
+        let root =
+            r#"{ data = "Custom:Signal", identifier = "GC.GLBX", metadata = { window = "5m" } }"#;
+        let contract = r#"{ data = "Custom:Signal", identifier = "GCZ26.GLBX" }"#;
+        for entries in [[root, contract], [contract, root]] {
+            let err = load(&with_custom(&entries)).unwrap_err();
+
+            assert_eq!(fields_of(&err), ["data.series[4]"], "{entries:?}");
+            let [
+                ConfigError::Duplicate {
+                    value: Some(value), ..
+                },
+            ] = &errors_of(&err)[..]
+            else {
+                panic!("not a duplicate naming the series: {err:?}");
+            };
+            assert!(
+                value.contains("data.series[3]")
+                    && value.contains("identifier=GC.GLBX")
+                    && value.contains("identifier=GCZ26.GLBX"),
+                "{value}"
+            );
+        }
+    }
+
+    /// GCZ26.GLBX's series of the root's metadata is the root's on GCZ26,
+    /// read once; GCV26 is no contract GC rolls through, so its folder is
+    /// its own whatever its metadata.
+    #[test]
+    fn a_contract_s_custom_series_beside_its_root_s_loads_if_it_is_the_root_s_on_it_or_one_it_never_rolls_through()
+     {
+        nautilus_serialization::ensure_custom_data_registered::<Signal>();
+        let root =
+            r#"{ data = "Custom:Signal", identifier = "GC.GLBX", metadata = { window = "5m" } }"#;
+        let on_it = r#"{ data = "Custom:Signal", identifier = "GCZ26.GLBX", metadata = { window = "5m" } }"#;
+        let unrolled = r#"{ data = "Custom:Signal", identifier = "GCV26.GLBX" }"#;
+
+        load(&with_custom(&[root, on_it, unrolled])).unwrap();
+    }
+
+    /// The same series twice is a series listed again, refused once.
+    #[test]
+    fn a_custom_series_listed_again_is_refused_once_under_its_later_listing() {
+        let err = load(&with_custom(&[US10Y, US10Y])).unwrap_err();
+
+        assert_eq!(fields_of(&err), ["data.series[4]"]);
     }
 
     #[test]
@@ -1808,13 +2064,13 @@ mod tests {
         assert_eq!(config.data.series.len(), 3);
     }
 
-    /// Depth, book deltas and custom data of an instrument traded give
-    /// Nautilus no price of it for a market order, and the latter two move
-    /// no L1 book: an instrument traded that only they read adds its
-    /// quotes, after the series' ticks.
+    /// Depth and book deltas of an instrument traded give Nautilus no
+    /// price of it for a market order, and deltas move no L1 book: an
+    /// instrument traded that only they read adds its quotes, after the
+    /// series' ticks.
     #[test]
-    fn a_traded_instrument_read_only_through_depth_deltas_or_custom_data_loads_its_quotes() {
-        for data in ["order_book_depths", "order_book_deltas", "Custom:Imbalance"] {
+    fn a_traded_instrument_read_only_through_depth_or_deltas_loads_its_quotes() {
+        for data in ["order_book_depths", "order_book_deltas"] {
             let toml = TOML.replace(
                 r#"{ data = "bars", instrument_id = "ESM24.CME", bar_spec = { step = 5, aggregation = "MINUTE", price_type = "BID" } },"#,
                 &format!(r#"{{ data = "{data}", instrument_id = "ESM24.CME" }},"#),
@@ -1834,6 +2090,37 @@ mod tests {
                 "{data}"
             );
         }
+    }
+
+    /// A custom series under an instrument traded's id, its custom data,
+    /// gives Nautilus no price of it either, and brings no instrument: an
+    /// instrument traded that only it reads adds its quotes, after the
+    /// series' ticks.
+    #[test]
+    fn a_traded_instrument_read_only_through_a_custom_series_under_its_id_loads_its_quotes() {
+        nautilus_serialization::ensure_custom_data_registered::<Signal>();
+        let toml = TOML.replace(
+            r#"{ data = "bars", instrument_id = "ESM24.CME", bar_spec = { step = 5, aggregation = "MINUTE", price_type = "BID" } },"#,
+            r#"{ data = "Custom:Signal", identifier = "ESM24.CME" },"#,
+        );
+
+        let requirements = load(&toml).unwrap().data_requirements();
+
+        let es = |data, instrument_id: &str| TickSeries {
+            data,
+            instrument_id: InstrumentId::from(instrument_id),
+        };
+        assert_eq!(
+            requirements.ticks,
+            [
+                es(NautilusDataType::TradeTick, "ESH24.CME"),
+                es(NautilusDataType::QuoteTick, "ESM24.CME"),
+            ]
+        );
+        assert_eq!(
+            requirements.custom,
+            [CustomSeries::new("Signal", "ESM24.CME".to_string(), None).unwrap()]
+        );
     }
 
     /// Each instrument traded is read by a series, its bars or its

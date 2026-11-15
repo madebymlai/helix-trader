@@ -73,18 +73,19 @@
 //! (`strategy::subscriptions::Subscriptions`) to the bars of its
 //! requirements and of its target's ATR (`TargetSetter::atr_bar_type`), a
 //! dataset run's targets' (`Targets::atr_bar_type`), which no strategy
-//! declares, to the features' tick series (`FeatureSet::ticks`, custom data
-//! among them) and to every other tick series of its data requirements,
+//! declares, to the features' tick series (`FeatureSet::ticks`) and to
+//! every other tick series of its data requirements,
 //! those of the traded instrument, which the harness reads for the
 //! decisions' freshness, its quotes among them when no series of the
 //! strategy reads it (`StandardConfig::data_requirements`, the decision's
 //! reference price, the venue's fills and the target's ATR then coming from
-//! them), and to the custom data of no instrument of its requirements
-//! (`DataRequirements::custom`), which reaches the strategy's `on_data`,
-//! and a `rolls::Roller` of the ticks' instruments: `start` subscribes
-//! each tick series on the contract standing for its instrument, a plain
-//! instrument once, a root on its front contract, and sets each root's
-//! roll alert; the strategy hands the handle its time events (after
+//! them), and to the custom series of its requirements
+//! (`DataRequirements::custom`), which reach the strategy's `on_data`,
+//! and a `rolls::Roller` of the ticks' instruments and of the custom
+//! series' roots (`Roller::custom_roots`): `start` subscribes each tick
+//! series and custom series on the contract standing for its instrument
+//! or root, a plain instrument, or a custom series of no root, once, a
+//! root on its front contract, and sets each root's roll alert; the strategy hands the handle its time events (after
 //! `strategy::orders::on_time_event`), for the roller. At a roll the
 //! root's series move to the post contract (`Subscriptions::roll`), and
 //! its features too, restarting (`FeatureSet::roll`), so decisions wait on
@@ -110,9 +111,10 @@
 //! no live tick reaches them before an older window of the history
 //! (`strategy::warmup`'s `hold`); in a replay they go straight through. Live, the warmup requests the history of
 //! every tick series of the requirements its venue's history serves, a
-//! root's on the contract standing for it, custom data from the catalog
-//! alone, added to the cache the features read it from
-//! (`FeatureSet::data`), and the subscriptions continue from its end, so
+//! root's on the contract standing for it, and of every custom series, of
+//! its type's live data client or the catalog alone, added to the cache
+//! the features read it from (`FeatureSetBuilder::custom`), and the
+//! subscriptions continue from its end, so
 //! the first decision after a start is warm. A series no feature
 //! reads, the traded instrument's or a conversion pair's, is warmed up
 //! too, so that the cache holds its latest price at the start, and its
@@ -164,6 +166,7 @@ use crate::{
     rolls::Roller,
     strategy::{
         orders::{self, Trade},
+        requirements::CustomSeries,
         risk::R,
         subscriptions::Subscriptions,
         warmup::{self, BookIndicator, Warmup},
@@ -353,7 +356,8 @@ impl ModelHandle {
         let roller = match mode {
             Mode::Live { .. } => Roller::live(instrument_ids),
             Mode::Backtest { .. } | Mode::Dataset { .. } => Roller::replayed(instrument_ids),
-        };
+        }
+        .custom_roots(requirements.custom.iter().filter_map(CustomSeries::root));
         let delay = warmup::bar_build_delay(&requirements.bar_types);
         let serving = match mode {
             Mode::Backtest { models } | Mode::Live { models } => {
@@ -419,8 +423,8 @@ impl ModelHandle {
     /// then the subscriptions (`Subscriptions::start`) to the bars, the
     /// target's ATR's among them, the features' ticks, every other tick
     /// series of the requirements, the traded instrument's and the
-    /// conversion pairs' quotes, and the requirements' custom data of no
-    /// instrument, from where the warmup ends, a root's ticks on the
+    /// conversion pairs' quotes, and the requirements' custom series, from
+    /// where the warmup ends, a root's ticks and custom series on the
     /// contract standing for it then, and the roller, which sets each root's roll alert; starts the target's
     /// ATR, if it has one, registering it for its bars (in a dataset run the
     /// targets', and collects the rows they settle); then starts the
@@ -771,7 +775,7 @@ mod tests {
         AtrArgs, Declared, EmaArgs, IndicatorsConfig,
         conversions::Conversions,
         orders::{Bracket, Exits},
-        requirements::{DataRequirements, TickSeries},
+        requirements::{CustomSeries, DataRequirements, TickSeries},
         risk::R,
     };
     use rust_decimal::Decimal;
@@ -2934,20 +2938,14 @@ mod tests {
         );
     }
 
-    /// Custom data of the traded AUD/USD, which no feature reads as a tick
-    /// series (`FeatureSet::ticks`), is a series of the requirements: the
-    /// start requests the hour of warmup of it from the catalog alone, as
-    /// it does a feature's.
+    /// Custom data of the traded AUD/USD, a custom series under its id
+    /// which no feature reads, is a series of the requirements: the start
+    /// requests the hour of warmup of it from the catalog alone, as it
+    /// does a feature's.
     #[test]
     fn a_live_start_requests_custom_data_of_the_traded_instrument_from_the_catalog() {
-        let imbalance = TickSeries {
-            data: NautilusDataType::Custom {
-                type_name: "Imbalance".to_string(),
-            },
-            instrument_id: InstrumentId::from(AUD),
-        };
-
-        let sent = started_live(features(), vec![], vec![aud_quotes(), imbalance]);
+        let (_probe, _handle, sent, _models) =
+            started_live_reading(features(), vec![aud_quotes()], vec![imbalance_series(AUD)]);
 
         assert_sent(
             &sent,
@@ -2995,16 +2993,6 @@ mod tests {
         pub ts_init: UnixNanos,
     }
 
-    /// The imbalances of `instrument_id`, custom data keyed by its id.
-    fn imbalances_of(instrument_id: &str) -> TickSeries {
-        TickSeries {
-            data: NautilusDataType::Custom {
-                type_name: "Imbalance".to_string(),
-            },
-            instrument_id: InstrumentId::from(instrument_id),
-        }
-    }
-
     /// The data type of the imbalances of `instrument_id`, keyed by its id.
     fn imbalance_type(instrument_id: &str) -> nautilus_model::data::DataType {
         nautilus_model::data::DataType::new("Imbalance", None, Some(instrument_id.to_string()))
@@ -3027,39 +3015,44 @@ mod tests {
         msgbus::subscriptions_count_any(get_custom_topic(&imbalance_type(instrument_id))).unwrap()
     }
 
-    /// A raw feature, the last imbalance of `instrument_id`.
-    fn last_imbalance(instrument_id: &str) -> Rc<FeatureSet> {
+    /// The value of an imbalance.
+    fn read_imbalance(data: &CustomData) -> f64 {
+        data.data
+            .as_any()
+            .downcast_ref::<Imbalance>()
+            .map_or(f64::NAN, |imbalance| imbalance.value)
+    }
+
+    /// The imbalances under `identifier`, a custom series, an
+    /// instrument's under its id.
+    fn imbalance_series(identifier: &str) -> CustomSeries {
+        CustomSeries::new("Imbalance", identifier.to_string(), None).unwrap()
+    }
+
+    /// A raw feature, the last imbalance under `identifier`.
+    fn last_imbalance(identifier: &str) -> Rc<FeatureSet> {
         FeatureSet::builder()
-            .data(
-                "Imbalance",
-                InstrumentId::from(instrument_id),
-                "imbalance",
-                |data| {
-                    data.data
-                        .as_any()
-                        .downcast_ref::<Imbalance>()
-                        .map_or(f64::NAN, |imbalance| imbalance.value)
-                },
-            )
+            .custom(&imbalance_series(identifier), "imbalance", read_imbalance)
             .build()
             .unwrap()
     }
 
     /// Live on 2026-08-10 at 14:30, with an hour of warmup, the model
-    /// strategy of `features` reading `ticks`, on `bracket_config`, whose
-    /// target has no ATR to warm, its warmup handed its historical custom
-    /// data, started: the probe, the handle and the data commands the start
-    /// sent.
+    /// strategy of `features` reading `ticks` and `custom`, on
+    /// `bracket_config`, whose target has no ATR to warm, its warmup handed
+    /// its historical custom data, started: the probe, the handle and the
+    /// data commands the start sent.
     fn started_live_reading(
         features: Rc<FeatureSet>,
         ticks: Vec<TickSeries>,
+        custom: Vec<CustomSeries>,
     ) -> (Decider, Rc<ModelHandle>, Vec<String>, tempfile::TempDir) {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = registered(at("2026-08-10T14:30:00Z"));
         let requirements = DataRequirements {
             bar_types: vec![],
             ticks,
-            custom: vec![],
+            custom,
             warmup: SignedDuration::from_hours(1),
         };
         let handle = ModelHandle::new(
@@ -3090,8 +3083,9 @@ mod tests {
         )
     }
 
-    /// Live on 2026-08-10 at 14:30, a feature on AUD/USD's imbalances,
-    /// custom data no data client serves: the start requests the hour of
+    /// Live on 2026-08-10 at 14:30, a feature on AUD/USD's imbalances, a
+    /// custom series under its id no data client serves, the catalog's:
+    /// the start requests the hour of
     /// warmup of them, ending now, naming the client `CATALOG`, which
     /// Nautilus answers from the catalog alone, and subscribes to them.
     /// Nautilus hands the answer's imbalances to the strategy's
@@ -3101,7 +3095,7 @@ mod tests {
     fn a_live_start_warms_a_custom_feature_from_the_catalog() {
         let features = last_imbalance(AUD);
         let (mut probe, _handle, sent, _models) =
-            started_live_reading(Rc::clone(&features), vec![imbalances_of(AUD)]);
+            started_live_reading(Rc::clone(&features), vec![], vec![imbalance_series(AUD)]);
         let cold = features.values();
 
         probe.handle_data_response(&catalog_answer(
@@ -3134,7 +3128,7 @@ mod tests {
     fn a_warmup_answer_older_than_a_live_point_leaves_it_the_latest() {
         let features = last_imbalance(AUD);
         let (mut probe, _handle, _sent, _models) =
-            started_live_reading(Rc::clone(&features), vec![imbalances_of(AUD)]);
+            started_live_reading(Rc::clone(&features), vec![], vec![imbalance_series(AUD)]);
         let live = imbalance(AUD, "2026-08-10T14:30:00Z", 0.1);
         probe.cache_rc().borrow_mut().add_custom_data(live);
 
@@ -3157,18 +3151,20 @@ mod tests {
         );
     }
 
-    /// Live on 2026-08-10 at 14:30, a feature on the imbalances of the
-    /// root GC reads GCZ26's, the contract standing for it (GC rolls into
-    /// GCZ26 on 2026-07-29, `rolls/README.md`): the start requests GCZ26's
-    /// over the hour of warmup from the catalog, subscribes to them, not
-    /// to the root's, and loads GCG27, the post contract of the next roll.
-    /// The answer's imbalance of GCZ26 makes the feature hold it.
+    /// Live on 2026-08-10 at 14:30, a feature on the imbalances under the
+    /// root GC's id reads GCZ26's, the contract standing for it (GC rolls
+    /// into GCZ26 on 2026-07-29, `rolls/README.md`): the start requests
+    /// GCZ26's over the hour of warmup from the catalog and subscribes to
+    /// them, not to the root's, and loads no contract of GC, a custom
+    /// series bringing no instrument. The answer's imbalance of GCZ26
+    /// makes the feature hold it.
     #[test]
     fn a_live_start_warms_a_custom_feature_on_a_root_on_its_front_contract() {
         let features = last_imbalance("GC.GLBX");
         let (mut probe, _handle, sent, _models) = started_live_reading(
             Rc::clone(&features),
-            vec![imbalances_of("GC.GLBX"), aud_quotes()],
+            vec![aud_quotes()],
+            vec![imbalance_series("GC.GLBX")],
         );
 
         probe.handle_data_response(&catalog_answer(
@@ -3181,12 +3177,13 @@ mod tests {
             &[
                 "request data Imbalance of Some(\"GCZ26.GLBX\") from CATALOG \
                  Some(2026-08-10T13:30:00Z)..Some(2026-08-10T14:30:00Z)",
-                "request instrument [GCG27.GLBX]",
                 "subscribe quotes [AUD/USD.SIM] from Some(2026-08-10T14:30:00Z)",
             ],
         );
         assert!(
-            !sent.iter().any(|line| line.contains("\"GC.GLBX\"")),
+            !sent
+                .iter()
+                .any(|line| line.contains("\"GC.GLBX\"") || line.starts_with("request instrument")),
             "{sent:#?}"
         );
         assert_eq!(
@@ -3199,24 +3196,28 @@ mod tests {
         assert_eq!(features.values(), Some(vec![0.75]));
     }
 
-    /// A feature on the imbalances of the root GC, in a backtest from
-    /// 2026-11-25 at 23:00, reads GCZ26's, the contract standing for it,
-    /// not GCG27's, each as the data engine caches it. GC rolls into GCG27
-    /// at 00:00 UTC on 2026-11-26: the roll's alert, handed to the handle,
-    /// moves the subscription to GCG27's, and the feature reads GCG27's
-    /// latest imbalance the cache holds from then, the one of 23:20, then
-    /// later ones, not GCZ26's.
+    /// A raw feature over the custom series of GC's imbalances, the root's,
+    /// in a backtest from 2026-11-25 at 23:00, the strategy reading no tick
+    /// of GC, reads GCZ26's, the contract standing for it, not GCG27's. GC
+    /// rolls into GCG27 at 00:00 UTC on 2026-11-26: the handle's roller
+    /// rolls the series' root, and the roll's alert moves the subscription
+    /// to GCG27's and the feature onto GCG27's latest imbalance the cache
+    /// holds, the one of 23:20, then later ones, not GCZ26's.
     #[test]
-    fn a_custom_feature_on_a_root_reads_each_contract_in_turn_from_the_cache() {
+    fn a_feature_on_a_roots_custom_series_reads_each_contract_in_turn_from_the_cache() {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, clock) = registered(at("2026-11-25T23:00:00Z"));
+        let series = imbalance_series("GC.GLBX");
         let requirements = DataRequirements {
             bar_types: vec![],
-            ticks: vec![imbalances_of("GC.GLBX"), aud_quotes()],
-            custom: vec![],
+            ticks: vec![aud_quotes()],
+            custom: vec![series.clone()],
             warmup: SignedDuration::ZERO,
         };
-        let features = last_imbalance("GC.GLBX");
+        let features = FeatureSet::builder()
+            .custom(&series, "imbalance", read_imbalance)
+            .build()
+            .unwrap();
         let handle = ModelHandle::new(
             &blueprint_of(&features, &config(), requirements),
             Mode::Backtest {
@@ -3238,22 +3239,22 @@ mod tests {
             &probe,
             imbalance("GCG27.GLBX", "2026-11-25T23:20:00Z", 0.75),
         );
+        let subscribed = (
+            imbalance_subscribers("GCZ26.GLBX"),
+            imbalance_subscribers("GCG27.GLBX"),
+        );
         run_to(&handle, &mut probe, &clock, "2026-11-26T00:30:00Z");
         let rolled = features.values();
         let pre_after_the_roll = read(
             &probe,
             imbalance("GCZ26.GLBX", "2026-11-26T00:40:00Z", -0.25),
         );
-        let post = read(
-            &probe,
-            imbalance("GCG27.GLBX", "2026-11-26T00:50:00Z", -0.75),
-        );
 
+        assert_eq!(subscribed, (1, 0));
         assert_eq!(pre, Some(vec![0.25]));
         assert_eq!(post_before_the_roll, Some(vec![0.25]));
         assert_eq!(rolled, Some(vec![0.75]));
         assert_eq!(pre_after_the_roll, Some(vec![0.75]));
-        assert_eq!(post, Some(vec![-0.75]));
         assert_eq!(
             (
                 imbalance_subscribers("GCZ26.GLBX"),
@@ -3263,21 +3264,21 @@ mod tests {
         );
     }
 
-    /// The data type of the yields of `symbol`, custom data of no
-    /// instrument keyed by its identifier.
+    /// The data type of the yields of `symbol`, keyed by its identifier.
     fn yields(symbol: &str) -> nautilus_model::data::DataType {
         nautilus_model::data::DataType::new("Yield", None, Some(symbol.to_string()))
     }
 
-    /// The custom data of no instrument of the requirements, the 10-year
-    /// and the 2-year US yields, is subscribed at a backtest's start
-    /// through the handle's subscriptions, on the message bus alone, so the
-    /// strategy's `on_data` gets it without subscribing itself.
+    /// The custom series of the requirements, the 10-year and the 2-year
+    /// US yields, are subscribed at a backtest's start through the
+    /// handle's subscriptions, on the message bus alone, so the strategy's
+    /// `on_data` gets them without subscribing itself.
     #[test]
-    fn a_backtests_start_subscribes_the_custom_data_of_no_instrument_of_its_requirements() {
+    fn a_backtests_start_subscribes_the_custom_series_of_its_requirements() {
         let models = tempfile::tempdir().unwrap();
+        let series = |symbol: &str| CustomSeries::new("Yield", symbol.to_string(), None).unwrap();
         let requirements = DataRequirements {
-            custom: vec![yields("US10Y"), yields("US02Y")],
+            custom: vec![series("US10Y"), series("US02Y")],
             ..requirements()
         };
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));

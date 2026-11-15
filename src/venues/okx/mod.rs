@@ -159,9 +159,8 @@ async fn write_definitions(
 /// bars of the LAST price at a width OKX has a candle of
 /// (`bar_spec_as_okx_channel`, the widths the client asks the candles
 /// endpoint in). The client asks for trade-price candles whatever price a
-/// bar type names, so it serves no other price, and it requests no quotes,
-/// no book and no custom data of an instrument (Nautilus' `DataClient`
-/// defaults refuse them).
+/// bar type names, so it serves no other price, and it requests no quotes
+/// and no book (Nautilus' `DataClient` defaults refuse them).
 ///
 /// # Errors
 ///
@@ -178,12 +177,6 @@ pub(super) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
             data: NautilusDataType::TradeTick,
             ..
         }) => {}
-        CatalogSeries::Ticks(
-            ticks @ TickSeries {
-                data: NautilusDataType::Custom { .. },
-                ..
-            },
-        ) => bail!("OKX's history serves no custom data of an instrument, so not the {ticks}"),
         CatalogSeries::Ticks(ticks) => {
             bail!("OKX's history serves its trades and its candles, not the {ticks}")
         }

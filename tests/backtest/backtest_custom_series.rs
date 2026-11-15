@@ -1,6 +1,6 @@
-//! A strategy reading LSE's daily bond yields, custom data of no instrument
-//! (`lse::LseRow`), declared in its config's `[data].custom` under the
-//! identifier `TREASURY-10Y`, which it chooses, not the symbol, and filled
+//! A strategy reading LSE's daily bond yields (`lse::LseRow`), a custom
+//! series of its config's `[data] series` under the identifier
+//! `TREASURY-10Y`, which it chooses, not the symbol, and filled
 //! into the catalog under it through fill-catalog's node fill from a mock
 //! LSE peer replaying a
 //! captured export (`lse::testing`): US10Y's rows of 9, 10 and 12 November
@@ -10,10 +10,11 @@
 //! of its window to the strategy, each of the data type it is subscribed
 //! to, when it is known: to a probe subscribing itself, and to one whose
 //! subscriptions (`strategy::subscriptions`) subscribe it, as a
-//! strategy's do. The fill and the run each on a thread of its own, one
-//! node per thread. A config naming that identifier with other metadata
-//! fails the run naming both data types, rather than replay rows under a
-//! data type its strategy is not subscribed to.
+//! strategy's do; and a raw feature of a model's features over the series
+//! reads each row from Nautilus' cache. The fill and the run each on a
+//! thread of its own, one node per thread. A config naming that identifier
+//! with other metadata fails the run naming both data types, rather than
+//! replay rows under a data type its strategy is not subscribed to.
 
 use std::{cell::RefCell, path::Path, rc::Rc};
 
@@ -21,7 +22,11 @@ use crate::common::ic;
 use helix_trader::{
     backtest::Backtest,
     catalog::{NodeClient, NodeFill, missing_custom},
-    strategy::{Part, Series, StandardConfig, subscriptions::Subscriptions},
+    model::features::FeatureSet,
+    strategy::{
+        Part, Series, StandardConfig, requirements::CustomSeries, subscriptions::Subscriptions,
+    },
+    venues,
 };
 use jiff::Timestamp;
 use lse::{
@@ -29,7 +34,7 @@ use lse::{
     testing::{API_KEY, MockLse, REFERENCE_CATALOGUE, Reply, US10Y_BOND_YIELDS},
 };
 use nautilus_common::{actor::DataActor, config::ConfigResult};
-use nautilus_core::{UnixNanos, string::secret::SecretString};
+use nautilus_core::{Params, UnixNanos, string::secret::SecretString};
 use nautilus_model::{
     data::{CustomData, CustomDataTrait, Data, DataType},
     identifiers::StrategyId,
@@ -71,13 +76,18 @@ impl Part for Reader {
 const TREASURY: &str = "TREASURY-10Y";
 
 /// The daily bond yields of `symbol` as a config declares them, under the
-/// identifier `TREASURY`: the one data type of its `[data].custom`.
-fn declared(symbol: &str) -> DataType {
+/// identifier `TREASURY`: the one custom series of its `[data] series`,
+/// loaded after registering the custom data types helix compiles, as the
+/// process does at its start.
+fn declared(symbol: &str) -> CustomSeries {
+    venues::register_custom_data();
     let config: StandardConfig<Reader> = StandardConfig::load(&format!(
         r#"
         [data]
-        series = [{{ data = "quotes", instrument_id = "{gold}" }}]
-        custom = [{{ type_name = "LseRow", identifier = "{TREASURY}", metadata = {{ source = "bond_yields", symbol = "{symbol}" }} }}]
+        series = [
+            {{ data = "quotes", instrument_id = "{gold}" }},
+            {{ data = "Custom:LseRow", identifier = "{TREASURY}", metadata = {{ source = "bond_yields", symbol = "{symbol}" }} }},
+        ]
         warmup = "1h"
 
         [trade]
@@ -87,13 +97,26 @@ fn declared(symbol: &str) -> DataType {
         gold = ic::INSTRUMENT_ID,
     ))
     .unwrap();
-    let [data_type] = <[DataType; 1]>::try_from(config.data_requirements().custom).unwrap();
-    data_type
+    let [series] = <[CustomSeries; 1]>::try_from(config.data_requirements().custom).unwrap();
+    series
 }
 
 /// US10Y's daily bond yields, the series filled.
-fn us10y() -> DataType {
+fn us10y() -> CustomSeries {
     declared("US10Y")
+}
+
+/// The data type of US10Y's daily bond yields under `TREASURY`, as
+/// Nautilus builds it.
+fn us10y_type() -> DataType {
+    let metadata = Params::new(
+        [
+            ("source".to_string(), json!("bond_yields")),
+            ("symbol".to_string(), json!("US10Y")),
+        ]
+        .into(),
+    );
+    DataType::new("LseRow", Some(metadata), Some(TREASURY.to_string()))
 }
 
 /// Fills the catalog in `dir` with `us10y()` over the rows of the
@@ -104,9 +127,7 @@ fn fill_bond_yields(dir: &Path) {
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     let requests = missing_custom(
         &catalog,
-        &[us10y()],
-        november("10T00:00:00"),
-        november("13T00:00:00"),
+        &us10y().slices(november("10T00:00:00"), november("13T00:00:00")),
     )
     .unwrap();
     let lse = MockLse::start(vec![
@@ -174,7 +195,7 @@ nautilus_strategy!(Probe);
 
 impl DataActor for Probe {
     fn on_start(&mut self) -> anyhow::Result<()> {
-        self.subscribe_data(us10y(), None, None);
+        self.subscribe_data(us10y_type(), None, None);
         Ok(())
     }
 
@@ -220,7 +241,7 @@ fn a_fill_stores_the_rows_under_the_identifier_the_config_names() {
         .join()
         .unwrap();
 
-    LseRow::register();
+    venues::register_custom_data();
     let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
     let stored = catalog
         .query_custom_data_dynamic(
@@ -245,7 +266,7 @@ fn a_fill_stores_the_rows_under_the_identifier_the_config_names() {
         .collect();
     assert_eq!(
         closes,
-        [json!(4.884), json!(5.0), json!(5.133)].map(|close| (us10y(), close))
+        [json!(4.884), json!(5.0), json!(5.133)].map(|close| (us10y_type(), close))
     );
 }
 
@@ -291,7 +312,7 @@ fn a_backtest_of_rows_stored_under_other_metadata_fails_naming_both() {
     .unwrap();
 
     let err = format!("{err:#}");
-    for named in [us02y, us10y()] {
+    for named in [us02y.data_type().clone(), us10y_type()] {
         assert!(err.contains(&named.to_string()), "{named}: {err}");
     }
 }
@@ -317,16 +338,16 @@ fn a_bond_yield_of_a_date_reaches_the_strategy_at_the_date_s_end() {
     .unwrap();
 
     let thirteenth = UnixNanos::from(november("13T00:00:00"));
-    assert_eq!(got, [(us10y(), thirteenth, json!(5.133), thirteenth)]);
+    assert_eq!(got, [(us10y_type(), thirteenth, json!(5.133), thirteenth)]);
 }
 
-/// A strategy's subscriptions of the backtest's custom data, as a strategy
-/// builds them of its data requirements (`DataRequirements::custom`,
-/// `[data].custom`), subscribe it to the series: its `on_data` gets the
-/// 12th's close at the 13th's 00:00, though it subscribes to nothing
-/// itself.
+/// A strategy's subscriptions of the backtest's custom series, as a
+/// strategy builds them of its data requirements
+/// (`DataRequirements::custom`), subscribe it to the series: its `on_data`
+/// gets the 12th's close at the 13th's 00:00, though it subscribes to
+/// nothing itself.
 #[test]
-fn a_strategy_gets_the_custom_data_of_no_instrument_through_its_subscriptions() {
+fn a_strategy_gets_a_custom_series_through_its_subscriptions() {
     let (_catalog, backtest) = bond_yields_backtest();
 
     let got = std::thread::spawn(move || {
@@ -343,5 +364,63 @@ fn a_strategy_gets_the_custom_data_of_no_instrument_through_its_subscriptions() 
     .unwrap();
 
     let thirteenth = UnixNanos::from(november("13T00:00:00"));
-    assert_eq!(got, [(us10y(), thirteenth, json!(5.133), thirteenth)]);
+    assert_eq!(got, [(us10y_type(), thirteenth, json!(5.133), thirteenth)]);
+}
+
+/// Registers a raw feature on the 10-year yields' closes at its start,
+/// subscribes to them, and records the feature's values at each row it
+/// gets.
+#[derive(Debug)]
+struct Featured {
+    core: StrategyCore,
+    features: Rc<FeatureSet>,
+    read: Rc<RefCell<Vec<Option<Vec<f64>>>>>,
+}
+
+nautilus_strategy!(Featured);
+
+impl DataActor for Featured {
+    fn on_start(&mut self) -> anyhow::Result<()> {
+        Rc::clone(&self.features).register(self);
+        self.subscribe_data(us10y_type(), None, None);
+        Ok(())
+    }
+
+    fn on_data(&mut self, _data: &CustomData) -> anyhow::Result<()> {
+        self.read.borrow_mut().push(self.features.values());
+        Ok(())
+    }
+}
+
+/// A model's raw feature over the custom series reads the 12th's close,
+/// replayed at the 13th's 00:00, from the cache, where the data engine
+/// put it before the strategy's handler, with no strategy code.
+#[test]
+fn a_raw_feature_over_a_custom_series_reads_each_replayed_row_from_the_cache() {
+    let (_catalog, backtest) = bond_yields_backtest();
+
+    let read = std::thread::spawn(move || {
+        let features = FeatureSet::builder()
+            .custom(&us10y(), "close", |data| {
+                data.data
+                    .as_any()
+                    .downcast_ref::<LseRow>()
+                    .and_then(|row| row.fields["close"].as_f64())
+                    .unwrap_or(f64::NAN)
+            })
+            .build()
+            .unwrap();
+        let read = Rc::new(RefCell::new(Vec::new()));
+        let featured = Featured {
+            core: core(),
+            features,
+            read: Rc::clone(&read),
+        };
+        backtest.run(featured).unwrap();
+        read.take()
+    })
+    .join()
+    .unwrap();
+
+    assert_eq!(read, [Some(vec![5.133])]);
 }

@@ -1,6 +1,7 @@
 //! A strategy whose config reads the instrument it trades only through
-//! data that gives Nautilus no market price for it, its custom data, its
-//! book deltas or its depth: the data requirements of its config
+//! data that gives Nautilus no market price for it, its custom data (a
+//! custom series under its id, which brings no instrument), its book
+//! deltas or its depth: the data requirements of its config
 //! (`StandardConfig::data_requirements`) still replay the instrument's
 //! quotes, so its market order on IC's gold (`common::ic`) is not denied
 //! for want of a price, nor of the instrument, and fills. One node per
@@ -51,12 +52,16 @@ impl Part for Reader {
     }
 }
 
-/// The config trading IC's gold, reading it through `data` alone.
-fn config(data: &str) -> StandardConfig<Reader> {
+/// The config trading IC's gold, reading it through `data` alone, keyed
+/// by `key`, `instrument_id` or, of custom data, `identifier`. A custom
+/// type loads once registered, as the process registers those it compiles
+/// at its start: `Imbalance` here.
+fn config(data: &str, key: &str) -> StandardConfig<Reader> {
+    nautilus_serialization::ensure_custom_data_registered::<glbx::Imbalance>();
     StandardConfig::load(&format!(
         r#"
         [data]
-        series = [{{ data = "{data}", instrument_id = "{gold}" }}]
+        series = [{{ data = "{data}", {key} = "{gold}" }}]
         warmup = "1h"
 
         [trade]
@@ -212,6 +217,7 @@ fn positions(catalog: &tempfile::TempDir, config: &StandardConfig<Reader>, reads
     let backtest = Backtest {
         bar_types: requirements.bar_types,
         ticks: requirements.ticks,
+        custom: requirements.custom,
         ..ic::backtest(catalog)
     };
     let bought = Rc::new(RefCell::new(false));
@@ -231,7 +237,11 @@ fn a_traded_instrument_read_only_through_its_custom_data_fills_its_orders() {
     let catalog = ic::catalog();
     store_imbalances(&catalog);
 
-    let opened = positions(&catalog, &config("Custom:Imbalance"), Reads::Imbalances);
+    let opened = positions(
+        &catalog,
+        &config("Custom:Imbalance", "identifier"),
+        Reads::Imbalances,
+    );
 
     assert_eq!(opened, 1);
 }
@@ -241,7 +251,11 @@ fn a_traded_instrument_read_only_through_its_book_deltas_fills_its_orders() {
     let catalog = ic::catalog();
     store_deltas(&catalog);
 
-    let opened = positions(&catalog, &config("order_book_deltas"), Reads::Deltas);
+    let opened = positions(
+        &catalog,
+        &config("order_book_deltas", "instrument_id"),
+        Reads::Deltas,
+    );
 
     assert_eq!(opened, 1);
 }
@@ -251,7 +265,11 @@ fn a_traded_instrument_read_only_through_its_depth_fills_its_orders() {
     let catalog = ic::catalog();
     store_depth(&catalog);
 
-    let opened = positions(&catalog, &config("order_book_depths"), Reads::Depth);
+    let opened = positions(
+        &catalog,
+        &config("order_book_depths", "instrument_id"),
+        Reads::Depth,
+    );
 
     assert_eq!(opened, 1);
 }

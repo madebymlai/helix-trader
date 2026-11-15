@@ -3,8 +3,8 @@
 //! depth snapshots of 10 levels a side keyed by its id, its trades, no
 //! quotes. Here a few snapshots and trades on Wednesday 21 October 2026,
 //! the day of `common::ic`; and its book deltas, as Databento's MBO fills
-//! the catalog with them, and custom data of it, `Imbalance`, a type of
-//! the tests'; and, apart, its quotes, as LSE streams CME Globex's Level
+//! the catalog with them, and custom data under its id, `Imbalance`, a
+//! type of the tests'; and, apart, its quotes, as LSE streams CME Globex's Level
 //! 1, for a run trading it.
 
 use std::{path::Path, sync::Arc};
@@ -220,11 +220,17 @@ pub fn imbalances() -> Vec<Imbalance> {
 /// 12:00. Registers `Imbalance` with Nautilus first, as any reader of it
 /// must.
 pub fn store_imbalances(dir: &Path) {
+    store_imbalances_as(dir, &imbalance_type());
+}
+
+/// Writes `imbalances()` into the catalog in `dir` as `data_type`, stored
+/// under its identifier over 08:00 to 12:00, as `store_imbalances` does.
+pub fn store_imbalances_as(dir: &Path, data_type: &DataType) {
     nautilus_serialization::ensure_custom_data_registered::<Imbalance>();
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     let data: Vec<CustomData> = imbalances()
         .into_iter()
-        .map(|imbalance| CustomData::new(Arc::new(imbalance), imbalance_type()))
+        .map(|imbalance| CustomData::new(Arc::new(imbalance), data_type.clone()))
         .collect();
     catalog
         .write_custom_data_batch(

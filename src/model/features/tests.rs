@@ -148,27 +148,28 @@ impl nautilus_model::data::CustomDataTrait for Level {
     }
 }
 
-/// The data type of the levels of `instrument`, keyed by its id.
-fn level_type(instrument: &str) -> DataType {
-    DataType::new("Level", None, Some(instrument.to_string()))
+/// The levels of `instrument`, a custom series of no metadata under its
+/// id, as Nautilus' Databento client keys its custom data of an
+/// instrument.
+fn level_series(instrument: &str) -> CustomSeries {
+    CustomSeries::new("Level", instrument.to_string(), None).unwrap()
 }
 
-/// A level of `instrument`.
+/// A level of `instrument`, under its id.
 fn level(instrument: &str, level: f64) -> CustomData {
-    point(&level_type(instrument), level)
+    point(level_series(instrument).data_type(), level)
 }
 
-/// The data type of the levels of no instrument from `source`, under
-/// `identifier`, as `[data].custom` gives one.
-fn levels(source: &str, identifier: &str) -> DataType {
-    of_no_instrument("Level", source, identifier)
+/// The custom series of the levels from `source`, under `identifier`, as
+/// `[data] series` gives one.
+fn levels(source: &str, identifier: &str) -> CustomSeries {
+    custom_series("Level", source, identifier)
 }
 
-/// The data type `type_name` of no instrument from `source`, under
-/// `identifier`.
-fn of_no_instrument(type_name: &str, source: &str, identifier: &str) -> DataType {
+/// The custom series of `type_name` from `source`, under `identifier`.
+fn custom_series(type_name: &str, source: &str, identifier: &str) -> CustomSeries {
     let metadata = Params::new([("source".to_string(), serde_json::json!(source))].into());
-    DataType::new(type_name, Some(metadata), Some(identifier.to_string()))
+    CustomSeries::new(type_name, identifier.to_string(), Some(metadata)).unwrap()
 }
 
 /// A level of `data_type`.
@@ -255,7 +256,7 @@ fn the_names_keep_the_order_of_their_declaration() {
 
     let features = FeatureSet::builder()
         .bars(BarType::from(AUD_BARS), TWO, &tables)
-        .data("Level", id(AUD), "level", read_level)
+        .custom(&level_series(AUD), "level", read_level)
         .quotes(id(AUD), LAST, &tables)
         .build()
         .unwrap();
@@ -450,12 +451,13 @@ fn cached(probe: &Probe, data: CustomData) {
 }
 
 /// Cold before the set is registered, whatever the cache holds; then the
-/// latest level of AUD/USD the cache holds, another instrument's not read.
+/// latest level under AUD/USD's id the cache holds, from one cached before
+/// the registration on, another instrument's not read.
 #[test]
 fn a_raw_feature_reads_the_latest_point_of_its_data_type_in_the_cache() {
     let mut probe = registered();
     let features = FeatureSet::builder()
-        .data("Level", id(AUD), "level", read_level)
+        .custom(&level_series(AUD), "level", read_level)
         .build()
         .unwrap();
     cached(&probe, level(AUD, 0.5));
@@ -478,26 +480,81 @@ fn a_raw_feature_reads_the_latest_point_of_its_data_type_in_the_cache() {
 /// a point of its data type, a point of another identifier not read; then
 /// the latest point of its data type the cache holds.
 #[test]
-fn a_raw_feature_of_no_instrument_reads_the_latest_point_of_its_data_type_in_the_cache() {
+fn a_raw_feature_of_a_custom_series_reads_the_latest_point_of_its_data_type_in_the_cache() {
     let mut probe = registered();
     let yields = levels("yields", "US10Y");
     let features = FeatureSet::builder()
         .custom(&yields, "yield", read_level)
         .build()
         .unwrap();
+    let of = |identifier: &str| {
+        let metadata = Params::new([("source".to_string(), serde_json::json!("yields"))].into());
+        DataType::new("Level", Some(metadata), Some(identifier.to_string()))
+    };
 
     let unregistered = features.values();
     features.register(&mut probe);
     let on_register = features.values();
-    cached(&probe, point(&levels("yields", "US2Y"), 9.0));
+    cached(&probe, point(&of("US2Y"), 9.0));
     let after_another = features.values();
-    cached(&probe, point(&yields, 1.5));
-    cached(&probe, point(&yields, 2.5));
+    cached(&probe, point(&of("US10Y"), 1.5));
+    cached(&probe, point(&of("US10Y"), 2.5));
 
     assert_eq!(unregistered, None);
     assert_eq!(on_register, None);
     assert_eq!(after_another, None);
     assert_eq!(features.values(), Some(vec![2.5]));
+}
+
+/// The levels from `yields` under `identifier`, as the cache keys them.
+fn yields_type(identifier: &str) -> DataType {
+    levels("yields", identifier).data_type().clone()
+}
+
+/// The values of a raw feature over the levels from `yields` under
+/// `identifier`, registered on 2026-11-25 at 23:00, when GCZ26 stands for
+/// the root GC, then handed GC's roll into GCG27 at 00:00 UTC on
+/// 2026-11-26 (`rolls/README.md`): after GCZ26's and GCG27's levels are
+/// cached before the roll, after the roll, and after another of GCZ26's.
+fn levels_across_the_roll(identifier: &str) -> [Option<Vec<f64>>; 3] {
+    let start: jiff::Timestamp = "2026-11-25T23:00:00Z".parse().unwrap();
+    let mut probe = registered_at(start.into());
+    let features = FeatureSet::builder()
+        .custom(&levels("yields", identifier), "level", read_level)
+        .build()
+        .unwrap();
+    features.register(&mut probe);
+    cached(&probe, point(&yields_type("GCZ26.GLBX"), 0.25));
+    cached(&probe, point(&yields_type("GCG27.GLBX"), 0.75));
+    let before_the_roll = features.values();
+
+    let roll = Transition::after(id("GC.GLBX"), start).unwrap();
+    features.roll(&mut probe, &roll);
+    let rolled = features.values();
+    cached(&probe, point(&yields_type("GCZ26.GLBX"), -0.25));
+
+    [before_the_roll, rolled, features.values()]
+}
+
+/// A raw feature over a custom series on the root GC reads the latest
+/// point of the contract standing for it, GCZ26's, the root's own data
+/// type keying none; at the roll it moves to GCG27's, the post contract's
+/// latest it reads at once, and no later point of GCZ26 reaches it.
+#[test]
+fn a_raw_feature_of_a_roots_custom_series_reads_the_contract_in_front_and_moves_at_its_roll() {
+    assert_eq!(
+        levels_across_the_roll("GC.GLBX"),
+        [Some(vec![0.25]), Some(vec![0.75]), Some(vec![0.75])]
+    );
+}
+
+/// GCZ26's own series stands for itself: the roll of GC moves it not.
+#[test]
+fn a_raw_feature_of_a_contracts_custom_series_is_not_moved_by_its_roots_roll() {
+    assert_eq!(
+        levels_across_the_roll("GCZ26.GLBX"),
+        [Some(vec![0.25]), Some(vec![0.25]), Some(vec![-0.25])]
+    );
 }
 
 /// `update` made at `ns`.
@@ -535,11 +592,13 @@ fn an_instruments_last_update_is_the_latest_a_feature_read_of_any_kind() {
     );
 }
 
+/// A custom series under an instrument's id is no update of the
+/// instrument: it brings none.
 #[test]
 fn an_update_no_feature_reads_and_custom_data_are_no_update_of_an_instrument() {
     let features = FeatureSet::builder()
         .quotes(id(AUD), LAST, &tables())
-        .data("Level", id(AUD), "level", read_level)
+        .custom(&level_series(AUD), "level", read_level)
         .build()
         .unwrap();
 
@@ -554,16 +613,16 @@ fn an_update_no_feature_reads_and_custom_data_are_no_update_of_an_instrument() {
 }
 
 /// A strategy subscribes these and a live warmup requests them: each kind of
-/// tick or custom data of each instrument once, in the order declared, and
-/// no bars.
+/// tick of each instrument once, in the order declared, and no bars, nor
+/// the custom series under an instrument's id a raw feature reads.
 #[test]
-fn a_sets_ticks_are_those_of_its_tick_and_raw_features_each_once() {
+fn a_sets_ticks_are_those_of_its_tick_features_each_once() {
     let tables = tables();
     let features = FeatureSet::builder()
         .bars(BarType::from(AUD_BARS), LAST, &tables)
         .trades(id(GBP), LAST, &tables)
         .quotes(id(AUD), LAST, &tables)
-        .data("Level", id(AUD), "level", read_level)
+        .custom(&level_series(AUD), "level", read_level)
         .quotes(id(AUD), TWO, &tables)
         .depth(id(AUD), BOOK, &tables)
         .deltas(id(GBP), BOOK, &tables)
@@ -579,42 +638,32 @@ fn a_sets_ticks_are_those_of_its_tick_and_raw_features_each_once() {
         [
             tick(NautilusDataType::TradeTick, GBP),
             tick(NautilusDataType::QuoteTick, AUD),
-            tick(
-                NautilusDataType::Custom {
-                    type_name: "Level".to_string()
-                },
-                AUD
-            ),
             tick(NautilusDataType::OrderBookDepth, AUD),
             tick(NautilusDataType::OrderBookDelta, GBP),
         ]
     );
 }
 
-/// A model strategy's `[data].custom` lists these: each data type of no
-/// instrument a raw feature reads once, in the order declared; none is a
-/// tick series, which is of an instrument.
+/// A model strategy reads these (`model::reads`): each custom series a raw
+/// feature reads once, in the order declared, one under an instrument's
+/// id among them; none is a tick series.
 #[test]
-fn a_sets_custom_data_are_the_data_types_of_its_raw_features_of_no_instrument_each_once() {
-    let (us10y, us2y) = (levels("yields", "US10Y"), levels("yields", "US2Y"));
+fn a_sets_custom_series_are_those_of_its_raw_features_each_once() {
+    let (us10y, us2y, aud) = (
+        levels("yields", "US10Y"),
+        levels("yields", "US2Y"),
+        level_series(AUD),
+    );
     let features = FeatureSet::builder()
         .custom(&us2y, "2y", read_level)
-        .data("Level", id(AUD), "aud", read_level)
+        .custom(&aud, "aud", read_level)
         .custom(&us10y, "10y", read_level)
         .custom(&us2y, "2y again", read_level)
         .build()
         .unwrap();
 
-    assert_eq!(features.custom(), [us2y, us10y]);
-    assert_eq!(
-        features.ticks(),
-        [TickSeries {
-            data: NautilusDataType::Custom {
-                type_name: "Level".to_string()
-            },
-            instrument_id: id(AUD),
-        }]
-    );
+    assert_eq!(features.custom(), [us2y, aud, us10y]);
+    assert_eq!(features.ticks(), []);
 }
 
 /// The bars of AUD's mids read by two features, its bids by one: each bar
@@ -684,8 +733,8 @@ fn a_negative_warmup_is_an_error() {
 /// feature has no table, so its name and the series it reads are in it.
 fn fingerprint(names: [&str; 2], version: u32) -> Fingerprint {
     FeatureSet::builder()
-        .data("Level", id(AUD), names[0], read_level)
-        .data("Level", id(GBP), names[1], read_level)
+        .custom(&level_series(AUD), names[0], read_level)
+        .custom(&level_series(GBP), names[1], read_level)
         .version(version)
         .build()
         .unwrap()
@@ -708,30 +757,14 @@ fn the_fingerprint_changes_with_a_name_their_order_or_the_version() {
     assert_ne!(fingerprint(["ab", "c"], 1), fingerprint(["a", "bc"], 1));
 }
 
-/// A raw feature's name is the strategy's: what it reads is in the
-/// fingerprint besides, the type name and the instrument of its data.
+/// Pointed at another series, a raw feature of a custom series rebuilds
+/// the dataset and the models: its data type's identifier, metadata and
+/// type name are in the fingerprint beside its name.
 #[test]
-fn the_fingerprint_changes_with_the_custom_data_a_raw_feature_reads() {
-    let reading = |type_name: &str, instrument: &str| {
+fn the_fingerprint_changes_with_the_custom_series_a_raw_feature_reads() {
+    let reading = |series: CustomSeries| {
         FeatureSet::builder()
-            .data(type_name, id(instrument), "level", read_level)
-            .build()
-            .unwrap()
-            .fingerprint()
-    };
-
-    assert_ne!(reading("Level", GBP), reading("Level", AUD));
-    assert_ne!(reading("Depth", AUD), reading("Level", AUD));
-}
-
-/// Pointed at another series, a raw feature of no instrument rebuilds the
-/// dataset and the models: its data type's identifier, metadata and type
-/// name are in the fingerprint beside its name.
-#[test]
-fn the_fingerprint_changes_with_the_data_type_a_raw_feature_of_no_instrument_reads() {
-    let reading = |data_type: DataType| {
-        FeatureSet::builder()
-            .custom(&data_type, "yield", read_level)
+            .custom(&series, "yield", read_level)
             .build()
             .unwrap()
             .fingerprint()
@@ -741,15 +774,15 @@ fn the_fingerprint_changes_with_the_data_type_a_raw_feature_of_no_instrument_rea
     assert_eq!(base, reading(levels("yields", "US10Y")));
     assert_ne!(base, reading(levels("yields", "US2Y")));
     assert_ne!(base, reading(levels("rates", "US10Y")));
-    assert_ne!(base, reading(of_no_instrument("Depth", "yields", "US10Y")));
+    assert_ne!(base, reading(custom_series("Depth", "yields", "US10Y")));
 }
 
 /// A set without a version is of version 0, as one given it.
 #[test]
 fn a_set_without_a_version_is_of_version_nought() {
     let unversioned = FeatureSet::builder()
-        .data("Level", id(AUD), "a", read_level)
-        .data("Level", id(GBP), "b", read_level)
+        .custom(&level_series(AUD), "a", read_level)
+        .custom(&level_series(GBP), "b", read_level)
         .build()
         .unwrap()
         .fingerprint();
@@ -778,6 +811,11 @@ nautilus_strategy!(Probe);
 impl DataActor for Probe {}
 
 fn registered() -> Probe {
+    registered_at(UnixNanos::default())
+}
+
+/// A probe registered as `registered`'s, its clock at `now`.
+fn registered_at(now: UnixNanos) -> Probe {
     let mut probe = Probe {
         core: StrategyCore::new(StrategyConfig {
             strategy_id: Some(nautilus_model::identifiers::StrategyId::from("PROBE-001")),
@@ -786,6 +824,7 @@ fn registered() -> Probe {
         }),
     };
     let clock = Rc::new(RefCell::new(VirtualClock::new()));
+    clock.borrow_mut().advance_time(now, true);
     let cache = Rc::new(RefCell::new(Cache::default()));
     let portfolio = Rc::new(RefCell::new(Portfolio::new(
         clock.clone(),

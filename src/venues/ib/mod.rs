@@ -643,8 +643,7 @@ pub(crate) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
 /// IB's historical ticks (the requests of the historical client's
 /// `request_ticks`, the live client's `request_quotes` and
 /// `request_trades`). Nautilus' IB
-/// clients request no book history and no custom data of an instrument
-/// (Nautilus' `DataClient` default refuses `request_data`).
+/// clients request no book history.
 ///
 /// # Errors
 ///
@@ -689,10 +688,6 @@ fn served(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<Serv
             );
             Ok(Served::Ticks(IbHistoricalTickType::Trades, instrument_id))
         }
-        NautilusDataType::Custom { .. } => bail!(
-            "IB's history serves no custom data of an instrument, so not the {data_type} of \
-             {identifier}"
-        ),
         other => {
             bail!("IB's history serves bars, quotes and trades, not the {other} of {identifier}")
         }
@@ -1482,8 +1477,8 @@ mod tests {
 
     /// A price IB's adapter would ask TRADES for, a size IB has not,
     /// monthly bars, which Nautilus' IB history client parses none of, bars
-    /// Nautilus builds, and books and custom data, which Nautilus' IB
-    /// clients request none of.
+    /// Nautilus builds, and books, which Nautilus' IB clients request none
+    /// of.
     #[test]
     fn ib_serves_no_other_series() {
         for (data_type, identifier) in [
@@ -1507,12 +1502,6 @@ mod tests {
             ),
             (NautilusDataType::OrderBookDelta, "SXR8.IBIS"),
             (NautilusDataType::OrderBookDepth, "SXR8.IBIS"),
-            (
-                NautilusDataType::Custom {
-                    type_name: "Imbalance".to_string(),
-                },
-                "SXR8.IBIS",
-            ),
         ] {
             let err = served(&data_type, identifier).unwrap_err();
             assert!(err.to_string().contains(identifier), "{err}");

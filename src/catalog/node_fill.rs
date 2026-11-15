@@ -7,8 +7,9 @@
 //! (`get_missing_intervals_for_request`): per contract its definitions, then
 //! each series' missing windows, the slivers between a live node's promoted
 //! files among them, each asked once and closed by its write-back.
-//! `missing_custom` does the same for custom data of no instrument, keyed by
-//! its data type's identifier, with no definition. A `NodeFill` gathers each
+//! `missing_custom` does the same for custom series over their slices, a
+//! root's contract by contract, keyed by their data type's identifier,
+//! with no definition. A `NodeFill` gathers each
 //! source's data client with its requests and the source's period, and `run`
 //! builds a live node with those clients and the catalog, and an actor asking
 //! for one request at a time, naming the client it was added with, which the
@@ -48,7 +49,10 @@ use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use serde_json::json;
 
 use super::catalog_config;
-use crate::{strategy::requirements::SeriesSlice, time_range, venues};
+use crate::{
+    strategy::requirements::{CustomSlice, SeriesSlice},
+    time_range, venues,
+};
 
 /// What a fill asks a source for: an instrument's definition, or one of
 /// its series.
@@ -74,9 +78,9 @@ pub enum FillData {
 impl FillData {
     /// The series of `data_type` keyed by `identifier`, as the catalog
     /// keys it (see `strategy::requirements::catalog_keys`): the bar type of bars, the
-    /// instrument id of anything else; an error for custom data of an
-    /// instrument, which no node source serves here (custom data of no
-    /// instrument is asked by `missing_custom`).
+    /// instrument id of anything else; an error for any other data type,
+    /// which no series slice holds (a custom series is asked by
+    /// `missing_custom`).
     fn of(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<Self> {
         Ok(match data_type {
             NautilusDataType::QuoteTick => Self::Quotes,
@@ -203,10 +207,10 @@ pub fn missing(
         .collect())
 }
 
-/// A request of a fill of custom data of no instrument (see
-/// `strategy::requirements::DataRequirements::custom`): the rows of `data_type` over the
-/// closed window `[from, to]`, as the catalog stores intervals, stored under
-/// its type and identifier.
+/// A request of a fill of a custom series (see
+/// `strategy::requirements::CustomSeries`): the rows of its `data_type`
+/// over the closed window `[from, to]`, as the catalog stores intervals,
+/// stored under its type and identifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomFillRequest {
     pub data_type: DataType,
@@ -224,40 +228,35 @@ impl fmt::Display for CustomFillRequest {
     }
 }
 
-/// What `catalog` lacks of each of `custom`, custom data of no instrument,
-/// over `[from, to]`: its missing windows (Nautilus'
-/// `get_missing_intervals_for_request`, of its type and identifier), in time
-/// order, the series in the order given; a config lists each once
-/// (`StandardConfig::validate`). No definition: it is of no instrument.
+/// What `catalog` lacks of each of `slices`, custom series over the part
+/// of a window each is read in, a root's contract by contract
+/// (`DataRequirements::custom_slices`): its missing windows (Nautilus'
+/// `get_missing_intervals_for_request`, of its type and identifier, a
+/// contract's id on a root), in time order, the slices in the order given.
+/// No definition: a custom series brings no instrument.
 ///
 /// # Errors
 ///
-/// Returns an error if a data type has no identifier, which keys a custom
-/// series in the catalog, or if the catalog cannot be read.
+/// Returns an error if the catalog cannot be read.
 pub fn missing_custom(
     catalog: &ParquetDataCatalog,
-    custom: &[DataType],
-    from: Timestamp,
-    to: Timestamp,
+    slices: &[CustomSlice],
 ) -> anyhow::Result<Vec<CustomFillRequest>> {
     let mut requests = Vec::new();
-    for data_type in custom {
-        let identifier = data_type.identifier().with_context(|| {
-            format!("{data_type:?} has no identifier, which keys custom data in the catalog")
-        })?;
+    for CustomSlice { series, from, to } in slices {
         let stored = NautilusDataType::Custom {
-            type_name: data_type.type_name().to_string(),
+            type_name: series.type_name().to_string(),
         };
         let gaps = catalog
             .get_missing_intervals_for_request(
-                nanos(from),
-                nanos(to),
+                nanos(*from),
+                nanos(*to),
                 &stored.into(),
-                Some(identifier),
+                Some(series.identifier()),
             )
-            .with_context(|| format!("reading the stored {data_type}"))?;
+            .with_context(|| format!("reading the stored {series}"))?;
         requests.extend(gaps.into_iter().map(|(from, to)| CustomFillRequest {
-            data_type: data_type.clone(),
+            data_type: series.data_type().clone(),
             from: at(from),
             to: at(to),
         }));
@@ -300,7 +299,7 @@ struct Asked {
 }
 
 /// What a request of the fill asks: an instrument's definition or one of
-/// its series, or custom data of no instrument.
+/// its series, or a custom series.
 #[derive(Debug, Clone)]
 enum Request {
     Series(FillRequest),
@@ -340,7 +339,7 @@ impl NodeFill {
     }
 
     /// Adds `requests` as `add` does, then `custom` (see `missing_custom`),
-    /// custom data of no instrument, asked of the same client, each whole:
+    /// of custom series, asked of the same client, each whole:
     /// Nautilus' time-range pipeline windows no custom data request
     /// (`data/src/engine/time_range.rs`, `is_time_range_pipeline_variant`).
     /// No request of either kind leaves the client out of the node.
@@ -628,7 +627,7 @@ mod tests {
     use nautilus_persistence::backend::parquet::paths::timestamps_to_filename;
 
     use super::*;
-    use crate::rolls::Slice;
+    use crate::{rolls::Slice, strategy::requirements::CustomSeries};
 
     fn ts(s: &str) -> Timestamp {
         s.parse().unwrap()
@@ -1003,73 +1002,82 @@ mod tests {
         );
     }
 
-    fn bond_yields() -> DataType {
-        DataType::new(
-            "LseRow",
-            Some(Params::new(
-                [("source".to_string(), json!("bond_yields"))].into(),
-            )),
-            Some("US10Y".to_string()),
-        )
+    fn bond_yields_metadata() -> Params {
+        Params::new([("source".to_string(), json!("bond_yields"))].into())
     }
 
-    /// No definition: the series is of no instrument.
+    /// No definition: a custom series brings no instrument. Asked by its
+    /// data type as Nautilus builds it.
     #[test]
-    fn custom_data_of_no_instrument_is_lacking_over_its_window_alone() {
+    fn a_custom_series_is_lacking_over_its_window_alone() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
         let (from, to) = (
             ts("2026-11-09T00:00:00Z"),
             ts("2026-11-12T23:59:59.999999999Z"),
         );
+        let bond_yields =
+            CustomSeries::new("LseRow", "US10Y".to_string(), Some(bond_yields_metadata())).unwrap();
 
-        let asked = missing_custom(&catalog, &[bond_yields()], from, to).unwrap();
+        let asked = missing_custom(&catalog, &bond_yields.slices(from, to)).unwrap();
 
         assert_eq!(
             asked,
             [CustomFillRequest {
-                data_type: bond_yields(),
+                data_type: DataType::new(
+                    "LseRow",
+                    Some(bond_yields_metadata()),
+                    Some("US10Y".to_string())
+                ),
                 from,
                 to,
             }]
         );
     }
 
-    /// Nautilus would store it under its type alone, beside every other
-    /// series of the type.
+    /// The bond yields under GC's id, a root GC rolls from GCQ26 into GCZ26
+    /// at 00:00 UTC on 29 July 2026 (`rolls/README.md`): each contract's
+    /// series lacks over its slice, asked by its data type, the
+    /// contract's id its identifier, the type and metadata kept.
     #[test]
-    fn custom_data_with_no_identifier_is_refused_naming_its_type() {
+    fn a_roots_custom_series_is_lacking_contract_by_contract_over_its_slices() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        let unkeyed = DataType::new("LseRow", None, None);
-
-        let err = missing_custom(
-            &catalog,
-            &[unkeyed],
-            ts("2026-11-09T00:00:00Z"),
-            ts("2026-11-12T23:59:59.999999999Z"),
+        let (from, roll, to) = (
+            ts("2026-07-28T00:00:00Z"),
+            ts("2026-07-29T00:00:00Z"),
+            ts("2026-07-30T00:00:00Z"),
+        );
+        let bond_yields = CustomSeries::new(
+            "LseRow",
+            "GC.GLBX".to_string(),
+            Some(bond_yields_metadata()),
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(err.to_string().contains("LseRow"), "{err:#}");
-    }
+        let asked = missing_custom(&catalog, &bond_yields.slices(from, to)).unwrap();
 
-    #[test]
-    fn custom_data_of_an_instrument_is_refused_naming_its_type_and_instrument() {
-        let dir = tempfile::tempdir().unwrap();
-        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        let slices = [slice(
-            NautilusDataType::Custom {
-                type_name: "Imbalance".to_string(),
-            },
-            "GCZ26.GLBX",
-            "2026-10-21T00:00:00Z",
-            "2026-10-22T00:00:00Z",
-        )];
-
-        let err = format!("{:#}", missing(&catalog, &slices).unwrap_err());
-
-        assert!(err.contains("Imbalance"), "{err}");
-        assert!(err.contains("GCZ26.GLBX"), "{err}");
+        let of = |contract: &str| {
+            DataType::new(
+                "LseRow",
+                Some(bond_yields_metadata()),
+                Some(contract.to_string()),
+            )
+        };
+        assert_eq!(
+            asked,
+            [
+                CustomFillRequest {
+                    data_type: of("GCQ26.GLBX"),
+                    from,
+                    to: roll - SignedDuration::from_nanos(1),
+                },
+                CustomFillRequest {
+                    data_type: of("GCZ26.GLBX"),
+                    from: roll,
+                    to,
+                },
+            ]
+        );
     }
 }

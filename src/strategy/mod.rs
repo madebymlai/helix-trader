@@ -38,7 +38,7 @@
 //! through among them, the warmup asks the history of too, where their
 //! venue serves it. A `subscriptions::Subscriptions`, which each strategy
 //! holds too (a model strategy's handle), subscribes to the bars, the
-//! ticks and the custom data of no instrument from where the warmup ends,
+//! ticks and the custom series from where the warmup ends,
 //! and a `rolls::Roller`, held where a
 //! root's ticks need rolling (see `README.md`, "Configuration and
 //! series"), tells it of each roll of a root, at which it moves the root's

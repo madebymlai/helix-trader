@@ -225,8 +225,7 @@ pub(crate) fn ensure_on(id: InstrumentId, venue: Venue) -> anyhow::Result<()> {
 /// # Errors
 ///
 /// Returns an error naming the first series that is not the quotes of an
-/// instrument on `venue`: the adapter serves nothing else (`SERVED_DATA`),
-/// and the refusal of an instrument's custom data says it serves none.
+/// instrument on `venue`: the adapter serves nothing else (`SERVED_DATA`).
 pub fn quoted(
     venue: Venue,
     series: &[(NautilusDataType, String)],
@@ -234,11 +233,6 @@ pub fn quoted(
     series
         .iter()
         .map(|(data_type, identifier)| {
-            ensure!(
-                !matches!(data_type, NautilusDataType::Custom { .. }),
-                "{venue} serves quotes only, no custom data of an instrument, so not the \
-                 {data_type} of {identifier}"
-            );
             ensure!(
                 *data_type == SERVED_DATA,
                 "{venue} serves quotes only, not the {data_type} of {identifier}"
@@ -296,13 +290,10 @@ mod tests {
     #[test]
     fn a_series_not_of_quotes_is_refused_naming_it() {
         let bars = format!("XAUUSD.{VENUE}-1-MINUTE-BID-EXTERNAL");
-        let imbalance = NautilusDataType::Custom {
-            type_name: "Imbalance".to_string(),
-        };
         for data_type in [
             NautilusDataType::Bar,
             NautilusDataType::OrderBookDelta,
-            imbalance,
+            NautilusDataType::TradeTick,
         ] {
             let named = data_type.to_string();
 
@@ -313,25 +304,6 @@ mod tests {
             assert!(err.contains("serves quotes only"), "{err}");
             assert!(err.contains(&named) && err.contains(&bars), "{err}");
         }
-    }
-
-    #[test]
-    fn an_instrument_s_custom_data_is_refused_saying_the_broker_serves_none() {
-        let imbalance = NautilusDataType::Custom {
-            type_name: "Imbalance".to_string(),
-        };
-        let gold = format!("XAUUSD.{VENUE}");
-
-        let err = quoted(venue(), &[(imbalance, gold.clone())])
-            .unwrap_err()
-            .to_string();
-
-        assert!(
-            err.contains(&format!("{VENUE} serves"))
-                && err.contains("no custom data of an instrument")
-                && err.contains(&gold),
-            "{err}"
-        );
     }
 
     #[test]
