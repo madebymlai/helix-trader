@@ -8,7 +8,7 @@ use nautilus_model::{
     enums::{AggregationSource, BarAggregation, PriceType},
     identifiers::{InstrumentId, StrategyId},
 };
-use nautilus_persistence::common::paths::{make_object_store_path, urisafe_instrument_id};
+use nautilus_persistence::common::paths::urisafe_instrument_id;
 use nautilus_trading::strategy::StrategyConfig;
 use serde::{
     Deserialize, Deserializer,
@@ -380,13 +380,15 @@ fn custom_data<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<DataTyp
 }
 
 /// The folder Nautilus' catalog stores the series of custom data keyed by
-/// `identifier` under, below its type's folder
-/// (`ParquetDataCatalog::make_path_custom_data`): the identifier made
-/// URI-safe (`urisafe_instrument_id`: `/` removed, `^` made `_`) and a
-/// path component (`make_object_store_path`: `\` made `/`, the ends'
-/// slashes trimmed); empty for the type's folder itself.
+/// `identifier` under, below its type's folder, and reads it back from
+/// (`ParquetDataCatalog::make_path_custom_data`, `filter_identifier_files`):
+/// the identifier made URI-safe (`urisafe_instrument_id`: `/` removed, `^`
+/// made `_`); empty for the type's folder itself. So for an identifier
+/// holding no backslash alone: the write makes a backslash a folder
+/// separator and the read keeps it, so the two disagree on such an
+/// identifier, which `DataConfig::validate` refuses.
 fn catalog_folder(identifier: &str) -> String {
-    make_object_store_path("", [urisafe_instrument_id(identifier)])
+    urisafe_instrument_id(identifier)
 }
 
 impl DataConfig {
@@ -428,10 +430,11 @@ impl DataConfig {
 
     /// Pushes the violations of `[data]`: no series; a series listed
     /// again, under each listing after its first, naming it; custom data
-    /// of an identifier whose catalog folder (`catalog_folder`) Nautilus
-    /// finds no string of meaning in, empty or blank
-    /// (`check_valid_string_utf8`), under `data.custom[i].identifier`, an
-    /// empty one keying the folder of its type alone, as none does; custom
+    /// of an identifier holding a backslash (see `catalog_folder`), or
+    /// whose catalog folder Nautilus finds no string of meaning in, empty
+    /// or blank (`check_valid_string_utf8`), each under
+    /// `data.custom[i].identifier`, an empty folder the folder of its type
+    /// alone, as none keys; custom
     /// data of a type and a catalog folder listed already, under
     /// `data.custom[i]` naming it, whatever its metadata, the two series
     /// stored under one folder; custom data its source does not serve, or of a type no source
@@ -469,7 +472,16 @@ impl DataConfig {
                 listed.type_name() == data_type.type_name()
                     && catalog_folder(listed.identifier().unwrap_or_default()) == folder
             };
-            if let Err(e) = check_valid_string_utf8(&folder, "identifier") {
+            if identifier.contains('\\') {
+                errors.push(ConfigError::invalid_value(
+                    format!("{field}.identifier"),
+                    format!(
+                        "{identifier:?} holds a backslash, which Nautilus' catalog writes as a \
+                         folder separator and reads back as a character, so its series would \
+                         be stored where no read finds it"
+                    ),
+                ));
+            } else if let Err(e) = check_valid_string_utf8(&folder, "identifier") {
                 errors.push(ConfigError::invalid_value(
                     format!("{field}.identifier"),
                     format!("{identifier:?} keys the catalog folder {folder:?}: {e}"),
@@ -1585,14 +1597,12 @@ mod tests {
     }
 
     /// The catalog stores a series under its type's folder, then its
-    /// identifier's, made URI-safe and a path component: `/` removed, `\`
-    /// a separator, the ends' trimmed. An identifier left empty so keys
-    /// the folder of its type alone, as none does; a blank one names
-    /// nothing either.
+    /// identifier's, made URI-safe: `/` removed. An identifier left empty
+    /// so keys the folder of its type alone, as none does; a blank one
+    /// names nothing either.
     #[test]
     fn custom_data_of_an_identifier_naming_no_catalog_folder_is_refused_under_its_identifier() {
-        // As TOML basic strings: a backslash is written escaped.
-        for identifier in ["", "  ", "/", "//", r"\\"] {
+        for identifier in ["", "  ", "/", "//"] {
             let toml = with_custom(&format!(
                 "[{}]",
                 US10Y.replace(
@@ -1606,6 +1616,28 @@ mod tests {
                 ["data.custom[0].identifier"],
                 "{identifier:?}"
             );
+        }
+    }
+
+    /// Nautilus writes the series under `US/10Y`, a backslash a folder
+    /// separator there, and reads it back under `US\10Y`, keeping it: a
+    /// fill would find nothing missing and a backtest read nothing.
+    #[test]
+    fn custom_data_of_an_identifier_holding_a_backslash_is_refused_under_its_identifier_naming_it()
+    {
+        // As TOML basic strings: a backslash is written escaped.
+        for identifier in [r"US\\10Y", r"\\US10Y", r"\\"] {
+            let toml = with_custom(&format!(
+                "[{}]",
+                US10Y.replace(
+                    r#"identifier = "US10Y""#,
+                    &format!(r#"identifier = "{identifier}""#)
+                )
+            ));
+
+            let reason = invalid_value(&toml, "data.custom[0].identifier");
+
+            assert!(reason.contains("backslash"), "{identifier}: {reason}");
         }
     }
 
