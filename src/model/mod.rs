@@ -310,8 +310,7 @@ mod tests {
 
     /// The part of a strategy trading on a model whose features read the
     /// series its own `features` lists, its span on each, a custom
-    /// data's or a custom series' last value; its filter is its own
-    /// logic's.
+    /// series' last value; its filter is its own logic's.
     #[derive(Debug, Clone, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct ProbeParams {
@@ -348,9 +347,6 @@ mod tests {
                         }
                         NautilusDataType::TradeTick => {
                             builder.trades(ticks.instrument_id, SPAN, tables)
-                        }
-                        NautilusDataType::Custom { type_name } => {
-                            builder.data(type_name, ticks.instrument_id, &i.to_string(), |_| 0.0)
                         }
                         data => panic!("the probe reads no {data}"),
                     },

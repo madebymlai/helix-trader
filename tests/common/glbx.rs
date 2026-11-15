@@ -3,8 +3,8 @@
 //! depth snapshots of 10 levels a side keyed by its id, its trades, no
 //! quotes. Here a few snapshots and trades on Wednesday 21 October 2026,
 //! the day of `common::ic`; and its book deltas, as Databento's MBO fills
-//! the catalog with them, and custom data of it, `Imbalance`, a type of
-//! the tests'; and, apart, its quotes, as LSE streams CME Globex's Level
+//! the catalog with them, and custom data under its id, `Imbalance`, a
+//! type of the tests'; and, apart, its quotes, as LSE streams CME Globex's Level
 //! 1, for a run trading it.
 
 use std::{path::Path, sync::Arc};

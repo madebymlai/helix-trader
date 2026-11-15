@@ -49,17 +49,17 @@
 //! Custom data is subscribed by its data type, naming no client: each
 //! custom series (`DataRequirements::custom`, a custom series of a
 //! config's `[data] series`) as it is read at the start
-//! (`CustomSeries::at`), and an instrument's custom data keyed by the
-//! contract standing for it, as the catalog keys it. Nautilus subscribes
-//! the message bus alone (`DataActorCore::subscribe_data`), where a
-//! replay's rows arrive, and a live run reading a custom series is refused
-//! at its start (`venues::live_clients`). A custom series on a root, its
-//! identifier the root's (`GC.GLBX`), is read on the contract standing for
-//! it, keyed by the contract's id, and moves at each roll as the root's
-//! tick series do, but for a data type another series, of either kind,
-//! still reads at the roll, which stays subscribed; any other custom
-//! series stands for itself, and no roll moves it. A strategy's `on_data`
-//! gets its rows: the strategy subscribes to none itself.
+//! (`CustomSeries::at`). Nautilus subscribes the message bus alone
+//! (`DataActorCore::subscribe_data`), where a replay's rows arrive, and a
+//! live run reading a custom series is refused at its start
+//! (`venues::live_clients`). A custom series on a root, its identifier
+//! the root's (`GC.GLBX`), is read on the contract standing for it, keyed
+//! by the contract's id, and moves at each roll as the root's tick series
+//! do, but for a data type another series still reads at the roll, which
+//! stays subscribed; any other custom series stands for itself, a
+//! contract's (`GCZ26.GLBX`) among them, and no roll moves it. A
+//! strategy's `on_data` gets its rows: the strategy subscribes to none
+//! itself.
 
 use std::{collections::BTreeMap, fmt::Debug};
 
@@ -173,29 +173,16 @@ impl Subscriptions {
         }
     }
 
-    /// The data types of the custom data read at `time`, each once, of the
-    /// roots `roll` rolls alone if given: an instrument's custom data keyed
-    /// by the contract standing for it then (see `TickSeries`), and each
-    /// custom series as `CustomSeries::at` reads it, a root's on its
-    /// contract. Custom data is subscribed by its data type, whatever its
-    /// kind, so one read by both is subscribed once and kept while either
-    /// still reads it.
+    /// The data types of the custom series read at `time`, each once, of
+    /// the roots `roll` rolls alone if given: each as `CustomSeries::at`
+    /// reads it, a root's on its contract. Custom data is subscribed by its
+    /// data type, so one two series read, a contract's own and its root's
+    /// then, is subscribed once and kept while either still reads it.
     fn custom_at(&self, time: Timestamp, roll: Option<&Transition>) -> Vec<DataType> {
-        let instruments = self.ticks.iter().filter_map(|tick| match &tick.data {
-            NautilusDataType::Custom { type_name } => {
-                let contract = front(tick.instrument_id, time);
-                let data_type = DataType::new(type_name, None, Some(contract.to_string()));
-                Some((Some(tick.instrument_id), data_type))
-            }
-            _ => None,
-        });
-        let series = self
-            .custom
-            .iter()
-            .map(|series| (series.root(), series.at(time).data_type().clone()));
         let mut data_types: Vec<DataType> = Vec::new();
-        for (on, data_type) in instruments.chain(series) {
-            let kept = roll.is_none_or(|roll| on.is_some_and(|id| rolled_by(id, roll)));
+        for series in &self.custom {
+            let kept = roll.is_none_or(|roll| series.root().is_some_and(|id| rolled_by(id, roll)));
+            let data_type = series.at(time).data_type().clone();
             if kept && !data_types.contains(&data_type) {
                 data_types.push(data_type);
             }
@@ -249,14 +236,12 @@ impl Subscriptions {
         ids
     }
 
-    /// The kinds of the tick series of `instrument_id` but custom data,
-    /// which is subscribed by its data type (`custom_at`).
+    /// The kinds of the tick series of `instrument_id`.
     fn data_of(&self, instrument_id: InstrumentId) -> impl Iterator<Item = &NautilusDataType> + '_ {
         self.ticks
             .iter()
             .filter(move |tick| tick.instrument_id == instrument_id)
             .map(|tick| &tick.data)
-            .filter(|data| !matches!(data, NautilusDataType::Custom { .. }))
     }
 
     /// Subscribes `actor` to the tick series of `instrument_id` on
@@ -602,42 +587,14 @@ mod tests {
         msgbus::subscriptions_count_any(get_custom_topic(data_type)).unwrap()
     }
 
-    /// The handlers subscribed to the imbalances of `instrument_id` on the
+    /// The handlers subscribed to the imbalances under `identifier` on the
     /// message bus (see `subscribers`).
-    fn imbalance_subscribers(instrument_id: &str) -> usize {
+    fn imbalance_subscribers(identifier: &str) -> usize {
         subscribers(&DataType::new(
             "Imbalance",
             None,
-            Some(instrument_id.to_string()),
+            Some(identifier.to_string()),
         ))
-    }
-
-    /// Custom data of a root is keyed by the contract standing for it, and
-    /// moves with it: GC's imbalances are GCZ26's on 2026-08-10, GCG27's
-    /// from its roll on 2026-11-26.
-    #[test]
-    fn a_roots_custom_data_is_subscribed_keyed_by_its_contract_and_moved_at_its_roll() {
-        let imbalances = NautilusDataType::Custom {
-            type_name: "Imbalance".to_string(),
-        };
-        let subscriptions = Subscriptions::new(vec![], ticks(&[(imbalances, "GC.GLBX")]), vec![]);
-        let (mut probe, clock, _) = registered(at("2026-08-10T14:30:00Z"));
-        let roll = Transition::after(id("GC.GLBX"), at("2026-08-10T14:30:00Z")).unwrap();
-
-        subscriptions.start(&mut probe, at("2026-08-10T14:30:00Z"));
-        let started = [
-            imbalance_subscribers("GCZ26.GLBX"),
-            imbalance_subscribers("GCG27.GLBX"),
-        ];
-        let alert = roll.time - SignedDuration::from_nanos(1);
-        clock.borrow_mut().advance_time(alert.into(), true);
-        subscriptions.roll(&mut probe, &roll);
-        let rolled = [
-            imbalance_subscribers("GCZ26.GLBX"),
-            imbalance_subscribers("GCG27.GLBX"),
-        ];
-
-        assert_eq!((started, rolled), ([1, 0], [0, 1]));
     }
 
     /// Custom series, each a data type keyed by its identifier, here the
@@ -666,18 +623,17 @@ mod tests {
         CustomSeries::new("Imbalance", identifier.to_string(), None).unwrap()
     }
 
-    /// A strategy reading `ticks` and `custom`, started on 2026-08-10 at
-    /// 14:30, when GCZ26 stands for GC, then handed GC's roll into GCG27 at
-    /// 00:00 UTC on 2026-11-26, at the last nanosecond before it, as its
-    /// roller hands it over: the handlers subscribed to the imbalances
-    /// under each of `identifiers` on the message bus at the start, then
-    /// after the roll, and whether it sent the data engine anything.
+    /// A strategy reading `custom`, started on 2026-08-10 at 14:30, when
+    /// GCZ26 stands for GC, then handed GC's roll into GCG27 at 00:00 UTC
+    /// on 2026-11-26, at the last nanosecond before it, as its roller hands
+    /// it over: the handlers subscribed to the imbalances under each of
+    /// `identifiers` on the message bus at the start, then after the roll,
+    /// and whether it sent the data engine anything.
     fn imbalances_across_the_roll(
-        ticks: Vec<TickSeries>,
         custom: Vec<CustomSeries>,
         identifiers: &[&str],
     ) -> (Vec<usize>, Vec<usize>, bool) {
-        let subscriptions = Subscriptions::new(vec![], ticks, custom);
+        let subscriptions = Subscriptions::new(vec![], vec![], custom);
         let start = at("2026-08-10T14:30:00Z");
         let (mut probe, clock, commands) = registered(start);
         let roll = Transition::after(id("GC.GLBX"), start).unwrap();
@@ -703,7 +659,6 @@ mod tests {
     #[test]
     fn a_roots_custom_series_is_subscribed_on_its_front_contract_and_moved_at_its_roll() {
         let (started, rolled, sent) = imbalances_across_the_roll(
-            vec![],
             vec![imbalances("GC.GLBX")],
             &["GC.GLBX", "GCZ26.GLBX", "GCG27.GLBX"],
         );
@@ -719,29 +674,7 @@ mod tests {
     #[test]
     fn a_roll_keeps_a_custom_series_another_still_reads_on_the_pre_contract() {
         let (started, rolled, _) = imbalances_across_the_roll(
-            vec![],
             vec![imbalances("GC.GLBX"), imbalances("GCZ26.GLBX")],
-            &["GCZ26.GLBX", "GCG27.GLBX"],
-        );
-
-        assert_eq!((started, rolled), (vec![1, 0], vec![1, 1]));
-    }
-
-    /// GCZ26's imbalances read as an instrument's custom data, keyed by
-    /// its id as the root's custom series is on GCZ26, stay subscribed at
-    /// the roll that moves the root's series on.
-    #[test]
-    fn a_roll_keeps_a_custom_series_an_instrument_still_reads_on_the_pre_contract() {
-        let instrument = ticks(&[(
-            NautilusDataType::Custom {
-                type_name: "Imbalance".to_string(),
-            },
-            "GCZ26.GLBX",
-        )]);
-
-        let (started, rolled, _) = imbalances_across_the_roll(
-            instrument,
-            vec![imbalances("GC.GLBX")],
             &["GCZ26.GLBX", "GCG27.GLBX"],
         );
 
@@ -753,7 +686,6 @@ mod tests {
     #[test]
     fn custom_series_of_no_root_are_never_moved() {
         let (started, rolled, _) = imbalances_across_the_roll(
-            vec![],
             vec![imbalances("GCZ26.GLBX"), imbalances("US10Y")],
             &["GCZ26.GLBX", "US10Y", "GCG27.GLBX"],
         );

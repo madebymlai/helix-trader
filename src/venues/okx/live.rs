@@ -75,9 +75,7 @@ pub(in crate::venues) const BOOK: BookFormat = BookFormat {
 /// `bar_spec_as_okx_channel`, `websocket/client.rs:1709-1715`, failing any
 /// other bar type: see `is_candle`); and its book, which a run subscribes
 /// to in OKX's format (`BOOK`, through `venues::book_format`), its deltas
-/// of an L2_MBP book and its depth five levels a side. It subscribes to no
-/// custom data: Nautilus' `DataClient` default logs "Handler not
-/// implemented" and streams nothing (`common/src/clients/data.rs:130-133`).
+/// of an L2_MBP book and its depth five levels a side.
 ///
 /// # Errors
 ///

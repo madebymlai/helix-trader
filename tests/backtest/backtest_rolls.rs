@@ -428,20 +428,19 @@ fn the_subscriptions_keep_a_contract_declared_beside_its_root_after_the_root_rol
     assert_eq!(ticks_of(&got, PRE), pre_ticks_of_the_run());
 }
 
+/// The kind an imbalance the probe gets is recorded as.
 fn imbalances() -> NautilusDataType {
     NautilusDataType::Custom {
         type_name: glbx::IMBALANCE.to_string(),
     }
 }
 
-/// The book deltas and imbalances of `instrument_id`.
-fn deltas_and_imbalances(instrument_id: &str) -> Vec<TickSeries> {
-    [NautilusDataType::OrderBookDelta, imbalances()]
-        .map(|data| TickSeries {
-            data,
-            instrument_id: InstrumentId::from(instrument_id),
-        })
-        .to_vec()
+/// The book deltas of `instrument_id`.
+fn deltas(instrument_id: &str) -> TickSeries {
+    TickSeries {
+        data: NautilusDataType::OrderBookDelta,
+        instrument_id: InstrumentId::from(instrument_id),
+    }
 }
 
 /// Writes a delta event of `instrument_id` at each of `deltas` and an
@@ -512,6 +511,9 @@ fn store_imbalances(dir: &Path, instrument_id: &str, values: &[(&str, f64)]) {
         .unwrap();
 }
 
+/// The root's book deltas and its imbalances, a custom series under its
+/// id, through subscriptions moved at the roll by a roller of the root,
+/// as a strategy's are.
 #[test]
 fn the_subscriptions_roll_book_deltas_and_custom_data_keyed_by_the_contract() {
     let catalog = rolls::catalog();
@@ -529,10 +531,21 @@ fn the_subscriptions_roll_book_deltas_and_custom_data_keyed_by_the_contract() {
     );
     // Both contracts declared as themselves: each replayed over the whole
     // run, so what reaches the probe is what its subscriptions subscribe to.
-    let declared = [deltas_and_imbalances(PRE), deltas_and_imbalances(POST)].concat();
-    let backtest = backtest(&catalog, declared);
+    let backtest = Backtest {
+        custom: vec![imbalance_series(PRE), imbalance_series(POST)],
+        ..backtest(&catalog, vec![deltas(PRE), deltas(POST)])
+    };
+    let custom = vec![imbalance_series(ROOT)];
+    let roller = Roller::replayed(vec![InstrumentId::from(ROOT)])
+        .custom_roots(custom.iter().filter_map(CustomSeries::root));
 
-    let got = run(&backtest, rolled(deltas_and_imbalances(ROOT)));
+    let got = run(
+        &backtest,
+        Subscribe::Rolled(
+            roller,
+            Subscriptions::new(vec![], vec![deltas(ROOT)], custom),
+        ),
+    );
 
     // August's before the roll, December's after.
     assert_eq!(
