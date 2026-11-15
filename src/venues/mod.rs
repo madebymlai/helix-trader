@@ -552,7 +552,7 @@ pub(crate) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
 /// broker's quotes alone (`ctrader::quoted`), the adapter's one rule of
 /// its history and its spots; OKX's quotes, trades, candles and book
 /// (`okx::streams`); the series LSE's client streams
-/// (`lse::check_streamed`); IB's quotes, trades, time bars and book deltas
+/// (`lse::streams`); IB's quotes, trades, time bars and book deltas
 /// (`ib::streams`). A book is checked as a run subscribes to it, in its
 /// venue's format (`book_format`). Custom data of an instrument is streamed by no client:
 /// none implements a subscription of custom data, the roller's names no
@@ -576,7 +576,7 @@ pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
             ctrader::quoted(Venue::new(broker.venue), &[source.key()]).map(drop)
         }
         LiveDataSource::Okx => okx::streams(source),
-        LiveDataSource::Lse => ::lse::check_streamed(&[source.key()]),
+        LiveDataSource::Lse => ::lse::streams(&source.key()),
         LiveDataSource::Ib => ib::streams(source),
     }
 }
@@ -2089,7 +2089,7 @@ mod tests {
     /// LSE's client streams an `LSEDGE` series' quotes, an `OPRA`
     /// contract's trades and a `GLBX` contract's or an `XNAS` stock's
     /// Levels 1 to 3, a rolled root's on its contracts
-    /// (`lse::check_streamed`); no candles, of which its history serves
+    /// (`lse::streams`); no candles, of which its history serves
     /// some, and no custom data.
     #[test]
     fn lse_s_client_streams_what_its_streams_carry() {
@@ -2158,6 +2158,56 @@ mod tests {
                 bars_of("SXR8.IBIS-100-TICK-LAST-EXTERNAL"),
                 bars_of("SXR8.IBIS-1-MINUTE-LAST-INTERNAL"),
             ],
+        );
+    }
+
+    /// IB's refusal of bars of a size it does not stream offers exactly the
+    /// sizes it streams: those IB has as Nautilus' IB client asks them
+    /// (`bar_type_to_ib_bar_size`: 1, 5, 15 and 30 seconds, 1, 2, 3, 5, 10,
+    /// 15, 20 and 30 minutes, 1, 2, 3, 4 and 8 hours, a day, a week, a
+    /// month) but 1 second, which IB does not keep up to date. No 10-second
+    /// bars, of which the client has no size.
+    #[test]
+    fn ib_s_refusal_of_bars_offers_exactly_the_sizes_it_streams() {
+        let units = ["SECOND", "MINUTE", "HOUR", "DAY", "WEEK", "MONTH"];
+        let err = format!(
+            "{:#}",
+            streams(&bars_of("SXR8.IBIS-10-SECOND-LAST-EXTERNAL")).unwrap_err()
+        );
+
+        let offered: Vec<&str> = err
+            .split([' ', ',', '(', ')', ':'])
+            .filter(|word| {
+                word.split_once('-').is_some_and(|(step, unit)| {
+                    step.parse::<usize>().is_ok() && units.contains(&unit)
+                })
+            })
+            .collect();
+
+        assert_eq!(
+            offered,
+            [
+                "5-SECOND",
+                "15-SECOND",
+                "30-SECOND",
+                "1-MINUTE",
+                "2-MINUTE",
+                "3-MINUTE",
+                "5-MINUTE",
+                "10-MINUTE",
+                "15-MINUTE",
+                "20-MINUTE",
+                "30-MINUTE",
+                "1-HOUR",
+                "2-HOUR",
+                "3-HOUR",
+                "4-HOUR",
+                "8-HOUR",
+                "1-DAY",
+                "1-WEEK",
+                "1-MONTH",
+            ],
+            "{err}"
         );
     }
 

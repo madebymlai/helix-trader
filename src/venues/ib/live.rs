@@ -20,8 +20,8 @@ use nautilus_interactive_brokers::{
 };
 use nautilus_live::config::RoutingConfig;
 use nautilus_model::{
-    data::NautilusDataType,
-    enums::{BookType, PriceType},
+    data::{BarSpecification, BarType, NautilusDataType},
+    enums::{AggregationSource, BarAggregation, BookType, PriceType},
     identifiers::{InstrumentId, Venue},
 };
 
@@ -186,11 +186,10 @@ pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
             ensure!(
                 bar_type.is_externally_aggregated()
                     && BAR_PRICES.contains(&bar_type.spec().price_type)
-                    && bar_type_to_ib_bar_size(bar_type).is_ok()
-                    && bar_type.spec().timedelta() >= KEPT_UP_TO_DATE,
+                    && streamed_size(bar_type),
                 "IB streams its own (EXTERNAL) time bars of a size IB has and keeps up to date, \
-                 5, 10, 15 or 30 seconds, 1, 2, 3, 5, 10, 15, 20 or 30 minutes, 1, 2, 3, 4 or 8 \
-                 hours, a day, a week or a month, priced LAST, BID, ASK or MID, not {bar_type}"
+                 {}, priced LAST, BID, ASK or MID, not {bar_type}",
+                streamed_sizes(bar_type.instrument_id()).join(", ")
             );
             ensure!(
                 !(bar_type.spec().price_type == PriceType::Last
@@ -226,6 +225,46 @@ pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Whether IB streams bars of `bar_type`'s size: one IB has
+/// (`bar_type_to_ib_bar_size`, on which the client's subscription task
+/// fails any other) and keeps up to date (`KEPT_UP_TO_DATE`).
+fn streamed_size(bar_type: &BarType) -> bool {
+    bar_type_to_ib_bar_size(bar_type).is_ok() && bar_type.spec().timedelta() >= KEPT_UP_TO_DATE
+}
+
+/// The sizes IB streams bars of `instrument_id` of (`streamed_size`), as
+/// Nautilus writes a bar's step and aggregation (`5-SECOND`), shortest
+/// first: each valid step to 60 of each time aggregation tried, so that the
+/// sizes a refusal offers are the rule's.
+fn streamed_sizes(instrument_id: InstrumentId) -> Vec<String> {
+    use BarAggregation as A;
+    [
+        A::Millisecond,
+        A::Second,
+        A::Minute,
+        A::Hour,
+        A::Day,
+        A::Week,
+        A::Month,
+        A::Year,
+    ]
+    .into_iter()
+    .flat_map(|aggregation| {
+        (1..=60).filter_map(move |step| {
+            BarSpecification::new_checked(step, aggregation, PriceType::Last).ok()
+        })
+    })
+    .filter(|&spec| {
+        streamed_size(&BarType::new(
+            instrument_id,
+            spec,
+            AggregationSource::External,
+        ))
+    })
+    .map(|spec| format!("{}-{}", spec.step, spec.aggregation))
+    .collect()
 }
 
 /// IB's clients of a node trading `instrument_ids` on the paper account

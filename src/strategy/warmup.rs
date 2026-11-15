@@ -173,7 +173,13 @@
 //! (`docs/concepts/cache.md`, "Custom data"): the warmup adds the
 //! response's points to the cache itself, oldest first, as Nautilus' docs
 //! ask (`Cache::add_custom_data`), but a point no later than the latest the
-//! cache holds of its data type (`Warmup::on_historical_data`).
+//! cache holds of its data type (`Warmup::on_historical_data`). Nautilus
+//! answers a request naming a client no node registers from the catalog
+//! alone (`dispatch_date_range_request`, `crates/data/src/engine/streaming.rs`).
+//! No venue's live client streams an instrument's custom data yet, so a
+//! live start refuses a run reading it (`venues::streams`) and no run
+//! reaches this request today: it is the warmup half of such a run, kept
+//! for when a live source of an instrument's custom data exists.
 //!
 //! A strategy holds a `Warmup`, which runs these calls, and delegates its
 //! hooks to it; a model strategy's `ModelHandle` builds and owns it, and
