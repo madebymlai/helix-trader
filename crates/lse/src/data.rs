@@ -85,7 +85,7 @@ use nautilus_model::{
 };
 
 use self::{exchange::ExchangeAccess, streams::LseStreams};
-pub use self::{served::check_served, streams::check_streamed};
+pub use self::{served::serves, streams::check_streamed};
 use crate::{
     common::{
         consts::{CME_MARKET, LseExchange},

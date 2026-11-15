@@ -503,7 +503,7 @@ pub fn rate_series(pair: InstrumentId) -> anyhow::Result<Vec<Series>> {
 /// without a row of its own as IB's), each a copy of what the data client
 /// its fill asks requests: a cTrader broker's quotes alone
 /// (`ctrader::quoted`); OKX's trades and candles (`okx::serves`); the
-/// series LSE's client asks LSE for (`lse::check_served`); IB's time bars,
+/// series LSE's client asks LSE for (`lse::serves`); IB's time bars,
 /// quotes and trades (`ib::serves`). fill-catalog checks every series it
 /// fills here before anything connects, and a live warmup requests the
 /// history of a series only if served (`strategy::warmup`), so the two
@@ -521,7 +521,7 @@ pub(crate) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
             ctrader::quoted(Venue::new(broker.venue), &[source.key()]).map(drop)
         }
         HistorySource::Okx => okx::serves(source),
-        HistorySource::Lse => ::lse::check_served(&source.key()),
+        HistorySource::Lse => ::lse::serves(&source.key()),
         HistorySource::Ib => ib::serves(source),
     }
 }
@@ -1954,7 +1954,7 @@ mod tests {
     /// instrument of its venues, but an index's trades, which it has none
     /// of, and for its candles of an LSEDGE series and an OPRA contract
     /// alone, EXTERNAL bars of the LAST price below a day wide
-    /// (`lse::check_served`).
+    /// (`lse::serves`).
     #[test]
     fn lse_s_history_serves_what_its_client_asks_lse_for() {
         use NautilusDataType as D;

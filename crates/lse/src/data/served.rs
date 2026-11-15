@@ -1,4 +1,4 @@
-//! What the client serves of the past (`check_served`), as a fill or a
+//! What the client serves of the past (`serves`), as a fill or a
 //! warmup asks before it requests, the twin of what it streams
 //! (`streams::check_streamed`).
 
@@ -34,7 +34,7 @@ use crate::{
 ///
 /// Returns an error naming the series and saying why if the client does
 /// not serve it.
-pub fn check_served(series: &(NautilusDataType, String)) -> anyhow::Result<()> {
+pub fn serves(series: &(NautilusDataType, String)) -> anyhow::Result<()> {
     let (data, identifier) = series;
     if *data == NautilusDataType::Bar {
         let bar_type = BarType::from_str(identifier)
