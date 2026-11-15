@@ -15,9 +15,12 @@
 //! orders may be reduce-only and post-only
 //! (`takes_reduce_only_and_post_only`, its broker's answer) and the tag
 //! linking a bracket's exits at its broker (`bracket_exits_tag`, IB's OCA
-//! group), a strategy the series an FX pair it converts through is read in
-//! (`rate_series`, its history's answer: quotes, or IB's BID and ASK
-//! bars); venue code checks its own
+//! group), fill-catalog and a live warmup whether a venue's history serves
+//! a series (`serves`, its history source's answer, each a copy of the data
+//! client its fill asks, so that a fill and a warmup agree on what history
+//! there is), and a strategy the series an FX pair it converts through is
+//! read in (`rate_series`: the first form `serves` takes, the pair's
+//! 1-minute BID and ASK bars, then its quotes); venue code checks its own
 //! instruments against the table. Custom data of no instrument has no venue
 //! and no row: its type names its source, LSE's rows LSE (`fill_history`).
 //! The settings each command takes of the venues are composed here,
@@ -58,8 +61,8 @@ use nautilus_common::factories::DataClientFactory;
 use nautilus_interactive_brokers::factories::InteractiveBrokersDataClientFactory;
 use nautilus_live::config::RoutingConfig;
 use nautilus_model::{
-    data::{CustomDataTrait, DataType, NautilusDataType},
-    enums::OmsType,
+    data::{BarSpecification, BarType, CustomDataTrait, DataType, NautilusDataType},
+    enums::{AggregationSource, BarAggregation, OmsType, PriceType},
     identifiers::{ClientId, ClientOrderId, InstrumentId, Venue},
 };
 use nautilus_okx::factories::OKXDataClientFactory;
@@ -70,7 +73,10 @@ use self::{databento::DatabentoHistory, ib::IbHistory, okx::OkxHistory};
 use crate::{
     catalog::{NodeClient, NodeFill, missing},
     live::node::{Clients, ExecClient},
-    strategy::{DataRequirements, Series, SeriesSlice, TickSeries},
+    strategy::{
+        Series,
+        requirements::{CatalogSeries, DataRequirements, SeriesSlice, TickSeries},
+    },
 };
 
 /// A cTrader broker: the venue of its instruments, which names its clients
@@ -155,26 +161,8 @@ pub(crate) enum HistorySource {
     CTrader(CTraderBroker),
     /// LSE's exports, through the LSE adapter's data client.
     Lse,
-    /// Interactive Brokers' historical bars.
+    /// Interactive Brokers' historical bars and ticks.
     Ib,
-}
-
-impl HistorySource {
-    /// The series of `pair`, an FX pair whose history the source serves,
-    /// its rates are read from: of IB's, its own 1-minute BID and ASK bars
-    /// (`ib::pair_bars`), IB serving no quotes of history and no trades of
-    /// a pair, and Nautilus reading a pair with no quote cached at the
-    /// closes of its latest BID and ASK bars (`Cache::get_xrate`); of
-    /// another source's, a cTrader broker's, its quotes.
-    fn rate_series(self, pair: InstrumentId) -> Vec<Series> {
-        match self {
-            Self::Ib => ib::pair_bars(pair).map(Series::Bars).to_vec(),
-            Self::Okx | Self::CTrader(_) | Self::Lse => vec![Series::Ticks(TickSeries {
-                data: NautilusDataType::QuoteTick,
-                instrument_id: pair,
-            })],
-        }
-    }
 }
 
 /// The source of a venue's live data on the live node: a data client.
@@ -463,16 +451,79 @@ pub fn has_base_currency(venue: Venue) -> bool {
 }
 
 /// The series the rates of `pair`, an FX pair a strategy converts equity
-/// through (`[trade] conversions`), are read from: those its venue's
-/// history serves (`HistorySource::rate_series`), so every venue without
-/// a row of its own as IB's. The strategy's data requirements carry them
-/// (`StandardConfig::data_requirements`), so that fill-catalog fills them
-/// and a backtest replays them as any series of the pair's venue, and the
-/// rates are read from one form of the pair, the same in a backtest as
-/// live: Nautilus reads a pair's quotes before its bars, however old.
-#[must_use]
-pub fn rate_series(pair: InstrumentId) -> Vec<Series> {
-    Row::of(pair.venue).history.rate_series(pair)
+/// through (`[trade] conversions`), are read from: the first form of the
+/// pair its venue's history serves (`serves`), its 1-minute BID and ASK
+/// bars, then its quotes; an IB pair's bars, a cTrader pair's quotes.
+/// Bars first: a rate needs the pair's latest value alone, which Nautilus
+/// reads of a pair with no quote cached at the closes of its latest BID
+/// and ASK bars (`Cache::get_xrate`), and bars are the lighter history to
+/// fill and warm up on. The strategy's data requirements carry them
+/// (`StandardConfig::data_requirements`), so that fill-catalog fills them,
+/// a backtest replays them and a live warmup requests them as any series
+/// served, and the rates are read from one form of the pair, the same in
+/// a backtest as live: Nautilus reads a pair's quotes before its bars,
+/// however old.
+///
+/// # Errors
+///
+/// Returns an error naming the pair and its venue, and why, if its venue's
+/// history serves neither form, OKX's: no rate of it could be read.
+pub fn rate_series(pair: InstrumentId) -> anyhow::Result<Vec<Series>> {
+    let bars = [PriceType::Bid, PriceType::Ask].map(|price_type| {
+        BarType::new(
+            pair,
+            BarSpecification::new(1, BarAggregation::Minute, price_type),
+            AggregationSource::External,
+        )
+    });
+    let quotes = TickSeries {
+        data: NautilusDataType::QuoteTick,
+        instrument_id: pair,
+    };
+    let no_bars = match bars
+        .iter()
+        .try_for_each(|bars| serves(&CatalogSeries::Bars(*bars)))
+    {
+        Ok(()) => return Ok(bars.map(Series::Bars).to_vec()),
+        Err(e) => e,
+    };
+    let no_quotes = match serves(&CatalogSeries::Ticks(quotes.clone())) {
+        Ok(()) => return Ok(vec![Series::Ticks(quotes)]),
+        Err(e) => e,
+    };
+    bail!(
+        "no rate of {pair} can be read: {venue}'s history serves neither its 1-minute BID and \
+         ASK bars ({no_bars:#}) nor its quotes ({no_quotes:#})",
+        venue = pair.venue
+    )
+}
+
+/// Checks that the history of the venue of `source`'s instrument serves
+/// it, as its row's history source answers (`Row::of`, so every venue
+/// without a row of its own as IB's), each a copy of what the data client
+/// its fill asks requests: a cTrader broker's quotes alone
+/// (`ctrader::quoted`); OKX's trades and candles (`okx::serves`); the
+/// series LSE's client asks LSE for (`lse::serves`); IB's time bars,
+/// quotes and trades (`ib::serves`). fill-catalog checks every series it
+/// fills here before anything connects, and a live warmup requests the
+/// history of a series only if served (`strategy::warmup`), so the two
+/// agree; a conversion pair is read in a form served (`rate_series`).
+/// Custom data of an instrument is the catalog's: a fill fills it from no
+/// source, and a warmup asks the catalog alone.
+///
+/// # Errors
+///
+/// Returns an error naming `source` and saying why if its venue's history
+/// does not serve it.
+pub(crate) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
+    match Row::of(source.instrument_id().venue).history {
+        HistorySource::CTrader(broker) => {
+            ctrader::quoted(Venue::new(broker.venue), &[source.key()]).map(drop)
+        }
+        HistorySource::Okx => okx::serves(source),
+        HistorySource::Lse => ::lse::serves(&source.key()),
+        HistorySource::Ib => ib::serves(source),
+    }
 }
 
 /// Where a trade on `venue` reads the equity of its broker's account as the
@@ -552,25 +603,23 @@ fn ctrader_node_client(
     }
 }
 
-/// Adds to `node` the fill of `series`, the quotes of the instruments of the
-/// cTrader broker of `venue`, over what the catalog misses of `slices`, a
-/// window holding at most what one tick request spans. The connection is
-/// read only if something is missing, so a complete catalog needs no
-/// credential.
+/// Adds to `node` the fill of `slices`, the quotes of `instrument_ids`,
+/// instruments of a cTrader broker, which its history serves (`serves`),
+/// over what the catalog misses of them, a window holding at most what one
+/// tick request spans, the broker's data client loading `instrument_ids`.
+/// The connection is read only if something is missing, so a complete
+/// catalog needs no credential.
 ///
 /// # Errors
 ///
-/// Returns an error if a series is not the quotes of an instrument on
-/// `venue`, if the catalog cannot be read, or as `connection`.
+/// Returns an error if the catalog cannot be read, or as `connection`.
 fn add_ctrader_fill(
     node: &mut NodeFill,
     catalog: &ParquetDataCatalog,
-    venue: &str,
     connection: impl FnOnce() -> anyhow::Result<CTraderConnection>,
-    series: &[(NautilusDataType, String)],
+    instrument_ids: Vec<InstrumentId>,
     slices: &[SeriesSlice],
 ) -> anyhow::Result<()> {
-    let instrument_ids = ctrader::quoted(Venue::new(venue), series)?;
     let requests = missing(catalog, slices)?;
     if !requests.is_empty() {
         node.add(
@@ -602,7 +651,7 @@ fn of_definitions_source(slices: &[SeriesSlice], source: DefinitionsSource) -> V
 
 /// Fills the catalog in `catalog_dir` with the instruments and the series
 /// `requirements` reads over `[start, end]`, those its bars are built from
-/// and its ticks (see `DataRequirements::catalog_series`), each on a contract
+/// and its ticks (see `DataRequirements::catalog_keys`), each on a contract
 /// over its slice (`DataRequirements::slices`), every history source
 /// (`Row::of`, `HistorySource`) given its slices, and its custom data of no
 /// instrument (`DataRequirements::custom`), which has no venue, from the
@@ -622,13 +671,18 @@ fn of_definitions_source(slices: &[SeriesSlice], source: DefinitionsSource) -> V
 /// Databento's data client in LSE's fill, each within the end of its
 /// dataset; LSEDGE's are the catalog's alone, which the data
 /// engine answers LSE's client's definition requests from.
-/// The cTrader brokers, LSE and IB refuse a series they do not serve. A
-/// source with nothing missing reads no credential, IB's connection aside.
+/// Before anything connects, every series is checked against its venue's
+/// history (`serves`), custom data of an instrument aside, which each
+/// source refuses as it reaches it, and IB's against what IB holds
+/// (`ib::check_held`). A source with nothing missing reads no credential,
+/// IB's connection aside.
 ///
 /// # Errors
 ///
 /// Returns an error if custom data of no instrument is of a type no source
-/// fills, before anything connects, if the catalog cannot be read, if
+/// fills, if a venue's history does not serve a series, or if IB holds no
+/// bars of a series as old as its slice, each before anything connects; if
+/// the catalog cannot be read, if
 /// `DATABENTO_API_KEY` is missing while Databento has a definition to give,
 /// or as `add_ctrader_fill`, `OkxHistory::write_definitions`,
 /// `lse::add_fill` (`DatabentoHistory::new` and
@@ -645,7 +699,23 @@ pub async fn fill_history(
     for data_type in &requirements.custom {
         custom_source(data_type.type_name())?;
     }
+    for source in requirements.catalog_series() {
+        if !matches!(
+            source,
+            CatalogSeries::Ticks(TickSeries {
+                data: NautilusDataType::Custom { .. },
+                ..
+            })
+        ) {
+            serves(&source)?;
+        }
+    }
+    // Every source takes the series slices of its instruments: a rolled
+    // root's series contract by contract, each over its slice.
+    let slices = requirements.slices(start, end);
+    let ib_slices = of_source(&slices, HistorySource::Ib);
     let mut catalog = ParquetDataCatalog::new(catalog_dir, None, None, None, None);
+    ib::check_held(&catalog, &ib_slices, Timestamp::now())?;
     let (mut okx_ids, mut ctrader_ids, mut lse_ids, mut ib_ids) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for id in requirements.instrument_ids() {
@@ -656,17 +726,13 @@ pub async fn fill_history(
             HistorySource::Ib => ib_ids.push(id),
         }
     }
-    // Every source takes the series slices of its instruments: a rolled
-    // root's series contract by contract, each over its slice.
-    let slices = requirements.slices(start, end);
     let mut node = NodeFill::new();
     for (broker, ids) in ctrader_brokers_present(&ctrader_ids) {
         add_ctrader_fill(
             &mut node,
             &catalog,
-            broker.venue,
             || broker.connection(),
-            &requirements.of_instruments(&ids).catalog_series(),
+            ids,
             &of_source(&slices, HistorySource::CTrader(broker)),
         )?;
     }
@@ -705,8 +771,7 @@ pub async fn fill_history(
     // the node.
     if !ib_ids.is_empty() {
         let ib = IbHistory::connect(venues.ib.client_id, end, Timestamp::now()).await?;
-        ib.fill(&mut catalog, &of_source(&slices, HistorySource::Ib))
-            .await?;
+        ib.fill(&mut catalog, &ib_slices).await?;
     }
     Ok(())
 }
@@ -732,7 +797,7 @@ fn ctrader_clients(connection: CTraderConnection, instrument_ids: Vec<Instrument
 /// What a node needs of the cTrader broker of `venue` to trade its
 /// instruments `ids`: the connection `connection` reads, and the instruments
 /// of the series `requirements` reads of them, those its bars are built from
-/// and its ticks, as a fill reads them (`DataRequirements::catalog_series`),
+/// and its ticks, as a fill reads them (`DataRequirements::catalog_keys`),
 /// their quotes being all cTrader serves: an instrument read as its quotes
 /// alone, a conversion pair's, is loaded, so that the strategy's
 /// subscription to them is served. Nothing connects.
@@ -750,7 +815,7 @@ fn ctrader_read(
 ) -> anyhow::Result<(CTraderConnection, Vec<InstrumentId>)> {
     let instrument_ids = ctrader::quoted(
         Venue::new(venue),
-        &requirements.of_instruments(ids).catalog_series(),
+        &requirements.of_instruments(ids).catalog_keys(),
     )?;
     Ok((connection()?, instrument_ids))
 }
@@ -870,7 +935,7 @@ pub(crate) async fn live_clients(
         .into_iter()
         .filter(|id| Row::of(id.venue).live_data == LiveDataSource::Lse)
         .collect();
-    ::lse::check_streamed(&requirements.of_instruments(&lse_read).catalog_series())?;
+    ::lse::check_streamed(&requirements.of_instruments(&lse_read).catalog_keys())?;
     let ctrader = ctrader_brokers_present(&ctrader_ids)
         .into_iter()
         .map(|(broker, ids)| ctrader_read(requirements, &ids, broker.venue, || broker.connection()))
@@ -915,11 +980,16 @@ mod tests {
     use jiff::SignedDuration;
     use nautilus_common::{
         cache::Cache,
+        clients::DataClient,
         clock::VirtualClock,
         enums::Environment,
         live::runner::{replace_data_event_sender, replace_exec_event_sender},
+        messages::data::{
+            RequestBars, RequestBookDeltas, RequestBookDepth, RequestCommand, RequestQuotes,
+            RequestTrades,
+        },
     };
-    use nautilus_core::string::secret::SecretString;
+    use nautilus_core::{UUID4, UnixNanos, string::secret::SecretString};
     use nautilus_live::{builder::LiveNodeBuilder, config::LiveNodeConfig, node::LiveNode};
     use nautilus_model::{
         data::{BarType, DataType, FundingRateUpdate, QuoteTick, TradeTick},
@@ -1474,20 +1544,63 @@ mod tests {
         );
     }
 
-    /// Named Pepperstone first, IC is asked first. Refused before any
-    /// connection is read, and before IB, which would refuse the end.
+    /// Every series of a fill is checked against its venue's history
+    /// before anything connects: OKX's quotes, which its client does not
+    /// request, and a cTrader broker's bars, its history being quotes, each
+    /// fail the fill naming them, before OKX writes a definition, which
+    /// would read its account's environment, missing here, before a
+    /// cTrader broker's connection is read, and before IB, which would
+    /// refuse the end.
     #[tokio::test]
-    async fn a_fill_asks_the_ctrader_brokers_in_their_table_s_order_and_before_ib() {
+    async fn a_series_its_venue_does_not_serve_fails_the_fill_before_anything_connects() {
+        for (requirements, refused) in [
+            (
+                ticks(&[
+                    (NautilusDataType::QuoteTick, SWAP),
+                    (NautilusDataType::QuoteTick, "XAUUSD.ICMARKETS"),
+                    (NautilusDataType::TradeTick, "SXR8.IBIS"),
+                ]),
+                SWAP,
+            ),
+            (
+                reading(&[
+                    "XAUUSD.PEPPERSTONE-1-MINUTE-BID-EXTERNAL",
+                    "SXR8.IBIS-1-MINUTE-LAST-EXTERNAL",
+                ]),
+                "XAUUSD.PEPPERSTONE-1-MINUTE-BID-EXTERNAL",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+
+            let err = fill_history(
+                &requirements,
+                at(FILL_START),
+                at(FILL_END),
+                &history_args(),
+                dir.path(),
+            )
+            .await
+            .unwrap_err();
+
+            let err = format!("{err:#}");
+            assert!(
+                err.contains(refused) && err.contains("serves") && !err.contains(IB_REFUSES),
+                "{refused}: {err}"
+            );
+        }
+    }
+
+    /// IB holds no bars of 30 seconds or less older than six months: a
+    /// fill of them reaching earlier fails naming that before IB connects,
+    /// which would refuse the end.
+    #[tokio::test]
+    async fn a_fill_of_small_ib_bars_older_than_six_months_fails_before_ib_connects() {
         let dir = tempfile::tempdir().unwrap();
-        let requirements = reading(&[
-            "XAUUSD.PEPPERSTONE-1-MINUTE-BID-EXTERNAL",
-            "XAUUSD.ICMARKETS-1-MINUTE-BID-EXTERNAL",
-            "SXR8.IBIS-1-MINUTE-LAST-EXTERNAL",
-        ]);
+        let bars = "SXR8.IBIS-5-SECOND-LAST-EXTERNAL";
 
         let err = fill_history(
-            &requirements,
-            at(FILL_START),
+            &reading(&[bars]),
+            at("2020-01-01T00:00:00Z"),
             at(FILL_END),
             &history_args(),
             dir.path(),
@@ -1495,20 +1608,18 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert!(
-            err.to_string().contains("ICMARKETS serves quotes only"),
-            "{err:#}"
-        );
+        let err = format!("{err:#}");
+        assert!(err.contains(bars) && err.contains("six months"), "{err}");
     }
 
-    /// The series and slices of a fill of gold's quotes on `venue`.
-    fn gold_slices(venue: &str) -> (Vec<(NautilusDataType, String)>, Vec<SeriesSlice>) {
+    /// The instruments and slices of a fill of gold's quotes on `venue`.
+    fn gold_slices(venue: &str) -> (Vec<InstrumentId>, Vec<SeriesSlice>) {
         let requirements = ticks(&[(
             NautilusDataType::QuoteTick,
             format!("XAUUSD.{venue}").as_str(),
         )]);
         (
-            requirements.catalog_series(),
+            requirements.instrument_ids(),
             requirements.slices(at(FILL_START), at(FILL_END)),
         )
     }
@@ -1517,15 +1628,14 @@ mod tests {
     fn a_ctrader_fill_asks_what_the_catalog_lacks_in_tick_requests_and_a_definition_whole() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        let (series, slices) = gold_slices(pepperstone::VENUE);
+        let (ids, slices) = gold_slices(pepperstone::VENUE);
         let mut node = NodeFill::new();
 
         add_ctrader_fill(
             &mut node,
             &catalog,
-            pepperstone::VENUE,
             || Ok(demo_connection(pepperstone::BROKER)),
-            &series,
+            ids,
             &slices,
         )
         .unwrap();
@@ -1550,39 +1660,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
         store_quotes(&catalog, &[quote("XAUUSD.PEPPERSTONE")]);
-        let (series, slices) = gold_slices(pepperstone::VENUE);
+        let (ids, slices) = gold_slices(pepperstone::VENUE);
         let mut node = NodeFill::new();
 
         add_ctrader_fill(
             &mut node,
             &catalog,
-            pepperstone::VENUE,
             || panic!("the connection was read with nothing missing"),
-            &series,
+            ids,
             &slices,
         )
         .unwrap();
 
         assert_eq!(node.asked(), []);
-    }
-
-    #[test]
-    fn a_series_a_ctrader_broker_does_not_serve_is_refused_before_the_connection_is_read() {
-        let dir = tempfile::tempdir().unwrap();
-        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        let requirements = reading(&["XAUUSD.PEPPERSTONE-1-MINUTE-BID-EXTERNAL"]);
-
-        let err = add_ctrader_fill(
-            &mut NodeFill::new(),
-            &catalog,
-            pepperstone::VENUE,
-            || panic!("the connection was read before the series were checked"),
-            &requirements.catalog_series(),
-            &requirements.slices(at(FILL_START), at(FILL_END)),
-        )
-        .unwrap_err();
-
-        assert!(err.to_string().contains("serves quotes only"), "{err:#}");
     }
 
     /// GC.GLBX rolls from GCQ26 to GCZ26 at 00:00 UTC on 29 July 2026: its
@@ -1734,12 +1824,13 @@ mod tests {
         }
     }
 
-    /// A pair's rates are read as its venue's history serves it: a cTrader
-    /// broker's as its quotes; IB's, an IDEALPRO pair's, IDEALPRO having no
-    /// row of its own, as its 1-minute BID and ASK bars, IB serving no
-    /// quotes of history and no trades of a pair.
+    /// A pair's rates are read in the first form its venue's history serves
+    /// of its 1-minute BID and ASK bars, then its quotes: a cTrader
+    /// broker's as its quotes, serving no bars; IB's, an IDEALPRO pair's,
+    /// IDEALPRO having no row of its own, as its bars, which IB serves
+    /// beside its quotes.
     #[test]
-    fn each_venue_s_pairs_are_read_in_the_series_its_history_serves() {
+    fn each_venue_s_pairs_are_read_in_the_first_form_its_history_serves() {
         let quotes = |pair: &str| {
             vec![Series::Ticks(TickSeries {
                 data: NautilusDataType::QuoteTick,
@@ -1756,8 +1847,368 @@ mod tests {
             ("EURUSD.PEPPERSTONE", quotes("EURUSD.PEPPERSTONE")),
             ("EUR/USD.IDEALPRO", bars("EUR/USD.IDEALPRO")),
         ] {
-            assert_eq!(rate_series(InstrumentId::from(pair)), read, "{pair}");
+            assert_eq!(
+                rate_series(InstrumentId::from(pair)).unwrap(),
+                read,
+                "{pair}"
+            );
         }
+    }
+
+    /// OKX's history serves no BID or ASK bars, its candles being of trades,
+    /// and no quotes: no rate of an OKX pair can be read, which names the
+    /// pair and its venue.
+    #[test]
+    fn a_pair_whose_venue_serves_neither_form_has_no_rate_series() {
+        let err = rate_series(InstrumentId::from("USDC-USDT.OKX"))
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains("USDC-USDT.OKX") && err.contains("OKX's history"),
+            "{err}"
+        );
+    }
+
+    /// The external bars of `bar_type`, a source as it is.
+    fn bars_of(bar_type: &str) -> CatalogSeries {
+        CatalogSeries::Bars(BarType::from(bar_type))
+    }
+
+    /// The `data` of `instrument_id`, a source as it is.
+    fn ticks_of(data: NautilusDataType, instrument_id: &str) -> CatalogSeries {
+        CatalogSeries::Ticks(TickSeries {
+            data,
+            instrument_id: InstrumentId::from(instrument_id),
+        })
+    }
+
+    /// Asserts each of `served` is served and each of `refused` refused,
+    /// the error naming it.
+    fn assert_serves(served: &[CatalogSeries], refused: &[CatalogSeries]) {
+        for source in served {
+            if let Err(err) = serves(source) {
+                panic!("{source} refused: {err:#}");
+            }
+        }
+        for source in refused {
+            let Err(err) = serves(source) else {
+                panic!("{source} served");
+            };
+            let (_, identifier) = source.key();
+            assert!(
+                format!("{err:#}").contains(&identifier),
+                "{source}: {err:#}"
+            );
+        }
+    }
+
+    /// A cTrader broker's history is its tick history, of quotes alone, as
+    /// its adapter serves (`ctrader::quoted`).
+    #[test]
+    fn a_ctrader_broker_s_history_serves_its_quotes_alone() {
+        use NautilusDataType as D;
+        assert_serves(
+            &[
+                ticks_of(D::QuoteTick, "XAUUSD.ICMARKETS"),
+                ticks_of(D::QuoteTick, "EURUSD.PEPPERSTONE"),
+            ],
+            &[
+                ticks_of(D::TradeTick, "XAUUSD.ICMARKETS"),
+                ticks_of(D::OrderBookDelta, "XAUUSD.PEPPERSTONE"),
+                bars_of("XAUUSD.ICMARKETS-1-MINUTE-BID-EXTERNAL"),
+                bars_of("EURUSD.PEPPERSTONE-1-MINUTE-LAST-EXTERNAL"),
+            ],
+        );
+    }
+
+    /// Nautilus' OKX data client requests trades and candles alone
+    /// (`request_trades`, `request_bars`), no quotes and no book: its
+    /// candles are of trade prices, at a width OKX has a candle of
+    /// (`bar_spec_as_okx_channel`), whatever price a bar type names.
+    #[test]
+    fn okx_s_history_serves_its_trades_and_its_candles() {
+        use NautilusDataType as D;
+        assert_serves(
+            &[
+                ticks_of(D::TradeTick, SWAP),
+                bars_of("BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL"),
+                bars_of("BTC-USDT-SWAP.OKX-5-MINUTE-LAST-EXTERNAL"),
+                bars_of("BTC-USDT-SWAP.OKX-4-HOUR-LAST-EXTERNAL"),
+                bars_of("BTC-USDT-SWAP.OKX-1-DAY-LAST-EXTERNAL"),
+            ],
+            &[
+                ticks_of(D::QuoteTick, SWAP),
+                ticks_of(D::OrderBookDepth, SWAP),
+                ticks_of(D::OrderBookDelta, SWAP),
+                bars_of("BTC-USDT-SWAP.OKX-1-MINUTE-MID-EXTERNAL"),
+                bars_of("BTC-USDT-SWAP.OKX-1-MINUTE-BID-EXTERNAL"),
+                bars_of("BTC-USDT-SWAP.OKX-1-MINUTE-MARK-EXTERNAL"),
+                bars_of("BTC-USDT-SWAP.OKX-4-MINUTE-LAST-EXTERNAL"),
+                bars_of("BTC-USDT-SWAP.OKX-1-MINUTE-LAST-INTERNAL"),
+            ],
+        );
+    }
+
+    /// LSE's client asks LSE for the quotes, trades and books of an
+    /// instrument of its venues, but an index's trades, which it has none
+    /// of, and for its candles of an LSEDGE series and an OPRA contract
+    /// alone, EXTERNAL bars of the LAST price below a day wide
+    /// (`lse::serves`).
+    #[test]
+    fn lse_s_history_serves_what_its_client_asks_lse_for() {
+        use NautilusDataType as D;
+        assert_serves(
+            &[
+                ticks_of(D::QuoteTick, "GCZ26.GLBX"),
+                ticks_of(D::TradeTick, "GCZ26.GLBX"),
+                ticks_of(D::OrderBookDepth, "GCZ26.GLBX"),
+                ticks_of(D::OrderBookDelta, "NVDA.XNAS"),
+                ticks_of(D::TradeTick, "GOLD-FUTURES.LSEDGE"),
+                ticks_of(D::QuoteTick, "SPX-INDICES.LSEDGE"),
+                ticks_of(D::TradeTick, "AAPL  261120C00355000.OPRA"),
+                bars_of("GOLD-FUTURES.LSEDGE-1-MINUTE-LAST-EXTERNAL"),
+                bars_of("AAPL  261120C00355000.OPRA-5-MINUTE-LAST-EXTERNAL"),
+            ],
+            &[
+                ticks_of(D::TradeTick, "SPX-INDICES.LSEDGE"),
+                bars_of("GCZ26.GLBX-1-MINUTE-LAST-EXTERNAL"),
+                bars_of("NVDA.XNAS-1-MINUTE-LAST-EXTERNAL"),
+                bars_of("GOLD-FUTURES.LSEDGE-1-DAY-LAST-EXTERNAL"),
+                bars_of("GOLD-FUTURES.LSEDGE-1-MINUTE-MID-EXTERNAL"),
+                bars_of("GOLD-FUTURES.LSEDGE-4-MINUTE-LAST-EXTERNAL"),
+            ],
+        );
+    }
+
+    /// Nautilus' IB client serves IB's own time bars of every size IB has
+    /// but a month's, which its history client parses none of, priced
+    /// LAST, BID, ASK or MID (its TRADES, BID, ASK and MIDPOINT),
+    /// and IB's historical ticks, BID_ASK as quotes and TRADES as trades,
+    /// every venue without a row of its own; no book, no other price and
+    /// no size IB has not.
+    #[test]
+    fn ib_s_history_serves_its_time_bars_quotes_and_trades() {
+        use NautilusDataType as D;
+        assert_serves(
+            &[
+                bars_of("SXR8.IBIS-1-MINUTE-LAST-EXTERNAL"),
+                bars_of("SXR8.IBIS-1-MINUTE-MID-EXTERNAL"),
+                bars_of("EUR/USD.IDEALPRO-1-MINUTE-BID-EXTERNAL"),
+                bars_of("EUR/USD.IDEALPRO-1-MINUTE-ASK-EXTERNAL"),
+                bars_of("SXR8.IBIS-1-SECOND-LAST-EXTERNAL"),
+                bars_of("SXR8.IBIS-30-SECOND-BID-EXTERNAL"),
+                bars_of("ESZ26.CME-2-MINUTE-LAST-EXTERNAL"),
+                bars_of("ESZ26.CME-20-MINUTE-LAST-EXTERNAL"),
+                bars_of("ESZ26.CME-8-HOUR-LAST-EXTERNAL"),
+                bars_of("SXR8.IBIS-1-DAY-LAST-EXTERNAL"),
+                bars_of("SXR8.IBIS-1-WEEK-LAST-EXTERNAL"),
+                ticks_of(D::QuoteTick, "SXR8.IBIS"),
+                ticks_of(D::QuoteTick, "EUR/USD.IDEALPRO"),
+                ticks_of(D::TradeTick, "ESZ26.CME"),
+            ],
+            &[
+                bars_of("SXR8.IBIS-1-MINUTE-MARK-EXTERNAL"),
+                bars_of("SXR8.IBIS-4-MINUTE-LAST-EXTERNAL"),
+                bars_of("SXR8.IBIS-2-SECOND-LAST-EXTERNAL"),
+                bars_of("SXR8.IBIS-1-MONTH-LAST-EXTERNAL"),
+                bars_of("SXR8.IBIS-1-MINUTE-LAST-INTERNAL"),
+                bars_of("SXR8.IBIS-100-TICK-LAST-EXTERNAL"),
+                ticks_of(D::OrderBookDepth, "SXR8.IBIS"),
+                ticks_of(D::OrderBookDelta, "ESZ26.CME"),
+            ],
+        );
+    }
+
+    /// A history request of each kind a data client takes, of `id`, its
+    /// bars `id`'s 1-minute LAST bars, over an hour, as a fill or a warmup
+    /// sends it: the kind's name, the source it asks for and the request.
+    fn requests_of(id: InstrumentId) -> Vec<(&'static str, CatalogSeries, RequestCommand)> {
+        use NautilusDataType as D;
+        let (start, end): (Timestamp, Timestamp) = (
+            at(FILL_START),
+            at(FILL_START) + SignedDuration::from_hours(1),
+        );
+        let bars = BarType::from(format!("{id}-1-MINUTE-LAST-EXTERNAL").as_str());
+        let ticks = |data| {
+            CatalogSeries::Ticks(TickSeries {
+                data,
+                instrument_id: id,
+            })
+        };
+        let ts = UnixNanos::from(end);
+        vec![
+            (
+                "quotes",
+                ticks(D::QuoteTick),
+                RequestCommand::Quotes(RequestQuotes::new(
+                    id,
+                    Some(start),
+                    Some(end),
+                    None,
+                    None,
+                    UUID4::new(),
+                    ts,
+                    None,
+                )),
+            ),
+            (
+                "trades",
+                ticks(D::TradeTick),
+                RequestCommand::Trades(RequestTrades::new(
+                    id,
+                    Some(start),
+                    Some(end),
+                    None,
+                    None,
+                    UUID4::new(),
+                    ts,
+                    None,
+                )),
+            ),
+            (
+                "bars",
+                CatalogSeries::Bars(bars),
+                RequestCommand::Bars(RequestBars::new(
+                    bars,
+                    Some(start),
+                    Some(end),
+                    None,
+                    None,
+                    UUID4::new(),
+                    ts,
+                    None,
+                )),
+            ),
+            (
+                "book deltas",
+                ticks(D::OrderBookDelta),
+                RequestCommand::BookDeltas(RequestBookDeltas::new(
+                    id,
+                    Some(start),
+                    Some(end),
+                    None,
+                    None,
+                    UUID4::new(),
+                    ts,
+                    None,
+                )),
+            ),
+            (
+                "book depth",
+                ticks(D::OrderBookDepth),
+                RequestCommand::BookDepth(RequestBookDepth::new(
+                    id,
+                    Some(start),
+                    Some(end),
+                    None,
+                    None,
+                    None,
+                    UUID4::new(),
+                    ts,
+                    None,
+                )),
+            ),
+        ]
+    }
+
+    /// Whether `client` refuses `request` as a kind it does not take:
+    /// Nautilus' `DataClient` default refusal (`does not support`), which
+    /// a client implementing the kind never gives.
+    fn unsupported(client: &dyn DataClient, request: RequestCommand) -> bool {
+        let answer = match request {
+            RequestCommand::Quotes(request) => client.request_quotes(request),
+            RequestCommand::Trades(request) => client.request_trades(request),
+            RequestCommand::Bars(request) => client.request_bars(request),
+            RequestCommand::BookDeltas(request) => client.request_book_deltas(request),
+            RequestCommand::BookDepth(request) => client.request_book_depth(request),
+            other => panic!("no history request: {other:?}"),
+        };
+        answer.is_err_and(|e| e.to_string().contains("does not support"))
+    }
+
+    /// `serves` against the data clients its answers copy: each history
+    /// source's client, built as its fill builds it and unconnected, on
+    /// unreachable addresses, refuses as a kind it does not take exactly
+    /// the kinds of request of which `serves` refuses the source of every
+    /// instrument of its venues tried; a kind it takes the source of one
+    /// of them, it does not. Each kind is tried on the 1-minute LAST bars
+    /// of each instrument, its quotes, its trades and its book; a bar type
+    /// a client takes but `serves` refuses (a price, a width) is not
+    /// checked here.
+    #[tokio::test]
+    async fn each_history_source_s_client_takes_the_kinds_of_request_its_history_serves() {
+        let (data_tx, _data_events) = tokio::sync::mpsc::unbounded_channel();
+        replace_data_event_sender(data_tx);
+        let cache = Rc::new(RefCell::new(Cache::default()));
+        let clock = Rc::new(RefCell::new(VirtualClock::new()));
+        let unreachable = "http://127.0.0.1:1".to_string();
+        let ids = |ids: &[&str]| {
+            ids.iter()
+                .map(|&id| InstrumentId::from(id))
+                .collect::<Vec<_>>()
+        };
+        let okx = NodeClient {
+            factory: Box::new(OKXDataClientFactory::new()),
+            config: Box::new(nautilus_okx::config::OKXDataClientConfig {
+                base_url_http: Some(unreachable.clone()),
+                ..Default::default()
+            }),
+        };
+        let lse = NodeClient {
+            factory: Box::new(LseDataClientFactory::new()),
+            config: Box::new(
+                LseDataClientConfig::builder()
+                    .api_key(SecretString::from(::lse::testing::API_KEY))
+                    .cme_api_key(SecretString::from(::lse::testing::CME_API_KEY))
+                    .nasdaq_api_key(SecretString::from(::lse::testing::NASDAQ_API_KEY))
+                    .base_url_http(unreachable)
+                    .build(),
+            ),
+        };
+        let ib = ib::offline_clients(&ids(&["SXR8.IBIS"])).into_node_clients(&[]);
+        let ib = NodeClient {
+            factory: ib.data_factory,
+            config: ib.data_config,
+        };
+        let ctrader = ctrader_node_client(demo_connection(ic::BROKER), ids(&["XAUUSD.ICMARKETS"]));
+        let mut drift = Vec::new();
+        for (client, venues) in [
+            (ctrader, ids(&["XAUUSD.ICMARKETS"])),
+            (okx, ids(&[SWAP])),
+            (
+                lse,
+                ids(&[
+                    "GOLD-FUTURES.LSEDGE",
+                    "GCZ26.GLBX",
+                    "NVDA.XNAS",
+                    "AAPL  261120C00355000.OPRA",
+                ]),
+            ),
+            (ib, ids(&["SXR8.IBIS"])),
+        ] {
+            let name = client.factory.name().to_string();
+            let created = client
+                .factory
+                .create(
+                    &name,
+                    client.config.as_ref(),
+                    cache.clone().into(),
+                    clock.clone(),
+                )
+                .unwrap();
+            assert!(created.is_disconnected(), "{name}");
+            for (i, (kind, _, request)) in requests_of(venues[0]).into_iter().enumerate() {
+                let served = venues
+                    .iter()
+                    .any(|&id| serves(&requests_of(id).swap_remove(i).1).is_ok());
+                if unsupported(created.as_ref(), request) == served {
+                    drift.push(format!("{name}'s {kind}: served {served}"));
+                }
+            }
+        }
+
+        assert_eq!(drift, Vec::<String>::new());
     }
 
     /// IB's execution client denies reduce-only and post-only orders, GLBX's

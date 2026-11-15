@@ -1,12 +1,14 @@
 //! End to end on a cTrader broker's demo: a strategy converting through the
 //! broker's EUR/USD (`[trade] conversions`) runs on `Live` reading gold's
-//! minute bars, and the node's cache holds the pair's quotes after the
-//! start, with no warmup of them: the broker's clients load the pair, which
-//! the strategy reads as its quotes alone, and the strategy subscribes to
-//! them from its start, as every strategy does through its roller
-//! (`rolls::Roller`) of its data requirements' ticks. Its rates then convert
-//! euros into dollars. It needs what `ctrader_demo.rs` needs, and the
-//! forex market open.
+//! minute bars, and the node's cache holds the pair's quotes from the
+//! start: the broker's clients load the pair, which the strategy reads as
+//! its quotes alone, the form its venue's history serves
+//! (`venues::rate_series`), its warmup asks their history as it does every
+//! series of its data requirements its venue serves, and the strategy
+//! subscribes to them from its start, as every strategy does through its
+//! roller (`rolls::Roller`) of its data requirements' ticks. Its rates then
+//! convert euros into dollars. It needs what `ctrader_demo.rs` needs, and
+//! the forex market open.
 //!
 //! Gated as `ctrader_demo.rs` is. The strategy is a recorder wired as the
 //! EMA crossover is, a warmup of its bars and a roller of its ticks, its
@@ -225,10 +227,10 @@ async fn a_live_run_caches_its_conversion_pairs_quotes_after_its_start() {
         record.converted,
     );
     assert_eq!(record.warmup_failure, None);
-    // The pair has no warmup: the gold's quotes alone, which its bars are
-    // built from, are asked.
+    // The pair is warmed up beside the gold's quotes, which its bars are
+    // built from.
     assert!(
-        !record.warmup_quoted.contains(&eurusd),
+        record.warmup_quoted.contains(&eurusd),
         "{:?}",
         record.warmup_quoted
     );

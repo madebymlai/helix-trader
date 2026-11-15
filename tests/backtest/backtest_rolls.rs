@@ -14,7 +14,7 @@ use crate::common::{
 use helix_trader::{
     backtest::{Backtest, Commission},
     rolls::{Roller, Transition},
-    strategy::TickSeries,
+    strategy::requirements::TickSeries,
     venues,
 };
 use nautilus_common::{actor::DataActor, logging::logger::LoggerConfig, timer::TimeEvent};

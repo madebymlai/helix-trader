@@ -34,7 +34,7 @@ use crate::{
         handle::SettledRows,
         holdout::Example,
     },
-    strategy::TickSeries,
+    strategy::requirements::TickSeries,
 };
 
 /// Deciding every `minutes` minutes.

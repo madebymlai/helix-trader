@@ -14,11 +14,11 @@ use serde::{
 };
 
 use super::{
-    DataRequirements, Declaration, IndicatorsConfig, TickSeries,
+    Declaration, IndicatorsConfig,
     conversions::{Conversions, Rates},
+    requirements::{DataRequirements, TickSeries, tick_data},
     risk::{Risk, Stake},
     session::Session,
-    tick_data,
 };
 use crate::{
     model::config::{ModelConfig, ModelSection},
@@ -1706,6 +1706,22 @@ mod tests {
         assert_eq!(config.data.series.len(), 3);
     }
 
+    /// OKX's history serves no pair's BID and ASK bars, its candles being of
+    /// trades, and no quotes, so no rate of an OKX pair could be read: it
+    /// is refused under its field, naming the pair and its venue.
+    #[test]
+    fn a_pair_whose_venue_serves_neither_its_bars_nor_its_quotes_is_refused_naming_both() {
+        let err = load(&converting(r#"["USDC-USDT.OKX"]"#)).unwrap_err();
+
+        assert_eq!(fields_of(&err), ["trade.conversions[0]"]);
+        assert!(
+            ["USDC-USDT.OKX", "OKX's history"]
+                .iter()
+                .all(|named| err.to_string().contains(named)),
+            "{err}"
+        );
+    }
+
     /// A strategy's rates are Nautilus' on one venue: pairs on two are
     /// refused under the conversions, naming both venues.
     #[test]
@@ -1999,6 +2015,30 @@ mod tests {
             )
         }
 
+        /// A pair no rate of which can be read, an OKX pair, is refused under
+        /// its field, once, as a strategy trading on no model refuses it,
+        /// the model's rules reading the requirements it is left out of.
+        #[test]
+        fn a_pair_whose_venue_serves_neither_its_bars_nor_its_quotes_is_refused_once() {
+            let toml = TOML.replace(
+                r#"risk = "0.5%""#,
+                "risk = \"0.5%\"\nconversions = [\"USDC-USDT.OKX\"]",
+            );
+
+            let err = load(&toml).unwrap_err();
+
+            assert!(
+                fields_of(&err).contains(&"trade.conversions[0]".to_string()),
+                "{err}"
+            );
+            let err = err.to_string();
+            assert_eq!(
+                err.matches("no rate of USDC-USDT.OKX can be read").count(),
+                1,
+                "{err}"
+            );
+        }
+
         #[test]
         fn loads_the_standard_tables_and_the_model() {
             let config = load(TOML).unwrap();
@@ -2129,7 +2169,7 @@ mod tests {
             let requirements = load(&toml).unwrap().data_requirements();
 
             assert_eq!(
-                requirements.catalog_series(),
+                requirements.catalog_keys(),
                 [(
                     NautilusDataType::Bar,
                     "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL".to_string()

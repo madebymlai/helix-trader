@@ -71,7 +71,7 @@ use self::{
     blueprint::ModelBlueprint, dataset::Dataset, features::FeatureSet, handle::Mode,
     train::Training, walk::WalkForward,
 };
-use crate::strategy::{Part, Series, StandardConfig, catalog_series, warmup::Warmup};
+use crate::strategy::{Part, Series, StandardConfig, requirements::catalog_keys, warmup::Warmup};
 
 /// The part of a strategy trading on a model (`Part::TAKES_MODEL`): the
 /// features its model decides on, built of its config. The load and every
@@ -97,7 +97,7 @@ pub trait ModelPart: Part {
 /// bar types (`FeatureSet::bar_types`) and their tick series
 /// (`FeatureSet::ticks`), then each series `[data]` lists that the
 /// target's ATR, if it has one, reads, its bars or the ticks they are built
-/// from (`catalog_series`). The ATR is built of what the strategy reads of
+/// from (`catalog_keys`). The ATR is built of what the strategy reads of
 /// the traded instrument (`TargetConfig::atr_bars`), so it reads a series of
 /// `[data]` if one serves it, and needs none listed.
 ///
@@ -118,10 +118,10 @@ pub fn reads<P: ModelPart>(config: &StandardConfig<P>) -> ConfigResult<Vec<Serie
         .target
         .atr_bars(model.decision, &config.data_requirements())
     {
-        let built_of = catalog_series(&[atr.bar_type]);
+        let built_of = catalog_keys(&[atr.bar_type]);
         let atr_reads = |series: &Series| match series {
             Series::Bars(bar_type) => *bar_type == atr.bar_type,
-            Series::Ticks(ticks) => built_of.contains(&ticks.catalog_series()),
+            Series::Ticks(ticks) => built_of.contains(&ticks.catalog_key()),
         };
         let by_atr: Vec<Series> = config
             .data

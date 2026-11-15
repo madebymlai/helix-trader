@@ -22,7 +22,10 @@ use helix_trader::{
         features::FeatureSet,
         handle::{Mode, SettledRows},
     },
-    strategy::{DataRequirements, Declared, IndicatorsConfig, TickSeries},
+    strategy::{
+        Declared, IndicatorsConfig,
+        requirements::{DataRequirements, TickSeries},
+    },
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_model::{

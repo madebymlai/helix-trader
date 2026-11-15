@@ -44,7 +44,7 @@ use rust_decimal::Decimal;
 use super::{Backtest, Latency, report::Outcome};
 use crate::{
     catalog::catalog_config,
-    strategy::{SeriesSlice, warmup},
+    strategy::{requirements::SeriesSlice, warmup},
     venues,
 };
 
@@ -806,7 +806,7 @@ mod tests {
     fn a_run_of_custom_data_loads_the_other_series_at_once() {
         let dir = tempfile::tempdir().unwrap();
         let backtest = Backtest {
-            ticks: vec![crate::strategy::TickSeries {
+            ticks: vec![crate::strategy::requirements::TickSeries {
                 data: NautilusDataType::Custom {
                     type_name: "Imbalance".to_string(),
                 },
@@ -898,7 +898,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let backtest = Backtest {
             bar_types: vec![BarType::from("XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL")],
-            ticks: vec![crate::strategy::TickSeries {
+            ticks: vec![crate::strategy::requirements::TickSeries {
                 data: NautilusDataType::TradeTick,
                 instrument_id: InstrumentId::from("GOLD-FUTURES.LSEDGE"),
             }],

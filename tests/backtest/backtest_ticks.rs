@@ -8,7 +8,7 @@
 use std::{cell::RefCell, num::NonZeroUsize, rc::Rc};
 
 use crate::common::{glbx, ic};
-use helix_trader::{backtest::Backtest, strategy::TickSeries};
+use helix_trader::{backtest::Backtest, strategy::requirements::TickSeries};
 use nautilus_common::actor::DataActor;
 use nautilus_core::UnixNanos;
 use nautilus_model::{

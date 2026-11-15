@@ -12,9 +12,9 @@ use std::{cell::RefCell, path::Path, process::Command, rc::Rc};
 use helix_trader::{
     backtest::{Commission, Outcome},
     strategy::{
-        TickSeries,
         conversions::Conversions,
         orders::{EntryRisk, entry_risk},
+        requirements::TickSeries,
         risk::Stake,
     },
 };

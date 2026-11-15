@@ -1,9 +1,9 @@
 //! IB's euro in US dollars on IDEALPRO as fill-catalog stores it from IB's
 //! history: EUR/USD.IDEALPRO, Nautilus' FX pair, and its 1-minute BID and
-//! ASK bars, IB serving no quotes of history and no TRADES of a pair, each
-//! bar stamped at its close and of no volume, as IB's BID and ASK bars
-//! carry none. On Wednesday 21 October 2026, the day of `common::ic`. A
-//! strategy converting through the pair reads its rates from these bars
+//! ASK bars, each stamped at its close and of no volume, as IB's BID and
+//! ASK bars carry none. On Wednesday 21 October 2026, the day of
+//! `common::ic`. A strategy converting through the pair reads its rates
+//! from these bars, the first form of a pair IB's history serves
 //! (`venues::rate_series`).
 
 use std::path::Path;

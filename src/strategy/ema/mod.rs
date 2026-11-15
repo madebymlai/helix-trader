@@ -16,8 +16,9 @@
 //! bars it subscribes to through `strategy::warmup`, its warmup requested
 //! there live; `[trade]` names the one instrument traded, read on its one
 //! bars series, the only series `[data]` lists, and the FX pairs its
-//! equity converts through, a cTrader pair's quotes it subscribes to from
-//! its start through a roller (`rolls::Roller`), with no warmup; and
+//! equity converts through, a cTrader pair's quotes its warmup asks the
+//! history of and it subscribes to from its start through a roller
+//! (`rolls::Roller`); and
 //! `[indicators]` its fast and slow EMAs. Its signal is its Nautilus indicator, and it
 //! decides only once its indicators are initialized, on the replay in a
 //! backtest, on the warmup live. A minimal strategy to drive data,
@@ -51,9 +52,9 @@ use self::signal::Signal;
 use crate::{
     rolls::Roller,
     strategy::{
-        DataRequirements, Declaration, Declared, EmaArgs, Part, PlainStrategy, Series,
-        StandardConfig, TickSeries, Visitor,
+        Declaration, Declared, EmaArgs, Part, PlainStrategy, Series, StandardConfig, Visitor,
         orders::{self, Bracket, Exits, Trade},
+        requirements::{DataRequirements, TickSeries},
         warmup::Warmup,
     },
 };

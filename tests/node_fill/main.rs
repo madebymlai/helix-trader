@@ -25,7 +25,7 @@ use std::{
 use helix_trader::{
     catalog::{FillData, FillRequest, NodeClient, NodeFill, missing},
     rolls::Slice,
-    strategy::{DataRequirements, SeriesSlice, TickSeries},
+    strategy::requirements::{DataRequirements, SeriesSlice, TickSeries},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{

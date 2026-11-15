@@ -7,15 +7,16 @@
 //! money may be in another currency: an IC Markets account in EUR trading
 //! gold quoted in USD. The config lists the pairs to convert through, all
 //! on one venue, `conversions = ["EURUSD.ICMARKETS"]` or
-//! `["EUR/USD.IDEALPRO"]`, and the strategy reads each in the form its
-//! venue's history serves (`venues::rate_series`,
-//! `StandardConfig::data_requirements`), a cTrader broker's quotes, IB's
-//! 1-minute BID and ASK bars: fill-catalog fills them, a backtest replays
-//! them, a live strategy subscribes to them from its start, a cTrader
-//! pair's quotes with no warmup (`rolls::Roller`), an IB pair's bars as
-//! any bar type it warms up on, and Nautilus' data engine caches each
-//! quote and bar it processes, which its exchange rates are read from, a
-//! pair's quotes before its bars. Before a pair's first quote or bars
+//! `["EUR/USD.IDEALPRO"]`, and the strategy reads each in the first form
+//! its venue's history serves of its 1-minute BID and ASK bars, then its
+//! quotes (`venues::rate_series`, `StandardConfig::data_requirements`),
+//! IB's bars, a cTrader broker's quotes: fill-catalog fills them, a
+//! backtest replays them, a live strategy warms up on them and subscribes
+//! to them from its start, a cTrader pair's quotes through its roller
+//! (`rolls::Roller`), an IB pair's bars as any bar type, and Nautilus'
+//! data engine caches each quote and bar it processes, a warmup's among
+//! them, which its exchange rates are read from, a pair's quotes before its
+//! bars. Before a pair's first quote or bars
 //! there is no rate through it, and a trade sends nothing, logged
 //! (`orders::Trade::send`).
 //!
@@ -37,9 +38,10 @@
 //!   run's lookup finds a rate once the pairs are quoted.
 //!
 //! A config whose pairs could never convert is refused at load
-//! (`Conversions::validate`): pairs on more than one venue, or off the
-//! venue of an instrument traded whose broker's account has a base
-//! currency.
+//! (`Conversions::validate`): a pair whose venue's history serves no form
+//! of it a rate is read from, an OKX pair, pairs on more than one venue, or
+//! a pair off the venue of an instrument traded whose broker's account has
+//! a base currency.
 
 use std::fmt;
 
@@ -98,7 +100,10 @@ impl Conversions {
     /// the instrument, since Nautilus converts such an account's margins,
     /// commissions and P&L into its base currency only through rates on the
     /// traded instrument's venue. For an account without one only the
-    /// sizer converts, at the pairs' rates, so their venue may be any.
+    /// sizer converts, at the pairs' rates, so their venue may be any. And
+    /// each pair whose venue's history serves no form a rate is read from,
+    /// under its field, naming the pair, its venue and why
+    /// (`venues::rate_series`), OKX's.
     pub(super) fn validate(&self, traded: &[InstrumentId], errors: &mut ConfigErrorCollector) {
         let mut on: Vec<Venue> = vec![];
         for pair in &self.0 {
@@ -118,6 +123,12 @@ impl Conversions {
             ));
         }
         for (i, pair) in self.0.iter().enumerate() {
+            if let Err(e) = venues::rate_series(*pair) {
+                errors.push(ConfigError::invalid_value(
+                    format!("trade.conversions[{i}]"),
+                    format!("{e:#}"),
+                ));
+            }
             let based_elsewhere = traded.iter().find(|instrument| {
                 instrument.venue != pair.venue && venues::has_base_currency(instrument.venue)
             });
@@ -135,11 +146,16 @@ impl Conversions {
         }
     }
 
-    /// The series each pair's rates are read from, in order: those its
-    /// venue's history serves (`venues::rate_series`), a cTrader broker's
-    /// quotes, IB's 1-minute BID and ASK bars.
+    /// The series each pair's rates are read from, in order: the form its
+    /// venue's history serves (`venues::rate_series`), an IB pair's
+    /// 1-minute BID and ASK bars, a cTrader pair's quotes; none of a pair
+    /// whose venue serves neither form, which `validate` refuses, so that
+    /// the rules reading the requirements the pairs are in while the config
+    /// is checked read them and `validate` reports the pair once.
     pub(super) fn series(&self) -> impl Iterator<Item = Series> + '_ {
-        self.0.iter().flat_map(|&pair| venues::rate_series(pair))
+        self.0
+            .iter()
+            .flat_map(|&pair| venues::rate_series(pair).unwrap_or_default())
     }
 
     /// The rates an equity is converted at: Nautilus' cached rates on the

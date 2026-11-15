@@ -24,7 +24,7 @@ use std::{cell::RefCell, process::Command, rc::Rc, time::Duration};
 
 use helix_trader::{
     live::Live,
-    strategy::{DataRequirements, warmup::Warmup},
+    strategy::{requirements::DataRequirements, warmup::Warmup},
 };
 use jiff::SignedDuration;
 use nautilus_common::{

@@ -39,7 +39,7 @@ use super::{DefinitionsSource, Row, databento::DatabentoHistory};
 use crate::{
     catalog::{FillData, NodeClient, NodeFill, missing, missing_custom},
     live::node::Clients,
-    strategy::SeriesSlice,
+    strategy::requirements::SeriesSlice,
 };
 
 /// The window of one request of a series: a day, as Databento's. The
@@ -171,7 +171,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        strategy::{DataRequirements, TickSeries},
+        strategy::requirements::{DataRequirements, TickSeries},
         venues::databento::testing::MockDatabento,
     };
 

@@ -22,7 +22,7 @@ use std::{path::PathBuf, process::Command, time::Duration};
 use crate::common::cache::delete_trader;
 use helix_trader::{
     live::Live,
-    strategy::{DataRequirements, warmup::Warmup},
+    strategy::{requirements::DataRequirements, warmup::Warmup},
     venues::ib::IbAccount,
 };
 use ibapi::{Client, accounts::PositionUpdate, contracts::Contract, orders::Orders};

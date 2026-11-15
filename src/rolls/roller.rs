@@ -19,7 +19,7 @@ use nautilus_model::{
 
 use super::Transition;
 use crate::{
-    strategy::{TickSeries, warmup::subscription_params},
+    strategy::{requirements::TickSeries, warmup::subscription_params},
     venues,
 };
 

@@ -22,7 +22,7 @@ use std::{cell::RefCell, collections::BTreeSet, rc::Rc, time::Duration};
 
 use helix_trader::{
     live::Live,
-    strategy::{DataRequirements, warmup::Warmup},
+    strategy::{requirements::DataRequirements, warmup::Warmup},
     venues::ib::{IbAccount, IbHistory},
 };
 use jiff::{SignedDuration, Timestamp};

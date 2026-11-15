@@ -33,7 +33,10 @@ use helix_trader::{
     catalog::fill_catalog,
     live::Live,
     rolls::ContinuousBars,
-    strategy::{DataRequirements, catalog_series, warmup},
+    strategy::{
+        requirements::{DataRequirements, catalog_keys},
+        warmup,
+    },
     venues::ib::{IbAccount, IbHistory},
 };
 use jiff::{SignedDuration, Timestamp};
@@ -196,7 +199,7 @@ async fn the_live_minute_bars_follow_the_warmup_with_no_gap_and_no_duplicate() {
         fill_catalog(
             &mut parquet,
             instruments,
-            &catalog_series(&[composite]),
+            &catalog_keys(&[composite]),
             now - WARMUP,
             catalog_end,
             async |data_type, identifier, from, to| ib.data(data_type, identifier, from, to).await,

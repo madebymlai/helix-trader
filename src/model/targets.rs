@@ -181,9 +181,10 @@ use super::{
 use crate::{
     backtest::{self, Commission},
     strategy::{
-        AtrArgs, DataRequirements, IndicatorArgs, TradedInstrument,
+        AtrArgs, IndicatorArgs, TradedInstrument,
         conversions::{Conversions, Rates},
         orders::{self, Bracket, Exits, OrderIds, Trade, worth},
+        requirements::DataRequirements,
         risk::{Risk, Stake},
         warmup::{self, Warmup},
     },
@@ -642,7 +643,7 @@ impl TargetConfig {
                 })
         };
         let traded = self.instrument_id;
-        let series = requirements.catalog_series();
+        let series = requirements.catalog_keys();
         let reads = |data| series.contains(&(data, traded.to_string()));
         let bar_type = if reads(NautilusDataType::QuoteTick) {
             BarType::new(traded, spec(PriceType::Mid)?, AggregationSource::Internal)

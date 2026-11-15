@@ -3,7 +3,7 @@
 //!
 //! Source-agnostic, no node: the data comes from a fetch function the
 //! caller passes, backed by an adapter's historical client (`venues::ib`). A series is a Nautilus data type and its catalog
-//! identifier (see `strategy::catalog_series`): the quotes of an
+//! identifier (see `strategy::requirements::catalog_keys`): the quotes of an
 //! instrument, keyed by its id, or the bars of a bar type, keyed by the bar
 //! type. Per series it resumes after its stored range
 //! (`query_first_timestamp`, `query_last_timestamp`), checks the response,
@@ -32,7 +32,7 @@ use nautilus_persistence::{
     backend::parquet::catalog::ParquetDataCatalog, catalog::types::data_path_prefix,
 };
 
-use crate::strategy::SeriesSlice;
+use crate::strategy::requirements::SeriesSlice;
 
 /// Fills `catalog` with `instruments`, then over `[start, end]` with each
 /// of `series`, a Nautilus data type and its catalog identifier, fetched one
@@ -54,7 +54,10 @@ use crate::strategy::SeriesSlice;
 /// item of another series, is an error. Once a
 /// series is stored, an empty response, or one of only already stored
 /// items, means nothing new: nothing is written and the next series run.
-/// Items are stored sorted by `ts_init`, one per `ts_init`.
+/// Items are stored sorted by `ts_init`, a bar per `ts_init`, and ticks as
+/// fetched, those of one `ts_init` in the order fetched: the fetch drops a
+/// tick it was given again, and ticks alike in every field are the venue's,
+/// each stored.
 pub async fn fill_catalog(
     catalog: &mut ParquetDataCatalog,
     instruments: Vec<InstrumentAny>,
@@ -82,37 +85,13 @@ pub async fn fill_catalog(
     catalog
         .write_instruments(new)
         .context("writing instruments")?;
-    let start_ns = UnixNanos::from(start);
     let end_ns = UnixNanos::from(end);
     for (data_type, identifier) in series {
         let named = || format!("the {} of {identifier}", data_path_prefix(data_type));
-        let catalog_type = data_type.clone().into();
-        let reading = || format!("reading the stored range of {}", named());
-        let first = catalog
-            .query_first_timestamp(&catalog_type, Some(identifier))
-            .with_context(reading)?;
-        let last = catalog
-            .query_last_timestamp(&catalog_type, Some(identifier))
-            .with_context(reading)?;
-        if let (Some(first), Some(last)) = (first, last)
-            && start_ns < UnixNanos::from(first)
-        {
-            bail!(
-                "{} are stored over [{}, {}] and {start} is before it: \
-                 extending history backwards is not supported; use a new catalog",
-                named(),
-                UnixNanos::from(first),
-                UnixNanos::from(last),
-            );
-        }
-        let resume_point = last.map(UnixNanos::from);
-        let from = match resume_point {
-            Some(last) => just_after(last),
-            None => start,
-        };
-        if from >= end {
+        let (Some(from), resume_point) = resumed(catalog, data_type, identifier, start, end)?
+        else {
             continue;
-        }
+        };
         let mut items = fetch(data_type, identifier, from, end)
             .await
             .with_context(|| format!("fetching {}", named()))?;
@@ -134,7 +113,15 @@ pub async fn fill_catalog(
             items.retain(|item| item.ts_init() > last);
         }
         items.sort_by_key(HasTsInit::ts_init);
-        items.dedup_by_key(|item| item.ts_init());
+        // One bar per close, a walk back's requests overlapping at their
+        // bounds. Ticks are kept as given: the fetch drops those it was
+        // given again, and two ticks alike in every field are two of the
+        // venue's, a venue stamping to the second (IB) giving such ticks
+        // with no id to tell them apart.
+        items.dedup_by(|later, earlier| match (later, earlier) {
+            (Data::Bar(later), Data::Bar(earlier)) => later.ts_init == earlier.ts_init,
+            _ => false,
+        });
         let (Some(oldest), Some(newest)) = (items.first(), items.last()) else {
             continue;
         };
@@ -145,6 +132,49 @@ pub async fn fill_catalog(
             .with_context(|| format!("writing {}", named()))?;
     }
     Ok(())
+}
+
+/// Where a fill of the series of `data_type` and `identifier` over the
+/// window `[start, end]` resumes, by what `catalog` stores of it: from
+/// `start` if it stores nothing of it, else 1 ns after its stored end,
+/// whatever `start`, so that no hole opens between the stored range and
+/// the window; none if that is at or after `end`, the fill asking its
+/// source nothing of the series. With the stored end, if any.
+///
+/// # Errors
+///
+/// Returns an error if the catalog cannot be read, or if `start` is before
+/// the stored range: extending history backwards is not supported.
+pub(crate) fn resumed(
+    catalog: &ParquetDataCatalog,
+    data_type: &NautilusDataType,
+    identifier: &str,
+    start: Timestamp,
+    end: Timestamp,
+) -> anyhow::Result<(Option<Timestamp>, Option<UnixNanos>)> {
+    let named = || format!("the {} of {identifier}", data_path_prefix(data_type));
+    let catalog_type = data_type.clone().into();
+    let reading = || format!("reading the stored range of {}", named());
+    let first = catalog
+        .query_first_timestamp(&catalog_type, Some(identifier))
+        .with_context(reading)?;
+    let last = catalog
+        .query_last_timestamp(&catalog_type, Some(identifier))
+        .with_context(reading)?;
+    if let (Some(first), Some(last)) = (first, last)
+        && UnixNanos::from(start) < UnixNanos::from(first)
+    {
+        bail!(
+            "{} are stored over [{}, {}] and {start} is before it: \
+             extending history backwards is not supported; use a new catalog",
+            named(),
+            UnixNanos::from(first),
+            UnixNanos::from(last),
+        );
+    }
+    let last = last.map(UnixNanos::from);
+    let from = last.map_or(start, just_after);
+    Ok(((from < end).then_some(from), last))
 }
 
 /// Fills `catalog` with `slices`, each a series on a contract over its
@@ -214,7 +244,7 @@ mod tests {
     use super::*;
     use crate::{
         rolls::Slice,
-        strategy::{DataRequirements, SeriesSlice, TickSeries},
+        strategy::requirements::{DataRequirements, SeriesSlice, TickSeries},
     };
     use nautilus_model::{
         data::{Bar, BarType, OrderBookDepth, QuoteTick, TradeTick, stubs::stub_depth10},
@@ -416,8 +446,10 @@ mod tests {
         assert!(filled == written, "the files' bytes differ");
     }
 
+    /// Each instrument's quotes, sorted by `ts_init`; one given twice at a
+    /// stamp is two quotes, as a venue stamping to the second gives them.
     #[tokio::test]
-    async fn quotes_are_written_and_read_back_per_instrument_sorted_and_unique() {
+    async fn quotes_are_written_and_read_back_per_instrument_sorted() {
         let dir = tempfile::tempdir().unwrap();
         let mut catalog = new_catalog(&dir);
         let aapl_id = aapl().id();
@@ -436,8 +468,42 @@ mod tests {
         .await;
         r.unwrap();
         assert_eq!(asked, vec![(es_id(), 0, 100), (aapl_id, 0, 100)]);
-        assert_eq!(stored_quotes(&mut catalog, es_id()), vec![10, 20, 30]);
+        assert_eq!(stored_quotes(&mut catalog, es_id()), vec![10, 20, 30, 30]);
         assert_eq!(stored_quotes(&mut catalog, aapl_id), vec![5]);
+    }
+
+    /// IB stamps its historical ticks to the second, and two of its ticks
+    /// alike in every field are two ticks: the quotes of one second are
+    /// stored as given, in the order given, one given twice stored twice.
+    #[tokio::test]
+    async fn every_quote_of_one_stamp_is_stored_as_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = new_catalog(&dir);
+        let at_10 = |bid: &str| {
+            let quote = quote_at(es_id(), 10);
+            QuoteTick {
+                bid_price: Price::from(bid),
+                ..quote
+            }
+        };
+        let (r, _) = fill(&mut catalog, vec![instrument()], 0, 100, |_| {
+            Ok(vec![
+                at_10("100.00"),
+                at_10("99.75"),
+                at_10("99.75"),
+                at_10("100.25"),
+            ])
+        })
+        .await;
+        r.unwrap();
+
+        let bids: Vec<String> = catalog
+            .quote_ticks(Some(vec![es_id().to_string()]), None, None)
+            .unwrap()
+            .iter()
+            .map(|quote| quote.bid_price.to_string())
+            .collect();
+        assert_eq!(bids, ["100.00", "99.75", "99.75", "100.25"]);
     }
 
     #[tokio::test]
@@ -981,7 +1047,7 @@ mod tests {
         let result = fill_catalog(
             catalog,
             vec![instrument()],
-            &requirements.catalog_series(),
+            &requirements.catalog_keys(),
             ns(start),
             ns(end),
             async |data_type, identifier, from, to| {

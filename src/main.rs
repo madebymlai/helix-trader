@@ -28,7 +28,9 @@ use helix_trader::{
         targets::TargetRow,
         train::Trained,
     },
-    strategy::{DataRequirements, Part, PlainStrategy, StandardConfig, StrategyName, Visitor},
+    strategy::{
+        Part, PlainStrategy, StandardConfig, StrategyName, Visitor, requirements::DataRequirements,
+    },
     venues::{self, HistoryVenueArgs, LiveVenueArgs},
 };
 use jiff::Timestamp;

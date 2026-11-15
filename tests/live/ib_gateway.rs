@@ -38,8 +38,8 @@ use clap::{Args, FromArgMatches};
 use helix_trader::{
     live::Live,
     strategy::{
-        DataRequirements,
         ema::{EmaCross, EmaCrossConfig},
+        requirements::DataRequirements,
     },
     venues::{
         HistoryVenueArgs, fill_history,

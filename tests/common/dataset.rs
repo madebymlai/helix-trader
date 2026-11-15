@@ -30,9 +30,10 @@ use helix_trader::{
         targets::{BracketSpec, Distance, Side, Target, TargetConfig, TargetRow},
     },
     strategy::{
-        DataRequirements, Declared, IndicatorArgs, IndicatorsConfig, TickSeries,
+        Declared, IndicatorArgs, IndicatorsConfig,
         conversions::Conversions,
         orders::{self, EntryRisk},
+        requirements::{DataRequirements, TickSeries},
         risk::{R, Stake},
     },
 };

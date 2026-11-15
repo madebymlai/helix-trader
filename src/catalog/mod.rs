@@ -10,7 +10,7 @@
 
 mod fill_catalog;
 pub use fill_catalog::fill_catalog;
-pub(crate) use fill_catalog::fill_slices;
+pub(crate) use fill_catalog::{fill_slices, resumed};
 mod node_fill;
 pub use node_fill::{
     CustomFillRequest, FillData, FillRequest, NodeClient, NodeFill, missing, missing_custom,

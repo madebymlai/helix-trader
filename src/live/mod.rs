@@ -37,7 +37,7 @@ use crate::{
     model::launcher::RetrainActor,
     rolls::Transition,
     strategy::{
-        DataRequirements,
+        requirements::DataRequirements,
         warmup::{self, Warmup},
     },
     venues::{self, LiveVenueArgs},
@@ -193,7 +193,7 @@ mod tests {
     use nautilus_model::data::{BarType, NautilusDataType};
 
     use super::*;
-    use crate::strategy::TickSeries;
+    use crate::strategy::requirements::TickSeries;
 
     fn at(s: &str) -> Timestamp {
         s.parse().unwrap()
