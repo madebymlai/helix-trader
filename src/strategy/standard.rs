@@ -365,7 +365,7 @@ impl DataConfig {
     /// Whether a series prices `instrument_id` as Nautilus prices a market
     /// order and the top of a simulated L1 book: its bars, its quotes or
     /// its trades. Its depth, book deltas and custom data do not, nor does
-    /// a custom series, of no instrument: the risk engine prices a market
+    /// a custom series, which brings no instrument: the risk engine prices a market
     /// order from the cache's bid or ask, last trade or external bar
     /// (`Cache::price` reads quotes and trades alone), and an L1 book
     /// ignores deltas.
@@ -562,7 +562,9 @@ impl DataConfig {
 ///   as OKX's 1-minute candles are.
 /// - `Custom:<type name>` with an `identifier`, and `metadata` if its
 ///   type's source asks for any, is a custom series, the custom data of
-///   that Nautilus data type (see `CustomSeries`), of no instrument.
+///   that Nautilus data type (see `CustomSeries`), bringing no
+///   instrument; under a root's id, it rolls as the root's other series
+///   do (`CustomSeries::root`).
 /// - Any other, of an instrument, is ticks the strategy reads as they are
 ///   (see `TickSeries`), `Custom:<type name>` with an `instrument_id`
 ///   among them, the instrument's custom data.

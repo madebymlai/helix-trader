@@ -2,10 +2,12 @@
 //! instrument it reads changes, with the plain Nautilus clock, as Nautilus'
 //! own (crate-private) roller of continuous bars does: an alert before each
 //! roll, at which it returns the roll, and, live, the post contract loaded
-//! before it. It subscribes to nothing: the strategy hands each roll to its
+//! before it, but a custom series' root's alone (`Roller::custom_roots`).
+//! It subscribes to nothing: the strategy hands each roll to its
 //! subscriptions (`strategy::subscriptions`), which move the rolled
-//! instrument's series to the post contract, and to whatever else reads the
-//! contract, a model strategy's features.
+//! instrument's series, its custom series among them, to the post
+//! contract, and to whatever else reads the contract, a model strategy's
+//! features.
 
 use std::fmt::Debug;
 
@@ -50,6 +52,9 @@ const FORCE_INSTRUMENT_UPDATE: &str = "force_instrument_update";
 pub struct Roller {
     /// The instruments, roots or plain, each once.
     instrument_ids: Vec<InstrumentId>,
+    /// The roots of custom series, each once, none of `instrument_ids`:
+    /// rolled as those are, loading nothing (see `custom_roots`).
+    custom_roots: Vec<InstrumentId>,
     loading: Loading,
 }
 
@@ -93,8 +98,32 @@ impl Roller {
         }
         Self {
             instrument_ids: ids,
+            custom_roots: Vec::new(),
             loading,
         }
+    }
+
+    /// The roller rolling `roots` too, the roots of custom series
+    /// (`CustomSeries::root`), as it rolls its instruments, but loading
+    /// none of their contracts, live too: a custom series brings no
+    /// instrument, its contract standing in its data type's identifier
+    /// alone. A root among its instruments loads its contracts still.
+    #[must_use]
+    pub fn custom_roots(mut self, roots: impl IntoIterator<Item = InstrumentId>) -> Self {
+        for root in roots {
+            if !self.instrument_ids.contains(&root) && !self.custom_roots.contains(&root) {
+                self.custom_roots.push(root);
+            }
+        }
+        self
+    }
+
+    /// The instruments and the custom series' roots it rolls, each once.
+    fn rolled(&self) -> impl Iterator<Item = InstrumentId> + '_ {
+        self.instrument_ids
+            .iter()
+            .chain(&self.custom_roots)
+            .copied()
     }
 
     /// Sets the alert of each instrument's next roll after `now`, if it
@@ -111,7 +140,7 @@ impl Roller {
     where
         A: DataActor + DataActorNative + Debug + 'static,
     {
-        for &instrument_id in &self.instrument_ids {
+        for instrument_id in self.rolled() {
             if let Some(next) = Transition::after(instrument_id, now) {
                 self.arm(actor, instrument_id, next)?;
             }
@@ -150,9 +179,8 @@ impl Roller {
         A: DataActor + DataActorNative + Debug + 'static,
     {
         let Some((instrument_id, roll)) = self
-            .instrument_ids
-            .iter()
-            .find_map(|&instrument_id| Some((instrument_id, armed(event, instrument_id)?)))
+            .rolled()
+            .find_map(|instrument_id| Some((instrument_id, armed(event, instrument_id)?)))
         else {
             return Ok(None);
         };
@@ -163,7 +191,8 @@ impl Roller {
     }
 
     /// Sets the roll alert of `instrument_id` for `next` and, live,
-    /// requests its post contract (see `Loading::Requested`).
+    /// requests its post contract (see `Loading::Requested`) if it is an
+    /// instrument read, not a custom series' root alone.
     fn arm<A>(
         &self,
         actor: &mut A,
@@ -174,7 +203,7 @@ impl Roller {
         A: DataActor + DataActorNative + Debug + 'static,
     {
         set_alert(actor, instrument_id, next)?;
-        if self.loading == Loading::Requested {
+        if self.loading == Loading::Requested && self.instrument_ids.contains(&instrument_id) {
             let params = Params::new([(FORCE_INSTRUMENT_UPDATE.to_string(), true.into())].into());
             let client = venues::live_definitions_client(next.post.venue);
             actor.request_instrument(next.post, None, None, Some(client), Some(params))?;
@@ -439,6 +468,42 @@ mod tests {
             .collect();
 
         assert_eq!(rolls, [(id("GCZ26.GLBX"), id("GCG27.GLBX"))]);
+    }
+
+    /// GC as the root of a custom series alone rolls as a root read for its
+    /// ticks does, live too, but its contracts are asked of no client: a
+    /// custom series brings no instrument.
+    #[test]
+    fn a_live_roller_rolls_a_custom_series_root_requesting_no_contract() {
+        let (sent, rolls) = run(
+            &Roller::live(vec![]).custom_roots([id("GC.GLBX")]),
+            "2026-08-10T14:30:00Z",
+            "2027-02-01T00:00:00Z",
+        );
+        assert_eq!(
+            rolls
+                .iter()
+                .map(|roll| (roll.pre, roll.post))
+                .collect::<Vec<_>>(),
+            [
+                (id("GCZ26.GLBX"), id("GCG27.GLBX")),
+                (id("GCG27.GLBX"), id("GCJ27.GLBX"))
+            ]
+        );
+        assert_eq!(sent, []);
+    }
+
+    /// GC read for its ticks and as a custom series' root rolls once a
+    /// roll, its contracts loaded as its ticks need.
+    #[test]
+    fn a_root_read_for_its_ticks_and_its_custom_series_rolls_once_loading_its_contracts() {
+        let (sent, rolls) = run(
+            &Roller::live(vec![id("GC.GLBX")]).custom_roots([id("GC.GLBX")]),
+            "2026-08-10T14:30:00Z",
+            "2027-02-01T00:00:00Z",
+        );
+        assert_eq!(rolls.len(), 2);
+        assert_eq!(sent.len(), 3, "{sent:?}");
     }
 
     #[test]

@@ -47,7 +47,9 @@
 //! client makes), fill-catalog which source fills it (`fill_history`), a
 //! live start whether its live data streams it (`streams_custom`, its live
 //! data source's answer: none does yet), and a live warmup the client it
-//! asks its history of (`custom_data_client`). A type the table has no
+//! asks its history of (`custom_data_client`). On a root, its contracts'
+//! series are routed as it is, by their type, the source asked for each
+//! over its slice (`DataRequirements::custom_slices`). A type the table has no
 //! row of, or a row with no history source, is the catalog's: data
 //! written into the catalog from outside helix, which a config loads,
 //! fill-catalog skips, a replay reads, a live warmup asks of the catalog
@@ -107,7 +109,9 @@ use crate::{
     live::node::{Clients, ExecClient},
     strategy::{
         Series,
-        requirements::{CatalogSeries, CustomSeries, DataRequirements, SeriesSlice, TickSeries},
+        requirements::{
+            CatalogSeries, CustomSeries, CustomSlice, DataRequirements, SeriesSlice, TickSeries,
+        },
     },
 };
 
@@ -854,13 +858,13 @@ fn of_source(slices: &[SeriesSlice], source: HistorySource) -> Vec<SeriesSlice> 
         .collect()
 }
 
-/// Those of `custom`, custom series, whose history `source` fills, their
-/// type's row's (`CustomRow::of`); none of a type with no row, the
-/// catalog's.
-fn of_custom_source(custom: &[CustomSeries], source: HistorySource) -> Vec<CustomSeries> {
+/// Those of `custom`, custom series over their slices, whose history
+/// `source` fills, their type's row's (`CustomRow::of`); none of a type
+/// with no row, the catalog's.
+fn of_custom_source(custom: &[CustomSlice], source: HistorySource) -> Vec<CustomSlice> {
     custom
         .iter()
-        .filter(|series| CustomRow::of(series).history == Some(source))
+        .filter(|slice| CustomRow::of(&slice.series).history == Some(source))
         .cloned()
         .collect()
 }
@@ -985,15 +989,14 @@ pub async fn fill_history(
             node.add(okx::node_client(&okx_ids)?, &requests, okx::period);
         }
     }
-    let lse_custom = of_custom_source(&requirements.custom, HistorySource::Lse);
+    let custom = requirements.custom_slices(start, end);
+    let lse_custom = of_custom_source(&custom, HistorySource::Lse);
     if !lse_ids.is_empty() || !lse_custom.is_empty() {
         lse::add_fill(
             &mut node,
             &catalog,
             &of_source(&slices, HistorySource::Lse),
             &lse_custom,
-            start,
-            end,
             LseDataClientConfig::default(),
             || {
                 let api_key =

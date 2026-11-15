@@ -7,8 +7,10 @@
 //! product root (`GC.GLBX`) rolls through its contracts (`GCQ26.GLBX`,
 //! `GCZ26.GLBX`, ...); any other id is a plain instrument, with no
 //! transitions and one slice on itself. Callers use the slices and never
-//! branch on an id. A `Roller` tells a strategy of each roll of a root, at
-//! which its subscriptions (`strategy::subscriptions`) move the root's tick
+//! branch on an id, but a custom series' identifier, which may name no
+//! instrument at all (`CustomSeries::root`). A `Roller` tells a strategy of
+//! each roll of a root, at which its subscriptions
+//! (`strategy::subscriptions`) move the root's tick series and custom
 //! series to the post contract, and `ContinuousBars` makes a strategy's
 //! bars on a root Nautilus' continuous bars, which roll themselves.
 

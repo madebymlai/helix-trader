@@ -32,7 +32,7 @@
 use std::num::NonZeroUsize;
 
 use ::lse::{LseDataClientConfig, LseDataClientFactory};
-use jiff::{SignedDuration, Timestamp};
+use jiff::SignedDuration;
 use nautilus_live::config::RoutingConfig;
 use nautilus_model::{data::DEPTH10_LEN, enums::BookType, identifiers::InstrumentId};
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
@@ -41,7 +41,7 @@ use super::{BookFormat, DefinitionsSource, Row, databento::DatabentoHistory};
 use crate::{
     catalog::{FillData, NodeClient, NodeFill, missing, missing_custom},
     live::node::Clients,
-    strategy::requirements::{CustomSeries, SeriesSlice},
+    strategy::requirements::{CustomSlice, SeriesSlice},
 };
 
 /// The window of one request of a series: a day, as Databento's. The
@@ -64,8 +64,9 @@ pub(super) const BOOK: BookFormat = BookFormat {
 
 /// Adds to `node` the fill of what the catalog lacks of `slices`, series
 /// LSE gives the history of (see `catalog::missing`), and of `custom`,
-/// custom series of LSE's rows (`lse::LseRow`) over `[start, end]` (see
-/// `catalog::missing_custom`): first each contract's definition, asked of
+/// custom series of LSE's rows (`lse::LseRow`) over their slices, a root's
+/// contract by contract (see `catalog::missing_custom`): first each
+/// contract's definition, asked of
 /// its row's definitions source, Databento's client, which `databento`
 /// makes only if Databento has a definition to give, within its dataset's
 /// end (`DatabentoHistory::within_datasets`), for the contracts Databento
@@ -82,14 +83,11 @@ pub(super) const BOOK: BookFormat = BookFormat {
 /// Returns an error if a series is not one the node fills (see `missing`),
 /// if the catalog cannot be read, or as `databento` and
 /// `DatabentoHistory::within_datasets`.
-#[expect(clippy::too_many_arguments, reason = "a fill's parts")]
 pub(super) async fn add_fill(
     node: &mut NodeFill,
     catalog: &ParquetDataCatalog,
     slices: &[SeriesSlice],
-    custom: &[CustomSeries],
-    start: Timestamp,
-    end: Timestamp,
+    custom: &[CustomSlice],
     config: LseDataClientConfig,
     databento: impl FnOnce() -> anyhow::Result<DatabentoHistory>,
 ) -> anyhow::Result<()> {
@@ -98,7 +96,7 @@ pub(super) async fn add_fill(
             request.data == FillData::Instrument
                 && Row::of(request.instrument_id.venue).definitions == DefinitionsSource::Databento
         });
-    let custom = missing_custom(catalog, custom, start, end)?;
+    let custom = missing_custom(catalog, custom)?;
     if !definitions.is_empty() {
         let databento = databento()?;
         let definitions = databento.within_datasets(&definitions).await?;
@@ -187,7 +185,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        strategy::requirements::{DataRequirements, TickSeries},
+        strategy::requirements::{CustomSeries, DataRequirements, TickSeries},
         venues::databento::testing::MockDatabento,
     };
 
@@ -300,9 +298,7 @@ mod tests {
                     &mut node,
                     &catalog,
                     &slices,
-                    &requirements.custom,
-                    from,
-                    to,
+                    &requirements.custom_slices(from, to),
                     config,
                     databento,
                 )
@@ -946,6 +942,44 @@ mod tests {
         assert_eq!(
             froms,
             [Some("2026-11-12"), Some("2026-11-12")].map(|from| from.map(String::from))
+        );
+    }
+
+    /// US10Y's daily bond yields under GC's id, a root GC rolls from GCQ26
+    /// into GCZ26 at 00:00 UTC on 29 July 2026 (`rolls/README.md`), filled
+    /// from the 28th to the 30th: LSE is asked once for each contract's
+    /// series, over the slice it stands for GC, each date's close known at
+    /// its end. GCQ26's slice, the 28th, holds the 27th's close; GCZ26's,
+    /// from the 29th to the 30th, the 28th's and the 29th's.
+    #[test]
+    fn a_roots_custom_series_fills_contract_by_contract_over_each_slice() {
+        let dir = tempfile::tempdir().unwrap();
+        let lse = MockLse::start(vec![
+            Reply::json(REFERENCE_CATALOGUE),
+            Reply::file(US10Y_BOND_YIELDS),
+            Reply::json(REFERENCE_CATALOGUE),
+            Reply::file(US10Y_BOND_YIELDS),
+        ]);
+        let metadata = us10y().data_type().metadata().cloned();
+        let series = CustomSeries::new("LseRow", "GC.GLBX".to_string(), metadata).unwrap();
+
+        fill_custom(
+            dir.path(),
+            &lse,
+            &series,
+            ("2026-07-28T00:00:00Z", "2026-07-30T00:00:00Z"),
+        )
+        .unwrap();
+
+        let exports: Vec<(String, String)> = lse
+            .calls()
+            .iter()
+            .filter_map(|call| Some((call.param("from")?.into(), call.param("to")?.into())))
+            .collect();
+        assert_eq!(
+            exports,
+            [("2026-07-27", "2026-07-27"), ("2026-07-28", "2026-07-29")]
+                .map(|(from, to)| (from.to_string(), to.to_string()))
         );
     }
 

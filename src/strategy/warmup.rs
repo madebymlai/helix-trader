@@ -196,8 +196,9 @@
 //!
 //! Each custom series of the requirements (`DataRequirements::custom`, an
 //! LSE reference series or the catalog's own) is requested in the same
-//! group over the same window with `request_data` of its data type as the
-//! config gives it, by the same rule (`custom_request`): if its type's
+//! group over the same window with `request_data` of its data type as
+//! read at the start (`CustomSeries::at`), a root's the front contract's,
+//! each data type once, by the same rule (`custom_request`): if its type's
 //! row's history serves it, naming the data client of the row's live data
 //! source on the node (`venues::custom_data_client`), LSE's for LSE's
 //! rows, with `update_catalog`, the catalog answering first and the
@@ -899,13 +900,18 @@ where
         };
         requested.push((id, built));
     }
-    // Of its type's row's live data client if its history serves it, of
-    // the catalog alone if not, building nothing: Nautilus takes no windows
-    // on custom data.
+    // As read now, a root's on its front contract, each once; of its type's
+    // row's live data client if its history serves it, of the catalog alone
+    // if not, building nothing: Nautilus takes no windows on custom data.
+    let mut warmed: Vec<CustomSeries> = Vec::new();
     for series in &requirements.custom {
+        let read = series.at(now);
+        if warmed.contains(&read) {
+            continue;
+        }
         let (client, params) = custom_request(venues::custom_data_client(series)?);
         let id = actor.request_data(
-            series.data_type().clone(),
+            read.data_type().clone(),
             client,
             Some(start),
             Some(now),
@@ -913,6 +919,7 @@ where
             params,
         )?;
         requested.push((id, vec![]));
+        warmed.push(read);
     }
     if !requested.is_empty() {
         let ids = requested.iter().map(|(id, _)| *id).collect();
@@ -1897,6 +1904,49 @@ mod tests {
                 Some(at("2026-08-10T14:30:00Z")),
                 true,
             )
+        );
+    }
+
+    /// LSE's daily 10-year US yields under `identifier`, a custom series.
+    fn us10y_under(identifier: &str) -> CustomSeries {
+        CustomSeries::new("LseRow", identifier.to_string(), Some(us10y_metadata())).unwrap()
+    }
+
+    /// The data types the custom data requests of a live warmup of
+    /// `custom`, started on 2026-08-10 at 14:30, ask for, in order.
+    fn requested_custom(custom: Vec<CustomSeries>) -> Vec<DataType> {
+        let warmup = Warmup::live(&DataRequirements {
+            custom,
+            ..reading(&[])
+        });
+        let (mut probe, commands) = registered();
+
+        warmup.start(&mut probe).unwrap();
+
+        custom_requests(&commands)
+            .into_iter()
+            .map(|request| request.data_type)
+            .collect()
+    }
+
+    /// The yields under GC's id, a root GC rolls into GCZ26 on 2026-07-29
+    /// (`rolls/README.md`), are requested as GCZ26's, the contract standing
+    /// for GC on 2026-08-10, their type and metadata kept.
+    #[test]
+    fn a_live_warmup_requests_a_roots_custom_series_on_the_contract_standing_for_it() {
+        assert_eq!(
+            requested_custom(vec![us10y_under("GC.GLBX")]),
+            [us10y_under("GCZ26.GLBX").data_type().clone()]
+        );
+    }
+
+    /// GCZ26's own yields, listed beside the root's, are the same data type
+    /// now: requested once.
+    #[test]
+    fn a_live_warmup_requests_a_contract_s_custom_series_listed_beside_its_root_s_once() {
+        assert_eq!(
+            requested_custom(vec![us10y_under("GC.GLBX"), us10y_under("GCZ26.GLBX")]),
+            [us10y_under("GCZ26.GLBX").data_type().clone()]
         );
     }
 
