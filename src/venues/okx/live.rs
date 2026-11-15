@@ -18,7 +18,9 @@
 //! candles (a composite bar type): the data client serves their warmup
 //! from OKX's REST candles, up to now, and the live bars from the candle
 //! channel. OKX serves no quote history (the data client does not
-//! implement `request_quotes`), so bars built from quotes get no warmup.
+//! implement `request_quotes`), so bars built from quotes get no warmup,
+//! which requests no series a venue's history does not serve
+//! (`venues::serves`).
 
 use std::path::Path;
 

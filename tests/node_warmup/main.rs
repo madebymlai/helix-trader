@@ -74,8 +74,12 @@ use nautilus_persistence::{
 };
 
 const GCZ26: &str = "GCZ26.GLBX";
+/// CME's E-mini S&P 500 of December 2026, of a venue whose history, IB's,
+/// serves its own minute bars, which GLBX's, LSE's, does not
+/// (`venues::serves`).
+const ESZ26: &str = "ESZ26.CME";
 /// Hour bars built from the venue's minute bars.
-const COMPOSITE: &str = "GCZ26.GLBX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL";
+const COMPOSITE: &str = "ESZ26.CME-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL";
 /// Minute bars built from the venue's quotes.
 const MID_MINUTES: &str = "GCZ26.GLBX-1-MINUTE-MID-INTERNAL";
 
@@ -90,6 +94,12 @@ const COMPOSITE_DELAY_NS: u64 = 5_000_000_000;
 fn gcz26() -> InstrumentAny {
     let mut contract = futures_contract_es(None, None);
     contract.id = InstrumentId::from(GCZ26);
+    InstrumentAny::FuturesContract(contract)
+}
+
+fn esz26() -> InstrumentAny {
+    let mut contract = futures_contract_es(None, None);
+    contract.id = InstrumentId::from(ESZ26);
     InstrumentAny::FuturesContract(contract)
 }
 
@@ -593,6 +603,7 @@ nautilus_actor!(Warming);
 impl DataActor for Warming {
     fn on_start(&mut self) -> anyhow::Result<()> {
         self.cache_rc().borrow_mut().add_instrument(gcz26())?;
+        self.cache_rc().borrow_mut().add_instrument(esz26())?;
         Rc::clone(&self.warmup).start(self)?;
         if let Some(roller) = self.roller.clone() {
             roller.start(self)?;
@@ -719,7 +730,7 @@ fn run(
                 Box::new(FakeConfig),
                 RoutingConfig {
                     default: false,
-                    venues: Some(vec!["GLBX".to_string()]),
+                    venues: Some(vec!["GLBX".to_string(), "CME".to_string()]),
                 },
             )
             .unwrap()
@@ -974,9 +985,9 @@ fn a_warmup_reads_what_a_catalog_given_relative_to_the_working_directory_holds()
     assert!(one_every(&warmed.bars, MINUTE_NS));
 }
 
-/// The long side's target when a warmup of 72 hours of `requirements`' ends:
-/// a bracket's take profit two ATRs away, its stop one, the ATR of model_ema's
-/// config, on hourly bars.
+/// The long side's target when a warmup of 72 hours of `requirements`' ends,
+/// traded on the instrument they read first: a bracket's take profit two ATRs
+/// away, its stop one, the ATR of model_ema's config, on hourly bars.
 fn bracket_of(bar_types: Vec<BarType>, ticks: Vec<TickSeries>) -> SideTarget {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::Envelope);
@@ -997,7 +1008,7 @@ fn bracket_of(bar_types: Vec<BarType>, ticks: Vec<TickSeries>) -> SideTarget {
     )
     .unwrap();
     let target = TargetConfig::builder()
-        .instrument_id(InstrumentId::from(GCZ26))
+        .instrument_id(requirements.instrument_ids()[0])
         .risk("0.5%".parse().unwrap())
         .spec(spec)
         .build();
@@ -1084,9 +1095,8 @@ fn read_live(
         warmup: length,
     };
     let features = Rc::new(Fed::default());
-    let warmup = Warmup::live(&requirements)
-        .reading(vec![series.clone()])
-        .feeding_ticks(Rc::clone(&features) as SharedActorIndicator);
+    let warmup =
+        Warmup::live(&requirements).feeding_ticks(Rc::clone(&features) as SharedActorIndicator);
     let roller = Roller::live(vec![series]);
     let (failure, _) = run(dir, venue, &requirements, warmup, Some(roller), None);
     assert_eq!(failure, None);
@@ -1270,9 +1280,8 @@ fn warm_deltas(dir: &Path) -> (Rc<Books>, Vec<(u64, u64)>) {
         book: RefCell::new(OrderBook::new(id, BookType::L3_MBO)),
         fed: RefCell::new(vec![]),
     });
-    let warmup = Warmup::live(&requirements)
-        .reading(ticks)
-        .feeding_books(Rc::clone(&books) as Rc<dyn BookIndicator>);
+    let warmup =
+        Warmup::live(&requirements).feeding_books(Rc::clone(&books) as Rc<dyn BookIndicator>);
     let (failure, _) = run(dir, &venue, &requirements, warmup, None, None);
     assert_eq!(failure, None);
     let asked = venue.borrow().asked.clone();
@@ -1431,7 +1440,7 @@ fn an_lsedge_definition_the_cache_lacks_comes_from_the_catalog_before_lse_stream
         custom: vec![],
         warmup: SignedDuration::from_hours(1),
     };
-    let warmup = Rc::new(Warmup::live(&requirements).reading(ticks.clone()));
+    let warmup = Rc::new(Warmup::live(&requirements));
     let config = LiveNodeConfig {
         environment: Environment::Live,
         trader_id: TraderId::from("WARMUP-001"),
@@ -1629,7 +1638,7 @@ fn glbx_data_comes_from_lse_s_cme_stream_routed_glbx_beside_another_client() {
         custom: vec![],
         warmup: SignedDuration::from_hours(48),
     };
-    let warmup = Rc::new(Warmup::live(&requirements).reading(ticks.clone()));
+    let warmup = Rc::new(Warmup::live(&requirements));
     let config = LiveNodeConfig {
         environment: Environment::Live,
         trader_id: TraderId::from("WARMUP-001"),

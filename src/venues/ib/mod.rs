@@ -1,7 +1,7 @@
 //! Interactive Brokers: the account, the gateway (see `gateway`) and the
 //! data client config its history and its live clients share, instruments
-//! and bars for `fill_catalog`, which asks for series of any data type: IB
-//! serves its 1-MINUTE TRADES, BID and ASK bars only (see
+//! and history for `fill_catalog`, which asks for series of any data type:
+//! IB serves its own time bars, its quotes and its trades (see `serves`,
 //! `IbHistory::data`), and the live node's clients (see `live`), and the
 //! tag linking a bracket's exits in an OCA group (`bracket_exits_tag`); the
 //! client id each command connects with, and live's account, are its flags
@@ -16,26 +16,32 @@
 //! Uses `HistoricalInteractiveBrokersClient`
 //! (`nautilus_interactive_brokers::historical`), which needs no node: it
 //! connects to IB Gateway or TWS, returns `Vec<InstrumentAny>` from
-//! `request_instruments` and `Vec<Bar>` from `request_bars`. The bars are
-//! stored as IB gives them.
+//! `request_instruments`, `Vec<Bar>` from `request_bars` and the quotes or
+//! trades of IB's historical ticks from `request_ticks`. The data is
+//! stored as IB gives it.
 
-use std::str::FromStr;
+use std::{
+    str::FromStr,
+    sync::{Mutex, PoisonError},
+    time::{Duration, Instant},
+};
 
-use anyhow::{Context, ensure};
+use anyhow::{Context, bail, ensure};
 use clap::Args;
 use ibapi::{
     contracts::{Contract, Symbol},
     orders::OcaType,
 };
-use jiff::Timestamp;
+use jiff::{SignedDuration, Timestamp, ToSpan, tz::TimeZone};
 use nautilus_interactive_brokers::{
-    common::{futures::parse_futures_symbol, symbology::Symbology},
+    common::{enums::IbHistoricalTickType, futures::parse_futures_symbol, symbology::Symbology},
     config::InteractiveBrokersDataClientConfig,
+    data::convert::bar_type_to_ib_bar_size,
     historical::HistoricalInteractiveBrokersClient,
 };
 use nautilus_model::{
     data::{Bar, BarSpecification, BarType, Data, NautilusDataType},
-    enums::{AggregationSource, BarAggregation, PriceType},
+    enums::{BarAggregation, PriceType},
     identifiers::{ClientOrderId, InstrumentId},
     instruments::{Instrument, InstrumentAny},
 };
@@ -43,7 +49,10 @@ use nautilus_model::{
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use ustr::Ustr;
 
-use crate::{catalog::fill_slices, strategy::SeriesSlice};
+use crate::{
+    catalog::fill_slices,
+    strategy::{SeriesSlice, Source},
+};
 
 mod gateway;
 pub use gateway::IbAccount;
@@ -88,22 +97,24 @@ pub(crate) struct IbHistoryArgs {
     pub(super) client_id: i32,
 }
 
-/// A connection to IB for history: instruments and bars, no node.
+/// A connection to IB for history: instruments, bars and ticks, no node.
 pub struct IbHistory {
     client: HistoricalInteractiveBrokersClient,
-    requests: BarRequests,
+    requests: HistoryRequests,
     symbology: Symbology,
+    /// The requests of small bars sent so far, which IB paces.
+    small_bars: Mutex<SmallBarPacing>,
 }
 
-/// The settings every bar request passes, taken from the data client
+/// The settings every history request passes, taken from the data client
 /// config so history and live agree on the session.
 #[derive(Debug, Clone, Copy)]
-struct BarRequests {
+struct HistoryRequests {
     use_rth: bool,
     timeout_secs: u64,
 }
 
-impl BarRequests {
+impl HistoryRequests {
     fn of(config: &InteractiveBrokersDataClientConfig) -> Self {
         Self {
             use_rth: config.use_regular_trading_hours,
@@ -124,7 +135,7 @@ impl IbHistory {
     pub async fn connect(client_id: i32, end: Timestamp, now: Timestamp) -> anyhow::Result<Self> {
         ensure_bars_closed(end, now)?;
         let config = data_client_config(IbGateway::paper(client_id).await?);
-        let requests = BarRequests::of(&config);
+        let requests = HistoryRequests::of(&config);
         let symbology = Symbology::new(config.instrument_provider.symbology_method);
         let address = format!("{}:{}", config.host, config.port);
         let client = HistoricalInteractiveBrokersClient::connect(config)
@@ -134,18 +145,18 @@ impl IbHistory {
             client,
             requests,
             symbology,
+            small_bars: Mutex::default(),
         })
     }
 
     /// The latest end of a window IB can serve closed bars over at `now`:
-    /// one bar before `now`, the bar still in progress until then (see
-    /// `served_spec`, a bar as long at every price).
+    /// a minute before `now`, the 1-minute bar in progress until then.
     ///
     /// # Errors
     ///
     /// Returns an error if that end is out of range.
     pub fn latest_end(now: Timestamp) -> anyhow::Result<Timestamp> {
-        Ok(now.checked_sub(served_spec(PriceType::Last).timedelta())?)
+        Ok(now.checked_sub(SignedDuration::from_mins(1))?)
     }
 
     /// The instruments of `ids`, as IB defines them. A future IB does not
@@ -179,15 +190,16 @@ impl IbHistory {
     }
 
     /// Fills `catalog` with `slices`, IB series each on a contract over its
-    /// slice (`DataRequirements::slices`, as the node fill takes them): the
-    /// instruments of their contracts, then each slice through
-    /// `fill_slices`, fetched by `data`. Temporary until
+    /// slice (`DataRequirements::slices`, as the node fill takes them),
+    /// which IB serves (`serves`) and holds (`check_held`, checked before
+    /// the fill connects): the instruments of their contracts, then each
+    /// slice through `fill_slices`, fetched by `data`. Temporary until
     /// nautilus_trader#5472 is fixed; then IB fills through the node.
     ///
     /// # Errors
     ///
-    /// Returns an error if a slice is not IB's 1-MINUTE TRADES, BID or ASK
-    /// bars (before any request), or as `instruments` and `fill_slices`.
+    /// Returns an error if a slice is not of a series IB serves (before any
+    /// request), or as `instruments` and `fill_slices`.
     pub async fn fill(
         &self,
         catalog: &mut ParquetDataCatalog,
@@ -199,7 +211,7 @@ impl IbHistory {
             slice,
         } in slices
         {
-            served_bar_type(data_type, identifier)?;
+            served(data_type, identifier)?;
             if !ids.contains(&slice.instrument_id) {
                 ids.push(slice.instrument_id);
             }
@@ -217,13 +229,14 @@ impl IbHistory {
     }
 
     /// The series of `data_type` and `identifier` over `[start, end]`, for
-    /// `fill_catalog`: the bars of the bar type `identifier` names, as IB
-    /// gives them (see `bars`).
+    /// `fill_catalog`, as IB gives it: the bars of the bar type
+    /// `identifier` names (see `bars`), or the quotes or trades of the
+    /// instrument it names (see `ticks`).
     ///
     /// # Errors
     ///
-    /// Returns an error if the series is not IB's 1-MINUTE TRADES, BID or
-    /// ASK bars of an instrument (see `served_bar_type`), or as `bars`.
+    /// Returns an error if IB's history does not serve the series (see
+    /// `serves`), or as `bars` and `ticks`.
     pub async fn data(
         &self,
         data_type: &NautilusDataType,
@@ -231,27 +244,44 @@ impl IbHistory {
         start: Timestamp,
         end: Timestamp,
     ) -> anyhow::Result<Vec<Data>> {
-        let bar_type = served_bar_type(data_type, identifier)?;
-        let bars = self.bars(bar_type, start, end).await?;
-        Ok(bars.into_iter().map(Data::Bar).collect())
+        match served(data_type, identifier)? {
+            Served::Bars(bar_type) => {
+                let bars = self.bars(bar_type, start, end).await?;
+                Ok(bars.into_iter().map(Data::Bar).collect())
+            }
+            Served::Ticks(tick_type, instrument_id) => {
+                self.ticks(tick_type, instrument_id, start, end).await
+            }
+        }
     }
 
     /// The bars of `bar_type` over `[start, end]`, sorted by `ts_init` and
     /// unique, with the regular-hours setting of the live data client.
-    /// Walks back from `end` one request at a time, each of
-    /// `BARS_PER_REQUEST` (see `walk_back`).
+    /// Walks back from `end` one request at a time (see `walk_back`), each
+    /// over the duration IB takes for the bars' size (`request_duration`),
+    /// a request of bars of 30 seconds or less sent once IB's pacing of
+    /// them takes it (`SmallBarPacing`).
     async fn bars(
         &self,
         bar_type: BarType,
         start: Timestamp,
         end: Timestamp,
     ) -> anyhow::Result<Vec<Bar>> {
-        let spec = bar_type.spec().to_string();
-        let duration = BARS_PER_REQUEST;
+        let spec = bar_type.spec();
+        let spec_string = spec.to_string();
+        let duration = request_duration(spec);
         walk_back(start, end, async |cursor| {
+            if spec.aggregation == BarAggregation::Second {
+                self.paced(SmallBarRequest {
+                    bar_type,
+                    end: cursor,
+                    duration,
+                })
+                .await;
+            }
             self.client
                 .request_bars(
-                    vec![&spec],
+                    vec![&spec_string],
                     cursor,
                     None,
                     Some(duration),
@@ -265,52 +295,278 @@ impl IbHistory {
         })
         .await
     }
+
+    /// Waits until IB's pacing of small bars takes `request`
+    /// (`SmallBarPacing::wait`), then counts it sent.
+    async fn paced(&self, request: SmallBarRequest) {
+        let pacing = || {
+            self.small_bars
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+        };
+        loop {
+            let wait = pacing().wait(Instant::now(), &request);
+            if wait.is_zero() {
+                break;
+            }
+            tokio::time::sleep(wait).await;
+        }
+        pacing().sent(Instant::now(), request);
+    }
+
+    /// The `tick_type` ticks of `instrument_id` over `[start, end]`, IB's
+    /// historical BID_ASK ticks as quotes or its TRADES ticks as trades,
+    /// sorted by `ts_event`, with the regular-hours setting of the live
+    /// data client: Nautilus' `request_ticks`, which pages back from `end`
+    /// to `start`, 1,000 ticks a request, a trading session at most, and
+    /// keeps the latest ticks up to a limit, here one that bounds nothing.
+    async fn ticks(
+        &self,
+        tick_type: IbHistoricalTickType,
+        instrument_id: InstrumentId,
+        start: Timestamp,
+        end: Timestamp,
+    ) -> anyhow::Result<Vec<Data>> {
+        self.client
+            .request_ticks(
+                tick_type,
+                start,
+                end,
+                None,
+                Some(vec![instrument_id]),
+                self.requests.use_rth,
+                self.requests.timeout_secs,
+                usize::MAX,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "requesting the {} ticks of {instrument_id} over [{start}, {end}]",
+                    tick_type.as_str()
+                )
+            })
+    }
 }
 
-/// The bar type of the series of `data_type` and `identifier`, which must
-/// be bars IB serves: its own (`EXTERNAL`) 1-MINUTE TRADES, BID or ASK
-/// bars (see `served_spec`).
-fn served_bar_type(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<BarType> {
-    ensure!(
-        *data_type == NautilusDataType::Bar,
-        "IB's history serves bars, not {data_type} ({identifier})"
-    );
-    let bar_type = BarType::from_str(identifier)?;
-    ensure!(
-        bar_type.is_externally_aggregated()
-            && SERVED_PRICES.map(served_spec).contains(&bar_type.spec()),
-        "IB's history serves its own 1-MINUTE-LAST, 1-MINUTE-BID and 1-MINUTE-ASK bars, \
-         not {identifier}"
-    );
-    Ok(bar_type)
+/// What IB's history is asked for a series it serves (see `served`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Served {
+    /// The bars of a bar type, IB's own (`request_bars`).
+    Bars(BarType),
+    /// An instrument's historical ticks of a type (`request_ticks`): its
+    /// BID_ASK ticks, its quotes, or its TRADES ticks, its trades.
+    Ticks(IbHistoricalTickType, InstrumentId),
 }
 
-/// The prices of the bars IB's history serves: LAST, IB's TRADES bars, the
-/// only ones with a volume, and BID and ASK, IB's BID and ASK bars, the
-/// history of an IDEALPRO pair, which has no TRADES.
-const SERVED_PRICES: [PriceType; 3] = [PriceType::Last, PriceType::Bid, PriceType::Ask];
-
-/// The spec of the bars IB's history serves priced at `price_type`, one of
-/// `SERVED_PRICES`: 1-MINUTE, the finest bars IB paces softly. Its string
-/// (`1-MINUTE-LAST`) is IB's bar spec string, which the adapter requests as
-/// IB's bars of the price (TRADES for LAST, BID and ASK as they are).
-fn served_spec(price_type: PriceType) -> BarSpecification {
-    BarSpecification::new(1, BarAggregation::Minute, price_type)
+/// Checks that IB's history serves `source`, the series of an instrument
+/// of a venue whose history is IB's (see `served`).
+///
+/// # Errors
+///
+/// Returns an error naming `source` and saying why if not.
+pub(crate) fn serves(source: &Source) -> anyhow::Result<()> {
+    let (data_type, identifier) = source.series();
+    served(&data_type, &identifier).map(drop)
 }
 
-/// The bars of `pair`, an FX pair, IB's history serves for its rates: its
-/// own 1-MINUTE BID and ASK bars (`served_spec`), IB serving no TRADES of
-/// a pair.
-pub(crate) fn pair_bars(pair: InstrumentId) -> [BarType; 2] {
-    [PriceType::Bid, PriceType::Ask]
-        .map(|price_type| BarType::new(pair, served_spec(price_type), AggregationSource::External))
+/// What IB's history is asked for the series of `data_type` and
+/// `identifier`, as Nautilus' IB clients serve it: IB's own (`EXTERNAL`)
+/// time bars of a size IB has (Nautilus' `bar_type_to_ib_bar_size`),
+/// priced at one of `SERVED_PRICES`, and an instrument's quotes and trades,
+/// IB's historical ticks (the historical client's `request_ticks`, the
+/// live client's `request_quotes` and `request_trades`). Nautilus' IB
+/// clients request no book history.
+///
+/// # Errors
+///
+/// Returns an error naming the series and saying why if IB's history does
+/// not serve it.
+fn served(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<Served> {
+    let instrument = || {
+        InstrumentId::from_str(identifier)
+            .with_context(|| format!("the {data_type} of {identifier}, no instrument id"))
+    };
+    match data_type {
+        NautilusDataType::Bar => {
+            let bar_type = BarType::from_str(identifier)?;
+            ensure!(
+                bar_type.is_externally_aggregated()
+                    && SERVED_PRICES.contains(&bar_type.spec().price_type)
+                    && bar_type_to_ib_bar_size(&bar_type).is_ok(),
+                "IB's history serves its own (EXTERNAL) time bars of a size IB has, 1, 5, 10, \
+                 15 or 30 seconds, 1, 2, 3, 5, 10, 15, 20 or 30 minutes, 1, 2, 3, 4 or 8 hours, \
+                 a day, a week or a month, priced LAST, BID, ASK or MID, not {identifier}"
+            );
+            Ok(Served::Bars(bar_type))
+        }
+        NautilusDataType::QuoteTick => {
+            Ok(Served::Ticks(IbHistoricalTickType::BidAsk, instrument()?))
+        }
+        NautilusDataType::TradeTick => {
+            Ok(Served::Ticks(IbHistoricalTickType::Trades, instrument()?))
+        }
+        other => {
+            bail!("IB's history serves bars, quotes and trades, not the {other} of {identifier}")
+        }
+    }
 }
 
-/// The IB duration of one bar request: within IB's maximum duration for
-/// 1-MINUTE bars. `D` counts whole trading days: a `1 D` request ending in
-/// a session's first minute answers that one bar, so `86400 S`, the 1,440
-/// bars before the end, across sessions (IB's documented alternative).
-const BARS_PER_REQUEST: &str = "86400 S";
+/// The prices of the bars IB's history serves, as Nautilus' IB clients ask
+/// IB for them (`price_type_to_ib_what_to_show`): LAST, IB's TRADES bars,
+/// the only ones with a volume, BID and ASK, IB's BID and ASK bars, the
+/// history of an IDEALPRO pair, which has no TRADES, and MID, IB's MIDPOINT
+/// bars. The adapter asks TRADES for any other price, so it serves none.
+const SERVED_PRICES: [PriceType; 4] = [
+    PriceType::Last,
+    PriceType::Bid,
+    PriceType::Ask,
+    PriceType::Mid,
+];
+
+/// The IB duration of one request of bars of `spec`, a size IB has: the
+/// longest IB's step-size table admits the size in (TWS API, "Historical
+/// Data Limitations", "Step Sizes"), so that IB serves it and a request
+/// holds a few thousand bars at most: `1800 S` of 1-second bars, `3600 S`
+/// of 5-second bars, `14400 S` of 10- and 15-second bars, `28800 S` of
+/// 30-second bars, a day of 1-minute bars, two of 2-minute bars, a week of
+/// 3- to 20-minute bars, a month of 30-minute and hour bars and a year of
+/// daily, weekly and monthly bars. A day of 1-minute bars is asked as
+/// `86400 S`: `D` counts whole trading days, so a `1 D` request ending in
+/// a session's first minute answers that one bar, and the walk back would
+/// end there (see `walk_back`); the longer durations end there with a
+/// session or more before it.
+fn request_duration(spec: BarSpecification) -> &'static str {
+    use BarAggregation as A;
+    match (spec.aggregation, spec.step.get()) {
+        (A::Second, 1) => "1800 S",
+        (A::Second, 2..=5) => "3600 S",
+        (A::Second, 6..=15) => "14400 S",
+        (A::Second, _) => "28800 S",
+        (A::Minute, 1) => "86400 S",
+        (A::Minute, 2) => "2 D",
+        (A::Minute, 3..=20) => "1 W",
+        (A::Minute | A::Hour, _) => "1 M",
+        _ => "1 Y",
+    }
+}
+
+/// A request of bars of 30 seconds or less, which IB paces
+/// (`SmallBarPacing`): its bar type, naming the contract, its exchange and
+/// the data IB shows (its price), and its end and duration, the rest of
+/// what makes two requests identical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SmallBarRequest {
+    bar_type: BarType,
+    end: Timestamp,
+    duration: &'static str,
+}
+
+/// IB's hard pacing of the history of bars of 30 seconds or less (TWS API,
+/// "Historical Data Limitations", "Pacing Violations for Small Bars"),
+/// which Nautilus' IB clients do not pace: no request identical to one
+/// sent in the last 15 seconds, fewer than six of one contract, exchange
+/// and data shown within two seconds, and no more than 60 within ten
+/// minutes. IB counts a BID_ASK request twice; Nautilus asks IB for the
+/// BID and the ASK of bars apart, never BID_ASK, so each counts once. The
+/// requests sent in the last ten minutes, oldest first.
+#[derive(Debug, Default)]
+struct SmallBarPacing {
+    sent: Vec<(Instant, SmallBarRequest)>,
+}
+
+/// How long IB remembers a request, refusing an identical one.
+const IDENTICAL_WINDOW: Duration = Duration::from_secs(15);
+/// The window of IB's count of the requests of one contract, exchange and
+/// data shown, and how many it takes within one.
+const SAME_SERIES_WINDOW: Duration = Duration::from_secs(2);
+const SAME_SERIES_MOST: usize = 5;
+/// The window of IB's count of every request, and how many it takes within
+/// one.
+const ALL_WINDOW: Duration = Duration::from_secs(600);
+const ALL_MOST: usize = 60;
+
+impl SmallBarPacing {
+    /// How long `request` waits at `now` before IB takes it, by the
+    /// requests sent: until 15 seconds after an identical one, until two
+    /// seconds after the fifth latest of its contract and price within two
+    /// seconds, and until ten minutes after the sixtieth latest within ten
+    /// minutes; none if no rule holds it.
+    fn wait(&self, now: Instant, request: &SmallBarRequest) -> Duration {
+        let after = |at: Instant, window: Duration| (at + window).saturating_duration_since(now);
+        let within = |window: Duration, of: &dyn Fn(&SmallBarRequest) -> bool| -> Vec<Instant> {
+            self.sent
+                .iter()
+                .filter(|(at, sent)| now.saturating_duration_since(*at) < window && of(sent))
+                .map(|(at, _)| *at)
+                .collect()
+        };
+        // Holds until the earliest of `sent` leaves `window`, if `most`
+        // are within it: after it, `most - 1` are, and the request.
+        let full = |sent: Vec<Instant>, window: Duration, most: usize| {
+            sent.len()
+                .checked_sub(most)
+                .map_or(Duration::ZERO, |first| after(sent[first], window))
+        };
+        let identical = full(
+            within(IDENTICAL_WINDOW, &|sent| sent == request),
+            IDENTICAL_WINDOW,
+            1,
+        );
+        let same_series = full(
+            within(SAME_SERIES_WINDOW, &|sent| {
+                sent.bar_type.instrument_id() == request.bar_type.instrument_id()
+                    && sent.bar_type.spec().price_type == request.bar_type.spec().price_type
+            }),
+            SAME_SERIES_WINDOW,
+            SAME_SERIES_MOST,
+        );
+        let all = full(within(ALL_WINDOW, &|_| true), ALL_WINDOW, ALL_MOST);
+        identical.max(same_series).max(all)
+    }
+
+    /// Counts `request` sent at `at`, forgetting those IB no longer counts.
+    fn sent(&mut self, at: Instant, request: SmallBarRequest) {
+        self.sent
+            .retain(|(sent, _)| at.saturating_duration_since(*sent) < ALL_WINDOW);
+        self.sent.push((at, request));
+    }
+}
+
+/// Checks that IB's history holds `slices` at `now`: IB holds no bars of
+/// 30 seconds or less older than six months (TWS API, "Historical Data
+/// Limitations"), so a slice of them starts within six months of `now`,
+/// rather than the fill storing its older windows empty.
+///
+/// # Errors
+///
+/// Returns an error naming the bars and the oldest start IB holds if a
+/// slice of them starts earlier, or naming a slice of bars keyed by no bar
+/// type.
+pub(crate) fn check_held(slices: &[SeriesSlice], now: Timestamp) -> anyhow::Result<()> {
+    let oldest = now
+        .to_zoned(TimeZone::UTC)
+        .checked_sub(6.months())?
+        .timestamp();
+    for SeriesSlice {
+        series: (data_type, identifier),
+        slice,
+    } in slices
+    {
+        if *data_type != NautilusDataType::Bar {
+            continue;
+        }
+        let bar_type = BarType::from_str(identifier)?;
+        if bar_type.spec().aggregation == BarAggregation::Second {
+            ensure!(
+                slice.from >= oldest,
+                "IB holds no bars of 30 seconds or less older than six months: {bar_type} from \
+                 {} reaches before {oldest}",
+                slice.from
+            );
+        }
+    }
+    Ok(())
+}
 
 /// Fails if `end` is later than `IbHistory::latest_end(now)`.
 ///
@@ -596,14 +852,14 @@ mod tests {
     }
 
     #[test]
-    fn bar_requests_use_the_regular_hours_setting_of_the_data_client_config() {
+    fn history_requests_use_the_regular_hours_setting_of_the_data_client_config() {
         let config = data_client_config(closed_gateway());
-        assert!(!BarRequests::of(&config).use_rth);
+        assert!(!HistoryRequests::of(&config).use_rth);
         let regular = InteractiveBrokersDataClientConfig {
             use_regular_trading_hours: true,
             ..config
         };
-        assert!(BarRequests::of(&regular).use_rth);
+        assert!(HistoryRequests::of(&regular).use_rth);
     }
 
     #[test]
@@ -612,57 +868,61 @@ mod tests {
             "SXR8.IBIS-1-MINUTE-LAST-EXTERNAL",
             "ESZ26.CME-1-MINUTE-LAST-EXTERNAL",
         ] {
-            let served = served_bar_type(&NautilusDataType::Bar, identifier).unwrap();
-            assert_eq!(served, bar_type(identifier));
+            let served = served(&NautilusDataType::Bar, identifier).unwrap();
+            assert_eq!(served, Served::Bars(bar_type(identifier)));
             // IB's bar spec string, as `bars` requests it.
-            assert_eq!(served.spec().to_string(), "1-MINUTE-LAST");
+            assert_eq!(bar_type(identifier).spec().to_string(), "1-MINUTE-LAST");
         }
     }
 
     /// An IDEALPRO pair, which IB serves no TRADES bars of, has its own
-    /// 1-MINUTE BID and ASK bars.
+    /// BID and ASK bars, of any size IB has, and IB serves MIDPOINT bars
+    /// too.
     #[test]
-    fn ib_serves_its_own_one_minute_bid_and_ask_bars() {
-        for (identifier, spec) in [
-            ("EUR/USD.IDEALPRO-1-MINUTE-BID-EXTERNAL", "1-MINUTE-BID"),
-            ("EUR/USD.IDEALPRO-1-MINUTE-ASK-EXTERNAL", "1-MINUTE-ASK"),
-            ("SXR8.IBIS-1-MINUTE-BID-EXTERNAL", "1-MINUTE-BID"),
+    fn ib_serves_its_own_bid_ask_and_mid_bars_of_any_size_it_has() {
+        for identifier in [
+            "EUR/USD.IDEALPRO-1-MINUTE-BID-EXTERNAL",
+            "EUR/USD.IDEALPRO-1-MINUTE-ASK-EXTERNAL",
+            "EUR/USD.IDEALPRO-1-HOUR-BID-EXTERNAL",
+            "EUR/USD.IDEALPRO-5-MINUTE-ASK-EXTERNAL",
+            "EUR/USD.IDEALPRO-1-SECOND-BID-EXTERNAL",
+            "EUR/USD.IDEALPRO-1-MINUTE-MID-EXTERNAL",
+            "SXR8.IBIS-1-MINUTE-MID-EXTERNAL",
+            "SXR8.IBIS-1-DAY-BID-EXTERNAL",
         ] {
-            let served = served_bar_type(&NautilusDataType::Bar, identifier).unwrap();
-            assert_eq!(served, bar_type(identifier));
-            // IB's bar spec string, as `bars` requests it.
-            assert_eq!(served.spec().to_string(), spec);
+            let served = served(&NautilusDataType::Bar, identifier).unwrap();
+            assert_eq!(served, Served::Bars(bar_type(identifier)));
         }
     }
 
+    /// IB's historical ticks: BID_ASK for quotes, TRADES for trades, of the
+    /// instrument the series names.
+    #[test]
+    fn ib_serves_quotes_and_trades_as_its_historical_ticks() {
+        let sxr8 = InstrumentId::from("SXR8.IBIS");
+        assert_eq!(
+            served(&NautilusDataType::QuoteTick, "SXR8.IBIS").unwrap(),
+            Served::Ticks(IbHistoricalTickType::BidAsk, sxr8)
+        );
+        assert_eq!(
+            served(&NautilusDataType::TradeTick, "SXR8.IBIS").unwrap(),
+            Served::Ticks(IbHistoricalTickType::Trades, sxr8)
+        );
+    }
+
+    /// A price IB's adapter would ask TRADES for, a size IB has not,
+    /// bars Nautilus builds, and books and custom data, which Nautilus' IB
+    /// clients request none of.
     #[test]
     fn ib_serves_no_other_series() {
         for (data_type, identifier) in [
-            (NautilusDataType::QuoteTick, "SXR8.IBIS"),
-            (NautilusDataType::QuoteTick, "EUR/USD.IDEALPRO"),
-            (NautilusDataType::Bar, "SXR8.IBIS-1-MINUTE-MID-EXTERNAL"),
-            (
-                NautilusDataType::Bar,
-                "EUR/USD.IDEALPRO-1-MINUTE-MID-EXTERNAL",
-            ),
             (
                 NautilusDataType::Bar,
                 "EUR/USD.IDEALPRO-1-MINUTE-MARK-EXTERNAL",
             ),
-            (NautilusDataType::Bar, "SXR8.IBIS-1-HOUR-LAST-EXTERNAL"),
-            (NautilusDataType::Bar, "SXR8.IBIS-5-MINUTE-LAST-EXTERNAL"),
-            (
-                NautilusDataType::Bar,
-                "EUR/USD.IDEALPRO-1-HOUR-BID-EXTERNAL",
-            ),
-            (
-                NautilusDataType::Bar,
-                "EUR/USD.IDEALPRO-5-MINUTE-ASK-EXTERNAL",
-            ),
-            (
-                NautilusDataType::Bar,
-                "EUR/USD.IDEALPRO-1-SECOND-BID-EXTERNAL",
-            ),
+            (NautilusDataType::Bar, "SXR8.IBIS-4-MINUTE-LAST-EXTERNAL"),
+            (NautilusDataType::Bar, "SXR8.IBIS-2-SECOND-LAST-EXTERNAL"),
+            (NautilusDataType::Bar, "SXR8.IBIS-6-HOUR-LAST-EXTERNAL"),
             (NautilusDataType::Bar, "SXR8.IBIS-1-MINUTE-LAST-INTERNAL"),
             (
                 NautilusDataType::Bar,
@@ -673,6 +933,7 @@ mod tests {
                 "EUR/USD.IDEALPRO-1-MINUTE-ASK-INTERNAL",
             ),
             (NautilusDataType::OrderBookDelta, "SXR8.IBIS"),
+            (NautilusDataType::OrderBookDepth, "SXR8.IBIS"),
             (
                 NautilusDataType::Custom {
                     type_name: "Imbalance".to_string(),
@@ -680,9 +941,178 @@ mod tests {
                 "SXR8.IBIS",
             ),
         ] {
-            let err = served_bar_type(&data_type, identifier).unwrap_err();
+            let err = served(&data_type, identifier).unwrap_err();
             assert!(err.to_string().contains(identifier), "{err}");
         }
+    }
+
+    /// IB's step-size table ("Historical Data Limitations"): the longest
+    /// duration whose row admits each size IB has, a day of 1-minute bars
+    /// in seconds.
+    #[test]
+    fn each_bar_size_is_asked_over_the_longest_duration_ibs_step_sizes_admit_it_in() {
+        for (bars, duration) in [
+            ("1-SECOND", "1800 S"),
+            ("5-SECOND", "3600 S"),
+            ("10-SECOND", "14400 S"),
+            ("15-SECOND", "14400 S"),
+            ("30-SECOND", "28800 S"),
+            ("1-MINUTE", "86400 S"),
+            ("2-MINUTE", "2 D"),
+            ("3-MINUTE", "1 W"),
+            ("5-MINUTE", "1 W"),
+            ("10-MINUTE", "1 W"),
+            ("15-MINUTE", "1 W"),
+            ("20-MINUTE", "1 W"),
+            ("30-MINUTE", "1 M"),
+            ("1-HOUR", "1 M"),
+            ("2-HOUR", "1 M"),
+            ("3-HOUR", "1 M"),
+            ("4-HOUR", "1 M"),
+            ("8-HOUR", "1 M"),
+            ("1-DAY", "1 Y"),
+            ("1-WEEK", "1 Y"),
+            ("1-MONTH", "1 Y"),
+        ] {
+            let spec = bar_type(&format!("SXR8.IBIS-{bars}-LAST-EXTERNAL")).spec();
+            assert_eq!(request_duration(spec), duration, "{bars}");
+        }
+    }
+
+    /// A request of `bars`, 1-second bars of SXR8 priced `price`, ending at
+    /// second `end` of the epoch.
+    fn small(price: &str, end: i64) -> SmallBarRequest {
+        SmallBarRequest {
+            bar_type: bar_type(&format!("SXR8.IBIS-1-SECOND-{price}-EXTERNAL")),
+            end: Timestamp::from_second(end).unwrap(),
+            duration: "1800 S",
+        }
+    }
+
+    /// `requests`, each sent at its offset from `start`.
+    fn pacing_of(start: Instant, requests: &[(u64, SmallBarRequest)]) -> SmallBarPacing {
+        let mut pacing = SmallBarPacing::default();
+        for &(at, request) in requests {
+            pacing.sent(start + Duration::from_millis(at), request);
+        }
+        pacing
+    }
+
+    /// Worked by hand: a request identical to one sent at 0 waits until
+    /// 15 s, at 10 s 5 s more; one of another end does not.
+    #[test]
+    fn an_identical_small_bar_request_waits_15_seconds_after_the_first() {
+        let start = Instant::now();
+        let pacing = pacing_of(start, &[(0, small("LAST", 3600))]);
+        let at_10_s = start + Duration::from_secs(10);
+
+        assert_eq!(
+            pacing.wait(at_10_s, &small("LAST", 3600)),
+            Duration::from_secs(5)
+        );
+        assert_eq!(pacing.wait(at_10_s, &small("LAST", 1800)), Duration::ZERO);
+        assert_eq!(
+            pacing.wait(start + Duration::from_secs(15), &small("LAST", 3600)),
+            Duration::ZERO
+        );
+    }
+
+    /// Worked by hand: five requests of SXR8's LAST bars sent at 0, 100,
+    /// 200, 300 and 400 ms; a sixth within two seconds of the first would
+    /// be IB's sixth, so at 500 ms it waits until the first is 2 s old,
+    /// 1.5 s; one of SXR8's BID bars, another data shown, does not wait.
+    #[test]
+    fn a_sixth_small_bar_request_of_a_series_within_two_seconds_waits() {
+        let start = Instant::now();
+        let sent: Vec<(u64, SmallBarRequest)> = (0..5)
+            .map(|i| (i * 100, small("LAST", 3600 - i64::try_from(i).unwrap())))
+            .collect();
+        let pacing = pacing_of(start, &sent);
+        let at_500_ms = start + Duration::from_millis(500);
+
+        assert_eq!(
+            pacing.wait(at_500_ms, &small("LAST", 100)),
+            Duration::from_millis(1500)
+        );
+        assert_eq!(pacing.wait(at_500_ms, &small("BID", 100)), Duration::ZERO);
+    }
+
+    /// Worked by hand: 60 requests, of two series apart, one every 3 s from
+    /// 0 to 177 s; the 61st within ten minutes of the first, at 180 s,
+    /// waits until the first is ten minutes old, 420 s; at 600 s the first
+    /// is out of the count and the 61st goes.
+    #[test]
+    fn a_61st_small_bar_request_within_ten_minutes_waits() {
+        let start = Instant::now();
+        let sent: Vec<(u64, SmallBarRequest)> = (0..60)
+            .map(|i| {
+                let price = if i % 2 == 0 { "BID" } else { "ASK" };
+                (i * 3000, small(price, 3600 - i64::try_from(i).unwrap()))
+            })
+            .collect();
+        let pacing = pacing_of(start, &sent);
+
+        assert_eq!(
+            pacing.wait(start + Duration::from_secs(180), &small("LAST", 100)),
+            Duration::from_secs(420)
+        );
+        assert_eq!(
+            pacing.wait(start + Duration::from_secs(600), &small("LAST", 100)),
+            Duration::ZERO
+        );
+    }
+
+    /// The slices of `series`, each over `[from, to]` on its instrument.
+    fn slices_of(series: &[(NautilusDataType, &str, &str)], from: &str) -> Vec<SeriesSlice> {
+        series
+            .iter()
+            .map(|(data, identifier, instrument)| SeriesSlice {
+                series: (data.clone(), (*identifier).to_string()),
+                slice: crate::rolls::Slice {
+                    instrument_id: InstrumentId::from(*instrument),
+                    from: at(from),
+                    to: at("2026-11-14T00:00:00Z"),
+                },
+            })
+            .collect()
+    }
+
+    /// On 15 November 2026 IB holds 30-second bars from 15 May on, six
+    /// months before: a fill of them from 16 May is held, one from 14 May
+    /// is refused, naming the bars and the start IB holds; 1-minute bars
+    /// and quotes from 14 May are held, IB keeping them longer.
+    #[test]
+    fn small_bars_older_than_six_months_are_refused_naming_the_oldest_ib_holds() {
+        let now = at("2026-11-15T12:00:00Z");
+        let small_bars = "SXR8.IBIS-30-SECOND-LAST-EXTERNAL";
+        let held = |from| {
+            check_held(
+                &slices_of(&[(NautilusDataType::Bar, small_bars, "SXR8.IBIS")], from),
+                now,
+            )
+        };
+
+        held("2026-05-16T00:00:00Z").unwrap();
+        let err = held("2026-05-14T00:00:00Z").unwrap_err().to_string();
+        assert!(
+            err.contains(small_bars) && err.contains("2026-05-15T12:00:00Z"),
+            "{err}"
+        );
+        check_held(
+            &slices_of(
+                &[
+                    (
+                        NautilusDataType::Bar,
+                        "SXR8.IBIS-1-MINUTE-LAST-EXTERNAL",
+                        "SXR8.IBIS",
+                    ),
+                    (NautilusDataType::QuoteTick, "SXR8.IBIS", "SXR8.IBIS"),
+                ],
+                "2026-05-14T00:00:00Z",
+            ),
+            now,
+        )
+        .unwrap();
     }
 
     #[test]

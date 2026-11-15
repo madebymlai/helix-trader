@@ -47,6 +47,7 @@
 //! cannot confirm, so that a fill asks for it again; the span is logged.
 
 mod exchange;
+mod served;
 mod streams;
 
 use std::{collections::HashMap, future::Future, num::NonZeroUsize, sync::Arc};
@@ -83,8 +84,8 @@ use nautilus_model::{
     instruments::Instrument,
 };
 
-pub use self::streams::check_streamed;
 use self::{exchange::ExchangeAccess, streams::LseStreams};
+pub use self::{served::check_served, streams::check_streamed};
 use crate::{
     common::{
         consts::{CME_MARKET, LseExchange},

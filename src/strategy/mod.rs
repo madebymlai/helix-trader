@@ -35,9 +35,10 @@
 //! each strategy holds, asks for their history live and hands it back, so
 //! that no strategy knows how, and subscribes to them in a backtest, which
 //! requests none. The ticks of its data requirements, the quotes of the FX
-//! pairs its equity converts through among them, a `rolls::Roller`, which
-//! each strategy holds too (a model strategy's handle), subscribes to from
-//! its start. The catalog
+//! pairs its equity converts through among them, the warmup asks the
+//! history of too, where their venue serves it, and a `rolls::Roller`,
+//! which each strategy holds too (a model strategy's handle), subscribes
+//! to them from its start. The catalog
 //! stores what their bars are built from (see `catalog_series`).
 
 pub mod conversions;
@@ -76,26 +77,28 @@ use crate::rolls::{Slice, TransitionTable};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataRequirements {
     /// The bar types the strategy reads and warms up on, internal bars
-    /// Nautilus builds and, of a pair it converts through whose history is
-    /// bars, the pair's own (an IB pair's 1-minute BID and ASK bars,
-    /// `StandardConfig::data_requirements`): their instruments are those it
+    /// Nautilus builds and, of a pair it converts through read as bars, the
+    /// pair's own (an IB pair's 1-minute BID and ASK bars,
+    /// `venues::rate_series`, `StandardConfig::data_requirements`): their
+    /// instruments are those it
     /// reads (see `instrument_ids`), and a live node sizes its cache to hold
     /// their warmup (see `warmup::Warmup::cache_config`).
     pub bar_types: Vec<BarType>,
     /// The tick series the strategy reads as they are, beside or instead
     /// of bars, book deltas and custom data among them (see
-    /// `TickSeries`): fetched by fill-catalog from their instrument's
-    /// source (LSE fetches a GLBX instrument's trades and quotes, and
-    /// refuses its book; no source serves an instrument's custom data)
-    /// and replayed in a backtest as declared, those of its harness among
-    /// them (a model strategy's traded quotes when no series prices the
-    /// traded instrument, `StandardConfig::data_requirements`), and the
-    /// quotes of its `[trade] conversions` pairs. Their instruments are
-    /// read too: live sets up their clients, which load them, but
-    /// subscribes to none of the ticks: the strategy subscribes to each
-    /// from its start through its roller (`rolls::Roller`, a model
-    /// strategy's handle's), and warms up on those its features read
-    /// (`warmup::Warmup::reading`) alone, a pair's quotes having no warmup.
+    /// `TickSeries`), those of its harness among them (a traded
+    /// instrument's quotes when no series prices it,
+    /// `StandardConfig::data_requirements`), and the quotes of a
+    /// `[trade] conversions` pair read as quotes (a cTrader pair's,
+    /// `venues::rate_series`): fetched by fill-catalog from their
+    /// instrument's source, which must serve them (`venues::serves`; no
+    /// source serves an instrument's custom data), and replayed in a
+    /// backtest as declared. Their instruments are read too: live sets up
+    /// their clients, which load them, but subscribes to none of the ticks:
+    /// the strategy subscribes to each from its start through its roller
+    /// (`rolls::Roller`, a model strategy's handle's), and warms up on each
+    /// its venue's history serves (`warmup::Warmup`), custom data from the
+    /// catalog alone.
     pub ticks: Vec<TickSeries>,
     /// The custom data the strategy reads that is of no instrument, a
     /// reference series such as LSE's daily bond yields: each series a
@@ -259,7 +262,7 @@ impl DataRequirements {
 
     /// The sources of the bars and the ticks, as `catalog_series` sorts
     /// their series.
-    fn sources(&self) -> Vec<Source> {
+    pub(crate) fn sources(&self) -> Vec<Source> {
         let ticks = self.ticks.iter().cloned().map(Source::Ticks);
         sorted_sources(bar_sources(&self.bar_types).chain(ticks))
     }
@@ -352,15 +355,25 @@ pub fn catalog_series(bar_types: &[BarType]) -> Vec<(NautilusDataType, String)> 
 }
 
 /// What a catalog series holds: external bars, or the ticks of an
-/// instrument.
+/// instrument. A venue's history serves some (`venues::serves`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Source {
+pub(crate) enum Source {
     Bars(BarType),
     Ticks(TickSeries),
 }
 
+/// The bars by their bar type, the ticks as `TickSeries` names them.
+impl fmt::Display for Source {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bars(bar_type) => write!(f, "{bar_type}"),
+            Self::Ticks(tick) => write!(f, "{tick}"),
+        }
+    }
+}
+
 impl Source {
-    fn instrument_id(&self) -> InstrumentId {
+    pub(crate) fn instrument_id(&self) -> InstrumentId {
         match self {
             Self::Bars(bar_type) => bar_type.instrument_id(),
             Self::Ticks(tick) => tick.instrument_id,
@@ -383,7 +396,7 @@ impl Source {
     }
 
     /// The catalog series: its Nautilus data type and catalog identifier.
-    fn series(&self) -> (NautilusDataType, String) {
+    pub(crate) fn series(&self) -> (NautilusDataType, String) {
         match self {
             Self::Bars(bar_type) => (NautilusDataType::Bar, bar_type.to_string()),
             Self::Ticks(tick) => tick.catalog_series(),

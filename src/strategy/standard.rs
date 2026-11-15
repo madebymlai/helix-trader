@@ -1706,6 +1706,22 @@ mod tests {
         assert_eq!(config.data.series.len(), 3);
     }
 
+    /// OKX's history serves no pair's BID and ASK bars, its candles being of
+    /// trades, and no quotes, so no rate of an OKX pair could be read: it
+    /// is refused under its field, naming the pair and its venue.
+    #[test]
+    fn a_pair_whose_venue_serves_neither_its_bars_nor_its_quotes_is_refused_naming_both() {
+        let err = load(&converting(r#"["USDC-USDT.OKX"]"#)).unwrap_err();
+
+        assert_eq!(fields_of(&err), ["trade.conversions[0]"]);
+        assert!(
+            ["USDC-USDT.OKX", "OKX's history"]
+                .iter()
+                .all(|named| err.to_string().contains(named)),
+            "{err}"
+        );
+    }
+
     /// A strategy's rates are Nautilus' on one venue: pairs on two are
     /// refused under the conversions, naming both venues.
     #[test]

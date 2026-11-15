@@ -25,8 +25,8 @@ use nautilus_okx::{
         enums::OKXInstrumentType,
         models::OKXInstrument,
         parse::{
-            extract_inst_family, is_xperp_rule_type, okx_instrument_type_from_symbol,
-            parse_instrument_any,
+            bar_spec_as_okx_channel, extract_inst_family, is_xperp_rule_type,
+            okx_instrument_type_from_symbol, parse_instrument_any,
         },
     },
     config::OKXDataClientConfig,
@@ -40,7 +40,7 @@ use self::account::Account;
 use super::{HistorySource, Row};
 use crate::{
     catalog::{FillData, FillRequest, NodeClient, missing},
-    strategy::SeriesSlice,
+    strategy::{SeriesSlice, Source, TickSeries},
 };
 
 mod account;
@@ -149,6 +149,37 @@ async fn write_definitions(
     catalog
         .write_instruments(new)
         .context("writing instruments")?;
+    Ok(())
+}
+
+/// Checks that Nautilus' OKX data client, which OKX's fill and a live
+/// warmup ask, serves the history of `source`, an OKX instrument's: its
+/// trades (`request_trades`) and its candles (`request_bars`), EXTERNAL
+/// bars of the LAST price at a width OKX has a candle of
+/// (`bar_spec_as_okx_channel`, the widths the client asks the candles
+/// endpoint in). The client asks for trade-price candles whatever price a
+/// bar type names, so it serves no other price, and it requests no quotes
+/// and no book (Nautilus' `DataClient` defaults refuse them).
+///
+/// # Errors
+///
+/// Returns an error naming `source` and saying why if not served.
+pub(super) fn serves(source: &Source) -> anyhow::Result<()> {
+    match source {
+        Source::Bars(bar_type) => ensure!(
+            bar_type.is_externally_aggregated() && bar_spec_as_okx_channel(bar_type.spec()).is_ok(),
+            "OKX's history serves its candles, EXTERNAL bars of the LAST price 1, 3, 5, 15 or 30 \
+             minutes, 1, 2, 4, 6 or 12 hours, 1, 2, 3 or 5 days, a week or 1, 3, 6 or 12 months \
+             wide, or 1 second, and its trades, not {bar_type}"
+        ),
+        Source::Ticks(TickSeries {
+            data: NautilusDataType::TradeTick,
+            ..
+        }) => {}
+        Source::Ticks(ticks) => {
+            bail!("OKX's history serves its trades and its candles, not the {ticks}")
+        }
+    }
     Ok(())
 }
 

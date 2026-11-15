@@ -111,15 +111,29 @@
 //! answers it with no bars; `continuous_bars` reads them once the group
 //! ended.
 //!
-//! Ticks a strategy's features read as they are (`Warmup::reading`, a
-//! model strategy's handle naming its features') are requested over the
-//! same window in the same group, catalog first with `update_catalog`, a
-//! root's on the contract standing for it at the start (`rolls::front`)
-//! alone: `request_quotes`, `request_trades`, `request_book_depth` and
+//! The tick series of the strategy's data requirements are requested over
+//! the same window in the same group, whatever reads them: those its
+//! features read, the quotes of the pairs its equity converts through
+//! (`venues::rate_series`), which Nautilus caches as it does every
+//! response's quotes, so that a trade sized at the start has their rate,
+//! and a traded instrument's quotes no series prices. Each is requested
+//! catalog first with `update_catalog`, a root's on the contract standing
+//! for it at the start (`rolls::front`) alone: `request_quotes`, `request_trades`, `request_book_depth` and
 //! `request_book_deltas` (with the book type the roller subscribes to,
 //! `rolls::DELTAS_BOOK_TYPE`, onto which Nautilus replays the deltas from
 //! the day's start into the snapshot a window opens with). A series
-//! some bars are built from is requested once, building them. The last
+//! some bars are built from is requested once, building them.
+//!
+//! A series, bars' source or tick series, is requested only if its venue's
+//! history serves it (`venues::serves`), the rule fill-catalog fills by:
+//! one it does not serve, an OKX instrument's quotes, an IB instrument's
+//! book, is requested no history, which the warmup logs as a warning
+//! naming why; the series is subscribed from the start all the same, and
+//! the bars built from it start there. Custom data, the catalog's, is
+//! requested of it alone (see below). The definitions of the instruments of
+//! every series are asked, served or not, as their clients need them.
+//!
+//! The last
 //! window ends at `now`, trimmed to it, and the roller, started right
 //! after, subscribes to the series with `start_ns` its own `now`
 //! (`subscription_params`). That keeps the data engine from starting the
@@ -147,8 +161,8 @@
 //! actor hands it from `on_book_depth` and `on_book_deltas` the same way,
 //! held as live ticks are.
 //!
-//! Custom data the features read (a raw feature's, a root's on its
-//! contract's data type) is requested in the same group over the same
+//! Custom data of an instrument of the requirements (a raw feature's, a
+//! root's on its contract's data type) is requested in the same group over the same
 //! window with `request_data`, naming the client `CATALOG`, which no node
 //! registers: no data client serves an instrument's custom data, and
 //! Nautilus answers the request from the catalog alone. The features read
@@ -254,8 +268,9 @@ pub trait BookIndicator {
 ///
 /// Live, `start` requests the warmup of the bar types the strategy reads,
 /// of those the strategy's harness needs warm (`building`, the target's
-/// ATR's) and of the tick series its features read (`reading`), and
-/// subscribes to the bars from the warmup's end; the bars each request built
+/// ATR's) and of the tick series of its requirements, those its venue's
+/// history serves (`venues::serves`), and subscribes to the bars from the
+/// warmup's end; the bars each request built
 /// go to the indicators the warmup feeds (`feeding`, `building`), oldest
 /// first, when it completes, each response's quotes and trades to its tick
 /// indicators (`feeding_ticks`), holding the live ones until the group ends,
@@ -276,7 +291,8 @@ pub struct Warmup {
     bar_types: Vec<BarType>,
     /// The bar types the harness needs warm beyond those.
     harness: Vec<BarType>,
-    /// The tick series warmed as they are, of roots or plain instruments.
+    /// The tick series of the requirements, of roots or plain instruments,
+    /// warmed as they are if served.
     ticks: Vec<TickSeries>,
     /// What the warmup's bars are handed to.
     indicators: Vec<SharedActorIndicator>,
@@ -322,7 +338,7 @@ impl Warmup {
             length: requirements.warmup,
             bar_types: requirements.bar_types.clone(),
             harness: Vec::new(),
-            ticks: Vec::new(),
+            ticks: requirements.ticks.clone(),
             indicators: Vec::new(),
             hold: Hold::default(),
             group: Cell::new(UUID4::new()),
@@ -349,20 +365,6 @@ impl Warmup {
             self.harness.push(bar_type);
         }
         self.feeding(indicator)
-    }
-
-    /// The warmup requesting the history of `ticks` too, quotes, trades,
-    /// book depth, deltas or custom data of roots or plain instruments,
-    /// each on the contract standing for its instrument at the start
-    /// (`rolls::front`): the series a strategy's features read, which its
-    /// roller subscribes to from the warmup's end. Quotes and trades reach
-    /// the indicators `feeding_ticks` names; depth and deltas reach those
-    /// `feeding_books` names; custom data, requested from the catalog alone
-    /// (see `CATALOG`), the cache (`on_historical_data`).
-    #[must_use]
-    pub fn reading(mut self, ticks: Vec<TickSeries>) -> Self {
-        self.ticks = ticks;
-        self
     }
 
     /// The warmup handing the book depth and deltas of its responses to
@@ -671,7 +673,10 @@ impl Debug for Warmup {
 /// the instrument of internal BID, ASK and MID bars; an external bar type
 /// is requested as it is, building nothing; each tick series is requested on
 /// the contract standing for its instrument now, once with the bars built
-/// from it if any, custom data from the catalog alone (see `CATALOG`). The
+/// from it if any, custom data from the catalog alone (see `CATALOG`). A
+/// series its venue's history does not serve (`venues::serves`) is
+/// requested no history, logged as a warning, its instrument's definition
+/// asked all the same. The
 /// warmup of each request arrives a window at a time in
 /// `on_historical_bars`, `on_historical_trades`, `on_historical_quotes`,
 /// `on_historical_book_depth` or `on_historical_book_deltas`, at once in
@@ -732,6 +737,23 @@ where
         requested.push((id, vec![]));
     }
     for (source, built) in sources {
+        let custom = matches!(
+            source,
+            Source::Ticks(TickSeries {
+                data: NautilusDataType::Custom { .. },
+                ..
+            })
+        );
+        if !custom && let Err(e) = venues::serves(&source) {
+            let bars: Vec<String> = built.iter().map(ToString::to_string).collect();
+            let bars = if bars.is_empty() {
+                String::new()
+            } else {
+                format!(", and so are the bars built from it, {}", bars.join(", "))
+            };
+            log::warn!("No warmup of {source}: {e:#}; it is subscribed from now{bars}");
+            continue;
+        }
         let params = Some(request_params(built.iter(), windows.clone()));
         let id = match source {
             Source::Bars(source) => {
@@ -1408,7 +1430,16 @@ mod tests {
         }
     }
 
-    /// A live start requests the history of the ticks the strategy reads
+    /// The requirements of a strategy reading `bar_types` and `ticks` over a
+    /// day.
+    fn reading_ticks(bar_types: &[&str], ticks: Vec<TickSeries>) -> DataRequirements {
+        DataRequirements {
+            ticks,
+            ..reading(bar_types)
+        }
+    }
+
+    /// A live start requests the history of the ticks of the requirements
     /// too, a root's on the contract standing for it then: GC rolls into
     /// GCZ26 on 2026-07-29 and out of it on 2026-11-26 (`rolls/README.md`),
     /// so on 2026-08-10 the root's trades and depth are GCZ26's, requested
@@ -1418,14 +1449,16 @@ mod tests {
     #[test]
     fn a_live_warmup_requests_a_roots_ticks_on_its_front_contract() {
         let bars = BarType::from("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL");
-        let warmup =
-            Warmup::live(&reading(&["XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL"])).reading(vec![
+        let warmup = Warmup::live(&reading_ticks(
+            &["XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL"],
+            vec![
                 tick(NautilusDataType::TradeTick, "GC.GLBX"),
                 tick(NautilusDataType::OrderBookDepth, "GC.GLBX"),
                 tick(NautilusDataType::QuoteTick, "XAUUSD.ICMARKETS"),
                 tick(NautilusDataType::TradeTick, "GCZ26.GLBX"),
                 tick(NautilusDataType::OrderBookDelta, "GC.GLBX"),
-            ]);
+            ],
+        ));
         let (mut probe, commands) = registered();
 
         warmup.start(&mut probe).unwrap();
@@ -1453,6 +1486,91 @@ mod tests {
         );
     }
 
+    /// Every series of the requirements its venue's history serves is
+    /// requested, whatever reads it: IC's EURUSD quotes, a conversion
+    /// pair's no feature reads, over the window, building nothing, beside
+    /// IC's gold quotes, which build the strategy's bars; IDEALPRO's
+    /// EUR/USD BID and ASK bars, an IB pair's, as they are.
+    #[test]
+    fn a_live_warmup_requests_the_series_its_conversion_pairs_are_read_from() {
+        let bars = BarType::from("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL");
+        let warmup = Warmup::live(&reading_ticks(
+            &[
+                "XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL",
+                "EUR/USD.IDEALPRO-1-MINUTE-BID-EXTERNAL",
+                "EUR/USD.IDEALPRO-1-MINUTE-ASK-EXTERNAL",
+            ],
+            vec![tick(NautilusDataType::QuoteTick, "EURUSD.ICMARKETS")],
+        ));
+        let (mut probe, commands) = registered();
+
+        warmup.start(&mut probe).unwrap();
+
+        assert_eq!(
+            requested(&commands),
+            [
+                (
+                    Source::Ticks(tick(NautilusDataType::QuoteTick, "XAUUSD.ICMARKETS")),
+                    vec![bars],
+                ),
+                (
+                    Source::Bars(BarType::from("EUR/USD.IDEALPRO-1-MINUTE-BID-EXTERNAL")),
+                    vec![],
+                ),
+                (
+                    Source::Bars(BarType::from("EUR/USD.IDEALPRO-1-MINUTE-ASK-EXTERNAL")),
+                    vec![],
+                ),
+                (
+                    Source::Ticks(tick(NautilusDataType::QuoteTick, "EURUSD.ICMARKETS")),
+                    vec![],
+                ),
+            ]
+        );
+    }
+
+    /// A series its venue's history does not serve is requested no history
+    /// (`venues::serves`): OKX's client requests no quotes, so neither the
+    /// quotes OKX's MID bars are built from nor OKX's quotes as ticks are
+    /// asked, nor SXR8's book depth, which IB serves none of; OKX's trades
+    /// are. The definitions of their instruments are asked all the same,
+    /// before any series, each of the client its venue's row names, so that
+    /// the clients subscribing to the series find them.
+    #[test]
+    fn a_live_warmup_requests_no_series_its_venue_does_not_serve_but_asks_its_definition() {
+        let swap = "BTC-USDT-SWAP.OKX";
+        let warmup = Warmup::live(&reading_ticks(
+            &["BTC-USDT-SWAP.OKX-1-HOUR-MID-INTERNAL"],
+            vec![
+                tick(NautilusDataType::QuoteTick, swap),
+                tick(NautilusDataType::TradeTick, swap),
+                tick(NautilusDataType::OrderBookDepth, "SXR8.IBIS"),
+            ],
+        ));
+        let (mut probe, commands) = registered();
+
+        warmup.start(&mut probe).unwrap();
+
+        assert_eq!(
+            requested(&commands),
+            [(
+                Source::Ticks(tick(NautilusDataType::TradeTick, swap)),
+                vec![]
+            )]
+        );
+        assert_eq!(
+            definitions_asked(&commands),
+            [
+                (InstrumentId::from(swap), Some(ClientId::from("OKX")), 0),
+                (
+                    InstrumentId::from("SXR8.IBIS"),
+                    Some(ClientId::from("IB")),
+                    0
+                ),
+            ]
+        );
+    }
+
     /// A definition of `id`, as a broker's client puts one in the cache.
     fn defined(id: &str) -> nautilus_model::instruments::InstrumentAny {
         let mut contract = nautilus_model::instruments::stubs::futures_contract_es(None, None);
@@ -1460,19 +1578,22 @@ mod tests {
         nautilus_model::instruments::InstrumentAny::FuturesContract(contract)
     }
 
-    /// LSE's gold futures quotes, SXR8's trades and IC's gold quotes, which
-    /// build the strategy's bars; IC's client put its gold in the cache.
-    /// Each instrument the cache lacks is asked once, of the client its
-    /// venue's row names (`venues::live_definitions_client`), before any of
-    /// its series is: LSE's for LSEDGE, which has no broker, IB's for IBIS.
+    /// LSE's gold futures quotes, SXR8's trades and book depth and IC's
+    /// gold quotes, which build the strategy's bars; IC's client put its
+    /// gold in the cache. Each instrument the cache lacks is asked once, of
+    /// the client its venue's row names (`venues::live_definitions_client`),
+    /// before any of its series is: LSE's for LSEDGE, which has no broker,
+    /// IB's for IBIS. Three series are requested, IB serving no book depth.
     #[test]
     fn a_live_warmup_asks_the_definitions_the_cache_lacks_before_any_series() {
-        let warmup =
-            Warmup::live(&reading(&["XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL"])).reading(vec![
+        let warmup = Warmup::live(&reading_ticks(
+            &["XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL"],
+            vec![
                 tick(NautilusDataType::QuoteTick, "GOLD-FUTURES.LSEDGE"),
                 tick(NautilusDataType::TradeTick, "SXR8.IBIS"),
                 tick(NautilusDataType::OrderBookDepth, "SXR8.IBIS"),
-            ]);
+            ],
+        ));
         let (mut probe, commands) = registered();
         probe
             .cache_rc()
@@ -1497,18 +1618,21 @@ mod tests {
                 ),
             ]
         );
-        assert_eq!(sent_requests(&commands).len(), 4);
+        assert_eq!(sent_requests(&commands).len(), 3);
     }
 
     /// The catalog alone answers custom data, and needs no definition.
     #[test]
     fn a_live_warmup_asks_no_definition_for_custom_data() {
-        let warmup = Warmup::live(&reading(&[])).reading(vec![tick(
-            NautilusDataType::Custom {
-                type_name: "Imbalance".to_string(),
-            },
-            "GCZ26.GLBX",
-        )]);
+        let warmup = Warmup::live(&reading_ticks(
+            &[],
+            vec![tick(
+                NautilusDataType::Custom {
+                    type_name: "Imbalance".to_string(),
+                },
+                "GCZ26.GLBX",
+            )],
+        ));
         let (mut probe, commands) = registered();
 
         warmup.start(&mut probe).unwrap();
@@ -1619,9 +1743,11 @@ mod tests {
     #[test]
     fn live_book_depth_and_deltas_are_held_and_dropped_at_the_seam_as_ticks_are() {
         let books = Rc::new(Books::default());
-        let warmup = Warmup::live(&reading(&[]))
-            .reading(vec![tick(NautilusDataType::QuoteTick, XAU)])
-            .feeding_books(Rc::clone(&books) as _);
+        let warmup = Warmup::live(&reading_ticks(
+            &[],
+            vec![tick(NautilusDataType::QuoteTick, XAU)],
+        ))
+        .feeding_books(Rc::clone(&books) as _);
         let (mut probe, _) = registered();
         warmup.start(&mut probe).unwrap();
 
@@ -1807,15 +1933,17 @@ mod tests {
     /// seconds (see `WINDOW`).
     #[test]
     fn every_series_is_asked_in_windows_under_a_day() {
-        let warmup = Warmup::live(&reading(&[
-            "XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL",
-            "ESM24.CME-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
-        ]))
-        .reading(vec![
-            tick(NautilusDataType::TradeTick, "GCZ26.GLBX"),
-            tick(NautilusDataType::OrderBookDepth, "GCZ26.GLBX"),
-            tick(NautilusDataType::OrderBookDelta, "GCZ26.GLBX"),
-        ]);
+        let warmup = Warmup::live(&reading_ticks(
+            &[
+                "XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL",
+                "ESM24.CME-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
+            ],
+            vec![
+                tick(NautilusDataType::TradeTick, "GCZ26.GLBX"),
+                tick(NautilusDataType::OrderBookDepth, "GCZ26.GLBX"),
+                tick(NautilusDataType::OrderBookDelta, "GCZ26.GLBX"),
+            ],
+        ));
         let (mut probe, commands) = registered();
 
         warmup.start(&mut probe).unwrap();
@@ -1900,7 +2028,8 @@ mod tests {
         }
     }
 
-    const XAU: &str = "XAUUSD.ICMARKETS";
+    /// CME gold, whose history LSE serves, quotes and trades.
+    const XAU: &str = "GCZ26.GLBX";
     const EUR: &str = "EURUSD.ICMARKETS";
 
     /// `time` on 2026-08-10, UTC, the day `registered` starts on.
@@ -1923,12 +2052,12 @@ mod tests {
         )
     }
 
-    /// A quote of XAUUSD made at `made` and stamped then, as a history's.
+    /// A quote of GCZ26 made at `made` and stamped then, as a history's.
     fn quote(made: &str) -> QuoteTick {
         quote_of(XAU, made, made)
     }
 
-    /// A trade of XAUUSD made at `made` and stamped by its client at
+    /// A trade of GCZ26 made at `made` and stamped by its client at
     /// `received`.
     fn trade(made: &str, received: &str) -> TradeTick {
         TradeTick::new(
@@ -1947,21 +2076,23 @@ mod tests {
         ("quote", InstrumentId::from(instrument_id), on_the_day(made))
     }
 
-    /// What `Ticks` records of a trade of XAUUSD made at `made`.
+    /// What `Ticks` records of a trade of GCZ26 made at `made`.
     fn read_trade(made: &str) -> Read {
         ("trade", InstrumentId::from(XAU), on_the_day(made))
     }
 
-    /// The live warmup of a day of XAUUSD's quotes and trades handing its
+    /// The live warmup of a day of GCZ26's quotes and trades handing its
     /// ticks to `ticks`, started at 14:30 (`registered`), its group pending,
     /// and the strategy it started on.
     fn warming(ticks: &Rc<Ticks>) -> (Warmup, Probe) {
-        let warmup = Warmup::live(&reading(&[]))
-            .reading(vec![
+        let warmup = Warmup::live(&reading_ticks(
+            &[],
+            vec![
                 tick(NautilusDataType::QuoteTick, XAU),
                 tick(NautilusDataType::TradeTick, XAU),
-            ])
-            .feeding_ticks(Rc::clone(ticks) as SharedActorIndicator);
+            ],
+        ))
+        .feeding_ticks(Rc::clone(ticks) as SharedActorIndicator);
         let (mut probe, _) = registered();
         warmup.start(&mut probe).unwrap();
         (warmup, probe)
@@ -2007,7 +2138,7 @@ mod tests {
     }
 
     /// The hold ends with the group, not with one of its requests. Started
-    /// at 14:30, the warmup asks XAUUSD's quotes and its trades, a request
+    /// at 14:30, the warmup asks GCZ26's quotes and its trades, a request
     /// each: the quotes' answers a quote made at 14:29:00 and completes,
     /// then a live quote made at 14:30:01 comes while the trades' request
     /// is still pending, and is held; the trades' answers a trade made at
@@ -2015,12 +2146,14 @@ mod tests {
     #[test]
     fn live_ticks_are_held_until_the_group_ends_not_one_of_its_requests() {
         let ticks = Rc::new(Ticks::default());
-        let warmup = Warmup::live(&reading(&[]))
-            .reading(vec![
+        let warmup = Warmup::live(&reading_ticks(
+            &[],
+            vec![
                 tick(NautilusDataType::QuoteTick, XAU),
                 tick(NautilusDataType::TradeTick, XAU),
-            ])
-            .feeding_ticks(Rc::clone(&ticks) as SharedActorIndicator);
+            ],
+        ))
+        .feeding_ticks(Rc::clone(&ticks) as SharedActorIndicator);
         let (mut probe, commands) = registered();
         warmup.start(&mut probe).unwrap();
         let quotes = sent_requests(&commands)
@@ -2090,8 +2223,8 @@ mod tests {
     }
 
     /// The overlap is judged within a series, the quotes or the trades of
-    /// one instrument: the history of XAUUSD's quotes ends at 14:29:59, and
-    /// a live trade of XAUUSD made at 14:29:30 and a live quote of EURUSD
+    /// one instrument: the history of GCZ26's quotes ends at 14:29:59, and
+    /// a live trade of GCZ26 made at 14:29:30 and a live quote of EURUSD
     /// made at 14:29:00, series without history, are read.
     #[test]
     fn a_series_without_history_drops_none_of_its_live_ticks() {
@@ -2209,9 +2342,11 @@ mod tests {
     #[test]
     fn a_replays_ticks_reach_the_features_as_they_come() {
         let ticks = Rc::new(Ticks::default());
-        let replayed = Warmup::replayed(&reading(&[]))
-            .reading(vec![tick(NautilusDataType::QuoteTick, XAU)])
-            .feeding_ticks(Rc::clone(&ticks) as SharedActorIndicator);
+        let replayed = Warmup::replayed(&reading_ticks(
+            &[],
+            vec![tick(NautilusDataType::QuoteTick, XAU)],
+        ))
+        .feeding_ticks(Rc::clone(&ticks) as SharedActorIndicator);
         let (mut probe, _) = registered();
         replayed.start(&mut probe).unwrap();
 

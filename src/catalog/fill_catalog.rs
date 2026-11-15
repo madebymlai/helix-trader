@@ -54,7 +54,8 @@ use crate::strategy::SeriesSlice;
 /// item of another series, is an error. Once a
 /// series is stored, an empty response, or one of only already stored
 /// items, means nothing new: nothing is written and the next series run.
-/// Items are stored sorted by `ts_init`, one per `ts_init`.
+/// Items are stored sorted by `ts_init`, a bar per `ts_init`, ticks of one
+/// `ts_init` in the order fetched, each given more than once stored once.
 pub async fn fill_catalog(
     catalog: &mut ParquetDataCatalog,
     instruments: Vec<InstrumentAny>,
@@ -134,7 +135,12 @@ pub async fn fill_catalog(
             items.retain(|item| item.ts_init() > last);
         }
         items.sort_by_key(HasTsInit::ts_init);
-        items.dedup_by_key(|item| item.ts_init());
+        // One bar per close; ticks of one stamp are as many as they differ,
+        // a venue stamping to the second (IB) giving many.
+        items.dedup_by(|later, earlier| match (later, earlier) {
+            (Data::Bar(later), Data::Bar(earlier)) => later.ts_init == earlier.ts_init,
+            (later, earlier) => later == earlier,
+        });
         let (Some(oldest), Some(newest)) = (items.first(), items.last()) else {
             continue;
         };
@@ -438,6 +444,40 @@ mod tests {
         assert_eq!(asked, vec![(es_id(), 0, 100), (aapl_id, 0, 100)]);
         assert_eq!(stored_quotes(&mut catalog, es_id()), vec![10, 20, 30]);
         assert_eq!(stored_quotes(&mut catalog, aapl_id), vec![5]);
+    }
+
+    /// IB stamps its historical ticks to the second: three quotes of one
+    /// second, each of its own prices, are three quotes, stored in the
+    /// order given; one given twice is stored once.
+    #[tokio::test]
+    async fn distinct_quotes_of_one_stamp_are_all_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut catalog = new_catalog(&dir);
+        let at_10 = |bid: &str| {
+            let quote = quote_at(es_id(), 10);
+            QuoteTick {
+                bid_price: Price::from(bid),
+                ..quote
+            }
+        };
+        let (r, _) = fill(&mut catalog, vec![instrument()], 0, 100, |_| {
+            Ok(vec![
+                at_10("100.00"),
+                at_10("99.75"),
+                at_10("99.75"),
+                at_10("100.25"),
+            ])
+        })
+        .await;
+        r.unwrap();
+
+        let bids: Vec<String> = catalog
+            .quote_ticks(Some(vec![es_id().to_string()]), None, None)
+            .unwrap()
+            .iter()
+            .map(|quote| quote.bid_price.to_string())
+            .collect();
+        assert_eq!(bids, ["100.00", "99.75", "100.25"]);
     }
 
     #[tokio::test]

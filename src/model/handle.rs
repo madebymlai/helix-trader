@@ -92,8 +92,8 @@
 //! `decide`).
 //!
 //! The handle builds the strategy's warmup (`strategy::warmup::Warmup`)
-//! from its requirements and mode, reading the features' tick series
-//! (`FeatureSet::ticks`) and feeding the features, and `start` starts it,
+//! from its requirements and mode, feeding the features, and `start`
+//! starts it,
 //! the features registered first. The strategy's data hooks hand it the
 //! responses and the live quotes, trades, depth and deltas:
 //! `model_data_hooks!` writes them, the one place they are written, so that
@@ -102,13 +102,15 @@
 //! deltas of its responses and the live ones, held until it ends, so that
 //! no live tick reaches them before an older window of the history
 //! (`strategy::warmup`'s `hold`); in a replay they go straight through. Live, the warmup requests the history of
-//! the features' ticks, a root's on the contract standing for it, their
-//! custom data from the catalog alone, added to the cache the features
-//! read it from (`FeatureSet::data`), and the
-//! roller's subscriptions continue from its end, so the first decision
-//! after a start is warm. A series of the traded instrument no feature
-//! reads, custom data among them, has no warmup, and its live ticks reach
-//! no feature. It warms the target's ATR from
+//! every tick series of the requirements its venue's history serves, a
+//! root's on the contract standing for it, custom data from the catalog
+//! alone, added to the cache the features read it from
+//! (`FeatureSet::data`), and the roller's subscriptions continue from its
+//! end, so the first decision after a start is warm. A series no feature
+//! reads, the traded instrument's or a conversion pair's, is warmed up
+//! too, so that the cache holds its latest price at the start, and its
+//! ticks, of the history and live, reach no feature, each reading those of
+//! its own series alone. It warms the target's ATR from
 //! the warmup request, as it does the features: the request builds the
 //! ATR's bars too (`TargetSetter::warmed`), and the warmup hands the bars of the
 //! response to both, so the first decision after a start sets the stop and
@@ -283,7 +285,7 @@ pub struct ModelHandle {
     /// Subscribes the features' ticks, on the contract standing for each
     /// root, and every other tick series of the requirements: the traded
     /// instrument's, and the quotes of the pairs of `[trade] conversions`,
-    /// which the warmup does not read.
+    /// which the warmup requests too but no feature reads.
     roller: Roller,
 }
 
@@ -332,7 +334,6 @@ impl ModelHandle {
             Mode::Live { .. } => Warmup::live(requirements),
             Mode::Backtest { .. } | Mode::Dataset { .. } => Warmup::replayed(requirements),
         }
-        .reading(features.ticks())
         .feeding(Rc::clone(features) as SharedActorIndicator)
         .feeding_ticks(Rc::clone(features) as SharedActorIndicator)
         .feeding_books(Rc::clone(features) as Rc<dyn BookIndicator>);
@@ -389,7 +390,8 @@ impl ModelHandle {
     /// (`orders::refuse_inverse`), registers the features for their bars,
     /// starts the strategy's warmup
     /// (`Warmup::start`), holding the live ticks while it is pending, live
-    /// requesting the history of the bars and of the features' ticks, then
+    /// requesting the history of the bars and of the requirements' ticks,
+    /// then
     /// the roller, which subscribes the features' ticks and every other
     /// tick series of the requirements, the traded instrument's and the
     /// conversion pairs' quotes, from now, where the warmup ends, a root's
@@ -1774,6 +1776,95 @@ mod tests {
         );
     }
 
+    /// A live warmup hands the features every quote of its responses, and
+    /// each live one it held, and they read those of the series they read
+    /// alone: a feature on GCZ26's quotes, an average of two mids, is handed the
+    /// quotes of IC's EURUSD, a conversion pair, and of the traded AUD/USD,
+    /// series of the requirements the warmup requests, each's history and
+    /// a live one held while the warmup is pending, and stays cold,
+    /// recording no update of them; GCZ26's two quotes then warm it.
+    #[test]
+    fn the_features_read_of_a_warmup_the_quotes_of_the_series_they_read_alone() {
+        let models = tempfile::tempdir().unwrap();
+        let gcz26 = InstrumentId::from("GCZ26.GLBX");
+        const GC_2_MIDS: Declared<EmaArgs> = Declared::new("gc_2_mids");
+        let mids: IndicatorsConfig =
+            toml::from_str(r#"gc_2_mids = { period = 2, price_type = "MID" }"#).unwrap();
+        let features = FeatureSet::builder()
+            .quotes(gcz26, GC_2_MIDS, &mids)
+            .build()
+            .unwrap();
+        let requirements = DataRequirements {
+            bar_types: vec![],
+            ticks: vec![
+                TickSeries {
+                    data: NautilusDataType::QuoteTick,
+                    instrument_id: gcz26,
+                },
+                aud_quotes(),
+                eurusd_quotes(),
+            ],
+            custom: vec![],
+            warmup: SignedDuration::from_hours(1),
+        };
+        let model = ModelHandle::new(
+            &blueprint_of(&features, &bracket_config(10), requirements),
+            live(models.path().to_path_buf()),
+        )
+        .unwrap();
+        let mut hooked = Hooked {
+            core: strategy_core(),
+            model: Rc::clone(&model),
+        };
+        register(&mut hooked.core, at("2026-08-10T14:30:00Z"));
+        model.start(&mut hooked).unwrap();
+        let quote = |instrument_id: InstrumentId, time: &str| {
+            let ts = UnixNanos::from(at(time));
+            QuoteTick::new(
+                instrument_id,
+                Price::from("1.00000"),
+                Price::from("1.00010"),
+                Quantity::from(1),
+                Quantity::from(1),
+                ts,
+                ts,
+            )
+        };
+        let answer = |hooked: &mut Hooked, instrument_id: InstrumentId| {
+            hooked.handle_quotes_response(&QuotesResponse::new(
+                UUID4::new(),
+                ClientId::from("SIM"),
+                instrument_id,
+                ["2026-08-10T14:00:00Z", "2026-08-10T14:29:00Z"]
+                    .map(|time| quote(instrument_id, time))
+                    .to_vec(),
+                None,
+                None,
+                UnixNanos::from(at("2026-08-10T14:30:00Z")),
+                None,
+            ));
+        };
+        let others = [
+            InstrumentId::from(AUD),
+            InstrumentId::from("EURUSD.ICMARKETS"),
+        ];
+
+        for instrument_id in others {
+            answer(&mut hooked, instrument_id);
+            DataActor::on_quote(&mut hooked, &quote(instrument_id, "2026-08-10T14:30:01Z"))
+                .unwrap();
+        }
+        model.warmup().complete(&hooked).unwrap();
+        let cold = (
+            features.initialized(),
+            others.map(|instrument_id| features.last_update(instrument_id)),
+        );
+        answer(&mut hooked, gcz26);
+
+        assert_eq!(cold, (false, [None, None]));
+        assert!(features.initialized());
+    }
+
     /// The hooks `model_data_hooks!` writes hand the warmup a strategy's
     /// live book depth and deltas too, which Nautilus hands no indicator,
     /// only the strategy's handlers. In a backtest, which holds nothing, a
@@ -2579,8 +2670,10 @@ mod tests {
     /// requests GCZ26's trades over the hour of warmup, ending now, then
     /// subscribes to them from now, so the live stream starts where the
     /// warmup ends, and loads GCG27, the post contract of the next roll;
-    /// the traded AUD/USD's quotes, which no feature reads, are subscribed
-    /// with no warmup, the target, `bracket_config`'s, having no ATR to warm.
+    /// the traded AUD/USD's quotes, which no feature reads, are requested
+    /// over the warmup too, as IB, SIM having no row of its own, serves
+    /// them, and subscribed from now, the target, `bracket_config`'s,
+    /// having no ATR to warm.
     /// The response's two trades, which Nautilus hands to the strategy's
     /// `on_historical_trades` and that to the warmup, make the features
     /// initialized: the first decision after the warmup is warm.
@@ -2635,13 +2728,12 @@ mod tests {
                 "request trades [GCZ26.GLBX] Some(2026-08-10T13:30:00Z)..Some(2026-08-10T14:30:00Z)",
                 "subscribe trades [GCZ26.GLBX] from Some(2026-08-10T14:30:00Z)",
                 "request instrument [GCG27.GLBX]",
+                "request quotes [AUD/USD.SIM] Some(2026-08-10T13:30:00Z)..Some(2026-08-10T14:30:00Z)",
                 "subscribe quotes [AUD/USD.SIM] from Some(2026-08-10T14:30:00Z)",
             ],
         );
         assert!(
-            !sent
-                .iter()
-                .any(|line| line.contains("[GC.GLBX]") || line.starts_with("request quotes")),
+            !sent.iter().any(|line| line.contains("[GC.GLBX]")),
             "{sent:#?}"
         );
         assert!(!cold);
@@ -2685,31 +2777,31 @@ mod tests {
     }
 
     /// A conversion pair's quotes, of no feature and not of the traded
-    /// AUD/USD: the start subscribes to them from now, so that the cache
-    /// holds a rate when a trade is sized, and asks nothing of them, no
-    /// history and no definition, the broker's client loading the pair at
-    /// connect.
+    /// AUD/USD: the start requests their history over the hour of warmup,
+    /// as IC's history serves them, so that the cache holds a rate when a
+    /// trade is sized at the start, a start while the market is closed
+    /// among them if the warmup reaches back to its close, then subscribes
+    /// to them from now.
     #[test]
-    fn a_live_start_subscribes_to_a_conversion_pairs_quotes_from_now_with_no_warmup() {
+    fn a_live_start_warms_up_a_conversion_pairs_quotes_then_subscribes_to_them_from_now() {
         let sent = started_live(features(), vec![], vec![aud_quotes(), eurusd_quotes()]);
 
         assert_sent(
             &sent,
-            &["subscribe quotes [EURUSD.ICMARKETS] from Some(2026-08-10T14:30:00Z)"],
-        );
-        assert!(
-            !sent
-                .iter()
-                .any(|line| line.starts_with("request") && line.contains("EURUSD")),
-            "{sent:#?}"
+            &[
+                "request quotes [EURUSD.ICMARKETS] \
+                 Some(2026-08-10T13:30:00Z)..Some(2026-08-10T14:30:00Z)",
+                "subscribe quotes [EURUSD.ICMARKETS] from Some(2026-08-10T14:30:00Z)",
+            ],
         );
     }
 
     /// Custom data of the traded AUD/USD, which no feature reads as a tick
-    /// series (`FeatureSet::ticks`), has no warmup: the start requests
-    /// none of it.
+    /// series (`FeatureSet::ticks`), is a series of the requirements: the
+    /// start requests the hour of warmup of it from the catalog alone, as
+    /// it does a feature's.
     #[test]
-    fn a_live_start_requests_no_custom_data_of_the_traded_instrument() {
+    fn a_live_start_requests_custom_data_of_the_traded_instrument_from_the_catalog() {
         let imbalance = TickSeries {
             data: NautilusDataType::Custom {
                 type_name: "Imbalance".to_string(),
@@ -2719,19 +2811,21 @@ mod tests {
 
         let sent = started_live(features(), vec![], vec![aud_quotes(), imbalance]);
 
-        assert!(
-            !sent
-                .iter()
-                .any(|line| line.starts_with("request data") && line.contains("Imbalance")),
-            "{sent:#?}"
+        assert_sent(
+            &sent,
+            &[
+                "request data Imbalance of Some(\"AUD/USD.SIM\") from CATALOG \
+               Some(2026-08-10T13:30:00Z)..Some(2026-08-10T14:30:00Z)",
+            ],
         );
     }
 
     /// Features on bars built from external minute bars alone read no
-    /// tick: the start requests the minute bars and no quotes or trades,
-    /// the traded AUD/USD's quotes included.
+    /// tick: the start requests the minute bars, and the traded AUD/USD's
+    /// quotes, a series of the requirements IB serves, no feature reading
+    /// them, and no trades.
     #[test]
-    fn a_live_start_of_bar_features_requests_no_tick_history() {
+    fn a_live_start_of_bar_features_requests_the_minute_bars_and_the_traded_quotes() {
         let hours = BarType::from("AUD/USD.SIM-1-HOUR-MID-INTERNAL@1-MINUTE-EXTERNAL");
         let features = FeatureSet::builder()
             .bars(hours, HOURLY_CLOSE, &tables())
@@ -2742,13 +2836,15 @@ mod tests {
 
         assert_sent(
             &sent,
-            &["request bars [AUD/USD.SIM-1-MINUTE-MID-EXTERNAL] \
-               Some(2026-08-10T13:30:00Z)..Some(2026-08-10T14:30:00Z)"],
+            &[
+                "request bars [AUD/USD.SIM-1-MINUTE-MID-EXTERNAL] \
+                 Some(2026-08-10T13:30:00Z)..Some(2026-08-10T14:30:00Z)",
+                "request quotes [AUD/USD.SIM] \
+                 Some(2026-08-10T13:30:00Z)..Some(2026-08-10T14:30:00Z)",
+            ],
         );
         assert!(
-            !sent.iter().any(
-                |line| line.starts_with("request quotes") || line.starts_with("request trades")
-            ),
+            !sent.iter().any(|line| line.starts_with("request trades")),
             "{sent:#?}"
         );
     }
