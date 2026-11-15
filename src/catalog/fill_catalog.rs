@@ -85,34 +85,10 @@ pub async fn fill_catalog(
     catalog
         .write_instruments(new)
         .context("writing instruments")?;
-    let start_ns = UnixNanos::from(start);
     let end_ns = UnixNanos::from(end);
     for (data_type, identifier) in series {
         let named = || format!("the {} of {identifier}", data_path_prefix(data_type));
-        let catalog_type = data_type.clone().into();
-        let reading = || format!("reading the stored range of {}", named());
-        let first = catalog
-            .query_first_timestamp(&catalog_type, Some(identifier))
-            .with_context(reading)?;
-        let last = catalog
-            .query_last_timestamp(&catalog_type, Some(identifier))
-            .with_context(reading)?;
-        if let (Some(first), Some(last)) = (first, last)
-            && start_ns < UnixNanos::from(first)
-        {
-            bail!(
-                "{} are stored over [{}, {}] and {start} is before it: \
-                 extending history backwards is not supported; use a new catalog",
-                named(),
-                UnixNanos::from(first),
-                UnixNanos::from(last),
-            );
-        }
-        let resume_point = last.map(UnixNanos::from);
-        let from = match resume_point {
-            Some(last) => just_after(last),
-            None => start,
-        };
+        let (from, resume_point) = resumed(catalog, data_type, identifier, start)?;
         if from >= end {
             continue;
         }
@@ -156,6 +132,46 @@ pub async fn fill_catalog(
             .with_context(|| format!("writing {}", named()))?;
     }
     Ok(())
+}
+
+/// Where a fill of the series of `data_type` and `identifier` over a
+/// window from `start` resumes, by what `catalog` stores of it: from
+/// `start` if it stores nothing of it, else 1 ns after its stored end,
+/// whatever `start`, so that no hole opens between the stored range and
+/// the window; with that stored end, if any.
+///
+/// # Errors
+///
+/// Returns an error if the catalog cannot be read, or if `start` is before
+/// the stored range: extending history backwards is not supported.
+pub(crate) fn resumed(
+    catalog: &ParquetDataCatalog,
+    data_type: &NautilusDataType,
+    identifier: &str,
+    start: Timestamp,
+) -> anyhow::Result<(Timestamp, Option<UnixNanos>)> {
+    let named = || format!("the {} of {identifier}", data_path_prefix(data_type));
+    let catalog_type = data_type.clone().into();
+    let reading = || format!("reading the stored range of {}", named());
+    let first = catalog
+        .query_first_timestamp(&catalog_type, Some(identifier))
+        .with_context(reading)?;
+    let last = catalog
+        .query_last_timestamp(&catalog_type, Some(identifier))
+        .with_context(reading)?;
+    if let (Some(first), Some(last)) = (first, last)
+        && UnixNanos::from(start) < UnixNanos::from(first)
+    {
+        bail!(
+            "{} are stored over [{}, {}] and {start} is before it: \
+             extending history backwards is not supported; use a new catalog",
+            named(),
+            UnixNanos::from(first),
+            UnixNanos::from(last),
+        );
+    }
+    let last = last.map(UnixNanos::from);
+    Ok((last.map_or(start, just_after), last))
 }
 
 /// Fills `catalog` with `slices`, each a series on a contract over its

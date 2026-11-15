@@ -73,7 +73,7 @@ use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use ustr::Ustr;
 
 use crate::{
-    catalog::fill_slices,
+    catalog::{fill_slices, resumed},
     strategy::requirements::{CatalogSeries, SeriesSlice},
 };
 
@@ -826,17 +826,25 @@ impl SmallBarPacing {
     }
 }
 
-/// Checks that IB's history holds `slices` at `now`: IB holds no bars of
-/// 30 seconds or less older than six months (TWS API, "Historical Data
-/// Limitations"), so a slice of them starts within six months of `now`,
-/// rather than the fill storing its older windows empty.
+/// Checks that IB's history holds what a fill of `slices` into `catalog`
+/// asks of it at `now`: IB holds no bars of 30 seconds or less older than
+/// six months (TWS API, "Historical Data Limitations"), so the writer asks
+/// a slice of them from within six months of `now`, rather than storing its
+/// older windows empty. The writer asks a slice from where it resumes it
+/// (`catalog::resumed`): from its start if the catalog stores none of its
+/// series, else 1 ns after their stored end, so a fill run again over a
+/// window whose bars are stored is held as far as it asks IB for more.
 ///
 /// # Errors
 ///
 /// Returns an error naming the bars and the oldest start IB holds if a
-/// slice of them starts earlier, or naming a slice of bars keyed by no bar
-/// type.
-pub(crate) fn check_held(slices: &[SeriesSlice], now: Timestamp) -> anyhow::Result<()> {
+/// slice of them would be asked from earlier, naming a slice of bars keyed
+/// by no bar type, or as `catalog::resumed`.
+pub(crate) fn check_held(
+    catalog: &ParquetDataCatalog,
+    slices: &[SeriesSlice],
+    now: Timestamp,
+) -> anyhow::Result<()> {
     let oldest = now
         .to_zoned(TimeZone::UTC)
         .checked_sub(6.months())?
@@ -851,11 +859,11 @@ pub(crate) fn check_held(slices: &[SeriesSlice], now: Timestamp) -> anyhow::Resu
         }
         let bar_type = BarType::from_str(identifier)?;
         if bar_type.spec().aggregation == BarAggregation::Second {
+            let (from, _) = resumed(catalog, data_type, identifier, slice.from)?;
             ensure!(
-                slice.from >= oldest,
-                "IB holds no bars of 30 seconds or less older than six months: {bar_type} from \
-                 {} reaches before {oldest}",
-                slice.from
+                from >= oldest,
+                "IB holds no bars of 30 seconds or less older than six months: {bar_type}, \
+                 asked from {from}, reaches before {oldest}"
             );
         }
     }
@@ -1634,8 +1642,11 @@ mod tests {
     fn small_bars_older_than_six_months_are_refused_naming_the_oldest_ib_holds() {
         let now = at("2026-11-15T12:00:00Z");
         let small_bars = "SXR8.IBIS-30-SECOND-LAST-EXTERNAL";
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
         let held = |from| {
             check_held(
+                &catalog,
                 &slices_of(&[(NautilusDataType::Bar, small_bars, "SXR8.IBIS")], from),
                 now,
             )
@@ -1648,6 +1659,7 @@ mod tests {
             "{err}"
         );
         check_held(
+            &catalog,
             &slices_of(
                 &[
                     (
@@ -1662,6 +1674,67 @@ mod tests {
             now,
         )
         .unwrap();
+    }
+
+    /// Stores 5-second LAST bars of SXR8 at `from` and `to` in `catalog`,
+    /// over `[from, to]`.
+    fn store_small_bars(catalog: &ParquetDataCatalog, from: &str, to: &str) {
+        use nautilus_model::types::{Price, Quantity};
+        let price = Price::from("100.00");
+        let bars: Vec<Bar> = [from, to]
+            .map(|time| {
+                let ts = UnixNanos::from(at(time));
+                Bar::new(
+                    bar_type("SXR8.IBIS-5-SECOND-LAST-EXTERNAL"),
+                    price,
+                    price,
+                    price,
+                    price,
+                    Quantity::from(1),
+                    ts,
+                    ts,
+                )
+            })
+            .to_vec();
+        catalog
+            .write_to_parquet(&bars, Some(at(from).into()), Some(at(to).into()), None)
+            .unwrap();
+    }
+
+    /// A fill of stored bars asks IB from 1 ns after their stored end, the
+    /// writer's resume (`catalog::fill_catalog`), whatever its slice's
+    /// start. On 30 November 2026 IB holds small bars from 30 May on: 5-second
+    /// bars stored over 20 May to 20 June are filled again from 20 June,
+    /// held, though the slice starts on 20 May; stored over 1 April to 1
+    /// May, they would be filled again from 1 May, refused, naming them,
+    /// though the slice starts on 15 June.
+    #[test]
+    fn small_bars_stored_are_held_from_where_the_writer_resumes_them() {
+        let now = at("2026-11-30T12:00:00Z");
+        let small_bars = "SXR8.IBIS-5-SECOND-LAST-EXTERNAL";
+        let held = |stored: [&str; 2], from: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+            store_small_bars(&catalog, stored[0], stored[1]);
+            check_held(
+                &catalog,
+                &slices_of(&[(NautilusDataType::Bar, small_bars, "SXR8.IBIS")], from),
+                now,
+            )
+        };
+
+        held(
+            ["2026-05-20T00:00:00Z", "2026-06-20T00:00:00Z"],
+            "2026-05-20T00:00:00Z",
+        )
+        .unwrap();
+        let err = held(
+            ["2026-04-01T00:00:00Z", "2026-05-01T00:00:00Z"],
+            "2026-06-15T00:00:00Z",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(small_bars), "{err}");
     }
 
     #[test]

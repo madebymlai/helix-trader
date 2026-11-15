@@ -714,8 +714,8 @@ pub async fn fill_history(
     // root's series contract by contract, each over its slice.
     let slices = requirements.slices(start, end);
     let ib_slices = of_source(&slices, HistorySource::Ib);
-    ib::check_held(&ib_slices, Timestamp::now())?;
     let mut catalog = ParquetDataCatalog::new(catalog_dir, None, None, None, None);
+    ib::check_held(&catalog, &ib_slices, Timestamp::now())?;
     let (mut okx_ids, mut ctrader_ids, mut lse_ids, mut ib_ids) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for id in requirements.instrument_ids() {
