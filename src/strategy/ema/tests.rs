@@ -3,7 +3,7 @@ use std::{cell::RefCell, rc::Rc};
 use nautilus_common::{
     cache::Cache,
     clock::{Clock, VirtualClock},
-    messages::data::{DataCommand, RequestCommand, SubscribeCommand},
+    messages::data::{DataCommand, SubscribeCommand},
     msgbus::{self, MessagingSwitchboard, stubs::get_typed_into_message_saving_handler},
     timer::TimeEventCallback,
 };
@@ -610,12 +610,12 @@ fn converting() -> EmaCrossConfig {
     EmaCrossConfig::load(&toml).unwrap()
 }
 
-/// Live, the crossover warms up at its start on the quotes of its
-/// conversion pair, IC's EURUSD, over its warmup, ending now, so that the
-/// cache holds a rate when it sizes a trade at the start, then subscribes
-/// to them from now.
+/// Live, the crossover subscribes at its start to the quotes of its
+/// conversion pair, IC's EURUSD, from now, so that the cache holds a rate
+/// when it sizes a trade, and asks nothing of them, no history and no
+/// definition, the broker's client loading the pair at connect.
 #[test]
-fn live_it_warms_up_its_conversion_pairs_quotes_then_subscribes_to_them_from_its_start() {
+fn live_it_subscribes_to_its_conversion_pairs_quotes_from_its_start_with_no_warmup() {
     let (handler, sent) = get_typed_into_message_saving_handler::<DataCommand>(None);
     msgbus::register_data_command_endpoint(
         MessagingSwitchboard::data_engine_queue_execute(),
@@ -643,16 +643,11 @@ fn live_it_warms_up_its_conversion_pairs_quotes_then_subscribes_to_them_from_its
         })
         .collect();
     assert_eq!(subscribed_from, [Some(NOW)]);
-    let warmed_to: Vec<Option<UnixNanos>> = sent
+    let asked: Vec<String> = sent
         .iter()
-        .filter_map(|command| match command {
-            DataCommand::Request(RequestCommand::Quotes(quotes))
-                if quotes.instrument_ids == [eurusd] =>
-            {
-                Some(quotes.end.map(UnixNanos::from))
-            }
-            _ => None,
-        })
+        .filter(|command| matches!(command, DataCommand::Request(_)))
+        .map(|request| format!("{request:?}"))
+        .filter(|request| request.contains("EURUSD"))
         .collect();
-    assert_eq!(warmed_to, [Some(UnixNanos::from(NOW))]);
+    assert!(asked.is_empty(), "{asked:#?}");
 }

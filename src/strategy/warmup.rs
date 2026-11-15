@@ -112,9 +112,8 @@
 //! ended.
 //!
 //! Ticks a strategy's features read as they are (`Warmup::reading`, a
-//! model strategy's handle naming its features'), and the quotes its
-//! conversion pairs' rates are read from (`Warmup::converting`), are
-//! requested over the same window in the same group, catalog first with `update_catalog`, a
+//! model strategy's handle naming its features') are requested over the
+//! same window in the same group, catalog first with `update_catalog`, a
 //! root's on the contract standing for it at the start (`rolls::front`)
 //! alone: `request_quotes`, `request_trades`, `request_book_depth` and
 //! `request_book_deltas` (with the book type the roller subscribes to,
@@ -202,9 +201,7 @@ use serde_json::{Value, json};
 
 use crate::{
     rolls::{ContinuousBars, DELTAS_BOOK_TYPE, front},
-    strategy::{
-        DataRequirements, Series, Source, TickSeries, bar_sources, conversions::Conversions,
-    },
+    strategy::{DataRequirements, Source, TickSeries, bar_sources},
     time_range, venues,
 };
 
@@ -257,8 +254,7 @@ pub trait BookIndicator {
 ///
 /// Live, `start` requests the warmup of the bar types the strategy reads,
 /// of those the strategy's harness needs warm (`building`, the target's
-/// ATR's), of the tick series its features read (`reading`) and of those
-/// its conversion pairs are read from (`converting`), and
+/// ATR's) and of the tick series its features read (`reading`), and
 /// subscribes to the bars from the warmup's end; the bars each request built
 /// go to the indicators the warmup feeds (`feeding`, `building`), oldest
 /// first, when it completes, each response's quotes and trades to its tick
@@ -365,30 +361,8 @@ impl Warmup {
     /// (see `CATALOG`), the cache (`on_historical_data`).
     #[must_use]
     pub fn reading(mut self, ticks: Vec<TickSeries>) -> Self {
-        for tick in ticks {
-            if !self.ticks.contains(&tick) {
-                self.ticks.push(tick);
-            }
-        }
+        self.ticks = ticks;
         self
-    }
-
-    /// The warmup requesting the history of the tick series the pairs of
-    /// `conversions` are read from too, as `reading` does, so that a trade
-    /// sized at the start has their rate: those their venue's history
-    /// serves (`venues::rate_series`), a cTrader pair's quotes. A pair read
-    /// as bars, an IB pair's, is warmed up as a bar type of the
-    /// requirements already.
-    #[must_use]
-    pub fn converting(self, conversions: &Conversions) -> Self {
-        let ticks = conversions
-            .series()
-            .filter_map(|series| match series {
-                Series::Ticks(ticks) => Some(ticks),
-                Series::Bars(_) => None,
-            })
-            .collect();
-        self.reading(ticks)
     }
 
     /// The warmup handing the book depth and deltas of its responses to
@@ -1773,39 +1747,6 @@ mod tests {
                 (Source::Bars(minutes), vec![composite]),
                 (Source::Bars(bid), vec![]),
                 (Source::Bars(ask), vec![]),
-            ]
-        );
-    }
-
-    /// The pairs a strategy converts through are warmed up in the form
-    /// their venue's history serves: IC's EURUSD as its quotes, requested
-    /// over the window, building nothing; IDEALPRO's EUR/USD, read as its
-    /// BID and ASK bars, adds no tick request, its bars being bar types of
-    /// the requirements, requested as they are.
-    #[test]
-    fn a_live_warmup_requests_the_quotes_its_conversion_pairs_are_read_from() {
-        let bars = BarType::from("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL");
-        let conversions = Conversions::new(vec![
-            InstrumentId::from("EURUSD.ICMARKETS"),
-            InstrumentId::from("EUR/USD.IDEALPRO"),
-        ]);
-        let warmup = Warmup::live(&reading(&["XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL"]))
-            .converting(&conversions);
-        let (mut probe, commands) = registered();
-
-        warmup.start(&mut probe).unwrap();
-
-        assert_eq!(
-            requested(&commands),
-            [
-                (
-                    Source::Ticks(tick(NautilusDataType::QuoteTick, "XAUUSD.ICMARKETS")),
-                    vec![bars],
-                ),
-                (
-                    Source::Ticks(tick(NautilusDataType::QuoteTick, "EURUSD.ICMARKETS")),
-                    vec![],
-                ),
             ]
         );
     }
