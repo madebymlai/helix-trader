@@ -1,9 +1,9 @@
 //! fill-catalog of an hour of quotes from IB, end to end on the Docker
 //! paper gateway: IB's history serves an instrument's quotes as its
-//! historical BID_ASK ticks (`venues::serves`), which IB's writer asks of
-//! Nautilus' historical client (`request_ticks`, a page of 1,000 ticks at
-//! a time back from the end), and the catalog holds every quote of the
-//! hour, those IB stamps in one second among them.
+//! historical BID_ASK ticks (`venues::serves`), which IB's writer pages
+//! back from the end, 1,000 ticks a request (`ib::page_back`), and the
+//! catalog holds every quote of the hour, those IB stamps in one second
+//! among them.
 //!
 //! Gated as `ib_gateway.rs`: it returns at once, saying it was skipped,
 //! unless `NAUTILUS_IB_RUN=1` is set in the shell. It needs what

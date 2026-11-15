@@ -14,30 +14,53 @@
 //! helix-trader issue #4 (<https://github.com/madebymlai/helix-trader/issues/4>).
 //!
 //! Uses `HistoricalInteractiveBrokersClient`
-//! (`nautilus_interactive_brokers::historical`), which needs no node: it
-//! connects to IB Gateway or TWS, returns `Vec<InstrumentAny>` from
-//! `request_instruments`, `Vec<Bar>` from `request_bars` and the quotes or
-//! trades of IB's historical ticks from `request_ticks`. The data is
-//! stored as IB gives it.
+//! (`nautilus_interactive_brokers::historical`), which needs no node: on
+//! the connection to IB Gateway or TWS this module makes for it
+//! (`connected`), it returns `Vec<InstrumentAny>` from
+//! `request_instruments` and `Vec<Bar>` from `request_bars`. The quotes and
+//! trades of IB's historical ticks are paged here, on the same connection,
+//! with the requests and the parsers Nautilus' IB clients use, failing
+//! where Nautilus' `request_ticks` ends short (`IbHistory::ticks`). The
+//! data is stored as IB gives it.
 
 use std::{
     str::FromStr,
-    sync::{Mutex, PoisonError},
+    sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, bail, ensure};
 use clap::Args;
 use ibapi::{
+    Client, SUBSCRIPTION_LAG_CODE,
     contracts::{Contract, Symbol},
+    market_data::{
+        IgnoreSize, TradingHours,
+        historical::{TickBidAsk, TickDecoder, TickLast, TickSubscription},
+    },
     orders::OcaType,
+    prelude::StreamExt,
+    subscriptions::SubscriptionItem,
 };
 use jiff::{SignedDuration, Timestamp, ToSpan, tz::TimeZone};
+use nautilus_core::UnixNanos;
 use nautilus_interactive_brokers::{
-    common::{enums::IbHistoricalTickType, futures::parse_futures_symbol, symbology::Symbology},
-    config::InteractiveBrokersDataClientConfig,
-    data::convert::bar_type_to_ib_bar_size,
+    common::{
+        enums::IbHistoricalTickType,
+        futures::parse_futures_symbol,
+        shared_client::{self, SharedClientHandle},
+        symbology::Symbology,
+    },
+    config::{InteractiveBrokersDataClientConfig, MarketDataType},
+    data::{
+        convert::{
+            IbPriceConverter, bar_type_to_ib_bar_size, ib_timestamp_to_unix_nanos,
+            jiff_to_ib_datetime,
+        },
+        parse::{parse_quote_tick, parse_trade_tick},
+    },
     historical::HistoricalInteractiveBrokersClient,
+    providers::instruments::InteractiveBrokersInstrumentProvider,
 };
 use nautilus_model::{
     data::{Bar, BarSpecification, BarType, Data, NautilusDataType},
@@ -100,6 +123,12 @@ pub(crate) struct IbHistoryArgs {
 /// A connection to IB for history: instruments, bars and ticks, no node.
 pub struct IbHistory {
     client: HistoricalInteractiveBrokersClient,
+    /// The connection the client asks IB on, which the ticks' pages are
+    /// asked on too (`TickPages`).
+    ib: SharedClientHandle,
+    /// The instrument provider the client defines instruments with, which
+    /// the ticks' pages take their contracts and prices from.
+    provider: Arc<InteractiveBrokersInstrumentProvider>,
     requests: HistoryRequests,
     symbology: Symbology,
     /// The requests of small bars sent so far, which IB paces.
@@ -138,11 +167,15 @@ impl IbHistory {
         let requests = HistoryRequests::of(&config);
         let symbology = Symbology::new(config.instrument_provider.symbology_method);
         let address = format!("{}:{}", config.host, config.port);
-        let client = HistoricalInteractiveBrokersClient::connect(config)
+        let (ib, provider) = connected(&config)
             .await
             .with_context(|| format!("connecting to IB at {address}"))?;
+        let client =
+            HistoricalInteractiveBrokersClient::new(Arc::clone(ib.as_arc()), Arc::clone(&provider));
         Ok(Self {
             client,
+            ib,
+            provider,
             requests,
             symbology,
             small_bars: Mutex::default(),
@@ -317,9 +350,22 @@ impl IbHistory {
     /// The `tick_type` ticks of `instrument_id` over `[start, end]`, IB's
     /// historical BID_ASK ticks as quotes or its TRADES ticks as trades,
     /// sorted by `ts_event`, with the regular-hours setting of the live
-    /// data client: Nautilus' `request_ticks`, which pages back from `end`
-    /// to `start`, 1,000 ticks a request, a trading session at most, and
-    /// keeps the latest ticks up to a limit, here one that bounds nothing.
+    /// data client: paged back from `end` (`page_back`), each page asked as
+    /// Nautilus' IB clients ask it (`TickPages::page`), on the contract and
+    /// at the prices of the instrument's definition, fetched first if the
+    /// provider lacks it, as Nautilus' `request_ticks` does. Nautilus'
+    /// `request_ticks` is not used: it logs and skips an error in a page,
+    /// which then reads as a short or an empty page, the latter ending the
+    /// paging, and it ends the paging at a second holding a full page too,
+    /// answering the ticks so far with no error, which the writer would
+    /// store as the whole window.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error naming the instrument and the window, and IB's
+    /// error, if the definition cannot be had, if a page is refused, is not
+    /// answered whole within the request timeout or ends with an error, or
+    /// if a second holds a full page (see `page_back`).
     async fn ticks(
         &self,
         tick_type: IbHistoricalTickType,
@@ -327,25 +373,242 @@ impl IbHistory {
         start: Timestamp,
         end: Timestamp,
     ) -> anyhow::Result<Vec<Data>> {
-        self.client
-            .request_ticks(
-                tick_type,
+        let paged = async {
+            let client = self.ib.as_arc().as_ref();
+            if self.provider.find(&instrument_id).is_none() {
+                self.provider
+                    .fetch_contract_details(client, instrument_id, false, None)
+                    .await?;
+            }
+            let instrument = self
+                .provider
+                .find(&instrument_id)
+                .with_context(|| format!("IB defines no instrument {instrument_id}"))?;
+            let contract = self
+                .provider
+                .resolve_contract_for_instrument_async(client, instrument_id)
+                .await?;
+            let pages = TickPages {
+                client,
+                contract: &contract,
+                instrument_id,
+                prices: IbPriceConverter::for_instrument(
+                    &instrument,
+                    self.provider.get_price_magnifier(&instrument_id),
+                ),
+                size_precision: instrument.size_precision(),
+                trading_hours: if self.requests.use_rth {
+                    TradingHours::Regular
+                } else {
+                    TradingHours::Extended
+                },
+                timeout: Duration::from_secs(self.requests.timeout_secs),
+            };
+            page_back(
                 start,
                 end,
-                None,
-                Some(vec![instrument_id]),
-                self.requests.use_rth,
-                self.requests.timeout_secs,
-                usize::MAX,
+                |(ts_event, _): &PagedTick| *ts_event,
+                async |cursor| pages.page(tick_type, cursor).await,
             )
             .await
-            .with_context(|| {
-                format!(
-                    "requesting the {} ticks of {instrument_id} over [{start}, {end}]",
-                    tick_type.as_str()
-                )
-            })
+        };
+        let paged = paged.await.with_context(|| {
+            format!(
+                "requesting the {} ticks of {instrument_id} over [{start}, {end}]",
+                tick_type.as_str()
+            )
+        })?;
+        Ok(paged.into_iter().filter_map(|(_, tick)| tick).collect())
     }
+}
+
+/// A tick of a page of IB's historical ticks: its time (`ts_event`), and
+/// the tick Nautilus' parsers make of it, none of one Nautilus' IB clients
+/// drop.
+type PagedTick = (UnixNanos, Option<Data>);
+
+/// How many ticks a request of IB's historical ticks asks, IB's most: IB
+/// answers more to complete a second.
+const TICKS_PER_PAGE: i32 = 1000;
+
+/// What the pages of an instrument's historical ticks are asked on: the
+/// connection, the instrument's contract, the prices and size precision of
+/// its definition, the session and the request timeout.
+struct TickPages<'a> {
+    client: &'a Client,
+    contract: &'a Contract,
+    instrument_id: InstrumentId,
+    prices: IbPriceConverter,
+    size_precision: u8,
+    trading_hours: TradingHours,
+    timeout: Duration,
+}
+
+impl TickPages<'_> {
+    /// The page of `tick_type` ticks up to `cursor`, asked as Nautilus' IB
+    /// clients ask it (`historical_ticks` of `TICKS_PER_PAGE`, ending at
+    /// `cursor`, in the session, BID_ASK with sizes or TRADES), read whole
+    /// within the request timeout: its items in the order IB sent them,
+    /// each a tick, made of IB's by Nautilus' public parsers
+    /// (`parse_quote_tick`, `parse_trade_tick`), or the error the page
+    /// ended with (see `drained`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the request is refused, or not answered whole
+    /// within the timeout.
+    async fn page(
+        &self,
+        tick_type: IbHistoricalTickType,
+        cursor: Timestamp,
+    ) -> anyhow::Result<Vec<anyhow::Result<PagedTick>>> {
+        let request = async {
+            let request = self
+                .client
+                .historical_ticks(self.contract, TICKS_PER_PAGE)
+                .ending(jiff_to_ib_datetime(&cursor))
+                .trading_hours(self.trading_hours);
+            anyhow::Ok(match tick_type {
+                IbHistoricalTickType::BidAsk => {
+                    let page = request.bid_ask(IgnoreSize::No).await?;
+                    drained(page, |tick: TickBidAsk| self.quote(&tick)).await
+                }
+                IbHistoricalTickType::Trades => {
+                    let page = request.trade().await?;
+                    drained(page, |tick: TickLast| self.trade(&tick)).await
+                }
+            })
+        };
+        tokio::time::timeout(self.timeout, request)
+            .await
+            .with_context(|| format!("no whole answer within {:?}", self.timeout))?
+    }
+
+    /// The quote of `tick`, at its prices and sizes, as Nautilus' live IB
+    /// client makes it; none, logged, if Nautilus' parser refuses it.
+    fn quote(&self, tick: &TickBidAsk) -> PagedTick {
+        let ts_event = ib_timestamp_to_unix_nanos(&tick.timestamp);
+        let quote = parse_quote_tick(
+            self.instrument_id,
+            Some(tick.price_bid),
+            Some(tick.price_ask),
+            tick.size_bid,
+            tick.size_ask,
+            self.prices,
+            self.size_precision,
+            ts_event,
+            ts_event,
+        );
+        (ts_event, self.kept("quote", quote.map(Data::Quote)))
+    }
+
+    /// The trade of `tick`, as Nautilus' live IB client makes it, its id
+    /// Nautilus' of its time, price and size; none, logged, for a tick of
+    /// no size, which Nautilus' IB clients skip, or one Nautilus' parser
+    /// refuses.
+    fn trade(&self, tick: &TickLast) -> PagedTick {
+        let ts_event = ib_timestamp_to_unix_nanos(&tick.timestamp);
+        let Some(size) = tick.size else {
+            log::warn!(
+                "Dropping IB's trade tick of {} at {ts_event}: no size",
+                self.instrument_id
+            );
+            return (ts_event, None);
+        };
+        let trade = parse_trade_tick(
+            self.instrument_id,
+            tick.price,
+            size,
+            self.prices,
+            self.size_precision,
+            ts_event,
+            ts_event,
+            None,
+        );
+        (ts_event, self.kept("trade", trade.map(Data::Trade)))
+    }
+
+    /// `parsed`, a tick of `kind` Nautilus' parser made, if it did; none,
+    /// logged, as Nautilus' IB clients drop it, if it refused it.
+    fn kept(&self, kind: &str, parsed: anyhow::Result<Data>) -> Option<Data> {
+        parsed
+            .inspect_err(|e| {
+                log::warn!("Dropping IB's {kind} tick of {}: {e:#}", self.instrument_id);
+            })
+            .ok()
+    }
+}
+
+/// The items of `page`, a subscription to a page of IB's historical ticks,
+/// in the order IB sent them, each tick made by `tick`, until the page
+/// ends: whole, or with an error, its last item, IB's or ibapi's notice
+/// that it dropped frames of the page (`SUBSCRIPTION_LAG_CODE`), ticks
+/// lost. Other notices, IB's warnings and data advisories, are logged.
+async fn drained<T: TickDecoder<T> + Send + Unpin>(
+    mut page: TickSubscription<T>,
+    tick: impl Fn(T) -> PagedTick,
+) -> Vec<anyhow::Result<PagedTick>> {
+    let mut items = Vec::new();
+    while let Some(item) = page.next().await {
+        match item {
+            Ok(SubscriptionItem::Data(data)) => items.push(Ok(tick(data))),
+            Ok(SubscriptionItem::Notice(notice)) if notice.code == SUBSCRIPTION_LAG_CODE => {
+                items.push(Err(anyhow::anyhow!("ticks lost: {}", notice.message)));
+                break;
+            }
+            Ok(SubscriptionItem::Notice(notice)) => {
+                log::info!(
+                    "IB's notice on a page of ticks: {} {}",
+                    notice.code,
+                    notice.message
+                );
+            }
+            Err(e) => {
+                items.push(Err(e.into()));
+                break;
+            }
+        }
+    }
+    items
+}
+
+/// The connection to IB on `config` and an instrument provider initialized
+/// on it, as Nautilus' `HistoricalInteractiveBrokersClient::connect` makes
+/// them, held here so that the ticks' pages are asked on the connection and
+/// with the definitions the client's other requests use. `connect` checks
+/// the config first (crate-private): the provider's config, which the
+/// provider checks itself, and the idle timeout of live subscriptions,
+/// which history has none of.
+///
+/// # Errors
+///
+/// Returns an error if the provider's config is refused, if the connection
+/// fails, or if the provider cannot be initialized.
+async fn connected(
+    config: &InteractiveBrokersDataClientConfig,
+) -> anyhow::Result<(
+    SharedClientHandle,
+    Arc<InteractiveBrokersInstrumentProvider>,
+)> {
+    let provider = Arc::new(InteractiveBrokersInstrumentProvider::new(
+        config.instrument_provider.clone(),
+    )?);
+    let ib = shared_client::get_or_connect(
+        &config.host,
+        config.port,
+        config.client_id,
+        config.connection_timeout,
+        config.max_reconnect_attempts,
+    )
+    .await?;
+    if config.market_data_type != MarketDataType::Realtime {
+        ib.switch_market_data_type(config.market_data_type.into())
+            .await?;
+    }
+    provider
+        .initialize_with_client(ib.as_arc().as_ref())
+        .await?;
+    Ok((ib, provider))
 }
 
 /// What IB's history is asked for a series it serves (see `served`).
@@ -353,7 +616,7 @@ impl IbHistory {
 enum Served {
     /// The bars of a bar type, IB's own (`request_bars`).
     Bars(BarType),
-    /// An instrument's historical ticks of a type (`request_ticks`): its
+    /// An instrument's historical ticks of a type (`IbHistory::ticks`): its
     /// BID_ASK ticks, its quotes, or its TRADES ticks, its trades.
     Ticks(IbHistoricalTickType, InstrumentId),
 }
@@ -373,8 +636,9 @@ pub(crate) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
 /// `identifier`, as Nautilus' IB clients serve it: IB's own (`EXTERNAL`)
 /// time bars of a size IB has (Nautilus' `bar_type_to_ib_bar_size`),
 /// priced at one of `SERVED_PRICES`, and an instrument's quotes and trades,
-/// IB's historical ticks (the historical client's `request_ticks`, the
-/// live client's `request_quotes` and `request_trades`). Nautilus' IB
+/// IB's historical ticks (the requests of the historical client's
+/// `request_ticks`, the live client's `request_quotes` and
+/// `request_trades`). Nautilus' IB
 /// clients request no book history.
 ///
 /// # Errors
@@ -607,6 +871,63 @@ fn ensure_bars_closed(end: Timestamp, now: Timestamp) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The ticks over `[start, end]`, paged back from `end` as Nautilus' IB
+/// clients page IB's historical ticks (`extend_historical_tick_batch` in
+/// `data/convert.rs`), but failing where they end short: `fetch` sends one
+/// request ending at a cursor, first `end`, then 1 ns before the earliest
+/// tick so far, and answers IB's page, its items in the order IB sent them,
+/// each a tick or the error IB ended the page with. IB reads an end to the
+/// second, inclusive, so a page's ticks after its cursor, of a second the
+/// page before held, are dropped. The paging ends on an empty page, IB
+/// holding nothing earlier, or once the cursor is before `start`. Returns
+/// the ticks in `[start, end]`, oldest first, those of one time in IB's
+/// order.
+///
+/// # Errors
+///
+/// Returns the error of a request (`fetch`'s) or of a page (an item's), the
+/// ticks paged so far dropped, or one naming the second if a page holds no
+/// tick at or before its cursor: that second alone holds a full page, which
+/// IB cannot page past, so the ticks before it cannot be asked.
+async fn page_back<T>(
+    start: Timestamp,
+    end: Timestamp,
+    ts_event: impl Fn(&T) -> UnixNanos,
+    mut fetch: impl AsyncFnMut(Timestamp) -> anyhow::Result<Vec<anyhow::Result<T>>>,
+) -> anyhow::Result<Vec<T>> {
+    let mut ticks: Vec<T> = Vec::new();
+    let mut cursor = end;
+    while cursor >= start {
+        let page = fetch(cursor)
+            .await
+            .with_context(|| format!("requesting the ticks up to {cursor}"))?
+            .into_iter()
+            .collect::<anyhow::Result<Vec<T>>>()
+            .with_context(|| format!("reading the ticks up to {cursor}"))?;
+        let Some(earliest_sent) = page.iter().map(&ts_event).min() else {
+            break;
+        };
+        let held: Vec<T> = page
+            .into_iter()
+            .filter(|tick| ts_event(tick) <= UnixNanos::from(cursor))
+            .collect();
+        let Some(earliest) = held.iter().map(&ts_event).min() else {
+            bail!(
+                "the second of {} holds a full page of ticks, which IB cannot page past: the \
+                 ticks up to {cursor} cannot be asked",
+                Timestamp::from(earliest_sent)
+            );
+        };
+        ticks.extend(held);
+        cursor = Timestamp::from(earliest) - SignedDuration::from_nanos(1);
+    }
+    let window = UnixNanos::from(start)..=UnixNanos::from(end);
+    ticks.retain(|tick| window.contains(&ts_event(tick)));
+    // Pages come latest first, each oldest first.
+    ticks.sort_by_key(&ts_event);
+    Ok(ticks)
+}
+
 /// The bars over `[start, end]`, fetched by walking back from `end`:
 /// `fetch` gets one request ending at a cursor, first `end`, then the
 /// `ts_init` of the oldest bar so far. Stops once a bar at or before
@@ -702,7 +1023,6 @@ fn ensure_all_loaded(requested: &[InstrumentId], loaded: &[InstrumentAny]) -> an
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nautilus_core::UnixNanos;
     use nautilus_model::instruments::stubs::futures_contract_es;
 
     fn es() -> InstrumentAny {
@@ -777,6 +1097,171 @@ mod tests {
             answer.drain(..answer.len().saturating_sub(per_answer));
             Ok(answer)
         }
+    }
+
+    /// A tick of the pager's tests: when it was made, and a name telling
+    /// ticks of one second apart.
+    type Tick = (UnixNanos, &'static str);
+
+    /// `time`, `HH:MM:SS` or finer, on 10 November 2026.
+    fn on_the_10th(time: &str) -> Timestamp {
+        at(&format!("2026-11-10T{time}Z"))
+    }
+
+    /// A tick named `name` made at `time` on the 10th.
+    fn tick_at(time: &str, name: &'static str) -> anyhow::Result<Tick> {
+        Ok((UnixNanos::from(on_the_10th(time)), name))
+    }
+
+    /// Answers the pages' requests with `pages` in turn, each a request's
+    /// answer, recording each cursor; a request past the last answer is an
+    /// error.
+    fn pages(
+        pages: Vec<anyhow::Result<Vec<anyhow::Result<Tick>>>>,
+        cursors: &mut Vec<Timestamp>,
+    ) -> impl AsyncFnMut(Timestamp) -> anyhow::Result<Vec<anyhow::Result<Tick>>> {
+        let mut pages = pages.into_iter();
+        async move |cursor: Timestamp| {
+            cursors.push(cursor);
+            pages.next().context("no page left")?
+        }
+    }
+
+    /// Pages the ticks of `[10:00:00, 10:00:10]` on the 10th through `fetch`.
+    async fn paged(
+        fetch: impl AsyncFnMut(Timestamp) -> anyhow::Result<Vec<anyhow::Result<Tick>>>,
+    ) -> anyhow::Result<Vec<&'static str>> {
+        let ticks = page_back(
+            on_the_10th("10:00:00"),
+            on_the_10th("10:00:10"),
+            |tick: &Tick| tick.0,
+            fetch,
+        )
+        .await?;
+        Ok(ticks.into_iter().map(|(_, name)| name).collect())
+    }
+
+    /// Worked by hand, IB re-delivering the second its end reads to: the
+    /// page ending at 10:00:10 holds a to d, 10:00:07 to 10:00:10; the next
+    /// ends 1 ns before a, its 10:00:07 tick re-delivered and dropped, and
+    /// holds e and f of 10:00:05 and g; the next h and i; the last, ending
+    /// 1 ns before h, holds j, before the window, k and l, which reach its
+    /// start. The ticks of the window, oldest first, each once, j left out.
+    #[tokio::test]
+    async fn ticks_are_paged_back_to_the_windows_start_each_once() {
+        let mut cursors = Vec::new();
+        let answers = vec![
+            Ok(vec![
+                tick_at("10:00:07", "a"),
+                tick_at("10:00:08", "b"),
+                tick_at("10:00:09", "c"),
+                tick_at("10:00:10", "d"),
+            ]),
+            Ok(vec![
+                tick_at("10:00:05", "e"),
+                tick_at("10:00:05", "f"),
+                tick_at("10:00:06", "g"),
+                tick_at("10:00:07", "a"),
+            ]),
+            Ok(vec![tick_at("10:00:03", "h"), tick_at("10:00:04", "i")]),
+            Ok(vec![
+                tick_at("09:59:59", "j"),
+                tick_at("10:00:00", "k"),
+                tick_at("10:00:02", "l"),
+            ]),
+        ];
+
+        let ticks = paged(pages(answers, &mut cursors)).await.unwrap();
+
+        assert_eq!(
+            ticks,
+            ["k", "l", "h", "i", "e", "f", "g", "a", "b", "c", "d"]
+        );
+        assert_eq!(
+            cursors,
+            [
+                on_the_10th("10:00:10"),
+                on_the_10th("10:00:06.999999999"),
+                on_the_10th("10:00:04.999999999"),
+                on_the_10th("10:00:02.999999999"),
+            ]
+        );
+    }
+
+    /// An empty page with no error: IB holds nothing earlier, and the ticks
+    /// paged so far are the window's.
+    #[tokio::test]
+    async fn an_empty_page_ends_the_paging() {
+        let mut cursors = Vec::new();
+        let answers = vec![
+            Ok(vec![tick_at("10:00:09", "a"), tick_at("10:00:10", "b")]),
+            Ok(vec![]),
+        ];
+
+        let ticks = paged(pages(answers, &mut cursors)).await.unwrap();
+
+        assert_eq!(ticks, ["a", "b"]);
+        assert_eq!(cursors.len(), 2);
+    }
+
+    /// IB ends the second page with an error after one tick: the paging
+    /// fails with IB's error, rather than answering the ticks it got.
+    #[tokio::test]
+    async fn an_error_ending_a_page_fails_the_paging() {
+        let mut cursors = Vec::new();
+        let answers = vec![
+            Ok(vec![tick_at("10:00:09", "a"), tick_at("10:00:10", "b")]),
+            Ok(vec![
+                tick_at("10:00:05", "c"),
+                Err(anyhow::anyhow!("162: Historical Market Data Service error")),
+            ]),
+        ];
+
+        let err = paged(pages(answers, &mut cursors)).await.unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("Historical Market Data Service error"),
+            "{err:#}"
+        );
+    }
+
+    /// A request that fails, sent or timed out, fails the paging with its
+    /// error.
+    #[tokio::test]
+    async fn a_failed_request_fails_the_paging() {
+        let mut cursors = Vec::new();
+        let answers = vec![
+            Ok(vec![tick_at("10:00:09", "a"), tick_at("10:00:10", "b")]),
+            Err(anyhow::anyhow!("not connected")),
+        ];
+
+        let err = paged(pages(answers, &mut cursors)).await.unwrap_err();
+
+        assert!(format!("{err:#}").contains("not connected"), "{err:#}");
+    }
+
+    /// The page ending 1 ns before 10:00:08 holds only ticks of 10:00:08,
+    /// re-delivered: that second holds a full page, which IB cannot page
+    /// past, so the ticks before it cannot be asked and the paging fails,
+    /// naming the second.
+    #[tokio::test]
+    async fn a_second_holding_a_full_page_fails_the_paging_naming_it() {
+        let mut cursors = Vec::new();
+        let answers = vec![
+            Ok(vec![tick_at("10:00:08", "a"), tick_at("10:00:10", "b")]),
+            Ok(vec![
+                tick_at("10:00:08", "a"),
+                tick_at("10:00:08", "c"),
+                tick_at("10:00:08", "d"),
+            ]),
+        ];
+
+        let err = paged(pages(answers, &mut cursors)).await.unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("2026-11-10T10:00:08Z"),
+            "{err:#}"
+        );
     }
 
     #[tokio::test]
