@@ -21,7 +21,7 @@ use nautilus_persistence::common::{
 };
 use serde::{Deserialize, Deserializer, de};
 
-use crate::rolls::{Slice, TransitionTable};
+use crate::rolls::{Slice, Transition, TransitionTable, front};
 
 /// What a strategy needs from data, stated by its config: filling the
 /// catalog, backtesting and going live all read it from here.
@@ -191,6 +191,75 @@ impl CustomSeries {
     pub fn catalog_folder(&self) -> String {
         urisafe_instrument_id(self.identifier())
     }
+
+    /// The root of the roll calendar its identifier names, if it names
+    /// one (`GC.GLBX`, see `rolls`): the series then rolls, read on the
+    /// contract standing for the root, as every series on a root is. Any
+    /// other identifier stands for itself: a contract's (`GCZ26.GLBX`), a
+    /// plain instrument's, or one naming no instrument (`US10Y`).
+    #[must_use]
+    pub fn root(&self) -> Option<InstrumentId> {
+        InstrumentId::from_str(self.identifier())
+            .ok()
+            .filter(|&id| Transition::after(id, Timestamp::UNIX_EPOCH).is_some())
+    }
+
+    /// The series read at `time`: on a root, that of the contract standing
+    /// for it then (`rolls::front`); itself otherwise.
+    #[must_use]
+    pub fn at(&self, time: Timestamp) -> Self {
+        self.root()
+            .map_or_else(|| self.clone(), |root| self.on(front(root, time)))
+    }
+
+    /// The series of `contract`: its type and metadata under the
+    /// contract's id, which keys it in the catalog, on the message bus
+    /// and in the cache, as Nautilus' Databento client keys an
+    /// instrument's custom data. The metadata passed `new` already, and a
+    /// contract of the roll calendar keys a folder of its own.
+    pub(crate) fn on(&self, contract: InstrumentId) -> Self {
+        Self(DataType::new(
+            self.type_name(),
+            self.0.metadata().cloned(),
+            Some(contract.to_string()),
+        ))
+    }
+
+    /// Its slices over `[start, end]`: on a root, the series of each
+    /// contract over the slice it stands for the root, in time order
+    /// (`rolls::TransitionTable::slices`); itself over the window
+    /// otherwise.
+    #[must_use]
+    pub fn slices(&self, start: Timestamp, end: Timestamp) -> Vec<CustomSlice> {
+        let Some(root) = self.root() else {
+            return vec![CustomSlice {
+                series: self.clone(),
+                from: start,
+                to: end,
+            }];
+        };
+        TransitionTable::of(root, start, end)
+            .slices()
+            .into_iter()
+            .map(|slice| CustomSlice {
+                series: self.on(slice.instrument_id),
+                from: slice.from,
+                to: slice.to,
+            })
+            .collect()
+    }
+}
+
+/// A custom series over the part of a window it is read in, both ends
+/// included, as the catalog's ranges are: on a root, a contract's series
+/// over the slice the contract stands for the root (see
+/// `CustomSeries::slices`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomSlice {
+    /// The series read, a root's on the contract.
+    pub series: CustomSeries,
+    pub from: Timestamp,
+    pub to: Timestamp,
 }
 
 /// The series by its data type as Nautilus writes it, its topic of its
@@ -300,9 +369,34 @@ impl DataRequirements {
             TransitionTable::of(id, start, end)
                 .slices()
                 .into_iter()
-                .map(|slice| (slice.instrument_id, slice))
+                .map(|slice| (slice.instrument_id, slice.from, slice.to))
         });
-        merged(keyed).into_iter().map(|(_, slice)| slice).collect()
+        merged(keyed)
+            .into_iter()
+            .map(|(instrument_id, from, to)| Slice {
+                instrument_id,
+                from,
+                to,
+            })
+            .collect()
+    }
+
+    /// The custom series read over `[start, end]`, contract by contract:
+    /// the slices of each (`CustomSeries::slices`), in the order listed,
+    /// then time, those of one series merged where they overlap or touch,
+    /// so a contract's series listed beside its root's is read once.
+    #[must_use]
+    pub fn custom_slices(&self, start: Timestamp, end: Timestamp) -> Vec<CustomSlice> {
+        let keyed = self.custom.iter().flat_map(|series| {
+            series
+                .slices(start, end)
+                .into_iter()
+                .map(|slice| (slice.series, slice.from, slice.to))
+        });
+        merged(keyed)
+            .into_iter()
+            .map(|(series, from, to)| CustomSlice { series, from, to })
+            .collect()
     }
 
     /// The catalog series read: those the bars are built from
@@ -314,33 +408,33 @@ impl DataRequirements {
     }
 }
 
-/// The slices of `keyed`, those of one key merged where they overlap or
-/// touch (Nautilus' `merge_closed_intervals`), each key's in time order,
-/// the keys in the order they first come. A key is of one contract.
-fn merged<K: PartialEq + Clone>(keyed: impl IntoIterator<Item = (K, Slice)>) -> Vec<(K, Slice)> {
-    let mut groups: Vec<(K, InstrumentId, Vec<ClosedInterval>)> = Vec::new();
-    for (key, slice) in keyed {
+/// The windows `[from, to]` of `keyed`, those of one key merged where they
+/// overlap or touch (Nautilus' `merge_closed_intervals`), each key's in
+/// time order, the keys in the order they first come. A key is of one
+/// contract.
+fn merged<K: PartialEq + Clone>(
+    keyed: impl IntoIterator<Item = (K, Timestamp, Timestamp)>,
+) -> Vec<(K, Timestamp, Timestamp)> {
+    let mut groups: Vec<(K, Vec<ClosedInterval>)> = Vec::new();
+    for (key, from, to) in keyed {
         let interval = ClosedInterval {
-            start: UnixNanos::from(slice.from).as_u64(),
-            end: UnixNanos::from(slice.to).as_u64(),
+            start: UnixNanos::from(from).as_u64(),
+            end: UnixNanos::from(to).as_u64(),
         };
-        match groups.iter_mut().find(|(of, _, _)| *of == key) {
-            Some((_, _, intervals)) => intervals.push(interval),
-            None => groups.push((key, slice.instrument_id, vec![interval])),
+        match groups.iter_mut().find(|(of, _)| *of == key) {
+            Some((_, intervals)) => intervals.push(interval),
+            None => groups.push((key, vec![interval])),
         }
     }
     groups
         .into_iter()
-        .flat_map(|(key, instrument_id, intervals)| {
+        .flat_map(|(key, intervals)| {
             merge_closed_intervals(&intervals)
                 .into_iter()
                 .map(move |interval| {
-                    let slice = Slice {
-                        instrument_id,
-                        from: UnixNanos::from(interval.start).into(),
-                        to: UnixNanos::from(interval.end).into(),
-                    };
-                    (key.clone(), slice)
+                    let from = UnixNanos::from(interval.start).into();
+                    let to = UnixNanos::from(interval.end).into();
+                    (key.clone(), from, to)
                 })
         })
         .collect()
@@ -361,9 +455,23 @@ impl SeriesSlice {
     /// come: no part of a series is read twice.
     #[must_use]
     pub fn merged(slices: impl IntoIterator<Item = Self>) -> Vec<Self> {
-        merged(slices.into_iter().map(|of| (of.series, of.slice)))
+        let keyed = slices.into_iter().map(|of| {
+            (
+                (of.series, of.slice.instrument_id),
+                of.slice.from,
+                of.slice.to,
+            )
+        });
+        merged(keyed)
             .into_iter()
-            .map(|(series, slice)| Self { series, slice })
+            .map(|((series, instrument_id), from, to)| Self {
+                series,
+                slice: Slice {
+                    instrument_id,
+                    from,
+                    to,
+                },
+            })
             .collect()
     }
 }
@@ -914,6 +1022,126 @@ mod tests {
             [
                 slice("GCQ26.GLBX", start, end),
                 slice("GCZ26.GLBX", at("2026-07-29T00:00Z"), end),
+            ]
+        );
+    }
+
+    /// The imbalances under `identifier`, a custom series of no metadata.
+    fn imbalances(identifier: &str) -> CustomSeries {
+        CustomSeries::new("Imbalance", identifier.to_string(), None).unwrap()
+    }
+
+    /// LSE's 10-year US yields under `identifier`, a custom series of
+    /// metadata.
+    fn yields(identifier: &str) -> CustomSeries {
+        let metadata = Params::new(
+            [
+                ("source".to_string(), serde_json::json!("bond_yields")),
+                ("symbol".to_string(), serde_json::json!("US10Y")),
+            ]
+            .into(),
+        );
+        CustomSeries::new("LseRow", identifier.to_string(), Some(metadata)).unwrap()
+    }
+
+    fn custom_slice(series: CustomSeries, from: Timestamp, to: Timestamp) -> CustomSlice {
+        CustomSlice { series, from, to }
+    }
+
+    /// An identifier naming a root of the roll calendar rolls; one naming a
+    /// contract, an instrument the calendar does not roll, or no
+    /// instrument at all, stands for itself.
+    #[test]
+    fn a_custom_series_has_a_root_only_under_a_root_s_identifier() {
+        let roots = ["GC.GLBX", "GCZ26.GLBX", "XAUUSD.ICMARKETS", "US10Y"]
+            .map(|identifier| imbalances(identifier).root());
+
+        assert_eq!(
+            roots,
+            [Some(InstrumentId::from("GC.GLBX")), None, None, None]
+        );
+    }
+
+    /// GC rolls from GCQ26 into GCZ26 at 00:00 UTC on 29 July 2026
+    /// (`rolls/README.md`): its series is GCQ26's up to the last nanosecond
+    /// before, GCZ26's from the roll on, its type and metadata kept, the
+    /// contract's id its identifier.
+    #[test]
+    fn a_custom_series_on_a_root_is_at_each_time_the_series_of_the_contract_in_front() {
+        let series = yields("GC.GLBX");
+
+        let read = [before("2026-07-29T00:00Z"), at("2026-07-29T00:00Z")]
+            .map(|time| series.at(time).data_type().clone());
+
+        assert_eq!(
+            read,
+            [
+                yields("GCQ26.GLBX").data_type().clone(),
+                yields("GCZ26.GLBX").data_type().clone(),
+            ]
+        );
+    }
+
+    /// A contract's series and one of no instrument are themselves at any
+    /// time.
+    #[test]
+    fn a_custom_series_of_no_root_is_itself_at_any_time() {
+        for series in [yields("GCQ26.GLBX"), yields("US10Y")] {
+            assert_eq!(series.at(at("2026-07-29T00:00Z")), series);
+        }
+    }
+
+    /// Over July and August 2026, across GC's roll of 29 July: GCQ26's
+    /// series up to 1 ns before the roll, GCZ26's from it.
+    #[test]
+    fn the_slices_of_a_custom_series_on_a_root_are_its_contracts_series_over_their_slices() {
+        let (start, end) = (at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
+        let roll = "2026-07-29T00:00Z";
+
+        assert_eq!(
+            yields("GC.GLBX").slices(start, end),
+            [
+                custom_slice(yields("GCQ26.GLBX"), start, before(roll)),
+                custom_slice(yields("GCZ26.GLBX"), at(roll), end),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_custom_series_of_no_root_is_one_slice_over_the_window() {
+        let (start, end) = (at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
+
+        for series in [yields("GCQ26.GLBX"), yields("US10Y")] {
+            assert_eq!(
+                series.slices(start, end),
+                [custom_slice(series.clone(), start, end)]
+            );
+        }
+    }
+
+    /// GCQ26's imbalances listed beside GC's are read once over the whole
+    /// window, the root's GCQ26 slice within it; the yields under US10Y
+    /// over the window too.
+    #[test]
+    fn a_contract_s_custom_series_listed_beside_its_root_s_is_one_slice_over_both() {
+        let requirements = DataRequirements {
+            bar_types: vec![],
+            ticks: vec![],
+            custom: vec![
+                imbalances("GC.GLBX"),
+                imbalances("GCQ26.GLBX"),
+                yields("US10Y"),
+            ],
+            warmup: SignedDuration::ZERO,
+        };
+        let (start, end) = (at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
+
+        assert_eq!(
+            requirements.custom_slices(start, end),
+            [
+                custom_slice(imbalances("GCQ26.GLBX"), start, end),
+                custom_slice(imbalances("GCZ26.GLBX"), at("2026-07-29T00:00Z"), end),
+                custom_slice(yields("US10Y"), start, end),
             ]
         );
     }

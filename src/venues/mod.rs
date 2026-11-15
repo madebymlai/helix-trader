@@ -102,7 +102,9 @@ use crate::{
     live::node::{Clients, ExecClient},
     strategy::{
         Series,
-        requirements::{CatalogSeries, CustomSeries, DataRequirements, SeriesSlice, TickSeries},
+        requirements::{
+            CatalogSeries, CustomSeries, CustomSlice, DataRequirements, SeriesSlice, TickSeries,
+        },
     },
 };
 
@@ -858,13 +860,14 @@ fn of_source(slices: &[SeriesSlice], source: HistorySource) -> Vec<SeriesSlice> 
         .collect()
 }
 
-/// Those of `custom`, custom series, whose history `source` fills, their
-/// type's row's (`CustomRow::of`); none of a type with no row.
-fn of_custom_source(custom: &[CustomSeries], source: HistorySource) -> Vec<CustomSeries> {
+/// Those of `custom`, custom series over their slices, whose history
+/// `source` fills, their type's row's (`CustomRow::of`); none of a type
+/// with no row.
+fn of_custom_source(custom: &[CustomSlice], source: HistorySource) -> Vec<CustomSlice> {
     custom
         .iter()
-        .filter(|series| {
-            CustomRow::of(series.type_name()).is_some_and(|row| row.history == Some(source))
+        .filter(|slice| {
+            CustomRow::of(slice.series.type_name()).is_some_and(|row| row.history == Some(source))
         })
         .cloned()
         .collect()
@@ -988,15 +991,14 @@ pub async fn fill_history(
             node.add(okx::node_client(&okx_ids)?, &requests, okx::period);
         }
     }
-    let lse_custom = of_custom_source(&requirements.custom, HistorySource::Lse);
+    let custom = requirements.custom_slices(start, end);
+    let lse_custom = of_custom_source(&custom, HistorySource::Lse);
     if !lse_ids.is_empty() || !lse_custom.is_empty() {
         lse::add_fill(
             &mut node,
             &catalog,
             &of_source(&slices, HistorySource::Lse),
             &lse_custom,
-            start,
-            end,
             LseDataClientConfig::default(),
             || {
                 let api_key =

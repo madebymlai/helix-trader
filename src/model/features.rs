@@ -241,14 +241,16 @@ enum Slot {
     /// The custom data of a type name, of the instrument read, read from
     /// the cache.
     Data(Reading, String, Read),
-    /// A custom series, read from the cache by its data type.
-    Custom(CustomSeries, Read),
+    /// A custom series, read from the cache by its data type: on a root,
+    /// with the root it reads, by the data type of the contract read
+    /// (`CustomSeries::on`).
+    Custom(CustomSeries, Option<Reading>, Read),
 }
 
-/// The instrument whose ticks a feature reads, a futures root or a plain
-/// instrument, and the contract whose ticks it reads: the one standing for
-/// the root, from `register` (`rolls::front`) and each roll (`roll`); the
-/// instrument itself if it does not roll.
+/// The instrument whose ticks or custom data a feature reads, a futures
+/// root or a plain instrument, and the contract it reads them of: the one
+/// standing for the root, from `register` (`rolls::front`) and each roll
+/// (`roll`); the instrument itself if it does not roll.
 #[derive(Debug, Clone, Copy)]
 struct Reading {
     instrument_id: InstrumentId,
@@ -417,7 +419,7 @@ impl FeatureSet {
     pub fn custom(&self) -> Vec<CustomSeries> {
         let mut custom: Vec<CustomSeries> = Vec::new();
         for slot in self.slots.borrow().iter() {
-            if let Slot::Custom(series, _) = slot
+            if let Slot::Custom(series, ..) = slot
                 && !custom.contains(series)
             {
                 custom.push(series.clone());
@@ -443,8 +445,9 @@ impl FeatureSet {
     }
 
     /// Registers the set with `actor`'s Nautilus indicators, from its
-    /// `on_start`: each tick feature or raw feature of an instrument reads
-    /// the contract standing for its instrument now (`rolls::front`), the
+    /// `on_start`: each tick feature or raw feature of an instrument or of
+    /// a custom series on a root reads the contract standing for its
+    /// instrument or root now (`rolls::front`), the
     /// raw features from `actor`'s cache, and the set is registered for the
     /// bars of each bar type a feature reads (`register_contracts`).
     /// Nautilus registers an indicator once per source, so a set registered
@@ -549,12 +552,17 @@ impl Slot {
                 let data_type = DataType::new(type_name, None, Some(reading.contract.to_string()));
                 cache?.custom_data(&data_type).map(&**read)
             }
-            Self::Custom(series, read) => cache?.custom_data(series.data_type()).map(&**read),
+            Self::Custom(series, reading, read) => {
+                let on = reading.map(|reading| series.on(reading.contract));
+                cache?
+                    .custom_data(on.as_ref().unwrap_or(series).data_type())
+                    .map(&**read)
+            }
         }
     }
 
-    /// What a tick feature or a raw feature of an instrument reads; none
-    /// for bars or a custom series.
+    /// What a tick feature or a raw feature of an instrument or of a custom
+    /// series on a root reads; none for bars or another custom series.
     fn reading_mut(&mut self) -> Option<&mut Reading> {
         match self {
             Self::Quotes(reading, _)
@@ -562,7 +570,8 @@ impl Slot {
             | Self::Depth(reading, _)
             | Self::Deltas(reading, _)
             | Self::Data(reading, ..) => Some(reading),
-            Self::Bars(..) | Self::Custom(..) => None,
+            Self::Custom(_, reading, _) => reading.as_mut(),
+            Self::Bars(..) => None,
         }
     }
 
@@ -622,7 +631,7 @@ impl Slot {
     fn series(&self) -> String {
         match self {
             Self::Bars(bar_type, _) => bar_type.to_string(),
-            Self::Custom(series, _) => series.to_string(),
+            Self::Custom(series, ..) => series.to_string(),
             slot => slot
                 .tick_series()
                 .expect("a feature on neither bars nor a custom series reads ticks")
@@ -886,7 +895,9 @@ impl FeatureSetBuilder {
     /// Declares a raw feature, named `name`, on `series`, a custom series
     /// (see `strategy::requirements::CustomSeries`): its value is `read` of
     /// the latest point of its data type the cache holds, cold until it
-    /// holds one. It reads no instrument, so no roll moves it.
+    /// holds one. On a root, it reads the series of the contract standing
+    /// for the root, from `register` and each roll; any other series
+    /// stands for itself, and no roll moves it.
     #[must_use]
     pub fn custom(
         self,
@@ -896,7 +907,11 @@ impl FeatureSetBuilder {
     ) -> Self {
         self.declare(
             Name::Given(name.to_string()),
-            Slot::Custom(series.clone(), Box::new(read)),
+            Slot::Custom(
+                series.clone(),
+                series.root().map(Reading::of),
+                Box::new(read),
+            ),
         )
     }
 

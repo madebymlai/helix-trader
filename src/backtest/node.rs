@@ -44,7 +44,10 @@ use rust_decimal::Decimal;
 use super::{Backtest, Latency, report::Outcome};
 use crate::{
     catalog::catalog_config,
-    strategy::{requirements::SeriesSlice, warmup},
+    strategy::{
+        requirements::{CustomSlice, SeriesSlice},
+        warmup,
+    },
     venues,
 };
 
@@ -278,8 +281,10 @@ fn is_custom(series: &SeriesSlice) -> bool {
 /// The custom data `backtest` replays, read from its catalog: that of its
 /// instruments (see `Backtest::series`), each series over its slice, and
 /// its custom series (`Backtest::custom`), each keyed by its data type's
-/// identifier, over the run's window, both ends included: the data
-/// the node cannot load (see `run_config`). Nautilus decodes each type by
+/// identifier, over its slices of the run's window, both ends included, a
+/// root's contract by contract, each contract's series over the slice it
+/// stands for the root (`DataRequirements::custom_slices`): the data the
+/// node cannot load (see `run_config`). Nautilus decodes each type by
 /// its name, so each must be registered with Nautilus before the run
 /// (`nautilus_serialization::ensure_custom_data_registered`): the run
 /// registers those the venues' sources serve, LSE's rows
@@ -300,14 +305,17 @@ pub(super) fn custom_data(backtest: &Backtest) -> anyhow::Result<Vec<Data>> {
     venues::register_custom_data();
     let mut catalog = ParquetDataCatalog::new(&backtest.catalog, None, None, None, None);
     let mut data = Vec::new();
-    for series in &backtest.custom {
+    let custom = backtest
+        .requirements()
+        .custom_slices(backtest.start, backtest.end);
+    for CustomSlice { series, from, to } in &custom {
         let data_type = series.data_type();
         let read = catalog
             .query_custom_data_dynamic(
                 series.type_name(),
                 Some(&[series.identifier().to_string()]),
-                Some(UnixNanos::from(backtest.start)),
-                Some(UnixNanos::from(backtest.end)),
+                Some(UnixNanos::from(*from)),
+                Some(UnixNanos::from(*to)),
                 None,
                 None,
                 true,

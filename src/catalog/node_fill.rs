@@ -49,7 +49,7 @@ use serde_json::json;
 
 use super::catalog_config;
 use crate::{
-    strategy::requirements::{CustomSeries, SeriesSlice},
+    strategy::requirements::{CustomSlice, SeriesSlice},
     time_range, venues,
 };
 
@@ -227,30 +227,29 @@ impl fmt::Display for CustomFillRequest {
     }
 }
 
-/// What `catalog` lacks of each of `custom`, custom series, over `[from,
-/// to]`: its missing windows (Nautilus' `get_missing_intervals_for_request`,
-/// of its type and identifier), in time order, the series in the order
-/// given; a config lists each once (`StandardConfig::validate`). No
-/// definition: a custom series brings no instrument.
+/// What `catalog` lacks of each of `slices`, custom series over the part
+/// of a window each is read in, a root's contract by contract
+/// (`DataRequirements::custom_slices`): its missing windows (Nautilus'
+/// `get_missing_intervals_for_request`, of its type and identifier, a
+/// contract's id on a root), in time order, the slices in the order given.
+/// No definition: a custom series brings no instrument.
 ///
 /// # Errors
 ///
 /// Returns an error if the catalog cannot be read.
 pub fn missing_custom(
     catalog: &ParquetDataCatalog,
-    custom: &[CustomSeries],
-    from: Timestamp,
-    to: Timestamp,
+    slices: &[CustomSlice],
 ) -> anyhow::Result<Vec<CustomFillRequest>> {
     let mut requests = Vec::new();
-    for series in custom {
+    for CustomSlice { series, from, to } in slices {
         let stored = NautilusDataType::Custom {
             type_name: series.type_name().to_string(),
         };
         let gaps = catalog
             .get_missing_intervals_for_request(
-                nanos(from),
-                nanos(to),
+                nanos(*from),
+                nanos(*to),
                 &stored.into(),
                 Some(series.identifier()),
             )
@@ -627,7 +626,7 @@ mod tests {
     use nautilus_persistence::backend::parquet::paths::timestamps_to_filename;
 
     use super::*;
-    use crate::rolls::Slice;
+    use crate::{rolls::Slice, strategy::requirements::CustomSeries};
 
     fn ts(s: &str) -> Timestamp {
         s.parse().unwrap()
@@ -1019,7 +1018,7 @@ mod tests {
         let bond_yields =
             CustomSeries::new("LseRow", "US10Y".to_string(), Some(bond_yields_metadata())).unwrap();
 
-        let asked = missing_custom(&catalog, &[bond_yields], from, to).unwrap();
+        let asked = missing_custom(&catalog, &bond_yields.slices(from, to)).unwrap();
 
         assert_eq!(
             asked,
@@ -1032,6 +1031,52 @@ mod tests {
                 from,
                 to,
             }]
+        );
+    }
+
+    /// The bond yields under GC's id, a root GC rolls from GCQ26 into GCZ26
+    /// at 00:00 UTC on 29 July 2026 (`rolls/README.md`): each contract's
+    /// series lacks over its slice, asked by its data type, the
+    /// contract's id its identifier, the type and metadata kept.
+    #[test]
+    fn a_roots_custom_series_is_lacking_contract_by_contract_over_its_slices() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let (from, roll, to) = (
+            ts("2026-07-28T00:00:00Z"),
+            ts("2026-07-29T00:00:00Z"),
+            ts("2026-07-30T00:00:00Z"),
+        );
+        let bond_yields = CustomSeries::new(
+            "LseRow",
+            "GC.GLBX".to_string(),
+            Some(bond_yields_metadata()),
+        )
+        .unwrap();
+
+        let asked = missing_custom(&catalog, &bond_yields.slices(from, to)).unwrap();
+
+        let of = |contract: &str| {
+            DataType::new(
+                "LseRow",
+                Some(bond_yields_metadata()),
+                Some(contract.to_string()),
+            )
+        };
+        assert_eq!(
+            asked,
+            [
+                CustomFillRequest {
+                    data_type: of("GCQ26.GLBX"),
+                    from,
+                    to: roll - SignedDuration::from_nanos(1),
+                },
+                CustomFillRequest {
+                    data_type: of("GCZ26.GLBX"),
+                    from: roll,
+                    to,
+                },
+            ]
         );
     }
 

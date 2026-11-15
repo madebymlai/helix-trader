@@ -3,7 +3,9 @@
 //! from 23:00 to 01:00 across the roll: the run replays each contract's
 //! series over its slice only, and a `Roller` tells the strategy of the
 //! roll, at which its `Subscriptions` switch from one contract to the next.
-//! One node per thread, so one run per test.
+//! A custom series under the root's id, the contracts' imbalances, rolls
+//! alike, and a raw feature over it moves at the roll. One node per thread,
+//! so one run per test.
 
 use std::{cell::RefCell, num::NonZeroUsize, path::Path, rc::Rc, sync::Arc};
 
@@ -13,8 +15,12 @@ use crate::common::{
 };
 use helix_trader::{
     backtest::{Backtest, Commission},
+    model::features::FeatureSet,
     rolls::{Roller, Transition},
-    strategy::{requirements::TickSeries, subscriptions::Subscriptions},
+    strategy::{
+        requirements::{CustomSeries, TickSeries},
+        subscriptions::Subscriptions,
+    },
     venues,
 };
 use nautilus_common::{actor::DataActor, logging::logger::LoggerConfig, timer::TimeEvent};
@@ -36,7 +42,7 @@ use nautilus_trading::{
 use rust_decimal::Decimal;
 
 /// What the probe got, in order.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 enum Got {
     /// The times of the clock's alerts once started.
     Alerts(Vec<UnixNanos>),
@@ -44,6 +50,8 @@ enum Got {
     Tick(NautilusDataType, InstrumentId, UnixNanos),
     /// A roll the roller returned, and the clock's time then.
     Roll(Transition, UnixNanos),
+    /// The values of its features, read after each tick and roll.
+    Read(Option<Vec<f64>>),
 }
 
 /// How the probe subscribes.
@@ -52,8 +60,13 @@ enum Subscribe {
     /// Through subscriptions to the declared series and a roller of their
     /// instruments, as a strategy does.
     Rolled(Roller, Subscriptions),
+    /// As `Rolled`, its features registered at its start and rolled at each
+    /// roll, as a model strategy's handle does.
+    Featured(Roller, Subscriptions, Rc<FeatureSet>),
     /// To the trades and book depth of both contracts, directly.
     Contracts,
+    /// To the imbalances of both contracts, directly.
+    ContractImbalances,
 }
 
 /// Records each tick it gets, and each roll.
@@ -81,6 +94,19 @@ impl DataActor for RollProbe {
                 subscriptions.start(self, now);
                 roller.start(self, now)?;
             }
+            Subscribe::Featured(roller, subscriptions, features) => {
+                let (roller, subscriptions) = (roller.clone(), subscriptions.clone());
+                Rc::clone(features).register(self);
+                let now = self.clock().utc_now();
+                subscriptions.start(self, now);
+                roller.start(self, now)?;
+            }
+            Subscribe::ContractImbalances => {
+                for id in [PRE, POST] {
+                    let data_type = DataType::new(glbx::IMBALANCE, None, Some(id.to_string()));
+                    self.subscribe_data(data_type, None, None);
+                }
+            }
             Subscribe::Contracts => {
                 for id in [PRE, POST].map(InstrumentId::from) {
                     self.subscribe_trades(id, None, None);
@@ -107,12 +133,24 @@ impl DataActor for RollProbe {
     }
 
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {
-        if let Subscribe::Rolled(roller, subscriptions) = &self.subscribe {
-            let (roller, subscriptions) = (roller.clone(), subscriptions.clone());
-            if let Some(roll) = roller.on_time_event(self, event)? {
-                subscriptions.roll(self, &roll);
-                let now = self.clock().timestamp_ns();
-                self.record(Got::Roll(roll, now));
+        let (roller, subscriptions, features) = match &self.subscribe {
+            Subscribe::Rolled(roller, subscriptions) => {
+                (roller.clone(), subscriptions.clone(), None)
+            }
+            Subscribe::Featured(roller, subscriptions, features) => (
+                roller.clone(),
+                subscriptions.clone(),
+                Some(Rc::clone(features)),
+            ),
+            Subscribe::Contracts | Subscribe::ContractImbalances => return Ok(()),
+        };
+        if let Some(roll) = roller.on_time_event(self, event)? {
+            subscriptions.roll(self, &roll);
+            let now = self.clock().timestamp_ns();
+            self.record(Got::Roll(roll, now));
+            if let Some(features) = features {
+                features.roll(self, &roll);
+                self.record(Got::Read(features.values()));
             }
         }
         Ok(())
@@ -152,6 +190,9 @@ impl DataActor for RollProbe {
             InstrumentId::from(id),
             data.data.ts_init(),
         ));
+        if let Subscribe::Featured(_, _, features) = &self.subscribe {
+            self.record(Got::Read(features.values()));
+        }
         Ok(())
     }
 }
@@ -436,16 +477,38 @@ fn store_deltas_and_imbalances(
         })
         .collect();
     catalog.write_to_parquet(&deltas, from, to, None).unwrap();
+    let imbalances: Vec<(&str, f64)> = imbalances.iter().map(|&time| (time, 0.5)).collect();
+    store_imbalances(dir, instrument_id, &imbalances);
+}
+
+/// Writes an imbalance of `instrument_id` of each of `values` at its time
+/// into the catalog in `dir`, keyed by its id, stored over 22:00 Tuesday
+/// to 02:00 Wednesday. Registers `Imbalance` with Nautilus first, as any
+/// reader of it must.
+fn store_imbalances(dir: &Path, instrument_id: &str, values: &[(&str, f64)]) {
+    nautilus_serialization::ensure_custom_data_registered::<Imbalance>();
+    let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
+    let at = |time: &str| -> UnixNanos {
+        let Got::Tick(_, _, at) = tick(imbalances(), instrument_id, time) else {
+            unreachable!()
+        };
+        at
+    };
     let data_type = DataType::new(glbx::IMBALANCE, None, Some(instrument_id.to_string()));
-    let imbalances: Vec<CustomData> = imbalances
+    let imbalances: Vec<CustomData> = values
         .iter()
-        .map(|time| {
-            let imbalance = Imbalance::new(0.5, at(time), at(time));
+        .map(|&(time, value)| {
+            let imbalance = Imbalance::new(value, at(time), at(time));
             CustomData::new(Arc::new(imbalance), data_type.clone())
         })
         .collect();
     catalog
-        .write_custom_data_batch(imbalances, from, to, None)
+        .write_custom_data_batch(
+            imbalances,
+            Some(tuesday("22:00:00").into()),
+            Some(wednesday("02:00:00").into()),
+            None,
+        )
         .unwrap();
 }
 
@@ -488,6 +551,104 @@ fn the_subscriptions_roll_book_deltas_and_custom_data_keyed_by_the_contract() {
             ),
             tick(NautilusDataType::OrderBookDelta, POST, "00:15:00"),
             tick(imbalances(), POST, "00:17:00"),
+        ]
+    );
+}
+
+/// The imbalances under `identifier`, a custom series: under the root's
+/// id, the imbalances of the contract standing for it.
+fn imbalance_series(identifier: &str) -> CustomSeries {
+    CustomSeries::new(glbx::IMBALANCE, identifier.to_string(), None).unwrap()
+}
+
+/// August's imbalances on both sides of the roll, and December's.
+fn store_both_contracts_imbalances(dir: &Path) {
+    store_imbalances(dir, PRE, &[("thu 23:42:00", 0.25), ("00:07:00", 0.5)]);
+    store_imbalances(dir, POST, &[("thu 23:37:00", 0.75), ("00:17:00", 1.0)]);
+}
+
+/// A backtest declaring the root's trades and depth and `custom`.
+fn backtest_of(catalog: &tempfile::TempDir, custom: Vec<CustomSeries>) -> Backtest {
+    Backtest {
+        custom,
+        ..backtest(catalog, ticks(ROOT))
+    }
+}
+
+#[test]
+fn a_roots_custom_series_replays_each_contracts_imbalances_only_within_its_slice() {
+    let catalog = rolls::catalog();
+    store_both_contracts_imbalances(catalog.path());
+    let backtest = backtest_of(&catalog, vec![imbalance_series(ROOT)]);
+
+    let got = run(&backtest, Subscribe::ContractImbalances);
+
+    // Subscribed to both contracts' all along: what reaches the probe is
+    // what the run replays. August's before the roll, not after it;
+    // December's from the roll on, not before it.
+    assert_eq!(
+        got,
+        [
+            Got::Alerts(vec![]),
+            tick(imbalances(), PRE, "thu 23:42:00"),
+            tick(imbalances(), POST, "00:17:00"),
+        ]
+    );
+}
+
+#[test]
+fn a_feature_over_a_roots_custom_series_reads_the_pre_then_the_post_contract() {
+    let catalog = rolls::catalog();
+    store_both_contracts_imbalances(catalog.path());
+    // Both contracts' own series beside the root's: each replayed over the
+    // whole run, so that the cache holds both sides of the roll.
+    let custom = vec![
+        imbalance_series(ROOT),
+        imbalance_series(PRE),
+        imbalance_series(POST),
+    ];
+    let backtest = backtest_of(&catalog, custom.clone());
+    let features = FeatureSet::builder()
+        .custom(&imbalance_series(ROOT), "imbalance", |data| {
+            data.data
+                .as_any()
+                .downcast_ref::<Imbalance>()
+                .map_or(f64::NAN, |imbalance| imbalance.value)
+        })
+        .build()
+        .unwrap();
+    let roller =
+        Roller::replayed(vec![]).custom_roots(custom.iter().filter_map(CustomSeries::root));
+    let subscriptions = Subscriptions::new(vec![], vec![], custom);
+
+    let got = run(
+        &backtest,
+        Subscribe::Featured(roller, subscriptions, features),
+    );
+
+    // August's imbalance before the roll, December's at it and after;
+    // December's before the roll, and August's after it, are not read.
+    assert_eq!(
+        got,
+        [
+            Got::Alerts(vec![before_roll()]),
+            tick(imbalances(), POST, "thu 23:37:00"),
+            Got::Read(None),
+            tick(imbalances(), PRE, "thu 23:42:00"),
+            Got::Read(Some(vec![0.25])),
+            Got::Roll(
+                Transition {
+                    time: roll(),
+                    pre: InstrumentId::from(PRE),
+                    post: InstrumentId::from(POST),
+                },
+                before_roll(),
+            ),
+            Got::Read(Some(vec![0.75])),
+            tick(imbalances(), PRE, "00:07:00"),
+            Got::Read(Some(vec![0.75])),
+            tick(imbalances(), POST, "00:17:00"),
+            Got::Read(Some(vec![1.0])),
         ]
     );
 }

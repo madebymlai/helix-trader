@@ -123,9 +123,7 @@ fn fill_bond_yields(dir: &Path) {
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     let requests = missing_custom(
         &catalog,
-        &[us10y()],
-        november("10T00:00:00"),
-        november("13T00:00:00"),
+        &us10y().slices(november("10T00:00:00"), november("13T00:00:00")),
     )
     .unwrap();
     let lse = MockLse::start(vec![

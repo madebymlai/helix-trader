@@ -503,6 +503,57 @@ fn a_raw_feature_of_a_custom_series_reads_the_latest_point_of_its_data_type_in_t
     assert_eq!(features.values(), Some(vec![2.5]));
 }
 
+/// The levels from `yields` under `identifier`, as the cache keys them.
+fn yields_type(identifier: &str) -> DataType {
+    levels("yields", identifier).data_type().clone()
+}
+
+/// The values of a raw feature over the levels from `yields` under
+/// `identifier`, registered on 2026-11-25 at 23:00, when GCZ26 stands for
+/// the root GC, then handed GC's roll into GCG27 at 00:00 UTC on
+/// 2026-11-26 (`rolls/README.md`): after GCZ26's and GCG27's levels are
+/// cached before the roll, after the roll, and after another of GCZ26's.
+fn levels_across_the_roll(identifier: &str) -> [Option<Vec<f64>>; 3] {
+    let start: jiff::Timestamp = "2026-11-25T23:00:00Z".parse().unwrap();
+    let mut probe = registered_at(start.into());
+    let features = FeatureSet::builder()
+        .custom(&levels("yields", identifier), "level", read_level)
+        .build()
+        .unwrap();
+    features.register(&mut probe);
+    cached(&probe, point(&yields_type("GCZ26.GLBX"), 0.25));
+    cached(&probe, point(&yields_type("GCG27.GLBX"), 0.75));
+    let before_the_roll = features.values();
+
+    let roll = Transition::after(id("GC.GLBX"), start).unwrap();
+    features.roll(&mut probe, &roll);
+    let rolled = features.values();
+    cached(&probe, point(&yields_type("GCZ26.GLBX"), -0.25));
+
+    [before_the_roll, rolled, features.values()]
+}
+
+/// A raw feature over a custom series on the root GC reads the latest
+/// point of the contract standing for it, GCZ26's, the root's own data
+/// type keying none; at the roll it moves to GCG27's, the post contract's
+/// latest it reads at once, and no later point of GCZ26 reaches it.
+#[test]
+fn a_raw_feature_of_a_roots_custom_series_reads_the_contract_in_front_and_moves_at_its_roll() {
+    assert_eq!(
+        levels_across_the_roll("GC.GLBX"),
+        [Some(vec![0.25]), Some(vec![0.75]), Some(vec![0.75])]
+    );
+}
+
+/// GCZ26's own series stands for itself: the roll of GC moves it not.
+#[test]
+fn a_raw_feature_of_a_contracts_custom_series_is_not_moved_by_its_roots_roll() {
+    assert_eq!(
+        levels_across_the_roll("GCZ26.GLBX"),
+        [Some(vec![0.25]), Some(vec![0.25]), Some(vec![-0.25])]
+    );
+}
+
 /// `update` made at `ns`.
 macro_rules! at {
     ($update:expr, $ns:expr) => {{
@@ -781,6 +832,11 @@ nautilus_strategy!(Probe);
 impl DataActor for Probe {}
 
 fn registered() -> Probe {
+    registered_at(UnixNanos::default())
+}
+
+/// A probe registered as `registered`'s, its clock at `now`.
+fn registered_at(now: UnixNanos) -> Probe {
     let mut probe = Probe {
         core: StrategyCore::new(StrategyConfig {
             strategy_id: Some(nautilus_model::identifiers::StrategyId::from("PROBE-001")),
@@ -789,6 +845,7 @@ fn registered() -> Probe {
         }),
     };
     let clock = Rc::new(RefCell::new(VirtualClock::new()));
+    clock.borrow_mut().advance_time(now, true);
     let cache = Rc::new(RefCell::new(Cache::default()));
     let portfolio = Rc::new(RefCell::new(Portfolio::new(
         clock.clone(),

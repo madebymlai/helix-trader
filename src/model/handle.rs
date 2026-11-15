@@ -164,6 +164,7 @@ use crate::{
     rolls::Roller,
     strategy::{
         orders::{self, Trade},
+        requirements::CustomSeries,
         risk::R,
         subscriptions::Subscriptions,
         warmup::{self, BookIndicator, Warmup},
@@ -353,7 +354,8 @@ impl ModelHandle {
         let roller = match mode {
             Mode::Live { .. } => Roller::live(instrument_ids),
             Mode::Backtest { .. } | Mode::Dataset { .. } => Roller::replayed(instrument_ids),
-        };
+        }
+        .custom_roots(requirements.custom.iter().filter_map(CustomSeries::root));
         let delay = warmup::bar_build_delay(&requirements.bar_types);
         let serving = match mode {
             Mode::Backtest { models } | Mode::Live { models } => {
@@ -3027,6 +3029,14 @@ mod tests {
         msgbus::subscriptions_count_any(get_custom_topic(&imbalance_type(instrument_id))).unwrap()
     }
 
+    /// The value of an imbalance.
+    fn read_imbalance(data: &CustomData) -> f64 {
+        data.data
+            .as_any()
+            .downcast_ref::<Imbalance>()
+            .map_or(f64::NAN, |imbalance| imbalance.value)
+    }
+
     /// A raw feature, the last imbalance of `instrument_id`.
     fn last_imbalance(instrument_id: &str) -> Rc<FeatureSet> {
         FeatureSet::builder()
@@ -3034,15 +3044,16 @@ mod tests {
                 "Imbalance",
                 InstrumentId::from(instrument_id),
                 "imbalance",
-                |data| {
-                    data.data
-                        .as_any()
-                        .downcast_ref::<Imbalance>()
-                        .map_or(f64::NAN, |imbalance| imbalance.value)
-                },
+                read_imbalance,
             )
             .build()
             .unwrap()
+    }
+
+    /// The imbalances under `identifier`, a custom series, keyed as an
+    /// instrument's imbalances are under its id.
+    fn imbalance_series(identifier: &str) -> CustomSeries {
+        CustomSeries::new("Imbalance", identifier.to_string(), None).unwrap()
     }
 
     /// Live on 2026-08-10 at 14:30, with an hour of warmup, the model
@@ -3254,6 +3265,74 @@ mod tests {
         assert_eq!(rolled, Some(vec![0.75]));
         assert_eq!(pre_after_the_roll, Some(vec![0.75]));
         assert_eq!(post, Some(vec![-0.75]));
+        assert_eq!(
+            (
+                imbalance_subscribers("GCZ26.GLBX"),
+                imbalance_subscribers("GCG27.GLBX")
+            ),
+            (0, 1)
+        );
+    }
+
+    /// A raw feature over the custom series of GC's imbalances, the root's,
+    /// in a backtest from 2026-11-25 at 23:00, the strategy reading no tick
+    /// of GC, reads GCZ26's, the contract standing for it, not GCG27's. GC
+    /// rolls into GCG27 at 00:00 UTC on 2026-11-26: the handle's roller
+    /// rolls the series' root, and the roll's alert moves the subscription
+    /// to GCG27's and the feature onto GCG27's latest imbalance the cache
+    /// holds, the one of 23:20, then later ones, not GCZ26's.
+    #[test]
+    fn a_feature_on_a_roots_custom_series_reads_each_contract_in_turn_from_the_cache() {
+        let models = tempfile::tempdir().unwrap();
+        let (mut probe, clock) = registered(at("2026-11-25T23:00:00Z"));
+        let series = imbalance_series("GC.GLBX");
+        let requirements = DataRequirements {
+            bar_types: vec![],
+            ticks: vec![aud_quotes()],
+            custom: vec![series.clone()],
+            warmup: SignedDuration::ZERO,
+        };
+        let features = FeatureSet::builder()
+            .custom(&series, "imbalance", read_imbalance)
+            .build()
+            .unwrap();
+        let handle = ModelHandle::new(
+            &blueprint_of(&features, &config(), requirements),
+            Mode::Backtest {
+                models: models.path().to_path_buf(),
+            },
+        )
+        .unwrap();
+        handle.start(&mut probe).unwrap();
+        let read = |probe: &Decider, data: CustomData| {
+            probe.cache_rc().borrow_mut().add_custom_data(data);
+            features.values()
+        };
+
+        let pre = read(
+            &probe,
+            imbalance("GCZ26.GLBX", "2026-11-25T23:10:00Z", 0.25),
+        );
+        let post_before_the_roll = read(
+            &probe,
+            imbalance("GCG27.GLBX", "2026-11-25T23:20:00Z", 0.75),
+        );
+        let subscribed = (
+            imbalance_subscribers("GCZ26.GLBX"),
+            imbalance_subscribers("GCG27.GLBX"),
+        );
+        run_to(&handle, &mut probe, &clock, "2026-11-26T00:30:00Z");
+        let rolled = features.values();
+        let pre_after_the_roll = read(
+            &probe,
+            imbalance("GCZ26.GLBX", "2026-11-26T00:40:00Z", -0.25),
+        );
+
+        assert_eq!(subscribed, (1, 0));
+        assert_eq!(pre, Some(vec![0.25]));
+        assert_eq!(post_before_the_roll, Some(vec![0.25]));
+        assert_eq!(rolled, Some(vec![0.75]));
+        assert_eq!(pre_after_the_roll, Some(vec![0.75]));
         assert_eq!(
             (
                 imbalance_subscribers("GCZ26.GLBX"),

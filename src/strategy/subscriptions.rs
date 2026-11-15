@@ -34,8 +34,7 @@
 //! the start the one standing for it then. At a roll of a root its series
 //! move from the pre to the post contract, but for those another series
 //! still reads on the pre contract (the contract itself, read beside its
-//! root), which stay subscribed. Custom data of an instrument is keyed by
-//! its contract, as the catalog keys it. A book is subscribed in the format
+//! root), which stay subscribed. A book is subscribed in the format
 //! its venue's live data streams (`venues::book_format`), live as in a
 //! backtest or a dataset run, whose replay of the catalog's book reads
 //! neither the book type nor the levels of a subscription that manages no
@@ -47,17 +46,24 @@
 //! start refuses such a book before anything connects (`venues::streams`),
 //! so only a replay subscribes to it.
 //!
-//! Each custom series (`DataRequirements::custom`, a custom series of a
-//! config's `[data] series`) is subscribed at the start by its data type,
-//! naming no client, as an instrument's custom data is: Nautilus
-//! subscribes the message bus alone (`DataActorCore::subscribe_data`),
-//! where a replay's rows arrive, and a live run reading any is refused at
-//! its start (`venues::live_clients`). No roll moves it. A strategy's
-//! `on_data` gets its rows: the strategy subscribes to none itself.
+//! Custom data is subscribed by its data type, naming no client: each
+//! custom series (`DataRequirements::custom`, a custom series of a
+//! config's `[data] series`) as it is read at the start
+//! (`CustomSeries::at`), and an instrument's custom data keyed by the
+//! contract standing for it, as the catalog keys it. Nautilus subscribes
+//! the message bus alone (`DataActorCore::subscribe_data`), where a
+//! replay's rows arrive, and a live run reading a custom series is refused
+//! at its start (`venues::live_clients`). A custom series on a root, its
+//! identifier the root's (`GC.GLBX`), is read on the contract standing for
+//! it, keyed by the contract's id, and moves at each roll as the root's
+//! tick series do, but for a data type another series, of either kind,
+//! still reads at the roll, which stays subscribed; any other custom
+//! series stands for itself, and no roll moves it. A strategy's `on_data`
+//! gets its rows: the strategy subscribes to none itself.
 
 use std::{collections::BTreeMap, fmt::Debug};
 
-use jiff::Timestamp;
+use jiff::{SignedDuration, Timestamp};
 use nautilus_common::actor::{DataActor, DataActorNative};
 use nautilus_core::{Params, UnixNanos};
 use nautilus_model::{
@@ -88,15 +94,15 @@ pub struct Subscriptions {
     continuous: ContinuousBars,
     /// The tick series, of roots or plain instruments.
     ticks: Vec<TickSeries>,
-    /// The custom series.
+    /// The custom series, on roots or standing for themselves.
     custom: Vec<CustomSeries>,
 }
 
 impl Subscriptions {
     /// The subscriptions to `bar_types`, of plain instruments, to `ticks`,
     /// of roots or plain instruments, and to `custom`, custom series
-    /// (`DataRequirements::custom`): a bar type given twice is subscribed
-    /// once (see the module).
+    /// (`DataRequirements::custom`), on roots or standing for themselves:
+    /// a bar type given twice is subscribed once (see the module).
     #[must_use]
     pub fn new(bar_types: Vec<BarType>, ticks: Vec<TickSeries>, custom: Vec<CustomSeries>) -> Self {
         Self {
@@ -118,9 +124,9 @@ impl Subscriptions {
 
     /// Subscribes `actor` to the bars, then to each tick series on the
     /// contract standing for its instrument at `now` (`rolls::front`), then
-    /// to each custom series by its data type, naming no client, all from
-    /// `now`: the time the strategy's warmup's start returns
-    /// (`Warmup::start`), where a live warmup's requests end.
+    /// to the custom data read at `now` by its data type (`custom_at`),
+    /// naming no client, all from `now`: the time the strategy's warmup's
+    /// start returns (`Warmup::start`), where a live warmup's requests end.
     pub fn start<A>(&self, actor: &mut A, now: Timestamp)
     where
         A: DataActor + DataActorNative + Debug + 'static,
@@ -130,18 +136,18 @@ impl Subscriptions {
         for instrument_id in self.instrument_ids() {
             self.subscribe(actor, instrument_id, front(instrument_id, now), from);
         }
-        for series in &self.custom {
-            let params = Some(subscription_params(from, []));
-            actor.subscribe_data(series.data_type().clone(), None, params);
+        for data_type in self.custom_at(now, None) {
+            actor.subscribe_data(data_type, None, Some(subscription_params(from, [])));
         }
     }
 
-    /// Moves the series of each instrument `roll` rolls, a root of which it
-    /// is the roll at its time, from its pre to its post contract:
-    /// unsubscribes `actor` from them on the pre contract, but for the kinds
-    /// an instrument still reads there at the roll, the contract standing
-    /// for it then, and subscribes it to them on the post contract, from
-    /// now. Handed the roll the strategy's roller returns
+    /// Moves the series of each root `roll` rolls, of which it is the roll
+    /// at its time, from its pre to its post contract: unsubscribes `actor`
+    /// from them on the pre contract, but for those a series still reads
+    /// there at the roll, the contract standing for it then, and subscribes
+    /// it to them on the post contract, from now: its tick series, then its
+    /// custom data, by the data type it is read by on each side of the roll
+    /// (`custom_at`). Handed the roll the strategy's roller returns
     /// (`rolls::Roller::on_time_event`), at the last nanosecond before it.
     pub fn roll<A>(&self, actor: &mut A, roll: &Transition)
     where
@@ -149,12 +155,52 @@ impl Subscriptions {
     {
         let now = UnixNanos::from(actor.clock().utc_now());
         for instrument_id in self.instrument_ids() {
-            if Transition::before(instrument_id, roll.time) != Some(*roll) {
+            if !rolled_by(instrument_id, roll) {
                 continue;
             }
             self.unsubscribe(actor, instrument_id, roll);
             self.subscribe(actor, instrument_id, roll.post, now);
         }
+        let read = self.custom_at(roll.time, None);
+        let pre = roll.time - SignedDuration::from_nanos(1);
+        for data_type in self.custom_at(pre, Some(roll)) {
+            if !read.contains(&data_type) {
+                actor.unsubscribe_data(data_type, None, None);
+            }
+        }
+        for data_type in self.custom_at(roll.time, Some(roll)) {
+            actor.subscribe_data(data_type, None, Some(subscription_params(now, [])));
+        }
+    }
+
+    /// The data types of the custom data read at `time`, each once, of the
+    /// roots `roll` rolls alone if given: an instrument's custom data keyed
+    /// by the contract standing for it then (see `TickSeries`), and each
+    /// custom series as `CustomSeries::at` reads it, a root's on its
+    /// contract. Custom data is subscribed by its data type, whatever its
+    /// kind, so one read by both is subscribed once and kept while either
+    /// still reads it.
+    fn custom_at(&self, time: Timestamp, roll: Option<&Transition>) -> Vec<DataType> {
+        let instruments = self.ticks.iter().filter_map(|tick| match &tick.data {
+            NautilusDataType::Custom { type_name } => {
+                let contract = front(tick.instrument_id, time);
+                let data_type = DataType::new(type_name, None, Some(contract.to_string()));
+                Some((Some(tick.instrument_id), data_type))
+            }
+            _ => None,
+        });
+        let series = self
+            .custom
+            .iter()
+            .map(|series| (series.root(), series.at(time).data_type().clone()));
+        let mut data_types: Vec<DataType> = Vec::new();
+        for (on, data_type) in instruments.chain(series) {
+            let kept = roll.is_none_or(|roll| on.is_some_and(|id| rolled_by(id, roll)));
+            if kept && !data_types.contains(&data_type) {
+                data_types.push(data_type);
+            }
+        }
+        data_types
     }
 
     /// Subscribes `actor` to the bars from `from`: those on a root with
@@ -203,12 +249,14 @@ impl Subscriptions {
         ids
     }
 
-    /// The kinds of the tick series of `instrument_id`.
+    /// The kinds of the tick series of `instrument_id` but custom data,
+    /// which is subscribed by its data type (`custom_at`).
     fn data_of(&self, instrument_id: InstrumentId) -> impl Iterator<Item = &NautilusDataType> + '_ {
         self.ticks
             .iter()
             .filter(move |tick| tick.instrument_id == instrument_id)
             .map(|tick| &tick.data)
+            .filter(|data| !matches!(data, NautilusDataType::Custom { .. }))
     }
 
     /// Subscribes `actor` to the tick series of `instrument_id` on
@@ -245,10 +293,6 @@ impl Subscriptions {
                     false,
                     params,
                 ),
-                NautilusDataType::Custom { type_name } => {
-                    let data_type = DataType::new(type_name, None, Some(contract.to_string()));
-                    actor.subscribe_data(data_type, None, params);
-                }
                 other => unreachable!("{other} is not a tick series (see `TickSeries`)"),
             }
         }
@@ -279,14 +323,16 @@ impl Subscriptions {
                 NautilusDataType::OrderBookDelta => {
                     actor.unsubscribe_book_deltas(contract, None, None);
                 }
-                NautilusDataType::Custom { type_name } => {
-                    let data_type = DataType::new(type_name, None, Some(contract.to_string()));
-                    actor.unsubscribe_data(data_type, None, None);
-                }
                 other => unreachable!("{other} is not a tick series (see `TickSeries`)"),
             }
         }
     }
+}
+
+/// Whether `roll` rolls `instrument_id`: it is a root, and `roll` its roll
+/// at its time.
+fn rolled_by(instrument_id: InstrumentId, roll: &Transition) -> bool {
+    Transition::before(instrument_id, roll.time) == Some(*roll)
 }
 
 /// The params of a subscription streaming from `from`, bars, ticks or
@@ -308,7 +354,6 @@ fn subscription_params(
 mod tests {
     use std::{cell::RefCell, num::NonZeroUsize, rc::Rc};
 
-    use jiff::SignedDuration;
     use nautilus_common::{
         cache::Cache,
         clock::{Clock, VirtualClock},
@@ -614,6 +659,106 @@ mod tests {
             [1, 1]
         );
         assert!(commands.get_messages().is_empty());
+    }
+
+    /// The imbalances under `identifier`, a custom series.
+    fn imbalances(identifier: &str) -> CustomSeries {
+        CustomSeries::new("Imbalance", identifier.to_string(), None).unwrap()
+    }
+
+    /// A strategy reading `ticks` and `custom`, started on 2026-08-10 at
+    /// 14:30, when GCZ26 stands for GC, then handed GC's roll into GCG27 at
+    /// 00:00 UTC on 2026-11-26, at the last nanosecond before it, as its
+    /// roller hands it over: the handlers subscribed to the imbalances
+    /// under each of `identifiers` on the message bus at the start, then
+    /// after the roll, and whether it sent the data engine anything.
+    fn imbalances_across_the_roll(
+        ticks: Vec<TickSeries>,
+        custom: Vec<CustomSeries>,
+        identifiers: &[&str],
+    ) -> (Vec<usize>, Vec<usize>, bool) {
+        let subscriptions = Subscriptions::new(vec![], ticks, custom);
+        let start = at("2026-08-10T14:30:00Z");
+        let (mut probe, clock, commands) = registered(start);
+        let roll = Transition::after(id("GC.GLBX"), start).unwrap();
+        let counts = || {
+            identifiers
+                .iter()
+                .map(|&identifier| imbalance_subscribers(identifier))
+                .collect::<Vec<_>>()
+        };
+
+        subscriptions.start(&mut probe, start);
+        let started = counts();
+        let alert = roll.time - SignedDuration::from_nanos(1);
+        clock.borrow_mut().advance_time(alert.into(), true);
+        subscriptions.roll(&mut probe, &roll);
+
+        (started, counts(), !commands.get_messages().is_empty())
+    }
+
+    /// A custom series on the root GC is subscribed on GCZ26's data type,
+    /// the contract standing for GC on 2026-08-10, not the root's, and
+    /// moved to GCG27's at the roll, naming no client either time.
+    #[test]
+    fn a_roots_custom_series_is_subscribed_on_its_front_contract_and_moved_at_its_roll() {
+        let (started, rolled, sent) = imbalances_across_the_roll(
+            vec![],
+            vec![imbalances("GC.GLBX")],
+            &["GC.GLBX", "GCZ26.GLBX", "GCG27.GLBX"],
+        );
+
+        assert_eq!(
+            (started, rolled, sent),
+            (vec![0, 1, 0], vec![0, 0, 1], false)
+        );
+    }
+
+    /// GCZ26's own imbalances, listed beside the root's, are still read
+    /// on GCZ26 at the roll: they stay subscribed, the root's moving on.
+    #[test]
+    fn a_roll_keeps_a_custom_series_another_still_reads_on_the_pre_contract() {
+        let (started, rolled, _) = imbalances_across_the_roll(
+            vec![],
+            vec![imbalances("GC.GLBX"), imbalances("GCZ26.GLBX")],
+            &["GCZ26.GLBX", "GCG27.GLBX"],
+        );
+
+        assert_eq!((started, rolled), (vec![1, 0], vec![1, 1]));
+    }
+
+    /// GCZ26's imbalances read as an instrument's custom data, keyed by
+    /// its id as the root's custom series is on GCZ26, stay subscribed at
+    /// the roll that moves the root's series on.
+    #[test]
+    fn a_roll_keeps_a_custom_series_an_instrument_still_reads_on_the_pre_contract() {
+        let instrument = ticks(&[(
+            NautilusDataType::Custom {
+                type_name: "Imbalance".to_string(),
+            },
+            "GCZ26.GLBX",
+        )]);
+
+        let (started, rolled, _) = imbalances_across_the_roll(
+            instrument,
+            vec![imbalances("GC.GLBX")],
+            &["GCZ26.GLBX", "GCG27.GLBX"],
+        );
+
+        assert_eq!((started, rolled), (vec![1, 0], vec![1, 1]));
+    }
+
+    /// A contract's custom series and one of no instrument stand for
+    /// themselves: subscribed at the start, and no roll of GC moves them.
+    #[test]
+    fn custom_series_of_no_root_are_never_moved() {
+        let (started, rolled, _) = imbalances_across_the_roll(
+            vec![],
+            vec![imbalances("GCZ26.GLBX"), imbalances("US10Y")],
+            &["GCZ26.GLBX", "US10Y", "GCG27.GLBX"],
+        );
+
+        assert_eq!((started, rolled), (vec![1, 1, 0], vec![1, 1, 0]));
     }
 
     /// The `start_ns` param of each subscription of `commands`, bars and
