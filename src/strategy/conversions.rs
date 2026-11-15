@@ -148,18 +148,14 @@ impl Conversions {
 
     /// The series each pair's rates are read from, in order: the form its
     /// venue's history serves (`venues::rate_series`), an IB pair's
-    /// 1-minute BID and ASK bars, a cTrader pair's quotes.
-    ///
-    /// # Panics
-    ///
-    /// Panics if a pair's venue serves neither form, which `validate`
-    /// refuses.
+    /// 1-minute BID and ASK bars, a cTrader pair's quotes; none of a pair
+    /// whose venue serves neither form, which `validate` refuses, so that
+    /// the rules reading the requirements the pairs are in while the config
+    /// is checked read them and `validate` reports the pair once.
     pub(super) fn series(&self) -> impl Iterator<Item = Series> + '_ {
-        self.0.iter().flat_map(|&pair| {
-            venues::rate_series(pair).unwrap_or_else(|e| {
-                panic!("a loaded config's pairs are read in a form served: {e:#}")
-            })
-        })
+        self.0
+            .iter()
+            .flat_map(|&pair| venues::rate_series(pair).unwrap_or_default())
     }
 
     /// The rates an equity is converted at: Nautilus' cached rates on the

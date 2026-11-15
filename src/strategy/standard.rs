@@ -2015,6 +2015,30 @@ mod tests {
             )
         }
 
+        /// A pair no rate of which can be read, an OKX pair, is refused under
+        /// its field, once, as a strategy trading on no model refuses it,
+        /// the model's rules reading the requirements it is left out of.
+        #[test]
+        fn a_pair_whose_venue_serves_neither_its_bars_nor_its_quotes_is_refused_once() {
+            let toml = TOML.replace(
+                r#"risk = "0.5%""#,
+                "risk = \"0.5%\"\nconversions = [\"USDC-USDT.OKX\"]",
+            );
+
+            let err = load(&toml).unwrap_err();
+
+            assert!(
+                fields_of(&err).contains(&"trade.conversions[0]".to_string()),
+                "{err}"
+            );
+            let err = err.to_string();
+            assert_eq!(
+                err.matches("no rate of USDC-USDT.OKX can be read").count(),
+                1,
+                "{err}"
+            );
+        }
+
         #[test]
         fn loads_the_standard_tables_and_the_model() {
             let config = load(TOML).unwrap();
