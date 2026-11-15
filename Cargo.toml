@@ -94,8 +94,10 @@ nautilus-backtest = { workspace = true, features = ["streaming"] }
 nautilus-common = { workspace = true, features = ["indicators", "live", "tracing-bridge"] }
 nautilus-core.workspace = true
 nautilus-data.workspace = true
-# `live` for its data client, which fill-catalog's node asks for history.
-nautilus-databento = { workspace = true, features = ["live"] }
+# `live` for its data client, which fill-catalog's node asks for history;
+# `arrow` for the Arrow schemas of its custom data types, which helix registers
+# with every type it compiles (`venues::register_custom_data`).
+nautilus-databento = { workspace = true, features = ["arrow", "live"] }
 nautilus-execution.workspace = true
 nautilus-indicators.workspace = true
 nautilus-infrastructure.workspace = true

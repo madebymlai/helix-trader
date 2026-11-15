@@ -1854,6 +1854,27 @@ mod tests {
         );
     }
 
+    /// Nautilus' Databento adapter is compiled in, its imbalances and
+    /// statistics with it, so helix registers both: no row routes them,
+    /// so each is the catalog's.
+    #[test]
+    fn databento_s_custom_series_load_as_the_catalog_s() {
+        let toml = with_custom(&[
+            r#"{ data = "Custom:DatabentoImbalance", identifier = "GC.GLBX" }"#,
+            r#"{ data = "Custom:DatabentoStatistics", identifier = "GC.GLBX" }"#,
+        ]);
+
+        let config = load(&toml).unwrap();
+
+        assert_eq!(
+            custom_of(&config),
+            [
+                DataType::new("DatabentoImbalance", None, Some("GC.GLBX".to_string())),
+                DataType::new("DatabentoStatistics", None, Some("GC.GLBX".to_string())),
+            ]
+        );
+    }
+
     /// LSE's client asks LSE for a source's symbol.
     #[test]
     fn lse_s_rows_naming_no_symbol_are_refused_under_their_entry_naming_it() {

@@ -3237,6 +3237,7 @@ source = "git+https://github.com/nautechsystems/nautilus_trader?rev=97ecbafd6621
 dependencies = [
  "ahash",
  "anyhow",
+ "arrow",
  "async-trait",
  "databento",
  "fallible-streaming-iterator",
@@ -3248,6 +3249,7 @@ dependencies = [
  "nautilus-live",
  "nautilus-model",
  "nautilus-network",
+ "nautilus-serialization",
  "nautilus-system",
  "parking_lot 0.13.0",
  "serde",
