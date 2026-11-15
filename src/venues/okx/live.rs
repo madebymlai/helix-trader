@@ -60,10 +60,8 @@ use crate::{
 /// `BOOK_SNAPSHOT_DEPTH`, `:112`). A deltas subscription of no depth takes
 /// OKX's book 400 levels deep, the client keeping no depth as 0
 /// (`book_channel`, `:354-382`; `resolve_book_depth`,
-/// `common/consts.rs:525-531`), which subscribes OKX's `books` channel, or
-/// `books-l2-tbt`, tick by tick, on an account of VIP level 4 or more
-/// (`select_book_channel`, `:533-540`); a depth of 1 to 50 would take
-/// `books50-l2-tbt` there instead, 50 levels deep.
+/// `common/consts.rs:525-531`), which subscribes OKX's `books` channel
+/// (`select_book_channel`, `:533-540`).
 pub(in crate::venues) const BOOK: BookFormat = BookFormat {
     deltas: BookType::L2_MBP,
     depth: NonZeroUsize::new(5),
@@ -95,17 +93,9 @@ pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
              1 second, its quotes, its trades and its book, not {bar_type}"
         ),
         CatalogSeries::Ticks(TickSeries {
-            data: D::QuoteTick | D::TradeTick | D::OrderBookDelta,
+            data: D::QuoteTick | D::TradeTick | D::OrderBookDelta | D::OrderBookDepth,
             ..
         }) => {}
-        CatalogSeries::Ticks(TickSeries {
-            data: D::OrderBookDepth,
-            instrument_id,
-        }) => ensure!(
-            BOOK.depth.is_some(),
-            "Nautilus' OKX client streams no book depth, so OKX streams none of {instrument_id}: \
-             read its book deltas"
-        ),
         CatalogSeries::Ticks(ticks) => {
             bail!("OKX streams its quotes, its trades, its candles and its book, not the {ticks}")
         }

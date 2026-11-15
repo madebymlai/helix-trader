@@ -136,10 +136,10 @@ impl IbClients {
 
 /// IB's book as Nautilus' IB data client streams it
 /// (`venues::book_format`): its deltas of an L2_MBP book, the rows of IB's
-/// market depth, each a price level by its position, and by the exchange
-/// posting it on IB's SMART depth, the client's default
-/// (`subscribe_book_deltas`, `data/core.rs:1249`, `:1301-1306`;
-/// `data/streams.rs:1952-2027`), the client logging an L3_MBO
+/// market depth, each by its position, and by the exchange posting it on
+/// IB's SMART depth, the client's default, an update able to move a row to
+/// another price (`subscribe_book_deltas`, `data/core.rs:1249`,
+/// `:1301-1306`; `data/streams.rs:1952-2027`), the client logging an L3_MBO
 /// subscription as unpublished by IB and streaming nothing
 /// (`core.rs:1262-1268`); no depth snapshots, which it does not subscribe
 /// to (Nautilus' `DataClient` default, `common/src/clients/data.rs:171-174`).
@@ -213,8 +213,7 @@ pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
         CatalogSeries::Ticks(TickSeries {
             data: D::OrderBookDepth,
             instrument_id,
-        }) => ensure!(
-            BOOK.depth.is_some(),
+        }) => bail!(
             "Nautilus' IB client streams no book depth, so IB streams none of {instrument_id}: \
              read its book deltas"
         ),

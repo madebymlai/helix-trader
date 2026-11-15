@@ -5,7 +5,6 @@
 
 use std::fmt::Debug;
 
-use anyhow::Context;
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::{DataActor, DataActorNative},
@@ -40,7 +39,7 @@ const FORCE_INSTRUMENT_UPDATE: &str = "force_instrument_update";
 /// subscribed to in the format its venue's live data streams
 /// (`venues::book_format`), live as in a backtest or a dataset run, whose
 /// replay of the catalog's book reads neither the book type nor the levels
-/// of a subscription that manages no book.
+/// of a subscription that manages no book (see `subscribe`).
 ///
 /// A live roller loads each post contract when it sets its roll alert, so
 /// a node rolls any number of times: it requests the instrument from the
@@ -102,15 +101,14 @@ impl Roller {
     /// # Errors
     ///
     /// Returns an error if the clock refuses an alert or Nautilus a
-    /// request, or naming a book its venue's live data streams none of
-    /// (see `subscribe`).
+    /// request.
     pub fn start<A>(&self, actor: &mut A) -> anyhow::Result<()>
     where
         A: DataActor + DataActorNative + Debug + 'static,
     {
         let now = actor.clock().utc_now();
         for instrument_id in self.instrument_ids() {
-            self.subscribe(actor, instrument_id, front(instrument_id, now))?;
+            self.subscribe(actor, instrument_id, front(instrument_id, now));
             if let Some(next) = Transition::after(instrument_id, now) {
                 self.arm(actor, instrument_id, next)?;
             }
@@ -136,7 +134,7 @@ impl Roller {
     /// # Errors
     ///
     /// Returns an error if the clock refuses the next alert or Nautilus
-    /// the request, or as `subscribe`.
+    /// the request.
     pub fn on_time_event<A>(
         &self,
         actor: &mut A,
@@ -155,7 +153,7 @@ impl Roller {
         let roll = Transition::after(instrument_id, event.ts_event.into())
             .expect("an instrument with a roll alert rolls");
         self.unsubscribe(actor, instrument_id, roll.pre, roll.time);
-        self.subscribe(actor, instrument_id, roll.post)?;
+        self.subscribe(actor, instrument_id, roll.post);
         if let Some(next) = Transition::after(instrument_id, roll.time) {
             self.arm(actor, instrument_id, next)?;
         }
@@ -207,57 +205,39 @@ impl Roller {
     /// live data (`venues::book_format`): its deltas at the format's book
     /// type, asking no depth, so each client streams the whole book it
     /// gives, and its depth at the format's levels, snapshots of price
-    /// levels (L2_MBP).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error naming `contract` if the series are of a book, or
-    /// of a depth, its venue's live data streams none of: a live start
-    /// refuses such a series first (`venues::streams`), and no source
-    /// fills it.
-    fn subscribe<A>(
-        &self,
-        actor: &mut A,
-        instrument_id: InstrumentId,
-        contract: InstrumentId,
-    ) -> anyhow::Result<()>
+    /// levels (L2_MBP). A venue whose live data streams no book, a cTrader
+    /// broker's, has its deltas subscribed as L2_MBP, and one streaming no
+    /// depth, IB, its depth with no levels: a live start refuses such a
+    /// book before anything connects (`venues::streams`), so only a replay
+    /// subscribes to it, which reads neither value of a subscription that
+    /// manages no book.
+    fn subscribe<A>(&self, actor: &mut A, instrument_id: InstrumentId, contract: InstrumentId)
     where
         A: DataActor + DataActorNative + Debug + 'static,
     {
         let now = UnixNanos::from(actor.clock().utc_now());
-        let book = || {
-            venues::book_format(contract.venue).with_context(|| {
-                format!(
-                    "the live data of {} streams no book, so none of {contract} is subscribed to",
-                    contract.venue
-                )
-            })
-        };
+        let book = venues::book_format(contract.venue);
         for data in self.data_of(instrument_id) {
             let params = Some(subscription_params(now, []));
             match data {
                 NautilusDataType::QuoteTick => actor.subscribe_quotes(contract, None, params),
                 NautilusDataType::TradeTick => actor.subscribe_trades(contract, None, params),
-                NautilusDataType::OrderBookDepth => {
-                    let levels = book()?.depth.with_context(|| {
-                        format!(
-                            "the live data of {} streams no book depth, so none of {contract} is \
-                             subscribed to",
-                            contract.venue
-                        )
-                    })?;
-                    actor.subscribe_book_depth(
-                        contract,
-                        BookType::L2_MBP,
-                        Some(levels),
-                        None,
-                        false,
-                        params,
-                    );
-                }
-                NautilusDataType::OrderBookDelta => {
-                    actor.subscribe_book_deltas(contract, book()?.deltas, None, None, false, params)
-                }
+                NautilusDataType::OrderBookDepth => actor.subscribe_book_depth(
+                    contract,
+                    BookType::L2_MBP,
+                    book.and_then(|book| book.depth),
+                    None,
+                    false,
+                    params,
+                ),
+                NautilusDataType::OrderBookDelta => actor.subscribe_book_deltas(
+                    contract,
+                    book.map_or(BookType::L2_MBP, |book| book.deltas),
+                    None,
+                    None,
+                    false,
+                    params,
+                ),
                 NautilusDataType::Custom { type_name } => {
                     let data_type = DataType::new(type_name, None, Some(contract.to_string()));
                     actor.subscribe_data(data_type, None, params);
@@ -265,7 +245,6 @@ impl Roller {
                 other => unreachable!("{other} is not a tick series (see `TickSeries`)"),
             }
         }
-        Ok(())
     }
 
     /// Unsubscribes `actor` from the series of `instrument_id` on
@@ -582,9 +561,9 @@ mod tests {
 
     /// Each book in the format its venue's live data streams: a GLBX
     /// contract's, LSE's, its deltas as orders (L3_MBO) and its depth ten
-    /// levels a side; a CME contract's, IB's, its deltas as price levels
-    /// (L2_MBP); an OKX swap's its deltas as price levels and its depth
-    /// five levels a side. Deltas of the whole book each client streams,
+    /// levels a side; a CME contract's, IB's, its deltas as rows of IB's
+    /// market depth (L2_MBP); an OKX swap's its deltas as price levels
+    /// (L2_MBP) and its depth five levels a side. Deltas of the whole book each client streams,
     /// no depth asked; depth snapshots of price levels.
     #[test]
     fn a_roller_subscribes_each_book_in_its_venue_s_format() {
@@ -619,27 +598,35 @@ mod tests {
         );
     }
 
-    /// A book its venue's live data streams none of, which a live start
-    /// refuses before (`venues::streams`) and no source fills: a cTrader
-    /// broker's deltas, its venue having no book, and an IB instrument's
-    /// depth, IB's having none. Each refused naming it.
+    /// A book its venue's live data streams none of, a cTrader broker's
+    /// deltas, its venue having no book, and an IB instrument's depth,
+    /// IB's having none: a live start refuses it first
+    /// (`venues::streams`), so only a replay subscribes to it, which reads
+    /// neither the book type nor the levels, and it replays as declared.
+    /// Deltas as L2_MBP, depth with no levels.
     #[test]
-    fn a_roller_refuses_a_book_its_venue_streams_none_of_naming_it() {
+    fn a_replayed_roller_subscribes_a_book_its_venue_streams_none_of() {
         use NautilusDataType as D;
-        for (data, instrument_id) in [
+        let roller = Roller::replayed(ticks(&[
             (D::OrderBookDelta, "XAUUSD.ICMARKETS"),
             (D::OrderBookDepth, "SXR8.IBIS"),
-        ] {
-            let roller = Roller::replayed(ticks(&[(data.clone(), instrument_id)]));
-            let (mut probe, _, _) = registered("2026-08-10T14:30:00Z");
+        ]));
+        let (mut probe, _, commands) = registered("2026-08-10T14:30:00Z");
 
-            let err = roller.start(&mut probe).unwrap_err();
+        roller.start(&mut probe).unwrap();
 
-            assert!(
-                format!("{err:#}").contains(instrument_id),
-                "{data} of {instrument_id}: {err:#}"
-            );
-        }
+        assert_eq!(
+            books_subscribed(&commands),
+            [
+                (
+                    id("XAUUSD.ICMARKETS"),
+                    D::OrderBookDelta,
+                    BookType::L2_MBP,
+                    None
+                ),
+                (id("SXR8.IBIS"), D::OrderBookDepth, BookType::L2_MBP, None),
+            ]
+        );
     }
 
     #[test]

@@ -187,8 +187,9 @@ pub(crate) enum LiveDataSource {
 
 /// The format of a venue's book as its live data streams it
 /// (`book_format`): the book type of its deltas, L3_MBO if each is an
-/// order, by its id, L2_MBP if each is a price level, and the levels a
-/// side of its depth snapshots, if it streams any.
+/// order, by its id, L2_MBP if each is a level of the book, OKX's a price
+/// level, IB's a row of its market depth, and the levels a side of its
+/// depth snapshots, if it streams any.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BookFormat {
     /// The book type of its deltas.
@@ -584,8 +585,8 @@ pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
 /// The format of the book of `venue`'s instruments, as its row's live data
 /// source streams it (`Row::of`, so every venue without a row of its own
 /// as IB's), each a copy of its data client: LSE's orders and depth of ten
-/// levels a side (`lse::BOOK`); IB's price levels and no depth
-/// (`ib::BOOK`); OKX's price levels and depth of five levels a side
+/// levels a side (`lse::BOOK`); IB's rows of its market depth and no
+/// depth (`ib::BOOK`); OKX's price levels and depth of five levels a side
 /// (`okx::BOOK`); none of a cTrader broker's, whose client streams its
 /// quotes alone (`ctrader::quoted`). A venue has one format, its live
 /// data's: a subscription names it, each client streaming its own alone
@@ -2242,9 +2243,9 @@ mod tests {
     /// Each venue's book as its live data's client streams it: LSE's, of
     /// GLBX, XNAS, OPRA and LSEDGE, orders (L3_MBO) and ten levels a side
     /// of depth, the one depth its client streams and serves; IB's, of
-    /// every venue without a row of its own, price levels (L2_MBP), its
-    /// client publishing no L3_MBO book, and no depth, which it does not
-    /// subscribe to; OKX's price levels (L2_MBP), the one book type its
+    /// every venue without a row of its own, rows of its market depth
+    /// (L2_MBP), its client publishing no L3_MBO book, and no depth, which
+    /// it does not subscribe to; OKX's price levels (L2_MBP), the one book type its
     /// client takes, and five levels a side of depth, the most it takes; a
     /// cTrader broker's none, its client streaming quotes alone.
     #[test]
