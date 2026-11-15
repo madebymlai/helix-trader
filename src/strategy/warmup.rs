@@ -190,6 +190,7 @@
 //! custom series yet, LSE's streaming none and nothing the catalog's, so a
 //! live start refuses a run reading one (`venues::streams_custom`) and no
 //! run reaches this request today: it is the warmup half of such a run,
+//! whose subscription names the same client (`strategy::subscriptions`),
 //! kept for when a source streams it.
 //!
 //! A strategy holds a `Warmup`, which runs these calls, and delegates its
@@ -729,8 +730,8 @@ impl Debug for Warmup {
 ///
 /// Returns an error if a request fails, or if a custom series' type's
 /// history source does not serve it, or its row names no live data source
-/// to ask (see `venues::custom_data_client`), which the load and the live
-/// start refuse. A composite bar
+/// to ask (see `custom_request`), which the load and the live start
+/// refuse. A composite bar
 /// type's source bars are external, as the config's load requires (see
 /// `strategy::DataConfig`): they are requested, not built.
 pub fn start<A>(
@@ -859,7 +860,7 @@ where
         if warmed.contains(&read) {
             continue;
         }
-        let (client, params) = custom_request(venues::custom_data_client(series)?);
+        let (client, params) = custom_request(series)?;
         let id = actor.request_data(
             read.data_type().clone(),
             client,
@@ -878,21 +879,33 @@ where
     Ok(requested)
 }
 
-/// The client a warmup asks custom data of, and the request's params, by
-/// `served`, the live data client of the source whose history serves it,
-/// if one does: that client with `update_catalog`, the catalog answering
-/// first, the client the rest, its answers written back, as with every
-/// series served; if none, `CATALOG` with no params, the catalog alone
+/// The client a warmup asks `series`, a custom series, of, and the
+/// request's params: if its type's history serves it
+/// (`venues::serves_custom`), its data client on the node
+/// (`venues::custom_data_client`) with `update_catalog`, the catalog
+/// answering first, the client the rest, its answers written back, as with
+/// every series served; if not, `CATALOG` with no params, the catalog alone
 /// answering: data written into it from outside helix, which no client
 /// answers anything of to write back.
-fn custom_request(served: Option<ClientId>) -> (ClientId, Option<Params>) {
-    match served {
-        Some(client) => {
-            let params = Params::new([("update_catalog".to_string(), json!(true))].into());
-            (client, Some(params))
-        }
-        None => (ClientId::new(CATALOG), None),
+///
+/// # Errors
+///
+/// Returns an error as `venues::serves_custom` does, or naming its type if
+/// its type's history serves it and its row names no live data source,
+/// whose client the node would ask.
+fn custom_request(series: &CustomSeries) -> anyhow::Result<(ClientId, Option<Params>)> {
+    if venues::serves_custom(series)?.is_none() {
+        return Ok((ClientId::new(CATALOG), None));
     }
+    let client = venues::custom_data_client(series).with_context(|| {
+        format!(
+            "no live data source asks the history of custom data of the type {}: its row \
+             names none",
+            series.type_name()
+        )
+    })?;
+    let params = Params::new([("update_catalog".to_string(), json!(true))].into());
+    Ok((client, Some(params)))
 }
 
 /// The instruments of `sources` whose definitions the cache of `actor`
@@ -1711,18 +1724,18 @@ mod tests {
     /// written back.
     #[test]
     fn custom_data_a_source_serves_is_asked_of_its_live_data_client_written_back() {
-        let (client, params) = custom_request(Some(ClientId::from("LSE")));
+        let (client, params) = custom_request(&us10y_under("US10Y")).unwrap();
 
         assert_eq!(client, ClientId::from("LSE"));
         let update_catalog = params.and_then(|params| params.get_bool("update_catalog"));
         assert_eq!(update_catalog, Some(true));
     }
 
-    /// Custom data no source's history serves is asked of `CATALOG`, the
-    /// catalog alone, with no params.
+    /// Custom data no source's history serves, of a type with no row, is
+    /// asked of `CATALOG`, the catalog alone, with no params.
     #[test]
     fn custom_data_no_source_serves_is_asked_of_the_catalog() {
-        let (client, params) = custom_request(None);
+        let (client, params) = custom_request(&imbalances("AUD/USD.SIM")).unwrap();
 
         assert_eq!(client, ClientId::from("CATALOG"));
         assert!(params.is_none(), "{params:?}");

@@ -131,7 +131,10 @@ fn node_client(config: LseDataClientConfig) -> NodeClient {
 /// `XNAS`'s and `OPRA`'s orders going to IB's. The client is on no venue,
 /// so it takes the routes of theirs (`RoutingConfig::venues`); helix makes
 /// it not the default, which Nautilus may make it, nothing depending on
-/// that, every venue read having a route (see `live::node::Clients`).
+/// that, every venue read having a route (see `live::node::Clients`). With
+/// no instrument, the node of a run reading a custom series of LSE's rows
+/// alone, it streams none and takes no route, the series' subscription
+/// naming it by its client id (`venues::custom_data_client`).
 pub(super) fn live_clients(instrument_ids: &[InstrumentId]) -> Clients {
     let mut venues: Vec<String> = Vec::new();
     for id in instrument_ids {
