@@ -332,8 +332,9 @@ pub struct DataConfig {
     /// replayed in a backtest, to the strategy, whose subscriptions
     /// subscribe to its data type (`strategy::subscriptions`); a live run
     /// reading any its source does not stream is refused
-    /// (`venues::streams_custom`). No part answers it reads one, and none
-    /// is required: none by default.
+    /// (`venues::streams_custom`). No part answers it reads one; a model
+    /// strategy's load requires each its features read listed
+    /// (`model::reads`). None by default.
     #[serde(default, deserialize_with = "custom_data")]
     pub custom: Vec<DataType>,
     /// How far back the warmup history a live node requests at start

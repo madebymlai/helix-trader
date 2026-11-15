@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use nautilus_common::{actor::DataActor, cache::Cache, clock::VirtualClock};
+use nautilus_core::Params;
 use nautilus_model::{
     data::{BookOrder, DataType, HasTsInit, OrderBookDelta, stubs::stub_depth10},
     enums::{AggressorSide, BookAction, OrderSide},
@@ -154,12 +155,30 @@ fn level_type(instrument: &str) -> DataType {
 
 /// A level of `instrument`.
 fn level(instrument: &str, level: f64) -> CustomData {
+    point(&level_type(instrument), level)
+}
+
+/// The data type of the levels of no instrument from `source`, under
+/// `identifier`, as `[data].custom` gives one.
+fn levels(source: &str, identifier: &str) -> DataType {
+    of_no_instrument("Level", source, identifier)
+}
+
+/// The data type `type_name` of no instrument from `source`, under
+/// `identifier`.
+fn of_no_instrument(type_name: &str, source: &str, identifier: &str) -> DataType {
+    let metadata = Params::new([("source".to_string(), serde_json::json!(source))].into());
+    DataType::new(type_name, Some(metadata), Some(identifier.to_string()))
+}
+
+/// A level of `data_type`.
+fn point(data_type: &DataType, level: f64) -> CustomData {
     CustomData::new(
         Arc::new(Level {
             level,
             ts: UnixNanos::default(),
         }),
-        level_type(instrument),
+        data_type.clone(),
     )
 }
 
@@ -455,6 +474,32 @@ fn a_raw_feature_reads_the_latest_point_of_its_data_type_in_the_cache() {
     assert_eq!(features.values(), Some(vec![2.5]));
 }
 
+/// Cold before the set is registered, and registered until the cache holds
+/// a point of its data type, a point of another identifier not read; then
+/// the latest point of its data type the cache holds.
+#[test]
+fn a_raw_feature_of_no_instrument_reads_the_latest_point_of_its_data_type_in_the_cache() {
+    let mut probe = registered();
+    let yields = levels("yields", "US10Y");
+    let features = FeatureSet::builder()
+        .custom(&yields, "yield", read_level)
+        .build()
+        .unwrap();
+
+    let unregistered = features.values();
+    features.register(&mut probe);
+    let on_register = features.values();
+    cached(&probe, point(&levels("yields", "US2Y"), 9.0));
+    let after_another = features.values();
+    cached(&probe, point(&yields, 1.5));
+    cached(&probe, point(&yields, 2.5));
+
+    assert_eq!(unregistered, None);
+    assert_eq!(on_register, None);
+    assert_eq!(after_another, None);
+    assert_eq!(features.values(), Some(vec![2.5]));
+}
+
 /// `update` made at `ns`.
 macro_rules! at {
     ($update:expr, $ns:expr) => {{
@@ -543,6 +588,32 @@ fn a_sets_ticks_are_those_of_its_tick_and_raw_features_each_once() {
             tick(NautilusDataType::OrderBookDepth, AUD),
             tick(NautilusDataType::OrderBookDelta, GBP),
         ]
+    );
+}
+
+/// A model strategy's `[data].custom` lists these: each data type of no
+/// instrument a raw feature reads once, in the order declared; none is a
+/// tick series, which is of an instrument.
+#[test]
+fn a_sets_custom_data_are_the_data_types_of_its_raw_features_of_no_instrument_each_once() {
+    let (us10y, us2y) = (levels("yields", "US10Y"), levels("yields", "US2Y"));
+    let features = FeatureSet::builder()
+        .custom(&us2y, "2y", read_level)
+        .data("Level", id(AUD), "aud", read_level)
+        .custom(&us10y, "10y", read_level)
+        .custom(&us2y, "2y again", read_level)
+        .build()
+        .unwrap();
+
+    assert_eq!(features.custom(), [us2y, us10y]);
+    assert_eq!(
+        features.ticks(),
+        [TickSeries {
+            data: NautilusDataType::Custom {
+                type_name: "Level".to_string()
+            },
+            instrument_id: id(AUD),
+        }]
     );
 }
 
@@ -651,6 +722,26 @@ fn the_fingerprint_changes_with_the_custom_data_a_raw_feature_reads() {
 
     assert_ne!(reading("Level", GBP), reading("Level", AUD));
     assert_ne!(reading("Depth", AUD), reading("Level", AUD));
+}
+
+/// Pointed at another series, a raw feature of no instrument rebuilds the
+/// dataset and the models: its data type's identifier, metadata and type
+/// name are in the fingerprint beside its name.
+#[test]
+fn the_fingerprint_changes_with_the_data_type_a_raw_feature_of_no_instrument_reads() {
+    let reading = |data_type: DataType| {
+        FeatureSet::builder()
+            .custom(&data_type, "yield", read_level)
+            .build()
+            .unwrap()
+            .fingerprint()
+    };
+    let base = reading(levels("yields", "US10Y"));
+
+    assert_eq!(base, reading(levels("yields", "US10Y")));
+    assert_ne!(base, reading(levels("yields", "US2Y")));
+    assert_ne!(base, reading(levels("rates", "US10Y")));
+    assert_ne!(base, reading(of_no_instrument("Depth", "yields", "US10Y")));
 }
 
 /// A set without a version is of version 0, as one given it.
