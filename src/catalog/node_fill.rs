@@ -2,7 +2,7 @@
 //! answers a request with a completed `DataResponseEnvelope`, which the
 //! data engine writes back to the catalog (`update_catalog`).
 //!
-//! `missing` turns series slices (`strategy::SeriesSlice`) into what the
+//! `missing` turns series slices (`strategy::requirements::SeriesSlice`) into what the
 //! catalog lacks of them, by Nautilus' own count
 //! (`get_missing_intervals_for_request`): per contract its definitions, then
 //! each series' missing windows, the slivers between a live node's promoted
@@ -48,7 +48,7 @@ use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use serde_json::json;
 
 use super::catalog_config;
-use crate::{strategy::SeriesSlice, time_range};
+use crate::{strategy::requirements::SeriesSlice, time_range};
 
 /// The book depth of an `OrderBookDepth` request: MBP-10's.
 const DEPTH: usize = 10;
@@ -75,7 +75,7 @@ pub enum FillData {
 
 impl FillData {
     /// The series of `data_type` keyed by `identifier`, as the catalog
-    /// keys it (see `strategy::catalog_series`): the bar type of bars, the
+    /// keys it (see `strategy::requirements::catalog_keys`): the bar type of bars, the
     /// instrument id of anything else; an error for custom data of an
     /// instrument, which no node source serves here (custom data of no
     /// instrument is asked by `missing_custom`).
@@ -206,7 +206,7 @@ pub fn missing(
 }
 
 /// A request of a fill of custom data of no instrument (see
-/// `strategy::DataRequirements::custom`): the rows of `data_type` over the
+/// `strategy::requirements::DataRequirements::custom`): the rows of `data_type` over the
 /// closed window `[from, to]`, as the catalog stores intervals, stored under
 /// its type and identifier.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -51,7 +51,7 @@ use ustr::Ustr;
 
 use crate::{
     catalog::fill_slices,
-    strategy::{SeriesSlice, Source},
+    strategy::requirements::{CatalogSeries, SeriesSlice},
 };
 
 mod gateway;
@@ -364,8 +364,8 @@ enum Served {
 /// # Errors
 ///
 /// Returns an error naming `source` and saying why if not.
-pub(crate) fn serves(source: &Source) -> anyhow::Result<()> {
-    let (data_type, identifier) = source.series();
+pub(crate) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
+    let (data_type, identifier) = source.key();
     served(&data_type, &identifier).map(drop)
 }
 

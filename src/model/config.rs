@@ -24,8 +24,9 @@ use super::{
     targets::{Side, Target, TargetConfig},
 };
 use crate::strategy::{
-    DataRequirements, TradedInstrument,
+    TradedInstrument,
     conversions::Conversions,
+    requirements::DataRequirements,
     risk::{R, Risk},
 };
 
@@ -506,7 +507,7 @@ mod tests {
             learner::LightGbmConfig,
             targets::{BracketSpec, DEFAULT_ATR, Distance},
         },
-        strategy::{AtrArgs, TickSeries},
+        strategy::{AtrArgs, requirements::TickSeries},
     };
 
     const GOLD: &str = "XAUUSD.ICMARKETS";

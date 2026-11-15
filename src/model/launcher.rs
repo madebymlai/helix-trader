@@ -70,7 +70,7 @@ use super::{
     schedule::{self, Retrain},
     train::Trained,
 };
-use crate::strategy::DataRequirements;
+use crate::strategy::requirements::DataRequirements;
 
 /// The most lines of a child's standard error kept for the reason it
 /// failed: the error it printed last is at their end.
@@ -426,7 +426,7 @@ mod tests {
             score::ExpectedScore,
             train::{Kept, Outcome},
         },
-        strategy::{TickSeries, risk::R},
+        strategy::{requirements::TickSeries, risk::R},
     };
 
     fn at(time: &str) -> Timestamp {

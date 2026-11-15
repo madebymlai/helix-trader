@@ -20,7 +20,7 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 use clap::{Args, Command, FromArgMatches};
 use ctrader::{CTraderExecutionClientConfig, CTraderExecutionClientFactory, CTraderSession};
 use helix_trader::{
-    strategy::{DataRequirements, TickSeries},
+    strategy::requirements::{DataRequirements, TickSeries},
     venues::{HistoryVenueArgs, fill_history},
 };
 use jiff::Timestamp;

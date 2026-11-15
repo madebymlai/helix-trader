@@ -739,9 +739,10 @@ mod tests {
         targets::{BracketSpec, BracketWidth, DEFAULT_ATR, Distance, Side, Target, TargetConfig},
     };
     use crate::strategy::{
-        AtrArgs, DataRequirements, Declared, EmaArgs, IndicatorsConfig, TickSeries,
+        AtrArgs, Declared, EmaArgs, IndicatorsConfig,
         conversions::Conversions,
         orders::{Bracket, Exits},
+        requirements::{DataRequirements, TickSeries},
         risk::R,
     };
     use rust_decimal::Decimal;

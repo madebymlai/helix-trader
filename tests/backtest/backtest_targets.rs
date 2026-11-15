@@ -45,7 +45,11 @@ use helix_trader::{
             TargetRow, Targets,
         },
     },
-    strategy::{AtrArgs, DataRequirements, Declared, TickSeries, orders, risk::Risk},
+    strategy::{
+        AtrArgs, Declared, orders,
+        requirements::{DataRequirements, TickSeries},
+        risk::Risk,
+    },
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{

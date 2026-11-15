@@ -40,7 +40,7 @@ use self::account::Account;
 use super::{HistorySource, Row};
 use crate::{
     catalog::{FillData, FillRequest, NodeClient, missing},
-    strategy::{SeriesSlice, Source, TickSeries},
+    strategy::requirements::{CatalogSeries, SeriesSlice, TickSeries},
 };
 
 mod account;
@@ -164,19 +164,19 @@ async fn write_definitions(
 /// # Errors
 ///
 /// Returns an error naming `source` and saying why if not served.
-pub(super) fn serves(source: &Source) -> anyhow::Result<()> {
+pub(super) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
     match source {
-        Source::Bars(bar_type) => ensure!(
+        CatalogSeries::Bars(bar_type) => ensure!(
             bar_type.is_externally_aggregated() && bar_spec_as_okx_channel(bar_type.spec()).is_ok(),
             "OKX's history serves its candles, EXTERNAL bars of the LAST price 1, 3, 5, 15 or 30 \
              minutes, 1, 2, 4, 6 or 12 hours, 1, 2, 3 or 5 days, a week or 1, 3, 6 or 12 months \
              wide, or 1 second, and its trades, not {bar_type}"
         ),
-        Source::Ticks(TickSeries {
+        CatalogSeries::Ticks(TickSeries {
             data: NautilusDataType::TradeTick,
             ..
         }) => {}
-        Source::Ticks(ticks) => {
+        CatalogSeries::Ticks(ticks) => {
             bail!("OKX's history serves its trades and its candles, not the {ticks}")
         }
     }
@@ -347,7 +347,7 @@ mod tests {
     use nautilus_model::data::BarType;
 
     use super::*;
-    use crate::strategy::DataRequirements;
+    use crate::strategy::requirements::DataRequirements;
 
     const INSTRUMENT: &str = include_str!("testdata/BTC-USDT-SWAP-instrument.json");
 

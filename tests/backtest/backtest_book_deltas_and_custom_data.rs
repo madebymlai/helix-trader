@@ -11,7 +11,9 @@
 use std::{cell::RefCell, rc::Rc};
 
 use crate::common::{glbx, ic};
-use helix_trader::{backtest::Backtest, model::features::FeatureSet, strategy::TickSeries};
+use helix_trader::{
+    backtest::Backtest, model::features::FeatureSet, strategy::requirements::TickSeries,
+};
 use nautilus_common::actor::DataActor;
 use nautilus_core::UnixNanos;
 use nautilus_model::{

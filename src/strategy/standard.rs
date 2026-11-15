@@ -14,11 +14,11 @@ use serde::{
 };
 
 use super::{
-    DataRequirements, Declaration, IndicatorsConfig, TickSeries,
+    Declaration, IndicatorsConfig,
     conversions::{Conversions, Rates},
+    requirements::{DataRequirements, TickSeries, tick_data},
     risk::{Risk, Stake},
     session::Session,
-    tick_data,
 };
 use crate::{
     model::config::{ModelConfig, ModelSection},
@@ -2145,7 +2145,7 @@ mod tests {
             let requirements = load(&toml).unwrap().data_requirements();
 
             assert_eq!(
-                requirements.catalog_series(),
+                requirements.catalog_keys(),
                 [(
                     NautilusDataType::Bar,
                     "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL".to_string()

@@ -215,7 +215,7 @@ use serde_json::{Value, json};
 
 use crate::{
     rolls::{ContinuousBars, DELTAS_BOOK_TYPE, front},
-    strategy::{DataRequirements, Source, TickSeries, bar_sources},
+    strategy::requirements::{CatalogSeries, DataRequirements, TickSeries, bar_sources},
     time_range, venues,
 };
 
@@ -739,7 +739,7 @@ where
     for (source, built) in sources {
         let custom = matches!(
             source,
-            Source::Ticks(TickSeries {
+            CatalogSeries::Ticks(TickSeries {
                 data: NautilusDataType::Custom { .. },
                 ..
             })
@@ -756,10 +756,10 @@ where
         }
         let params = Some(request_params(built.iter(), windows.clone()));
         let id = match source {
-            Source::Bars(source) => {
+            CatalogSeries::Bars(source) => {
                 actor.request_bars(source, Some(start), Some(now), None, None, params)?
             }
-            Source::Ticks(tick) => match tick.data {
+            CatalogSeries::Ticks(tick) => match tick.data {
                 NautilusDataType::TradeTick => actor.request_trades(
                     tick.instrument_id,
                     Some(start),
@@ -878,7 +878,7 @@ fn subscribe_from<A>(
 /// The instruments of `sources` whose definitions the cache of `actor`
 /// lacks, each once, in order: those the series of a data client are of,
 /// custom data, from the catalog alone, aside.
-fn undefined<A>(actor: &A, sources: &[(Source, Vec<BarType>)]) -> Vec<InstrumentId>
+fn undefined<A>(actor: &A, sources: &[(CatalogSeries, Vec<BarType>)]) -> Vec<InstrumentId>
 where
     A: DataActor + DataActorNative,
 {
@@ -886,12 +886,12 @@ where
     let mut undefined: Vec<InstrumentId> = Vec::new();
     for (source, _) in sources {
         let instrument_id = match source {
-            Source::Bars(bar_type) => bar_type.instrument_id(),
-            Source::Ticks(TickSeries {
+            CatalogSeries::Bars(bar_type) => bar_type.instrument_id(),
+            CatalogSeries::Ticks(TickSeries {
                 data: NautilusDataType::Custom { .. },
                 ..
             }) => continue,
-            Source::Ticks(tick) => tick.instrument_id,
+            CatalogSeries::Ticks(tick) => tick.instrument_id,
         };
         if !undefined.contains(&instrument_id) && cache.instrument(&instrument_id).is_none() {
             undefined.push(instrument_id);
@@ -902,7 +902,7 @@ where
 
 /// The warmup requests of `bar_types`, bar types on no root, and of
 /// `ticks` at `now`: one per series the bars are built from, as Nautilus'
-/// data engine builds them (see `strategy::catalog_series`), with the bar
+/// data engine builds them (see `strategy::requirements::catalog_keys`), with the bar
 /// types built from it, in the order the series first come, an external
 /// bar type being its own series, which builds none of it; then
 /// one per tick series on the contract standing for its instrument at
@@ -911,19 +911,19 @@ fn requests(
     bar_types: &[BarType],
     ticks: &[TickSeries],
     now: Timestamp,
-) -> Vec<(Source, Vec<BarType>)> {
-    let mut requests: Vec<(Source, Vec<BarType>)> = Vec::new();
+) -> Vec<(CatalogSeries, Vec<BarType>)> {
+    let mut requests: Vec<(CatalogSeries, Vec<BarType>)> = Vec::new();
     for (source, bar_type) in bar_sources(bar_types).zip(bar_types) {
         // An external bar type is its own source: requested as it is, it
         // builds nothing, Nautilus aggregating into internal bar types alone.
-        let built = (source != Source::Bars(*bar_type)).then_some(*bar_type);
+        let built = (source != CatalogSeries::Bars(*bar_type)).then_some(*bar_type);
         match requests.iter_mut().find(|(of, _)| *of == source) {
             Some((_, of_source)) => of_source.extend(built),
             None => requests.push((source, built.into_iter().collect())),
         }
     }
     for tick in ticks {
-        let source = Source::Ticks(TickSeries {
+        let source = CatalogSeries::Ticks(TickSeries {
             data: tick.data.clone(),
             instrument_id: front(tick.instrument_id, now),
         });
@@ -1184,7 +1184,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::strategy::TickSeries;
+    use crate::strategy::requirements::TickSeries;
 
     const DAY: SignedDuration = SignedDuration::from_hours(24);
 
@@ -1233,12 +1233,12 @@ mod tests {
     /// params.
     fn sent_requests(
         commands: &TypedIntoMessageSavingHandler<DataCommand>,
-    ) -> Vec<(Source, UUID4, Option<Params>)> {
+    ) -> Vec<(CatalogSeries, UUID4, Option<Params>)> {
         let ticks = |data, instrument_ids: &[InstrumentId]| {
             let [instrument_id] = instrument_ids else {
                 panic!("one instrument")
             };
-            Source::Ticks(TickSeries {
+            CatalogSeries::Ticks(TickSeries {
                 data,
                 instrument_id: *instrument_id,
             })
@@ -1274,7 +1274,7 @@ mod tests {
                         let [bar_type] = request.bar_types.as_slice() else {
                             panic!("one bar type")
                         };
-                        (Source::Bars(*bar_type), request.params)
+                        (CatalogSeries::Bars(*bar_type), request.params)
                     }
                     other => panic!("unexpected {other:?}"),
                 };
@@ -1309,7 +1309,7 @@ mod tests {
     /// types it builds (its `bar_types` param).
     fn requested(
         commands: &TypedIntoMessageSavingHandler<DataCommand>,
-    ) -> Vec<(Source, Vec<BarType>)> {
+    ) -> Vec<(CatalogSeries, Vec<BarType>)> {
         sent_requests(commands)
             .into_iter()
             .map(|(source, _, params)| {
@@ -1417,7 +1417,7 @@ mod tests {
         assert_eq!(
             requested(&commands),
             [(
-                Source::Ticks(tick(NautilusDataType::QuoteTick, "SXR8.IBIS")),
+                CatalogSeries::Ticks(tick(NautilusDataType::QuoteTick, "SXR8.IBIS")),
                 vec![hours, minutes],
             )]
         );
@@ -1467,19 +1467,19 @@ mod tests {
             requested(&commands),
             [
                 (
-                    Source::Ticks(tick(NautilusDataType::QuoteTick, "XAUUSD.ICMARKETS")),
+                    CatalogSeries::Ticks(tick(NautilusDataType::QuoteTick, "XAUUSD.ICMARKETS")),
                     vec![bars],
                 ),
                 (
-                    Source::Ticks(tick(NautilusDataType::TradeTick, "GCZ26.GLBX")),
+                    CatalogSeries::Ticks(tick(NautilusDataType::TradeTick, "GCZ26.GLBX")),
                     vec![],
                 ),
                 (
-                    Source::Ticks(tick(NautilusDataType::OrderBookDepth, "GCZ26.GLBX")),
+                    CatalogSeries::Ticks(tick(NautilusDataType::OrderBookDepth, "GCZ26.GLBX")),
                     vec![],
                 ),
                 (
-                    Source::Ticks(tick(NautilusDataType::OrderBookDelta, "GCZ26.GLBX")),
+                    CatalogSeries::Ticks(tick(NautilusDataType::OrderBookDelta, "GCZ26.GLBX")),
                     vec![],
                 ),
             ]
@@ -1510,19 +1510,19 @@ mod tests {
             requested(&commands),
             [
                 (
-                    Source::Ticks(tick(NautilusDataType::QuoteTick, "XAUUSD.ICMARKETS")),
+                    CatalogSeries::Ticks(tick(NautilusDataType::QuoteTick, "XAUUSD.ICMARKETS")),
                     vec![bars],
                 ),
                 (
-                    Source::Bars(BarType::from("EUR/USD.IDEALPRO-1-MINUTE-BID-EXTERNAL")),
+                    CatalogSeries::Bars(BarType::from("EUR/USD.IDEALPRO-1-MINUTE-BID-EXTERNAL")),
                     vec![],
                 ),
                 (
-                    Source::Bars(BarType::from("EUR/USD.IDEALPRO-1-MINUTE-ASK-EXTERNAL")),
+                    CatalogSeries::Bars(BarType::from("EUR/USD.IDEALPRO-1-MINUTE-ASK-EXTERNAL")),
                     vec![],
                 ),
                 (
-                    Source::Ticks(tick(NautilusDataType::QuoteTick, "EURUSD.ICMARKETS")),
+                    CatalogSeries::Ticks(tick(NautilusDataType::QuoteTick, "EURUSD.ICMARKETS")),
                     vec![],
                 ),
             ]
@@ -1554,7 +1554,7 @@ mod tests {
         assert_eq!(
             requested(&commands),
             [(
-                Source::Ticks(tick(NautilusDataType::TradeTick, swap)),
+                CatalogSeries::Ticks(tick(NautilusDataType::TradeTick, swap)),
                 vec![]
             )]
         );
@@ -1812,7 +1812,7 @@ mod tests {
         let hour_mid = BarType::from("ESM24.CME-1-HOUR-MID-INTERNAL");
         let composite = BarType::from("ESM24.CME-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL");
         let ticks = |data, instrument_id: &str| {
-            Source::Ticks(TickSeries {
+            CatalogSeries::Ticks(TickSeries {
                 data,
                 instrument_id: InstrumentId::from(instrument_id),
             })
@@ -1839,7 +1839,7 @@ mod tests {
                     vec![hour_mid]
                 ),
                 (
-                    Source::Bars(BarType::from("ESM24.CME-1-MINUTE-LAST-EXTERNAL")),
+                    CatalogSeries::Bars(BarType::from("ESM24.CME-1-MINUTE-LAST-EXTERNAL")),
                     vec![composite]
                 ),
             ]
@@ -1870,9 +1870,9 @@ mod tests {
         assert_eq!(
             requested(&commands),
             vec![
-                (Source::Bars(minutes), vec![composite]),
-                (Source::Bars(bid), vec![]),
-                (Source::Bars(ask), vec![]),
+                (CatalogSeries::Bars(minutes), vec![composite]),
+                (CatalogSeries::Bars(bid), vec![]),
+                (CatalogSeries::Bars(ask), vec![]),
             ]
         );
     }
@@ -1900,17 +1900,17 @@ mod tests {
             };
             probe.cache_rc().borrow_mut().add_bar(bar).unwrap();
         }
-        let id_of = |wanted: &Source| {
+        let id_of = |wanted: &CatalogSeries| {
             sent_requests(&commands)
                 .into_iter()
                 .find_map(|(source, id, _)| (source == *wanted).then_some(id))
                 .unwrap()
         };
-        let quotes = id_of(&Source::Ticks(tick(
+        let quotes = id_of(&CatalogSeries::Ticks(tick(
             NautilusDataType::QuoteTick,
             "ESM24.CME",
         )));
-        let minutes = id_of(&Source::Bars(BarType::from(
+        let minutes = id_of(&CatalogSeries::Bars(BarType::from(
             "ESM24.CME-1-MINUTE-LAST-EXTERNAL",
         )));
         let completed = |id| DataResponseEnvelope::terminal(id, None);
@@ -2159,7 +2159,8 @@ mod tests {
         let quotes = sent_requests(&commands)
             .into_iter()
             .find_map(|(source, id, _)| {
-                (source == Source::Ticks(tick(NautilusDataType::QuoteTick, XAU))).then_some(id)
+                (source == CatalogSeries::Ticks(tick(NautilusDataType::QuoteTick, XAU)))
+                    .then_some(id)
             })
             .unwrap();
 

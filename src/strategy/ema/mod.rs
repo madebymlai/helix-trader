@@ -52,9 +52,9 @@ use self::signal::Signal;
 use crate::{
     rolls::Roller,
     strategy::{
-        DataRequirements, Declaration, Declared, EmaArgs, Part, PlainStrategy, Series,
-        StandardConfig, TickSeries, Visitor,
+        Declaration, Declared, EmaArgs, Part, PlainStrategy, Series, StandardConfig, Visitor,
         orders::{self, Bracket, Exits, Trade},
+        requirements::{DataRequirements, TickSeries},
         warmup::Warmup,
     },
 };

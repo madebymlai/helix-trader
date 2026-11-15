@@ -231,7 +231,7 @@ mod tests {
     use super::*;
     use crate::{
         catalog::missing,
-        strategy::{DataRequirements, TickSeries},
+        strategy::requirements::{DataRequirements, TickSeries},
     };
 
     fn ts(s: &str) -> Timestamp {

@@ -73,7 +73,10 @@ use self::{databento::DatabentoHistory, ib::IbHistory, okx::OkxHistory};
 use crate::{
     catalog::{NodeClient, NodeFill, missing},
     live::node::{Clients, ExecClient},
-    strategy::{DataRequirements, Series, SeriesSlice, Source, TickSeries},
+    strategy::{
+        Series,
+        requirements::{CatalogSeries, DataRequirements, SeriesSlice, TickSeries},
+    },
 };
 
 /// A cTrader broker: the venue of its instruments, which names its clients
@@ -479,12 +482,12 @@ pub fn rate_series(pair: InstrumentId) -> anyhow::Result<Vec<Series>> {
     };
     let no_bars = match bars
         .iter()
-        .try_for_each(|bars| serves(&Source::Bars(*bars)))
+        .try_for_each(|bars| serves(&CatalogSeries::Bars(*bars)))
     {
         Ok(()) => return Ok(bars.map(Series::Bars).to_vec()),
         Err(e) => e,
     };
-    let no_quotes = match serves(&Source::Ticks(quotes.clone())) {
+    let no_quotes = match serves(&CatalogSeries::Ticks(quotes.clone())) {
         Ok(()) => return Ok(vec![Series::Ticks(quotes)]),
         Err(e) => e,
     };
@@ -512,13 +515,13 @@ pub fn rate_series(pair: InstrumentId) -> anyhow::Result<Vec<Series>> {
 ///
 /// Returns an error naming `source` and saying why if its venue's history
 /// does not serve it.
-pub(crate) fn serves(source: &Source) -> anyhow::Result<()> {
+pub(crate) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
     match Row::of(source.instrument_id().venue).history {
         HistorySource::CTrader(broker) => {
-            ctrader::quoted(Venue::new(broker.venue), &[source.series()]).map(drop)
+            ctrader::quoted(Venue::new(broker.venue), &[source.key()]).map(drop)
         }
         HistorySource::Okx => okx::serves(source),
-        HistorySource::Lse => ::lse::check_served(&source.series()),
+        HistorySource::Lse => ::lse::check_served(&source.key()),
         HistorySource::Ib => ib::serves(source),
     }
 }
@@ -648,7 +651,7 @@ fn of_definitions_source(slices: &[SeriesSlice], source: DefinitionsSource) -> V
 
 /// Fills the catalog in `catalog_dir` with the instruments and the series
 /// `requirements` reads over `[start, end]`, those its bars are built from
-/// and its ticks (see `DataRequirements::catalog_series`), each on a contract
+/// and its ticks (see `DataRequirements::catalog_keys`), each on a contract
 /// over its slice (`DataRequirements::slices`), every history source
 /// (`Row::of`, `HistorySource`) given its slices, and its custom data of no
 /// instrument (`DataRequirements::custom`), which has no venue, from the
@@ -696,10 +699,10 @@ pub async fn fill_history(
     for data_type in &requirements.custom {
         custom_source(data_type.type_name())?;
     }
-    for source in requirements.sources() {
+    for source in requirements.catalog_series() {
         if !matches!(
             source,
-            Source::Ticks(TickSeries {
+            CatalogSeries::Ticks(TickSeries {
                 data: NautilusDataType::Custom { .. },
                 ..
             })
@@ -794,7 +797,7 @@ fn ctrader_clients(connection: CTraderConnection, instrument_ids: Vec<Instrument
 /// What a node needs of the cTrader broker of `venue` to trade its
 /// instruments `ids`: the connection `connection` reads, and the instruments
 /// of the series `requirements` reads of them, those its bars are built from
-/// and its ticks, as a fill reads them (`DataRequirements::catalog_series`),
+/// and its ticks, as a fill reads them (`DataRequirements::catalog_keys`),
 /// their quotes being all cTrader serves: an instrument read as its quotes
 /// alone, a conversion pair's, is loaded, so that the strategy's
 /// subscription to them is served. Nothing connects.
@@ -812,7 +815,7 @@ fn ctrader_read(
 ) -> anyhow::Result<(CTraderConnection, Vec<InstrumentId>)> {
     let instrument_ids = ctrader::quoted(
         Venue::new(venue),
-        &requirements.of_instruments(ids).catalog_series(),
+        &requirements.of_instruments(ids).catalog_keys(),
     )?;
     Ok((connection()?, instrument_ids))
 }
@@ -932,7 +935,7 @@ pub(crate) async fn live_clients(
         .into_iter()
         .filter(|id| Row::of(id.venue).live_data == LiveDataSource::Lse)
         .collect();
-    ::lse::check_streamed(&requirements.of_instruments(&lse_read).catalog_series())?;
+    ::lse::check_streamed(&requirements.of_instruments(&lse_read).catalog_keys())?;
     let ctrader = ctrader_brokers_present(&ctrader_ids)
         .into_iter()
         .map(|(broker, ids)| ctrader_read(requirements, &ids, broker.venue, || broker.connection()))
@@ -1868,13 +1871,13 @@ mod tests {
     }
 
     /// The external bars of `bar_type`, a source as it is.
-    fn bars_of(bar_type: &str) -> Source {
-        Source::Bars(BarType::from(bar_type))
+    fn bars_of(bar_type: &str) -> CatalogSeries {
+        CatalogSeries::Bars(BarType::from(bar_type))
     }
 
     /// The `data` of `instrument_id`, a source as it is.
-    fn ticks_of(data: NautilusDataType, instrument_id: &str) -> Source {
-        Source::Ticks(TickSeries {
+    fn ticks_of(data: NautilusDataType, instrument_id: &str) -> CatalogSeries {
+        CatalogSeries::Ticks(TickSeries {
             data,
             instrument_id: InstrumentId::from(instrument_id),
         })
@@ -1882,7 +1885,7 @@ mod tests {
 
     /// Asserts each of `served` is served and each of `refused` refused,
     /// the error naming it.
-    fn assert_serves(served: &[Source], refused: &[Source]) {
+    fn assert_serves(served: &[CatalogSeries], refused: &[CatalogSeries]) {
         for source in served {
             if let Err(err) = serves(source) {
                 panic!("{source} refused: {err:#}");
@@ -1892,7 +1895,7 @@ mod tests {
             let Err(err) = serves(source) else {
                 panic!("{source} served");
             };
-            let (_, identifier) = source.series();
+            let (_, identifier) = source.key();
             assert!(
                 format!("{err:#}").contains(&identifier),
                 "{source}: {err:#}"
@@ -2019,7 +2022,7 @@ mod tests {
     /// A history request of each kind a data client takes, of `id`, its
     /// bars `id`'s 1-minute LAST bars, over an hour, as a fill or a warmup
     /// sends it: the kind's name, the source it asks for and the request.
-    fn requests_of(id: InstrumentId) -> Vec<(&'static str, Source, RequestCommand)> {
+    fn requests_of(id: InstrumentId) -> Vec<(&'static str, CatalogSeries, RequestCommand)> {
         use NautilusDataType as D;
         let (start, end): (Timestamp, Timestamp) = (
             at(FILL_START),
@@ -2027,7 +2030,7 @@ mod tests {
         );
         let bars = BarType::from(format!("{id}-1-MINUTE-LAST-EXTERNAL").as_str());
         let ticks = |data| {
-            Source::Ticks(TickSeries {
+            CatalogSeries::Ticks(TickSeries {
                 data,
                 instrument_id: id,
             })
@@ -2064,7 +2067,7 @@ mod tests {
             ),
             (
                 "bars",
-                Source::Bars(bars),
+                CatalogSeries::Bars(bars),
                 RequestCommand::Bars(RequestBars::new(
                     bars,
                     Some(start),

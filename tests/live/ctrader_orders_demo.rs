@@ -39,7 +39,7 @@ use std::{
 use ctrader::{CTraderExecutionClientConfig, CTraderExecutionClientFactory};
 use helix_trader::{
     live::Live,
-    strategy::{DataRequirements, warmup::Warmup},
+    strategy::{requirements::DataRequirements, warmup::Warmup},
 };
 use jiff::SignedDuration;
 use nautilus_common::{

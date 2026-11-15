@@ -36,7 +36,10 @@ pub use self::{
 };
 use crate::{
     rolls::ContinuousBars,
-    strategy::{DataRequirements, SeriesSlice, TickSeries, TradeConfig, conversions},
+    strategy::{
+        TradeConfig, conversions,
+        requirements::{DataRequirements, SeriesSlice, TickSeries},
+    },
     venues,
 };
 
@@ -52,10 +55,10 @@ pub struct Backtest {
     pub catalog: PathBuf,
     /// The bar types the strategy trades on, internal, and the external
     /// bars of a pair it converts through, an IB pair's BID and ASK bars
-    /// (`strategy::DataRequirements::bar_types`). Their instruments
+    /// (`strategy::requirements::DataRequirements::bar_types`). Their instruments
     /// are those the strategy reads, on one venue or several, each a
     /// simulated venue of the run. The series Nautilus builds the
-    /// bars from (see `strategy::catalog_series`: the quotes of their
+    /// bars from (see `strategy::requirements::catalog_keys`: the quotes of their
     /// instrument, the source bars of a composite bar type, or external
     /// bars themselves) are replayed, as is the book of each instrument the catalog stores one
     /// of (see `series`).
@@ -66,7 +69,7 @@ pub struct Backtest {
     /// are read too, each a simulated venue of the run as well.
     pub ticks: Vec<TickSeries>,
     /// The custom data of no instrument the strategy reads (see
-    /// `strategy::DataRequirements::custom`): each series replayed over the
+    /// `strategy::requirements::DataRequirements::custom`): each series replayed over the
     /// window, beside the others, each row when it is known (`lse::LseRow`:
     /// a date's at its end). The run registers the types the venues'
     /// sources serve with Nautilus, which decodes custom data by its type's
@@ -218,14 +221,14 @@ impl Backtest {
 
     /// The catalog series the run replays, each over the slice of
     /// `[start, end]` its contract stands for its instrument (see
-    /// `strategy::DataRequirements::slices`), the slices of one series
+    /// `strategy::requirements::DataRequirements::slices`), the slices of one series
     /// merged (`SeriesSlice::merged`): those the bars are built from (see
-    /// `strategy::catalog_series`) and the ticks as declared, then the
+    /// `strategy::requirements::catalog_keys`) and the ticks as declared, then the
     /// book depth of each contract of the instruments of the bar types
     /// whose catalog stores one, then the funding of each contract whose
     /// catalog stores funding, which the venue settles on open positions;
     /// the book and the funding keyed by the contract's id, over its
-    /// slices (see `strategy::DataRequirements::contract_slices`); no part
+    /// slices (see `strategy::requirements::DataRequirements::contract_slices`); no part
     /// of a series twice. A plain instrument is one slice on itself over the
     /// whole span. An instrument read for its book alone, none of the
     /// series its bars are built from stored (CME gold's book without its

@@ -143,7 +143,8 @@ use super::{calibration::Expected, targets::BracketWidth};
 use crate::{
     rolls::{Transition, front},
     strategy::{
-        Declaration, Declared, IndicatorArgs, IndicatorsConfig, TickSeries, warmup::BookIndicator,
+        Declaration, Declared, IndicatorArgs, IndicatorsConfig, requirements::TickSeries,
+        warmup::BookIndicator,
     },
 };
 
@@ -827,7 +828,7 @@ impl FeatureSetBuilder {
     }
 
     /// Declares a raw feature, named `name`, on the custom data
-    /// `type_name` of `instrument_id` (see `strategy::TickSeries`): its
+    /// `type_name` of `instrument_id` (see `strategy::requirements::TickSeries`): its
     /// value is `read` of the latest point of that data type the cache
     /// holds, cold until it holds one.
     #[must_use]

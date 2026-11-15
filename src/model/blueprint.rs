@@ -32,7 +32,7 @@ use super::{
     train::Training,
     walk::WalkForward,
 };
-use crate::strategy::DataRequirements;
+use crate::strategy::requirements::DataRequirements;
 
 /// A strategy's model as its config alone determines it, of a valid
 /// decision rule and target (`new`).

@@ -1,6 +1,6 @@
 //! A strategy on a composite bar type, hour bars Nautilus builds from
 //! external minute bars: `fill_catalog` stores the minute bars a source
-//! returns, as the strategy's bar types ask (`strategy::catalog_series`),
+//! returns, as the strategy's bar types ask (`strategy::requirements::catalog_keys`),
 //! and the backtest replays them, so that every hour bar has the open,
 //! high, low and close of its minute bars, built `BUILT_AFTER` its close
 //! as live. A model strategy deciding on them decides once the hour bar
@@ -24,7 +24,10 @@ use helix_trader::{
         handle::{Mode, SettledRows},
         targets::TargetConfig,
     },
-    strategy::{DataRequirements, Declared, catalog_series},
+    strategy::{
+        Declared,
+        requirements::{DataRequirements, catalog_keys},
+    },
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
@@ -96,7 +99,7 @@ fn hour_bar(close: Timestamp) -> common::Ohlc {
 /// hour bars are built from, over 06:00 to 15:00, as `fill-catalog` does.
 fn fill(dir: &Path) {
     let mut catalog = ParquetDataCatalog::new(dir, None, None, None, None);
-    let series = catalog_series(&[BarType::from(COMPOSITE)]);
+    let series = catalog_keys(&[BarType::from(COMPOSITE)]);
     let fill = fill_catalog(
         &mut catalog,
         vec![instrument()],
@@ -117,7 +120,7 @@ fn hour_bars_built_from_stored_minute_bars_have_the_prices_of_their_minutes() {
     let dir = tempfile::tempdir().unwrap();
     let bar_types = [BarType::from(COMPOSITE)];
     assert_eq!(
-        catalog_series(&bar_types),
+        catalog_keys(&bar_types),
         [(NautilusDataType::Bar, MINUTE_BARS.to_string())],
         "the minute bars are what the hour bars are built from"
     );

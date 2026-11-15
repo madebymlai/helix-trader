@@ -33,7 +33,7 @@
 
 use clap::{Args, Command, FromArgMatches};
 use helix_trader::{
-    strategy::{DataRequirements, TickSeries},
+    strategy::requirements::{DataRequirements, TickSeries},
     venues::{HistoryVenueArgs, fill_history},
 };
 use jiff::{SignedDuration, Timestamp};

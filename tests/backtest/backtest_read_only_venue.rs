@@ -16,7 +16,7 @@ use std::{
 use crate::common::ic;
 use helix_trader::{
     catalog::{NodeClient, NodeFill, missing},
-    strategy::{DataRequirements, TickSeries},
+    strategy::requirements::{DataRequirements, TickSeries},
 };
 use jiff::SignedDuration;
 use lse::{

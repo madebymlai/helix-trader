@@ -25,7 +25,10 @@ use helix_trader::{
         features::{Feature, FeatureSet},
         targets::{BracketSpec, Distance, Target, TargetConfig},
     },
-    strategy::{DataRequirements, Declared, IndicatorArgs, TickSeries},
+    strategy::{
+        Declared, IndicatorArgs,
+        requirements::{DataRequirements, TickSeries},
+    },
 };
 use jiff::{SignedDuration, Timestamp, civil::Date};
 use nautilus_indicators::indicator::Indicator;

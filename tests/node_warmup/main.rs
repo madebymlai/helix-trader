@@ -27,7 +27,7 @@ use helix_trader::{
     },
     rolls::Roller,
     strategy::{
-        DataRequirements, TickSeries,
+        requirements::{DataRequirements, TickSeries},
         warmup::{self, BookIndicator, Warmup},
     },
 };

@@ -21,7 +21,7 @@ use crate::{
         decide::DecisionRule,
         targets::{BracketSpec, Distance, Target, TargetConfig},
     },
-    strategy::{AtrArgs, DataRequirements, EmaArgs},
+    strategy::{AtrArgs, EmaArgs, requirements::DataRequirements},
 };
 
 const AUD: &str = "AUD/USD.SIM";
@@ -774,7 +774,7 @@ fn width_of(distance: Distance) -> Rc<BracketWidth> {
         .build();
     let requirements = DataRequirements {
         bar_types: vec![],
-        ticks: vec![crate::strategy::TickSeries {
+        ticks: vec![crate::strategy::requirements::TickSeries {
             data: nautilus_model::data::NautilusDataType::QuoteTick,
             instrument_id: id(AUD),
         }],

@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 
 use clap::{Args, FromArgMatches};
 use helix_trader::{
-    strategy::{DataRequirements, TickSeries},
+    strategy::requirements::{DataRequirements, TickSeries},
     venues::{HistoryVenueArgs, fill_history},
 };
 use jiff::{SignedDuration, Timestamp};

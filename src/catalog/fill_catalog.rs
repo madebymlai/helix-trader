@@ -3,7 +3,7 @@
 //!
 //! Source-agnostic, no node: the data comes from a fetch function the
 //! caller passes, backed by an adapter's historical client (`venues::ib`). A series is a Nautilus data type and its catalog
-//! identifier (see `strategy::catalog_series`): the quotes of an
+//! identifier (see `strategy::requirements::catalog_keys`): the quotes of an
 //! instrument, keyed by its id, or the bars of a bar type, keyed by the bar
 //! type. Per series it resumes after its stored range
 //! (`query_first_timestamp`, `query_last_timestamp`), checks the response,
@@ -32,7 +32,7 @@ use nautilus_persistence::{
     backend::parquet::catalog::ParquetDataCatalog, catalog::types::data_path_prefix,
 };
 
-use crate::strategy::SeriesSlice;
+use crate::strategy::requirements::SeriesSlice;
 
 /// Fills `catalog` with `instruments`, then over `[start, end]` with each
 /// of `series`, a Nautilus data type and its catalog identifier, fetched one
@@ -220,7 +220,7 @@ mod tests {
     use super::*;
     use crate::{
         rolls::Slice,
-        strategy::{DataRequirements, SeriesSlice, TickSeries},
+        strategy::requirements::{DataRequirements, SeriesSlice, TickSeries},
     };
     use nautilus_model::{
         data::{Bar, BarType, OrderBookDepth, QuoteTick, TradeTick, stubs::stub_depth10},
@@ -1021,7 +1021,7 @@ mod tests {
         let result = fill_catalog(
             catalog,
             vec![instrument()],
-            &requirements.catalog_series(),
+            &requirements.catalog_keys(),
             ns(start),
             ns(end),
             async |data_type, identifier, from, to| {

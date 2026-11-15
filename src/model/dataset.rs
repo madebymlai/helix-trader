@@ -112,7 +112,7 @@ use super::{
 };
 use crate::{
     backtest::{Commission, Latency},
-    strategy::{DataRequirements, warmup},
+    strategy::{requirements::DataRequirements, warmup},
 };
 
 /// The version of the code that makes every strategy's rows: the
@@ -846,7 +846,7 @@ mod tests {
     fn requirements() -> DataRequirements {
         DataRequirements {
             bar_types: vec![],
-            ticks: vec![crate::strategy::TickSeries {
+            ticks: vec![crate::strategy::requirements::TickSeries {
                 data: nautilus_model::data::NautilusDataType::QuoteTick,
                 instrument_id: InstrumentId::from(GOLD),
             }],
@@ -1651,14 +1651,16 @@ mod tests {
     fn converting(pairs: &[&str]) -> Fingerprint {
         let pairs: Vec<InstrumentId> = pairs.iter().map(|&pair| InstrumentId::from(pair)).collect();
         let mut requirements = requirements();
-        requirements.ticks.extend(
-            pairs
-                .iter()
-                .map(|&instrument_id| crate::strategy::TickSeries {
-                    data: nautilus_model::data::NautilusDataType::QuoteTick,
-                    instrument_id,
-                }),
-        );
+        requirements
+            .ticks
+            .extend(
+                pairs
+                    .iter()
+                    .map(|&instrument_id| crate::strategy::requirements::TickSeries {
+                        data: nautilus_model::data::NautilusDataType::QuoteTick,
+                        instrument_id,
+                    }),
+            );
         let target = TargetConfig {
             conversions: Conversions::new(pairs),
             ..target()

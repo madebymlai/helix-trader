@@ -445,7 +445,7 @@ mod tests {
                 TargetRow,
             },
         },
-        strategy::{DataRequirements, risk::R},
+        strategy::{requirements::DataRequirements, risk::R},
     };
 
     const GOLD: &str = "XAUUSD.ICMARKETS";
@@ -492,7 +492,7 @@ mod tests {
     fn requirements() -> DataRequirements {
         DataRequirements {
             bar_types: vec![],
-            ticks: vec![crate::strategy::TickSeries {
+            ticks: vec![crate::strategy::requirements::TickSeries {
                 data: nautilus_model::data::NautilusDataType::QuoteTick,
                 instrument_id: InstrumentId::from(GOLD),
             }],
