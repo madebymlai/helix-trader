@@ -233,7 +233,9 @@ impl EmaCross {
         config.validate()?;
         let signal = Rc::new(Signal::new(&config));
         let requirements = config.data_requirements();
-        let warmup = warmup(&requirements).feeding(Rc::clone(&signal) as SharedActorIndicator);
+        let warmup = warmup(&requirements)
+            .converting(&config.trade.conversions)
+            .feeding(Rc::clone(&signal) as SharedActorIndicator);
         Ok(Self {
             core: StrategyCore::new_checked(config.base.clone())?,
             signal,
