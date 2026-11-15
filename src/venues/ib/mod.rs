@@ -643,7 +643,8 @@ pub(crate) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
 /// IB's historical ticks (the requests of the historical client's
 /// `request_ticks`, the live client's `request_quotes` and
 /// `request_trades`). Nautilus' IB
-/// clients request no book history.
+/// clients request no book history and no custom data of an instrument
+/// (Nautilus' `DataClient` default refuses `request_data`).
 ///
 /// # Errors
 ///
@@ -688,6 +689,10 @@ fn served(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<Serv
             );
             Ok(Served::Ticks(IbHistoricalTickType::Trades, instrument_id))
         }
+        NautilusDataType::Custom { .. } => bail!(
+            "IB's history serves no custom data of an instrument, so not the {data_type} of \
+             {identifier}"
+        ),
         other => {
             bail!("IB's history serves bars, quotes and trades, not the {other} of {identifier}")
         }

@@ -125,7 +125,7 @@ async fn a_warmup_of_days_holds_every_minute_bar_of_ibs_history_and_builds_each_
             ..Default::default()
         }),
         warmup: Rc::clone(&warmup),
-        subscriptions: Subscriptions::new(requirements.bar_types.clone(), vec![]),
+        subscriptions: Subscriptions::new(requirements.bar_types.clone(), vec![], vec![]),
         record: Rc::clone(&record),
     };
     // An empty catalog of its own: IB answers the whole warmup.

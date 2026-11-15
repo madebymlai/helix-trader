@@ -170,7 +170,7 @@ nautilus_strategy!(Recorder, {
 impl DataActor for Recorder {
     fn on_start(&mut self) -> anyhow::Result<()> {
         let now = self.clock().utc_now();
-        Subscriptions::new(vec![self.bar_type], vec![])
+        Subscriptions::new(vec![self.bar_type], vec![], vec![])
             .continuous(self.continuous.clone())
             .start(self, now);
         Ok(())

@@ -262,8 +262,12 @@ impl DataActor for TargetProbe {
         features.register(self);
         Rc::clone(&self.targets).start(self)?;
         let now = self.clock().utc_now();
-        Subscriptions::new(self.targets.atr_bar_type().into_iter().collect(), vec![])
-            .start(self, now);
+        Subscriptions::new(
+            self.targets.atr_bar_type().into_iter().collect(),
+            vec![],
+            vec![],
+        )
+        .start(self, now);
         let record = Rc::clone(&self.record);
         let handler = ShareableMessageHandler::from_typed(move |data: &CustomData| {
             let row = data.data.as_any().downcast_ref::<TargetRow>().unwrap();

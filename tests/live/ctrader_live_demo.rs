@@ -73,7 +73,7 @@ nautilus_strategy!(Recorder);
 impl DataActor for Recorder {
     fn on_start(&mut self) -> anyhow::Result<()> {
         let now = Rc::clone(&self.warmup).start(self)?;
-        Subscriptions::new(vec![self.bar_type], vec![]).start(self, now);
+        Subscriptions::new(vec![self.bar_type], vec![], vec![]).start(self, now);
         self.subscribe_quotes(self.bar_type.instrument_id(), None, None);
         Ok(())
     }

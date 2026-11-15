@@ -158,7 +158,7 @@ async fn a_live_start_warms_up_an_idealpro_pairs_bid_and_ask_bars_and_has_its_ra
             ..Default::default()
         }),
         warmup: Rc::clone(&warmup),
-        subscriptions: Subscriptions::new(requirements.bar_types.clone(), vec![]),
+        subscriptions: Subscriptions::new(requirements.bar_types.clone(), vec![], vec![]),
         record: Rc::clone(&record),
     };
     // An empty catalog of its own: IB answers the whole warmup.

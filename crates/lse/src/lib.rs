@@ -27,7 +27,7 @@
 pub use self::{
     common::consts::{LSE_API_KEY, LSE_CME_API_KEY, LSE_NASDAQ_API_KEY, LSEDGE_VENUE},
     config::LseDataClientConfig,
-    data::{serves, streams},
+    data::{serves, serves_custom, streams, streams_custom},
     factories::LseDataClientFactory,
     types::LseRow,
 };

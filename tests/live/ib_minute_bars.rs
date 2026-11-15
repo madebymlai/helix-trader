@@ -101,13 +101,16 @@ impl DataActor for Probe {
         warmup::start(
             self,
             now,
-            &[composite],
-            &[],
-            WARMUP,
+            &DataRequirements {
+                bar_types: vec![composite],
+                ticks: vec![],
+                custom: vec![],
+                warmup: WARMUP,
+            },
             &ContinuousBars::default(),
             self.warmup,
         )?;
-        Subscriptions::new(vec![composite], vec![]).start(self, now);
+        Subscriptions::new(vec![composite], vec![], vec![]).start(self, now);
         self.subscribe_bars(composite.composite(), None, None);
         Ok(())
     }

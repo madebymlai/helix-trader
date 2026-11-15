@@ -79,8 +79,10 @@
 //! decisions' freshness, its quotes among them when no series of the
 //! strategy reads it (`StandardConfig::data_requirements`, the decision's
 //! reference price, the venue's fills and the target's ATR then coming from
-//! them), and a `rolls::Roller` of their instruments: `start` subscribes
-//! each series on the contract standing for its instrument, a plain
+//! them), and to the custom data of no instrument of its requirements
+//! (`DataRequirements::custom`), which reaches the strategy's `on_data`,
+//! and a `rolls::Roller` of the ticks' instruments: `start` subscribes
+//! each tick series on the contract standing for its instrument, a plain
 //! instrument once, a root on its front contract, and sets each root's
 //! roll alert; the strategy hands the handle its time events (after
 //! `strategy::orders::on_time_event`), for the roller. At a roll the
@@ -398,7 +400,11 @@ impl ModelHandle {
             delay,
             traded,
             serving,
-            subscriptions: Subscriptions::new(bar_types.collect(), ticks),
+            subscriptions: Subscriptions::new(
+                bar_types.collect(),
+                ticks,
+                requirements.custom.clone(),
+            ),
             warmup: Rc::new(warmup),
             roller,
         }))
@@ -411,9 +417,10 @@ impl ModelHandle {
     /// (`Warmup::start`), holding the live ticks while it is pending, live
     /// requesting the history of the bars and of the requirements' ticks,
     /// then the subscriptions (`Subscriptions::start`) to the bars, the
-    /// target's ATR's among them, the features' ticks and every other tick
+    /// target's ATR's among them, the features' ticks, every other tick
     /// series of the requirements, the traded instrument's and the
-    /// conversion pairs' quotes, from where the warmup ends, a root's on the
+    /// conversion pairs' quotes, and the requirements' custom data of no
+    /// instrument, from where the warmup ends, a root's ticks on the
     /// contract standing for it then, and the roller, which sets each root's roll alert; starts the target's
     /// ATR, if it has one, registering it for its bars (in a dataset run the
     /// targets', and collects the rows they settle); then starts the
@@ -3254,5 +3261,38 @@ mod tests {
             ),
             (0, 1)
         );
+    }
+
+    /// The data type of the yields of `symbol`, custom data of no
+    /// instrument keyed by its identifier.
+    fn yields(symbol: &str) -> nautilus_model::data::DataType {
+        nautilus_model::data::DataType::new("Yield", None, Some(symbol.to_string()))
+    }
+
+    /// The custom data of no instrument of the requirements, the 10-year
+    /// and the 2-year US yields, is subscribed at a backtest's start
+    /// through the handle's subscriptions, on the message bus alone, so the
+    /// strategy's `on_data` gets it without subscribing itself.
+    #[test]
+    fn a_backtests_start_subscribes_the_custom_data_of_no_instrument_of_its_requirements() {
+        let models = tempfile::tempdir().unwrap();
+        let requirements = DataRequirements {
+            custom: vec![yields("US10Y"), yields("US02Y")],
+            ..requirements()
+        };
+        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+        let handle = ModelHandle::new(
+            &blueprint_of(&features(), &config(), requirements),
+            Mode::Backtest {
+                models: models.path().to_path_buf(),
+            },
+        )
+        .unwrap();
+
+        handle.start(&mut probe).unwrap();
+
+        let subscribers =
+            |symbol| msgbus::subscriptions_count_any(get_custom_topic(&yields(symbol))).unwrap();
+        assert_eq!([subscribers("US10Y"), subscribers("US02Y")], [1, 1]);
     }
 }

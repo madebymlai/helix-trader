@@ -47,18 +47,23 @@ pub struct DataRequirements {
     /// handle's), a live start
     /// refusing one its venue's live data does not stream
     /// (`venues::streams`), and warms up on each its venue's history serves
-    /// (`warmup::Warmup`), custom data from the catalog alone.
+    /// (`warmup::Warmup`), and on custom data its venue's history does not
+    /// serve, from the catalog alone.
     pub ticks: Vec<TickSeries>,
     /// The custom data the strategy reads that is of no instrument, a
     /// reference series such as LSE's daily bond yields: each series a
-    /// Nautilus data type keyed by its identifier, as Nautilus keys custom
-    /// data in the catalog, its metadata saying what its source asks for
-    /// (`lse::LseRow::data_type`). Fetched by fill-catalog from the source
-    /// of its type, with no definition, and replayed in a backtest over the
-    /// run's window; a live run reading any is refused (`venues::live_clients`),
-    /// no source streaming it yet. A config lists it in `[data].custom`
-    /// (`DataConfig::custom`). Custom data of an instrument is a tick
-    /// series, keyed by the instrument and rolled with it.
+    /// Nautilus data type as its config gives it (`DataConfig::custom`,
+    /// `[data].custom`), keyed in the catalog by the identifier the config
+    /// chooses, as Nautilus keys custom data, its metadata saying what its
+    /// source asks for, which its type names (`venues::serves_custom`).
+    /// Fetched by fill-catalog from the source of its type, with no
+    /// definition, and replayed in a backtest over the run's window, the
+    /// strategy's subscriptions subscribing to each from its start
+    /// (`strategy::subscriptions`), each by that data type unchanged; a
+    /// live run reading any its source does not stream is refused
+    /// (`venues::streams_custom`), none streaming any yet. Custom data of
+    /// an instrument is a tick series, keyed by the instrument and rolled
+    /// with it.
     pub custom: Vec<DataType>,
     /// How far back before a live start the warmup history starts: a
     /// backtest requests none.

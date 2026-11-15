@@ -702,7 +702,7 @@ fn run(
 ) -> (Option<String>, Option<SideTarget>) {
     let atr_bars = traded.as_ref().and_then(|traded| traded.atr_bar_type());
     let bar_types = requirements.bar_types.iter().copied().chain(atr_bars);
-    let subscriptions = Subscriptions::new(bar_types.collect(), ticks);
+    let subscriptions = Subscriptions::new(bar_types.collect(), ticks, vec![]);
     let warmup = Rc::new(warmup);
     let config = LiveNodeConfig {
         environment: Environment::Live,
@@ -1504,7 +1504,7 @@ fn an_lsedge_definition_the_cache_lacks_comes_from_the_catalog_before_lse_stream
             .unwrap();
         node.add_actor(Streaming {
             core: DataActorCore::new(DataActorConfig::default()),
-            subscriptions: Subscriptions::new(requirements.bar_types.clone(), ticks),
+            subscriptions: Subscriptions::new(requirements.bar_types.clone(), ticks, vec![]),
             warmup,
             streamed: Rc::clone(&streamed),
             failure: Rc::clone(&failure),
@@ -1704,7 +1704,7 @@ fn glbx_data_comes_from_lse_s_cme_stream_routed_glbx_beside_another_client() {
             .unwrap();
         node.add_actor(GlbxStreaming {
             core: DataActorCore::new(DataActorConfig::default()),
-            subscriptions: Subscriptions::new(requirements.bar_types.clone(), ticks),
+            subscriptions: Subscriptions::new(requirements.bar_types.clone(), ticks, vec![]),
             warmup,
             stream: Rc::clone(&stream),
             seen: Rc::clone(&seen),

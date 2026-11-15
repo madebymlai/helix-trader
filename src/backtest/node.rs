@@ -18,7 +18,7 @@
 
 use std::{collections::BTreeSet, fmt::Debug, str::FromStr, sync::Arc};
 
-use anyhow::{Context, anyhow, ensure};
+use anyhow::{Context, anyhow, bail, ensure};
 use nautilus_analysis::statistics::max_drawdown::MaxDrawdown;
 use nautilus_backtest::{
     config::{BacktestDataConfig, BacktestEngineConfig, BacktestRunConfig, BacktestVenueConfig},
@@ -289,7 +289,13 @@ fn is_custom(series: &SeriesSlice) -> bool {
 /// # Errors
 ///
 /// Returns an error if the series cannot be worked out, or if the catalog
-/// cannot be read or a stored type is not registered, naming the series.
+/// cannot be read or a stored type is not registered, naming the series;
+/// or naming both if a row of `Backtest::custom` is stored under its
+/// identifier as another data type, of other metadata: Nautilus decodes
+/// each row as the data type stored beside it and publishes it on that
+/// data type's topic, so the strategy, subscribed to its own, would get
+/// none of the series, or part of it, and fill-catalog, which reads the
+/// catalog by identifier, would find nothing missing.
 pub(super) fn custom_data(backtest: &Backtest) -> anyhow::Result<Vec<Data>> {
     venues::register_custom_data();
     let mut catalog = ParquetDataCatalog::new(&backtest.catalog, None, None, None, None);
@@ -307,6 +313,19 @@ pub(super) fn custom_data(backtest: &Backtest) -> anyhow::Result<Vec<Data>> {
                 true,
             )
             .with_context(|| format!("reading the {data_type}"))?;
+        // The engine publishes each row on the topic of its stored data
+        // type, which the strategy subscribed to only if it is this one.
+        if let Some(stored) = read.iter().find_map(|row| match row {
+            Data::Custom(custom) if custom.data_type != *data_type => Some(&custom.data_type),
+            _ => None,
+        }) {
+            bail!(
+                "the catalog stores the rows of {data_type} under its identifier as \
+                 {stored}, of other metadata: the run would replay them under that data \
+                 type, which its strategy does not read; name the data type they were \
+                 filled as, or fill them under another identifier"
+            );
+        }
         data.extend(read);
     }
     for series in backtest.series()?.into_iter().filter(is_custom) {

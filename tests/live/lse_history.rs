@@ -55,6 +55,20 @@ const SPX: &str = "SPX-INDICES.LSEDGE";
 const GCZ26: &str = "GCZ26.GLBX";
 const AAPL_CALL: &str = "AAPL  261120C00355000.OPRA";
 
+/// The data type of the rows of `symbol` in LSE's `source`, custom data of
+/// no instrument: both in its metadata, under an identifier of the
+/// config's, here the symbol.
+fn lse_rows(source: &str, symbol: &str) -> nautilus_model::data::DataType {
+    let metadata = nautilus_core::Params::new(
+        [
+            ("source".to_string(), serde_json::json!(source)),
+            ("symbol".to_string(), serde_json::json!(symbol)),
+        ]
+        .into(),
+    );
+    nautilus_model::data::DataType::new("LseRow", Some(metadata), Some(symbol.to_string()))
+}
+
 /// Whether the run is opted in: from the shell, before `.env` is read, so
 /// that the file cannot opt in.
 /// An opted-in run claims the process for this module (`claim_process`).
@@ -275,7 +289,7 @@ async fn a_day_of_bond_yields_fills_from_lse_as_custom_data() {
     }
     dotenvy::dotenv().ok();
     let dir = tempfile::tempdir().unwrap();
-    let us10y = LseRow::data_type("bond_yields", "US10Y");
+    let us10y = lse_rows("bond_yields", "US10Y");
     let requirements = DataRequirements {
         bar_types: vec![],
         ticks: vec![],
@@ -555,7 +569,7 @@ async fn a_release_and_a_yield_fill_from_lse_at_the_times_they_are_known() {
     let october = ("2026-10-01T00:00:00Z", "2026-10-31T00:00:00Z");
     for source in ["economic_calendar", "macro_release"] {
         let dir = tempfile::tempdir().unwrap();
-        let data_type = LseRow::data_type(source, "US.Core Inflation Rate YoY");
+        let data_type = lse_rows(source, "US.Core Inflation Rate YoY");
 
         let rows = filled_rows(dir.path(), &data_type, october).await;
 
@@ -570,7 +584,7 @@ async fn a_release_and_a_yield_fill_from_lse_at_the_times_they_are_known() {
         );
     }
     let dir = tempfile::tempdir().unwrap();
-    let yields = LseRow::data_type("macro_yield", "US10Y");
+    let yields = lse_rows("macro_yield", "US10Y");
 
     let rows = filled_rows(
         dir.path(),
@@ -602,7 +616,7 @@ async fn commitments_of_traders_fill_from_lse_at_their_release() {
         return;
     }
     dotenvy::dotenv().ok();
-    let cot = LseRow::data_type("cot", "ZN");
+    let cot = lse_rows("cot", "ZN");
     for (window, released) in [
         (("2025-09-01T00:00:00Z", "2025-10-01T00:00:00Z"), true),
         (("2026-09-01T00:00:00Z", "2026-10-01T00:00:00Z"), false),
@@ -636,7 +650,7 @@ async fn financial_reports_fill_from_lse_when_their_statements_were_accepted() {
     }
     dotenvy::dotenv().ok();
     let dir = tempfile::tempdir().unwrap();
-    let reports = LseRow::data_type("financial_reports", "AAPL");
+    let reports = lse_rows("financial_reports", "AAPL");
 
     let rows = filled_rows(
         dir.path(),
@@ -670,7 +684,7 @@ async fn an_instrument_s_factors_fill_from_lse_at_their_days_ends() {
     }
     dotenvy::dotenv().ok();
     let dir = tempfile::tempdir().unwrap();
-    let dividends = LseRow::data_type("factors_dividends", "AAPL-US_STOCKS");
+    let dividends = lse_rows("factors_dividends", "AAPL-US_STOCKS");
 
     let rows = filled_rows(
         dir.path(),
@@ -692,7 +706,7 @@ async fn an_instrument_s_factors_fill_from_lse_at_their_days_ends() {
         ]
     );
     let dir = tempfile::tempdir().unwrap();
-    let splits = LseRow::data_type("factors_splits", "AAPL-US_STOCKS");
+    let splits = lse_rows("factors_splits", "AAPL-US_STOCKS");
 
     let rows = filled_rows(
         dir.path(),

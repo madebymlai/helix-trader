@@ -808,9 +808,23 @@ mod tests {
         assert_eq!(stored_trades(dir.path()), []);
     }
 
+    /// The data type of the rows of `symbol` in LSE's `source`, custom
+    /// data of no instrument: both in its metadata, under an identifier of
+    /// the config's, here the symbol.
+    fn lse_rows(source: &str, symbol: &str) -> DataType {
+        let metadata = nautilus_core::Params::new(
+            [
+                ("source".to_string(), serde_json::json!(source)),
+                ("symbol".to_string(), serde_json::json!(symbol)),
+            ]
+            .into(),
+        );
+        DataType::new("LseRow", Some(metadata), Some(symbol.to_string()))
+    }
+
     /// US10Y's daily bond yields, custom data of no instrument.
     fn us10y() -> DataType {
-        LseRow::data_type("bond_yields", "US10Y")
+        lse_rows("bond_yields", "US10Y")
     }
 
     /// fill-catalog's fill of `us10y()` over the rows of the captured
@@ -1008,7 +1022,7 @@ mod tests {
         ];
         let cases = [
             (
-                LseRow::data_type("economic_calendar", "US.Core Inflation Rate YoY"),
+                lse_rows("economic_calendar", "US.Core Inflation Rate YoY"),
                 vec![
                     Reply::json(REFERENCE_CATALOGUE),
                     Reply::file(US_CORE_CPI_CALENDAR),
@@ -1017,13 +1031,13 @@ mod tests {
                 cpi.to_vec(),
             ),
             (
-                LseRow::data_type("macro_release", "US.Core Inflation Rate YoY"),
+                lse_rows("macro_release", "US.Core Inflation Rate YoY"),
                 vec![Reply::file(US_CORE_CPI_RELEASES)],
                 ("2026-03-01T00:00:00Z", "2026-10-31T00:00:00Z"),
                 cpi.to_vec(),
             ),
             (
-                LseRow::data_type("cot", "ZN"),
+                lse_rows("cot", "ZN"),
                 vec![Reply::json(REFERENCE_CATALOGUE), Reply::file(ZN_COT)],
                 ("2026-09-01T00:00:00Z", "2026-10-01T00:00:00Z"),
                 vec![
@@ -1034,7 +1048,7 @@ mod tests {
                 ],
             ),
             (
-                LseRow::data_type("factors_dividends", "AAPL-US_STOCKS"),
+                lse_rows("factors_dividends", "AAPL-US_STOCKS"),
                 vec![Reply::json(AAPL_FACTORS)],
                 ("2026-01-01T00:00:00Z", "2026-10-31T00:00:00Z"),
                 vec![
@@ -1066,7 +1080,7 @@ mod tests {
     #[test]
     fn a_window_of_releases_lse_has_not_filled_is_asked_again() {
         let dir = tempfile::tempdir().unwrap();
-        let calendar = LseRow::data_type("economic_calendar", "US.Core Inflation Rate YoY");
+        let calendar = lse_rows("economic_calendar", "US.Core Inflation Rate YoY");
         let february = ("2026-02-01T00:00:00Z", "2026-02-28T00:00:00Z");
         let lse = MockLse::start(vec![
             Reply::json(REFERENCE_CATALOGUE),
@@ -1094,7 +1108,7 @@ mod tests {
         let err = fill_custom(
             dir.path(),
             &lse,
-            &LseRow::data_type("macro_observation", "US.core_inflation_rate"),
+            &lse_rows("macro_observation", "US.core_inflation_rate"),
             ("2026-06-01T00:00:00Z", "2026-10-31T00:00:00Z"),
         )
         .unwrap_err();
