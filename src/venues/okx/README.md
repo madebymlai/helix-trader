@@ -37,6 +37,10 @@ OKX composite bars warm up from catalog minute candles and then REST candles; li
 
 A warmup needing more than 500 pages of minute candles beyond the catalog, roughly 835 hours (100 candles a page, up to 300 on a page less than two hours old), fails its request: the warmup is logged incomplete and keeps the candles fetched. X-Perp candle behavior has been observed on demo; X-Perp orders have not been verified there.
 
+## Live data
+
+OKX's live data streams what Nautilus' OKX data client subscribes to (`venues::streams`, `okx::streams`), which a live start checks every series the run subscribes to against before anything connects, refusing one it does not stream, naming it and why (see [live](../../live/README.md#startup-and-routing)): an instrument's quotes (`subscribe_quotes`), its trades (`subscribe_trades`) and its candles (`subscribe_bars`), the bar types its [history](#history) serves, so bars built from its quotes, which get no warmup, start at the live quotes. It streams no book a run reads: the client takes L2_MBP books alone, and a run subscribes to book deltas as L3_MBO (`rolls::DELTAS_BOOK_TYPE`), and its depth snapshots hold five levels a side at most, OKX's `books5`, and a run subscribes to ten; it refuses both subscriptions, which Nautilus logs alone. Nor does it subscribe to custom data, Nautilus' default logging the subscription as not implemented.
+
 ## Tests
 
 Offline definition, request and client tests are in `src/venues/okx`; the node fill of bars and funding is tested in `tests/node_fill`. The account-check test in `tests/live/okx_demo.rs` requires `NAUTILUS_OKX_RUN=1` in the shell and reads the demo account without placing orders. Other venue tests may place real orders; inspect their gates and account before running. Run live-node tests in separate processes.

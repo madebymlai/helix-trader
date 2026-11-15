@@ -126,12 +126,14 @@
 //!
 //! A series, bars' source or tick series, is requested only if its venue's
 //! history serves it (`venues::serves`), the rule fill-catalog fills by:
-//! one it does not serve, an OKX instrument's quotes, an IB instrument's
-//! book, is requested no history, which the warmup logs as a warning
-//! naming why; the series is subscribed from the start all the same, and
-//! the bars built from it start there. Custom data, the catalog's, is
-//! requested of it alone (see below). The definitions of the instruments of
-//! every series are asked, served or not, as their clients need them.
+//! one it does not serve, an OKX instrument's quotes, is requested no
+//! history, which the warmup logs as a warning naming why; the series is
+//! subscribed from the start all the same, and the bars built from it
+//! start there. A series its venue's live data does not stream is refused
+//! before a live node starts (`venues::streams`). Custom data, the
+//! catalog's, is requested of it alone (see below). The definitions of the
+//! instruments of every series are asked, served or not, as their clients
+//! need them.
 //!
 //! The last
 //! window ends at `now`, trimmed to it, and the roller, started right

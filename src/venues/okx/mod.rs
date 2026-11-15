@@ -15,7 +15,7 @@ use anyhow::{Context, bail, ensure};
 use jiff::SignedDuration;
 use nautilus_core::{UnixNanos, time::get_atomic_clock_realtime};
 use nautilus_model::{
-    data::NautilusDataType,
+    data::{BarType, NautilusDataType},
     identifiers::InstrumentId,
     instruments::{Instrument, InstrumentAny},
 };
@@ -45,7 +45,7 @@ use crate::{
 
 mod account;
 mod live;
-pub(crate) use live::clients;
+pub(crate) use live::{clients, streams};
 
 /// The window one funding request holds at most: two weeks, 336 funding
 /// times at an hourly interval, within the one page of 400 the client
@@ -167,7 +167,7 @@ async fn write_definitions(
 pub(super) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
     match source {
         CatalogSeries::Bars(bar_type) => ensure!(
-            bar_type.is_externally_aggregated() && bar_spec_as_okx_channel(bar_type.spec()).is_ok(),
+            is_candle(bar_type),
             "OKX's history serves its candles, EXTERNAL bars of the LAST price 1, 3, 5, 15 or 30 \
              minutes, 1, 2, 4, 6 or 12 hours, 1, 2, 3 or 5 days, a week or 1, 3, 6 or 12 months \
              wide, or 1 second, and its trades, not {bar_type}"
@@ -181,6 +181,14 @@ pub(super) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Whether `bar_type` is of OKX's candles, which Nautilus' OKX client asks
+/// its history (`request_bars`) and its candle channels
+/// (`subscribe_bars`) for alike: EXTERNAL bars at a spec OKX has a
+/// trade-price candle of (`bar_spec_as_okx_channel`).
+fn is_candle(bar_type: &BarType) -> bool {
+    bar_type.is_externally_aggregated() && bar_spec_as_okx_channel(bar_type.spec()).is_ok()
 }
 
 /// What `catalog` lacks of `slices`, series of OKX instruments

@@ -1,5 +1,5 @@
-//! Interactive Brokers clients for the live node, and the live command's
-//! IB flags (`IbLiveArgs`).
+//! Interactive Brokers clients for the live node, what their data client
+//! streams (`streams`), and the live command's IB flags (`IbLiveArgs`).
 //!
 //! Provides the Nautilus client factories and configs from
 //! `nautilus_interactive_brokers`: `InteractiveBrokersDataClientFactory`,
@@ -7,20 +7,31 @@
 //! gateway of the account's trading mode (`IbGateway`); the account id
 //! goes in the execution config.
 
-use anyhow::ensure;
+use anyhow::{bail, ensure};
 use clap::Args;
+use jiff::SignedDuration;
 use nautilus_interactive_brokers::{
     config::{
         InteractiveBrokersDataClientConfig, InteractiveBrokersExecutionClientConfig,
         InteractiveBrokersInstrumentProviderConfig,
     },
+    data::convert::bar_type_to_ib_bar_size,
     factories::{InteractiveBrokersDataClientFactory, InteractiveBrokersExecutionClientFactory},
 };
 use nautilus_live::config::RoutingConfig;
-use nautilus_model::identifiers::{InstrumentId, Venue};
+use nautilus_model::{
+    data::NautilusDataType,
+    enums::PriceType,
+    identifiers::{InstrumentId, Venue},
+};
 
-use super::{IbAccount, IbGateway, data_client_config};
-use crate::live::node::{Clients, ExecClient};
+use super::{
+    BAR_PRICES, CURRENCY_PAIR_VENUES, FOREX_VENUE, IbAccount, IbGateway, data_client_config,
+};
+use crate::{
+    live::node::{Clients, ExecClient},
+    strategy::requirements::{CatalogSeries, TickSeries},
+};
 
 /// IB's settings of a live node, the live command's flags: the account
 /// traded and the client id of the node's IB clients (see `clients`).
@@ -120,6 +131,82 @@ impl IbClients {
             }),
         }
     }
+}
+
+/// The narrowest bars IB keeps up to date: its historical bars streamed
+/// with `keepUpToDate`, "only ... with bar sizes 5 seconds or greater"
+/// (TWS API, "Historical Bar Data"), and its real-time bars, 5 seconds
+/// wide.
+const KEPT_UP_TO_DATE: SignedDuration = SignedDuration::from_secs(5);
+
+/// Checks that Nautilus' IB data client, the live node's, streams
+/// `source`, the series of an instrument of a venue whose live data is
+/// IB's, as a run subscribes to it: its quotes (`subscribe_quotes`,
+/// `data/core.rs:724`), its trades (`subscribe_trades`, `:979`) but a
+/// currency pair's, which the client logs as unsupported and streams
+/// none of (`:1000-1006`, see `CURRENCY_PAIR_VENUES`), and IB's own
+/// (`EXTERNAL`) time bars (`subscribe_bars`, `:1093`) of a size IB has
+/// (`bar_type_to_ib_bar_size`, on which the client's subscription task
+/// fails any other) but 1 second: its 5-second bars as IB's real-time
+/// bars (`:1166`), the others as its historical bars kept up to date
+/// (`data/streams.rs:817-821`), which IB keeps only at 5 seconds or more
+/// (`KEPT_UP_TO_DATE`), each priced at one of `BAR_PRICES`, a forex
+/// pair's LAST bars aside, IB having no TRADES of them. The client
+/// streams book deltas of L1_MBP and L2_MBP books alone, logging an L3_MBO
+/// subscription as unpublished by IB and streaming nothing
+/// (`subscribe_book_deltas`, `:1249`, `:1262-1268`), and a run subscribes
+/// to book deltas as L3_MBO (`rolls::DELTAS_BOOK_TYPE`), so it streams
+/// none of a run's. It subscribes to no book depth and no custom
+/// data: Nautilus' `DataClient` defaults log "Handler not implemented"
+/// and stream nothing (`common/src/clients/data.rs:130-133`, `:171-174`).
+///
+/// # Errors
+///
+/// Returns an error naming `source` and saying why if the client does not
+/// stream it.
+pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
+    use NautilusDataType as D;
+    match source {
+        CatalogSeries::Bars(bar_type) => {
+            ensure!(
+                bar_type.is_externally_aggregated()
+                    && BAR_PRICES.contains(&bar_type.spec().price_type)
+                    && bar_type_to_ib_bar_size(bar_type).is_ok()
+                    && bar_type.spec().timedelta() >= KEPT_UP_TO_DATE,
+                "IB streams its own (EXTERNAL) time bars of a size IB has and keeps up to date, \
+                 5, 10, 15 or 30 seconds, 1, 2, 3, 5, 10, 15, 20 or 30 minutes, 1, 2, 3, 4 or 8 \
+                 hours, a day, a week or a month, priced LAST, BID, ASK or MID, not {bar_type}"
+            );
+            ensure!(
+                !(bar_type.spec().price_type == PriceType::Last
+                    && bar_type.instrument_id().venue.as_str() == FOREX_VENUE),
+                "IB has no TRADES bars of a forex pair, so it streams no {bar_type}: read its \
+                 BID, ASK or MID bars"
+            );
+        }
+        CatalogSeries::Ticks(TickSeries {
+            data: D::QuoteTick, ..
+        }) => {}
+        CatalogSeries::Ticks(TickSeries {
+            data: D::TradeTick,
+            instrument_id,
+        }) => ensure!(
+            !CURRENCY_PAIR_VENUES.contains(&instrument_id.venue.as_str()),
+            "Nautilus' IB client streams no trades of a currency pair, so IB streams no trades \
+             of {instrument_id}: read its quotes"
+        ),
+        CatalogSeries::Ticks(TickSeries {
+            data: D::OrderBookDelta,
+            instrument_id,
+        }) => bail!(
+            "IB streams no book deltas of {instrument_id} as a run subscribes to them, L3_MBO: \
+             IB publishes L1_MBP and L2_MBP books alone"
+        ),
+        CatalogSeries::Ticks(ticks) => {
+            bail!("Nautilus' IB client streams quotes, trades and bars, not the {ticks}")
+        }
+    }
+    Ok(())
 }
 
 /// IB's clients of a node trading `instrument_ids` on the paper account

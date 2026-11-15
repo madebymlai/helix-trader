@@ -20,14 +20,16 @@
 //! channel. OKX serves no quote history (the data client does not
 //! implement `request_quotes`), so bars built from quotes get no warmup,
 //! which requests no series a venue's history does not serve
-//! (`venues::serves`).
+//! (`venues::serves`), and start at the live quotes. A live start refuses
+//! a series the data client does not stream (`streams`), OKX's books as a
+//! run subscribes to them among them.
 
 use std::path::Path;
 
-use anyhow::{Context, ensure};
+use anyhow::{Context, bail, ensure};
 use nautilus_common::factories::{ClientConfig, DataClientFactory, ExecutionClientFactory};
 use nautilus_live::config::RoutingConfig;
-use nautilus_model::{identifiers::InstrumentId, instruments::Instrument};
+use nautilus_model::{data::NautilusDataType, identifiers::InstrumentId, instruments::Instrument};
 use nautilus_okx::{
     OKXPositionMode,
     common::enums::OKXEnvironment,
@@ -38,12 +40,69 @@ use rust_decimal::Decimal;
 
 use super::{
     account::{Account, ENVIRONMENT_VAR, MARGIN_MODE, REGION, environment_of},
-    margin_at, selection,
+    is_candle, margin_at, selection,
 };
 use crate::{
     catalog,
     live::node::{Clients, ExecClient},
+    strategy::requirements::{CatalogSeries, TickSeries},
 };
+
+/// Checks that Nautilus' OKX data client, the live node's, streams
+/// `source`, an OKX instrument's series, as a run subscribes to it: its
+/// quotes (`subscribe_quotes`, `data.rs:2214`), its trades
+/// (`subscribe_trades`, `:2244`) and its candles (`subscribe_bars`,
+/// `:2314`, whose task subscribes the channel of
+/// `bar_spec_as_okx_channel`, `websocket/client.rs:1709-1715`, failing any
+/// other bar type: see `is_candle`). The client streams L2_MBP books alone
+/// (`subscribe_book_deltas`, `data.rs:2139-2142`), and a run subscribes to
+/// book deltas as L3_MBO (`rolls::DELTAS_BOOK_TYPE`), so it streams none
+/// of a run's; and depth snapshots of five levels a side at most, OKX's
+/// `books5` (`subscribe_book_depth`, `:2166-2172`, `BOOK_SNAPSHOT_DEPTH`,
+/// `:112`), and a run subscribes to all ten of an `OrderBookDepth10`
+/// (`rolls::Roller`), so it streams none of a run's either. Both refusals
+/// fail the subscription, which Nautilus' data engine logs alone. It
+/// subscribes to no custom data: Nautilus' `DataClient` default logs
+/// "Handler not implemented" and streams nothing
+/// (`common/src/clients/data.rs:130-133`).
+///
+/// # Errors
+///
+/// Returns an error naming `source` and saying why if the client does not
+/// stream it.
+pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
+    use NautilusDataType as D;
+    match source {
+        CatalogSeries::Bars(bar_type) => ensure!(
+            is_candle(bar_type),
+            "OKX streams its candles, EXTERNAL bars of the LAST price 1, 3, 5, 15 or 30 minutes, \
+             1, 2, 4, 6 or 12 hours, 1, 2, 3 or 5 days, a week or 1, 3, 6 or 12 months wide, or \
+             1 second, its quotes and its trades, not {bar_type}"
+        ),
+        CatalogSeries::Ticks(TickSeries {
+            data: D::QuoteTick | D::TradeTick,
+            ..
+        }) => {}
+        CatalogSeries::Ticks(TickSeries {
+            data: D::OrderBookDelta,
+            instrument_id,
+        }) => bail!(
+            "OKX streams no book deltas of {instrument_id} as a run subscribes to them, L3_MBO: \
+             Nautilus' OKX client streams L2_MBP books alone"
+        ),
+        CatalogSeries::Ticks(TickSeries {
+            data: D::OrderBookDepth,
+            instrument_id,
+        }) => bail!(
+            "OKX streams no book depth of {instrument_id} as a run subscribes to it, ten levels a \
+             side: Nautilus' OKX client streams snapshots of five at most"
+        ),
+        CatalogSeries::Ticks(ticks) => {
+            bail!("OKX streams its quotes, its trades and its candles, not the {ticks}")
+        }
+    }
+    Ok(())
+}
 
 /// The OKX data and execution client configs of a node trading OKX swaps
 /// or X-Perps.
