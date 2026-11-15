@@ -1981,8 +1981,9 @@ mod tests {
         );
     }
 
-    /// Nautilus' IB client serves IB's own time bars of every size IB has,
-    /// priced LAST, BID, ASK or MID (its TRADES, BID, ASK and MIDPOINT),
+    /// Nautilus' IB client serves IB's own time bars of every size IB has
+    /// but a month's, which its history client parses none of, priced
+    /// LAST, BID, ASK or MID (its TRADES, BID, ASK and MIDPOINT),
     /// and IB's historical ticks, BID_ASK as quotes and TRADES as trades,
     /// every venue without a row of its own; no book, no other price and
     /// no size IB has not.
@@ -2002,7 +2003,6 @@ mod tests {
                 bars_of("ESZ26.CME-8-HOUR-LAST-EXTERNAL"),
                 bars_of("SXR8.IBIS-1-DAY-LAST-EXTERNAL"),
                 bars_of("SXR8.IBIS-1-WEEK-LAST-EXTERNAL"),
-                bars_of("SXR8.IBIS-1-MONTH-LAST-EXTERNAL"),
                 ticks_of(D::QuoteTick, "SXR8.IBIS"),
                 ticks_of(D::QuoteTick, "EUR/USD.IDEALPRO"),
                 ticks_of(D::TradeTick, "ESZ26.CME"),
@@ -2011,6 +2011,7 @@ mod tests {
                 bars_of("SXR8.IBIS-1-MINUTE-MARK-EXTERNAL"),
                 bars_of("SXR8.IBIS-4-MINUTE-LAST-EXTERNAL"),
                 bars_of("SXR8.IBIS-2-SECOND-LAST-EXTERNAL"),
+                bars_of("SXR8.IBIS-1-MONTH-LAST-EXTERNAL"),
                 bars_of("SXR8.IBIS-1-MINUTE-LAST-INTERNAL"),
                 bars_of("SXR8.IBIS-100-TICK-LAST-EXTERNAL"),
                 ticks_of(D::OrderBookDepth, "SXR8.IBIS"),

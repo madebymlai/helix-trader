@@ -634,7 +634,9 @@ pub(crate) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
 
 /// What IB's history is asked for the series of `data_type` and
 /// `identifier`, as Nautilus' IB clients serve it: IB's own (`EXTERNAL`)
-/// time bars of a size IB has (Nautilus' `bar_type_to_ib_bar_size`),
+/// time bars of a size IB has (Nautilus' `bar_type_to_ib_bar_size`) but a
+/// month, which Nautilus' IB history client reads no bars of (its
+/// `request_bars` parses seconds, minutes, hours, days and weeks alone),
 /// priced at one of `SERVED_PRICES`, and an instrument's quotes and trades,
 /// IB's historical ticks (the requests of the historical client's
 /// `request_ticks`, the live client's `request_quotes` and
@@ -653,13 +655,16 @@ fn served(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<Serv
     match data_type {
         NautilusDataType::Bar => {
             let bar_type = BarType::from_str(identifier)?;
+            let spec = bar_type.spec();
             ensure!(
                 bar_type.is_externally_aggregated()
-                    && SERVED_PRICES.contains(&bar_type.spec().price_type)
-                    && bar_type_to_ib_bar_size(&bar_type).is_ok(),
-                "IB's history serves its own (EXTERNAL) time bars of a size IB has, 1, 5, 10, \
-                 15 or 30 seconds, 1, 2, 3, 5, 10, 15, 20 or 30 minutes, 1, 2, 3, 4 or 8 hours, \
-                 a day, a week or a month, priced LAST, BID, ASK or MID, not {identifier}"
+                    && SERVED_PRICES.contains(&spec.price_type)
+                    && bar_type_to_ib_bar_size(&bar_type).is_ok()
+                    && spec.aggregation != BarAggregation::Month,
+                "IB's history serves its own (EXTERNAL) time bars of a size IB has and \
+                 Nautilus' IB history client reads, 1, 5, 15 or 30 seconds, 1, 2, 3, 5, 10, \
+                 15, 20 or 30 minutes, 1, 2, 3, 4 or 8 hours, a day or a week, priced LAST, \
+                 BID, ASK or MID, not {identifier}"
             );
             ensure!(
                 !(bar_type.spec().price_type == PriceType::Last
@@ -716,10 +721,10 @@ const SERVED_PRICES: [PriceType; 4] = [
 /// longest IB's step-size table admits the size in (TWS API, "Historical
 /// Data Limitations", "Step Sizes"), so that IB serves it and a request
 /// holds a few thousand bars at most: `1800 S` of 1-second bars, `3600 S`
-/// of 5-second bars, `14400 S` of 10- and 15-second bars, `28800 S` of
-/// 30-second bars, a day of 1-minute bars, two of 2-minute bars, a week of
-/// 3- to 20-minute bars, a month of 30-minute and hour bars and a year of
-/// daily, weekly and monthly bars. A day of 1-minute bars is asked as
+/// of 5-second bars, `14400 S` of 15-second bars, `28800 S` of 30-second
+/// bars, a day of 1-minute bars, two of 2-minute bars, a week of 3- to
+/// 20-minute bars, a month of 30-minute and hour bars and a year of daily
+/// and weekly bars. A day of 1-minute bars is asked as
 /// `86400 S`: `D` counts whole trading days, so a `1 D` request ending in
 /// a session's first minute answers that one bar, and the walk back would
 /// end there (see `walk_back`); the longer durations end there with a
@@ -728,8 +733,8 @@ fn request_duration(spec: BarSpecification) -> &'static str {
     use BarAggregation as A;
     match (spec.aggregation, spec.step.get()) {
         (A::Second, 1) => "1800 S",
-        (A::Second, 2..=5) => "3600 S",
-        (A::Second, 6..=15) => "14400 S",
+        (A::Second, 5) => "3600 S",
+        (A::Second, 15) => "14400 S",
         (A::Second, _) => "28800 S",
         (A::Minute, 1) => "86400 S",
         (A::Minute, 2) => "2 D",
@@ -1454,7 +1459,8 @@ mod tests {
     }
 
     /// A price IB's adapter would ask TRADES for, a size IB has not,
-    /// bars Nautilus builds, and books and custom data, which Nautilus' IB
+    /// monthly bars, which Nautilus' IB history client parses none of, bars
+    /// Nautilus builds, and books and custom data, which Nautilus' IB
     /// clients request none of.
     #[test]
     fn ib_serves_no_other_series() {
@@ -1465,7 +1471,9 @@ mod tests {
             ),
             (NautilusDataType::Bar, "SXR8.IBIS-4-MINUTE-LAST-EXTERNAL"),
             (NautilusDataType::Bar, "SXR8.IBIS-2-SECOND-LAST-EXTERNAL"),
+            (NautilusDataType::Bar, "SXR8.IBIS-10-SECOND-LAST-EXTERNAL"),
             (NautilusDataType::Bar, "SXR8.IBIS-6-HOUR-LAST-EXTERNAL"),
+            (NautilusDataType::Bar, "SXR8.IBIS-1-MONTH-LAST-EXTERNAL"),
             (NautilusDataType::Bar, "SXR8.IBIS-1-MINUTE-LAST-INTERNAL"),
             (
                 NautilusDataType::Bar,
@@ -1497,7 +1505,6 @@ mod tests {
         for (bars, duration) in [
             ("1-SECOND", "1800 S"),
             ("5-SECOND", "3600 S"),
-            ("10-SECOND", "14400 S"),
             ("15-SECOND", "14400 S"),
             ("30-SECOND", "28800 S"),
             ("1-MINUTE", "86400 S"),
@@ -1515,7 +1522,6 @@ mod tests {
             ("8-HOUR", "1 M"),
             ("1-DAY", "1 Y"),
             ("1-WEEK", "1 Y"),
-            ("1-MONTH", "1 Y"),
         ] {
             let spec = bar_type(&format!("SXR8.IBIS-{bars}-LAST-EXTERNAL")).spec();
             assert_eq!(request_duration(spec), duration, "{bars}");
