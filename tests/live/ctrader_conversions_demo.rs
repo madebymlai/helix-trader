@@ -12,8 +12,7 @@
 //! the forex market open.
 //!
 //! Gated as `ctrader_demo.rs` is. The strategy is a recorder wired as the
-//! EMA crossover is, a warmup, subscriptions to its bars and ticks and a
-//! roller of their instruments, its
+//! EMA crossover is, a warmup and subscriptions to its bars and ticks, its
 //! requirements and rates those of an EMA config listing the pair; it sends
 //! no order, and the broker's execution client reconciles the account. One
 //! node per process, hence its own module, run alone (`main.rs`). The node
@@ -31,7 +30,6 @@ use std::{cell::RefCell, process::Command, rc::Rc, time::Duration};
 
 use helix_trader::{
     live::Live,
-    rolls::Roller,
     strategy::{
         conversions::Rates, ema::EmaCrossConfig, subscriptions::Subscriptions, warmup::Warmup,
     },
@@ -73,16 +71,15 @@ struct Record {
     converted: Option<Money>,
 }
 
-/// Warms up its bars through a `Warmup`, subscribes to them and to its
-/// ticks through `Subscriptions` from where it ends, and starts a `Roller`
-/// of the ticks' instruments, as the EMA crossover does, records the pair's
-/// quotes, and at its stop reads the cache. It sends no order.
+/// Warms up its bars through a `Warmup` and subscribes to them and to its
+/// ticks through `Subscriptions` from where it ends, as the EMA crossover
+/// does, records the pair's quotes, and at its stop reads the cache. It
+/// sends no order.
 #[derive(Debug)]
 struct Recorder {
     core: StrategyCore,
     warmup: Rc<Warmup>,
     subscriptions: Subscriptions,
-    roller: Roller,
     pair: InstrumentId,
     rates: Rates,
     record: Rc<RefCell<Record>>,
@@ -101,7 +98,7 @@ impl DataActor for Recorder {
         self.record.borrow_mut().started = Some(self.clock().timestamp_ns());
         let now = Rc::clone(&self.warmup).start(self)?;
         self.subscriptions.clone().start(self, now);
-        self.roller.clone().start(self, now)
+        Ok(())
     }
 
     fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
@@ -188,13 +185,6 @@ async fn a_live_run_caches_its_conversion_pairs_quotes_after_its_start() {
         subscriptions: Subscriptions::new(
             requirements.bar_types.clone(),
             requirements.ticks.clone(),
-        ),
-        roller: Roller::live(
-            requirements
-                .ticks
-                .iter()
-                .map(|tick| tick.instrument_id)
-                .collect(),
         ),
         pair: eurusd,
         rates: config.rates(),

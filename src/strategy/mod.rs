@@ -38,8 +38,10 @@
 //! through among them, the warmup asks the history of too, where their
 //! venue serves it. A `subscriptions::Subscriptions`, which each strategy
 //! holds too (a model strategy's handle), subscribes to the bars and the
-//! ticks from where the warmup ends, and a `rolls::Roller` tells it of each
-//! roll of a root, at which it moves the root's ticks. The catalog
+//! ticks from where the warmup ends, and a `rolls::Roller`, held where a
+//! root's ticks need rolling (see `README.md`, "Configuration and
+//! series"), tells it of each roll of a root, at which it moves the root's
+//! ticks. The catalog
 //! stores what their bars are built from (see
 //! `requirements::catalog_keys`).
 
