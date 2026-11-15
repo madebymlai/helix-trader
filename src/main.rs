@@ -314,6 +314,10 @@ async fn main() -> anyhow::Result<()> {
     // Before parsing, since arguments fall back on the environment; a
     // variable already set wins over the file.
     dotenvy::dotenv().ok();
+    // Once, before any config loads, on every command: a config's custom
+    // series are checked against Nautilus' registry, and every catalog and
+    // client of custom data decodes and encodes it by its registration.
+    venues::register_custom_data();
     match Cli::parse().command {
         Command::FillCatalog(args) => run_fill_catalog(args).await,
         Command::Backtest(args) => run_backtest(*args),

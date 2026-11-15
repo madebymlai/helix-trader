@@ -19,6 +19,7 @@ mod backtest_bars;
 mod backtest_bars_on_close;
 mod backtest_book_deltas_and_custom_data;
 mod backtest_budget_off_grid;
+mod backtest_catalog_custom_series;
 mod backtest_catalog_gaps;
 mod backtest_commission_rate;
 mod backtest_composite_bars;
