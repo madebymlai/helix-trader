@@ -47,7 +47,9 @@
 //! client makes), fill-catalog which source fills it (`fill_history`), a
 //! live start whether its live data streams it (`streams_custom`, its live
 //! data source's answer: none does yet), and a live warmup the client it
-//! asks its history of (`custom_data_client`). A type the table has no
+//! asks its history of (`custom_data_client`). On a root, its contracts'
+//! series are routed as it is, by their type, the source asked for each
+//! over its slice (`DataRequirements::custom_slices`). A type the table has no
 //! row of, or a row with no history source, is the catalog's: data
 //! written into the catalog from outside helix, which a config loads,
 //! fill-catalog skips, a replay reads, a live warmup asks of the catalog

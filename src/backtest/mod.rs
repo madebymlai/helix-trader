@@ -70,7 +70,9 @@ pub struct Backtest {
     pub ticks: Vec<TickSeries>,
     /// The custom series the strategy reads (see
     /// `strategy::requirements::DataRequirements::custom`): each replayed
-    /// over the window by its data type, beside the others, each row when
+    /// over its slices of the window by its data type, a root's as its
+    /// contracts' series over their slices
+    /// (`DataRequirements::custom_slices`), beside the others, each row when
     /// it is known (`lse::LseRow`: a date's at its end), whether its
     /// type's history source fills it or it is the catalog's, written
     /// into it from outside helix (`venues::serves_custom`). They bring no

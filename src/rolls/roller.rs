@@ -2,10 +2,12 @@
 //! instrument it reads changes, with the plain Nautilus clock, as Nautilus'
 //! own (crate-private) roller of continuous bars does: an alert before each
 //! roll, at which it returns the roll, and, live, the post contract loaded
-//! before it. It subscribes to nothing: the strategy hands each roll to its
+//! before it, but a custom series' root's alone (`Roller::custom_roots`).
+//! It subscribes to nothing: the strategy hands each roll to its
 //! subscriptions (`strategy::subscriptions`), which move the rolled
-//! instrument's series to the post contract, and to whatever else reads the
-//! contract, a model strategy's features.
+//! instrument's series, its custom series among them, to the post
+//! contract, and to whatever else reads the contract, a model strategy's
+//! features.
 
 use std::fmt::Debug;
 

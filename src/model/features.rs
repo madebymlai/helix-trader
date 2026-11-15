@@ -52,9 +52,11 @@
 //! holds a point of its data type.
 //!
 //! A feature on the ticks or custom data of a futures root (`GC.GLBX`, see
-//! `rolls`) reads the contract standing for it: `register` sets it from
-//! the clock (`rolls::front`), and that contract's quotes, trades, depth,
-//! deltas and custom data (keyed by the contract's id) are matched to it.
+//! `rolls`), a custom series under the root's id among them, reads the
+//! contract standing for it: `register` sets it from the clock
+//! (`rolls::front`), and that contract's quotes, trades, depth, deltas and
+//! custom data (keyed by the contract's id, `CustomSeries::on`) are
+//! matched to it.
 //! The set's tick series (`ticks`), an instrument's custom data among them,
 //! are what the model handle's subscriptions subscribe to
 //! (`strategy::subscriptions`) and a live warmup requests; at the roller's
@@ -64,7 +66,7 @@
 //! and the set is not initialized until they refill, so decisions wait. A
 //! raw feature has no window: it reads the latest point of the post
 //! contract the cache holds, if any. Other instruments' features, and the
-//! raw features of a custom series, are untouched.
+//! raw features of a custom series of no root, are untouched.
 //!
 //! Each update reaches only the features declared on its kind and source.
 //! An update of a kind or source no feature reads is a no-op, so the
@@ -471,7 +473,8 @@ impl FeatureSet {
 
     /// Moves the features reading a root rolled by `roll` (those on its
     /// pre contract that are not the contract itself, read as a plain
-    /// instrument), tick and raw features alike, to its post contract, and
+    /// instrument), tick and raw features alike, a custom series' on the
+    /// root among them, to its post contract, and
     /// resets the tick features (`Indicator::reset`): they are cold until
     /// they refill on the post contract, so the set is not initialized and
     /// decisions wait; a raw feature reads the post contract's latest point

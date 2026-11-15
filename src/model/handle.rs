@@ -81,10 +81,11 @@
 //! reference price, the venue's fills and the target's ATR then coming from
 //! them), and to the custom series of its requirements
 //! (`DataRequirements::custom`), which reach the strategy's `on_data`,
-//! and a `rolls::Roller` of the ticks' instruments: `start` subscribes
-//! each tick series on the contract standing for its instrument, a plain
-//! instrument once, a root on its front contract, and sets each root's
-//! roll alert; the strategy hands the handle its time events (after
+//! and a `rolls::Roller` of the ticks' instruments and of the custom
+//! series' roots (`Roller::custom_roots`): `start` subscribes each tick
+//! series and custom series on the contract standing for its instrument
+//! or root, a plain instrument, or a custom series of no root, once, a
+//! root on its front contract, and sets each root's roll alert; the strategy hands the handle its time events (after
 //! `strategy::orders::on_time_event`), for the roller. At a roll the
 //! root's series move to the post contract (`Subscriptions::roll`), and
 //! its features too, restarting (`FeatureSet::roll`), so decisions wait on

@@ -7,8 +7,9 @@
 //! (`get_missing_intervals_for_request`): per contract its definitions, then
 //! each series' missing windows, the slivers between a live node's promoted
 //! files among them, each asked once and closed by its write-back.
-//! `missing_custom` does the same for custom series, keyed by their data
-//! type's identifier, with no definition. A `NodeFill` gathers each
+//! `missing_custom` does the same for custom series over their slices, a
+//! root's contract by contract, keyed by their data type's identifier,
+//! with no definition. A `NodeFill` gathers each
 //! source's data client with its requests and the source's period, and `run`
 //! builds a live node with those clients and the catalog, and an actor asking
 //! for one request at a time, naming the client it was added with, which the

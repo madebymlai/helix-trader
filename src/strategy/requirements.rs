@@ -61,14 +61,16 @@ pub struct DataRequirements {
     /// fill-catalog from its type's history source, with no definition,
     /// or, of a type with no row or one with no history source, the
     /// catalog's, written into it from outside helix and fetched by
-    /// nothing; replayed in a backtest over the run's window, the
-    /// strategy's subscriptions subscribing to each from its start
-    /// (`strategy::subscriptions`), each by its data type unchanged; a
-    /// live run reading any its type's live data does not stream is
-    /// refused (`venues::streams_custom`), none streaming any yet, nor
-    /// anything the catalog's. They bring no instrument. Custom data of an
-    /// instrument written with an `instrument_id` is a tick series still,
-    /// keyed by the instrument and rolled with it.
+    /// nothing; replayed in a backtest over its slices of the run's window
+    /// (`custom_slices`), the strategy's subscriptions subscribing to each
+    /// from its start (`strategy::subscriptions`), each by its data type as
+    /// read then (`CustomSeries::at`); a live run reading any its type's
+    /// live data does not stream is refused (`venues::streams_custom`),
+    /// none streaming any yet, nor anything the catalog's. Under a root's
+    /// id, each rolls contract by contract, as the root's other series do;
+    /// any other stands for itself. They bring no instrument. Custom data
+    /// of an instrument written with an `instrument_id` is a tick series
+    /// still, keyed by the instrument and rolled with it.
     pub custom: Vec<CustomSeries>,
     /// How far back before a live start the warmup history starts: a
     /// backtest requests none.
@@ -123,7 +125,10 @@ pub(super) fn tick_data(name: &str) -> Result<NautilusDataType, String> {
 /// metadata = { source = "bond_yields", symbol = "US10Y" } }` in `[data]
 /// series`. Built only through `new`, which holds it to what makes it one
 /// series of the catalog. Its data type is the one Nautilus subscribes,
-/// caches, requests and stores it by, as the config names it.
+/// caches, requests and stores it by, as the config names it; under a
+/// root's id (`root`), that of the contract standing for the root at a
+/// time (`at`), the contract's id its identifier, its type and metadata
+/// kept, as every series on a root is read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomSeries(DataType);
 

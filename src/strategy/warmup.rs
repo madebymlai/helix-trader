@@ -196,8 +196,9 @@
 //!
 //! Each custom series of the requirements (`DataRequirements::custom`, an
 //! LSE reference series or the catalog's own) is requested in the same
-//! group over the same window with `request_data` of its data type as the
-//! config gives it, by the same rule (`custom_request`): if its type's
+//! group over the same window with `request_data` of its data type as
+//! read at the start (`CustomSeries::at`), a root's the front contract's,
+//! each data type once, by the same rule (`custom_request`): if its type's
 //! row's history serves it, naming the data client of the row's live data
 //! source on the node (`venues::custom_data_client`), LSE's for LSE's
 //! rows, with `update_catalog`, the catalog answering first and the
