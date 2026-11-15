@@ -38,6 +38,7 @@ mod ctrader_token_demo;
 mod demo_broker;
 mod ib_gateway;
 mod ib_minute_bars;
+mod ib_pair_warmup;
 mod ib_restart;
 mod ib_warmup_days;
 mod lse_history;
