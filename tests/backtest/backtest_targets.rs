@@ -11,7 +11,8 @@
 //! a bracket and a time-only target on an inverse instrument refused, each
 //! side's payoff features worked out by hand on quotes, on bars and on
 //! trades alone, exits in basis points and in average true ranges of hourly
-//! bars, the cadence's, which the targets subscribe to themselves, built
+//! bars, the cadence's, which the probe subscribes to as a model handle
+//! does (`Targets::atr_bar_type`, `strategy::subscriptions`), built
 //! from the quotes, from the trades alone and from minute bars alone, a
 //! time-only target's unit the worth of such an ATR on quotes and on minute
 //! bars, no order before the ATR is initialized; deciding on LAST bars the run
@@ -49,6 +50,7 @@ use helix_trader::{
         AtrArgs, Declared, orders,
         requirements::{DataRequirements, TickSeries},
         risk::Risk,
+        subscriptions::Subscriptions,
     },
 };
 use jiff::{SignedDuration, Timestamp};
@@ -259,6 +261,9 @@ impl DataActor for TargetProbe {
         let features = Rc::clone(&self.features);
         features.register(self);
         Rc::clone(&self.targets).start(self)?;
+        let now = self.clock().utc_now();
+        Subscriptions::new(self.targets.atr_bar_type().into_iter().collect(), vec![])
+            .start(self, now);
         let record = Rc::clone(&self.record);
         let handler = ShareableMessageHandler::from_typed(move |data: &CustomData| {
             let row = data.data.as_any().downcast_ref::<TargetRow>().unwrap();

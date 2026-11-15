@@ -48,9 +48,10 @@
 //! `rolls`) reads the contract standing for it: `register` sets it from
 //! the clock (`rolls::front`), and that contract's quotes, trades, depth,
 //! deltas and custom data (keyed by the contract's id) are matched to it.
-//! The set's tick series (`ticks`), custom data among them, are what a
-//! `rolls::Roller` subscribes to and a live warmup requests, the model
-//! handle's; at the roller's transition, `roll` moves the root's features
+//! The set's tick series (`ticks`), custom data among them, are what the
+//! model handle's subscriptions subscribe to (`strategy::subscriptions`)
+//! and a live warmup requests; at the roller's transition, `roll` moves the
+//! root's features
 //! to the post contract and resets them (Nautilus' `Indicator::reset`):
 //! their windows never mix two contracts, which trade at different prices,
 //! and the set is not initialized until they refill, so decisions wait. A
@@ -371,8 +372,9 @@ impl FeatureSet {
 
     /// The tick series the features read as they are, quotes, trades,
     /// depth, deltas and custom data, each of its declared instrument, a
-    /// root or plain, each once, in order: what a `rolls::Roller`
-    /// subscribes to and a live warmup requests. Bars are not among them.
+    /// root or plain, each once, in order: what a strategy's subscriptions
+    /// subscribe to (`strategy::subscriptions`) and a live warmup requests.
+    /// Bars are not among them.
     #[must_use]
     pub fn ticks(&self) -> Vec<TickSeries> {
         let mut ticks: Vec<TickSeries> = Vec::new();

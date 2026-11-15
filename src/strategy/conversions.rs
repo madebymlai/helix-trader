@@ -12,8 +12,8 @@
 //! quotes (`venues::rate_series`, `StandardConfig::data_requirements`),
 //! IB's bars, a cTrader broker's quotes: fill-catalog fills them, a
 //! backtest replays them, a live strategy warms up on them and subscribes
-//! to them from its start, a cTrader pair's quotes through its roller
-//! (`rolls::Roller`), an IB pair's bars as any bar type, and Nautilus'
+//! to them from its start (`strategy::subscriptions`), a cTrader pair's
+//! quotes as any tick series, an IB pair's bars as any bar type, and Nautilus'
 //! data engine caches each quote and bar it processes, a warmup's among
 //! them, which its exchange rates are read from, a pair's quotes before its
 //! bars. Before a pair's first quote or bars

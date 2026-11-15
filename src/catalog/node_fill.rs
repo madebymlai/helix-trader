@@ -48,10 +48,7 @@ use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use serde_json::json;
 
 use super::catalog_config;
-use crate::{strategy::requirements::SeriesSlice, time_range};
-
-/// The book depth of an `OrderBookDepth` request: MBP-10's.
-const DEPTH: usize = 10;
+use crate::{strategy::requirements::SeriesSlice, time_range, venues};
 
 /// What a fill asks a source for: an instrument's definition, or one of
 /// its series.
@@ -63,7 +60,8 @@ pub enum FillData {
     Quotes,
     /// `TradeTick`s (`request_trades`).
     Trades,
-    /// `OrderBookDepth` snapshots of 10 levels (`request_book_depth`).
+    /// `OrderBookDepth` snapshots of the levels of its venue's book
+    /// (`request_book_depth`, `venues::book_format`).
     Depth,
     /// `OrderBookDelta`s (`request_book_deltas`).
     Deltas,
@@ -496,7 +494,14 @@ impl FillActor {
 
     /// Sends `asked` to the data engine, naming its client, with
     /// `update_catalog`, a series in windows of its period, custom data
-    /// whole.
+    /// whole; depth at the levels of its venue's book
+    /// (`venues::book_format`), the one format of the catalog's series of
+    /// it, which the venue's history serves in that format or not at all.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if Nautilus refuses the request, or naming the
+    /// instrument if it asks the depth of a venue whose book has none.
     fn issue(&mut self, asked: Asked) -> anyhow::Result<UUID4> {
         let Asked {
             request,
@@ -536,15 +541,17 @@ impl FillActor {
             }
             FillData::Quotes => self.request_quotes(instrument_id, from, to, None, client, params),
             FillData::Trades => self.request_trades(instrument_id, from, to, None, client, params),
-            FillData::Depth => self.request_book_depth(
-                instrument_id,
-                from,
-                to,
-                None,
-                std::num::NonZeroUsize::new(DEPTH),
-                client,
-                params,
-            ),
+            FillData::Depth => {
+                let levels = venues::book_format(instrument_id.venue)
+                    .and_then(|book| book.depth)
+                    .with_context(|| {
+                        format!(
+                            "the book of {} has no depth: none of {instrument_id} is asked",
+                            instrument_id.venue
+                        )
+                    })?;
+                self.request_book_depth(instrument_id, from, to, None, Some(levels), client, params)
+            }
             FillData::Deltas => {
                 self.request_book_deltas(instrument_id, from, to, None, client, params)
             }

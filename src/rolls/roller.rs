@@ -1,29 +1,27 @@
-//! The roller: keeps a strategy subscribed to the tick series it reads on
-//! the contract standing for each of their instruments, switching at each
-//! roll, with the plain Nautilus clock and subscription API, as Nautilus'
-//! own (crate-private) roller of continuous bars does.
+//! The roller: tells a strategy when the contract standing for each
+//! instrument it reads changes, with the plain Nautilus clock, as Nautilus'
+//! own (crate-private) roller of continuous bars does: an alert before each
+//! roll, at which it returns the roll, and, live, the post contract loaded
+//! before it. It subscribes to nothing: the strategy hands each roll to its
+//! subscriptions (`strategy::subscriptions`), which move the rolled
+//! instrument's series to the post contract, and to whatever else reads the
+//! contract, a model strategy's features.
 
-use std::{fmt::Debug, num::NonZeroUsize};
+use std::fmt::Debug;
 
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::{DataActor, DataActorNative},
     timer::TimeEvent,
 };
-use nautilus_core::{Params, UnixNanos};
-use nautilus_model::{
-    data::{DataType, NautilusDataType},
-    enums::BookType,
-    identifiers::InstrumentId,
-};
+use nautilus_core::Params;
+use nautilus_model::identifiers::InstrumentId;
 
 use super::Transition;
-use crate::{
-    strategy::{requirements::TickSeries, warmup::subscription_params},
-    venues,
-};
+use crate::venues;
 
-/// The prefix of an instrument's roll alert, followed by its id.
+/// The prefix of an instrument's roll alert, followed by its id, `@` and
+/// the time of the roll the alert is armed for (see `alert_name`).
 const ROLL_ALERT: &str = "ROLL:";
 
 /// The request param that sends an instrument request past the node's
@@ -31,18 +29,12 @@ const ROLL_ALERT: &str = "ROLL:";
 /// Nautilus' data engine), which loads the instrument as it answers.
 const FORCE_INSTRUMENT_UPDATE: &str = "force_instrument_update";
 
-/// The levels a side of an `OrderBookDepth10` snapshot.
-const DEPTH: NonZeroUsize = NonZeroUsize::new(10).unwrap();
-
-/// The book type of the book deltas a roller subscribes to, and a warmup
-/// requests.
-pub const DELTAS_BOOK_TYPE: BookType = BookType::L3_MBO;
-
-/// Subscribes a strategy to its tick series, each on the contract standing
-/// for its instrument (see `Transition::after`), and rolls them: owned by
-/// the strategy, started in its `on_start` and handed its time events in
-/// `on_time_event`, which return the roll they made, if any. An instrument
-/// that does not roll is subscribed once, with no alert.
+/// Rolls a strategy's instruments, each from the contract standing for it
+/// (see `Transition::after`) to the next: owned by the strategy, started in
+/// its `on_start` and handed its time events in `on_time_event`, which
+/// returns the roll it made, if any, for the strategy to hand its
+/// subscriptions (`Subscriptions::roll`). An instrument that does not roll
+/// gets no alert.
 ///
 /// A live roller loads each post contract when it sets its roll alert, so
 /// a node rolls any number of times: it requests the instrument from the
@@ -50,16 +42,18 @@ pub const DELTAS_BOOK_TYPE: BookType = BookType::L3_MBO;
 /// nothing: a backtest or dataset run registers every contract of its
 /// slices up front.
 ///
-/// It subscribes through the strategy that owns it, so the strategy calls
-/// it on a clone (`self.roller.clone().start(self)`): it holds the series
-/// only, and works out the contracts from the clock.
+/// It sets its alerts and requests through the strategy that owns it, so
+/// the strategy calls it on a clone (`self.roller.clone().start(self, now)`):
+/// it holds the instruments only, and works out the contracts from the time
+/// it starts at and the roll time each alert's name holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Roller {
-    ticks: Vec<TickSeries>,
+    /// The instruments, roots or plain, each once.
+    instrument_ids: Vec<InstrumentId>,
     loading: Loading,
 }
 
-/// How the node comes to hold the contracts a roller subscribes to.
+/// How the node comes to hold the contracts a roller rolls into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Loading {
     /// The run registered them all before it started.
@@ -76,42 +70,48 @@ enum Loading {
 }
 
 impl Roller {
-    /// A live roller of `ticks`, their instruments roots or plain
-    /// instruments: it requests each post contract before its roll.
+    /// A live roller of `instrument_ids`, roots or plain instruments: it
+    /// requests each post contract before its roll.
     #[must_use]
-    pub fn live(ticks: Vec<TickSeries>) -> Self {
+    pub fn live(instrument_ids: Vec<InstrumentId>) -> Self {
+        Self::of(instrument_ids, Loading::Requested)
+    }
+
+    /// A roller of `instrument_ids` in a backtest or a dataset run, which
+    /// register every contract up front: it requests nothing.
+    #[must_use]
+    pub fn replayed(instrument_ids: Vec<InstrumentId>) -> Self {
+        Self::of(instrument_ids, Loading::Registered)
+    }
+
+    fn of(instrument_ids: Vec<InstrumentId>, loading: Loading) -> Self {
+        let mut ids: Vec<InstrumentId> = Vec::new();
+        for instrument_id in instrument_ids {
+            if !ids.contains(&instrument_id) {
+                ids.push(instrument_id);
+            }
+        }
         Self {
-            ticks,
-            loading: Loading::Requested,
+            instrument_ids: ids,
+            loading,
         }
     }
 
-    /// A roller of `ticks` in a backtest or a dataset run, which register
-    /// every contract up front: it requests nothing.
-    #[must_use]
-    pub fn replayed(ticks: Vec<TickSeries>) -> Self {
-        Self {
-            ticks,
-            loading: Loading::Registered,
-        }
-    }
-
-    /// Subscribes `actor` to each series on the contract standing for its
-    /// instrument now, and sets the alert of each instrument's next roll,
-    /// if it rolls (see `on_time_event`), live requesting its post
-    /// contract.
+    /// Sets the alert of each instrument's next roll after `now`, if it
+    /// rolls (see `on_time_event`), live requesting its post contract.
+    /// `now` is the time the strategy's subscriptions start from
+    /// (`Subscriptions::start`), so the alert is of the roll out of the
+    /// contract they subscribe to (`front`).
     ///
     /// # Errors
     ///
     /// Returns an error if the clock refuses an alert or Nautilus a
     /// request.
-    pub fn start<A>(&self, actor: &mut A) -> anyhow::Result<()>
+    pub fn start<A>(&self, actor: &mut A, now: Timestamp) -> anyhow::Result<()>
     where
         A: DataActor + DataActorNative + Debug + 'static,
     {
-        let now = actor.clock().utc_now();
-        for instrument_id in self.instrument_ids() {
-            self.subscribe(actor, instrument_id, front(instrument_id, now));
+        for &instrument_id in &self.instrument_ids {
             if let Some(next) = Transition::after(instrument_id, now) {
                 self.arm(actor, instrument_id, next)?;
             }
@@ -119,13 +119,16 @@ impl Roller {
         Ok(())
     }
 
-    /// If `event` is an instrument's roll alert, rolls its series: from
-    /// the pre contract to the post contract of its transition, and sets
-    /// the alert of the next one, live requesting its post contract;
-    /// returns the transition made. `None` for any
-    /// other event, which is the strategy's own. A series of the pre
-    /// contract that another of the instruments still stands on after the
-    /// roll (the contract itself, read beside its root) stays subscribed.
+    /// If `event` is an instrument's roll alert, sets the alert of its next
+    /// roll, live requesting its post contract, and returns the roll the
+    /// alert was armed for, from its pre to its post contract, which the
+    /// strategy hands its subscriptions (`Subscriptions::roll`). `None` for
+    /// any other event, which is the strategy's own. The roll is the one
+    /// the alert's name holds, not one worked out from the event's time:
+    /// Nautilus fires an alert set in the past at once, at the clock's time
+    /// (`validate_and_prepare_time_alert`), so an alert armed after its roll,
+    /// at a live start just before it, comes at or after the roll's time,
+    /// when the next roll is the one after it.
     ///
     /// The alert is at the last nanosecond of the pre contract's slice,
     /// not at the transition: the backtest engine delivers the data of a
@@ -146,17 +149,13 @@ impl Roller {
     where
         A: DataActor + DataActorNative + Debug + 'static,
     {
-        let Some(instrument_id) = self
-            .instrument_ids()
-            .into_iter()
-            .find(|&instrument_id| event.name.as_str() == alert_name(instrument_id))
+        let Some((instrument_id, roll)) = self
+            .instrument_ids
+            .iter()
+            .find_map(|&instrument_id| Some((instrument_id, armed(event, instrument_id)?)))
         else {
             return Ok(None);
         };
-        let roll = Transition::after(instrument_id, event.ts_event.into())
-            .expect("an instrument with a roll alert rolls");
-        self.unsubscribe(actor, instrument_id, roll.pre, roll.time);
-        self.subscribe(actor, instrument_id, roll.post);
         if let Some(next) = Transition::after(instrument_id, roll.time) {
             self.arm(actor, instrument_id, next)?;
         }
@@ -182,114 +181,35 @@ impl Roller {
         }
         Ok(())
     }
-
-    /// The instruments of the series, each once, in order.
-    fn instrument_ids(&self) -> Vec<InstrumentId> {
-        let mut ids: Vec<InstrumentId> = Vec::new();
-        for tick in &self.ticks {
-            if !ids.contains(&tick.instrument_id) {
-                ids.push(tick.instrument_id);
-            }
-        }
-        ids
-    }
-
-    /// The kinds of the series of `instrument_id`.
-    fn data_of(&self, instrument_id: InstrumentId) -> impl Iterator<Item = &NautilusDataType> + '_ {
-        self.ticks
-            .iter()
-            .filter(move |tick| tick.instrument_id == instrument_id)
-            .map(|tick| &tick.data)
-    }
-
-    /// Subscribes `actor` to the series of `instrument_id` on `contract`,
-    /// streaming from now: live, where the warmup, requested up to now,
-    /// ends (`strategy::warmup`).
-    fn subscribe<A>(&self, actor: &mut A, instrument_id: InstrumentId, contract: InstrumentId)
-    where
-        A: DataActor + DataActorNative + Debug + 'static,
-    {
-        let now = UnixNanos::from(actor.clock().utc_now());
-        for data in self.data_of(instrument_id) {
-            let params = Some(subscription_params(now, []));
-            match data {
-                NautilusDataType::QuoteTick => actor.subscribe_quotes(contract, None, params),
-                NautilusDataType::TradeTick => actor.subscribe_trades(contract, None, params),
-                NautilusDataType::OrderBookDepth => actor.subscribe_book_depth(
-                    contract,
-                    BookType::L2_MBP,
-                    Some(DEPTH),
-                    None,
-                    false,
-                    params,
-                ),
-                NautilusDataType::OrderBookDelta => actor.subscribe_book_deltas(
-                    contract,
-                    DELTAS_BOOK_TYPE,
-                    None,
-                    None,
-                    false,
-                    params,
-                ),
-                NautilusDataType::Custom { type_name } => {
-                    let data_type = DataType::new(type_name, None, Some(contract.to_string()));
-                    actor.subscribe_data(data_type, None, params);
-                }
-                other => unreachable!("{other} is not a tick series (see `TickSeries`)"),
-            }
-        }
-    }
-
-    /// Unsubscribes `actor` from the series of `instrument_id` on
-    /// `contract`, but for the kinds an instrument of the roller still
-    /// reads on `contract` at `time`, the contract standing for it then.
-    fn unsubscribe<A>(
-        &self,
-        actor: &mut A,
-        instrument_id: InstrumentId,
-        contract: InstrumentId,
-        time: Timestamp,
-    ) where
-        A: DataActor + DataActorNative + Debug + 'static,
-    {
-        for data in self.data_of(instrument_id) {
-            let still_read = self
-                .ticks
-                .iter()
-                .any(|tick| tick.data == *data && front(tick.instrument_id, time) == contract);
-            if still_read {
-                continue;
-            }
-            match data {
-                NautilusDataType::QuoteTick => actor.unsubscribe_quotes(contract, None, None),
-                NautilusDataType::TradeTick => actor.unsubscribe_trades(contract, None, None),
-                NautilusDataType::OrderBookDepth => {
-                    actor.unsubscribe_book_depth(contract, None, None);
-                }
-                NautilusDataType::OrderBookDelta => {
-                    actor.unsubscribe_book_deltas(contract, None, None);
-                }
-                NautilusDataType::Custom { type_name } => {
-                    let data_type = DataType::new(type_name, None, Some(contract.to_string()));
-                    actor.unsubscribe_data(data_type, None, None);
-                }
-                other => unreachable!("{other} is not a tick series (see `TickSeries`)"),
-            }
-        }
-    }
 }
 
 /// The contract standing for `instrument_id` at `time`: the pre contract
-/// of its next roll, or itself if it does not roll. What a roller
-/// subscribes to at its start.
+/// of its next roll, or itself if it does not roll. What a strategy
+/// subscribes to at its start (`Subscriptions::start`).
 #[must_use]
 pub fn front(instrument_id: InstrumentId, time: Timestamp) -> InstrumentId {
     Transition::after(instrument_id, time).map_or(instrument_id, |next| next.pre)
 }
 
-/// The name of the roll alert of `instrument_id`.
-fn alert_name(instrument_id: InstrumentId) -> String {
-    format!("{ROLL_ALERT}{instrument_id}")
+/// The name of the roll alert of `instrument_id` for `roll`: its prefix,
+/// the instrument and the roll's time, from which `armed` reads the roll
+/// back.
+fn alert_name(instrument_id: InstrumentId, roll: Transition) -> String {
+    format!("{ROLL_ALERT}{instrument_id}@{}", roll.time)
+}
+
+/// The roll of `instrument_id` that `event` is the alert of, if it is
+/// one: the roll at the time its name holds (see `alert_name`).
+fn armed(event: &TimeEvent, instrument_id: InstrumentId) -> Option<Transition> {
+    let time: Timestamp = event
+        .name
+        .as_str()
+        .strip_prefix(&format!("{ROLL_ALERT}{instrument_id}@"))?
+        .parse()
+        .ok()?;
+    let roll = Transition::after(instrument_id, time - SignedDuration::from_nanos(1))
+        .expect("an instrument with a roll alert rolls");
+    Some(roll)
 }
 
 /// Sets the roll alert of `instrument_id` for `next`, at the last
@@ -302,7 +222,7 @@ where
     let at: Timestamp = next.time - SignedDuration::from_nanos(1);
     actor
         .clock()
-        .set_time_alert(&alert_name(instrument_id), at, None, None)
+        .set_time_alert(&alert_name(instrument_id, next), at, None, None)
 }
 
 #[cfg(test)]
@@ -338,7 +258,8 @@ mod tests {
 
     impl DataActor for Probe {}
 
-    /// What the probe sent the data engine about an instrument.
+    /// What the probe sent the data engine about an instrument: a roller
+    /// sends requests alone, so a subscription shows as a regression.
     #[derive(Debug, PartialEq, Eq)]
     enum Sent {
         Subscribe(InstrumentId),
@@ -432,7 +353,7 @@ mod tests {
     /// and the rolls the roller made.
     fn run(roller: &Roller, start: &str, end: &str) -> (Vec<Sent>, Vec<Transition>) {
         let (mut probe, clock, commands) = registered(start);
-        roller.start(&mut probe).unwrap();
+        roller.start(&mut probe, start.parse().unwrap()).unwrap();
         let end: Timestamp = end.parse().unwrap();
         let mut now: Timestamp = start.parse().unwrap();
         let mut rolls = Vec::new();
@@ -446,13 +367,6 @@ mod tests {
         (sent(&commands), rolls)
     }
 
-    fn gc_trades() -> Vec<TickSeries> {
-        vec![TickSeries {
-            data: NautilusDataType::TradeTick,
-            instrument_id: id("GC.GLBX"),
-        }]
-    }
-
     /// GC rolls into GCG27 at 00:00 UTC on 2026-11-26 and into GCJ27 on
     /// 2027-01-27, two business days before the last business day of the
     /// month before delivery (`calendar.toml`); GCJ27 rolls into GCM27.
@@ -462,7 +376,7 @@ mod tests {
     #[test]
     fn a_live_roller_rolls_twice_requesting_each_post_contract_before_its_roll() {
         let (sent, rolls) = run(
-            &Roller::live(gc_trades()),
+            &Roller::live(vec![id("GC.GLBX")]),
             "2026-08-10T14:30:00Z",
             "2027-02-01T00:00:00Z",
         );
@@ -479,13 +393,8 @@ mod tests {
         assert_eq!(
             sent,
             [
-                Sent::Subscribe(id("GCZ26.GLBX")),
                 Sent::Request(id("GCG27.GLBX"), true, Some(ClientId::from("IB"))),
-                Sent::Unsubscribe(id("GCZ26.GLBX")),
-                Sent::Subscribe(id("GCG27.GLBX")),
                 Sent::Request(id("GCJ27.GLBX"), true, Some(ClientId::from("IB"))),
-                Sent::Unsubscribe(id("GCG27.GLBX")),
-                Sent::Subscribe(id("GCJ27.GLBX")),
                 Sent::Request(id("GCM27.GLBX"), true, Some(ClientId::from("IB"))),
             ]
         );
@@ -494,35 +403,52 @@ mod tests {
     #[test]
     fn a_replayed_roller_rolls_twice_requesting_nothing() {
         let (sent, rolls) = run(
-            &Roller::replayed(gc_trades()),
+            &Roller::replayed(vec![id("GC.GLBX")]),
             "2026-08-10T14:30:00Z",
             "2027-02-01T00:00:00Z",
         );
         assert_eq!(rolls.len(), 2);
-        assert_eq!(
-            sent,
-            [
-                Sent::Subscribe(id("GCZ26.GLBX")),
-                Sent::Unsubscribe(id("GCZ26.GLBX")),
-                Sent::Subscribe(id("GCG27.GLBX")),
-                Sent::Unsubscribe(id("GCG27.GLBX")),
-                Sent::Subscribe(id("GCJ27.GLBX")),
-            ]
-        );
+        assert_eq!(sent, []);
+    }
+
+    /// A live start a minute before GC rolls from GCZ26 into GCG27, at
+    /// 00:00 UTC on 2026-11-26: the strategy subscribes on GCZ26 from the
+    /// warmup's `now`, 23:59, and the clock has passed the roll by the time
+    /// the roller arms it, so Nautilus fires its alert at once, at the
+    /// clock's time (`validate_and_prepare_time_alert`). The roll the
+    /// roller returns is the one it armed, out of GCZ26, the contract
+    /// subscribed, not the next one after the alert's time.
+    #[test]
+    fn a_roll_armed_after_its_time_is_the_one_out_of_the_contract_standing_at_the_start() {
+        let roller = Roller::live(vec![id("GC.GLBX")]);
+        let (mut probe, clock, _) = registered("2026-11-25T23:59:00Z");
+        clock
+            .borrow_mut()
+            .advance_time(at("2026-11-26T00:00:01Z"), true);
+
+        roller
+            .start(&mut probe, "2026-11-25T23:59:00Z".parse().unwrap())
+            .unwrap();
+        let events = clock
+            .borrow_mut()
+            .advance_time(at("2026-11-26T00:00:02Z"), true);
+        let rolls: Vec<(InstrumentId, InstrumentId)> = events
+            .iter()
+            .filter_map(|event| roller.on_time_event(&mut probe, event).unwrap())
+            .map(|roll| (roll.pre, roll.post))
+            .collect();
+
+        assert_eq!(rolls, [(id("GCZ26.GLBX"), id("GCG27.GLBX"))]);
     }
 
     #[test]
     fn a_live_roller_requests_nothing_for_a_plain_instrument() {
-        let ticks = vec![TickSeries {
-            data: NautilusDataType::TradeTick,
-            instrument_id: id("GCZ26.GLBX"),
-        }];
         let (sent, rolls) = run(
-            &Roller::live(ticks),
+            &Roller::live(vec![id("GCZ26.GLBX")]),
             "2026-08-10T14:30:00Z",
             "2027-02-01T00:00:00Z",
         );
         assert!(rolls.is_empty());
-        assert_eq!(sent, [Sent::Subscribe(id("GCZ26.GLBX"))]);
+        assert_eq!(sent, []);
     }
 }

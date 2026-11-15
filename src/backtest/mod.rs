@@ -172,8 +172,8 @@ impl Backtest {
 
     /// The continuous bars of the bar types on roots over the run,
     /// adjusted in `mode`, their roll prices read from the catalog (see
-    /// `rolls::ContinuousBars::read`): the strategy passes them to
-    /// `warmup::subscribe`.
+    /// `rolls::ContinuousBars::read`): the strategy subscribes to them
+    /// through `strategy::subscriptions::Subscriptions::continuous`.
     ///
     /// # Errors
     ///

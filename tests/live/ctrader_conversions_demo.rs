@@ -6,12 +6,13 @@
 //! (`venues::rate_series`), its warmup asks their history as it does every
 //! series of its data requirements its venue serves, and the strategy
 //! subscribes to them from its start, as every strategy does through its
-//! roller (`rolls::Roller`) of its data requirements' ticks. Its rates then
+//! subscriptions (`strategy::subscriptions`) to its data requirements'
+//! ticks. Its rates then
 //! convert euros into dollars. It needs what `ctrader_demo.rs` needs, and
 //! the forex market open.
 //!
 //! Gated as `ctrader_demo.rs` is. The strategy is a recorder wired as the
-//! EMA crossover is, a warmup of its bars and a roller of its ticks, its
+//! EMA crossover is, a warmup and subscriptions to its bars and ticks, its
 //! requirements and rates those of an EMA config listing the pair; it sends
 //! no order, and the broker's execution client reconciles the account. One
 //! node per process, hence its own module, run alone (`main.rs`). The node
@@ -29,8 +30,9 @@ use std::{cell::RefCell, process::Command, rc::Rc, time::Duration};
 
 use helix_trader::{
     live::Live,
-    rolls::Roller,
-    strategy::{conversions::Rates, ema::EmaCrossConfig, warmup::Warmup},
+    strategy::{
+        conversions::Rates, ema::EmaCrossConfig, subscriptions::Subscriptions, warmup::Warmup,
+    },
 };
 use nautilus_common::{
     actor::{DataActor, DataActorNative},
@@ -69,14 +71,15 @@ struct Record {
     converted: Option<Money>,
 }
 
-/// Warms up its bars through a `Warmup` and subscribes to its ticks through
-/// a `Roller`, as the EMA crossover does, records the pair's quotes, and
-/// at its stop reads the cache. It sends no order.
+/// Warms up its bars through a `Warmup` and subscribes to them and to its
+/// ticks through `Subscriptions` from where it ends, as the EMA crossover
+/// does, records the pair's quotes, and at its stop reads the cache. It
+/// sends no order.
 #[derive(Debug)]
 struct Recorder {
     core: StrategyCore,
     warmup: Rc<Warmup>,
-    roller: Roller,
+    subscriptions: Subscriptions,
     pair: InstrumentId,
     rates: Rates,
     record: Rc<RefCell<Record>>,
@@ -93,8 +96,9 @@ nautilus_strategy!(Recorder, {
 impl DataActor for Recorder {
     fn on_start(&mut self) -> anyhow::Result<()> {
         self.record.borrow_mut().started = Some(self.clock().timestamp_ns());
-        Rc::clone(&self.warmup).start(self)?;
-        self.roller.clone().start(self)
+        let now = Rc::clone(&self.warmup).start(self)?;
+        self.subscriptions.clone().start(self, now);
+        Ok(())
     }
 
     fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
@@ -178,7 +182,10 @@ async fn a_live_run_caches_its_conversion_pairs_quotes_after_its_start() {
             ..Default::default()
         }),
         warmup: Rc::clone(&warmup),
-        roller: Roller::live(requirements.ticks.clone()),
+        subscriptions: Subscriptions::new(
+            requirements.bar_types.clone(),
+            requirements.ticks.clone(),
+        ),
         pair: eurusd,
         rates: config.rates(),
         record: Rc::clone(&record),

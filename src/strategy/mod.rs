@@ -33,12 +33,15 @@
 //! 1-minute bars, OKX's candles) or from ticks (quotes, or trades for
 //! LAST bars); a `warmup::Warmup`, which
 //! each strategy holds, asks for their history live and hands it back, so
-//! that no strategy knows how, and subscribes to them in a backtest, which
-//! requests none. The ticks of its data requirements, the quotes of the FX
-//! pairs its equity converts through among them, the warmup asks the
-//! history of too, where their venue serves it, and a `rolls::Roller`,
-//! which each strategy holds too (a model strategy's handle), subscribes
-//! to them from its start. The catalog
+//! that no strategy knows how, a backtest requesting none. The ticks of its
+//! data requirements, the quotes of the FX pairs its equity converts
+//! through among them, the warmup asks the history of too, where their
+//! venue serves it. A `subscriptions::Subscriptions`, which each strategy
+//! holds too (a model strategy's handle), subscribes to the bars and the
+//! ticks from where the warmup ends, and a `rolls::Roller`, held where a
+//! root's ticks need rolling (see `README.md`, "Configuration and
+//! series"), tells it of each roll of a root, at which it moves the root's
+//! ticks. The catalog
 //! stores what their bars are built from (see
 //! `requirements::catalog_keys`).
 
@@ -50,6 +53,7 @@ pub mod requirements;
 pub mod risk;
 mod session;
 mod standard;
+pub mod subscriptions;
 pub mod warmup;
 
 // The strategies, a module each, and `StrategyName` (see `build.rs`).

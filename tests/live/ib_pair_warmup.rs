@@ -23,7 +23,7 @@ use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use helix_trader::{
     live::Live,
-    strategy::{ema::EmaCrossConfig, warmup::Warmup},
+    strategy::{ema::EmaCrossConfig, subscriptions::Subscriptions, warmup::Warmup},
     venues::ib::IbAccount,
 };
 use nautilus_common::{
@@ -77,12 +77,13 @@ struct Record {
     failure: Option<String>,
 }
 
-/// Warms up as a strategy does, reads the rate when the warmup ends, and
-/// stops the node.
+/// Warms up and subscribes to its bars from where the warmup ends as a
+/// strategy does, reads the rate when the warmup ends, and stops the node.
 #[derive(Debug)]
 struct Probe {
     core: StrategyCore,
     warmup: Rc<Warmup>,
+    subscriptions: Subscriptions,
     record: Rc<RefCell<Record>>,
 }
 
@@ -90,7 +91,9 @@ nautilus_strategy!(Probe);
 
 impl DataActor for Probe {
     fn on_start(&mut self) -> anyhow::Result<()> {
-        Rc::clone(&self.warmup).start(self)
+        let now = Rc::clone(&self.warmup).start(self)?;
+        self.subscriptions.clone().start(self, now);
+        Ok(())
     }
 
     fn on_historical_bars(&mut self, bars: &[Bar]) -> anyhow::Result<()> {
@@ -155,6 +158,7 @@ async fn a_live_start_warms_up_an_idealpro_pairs_bid_and_ask_bars_and_has_its_ra
             ..Default::default()
         }),
         warmup: Rc::clone(&warmup),
+        subscriptions: Subscriptions::new(requirements.bar_types.clone(), vec![]),
         record: Rc::clone(&record),
     };
     // An empty catalog of its own: IB answers the whole warmup.

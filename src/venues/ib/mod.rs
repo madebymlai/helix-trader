@@ -2,7 +2,8 @@
 //! data client config its history and its live clients share, instruments
 //! and history for `fill_catalog`, which asks for series of any data type:
 //! IB serves its own time bars, its quotes and its trades (see `serves`,
-//! `IbHistory::data`), and the live node's clients (see `live`), and the
+//! `IbHistory::data`), and the live node's clients (see `live`), whose
+//! data client streams its quotes, trades and time bars (`streams`), and the
 //! tag linking a bracket's exits in an OCA group (`bracket_exits_tag`); the
 //! client id each command connects with, and live's account, are its flags
 //! (`IbHistoryArgs`, `live::IbLiveArgs`). See `README.md`.
@@ -81,9 +82,10 @@ mod gateway;
 pub use gateway::IbAccount;
 use gateway::IbGateway;
 mod live;
+pub(in crate::venues) use live::BOOK;
 #[cfg(test)]
 pub(in crate::venues) use live::offline_clients;
-pub(crate) use live::{IbLiveArgs, clients};
+pub(crate) use live::{IbLiveArgs, clients, streams};
 
 /// The tag linking a bracket's exits in one IB OCA group named `entry`,
 /// its entry's client order id, in the form Nautilus' IB adapter reads
@@ -637,7 +639,7 @@ pub(crate) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
 /// time bars of a size IB has (Nautilus' `bar_type_to_ib_bar_size`) but a
 /// month, which Nautilus' IB history client reads no bars of (its
 /// `request_bars` parses seconds, minutes, hours, days and weeks alone),
-/// priced at one of `SERVED_PRICES`, and an instrument's quotes and trades,
+/// priced at one of `BAR_PRICES`, and an instrument's quotes and trades,
 /// IB's historical ticks (the requests of the historical client's
 /// `request_ticks`, the live client's `request_quotes` and
 /// `request_trades`). Nautilus' IB
@@ -658,7 +660,7 @@ fn served(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<Serv
             let spec = bar_type.spec();
             ensure!(
                 bar_type.is_externally_aggregated()
-                    && SERVED_PRICES.contains(&spec.price_type)
+                    && BAR_PRICES.contains(&spec.price_type)
                     && bar_type_to_ib_bar_size(&bar_type).is_ok()
                     && spec.aggregation != BarAggregation::Month,
                 "IB's history serves its own (EXTERNAL) time bars of a size IB has and \
@@ -701,16 +703,21 @@ const FOREX_VENUE: &str = "IDEALPRO";
 /// `parse_crypto_contract`, at the pin): its `request_trades` refuses a
 /// currency pair's trades by logging an error and answering nothing
 /// (`data/core.rs`, `request_trades`), so a warmup asking for them would
-/// never end. A venue is known before any definition is, as `serves` is
-/// asked: IB routes crypto to PAXOS and ZEROHASH (`common/symbology.rs`).
+/// never end, and its `subscribe_trades` by logging an error and
+/// streaming nothing (`data/core.rs:1000-1006`), so a run subscribing to
+/// them would hear none. A venue is known before any definition is, as
+/// `serves` and `streams` are asked: IB routes crypto to PAXOS and
+/// ZEROHASH (`common/symbology.rs`).
 const CURRENCY_PAIR_VENUES: [&str; 3] = [FOREX_VENUE, "PAXOS", "ZEROHASH"];
 
-/// The prices of the bars IB's history serves, as Nautilus' IB clients ask
-/// IB for them (`price_type_to_ib_what_to_show`): LAST, IB's TRADES bars,
-/// the only ones with a volume, BID and ASK, IB's BID and ASK bars, the
-/// history of an IDEALPRO pair, which has no TRADES, and MID, IB's MIDPOINT
-/// bars. The adapter asks TRADES for any other price, so it serves none.
-const SERVED_PRICES: [PriceType; 4] = [
+/// The prices of the bars IB's history serves and its live data streams,
+/// as Nautilus' IB clients ask IB for them (`price_type_to_ib_what_to_show`,
+/// and `price_type_to_ib_realtime_what_to_show` for IB's real-time
+/// bars): LAST, IB's TRADES bars, the only ones with a volume, BID and
+/// ASK, IB's BID and ASK bars, the history of an IDEALPRO pair, which has
+/// no TRADES, and MID, IB's MIDPOINT bars. The adapter asks TRADES for any
+/// other price, so it serves and streams none.
+const BAR_PRICES: [PriceType; 4] = [
     PriceType::Last,
     PriceType::Bid,
     PriceType::Ask,

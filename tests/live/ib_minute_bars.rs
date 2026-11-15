@@ -35,6 +35,7 @@ use helix_trader::{
     rolls::ContinuousBars,
     strategy::{
         requirements::{DataRequirements, catalog_keys},
+        subscriptions::Subscriptions,
         warmup,
     },
     venues::ib::{IbAccount, IbHistory},
@@ -79,9 +80,10 @@ struct Record {
     live: Vec<(Bar, UnixNanos)>,
 }
 
-/// Warms up on the composite hour bars through `strategy::warmup`, as a
-/// strategy does, and subscribes to their source minute bars too, to see
-/// each one; stops the node after `LIVE_MINUTES` of them.
+/// Warms up on the composite hour bars through `strategy::warmup` and
+/// subscribes to them from where it ends through `strategy::subscriptions`,
+/// as a strategy does, and to their source minute bars too, to see each
+/// one; stops the node after `LIVE_MINUTES` of them.
 #[derive(Debug)]
 struct Probe {
     core: StrategyCore,
@@ -95,14 +97,17 @@ impl DataActor for Probe {
     fn on_start(&mut self) -> anyhow::Result<()> {
         let composite = composite();
         self.record.borrow_mut().requested_at = self.clock().timestamp_ns();
+        let now = self.clock().utc_now();
         warmup::start(
             self,
+            now,
             &[composite],
             &[],
             WARMUP,
             &ContinuousBars::default(),
             self.warmup,
         )?;
+        Subscriptions::new(vec![composite], vec![]).start(self, now);
         self.subscribe_bars(composite.composite(), None, None);
         Ok(())
     }
