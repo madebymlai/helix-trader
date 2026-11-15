@@ -34,18 +34,14 @@ use std::num::NonZeroUsize;
 use ::lse::{LseDataClientConfig, LseDataClientFactory};
 use jiff::{SignedDuration, Timestamp};
 use nautilus_live::config::RoutingConfig;
-use nautilus_model::{
-    data::{DEPTH10_LEN, DataType},
-    enums::BookType,
-    identifiers::InstrumentId,
-};
+use nautilus_model::{data::DEPTH10_LEN, enums::BookType, identifiers::InstrumentId};
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 
 use super::{BookFormat, DefinitionsSource, Row, databento::DatabentoHistory};
 use crate::{
     catalog::{FillData, NodeClient, NodeFill, missing, missing_custom},
     live::node::Clients,
-    strategy::requirements::SeriesSlice,
+    strategy::requirements::{CustomSeries, SeriesSlice},
 };
 
 /// The window of one request of a series: a day, as Databento's. The
@@ -68,7 +64,7 @@ pub(super) const BOOK: BookFormat = BookFormat {
 
 /// Adds to `node` the fill of what the catalog lacks of `slices`, series
 /// LSE gives the history of (see `catalog::missing`), and of `custom`,
-/// LSE's rows (`lse::LseRow`) over `[start, end]` (see
+/// custom series of LSE's rows (`lse::LseRow`) over `[start, end]` (see
 /// `catalog::missing_custom`): first each contract's definition, asked of
 /// its row's definitions source, Databento's client, which `databento`
 /// makes only if Databento has a definition to give, within its dataset's
@@ -79,19 +75,19 @@ pub(super) const BOOK: BookFormat = BookFormat {
 /// the LSE client `config` configures, its keys read only when the node
 /// creates it, so only if something is missing. The data engine puts each
 /// definition in the cache, where the client reads the precision of its
-/// prices. LSE's rows are of no instrument and have none.
+/// prices. A custom series brings no instrument and has none.
 ///
 /// # Errors
 ///
 /// Returns an error if a series is not one the node fills (see `missing`),
-/// if a custom series has no identifier, if the catalog cannot be read, or
-/// as `databento` and `DatabentoHistory::within_datasets`.
+/// if the catalog cannot be read, or as `databento` and
+/// `DatabentoHistory::within_datasets`.
 #[expect(clippy::too_many_arguments, reason = "a fill's parts")]
 pub(super) async fn add_fill(
     node: &mut NodeFill,
     catalog: &ParquetDataCatalog,
     slices: &[SeriesSlice],
-    custom: &[DataType],
+    custom: &[CustomSeries],
     start: Timestamp,
     end: Timestamp,
     config: LseDataClientConfig,
@@ -182,7 +178,7 @@ mod tests {
     use jiff::Timestamp;
     use nautilus_core::{UnixNanos, string::secret::SecretString};
     use nautilus_model::{
-        data::{Bar, BarType, Data, DataType, NautilusDataType, TradeTick},
+        data::{Bar, BarType, Data, NautilusDataType, TradeTick},
         enums::{AggressorSide, OptionKind, RecordFlag},
         identifiers::{InstrumentId, Symbol, TradeId},
         instruments::{IndexInstrument, InstrumentAny},
@@ -808,10 +804,10 @@ mod tests {
         assert_eq!(stored_trades(dir.path()), []);
     }
 
-    /// The data type of the rows of `symbol` in LSE's `source`, custom
-    /// data of no instrument: both in its metadata, under an identifier of
-    /// the config's, here the symbol.
-    fn lse_rows(source: &str, symbol: &str) -> DataType {
+    /// The custom series of the rows of `symbol` in LSE's `source`: both
+    /// in its metadata, under an identifier of the config's, here the
+    /// symbol.
+    fn lse_rows(source: &str, symbol: &str) -> CustomSeries {
         let metadata = nautilus_core::Params::new(
             [
                 ("source".to_string(), serde_json::json!(source)),
@@ -819,11 +815,11 @@ mod tests {
             ]
             .into(),
         );
-        DataType::new("LseRow", Some(metadata), Some(symbol.to_string()))
+        CustomSeries::new("LseRow", symbol.to_string(), Some(metadata)).unwrap()
     }
 
-    /// US10Y's daily bond yields, custom data of no instrument.
-    fn us10y() -> DataType {
+    /// US10Y's daily bond yields, a custom series.
+    fn us10y() -> CustomSeries {
         lse_rows("bond_yields", "US10Y")
     }
 
@@ -869,7 +865,7 @@ mod tests {
         fill_bond_yields(dir.path(), &lse).unwrap();
 
         let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        let identifier = us10y().identifier().unwrap().to_string();
+        let identifier = us10y().identifier().to_string();
         let stored = catalog
             .query_custom_data_dynamic("LseRow", Some(&[identifier]), None, None, None, None, true)
             .unwrap();
@@ -889,7 +885,7 @@ mod tests {
             .collect();
         let row = |day: &str, close: f64| {
             (
-                us10y(),
+                us10y().data_type().clone(),
                 UnixNanos::from(november(&format!("{day}T00:00:00"))),
                 serde_json::json!(close),
             )
@@ -951,18 +947,18 @@ mod tests {
         );
     }
 
-    /// fill-catalog's fill of `data_type` alone over `[from, to]` into the
+    /// fill-catalog's fill of `series` alone over `[from, to]` into the
     /// catalog in `dir`, from `lse`.
     fn fill_custom(
         dir: &Path,
         lse: &MockLse,
-        data_type: &DataType,
+        series: &CustomSeries,
         (from, to): (&str, &str),
     ) -> anyhow::Result<()> {
         let requirements = DataRequirements {
             bar_types: vec![],
             ticks: vec![],
-            custom: vec![data_type.clone()],
+            custom: vec![series.clone()],
             warmup: SignedDuration::ZERO,
         };
         fill_requirements(
@@ -975,11 +971,11 @@ mod tests {
         )
     }
 
-    /// The times of the rows of `data_type` the catalog in `dir` holds,
-    /// read back as Nautilus decodes custom data.
-    fn stored_stamps(dir: &Path, data_type: &DataType) -> Vec<UnixNanos> {
+    /// The times of the rows of `series` the catalog in `dir` holds, each
+    /// of its data type, read back as Nautilus decodes custom data.
+    fn stored_stamps(dir: &Path, series: &CustomSeries) -> Vec<UnixNanos> {
         let mut catalog = ParquetDataCatalog::new(dir, None, None, None, None);
-        let identifier = data_type.identifier().unwrap().to_string();
+        let identifier = series.identifier().to_string();
         catalog
             .query_custom_data_dynamic("LseRow", Some(&[identifier]), None, None, None, None, true)
             .unwrap()
@@ -988,7 +984,7 @@ mod tests {
                 let Data::Custom(custom) = data else {
                     panic!("not custom data: {data:?}");
                 };
-                assert_eq!(&custom.data_type, data_type);
+                assert_eq!(&custom.data_type, series.data_type());
                 custom
                     .data
                     .as_any()

@@ -79,8 +79,8 @@
 //! decisions' freshness, its quotes among them when no series of the
 //! strategy reads it (`StandardConfig::data_requirements`, the decision's
 //! reference price, the venue's fills and the target's ATR then coming from
-//! them), and to the custom data of no instrument of its requirements
-//! (`DataRequirements::custom`), which reaches the strategy's `on_data`,
+//! them), and to the custom series of its requirements
+//! (`DataRequirements::custom`), which reach the strategy's `on_data`,
 //! and a `rolls::Roller` of the ticks' instruments: `start` subscribes
 //! each tick series on the contract standing for its instrument, a plain
 //! instrument once, a root on its front contract, and sets each root's
@@ -771,7 +771,7 @@ mod tests {
         AtrArgs, Declared, EmaArgs, IndicatorsConfig,
         conversions::Conversions,
         orders::{Bracket, Exits},
-        requirements::{DataRequirements, TickSeries},
+        requirements::{CustomSeries, DataRequirements, TickSeries},
         risk::R,
     };
     use rust_decimal::Decimal;
@@ -3263,21 +3263,21 @@ mod tests {
         );
     }
 
-    /// The data type of the yields of `symbol`, custom data of no
-    /// instrument keyed by its identifier.
+    /// The data type of the yields of `symbol`, keyed by its identifier.
     fn yields(symbol: &str) -> nautilus_model::data::DataType {
         nautilus_model::data::DataType::new("Yield", None, Some(symbol.to_string()))
     }
 
-    /// The custom data of no instrument of the requirements, the 10-year
-    /// and the 2-year US yields, is subscribed at a backtest's start
-    /// through the handle's subscriptions, on the message bus alone, so the
-    /// strategy's `on_data` gets it without subscribing itself.
+    /// The custom series of the requirements, the 10-year and the 2-year
+    /// US yields, are subscribed at a backtest's start through the
+    /// handle's subscriptions, on the message bus alone, so the strategy's
+    /// `on_data` gets them without subscribing itself.
     #[test]
-    fn a_backtests_start_subscribes_the_custom_data_of_no_instrument_of_its_requirements() {
+    fn a_backtests_start_subscribes_the_custom_series_of_its_requirements() {
         let models = tempfile::tempdir().unwrap();
+        let series = |symbol: &str| CustomSeries::new("Yield", symbol.to_string(), None).unwrap();
         let requirements = DataRequirements {
-            custom: vec![yields("US10Y"), yields("US02Y")],
+            custom: vec![series("US10Y"), series("US02Y")],
             ..requirements()
         };
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));

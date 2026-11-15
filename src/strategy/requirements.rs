@@ -1,5 +1,6 @@
 //! The data requirements of a strategy (`DataRequirements`), stated by its
-//! config: the bar types and the tick series it reads (`TickSeries`), and
+//! config: the bar types, the tick series (`TickSeries`) and the custom
+//! series (`CustomSeries`) it reads, and
 //! the catalog series its bars are built from and its ticks are
 //! (`CatalogSeries`, keyed in the catalog by `CatalogSeries::key`), each
 //! over the slices its contracts stand for its instruments (`SeriesSlice`).
@@ -7,14 +8,17 @@
 
 use std::{fmt, str::FromStr};
 
+use anyhow::{anyhow, ensure};
 use jiff::{SignedDuration, Timestamp};
-use nautilus_core::{ClosedInterval, UnixNanos};
+use nautilus_core::{ClosedInterval, Params, UnixNanos, correctness::check_valid_string_utf8};
 use nautilus_model::{
     data::{BarType, DataType, NautilusDataType},
     enums::PriceType,
     identifiers::InstrumentId,
 };
-use nautilus_persistence::common::coverage::merge_closed_intervals;
+use nautilus_persistence::common::{
+    coverage::merge_closed_intervals, paths::urisafe_instrument_id,
+};
 use serde::{Deserialize, Deserializer, de};
 
 use crate::rolls::{Slice, TransitionTable};
@@ -50,21 +54,20 @@ pub struct DataRequirements {
     /// (`warmup::Warmup`), and on custom data its venue's history does not
     /// serve, from the catalog alone.
     pub ticks: Vec<TickSeries>,
-    /// The custom data the strategy reads that is of no instrument, a
-    /// reference series such as LSE's daily bond yields: each series a
-    /// Nautilus data type as its config gives it (`DataConfig::custom`,
-    /// `[data].custom`), keyed in the catalog by the identifier the config
-    /// chooses, as Nautilus keys custom data, its metadata saying what its
-    /// source asks for, which its type names (`venues::serves_custom`).
-    /// Fetched by fill-catalog from the source of its type, with no
-    /// definition, and replayed in a backtest over the run's window, the
-    /// strategy's subscriptions subscribing to each from its start
-    /// (`strategy::subscriptions`), each by that data type unchanged; a
-    /// live run reading any its source does not stream is refused
-    /// (`venues::streams_custom`), none streaming any yet. Custom data of
-    /// an instrument is a tick series, keyed by the instrument and rolled
-    /// with it.
-    pub custom: Vec<DataType>,
+    /// The custom series the strategy reads (see `CustomSeries`), a
+    /// reference series such as LSE's daily bond yields among them, each
+    /// as its config gives it in `[data] series`: routed by its type's row
+    /// alone, whatever its identifier (`venues::serves_custom`), fetched by
+    /// fill-catalog from its type's history source, with no definition,
+    /// and replayed in a backtest over the run's window, the strategy's
+    /// subscriptions subscribing to each from its start
+    /// (`strategy::subscriptions`), each by its data type unchanged; a
+    /// live run reading any its type's live data does not stream is
+    /// refused (`venues::streams_custom`), none streaming any yet. They
+    /// bring no instrument. Custom data of an instrument written with an
+    /// `instrument_id` is a tick series still, keyed by the instrument and
+    /// rolled with it.
+    pub custom: Vec<CustomSeries>,
     /// How far back before a live start the warmup history starts: a
     /// backtest requests none.
     pub warmup: SignedDuration,
@@ -108,6 +111,94 @@ pub(super) fn tick_data(name: &str) -> Result<NautilusDataType, String> {
             "{name} is not a series a strategy reads as it is: \
              quotes, trades, order_book_depths, order_book_deltas or Custom:<type name>"
         )),
+    }
+}
+
+/// A custom series: the custom data of one Nautilus data type
+/// (`DataType`), its type's name, the identifier keying it in the catalog
+/// and on the message bus, and its metadata, if any, saying what its
+/// source asks for, `{ data = "Custom:LseRow", identifier = "US10Y",
+/// metadata = { source = "bond_yields", symbol = "US10Y" } }` in `[data]
+/// series`. Built only through `new`, which holds it to what makes it one
+/// series of the catalog. Its data type is the one Nautilus subscribes,
+/// caches, requests and stores it by, as the config names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomSeries(DataType);
+
+impl CustomSeries {
+    /// The series of `type_name` under `identifier`, of `metadata`: empty
+    /// metadata is none, as Nautilus' data type of either has one topic,
+    /// which keys its points in the cache and on the message bus.
+    ///
+    /// # Errors
+    ///
+    /// Returns Nautilus' error if `metadata` holds the key it reserves for
+    /// the identifier (`DataType::try_new`), or an error naming
+    /// `identifier` if it holds a backslash, or if its catalog folder
+    /// (`catalog_folder`) is empty or blank, which Nautilus' correctness
+    /// check refuses (`check_valid_string_utf8`): an empty folder is its
+    /// type's own, which no series keys.
+    pub fn new(
+        type_name: &str,
+        identifier: String,
+        metadata: Option<Params>,
+    ) -> anyhow::Result<Self> {
+        let metadata = metadata.filter(|metadata| !metadata.is_empty());
+        let folder = urisafe_instrument_id(&identifier);
+        ensure!(
+            !identifier.contains('\\'),
+            "the identifier {identifier:?} holds a backslash, which Nautilus' catalog writes as a \
+             folder separator and reads back as a character, so its series would be stored where \
+             no read finds it"
+        );
+        check_valid_string_utf8(&folder, "identifier").map_err(|e| {
+            anyhow!("the identifier {identifier:?} keys the catalog folder {folder:?}: {e}")
+        })?;
+        Ok(Self(DataType::try_new(
+            type_name,
+            metadata,
+            Some(identifier),
+        )?))
+    }
+
+    /// Its data type as the config names it.
+    #[must_use]
+    pub fn data_type(&self) -> &DataType {
+        &self.0
+    }
+
+    /// Its type's name, which routes it (`venues::serves_custom`).
+    #[must_use]
+    pub fn type_name(&self) -> &str {
+        self.0.type_name()
+    }
+
+    /// The identifier keying it in the catalog.
+    #[must_use]
+    pub fn identifier(&self) -> &str {
+        self.0
+            .identifier()
+            .expect("a custom series is built with an identifier")
+    }
+
+    /// The folder Nautilus' catalog stores it under, below its type's
+    /// folder, and reads it back from (`ParquetDataCatalog::
+    /// make_path_custom_data`, `filter_identifier_files`): its identifier
+    /// made URI-safe (`urisafe_instrument_id`: `/` removed, `^` made `_`).
+    /// Of an identifier holding a backslash alone, the write would make it
+    /// a folder separator and the read keep it, which `new` refuses.
+    #[must_use]
+    pub fn catalog_folder(&self) -> String {
+        urisafe_instrument_id(self.identifier())
+    }
+}
+
+/// The series by its data type as Nautilus writes it, its topic of its
+/// type's name, metadata and identifier
+/// (`LseRow.source=bond_yields.symbol=US10Y.identifier=US10Y`).
+impl fmt::Display for CustomSeries {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 

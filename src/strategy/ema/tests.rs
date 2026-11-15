@@ -204,6 +204,19 @@ fn rejects_a_second_bars_series_of_the_trade_instrument_as_unread() {
     assert!(err.contains("ESM24.CME-2-HOUR-MID-INTERNAL"), "{err}");
 }
 
+/// The crossover reads no custom data: LSE's daily 10-year US yield, a
+/// custom series listed beside its bars, is read by nothing, refused under
+/// its listing, naming it.
+#[test]
+fn rejects_a_custom_series_as_unread() {
+    let toml = listing(
+        r#"{ data = "Custom:LseRow", identifier = "US10Y", metadata = { source = "bond_yields", symbol = "US10Y" } }"#,
+    );
+    assert_eq!(error_fields(&toml), ["data.series[1]"]);
+    let err = EmaCrossConfig::load(&toml).unwrap_err().to_string();
+    assert!(err.contains("LseRow") && err.contains("US10Y"), "{err}");
+}
+
 #[test]
 fn rejects_bars_of_another_instrument_as_unread() {
     let toml = listing(
@@ -655,35 +668,4 @@ fn live_it_warms_up_its_conversion_pairs_quotes_then_subscribes_to_them_from_its
         })
         .collect();
     assert_eq!(warmed_to, [Some(UnixNanos::from(NOW))]);
-}
-
-/// Started in a backtest, the crossover reading LSE's daily 10-year US
-/// yield in `[data].custom`, custom data of no instrument, is subscribed
-/// to it through its subscriptions, on the message bus alone, so its
-/// `on_data` gets the rows without subscribing itself.
-#[test]
-fn its_start_subscribes_the_custom_data_of_no_instrument_of_its_config() {
-    let config = CONFIG.replace(
-        r#"warmup = "1h""#,
-        r#"warmup = "1h"
-    custom = [{ type_name = "LseRow", identifier = "US10Y", metadata = { source = "bond_yields", symbol = "US10Y" } }]"#,
-    );
-    let cache = holding(InstrumentAny::CurrencyPair(audusd_sim()));
-    let (mut strategy, _) = registered(&cache, NOW, &config);
-
-    DataActor::on_start(&mut strategy).unwrap();
-
-    let metadata = nautilus_core::Params::new(
-        [
-            ("source".to_string(), serde_json::json!("bond_yields")),
-            ("symbol".to_string(), serde_json::json!("US10Y")),
-        ]
-        .into(),
-    );
-    let us10y =
-        nautilus_model::data::DataType::new("LseRow", Some(metadata), Some("US10Y".to_string()));
-    assert_eq!(
-        msgbus::subscriptions_count_any(msgbus::switchboard::get_custom_topic(&us10y)).unwrap(),
-        1
-    );
 }

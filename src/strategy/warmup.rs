@@ -194,19 +194,21 @@
 //! reaches this request today: it is the warmup half of such a run, kept
 //! for when a live source of an instrument's custom data exists.
 //!
-//! Custom data of no instrument of the requirements (`[data].custom`, an
+//! Each custom series of the requirements (`DataRequirements::custom`, an
 //! LSE reference series) is requested in the same group over the same
 //! window with `request_data` of its data type as the config gives it,
-//! naming its source's data client on the node, its row's live data
-//! source's (`venues::custom_data_client`), LSE's for LSE's rows, with
+//! naming the data client of its type's row's live data source on the
+//! node (`venues::custom_data_client`), LSE's for LSE's rows, with
 //! `update_catalog`: the data engine answers what the catalog holds and
-//! asks the client for the rest, writing its answers back. Its response
-//! reaches the cache as an instrument's custom data does
-//! (`Warmup::on_historical_data`). No source's live client streams custom
-//! data of no instrument yet, LSE's streaming none, so a live start
-//! refuses a run reading it (`venues::streams_custom`) and no run reaches
-//! this request today: it is the warmup half of such a run, kept for when
-//! a source streams it.
+//! asks the client for the rest, writing its answers back, as with every
+//! series served, the load having checked that its type's history serves
+//! it (`venues::serves_custom`). No definition is requested for it: it
+//! brings no instrument. Its response reaches the cache as an
+//! instrument's custom data does (`Warmup::on_historical_data`). No
+//! source's live client streams a custom series yet, LSE's streaming none,
+//! so a live start refuses a run reading one (`venues::streams_custom`)
+//! and no run reaches this request today: it is the warmup half of such a
+//! run, kept for when a source streams it.
 //!
 //! A strategy holds a `Warmup`, which runs these calls, and delegates its
 //! hooks to it; a model strategy's `ModelHandle` builds and owns it, and
@@ -250,7 +252,9 @@ use serde_json::{Value, json};
 
 use crate::{
     rolls::{ContinuousBars, front},
-    strategy::requirements::{CatalogSeries, DataRequirements, TickSeries, bar_sources},
+    strategy::requirements::{
+        CatalogSeries, CustomSeries, DataRequirements, TickSeries, bar_sources,
+    },
     time_range, venues,
 };
 
@@ -333,9 +337,8 @@ pub struct Warmup {
     /// The tick series of the requirements, of roots or plain instruments,
     /// warmed as they are if served.
     ticks: Vec<TickSeries>,
-    /// The custom data of no instrument of the requirements, warmed by its
-    /// data type.
-    custom: Vec<DataType>,
+    /// The custom series of the requirements, warmed by their data type.
+    custom: Vec<CustomSeries>,
     /// What the warmup's bars are handed to.
     indicators: Vec<SharedActorIndicator>,
     /// What hands the quotes and trades, of the warmup and live, to the
@@ -724,9 +727,9 @@ impl Debug for Warmup {
 /// from it if any, an instrument's custom data of its venue's live data
 /// client if its history serves it, of the catalog alone if not (see
 /// `instrument_custom_request`);
-/// each data type of its custom data, of no instrument, is requested
-/// of its source's data client (`venues::custom_data_client`), catalog
-/// first and written back. Any other series its venue's history does not
+/// each of its custom series is requested by its data type of its type's
+/// row's live data client (`venues::custom_data_client`), catalog first
+/// and written back. Any other series its venue's history does not
 /// serve (`venues::serves`) is
 /// requested no history, logged as a warning, its instrument's definition
 /// asked all the same. The
@@ -744,8 +747,9 @@ impl Debug for Warmup {
 ///
 /// # Errors
 ///
-/// Returns an error if a request fails, or if no source serves a data type
-/// of its custom data (see `venues::custom_data_client`). A composite bar
+/// Returns an error if a request fails, or if no live data source of its
+/// type's row serves a custom series (see `venues::custom_data_client`),
+/// which the load refuses. A composite bar
 /// type's source bars are external, as the config's load requires (see
 /// `strategy::DataConfig`): they are requested, not built.
 pub fn start<A>(
@@ -889,12 +893,12 @@ where
         };
         requested.push((id, built));
     }
-    // Of its source's data client, catalog first and written back, building
-    // nothing: Nautilus takes no windows on custom data.
-    for data_type in &requirements.custom {
-        let client = venues::custom_data_client(data_type)?;
+    // Of its type's row's live data client, catalog first and written back,
+    // building nothing: Nautilus takes no windows on custom data.
+    for series in &requirements.custom {
+        let client = venues::custom_data_client(series)?;
         let id = actor.request_data(
-            data_type.clone(),
+            series.data_type().clone(),
             client,
             Some(start),
             Some(now),
@@ -1772,23 +1776,31 @@ mod tests {
         assert!(params.is_none(), "{params:?}");
     }
 
-    /// LSE's daily 10-year US yields, custom data of no instrument, under
-    /// the identifier `US10Y`.
-    fn us10y() -> DataType {
-        let metadata = Params::new(
+    /// The metadata of LSE's daily 10-year US yields.
+    fn us10y_metadata() -> Params {
+        Params::new(
             [
                 ("source".to_string(), json!("bond_yields")),
                 ("symbol".to_string(), json!("US10Y")),
             ]
             .into(),
-        );
-        DataType::new("LseRow", Some(metadata), Some("US10Y".to_string()))
+        )
     }
 
-    /// The requirements of a strategy reading `us10y()` alone over a day.
+    /// The data type of LSE's daily 10-year US yields under the identifier
+    /// `US10Y`, as Nautilus builds it.
+    fn us10y() -> DataType {
+        DataType::new("LseRow", Some(us10y_metadata()), Some("US10Y".to_string()))
+    }
+
+    /// The requirements of a strategy reading LSE's daily 10-year US
+    /// yields alone, a custom series under the identifier `US10Y`, over a
+    /// day.
     fn reading_us10y() -> DataRequirements {
+        let series =
+            CustomSeries::new("LseRow", "US10Y".to_string(), Some(us10y_metadata())).unwrap();
         DataRequirements {
-            custom: vec![us10y()],
+            custom: vec![series],
             ..reading(&[])
         }
     }
@@ -1807,14 +1819,13 @@ mod tests {
             .collect()
     }
 
-    /// Live on 2026-08-10 at 14:30, custom data of no instrument is
-    /// requested of its source's data client on the node, LSE's for LSE's
-    /// rows, over the day of warmup ending now, as its data type is,
-    /// catalog first and written back: the data engine answers what the
-    /// catalog holds and asks the client for the rest.
+    /// Live on 2026-08-10 at 14:30, a custom series is requested of its
+    /// type's row's live data client on the node, LSE's for LSE's rows,
+    /// over the day of warmup ending now, by its data type, catalog first
+    /// and written back: the data engine answers what the catalog holds
+    /// and asks the client for the rest.
     #[test]
-    fn a_live_warmup_requests_custom_data_of_no_instrument_of_its_source_s_client_over_the_window()
-    {
+    fn a_live_warmup_requests_a_custom_series_of_its_type_s_client_over_the_window() {
         let warmup = Warmup::live(&reading_us10y());
         let (mut probe, commands) = registered();
 
@@ -1849,7 +1860,7 @@ mod tests {
     /// Its request is of the warmup's group, which goes on until it is
     /// answered: a warmup of it alone is warming once started.
     #[test]
-    fn a_live_warmup_of_custom_data_of_no_instrument_alone_goes_on_until_its_group_ends() {
+    fn a_live_warmup_of_a_custom_series_alone_goes_on_until_its_group_ends() {
         let warmup = Warmup::live(&reading_us10y());
         let (mut probe, _commands) = registered();
 
@@ -1861,7 +1872,7 @@ mod tests {
     /// The response's rows reach the cache, where the data engine puts no
     /// response's: the latest of `us10y()` is its newest.
     #[test]
-    fn the_rows_of_a_warmup_s_custom_data_of_no_instrument_land_in_the_cache() {
+    fn the_rows_of_a_warmup_s_custom_series_land_in_the_cache() {
         let warmup = Warmup::live(&reading_us10y());
         let (mut probe, _commands) = registered();
         warmup.start(&mut probe).unwrap();
