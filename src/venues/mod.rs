@@ -2213,9 +2213,6 @@ mod tests {
     /// for every venue without a row of its own.
     #[test]
     fn no_history_source_serves_an_instrument_s_custom_data() {
-        let imbalance = || NautilusDataType::Custom {
-            type_name: "Imbalance".to_string(),
-        };
         for (instrument_id, source) in [
             ("XAUUSD.ICMARKETS", "ICMARKETS serves"),
             ("EURUSD.PEPPERSTONE", "PEPPERSTONE serves"),
