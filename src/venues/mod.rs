@@ -93,6 +93,7 @@ use ctrader::{
 };
 use jiff::Timestamp;
 use nautilus_common::factories::DataClientFactory;
+use nautilus_databento::types::register_databento_custom_data;
 use nautilus_interactive_brokers::factories::InteractiveBrokersDataClientFactory;
 use nautilus_live::config::RoutingConfig;
 use nautilus_model::{
@@ -559,10 +560,15 @@ pub(crate) fn custom_data_client(series: &CustomSeries) -> anyhow::Result<Option
 /// a type Nautilus holds no schema of), a catalog's are read and a
 /// client's answers written back: Nautilus decodes and encodes custom data
 /// by its type's registered schema (`ensure_custom_data_registered`).
-/// LSE's rows (`lse::LseRow`); a type of no row, written into the catalog
-/// from outside helix, is compiled in and registered here too. Idempotent.
+/// LSE's rows (`lse::LseRow`), and Databento's imbalances and statistics
+/// (`DatabentoImbalance`, `DatabentoStatistics`), compiled in with
+/// Nautilus' Databento adapter, which registers neither itself
+/// (`register_databento_custom_data`): no row routes them, so they are the
+/// catalog's. A type of no row, written into the catalog from outside
+/// helix, is compiled in and registered here too. Idempotent.
 pub fn register_custom_data() {
     LseRow::register();
+    register_databento_custom_data();
 }
 
 /// How the accounts of `venue` keep positions: as those of its broker do
