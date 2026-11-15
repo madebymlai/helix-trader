@@ -511,8 +511,8 @@ pub fn rate_series(pair: InstrumentId) -> anyhow::Result<Vec<Series>> {
 /// fills here before anything connects, and a live warmup requests the
 /// history of a series only if served (`strategy::warmup`), so the two
 /// agree; a conversion pair is read in a form served (`rate_series`).
-/// Custom data of an instrument is the catalog's: a fill fills it from no
-/// source, and a warmup asks the catalog alone.
+/// Custom data of an instrument is served by no source: a fill fills it
+/// from none, and a live run reading it is refused (`streams`).
 ///
 /// # Errors
 ///
@@ -2114,6 +2114,56 @@ mod tests {
                 bars_of("SXR8.IBIS-100-TICK-LAST-EXTERNAL"),
                 bars_of("SXR8.IBIS-1-MINUTE-LAST-INTERNAL"),
             ],
+        );
+    }
+
+    /// IB's refusal of bars of a size it does not stream offers exactly the
+    /// sizes it streams: those IB has as Nautilus' IB client asks them
+    /// (`bar_type_to_ib_bar_size`: 1, 5, 15 and 30 seconds, 1, 2, 3, 5, 10,
+    /// 15, 20 and 30 minutes, 1, 2, 3, 4 and 8 hours, a day, a week, a
+    /// month) but 1 second, which IB does not keep up to date. No 10-second
+    /// bars, of which the client has no size.
+    #[test]
+    fn ib_s_refusal_of_bars_offers_exactly_the_sizes_it_streams() {
+        let units = ["SECOND", "MINUTE", "HOUR", "DAY", "WEEK", "MONTH"];
+        let err = format!(
+            "{:#}",
+            streams(&bars_of("SXR8.IBIS-10-SECOND-LAST-EXTERNAL")).unwrap_err()
+        );
+
+        let offered: Vec<&str> = err
+            .split([' ', ',', '(', ')', ':'])
+            .filter(|word| {
+                word.split_once('-').is_some_and(|(step, unit)| {
+                    step.parse::<usize>().is_ok() && units.contains(&unit)
+                })
+            })
+            .collect();
+
+        assert_eq!(
+            offered,
+            [
+                "5-SECOND",
+                "15-SECOND",
+                "30-SECOND",
+                "1-MINUTE",
+                "2-MINUTE",
+                "3-MINUTE",
+                "5-MINUTE",
+                "10-MINUTE",
+                "15-MINUTE",
+                "20-MINUTE",
+                "30-MINUTE",
+                "1-HOUR",
+                "2-HOUR",
+                "3-HOUR",
+                "4-HOUR",
+                "8-HOUR",
+                "1-DAY",
+                "1-WEEK",
+                "1-MONTH",
+            ],
+            "{err}"
         );
     }
 
