@@ -34,7 +34,7 @@
 use clap::{Args, Command, FromArgMatches};
 use helix_trader::{
     strategy::requirements::{CustomSeries, DataRequirements, TickSeries},
-    venues::{HistoryVenueArgs, fill_history},
+    venues::{HistoryVenueArgs, fill_history, register_custom_data},
 };
 use jiff::{SignedDuration, Timestamp};
 use lse::LseRow;
@@ -297,12 +297,12 @@ async fn a_day_of_bond_yields_fills_from_lse_as_custom_data() {
     };
     let (start, _) = the_day();
     let end = start + SignedDuration::from_hours(24);
+    register_custom_data();
 
     fill_history(&requirements, start, end, &history_venues(), dir.path())
         .await
         .unwrap();
 
-    LseRow::register();
     let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
     let identifier = us10y.identifier().to_string();
     let stored = catalog
@@ -505,10 +505,10 @@ async fn filled_rows(
         custom: vec![data_type.clone()],
         warmup: SignedDuration::ZERO,
     };
+    register_custom_data();
     fill_history(&requirements, start, end, &history_venues(), dir)
         .await
         .unwrap();
-    LseRow::register();
     let mut catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     let identifier = data_type.identifier().to_string();
     let rows: Vec<LseRow> = catalog
