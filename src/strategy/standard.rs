@@ -8,6 +8,7 @@ use nautilus_model::{
     enums::{AggregationSource, BarAggregation, PriceType},
     identifiers::{InstrumentId, StrategyId},
 };
+use nautilus_persistence::common::paths::{make_object_store_path, urisafe_instrument_id};
 use nautilus_trading::strategy::StrategyConfig;
 use serde::{
     Deserialize, Deserializer,
@@ -378,6 +379,16 @@ fn custom_data<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<DataTyp
         .collect()
 }
 
+/// The folder Nautilus' catalog stores the series of custom data keyed by
+/// `identifier` under, below its type's folder
+/// (`ParquetDataCatalog::make_path_custom_data`): the identifier made
+/// URI-safe (`urisafe_instrument_id`: `/` removed, `^` made `_`) and a
+/// path component (`make_object_store_path`: `\` made `/`, the ends'
+/// slashes trimmed); empty for the type's folder itself.
+fn catalog_folder(identifier: &str) -> String {
+    make_object_store_path("", [urisafe_instrument_id(identifier)])
+}
+
 impl DataConfig {
     /// The bar types of the bars series, in order.
     pub fn bar_types(&self) -> impl Iterator<Item = BarType> + '_ {
@@ -417,13 +428,13 @@ impl DataConfig {
 
     /// Pushes the violations of `[data]`: no series; a series listed
     /// again, under each listing after its first, naming it; custom data
-    /// of an identifier Nautilus finds no string of meaning in, empty or
-    /// blank (`check_valid_string_utf8`), under
-    /// `data.custom[i].identifier`, an empty one keying the catalog path of
-    /// its type alone, as none does; custom data of a type and an
-    /// identifier listed already, under `data.custom[i]` naming it,
-    /// whatever its metadata, the two series stored under one catalog
-    /// path; custom data its source does not serve, or of a type no source
+    /// of an identifier whose catalog folder (`catalog_folder`) Nautilus
+    /// finds no string of meaning in, empty or blank
+    /// (`check_valid_string_utf8`), under `data.custom[i].identifier`, an
+    /// empty one keying the folder of its type alone, as none does; custom
+    /// data of a type and a catalog folder listed already, under
+    /// `data.custom[i]` naming it, whatever its metadata, the two series
+    /// stored under one folder; custom data its source does not serve, or of a type no source
     /// serves, under `data.custom[i]`, saying why
     /// (`venues::serves_custom`); a bars series not aggregated on time
     /// (the session needs the bar's span), built from ticks but priced
@@ -452,20 +463,25 @@ impl DataConfig {
         }
         for (i, data_type) in self.custom.iter().enumerate() {
             let field = format!("data.custom[{i}]");
-            let keyed_alike = |listed: &DataType| {
-                listed.type_name() == data_type.type_name()
-                    && listed.identifier() == data_type.identifier()
-            };
             let identifier = data_type.identifier().unwrap_or_default();
-            if let Err(e) = check_valid_string_utf8(identifier, "identifier") {
+            let folder = catalog_folder(identifier);
+            let stored_alike = |listed: &DataType| {
+                listed.type_name() == data_type.type_name()
+                    && catalog_folder(listed.identifier().unwrap_or_default()) == folder
+            };
+            if let Err(e) = check_valid_string_utf8(&folder, "identifier") {
                 errors.push(ConfigError::invalid_value(
                     format!("{field}.identifier"),
-                    e.to_string(),
+                    format!("{identifier:?} keys the catalog folder {folder:?}: {e}"),
                 ));
-            } else if self.custom[..i].iter().any(keyed_alike) {
+            } else if let Some(j) = self.custom[..i].iter().position(stored_alike) {
                 errors.push(ConfigError::duplicate(
                     field.clone(),
-                    Some(data_type.to_string()),
+                    Some(format!(
+                        "{data_type}, stored under the catalog folder {folder} of {} as \
+                         data.custom[{j}] is",
+                        data_type.type_name()
+                    )),
                 ));
             }
             if let Err(e) = venues::serves_custom(data_type) {
@@ -1568,11 +1584,15 @@ mod tests {
         assert!(err.contains("identifier"), "{err}");
     }
 
-    /// An empty identifier keys the catalog path of its type alone, as
-    /// none does; a blank one names nothing either.
+    /// The catalog stores a series under its type's folder, then its
+    /// identifier's, made URI-safe and a path component: `/` removed, `\`
+    /// a separator, the ends' trimmed. An identifier left empty so keys
+    /// the folder of its type alone, as none does; a blank one names
+    /// nothing either.
     #[test]
-    fn custom_data_of_an_empty_or_blank_identifier_is_refused_under_its_identifier() {
-        for identifier in ["", "  "] {
+    fn custom_data_of_an_identifier_naming_no_catalog_folder_is_refused_under_its_identifier() {
+        // As TOML basic strings: a backslash is written escaped.
+        for identifier in ["", "  ", "/", "//", r"\\"] {
             let toml = with_custom(&format!(
                 "[{}]",
                 US10Y.replace(
@@ -1681,6 +1701,24 @@ mod tests {
             value.contains("LseRow") && value.contains("US10Y"),
             "{value}"
         );
+    }
+
+    /// `US/10Y` is stored under `US10Y`'s folder, and `US^10Y` under
+    /// `US_10Y`'s: Nautilus removes `/` and makes `^` `_`.
+    #[test]
+    fn custom_data_of_an_identifier_stored_under_the_folder_of_one_listed_already_is_refused_under_its_later_listing()
+     {
+        for (listed, again) in [("US10Y", "US/10Y"), ("US_10Y", "US^10Y")] {
+            let keyed = |identifier: &str| {
+                US10Y.replace(
+                    r#"identifier = "US10Y""#,
+                    &format!(r#"identifier = "{identifier}""#),
+                )
+            };
+            let toml = with_custom(&format!("[{}, {}]", keyed(listed), keyed(again)));
+
+            assert_eq!(error_fields(&toml), ["data.custom[1]"], "{again}");
+        }
     }
 
     #[test]

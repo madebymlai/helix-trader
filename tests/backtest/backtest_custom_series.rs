@@ -1,7 +1,8 @@
 //! A strategy reading LSE's daily bond yields, custom data of no instrument
 //! (`lse::LseRow`), declared in its config's `[data].custom` under the
-//! identifier `US10Y`, which it chooses, and filled into the catalog under
-//! it through fill-catalog's node fill from a mock LSE peer replaying a
+//! identifier `TREASURY-10Y`, which it chooses, not the symbol, and filled
+//! into the catalog under it through fill-catalog's node fill from a mock
+//! LSE peer replaying a
 //! captured export (`lse::testing`): US10Y's rows of 9, 10 and 12 November
 //! 2026, each stamped at its date's end, when its close is known. The
 //! backtest declares the series by the config's data type, unchanged,
@@ -10,7 +11,9 @@
 //! to, when it is known: to a probe subscribing itself, and to one whose
 //! subscriptions (`strategy::subscriptions`) subscribe it, as a
 //! strategy's do. The fill and the run each on a thread of its own, one
-//! node per thread.
+//! node per thread. A config naming that identifier with other metadata
+//! fails the run naming both data types, rather than replay rows under a
+//! data type its strategy is not subscribed to.
 
 use std::{cell::RefCell, path::Path, rc::Rc};
 
@@ -64,14 +67,17 @@ impl Part for Reader {
     }
 }
 
-/// US10Y's daily bond yields as a config declares them, under the
-/// identifier `US10Y`: the one data type of its `[data].custom`.
-fn us10y() -> DataType {
+/// The identifier the config keys the series by, not its symbol.
+const TREASURY: &str = "TREASURY-10Y";
+
+/// The daily bond yields of `symbol` as a config declares them, under the
+/// identifier `TREASURY`: the one data type of its `[data].custom`.
+fn declared(symbol: &str) -> DataType {
     let config: StandardConfig<Reader> = StandardConfig::load(&format!(
         r#"
         [data]
         series = [{{ data = "quotes", instrument_id = "{gold}" }}]
-        custom = [{{ type_name = "LseRow", identifier = "US10Y", metadata = {{ source = "bond_yields", symbol = "US10Y" }} }}]
+        custom = [{{ type_name = "LseRow", identifier = "{TREASURY}", metadata = {{ source = "bond_yields", symbol = "{symbol}" }} }}]
         warmup = "1h"
 
         [trade]
@@ -83,6 +89,11 @@ fn us10y() -> DataType {
     .unwrap();
     let [data_type] = <[DataType; 1]>::try_from(config.data_requirements().custom).unwrap();
     data_type
+}
+
+/// US10Y's daily bond yields, the series filled.
+fn us10y() -> DataType {
+    declared("US10Y")
 }
 
 /// Fills the catalog in `dir` with `us10y()` over the rows of the
@@ -214,7 +225,7 @@ fn a_fill_stores_the_rows_under_the_identifier_the_config_names() {
     let stored = catalog
         .query_custom_data_dynamic(
             LseRow::type_name_static(),
-            Some(&["US10Y".to_string()]),
+            Some(&[TREASURY.to_string()]),
             None,
             None,
             None,
@@ -253,6 +264,36 @@ fn bond_yields_backtest() -> (tempfile::TempDir, Backtest) {
         ..ic::backtest(&catalog)
     };
     (catalog, backtest)
+}
+
+/// The catalog holds the 10-year yields under `TREASURY`; a config naming
+/// that identifier with the 2-year's metadata would replay them under the
+/// 10-year's data type, which its strategy is not subscribed to, so that it
+/// would get nothing, and fill-catalog would find nothing missing: the run
+/// fails before it starts, naming both.
+#[test]
+fn a_backtest_of_rows_stored_under_other_metadata_fails_naming_both() {
+    let (_catalog, backtest) = bond_yields_backtest();
+    let us02y = declared("US02Y");
+    let backtest = Backtest {
+        custom: vec![us02y.clone()],
+        ..backtest
+    };
+
+    let err = std::thread::spawn(move || {
+        let probe = Probe {
+            core: core(),
+            got: Rc::default(),
+        };
+        backtest.run(probe).unwrap_err()
+    })
+    .join()
+    .unwrap();
+
+    let err = format!("{err:#}");
+    for named in [us02y, us10y()] {
+        assert!(err.contains(&named.to_string()), "{named}: {err}");
+    }
 }
 
 /// From the 12th's 00:00 to noon on the 13th: the 12th's close reaches

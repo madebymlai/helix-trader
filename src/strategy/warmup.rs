@@ -435,13 +435,17 @@ impl Warmup {
             self.group.set(UUID4::new());
             self.warming.set(true);
             self.hold.hold();
+            // The strategy's bar types and the harness's.
+            let requirements = DataRequirements {
+                bar_types: self.built(),
+                ticks: self.ticks.clone(),
+                custom: self.custom.clone(),
+                warmup: self.length,
+            };
             let requested = start(
                 actor,
                 now,
-                &self.built(),
-                &self.ticks,
-                &self.custom,
-                self.length,
+                &requirements,
                 &ContinuousBars::default(),
                 self.group.get(),
             )?;
@@ -690,9 +694,10 @@ impl Debug for Warmup {
     }
 }
 
-/// Requests the warmup of `bar_types`, of `ticks` and of `custom`, over
-/// `[now - warmup, now]` as the request group `group`; the strategy
-/// subscribes to them from `now` (`strategy::subscriptions`). The bars on a
+/// Requests the warmup of `requirements`, its bar types, its ticks and its
+/// custom data, over `[now - warmup, now]`, its warmup, as the request
+/// group `group`; the strategy subscribes to them from `now`
+/// (`strategy::subscriptions`). The bars on a
 /// root with continuous bars in `continuous` are
 /// its continuous future, requested per bar type with
 /// their `continuous_future_*` params; the others are requested per series
@@ -702,10 +707,9 @@ impl Debug for Warmup {
 /// is requested as it is, building nothing; each tick series is requested on
 /// the contract standing for its instrument now, once with the bars built
 /// from it if any, custom data from the catalog alone (see `CATALOG`);
-/// each data type of `custom`, custom data of no instrument, is requested
+/// each data type of its custom data, of no instrument, is requested
 /// of its source's data client (`venues::custom_data_client`), catalog
-/// first and written back. A
-/// series its venue's history does not serve (`venues::serves`) is
+/// first and written back. A series its venue's history does not serve (`venues::serves`) is
 /// requested no history, logged as a warning, its instrument's definition
 /// asked all the same. The
 /// warmup of each request arrives a window at a time in
@@ -723,29 +727,26 @@ impl Debug for Warmup {
 /// # Errors
 ///
 /// Returns an error if a request fails, or if no source serves a data type
-/// of `custom` (see `venues::custom_data_client`). A composite bar type's
-/// source bars are external, as the config's load requires (see
+/// of its custom data (see `venues::custom_data_client`). A composite bar
+/// type's source bars are external, as the config's load requires (see
 /// `strategy::DataConfig`): they are requested, not built.
-#[expect(clippy::too_many_arguments, reason = "a warmup's parts")]
 pub fn start<A>(
     actor: &mut A,
     now: Timestamp,
-    bar_types: &[BarType],
-    ticks: &[TickSeries],
-    custom: &[DataType],
-    warmup: SignedDuration,
+    requirements: &DataRequirements,
     continuous: &ContinuousBars,
     group: UUID4,
 ) -> anyhow::Result<Vec<(UUID4, Vec<BarType>)>>
 where
     A: DataActor + DataActorNative + Debug + 'static,
 {
-    let start = now.checked_sub(warmup)?;
+    let start = now.checked_sub(requirements.warmup)?;
     let windows = time_range::params(start, now, WINDOW);
-    let (continuous_bars, others): (Vec<BarType>, Vec<BarType>) = bar_types
+    let (continuous_bars, others): (Vec<BarType>, Vec<BarType>) = requirements
+        .bar_types
         .iter()
         .partition(|bar_type| continuous.params(bar_type.instrument_id()).is_some());
-    let sources = requests(&others, ticks, now);
+    let sources = requests(&others, &requirements.ticks, now);
     let mut requested = Vec::new();
     // First, so that the data engine, which takes an actor's commands in
     // the order sent, caches each definition the catalog answers before it
@@ -865,7 +866,7 @@ where
     }
     // Of its source's data client, catalog first and written back, building
     // nothing: Nautilus takes no windows on custom data.
-    for data_type in custom {
+    for data_type in &requirements.custom {
         let client = venues::custom_data_client(data_type)?;
         let id = actor.request_data(
             data_type.clone(),
