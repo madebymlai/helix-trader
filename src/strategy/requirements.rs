@@ -21,7 +21,7 @@ use nautilus_persistence::common::{
 };
 use serde::{Deserialize, Deserializer, de};
 
-use crate::rolls::{Slice, Transition, TransitionTable, front};
+use crate::rolls::{self, Slice, Transition, TransitionTable, front};
 
 /// What a strategy needs from data, stated by its config: filling the
 /// catalog, backtesting and going live all read it from here.
@@ -223,6 +223,30 @@ impl CustomSeries {
             self.0.metadata().cloned(),
             Some(contract.to_string()),
         ))
+    }
+
+    /// The contract whose catalog folder it and `other`, of its type,
+    /// share through a root, if they do: one of them on a root (`root`),
+    /// the other stored under the folder of a contract standing for that
+    /// root at some time (`rolls::root_of`), where the root's series is
+    /// stored on the contract (`on`), so a fill and a replay would take the
+    /// folder for two series. The other being the root's series on the
+    /// contract is one series, read once
+    /// (`DataRequirements::custom_slices`). A contract of the roll
+    /// calendar names its own folder, holding no `/` or `^`.
+    #[must_use]
+    pub fn contract_folder_shared_with(&self, other: &Self) -> Option<InstrumentId> {
+        let through = |on_root: &Self, series: &Self| {
+            let root = on_root.root()?;
+            let contract = InstrumentId::from_str(&series.catalog_folder())
+                .ok()
+                .filter(|&contract| rolls::root_of(contract) == Some(root))?;
+            (on_root.on(contract) != *series).then_some(contract)
+        };
+        if self.type_name() != other.type_name() {
+            return None;
+        }
+        through(self, other).or_else(|| through(other, self))
     }
 
     /// Its slices over `[start, end]`: on a root, the series of each

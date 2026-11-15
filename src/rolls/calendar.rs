@@ -22,6 +22,15 @@ pub(super) fn product(root: InstrumentId) -> Option<&'static Product> {
     PRODUCTS.iter().find(|product| product.root == root)
 }
 
+/// The root whose front contract `contract` is at some time, if any: that
+/// of the product rolling through it (`Product::rolls_through`).
+pub(super) fn root_of(contract: InstrumentId) -> Option<InstrumentId> {
+    PRODUCTS
+        .iter()
+        .find(|product| product.rolls_through(contract))
+        .map(|product| product.root)
+}
+
 /// The products of a calendar in TOML.
 ///
 /// # Errors
@@ -179,6 +188,36 @@ impl ContractTemplate {
             .collect();
         Symbol::new(symbol)
     }
+
+    /// The month code of the contract whose symbol is `symbol`, if the
+    /// template names one so: its text in place and each placeholder
+    /// filled, the month a letter, the years digits, each as wide as
+    /// `fill` writes it.
+    fn month_of<'a>(&self, symbol: &'a str) -> Option<&'a str> {
+        let mut month = None;
+        let mut rest = symbol;
+        for part in &self.0 {
+            let width = match part {
+                Part::Text(text) => {
+                    rest = rest.strip_prefix(text.as_str())?;
+                    continue;
+                }
+                Part::Month | Part::Y => 1,
+                Part::Yy => 2,
+                Part::Yyyy => 4,
+            };
+            let (filled, after) = rest.split_at_checked(width)?;
+            match part {
+                Part::Month if filled.chars().all(|c| c.is_ascii_uppercase()) => {
+                    month = Some(filled);
+                }
+                Part::Y | Part::Yy | Part::Yyyy if filled.chars().all(|c| c.is_ascii_digit()) => {}
+                _ => return None,
+            }
+            rest = after;
+        }
+        month.filter(|_| rest.is_empty())
+    }
 }
 
 /// A dated contract of a product: its delivery year and month.
@@ -253,6 +292,17 @@ impl Product {
     /// filled for it, on the root's venue (`GCZ26.GLBX`).
     pub(super) fn instrument_id(&self, contract: Contract) -> InstrumentId {
         InstrumentId::new(self.contract.fill(contract), self.root.venue)
+    }
+
+    /// Whether the front rolls through `contract`, of any year: it is on
+    /// the root's venue, its symbol the contract template filled for a
+    /// liquid month (`GCZ26.GLBX` of GC's, not `GCV26.GLBX`).
+    fn rolls_through(&self, contract: InstrumentId) -> bool {
+        contract.venue == self.root.venue
+            && self
+                .contract
+                .month_of(contract.symbol.as_str())
+                .is_some_and(|code| self.months.iter().any(|month| format!("{month:?}") == code))
     }
 }
 

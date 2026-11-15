@@ -8,11 +8,14 @@
 //! `GCZ26.GLBX`, ...); any other id is a plain instrument, with no
 //! transitions and one slice on itself. Callers use the slices and never
 //! branch on an id, but a custom series' identifier, which may name no
-//! instrument at all (`CustomSeries::root`). A `Roller` tells a strategy of
-//! each roll of a root, at which its subscriptions
-//! (`strategy::subscriptions`) move the root's tick series and custom
-//! series to the post contract, and `ContinuousBars` makes a strategy's
-//! bars on a root Nautilus' continuous bars, which roll themselves.
+//! instrument at all (`CustomSeries::root`), and the catalog folder of a
+//! custom series, which may be a contract's a root's series is stored
+//! under (`root_of`, `CustomSeries::contract_folder_shared_with`). A
+//! `Roller` tells a strategy of each roll of a root, at which its
+//! subscriptions (`strategy::subscriptions`) move the root's tick series
+//! and custom series to the post contract, and `ContinuousBars` makes a
+//! strategy's bars on a root Nautilus' continuous bars, which roll
+//! themselves.
 
 mod calendar;
 mod continuous;
@@ -83,6 +86,16 @@ impl Transition {
             post: product.instrument_id(front),
         })
     }
+}
+
+/// The root of the roll calendar `contract` stands for at some time, if
+/// any: a contract of any year of one of its product's liquid months, on
+/// its venue (`GCZ26.GLBX` of `GC.GLBX`). None for a contract of another
+/// month, which never stands for the root, for a root and for any other
+/// id.
+#[must_use]
+pub fn root_of(contract: InstrumentId) -> Option<InstrumentId> {
+    calendar::root_of(contract)
 }
 
 /// The part of a span one contract stands for its root, both ends
@@ -342,6 +355,32 @@ mod tests {
                 "{plain}"
             );
             assert_eq!(table.contract_at(at("2026-07-29T00:00Z")), id(plain));
+        }
+    }
+
+    /// GC's contracts are `GC{month}{yy}` on GLBX, of February, April,
+    /// June, August and December.
+    #[test]
+    fn a_contract_of_a_liquid_month_of_any_year_stands_for_its_root() {
+        for contract in ["GCZ26.GLBX", "GCG27.GLBX", "GCQ99.GLBX"] {
+            assert_eq!(root_of(id(contract)), Some(gc()), "{contract}");
+        }
+    }
+
+    #[test]
+    fn no_other_id_stands_for_a_root() {
+        for other in [
+            "GCV26.GLBX",
+            "GC.GLBX",
+            "GCZ6.GLBX",
+            "GCZ026.GLBX",
+            "GCZ26.XCME",
+            "GCz26.GLBX",
+            "SIZ26.GLBX",
+            "GC.v.0.GLBX",
+            "XAUUSD.ICMARKETS",
+        ] {
+            assert_eq!(root_of(id(other)), None, "{other}");
         }
     }
 

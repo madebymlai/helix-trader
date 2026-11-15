@@ -330,7 +330,8 @@ pub struct DataConfig {
     /// or the catalog's own (`DataRequirements::custom`), each of a type
     /// Nautilus holds a schema of, served by its type's row's history
     /// source or else the catalog's (`venues::serves_custom`), under a
-    /// catalog folder no other of its type takes.
+    /// catalog folder no other of its type takes, a root's series taking
+    /// those of the contracts standing for it.
     pub series: Vec<Series>,
     /// How far back the warmup history a live node requests at start
     /// starts; a backtest requests none, its strategy warming on the
@@ -396,8 +397,11 @@ impl DataConfig {
     /// again, under each listing after its first, naming it; a custom
     /// series of a type and a catalog folder (`CustomSeries::
     /// catalog_folder`) listed already, under `data.series[i]` naming it,
-    /// whatever its metadata, the two series stored under one folder; a
-    /// custom series of a type Nautilus holds no schema of
+    /// whatever its metadata, the two series stored under one folder, or
+    /// sharing a folder with one listed already through a root
+    /// (`CustomSeries::contract_folder_shared_with`: a root's and its
+    /// contract's of other metadata), so too; a custom series of a type
+    /// Nautilus holds no schema of
     /// (`get_arrow_schema`; helix registers each type it compiles as it
     /// starts, `venues::register_custom_data`), or one its type's history
     /// source does not serve (`venues::serves_custom`), under
@@ -434,18 +438,30 @@ impl DataConfig {
             }
             let field = format!("data.series[{i}]");
             let folder = custom.catalog_folder();
-            if let Some((j, _)) = self
-                .custom()
-                .take_while(|&(j, _)| j < i)
-                .find(|(_, listed)| {
-                    listed.type_name() == custom.type_name() && listed.catalog_folder() == folder
-                })
-            {
+            let before = || self.custom().take_while(|&(j, _)| j < i);
+            if let Some((j, _)) = before().find(|(_, listed)| {
+                listed.type_name() == custom.type_name() && listed.catalog_folder() == folder
+            }) {
                 errors.push(ConfigError::duplicate(
                     field.clone(),
                     Some(format!(
                         "{custom}, stored under the catalog folder {folder} of {} as \
                          data.series[{j}] is",
+                        custom.type_name()
+                    )),
+                ));
+            } else if let Some((j, listed, contract)) = before().find_map(|(j, listed)| {
+                custom
+                    .contract_folder_shared_with(listed)
+                    .map(|contract| (j, listed, contract))
+            }) {
+                errors.push(ConfigError::duplicate(
+                    field.clone(),
+                    Some(format!(
+                        "{custom}, stored under the catalog folder {contract} of {} as \
+                         data.series[{j}], {listed}, is while {contract} stands for its root: a \
+                         contract's series is read beside its root's only as the root's on it, \
+                         of the root's metadata, else under an identifier of its own",
                         custom.type_name()
                     )),
                 ));
@@ -1938,6 +1954,52 @@ mod tests {
 
             assert_eq!(error_fields(&toml), ["data.series[4]"], "{again}");
         }
+    }
+
+    /// GC.GLBX's series is stored on GCZ26.GLBX under GCZ26.GLBX's folder
+    /// while GCZ26 stands for the root, as the series of GCZ26.GLBX listed
+    /// beside it of other metadata is, whichever comes first.
+    #[test]
+    fn a_root_s_custom_series_and_its_contract_s_of_other_metadata_are_refused_under_the_later_naming_both()
+     {
+        nautilus_serialization::ensure_custom_data_registered::<Signal>();
+        let root =
+            r#"{ data = "Custom:Signal", identifier = "GC.GLBX", metadata = { window = "5m" } }"#;
+        let contract = r#"{ data = "Custom:Signal", identifier = "GCZ26.GLBX" }"#;
+        for entries in [[root, contract], [contract, root]] {
+            let err = load(&with_custom(&entries)).unwrap_err();
+
+            assert_eq!(fields_of(&err), ["data.series[4]"], "{entries:?}");
+            let [
+                ConfigError::Duplicate {
+                    value: Some(value), ..
+                },
+            ] = &errors_of(&err)[..]
+            else {
+                panic!("not a duplicate naming the series: {err:?}");
+            };
+            assert!(
+                value.contains("data.series[3]")
+                    && value.contains("identifier=GC.GLBX")
+                    && value.contains("identifier=GCZ26.GLBX"),
+                "{value}"
+            );
+        }
+    }
+
+    /// GCZ26.GLBX's series of the root's metadata is the root's on GCZ26,
+    /// read once; GCV26 is no contract GC rolls through, so its folder is
+    /// its own whatever its metadata.
+    #[test]
+    fn a_contract_s_custom_series_beside_its_root_s_loads_if_it_is_the_root_s_on_it_or_one_it_never_rolls_through()
+     {
+        nautilus_serialization::ensure_custom_data_registered::<Signal>();
+        let root =
+            r#"{ data = "Custom:Signal", identifier = "GC.GLBX", metadata = { window = "5m" } }"#;
+        let on_it = r#"{ data = "Custom:Signal", identifier = "GCZ26.GLBX", metadata = { window = "5m" } }"#;
+        let unrolled = r#"{ data = "Custom:Signal", identifier = "GCV26.GLBX" }"#;
+
+        load(&with_custom(&[root, on_it, unrolled])).unwrap();
     }
 
     /// The same series twice is a series listed again, refused once.
