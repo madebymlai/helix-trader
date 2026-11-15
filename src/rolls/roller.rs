@@ -45,7 +45,7 @@ const FORCE_INSTRUMENT_UPDATE: &str = "force_instrument_update";
 /// It sets its alerts and requests through the strategy that owns it, so
 /// the strategy calls it on a clone (`self.roller.clone().start(self, now)`):
 /// it holds the instruments only, and works out the contracts from the time
-/// it starts at and the time of each alert.
+/// it starts at and the roll time each alert's name holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Roller {
     /// The instruments, roots or plain, each once.
