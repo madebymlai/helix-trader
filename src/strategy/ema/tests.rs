@@ -205,10 +205,12 @@ fn rejects_a_second_bars_series_of_the_trade_instrument_as_unread() {
 }
 
 /// The crossover reads no custom data: LSE's daily 10-year US yield, a
-/// custom series listed beside its bars, is read by nothing, refused under
-/// its listing, naming it.
+/// custom series listed beside its bars, its type registered as the
+/// process does at its start, is read by nothing, refused under its
+/// listing, naming it.
 #[test]
 fn rejects_a_custom_series_as_unread() {
+    crate::venues::register_custom_data();
     let toml = listing(
         r#"{ data = "Custom:LseRow", identifier = "US10Y", metadata = { source = "bond_yields", symbol = "US10Y" } }"#,
     );

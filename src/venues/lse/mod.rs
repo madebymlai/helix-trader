@@ -261,8 +261,9 @@ mod tests {
 
     /// fill-catalog's fill of `requirements` over `[from, to]` into the
     /// catalog in `dir`, from `lse` and `databento`, Databento's mock peer,
-    /// the catalog holding `definitions`. With no peer of Databento's,
-    /// Databento is never asked.
+    /// the catalog holding `definitions`, the custom data types helix
+    /// compiles registered first, as the process does at its start. With
+    /// no peer of Databento's, Databento is never asked.
     fn fill_from(
         dir: &Path,
         lse: &MockLse,
@@ -271,6 +272,7 @@ mod tests {
         definitions: Vec<InstrumentAny>,
         (from, to): (Timestamp, Timestamp),
     ) -> anyhow::Result<()> {
+        crate::venues::register_custom_data();
         let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
         if !definitions.is_empty() {
             catalog.write_instruments(definitions).unwrap();

@@ -386,13 +386,16 @@ mod tests {
         load_of(features, series, target, TABLES)
     }
 
-    /// The probe as `load` has it, its `[indicators]` `tables`.
+    /// The probe as `load` has it, its `[indicators]` `tables`, loaded
+    /// after registering the custom data types helix compiles, as the
+    /// process does at its start.
     fn load_of(
         features: &[&str],
         series: &[&str],
         target: &str,
         tables: &str,
     ) -> anyhow::Result<StandardConfig<ProbeParams>> {
+        crate::venues::register_custom_data();
         StandardConfig::load(&toml_of(features, series, target, tables))
     }
 

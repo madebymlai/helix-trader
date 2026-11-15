@@ -283,13 +283,17 @@ fn is_custom(series: &SeriesSlice) -> bool {
 /// its custom series (`Backtest::custom`), each keyed by its data type's
 /// identifier, over its slices of the run's window, both ends included, a
 /// root's contract by contract, each contract's series over the slice it
-/// stands for the root (`DataRequirements::custom_slices`): the data the
-/// node cannot load (see `run_config`). Nautilus decodes each type by
-/// its name, so each must be registered with Nautilus before the run
-/// (`nautilus_serialization::ensure_custom_data_registered`): the run
-/// registers those the venues' sources serve, LSE's rows
-/// (`venues::register_custom_data`), and the code declaring another type's
-/// series registers it, as the tests do.
+/// stands for the root (`DataRequirements::custom_slices`), whether its
+/// type's history fills it or it is the catalog's: the data the node
+/// cannot load (see `run_config`). A slice the catalog holds nothing of is
+/// warned of as Nautilus' `BacktestNode` warns of any other series it
+/// reads nothing of, in its words, a root's per contract as its other
+/// series' data configs are, and the run goes on.
+/// Nautilus decodes each type by its name, so each must be registered
+/// with Nautilus before the run
+/// (`nautilus_serialization::ensure_custom_data_registered`): helix
+/// registers the types it compiles as the process starts
+/// (`venues::register_custom_data`), and the tests register their own.
 ///
 /// # Errors
 ///
@@ -302,7 +306,6 @@ fn is_custom(series: &SeriesSlice) -> bool {
 /// none of the series, or part of it, and fill-catalog, which reads the
 /// catalog by identifier, would find nothing missing.
 pub(super) fn custom_data(backtest: &Backtest) -> anyhow::Result<Vec<Data>> {
-    venues::register_custom_data();
     let mut catalog = ParquetDataCatalog::new(&backtest.catalog, None, None, None, None);
     let mut data = Vec::new();
     let custom = backtest
@@ -321,6 +324,11 @@ pub(super) fn custom_data(backtest: &Backtest) -> anyhow::Result<Vec<Data>> {
                 true,
             )
             .with_context(|| format!("reading the {data_type}"))?;
+        if read.is_empty() {
+            // As `BacktestNode::run_oneshot` warns of a data config.
+            log::warn!("No data found for config: {data_type:?}");
+            continue;
+        }
         // The engine publishes each row on the topic of its stored data
         // type, which the strategy subscribed to only if it is this one.
         if let Some(stored) = read.iter().find_map(|row| match row {
@@ -513,7 +521,7 @@ mod tests {
     use rust_decimal::Decimal;
 
     use super::*;
-    use crate::backtest::Commission;
+    use crate::{backtest::Commission, strategy::requirements::CustomSeries};
 
     /// A backtest on the catalog `catalog`.
     fn backtest(catalog: &Path) -> Backtest {
@@ -844,6 +852,34 @@ mod tests {
         let config = run_config(&backtest).unwrap();
         assert_eq!(config.chunk_size(), None);
         assert_eq!(quoted(&config, dir.path()), ["EUNL.IBIS", "SXR8.IBIS"]);
+    }
+
+    /// Nautilus' `BacktestNode` warns of a series it reads nothing of and
+    /// runs on (`run_oneshot`): the read of a custom series the catalog
+    /// holds nothing of warns so, naming its data type, and reads on.
+    #[test]
+    fn an_empty_read_of_a_custom_series_logs_nautilus_no_data_warning_and_reads_on() {
+        let name = "an_empty_read_of_a_custom_series_logs_nautilus_no_data_warning_and_reads_on";
+        if !crate::log_capture::alone(module_path!(), name) {
+            return;
+        }
+        crate::log_capture::capture(log::LevelFilter::Warn);
+        let dir = tempfile::tempdir().unwrap();
+        let backtest = Backtest {
+            custom: vec![CustomSeries::new("Signal", "GOLD-SIGNAL".to_string(), None).unwrap()],
+            ..backtest(dir.path())
+        };
+
+        let read = custom_data(&backtest).unwrap();
+
+        assert!(read.is_empty(), "{read:?}");
+        assert_eq!(
+            crate::log_capture::lines(),
+            [
+                "WARN No data found for config: DataType(type_name=Signal, metadata=None, \
+                 identifier=Some(\"GOLD-SIGNAL\"))"
+            ]
+        );
     }
 
     #[test]

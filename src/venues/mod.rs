@@ -42,14 +42,19 @@
 //! asked by its type alone, its type's row answering, each source judging
 //! its data type by its type, metadata and identifier shape, as Nautilus
 //! routes a custom data command by its client id alone, naming no venue:
-//! a strategy's config and fill-catalog whether its history serves it
+//! a strategy's config and fill-catalog which history source serves it
 //! (`serves_custom`, its history source's answer, LSE's the check its
 //! client makes), fill-catalog which source fills it (`fill_history`), a
 //! live start whether its live data streams it (`streams_custom`, its live
-//! data source's answer: none does yet), a live warmup the client it asks
-//! its history of (`custom_data_client`), and a backtest which types
-//! Nautilus decodes (`register_custom_data`, by history source). A venue's
-//! row never answers for a custom series.
+//! data source's answer: none does yet), and a live warmup the client it
+//! asks its history of (`custom_data_client`). A type the table has no
+//! row of, or a row with no history source, is the catalog's: data
+//! written into the catalog from outside helix, which a config loads,
+//! fill-catalog skips, a replay reads, a live warmup asks of the catalog
+//! alone and a live start refuses, nothing streaming it. A venue's row
+//! never answers for a custom series. Every custom data type helix
+//! compiles is registered with Nautilus once, as the process starts
+//! (`register_custom_data`).
 //! The settings each command takes of the venues are composed here,
 //! `LiveVenueArgs` for live and `HistoryVenueArgs` for fill-catalog, which
 //! the commands flatten.
@@ -420,8 +425,12 @@ impl Row {
 /// alone (`CustomRow::of`), whatever its identifier: Nautilus routes a
 /// custom data command by its client id alone, naming no venue, and a
 /// custom type is one adapter's. Its metadata and its identifier are its
-/// source's and the config's: nothing here reads either.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// source's and the config's: nothing here reads either. A type the table
+/// has no row of has a row of no source: with no history source, a custom
+/// series is the catalog's, written into the catalog from outside helix
+/// (`serves_custom`), and with no live data source nothing streams it
+/// (`streams_custom`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct CustomRow {
     /// Its history source, if one serves it.
     history: Option<HistorySource>,
@@ -444,85 +453,64 @@ impl CustomRow {
         )]
     }
 
-    /// The row of the custom data type `type_name`, if it has one.
-    fn of(type_name: &str) -> Option<Self> {
+    /// The row of `series`' type, of no source if the table has none.
+    fn of(series: &CustomSeries) -> Self {
         Self::table()
             .into_iter()
-            .find_map(|(name, row)| (name == type_name).then_some(row))
-    }
-
-    /// The row of `series`' type.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error naming its type and those the table routes if it
-    /// has no row.
-    fn of_series(series: &CustomSeries) -> anyhow::Result<Self> {
-        let type_name = series.type_name();
-        Self::of(type_name).with_context(|| {
-            let served = Self::table().map(|(name, _)| name).join(", ");
-            format!("no source serves custom data of the type {type_name}: they serve {served}")
-        })
+            .find_map(|(name, row)| (name == series.type_name()).then_some(row))
+            .unwrap_or_default()
     }
 }
 
-impl HistorySource {
-    /// Registers with Nautilus the custom data types the source serves,
-    /// so that a catalog's are read and its client's answers written back:
-    /// LSE's rows (`lse::LseRow::register`); the others serve none.
-    /// Idempotent.
-    fn register_custom_data(self) {
-        match self {
-            Self::Lse => LseRow::register(),
-            Self::Okx | Self::CTrader(_) | Self::Ib => {}
-        }
-    }
-}
-
-/// Checks that the history of `series`, a custom series, serves it, as
-/// its type's row's history source answers (`CustomRow::of`), judging its
-/// data type by its type, metadata and identifier alone: LSE's the check
-/// its client makes before asking LSE, its rows of a source and a symbol
-/// (`lse::serves_custom`); the other sources serve none. A config's
-/// custom series are checked here (`StandardConfig::validate`), and so
-/// are a fill's before anything connects (`fill_history`).
+/// The history source of `series`, a custom series, as its type's row
+/// answers (`CustomRow::of`), if it serves it, judging its data type by
+/// its type, metadata and identifier alone: LSE's the check its client
+/// makes before asking LSE, its rows of a source and a symbol
+/// (`lse::serves_custom`); the other sources serve none. None if its type
+/// has no row, or one with no history source: the series is the
+/// catalog's, data written into the catalog from outside helix, which
+/// fill-catalog hands to no source (`fill_history`), a replay reads as any
+/// other, and a live warmup asks of the catalog alone
+/// (`custom_data_client`). A config's custom series are checked here
+/// (`StandardConfig::validate`), and so are a fill's before anything
+/// connects.
 ///
 /// # Errors
 ///
-/// Returns an error naming its type if its type has no row, or one with
-/// no history source, or naming its data type and why if its history
+/// Returns an error naming its data type and why if its type's history
 /// source does not serve it.
-pub(crate) fn serves_custom(series: &CustomSeries) -> anyhow::Result<()> {
+pub(crate) fn serves_custom(series: &CustomSeries) -> anyhow::Result<Option<HistorySource>> {
     let data_type = series.data_type();
-    match CustomRow::of_series(series)?.history {
-        Some(HistorySource::Lse) => ::lse::serves_custom(data_type),
-        Some(HistorySource::Okx) => bail!("OKX's history serves no custom data, {data_type}"),
-        Some(HistorySource::CTrader(broker)) => bail!(
+    let Some(source) = CustomRow::of(series).history else {
+        return Ok(None);
+    };
+    match source {
+        HistorySource::Lse => ::lse::serves_custom(data_type)?,
+        HistorySource::Okx => bail!("OKX's history serves no custom data, {data_type}"),
+        HistorySource::CTrader(broker) => bail!(
             "{}'s history serves no custom data, {data_type}",
             broker.venue
         ),
-        Some(HistorySource::Ib) => bail!("IB's history serves no custom data, {data_type}"),
-        None => bail!(
-            "no history source serves custom data of the type {}: its row names none",
-            series.type_name()
-        ),
+        HistorySource::Ib => bail!("IB's history serves no custom data, {data_type}"),
     }
+    Ok(Some(source))
 }
 
 /// Checks that the live data of `series`, a custom series, streams it, as
 /// its type's row's live data source answers (`CustomRow::of`): LSE's
-/// client streams none (`lse::streams_custom`), nor do the others. A live
-/// start checks every one it reads here before anything connects
+/// client streams none (`lse::streams_custom`), nor do the others, and
+/// nothing streams a series of a type with no row, the catalog's. A live start
+/// checks every one it reads here before anything connects
 /// (`live_clients`), as it checks a series of an instrument (`streams`).
 ///
 /// # Errors
 ///
-/// Returns an error naming its type if its type has no row, or one with
-/// no live data source, or naming its data type and why if its live data
-/// source does not stream it.
+/// Returns an error naming `series` and its type if its type has no row,
+/// or one with no live data source, or naming its data type and why if its
+/// live data source does not stream it.
 pub(crate) fn streams_custom(series: &CustomSeries) -> anyhow::Result<()> {
     let data_type = series.data_type();
-    match CustomRow::of_series(series)?.live_data {
+    match CustomRow::of(series).live_data {
         Some(LiveDataSource::Lse) => ::lse::streams_custom(data_type),
         Some(LiveDataSource::Okx) => bail!("OKX's live data streams no custom data, {data_type}"),
         Some(LiveDataSource::CTrader(broker)) => bail!(
@@ -531,39 +519,47 @@ pub(crate) fn streams_custom(series: &CustomSeries) -> anyhow::Result<()> {
         ),
         Some(LiveDataSource::Ib) => bail!("IB's live data streams no custom data, {data_type}"),
         None => bail!(
-            "no live data source streams custom data of the type {}: its row names none",
+            "no live data source streams the custom series {series}: none streams custom data \
+             of the type {}",
             series.type_name()
         ),
     }
 }
 
 /// The data client a live node asks the history of `series`, a custom
-/// series, of: its type's row's live data source's (`CustomRow::of`),
-/// LSE's for its rows. The node's catalog answers first (see
-/// `strategy::warmup`).
+/// series, of, if its type's history serves it (`serves_custom`): its
+/// type's row's live data source's (`CustomRow::of`), LSE's for its rows,
+/// the node's catalog answering first (see `strategy::warmup`). None if
+/// the series is the catalog's, which the node's catalog alone answers.
 ///
 /// # Errors
 ///
-/// Returns an error naming its type if its type has no row, or one with
-/// no live data source.
-pub(crate) fn custom_data_client(series: &CustomSeries) -> anyhow::Result<ClientId> {
-    let source = CustomRow::of_series(series)?.live_data.with_context(|| {
+/// Returns an error as `serves_custom` does, or naming its type if its
+/// row names a history source and no live data source.
+pub(crate) fn custom_data_client(series: &CustomSeries) -> anyhow::Result<Option<ClientId>> {
+    if serves_custom(series)?.is_none() {
+        return Ok(None);
+    }
+    let source = CustomRow::of(series).live_data.with_context(|| {
         format!(
-            "no live data source streams custom data of the type {}: its row names none",
+            "no live data source asks the history of custom data of the type {}: its row \
+             names none",
             series.type_name()
         )
     })?;
-    Ok(source.client())
+    Ok(Some(source.client()))
 }
 
-/// Registers with Nautilus the custom data types every source serves,
-/// each by its row's history source (`HistorySource::register_custom_data`),
-/// so that a catalog's are read: Nautilus decodes custom data by its
-/// type's name. Idempotent.
+/// Registers with Nautilus every custom data type helix compiles, each
+/// once as the process starts, before any config loads (`main`), so that a
+/// config's custom series of it loads (`StandardConfig::validate` refuses
+/// a type Nautilus holds no schema of), a catalog's are read and a
+/// client's answers written back: Nautilus decodes and encodes custom data
+/// by its type's registered schema (`ensure_custom_data_registered`).
+/// LSE's rows (`lse::LseRow`); a type of no row, written into the catalog
+/// from outside helix, is compiled in and registered here too. Idempotent.
 pub fn register_custom_data() {
-    for history in CustomRow::table().iter().filter_map(|(_, row)| row.history) {
-        history.register_custom_data();
-    }
+    LseRow::register();
 }
 
 /// How the accounts of `venue` keep positions: as those of its broker do
@@ -862,13 +858,11 @@ fn of_source(slices: &[SeriesSlice], source: HistorySource) -> Vec<SeriesSlice> 
 
 /// Those of `custom`, custom series over their slices, whose history
 /// `source` fills, their type's row's (`CustomRow::of`); none of a type
-/// with no row.
+/// with no row, the catalog's.
 fn of_custom_source(custom: &[CustomSlice], source: HistorySource) -> Vec<CustomSlice> {
     custom
         .iter()
-        .filter(|slice| {
-            CustomRow::of(slice.series.type_name()).is_some_and(|row| row.history == Some(source))
-        })
+        .filter(|slice| CustomRow::of(&slice.series).history == Some(source))
         .cloned()
         .collect()
 }
@@ -890,7 +884,7 @@ fn of_definitions_source(slices: &[SeriesSlice], source: DefinitionsSource) -> V
 /// (`DataRequirements::custom`), which have no venue, each by its data type
 /// as given, from the history source its type's row names
 /// (`CustomRow::of`, `of_custom_source`): LSE's rows (`lse::LseRow`) from
-/// LSE, stored under the data type's identifier. The cTrader brokers',
+/// LSE, stored under the data type's identifier; none of the catalog's. The cTrader brokers',
 /// OKX's and LSE's fill through a Nautilus node (see `catalog::NodeFill`), each request naming
 /// the client that answers it: each cTrader broker's data client for its
 /// own instruments (`add_ctrader_fill`), OKX's for OKX instruments (their
@@ -908,15 +902,17 @@ fn of_definitions_source(slices: &[SeriesSlice], source: DefinitionsSource) -> V
 /// Before anything connects, every series is checked against its venue's
 /// history (`serves`), custom data of an instrument aside, which is
 /// written into the catalog from outside helix and handed to no source,
-/// each custom series against its type's history (`serves_custom`), and
+/// each custom series against its type's history (`serves_custom`), one
+/// of a type with no row, or one with no history source, being the
+/// catalog's and handed to no source either, and
 /// IB's against what IB holds
 /// (`ib::check_held`). A source with nothing missing reads no credential,
 /// IB's connection aside.
 ///
 /// # Errors
 ///
-/// Returns an error if the history of a custom series' type does not serve
-/// it (`serves_custom`), if a venue's history does not serve a
+/// Returns an error if the history source of a custom series' type does
+/// not serve it (`serves_custom`), if a venue's history does not serve a
 /// series, or if IB holds no bars of a series as old as its slice, each
 /// before anything connects; if the catalog cannot be read, if
 /// `DATABENTO_API_KEY` is missing while Databento has a definition to give,
@@ -1103,7 +1099,7 @@ impl LiveRoutes {
 /// (`DataRequirements::catalog_series`), rather than have the client log
 /// the subscription and the run go deaf to it; and so is a run reading a
 /// custom series its type's live data does not stream (`streams_custom`):
-/// LSE's client streams none of its rows. The cTrader
+/// LSE's client streams none of its rows, and nothing the catalog's. The cTrader
 /// brokers' environments and credential are read before anything
 /// connects, each broker's clients loading its instruments of `instrument_ids`; OKX's
 /// clients are set up once its account trades each instrument at the
@@ -1728,17 +1724,30 @@ mod tests {
         assert_eq!(format!("{err:#}"), format!("{lse_s:#}"));
     }
 
-    /// Before anything connects: an IB instrument beside it would connect
-    /// IB, which would refuse the end.
+    /// A custom series of the tests' own type, `Signal`, which no row
+    /// routes, under an identifier of no instrument.
+    fn signal() -> CustomSeries {
+        CustomSeries::new("Signal", "GOLD-SIGNAL".to_string(), None).unwrap()
+    }
+
+    /// A custom series of a type with no row is the catalog's, written
+    /// from outside helix: a fill hands it to no source and fills the
+    /// config's other series, here GCZ26's trades, all stored, so no node
+    /// starts and no credential is read.
     #[tokio::test]
-    async fn a_custom_series_of_a_type_with_no_row_fails_the_fill_naming_it() {
+    async fn a_fill_hands_a_custom_series_of_a_type_with_no_row_to_no_source() {
         let dir = tempfile::tempdir().unwrap();
+        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let (from, to) = (Some(at(FILL_START).into()), Some(at(FILL_END).into()));
+        catalog
+            .write_to_parquet(&[trade("GCZ26.GLBX")], from, to, None)
+            .unwrap();
         let requirements = DataRequirements {
-            custom: vec![CustomSeries::new("Imbalance", "GC.v.0.GLBX".to_string(), None).unwrap()],
-            ..ticks(&[(NautilusDataType::TradeTick, "SXR8.IBIS")])
+            custom: vec![signal()],
+            ..ticks(&[(NautilusDataType::TradeTick, "GCZ26.GLBX")])
         };
 
-        let err = fill_history(
+        fill_history(
             &requirements,
             at(FILL_START),
             at(FILL_END),
@@ -1746,10 +1755,28 @@ mod tests {
             dir.path(),
         )
         .await
-        .unwrap_err();
+        .unwrap();
+    }
 
-        let err = err.to_string();
-        assert!(err.contains("Imbalance") && err.contains("LseRow"), "{err}");
+    /// LSE's rows are LSE's: its history serves them, and a live node asks
+    /// their history of its live data client.
+    #[test]
+    fn lse_s_rows_are_served_by_lse_and_their_history_asked_of_lse_s_client() {
+        let us10y = lse_rows("bond_yields", "US10Y");
+
+        assert_eq!(serves_custom(&us10y).unwrap(), Some(HistorySource::Lse));
+        assert_eq!(
+            custom_data_client(&us10y).unwrap(),
+            Some(ClientId::from("LSE"))
+        );
+    }
+
+    /// A type with no row is the catalog's: no source serves it, and a
+    /// live node asks its history of no client.
+    #[test]
+    fn a_custom_series_of_a_type_with_no_row_is_served_by_no_source_and_asked_of_no_client() {
+        assert_eq!(serves_custom(&signal()).unwrap(), None);
+        assert_eq!(custom_data_client(&signal()).unwrap(), None);
     }
 
     /// Every series of a fill is checked against its venue's history
@@ -3572,5 +3599,31 @@ mod tests {
 
         let lse_s = ::lse::streams_custom(us10y.data_type()).unwrap_err();
         assert_eq!(format!("{err:#}"), format!("{lse_s:#}"));
+    }
+
+    /// Nothing streams the catalog's data: a custom series of a type with
+    /// no row is refused, naming it, before anything connects, OKX's
+    /// clients among them, which would fail on its missing environment.
+    #[tokio::test]
+    async fn a_run_reading_a_custom_series_of_a_type_with_no_row_is_refused_naming_it_before_anything_connects()
+     {
+        let requirements = DataRequirements {
+            custom: vec![signal()],
+            ..ticks(&[(NautilusDataType::QuoteTick, "BTC-USDT-SWAP.OKX")])
+        };
+
+        let Err(err) = live_clients(
+            &requirements,
+            &requirements.instrument_ids(),
+            &live_args(),
+            Path::new("catalog"),
+        )
+        .await
+        else {
+            panic!("set up clients for a custom series of the catalog's");
+        };
+
+        let err = format!("{err:#}");
+        assert!(err.contains(&signal().to_string()), "{err}");
     }
 }
