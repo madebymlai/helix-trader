@@ -3262,4 +3262,37 @@ mod tests {
             (0, 1)
         );
     }
+
+    /// The data type of the yields of `symbol`, custom data of no
+    /// instrument keyed by its identifier.
+    fn yields(symbol: &str) -> nautilus_model::data::DataType {
+        nautilus_model::data::DataType::new("Yield", None, Some(symbol.to_string()))
+    }
+
+    /// The custom data of no instrument of the requirements, the 10-year
+    /// and the 2-year US yields, is subscribed at a backtest's start
+    /// through the handle's subscriptions, on the message bus alone, so the
+    /// strategy's `on_data` gets it without subscribing itself.
+    #[test]
+    fn a_backtests_start_subscribes_the_custom_data_of_no_instrument_of_its_requirements() {
+        let models = tempfile::tempdir().unwrap();
+        let requirements = DataRequirements {
+            custom: vec![yields("US10Y"), yields("US02Y")],
+            ..requirements()
+        };
+        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+        let handle = ModelHandle::new(
+            &blueprint_of(&features(), &config(), requirements),
+            Mode::Backtest {
+                models: models.path().to_path_buf(),
+            },
+        )
+        .unwrap();
+
+        handle.start(&mut probe).unwrap();
+
+        let subscribers =
+            |symbol| msgbus::subscriptions_count_any(get_custom_topic(&yields(symbol))).unwrap();
+        assert_eq!([subscribers("US10Y"), subscribers("US02Y")], [1, 1]);
+    }
 }

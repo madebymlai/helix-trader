@@ -656,3 +656,26 @@ fn live_it_warms_up_its_conversion_pairs_quotes_then_subscribes_to_them_from_its
         .collect();
     assert_eq!(warmed_to, [Some(UnixNanos::from(NOW))]);
 }
+
+/// Started in a backtest, the crossover reading LSE's daily 10-year US
+/// yield in `[data].custom`, custom data of no instrument, is subscribed
+/// to it through its subscriptions, on the message bus alone, so its
+/// `on_data` gets the rows without subscribing itself.
+#[test]
+fn its_start_subscribes_the_custom_data_of_no_instrument_of_its_config() {
+    let config = CONFIG.replace(
+        r#"warmup = "1h""#,
+        r#"warmup = "1h"
+    custom = [{ data = "Custom:LseRow", metadata = { source = "bond_yields", symbol = "US10Y" } }]"#,
+    );
+    let cache = holding(InstrumentAny::CurrencyPair(audusd_sim()));
+    let (mut strategy, _) = registered(&cache, NOW, &config);
+
+    DataActor::on_start(&mut strategy).unwrap();
+
+    let us10y = ::lse::LseRow::data_type("bond_yields", "US10Y");
+    assert_eq!(
+        msgbus::subscriptions_count_any(msgbus::switchboard::get_custom_topic(&us10y)).unwrap(),
+        1
+    );
+}
