@@ -185,6 +185,7 @@ async fn a_live_run_caches_its_conversion_pairs_quotes_after_its_start() {
         subscriptions: Subscriptions::new(
             requirements.bar_types.clone(),
             requirements.ticks.clone(),
+            requirements.custom.clone(),
         ),
         pair: eurusd,
         rates: config.rates(),

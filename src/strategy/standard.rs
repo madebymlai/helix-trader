@@ -325,9 +325,10 @@ pub struct DataConfig {
     /// { source = "bond_yields", symbol = "US10Y" } }` in a TOML config,
     /// keyed as its source keys it (`venues::custom_data_type`), which
     /// refuses a type no source serves. Fetched by fill-catalog and replayed
-    /// in a backtest, to the strategy subscribing to its data type; a live
-    /// run reading any is refused. No part answers it reads one, and none
-    /// is required: none by default.
+    /// in a backtest, to the strategy, whose subscriptions subscribe to its
+    /// data type (`strategy::subscriptions`); a live run reading any is
+    /// refused. No part answers it reads one, and none is required: none
+    /// by default.
     #[serde(default, deserialize_with = "custom_data")]
     pub custom: Vec<DataType>,
     /// How far back the warmup history a live node requests at start

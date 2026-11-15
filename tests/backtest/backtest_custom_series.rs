@@ -5,13 +5,19 @@
 //! end, when its close is known. The backtest declares the series by its
 //! data type, beside IC's gold (`common::ic`), the run's venue, and
 //! replays the rows of its window to the strategy, each of the data type
-//! the strategy subscribed to, when it is known. The fill and the run each
-//! on a thread of its own, one node per thread.
+//! it is subscribed to, when it is known: to a probe subscribing itself,
+//! and to one whose subscriptions (`strategy::subscriptions`) subscribe
+//! it, as a strategy's do. The fill and the run each on a thread of its
+//! own, one node per thread.
 
 use std::{cell::RefCell, path::Path, rc::Rc};
 
 use crate::common::ic;
-use helix_trader::catalog::{NodeClient, NodeFill, missing_custom};
+use helix_trader::{
+    backtest::Backtest,
+    catalog::{NodeClient, NodeFill, missing_custom},
+    strategy::subscriptions::Subscriptions,
+};
 use jiff::Timestamp;
 use lse::{
     LseDataClientConfig, LseDataClientFactory, LseRow,
@@ -82,6 +88,30 @@ fn fill_bond_yields(dir: &Path) {
 /// of the run when it got it.
 type Got = (DataType, UnixNanos, Value, UnixNanos);
 
+/// What a strategy got of `data`, a row, at `now`.
+fn got(data: &CustomData, now: UnixNanos) -> Got {
+    let row = data
+        .data
+        .as_any()
+        .downcast_ref::<LseRow>()
+        .expect("an LSE row");
+    (
+        data.data_type.clone(),
+        row.ts_init,
+        row.fields["close"].clone(),
+        now,
+    )
+}
+
+/// The probe's core.
+fn core() -> StrategyCore {
+    StrategyCore::new(StrategyConfig {
+        strategy_id: Some(StrategyId::from("PROBE-001")),
+        order_id_tag: Some("001".to_string()),
+        ..Default::default()
+    })
+}
+
 /// Subscribes to `us10y()` and records each row it gets.
 #[derive(Debug)]
 struct Probe {
@@ -98,20 +128,52 @@ impl DataActor for Probe {
     }
 
     fn on_data(&mut self, data: &CustomData) -> anyhow::Result<()> {
-        let row = data
-            .data
-            .as_any()
-            .downcast_ref::<LseRow>()
-            .expect("an LSE row");
-        let got = (
-            data.data_type.clone(),
-            row.ts_init,
-            row.fields["close"].clone(),
-            self.clock().timestamp_ns(),
-        );
+        let got = got(data, self.clock().timestamp_ns());
         self.got.borrow_mut().push(got);
         Ok(())
     }
+}
+
+/// Starts its subscriptions at its start, as a strategy does, subscribing
+/// to nothing itself, and records each row it gets.
+#[derive(Debug)]
+struct Subscribed {
+    core: StrategyCore,
+    subscriptions: Subscriptions,
+    got: Rc<RefCell<Vec<Got>>>,
+}
+
+nautilus_strategy!(Subscribed);
+
+impl DataActor for Subscribed {
+    fn on_start(&mut self) -> anyhow::Result<()> {
+        let now = self.clock().utc_now();
+        self.subscriptions.clone().start(self, now);
+        Ok(())
+    }
+
+    fn on_data(&mut self, data: &CustomData) -> anyhow::Result<()> {
+        let got = got(data, self.clock().timestamp_ns());
+        self.got.borrow_mut().push(got);
+        Ok(())
+    }
+}
+
+/// The catalog filled with `us10y()` (`fill_bond_yields`) and a backtest
+/// on it from the 12th's 00:00 to noon on the 13th declaring the series.
+fn bond_yields_backtest() -> (tempfile::TempDir, Backtest) {
+    let catalog = ic::catalog();
+    let dir = catalog.path().to_path_buf();
+    std::thread::spawn(move || fill_bond_yields(&dir))
+        .join()
+        .unwrap();
+    let backtest = Backtest {
+        custom: vec![us10y()],
+        start: november("12T00:00:00"),
+        end: november("13T12:00:00"),
+        ..ic::backtest(&catalog)
+    };
+    (catalog, backtest)
 }
 
 /// From the 12th's 00:00 to noon on the 13th: the 12th's close reaches
@@ -120,26 +182,38 @@ impl DataActor for Probe {
 /// the run, does not.
 #[test]
 fn a_bond_yield_of_a_date_reaches_the_strategy_at_the_date_s_end() {
-    let catalog = ic::catalog();
-    let dir = catalog.path().to_path_buf();
-    std::thread::spawn(move || fill_bond_yields(&dir))
-        .join()
-        .unwrap();
-    let backtest = helix_trader::backtest::Backtest {
-        custom: vec![us10y()],
-        start: november("12T00:00:00"),
-        end: november("13T12:00:00"),
-        ..ic::backtest(&catalog)
-    };
+    let (_catalog, backtest) = bond_yields_backtest();
 
     let got = std::thread::spawn(move || {
         let got = Rc::new(RefCell::new(Vec::new()));
         let probe = Probe {
-            core: StrategyCore::new(StrategyConfig {
-                strategy_id: Some(StrategyId::from("PROBE-001")),
-                order_id_tag: Some("001".to_string()),
-                ..Default::default()
-            }),
+            core: core(),
+            got: Rc::clone(&got),
+        };
+        backtest.run(probe).unwrap();
+        got.take()
+    })
+    .join()
+    .unwrap();
+
+    let thirteenth = UnixNanos::from(november("13T00:00:00"));
+    assert_eq!(got, [(us10y(), thirteenth, json!(5.133), thirteenth)]);
+}
+
+/// A strategy's subscriptions of the backtest's custom data, as a strategy
+/// builds them of its data requirements (`DataRequirements::custom`,
+/// `[data].custom`), subscribe it to the series: its `on_data` gets the
+/// 12th's close at the 13th's 00:00, though it subscribes to nothing
+/// itself.
+#[test]
+fn a_strategy_gets_the_custom_data_of_no_instrument_through_its_subscriptions() {
+    let (_catalog, backtest) = bond_yields_backtest();
+
+    let got = std::thread::spawn(move || {
+        let got = Rc::new(RefCell::new(Vec::new()));
+        let probe = Subscribed {
+            core: core(),
+            subscriptions: Subscriptions::new(vec![], vec![], backtest.custom.clone()),
             got: Rc::clone(&got),
         };
         backtest.run(probe).unwrap();

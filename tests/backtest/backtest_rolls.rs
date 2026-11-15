@@ -175,7 +175,7 @@ fn rolled(ticks: Vec<TickSeries>) -> Subscribe {
     let instrument_ids = ticks.iter().map(|tick| tick.instrument_id).collect();
     Subscribe::Rolled(
         Roller::replayed(instrument_ids),
-        Subscriptions::new(vec![], ticks),
+        Subscriptions::new(vec![], ticks, vec![]),
     )
 }
 

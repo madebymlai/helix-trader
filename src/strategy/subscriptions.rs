@@ -1,7 +1,8 @@
-//! A strategy's live subscriptions, bars and ticks: what the data engine
-//! streams to it, live as in a backtest or a dataset run, through the plain
-//! Nautilus subscription API. A strategy holds a `Subscriptions` of the bar
-//! types and tick series it reads, a model strategy's `ModelHandle` building
+//! A strategy's live subscriptions, bars, ticks and custom data of no
+//! instrument: what the data engine streams to it, live as in a backtest
+//! or a dataset run, through the plain Nautilus subscription API. A
+//! strategy holds a `Subscriptions` of the bar types, tick series and
+//! custom data it reads, a model strategy's `ModelHandle` building
 //! and owning it, starts it from `on_start` after its warmup's start
 //! (`strategy::warmup::Warmup::start`) and hands it each roll its roller
 //! returns (`rolls::Roller::on_time_event`). The roller tells when the
@@ -45,6 +46,15 @@
 //! L2_MBP, and one streaming no depth, IB, its depth with no levels: a live
 //! start refuses such a book before anything connects (`venues::streams`),
 //! so only a replay subscribes to it.
+//!
+//! Custom data of no instrument (`DataRequirements::custom`, a config's
+//! `[data].custom`), which no `Part::reads` answers, is subscribed at the
+//! start by its data type, naming no client, as an instrument's custom data
+//! is: Nautilus subscribes the message bus alone
+//! (`DataActorCore::subscribe_data`), where a replay's rows arrive, and a
+//! live run reading any is refused at its start (`venues::live_clients`).
+//! No roll moves it. A strategy's `on_data` gets its rows: the strategy
+//! subscribes to none itself.
 
 use std::{collections::BTreeMap, fmt::Debug};
 
@@ -64,11 +74,12 @@ use crate::{
     venues,
 };
 
-/// A strategy's subscriptions to the bar types and the tick series it reads
-/// (see the module): `start` from its `on_start`, after its warmup's start,
-/// from the time that returns, and `roll` at each roll its roller returns.
-/// It holds the series alone and works the contracts out from the time and
-/// the roll, so a strategy holding it calls it on a clone
+/// A strategy's subscriptions to the bar types, the tick series and the
+/// custom data of no instrument it reads (see the module): `start` from
+/// its `on_start`, after its warmup's start, from the time that returns,
+/// and `roll` at each roll its roller returns. It holds the series alone
+/// and works the contracts out from the time and the roll, so a strategy
+/// holding it calls it on a clone
 /// (`self.subscriptions.clone().start(self, now)`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Subscriptions {
@@ -78,18 +89,22 @@ pub struct Subscriptions {
     continuous: ContinuousBars,
     /// The tick series, of roots or plain instruments.
     ticks: Vec<TickSeries>,
+    /// The custom data of no instrument, each series its data type.
+    custom: Vec<DataType>,
 }
 
 impl Subscriptions {
-    /// The subscriptions to `bar_types`, of plain instruments, and to
-    /// `ticks`, of roots or plain instruments: a bar type given twice is
+    /// The subscriptions to `bar_types`, of plain instruments, to `ticks`,
+    /// of roots or plain instruments, and to `custom`, custom data of no
+    /// instrument (`DataRequirements::custom`): a bar type given twice is
     /// subscribed once (see the module).
     #[must_use]
-    pub fn new(bar_types: Vec<BarType>, ticks: Vec<TickSeries>) -> Self {
+    pub fn new(bar_types: Vec<BarType>, ticks: Vec<TickSeries>, custom: Vec<DataType>) -> Self {
         Self {
             bar_types,
             continuous: ContinuousBars::default(),
             ticks,
+            custom,
         }
     }
 
@@ -103,8 +118,9 @@ impl Subscriptions {
     }
 
     /// Subscribes `actor` to the bars, then to each tick series on the
-    /// contract standing for its instrument at `now` (`rolls::front`), all
-    /// from `now`: the time the strategy's warmup's start returns
+    /// contract standing for its instrument at `now` (`rolls::front`), then
+    /// to the custom data of no instrument, naming no client, all from
+    /// `now`: the time the strategy's warmup's start returns
     /// (`Warmup::start`), where a live warmup's requests end.
     pub fn start<A>(&self, actor: &mut A, now: Timestamp)
     where
@@ -114,6 +130,9 @@ impl Subscriptions {
         self.subscribe_bars(actor, from);
         for instrument_id in self.instrument_ids() {
             self.subscribe(actor, instrument_id, front(instrument_id, now), from);
+        }
+        for data_type in &self.custom {
+            actor.subscribe_data(data_type.clone(), None, Some(subscription_params(from, [])));
         }
     }
 
@@ -270,9 +289,9 @@ impl Subscriptions {
     }
 }
 
-/// The params of a subscription streaming from `from`, bars or ticks
-/// (`start_ns`, see the module), with `others`: the `continuous` params of
-/// their root, if bars on one.
+/// The params of a subscription streaming from `from`, bars, ticks or
+/// custom data (`start_ns`, see the module), with `others`: the
+/// `continuous` params of their root, if bars on one.
 fn subscription_params(
     from: UnixNanos,
     others: impl IntoIterator<Item = (String, Value)>,
@@ -433,7 +452,7 @@ mod tests {
     /// and handed the rolls of GC up to `end`, each at the last nanosecond
     /// before it, as its roller hands it over (`rolls::Roller`).
     fn rolled(ticks: Vec<TickSeries>, start: &str, end: &str) -> Vec<Sent> {
-        let subscriptions = Subscriptions::new(vec![], ticks);
+        let subscriptions = Subscriptions::new(vec![], ticks, vec![]);
         let (mut probe, clock, commands) = registered(at(start));
         subscriptions.start(&mut probe, at(start));
         let mut time = at(start);
@@ -531,12 +550,21 @@ mod tests {
         );
     }
 
+    /// The handlers subscribed to `data_type` on the message bus: a
+    /// subscription to custom data naming no data client subscribes the
+    /// message bus alone (`DataActorCore::subscribe_data`).
+    fn subscribers(data_type: &DataType) -> usize {
+        msgbus::subscriptions_count_any(get_custom_topic(data_type)).unwrap()
+    }
+
     /// The handlers subscribed to the imbalances of `instrument_id` on the
-    /// message bus: a subscription to custom data naming no data client
-    /// subscribes the message bus alone (`DataActorCore::subscribe_data`).
+    /// message bus (see `subscribers`).
     fn imbalance_subscribers(instrument_id: &str) -> usize {
-        let imbalances = DataType::new("Imbalance", None, Some(instrument_id.to_string()));
-        msgbus::subscriptions_count_any(get_custom_topic(&imbalances)).unwrap()
+        subscribers(&DataType::new(
+            "Imbalance",
+            None,
+            Some(instrument_id.to_string()),
+        ))
     }
 
     /// Custom data of a root is keyed by the contract standing for it, and
@@ -547,7 +575,7 @@ mod tests {
         let imbalances = NautilusDataType::Custom {
             type_name: "Imbalance".to_string(),
         };
-        let subscriptions = Subscriptions::new(vec![], ticks(&[(imbalances, "GC.GLBX")]));
+        let subscriptions = Subscriptions::new(vec![], ticks(&[(imbalances, "GC.GLBX")]), vec![]);
         let (mut probe, clock, _) = registered(at("2026-08-10T14:30:00Z"));
         let roll = Transition::after(id("GC.GLBX"), at("2026-08-10T14:30:00Z")).unwrap();
 
@@ -565,6 +593,26 @@ mod tests {
         ];
 
         assert_eq!((started, rolled), ([1, 0], [0, 1]));
+    }
+
+    /// Custom data of no instrument, each series a data type keyed by its
+    /// identifier, here the 10-year and the 2-year US yields, is subscribed
+    /// at the start by its data type, naming no data client: on the
+    /// message bus alone, sending the data engine nothing.
+    #[test]
+    fn custom_data_of_no_instrument_is_subscribed_at_the_start() {
+        let yields = |symbol: &str| DataType::new("Yield", None, Some(symbol.to_string()));
+        let subscriptions =
+            Subscriptions::new(vec![], vec![], vec![yields("US10Y"), yields("US02Y")]);
+        let (mut probe, _, commands) = registered(at("2026-08-10T14:30:00Z"));
+
+        subscriptions.start(&mut probe, at("2026-08-10T14:30:00Z"));
+
+        assert_eq!(
+            [subscribers(&yields("US10Y")), subscribers(&yields("US02Y"))],
+            [1, 1]
+        );
+        assert!(commands.get_messages().is_empty());
     }
 
     /// The `start_ns` param of each subscription of `commands`, bars and
@@ -600,6 +648,7 @@ mod tests {
                 (D::QuoteTick, "EURUSD.ICMARKETS"),
                 (D::TradeTick, "GC.GLBX"),
             ]),
+            vec![],
         );
         let warmed_to = at("2026-08-10T14:30:00Z");
         let (mut probe, _, commands) = registered(at("2026-08-10T14:30:05Z"));
@@ -614,8 +663,11 @@ mod tests {
     /// then, the roll's.
     #[test]
     fn a_roll_subscribes_the_post_contract_from_the_time_of_the_roll() {
-        let subscriptions =
-            Subscriptions::new(vec![], ticks(&[(NautilusDataType::TradeTick, "GC.GLBX")]));
+        let subscriptions = Subscriptions::new(
+            vec![],
+            ticks(&[(NautilusDataType::TradeTick, "GC.GLBX")]),
+            vec![],
+        );
         let (mut probe, clock, commands) = registered(at("2026-08-10T14:30:00Z"));
         subscriptions.start(&mut probe, at("2026-08-10T14:30:00Z"));
         let roll = Transition::after(id("GC.GLBX"), at("2026-08-10T14:30:00Z")).unwrap();
@@ -650,7 +702,7 @@ mod tests {
         let euro = BarType::from("EURUSD.ICMARKETS-1-HOUR-MID-INTERNAL");
         let bid = BarType::from("EUR/USD.IDEALPRO-1-MINUTE-BID-EXTERNAL");
         let ask = BarType::from("EUR/USD.IDEALPRO-1-MINUTE-ASK-EXTERNAL");
-        let subscriptions = Subscriptions::new(vec![gold, bid, euro, ask], vec![]);
+        let subscriptions = Subscriptions::new(vec![gold, bid, euro, ask], vec![], vec![]);
         let (mut probe, _, commands) = registered(at("2026-08-10T14:30:00Z"));
 
         subscriptions.start(&mut probe, at("2026-08-10T14:30:00Z"));
@@ -712,6 +764,7 @@ mod tests {
                 (D::OrderBookDelta, swap),
                 (D::OrderBookDepth, swap),
             ]),
+            vec![],
         );
         let (mut probe, _, commands) = registered(at("2026-08-10T14:30:00Z"));
 
@@ -750,6 +803,7 @@ mod tests {
                 (D::OrderBookDelta, "XAUUSD.ICMARKETS"),
                 (D::OrderBookDepth, "SXR8.IBIS"),
             ]),
+            vec![],
         );
         let (mut probe, _, commands) = registered(at("2026-08-10T14:30:00Z"));
 

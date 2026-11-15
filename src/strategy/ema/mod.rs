@@ -194,9 +194,10 @@ pub struct EmaCross {
     signal: Rc<Signal>,
     /// Its warmup, which feeds the signal.
     warmup: Rc<Warmup>,
-    /// Its subscriptions to its bars and to the ticks of its data
-    /// requirements: the quotes of each conversion pair read as quotes
-    /// (`venues::rate_series`).
+    /// Its subscriptions to its bars and to the ticks and the custom data
+    /// of no instrument of its data requirements: the quotes of each
+    /// conversion pair read as quotes (`venues::rate_series`) among the
+    /// ticks.
     subscriptions: Subscriptions,
 }
 
@@ -223,7 +224,7 @@ impl EmaCross {
 
     /// The strategy of `config`, its warmup `warmup` of its data
     /// requirements, set to feed the signal, and its subscriptions to their
-    /// bars and ticks.
+    /// bars, ticks and custom data of no instrument.
     fn built(
         config: EmaCrossConfig,
         warmup: fn(&DataRequirements) -> Warmup,
@@ -236,7 +237,11 @@ impl EmaCross {
             core: StrategyCore::new_checked(config.base.clone())?,
             signal,
             config,
-            subscriptions: Subscriptions::new(requirements.bar_types, requirements.ticks),
+            subscriptions: Subscriptions::new(
+                requirements.bar_types,
+                requirements.ticks,
+                requirements.custom,
+            ),
             warmup: Rc::new(warmup),
         })
     }
@@ -329,8 +334,8 @@ impl DataActor for EmaCross {
     /// (`orders::refuse_inverse`), sets the time of each trade still open
     /// again, as after a restart (`orders::arm_open_trades`), registers the
     /// signal for the traded instrument's bars, then, live after requesting
-    /// the warmup, subscribes to the bars and to the conversion pairs'
-    /// quotes from where the warmup ends.
+    /// the warmup, subscribes to the bars, to the conversion pairs' quotes
+    /// and to the custom data of no instrument from where the warmup ends.
     fn on_start(&mut self) -> anyhow::Result<()> {
         orders::refuse_inverse(self, self.config.trade_instrument_id())?;
         orders::arm_open_trades(self)?;

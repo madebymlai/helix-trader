@@ -2556,6 +2556,7 @@ mod tests {
         Subscriptions::new(
             vec![bars],
             kinds.iter().map(|(_, data)| ticks(data.clone())).collect(),
+            vec![],
         )
         .start(&mut subscriber, at(FILL_START));
         let mut sent: Vec<SubscribeCommand> = sent

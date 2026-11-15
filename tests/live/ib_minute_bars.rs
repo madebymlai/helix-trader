@@ -107,7 +107,7 @@ impl DataActor for Probe {
             &ContinuousBars::default(),
             self.warmup,
         )?;
-        Subscriptions::new(vec![composite], vec![]).start(self, now);
+        Subscriptions::new(vec![composite], vec![], vec![]).start(self, now);
         self.subscribe_bars(composite.composite(), None, None);
         Ok(())
     }
