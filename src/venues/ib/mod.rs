@@ -832,8 +832,9 @@ impl SmallBarPacing {
 /// a slice of them from within six months of `now`, rather than storing its
 /// older windows empty. The writer asks a slice from where it resumes it
 /// (`catalog::resumed`): from its start if the catalog stores none of its
-/// series, else 1 ns after their stored end, so a fill run again over a
-/// window whose bars are stored is held as far as it asks IB for more.
+/// series, else 1 ns after their stored end, and nothing if that is past
+/// the slice, so a fill run again over a window whose bars are stored is
+/// held as far as it asks IB for more.
 ///
 /// # Errors
 ///
@@ -858,8 +859,9 @@ pub(crate) fn check_held(
             continue;
         }
         let bar_type = BarType::from_str(identifier)?;
-        if bar_type.spec().aggregation == BarAggregation::Second {
-            let (from, _) = resumed(catalog, data_type, identifier, slice.from)?;
+        if bar_type.spec().aggregation == BarAggregation::Second
+            && let (Some(from), _) = resumed(catalog, data_type, identifier, slice.from, slice.to)?
+        {
             ensure!(
                 from >= oldest,
                 "IB holds no bars of 30 seconds or less older than six months: {bar_type}, \
@@ -1735,6 +1737,32 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains(small_bars), "{err}");
+    }
+
+    /// A fill over a window whose small bars the catalog stores to its end
+    /// asks IB nothing, the writer resuming past the window
+    /// (`catalog::resumed`): 5-second bars stored over 1 April to 1 May 2026,
+    /// filled again over the same window on 30 November, are held, though
+    /// the window is all before 30 May, the oldest IB holds.
+    #[test]
+    fn small_bars_stored_over_the_whole_window_are_held_whenever() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let (from, to) = ("2026-04-01T00:00:00Z", "2026-05-01T00:00:00Z");
+        store_small_bars(&catalog, from, to);
+        let slice = SeriesSlice {
+            series: (
+                NautilusDataType::Bar,
+                "SXR8.IBIS-5-SECOND-LAST-EXTERNAL".to_string(),
+            ),
+            slice: crate::rolls::Slice {
+                instrument_id: InstrumentId::from("SXR8.IBIS"),
+                from: at(from),
+                to: at(to),
+            },
+        };
+
+        check_held(&catalog, &[slice], at("2026-11-30T12:00:00Z")).unwrap();
     }
 
     #[test]

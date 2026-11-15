@@ -88,10 +88,10 @@ pub async fn fill_catalog(
     let end_ns = UnixNanos::from(end);
     for (data_type, identifier) in series {
         let named = || format!("the {} of {identifier}", data_path_prefix(data_type));
-        let (from, resume_point) = resumed(catalog, data_type, identifier, start)?;
-        if from >= end {
+        let (Some(from), resume_point) = resumed(catalog, data_type, identifier, start, end)?
+        else {
             continue;
-        }
+        };
         let mut items = fetch(data_type, identifier, from, end)
             .await
             .with_context(|| format!("fetching {}", named()))?;
@@ -134,11 +134,12 @@ pub async fn fill_catalog(
     Ok(())
 }
 
-/// Where a fill of the series of `data_type` and `identifier` over a
-/// window from `start` resumes, by what `catalog` stores of it: from
+/// Where a fill of the series of `data_type` and `identifier` over the
+/// window `[start, end]` resumes, by what `catalog` stores of it: from
 /// `start` if it stores nothing of it, else 1 ns after its stored end,
 /// whatever `start`, so that no hole opens between the stored range and
-/// the window; with that stored end, if any.
+/// the window; none if that is at or after `end`, the fill asking its
+/// source nothing of the series. With the stored end, if any.
 ///
 /// # Errors
 ///
@@ -149,7 +150,8 @@ pub(crate) fn resumed(
     data_type: &NautilusDataType,
     identifier: &str,
     start: Timestamp,
-) -> anyhow::Result<(Timestamp, Option<UnixNanos>)> {
+    end: Timestamp,
+) -> anyhow::Result<(Option<Timestamp>, Option<UnixNanos>)> {
     let named = || format!("the {} of {identifier}", data_path_prefix(data_type));
     let catalog_type = data_type.clone().into();
     let reading = || format!("reading the stored range of {}", named());
@@ -171,7 +173,8 @@ pub(crate) fn resumed(
         );
     }
     let last = last.map(UnixNanos::from);
-    Ok((last.map_or(start, just_after), last))
+    let from = last.map_or(start, just_after);
+    Ok(((from < end).then_some(from), last))
 }
 
 /// Fills `catalog` with `slices`, each a series on a contract over its
