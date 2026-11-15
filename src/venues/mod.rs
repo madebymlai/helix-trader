@@ -536,7 +536,7 @@ pub(crate) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
 /// broker's quotes alone (`ctrader::quoted`), the adapter's one rule of
 /// its history and its spots; OKX's quotes, trades and candles
 /// (`okx::streams`); the series LSE's client streams
-/// (`lse::check_streamed`); IB's quotes, trades and time bars
+/// (`lse::streams`); IB's quotes, trades and time bars
 /// (`ib::streams`). Custom data of an instrument is streamed by no client:
 /// none implements a subscription of custom data, the roller's names no
 /// client, so Nautilus subscribes it to the message bus alone
@@ -559,7 +559,7 @@ pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
             ctrader::quoted(Venue::new(broker.venue), &[source.key()]).map(drop)
         }
         LiveDataSource::Okx => okx::streams(source),
-        LiveDataSource::Lse => ::lse::check_streamed(&[source.key()]),
+        LiveDataSource::Lse => ::lse::streams(&source.key()),
         LiveDataSource::Ib => ib::streams(source),
     }
 }
@@ -2046,7 +2046,7 @@ mod tests {
     /// LSE's client streams an `LSEDGE` series' quotes, an `OPRA`
     /// contract's trades and a `GLBX` contract's or an `XNAS` stock's
     /// Levels 1 to 3, a rolled root's on its contracts
-    /// (`lse::check_streamed`); no candles, of which its history serves
+    /// (`lse::streams`); no candles, of which its history serves
     /// some, and no custom data.
     #[test]
     fn lse_s_client_streams_what_its_streams_carry() {

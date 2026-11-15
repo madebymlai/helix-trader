@@ -636,7 +636,7 @@ impl LseStreams {
     }
 }
 
-/// Checks that the client streams each of `series`, a Nautilus data type
+/// Checks that the client streams `series`, a Nautilus data type
 /// and its catalog identifier, an instrument id, or a bar type for bars:
 /// an `LSEDGE` series' quotes, on its socket; an `OPRA` contract's trades,
 /// through its underlying's chain; a `GLBX` contract's or an `XNAS` stock's
@@ -647,29 +647,27 @@ impl LseStreams {
 ///
 /// # Errors
 ///
-/// Returns an error naming the first series the client does not stream,
+/// Returns an error naming the series if the client does not stream it,
 /// saying what LSE streams instead: bars, LSE streaming no candles, to be
 /// built from the instrument's quotes or trades (`INTERNAL`); an `LSEDGE`
 /// series' trades, its sockets' ticks being quotes; an `OPRA` contract's
 /// quotes, LSE's US options feed carrying trades alone; the book of either;
 /// any other data, custom data among them; or an instrument of another
 /// venue, or no instrument id.
-pub fn check_streamed(series: &[(NautilusDataType, String)]) -> anyhow::Result<()> {
-    for (data, identifier) in series {
-        if *data == NautilusDataType::Bar {
-            bail!(
-                "LSE streams no bars {identifier}: its candles are history alone; declare the \
-                 bars built (INTERNAL) from the instrument's quotes or trades LSE streams"
-            );
-        }
-        let id = InstrumentId::from_str(identifier)
-            .with_context(|| format!("the {data} of {identifier}, no instrument id"))?;
-        check_stream(data, id)?;
+pub fn streams(series: &(NautilusDataType, String)) -> anyhow::Result<()> {
+    let (data, identifier) = series;
+    if *data == NautilusDataType::Bar {
+        bail!(
+            "LSE streams no bars {identifier}: its candles are history alone; declare the \
+             bars built (INTERNAL) from the instrument's quotes or trades LSE streams"
+        );
     }
-    Ok(())
+    let id = InstrumentId::from_str(identifier)
+        .with_context(|| format!("the {data} of {identifier}, no instrument id"))?;
+    check_stream(data, id)
 }
 
-/// Checks that the client streams `data` of `id` (see `check_streamed`),
+/// Checks that the client streams `data` of `id` (see `streams`),
 /// by its venue alone.
 ///
 /// # Errors
@@ -752,8 +750,8 @@ mod tests {
 
     use super::*;
 
-    fn series(data: Data, identifier: &str) -> Vec<(Data, String)> {
-        vec![(data, identifier.to_string())]
+    fn series(data: Data, identifier: &str) -> (Data, String) {
+        (data, identifier.to_string())
     }
 
     /// An `LSEDGE` series' quotes, an `OPRA` contract's trades, and a
@@ -770,7 +768,7 @@ mod tests {
     #[case::a_stock_s_quotes(Data::QuoteTick, "NVDA.XNAS")]
     #[case::a_stock_s_deltas(Data::OrderBookDelta, "NVDA.XNAS")]
     fn a_series_lse_streams_passes(#[case] data: Data, #[case] identifier: &str) {
-        check_streamed(&series(data, identifier)).unwrap();
+        streams(&series(data, identifier)).unwrap();
     }
 
     /// Each refused naming the series and saying what LSE streams instead.
@@ -792,9 +790,7 @@ mod tests {
         #[case] identifier: &str,
         #[case] instead: &str,
     ) {
-        let err = check_streamed(&series(data, identifier))
-            .unwrap_err()
-            .to_string();
+        let err = streams(&series(data, identifier)).unwrap_err().to_string();
 
         assert!(err.contains(identifier) && err.contains(instead), "{err}");
     }

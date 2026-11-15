@@ -1,6 +1,6 @@
 //! What the client serves of the past (`check_served`), as a fill or a
 //! warmup asks before it requests, the twin of what it streams
-//! (`streams::check_streamed`).
+//! (`streams::streams`).
 
 use std::str::FromStr;
 
