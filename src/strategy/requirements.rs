@@ -59,14 +59,16 @@ pub struct DataRequirements {
     /// as its config gives it in `[data] series`: routed by its type's row
     /// alone, whatever its identifier (`venues::serves_custom`), fetched by
     /// fill-catalog from its type's history source, with no definition,
-    /// and replayed in a backtest over the run's window, the strategy's
-    /// subscriptions subscribing to each from its start
+    /// or, of a type with no row or one with no history source, the
+    /// catalog's, written into it from outside helix and fetched by
+    /// nothing; replayed in a backtest over the run's window, the
+    /// strategy's subscriptions subscribing to each from its start
     /// (`strategy::subscriptions`), each by its data type unchanged; a
     /// live run reading any its type's live data does not stream is
-    /// refused (`venues::streams_custom`), none streaming any yet. They
-    /// bring no instrument. Custom data of an instrument written with an
-    /// `instrument_id` is a tick series still, keyed by the instrument and
-    /// rolled with it.
+    /// refused (`venues::streams_custom`), none streaming any yet, nor
+    /// anything the catalog's. They bring no instrument. Custom data of an
+    /// instrument written with an `instrument_id` is a tick series still,
+    /// keyed by the instrument and rolled with it.
     pub custom: Vec<CustomSeries>,
     /// How far back before a live start the warmup history starts: a
     /// backtest requests none.

@@ -4,7 +4,7 @@ use jiff::{SignedDuration, Timestamp};
 use nautilus_common::config::{ConfigError, ConfigErrorCollector, ConfigResult};
 use nautilus_core::Params;
 use nautilus_model::{
-    data::{BarSpecification, BarType, NautilusDataType},
+    data::{BarSpecification, BarType, NautilusDataType, get_arrow_schema},
     enums::{AggregationSource, BarAggregation, PriceType},
     identifiers::{InstrumentId, StrategyId},
 };
@@ -327,9 +327,10 @@ pub struct DataConfig {
     /// The series read, bars, ticks and custom series (see `Series`):
     /// those the strategy's part answers it reads (`Part::reads`), each
     /// once, and no other, custom data among them, an LSE reference series
-    /// (`DataRequirements::custom`), each of a type its type's row's
-    /// source serves (`venues::serves_custom`), under a catalog folder no
-    /// other of its type takes.
+    /// or the catalog's own (`DataRequirements::custom`), each of a type
+    /// Nautilus holds a schema of, served by its type's row's history
+    /// source or else the catalog's (`venues::serves_custom`), under a
+    /// catalog folder no other of its type takes.
     pub series: Vec<Series>,
     /// How far back the warmup history a live node requests at start
     /// starts; a backtest requests none, its strategy warming on the
@@ -396,9 +397,12 @@ impl DataConfig {
     /// series of a type and a catalog folder (`CustomSeries::
     /// catalog_folder`) listed already, under `data.series[i]` naming it,
     /// whatever its metadata, the two series stored under one folder; a
-    /// custom series its type's source does not serve, or of a type no
-    /// source serves, under `data.series[i]`, saying why
-    /// (`venues::serves_custom`); a bars series not aggregated on time
+    /// custom series of a type Nautilus holds no schema of
+    /// (`get_arrow_schema`; helix registers each type it compiles as it
+    /// starts, `venues::register_custom_data`), or one its type's history
+    /// source does not serve (`venues::serves_custom`), under
+    /// `data.series[i]`, saying why: one of a type with no row, or with no
+    /// history source, is the catalog's; a bars series not aggregated on time
     /// (the session needs the bar's span), built from ticks but priced
     /// MARK (Nautilus builds bars from quotes or
     /// trades alone), on a venue other than the first bars', built from
@@ -444,6 +448,17 @@ impl DataConfig {
                          data.series[{j}] is",
                         custom.type_name()
                     )),
+                ));
+            }
+            if get_arrow_schema(custom.type_name()).is_none() {
+                errors.push(ConfigError::invalid_value(
+                    field.clone(),
+                    format!(
+                        "Nautilus has no custom data type {} registered, so it reads none of \
+                         {custom}: it decodes custom data by its type's registered schema, and \
+                         helix registers each type it compiles as it starts",
+                        custom.type_name()
+                    ),
                 ));
             }
             if let Err(e) = venues::serves_custom(custom) {
@@ -1008,7 +1023,10 @@ mod tests {
         risk = "0.5%"
     "#;
 
+    /// The config `toml` holds, loaded after registering the custom data
+    /// types helix compiles, as the process does at its start.
     fn load(toml: &str) -> anyhow::Result<StandardConfig<Pairs>> {
+        venues::register_custom_data();
         StandardConfig::load(toml)
     }
 
@@ -1770,14 +1788,51 @@ mod tests {
         assert!(err.contains("reserved"), "{err}");
     }
 
-    /// No source fills it.
+    /// Custom data of the tests' own, of a type no row of the routing
+    /// table routes, as a strategy author writes into the catalog by hand.
+    #[nautilus_serialization::arrow_custom_data]
+    #[nautilus_model::custom_data]
+    pub struct Signal {
+        pub value: f64,
+        pub ts_event: nautilus_core::UnixNanos,
+        pub ts_init: nautilus_core::UnixNanos,
+    }
+
+    /// The catalog's, registered by the test: no source serves it, and it
+    /// loads under its identifier, with metadata or without.
     #[test]
-    fn a_custom_series_of_a_type_no_source_serves_is_refused_under_its_entry_naming_it() {
-        let toml = with_custom(&[US10Y, &US10Y.replace("LseRow", "Imbalance")]);
+    fn a_custom_series_of_a_registered_type_no_row_routes_loads_as_the_catalog_s() {
+        nautilus_serialization::ensure_custom_data_registered::<Signal>();
+        let toml = with_custom(&[
+            r#"{ data = "Custom:Signal", identifier = "GOLD-SIGNAL" }"#,
+            r#"{ data = "Custom:Signal", identifier = "GOLD-SIGNAL-FAST", metadata = { window = "5m" } }"#,
+        ]);
+
+        let config = load(&toml).unwrap();
+
+        let window = Params::new([("window".to_string(), serde_json::json!("5m"))].into());
+        assert_eq!(
+            custom_of(&config),
+            [
+                DataType::new("Signal", None, Some("GOLD-SIGNAL".to_string())),
+                DataType::new("Signal", Some(window), Some("GOLD-SIGNAL-FAST".to_string())),
+            ]
+        );
+    }
+
+    /// Nautilus decodes custom data by its type's registered schema, and
+    /// has none of a type of that name: a typo of LSE's rows' type.
+    #[test]
+    fn a_custom_series_of_a_type_nautilus_has_no_registration_of_is_refused_under_its_entry_naming_it()
+     {
+        let toml = with_custom(&[US10Y, &US10Y.replace("LseRow", "LseRows")]);
 
         let reason = invalid_value(&toml, "data.series[4]");
 
-        assert!(reason.contains("Imbalance"), "{reason}");
+        assert!(
+            reason.contains("LseRows") && reason.contains("registered"),
+            "{reason}"
+        );
     }
 
     /// LSE's client asks LSE for a source's symbol.

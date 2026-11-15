@@ -170,7 +170,7 @@
 //! Custom data of an instrument of the requirements (a raw feature's, a
 //! root's on its contract's data type) is requested in the same group over
 //! the same window with `request_data`, naming a client by whether its
-//! venue's history serves it (`venues::serves`, `instrument_custom_request`).
+//! venue's history serves it (`venues::serves`, `custom_request`).
 //! If it does, the request names the venue's live data client
 //! (`venues::live_data_client`), with `update_catalog`: the data engine
 //! answers what the catalog holds and asks the client for the rest, writing
@@ -195,20 +195,22 @@
 //! for when a live source of an instrument's custom data exists.
 //!
 //! Each custom series of the requirements (`DataRequirements::custom`, an
-//! LSE reference series) is requested in the same group over the same
-//! window with `request_data` of its data type as the config gives it,
-//! naming the data client of its type's row's live data source on the
-//! node (`venues::custom_data_client`), LSE's for LSE's rows, with
-//! `update_catalog`: the data engine answers what the catalog holds and
-//! asks the client for the rest, writing its answers back, as with every
-//! series served, the load having checked that its type's history serves
-//! it (`venues::serves_custom`). No definition is requested for it: it
+//! LSE reference series or the catalog's own) is requested in the same
+//! group over the same window with `request_data` of its data type as the
+//! config gives it, by the same rule (`custom_request`): if its type's
+//! row's history serves it, naming the data client of the row's live data
+//! source on the node (`venues::custom_data_client`), LSE's for LSE's
+//! rows, with `update_catalog`, the catalog answering first and the
+//! client the rest, written back; if its type has no row, or one with no
+//! history source, naming `CATALOG` with no params, the catalog alone
+//! answering: it is the catalog's, written into it from outside helix
+//! (`venues::serves_custom`). No definition is requested for it: it
 //! brings no instrument. Its response reaches the cache as an
 //! instrument's custom data does (`Warmup::on_historical_data`). No
-//! source's live client streams a custom series yet, LSE's streaming none,
-//! so a live start refuses a run reading one (`venues::streams_custom`)
-//! and no run reaches this request today: it is the warmup half of such a
-//! run, kept for when a source streams it.
+//! source's live client streams a custom series yet, LSE's streaming none
+//! and nothing the catalog's, so a live start refuses a run reading one
+//! (`venues::streams_custom`) and no run reaches this request today: it is
+//! the warmup half of such a run, kept for when a source streams it.
 //!
 //! A strategy holds a `Warmup`, which runs these calls, and delegates its
 //! hooks to it; a model strategy's `ModelHandle` builds and owns it, and
@@ -246,7 +248,7 @@ use nautilus_model::{
         OrderBookDepth, QuoteTick, TradeTick,
     },
     enums::RecordFlag,
-    identifiers::{ClientId, InstrumentId, Venue},
+    identifiers::{ClientId, InstrumentId},
 };
 use serde_json::{Value, json};
 
@@ -272,9 +274,9 @@ use hold::{Hold, Tick};
 /// page within a window.
 const WINDOW: SignedDuration = SignedDuration::from_hours(23);
 
-/// The data client a warmup's request of an instrument's custom data names
-/// when its venue's history does not serve it (`venues::serves`, see
-/// `instrument_custom_request`), one served naming the venue's live data
+/// The data client a warmup's request of custom data names when no
+/// source's history serves it (`venues::serves`, `venues::serves_custom`,
+/// see `custom_request`), one served naming its source's live data
 /// client: such data is written into the catalog from outside helix, and
 /// the catalog alone holds it. Nautilus' data engine answers a request
 /// naming no registered client from its catalogs alone, planning no client
@@ -726,11 +728,12 @@ impl Debug for Warmup {
 /// the contract standing for its instrument now, once with the bars built
 /// from it if any, an instrument's custom data of its venue's live data
 /// client if its history serves it, of the catalog alone if not (see
-/// `instrument_custom_request`);
-/// each of its custom series is requested by its data type of its type's
-/// row's live data client (`venues::custom_data_client`), catalog first
-/// and written back. Any other series its venue's history does not
-/// serve (`venues::serves`) is
+/// `custom_request`);
+/// each of its custom series is requested by its data type by the same
+/// rule, of its type's row's live data client, catalog first and written
+/// back, if its type's history serves it, of the catalog alone if it is
+/// the catalog's (`venues::custom_data_client`). Any other series its
+/// venue's history does not serve (`venues::serves`) is
 /// requested no history, logged as a warning, its instrument's definition
 /// asked all the same. The
 /// warmup of each request arrives a window at a time in
@@ -747,9 +750,10 @@ impl Debug for Warmup {
 ///
 /// # Errors
 ///
-/// Returns an error if a request fails, or if no live data source of its
-/// type's row serves a custom series (see `venues::custom_data_client`),
-/// which the load refuses. A composite bar
+/// Returns an error if a request fails, or if a custom series' type's
+/// history source does not serve it, or its row names no live data source
+/// to ask (see `venues::custom_data_client`), which the load and the live
+/// start refuse. A composite bar
 /// type's source bars are external, as the config's load requires (see
 /// `strategy::DataConfig`): they are requested, not built.
 pub fn start<A>(
@@ -804,7 +808,7 @@ where
             })
         );
         // An instrument's custom data is warmed served or not (see
-        // `instrument_custom_request`).
+        // `custom_request`).
         if !custom && let Err(e) = served {
             let bars: Vec<String> = built.iter().map(ToString::to_string).collect();
             let bars = if bars.is_empty() {
@@ -877,8 +881,10 @@ where
                 // Of the venue's live data client if served, of the catalog
                 // alone if not, building no bars either way.
                 NautilusDataType::Custom { type_name } => {
-                    let (client, params) =
-                        instrument_custom_request(tick.instrument_id.venue, served.is_ok());
+                    let client = served
+                        .is_ok()
+                        .then(|| venues::live_data_client(tick.instrument_id.venue));
+                    let (client, params) = custom_request(client);
                     actor.request_data(
                         DataType::new(&type_name, None, Some(tick.instrument_id.to_string())),
                         client,
@@ -893,19 +899,18 @@ where
         };
         requested.push((id, built));
     }
-    // Of its type's row's live data client, catalog first and written back,
-    // building nothing: Nautilus takes no windows on custom data.
+    // Of its type's row's live data client if its history serves it, of
+    // the catalog alone if not, building nothing: Nautilus takes no windows
+    // on custom data.
     for series in &requirements.custom {
-        let client = venues::custom_data_client(series)?;
+        let (client, params) = custom_request(venues::custom_data_client(series)?);
         let id = actor.request_data(
             series.data_type().clone(),
             client,
             Some(start),
             Some(now),
             None,
-            Some(Params::new(
-                [("update_catalog".to_string(), json!(true))].into(),
-            )),
+            params,
         )?;
         requested.push((id, vec![]));
     }
@@ -916,20 +921,20 @@ where
     Ok(requested)
 }
 
-/// The client a warmup asks an instrument's custom data on `venue` of, and
-/// the request's params, by `served`, whether the venue's history serves it
-/// (`venues::serves`): if so, the venue's live data client
-/// (`venues::live_data_client`) with `update_catalog`, the catalog
-/// answering first, the client the rest, its answers written back, as with
-/// every series served; if not, `CATALOG` with no params, the catalog alone
+/// The client a warmup asks custom data of, and the request's params, by
+/// `served`, the live data client of the source whose history serves it,
+/// if one does: that client with `update_catalog`, the catalog answering
+/// first, the client the rest, its answers written back, as with every
+/// series served; if none, `CATALOG` with no params, the catalog alone
 /// answering: data written into it from outside helix, which no client
 /// answers anything of to write back.
-fn instrument_custom_request(venue: Venue, served: bool) -> (ClientId, Option<Params>) {
-    if served {
-        let params = Params::new([("update_catalog".to_string(), json!(true))].into());
-        (venues::live_data_client(venue), Some(params))
-    } else {
-        (ClientId::new(CATALOG), None)
+fn custom_request(served: Option<ClientId>) -> (ClientId, Option<Params>) {
+    match served {
+        Some(client) => {
+            let params = Params::new([("update_catalog".to_string(), json!(true))].into());
+            (client, Some(params))
+        }
+        None => (ClientId::new(CATALOG), None),
     }
 }
 
@@ -1753,24 +1758,23 @@ mod tests {
         );
     }
 
-    /// An instrument's custom data its venue's history serves is asked of
-    /// the venue's live data client, which fills what the catalog lacks,
-    /// its answers written back: GLBX's LSE, not IB, GLBX's broker, which
-    /// its definitions are asked of.
+    /// Custom data a source's history serves is asked of that source's
+    /// live data client, which fills what the catalog lacks, its answers
+    /// written back.
     #[test]
-    fn an_instrument_s_custom_data_its_venue_serves_is_asked_of_its_live_data_client() {
-        let (client, params) = instrument_custom_request(Venue::new("GLBX"), true);
+    fn custom_data_a_source_serves_is_asked_of_its_live_data_client_written_back() {
+        let (client, params) = custom_request(Some(ClientId::from("LSE")));
 
         assert_eq!(client, ClientId::from("LSE"));
         let update_catalog = params.and_then(|params| params.get_bool("update_catalog"));
         assert_eq!(update_catalog, Some(true));
     }
 
-    /// One its venue's history does not serve is asked of `CATALOG`, the
+    /// Custom data no source's history serves is asked of `CATALOG`, the
     /// catalog alone, with no params.
     #[test]
-    fn an_instrument_s_custom_data_its_venue_does_not_serve_is_asked_of_the_catalog() {
-        let (client, params) = instrument_custom_request(Venue::new("GLBX"), false);
+    fn custom_data_no_source_serves_is_asked_of_the_catalog() {
+        let (client, params) = custom_request(None);
 
         assert_eq!(client, ClientId::from("CATALOG"));
         assert!(params.is_none(), "{params:?}");
@@ -1855,6 +1859,45 @@ mod tests {
             .as_ref()
             .and_then(|params| params.get_bool("update_catalog"));
         assert_eq!(update_catalog, Some(true));
+    }
+
+    /// Live on 2026-08-10 at 14:30, a custom series of a type with no row,
+    /// the catalog's, written into it from outside helix, is requested over
+    /// the day of warmup ending now, by its data type, naming `CATALOG`,
+    /// which the catalog alone answers, with no params, no client
+    /// answering anything to write back.
+    #[test]
+    fn a_live_warmup_requests_a_custom_series_of_a_type_with_no_row_of_the_catalog() {
+        let signal = CustomSeries::new("Signal", "GOLD-SIGNAL".to_string(), None).unwrap();
+        let warmup = Warmup::live(&DataRequirements {
+            custom: vec![signal],
+            ..reading(&[])
+        });
+        let (mut probe, commands) = registered();
+
+        warmup.start(&mut probe).unwrap();
+
+        let requests = custom_requests(&commands);
+        let [request] = requests.as_slice() else {
+            panic!("{} custom data requests", requests.len())
+        };
+        let at = |time: &str| -> Timestamp { time.parse().unwrap() };
+        assert_eq!(
+            (
+                &request.data_type,
+                request.client_id,
+                request.start,
+                request.end,
+                request.params.is_none(),
+            ),
+            (
+                &DataType::new("Signal", None, Some("GOLD-SIGNAL".to_string())),
+                ClientId::from("CATALOG"),
+                Some(at("2026-08-09T14:30:00Z")),
+                Some(at("2026-08-10T14:30:00Z")),
+                true,
+            )
+        );
     }
 
     /// Its request is of the warmup's group, which goes on until it is

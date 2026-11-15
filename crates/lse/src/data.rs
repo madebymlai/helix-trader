@@ -107,7 +107,6 @@ use crate::{
         query::{CandleWidth, ExportQuery, Rows},
         rows::{self, Fetched},
     },
-    types::LseRow,
 };
 
 /// How long the client's tasks get to finish at a close, then to abort:
@@ -150,8 +149,7 @@ impl LseDataClient {
     /// Returns an error naming the variables if no key is given or in
     /// them, if an HTTP client cannot be built, or if an instrument
     /// streamed is not an `LSEDGE` series streamed on a socket, or is
-    /// streamed with no LSE key (see `LseStreams::new`). Registers `LseRow`
-    /// with Nautilus.
+    /// streamed with no LSE key (see `LseStreams::new`).
     ///
     /// # Panics
     ///
@@ -184,9 +182,6 @@ impl LseDataClient {
             "no LSE key: set {}, or give the config's",
             LseProduct::ALL.map(LseProduct::api_key_var).join(" or ")
         );
-        // The data engine writes the rows the client answers with back to
-        // a catalog by their type's registered encoding.
-        LseRow::register();
         let data_sender = get_data_event_sender();
         let clock = get_atomic_clock_realtime();
         let listings = Arc::<CmeListings>::default();

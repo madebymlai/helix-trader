@@ -26,6 +26,7 @@ use helix_trader::{
     strategy::{
         Part, Series, StandardConfig, requirements::CustomSeries, subscriptions::Subscriptions,
     },
+    venues,
 };
 use jiff::Timestamp;
 use lse::{
@@ -75,8 +76,11 @@ impl Part for Reader {
 const TREASURY: &str = "TREASURY-10Y";
 
 /// The daily bond yields of `symbol` as a config declares them, under the
-/// identifier `TREASURY`: the one custom series of its `[data] series`.
+/// identifier `TREASURY`: the one custom series of its `[data] series`,
+/// loaded after registering the custom data types helix compiles, as the
+/// process does at its start.
 fn declared(symbol: &str) -> CustomSeries {
+    venues::register_custom_data();
     let config: StandardConfig<Reader> = StandardConfig::load(&format!(
         r#"
         [data]
@@ -239,7 +243,7 @@ fn a_fill_stores_the_rows_under_the_identifier_the_config_names() {
         .join()
         .unwrap();
 
-    LseRow::register();
+    venues::register_custom_data();
     let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
     let stored = catalog
         .query_custom_data_dynamic(
