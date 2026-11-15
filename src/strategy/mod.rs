@@ -95,7 +95,8 @@ pub struct DataRequirements {
     /// subscribes to none of the ticks: the strategy subscribes to each
     /// from its start through its roller (`rolls::Roller`, a model
     /// strategy's handle's), and warms up on those its features read
-    /// (`warmup::Warmup::reading`) alone, a pair's quotes having no warmup.
+    /// (`warmup::Warmup::reading`) and on its pairs' quotes
+    /// (`warmup::Warmup::converting`), not on its harness's.
     pub ticks: Vec<TickSeries>,
     /// The custom data the strategy reads that is of no instrument, a
     /// reference series such as LSE's daily bond yields: each series a

@@ -333,6 +333,7 @@ impl ModelHandle {
             Mode::Backtest { .. } | Mode::Dataset { .. } => Warmup::replayed(requirements),
         }
         .reading(features.ticks())
+        .converting(&target.conversions)
         .feeding(Rc::clone(features) as SharedActorIndicator)
         .feeding_ticks(Rc::clone(features) as SharedActorIndicator)
         .feeding_books(Rc::clone(features) as Rc<dyn BookIndicator>);
@@ -2685,23 +2686,39 @@ mod tests {
     }
 
     /// A conversion pair's quotes, of no feature and not of the traded
-    /// AUD/USD: the start subscribes to them from now, so that the cache
-    /// holds a rate when a trade is sized, and asks nothing of them, no
-    /// history and no definition, the broker's client loading the pair at
-    /// connect.
+    /// AUD/USD, which the config's target converts through: the start
+    /// requests their history over the hour of warmup, as a feature's, so
+    /// that the cache holds a rate when a trade is sized at the start, then
+    /// subscribes to them from now.
     #[test]
-    fn a_live_start_subscribes_to_a_conversion_pairs_quotes_from_now_with_no_warmup() {
-        let sent = started_live(features(), vec![], vec![aud_quotes(), eurusd_quotes()]);
+    fn a_live_start_warms_up_a_conversion_pairs_quotes_then_subscribes_to_them_from_now() {
+        let models = tempfile::tempdir().unwrap();
+        let (mut probe, _clock) = registered(at("2026-08-10T14:30:00Z"));
+        let mut config = bracket_config(10);
+        config.target.conversions = Conversions::new(vec![InstrumentId::from("EURUSD.ICMARKETS")]);
+        let requirements = DataRequirements {
+            bar_types: vec![],
+            ticks: vec![aud_quotes(), eurusd_quotes()],
+            custom: vec![],
+            warmup: SignedDuration::from_hours(1),
+        };
+        let handle = ModelHandle::new(
+            &blueprint_of(&features(), &config, requirements),
+            live(models.path().to_path_buf()),
+        )
+        .unwrap();
+        let sent = sent_commands();
 
+        handle.start(&mut probe).unwrap();
+
+        let sent = sent.take();
         assert_sent(
             &sent,
-            &["subscribe quotes [EURUSD.ICMARKETS] from Some(2026-08-10T14:30:00Z)"],
-        );
-        assert!(
-            !sent
-                .iter()
-                .any(|line| line.starts_with("request") && line.contains("EURUSD")),
-            "{sent:#?}"
+            &[
+                "request quotes [EURUSD.ICMARKETS] \
+                 Some(2026-08-10T13:30:00Z)..Some(2026-08-10T14:30:00Z)",
+                "subscribe quotes [EURUSD.ICMARKETS] from Some(2026-08-10T14:30:00Z)",
+            ],
         );
     }
 
