@@ -878,8 +878,9 @@ fn of_definitions_source(slices: &[SeriesSlice], source: DefinitionsSource) -> V
 /// dataset; LSEDGE's are the catalog's alone, which the data
 /// engine answers LSE's client's definition requests from.
 /// Before anything connects, every series is checked against its venue's
-/// history (`serves`), custom data of an instrument aside, which each
-/// source refuses as it reaches it, custom data of no instrument against
+/// history (`serves`), custom data of an instrument aside, which is
+/// written into the catalog from outside helix and handed to no source,
+/// custom data of no instrument against
 /// its type's history (`serves_custom`), and IB's against what IB holds
 /// (`ib::check_held`). A source with nothing missing reads no credential,
 /// IB's connection aside.
@@ -918,8 +919,14 @@ pub async fn fill_history(
         }
     }
     // Every source takes the series slices of its instruments: a rolled
-    // root's series contract by contract, each over its slice.
-    let slices = requirements.slices(start, end);
+    // root's series contract by contract, each over its slice. An
+    // instrument's custom data is written into the catalog from outside
+    // helix: no source fills it, so none is handed it.
+    let slices: Vec<SeriesSlice> = requirements
+        .slices(start, end)
+        .into_iter()
+        .filter(|slice| !matches!(slice.series.0, NautilusDataType::Custom { .. }))
+        .collect();
     let ib_slices = of_source(&slices, HistorySource::Ib);
     let mut catalog = ParquetDataCatalog::new(catalog_dir, None, None, None, None);
     ib::check_held(&catalog, &ib_slices, Timestamp::now())?;
@@ -1578,6 +1585,34 @@ mod tests {
             (NautilusDataType::QuoteTick, "XAUUSD.PEPPERSTONE"),
             (NautilusDataType::TradeTick, "GCZ26.GLBX"),
             (NautilusDataType::TradeTick, SWAP),
+        ]);
+
+        fill_history(
+            &requirements,
+            at(FILL_START),
+            at(FILL_END),
+            &history_args(),
+            dir.path(),
+        )
+        .await
+        .unwrap();
+    }
+
+    /// An instrument's custom data is the catalog's, written from outside
+    /// helix: a fill hands it to no source and fills the config's other
+    /// series, here GCZ26's trades, all stored, so no node starts and no
+    /// credential is read.
+    #[tokio::test]
+    async fn a_fill_hands_an_instrument_s_custom_data_to_no_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let (from, to) = (Some(at(FILL_START).into()), Some(at(FILL_END).into()));
+        catalog
+            .write_to_parquet(&[trade("GCZ26.GLBX")], from, to, None)
+            .unwrap();
+        let requirements = ticks(&[
+            (NautilusDataType::TradeTick, "GCZ26.GLBX"),
+            (imbalance(), "GCZ26.GLBX"),
         ]);
 
         fill_history(
