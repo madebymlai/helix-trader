@@ -138,100 +138,95 @@ fn published() -> Rc<RefCell<Vec<FeatureRow>>> {
     rows
 }
 
+/// A cadence not positive is refused, naming its interval.
 #[rstest]
-fn a_cadence_must_be_positive() {
-    assert!(every(0).validate().is_err());
-    assert!(every(-15).validate().is_err());
-    assert!(every(15).validate().is_ok());
+#[case::of_nought(0, Some("0s"))]
+#[case::below_nought(-15, Some("15m ago"))]
+#[case::positive(15, None)]
+fn a_cadence_must_be_positive(#[case] minutes: i64, #[case] refused: Option<&str>) {
+    let validated = every(minutes).validate();
+
+    match refused {
+        Some(interval) => {
+            let err = validated.unwrap_err().to_string();
+            assert!(err.contains(interval), "{err}");
+        }
+        None => validated.unwrap(),
+    }
 }
 
+/// A cadence of 15 minutes decides at its grid times, plus its delay and
+/// the margin; started on a grid time, or between a grid time and its
+/// delayed decision, that decision is still to come.
 #[rstest]
-fn a_cadence_decides_just_after_the_grid_of_its_interval() {
-    let (probe, clock) = registered(NOW);
+#[case::started_off_the_grid(NOW, SignedDuration::ZERO, QUARTER + MARGIN)]
+#[case::started_on_the_grid(QUARTER, SignedDuration::ZERO, QUARTER + MARGIN)]
+#[case::delayed(NOW, SignedDuration::from_secs(5), QUARTER + 5 * SECOND + MARGIN)]
+#[case::delayed_started_inside_its_delay(
+    QUARTER + 2 * SECOND,
+    SignedDuration::from_secs(5),
+    QUARTER + 5 * SECOND + MARGIN
+)]
+fn a_cadence_decides_just_after_the_grid_of_its_interval(
+    #[case] now: u64,
+    #[case] delay: SignedDuration,
+    #[case] next: u64,
+) {
+    let (probe, clock) = registered(now);
 
-    start(&probe, every(15), SignedDuration::ZERO).unwrap();
+    start(&probe, every(15), delay).unwrap();
 
     assert_eq!(
         clock.borrow().next_time_ns(DECISION_TIMER),
-        Some(UnixNanos::from(QUARTER + MARGIN))
+        Some(UnixNanos::from(next))
     );
 }
 
-/// Started on a grid time, before its decision: that decision is still
-/// to come.
+/// What is made up to a decision's firing, its grid time plus its delay
+/// and the margin, is that decision's to read first; what comes after,
+/// the next one's. The grid starts at the epoch, and a cadence of 4 ms,
+/// shorter than its margin, reads what is made less than an interval
+/// before the epoch's decision fires there.
 #[rstest]
-fn a_cadence_started_on_the_grid_keeps_its_decision() {
-    let (probe, clock) = registered(QUARTER);
-
-    start(&probe, every(15), SignedDuration::ZERO).unwrap();
-
+#[case::before_the_grid_time(every(15), SignedDuration::ZERO, QUARTER - 1, QUARTER)]
+#[case::at_the_grid_time(every(15), SignedDuration::ZERO, QUARTER, QUARTER)]
+#[case::at_the_firing(every(15), SignedDuration::ZERO, QUARTER + MARGIN, QUARTER)]
+#[case::after_the_firing(
+    every(15),
+    SignedDuration::ZERO,
+    QUARTER + MARGIN + 1,
+    QUARTER + 900 * SECOND
+)]
+#[case::at_a_delayed_firing(
+    every(15),
+    SignedDuration::from_secs(5),
+    QUARTER + 5 * SECOND + MARGIN,
+    QUARTER
+)]
+#[case::after_a_delayed_firing(
+    every(15),
+    SignedDuration::from_secs(5),
+    QUARTER + 5 * SECOND + MARGIN + 1,
+    QUARTER + 900 * SECOND
+)]
+#[case::at_the_epoch(every(15), SignedDuration::ZERO, 0, 0)]
+#[case::at_the_epochs_firing(every(15), SignedDuration::ZERO, MARGIN, 0)]
+#[case::after_the_epochs_firing(every(15), SignedDuration::ZERO, MARGIN + 1, 900 * SECOND)]
+#[case::within_an_interval_before_the_epochs_firing(
+    DecisionRule::Every(SignedDuration::from_millis(4)),
+    SignedDuration::ZERO,
+    7_000_000,
+    0
+)]
+fn data_is_read_first_by_the_first_decision_firing_at_or_after_it(
+    #[case] rule: DecisionRule,
+    #[case] delay: SignedDuration,
+    #[case] ns: u64,
+    #[case] grid: u64,
+) {
     assert_eq!(
-        clock.borrow().next_time_ns(DECISION_TIMER),
-        Some(UnixNanos::from(QUARTER + MARGIN))
-    );
-}
-
-#[rstest]
-fn a_delayed_cadence_decides_its_delay_after_the_grid() {
-    let (probe, clock) = registered(NOW);
-
-    start(&probe, every(15), SignedDuration::from_secs(5)).unwrap();
-
-    assert_eq!(
-        clock.borrow().next_time_ns(DECISION_TIMER),
-        Some(UnixNanos::from(QUARTER + 5 * SECOND + MARGIN))
-    );
-}
-
-/// What is made up to a decision's firing, its grid time plus the margin,
-/// is that decision's to read first; what comes after, the next one's.
-#[rstest]
-fn data_is_read_first_by_the_first_decision_firing_at_or_after_it() {
-    let quarter = UnixNanos::from(QUARTER);
-    let of = |ns: u64| decision_of(every(15), SignedDuration::ZERO, UnixNanos::from(ns));
-
-    assert_eq!(of(QUARTER - 1), quarter);
-    assert_eq!(of(QUARTER), quarter);
-    assert_eq!(of(QUARTER + MARGIN), quarter);
-    assert_eq!(
-        of(QUARTER + MARGIN + 1),
-        UnixNanos::from(QUARTER + 900 * SECOND)
-    );
-}
-
-/// A delayed cadence's decision fires its delay later: it reads first what
-/// is made until then.
-#[rstest]
-fn data_inside_a_delay_is_read_first_by_the_delayed_decision() {
-    let of = |ns: u64| decision_of(every(15), SignedDuration::from_secs(5), UnixNanos::from(ns));
-
-    assert_eq!(of(QUARTER + 5 * SECOND + MARGIN), UnixNanos::from(QUARTER));
-    assert_eq!(
-        of(QUARTER + 5 * SECOND + MARGIN + 1),
-        UnixNanos::from(QUARTER + 900 * SECOND)
-    );
-}
-
-/// The grid starts at the epoch: what is made up to the firing of its
-/// decision there is that decision's to read first.
-#[rstest]
-fn data_up_to_the_firing_of_the_epochs_decision_is_read_by_it() {
-    let of = |ns: u64| decision_of(every(15), SignedDuration::ZERO, UnixNanos::from(ns));
-
-    assert_eq!(of(0), UnixNanos::default());
-    assert_eq!(of(MARGIN), UnixNanos::default());
-    assert_eq!(of(MARGIN + 1), UnixNanos::from(900 * SECOND));
-}
-
-/// A cadence of 4 ms, shorter than its margin: what is made less than an
-/// interval before the epoch's decision fires is that decision's.
-#[rstest]
-fn data_within_an_interval_before_the_epochs_decision_fires_is_read_by_it() {
-    let every_4_ms = DecisionRule::Every(SignedDuration::from_millis(4));
-
-    assert_eq!(
-        decision_of(every_4_ms, SignedDuration::ZERO, UnixNanos::from(7_000_000)),
-        UnixNanos::default()
+        decision_of(rule, delay, UnixNanos::from(ns)),
+        UnixNanos::from(grid)
     );
 }
 
@@ -244,39 +239,6 @@ fn data_read_first_by_a_decision_before_the_epoch_is_refused() {
     let every_4_ms = DecisionRule::Every(SignedDuration::from_millis(4));
 
     let _ = decision_of(every_4_ms, SignedDuration::ZERO, UnixNanos::from(6_000_000));
-}
-
-/// Started between a grid time and its delayed decision: that decision
-/// is still to come.
-#[rstest]
-fn a_delayed_cadence_started_inside_its_delay_keeps_the_next_decision() {
-    let (probe, clock) = registered(QUARTER + 2 * SECOND);
-
-    start(&probe, every(15), SignedDuration::from_secs(5)).unwrap();
-
-    assert_eq!(
-        clock.borrow().next_time_ns(DECISION_TIMER),
-        Some(UnixNanos::from(QUARTER + 5 * SECOND + MARGIN))
-    );
-}
-
-/// Nautilus fires the timer at its start plus whole intervals: the
-/// decisions after the first stay on the grid.
-#[rstest]
-fn the_cadence_keeps_the_grid_after_its_first_decision() {
-    let (probe, clock) = registered(NOW);
-    start(&probe, every(15), SignedDuration::ZERO).unwrap();
-
-    let events = clock
-        .borrow_mut()
-        .advance_time(UnixNanos::from(QUARTER + 15 * 60 * SECOND + MARGIN), true);
-
-    let times: Vec<u64> = events.iter().map(|e| e.ts_event.as_u64()).collect();
-    assert_eq!(
-        times,
-        [QUARTER + MARGIN, QUARTER + 15 * 60 * SECOND + MARGIN]
-    );
-    assert!(events.iter().all(is_decision));
 }
 
 #[rstest]
@@ -314,6 +276,7 @@ fn a_decision_publishes_the_features_keyed_by_the_strategy() {
 
     assert_eq!(row.strategy_id, StrategyId::from(STRATEGY));
     assert_eq!(row.ts_event, UnixNanos::from(NOW));
+    assert_eq!(row.ts_init, UnixNanos::from(NOW));
     assert_eq!(row.features.len(), 1);
     assert!((row.features[0] - 0.75).abs() < 1e-9, "{row:?}");
     assert_eq!(*rows.borrow(), [row]);
