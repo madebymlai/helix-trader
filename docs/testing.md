@@ -47,7 +47,13 @@ A module's shape decides which layers pay off. Apply the rule module by module: 
 - Add `debug_assert!` only where a test reaches it: release builds strip it, so an unexercised assertion carries no signal.
 - Prefer a property test to hand-written edge cases when the invariant spans a class of inputs. Targeted unit tests stay for known venue pathologies and as reproducers of shrunk counterexamples.
 - A hermetic test replays what a live acceptance test captured rather than repeating it: the live test proves the venue answers so, the hermetic one that helix handles that answer.
-- Leave language and library guarantees to their owners (`Option::is_some` after `Some(..)`, `Vec::len` after `push`).
+- Leave language guarantees to Rust (`Option::is_some` after `Some(..)`, `Vec::len` after `push`), and library logic to its library, as the next section says.
+
+### Library logic and drift tests
+
+Helix tests its own logic. A library's logic is its owner's to test, and an integration test runs Nautilus' engines only to observe what helix does through them.
+
+A drift test pins a library behavior that helix's code relies on and the library does not promise, so that a pin bump changing it goes red. Write one only when helix's code depends on that behavior and the maintainer has agreed to it, name it `drift_*`, and open its doc comment with the behavior it pins, where in the library's source, and the helix code that relies on it.
 
 ### Determinism
 
