@@ -152,7 +152,7 @@ pub fn hour_bars(quotes: &[QuoteTick], from: Timestamp) -> Vec<Ohlc> {
 /// Stepped quotes over `(from, to]`: the minute `m` (1 to 60) of the hour
 /// bar closing at `c` quotes the mid `level(c) + 0.01 m`, or nothing if
 /// `level(c)` is `None`. So that bar closes at its level + 0.60, and each
-/// quote differs from its neighbours.
+/// quote differs from its neighbors.
 pub fn stepped_quotes(
     from: Timestamp,
     to: Timestamp,

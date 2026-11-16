@@ -146,7 +146,7 @@ pub struct DatasetRow {
     /// (`targets::SideTarget::payoff`), in the order of the dataset's payoff
     /// names.
     pub long_payoff: Vec<f64>,
-    /// The long's realised P&L, net of its commission, in the target's P&L
+    /// The long's realized P&L, net of its commission, in the target's P&L
     /// currency.
     pub long_pnl: f64,
     /// The commission the long's P&L is net of.
@@ -159,7 +159,7 @@ pub struct DatasetRow {
     pub long_unit: f64,
     /// The short's payoff features, as the long's.
     pub short_payoff: Vec<f64>,
-    /// The short's realised P&L, as the long's.
+    /// The short's realized P&L, as the long's.
     pub short_pnl: f64,
     /// The commission the short's P&L is net of.
     pub short_commission: f64,

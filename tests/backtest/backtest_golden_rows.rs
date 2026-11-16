@@ -35,7 +35,7 @@ use crate::common::{
 
 /// Hourly decisions on IC's gold's 1-minute bars, its averages of 10 and
 /// 30 of them, warmed up 4 hours; a bracket 1.5 ATRs of 3 hourly bars in
-/// its favour, 7.5 bps against, closed after 45 minutes, at the reference
+/// its favor, 7.5 bps against, closed after 45 minutes, at the reference
 /// stake of 4 USD of the dataset balance of 10M USD (`venue`), one ounce,
 /// IC's whole ounces, on its stops of about 3 USD.
 const CONFIG: &str = r#"

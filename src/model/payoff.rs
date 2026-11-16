@@ -2,7 +2,7 @@
 //! the costs of its own (Elkan 2001; Bahnsen et al. 2015).
 //!
 //! A side's expected net R at a decision is its calibrated expected R
-//! (`calibration::Expected`), the realised value its model learned, its net
+//! (`calibration::Expected`), the realized value its model learned, its net
 //! P&L (fees and slippage included) over the unit of its row, its trade's R
 //! at the reference stake: with exits its own stop's worth, on a time-only
 //! target, which has no stop, the worth of a stop as far as its ATR at the

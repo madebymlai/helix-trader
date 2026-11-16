@@ -78,7 +78,7 @@
 //! `S` short, the entry, take profit or stop. The outcome of a target is
 //! read from Nautilus' events alone: a closed position's opening order
 //! names its decision and side, its closing order the exit (a take profit,
-//! a stop, or a time close), and Nautilus reports its realised P&L net of
+//! a stop, or a time close), and Nautilus reports its realized P&L net of
 //! commission, the position the commissions it is net of. The only state
 //! of our own is the rows being assembled. The commission is the run's
 //! (`backtest::Commission`), whose fee model charges the dataset run's
@@ -244,7 +244,7 @@ pub struct Target {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BracketSpec {
-    /// How far the take profit is, in the side's favour.
+    /// How far the take profit is, in the side's favor.
     pub take_profit: Distance,
     /// How far the stop is, against the side.
     pub stop: Distance,
@@ -312,11 +312,11 @@ pub enum Exit {
 /// The outcome of a target on one side.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Outcome {
-    /// The position's realised P&L, net of its commissions, as Nautilus
+    /// The position's realized P&L, net of its commissions, as Nautilus
     /// reports it.
     pub pnl: Money,
     /// The position's commissions in the P&L's currency, those its
-    /// realised P&L is net of (Nautilus' `Position::commissions`).
+    /// realized P&L is net of (Nautilus' `Position::commissions`).
     pub commission: Money,
     pub exit: Exit,
     /// The unit of the side's payoff, as the decision set it
@@ -897,14 +897,10 @@ fn exits(
     let take_profit = bracket.take_profit.length(reference, atr);
     let stop = bracket.stop.length(reference, atr);
     let of = |side: Side| -> anyhow::Result<Bracket> {
-        let favour = side.sign();
+        let favor = side.sign();
         Ok(Bracket {
-            take_profit: orders::nearest_tick(
-                instrument,
-                reference + favour * take_profit,
-                favour,
-            )?,
-            stop_loss: orders::nearest_tick(instrument, reference - favour * stop, -favour)?,
+            take_profit: orders::nearest_tick(instrument, reference + favor * take_profit, favor)?,
+            stop_loss: orders::nearest_tick(instrument, reference - favor * stop, -favor)?,
         })
     };
     let exits = PerSide {
@@ -1336,7 +1332,7 @@ impl TargetSetter {
     /// Checks that the target's payoff on `instrument` has a worth: the
     /// instrument linear (`orders::ensure_linear`) and the commission
     /// charged in its P&L currency, its cost currency, which Nautilus nets a
-    /// position's realised P&L of alone: a commission in another currency is
+    /// position's realized P&L of alone: a commission in another currency is
     /// not converted. The balance its trades are sized on is converted at
     /// each decision (`at`).
     ///
@@ -1751,7 +1747,7 @@ impl Targets {
                 target.decision,
                 format_args!(
                     "the position {} of {} closed by {:?}: no exit of its target, or no \
-                     realised P&L, or no such position in the cache",
+                     realized P&L, or no such position in the cache",
                     event.position_id,
                     target.order_id(Leg::Entry),
                     event.closing_order_id
@@ -1932,7 +1928,7 @@ impl Side {
         }
     }
 
-    /// 1 long, -1 short: the direction of the side's favour.
+    /// 1 long, -1 short: the direction of the side's favor.
     fn sign(self) -> Decimal {
         match self {
             Self::Long => Decimal::ONE,

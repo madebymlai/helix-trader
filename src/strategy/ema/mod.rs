@@ -58,7 +58,7 @@ use crate::strategy::{
 };
 
 /// The take profit of each trade, in basis points of the close of the bar
-/// it was decided on, in the trade's favour.
+/// it was decided on, in the trade's favor.
 const TAKE_PROFIT_BPS: Decimal = Decimal::from_parts(100, 0, 0, false, 0);
 
 /// The stop loss of each trade, in basis points of the close of the bar it
@@ -291,16 +291,16 @@ impl EmaCross {
 
 /// The take profit and the stop loss, unrounded, of a trade on `side`
 /// decided on a bar closing at `close`: `TAKE_PROFIT_BPS` of it in the
-/// trade's favour, `STOP_LOSS_BPS` against it.
+/// trade's favor, `STOP_LOSS_BPS` against it.
 fn exit_prices(close: Decimal, side: OrderSide) -> (Decimal, Decimal) {
-    let favour = match side {
+    let favor = match side {
         OrderSide::Sell => -Decimal::ONE,
         _ => Decimal::ONE,
     };
     let bps = |bps: Decimal| close * bps / Decimal::from(10_000);
     (
-        close + favour * bps(TAKE_PROFIT_BPS),
-        close - favour * bps(STOP_LOSS_BPS),
+        close + favor * bps(TAKE_PROFIT_BPS),
+        close - favor * bps(STOP_LOSS_BPS),
     )
 }
 

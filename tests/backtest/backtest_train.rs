@@ -1,6 +1,6 @@
 //! Training at a time (`model::train`) on a fixture catalog with an edge:
 //! the dataset probe (`common::dataset`) replays the days the window lacks
-//! through `Backtest::run_dataset`, and LightGBM fits each side's realised
+//! through `Backtest::run_dataset`, and LightGBM fits each side's realized
 //! R on the rows. IC's gold rises 4.00 over each even hour and falls back
 //! over each odd one (`edge_quotes`), and the probe's one feature, `cheap`,
 //! marks where the hour starts: 1 at the bottom, 0 at the top. Each side

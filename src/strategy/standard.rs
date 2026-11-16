@@ -2457,15 +2457,15 @@ mod tests {
         /// own.
         #[derive(Debug, Clone, Deserialize)]
         #[serde(deny_unknown_fields)]
-        struct Modelled {}
+        struct Modeled {}
 
-        impl Part for Modelled {
+        impl Part for Modeled {
             const INSTRUMENTS: usize = 1;
             const TAKES_MODEL: bool = true;
 
             fn default_base() -> StrategyConfig {
                 StrategyConfig {
-                    strategy_id: Some(StrategyId::from("MODELLED-001")),
+                    strategy_id: Some(StrategyId::from("MODELED-001")),
                     ..Default::default()
                 }
             }
@@ -2501,7 +2501,7 @@ mod tests {
             learner = { kind = "baseline" }
         "#;
 
-        fn load(toml: &str) -> anyhow::Result<StandardConfig<Modelled>> {
+        fn load(toml: &str) -> anyhow::Result<StandardConfig<Modeled>> {
             StandardConfig::load(toml)
         }
 

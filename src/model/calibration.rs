@@ -76,7 +76,7 @@ impl Expected {
 impl Ksplit {
     /// The calibration fitted on `rows`, each a row's sides, the long
     /// first, one or two, each its model's prediction and its trade's
-    /// realised R. `beta_C` is the least squares slope of the sides' mean
+    /// realized R. `beta_C` is the least squares slope of the sides' mean
     /// R on `C`, `beta_D` that of the long's R less the short's on `D`,
     /// through nought, each clipped to `[0, 1.5]`, and nought where its
     /// part's predictions never vary, the same to the bit on every row;
@@ -183,7 +183,7 @@ mod tests {
     }
 
     /// The rows of a pair whose level `C` and side `D`, predicted, are
-    /// `cs` and `ds`, and whose mean R and R long less R short, realised,
+    /// `cs` and `ds`, and whose mean R and R long less R short, realized,
     /// are `ys` and `ts`: each row the long's prediction and R, `C + D/2`
     /// and `Y + T/2`, then the short's, `C - D/2` and `Y - T/2`.
     fn pair_rows(cs: [f64; 3], ds: [f64; 3], ys: [f64; 3], ts: [f64; 3]) -> Vec<Vec<(f64, f64)>> {

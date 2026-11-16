@@ -82,7 +82,7 @@ pub struct Record {
     pub rows: Vec<FeatureRow>,
     /// Each decision to trade, and its time.
     pub trades: Vec<(UnixNanos, Decision)>,
-    /// Each position closed, when it opened and its realised P&L.
+    /// Each position closed, when it opened and its realized P&L.
     pub closed: Vec<(UnixNanos, Money)>,
     /// Each entry filled, when, of how much, and what its tags say it
     /// risks (`orders::entry_risk`).

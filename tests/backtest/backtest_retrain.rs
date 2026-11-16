@@ -221,16 +221,16 @@ fn each_period_scores_its_model_beside_that_models_own_baseline() {
             UnixNanos::from(from),
             UnixNanos::from(from + SignedDuration::from_hours(24)),
         );
-        let realised: Vec<f64> = rows
+        let realized: Vec<f64> = rows
             .iter()
             .filter(|row| from_ns <= row.ts_event && row.ts_event < to_ns)
             .map(|row| row.long_pnl / row.long_unit)
             .collect();
-        let mean = realised.iter().sum::<f64>() / realised.len() as f64;
+        let mean = realized.iter().sum::<f64>() / realized.len() as f64;
         assert_eq!(period.models, [from]);
-        assert!(!realised.is_empty(), "{period:?}");
+        assert!(!realized.is_empty(), "{period:?}");
         let score = period.score;
-        assert_eq!(score.rows, realised.len());
+        assert_eq!(score.rows, realized.len());
         assert_eq!((score.skill, score.slope), (Some(0.0), None), "{period:?}");
         let error = score.mean_error.unwrap() - (mean - predicts(&store, from));
         assert!(error.abs() < 1e-12, "{period:?}: {mean}");

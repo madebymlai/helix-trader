@@ -874,7 +874,7 @@ fn the_fingerprint_reads_the_atrs_default_period_as_written_out() {
 }
 
 /// A time-only target's ATR is its unit's: another period keys another
-/// target, whose rows realise their P&L over another unit.
+/// target, whose rows realize their P&L over another unit.
 #[test]
 fn a_time_only_targets_atr_changes_the_fingerprint() {
     let keyed = |period| {
@@ -1385,9 +1385,9 @@ fn a_stop_half_a_tick_from_a_mid_on_a_half_tick_is_worth_exactly_that() {
 /// the nearest ticks put each stop 0.000215 from the mid, outside the spread.
 /// On a dataset balance of 1 USD the reference stake, 0.003 USD, buys 13.95
 /// AUD/USD over it, rounded down 13, on which one R is worth 0.002795 USD.
-/// A trade losing 0.00559 USD on it realised -2R.
+/// A trade losing 0.00559 USD on it realized -2R.
 #[test]
-fn a_trade_on_a_stop_worth_under_half_a_cent_realises_over_its_exact_worth() {
+fn a_trade_on_a_stop_worth_under_half_a_cent_realizes_over_its_exact_worth() {
     let probe = Probe::holding(aud());
     let aud = InstrumentId::from(AUD);
     probe.quoted_at(aud, "0.70000", "0.70001");
@@ -1424,8 +1424,8 @@ fn a_trade_on_a_stop_worth_under_half_a_cent_realises_over_its_exact_worth() {
         settled_at: UnixNanos::from(2),
     });
     for side in [Side::Long, Side::Short] {
-        let realised = Example::of_side(&row, side).realised();
-        assert!((realised + 2.0).abs() < 1e-12, "{side:?}: {realised}");
+        let realized = Example::of_side(&row, side).realized();
+        assert!((realized + 2.0).abs() < 1e-12, "{side:?}: {realized}");
     }
 }
 
@@ -1997,7 +1997,7 @@ fn a_time_only_target_on_bars_alone_reads_its_payoff_from_the_last_close_with_no
 }
 
 /// 3 EUR an order on gold, quoted in USD: the target's P&L, its positions'
-/// realised P&L, is in USD, and the commission is not converted.
+/// realized P&L, is in USD, and the commission is not converted.
 fn in_euros() -> Commission {
     Commission::PerOrder(Money::from("3 EUR"))
 }

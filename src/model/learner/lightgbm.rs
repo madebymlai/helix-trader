@@ -8,7 +8,7 @@ use super::{Learner, Predictor, SavedModel, TrainingSet};
 
 /// LightGBM's settings, each named and meant as in LightGBM's parameters.
 /// The defaults of the rounds, the learning rate, the leaves and the rows a
-/// leaf (100, 0.05, 7 and 200) are regularised for a weak signal.
+/// leaf (100, 0.05, 7 and 200) are regularized for a weak signal.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, bon::Builder)]
 #[serde(deny_unknown_fields)]
 pub struct LightGbmConfig {
@@ -26,7 +26,7 @@ pub struct LightGbmConfig {
     /// The fewest rows in a leaf, 200 by default and 20 at least: lightgbm3
     /// builds LightGBM's dataset without parameters, and the dataset drops
     /// each feature no split leaves 20 rows each side of, LightGBM's
-    /// default, so fewer would not be honoured.
+    /// default, so fewer would not be honored.
     #[serde(default = "default_min_data_in_leaf")]
     #[builder(default = default_min_data_in_leaf())]
     pub min_data_in_leaf: u32,
@@ -52,7 +52,7 @@ const fn default_num_leaves() -> u32 {
     7
 }
 
-/// The fewest rows in a leaf LightGBM's dataset honours: its default, as
+/// The fewest rows in a leaf LightGBM's dataset honors: its default, as
 /// lightgbm3 builds the dataset without parameters.
 const DATASET_MIN_DATA_IN_LEAF: u32 = 20;
 
@@ -69,7 +69,7 @@ const fn default_seed() -> u32 {
 }
 
 impl LightGbmConfig {
-    /// Checks the settings LightGBM would not honour.
+    /// Checks the settings LightGBM would not honor.
     ///
     /// # Errors
     ///
@@ -219,7 +219,7 @@ mod tests {
         assert!(model.predict(&[0.7]).unwrap() < 0.1);
     }
 
-    /// 600 rows of one feature, 0.0 to 0.9 by 0.1, labelled 2 below 0.5
+    /// 600 rows of one feature, 0.0 to 0.9 by 0.1, labeled 2 below 0.5
     /// and -1 from it: 300 rows a side, enough for leaves of 200.
     fn step() -> TrainingSet {
         let features: Vec<f64> = (0..600_u32).map(|i| f64::from(i % 10) / 10.0).collect();
