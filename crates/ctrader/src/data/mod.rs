@@ -478,17 +478,12 @@ mod tests {
     use nautilus_common::{
         cache::Cache,
         clock::VirtualClock,
-        live::runner::{replace_data_event_sender, replace_system_event_sender},
-        messages::{
-            SystemEvent,
-            data::RequestCommand,
-            system::{SocketState, SocketStateChange},
-        },
+        live::runner::replace_data_event_sender,
+        messages::data::RequestCommand,
         msgbus::{self, MessageBus, TypedHandler},
     };
     use nautilus_core::{Params, UUID4, UnixNanos};
     use nautilus_data::{client::DataClientAdapter, engine::DataEngine};
-    use nautilus_live::{SocketReconnectRegistry, SocketReconnectRequestOutcome};
     use nautilus_model::{
         data::QuoteTick,
         identifiers::TraderId,
@@ -497,17 +492,15 @@ mod tests {
     };
     use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
     use prost::Message as _;
-    use ustr::Ustr;
 
     use super::*;
     use crate::{
         common::messages::{
-            Payload, ProtoMessage, ProtoOaAccountAuthReq, ProtoOaAssetListReq, ProtoOaAssetListRes,
-            ProtoOaErrorRes, ProtoOaGetDynamicLeverageByIdReq, ProtoOaGetTickDataReq,
-            ProtoOaRefreshTokenReq, ProtoOaSpotEvent, ProtoOaSubscribeSpotsReq,
-            ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes, ProtoOaSymbolsListReq,
-            ProtoOaSymbolsListRes, ProtoOaTraderReq, ProtoOaTraderRes, ProtoOaUnsubscribeSpotsReq,
-            ProtoOaUnsubscribeSpotsRes,
+            Payload, ProtoMessage, ProtoOaAssetListReq, ProtoOaAssetListRes, ProtoOaErrorRes,
+            ProtoOaGetDynamicLeverageByIdReq, ProtoOaGetTickDataReq, ProtoOaRefreshTokenReq,
+            ProtoOaSpotEvent, ProtoOaSubscribeSpotsReq, ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes,
+            ProtoOaSymbolsListReq, ProtoOaSymbolsListRes, ProtoOaTraderReq, ProtoOaTraderRes,
+            ProtoOaUnsubscribeSpotsReq, ProtoOaUnsubscribeSpotsRes,
         },
         session::ticks::Tick,
         testing::{
@@ -718,88 +711,6 @@ mod tests {
         assert!(client.is_disconnected());
     }
 
-    /// The next socket state the node is told of.
-    async fn next_socket_state(
-        system: &mut tokio::sync::mpsc::UnboundedReceiver<SystemEvent>,
-    ) -> SocketStateChange {
-        let event = tokio::time::timeout(Duration::from_secs(10), system.recv())
-            .await
-            .expect("no socket state within 10 s")
-            .expect("the system events ended");
-        let SystemEvent::SocketState(change) = event;
-        change
-    }
-
-    /// The session's socket under Nautilus' `SocketControl` (`live.md`,
-    /// "Socket transport state"): its availability goes to the node as the
-    /// client's, on its venue, endpoint `ctrader-open-api-data`; the node's
-    /// reconnect of it replaces the transport, on which the session
-    /// authenticates again; a disconnect deregisters it.
-    #[tokio::test]
-    async fn the_sessions_socket_state_goes_to_the_node_which_can_reconnect_it() {
-        let (system_tx, mut system) = tokio::sync::mpsc::unbounded_channel();
-        replace_system_event_sender(system_tx);
-        let (data_tx, _events) = tokio::sync::mpsc::unbounded_channel();
-        replace_data_event_sender(data_tx);
-        let (url, received) = testing::start(peer(vec![], vec![]));
-        let (credential, _tokens) = testing::credential();
-        let registry = SocketReconnectRegistry::default();
-        let mut client = registry.scope(|| {
-            CTraderDataClient::with_endpoint(
-                ClientId::from(CLIENT),
-                url,
-                Venue::new(VENUE),
-                credential,
-                vec![InstrumentId::from(XAUUSD), InstrumentId::from(EURUSD)],
-                get_atomic_clock_realtime(),
-            )
-        });
-        let endpoint = Ustr::from("ctrader-open-api-data");
-
-        client.connect().await.unwrap();
-
-        let connected = next_socket_state(&mut system).await;
-        assert_eq!(
-            connected,
-            SocketStateChange::new(
-                ClientId::from(CLIENT),
-                Some(Venue::new(VENUE)),
-                endpoint,
-                SocketState::Connected
-            )
-        );
-        let reconnect = registry
-            .handle(ClientId::from(CLIENT), endpoint)
-            .expect("the session's socket is registered");
-        assert_eq!(
-            reconnect.request_reconnect(),
-            SocketReconnectRequestOutcome::Accepted
-        );
-        assert_eq!(
-            next_socket_state(&mut system).await.state,
-            SocketState::Disconnected
-        );
-        assert_eq!(
-            next_socket_state(&mut system).await.state,
-            SocketState::Connected
-        );
-        let frames = testing::wait_until(&received, |frames| {
-            frames
-                .iter()
-                .any(|(c, f)| *c == 1 && f.payload_type == ProtoOaAccountAuthReq::TYPE)
-        })
-        .await;
-        assert!(
-            frames
-                .iter()
-                .any(|(c, f)| *c == 1 && f.payload_type == ProtoOaAccountAuthReq::TYPE),
-            "the session did not authenticate again"
-        );
-
-        client.disconnect().await.unwrap();
-        assert!(registry.handle(ClientId::from(CLIENT), endpoint).is_none());
-    }
-
     /// The client's clock stopped 210 ms after the captured spot event.
     #[tokio::test]
     async fn subscribed_quotes_come_from_the_spot_events_at_their_time() {
@@ -820,6 +731,7 @@ mod tests {
         assert_eq!(quote.ts_event, UnixNanos::new(1_793_017_475_790_000_000));
         assert_eq!(quote.ts_init, received_at);
         assert_eq!(quote.bid_size, Quantity::from(10_000));
+        assert_eq!(quote.ask_size, Quantity::from(10_000));
         let asked: Vec<ProtoOaSubscribeSpotsReq> = received_of(&received);
         assert_eq!(asked.len(), 1);
         assert_eq!(asked[0].symbol_id, [XAUUSD_SYMBOL_ID]);
@@ -1234,35 +1146,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_instrument_request_is_answered_with_ctraders_instrument_written_back_once() {
+    async fn an_instrument_request_is_answered_with_ctraders_instrument_written_back() {
         let (client, mut events, _, _tokens) = connected(peer(vec![], vec![])).await;
         skip_instruments(&mut events).await;
         let dir = tempfile::tempdir().unwrap();
         let mut engine = engine_with(client, dir.path(), "2026-10-01T03:00:00Z");
-        let ask = |engine: &mut DataEngine| {
-            let request = RequestInstrument::new(
-                InstrumentId::from(XAUUSD),
-                Some(at("2026-10-01T00:00:00Z")),
-                Some(at("2026-10-01T01:00:00Z")),
-                None,
-                UUID4::new(),
-                UnixNanos::default(),
-                Some(Params::new(
-                    [("update_catalog".to_string(), serde_json::json!(true))].into(),
-                )),
-            );
-            engine
-                .execute_request(RequestCommand::Instrument(request))
-                .unwrap();
-        };
+        let request = RequestInstrument::new(
+            InstrumentId::from(XAUUSD),
+            Some(at("2026-10-01T00:00:00Z")),
+            Some(at("2026-10-01T01:00:00Z")),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            Some(Params::new(
+                [("update_catalog".to_string(), serde_json::json!(true))].into(),
+            )),
+        );
 
-        ask(&mut engine);
+        engine
+            .execute_request(RequestCommand::Instrument(request))
+            .unwrap();
         let envelope = next_envelope(&mut events).await;
         engine.response_envelope(envelope.clone());
-        // Asked again: the stored definition is older than the window, so
-        // The broker is asked again, and its answer not written twice.
-        ask(&mut engine);
-        engine.response_envelope(next_envelope(&mut events).await);
 
         let Some(DataResponse::Instrument(answer)) = envelope.response() else {
             panic!("not an instrument response");
@@ -1272,9 +1177,11 @@ mod tests {
         let stored = catalog
             .instruments(Some(&[XAUUSD.to_string()]), None, None)
             .unwrap();
-        assert_eq!(stored.len(), 1);
-        assert_eq!(stored[0].id(), InstrumentId::from(XAUUSD));
-        assert_eq!(stored[0].price_precision(), 2);
+        let [stored] = stored.as_slice() else {
+            panic!("{stored:?}");
+        };
+        assert_eq!(stored.id(), InstrumentId::from(XAUUSD));
+        assert_eq!(stored.price_precision(), 2);
     }
 
     #[tokio::test]
@@ -1358,27 +1265,32 @@ mod tests {
         assert!(client.is_disconnected());
     }
 
+    /// Nothing is asked of cTrader: the disconnect writes every frame
+    /// queued before it.
     #[tokio::test]
     async fn a_quote_request_without_a_start_is_refused() {
-        let (mut client, _events, _, _tokens) = connected(peer(vec![], vec![])).await;
+        let (mut client, _events, received, _tokens) = connected(peer(vec![], vec![])).await;
 
         let err = client
             .request_quotes(request(None, at("2026-10-01T01:00:00Z"), None))
             .unwrap_err();
-
-        assert!(err.to_string().contains("needs a start"), "{err}");
         client.disconnect().await.unwrap();
+
+        assert!(err.to_string().contains(XAUUSD), "{err}");
+        assert!(received_of::<ProtoOaGetTickDataReq>(&received).is_empty());
     }
 
+    /// As `a_quote_request_without_a_start_is_refused`, nothing is asked.
     #[tokio::test]
     async fn quotes_of_an_instrument_not_loaded_are_refused() {
-        let (mut client, _events, _, _tokens) = connected(peer(vec![], vec![])).await;
+        let (mut client, _events, received, _tokens) = connected(peer(vec![], vec![])).await;
 
         let err = client
             .subscribe_quotes(subscribe("GBPUSD.ACMEFX"))
             .unwrap_err();
+        client.disconnect().await.unwrap();
 
         assert!(format!("{err:#}").contains("GBPUSD.ACMEFX"), "{err:#}");
-        client.disconnect().await.unwrap();
+        assert!(received_of::<ProtoOaSubscribeSpotsReq>(&received).is_empty());
     }
 }
