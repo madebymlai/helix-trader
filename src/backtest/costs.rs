@@ -215,7 +215,10 @@ mod tests {
     use nautilus_model::{
         enums::{LiquiditySide, OrderSide, OrderType},
         instruments::{Instrument, stubs::cfd_gold},
-        orders::{Order, OrderAny, OrderTestBuilder, stubs::TestOrderStubs},
+        orders::{
+            Order, OrderAny, OrderTestBuilder,
+            stubs::{OrderFilledTestBuilder, TestOrderStubs},
+        },
         types::Currency,
     };
     use rstest::rstest;
@@ -242,6 +245,16 @@ mod tests {
             .build();
         let mut order = TestOrderStubs::make_accepted_order(&order);
         order.set_liquidity_side(LiquiditySide::Taker);
+        order
+    }
+
+    /// `order` after a fill of `oz` at `price`.
+    fn filled(mut order: OrderAny, oz: u64) -> OrderAny {
+        let fill = OrderFilledTestBuilder::new(&order, &gold())
+            .last_qty(Quantity::from(oz))
+            .last_px(price())
+            .build();
+        order.apply(fill).unwrap();
         order
     }
 
@@ -334,6 +347,15 @@ mod tests {
         #[case] oz: u64,
     ) {
         assert_eq!(charged(commission, &order(), oz), cost(commission, oz));
+    }
+
+    /// A commission per order is charged once, on its order's first fill,
+    /// as the fee model is set to charge it: the 100 oz order filled 40 oz
+    /// then 60, the later fill is charged nothing.
+    #[rstest]
+    fn a_commission_per_order_is_charged_once_nothing_on_later_fills_of_the_order() {
+        let order = filled(order(), 40);
+        assert_eq!(charged(per_order(), &order, 60), Money::from("0 USD"));
     }
 
     #[rstest]
