@@ -155,7 +155,7 @@ async fn a_warmup_of_days_holds_every_minute_bar_of_ibs_history_and_builds_each_
     let started = record.borrow().started.expect("a start");
     let (from, to) = (started - WARMUP, started - SignedDuration::from_mins(2));
     let source = composite().composite();
-    let ib = IbHistory::connect(47, to, Timestamp::now()).await.unwrap();
+    let ib = IbHistory::connect(47, to, crate::now()).await.unwrap();
     let reference: BTreeSet<u64> = ib
         .data(&NautilusDataType::Bar, &source.to_string(), from, to)
         .await

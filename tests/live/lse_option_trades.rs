@@ -140,7 +140,7 @@ async fn the_trades_of_aapl_s_options_of_the_week_stream_from_lse_for_a_minute()
         return;
     }
     dotenvy::dotenv().ok();
-    let started = Timestamp::now();
+    let started = crate::now();
     let definitions = contracts_of_the_week(started);
     let contracts: Vec<InstrumentId> = definitions.iter().map(Instrument::id).collect();
     let config = LiveNodeConfig {
@@ -214,7 +214,7 @@ async fn the_trades_of_aapl_s_options_of_the_week_stream_from_lse_for_a_minute()
     println!("first: {first:?}");
     let (from, to) = (
         UnixNanos::from(started - 1.minute()),
-        UnixNanos::from(Timestamp::now() + 1.minute()),
+        UnixNanos::from(crate::now() + 1.minute()),
     );
     assert!(
         trades

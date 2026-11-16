@@ -38,7 +38,7 @@ use helix_trader::{
     },
     venues::ib::{IbAccount, IbHistory},
 };
-use jiff::{SignedDuration, Timestamp};
+use jiff::SignedDuration;
 use nautilus_common::{
     actor::DataActor, logging::logger::LoggerConfig, messages::data::DataResponseEnvelope,
 };
@@ -197,7 +197,7 @@ async fn the_live_minute_bars_follow_the_warmup_with_no_gap_and_no_duplicate() {
     // The catalog: the instrument and its minute bars over
     // [now - WARMUP, now - CATALOG_BEHIND], as fill-catalog stores them.
     let catalog = tempfile::tempdir().unwrap();
-    let now = Timestamp::now();
+    let now = crate::now();
     let catalog_end = now - CATALOG_BEHIND;
     {
         let ib = IbHistory::connect(47, catalog_end, now).await.unwrap();
@@ -224,7 +224,7 @@ async fn the_live_minute_bars_follow_the_warmup_with_no_gap_and_no_duplicate() {
         catalog: catalog.path().to_path_buf(),
         recording: crate::recording(staging.path()),
     };
-    let started = Timestamp::now();
+    let started = crate::now();
     let ran = Box::pin(tokio::time::timeout(
         Duration::from_secs(600),
         // The probe trades nothing: it claims no instrument.

@@ -924,7 +924,7 @@ mod tests {
             Reply::file(US10Y_BOND_YIELDS),
         ]);
         fill_bond_yields(dir.path(), &stored).unwrap();
-        let now = Timestamp::now();
+        let now = november("16T12:00:00");
         let not_loaded = || {
             MockLse::start(vec![
                 Reply::json(REFERENCE_CATALOGUE),
@@ -1236,7 +1236,7 @@ mod tests {
     #[test]
     fn a_window_lse_has_not_loaded_is_left_missing_for_the_next_run() {
         let dir = tempfile::tempdir().unwrap();
-        let now = Timestamp::now();
+        let now = november("16T12:00:00");
         let from = now - SignedDuration::from_hours(72);
         let stored_to = now - SignedDuration::from_hours(20);
         let trade = TradeTick::new(
