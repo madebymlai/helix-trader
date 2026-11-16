@@ -1,0 +1,31 @@
+# Configuration for typos spell checker
+
+[default]
+locale = "en-us"
+
+[default.extend-words]
+# A model's valid-from timestamps (`valid_froms`)
+froms = "froms"
+
+# Industry standard abbreviations and technical terms
+Pn = "Pn" # Part of PnL (Profit and Loss)
+PnL = "PnL" # Profit and Loss
+PnLs = "PnLs" # Plural of PnL
+ND = "ND" # Ordinal suffix (`ON_THE_22ND`)
+
+# Futures roots and contract symbols
+SIZ = "SIZ" # COMEX silver root with its month (`SIZ26`)
+
+# Misspelled config keys the tests refuse
+sesion = "sesion"
+spred = "spred"
+leafs = "leafs"
+
+[files]
+# Preserve vendored code and verbatim data
+extend-exclude = [
+  "crates/ctrader/proto/",
+  "crates/lse/docs-snapshot/",
+  "**/test_data/**/*.json",
+  "**/test_data/**/*.txt",
+]

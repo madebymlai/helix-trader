@@ -1,3 +1,4 @@
+exclude: ^crates/(ctrader/proto|lse/docs-snapshot)/
 default_install_hook_types: [pre-commit]
 default_stages: [pre-commit]
 
