@@ -1,0 +1,56 @@
+name: release
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        # https://github.com/actions/checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The top section of RELEASES.md, published once it has a date and its
+      # version no tag yet (docs/releases.md)
+      - name: Read the release in RELEASES.md
+        id: notes
+        run: |
+          version="$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['package']['version'])")"
+          if [[ "$(sed -n '1p' RELEASES.md)" != "# Helix Trader ${version}" ]]; then
+            echo "::error::RELEASES.md does not start with Helix Trader ${version}, Cargo.toml's version."
+            exit 1
+          fi
+          if grep -qx 'Released on TBD (UTC).' <(sed -n '3p' RELEASES.md); then
+            echo "Helix Trader ${version} is not released yet."
+            exit 0
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/v${version}" > /dev/null; then
+            echo "v${version} is already tagged."
+            exit 0
+          fi
+          sed -n '3,${/^---$/q;p}' RELEASES.md > "$RUNNER_TEMP/notes.md"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the release
+        if: steps.notes.outputs.version != ''
+        run: |
+          gh release create "v${VERSION}" --target "$GITHUB_SHA" \
+            --title "Helix Trader ${VERSION}" --notes-file "$RUNNER_TEMP/notes.md"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.notes.outputs.version }}
