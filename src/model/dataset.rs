@@ -1086,25 +1086,6 @@ mod tests {
         );
     }
 
-    /// The target's payoff names are three, a bracket's: a row of a payoff
-    /// of one under them is refused as read.
-    #[rstest]
-    fn a_row_of_another_payoff_width_is_a_schema_mismatch() {
-        let dir = tempfile::tempdir().unwrap();
-        let dataset = dataset(dir.path(), STRATEGY, 1);
-        let mut narrow = row("2026-01-05T09:00:00Z", vec![1.0], "1");
-        narrow.payoff = PerSide {
-            long: vec![0.1],
-            short: vec![0.2],
-        };
-        let (from, to) = (at("2026-01-05T00:00:00Z"), at("2026-01-06T02:00:00Z"));
-        dataset.write(&[narrow], from, to).unwrap();
-
-        let err = dataset.read(from, to).unwrap_err();
-
-        assert!(err.downcast_ref::<SchemaMismatch>().is_some(), "{err:#}");
-    }
-
     #[rstest]
     fn rows_read_back_bit_for_bit() {
         let dir = tempfile::tempdir().unwrap();
@@ -1360,59 +1341,85 @@ mod tests {
         );
     }
 
+    /// The dataset in the catalog at `dir` of the strategy of one
+    /// feature deciding as `rule` says on `target`, its dataset runs at
+    /// `commission`.
+    fn changed(
+        dir: &Path,
+        rule: DecisionRule,
+        target: TargetConfig,
+        commission: Commission,
+    ) -> Dataset {
+        blueprint_on(
+            STRATEGY,
+            features(1),
+            rule,
+            target,
+            requirements(),
+            DatasetVenue {
+                commission,
+                ..venue()
+            },
+        )
+        .dataset(dir)
+        .unwrap()
+    }
+
+    /// Deciding hourly.
+    const HOURLY: DecisionRule = DecisionRule::Every(SignedDuration::from_hours(1));
+
     #[rstest]
-    fn a_change_of_the_features_the_decisions_the_target_or_the_commission_finds_an_empty_cache() {
+    #[case::of_the_features(|dir: &Path| dataset(dir, STRATEGY, 2))]
+    #[case::of_the_decisions(|dir: &Path| {
+        changed(
+            dir,
+            DecisionRule::Every(SignedDuration::from_mins(30)),
+            target(),
+            venue().commission,
+        )
+    })]
+    #[case::of_the_target(|dir: &Path| {
+        changed(
+            dir,
+            HOURLY,
+            TargetConfig {
+                spec: Target {
+                    limit: SignedDuration::from_mins(30),
+                    ..target().spec
+                },
+                ..target()
+            },
+            venue().commission,
+        )
+    })]
+    #[case::of_the_commissions_rate(|dir: &Path| {
+        changed(dir, HOURLY, target(), Commission::Rate(Decimal::new(4, 5)))
+    })]
+    #[case::of_the_commissions_kind_per_order(|dir: &Path| {
+        changed(
+            dir,
+            HOURLY,
+            target(),
+            Commission::PerOrder(Money::from_str_exact("0.00003 USD").unwrap()),
+        )
+    })]
+    #[case::of_the_commissions_kind_per_quantity(|dir: &Path| {
+        changed(
+            dir,
+            HOURLY,
+            target(),
+            Commission::PerQuantity(Money::from_str_exact("0.00003 USD").unwrap()),
+        )
+    })]
+    fn a_change_of_the_features_the_decisions_the_target_or_the_commission_finds_an_empty_cache(
+        #[case] changed: fn(&Path) -> Dataset,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let (from, to) = (at("2026-01-05T00:00:00Z"), at("2026-01-06T02:00:00Z"));
         dataset(dir.path(), STRATEGY, 1)
             .write(&[row("2026-01-05T09:00:00Z", vec![1.0], "1")], from, to)
             .unwrap();
-        let changed = |rule, target, commission| {
-            blueprint_on(
-                STRATEGY,
-                features(1),
-                rule,
-                target,
-                requirements(),
-                DatasetVenue {
-                    commission,
-                    ..venue()
-                },
-            )
-            .dataset(dir.path())
-            .unwrap()
-        };
-        let hourly = DecisionRule::Every(SignedDuration::from_hours(1));
-        let changed = [
-            dataset(dir.path(), STRATEGY, 2),
-            changed(
-                DecisionRule::Every(SignedDuration::from_mins(30)),
-                target(),
-                venue().commission,
-            ),
-            changed(
-                hourly,
-                TargetConfig {
-                    spec: Target {
-                        limit: SignedDuration::from_mins(30),
-                        ..target().spec
-                    },
-                    ..target()
-                },
-                venue().commission,
-            ),
-            changed(hourly, target(), Commission::Rate(Decimal::new(4, 5))),
-            changed(
-                hourly,
-                target(),
-                Commission::PerOrder(Money::from_str_exact("0.00003 USD").unwrap()),
-            ),
-            changed(
-                hourly,
-                target(),
-                Commission::PerQuantity(Money::from_str_exact("0.00003 USD").unwrap()),
-            ),
-        ];
+        let changed = changed(dir.path());
 
         assert!(
             dataset(dir.path(), STRATEGY, 1)
@@ -1420,16 +1427,13 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        for dataset in changed {
-            assert_eq!(
-                dataset
-                    .missing(day("2026-01-05"), day("2026-01-05"))
-                    .unwrap(),
-                [day("2026-01-05")],
-                "{dataset:?}"
-            );
-            assert!(dataset.read(from, to).unwrap().is_empty(), "{dataset:?}");
-        }
+        assert_eq!(
+            changed
+                .missing(day("2026-01-05"), day("2026-01-05"))
+                .unwrap(),
+            [day("2026-01-05")]
+        );
+        assert!(changed.read(from, to).unwrap().is_empty());
     }
     #[rstest]
     fn the_manifest_names_the_features_the_payoff_the_target_and_the_fingerprint() {
@@ -1578,29 +1582,28 @@ mod tests {
     /// trailing zeros, beside the balance; a dataset run's accounts
     /// margin nothing, so no leverage keys it.
     #[rstest]
-    fn a_dataset_runs_venue_is_keyed_by_its_commissions_kind_and_amount() {
-        let of = |commission| {
-            DatasetVenue {
-                commission,
-                ..venue()
-            }
-            .fingerprint_part()
+    #[case::a_rate(
+        Commission::Rate(Decimal::new(30, 6)),
+        "commission rate 0.00003, balance 10000000 USD"
+    )]
+    #[case::per_order(
+        Commission::PerOrder(Money::from("3.00 USD")),
+        "commission per order 3 USD, balance 10000000 USD"
+    )]
+    #[case::per_quantity(
+        Commission::PerQuantity(Money::from_str_exact("0.0350 USD").unwrap()),
+        "commission per quantity 0.035 USD, balance 10000000 USD"
+    )]
+    fn a_dataset_runs_venue_is_keyed_by_its_commissions_kind_and_amount(
+        #[case] commission: Commission,
+        #[case] text: &str,
+    ) {
+        let venue = DatasetVenue {
+            commission,
+            ..venue()
         };
 
-        assert_eq!(
-            of(Commission::Rate(Decimal::new(30, 6))),
-            "commission rate 0.00003, balance 10000000 USD"
-        );
-        assert_eq!(
-            of(Commission::PerOrder(Money::from("3.00 USD"))),
-            "commission per order 3 USD, balance 10000000 USD"
-        );
-        assert_eq!(
-            of(Commission::PerQuantity(
-                Money::from_str_exact("0.0350 USD").unwrap()
-            )),
-            "commission per quantity 0.035 USD, balance 10000000 USD"
-        );
+        assert_eq!(venue.fingerprint_part(), text);
     }
 
     /// A latency of `millis` milliseconds.
@@ -1612,18 +1615,22 @@ mod tests {
     /// when declared: every venue declaring none keeps the text, so the
     /// datasets and stores, it was keyed by before.
     #[rstest]
-    fn a_dataset_runs_latency_keys_its_venue_only_when_declared() {
-        let at = |latency| DatasetVenue { latency, ..venue() }.fingerprint_part();
+    #[case::none(None, "commission rate 0.00003, balance 10000000 USD")]
+    #[case::of_milliseconds(
+        Some(latency(150)),
+        "commission rate 0.00003, balance 10000000 USD, latency 150ms"
+    )]
+    #[case::of_seconds_and_milliseconds(
+        Some(latency(1500)),
+        "commission rate 0.00003, balance 10000000 USD, latency 1s 500ms"
+    )]
+    fn a_dataset_runs_latency_keys_its_venue_only_when_declared(
+        #[case] latency: Option<Latency>,
+        #[case] text: &str,
+    ) {
+        let venue = DatasetVenue { latency, ..venue() };
 
-        assert_eq!(at(None), "commission rate 0.00003, balance 10000000 USD");
-        assert_eq!(
-            at(Some(latency(150))),
-            "commission rate 0.00003, balance 10000000 USD, latency 150ms"
-        );
-        assert_eq!(
-            at(Some(latency(1500))),
-            "commission rate 0.00003, balance 10000000 USD, latency 1s 500ms"
-        );
+        assert_eq!(venue.fingerprint_part(), text);
     }
 
     /// A dataset run's latency moves its fills, so its rows: another
@@ -1708,11 +1715,18 @@ mod tests {
         );
     }
 
+    /// Its reason names the manifest it could not read, under the catalog.
     #[rstest]
     fn a_dataset_never_written_has_no_manifest() {
         let dir = tempfile::tempdir().unwrap();
 
-        assert!(dataset(dir.path(), STRATEGY, 1).manifest().is_err());
+        let err = format!(
+            "{:#}",
+            dataset(dir.path(), STRATEGY, 1).manifest().unwrap_err()
+        );
+
+        assert!(err.contains(&dir.path().display().to_string()), "{err}");
+        assert!(err.contains("manifest.json"), "{err}");
     }
     #[rstest]
     fn a_build_replays_the_missing_days_once_through_their_settling() {
@@ -1853,18 +1867,28 @@ mod tests {
         assert!(built.is_empty());
     }
 
+    /// A row of a payoff of one, under the target's three payoff names, a
+    /// bracket's.
+    fn of_a_narrow_payoff() -> TargetRow {
+        let mut narrow = row("2026-01-05T09:00:00Z", vec![1.0], "1");
+        narrow.payoff = PerSide {
+            long: vec![0.1],
+            short: vec![0.2],
+        };
+        narrow
+    }
+
+    /// Rows of another width than the names, two features under the one
+    /// feature name or a payoff of one under the target's three payoff
+    /// names, are refused as read.
     #[rstest]
-    fn rows_of_another_width_than_the_names_are_a_schema_mismatch() {
+    #[case::of_features(row("2026-01-05T09:00:00Z", vec![1.0, 2.0], "1"))]
+    #[case::of_the_payoff(of_a_narrow_payoff())]
+    fn rows_of_another_width_than_the_names_are_a_schema_mismatch(#[case] row: TargetRow) {
         let dir = tempfile::tempdir().unwrap();
         let dataset = dataset(dir.path(), STRATEGY, 1);
         let (from, to) = (at("2026-01-05T00:00:00Z"), at("2026-01-06T02:00:00Z"));
-        dataset
-            .write(
-                &[row("2026-01-05T09:00:00Z", vec![1.0, 2.0], "1")],
-                from,
-                to,
-            )
-            .unwrap();
+        dataset.write(&[row], from, to).unwrap();
 
         let err = dataset.read(from, to).unwrap_err();
 
