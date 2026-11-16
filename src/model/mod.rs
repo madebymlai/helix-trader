@@ -16,9 +16,11 @@
 //! the stores, the training, the walk-forward and the handle built of it;
 //! `train` trains
 //! at a time, fitting a model of each side traded on a window of the
-//! dataset and publishing them together in the `store` if their `holdout`,
-//! each side's `score` and what the decision would have earned there, meets
-//! the minimums;
+//! dataset less its calibration slice, calibrating them together on that
+//! slice and publishing them together in the `store`, no figure of theirs
+//! judged; `holdout` is what the decision took and earned on rows, and
+//! `score` how its expected R met the R realized, which a backtest's
+//! scores read;
 //! `deciding` is the decision itself, the side picked among the models
 //! valid at a time and the meta's margin; `handle` is
 //! what the strategy holds and decides through, trading on the sides'
@@ -430,10 +432,9 @@ mod tests {
             target = {target}
             retrain = "24h"
             window = "48h"
-            holdout = "12h"
+            calibration = "12h"
             margins = {{ long = "0.5R", short = "0.5R" }}
-            min_expectancy = "0.5R"
-            min_trades = 30
+            min_rows = 30
             learner = {{ kind = "baseline" }}
             "#,
             features.join(", "),

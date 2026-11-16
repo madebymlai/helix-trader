@@ -894,13 +894,12 @@ mod tests {
             .target(target)
             .dataset(venue)
             .window(SignedDuration::from_hours(24))
-            .holdout(SignedDuration::from_hours(6))
+            .calibration(SignedDuration::from_hours(6))
             .margins(Margins {
                 long: Some(R::new(0.0)),
                 short: Some(R::new(0.0)),
             })
-            .min_expectancy(R::new(0.0))
-            .min_trades(1)
+            .min_rows(1)
             .learner(LearnerConfig::Fake {})
             .build();
         ModelBlueprint::new(StrategyId::from(strategy), features, config, requirements).unwrap()

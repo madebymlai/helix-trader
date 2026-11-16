@@ -37,12 +37,10 @@
 //! calibrated expected R against the R of the trade of the side picked, on
 //! the rows a side is picked on with a meta model. A side's trades taken are
 //! those picked for it on each row by the decision itself
-//! (`deciding::DecidingModels::pick`), the picks a train's gate reads (`train`),
-//! before any meta: a row where both sides clear counts one trade, for the side
+//! (`deciding::DecidingModels::pick`), before any meta: a row where both sides clear counts one trade, for the side
 //! expected the most, a tie none, so with no meta the sides' trades add up to
 //! the decisions returned. A meta's are the trades of the side picked its
-//! margin takes (`holdout::MetaMargin`), the figures its holdout is judged on,
-//! out of sample. All this judges the decision the handle returns, on the target's
+//! margin takes (`holdout::MetaMargin`), out of sample. All this judges the decision the handle returns, on the target's
 //! trade: no section adds the sides up, as the backtest's report gives what the
 //! strategy actually traded, which can differ whenever it filters its decisions.
 
@@ -401,7 +399,7 @@ mod tests {
             config::{Margins, MetaConfig, ModelConfig},
             dataset::DatasetVenue,
             decide::{DecisionRule, FeatureRow},
-            deciding::testing::{HOLDOUT, unchanged},
+            deciding::testing::unchanged,
             features::{FeatureSet, meta_names, side_names, testing::last_mid},
             holdout::Trades,
             learner::{LearnerConfig, TrainingSet},
@@ -444,13 +442,12 @@ mod tests {
             .retrain(SignedDuration::from_hours(24))
             .dataset(venue())
             .window(SignedDuration::from_hours(24))
-            .holdout(SignedDuration::from_hours(6))
+            .calibration(SignedDuration::from_hours(6))
             .margins(Margins {
                 long: Some(R::new(0.0)),
                 short: Some(R::new(0.0)),
             })
-            .min_expectancy(R::new(0.0))
-            .min_trades(1)
+            .min_rows(1)
             .learner(LearnerConfig::Fake {})
             .build()
     }
@@ -543,11 +540,9 @@ mod tests {
     }
 
     /// The 6th to the 8th of January, each the long's R of 1 or -1 and the
-    /// short's the reverse. Fitted at the retrain of the 7th, before its
-    /// holdout from 18:00 of the 6th: two wins in three, the long's mean R
-    /// 1/3; held out, a loss. Fitted at the retrain of the 8th: one win in
-    /// three, -1/3, the decisions of the 7th, scored on the 7th as well.
-    /// Scored on the 8th: two wins.
+    /// short's the reverse. Of the 6th, before 18:00, two wins in three, the
+    /// long's mean R 1/3, then a loss. Of the 7th: one win in three, -1/3,
+    /// scored on the 7th as well. Scored on the 8th: two wins.
     fn rows() -> Vec<TargetRow> {
         vec![
             row("2026-01-06T10:00:00Z", 0.5, true),
@@ -615,7 +610,6 @@ mod tests {
                 learner: LearnerConfig::Fake {},
                 calibration: unchanged(config, valid_from),
                 baseline,
-                holdout: HOLDOUT,
                 probes: vec![],
             },
             model: model.save().unwrap(),
@@ -633,8 +627,8 @@ mod tests {
     }
 
     /// Publishes a fake model valid from `valid_from` for each side of a
-    /// walk in `dir` as `config` says, with the baseline a train then fits
-    /// (`trained_baseline`).
+    /// walk in `dir` as `config` says, with the baseline of
+    /// `trained_baseline`.
     fn publish(dir: &Path, config: &ModelConfig, valid_from: Timestamp) {
         let fingerprint = dataset(dir, config).fingerprint().to_string();
         for (side, _) in config.margins.sides() {
@@ -645,11 +639,12 @@ mod tests {
         }
     }
 
-    /// The baseline of the `side` model a train at `valid_from` fits on
-    /// `rows`, the training mean of the side's R before its holdout: at the
-    /// 7th the long's two wins and a loss, 1/3, at the 8th its win and two
-    /// losses, -1/3, the short's the reverse, winning where the long loses;
-    /// nought at any other time, whose models' baselines no test reads.
+    /// The baseline the `side` model published at `valid_from` carries, a
+    /// training mean of the side's R on `rows`: at the 7th the long's two
+    /// wins and a loss of the 6th before 18:00, 1/3, at the 8th its win and
+    /// two losses of the 7th, -1/3, the short's the reverse, winning where
+    /// the long loses; nought at any other time, whose models' baselines no
+    /// test reads.
     fn trained_baseline(side: Side, valid_from: Timestamp) -> f64 {
         let long = if valid_from == at("2026-01-07T00:00:00Z") {
             1.0 / 3.0
@@ -1411,10 +1406,9 @@ Meta model scores, out of sample, over the span
         config.meta = Some(
             MetaConfig::builder()
                 .window(SignedDuration::from_hours(48))
-                .holdout(SignedDuration::from_hours(6))
+                .calibration(SignedDuration::from_hours(6))
                 .margin(R::new(0.3))
-                .min_expectancy(R::new(0.0))
-                .min_trades(1)
+                .min_rows(1)
                 .learner(LearnerConfig::Fake {})
                 .build(),
         );
@@ -1595,9 +1589,8 @@ Meta model scores, out of sample, over the span
     }
 
     /// Never retrained, the long's model of the 7th in use over a backtest
-    /// from the 8th is scored beside its own baseline, the training mean of R
-    /// its train fitted at the 7th, on the rows of the 6th before the
-    /// holdout from 18:00, 1/3 (`trained_baseline`): on the 8th's two wins at
+    /// from the 8th is scored beside its own baseline, the one its manifest
+    /// carries, 1/3 (`trained_baseline`): on the 8th's two wins at
     /// 0.9 and 0.2, squared errors 0.65 against 8/9, a skill of 1 - 0.65 x
     /// 9/8, where the 8th's baseline, -1/3, would make 1 - 0.65 x 9/32.
     #[rstest]

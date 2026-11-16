@@ -96,10 +96,9 @@ mod tests {
         target = { limit = "30m", atr = { period = 3 } }
         retrain = "24h"
         window = "48h"
-        holdout = "12h"
+        calibration = "12h"
         margins = { long = "0.5R", short = "0.5R" }
-        min_expectancy = "0.5R"
-        min_trades = 30
+        min_rows = 30
         learner = { kind = "baseline" }
     "#;
 

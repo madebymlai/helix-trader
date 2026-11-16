@@ -25,9 +25,7 @@ use crate::{
         dataset::DatasetVenue,
         decide::DecisionRule,
         features::{FeatureSet, meta_names, side_names, testing::last_mid},
-        holdout::{Earnings, Holdout, Trades},
         learner::{LearnerConfig, TrainingSet},
-        score::ExpectedScore,
         store::{
             ModelCalibration, ModelManifest, ModelSet, ModelStore, PairCalibration, Probe,
             StoredModel,
@@ -39,30 +37,6 @@ use crate::{
         requirements::{DataRequirements, TickSeries},
         risk::R,
     },
-};
-
-/// The holdout of the models of the tests, as a train publishes it: a
-/// skill of 0.1.
-pub(crate) const HOLDOUT: Holdout = Holdout {
-    earnings: Earnings {
-        taken: NO_TRADE,
-        every: NO_TRADE,
-        taken_stressed: NO_TRADE,
-        every_stressed: NO_TRADE,
-    },
-    score: ExpectedScore {
-        rows: 2,
-        skill: Some(0.1),
-        mean_error: Some(0.0),
-        slope: None,
-        top_decile_gap: Some(0.0),
-    },
-};
-
-const NO_TRADE: Trades = Trades {
-    count: 0,
-    expectancy: None,
-    win_rate: None,
 };
 
 pub(crate) const STRATEGY: &str = "HANDLE-001";
@@ -162,13 +136,12 @@ pub(crate) fn config() -> ModelConfig {
         .retrain(SignedDuration::from_hours(24))
         .dataset(venue())
         .window(SignedDuration::from_hours(48))
-        .holdout(SignedDuration::from_hours(12))
+        .calibration(SignedDuration::from_hours(12))
         .margins(Margins {
             long: Some(R::new(0.0)),
             short: None,
         })
-        .min_expectancy(R::new(0.0))
-        .min_trades(1)
+        .min_rows(1)
         .learner(LearnerConfig::Baseline {})
         .build()
 }
@@ -188,10 +161,9 @@ pub(crate) fn both_sides() -> ModelConfig {
 pub(crate) fn meta() -> MetaConfig {
     MetaConfig {
         window: SignedDuration::from_hours(48),
-        holdout: SignedDuration::from_hours(12),
+        calibration: SignedDuration::from_hours(12),
         margin: R::new(0.15),
-        min_expectancy: R::new(0.0),
-        min_trades: 1,
+        min_rows: 1,
         learner: LearnerConfig::Baseline {},
     }
 }
@@ -324,7 +296,6 @@ pub(crate) fn baseline_for(
             side: Some(side),
             learner: config.learner,
             baseline: r(tenths),
-            holdout: HOLDOUT,
             probes: vec![Probe {
                 prediction: model.predict(&probe).unwrap(),
                 row: probe,

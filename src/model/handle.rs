@@ -239,8 +239,8 @@ impl SettledRows {
 /// dataset run sends there, without a quantity (`trade`). The handle sends
 /// nothing and reads no equity: a strategy sends the trade at a stake of its
 /// choosing, the config's or a multiple of it (`orders::Trade::send`), or
-/// drops it, or trades otherwise, and then the models' holdout figures
-/// describe the target's trade, not its own. Its expected R, in R, is the
+/// drops it, or trades otherwise, and then the models' scores describe the
+/// target's trade, not its own. Its expected R, in R, is the
 /// same at any stake.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Decision {

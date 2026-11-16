@@ -8,6 +8,11 @@ Released on TBD (UTC).
 
 ### Breaking Changes
 
+- Removed the holdout gate: a train publishes its models unless a fit or calibration slice has fewer rows than `min_rows`, a prediction or calibration is not finite, or a model does not reproduce its probes; judge a config's models by a backtest's scores
+- Renamed `[model] holdout` and `[model.meta] holdout` to `calibration`, the last part of the window the models are calibrated on and not fitted on; rename the key, and keep `calibration` plus the target's limit shorter than the window
+- Removed `min_trades` and `min_expectancy` from `[model]` and `[model.meta]`, each refused at load as unknown; drop them
+- Changed `[model]` and `[model.meta]` to require `min_rows`, the fewest rows of each fit and calibration slice; set it to at least 1
+- Changed the model store's version, so every model is trained again; datasets keep their keys
 - Changed `backtest` of a model strategy to train nothing, refusing a store with no model to trade on at its start and naming the `train` that fills it; run `train` over the backtest's span first
 - Changed `train`'s report of a model it does not train again to "already published"; match that text instead of "in use"
 - Removed `WalkForward::prepare`, `Schedule::ensure_trades` and `Plan::fits`; train at each of `Training::retrain_times` with `Training::train_at`, and check a backtest's start with `WalkForward::untrained`

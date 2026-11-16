@@ -19,9 +19,7 @@ use helix_trader::{
         decide::{self, DecisionRule, FeatureRow},
         features::{Feature, FeatureSet, FeatureSetBuilder, PICKED_FEATURES, side_names},
         handle::{Decision, Mode, ModelHandle, SettledRows},
-        holdout::{Earnings, Holdout},
         learner::{LearnerConfig, TrainingSet},
-        score::ExpectedScore,
         store::{ModelCalibration, ModelManifest, PairCalibration, Probe, StoredModel},
         targets::{BracketSpec, Distance, Side, Target, TargetConfig, TargetRow},
     },
@@ -204,10 +202,9 @@ pub(crate) fn target() -> TargetConfig {
 }
 
 /// The probe's decisions and target, learning whether each side of the
-/// bracket gains, on a window of 46 hours, the last 12 held out and the
-/// 12 before them calibrated on, by the fake learner, published from
-/// nought per trade over a trade; each side traded from an expected net
-/// P&L of nought.
+/// bracket gains, on a window of 46 hours, the last 12 calibrated on, by
+/// the fake learner, each slice of at least one row; each side traded from
+/// an expected net P&L of nought.
 pub(crate) fn config() -> ModelConfig {
     ModelConfig::builder()
         .decision(rule())
@@ -215,13 +212,12 @@ pub(crate) fn config() -> ModelConfig {
         .retrain(SignedDuration::from_hours(24))
         .dataset(venue())
         .window(SignedDuration::from_hours(46))
-        .holdout(SignedDuration::from_hours(12))
+        .calibration(SignedDuration::from_hours(12))
         .margins(Margins {
             long: Some(R::new(0.0)),
             short: Some(R::new(0.0)),
         })
-        .min_expectancy(R::new(0.0))
-        .min_trades(1)
+        .min_rows(1)
         .learner(LearnerConfig::Fake {})
         .build()
 }
@@ -564,8 +560,8 @@ pub(crate) fn unchanged(config: &ModelConfig, valid_from: Timestamp) -> ModelCal
 /// (`features::side_names`), valid from `valid_from`, predicting an R of
 /// `r(tenths)` whatever the row, its pair's calibration leaving it as it is
 /// (`unchanged`), as a train publishes one: above 5 a trade expected to gain.
-/// For a test whose models come from no train: the fixture's walk has no
-/// edge for a train to publish on (`backtest_train` trains on one).
+/// For a test whose models' predictions a test sets, which no train's on
+/// the fixture's walk, with no edge, would be.
 pub(crate) fn baseline_of(
     features: &Rc<FeatureSet>,
     config: &ModelConfig,
@@ -628,7 +624,7 @@ fn stored_baseline(
 /// `fingerprint`, decided as `config` says, of `side` for a side's model
 /// and none for a meta, valid from `valid_from`, fitted on `set`, predicting
 /// the mean of its labels whatever the row, its manifest's baseline that
-/// mean, its holdout's skill 0.1: a meta's calibrated by `CALIBRATION`, a
+/// mean: a meta's calibrated by `CALIBRATION`, a
 /// side's by its pair's calibration leaving it as it is (`unchanged`).
 pub(crate) fn baseline_stored(
     strategy_id: StrategyId,
@@ -658,14 +654,6 @@ pub(crate) fn baseline_stored(
             learner: LearnerConfig::Baseline {},
             calibration,
             baseline: prediction,
-            holdout: Holdout {
-                earnings: Earnings::default(),
-                score: ExpectedScore {
-                    rows: 2,
-                    skill: Some(0.1),
-                    ..ExpectedScore::default()
-                },
-            },
             probes: vec![Probe {
                 prediction,
                 row: probe,

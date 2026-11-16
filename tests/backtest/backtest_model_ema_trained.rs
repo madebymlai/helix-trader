@@ -8,12 +8,12 @@
 //! fast average of the 1-minute bars: near the top at an odd hour's
 //! decision, near the bottom at an even hour's. Its calibration's line
 //! rises with it, so the short is expected to win at the odd hours alone,
-//! clearing its margin of nought there: the holdout's shorts taken earn
-//! more than every short, and each train publishes.
+//! clearing its margin of nought there, and each train with rows to fit
+//! and calibrate on publishes.
 //!
 //! The catalog starts at 21:00 of the 18th of October 2026, a Sunday: the
-//! train at midnight of the 19th has no row before its calibration to fit
-//! on, and fails; the trains from the 20th on publish.
+//! train at midnight of the 19th has no row before its calibration slice
+//! to fit on, and fails; the trains from the 20th on publish.
 
 use std::{
     path::{Path, PathBuf},
@@ -29,9 +29,9 @@ use crate::common::ic;
 /// Hourly decisions on IC's gold's 1-minute bars, its averages of 10 and
 /// 30 of them, warmed up an hour, learning the net P&L of the short of a
 /// 30-minute time-only target, its unit the worth of the ATR of one hourly
-/// bar; retrained every day on a window of 46 hours, the last 12 held out
-/// and the 12 before them calibrated on; trading the short alone, from an
-/// expected nought, published from nought a trade over a trade taken.
+/// bar; retrained every day on a window of 46 hours, the last 12 calibrated
+/// on, each slice of at least one row; trading the short alone, from an
+/// expected nought.
 const CONFIG: &str = r#"
     [data]
     series = [
@@ -54,10 +54,9 @@ const CONFIG: &str = r#"
     target = { limit = "30m", atr = { period = 1 } }
     retrain = "24h"
     window = "46h"
-    holdout = "12h"
+    calibration = "12h"
     margins = { short = "0R" }
-    min_expectancy = "0R"
-    min_trades = 1
+    min_rows = 1
     learner = { kind = "fake" }
     dataset = { commission = { rate = "0.00003" }, balance = "10000000 USD" }
 "#;
@@ -233,7 +232,7 @@ fn a_train_over_a_span_publishes_each_retrain_time_in_order_then_only_those_the_
 }
 
 /// The train of the 19th has no row to fit on, the catalog starting at
-/// 21:00 of the 18th, its fitting window's last hours: it fails, and the
+/// 21:00 of the 18th, within its calibration slice, from noon: it fails, and the
 /// trains of the 20th and the 21st after it publish. The command fails,
 /// listing the 19th alone, with its reason.
 #[rstest]

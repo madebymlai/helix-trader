@@ -5,11 +5,9 @@
 //! over each odd one (`ic::edge_quotes`), and the probe's one feature, `cheap`,
 //! marks where the hour starts: 1 at the bottom, 0 at the top. Each side
 //! learns its R from the feature, the long's high at the bottom, where it
-//! wins, and the short's at the top, and their pair calibrated together
-//! expects each to win where it does: each row picks the side that wins it,
-//! and the trades picked earn more per trade than taking every trade. One
-//! node per thread: a test training twice trains the first time on a thread
-//! of its own.
+//! wins, and the short's at the top, and their pair is calibrated together
+//! on the calibration slice and published, each model reloading to its
+//! probes.
 
 use std::{path::Path, rc::Rc};
 
@@ -17,11 +15,10 @@ use helix_trader::{
     model::{
         config::{Margins, ModelConfig},
         features::{Feature, FeatureSet, side_names},
-        holdout::{Holdout, Refusal},
         learner::{LearnerConfig, LightGbmConfig},
         store::{ModelCalibration, ModelStore},
         targets::Side,
-        train::{Kept, Outcome, Trained, Training},
+        train::{Outcome, Trained, Training},
     },
     strategy::{Declared, IndicatorArgs, risk::R},
 };
@@ -41,14 +38,6 @@ use crate::common::{
 /// and the rise over it.
 const BOTTOM: f64 = ic::EDGE_BOTTOM;
 const RISE: f64 = ic::EDGE_RISE;
-
-/// The worth of each trade's stop, 3.00 from its decision's mid, on an
-/// ounce: one R, in USD.
-const UNIT: f64 = 3.0;
-
-/// The least expectancy the models publish from, which the
-/// trades picked clear.
-const MINIMUM: R = R::new(0.5);
 
 /// Where the last mid is between the top of the hours, 4004.10, at 0, and
 /// their bottom, 4000.10, at 1, clamped.
@@ -116,39 +105,37 @@ fn features() -> Rc<FeatureSet> {
 
 /// The probe's decisions on `cheap`, learning the R of each side of the
 /// bracket by LightGBM, on leaves of 20 rows, on a window of 70 hours, the
-/// last 12 held out and the 12 before them calibrated on, so that the 46
-/// hours fitted on split; each side traded from an expected net R of
-/// nought, published from `min_expectancy` per trade over 5 trades.
-fn config(min_expectancy: R) -> ModelConfig {
+/// last 12 calibrated on, so that the 58 hours fitted on split, each slice
+/// of at least 5 rows; each side traded from an expected net R of nought.
+fn config() -> ModelConfig {
     ModelConfig::builder()
         .decision(rule())
         .target(target())
         .retrain(SignedDuration::from_hours(24))
         .dataset(venue())
         .window(SignedDuration::from_hours(70))
-        .holdout(SignedDuration::from_hours(12))
+        .calibration(SignedDuration::from_hours(12))
         .margins(Margins {
             long: Some(R::new(0.0)),
             short: Some(R::new(0.0)),
         })
-        .min_expectancy(min_expectancy)
-        .min_trades(5)
+        .min_rows(5)
         .learner(LearnerConfig::LightGbm(
             LightGbmConfig::builder().min_data_in_leaf(20).build(),
         ))
         .build()
 }
 
-fn training(catalog: &TempDir, models: &Path, min_expectancy: R) -> Training {
-    blueprint(features(), config(min_expectancy))
+fn training(catalog: &TempDir, models: &Path) -> Training {
+    blueprint(features(), config())
         .training(catalog.path(), models)
         .unwrap()
 }
 
-/// The store under `models` of the `side` models of a training of
-/// `min_expectancy`, as `training` keys it.
-fn store(models: &Path, min_expectancy: R, side: Side) -> ModelStore {
-    blueprint(features(), config(min_expectancy))
+/// The store under `models` of the `side` models of a training, as
+/// `training` keys it.
+fn store(models: &Path, side: Side) -> ModelStore {
+    blueprint(features(), config())
         .model_set(models)
         .unwrap()
         .side(side)
@@ -171,83 +158,35 @@ fn t() -> Timestamp {
     ic::at("00:00:00") + SignedDuration::from_hours(48)
 }
 
-fn close(actual: Option<f64>, expected: f64) {
-    let actual = actual.unwrap();
-    assert!((actual - expected).abs() < 1e-9, "{actual} != {expected}");
-}
-
-/// The holdout of a published `outcome`.
-fn published(outcome: Option<Outcome>) -> Holdout {
-    match outcome {
-        Some(Outcome::Published {
-            valid_from,
-            holdout,
-        }) if valid_from == t() => *holdout,
-        outcome => panic!("{outcome:?}"),
-    }
-}
-
-/// Worked by hand. A decision at the bottom, mid 4000.10, sets each exit
-/// 3.00 away (7.5 bps, on the cent), a stop worth 3.00 USD on the ounce,
-/// the trade's unit, one R (`UNIT`): the long enters at the ask, 4000.20,
-/// and its take profit, a sell limit at 4003.10, fills when the bid
-/// reaches it, +2.90 less two fees of 0.12, 2.66 USD; the short enters at
-/// the bid, 4000.00, and its stop at 4003.10 fills when the ask reaches
-/// it, -3.10 less the fees, -3.34. At the top, mid 4004.10, the reverse.
-/// Those fills are 58 and 62 quotes of 45 s after the hour starts, each
-/// row settling at 46:30 past it. Held out, the decisions of 12:00 to 23:00
-/// of the 22nd, the last settled at 23:46:30, before the train: six at the
-/// bottom, six at the top. Each row picks the side that wins it, the long at
-/// the bottom and the short at the top: 12 trades of 2.66 / 3 R, beside every
-/// trade, a win and a loss of each row, (12 x 2.66 - 12 x 3.34) / 24 / 3 R.
-/// Both sides hold those earnings. At 1.5 times the commission of 0.24 each
-/// trade makes 0.12 / 3 R less. Each side's expected R is nearer its R than its training mean is:
-/// a skill above nought. Both manifests hold the pair's one calibration,
-/// naming it, and each side's model, reloaded by its learner, predicts its
-/// probes to the bit.
+/// Each side published at t, valid from then. Both manifests hold the
+/// pair's one calibration, naming it, and each side's model, reloaded by
+/// its learner, predicts its probes, rows of the calibration slice, to the
+/// bit.
 #[rstest]
-fn train_at_t_publishes_each_side_earning_on_the_edge_whose_probes_reload_to_identical_predictions()
-{
+fn train_at_t_publishes_each_side_whose_probes_reload_to_identical_predictions() {
     let catalog = catalog();
     let models = tempfile::tempdir().unwrap();
-    let training = training(&catalog, models.path(), MINIMUM);
+    let training = training(&catalog, models.path());
 
     let trained = training.train_at(t(), |from, to| replay_on(&catalog, features(), from, to));
 
-    let Trained { long, short, meta } = trained;
-    assert_eq!(meta, None);
-    for holdout in [published(long), published(short)] {
-        let earnings = holdout.earnings;
-        assert_eq!(
-            (earnings.taken.count, earnings.every.count),
-            (12, 24),
-            "{holdout:?}"
-        );
-        close(earnings.taken.expectancy, 2.66 / UNIT);
-        close(earnings.taken.win_rate, 1.0);
-        close(
-            earnings.every.expectancy,
-            (12.0 * 2.66 - 12.0 * 3.34) / 24.0 / UNIT,
-        );
-        close(earnings.taken_stressed.expectancy, 2.54 / UNIT);
-        close(
-            earnings.every_stressed.expectancy,
-            (12.0 * 2.54 - 12.0 * 3.46) / 24.0 / UNIT,
-        );
-        assert!(
-            holdout.score.skill.is_some_and(|skill| skill > 0.0),
-            "{holdout:?}"
-        );
-    }
-    let fingerprint = blueprint(features(), config(MINIMUM))
+    let published = Some(Outcome::Published { valid_from: t() });
+    assert_eq!(
+        trained,
+        Trained {
+            long: published.clone(),
+            short: published,
+            meta: None
+        }
+    );
+    let fingerprint = blueprint(features(), config())
         .fingerprint()
         .unwrap()
         .to_string();
     // A side's model reads the strategy's features, then the bracket's payoff
     // features, the names the decision checks it against.
     let names = side_names(features().names(), &target().payoff_names());
-    let [long, short] =
-        Side::BOTH.map(|side| store(models.path(), MINIMUM, side).read(t()).unwrap());
+    let [long, short] = Side::BOTH.map(|side| store(models.path(), side).read(t()).unwrap());
     assert_eq!(long.manifest.calibration, short.manifest.calibration);
     let ModelCalibration::Pair(calibration) = &long.manifest.calibration else {
         panic!("{:?}", long.manifest.calibration);
@@ -275,62 +214,5 @@ fn train_at_t_publishes_each_side_earning_on_the_edge_whose_probes_reload_to_ide
                 "{probe:?}"
             );
         }
-    }
-}
-
-/// An hour later the holdout is the decisions of 13:00 to 00:00: each
-/// row picks the side that wins it, 2.66 / 3 R each, short of a minimum of
-/// 1R, however far above it their money is.
-#[rstest]
-fn a_minimum_above_what_the_holdout_earns_keeps_each_current_model() {
-    let catalog = catalog();
-    let models = tempfile::tempdir().unwrap();
-    let first = std::thread::scope(|scope| {
-        scope
-            .spawn(|| {
-                training(&catalog, models.path(), MINIMUM)
-                    .train_at(t(), |from, to| replay_on(&catalog, features(), from, to))
-            })
-            .join()
-            .unwrap()
-    });
-    for outcome in [first.long, first.short] {
-        published(outcome);
-    }
-    // The minimums key the store: the stricter one holds the models as if
-    // it had published them.
-    let stricter = training(&catalog, models.path(), R::new(1.0));
-    for side in Side::BOTH {
-        let current = store(models.path(), MINIMUM, side).read(t()).unwrap();
-        store(models.path(), R::new(1.0), side)
-            .publish(&current)
-            .unwrap();
-    }
-
-    let trained = stricter.train_at(t() + SignedDuration::from_hours(1), |from, to| {
-        replay_on(&catalog, features(), from, to)
-    });
-
-    for outcome in [trained.long, trained.short] {
-        let Some(Outcome::Kept(Kept::Refused { why, .. })) = outcome else {
-            panic!("{outcome:?}");
-        };
-        let Refusal::MinExpectancy {
-            expectancy,
-            min_expectancy,
-        } = why
-        else {
-            panic!("{why:?}");
-        };
-        close(Some(expectancy), 2.66 / UNIT);
-        assert_eq!(min_expectancy, R::new(1.0));
-    }
-    for side in Side::BOTH {
-        assert_eq!(
-            store(models.path(), R::new(1.0), side)
-                .valid_froms()
-                .unwrap(),
-            [t()]
-        );
     }
 }
