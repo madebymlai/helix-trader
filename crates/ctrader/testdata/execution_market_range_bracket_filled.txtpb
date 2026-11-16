@@ -1,0 +1,77 @@
+# Captured from a cTrader broker's demo (2026-11-16), protobuf port 5035:
+# that MARKET_RANGE buy filled at 3868.57, better than its base 3871.58,
+# by deal 961302807 into position 697002710, charged 0.11 EUR.
+# Scrubbed: ctidTraderAccountId replaced by the fake 1000001; re-encoded
+# from the decoded event, fields as served.
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOAExecutionEvent OpenApiMessages.proto < execution_market_range_bracket_filled.bin
+# Message: ProtoOAExecutionEvent
+ctidTraderAccountId: 1000001
+executionType: ORDER_FILLED
+position {
+  positionId: 697002710
+  tradeData {
+    symbolId: 41
+    volume: 100
+    tradeSide: BUY
+    openTimestamp: 1794849521888
+    guaranteedStopLoss: false
+    measurementUnits: "Oz"
+  }
+  positionStatus: POSITION_STATUS_OPEN
+  swap: 0
+  price: 3868.57
+  utcLastUpdateTimestamp: 1794849521888
+  commission: -11
+  marginRate: 3513.06
+  mirroringCommission: 0
+  guaranteedStopLoss: false
+  usedMargin: 11710
+  moneyDigits: 2
+  trailingStopLoss: false
+}
+order {
+  orderId: 1040675911
+  tradeData {
+    symbolId: 41
+    volume: 100
+    tradeSide: BUY
+    openTimestamp: 1794849521633
+    guaranteedStopLoss: false
+    measurementUnits: "Oz"
+    closeTimestamp: 1794849521888
+  }
+  orderType: MARKET_RANGE
+  orderStatus: ORDER_STATUS_FILLED
+  executionPrice: 3868.57
+  executedVolume: 100
+  utcLastUpdateTimestamp: 1794849521888
+  baseSlippagePrice: 3871.58
+  slippageInPoints: 0
+  closingOrder: false
+  stopLoss: 3851.58
+  takeProfit: 3891.58
+  clientOrderId: "PROBE-IOC-5"
+  timeInForce: IMMEDIATE_OR_CANCEL
+  positionId: 697002710
+  trailingStopLoss: false
+}
+deal {
+  dealId: 961302807
+  orderId: 1040675911
+  positionId: 697002710
+  volume: 100
+  filledVolume: 100
+  symbolId: 41
+  createTimestamp: 1794849521633
+  executionTimestamp: 1794849521888
+  utcLastUpdateTimestamp: 1794849521888
+  executionPrice: 3868.57
+  tradeSide: BUY
+  dealStatus: FILLED
+  marginRate: 3513.06
+  commission: -11
+  baseToUsdConversionRate: 3868.57
+  moneyDigits: 2
+}
+isServerEvent: false
