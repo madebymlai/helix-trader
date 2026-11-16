@@ -111,6 +111,25 @@ async fn an_okx_run_passes_the_account_checks_then_is_refused_at_another_leverag
         .unwrap_err()
         .to_string();
 
-    assert!(err.contains("catalog defines it at leverage 1000"), "{err}");
-    assert!(err.contains("BTC-USD_UM_XPERP-310328"), "{err}");
+    // The refusal names the X-Perp, the catalog's leverage, 1000, and the
+    // account's, at most OKX's highest, 125.
+    let numbers: Vec<f64> = err
+        .split(|c: char| !c.is_ascii_digit() && c != '.')
+        .filter_map(|number| number.trim_matches('.').parse().ok())
+        .collect();
+    assert!(err.contains("BTC-USD_UM_XPERP-310328.OKX"), "{err}");
+    assert!(numbers.contains(&1000.0), "{err}");
+    assert!(
+        numbers
+            .iter()
+            .any(|leverage| (1.0..=125.0).contains(leverage)),
+        "{err}"
+    );
+    // No node was built: the staging holds the trader's instance id alone,
+    // kept before the clients are set up, and nothing a node streams.
+    let staged: Vec<String> = std::fs::read_dir(staging.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(staged, ["HELIXTEST-001.instance-id"]);
 }
