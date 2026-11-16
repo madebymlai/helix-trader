@@ -10,7 +10,7 @@
 //! own binary; two modules opted in together would share it too, and they
 //! cannot: a node stops on the SIGINT its test sends to the whole process,
 //! the `tracing` subscriber `Live::run` installs can be installed only once
-//! per process, there is one node per process (`docs/ARCHITECTURE.md`,
+//! per process, there is one node per process (`docs/architecture.md`,
 //! "Process constraints"), and modules of one venue read and trade the
 //! same account. So the first module to opt in claims the process
 //! (`claim_process`), and another module's test fails before connecting.

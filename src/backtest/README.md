@@ -1,6 +1,6 @@
 # Backtesting
 
-Backtest runs one strategy in a Nautilus `BacktestNode` over the configured catalog. See the [root quick start](../../README.md), command `--help`, and [architecture](../../docs/ARCHITECTURE.md) for process constraints. A commission (fixed per order, a rate on each fill's value, or an amount per unit of each fill's quantity) and starting balance are required; choose values appropriate to the venue and instrument. Seed strategy randomness.
+Backtest runs one strategy in a Nautilus `BacktestNode` over the configured catalog. See the [root quick start](../../README.md), command `--help`, and [architecture](../../docs/architecture.md) for process constraints. A commission (fixed per order, a rate on each fill's value, or an amount per unit of each fill's quantity) and starting balance are required; choose values appropriate to the venue and instrument. Seed strategy randomness.
 
 ## Replay and data
 

@@ -6,7 +6,7 @@
 //! the first node, with the logging mode and clock each backtest switches,
 //! its logging worker and its Tokio runtime are the process's, shared by
 //! every node: a log line may carry another test's simulated time
-//! (`docs/ARCHITECTURE.md`, "Process constraints"). Run one module with:
+//! (`docs/architecture.md`, "Process constraints"). Run one module with:
 //!
 //! ```sh
 //! cargo test --test backtest backtest_warmup::
