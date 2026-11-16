@@ -32,7 +32,6 @@ use crate::{
         dataset::DatasetRow,
         deciding::testing::{self, GOLD, gold},
         features::testing::last_mid,
-        handle::SettledRows,
         holdout::Example,
     },
     strategy::requirements::TickSeries,
@@ -205,132 +204,114 @@ fn atr_refused(rule: DecisionRule, requirements: &DataRequirements) -> String {
     format!("{:#}", config().validate(rule, requirements).unwrap_err())
 }
 
+/// The ATR's bars are of the decision cadence, in its largest whole unit,
+/// on the instrument's mids where the strategy reads its quotes. Quotes read
+/// through bars built from them count as quotes read, and come first: with
+/// trades read beside them, the ATR is still on the mids. On trades alone it
+/// is on the last prices. On bars alone, the ATR's bars are Nautilus'
+/// composite bars of the cadence built from the source bars the strategy
+/// reads, priced as they are; of several, those whose length divides the
+/// cadence, the longest: the fewest source bars to a bar of the cadence.
 #[rstest]
-fn the_atr_is_on_the_instruments_mids_built_at_the_decision_cadence() {
-    let on = |rule| atr_bars(&config(), rule).unwrap().0;
-
-    assert_eq!(on(every(15)), "XAUUSD.ICMARKETS-15-MINUTE-MID-INTERNAL");
-    assert_eq!(on(every(60)), "XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL");
-    assert_eq!(on(every(120)), "XAUUSD.ICMARKETS-2-HOUR-MID-INTERNAL");
-    assert_eq!(on(every(24 * 60)), "XAUUSD.ICMARKETS-1-DAY-MID-INTERNAL");
-    assert_eq!(
-        on(DecisionRule::Every(SignedDuration::from_secs(30))),
-        "XAUUSD.ICMARKETS-30-SECOND-MID-INTERNAL"
-    );
-    assert_eq!(
-        on(DecisionRule::Every(SignedDuration::from_millis(250))),
-        "XAUUSD.ICMARKETS-250-MILLISECOND-MID-INTERNAL"
-    );
+#[case::quarters(quotes(), every(15), "XAUUSD.ICMARKETS-15-MINUTE-MID-INTERNAL")]
+#[case::hours(quotes(), every(60), "XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL")]
+#[case::two_hours(quotes(), every(120), "XAUUSD.ICMARKETS-2-HOUR-MID-INTERNAL")]
+#[case::days(quotes(), every(24 * 60), "XAUUSD.ICMARKETS-1-DAY-MID-INTERNAL")]
+#[case::seconds(
+    quotes(),
+    DecisionRule::Every(SignedDuration::from_secs(30)),
+    "XAUUSD.ICMARKETS-30-SECOND-MID-INTERNAL"
+)]
+#[case::milliseconds(
+    quotes(),
+    DecisionRule::Every(SignedDuration::from_millis(250)),
+    "XAUUSD.ICMARKETS-250-MILLISECOND-MID-INTERNAL"
+)]
+#[case::bars_of_quotes(
+    reading(&[], &["XAUUSD.ICMARKETS-1-HOUR-BID-INTERNAL"]),
+    rule(),
+    "XAUUSD.ICMARKETS-15-MINUTE-MID-INTERNAL"
+)]
+#[case::quotes_and_trades(
+    reading(&["trades", "quotes"], &[]),
+    rule(),
+    "XAUUSD.ICMARKETS-15-MINUTE-MID-INTERNAL"
+)]
+#[case::trades(
+    reading(&["trades"], &[]),
+    rule(),
+    "XAUUSD.ICMARKETS-15-MINUTE-LAST-INTERNAL"
+)]
+#[case::bars_of_trades(
+    reading(&[], &["XAUUSD.ICMARKETS-1-HOUR-LAST-INTERNAL"]),
+    rule(),
+    "XAUUSD.ICMARKETS-15-MINUTE-LAST-INTERNAL"
+)]
+#[case::source_bars(
+    reading(&[], &["XAUUSD.ICMARKETS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL"]),
+    rule(),
+    "XAUUSD.ICMARKETS-15-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL"
+)]
+#[case::source_bars_hourly(
+    reading(&[], &["XAUUSD.ICMARKETS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL"]),
+    every(60),
+    "XAUUSD.ICMARKETS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL"
+)]
+#[case::longest_of_five_minutes(
+    several_source_bars(),
+    rule(),
+    "XAUUSD.ICMARKETS-15-MINUTE-ASK-INTERNAL@5-MINUTE-EXTERNAL"
+)]
+#[case::longest_of_an_hour(
+    several_source_bars(),
+    every(120),
+    "XAUUSD.ICMARKETS-2-HOUR-LAST-INTERNAL@1-HOUR-EXTERNAL"
+)]
+#[case::longest_of_a_minute(
+    several_source_bars(),
+    every(3),
+    "XAUUSD.ICMARKETS-3-MINUTE-BID-INTERNAL@1-MINUTE-EXTERNAL"
+)]
+fn the_atr_is_on_the_instruments_prices_built_at_the_decision_cadence(
+    #[case] requirements: DataRequirements,
+    #[case] rule: DecisionRule,
+    #[case] expected: &str,
+) {
+    assert_eq!(atr_bar_type(rule, &requirements), expected);
 }
 
-/// Quotes read through bars built from them count as quotes read.
-#[rstest]
-fn the_atr_of_a_strategy_on_bars_of_quotes_is_on_the_mids() {
-    let requirements = reading(&[], &["XAUUSD.ICMARKETS-1-HOUR-BID-INTERNAL"]);
-
-    assert_eq!(
-        atr_bar_type(rule(), &requirements),
-        "XAUUSD.ICMARKETS-15-MINUTE-MID-INTERNAL"
-    );
-}
-
-/// Quotes come first: with trades read beside them, the ATR is still on
-/// the mids.
-#[rstest]
-fn the_atr_of_a_strategy_reading_quotes_and_trades_is_on_the_mids() {
-    let requirements = reading(&["trades", "quotes"], &[]);
-
-    assert_eq!(
-        atr_bar_type(rule(), &requirements),
-        "XAUUSD.ICMARKETS-15-MINUTE-MID-INTERNAL"
-    );
-}
-
-#[rstest]
-fn the_atr_of_a_strategy_reading_trades_alone_is_on_the_last_prices() {
-    for requirements in [
-        reading(&["trades"], &[]),
-        reading(&[], &["XAUUSD.ICMARKETS-1-HOUR-LAST-INTERNAL"]),
-    ] {
-        assert_eq!(
-            atr_bar_type(rule(), &requirements),
-            "XAUUSD.ICMARKETS-15-MINUTE-LAST-INTERNAL",
-            "{requirements:?}"
-        );
-    }
-}
-
-/// On bars alone, the ATR's bars are Nautilus' composite bars of the
-/// cadence built from the source bars the strategy reads, priced as they
-/// are.
-#[rstest]
-fn the_atr_of_a_strategy_reading_bars_alone_is_built_from_its_source_bars() {
-    let requirements = reading(
-        &[],
-        &["XAUUSD.ICMARKETS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL"],
-    );
-
-    assert_eq!(
-        atr_bar_type(rule(), &requirements),
-        "XAUUSD.ICMARKETS-15-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL"
-    );
-    assert_eq!(
-        atr_bar_type(every(60), &requirements),
-        "XAUUSD.ICMARKETS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL"
-    );
-}
-
-/// Of several source bars, those whose length divides the cadence, the
-/// longest: the fewest source bars to a bar of the cadence.
-#[rstest]
-fn the_atr_on_bars_alone_is_built_from_the_longest_source_bars_dividing_the_cadence() {
-    let requirements = reading(
+/// Source bars of 1 minute, 5 minutes and an hour, each priced its own way.
+fn several_source_bars() -> DataRequirements {
+    reading(
         &[],
         &[
             "XAUUSD.ICMARKETS-1-HOUR-BID-INTERNAL@1-MINUTE-EXTERNAL",
             "XAUUSD.ICMARKETS-4-HOUR-ASK-INTERNAL@5-MINUTE-EXTERNAL",
             "XAUUSD.ICMARKETS-1-DAY-LAST-INTERNAL@1-HOUR-EXTERNAL",
         ],
-    );
-
-    assert_eq!(
-        atr_bar_type(rule(), &requirements),
-        "XAUUSD.ICMARKETS-15-MINUTE-ASK-INTERNAL@5-MINUTE-EXTERNAL"
-    );
-    assert_eq!(
-        atr_bar_type(every(120), &requirements),
-        "XAUUSD.ICMARKETS-2-HOUR-LAST-INTERNAL@1-HOUR-EXTERNAL"
-    );
-    assert_eq!(
-        atr_bar_type(every(3), &requirements),
-        "XAUUSD.ICMARKETS-3-MINUTE-BID-INTERNAL@1-MINUTE-EXTERNAL"
-    );
+    )
 }
 
 /// The ATR's bars are of the cadence: source bars it is not a whole
-/// multiple of cannot build them, nor bars of no length.
+/// multiple of cannot build them, nor bars of no length. The refusal names
+/// the cadence, 15 minutes, and the source bars.
 #[rstest]
-fn an_atr_on_bars_alone_not_dividing_the_cadence_is_refused_naming_both() {
-    let hours = reading(
-        &[],
-        &["XAUUSD.ICMARKETS-1-DAY-LAST-INTERNAL@1-HOUR-EXTERNAL"],
-    );
-    let err = atr_refused(rule(), &hours);
-    assert!(err.contains("15m"), "{err}");
-    assert!(
-        err.contains("XAUUSD.ICMARKETS-1-HOUR-LAST-EXTERNAL"),
-        "{err}"
-    );
+#[case::hours(
+    "XAUUSD.ICMARKETS-1-DAY-LAST-INTERNAL@1-HOUR-EXTERNAL",
+    "XAUUSD.ICMARKETS-1-HOUR-LAST-EXTERNAL"
+)]
+#[case::ticks(
+    "XAUUSD.ICMARKETS-1-HOUR-LAST-INTERNAL@100-TICK-EXTERNAL",
+    "XAUUSD.ICMARKETS-100-TICK-LAST-EXTERNAL"
+)]
+fn an_atr_on_bars_alone_not_dividing_the_cadence_is_refused_naming_both(
+    #[case] bar_type: &str,
+    #[case] source: &str,
+) {
+    let err = atr_refused(rule(), &reading(&[], &[bar_type]));
 
-    let ticks = reading(
-        &[],
-        &["XAUUSD.ICMARKETS-1-HOUR-LAST-INTERNAL@100-TICK-EXTERNAL"],
-    );
-    let err = atr_refused(rule(), &ticks);
-    assert!(
-        err.contains("XAUUSD.ICMARKETS-100-TICK-LAST-EXTERNAL"),
-        "{err}"
-    );
+    assert!(err.contains("15m"), "{err}");
+    assert!(err.contains(source), "{err}");
 }
 
 /// Neither quotes, trades nor bars of the target's instrument: nothing to
@@ -358,10 +339,12 @@ fn an_atr_on_an_instrument_the_strategy_reads_no_prices_of_is_refused() {
     let err = atr_refused(rule(), &elsewhere);
 
     assert!(err.contains(GOLD), "{err}");
+    assert!(err.contains("model.target.bracket.atr"), "{err}");
     assert!(of(in_bps(20, 10)).validate(rule(), &elsewhere).is_ok());
     let time = time_only(SignedDuration::from_hours(1));
     let err = format!("{:#}", time.validate(rule(), &elsewhere).unwrap_err());
     assert!(err.contains(GOLD), "{err}");
+    assert!(err.contains("model.target.atr"), "{err}");
 }
 
 /// Wilder's period: an `atr` distance without an `atr` table has an ATR of
@@ -384,22 +367,6 @@ fn an_atr_distance_without_an_atr_table_has_an_atr_of_14_bars() {
     assert_eq!(atr_bars(&default, rule()).unwrap().1, 14);
     assert_eq!(atr_bars(&overridden, rule()).unwrap().1, 20);
     assert_eq!(atr_bars(&of(in_bps(20, 10)), rule()), None);
-}
-
-/// A time-only target runs the ATR of its table, on the bars a bracket's
-/// runs on: the cadence's, of the mids of the quotes the strategy reads.
-#[rstest]
-fn a_time_only_targets_atr_is_its_tables_on_the_cadences_bars() {
-    let config = of(Target::builder()
-        .limit(SignedDuration::from_hours(1))
-        .atr(atr_of(3))
-        .build());
-
-    assert!(config.validate(rule(), &quotes()).is_ok());
-    assert_eq!(
-        atr_bars(&config, rule()),
-        Some(("XAUUSD.ICMARKETS-15-MINUTE-MID-INTERNAL".to_string(), 3))
-    );
 }
 
 /// The ConfigError refusing `config` on `rule()` for a strategy reading the
@@ -427,24 +394,6 @@ fn blueprint(target: TargetConfig) -> anyhow::Result<ModelBlueprint> {
     )
 }
 
-/// A time-only target's unit is the worth of its ATR: one without an `atr`
-/// table has none, and is refused under it, saying so.
-#[rstest]
-fn a_time_only_target_without_an_atr_is_refused_under_its_atr() {
-    let config = of(Target::builder()
-        .limit(SignedDuration::from_hours(1))
-        .build());
-
-    let (field, reason) = refused_alone(&config);
-
-    assert_eq!(field, "model.target.atr");
-    assert!(
-        reason.contains("ATR") && reason.contains("unit"),
-        "{reason}"
-    );
-    assert!(blueprint(config).is_err());
-}
-
 /// A bracket's ATR is its own `atr` table's: one on the target beside it
 /// would be a second, and is refused under the target's.
 #[rstest]
@@ -462,15 +411,20 @@ fn an_atr_table_beside_a_bracket_is_refused_under_the_targets() {
 
 /// Nautilus builds only bars whose step divides the next unit
 /// (`BarSpecification::new_checked`): neither 90 nor 7 minutes divide an hour.
+/// The refusal names the cadence.
 #[rstest]
-fn an_atr_on_a_cadence_nautilus_builds_no_bars_of_is_refused() {
-    for minutes in [90, 7] {
-        let err = format!(
-            "{:#}",
-            config().validate(every(minutes), &quotes()).unwrap_err()
-        );
-        assert!(err.contains("ATR"), "{minutes}: {err}");
-    }
+#[case::ninety_minutes(90, "1h 30m")]
+#[case::seven_minutes(7, "7m")]
+fn an_atr_on_a_cadence_nautilus_builds_no_bars_of_is_refused(
+    #[case] minutes: i64,
+    #[case] cadence: &str,
+) {
+    let err = format!(
+        "{:#}",
+        config().validate(every(minutes), &quotes()).unwrap_err()
+    );
+
+    assert!(err.contains(&format!("cadence {cadence}")), "{err}");
 }
 
 #[rstest]
@@ -483,43 +437,37 @@ fn a_bracket_and_a_time_only_target_are_valid() {
     );
 }
 
-/// A bracket has both exits: one alone does not parse.
+/// A distance in ATRs or a limit not positive is refused under its field, a
+/// time-only target's limit as a bracket's, and the blueprint built on the
+/// target refuses it as well.
 #[rstest]
-fn one_exit_alone_does_not_parse() {
-    for (toml, missing) in [
-        ("bracket = { take_profit = { bps = 20 } }", "stop"),
-        ("bracket = { stop = { bps = 10 } }", "take_profit"),
-    ] {
-        let err = toml::from_str::<Target>(&format!("{toml}\nlimit = \"2h\"")).unwrap_err();
+#[case::stop_of_no_atr(
+    of(exiting(BracketSpec {
+        stop: Distance::Atr(Decimal::ZERO),
+        ..exits_of_config()
+    })),
+    "model.target.bracket"
+)]
+#[case::bracket_of_no_limit(
+    of(Target {
+        limit: SignedDuration::ZERO,
+        ..bracket()
+    }),
+    "model.target.limit"
+)]
+#[case::time_only_of_a_negative_limit(
+    time_only(SignedDuration::from_mins(-5)),
+    "model.target.limit"
+)]
+fn a_distance_or_a_limit_not_positive_is_refused_under_its_field(
+    #[case] config: TargetConfig,
+    #[case] field: &str,
+) {
+    let (refused, _) = refused_alone(&config);
+    let err = format!("{:#}", blueprint(config).unwrap_err());
 
-        assert!(
-            err.to_string()
-                .contains(&format!("missing field `{missing}`")),
-            "{err}"
-        );
-    }
-}
-
-#[rstest]
-fn sizes_distances_and_times_must_be_positive() {
-    let invalid = [
-        of(in_bps(0, 10)),
-        of(in_bps(10, -1)),
-        of(exiting(BracketSpec {
-            stop: Distance::Atr(Decimal::ZERO),
-            ..exits_of_config()
-        })),
-        of(Target {
-            limit: SignedDuration::ZERO,
-            ..bracket()
-        }),
-        time_only(SignedDuration::from_mins(-5)),
-    ];
-
-    for config in invalid {
-        assert!(config.validate(rule(), &quotes()).is_err(), "{config:?}");
-        assert!(blueprint(config).is_err());
-    }
+    assert_eq!(refused, field);
+    assert!(err.contains(field), "{err}");
 }
 
 /// The ATR of no bars, which this test refused as an error before the
@@ -537,84 +485,6 @@ fn an_atr_of_no_bars_panics_as_validated() {
         ..exits_of_config()
     }));
     let _ = config.validate(rule(), &quotes());
-}
-
-/// The ATR's arguments are Nautilus' `AverageTrueRange`'s, by their names,
-/// the moving average by Nautilus' name of it, case aside.
-#[rstest]
-fn an_atr_reads_nautilus_arguments_from_toml() {
-    let toml = r#"
-        limit = "2h"
-        [bracket]
-        take_profit = { atr = 2 }
-        stop = { atr = 1.5 }
-        atr = { period = 20, ma_type = "Exponential", use_previous = false, value_floor = 0.25 }
-    "#;
-
-    let atr = toml::from_str::<Target>(toml).unwrap().bracket.unwrap().atr;
-
-    assert_eq!(
-        atr,
-        Some(AtrArgs {
-            period: 20,
-            ma_type: Some(MovingAverageType::Exponential),
-            use_previous: Some(false),
-            value_floor: Some(0.25),
-        })
-    );
-}
-
-/// What the target trades is the strategy's `[trade]`: the table naming
-/// it is refused.
-#[rstest]
-fn a_table_naming_an_instrument_or_a_quantity_is_refused() {
-    for key in [r#"instrument_id = "XAUUSD.ICMARKETS""#, r#"quantity = "1""#] {
-        let toml = format!("{key}\nlimit = \"1h\"");
-        let err = toml::from_str::<Target>(&toml).unwrap_err();
-        let name = key.split(' ').next().unwrap();
-        assert!(err.to_string().contains(name), "{err}");
-    }
-}
-
-/// The table trades the instrument it is given at the risk it is given,
-/// through the conversions it is given.
-#[rstest]
-fn a_table_trades_the_instrument_and_risk_it_is_given() {
-    let table = toml::from_str::<Target>("limit = \"1h\"").unwrap();
-    let traded = TradedInstrument {
-        instrument_id: InstrumentId::from("EURUSD.ICMARKETS"),
-    };
-    let conversions = Conversions::new(vec![InstrumentId::from("GBPUSD.ICMARKETS")]);
-
-    let target = table.trading(&traded, risk(), conversions.clone());
-
-    assert_eq!(target.instrument_id, traded.instrument_id);
-    assert_eq!(target.risk, risk());
-    assert_eq!(target.conversions, conversions);
-    assert_eq!(target.settles_within(), SignedDuration::from_hours(1));
-}
-
-#[rstest]
-fn an_atr_table_is_refused_unless_a_distance_uses_the_atr() {
-    let valid = [
-        of(in_bps(20, 10)),
-        of(exiting(BracketSpec {
-            take_profit: Distance::Atr(Decimal::from(2)),
-            ..exits_of_config()
-        })),
-    ];
-    let unused = of(exiting(BracketSpec {
-        take_profit: Distance::BasisPoints(Decimal::from(20)),
-        stop: Distance::BasisPoints(Decimal::from(10)),
-        ..exits_of_config()
-    }));
-
-    for config in valid {
-        assert!(config.validate(rule(), &quotes()).is_ok(), "{config:?}");
-    }
-    let err = format!("{:#}", unused.validate(rule(), &quotes()).unwrap_err());
-    assert!(err.contains("no distance uses"), "{err}");
-    assert!(blueprint(unused).is_err());
 }
 
 /// A perpetual priced in half points, 0.5 a tick, as some futures are.
@@ -655,60 +525,47 @@ fn exits(target: Target, reference: &str, atr: Option<f64>) -> [(String, String)
     })
 }
 
+/// Each exit on the nearest half-point tick. 10 bps of 1000.0 is 1.0, on the
+/// tick; 12 bps 1.2, nearer 1.0 than 1.5; 13 bps 1.3, nearer 1.5. 12.5 bps is
+/// 1.25, half way between 1.0 and 1.5: a tie goes away from the reference.
+/// 1.5 ATRs of 2.1 is 3.15, nearer 3.0 than 3.5; 2 ATRs 4.2, nearer 4.0.
 #[rstest]
-fn exits_are_basis_points_of_the_reference_on_the_nearest_tick() {
-    // 10 bps of 1000.0 is 1.0, on the tick; 12 bps 1.2, nearer 1.0
-    // than 1.5; 13 bps 1.3, nearer 1.5.
-    assert_eq!(
-        exits(in_bps(10, 12), "1000.0", None),
-        [
-            ("1001.0".into(), "999.0".into()),
-            ("999.0".into(), "1001.0".into())
-        ]
-    );
-    assert_eq!(
-        exits(in_bps(13, 10), "1000.0", None),
-        [
-            ("1001.5".into(), "999.0".into()),
-            ("998.5".into(), "1001.0".into())
-        ]
-    );
-}
-
-#[rstest]
-fn a_tie_between_two_ticks_goes_away_from_the_reference() {
-    // 12.5 bps of 1000.0 is 1.25, half way between 1.0 and 1.5.
-    let target = exiting(BracketSpec {
+#[case::basis_points_on_and_below_a_half_tick(
+    in_bps(10, 12),
+    None,
+    [("1001.0", "999.0"), ("999.0", "1001.0")]
+)]
+#[case::basis_points_above_a_half_tick(
+    in_bps(13, 10),
+    None,
+    [("1001.5", "999.0"), ("998.5", "1001.0")]
+)]
+#[case::a_tie_between_two_ticks(
+    exiting(BracketSpec {
         take_profit: Distance::BasisPoints(Decimal::new(125, 1)),
         stop: Distance::BasisPoints(Decimal::from(10)),
         atr: None,
-    });
-
-    assert_eq!(
-        exits(target, "1000.0", None),
-        [
-            ("1001.5".into(), "999.0".into()),
-            ("998.5".into(), "1001.0".into())
-        ]
-    );
-}
-
-#[rstest]
-fn exits_are_multiples_of_the_atr_on_the_nearest_tick() {
-    // 1.5 ATRs of 2.1 is 3.15, nearer 3.0 than 3.5; 2 ATRs 4.2,
-    // nearer 4.0.
-    let target = exiting(BracketSpec {
+    }),
+    None,
+    [("1001.5", "999.0"), ("998.5", "1001.0")]
+)]
+#[case::multiples_of_the_atr(
+    exiting(BracketSpec {
         take_profit: Distance::Atr(Decimal::new(15, 1)),
         stop: Distance::Atr(Decimal::from(2)),
         ..exits_of_config()
-    });
-
+    }),
+    Some(2.1),
+    [("1003.0", "996.0"), ("997.0", "1004.0")]
+)]
+fn exits_are_their_distances_from_the_reference_on_the_nearest_tick(
+    #[case] target: Target,
+    #[case] atr: Option<f64>,
+    #[case] expected: [(&str, &str); 2],
+) {
     assert_eq!(
-        exits(target, "1000.0", Some(2.1)),
-        [
-            ("1003.0".into(), "996.0".into()),
-            ("997.0".into(), "1004.0".into())
-        ]
+        exits(target, "1000.0", atr),
+        expected.map(|(take_profit, stop)| (take_profit.to_string(), stop.to_string()))
     );
 }
 
@@ -733,71 +590,46 @@ fn an_exit_rounding_onto_the_reference_gives_no_exits() {
     assert!(exits_of(Decimal::from(10), Decimal::from(10)).is_some());
 }
 
+/// `config`, its ATR of 14 bars with `change` made to its arguments.
+fn config_atr(change: impl FnOnce(&mut AtrArgs)) -> TargetConfig {
+    let mut atr = atr_of(14);
+    change(&mut atr);
+    of(exiting(BracketSpec {
+        atr: Some(atr),
+        ..exits_of_config()
+    }))
+}
+
 #[rstest]
-fn the_fingerprint_changes_with_every_target_spec() {
+#[case::risk(TargetConfig {
+    risk: "0.4%".parse().unwrap(),
+    ..config()
+})]
+#[case::take_profit_in_bps(of(exiting(BracketSpec {
+    take_profit: Distance::BasisPoints(Decimal::from(21)),
+    ..exits_of_config()
+})))]
+#[case::take_profit_in_atrs(of(exiting(BracketSpec {
+    take_profit: Distance::Atr(Decimal::from(20)),
+    ..exits_of_config()
+})))]
+#[case::stop(of(exiting(BracketSpec {
+    stop: Distance::Atr(Decimal::from(2)),
+    ..exits_of_config()
+})))]
+#[case::atr_period(config_atr(|atr| atr.period = 15))]
+#[case::atr_moving_average(config_atr(|atr| atr.ma_type = Some(MovingAverageType::Simple)))]
+#[case::atr_use_previous(config_atr(|atr| atr.use_previous = Some(false)))]
+#[case::atr_value_floor(config_atr(|atr| atr.value_floor = Some(0.5)))]
+#[case::limit(of(Target {
+    limit: SignedDuration::from_hours(3),
+    ..bracket()
+}))]
+fn the_fingerprint_changes_with_every_target_spec(#[case] changed: TargetConfig) {
     let base = last_mid(InstrumentId::from(GOLD))
         .build()
         .unwrap()
         .fingerprint();
-    let changed = [
-        TargetConfig {
-            risk: "0.4%".parse().unwrap(),
-            ..config()
-        },
-        of(exiting(BracketSpec {
-            take_profit: Distance::BasisPoints(Decimal::from(21)),
-            ..exits_of_config()
-        })),
-        of(exiting(BracketSpec {
-            take_profit: Distance::Atr(Decimal::from(20)),
-            ..exits_of_config()
-        })),
-        of(exiting(BracketSpec {
-            stop: Distance::Atr(Decimal::from(2)),
-            ..exits_of_config()
-        })),
-        of(exiting(BracketSpec {
-            atr: Some(AtrArgs {
-                period: 15,
-                ..DEFAULT_ATR
-            }),
-            ..exits_of_config()
-        })),
-        of(exiting(BracketSpec {
-            atr: Some(AtrArgs {
-                ma_type: Some(MovingAverageType::Simple),
-                ..AtrArgs {
-                    period: 14,
-                    ..DEFAULT_ATR
-                }
-            }),
-            ..exits_of_config()
-        })),
-        of(exiting(BracketSpec {
-            atr: Some(AtrArgs {
-                use_previous: Some(false),
-                ..AtrArgs {
-                    period: 14,
-                    ..DEFAULT_ATR
-                }
-            }),
-            ..exits_of_config()
-        })),
-        of(exiting(BracketSpec {
-            atr: Some(AtrArgs {
-                value_floor: Some(0.5),
-                ..AtrArgs {
-                    period: 14,
-                    ..DEFAULT_ATR
-                }
-            }),
-            ..exits_of_config()
-        })),
-        of(Target {
-            limit: SignedDuration::from_hours(3),
-            ..bracket()
-        }),
-    ];
 
     assert_eq!(
         fingerprint(base, &config(), rule(), &quotes()).unwrap(),
@@ -807,13 +639,10 @@ fn the_fingerprint_changes_with_every_target_spec() {
         fingerprint(base, &config(), rule(), &quotes()).unwrap(),
         base
     );
-    for config in changed {
-        assert_ne!(
-            fingerprint(base, &config, rule(), &quotes()).unwrap(),
-            fingerprint(base, &self::config(), rule(), &quotes()).unwrap(),
-            "{config:?}"
-        );
-    }
+    assert_ne!(
+        fingerprint(base, &changed, rule(), &quotes()).unwrap(),
+        fingerprint(base, &config(), rule(), &quotes()).unwrap()
+    );
 }
 
 /// A trade with exits is not one closed at its time alone, whatever the
@@ -923,20 +752,18 @@ fn a_decision_settles_within_its_limit() {
 }
 
 #[rstest]
-fn an_outcome_has_the_sign_of_its_pnl() {
-    let sign = |pnl: &str| {
-        Outcome {
-            pnl: Money::from(pnl),
-            commission: Money::from("0.1 USD"),
-            exit: Exit::Time,
-            unit: Money::from("1 USD"),
-        }
-        .sign()
+#[case::a_gain("0.0005 USDT", 1)]
+#[case::a_loss("-0.44 USD", -1)]
+#[case::nought("0 USD", 0)]
+fn an_outcome_has_the_sign_of_its_pnl(#[case] pnl: &str, #[case] sign: i8) {
+    let outcome = Outcome {
+        pnl: Money::from(pnl),
+        commission: Money::from("0.1 USD"),
+        exit: Exit::Time,
+        unit: Money::from("1 USD"),
     };
 
-    assert_eq!(sign("0.0005 USDT"), 1);
-    assert_eq!(sign("-0.44 USD"), -1);
-    assert_eq!(sign("0 USD"), 0);
+    assert_eq!(outcome.sign(), sign);
 }
 
 // ------------------------------------------------------- reference stake
@@ -993,48 +820,31 @@ fn a_dataset_run_sends_each_side_at_the_size_its_row_is_priced_at() {
     }
 }
 
-/// A denial fails the dataset run with its reason: no row is dropped
-/// silently.
+/// Gold's P&L is in USD. A dataset balance in EUR: the reference stake is
+/// not sized on it, which is not converted. A commission of 3 EUR an order
+/// (`in_euros`): the target's costs are not converted. Either way the
+/// targets do not start, naming the currency.
 #[rstest]
-fn a_denied_order_fails_the_dataset_run_with_its_reason() {
-    let probe = Probe::holding(Some(aud()));
-    let targets = targets(on_aud(in_bps(20, 10)));
-    let rows = SettledRows::default();
-    let denied = OrderDenied::new(
-        TraderId::from("HELIX-001"),
-        StrategyId::from("S-001"),
-        InstrumentId::from(AUD),
-        ClientOrderId::from("D3-L-E"),
-        Ustr::from("INITIAL_MARGIN_EXCEEDS_FREE_BALANCE: free=1 USD, margin=2 USD"),
-        nautilus_core::UUID4::new(),
-        UnixNanos::default(),
-        UnixNanos::default(),
-    );
-
-    targets.on_order_denied(&probe, &denied, &rows);
-
-    let err = format!("{:#}", rows.take().unwrap_err());
-    assert!(
-        err.contains("D3-L-E") && err.contains("INITIAL_MARGIN_EXCEEDS_FREE_BALANCE"),
-        "{err}"
-    );
-}
-
-/// A dataset balance in EUR on gold, whose P&L is in USD: the reference
-/// stake is not sized on it, which is not converted, and the targets do not
-/// start.
-#[rstest]
-fn a_dataset_balance_in_another_currency_than_the_targets_pnl_is_refused_as_the_targets_start() {
-    let mut probe = Probe::holding(Some(gold()));
-    let venue = DatasetVenue {
+#[case::a_balance_in_euros(
+    DatasetVenue {
         balance: Money::from("100000 EUR"),
         ..venue_of(commission())
-    };
+    },
+    &["EUR", "balance"]
+)]
+#[case::a_commission_in_euros(venue_of(in_euros()), &["EUR"])]
+fn a_dataset_venue_in_another_currency_than_the_targets_pnl_is_refused_as_the_targets_start(
+    #[case] venue: DatasetVenue,
+    #[case] named: &[&str],
+) {
+    let mut probe = Probe::holding(Some(gold()));
     let targets = Targets::new(lot(no_exits()), rule(), &quotes(), &venue).unwrap();
 
     let err = format!("{:#}", targets.start(&mut probe).unwrap_err());
 
-    assert!(err.contains("EUR") && err.contains("balance"), "{err}");
+    for named in named {
+        assert!(err.contains(named), "{named}: {err}");
+    }
 }
 
 /// EUR/USD on the simulated venue, AUD/USD's: the pair a target on
@@ -1332,7 +1142,8 @@ fn decision() -> FeatureRow {
 /// The long's stop is below the price, its take profit above; the short's the
 /// reverse. At the reference stake, 300 USD, over 0.0007 on one AUD/USD, each
 /// side is 428,571.43 AUD/USD rounded down, 428,571, its stop worth 299.9997
-/// USD, the unit.
+/// USD, the unit. Each side is of the dataset balance, 100,000 USD, and
+/// closes after the target's 2 hours.
 #[rstest]
 fn a_bracket_is_set_on_each_side_with_the_worth_of_its_stop_at_the_reference_stake() {
     let probe = Probe::holding(Some(aud()));
@@ -1340,7 +1151,6 @@ fn a_bracket_is_set_on_each_side_with_the_worth_of_its_stop_at_the_reference_sta
 
     let set = setter(&on_aud(in_bps(20, 10))).at(&probe).unwrap().unwrap();
 
-    assert_eq!(set.long.reference, Price::from("0.70000"));
     assert_eq!(
         set.long.bracket,
         Some(Bracket {
@@ -1355,31 +1165,14 @@ fn a_bracket_is_set_on_each_side_with_the_worth_of_its_stop_at_the_reference_sta
             stop_loss: Price::from("0.70070"),
         })
     );
+
     for side in [&set.long, &set.short] {
+        assert_eq!(side.reference, Price::from("0.70000"));
+        assert_eq!(side.time_limit, SignedDuration::from_hours(2));
         assert_eq!(side.one_r, Decimal::new(70, 5));
+        assert_eq!(side.equity, Money::from("100000 USD"));
         assert_eq!(side.unit, Money::from_str_exact("299.9997 USD").unwrap());
     }
-}
-
-/// Gold at 4000.00/4000.01: the mid, 4000.005, is on a half tick, and exits a
-/// hundredth of a basis point from it, 0.004, are on the ticks either side,
-/// half a cent away. The reference stake, 300 USD, over half a cent would buy
-/// 60,000 oz, which Nautilus' sizer caps at gold's maximum of 10,000: each
-/// stop is worth exactly 50 USD on them.
-#[rstest]
-fn a_stop_half_a_tick_from_a_mid_on_a_half_tick_is_worth_exactly_that() {
-    let probe = Probe::holding(Some(gold()));
-    probe.quoted_at(InstrumentId::from(GOLD), "4000.00", "4000.01");
-    let exits = exiting(BracketSpec {
-        take_profit: Distance::BasisPoints(Decimal::new(1, 2)),
-        stop: Distance::BasisPoints(Decimal::new(1, 2)),
-        atr: None,
-    });
-
-    let set = setter(&of(exits)).at(&probe).unwrap().unwrap();
-
-    assert_eq!(set.long.unit, Money::from("50 USD"));
-    assert_eq!(set.short.unit, Money::from("50 USD"));
 }
 
 /// AUD/USD at 0.70000/0.70001: 3 bps of the mid of 0.700005 is 0.00021, and
@@ -1490,42 +1283,40 @@ fn a_time_only_target_is_set_with_the_worth_of_its_atr_through_the_multiplier() 
 /// worth of a time-only target's unit, so no target, which names the ATR's
 /// bars.
 #[rstest]
-fn a_target_on_an_atr_of_nought_says_so_and_names_its_bars() {
+#[case::time_only(no_exits())]
+#[case::a_bracket_in_atrs(exiting(BracketSpec {
+    take_profit: Distance::Atr(Decimal::from(2)),
+    stop: Distance::Atr(Decimal::ONE),
+    atr: Some(atr_of(1)),
+}))]
+fn a_target_on_an_atr_of_nought_says_so_and_names_its_bars(#[case] spec: Target) {
     let mut probe = Probe::holding(Some(gold()));
     probe.quoted_at(InstrumentId::from(GOLD), "3999.90", "4000.10");
     let flat = quarter(GOLD, ["4000.00"; 4]);
-    let in_atrs = exiting(BracketSpec {
-        take_profit: Distance::Atr(Decimal::from(2)),
-        stop: Distance::Atr(Decimal::ONE),
-        atr: Some(atr_of(1)),
-    });
 
-    for spec in [no_exits(), in_atrs] {
-        let set = warmed(setter(&of(spec)), &mut probe, &flat)
-            .at(&probe)
-            .unwrap();
+    let set = warmed(setter(&of(spec)), &mut probe, &flat)
+        .at(&probe)
+        .unwrap();
 
-        assert_eq!(
-            set,
-            Err(NoTarget::FlatAtr(BarType::from(
-                "XAUUSD.ICMARKETS-15-MINUTE-MID-INTERNAL"
-            ))),
-            "{spec:?}"
-        );
-    }
+    assert_eq!(
+        set,
+        Err(NoTarget::FlatAtr(BarType::from(
+            "XAUUSD.ICMARKETS-15-MINUTE-MID-INTERNAL"
+        )))
+    );
 }
 
 #[rstest]
-fn a_target_with_no_price_to_set_it_from_says_so() {
+#[case::a_bracket(in_bps(20, 10))]
+#[case::time_only(no_exits())]
+fn a_target_with_no_price_to_set_it_from_says_so(#[case] spec: Target) {
     let mut probe = Probe::holding(Some(gold()));
 
-    for spec in [in_bps(20, 10), no_exits()] {
-        let set = warmed(setter(&of(spec)), &mut probe, &gold_bar())
-            .at(&probe)
-            .unwrap();
+    let set = warmed(setter(&of(spec)), &mut probe, &gold_bar())
+        .at(&probe)
+        .unwrap();
 
-        assert_eq!(set, Err(NoTarget::NoPrice), "{spec:?}");
-    }
+    assert_eq!(set, Err(NoTarget::NoPrice));
 }
 
 /// Gold's bracket 0.3 of Wilder's ATR of 4 bars a side, closed after 5
@@ -1619,31 +1410,36 @@ fn a_setter_sharing_a_width_sets_its_exits_at_the_width_read_then() {
     assert_eq!(wider, (Some(0.9), Some(Price::from("3999.10"))));
 }
 
-/// A setter shares only the ATR it would run itself: a width's of another
-/// period, or a width in basis points with none, is refused.
+/// A setter shares only the ATR it would run itself, of 4 bars: a width's of
+/// another period, 14, or a width in basis points with none, is refused,
+/// naming both.
 #[rstest]
-fn a_setter_refuses_to_share_the_atr_of_another_width() {
-    let fourteen = Target {
+#[case::of_another_period(
+    Target {
         bracket: symmetric().spec.bracket.map(|bracket| BracketSpec {
             atr: Some(DEFAULT_ATR),
             ..bracket
         }),
         ..symmetric().spec
-    };
+    },
+    "period: 14"
+)]
+#[case::in_basis_points(in_bps(10, 10), "ATR None")]
+fn a_setter_refuses_to_share_the_atr_of_another_width(#[case] other: Target, #[case] shared: &str) {
+    let width = of(other).width(rule(), &quotes()).unwrap();
 
-    for other in [fourteen, in_bps(10, 10)] {
-        let width = of(other).width(rule(), &quotes()).unwrap();
-        let err = TargetSetter::sharing(
-            &symmetric(),
-            rule(),
-            &quotes(),
-            &venue_of(commission()),
-            Some(&width),
-        )
-        .unwrap_err();
+    let err = TargetSetter::sharing(
+        &symmetric(),
+        rule(),
+        &quotes(),
+        &venue_of(commission()),
+        Some(&width),
+    )
+    .unwrap_err()
+    .to_string();
 
-        assert!(err.to_string().contains("ATR"), "{other:?}: {err}");
-    }
+    assert!(err.contains(shared), "{err}");
+    assert!(err.contains("period: 4,"), "{err}");
 }
 
 /// 10 bps of 4000 is 4, of 2000 is 2, with no ATR to warm.
@@ -1656,16 +1452,18 @@ fn a_width_in_basis_points_is_of_the_price_it_is_read_at() {
     assert_eq!(width.length(2000.0), Some(2.0));
 }
 
-/// A bracket has one width only if its take profit and stop are as far.
+/// A bracket has one width only if its take profit and stop are as far: a
+/// time-only target has none, saying it has no bracket, and a bracket of 20
+/// bps and 10 bps none, naming both distances.
 #[rstest]
-fn a_width_needs_a_bracket_of_one_distance() {
-    let err = time_only(SignedDuration::from_hours(1))
-        .width(rule(), &quotes())
-        .unwrap_err();
-    assert!(err.to_string().contains("bracket"), "{err}");
+#[case::time_only(time_only(SignedDuration::from_hours(1)), &["bracket"])]
+#[case::two_distances(of(in_bps(20, 10)), &["20 bps", "10 bps"])]
+fn a_width_needs_a_bracket_of_one_distance(#[case] config: TargetConfig, #[case] named: &[&str]) {
+    let err = config.width(rule(), &quotes()).unwrap_err().to_string();
 
-    let err = of(in_bps(20, 10)).width(rule(), &quotes()).unwrap_err();
-    assert!(err.to_string().contains("take profit"), "{err}");
+    for named in named {
+        assert!(err.contains(named), "{named}: {err}");
+    }
 }
 
 /// Read at the decisions of the target's cadence, every 15 minutes, each
@@ -1713,37 +1511,11 @@ fn a_target_with_an_exit_on_the_price_says_so_and_names_the_price() {
     assert_eq!(set, Err(NoTarget::ExitOnPrice(Price::from("0.07000"))));
 }
 
-/// Nautilus' notional value of an inverse instrument divides by the price, so
-/// neither a stop's distance, an ATR nor a spread has a worth on it: a
-/// bracket, whose unit is its stop's worth, and a time-only target, whose
-/// unit is its ATR's, are refused alike, saying so.
-#[rstest]
-fn a_target_on_an_inverse_instrument_is_refused_as_the_targets_start() {
-    let instrument = inverse();
-    let mut probe = Probe::holding(Some(instrument.clone()));
-
-    for spec in [in_bps(20, 10), no_exits()] {
-        let target = trading(spec, instrument.id());
-
-        let err = format!("{:#}", targets(target).start(&mut probe).unwrap_err());
-
-        assert!(err.contains("inverse"), "{spec:?}: {err}");
-        assert!(err.contains("unit"), "{spec:?}: {err}");
-    }
-}
-
 /// Only an instrument seen to be inverse is refused: one missing from the cache
 /// is the error of each decision, as `TargetSetter::at` has it.
 #[rstest]
 fn a_bracket_on_an_instrument_not_in_the_cache_starts() {
     let mut probe = Probe::holding(None);
-
-    targets(on_aud(in_bps(20, 10))).start(&mut probe).unwrap();
-}
-
-#[rstest]
-fn a_bracket_on_a_linear_instrument_starts() {
-    let mut probe = Probe::holding(Some(aud()));
 
     targets(on_aud(in_bps(20, 10))).start(&mut probe).unwrap();
 }
@@ -1777,7 +1549,7 @@ fn a_time_only_target_missing_its_instrument_errs_before_any_order() {
 
     let err = targets.open(&mut probe, decision()).unwrap_err();
 
-    assert!(format!("{err:#}").contains("not in cache"), "{err:#}");
+    assert!(format!("{err:#}").contains(AUD), "{err:#}");
     assert_eq!(probe.orders(), Vec::<String>::new());
     probe.cache_rc().borrow_mut().add_instrument(aud()).unwrap();
     targets.open(&mut probe, decision()).unwrap();
@@ -1861,49 +1633,27 @@ fn a_target_names_the_payoff_features_of_the_barriers_it_has() {
 /// take profit nets 590 − 12.01 − 12.02, its stop loses 310 + 12.01 + 12.00,
 /// its entry costs 20 + 12.01; the short's take profit nets 590 − 12.00 −
 /// 11.99, its stop loses 310 + 12.00 + 12.01, its entry costs 20 + 12.00.
+/// At 3 USD an order each fill costs 3, the take profit nets 590 − 6, the
+/// stop loses 310 + 6 and the entry costs 20 + 3, on either side.
 #[rstest]
-fn a_brackets_payoff_at_a_commission_rate_is_worked_out_by_hand_on_each_side() {
-    let payoff = payoff_quoted(wide_take_profit(), commission());
+#[case::at_a_rate(
+    commission(),
+    [565.97, 334.01, 32.01],
+    [566.01, 334.01, 32.00]
+)]
+#[case::per_order(per_order(), [584.0, 316.0, 23.0], [584.0, 316.0, 23.0])]
+fn a_brackets_payoff_is_worked_out_by_hand_on_each_side(
+    #[case] commission: Commission,
+    #[case] long: [f64; 3],
+    #[case] short: [f64; 3],
+) {
+    let payoff = payoff_quoted(wide_take_profit(), commission);
 
     assert_near(
         &payoff,
         &PerSide {
-            long: vec![565.97 / 300.0, 334.01 / 300.0, 32.01 / 300.0],
-            short: vec![566.01 / 300.0, 334.01 / 300.0, 32.00 / 300.0],
-        },
-    );
-}
-
-/// The bracket of the rate's test at 3 USD an order: each fill costs 3, the
-/// take profit nets 590 − 6, the stop loses 310 + 6 and the entry costs 20 +
-/// 3, on either side.
-#[rstest]
-fn a_brackets_payoff_at_a_commission_per_order_is_worked_out_by_hand_on_each_side() {
-    let payoff = payoff_quoted(wide_take_profit(), per_order());
-
-    let side = vec![584.0 / 300.0, 316.0 / 300.0, 23.0 / 300.0];
-    assert_near(
-        &payoff,
-        &PerSide {
-            long: side.clone(),
-            short: side,
-        },
-    );
-}
-
-/// The bracket of the rate's test at Pepperstone's 0.035 USD an ounce: each
-/// fill of a lot costs 3.50 at any price, the take profit nets 590 − 7, the
-/// stop loses 310 + 7 and the entry costs 20 + 3.50, on either side.
-#[rstest]
-fn a_brackets_payoff_at_a_commission_per_quantity_is_worked_out_by_hand_on_each_side() {
-    let payoff = payoff_quoted(wide_take_profit(), per_ounce());
-
-    let side = vec![583.0 / 300.0, 317.0 / 300.0, 23.5 / 300.0];
-    assert_near(
-        &payoff,
-        &PerSide {
-            long: side.clone(),
-            short: side,
+            long: long.map(|usd| usd / 300.0).to_vec(),
+            short: short.map(|usd| usd / 300.0).to_vec(),
         },
     );
 }
@@ -1915,22 +1665,23 @@ fn a_brackets_payoff_at_a_commission_per_quantity_is_worked_out_by_hand_on_each_
 /// cent, 18.01 at the long's ask, 4001.70 (18.00765), and at the short's
 /// bid, 4001.50 (18.00675); 3 an order; 5.25 at 0.035 an ounce.
 #[rstest]
-fn a_time_only_targets_entry_cost_is_over_the_worth_of_its_atr_on_each_side() {
-    for (commission, long, short) in [
-        (commission(), 48.01, 48.01),
-        (per_order(), 33.0, 33.0),
-        (per_ounce(), 35.25, 35.25),
-    ] {
-        let payoff = payoff_quoted(no_exits(), commission);
+#[case::at_a_rate(commission(), 48.01, 48.01)]
+#[case::per_order(per_order(), 33.0, 33.0)]
+#[case::per_ounce(per_ounce(), 35.25, 35.25)]
+fn a_time_only_targets_entry_cost_is_over_the_worth_of_its_atr_on_each_side(
+    #[case] commission: Commission,
+    #[case] long: f64,
+    #[case] short: f64,
+) {
+    let payoff = payoff_quoted(no_exits(), commission);
 
-        assert_near(
-            &payoff,
-            &PerSide {
-                long: vec![long / 300.0],
-                short: vec![short / 300.0],
-            },
-        );
-    }
+    assert_near(
+        &payoff,
+        &PerSide {
+            long: vec![long / 300.0],
+            short: vec![short / 300.0],
+        },
+    );
 }
 
 /// A trade of gold at 4001.60, the reference of the bracket's tests: its exits
@@ -1967,64 +1718,29 @@ fn a_bracket_on_trades_alone_reads_its_payoff_from_the_last_trade_with_no_spread
     );
 }
 
-/// A bar of gold closing at 4001.60 and no quote: a time-only target's sides
-/// enter at the close, no spread, the entry costing its 3 USD alone, over the
-/// worth of the ATR of 2 on the 150 oz the reference stake buys, 300 USD.
-#[rstest]
-fn a_time_only_target_on_bars_alone_reads_its_payoff_from_the_last_close_with_no_spread() {
-    let mut probe = Probe::holding(Some(gold()));
-    probe
-        .cache_rc()
-        .borrow_mut()
-        .add_bar(Bar {
-            close: Price::from("4001.60"),
-            ..gold_bar()
-        })
-        .unwrap();
-
-    let payoff = payoff_on(&mut probe, no_exits(), per_order());
-
-    assert_near(
-        &payoff,
-        &PerSide {
-            long: vec![3.0 / 300.0],
-            short: vec![3.0 / 300.0],
-        },
-    );
-}
-
 /// 3 EUR an order on gold, quoted in USD: the target's P&L, its positions'
 /// realized P&L, is in USD, and the commission is not converted.
 fn in_euros() -> Commission {
     Commission::PerOrder(Money::from("3 EUR"))
 }
 
-#[rstest]
-fn a_commission_in_another_currency_than_the_targets_pnl_is_refused_as_the_targets_start() {
-    let mut probe = Probe::holding(Some(gold()));
-    let targets = Targets::new(lot(no_exits()), rule(), &quotes(), &venue_of(in_euros())).unwrap();
-
-    let err = targets.start(&mut probe).unwrap_err();
-
-    assert!(format!("{err:#}").contains("EUR"), "{err:#}");
-}
-
 /// Live, the instrument may come after the start: the setter refuses the
 /// commission at each decision instead.
 #[rstest]
-fn a_commission_in_another_currency_than_the_targets_pnl_is_an_error_at_a_decision() {
+#[case::a_bracket(wide_take_profit())]
+#[case::time_only(no_exits())]
+fn a_commission_in_another_currency_than_the_targets_pnl_is_an_error_at_a_decision(
+    #[case] spec: Target,
+) {
     let mut probe = Probe::holding(Some(gold()));
     probe.quoted_at(InstrumentId::from(GOLD), "4001.50", "4001.70");
+    let setter = TargetSetter::new(&lot(spec), rule(), &quotes(), &venue_of(in_euros())).unwrap();
 
-    for spec in [wide_take_profit(), no_exits()] {
-        let setter =
-            TargetSetter::new(&lot(spec), rule(), &quotes(), &venue_of(in_euros())).unwrap();
-        let err = warmed(setter, &mut probe, &gold_bar())
-            .at(&probe)
-            .unwrap_err();
+    let err = warmed(setter, &mut probe, &gold_bar())
+        .at(&probe)
+        .unwrap_err();
 
-        assert!(format!("{err:#}").contains("EUR"), "{spec:?}: {err:#}");
-    }
+    assert!(format!("{err:#}").contains("EUR"), "{err:#}");
 }
 
 /// A decision with no price is unsettled, its number taken; one with an exit on

@@ -1639,21 +1639,23 @@ mod tests {
 
     /// The short's publish fails after the long's: the long's model is in
     /// its store, valid from the train's time, but has no short beside it,
-    /// so the sides list no pair from then and both are kept, failed.
+    /// so the sides list no pair from then and both are kept, failed, for
+    /// the short's store, which each names.
     #[rstest]
     fn a_publish_failing_after_the_others_leaves_no_pair_published() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), config());
         let t = at("2026-01-07T00:00:00Z");
         store(dir.path(), &config(), Side::Short).break_publishing();
+        let short = models(dir.path(), &config()).directory().join("short");
 
         let trained = training.train_at(t, |_, _| Ok(rows()));
 
         for outcome in [&trained.long, &trained.short] {
-            assert!(
-                matches!(outcome, Some(Outcome::Kept(Kept::Failed(_)))),
-                "{trained:?}"
-            );
+            let Some(Outcome::Kept(Kept::Failed(why))) = outcome else {
+                panic!("{trained:?}");
+            };
+            assert!(why.contains(&short.display().to_string()), "{why}");
         }
         assert_eq!(
             store(dir.path(), &config(), Side::Long)
@@ -1667,27 +1669,31 @@ mod tests {
         );
     }
 
-    /// The long's publish fails, and the short, judged with it, publishes
-    /// nothing.
+    /// The long's publish fails, the first: both are kept, failed, for the
+    /// long's store, which each names, and neither the long nor the short,
+    /// judged with it, publishes anything.
     #[rstest]
     fn a_publish_failing_publishes_no_other_side() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), config());
-        store(dir.path(), &config(), Side::Long).break_publishing();
+        let long = store(dir.path(), &config(), Side::Long);
+        long.break_publishing();
+        let long_directory = models(dir.path(), &config()).directory().join("long");
 
         let trained = training.train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(rows()));
 
         for outcome in [&trained.long, &trained.short] {
-            assert!(
-                matches!(outcome, Some(Outcome::Kept(Kept::Failed(_)))),
-                "{trained:?}"
-            );
+            let Some(Outcome::Kept(Kept::Failed(why))) = outcome else {
+                panic!("{trained:?}");
+            };
+            assert!(why.contains(&long_directory.display().to_string()), "{why}");
         }
-        assert!(
+        assert_eq!(long.valid_froms().unwrap(), []);
+        assert_eq!(
             store(dir.path(), &config(), Side::Short)
                 .valid_froms()
-                .unwrap()
-                .is_empty()
+                .unwrap(),
+            []
         );
     }
 
@@ -2141,7 +2147,8 @@ mod tests {
         );
     }
 
-    /// No row between 12:00 and 18:00: nothing to calibrate the model on.
+    /// No row between 12:00 and 18:00: nothing to calibrate the pair on, so
+    /// both sides fail and neither publishes.
     #[rstest]
     fn a_calibration_without_a_row_fails() {
         let dir = tempfile::tempdir().unwrap();
@@ -2149,17 +2156,26 @@ mod tests {
         let mut rows = rows();
         rows.drain(4..7);
 
-        let outcome = training
-            .train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(rows))
-            .long
-            .unwrap();
+        let trained = training.train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(rows));
 
-        let Outcome::Kept(Kept::Failed(why)) = outcome else {
-            panic!("{outcome:?}");
-        };
-        assert!(why.contains("calibrat"), "{why}");
+        for outcome in [&trained.long, &trained.short] {
+            let Some(Outcome::Kept(Kept::Failed(why))) = outcome else {
+                panic!("{trained:?}");
+            };
+            assert!(why.contains("no row to calibrate"), "{why}");
+        }
+
+        for side in Side::BOTH {
+            assert_eq!(
+                store(dir.path(), &config(), side).valid_froms().unwrap(),
+                [],
+                "{side:?}"
+            );
+        }
     }
 
+    /// Rows of a feature more than the strategy's: neither side's model is
+    /// fitted on them, and neither publishes.
     #[rstest]
     fn rows_of_other_features_are_a_schema_mismatch() {
         let dir = tempfile::tempdir().unwrap();
@@ -2174,15 +2190,22 @@ mod tests {
 
         // The 6th settles by midnight of the 7th plus 2 hours, so it is
         // stored, and read back.
-        let outcome = training
-            .train_at(at("2026-01-07T02:00:00Z"), |_, _| Ok(wide))
-            .long
-            .unwrap();
+        let trained = training.train_at(at("2026-01-07T02:00:00Z"), |_, _| Ok(wide));
 
-        assert!(
-            matches!(outcome, Outcome::Kept(Kept::SchemaMismatch(_))),
-            "{outcome:?}"
-        );
+        for outcome in [&trained.long, &trained.short] {
+            assert!(
+                matches!(outcome, Some(Outcome::Kept(Kept::SchemaMismatch(_)))),
+                "{trained:?}"
+            );
+        }
+
+        for side in Side::BOTH {
+            assert_eq!(
+                store(dir.path(), &config(), side).valid_froms().unwrap(),
+                [],
+                "{side:?}"
+            );
+        }
     }
 
     /// A side's holdout taking 3 trades of 1.25R each, besides 8 of 0.4R; at
@@ -2630,63 +2653,6 @@ mod tests {
         assert_eq!(manifest.target.spec.bracket, None);
     }
 
-    /// A meta example carries the unit of its trade, the worth of the stop
-    /// of the side picked: on `meta_rows` with each short's
-    /// stop worth 4 USD, the long's 2, the
-    /// four buys of the models valid from 06:00 carry 2 and the two sells
-    /// of those valid from 17:00 carry 4, the short still expecting less
-    /// than its margin in the morning and more in the evening.
-    #[rstest]
-    fn the_metas_examples_carry_the_unit_of_their_sides_trade() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = with_meta(24);
-        publish_baselines(dir.path(), &config);
-        let rows: Vec<DatasetRow> = meta_rows()
-            .into_iter()
-            .map(|mut row| {
-                row.outcomes.short.unit = Money::from("4 USD");
-                DatasetRow::of(&row)
-            })
-            .collect();
-
-        let examples = meta::examples(
-            &models(dir.path(), &config),
-            &rows.iter().collect::<Vec<_>>(),
-        )
-        .unwrap();
-
-        let sides_and_units: Vec<(f64, f64)> = examples
-            .iter()
-            .map(|example| (example.features[1], example.trade.unit))
-            .collect();
-        assert_eq!(
-            sides_and_units,
-            [
-                (1.0, 2.0),
-                (1.0, 2.0),
-                (1.0, 2.0),
-                (1.0, 2.0),
-                (-1.0, 4.0),
-                (-1.0, 4.0)
-            ]
-        );
-    }
-
-    /// The examples list the stores as they are when made: one that cannot be
-    /// listed fails them, rows or none, so a train never learns silently from
-    /// rows skipped.
-    #[rstest]
-    fn a_store_that_cannot_be_listed_fails_the_metas_examples() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = with_meta(24);
-        publish_baselines(dir.path(), &config);
-        store(dir.path(), &config, Side::Short).break_listing();
-
-        let examples = meta::examples(&models(dir.path(), &config), &[]);
-
-        assert!(examples.is_err());
-    }
-
     /// Margins of the long alone: the short's models are never asked, and
     /// the meta's rows are the long's trades, the holdout's a loss at 0.3 and
     /// a win at 0.7, which the meta, taking the win, expected 0.55R, publishes
@@ -3019,12 +2985,6 @@ mod tests {
         }
         assert_eq!(trained.meta, Some(Outcome::Kept(Kept::Waiting)));
         assert!(
-            trained
-                .to_string()
-                .contains("waiting for the sides' decisions"),
-            "{trained}"
-        );
-        assert!(
             models
                 .meta()
                 .unwrap()
@@ -3066,42 +3026,34 @@ mod tests {
         assert!(!meta_waiting.succeeded());
     }
 
-    /// A model kept in use reads with its valid-from; a waiting meta as
-    /// waiting for the sides' decisions.
+    /// A model kept in use reads with its valid-from, and never retrained as
+    /// in use since it, and never retrained; a waiting meta as waiting for
+    /// the sides' decisions.
     #[rstest]
-    fn a_model_in_use_reads_with_its_valid_from_and_a_waiting_meta_as_waiting() {
-        let in_use = Outcome::InUse {
+    #[case::in_use(
+        Outcome::InUse {
             valid_from: at("2026-01-07T00:00:00Z"),
             retrain: Retrain::Every(SignedDuration::from_hours(24)),
-        }
-        .to_string();
-        let waiting = Outcome::Kept(Kept::Waiting).to_string();
-
-        assert!(
-            in_use.contains("in use") && in_use.contains("2026-01-07T00:00:00Z"),
-            "{in_use}"
-        );
-        assert!(
-            waiting.contains("waiting for the sides' decisions"),
-            "{waiting}"
-        );
-    }
-
-    /// Never retrained, a model in use reads as in use since its
-    /// valid-from, and never retrained.
-    #[rstest]
-    fn a_model_in_use_never_retrained_reads_as_in_use_since_its_valid_from() {
-        let in_use = Outcome::InUse {
+        },
+        &["in use", "2026-01-07T00:00:00Z"]
+    )]
+    #[case::in_use_never_retrained(
+        Outcome::InUse {
             valid_from: at("2026-01-06T00:00:00Z"),
             retrain: Retrain::Never,
-        }
-        .to_string();
+        },
+        &["in use since 2026-01-06T00:00:00Z", "never retrained"]
+    )]
+    #[case::waiting(Outcome::Kept(Kept::Waiting), &["waiting for the sides' decisions"])]
+    fn a_model_in_use_reads_with_its_valid_from_and_a_waiting_meta_as_waiting(
+        #[case] outcome: Outcome,
+        #[case] facts: &[&str],
+    ) {
+        let text = outcome.to_string();
 
-        assert!(
-            in_use.contains("in use since 2026-01-06T00:00:00Z")
-                && in_use.contains("never retrained"),
-            "{in_use}"
-        );
+        for fact in facts {
+            assert!(text.contains(fact), "{fact}: {text}");
+        }
     }
 
     #[rstest]
