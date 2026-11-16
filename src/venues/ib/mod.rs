@@ -1049,7 +1049,11 @@ mod tests {
         let Err(e) = IbHistory::connect(1, end, now).await else {
             panic!("connected");
         };
-        assert!(e.to_string().contains("within a minute of now"), "{e:#}");
+        let err = e.to_string();
+        assert!(
+            err.contains("2024-06-10T11:59:30Z") && err.contains("2024-06-10T11:59:00Z"),
+            "{err}"
+        );
     }
 
     fn at(s: &str) -> Timestamp {
@@ -1206,49 +1210,41 @@ mod tests {
         let ticks = paged(pages(answers, &mut cursors)).await.unwrap();
 
         assert_eq!(ticks, ["a", "b"]);
-        assert_eq!(cursors.len(), 2);
-    }
-
-    /// IB ends the second page with an error after one tick: the paging
-    /// fails with IB's error, rather than answering the ticks it got.
-    #[tokio::test]
-    async fn an_error_ending_a_page_fails_the_paging() {
-        let mut cursors = Vec::new();
-        let answers = vec![
-            Ok(vec![
-                Ok(tick_at("10:00:09", "a")),
-                Ok(tick_at("10:00:10", "b")),
-            ]),
-            Ok(vec![
-                Ok(tick_at("10:00:05", "c")),
-                Err(anyhow::anyhow!("162: Historical Market Data Service error")),
-            ]),
-        ];
-
-        let err = paged(pages(answers, &mut cursors)).await.unwrap_err();
-
-        assert!(
-            format!("{err:#}").contains("Historical Market Data Service error"),
-            "{err:#}"
+        assert_eq!(
+            cursors,
+            [on_the_10th("10:00:10"), on_the_10th("10:00:08.999999999")]
         );
     }
 
-    /// A request that fails, sent or timed out, fails the paging with its
-    /// error.
+    /// The second page fails: IB ends it with an error after one tick, or
+    /// its request fails, sent or timed out. The paging fails with the
+    /// error, rather than answering the ticks it got.
+    #[rstest]
+    #[case::ib_ending_a_page_with_an_error(
+        Ok(vec![
+            Ok(tick_at("10:00:05", "c")),
+            Err(anyhow::anyhow!("162: Historical Market Data Service error")),
+        ]),
+        "Historical Market Data Service error"
+    )]
+    #[case::a_failed_request(Err(anyhow::anyhow!("not connected")), "not connected")]
     #[tokio::test]
-    async fn a_failed_request_fails_the_paging() {
+    async fn an_error_ending_a_page_fails_the_paging(
+        #[case] second: anyhow::Result<Vec<anyhow::Result<Tick>>>,
+        #[case] error: &str,
+    ) {
         let mut cursors = Vec::new();
         let answers = vec![
             Ok(vec![
                 Ok(tick_at("10:00:09", "a")),
                 Ok(tick_at("10:00:10", "b")),
             ]),
-            Err(anyhow::anyhow!("not connected")),
+            second,
         ];
 
         let err = paged(pages(answers, &mut cursors)).await.unwrap_err();
 
-        assert!(format!("{err:#}").contains("not connected"), "{err:#}");
+        assert!(format!("{err:#}").contains(error), "{err:#}");
     }
 
     /// The page ending 1 ns before 10:00:08 holds only ticks of 10:00:08,
@@ -1312,57 +1308,44 @@ mod tests {
         assert_eq!(cursors, [hour(25), hour(21)]);
     }
 
+    /// A walk from hour 5 to hour 25 over canned answers: it asks again
+    /// from the oldest bar so far until an answer is empty, brings nothing
+    /// older than its cursor, or reaches the start, and keeps the bars from
+    /// start to end, sorted and unique.
+    #[rstest]
+    #[case::stopping_on_an_empty_answer(
+        vec![(20..=25).collect(), vec![]],
+        (20..=25).collect(),
+        vec![hour(25), hour(20)]
+    )]
+    #[case::empty_on_an_empty_first_answer(vec![vec![]], vec![], vec![hour(25)])]
+    #[case::stopping_when_an_answer_brings_nothing_older_than_its_cursor(
+        vec![(20..=25).collect(), (20..=25).collect(), vec![]],
+        (20..=25).collect(),
+        vec![hour(25), hour(20)]
+    )]
+    #[case::keeping_only_bars_from_start_to_end(
+        vec![(3..=27).collect()],
+        (5..=25).collect(),
+        vec![hour(25)]
+    )]
+    #[case::sorting_the_bars_and_keeping_each_once(
+        vec![vec![25, 23, 24, 22], vec![20, 22, 21, 21], vec![4]],
+        (20..=25).collect(),
+        vec![hour(25), hour(22), hour(20)]
+    )]
     #[tokio::test]
-    async fn stops_on_an_empty_answer() {
+    async fn walks_back_over_its_answers_to_the_bars_from_start_to_end(
+        #[case] answers: Vec<Vec<u64>>,
+        #[case] walked: Vec<u64>,
+        #[case] asked: Vec<Timestamp>,
+    ) {
         let mut cursors = Vec::new();
-        let answers = vec![(20..=25).collect(), vec![]];
         let bars = walk_back(hour(5), hour(25), canned(answers, &mut cursors))
             .await
             .unwrap();
-        assert_eq!(hours(&bars), (20..=25).collect::<Vec<_>>());
-        assert_eq!(cursors, [hour(25), hour(20)]);
-    }
-
-    #[tokio::test]
-    async fn an_empty_first_answer_is_empty() {
-        let mut cursors = Vec::new();
-        let bars = walk_back(hour(5), hour(25), canned(vec![vec![]], &mut cursors))
-            .await
-            .unwrap();
-        assert!(bars.is_empty());
-        assert_eq!(cursors, [hour(25)]);
-    }
-
-    #[tokio::test]
-    async fn stops_when_an_answer_brings_nothing_older_than_its_cursor() {
-        let mut cursors = Vec::new();
-        let answers = vec![(20..=25).collect(), (20..=25).collect(), vec![]];
-        let bars = walk_back(hour(5), hour(25), canned(answers, &mut cursors))
-            .await
-            .unwrap();
-        assert_eq!(hours(&bars), (20..=25).collect::<Vec<_>>());
-        assert_eq!(cursors, [hour(25), hour(20)]);
-    }
-
-    #[tokio::test]
-    async fn keeps_only_bars_from_start_to_end() {
-        let mut cursors = Vec::new();
-        let answers = vec![(3..=27).collect()];
-        let bars = walk_back(hour(5), hour(25), canned(answers, &mut cursors))
-            .await
-            .unwrap();
-        assert_eq!(hours(&bars), (5..=25).collect::<Vec<_>>());
-    }
-
-    #[tokio::test]
-    async fn returns_the_bars_sorted_and_unique() {
-        let mut cursors = Vec::new();
-        let answers = vec![vec![25, 23, 24, 22], vec![20, 22, 21, 21], vec![4]];
-        let bars = walk_back(hour(5), hour(25), canned(answers, &mut cursors))
-            .await
-            .unwrap();
-        assert_eq!(hours(&bars), (20..=25).collect::<Vec<_>>());
-        assert_eq!(cursors, [hour(25), hour(22), hour(20)]);
+        assert_eq!(hours(&bars), walked);
+        assert_eq!(cursors, asked);
     }
 
     #[tokio::test]
@@ -1378,43 +1361,36 @@ mod tests {
     #[rstest]
     fn history_requests_use_the_regular_hours_setting_of_the_data_client_config() {
         let config = data_client_config(closed_gateway());
-        assert!(!HistoryRequests::of(&config).use_rth);
+        let requests = HistoryRequests::of(&config);
+        assert!(!requests.use_rth);
+        assert_eq!(requests.timeout_secs, config.request_timeout);
         let regular = InteractiveBrokersDataClientConfig {
             use_regular_trading_hours: true,
+            request_timeout: 7,
             ..config
         };
-        assert!(HistoryRequests::of(&regular).use_rth);
+        let requests = HistoryRequests::of(&regular);
+        assert!(requests.use_rth);
+        assert_eq!(requests.timeout_secs, 7);
     }
 
+    /// IB's own 1-minute TRADES bars; an IDEALPRO pair, which IB serves no
+    /// TRADES bars of, has its own BID and ASK bars, of any size IB has,
+    /// and IB serves MIDPOINT bars too.
     #[rstest]
-    fn ib_serves_its_own_one_minute_trades_bars() {
-        for identifier in [
-            "SXR8.IBIS-1-MINUTE-LAST-EXTERNAL",
-            "ESZ26.CME-1-MINUTE-LAST-EXTERNAL",
-        ] {
-            let served = served(&NautilusDataType::Bar, identifier).unwrap();
-            assert_eq!(served, Served::Bars(bar_type(identifier)));
-        }
-    }
-
-    /// An IDEALPRO pair, which IB serves no TRADES bars of, has its own
-    /// BID and ASK bars, of any size IB has, and IB serves MIDPOINT bars
-    /// too.
-    #[rstest]
-    fn ib_serves_its_own_bid_ask_and_mid_bars_of_any_size_it_has() {
-        for identifier in [
-            "EUR/USD.IDEALPRO-1-MINUTE-BID-EXTERNAL",
-            "EUR/USD.IDEALPRO-1-MINUTE-ASK-EXTERNAL",
-            "EUR/USD.IDEALPRO-1-HOUR-BID-EXTERNAL",
-            "EUR/USD.IDEALPRO-5-MINUTE-ASK-EXTERNAL",
-            "EUR/USD.IDEALPRO-1-SECOND-BID-EXTERNAL",
-            "EUR/USD.IDEALPRO-1-MINUTE-MID-EXTERNAL",
-            "SXR8.IBIS-1-MINUTE-MID-EXTERNAL",
-            "SXR8.IBIS-1-DAY-BID-EXTERNAL",
-        ] {
-            let served = served(&NautilusDataType::Bar, identifier).unwrap();
-            assert_eq!(served, Served::Bars(bar_type(identifier)));
-        }
+    #[case::an_etf_s_last("SXR8.IBIS-1-MINUTE-LAST-EXTERNAL")]
+    #[case::a_future_s_last("ESZ26.CME-1-MINUTE-LAST-EXTERNAL")]
+    #[case::a_pair_s_bid("EUR/USD.IDEALPRO-1-MINUTE-BID-EXTERNAL")]
+    #[case::a_pair_s_ask("EUR/USD.IDEALPRO-1-MINUTE-ASK-EXTERNAL")]
+    #[case::a_pair_s_hourly_bid("EUR/USD.IDEALPRO-1-HOUR-BID-EXTERNAL")]
+    #[case::a_pair_s_5_minute_ask("EUR/USD.IDEALPRO-5-MINUTE-ASK-EXTERNAL")]
+    #[case::a_pair_s_1_second_bid("EUR/USD.IDEALPRO-1-SECOND-BID-EXTERNAL")]
+    #[case::a_pair_s_mid("EUR/USD.IDEALPRO-1-MINUTE-MID-EXTERNAL")]
+    #[case::an_etf_s_mid("SXR8.IBIS-1-MINUTE-MID-EXTERNAL")]
+    #[case::an_etf_s_daily_bid("SXR8.IBIS-1-DAY-BID-EXTERNAL")]
+    fn ib_serves_its_own_last_bid_ask_and_mid_bars_of_any_size_it_has(#[case] identifier: &str) {
+        let served = served(&NautilusDataType::Bar, identifier).unwrap();
+        assert_eq!(served, Served::Bars(bar_type(identifier)));
     }
 
     /// IB's historical ticks: BID_ASK for quotes, TRADES for trades, of the
@@ -1436,33 +1412,38 @@ mod tests {
     /// currency pair, a forex pair of IDEALPRO's or a crypto pair of
     /// PAXOS's or ZEROHASH's, which its `request_trades` refuses without
     /// an answer, and the TRADES bars of an IDEALPRO pair, which IB has
-    /// none of; a crypto pair's trade-price bars are served (IB's
-    /// AGGTRADES), as are other instruments' trades.
+    /// none of.
     #[rstest]
-    fn ib_serves_no_trades_of_a_currency_pair_and_no_trades_bars_of_a_forex_pair() {
-        for (data_type, identifier) in [
-            (NautilusDataType::TradeTick, "EUR/USD.IDEALPRO"),
-            (NautilusDataType::TradeTick, "BTC/USD.PAXOS"),
-            (NautilusDataType::TradeTick, "BTC/USD.ZEROHASH"),
-            (
-                NautilusDataType::Bar,
-                "EUR/USD.IDEALPRO-1-MINUTE-LAST-EXTERNAL",
-            ),
-        ] {
-            let err = served(&data_type, identifier).unwrap_err();
-            assert!(err.to_string().contains(identifier), "{err}");
-        }
-        for (data_type, identifier) in [
-            (
-                NautilusDataType::Bar,
-                "BTC/USD.PAXOS-1-MINUTE-LAST-EXTERNAL",
-            ),
-            (NautilusDataType::QuoteTick, "EUR/USD.IDEALPRO"),
-            (NautilusDataType::QuoteTick, "BTC/USD.ZEROHASH"),
-            (NautilusDataType::TradeTick, "ESZ26.CME"),
-        ] {
-            served(&data_type, identifier).unwrap();
-        }
+    #[case::a_forex_pair_s_trades(NautilusDataType::TradeTick, "EUR/USD.IDEALPRO")]
+    #[case::a_paxos_crypto_pair_s_trades(NautilusDataType::TradeTick, "BTC/USD.PAXOS")]
+    #[case::a_zerohash_crypto_pair_s_trades(NautilusDataType::TradeTick, "BTC/USD.ZEROHASH")]
+    #[case::a_forex_pair_s_trades_bars(
+        NautilusDataType::Bar,
+        "EUR/USD.IDEALPRO-1-MINUTE-LAST-EXTERNAL"
+    )]
+    fn ib_serves_no_trades_of_a_currency_pair_and_no_trades_bars_of_a_forex_pair(
+        #[case] data_type: NautilusDataType,
+        #[case] identifier: &str,
+    ) {
+        let err = served(&data_type, identifier).unwrap_err();
+        assert!(err.to_string().contains(identifier), "{err}");
+    }
+
+    /// A crypto pair's trade-price bars are served (IB's AGGTRADES), as
+    /// are a currency pair's quotes and other instruments' trades.
+    #[rstest]
+    #[case::a_crypto_pair_s_trades_bars(
+        NautilusDataType::Bar,
+        "BTC/USD.PAXOS-1-MINUTE-LAST-EXTERNAL"
+    )]
+    #[case::a_forex_pair_s_quotes(NautilusDataType::QuoteTick, "EUR/USD.IDEALPRO")]
+    #[case::a_crypto_pair_s_quotes(NautilusDataType::QuoteTick, "BTC/USD.ZEROHASH")]
+    #[case::a_future_s_trades(NautilusDataType::TradeTick, "ESZ26.CME")]
+    fn ib_serves_a_currency_pair_s_quotes_and_trade_priced_crypto_bars_and_other_trades(
+        #[case] data_type: NautilusDataType,
+        #[case] identifier: &str,
+    ) {
+        served(&data_type, identifier).unwrap();
     }
 
     /// A price IB's adapter would ask TRADES for, a size IB has not,
@@ -1470,63 +1451,51 @@ mod tests {
     /// Nautilus builds, and books, which Nautilus' IB clients request none
     /// of.
     #[rstest]
-    fn ib_serves_no_other_series() {
-        for (data_type, identifier) in [
-            (
-                NautilusDataType::Bar,
-                "EUR/USD.IDEALPRO-1-MINUTE-MARK-EXTERNAL",
-            ),
-            (NautilusDataType::Bar, "SXR8.IBIS-4-MINUTE-LAST-EXTERNAL"),
-            (NautilusDataType::Bar, "SXR8.IBIS-2-SECOND-LAST-EXTERNAL"),
-            (NautilusDataType::Bar, "SXR8.IBIS-10-SECOND-LAST-EXTERNAL"),
-            (NautilusDataType::Bar, "SXR8.IBIS-6-HOUR-LAST-EXTERNAL"),
-            (NautilusDataType::Bar, "SXR8.IBIS-1-MONTH-LAST-EXTERNAL"),
-            (NautilusDataType::Bar, "SXR8.IBIS-1-MINUTE-LAST-INTERNAL"),
-            (
-                NautilusDataType::Bar,
-                "EUR/USD.IDEALPRO-1-MINUTE-BID-INTERNAL",
-            ),
-            (
-                NautilusDataType::Bar,
-                "EUR/USD.IDEALPRO-1-MINUTE-ASK-INTERNAL",
-            ),
-            (NautilusDataType::OrderBookDelta, "SXR8.IBIS"),
-            (NautilusDataType::OrderBookDepth, "SXR8.IBIS"),
-        ] {
-            let err = served(&data_type, identifier).unwrap_err();
-            assert!(err.to_string().contains(identifier), "{err}");
-        }
+    #[case::a_mark_price(NautilusDataType::Bar, "EUR/USD.IDEALPRO-1-MINUTE-MARK-EXTERNAL")]
+    #[case::four_minutes(NautilusDataType::Bar, "SXR8.IBIS-4-MINUTE-LAST-EXTERNAL")]
+    #[case::two_seconds(NautilusDataType::Bar, "SXR8.IBIS-2-SECOND-LAST-EXTERNAL")]
+    #[case::ten_seconds(NautilusDataType::Bar, "SXR8.IBIS-10-SECOND-LAST-EXTERNAL")]
+    #[case::six_hours(NautilusDataType::Bar, "SXR8.IBIS-6-HOUR-LAST-EXTERNAL")]
+    #[case::a_month(NautilusDataType::Bar, "SXR8.IBIS-1-MONTH-LAST-EXTERNAL")]
+    #[case::internal_last_bars(NautilusDataType::Bar, "SXR8.IBIS-1-MINUTE-LAST-INTERNAL")]
+    #[case::internal_bid_bars(NautilusDataType::Bar, "EUR/USD.IDEALPRO-1-MINUTE-BID-INTERNAL")]
+    #[case::internal_ask_bars(NautilusDataType::Bar, "EUR/USD.IDEALPRO-1-MINUTE-ASK-INTERNAL")]
+    #[case::book_deltas(NautilusDataType::OrderBookDelta, "SXR8.IBIS")]
+    #[case::book_depth(NautilusDataType::OrderBookDepth, "SXR8.IBIS")]
+    fn ib_serves_no_other_series(#[case] data_type: NautilusDataType, #[case] identifier: &str) {
+        let err = served(&data_type, identifier).unwrap_err();
+        assert!(err.to_string().contains(identifier), "{err}");
     }
 
     /// IB's step-size table ("Historical Data Limitations"): the longest
     /// duration whose row admits each size IB has, a day of 1-minute bars
     /// in seconds.
     #[rstest]
-    fn each_bar_size_is_asked_over_the_longest_duration_ibs_step_sizes_admit_it_in() {
-        for (bars, duration) in [
-            ("1-SECOND", "1800 S"),
-            ("5-SECOND", "3600 S"),
-            ("15-SECOND", "14400 S"),
-            ("30-SECOND", "28800 S"),
-            ("1-MINUTE", "86400 S"),
-            ("2-MINUTE", "2 D"),
-            ("3-MINUTE", "1 W"),
-            ("5-MINUTE", "1 W"),
-            ("10-MINUTE", "1 W"),
-            ("15-MINUTE", "1 W"),
-            ("20-MINUTE", "1 W"),
-            ("30-MINUTE", "1 M"),
-            ("1-HOUR", "1 M"),
-            ("2-HOUR", "1 M"),
-            ("3-HOUR", "1 M"),
-            ("4-HOUR", "1 M"),
-            ("8-HOUR", "1 M"),
-            ("1-DAY", "1 Y"),
-            ("1-WEEK", "1 Y"),
-        ] {
-            let spec = bar_type(&format!("SXR8.IBIS-{bars}-LAST-EXTERNAL")).spec();
-            assert_eq!(request_duration(spec), duration, "{bars}");
-        }
+    #[case("1-SECOND", "1800 S")]
+    #[case("5-SECOND", "3600 S")]
+    #[case("15-SECOND", "14400 S")]
+    #[case("30-SECOND", "28800 S")]
+    #[case("1-MINUTE", "86400 S")]
+    #[case("2-MINUTE", "2 D")]
+    #[case("3-MINUTE", "1 W")]
+    #[case("5-MINUTE", "1 W")]
+    #[case("10-MINUTE", "1 W")]
+    #[case("15-MINUTE", "1 W")]
+    #[case("20-MINUTE", "1 W")]
+    #[case("30-MINUTE", "1 M")]
+    #[case("1-HOUR", "1 M")]
+    #[case("2-HOUR", "1 M")]
+    #[case("3-HOUR", "1 M")]
+    #[case("4-HOUR", "1 M")]
+    #[case("8-HOUR", "1 M")]
+    #[case("1-DAY", "1 Y")]
+    #[case("1-WEEK", "1 Y")]
+    fn each_bar_size_is_asked_over_the_longest_duration_ibs_step_sizes_admit_it_in(
+        #[case] bars: &str,
+        #[case] duration: &str,
+    ) {
+        let spec = bar_type(&format!("SXR8.IBIS-{bars}-LAST-EXTERNAL")).spec();
+        assert_eq!(request_duration(spec), duration);
     }
 
     /// A request of `bars`, 1-second bars of SXR8 priced `price`, ending at
@@ -1727,7 +1696,10 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains(small_bars), "{err}");
+        assert!(
+            err.contains(small_bars) && err.contains("2026-05-30T12:00:00Z"),
+            "{err}"
+        );
     }
 
     /// A fill over a window whose small bars the catalog stores to its end
@@ -1824,12 +1796,10 @@ mod tests {
     }
 
     #[rstest]
-    fn only_futures_are_asked_for_as_expired_contracts() {
-        assert!(expired_future_contract(symbology(), InstrumentId::from("AAPL.SMART")).is_none());
-        assert!(
-            expired_future_contract(symbology(), InstrumentId::from("EUR/USD.IDEALPRO")).is_none()
-        );
-        // A stock whose symbol reads like a future.
-        assert!(expired_future_contract(symbology(), InstrumentId::from("ABCZ5.SMART")).is_none());
+    #[case::a_stock("AAPL.SMART")]
+    #[case::a_forex_pair("EUR/USD.IDEALPRO")]
+    #[case::a_stock_whose_symbol_reads_like_a_future("ABCZ5.SMART")]
+    fn only_futures_are_asked_for_as_expired_contracts(#[case] id: &str) {
+        assert!(expired_future_contract(symbology(), InstrumentId::from(id)).is_none());
     }
 }
