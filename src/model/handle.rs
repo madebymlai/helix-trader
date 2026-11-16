@@ -335,7 +335,7 @@ impl ModelHandle {
     /// # Errors
     ///
     /// Returns an error if, deciding, a store cannot be keyed or read.
-    pub fn new(blueprint: &ModelBlueprint, mode: Mode) -> anyhow::Result<Rc<Self>> {
+    pub fn new(blueprint: &ModelBlueprint, mode: &Mode) -> anyhow::Result<Rc<Self>> {
         let (features, requirements) = (blueprint.features(), blueprint.requirements());
         let (rule, target) = (blueprint.config().decision, &blueprint.config().target);
         let traded = target.instrument_id;
@@ -359,7 +359,7 @@ impl ModelHandle {
         }
         .custom_roots(requirements.custom.iter().filter_map(CustomSeries::root));
         let delay = warmup::bar_build_delay(&requirements.bar_types);
-        let serving = match &mode {
+        let serving = match mode {
             Mode::Backtest { models } | Mode::Live { models } => {
                 let models = blueprint.model_set(models)?;
                 Serving::Deciding(Box::new(Deciding {
@@ -924,11 +924,11 @@ mod tests {
     /// The probe's handle trading in a backtest on the models under
     /// `models`, deciding on `features`, warm: a quote came at the time of
     /// `probe`.
-    fn handle(probe: &Decider, models: &Path, features: Rc<FeatureSet>) -> Rc<ModelHandle> {
-        warm(&features, probe.clock().timestamp_ns());
+    fn handle(probe: &Decider, models: &Path, features: &Rc<FeatureSet>) -> Rc<ModelHandle> {
+        warm(features, probe.clock().timestamp_ns());
         ModelHandle::new(
-            &blueprint_of(&features, &config(), requirements()),
-            Mode::Backtest {
+            &blueprint_of(features, &config(), requirements()),
+            &Mode::Backtest {
                 models: models.to_path_buf(),
             },
         )
@@ -950,7 +950,7 @@ mod tests {
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
         let cold = ModelHandle::new(
             &blueprint_of(&features(), &config(), requirements()),
-            Mode::Backtest {
+            &Mode::Backtest {
                 models: models.path().to_path_buf(),
             },
         )
@@ -967,7 +967,7 @@ mod tests {
             .publish(&baseline("2026-10-22T00:00:00Z", 8))
             .unwrap();
         let (mut probe, clock) = registered(at("2026-10-22T11:00:00Z"));
-        let handle = handle(&probe, models.path(), features());
+        let handle = handle(&probe, models.path(), &features());
         clock
             .borrow_mut()
             .advance_time(UnixNanos::from(at("2026-10-22T12:00:00Z")), true);
@@ -1005,7 +1005,7 @@ mod tests {
             .unwrap();
         let handle = ModelHandle::new(
             &blueprint_of(&features, &config(), requirements()),
-            Mode::Backtest {
+            &Mode::Backtest {
                 models: models.path().to_path_buf(),
             },
         )
@@ -1039,7 +1039,7 @@ mod tests {
         };
         let handle = ModelHandle::new(
             &blueprint_of(&features, &config(), requirements),
-            Mode::Backtest {
+            &Mode::Backtest {
                 models: models.path().to_path_buf(),
             },
         )
@@ -1074,12 +1074,12 @@ mod tests {
         let mode = Mode::Backtest {
             models: models.to_path_buf(),
         };
-        sides_handle_in(mode, probe, models, config, sides)
+        sides_handle_in(&mode, probe, models, config, sides)
     }
 
     /// `sides_handle`, in `mode`.
     fn sides_handle_in(
-        mode: Mode,
+        mode: &Mode,
         probe: &Decider,
         models: &Path,
         config: &ModelConfig,
@@ -1526,7 +1526,7 @@ mod tests {
         };
         ModelHandle::new(
             &blueprint_of(&features(), config, requirements),
-            live(models.to_path_buf()),
+            &live(models.to_path_buf()),
         )
         .unwrap()
     }
@@ -1591,7 +1591,7 @@ mod tests {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
         let handle = sides_handle_in(
-            live(models.path().to_path_buf()),
+            &live(models.path().to_path_buf()),
             &probe,
             models.path(),
             &atr_config(),
@@ -1645,7 +1645,7 @@ mod tests {
             models: models.path().to_path_buf(),
         };
         let handle = sides_handle_in(
-            backtest,
+            &backtest,
             &probe,
             models.path(),
             &atr_config(),
@@ -1681,7 +1681,7 @@ mod tests {
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
         let handle = ModelHandle::new(
             &blueprint_of(&features, &config(), requirements()),
-            Mode::Backtest {
+            &Mode::Backtest {
                 models: models.path().to_path_buf(),
             },
         )
@@ -1753,7 +1753,7 @@ mod tests {
         };
         let model = ModelHandle::new(
             &blueprint_of(&features, &config(), requirements),
-            live(models.path().to_path_buf()),
+            &live(models.path().to_path_buf()),
         )
         .unwrap();
         let mut hooked = Hooked {
@@ -1825,9 +1825,9 @@ mod tests {
     /// recording no update of them; GCZ26's two quotes then warm it.
     #[test]
     fn the_features_read_of_a_warmup_the_quotes_of_the_series_they_read_alone() {
+        const GC_2_MIDS: Declared<EmaArgs> = Declared::new("gc_2_mids");
         let models = tempfile::tempdir().unwrap();
         let gcz26 = InstrumentId::from("GCZ26.GLBX");
-        const GC_2_MIDS: Declared<EmaArgs> = Declared::new("gc_2_mids");
         let mids: IndicatorsConfig =
             toml::from_str(r#"gc_2_mids = { period = 2, price_type = "MID" }"#).unwrap();
         let features = FeatureSet::builder()
@@ -1849,7 +1849,7 @@ mod tests {
         };
         let model = ModelHandle::new(
             &blueprint_of(&features, &bracket_config(10), requirements),
-            live(models.path().to_path_buf()),
+            &live(models.path().to_path_buf()),
         )
         .unwrap();
         let mut hooked = Hooked {
@@ -1933,7 +1933,7 @@ mod tests {
         };
         let model = ModelHandle::new(
             &blueprint_of(&features, &config(), requirements),
-            Mode::Backtest {
+            &Mode::Backtest {
                 models: models.path().to_path_buf(),
             },
         )
@@ -1984,7 +1984,7 @@ mod tests {
 
     /// When the cadence of the handle in `mode` of a strategy reading
     /// `bar_type`, started at 11:30, first decides.
-    fn first_decision(mode: Mode, bar_type: &str) -> Timestamp {
+    fn first_decision(mode: &Mode, bar_type: &str) -> Timestamp {
         let requirements = DataRequirements {
             bar_types: vec![BarType::from(bar_type)],
             ..requirements()
@@ -2007,11 +2007,11 @@ mod tests {
         let live = live(models);
 
         assert_eq!(
-            first_decision(backtest, COMPOSITE),
+            first_decision(&backtest, COMPOSITE),
             at("2026-10-22T12:00:05.010Z")
         );
         assert_eq!(
-            first_decision(live, COMPOSITE),
+            first_decision(&live, COMPOSITE),
             at("2026-10-22T12:00:05.010Z")
         );
     }
@@ -2075,7 +2075,7 @@ mod tests {
         warm(&features, probe.clock().timestamp_ns());
         let handle = ModelHandle::new(
             &blueprint_of(&features, &config, requirements()),
-            Mode::Backtest {
+            &Mode::Backtest {
                 models: models.path().to_path_buf(),
             },
         )
@@ -2130,7 +2130,7 @@ mod tests {
         let (mut probe, _) = registered(at("2026-10-22T11:30:00Z"));
         let handle = ModelHandle::new(
             &blueprint_of(&features, &config, requirements()),
-            Mode::Dataset {
+            &Mode::Dataset {
                 rows: SettledRows::default(),
             },
         )
@@ -2150,7 +2150,7 @@ mod tests {
         };
 
         assert_eq!(
-            first_decision(dataset, COMPOSITE),
+            first_decision(&dataset, COMPOSITE),
             at("2026-10-22T12:00:05.010Z")
         );
     }
@@ -2179,7 +2179,7 @@ mod tests {
 
         for (name, mode) in modes {
             assert_eq!(
-                first_decision(mode, "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL"),
+                first_decision(&mode, "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL"),
                 at("2026-10-22T12:00:00.010Z"),
                 "{name}"
             );
@@ -2203,7 +2203,7 @@ mod tests {
     ) -> Rc<ModelHandle> {
         let handle = ModelHandle::new(
             &blueprint_of(&features(), &never_retrained(), requirements.clone()),
-            live(models.to_path_buf()),
+            &live(models.to_path_buf()),
         )
         .unwrap();
         handle.start(probe).unwrap();
@@ -2239,7 +2239,7 @@ mod tests {
     fn live_handle(
         probe: &mut Decider,
         models: &Path,
-        features: Rc<FeatureSet>,
+        features: &Rc<FeatureSet>,
     ) -> Rc<ModelHandle> {
         let handle = warming_handle(probe, models, features);
         handle.warmup().complete(probe).unwrap();
@@ -2252,12 +2252,12 @@ mod tests {
     fn warming_handle(
         probe: &mut Decider,
         models: &Path,
-        features: Rc<FeatureSet>,
+        features: &Rc<FeatureSet>,
     ) -> Rc<ModelHandle> {
-        warm(&features, probe.clock().timestamp_ns());
+        warm(features, probe.clock().timestamp_ns());
         let handle = ModelHandle::new(
-            &blueprint_of(&features, &config(), requirements()),
-            live(models.to_path_buf()),
+            &blueprint_of(features, &config(), requirements()),
+            &live(models.to_path_buf()),
         )
         .unwrap();
         handle.start(probe).unwrap();
@@ -2288,7 +2288,7 @@ mod tests {
         store.publish(&baseline("2026-10-21T00:00:00Z", 7)).unwrap();
         store.publish(&baseline("2026-10-22T00:00:00Z", 8)).unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T11:00:00Z"));
-        let handle = live_handle(&mut probe, models.path(), features());
+        let handle = live_handle(&mut probe, models.path(), &features());
 
         assert_eq!(level(handle.decide(&mut probe).unwrap()), Some(r(8)));
     }
@@ -2303,7 +2303,7 @@ mod tests {
             .publish(&baseline("2026-10-22T00:00:00Z", 8))
             .unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T11:00:00Z"));
-        let handle = warming_handle(&mut probe, models.path(), features());
+        let handle = warming_handle(&mut probe, models.path(), &features());
 
         let warming = level(handle.decide(&mut probe).unwrap());
         handle.warmup().complete(&probe).unwrap();
@@ -2324,7 +2324,7 @@ mod tests {
         store.publish(&baseline("2026-10-22T10:00:00Z", 7)).unwrap();
         let (mut probe, clock) = registered(at("2026-10-22T23:30:00Z"));
         let features = features();
-        let handle = live_handle(&mut probe, models.path(), Rc::clone(&features));
+        let handle = live_handle(&mut probe, models.path(), &features);
         let before = level(handle.decide(&mut probe).unwrap());
 
         store.publish(&baseline("2026-10-22T23:00:00Z", 9)).unwrap();
@@ -2356,7 +2356,7 @@ mod tests {
         warm(&features, UnixNanos::from(at("2026-10-22T12:00:00Z")));
         ModelHandle::new(
             &blueprint_of(&features, config, requirements()),
-            Mode::Backtest {
+            &Mode::Backtest {
                 models: models.to_path_buf(),
             },
         )
@@ -2403,7 +2403,7 @@ mod tests {
 
         let built = ModelHandle::new(
             &blueprint_of(&features(), &config(), requirements()),
-            Mode::Backtest { models: file },
+            &Mode::Backtest { models: file },
         );
 
         assert!(built.is_err());
@@ -2424,7 +2424,7 @@ mod tests {
         config.target.instrument_id = inverse.id();
         let handle = ModelHandle::new(
             &blueprint_of(&features(), &config, requirements()),
-            Mode::Dataset {
+            &Mode::Dataset {
                 rows: SettledRows::default(),
             },
         )
@@ -2453,7 +2453,7 @@ mod tests {
         config.target.instrument_id = inverse.id();
         let handle = ModelHandle::new(
             &blueprint_of(&features(), &config, requirements()),
-            Mode::Backtest {
+            &Mode::Backtest {
                 models: models.path().to_path_buf(),
             },
         )
@@ -2501,7 +2501,7 @@ mod tests {
         features.handle_quote(&eur_quote(eur)).unwrap();
         ModelHandle::new(
             &blueprint_of(&features, config, reading_eur(eur)),
-            Mode::Backtest {
+            &Mode::Backtest {
                 models: models.to_path_buf(),
             },
         )
@@ -2578,7 +2578,7 @@ mod tests {
         store.publish(&baseline("2026-10-22T12:00:00Z", 8)).unwrap();
         let (mut probe, clock) = registered(at("2026-10-22T11:00:00Z"));
         let features = features();
-        let handle = handle(&probe, models.path(), Rc::clone(&features));
+        let handle = handle(&probe, models.path(), &features);
         started(&handle, &mut probe);
         let before = level(handle.decide(&mut probe).unwrap());
 
@@ -2755,7 +2755,7 @@ mod tests {
         };
         let handle = ModelHandle::new(
             &blueprint_of(&features, &bracket_config(10), requirements),
-            live(models.path().to_path_buf()),
+            &live(models.path().to_path_buf()),
         )
         .unwrap();
         probe.warmup = Some(handle.warmup());
@@ -2801,7 +2801,7 @@ mod tests {
     /// and `ticks`, started live on 2026-08-10 at 14:30 with an hour of
     /// warmup: the data commands its start sent.
     fn started_live(
-        features: Rc<FeatureSet>,
+        features: &Rc<FeatureSet>,
         bar_types: Vec<BarType>,
         ticks: Vec<TickSeries>,
     ) -> Vec<String> {
@@ -2814,8 +2814,8 @@ mod tests {
             warmup: SignedDuration::from_hours(1),
         };
         let handle = ModelHandle::new(
-            &blueprint_of(&features, &bracket_config(10), requirements),
-            live(models.path().to_path_buf()),
+            &blueprint_of(features, &bracket_config(10), requirements),
+            &live(models.path().to_path_buf()),
         )
         .unwrap();
         let sent = sent_commands();
@@ -2827,7 +2827,7 @@ mod tests {
     /// on `config()`, whose target's ATR is on AUD/USD's hourly mids, for a
     /// strategy reading `bar_types` and AUD/USD's quotes: each its bar types
     /// and the time its stream starts.
-    fn bars_subscribed_at_start(mode: Mode, bar_types: &[&str]) -> Vec<String> {
+    fn bars_subscribed_at_start(mode: &Mode, bar_types: &[&str]) -> Vec<String> {
         let requirements = DataRequirements {
             bar_types: bar_types
                 .iter()
@@ -2855,7 +2855,7 @@ mod tests {
         let models = tempfile::tempdir().unwrap();
 
         let subscribed = bars_subscribed_at_start(
-            Mode::Backtest {
+            &Mode::Backtest {
                 models: models.path().to_path_buf(),
             },
             &[],
@@ -2871,7 +2871,7 @@ mod tests {
     #[test]
     fn a_dataset_runs_start_subscribes_the_targets_atr_bars_from_its_start() {
         let subscribed = bars_subscribed_at_start(
-            Mode::Dataset {
+            &Mode::Dataset {
                 rows: SettledRows::default(),
             },
             &[],
@@ -2889,7 +2889,7 @@ mod tests {
     fn a_live_start_subscribes_the_targets_atr_bars_from_where_the_warmup_ends() {
         let models = tempfile::tempdir().unwrap();
 
-        let subscribed = bars_subscribed_at_start(live(models.path().to_path_buf()), &[]);
+        let subscribed = bars_subscribed_at_start(&live(models.path().to_path_buf()), &[]);
 
         assert_eq!(
             subscribed,
@@ -2903,7 +2903,7 @@ mod tests {
     /// its data type, the client it names and the time its stream starts. A
     /// subscription naming no client sends none, Nautilus subscribing the
     /// message bus alone.
-    fn custom_subscribed_at_start(mode: Mode) -> Vec<String> {
+    fn custom_subscribed_at_start(mode: &Mode) -> Vec<String> {
         let metadata = nautilus_core::Params::new(
             [
                 ("source".to_string(), serde_json::json!("bond_yields")),
@@ -2936,7 +2936,7 @@ mod tests {
     fn a_live_start_subscribes_a_custom_series_naming_its_data_client() {
         let models = tempfile::tempdir().unwrap();
 
-        let subscribed = custom_subscribed_at_start(live(models.path().to_path_buf()));
+        let subscribed = custom_subscribed_at_start(&live(models.path().to_path_buf()));
 
         assert_eq!(
             subscribed,
@@ -2954,7 +2954,7 @@ mod tests {
     fn a_backtests_start_subscribes_a_custom_series_naming_no_client() {
         let models = tempfile::tempdir().unwrap();
 
-        let subscribed = custom_subscribed_at_start(Mode::Backtest {
+        let subscribed = custom_subscribed_at_start(&Mode::Backtest {
             models: models.path().to_path_buf(),
         });
 
@@ -2965,7 +2965,7 @@ mod tests {
     /// backtest's.
     #[test]
     fn a_dataset_runs_start_subscribes_a_custom_series_naming_no_client() {
-        let subscribed = custom_subscribed_at_start(Mode::Dataset {
+        let subscribed = custom_subscribed_at_start(&Mode::Dataset {
             rows: SettledRows::default(),
         });
 
@@ -2979,7 +2979,7 @@ mod tests {
         let models = tempfile::tempdir().unwrap();
 
         let subscribed = bars_subscribed_at_start(
-            Mode::Backtest {
+            &Mode::Backtest {
                 models: models.path().to_path_buf(),
             },
             &[
@@ -3014,7 +3014,7 @@ mod tests {
     /// to them from now.
     #[test]
     fn a_live_start_warms_up_a_conversion_pairs_quotes_then_subscribes_to_them_from_now() {
-        let sent = started_live(features(), vec![], vec![aud_quotes(), eurusd_quotes()]);
+        let sent = started_live(&features(), vec![], vec![aud_quotes(), eurusd_quotes()]);
 
         assert_sent(
             &sent,
@@ -3033,7 +3033,7 @@ mod tests {
     #[test]
     fn a_live_start_requests_custom_data_of_the_traded_instrument_from_the_catalog() {
         let (_probe, _handle, sent, _models) =
-            started_live_reading(features(), vec![aud_quotes()], vec![imbalance_series(AUD)]);
+            started_live_reading(&features(), vec![aud_quotes()], vec![imbalance_series(AUD)]);
 
         assert_sent(
             &sent,
@@ -3056,7 +3056,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let sent = started_live(features, vec![hours], vec![aud_quotes()]);
+        let sent = started_live(&features, vec![hours], vec![aud_quotes()]);
 
         assert_sent(
             &sent,
@@ -3131,7 +3131,7 @@ mod tests {
     /// its historical custom data, started: the probe, the handle and the
     /// data commands the start sent.
     fn started_live_reading(
-        features: Rc<FeatureSet>,
+        features: &Rc<FeatureSet>,
         ticks: Vec<TickSeries>,
         custom: Vec<CustomSeries>,
     ) -> (Decider, Rc<ModelHandle>, Vec<String>, tempfile::TempDir) {
@@ -3144,8 +3144,8 @@ mod tests {
             warmup: SignedDuration::from_hours(1),
         };
         let handle = ModelHandle::new(
-            &blueprint_of(&features, &bracket_config(10), requirements),
-            live(models.path().to_path_buf()),
+            &blueprint_of(features, &bracket_config(10), requirements),
+            &live(models.path().to_path_buf()),
         )
         .unwrap();
         probe.warmup = Some(handle.warmup());
@@ -3183,7 +3183,7 @@ mod tests {
     fn a_live_start_warms_a_custom_feature_from_the_catalog() {
         let features = last_imbalance(AUD);
         let (mut probe, _handle, sent, _models) =
-            started_live_reading(Rc::clone(&features), vec![], vec![imbalance_series(AUD)]);
+            started_live_reading(&features, vec![], vec![imbalance_series(AUD)]);
         let cold = features.values();
 
         probe.handle_data_response(&catalog_answer(
@@ -3216,7 +3216,7 @@ mod tests {
     fn a_warmup_answer_older_than_a_live_point_leaves_it_the_latest() {
         let features = last_imbalance(AUD);
         let (mut probe, _handle, _sent, _models) =
-            started_live_reading(Rc::clone(&features), vec![], vec![imbalance_series(AUD)]);
+            started_live_reading(&features, vec![], vec![imbalance_series(AUD)]);
         let live = imbalance(AUD, "2026-08-10T14:30:00Z", 0.1);
         probe.cache_rc().borrow_mut().add_custom_data(live);
 
@@ -3250,7 +3250,7 @@ mod tests {
     fn a_live_start_warms_a_custom_feature_on_a_root_on_its_front_contract() {
         let features = last_imbalance("GC.GLBX");
         let (mut probe, _handle, sent, _models) = started_live_reading(
-            Rc::clone(&features),
+            &features,
             vec![aud_quotes()],
             vec![imbalance_series("GC.GLBX")],
         );
@@ -3308,7 +3308,7 @@ mod tests {
             .unwrap();
         let handle = ModelHandle::new(
             &blueprint_of(&features, &config(), requirements),
-            Mode::Backtest {
+            &Mode::Backtest {
                 models: models.path().to_path_buf(),
             },
         )
@@ -3372,7 +3372,7 @@ mod tests {
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
         let handle = ModelHandle::new(
             &blueprint_of(&features(), &config(), requirements),
-            Mode::Backtest {
+            &Mode::Backtest {
                 models: models.path().to_path_buf(),
             },
         )

@@ -4,7 +4,7 @@ Read the [strategy guide](../strategy/README.md) first for config, series, order
 
 ## Authoring and decisions
 
-A model strategy's `Part` sets `TAKES_MODEL`, builds the shared `FeatureSet` through `ModelPart::features`, and delegates `Part::reads` to `model::reads`. Implement `ModelStrategy`: `blueprint` builds the model from config, and `with_blueprint` constructs `ModelHandle::new(&blueprint, mode)` for each mode. The handle decides; it does not submit orders. Register the strategy in `main.rs` for dataset, train, backtest and live.
+A model strategy's `Part` sets `TAKES_MODEL`, builds the shared `FeatureSet` through `ModelPart::features`, and delegates `Part::reads` to `model::reads`. Implement `ModelStrategy`: `blueprint` builds the model from config, and `with_blueprint` constructs `ModelHandle::new(&blueprint, &mode)` for each mode. The handle decides; it does not submit orders. Register the strategy in `main.rs` for dataset, train, backtest and live.
 
 The validated blueprint owns the strategy ID, features, model config and data requirements; paths remain separate. It computes one fingerprint for the dataset and stores, of the venue of the dataset runs the config declares (see [dataset venue](#targets-and-datasets)). Each strategy and dataset replay needs fresh mutable features. See [`blueprint.rs`](blueprint.rs) for construction and validation.
 

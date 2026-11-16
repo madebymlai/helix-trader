@@ -972,7 +972,7 @@ fn a_target_whose_size_at_the_reference_stake_rounds_to_none_is_none() {
 /// row's unit is, 299.9997 USD, and the multiple 1.
 #[test]
 fn a_dataset_run_sends_each_side_at_the_size_its_row_is_priced_at() {
-    let mut probe = Probe::holding(aud());
+    let mut probe = Probe::holding(Some(aud()));
     probe.quoted(InstrumentId::from(AUD), "0.70000");
     let targets = targets(on_aud(in_bps(20, 10)));
 
@@ -996,7 +996,7 @@ fn a_dataset_run_sends_each_side_at_the_size_its_row_is_priced_at() {
 /// silently.
 #[test]
 fn a_denied_order_fails_the_dataset_run_with_its_reason() {
-    let probe = Probe::holding(aud());
+    let probe = Probe::holding(Some(aud()));
     let targets = targets(on_aud(in_bps(20, 10)));
     let rows = SettledRows::default();
     let denied = OrderDenied::new(
@@ -1058,7 +1058,7 @@ fn holding(balance: &str) -> DatasetVenue {
 
 /// The probe holding AUD/USD and EUR/USD.
 fn holding_eurusd() -> Probe {
-    let probe = Probe::holding(aud());
+    let probe = Probe::holding(Some(aud()));
     probe
         .cache_rc()
         .borrow_mut()
@@ -1218,9 +1218,9 @@ impl Probe {
 
 const AUD: &str = "AUD/USD.SIM";
 
-/// AUD/USD, which `Probe::holding` takes.
-fn aud() -> Option<InstrumentAny> {
-    Some(InstrumentAny::CurrencyPair(audusd_sim()))
+/// AUD/USD.
+fn aud() -> InstrumentAny {
+    InstrumentAny::CurrencyPair(audusd_sim())
 }
 
 /// Bybit's inverse BTCUSD, settled in BTC.
@@ -1334,7 +1334,7 @@ fn decision() -> FeatureRow {
 /// USD, the unit.
 #[test]
 fn a_bracket_is_set_on_each_side_with_the_worth_of_its_stop_at_the_reference_stake() {
-    let probe = Probe::holding(aud());
+    let probe = Probe::holding(Some(aud()));
     probe.quoted(InstrumentId::from(AUD), "0.70000");
 
     let set = setter(&on_aud(in_bps(20, 10))).at(&probe).unwrap().unwrap();
@@ -1388,7 +1388,7 @@ fn a_stop_half_a_tick_from_a_mid_on_a_half_tick_is_worth_exactly_that() {
 /// A trade losing 0.00559 USD on it realized -2R.
 #[test]
 fn a_trade_on_a_stop_worth_under_half_a_cent_realizes_over_its_exact_worth() {
-    let probe = Probe::holding(aud());
+    let probe = Probe::holding(Some(aud()));
     let aud = InstrumentId::from(AUD);
     probe.quoted_at(aud, "0.70000", "0.70001");
     let venue = DatasetVenue {
@@ -1704,7 +1704,7 @@ fn a_target_on_a_cold_atr_says_so_and_names_its_bars() {
 /// From 0.07000, the stop's 0.0000007 rounds onto the price.
 #[test]
 fn a_target_with_an_exit_on_the_price_says_so_and_names_the_price() {
-    let probe = Probe::holding(aud());
+    let probe = Probe::holding(Some(aud()));
     probe.quoted(InstrumentId::from(AUD), "0.07000");
 
     let set = setter(&on_aud(tight_stop())).at(&probe).unwrap();
@@ -1742,7 +1742,7 @@ fn a_bracket_on_an_instrument_not_in_the_cache_starts() {
 
 #[test]
 fn a_bracket_on_a_linear_instrument_starts() {
-    let mut probe = Probe::holding(aud());
+    let mut probe = Probe::holding(Some(aud()));
 
     targets(on_aud(in_bps(20, 10))).start(&mut probe).unwrap();
 }
@@ -1778,11 +1778,7 @@ fn a_time_only_target_missing_its_instrument_errs_before_any_order() {
 
     assert!(format!("{err:#}").contains("not in cache"), "{err:#}");
     assert_eq!(probe.orders(), Vec::<String>::new());
-    probe
-        .cache_rc()
-        .borrow_mut()
-        .add_instrument(aud().unwrap())
-        .unwrap();
+    probe.cache_rc().borrow_mut().add_instrument(aud()).unwrap();
     targets.open(&mut probe, decision()).unwrap();
     assert_eq!(probe.orders(), ["D0-L-E", "D0-S-E"]);
 }
@@ -2035,7 +2031,7 @@ fn a_commission_in_another_currency_than_the_targets_pnl_is_an_error_at_a_decisi
 /// orders are of the decision after the first.
 #[test]
 fn a_decision_with_no_price_takes_a_number_and_one_with_an_exit_on_the_price_none() {
-    let mut probe = Probe::holding(aud());
+    let mut probe = Probe::holding(Some(aud()));
     let aud = InstrumentId::from(AUD);
     let targets = targets(on_aud(tight_stop()));
 

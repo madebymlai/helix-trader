@@ -320,9 +320,9 @@ async fn main() -> anyhow::Result<()> {
     venues::register_custom_data();
     match Cli::parse().command {
         Command::FillCatalog(args) => run_fill_catalog(args).await,
-        Command::Backtest(args) => run_backtest(*args),
+        Command::Backtest(args) => run_backtest(&args),
         Command::Live(args) => run_live(*args).await,
-        Command::Train(args) => run_train(*args),
+        Command::Train(args) => run_train(&args),
     }
 }
 
@@ -360,7 +360,7 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
 /// store, at the commission, balance and latency of the config's `[model]
 /// dataset`; the out-of-sample scores of its models follow the results,
 /// after the costs of the run and of its models' dataset runs.
-fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
+fn run_backtest(args: &BacktestArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     // The node installs Nautilus' logger from its engine config: pass the
     // NAUTILUS_LOG config through, rather than install a logger here.
@@ -382,7 +382,7 @@ fn run_backtest(args: BacktestArgs) -> anyhow::Result<()> {
         logging,
     };
     args.run.strategy.visit(Backtesting {
-        args: &args,
+        args,
         dataset_logging,
         backtest,
     })
@@ -679,15 +679,12 @@ fn reported(trained: &Trained) -> anyhow::Result<()> {
 /// Trains the strategy's model at `--at` and reports the outcome (see
 /// `reported`): the days its dataset lacks are replayed by a dataset run
 /// (`DatasetRun`).
-fn run_train(args: TrainArgs) -> anyhow::Result<()> {
+fn run_train(args: &TrainArgs) -> anyhow::Result<()> {
     let run = DatasetRun {
         catalog: args.catalog.clone(),
         logging: logger_config(std::env::var("NAUTILUS_LOG"))?,
     };
-    let outcome = args.strategy.visit(Training {
-        args: &args,
-        run: &run,
-    })?;
+    let outcome = args.strategy.visit(Training { args, run: &run })?;
     reported(&outcome)
 }
 
@@ -749,18 +746,28 @@ mod tests {
         Cli::try_parse_from(argv).map(|cli| cli.command)
     }
 
-    fn parse(args: &[&str]) -> Result<FillCatalogArgs, clap::Error> {
-        parse_command("fill-catalog", args).map(|command| match command {
+    /// The arguments of `command`, a fill-catalog.
+    fn fill_catalog_args(command: Command) -> FillCatalogArgs {
+        match command {
             Command::FillCatalog(args) => args,
             command => panic!("{command:?}"),
-        })
+        }
+    }
+
+    fn parse(args: &[&str]) -> Result<FillCatalogArgs, clap::Error> {
+        parse_command("fill-catalog", args).map(fill_catalog_args)
+    }
+
+    /// The arguments of `command`, a backtest.
+    fn backtest_args(command: Command) -> BacktestArgs {
+        match command {
+            Command::Backtest(args) => *args,
+            command => panic!("{command:?}"),
+        }
     }
 
     fn parse_backtest(args: &[&str]) -> Result<BacktestArgs, clap::Error> {
-        parse_command("backtest", args).map(|command| match command {
-            Command::Backtest(args) => *args,
-            command => panic!("{command:?}"),
-        })
+        parse_command("backtest", args).map(backtest_args)
     }
 
     const REQUIRED: [&str; 7] = [
@@ -965,11 +972,16 @@ mod tests {
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument, "{err}");
     }
 
-    fn parse_live(args: &[&str]) -> Result<LiveArgs, clap::Error> {
-        parse_command("live", args).map(|command| match command {
+    /// The arguments of `command`, a live run.
+    fn live_args(command: Command) -> LiveArgs {
+        match command {
             Command::Live(args) => *args,
             command => panic!("{command:?}"),
-        })
+        }
+    }
+
+    fn parse_live(args: &[&str]) -> Result<LiveArgs, clap::Error> {
+        parse_command("live", args).map(live_args)
     }
 
     #[test]
@@ -1062,11 +1074,16 @@ mod tests {
         assert!(logger_config(Ok("stdout=Loud".to_string())).is_err());
     }
 
-    fn parse_train(args: &[&str]) -> Result<TrainArgs, clap::Error> {
-        parse_command("train", args).map(|command| match command {
+    /// The arguments of `command`, a train.
+    fn train_args(command: Command) -> TrainArgs {
+        match command {
             Command::Train(args) => *args,
             command => panic!("{command:?}"),
-        })
+        }
+    }
+
+    fn parse_train(args: &[&str]) -> Result<TrainArgs, clap::Error> {
+        parse_command("train", args).map(train_args)
     }
 
     /// The arguments a train requires.
@@ -1286,7 +1303,7 @@ mod tests {
     fn the_ema_strategy_has_no_model_to_train() {
         let mut argv = TRAIN.to_vec();
         argv[0] = "ema";
-        let err = run_train(parse_train(&argv).unwrap()).unwrap_err();
+        let err = run_train(&parse_train(&argv).unwrap()).unwrap_err();
         assert!(err.to_string().contains("no model"), "{err}");
     }
 

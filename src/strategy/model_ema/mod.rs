@@ -136,7 +136,7 @@ impl ModelStrategy for ModelEma {
         blueprint: ModelBlueprint,
         mode: Mode,
     ) -> anyhow::Result<Self> {
-        let model = ModelHandle::new(&blueprint, mode)?;
+        let model = ModelHandle::new(&blueprint, &mode)?;
         Ok(Self {
             core: StrategyCore::new_checked(config.base.clone())?,
             model,

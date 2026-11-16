@@ -119,6 +119,7 @@ impl LseHttpClient {
     /// The client, asking again as `retry` says, for a test that cannot
     /// wait out the backoff.
     #[cfg(feature = "test-support")]
+    #[must_use]
     pub fn with_retry(mut self, retry: RetryConfig) -> Self {
         self.retries = RetryManager::new(retry);
         self

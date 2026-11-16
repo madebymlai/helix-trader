@@ -165,10 +165,10 @@ async fn phase() {
         recording: crate::recording(staging.path()),
     };
     let probe = Probe::new(step, broker, PathBuf::from(std::env::var(STATE).unwrap()));
-    let ran = tokio::time::timeout(
+    let ran = Box::pin(tokio::time::timeout(
         Duration::from_secs(300),
         live.run(&requirements, &Warmup::live(&requirements), probe, None),
-    )
+    ))
     .await;
     ran.expect("the node stops within 5 minutes").unwrap();
     let report: Report =

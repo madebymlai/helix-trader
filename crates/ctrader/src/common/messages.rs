@@ -13,7 +13,13 @@ use std::fmt;
 use prost::Message as _;
 use zeroize::Zeroize;
 
-#[allow(clippy::all, clippy::pedantic, missing_docs, dead_code)]
+#[allow(
+    clippy::all,
+    clippy::pedantic,
+    missing_docs,
+    dead_code,
+    unreachable_pub
+)]
 mod proto {
     include!(concat!(env!("OUT_DIR"), "/ctrader_open_api.rs"));
 }

@@ -192,7 +192,7 @@ fn a_decision_on_hour_bars_reads_the_bar_closing_on_its_grid() {
         features,
         &config,
         &requirements,
-        Mode::Dataset {
+        &Mode::Dataset {
             rows: SettledRows::default(),
         },
     );

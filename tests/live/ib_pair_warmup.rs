@@ -172,11 +172,11 @@ async fn a_live_start_warms_up_an_idealpro_pairs_bid_and_ask_bars_and_has_its_ra
         catalog: catalog.path().to_path_buf(),
         recording: crate::recording(staging.path()),
     };
-    let ran = tokio::time::timeout(
+    let ran = Box::pin(tokio::time::timeout(
         Duration::from_secs(300),
         // The probe trades nothing: it claims no instrument.
         live.run(&requirements, &warmup, probe, None),
-    )
+    ))
     .await;
     common::cache::delete_trader(TRADER).await;
     ran.expect("the probe stops the node within 5 minutes")

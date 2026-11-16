@@ -124,7 +124,7 @@ impl LseStreams {
         config: &LseDataClientConfig,
         credential: Option<LseCredential>,
         (cme, nasdaq): (Option<ExchangeAccess>, Option<ExchangeAccess>),
-        listings: Arc<CmeListings>,
+        listings: &Arc<CmeListings>,
         data_sender: EventSender<DataEvent>,
         clock: &'static AtomicTime,
     ) -> anyhow::Result<Self> {
@@ -150,7 +150,7 @@ impl LseStreams {
                 exchange,
                 streamed,
                 access,
-                Arc::clone(&listings),
+                Arc::clone(listings),
                 config.exchange_stream_url(exchange).to_owned(),
                 data_sender.clone(),
                 clock,

@@ -156,7 +156,7 @@ pub(crate) fn catalog() -> TempDir {
 
 /// A catalog of both contracts and `trades`, of either, stored over 22:00
 /// Tuesday to 02:00 Wednesday.
-pub(crate) fn catalog_of_trades(trades: Vec<TradeTick>) -> TempDir {
+pub(crate) fn catalog_of_trades(trades: &[TradeTick]) -> TempDir {
     let dir = tempfile::tempdir().unwrap();
     let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
     catalog

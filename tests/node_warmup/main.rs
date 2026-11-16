@@ -1276,7 +1276,7 @@ fn warm_deltas(dir: &Path) -> (Rc<Books>, Vec<(u64, u64)>) {
     }];
     let requirements = DataRequirements {
         bar_types: vec![],
-        ticks: ticks,
+        ticks,
         custom: vec![],
         warmup: WARMUP,
     };

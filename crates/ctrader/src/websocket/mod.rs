@@ -1590,8 +1590,8 @@ mod tests {
     }
 
     /// A token file whose access token is due for renewal `after` from now.
-    fn due_after(after: Duration) -> Option<Timestamp> {
-        Some(Timestamp::now() + RENEW_BEFORE + jiff::SignedDuration::try_from(after).unwrap())
+    fn due_after(after: Duration) -> Timestamp {
+        Timestamp::now() + RENEW_BEFORE + jiff::SignedDuration::try_from(after).unwrap()
     }
 
     #[tokio::test]
@@ -1714,7 +1714,7 @@ mod tests {
     async fn a_running_session_renews_its_token_on_schedule() {
         let venue = TokenVenue::new();
         let (url, received) = testing::start(venue_peer(&venue));
-        let (credential, _dir) = credential_expiring(due_after(Duration::from_secs(1)));
+        let (credential, _dir) = credential_expiring(Some(due_after(Duration::from_secs(1))));
         let tokens = credential.tokens();
         let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
 
@@ -1871,7 +1871,7 @@ mod tests {
         let slow = Duration::from_millis(300);
         let (one_url, one) = testing::start(slow_renewal(slow, venue_peer(&venue)));
         let (other_url, other) = testing::start(slow_renewal(slow, venue_peer(&venue)));
-        let (credential, _dir) = credential_expiring(due_after(Duration::from_millis(500)));
+        let (credential, _dir) = credential_expiring(Some(due_after(Duration::from_millis(500))));
         let one_client = connect(&one_url, credential.clone(), SLOW_HEARTBEAT)
             .await
             .unwrap();

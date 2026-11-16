@@ -543,7 +543,7 @@ impl Warmup {
     pub fn on_historical_book_depth(&self, response: &[OrderBookDepth]) -> anyhow::Result<()> {
         response
             .iter()
-            .try_for_each(|depth| self.hold.history(Tick::Depth(Box::new(depth.clone()))))
+            .try_for_each(|depth| self.hold.history(&Tick::Depth(Box::new(depth.clone()))))
     }
 
     /// Hands the book deltas of `response`, a response to the warmup's
@@ -557,7 +557,7 @@ impl Warmup {
     pub fn on_historical_book_deltas(&self, response: &[OrderBookDelta]) -> anyhow::Result<()> {
         batches(response)
             .into_iter()
-            .try_for_each(|deltas| self.hold.history(Tick::Deltas(deltas)))
+            .try_for_each(|deltas| self.hold.history(&Tick::Deltas(deltas)))
     }
 
     /// Takes `depth`, a live snapshot, from the actor's `on_book_depth`: the
@@ -620,7 +620,7 @@ impl Warmup {
     pub fn on_historical_quotes(&self, response: &[QuoteTick]) -> anyhow::Result<()> {
         response
             .iter()
-            .try_for_each(|quote| self.hold.history(Tick::Quote(*quote)))
+            .try_for_each(|quote| self.hold.history(&Tick::Quote(*quote)))
     }
 
     /// Hands the trades of `response` over as `on_historical_quotes` does
@@ -632,7 +632,7 @@ impl Warmup {
     pub fn on_historical_trades(&self, response: &[TradeTick]) -> anyhow::Result<()> {
         response
             .iter()
-            .try_for_each(|trade| self.hold.history(Tick::Trade(*trade)))
+            .try_for_each(|trade| self.hold.history(&Tick::Trade(*trade)))
     }
 
     /// Takes `quote`, a live one, from the actor's `on_quote`: the

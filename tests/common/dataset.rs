@@ -265,7 +265,7 @@ pub(crate) fn walk_quotes(from: Timestamp, to: Timestamp) -> Vec<QuoteTick> {
 fn probe(
     features: Rc<FeatureSet>,
     config: &ModelConfig,
-    mode: Mode,
+    mode: &Mode,
 ) -> (ModelProbe, Rc<RefCell<Record>>) {
     probe_reading(features, config, &requirements(), mode)
 }
@@ -277,7 +277,7 @@ pub(crate) fn probe_reading(
     features: Rc<FeatureSet>,
     config: &ModelConfig,
     requirements: &DataRequirements,
-    mode: Mode,
+    mode: &Mode,
 ) -> (ModelProbe, Rc<RefCell<Record>>) {
     probe_staking(features, config, requirements, mode, Decimal::ONE)
 }
@@ -288,7 +288,7 @@ fn probe_staking(
     features: Rc<FeatureSet>,
     config: &ModelConfig,
     requirements: &DataRequirements,
-    mode: Mode,
+    mode: &Mode,
     multiple: Decimal,
 ) -> (ModelProbe, Rc<RefCell<Record>>) {
     let record = Rc::new(RefCell::new(Record::default()));
@@ -396,7 +396,7 @@ pub(crate) fn replay_of(
     to: Timestamp,
 ) -> anyhow::Result<Vec<TargetRow>> {
     let rows = SettledRows::default();
-    let (probe, _) = probe(features, config, Mode::Dataset { rows: rows.clone() });
+    let (probe, _) = probe(features, config, &Mode::Dataset { rows: rows.clone() });
     backtest(catalog.path(), from, to).run_dataset(probe)?;
     rows.take()
 }
@@ -426,7 +426,7 @@ pub(crate) fn trade_on(
         balance: venue().balance,
         multiple: Decimal::ONE,
     };
-    trade_staking(catalog, features, (from, to), config, models, account)
+    trade_staking(catalog, features, (from, to), config, models, &account)
 }
 
 /// The account a probe trades on and the multiple of the config's stake it
@@ -445,13 +445,13 @@ pub(crate) fn trade_staking(
     (from, to): (Timestamp, Timestamp),
     config: &ModelConfig,
     models: &Path,
-    account: Account,
+    account: &Account,
 ) -> Record {
     let (probe, record) = probe_staking(
         features,
         config,
         &requirements(),
-        Mode::Backtest {
+        &Mode::Backtest {
             models: models.to_path_buf(),
         },
         account.multiple,

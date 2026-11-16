@@ -494,7 +494,7 @@ mod tests {
         let pages = side_ticks(0, 20, venue(&all, &mut vec![])).await;
 
         let err = pages.failure.unwrap();
-        assert!(err.to_string().contains("5"), "{err}");
+        assert!(err.to_string().contains('5'), "{err}");
         assert_eq!(pages.ticks, []);
         assert_eq!(pages.from_ms, 20);
     }

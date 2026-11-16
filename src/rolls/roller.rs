@@ -244,7 +244,7 @@ fn armed(event: &TimeEvent, instrument_id: InstrumentId) -> Option<Transition> {
 /// Sets the roll alert of `instrument_id` for `next`, at the last
 /// nanosecond before it (see `Roller::on_time_event`), handled by the
 /// actor's `on_time_event`.
-fn set_alert<A>(actor: &mut A, instrument_id: InstrumentId, next: Transition) -> anyhow::Result<()>
+fn set_alert<A>(actor: &A, instrument_id: InstrumentId, next: Transition) -> anyhow::Result<()>
 where
     A: DataActor + DataActorNative + Debug + 'static,
 {

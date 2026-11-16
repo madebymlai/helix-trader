@@ -210,10 +210,10 @@ async fn a_live_run_caches_its_conversion_pairs_quotes_after_its_start() {
         assert!(status.success());
     });
 
-    let ran = tokio::time::timeout(
+    let ran = Box::pin(tokio::time::timeout(
         LIVE_RUN + Duration::from_secs(60),
         live.run(&requirements, &warmup, recorder, None),
-    )
+    ))
     .await;
 
     let interrupted = interrupt.is_finished();
