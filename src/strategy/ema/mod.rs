@@ -213,13 +213,18 @@ impl EmaCross {
     }
 
     /// The strategy as a live node runs it: it requests its warmup
-    /// (`DataConfig::warmup`) at start, which hydrates its indicators.
+    /// (`DataConfig::warmup`) at start, which hydrates its indicators, and
+    /// its subscriptions are a live node's (`Subscriptions::live`).
     ///
     /// # Errors
     ///
     /// Returns an error if the config is invalid.
     pub fn live(config: EmaCrossConfig) -> anyhow::Result<Self> {
-        Self::built(config, Warmup::live)
+        let ema = Self::built(config, Warmup::live)?;
+        Ok(Self {
+            subscriptions: ema.subscriptions.live(),
+            ..ema
+        })
     }
 
     /// The strategy of `config`, its warmup `warmup` of its data

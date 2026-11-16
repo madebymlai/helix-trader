@@ -359,9 +359,9 @@ impl ModelHandle {
         }
         .custom_roots(requirements.custom.iter().filter_map(CustomSeries::root));
         let delay = warmup::bar_build_delay(&requirements.bar_types);
-        let serving = match mode {
+        let serving = match &mode {
             Mode::Backtest { models } | Mode::Live { models } => {
-                let models = blueprint.model_set(&models)?;
+                let models = blueprint.model_set(models)?;
                 Serving::Deciding(Box::new(Deciding {
                     models: RefCell::new(DecidingModels::new(&models)?),
                     target: TargetSetter::sharing(
@@ -382,7 +382,7 @@ impl ModelHandle {
                     &blueprint.config().dataset,
                     features.bracket_width(),
                 )?,
-                rows,
+                rows: rows.clone(),
             },
         };
         // A dataset run warms on its replay.
@@ -397,6 +397,12 @@ impl ModelHandle {
             Serving::Dataset { targets, .. } => targets.atr_bar_type(),
         };
         let bar_types = requirements.bar_types.iter().copied().chain(atr_bars);
+        let subscriptions =
+            Subscriptions::new(bar_types.collect(), ticks, requirements.custom.clone());
+        let subscriptions = match mode {
+            Mode::Live { .. } => subscriptions.live(),
+            Mode::Backtest { .. } | Mode::Dataset { .. } => subscriptions,
+        };
         Ok(Rc::new(Self {
             strategy_id: blueprint.strategy_id(),
             features: Rc::clone(features),
@@ -404,11 +410,7 @@ impl ModelHandle {
             delay,
             traded,
             serving,
-            subscriptions: Subscriptions::new(
-                bar_types.collect(),
-                ticks,
-                requirements.custom.clone(),
-            ),
+            subscriptions,
             warmup: Rc::new(warmup),
             roller,
         }))
@@ -2656,6 +2658,13 @@ mod tests {
                         r.start,
                         r.end
                     ),
+                    DataCommand::Subscribe(SubscribeCommand::Data(s)) => format!(
+                        "subscribe data {} of {:?} naming {:?} from {:?}",
+                        s.data_type.type_name(),
+                        s.data_type.identifier(),
+                        s.client_id,
+                        start_ns(s.params.as_ref())
+                    ),
                     other => format!("{other:?}"),
                 };
                 record.borrow_mut().push(line);
@@ -2882,6 +2891,81 @@ mod tests {
             subscribed,
             ["subscribe bars [AUD/USD.SIM-1-HOUR-MID-INTERNAL] from Some(2026-10-22T12:00:00Z)"]
         );
+    }
+
+    /// The custom data subscriptions the start of a handle in `mode` sends
+    /// at 12:00, on `config()`, for a strategy reading AUD/USD's quotes and
+    /// LSE's daily 10-year US yields, a custom series of LSE's rows: each
+    /// its data type, the client it names and the time its stream starts. A
+    /// subscription naming no client sends none, Nautilus subscribing the
+    /// message bus alone.
+    fn custom_subscribed_at_start(mode: Mode) -> Vec<String> {
+        let metadata = nautilus_core::Params::new(
+            [
+                ("source".to_string(), serde_json::json!("bond_yields")),
+                ("symbol".to_string(), serde_json::json!("US10Y")),
+            ]
+            .into(),
+        );
+        let us10y = CustomSeries::new("LseRow", "US10Y".to_string(), Some(metadata)).unwrap();
+        let requirements = DataRequirements {
+            custom: vec![us10y],
+            ..requirements()
+        };
+        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
+        let handle =
+            ModelHandle::new(&blueprint_of(&features(), &config(), requirements), mode).unwrap();
+        let sent = sent_commands();
+
+        handle.start(&mut probe).unwrap();
+
+        sent.take()
+            .into_iter()
+            .filter(|line| line.starts_with("subscribe data"))
+            .collect()
+    }
+
+    /// Live, a custom series' subscription names its data client on the
+    /// node, LSE's for LSE's rows, so that Nautilus sends it the
+    /// subscription, from where the warmup ends.
+    #[test]
+    fn a_live_start_subscribes_a_custom_series_naming_its_data_client() {
+        let models = tempfile::tempdir().unwrap();
+
+        let subscribed = custom_subscribed_at_start(live(models.path().to_path_buf()));
+
+        assert_eq!(
+            subscribed,
+            [
+                "subscribe data LseRow of Some(\"US10Y\") naming Some(\"LSE\") \
+                 from Some(2026-10-22T12:00:00Z)"
+            ]
+        );
+    }
+
+    /// A backtest's custom series' subscription names no client, its
+    /// engine having none of LSE's: Nautilus subscribes the message bus
+    /// alone, where the replay's rows arrive, and sends no command.
+    #[test]
+    fn a_backtests_start_subscribes_a_custom_series_naming_no_client() {
+        let models = tempfile::tempdir().unwrap();
+
+        let subscribed = custom_subscribed_at_start(Mode::Backtest {
+            models: models.path().to_path_buf(),
+        });
+
+        assert_eq!(subscribed, Vec::<String>::new());
+    }
+
+    /// A dataset run's custom series' subscription names no client, as a
+    /// backtest's.
+    #[test]
+    fn a_dataset_runs_start_subscribes_a_custom_series_naming_no_client() {
+        let subscribed = custom_subscribed_at_start(Mode::Dataset {
+            rows: SettledRows::default(),
+        });
+
+        assert_eq!(subscribed, Vec::<String>::new());
     }
 
     /// The target's ATR's bars the strategy reads too are subscribed once,

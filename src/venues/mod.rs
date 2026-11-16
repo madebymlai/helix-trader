@@ -44,8 +44,13 @@
 //! (`serves_custom`, its history source's answer, LSE's the check its
 //! client makes), fill-catalog which source fills it (`fill_history`), a
 //! live start whether its live data streams it (`streams_custom`, its live
-//! data source's answer: none does yet), and a live warmup the client it
-//! asks its history of (`custom_data_client`). On a root, its contracts'
+//! data source's answer: none does yet), and the client of its live data
+//! source on the live node (`custom_data_client`), which a live strategy's
+//! subscription to it names, so that Nautilus sends that client the
+//! subscription by its client id alone, a live warmup asks its history of
+//! if its type's history serves it, and the node has whether or not an
+//! instrument of the run routes to it (`live_clients`); a type with no row,
+//! or a row with no live data source, has none. On a root, its contracts'
 //! series are routed as it is, by their type, the source asked for each
 //! over its slice (`DataRequirements::custom_slices`). A type the table has no
 //! row of, or a row with no history source, is the catalog's: data
@@ -475,7 +480,7 @@ impl CustomRow {
 /// catalog's, data written into the catalog from outside helix, which
 /// fill-catalog hands to no source (`fill_history`), a replay reads as any
 /// other, and a live warmup asks of the catalog alone
-/// (`custom_data_client`). A config's custom series are checked here
+/// (`strategy::warmup::custom_request`). A config's custom series are checked here
 /// (`StandardConfig::validate`), and so are a fill's before anything
 /// connects.
 ///
@@ -530,28 +535,17 @@ pub(crate) fn streams_custom(series: &CustomSeries) -> anyhow::Result<()> {
     }
 }
 
-/// The data client a live node asks the history of `series`, a custom
-/// series, of, if its type's history serves it (`serves_custom`): its
+/// The data client of `series`, a custom series, on the live node: its
 /// type's row's live data source's (`CustomRow::of`), LSE's for its rows,
-/// the node's catalog answering first (see `strategy::warmup`). None if
-/// the series is the catalog's, which the node's catalog alone answers.
-///
-/// # Errors
-///
-/// Returns an error as `serves_custom` does, or naming its type if its
-/// row names a history source and no live data source.
-pub(crate) fn custom_data_client(series: &CustomSeries) -> anyhow::Result<Option<ClientId>> {
-    if serves_custom(series)?.is_none() {
-        return Ok(None);
-    }
-    let source = CustomRow::of(series).live_data.with_context(|| {
-        format!(
-            "no live data source asks the history of custom data of the type {}: its row \
-             names none",
-            series.type_name()
-        )
-    })?;
-    Ok(Some(source.client()))
+/// by the name the node registers it under. A live strategy's subscription
+/// to the series names it (`strategy::subscriptions`), a live warmup asks
+/// it the series' history if its type's history serves it, the node's
+/// catalog answering first (`strategy::warmup`), and the node has it
+/// whether or not an instrument of the run routes to it (`live_clients`).
+/// None if its type has no row, or one with no live data source: nothing
+/// streams the series.
+pub(crate) fn custom_data_client(series: &CustomSeries) -> Option<ClientId> {
+    CustomRow::of(series).live_data.map(LiveDataSource::client)
 }
 
 /// Registers with Nautilus every custom data type helix compiles, each
@@ -1011,8 +1005,9 @@ fn ctrader_clients(connection: CTraderConnection, instrument_ids: Vec<Instrument
     }
 }
 
-/// The instruments of each adapter's clients on the live node, and the
-/// venues IB's data client is routed.
+/// The instruments of each adapter's clients on the live node, the venues
+/// IB's data client is routed, and the live data sources of the custom
+/// series, whose clients their subscriptions name (`custom_data_client`).
 #[derive(Debug, Default, PartialEq, Eq)]
 struct LiveRoutes {
     okx: Vec<InstrumentId>,
@@ -1020,6 +1015,7 @@ struct LiveRoutes {
     lse: Vec<InstrumentId>,
     ib: Vec<InstrumentId>,
     ib_data_venues: Vec<Venue>,
+    custom: Vec<LiveDataSource>,
 }
 
 impl LiveRoutes {
@@ -1032,8 +1028,10 @@ impl LiveRoutes {
     /// both. IB's
     /// data client is routed the venues whose live data is IB's, each once.
     /// OKX's and the cTrader brokers' rows take their live data from their
-    /// broker.
-    fn of(instrument_ids: &[InstrumentId]) -> Self {
+    /// broker. Each of `custom`, custom series, to its type's row's live
+    /// data source (`CustomRow::of`), each source once, whether or not an
+    /// instrument routes to it; none if its type has none.
+    fn of(instrument_ids: &[InstrumentId], custom: &[CustomSeries]) -> Self {
         let mut routes = Self::default();
         for &id in instrument_ids {
             let row = Row::of(id.venue);
@@ -1051,18 +1049,76 @@ impl LiveRoutes {
                 routes.ib.push(id);
             }
         }
+        for series in custom {
+            if let Some(source) = CustomRow::of(series).live_data
+                && !routes.custom.contains(&source)
+            {
+                routes.custom.push(source);
+            }
+        }
         routes
+    }
+
+    /// The live node's clients of the routes, as `live_clients` sets them
+    /// up past its checks: LSE's if an instrument or a custom series routes
+    /// to it, streaming no instrument if none does (`lse::live_clients`).
+    /// OKX's, the cTrader brokers' and IB's live data stream no custom data,
+    /// so a live start refuses a custom series of theirs before this
+    /// (`streams_custom`), and their clients are set up for their
+    /// instruments alone.
+    ///
+    /// # Errors
+    ///
+    /// As `live_clients`, past its checks of what the run reads.
+    async fn clients(self, venues: &LiveVenueArgs, catalog: &Path) -> anyhow::Result<Vec<Clients>> {
+        let Self {
+            okx: okx_ids,
+            ctrader: ctrader_ids,
+            lse: lse_ids,
+            ib: ib_ids,
+            ib_data_venues,
+            custom,
+        } = self;
+        let ctrader = ctrader_brokers_present(&ctrader_ids)
+            .into_iter()
+            .map(|(broker, ids)| broker.connection().map(|connection| (connection, ids)))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let mut clients = Vec::new();
+        if !okx_ids.is_empty() {
+            let okx = okx::clients(&okx_ids, catalog).await?;
+            clients.push(okx.into_node_clients());
+        }
+        for (connection, ids) in ctrader {
+            connection.check_account().await?;
+            clients.push(ctrader_clients(connection, ids));
+        }
+        if !lse_ids.is_empty() || custom.contains(&LiveDataSource::Lse) {
+            clients.push(lse::live_clients(&lse_ids));
+        }
+        if !ib_ids.is_empty() {
+            let account = venues.ib.account.as_ref().context(
+                "the strategy trades IB instruments: give the IB account \
+                 (--account or NAUTILUS_IB_ACCOUNT_ID)",
+            )?;
+            let ib = ib::clients(account, venues.ib.client_id, &ib_ids).await?;
+            clients.push(ib.into_node_clients(&ib_data_venues));
+        }
+        Ok(clients)
     }
 }
 
 /// The live node's clients of `instrument_ids` (see `LiveRoutes`), for the
-/// instruments `requirements` reads: OKX's, each cTrader broker's
-/// (`ctrader_brokers_present`), LSE's, then IB's. OKX's, the cTrader
-/// brokers' and IB's are each a data client with the execution client of
-/// the same adapter on its connection; LSE's is a data client alone, routed
-/// the venues of its instruments, LSEDGE, which no broker trades, and GLBX,
-/// XNAS and OPRA, whose orders go to IB's execution client (see
-/// `lse::live_clients`), its keys read when the node creates it. IB's data
+/// instruments `requirements` reads, and of its custom series' live data
+/// sources: OKX's, each cTrader broker's (`ctrader_brokers_present`),
+/// LSE's, then IB's. OKX's, the cTrader brokers' and IB's are each a data
+/// client with the execution client of the same adapter on its connection;
+/// LSE's is a data client alone, routed the venues of its instruments,
+/// LSEDGE, which no broker trades, and GLBX, XNAS and OPRA, whose orders go
+/// to IB's execution client (see `lse::live_clients`), its keys read when
+/// the node creates it, and set up for a custom series of LSE's rows whether
+/// or not an instrument of the run is LSE's, streaming none and routed no
+/// venue if none is: a custom series' subscription names its client
+/// (`custom_data_client`), not a venue. IB's data
 /// client is routed the venues whose live data is IB's, and its execution
 /// client takes the default route of orders, every order but OKX's and the
 /// cTrader brokers'. So every venue the run reads has a route of its data,
@@ -1105,13 +1161,6 @@ pub(crate) async fn live_clients(
     venues: &LiveVenueArgs,
     catalog: &Path,
 ) -> anyhow::Result<Vec<Clients>> {
-    let LiveRoutes {
-        okx: okx_ids,
-        ctrader: ctrader_ids,
-        lse: lse_ids,
-        ib: ib_ids,
-        ib_data_venues,
-    } = LiveRoutes::of(instrument_ids);
     // Checked before anything connects: every series the run subscribes
     // to, a rolled root's by its venue, its contracts', and its custom
     // series, by its type's row.
@@ -1121,31 +1170,9 @@ pub(crate) async fn live_clients(
     for series in &requirements.custom {
         streams_custom(series)?;
     }
-    let ctrader = ctrader_brokers_present(&ctrader_ids)
-        .into_iter()
-        .map(|(broker, ids)| broker.connection().map(|connection| (connection, ids)))
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    let mut clients = Vec::new();
-    if !okx_ids.is_empty() {
-        let okx = okx::clients(&okx_ids, catalog).await?;
-        clients.push(okx.into_node_clients());
-    }
-    for (connection, ids) in ctrader {
-        connection.check_account().await?;
-        clients.push(ctrader_clients(connection, ids));
-    }
-    if !lse_ids.is_empty() {
-        clients.push(lse::live_clients(&lse_ids));
-    }
-    if !ib_ids.is_empty() {
-        let account = venues.ib.account.as_ref().context(
-            "the strategy trades IB instruments: give the IB account \
-             (--account or NAUTILUS_IB_ACCOUNT_ID)",
-        )?;
-        let ib = ib::clients(account, venues.ib.client_id, &ib_ids).await?;
-        clients.push(ib.into_node_clients(&ib_data_venues));
-    }
-    Ok(clients)
+    LiveRoutes::of(instrument_ids, &requirements.custom)
+        .clients(venues, catalog)
+        .await
 }
 
 #[cfg(test)]
@@ -1301,7 +1328,7 @@ mod tests {
             ])
         };
 
-        let routes = LiveRoutes::of(&requirements.instrument_ids());
+        let routes = LiveRoutes::of(&requirements.instrument_ids(), &requirements.custom);
 
         assert_eq!(
             routes.ctrader,
@@ -1740,25 +1767,22 @@ mod tests {
         .unwrap();
     }
 
-    /// LSE's rows are LSE's: its history serves them, and a live node asks
-    /// their history of its live data client.
+    /// LSE's rows are LSE's: its history serves them, and their data
+    /// client on a live node is LSE's.
     #[test]
-    fn lse_s_rows_are_served_by_lse_and_their_history_asked_of_lse_s_client() {
+    fn lse_s_rows_are_served_by_lse_and_their_live_data_client_is_lse_s() {
         let us10y = lse_rows("bond_yields", "US10Y");
 
         assert_eq!(serves_custom(&us10y).unwrap(), Some(HistorySource::Lse));
-        assert_eq!(
-            custom_data_client(&us10y).unwrap(),
-            Some(ClientId::from("LSE"))
-        );
+        assert_eq!(custom_data_client(&us10y), Some(ClientId::from("LSE")));
     }
 
-    /// A type with no row is the catalog's: no source serves it, and a
-    /// live node asks its history of no client.
+    /// A type with no row is the catalog's: no source serves it, and it
+    /// has no data client on a live node.
     #[test]
-    fn a_custom_series_of_a_type_with_no_row_is_served_by_no_source_and_asked_of_no_client() {
+    fn a_custom_series_of_a_type_with_no_row_is_served_by_no_source_and_has_no_client() {
         assert_eq!(serves_custom(&signal()).unwrap(), None);
-        assert_eq!(custom_data_client(&signal()).unwrap(), None);
+        assert_eq!(custom_data_client(&signal()), None);
     }
 
     /// Every series of a fill is checked against its venue's history
@@ -2710,9 +2734,10 @@ mod tests {
     /// a strategy registered without a node, the commands it sends the data
     /// engine captured. Its bars are `id`'s 1-minute LAST bars. The kind's
     /// name, the series it subscribes to and the command. Custom data is no
-    /// series of an instrument: a custom series, its subscription naming no
-    /// client, which Nautilus puts on the message bus alone
-    /// (`DataActorCore::subscribe_data`), so no client is asked it.
+    /// series of an instrument: a custom series, its subscription naming
+    /// its type's client live (`custom_data_client`), whose answer
+    /// `streams_custom` copies by its type, not by a venue, is not tried
+    /// here.
     fn subscriptions_of(
         id: InstrumentId,
     ) -> Vec<(&'static str, CatalogSeries, Option<SubscribeCommand>)> {
@@ -2997,15 +3022,18 @@ mod tests {
     /// alone.
     #[test]
     fn each_instrument_goes_to_the_clients_of_its_live_data_and_of_its_broker() {
-        let routes = LiveRoutes::of(&[
-            InstrumentId::from("GCZ26.GLBX"),
-            InstrumentId::from("GOLD-FUTURES.LSEDGE"),
-            InstrumentId::from("SXR8.IBIS"),
-            InstrumentId::from("NVDA.XNAS"),
-            InstrumentId::from("AAPL  261120C00355000.OPRA"),
-            InstrumentId::from("BTC-USDT-SWAP.OKX"),
-            InstrumentId::from("XAUUSD.ICMARKETS"),
-        ]);
+        let routes = LiveRoutes::of(
+            &[
+                InstrumentId::from("GCZ26.GLBX"),
+                InstrumentId::from("GOLD-FUTURES.LSEDGE"),
+                InstrumentId::from("SXR8.IBIS"),
+                InstrumentId::from("NVDA.XNAS"),
+                InstrumentId::from("AAPL  261120C00355000.OPRA"),
+                InstrumentId::from("BTC-USDT-SWAP.OKX"),
+                InstrumentId::from("XAUUSD.ICMARKETS"),
+            ],
+            &[],
+        );
 
         assert_eq!(
             routes,
@@ -3025,8 +3053,80 @@ mod tests {
                     InstrumentId::from("AAPL  261120C00355000.OPRA")
                 ],
                 ib_data_venues: vec![Venue::new("IBIS")],
+                custom: vec![],
             }
         );
+    }
+
+    /// The custom series' live data sources go to the node beside the
+    /// instruments' routes, each once, whether or not an instrument of the
+    /// run routes to them: LSE's for LSE's yields, here of no LSE
+    /// instrument; none for the tests' signal, of a type with no row.
+    #[test]
+    fn a_custom_series_routes_its_type_s_live_data_source_to_the_node_with_no_instrument_of_it() {
+        let routes = LiveRoutes::of(
+            &[InstrumentId::from("SXR8.IBIS")],
+            &[
+                lse_rows("bond_yields", "US10Y"),
+                lse_rows("bond_yields", "US02Y"),
+                signal(),
+            ],
+        );
+
+        assert_eq!(
+            routes,
+            LiveRoutes {
+                ib: vec![InstrumentId::from("SXR8.IBIS")],
+                ib_data_venues: vec![Venue::new("IBIS")],
+                custom: vec![LiveDataSource::Lse],
+                ..LiveRoutes::default()
+            }
+        );
+    }
+
+    /// A run reading LSE's yields alone, of no instrument LSE streams, has
+    /// LSE's data client on its node, the client its subscription names
+    /// (`custom_data_client`): LSE's alone, streaming no instrument and
+    /// taking no venue's route, and the node builds it, given the test key
+    /// a run reads from the environment, connecting nothing.
+    #[tokio::test]
+    async fn a_run_reading_a_custom_series_alone_has_lse_s_client_on_its_node_streaming_no_instrument()
+     {
+        let routes = LiveRoutes::of(&[], &[lse_rows("bond_yields", "US10Y")]);
+
+        let clients = routes
+            .clients(&live_args(), Path::new("catalog"))
+            .await
+            .unwrap();
+
+        let [mut lse] =
+            <[Clients; 1]>::try_from(clients).unwrap_or_else(|all| panic!("{} clients", all.len()));
+        assert_eq!(lse.data_factory.name(), "LSE");
+        assert!(lse.exec.is_none());
+        assert_eq!(
+            (lse.data_routing.default, lse.data_routing.venues.clone()),
+            (false, Some(vec![]))
+        );
+        let config = lse
+            .data_config
+            .as_any()
+            .downcast_ref::<LseDataClientConfig>()
+            .unwrap()
+            .clone();
+        assert_eq!(config.stream_ids, []);
+        lse.data_config = Box::new(LseDataClientConfig {
+            api_key: Some(SecretString::from(::lse::testing::API_KEY)),
+            ..config
+        });
+        let mut node = live_node(vec![lse]).unwrap();
+        let on_node = node
+            .kernel()
+            .data_engine
+            .borrow_mut()
+            .get_client(Some(&ClientId::from("LSE")), None)
+            .map(|client| client.client_id);
+        node.dispose();
+        assert_eq!(on_node, Some(ClientId::from("LSE")));
     }
 
     /// Its data is LSE's, but its orders IB's: refused before anything
@@ -3144,7 +3244,7 @@ mod tests {
     /// keys a run reads from the environment: created, they connect to
     /// nothing.
     fn lse_and_ib_clients(ids: &[InstrumentId]) -> Vec<Clients> {
-        let routes = LiveRoutes::of(ids);
+        let routes = LiveRoutes::of(ids, &[]);
         let mut lse = lse::live_clients(&routes.lse);
         let streamed = lse
             .data_config

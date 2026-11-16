@@ -46,20 +46,34 @@
 //! start refuses such a book before anything connects (`venues::streams`),
 //! so only a replay subscribes to it.
 //!
-//! Custom data is subscribed by its data type, naming no client: each
-//! custom series (`DataRequirements::custom`, a custom series of a
-//! config's `[data] series`) as it is read at the start
-//! (`CustomSeries::at`). Nautilus subscribes the message bus alone
-//! (`DataActorCore::subscribe_data`), where a replay's rows arrive, and a
-//! live run reading a custom series is refused at its start
-//! (`venues::live_clients`). A custom series on a root, its identifier
-//! the root's (`GC.GLBX`), is read on the contract standing for it, keyed
-//! by the contract's id, and moves at each roll as the root's tick series
-//! do, but for a data type another series still reads at the roll, which
-//! stays subscribed; any other custom series stands for itself, a
-//! contract's (`GCZ26.GLBX`) among them, and no roll moves it. A
-//! strategy's `on_data` gets its rows: the strategy subscribes to none
-//! itself.
+//! Custom data is subscribed by its data type: each custom series
+//! (`DataRequirements::custom`, a custom series of a config's `[data]
+//! series`) as it is read at the start (`CustomSeries::at`). In a backtest
+//! or a dataset run its subscription names no client, its engine having
+//! none of the series' source: Nautilus subscribes the message bus alone
+//! (`DataActorCore::subscribe_data`), where the replay's rows arrive. On a
+//! live node (`Subscriptions::live`) it names the series' data client on
+//! the node, its type's row's live data source's
+//! (`venues::custom_data_client`), LSE's for LSE's rows, which the node
+//! has whether or not an instrument of the run routes to it
+//! (`venues::live_clients`): Nautilus subscribes the message bus and sends
+//! that client the subscription, `SubscribeCustomData` of no venue, which
+//! its data engine routes by the client id alone, checking no route of it
+//! (`SubscribeCommand::validate_routing` passes a command of no instrument
+//! and no bar type; `DataEngine::get_client` answers the client named,
+//! with no fallback), and caches and publishes each point the client
+//! emits. A series of a type with no row, or a row with no live data
+//! source, names none live either, nothing streaming it; a live start
+//! refuses a custom series its type's live data does not stream before
+//! anything connects (`venues::streams_custom`), every one today. A custom
+//! series on a root, its identifier the root's (`GC.GLBX`), is read on the
+//! contract standing for it, keyed by the contract's id, and moves at each
+//! roll as the root's tick series do, its end and its new subscription
+//! naming its client as its start did, but for a data type another series
+//! still reads at the roll, which stays subscribed; any other custom
+//! series stands for itself, a contract's (`GCZ26.GLBX`) among them, and
+//! no roll moves it. A strategy's `on_data` gets its rows: the strategy
+//! subscribes to none itself.
 
 use std::{collections::BTreeMap, fmt::Debug};
 
@@ -69,7 +83,7 @@ use nautilus_core::{Params, UnixNanos};
 use nautilus_model::{
     data::{BarType, DataType, NautilusDataType},
     enums::BookType,
-    identifiers::{InstrumentId, Venue},
+    identifiers::{ClientId, InstrumentId, Venue},
 };
 use serde_json::{Value, json};
 
@@ -94,22 +108,26 @@ pub struct Subscriptions {
     continuous: ContinuousBars,
     /// The tick series, of roots or plain instruments.
     ticks: Vec<TickSeries>,
-    /// The custom series, on roots or standing for themselves.
-    custom: Vec<CustomSeries>,
+    /// The custom series, on roots or standing for themselves, each with
+    /// the data client its subscription names: none, but on a live node
+    /// (`live`).
+    custom: Vec<(CustomSeries, Option<ClientId>)>,
 }
 
 impl Subscriptions {
     /// The subscriptions to `bar_types`, of plain instruments, to `ticks`,
     /// of roots or plain instruments, and to `custom`, custom series
-    /// (`DataRequirements::custom`), on roots or standing for themselves:
-    /// a bar type given twice is subscribed once (see the module).
+    /// (`DataRequirements::custom`), on roots or standing for themselves,
+    /// as a backtest or a dataset run makes them, each custom series' naming
+    /// no client: a bar type given twice is subscribed once (see the
+    /// module).
     #[must_use]
     pub fn new(bar_types: Vec<BarType>, ticks: Vec<TickSeries>, custom: Vec<CustomSeries>) -> Self {
         Self {
             bar_types,
             continuous: ContinuousBars::default(),
             ticks,
-            custom,
+            custom: custom.into_iter().map(|series| (series, None)).collect(),
         }
     }
 
@@ -122,11 +140,32 @@ impl Subscriptions {
         Self { continuous, ..self }
     }
 
+    /// The subscriptions as a live node makes them: each custom series'
+    /// naming its data client on the node, its type's row's live data
+    /// source's (`venues::custom_data_client`), LSE's for LSE's rows, so
+    /// that Nautilus sends that client the subscription; none if its type
+    /// has no row, or one with no live data source (see the module). A
+    /// strategy's are made so where it is built for a live node, as its
+    /// warmup is (`Warmup::live`).
+    #[must_use]
+    pub fn live(self) -> Self {
+        let custom = self
+            .custom
+            .into_iter()
+            .map(|(series, _)| {
+                let client = venues::custom_data_client(&series);
+                (series, client)
+            })
+            .collect();
+        Self { custom, ..self }
+    }
+
     /// Subscribes `actor` to the bars, then to each tick series on the
     /// contract standing for its instrument at `now` (`rolls::front`), then
     /// to the custom data read at `now` by its data type (`custom_at`),
-    /// naming no client, all from `now`: the time the strategy's warmup's
-    /// start returns (`Warmup::start`), where a live warmup's requests end.
+    /// naming its client, if it has one, all from `now`: the time the
+    /// strategy's warmup's start returns (`Warmup::start`), where a live
+    /// warmup's requests end.
     pub fn start<A>(&self, actor: &mut A, now: Timestamp)
     where
         A: DataActor + DataActorNative + Debug + 'static,
@@ -136,8 +175,8 @@ impl Subscriptions {
         for instrument_id in self.instrument_ids() {
             self.subscribe(actor, instrument_id, front(instrument_id, now), from);
         }
-        for data_type in self.custom_at(now, None) {
-            actor.subscribe_data(data_type, None, Some(subscription_params(from, [])));
+        for (data_type, client) in self.custom_at(now, None) {
+            actor.subscribe_data(data_type, client, Some(subscription_params(from, [])));
         }
     }
 
@@ -147,7 +186,8 @@ impl Subscriptions {
     /// there at the roll, the contract standing for it then, and subscribes
     /// it to them on the post contract, from now: its tick series, then its
     /// custom data, by the data type it is read by on each side of the roll
-    /// (`custom_at`). Handed the roll the strategy's roller returns
+    /// (`custom_at`), each naming its series' client, if it has one. Handed
+    /// the roll the strategy's roller returns
     /// (`rolls::Roller::on_time_event`), at the last nanosecond before it.
     pub fn roll<A>(&self, actor: &mut A, roll: &Transition)
     where
@@ -163,31 +203,36 @@ impl Subscriptions {
         }
         let read = self.custom_at(roll.time, None);
         let pre = roll.time - SignedDuration::from_nanos(1);
-        for data_type in self.custom_at(pre, Some(roll)) {
-            if !read.contains(&data_type) {
-                actor.unsubscribe_data(data_type, None, None);
+        for (data_type, client) in self.custom_at(pre, Some(roll)) {
+            if !read.iter().any(|(of, _)| *of == data_type) {
+                actor.unsubscribe_data(data_type, client, None);
             }
         }
-        for data_type in self.custom_at(roll.time, Some(roll)) {
-            actor.subscribe_data(data_type, None, Some(subscription_params(now, [])));
+        for (data_type, client) in self.custom_at(roll.time, Some(roll)) {
+            actor.subscribe_data(data_type, client, Some(subscription_params(now, [])));
         }
     }
 
-    /// The data types of the custom series read at `time`, each once, of
-    /// the roots `roll` rolls alone if given: each as `CustomSeries::at`
-    /// reads it, a root's on its contract. Custom data is subscribed by its
-    /// data type, so one two series read, a contract's own and its root's
-    /// then, is subscribed once and kept while either still reads it.
-    fn custom_at(&self, time: Timestamp, roll: Option<&Transition>) -> Vec<DataType> {
-        let mut data_types: Vec<DataType> = Vec::new();
-        for series in &self.custom {
+    /// The data types of the custom series read at `time`, each once with
+    /// its series' client, of the roots `roll` rolls alone if given: each
+    /// as `CustomSeries::at` reads it, a root's on its contract. Custom data
+    /// is subscribed by its data type, so one two series read, a contract's
+    /// own and its root's then, is subscribed once and kept while either
+    /// still reads it; both name one client, their type's.
+    fn custom_at(
+        &self,
+        time: Timestamp,
+        roll: Option<&Transition>,
+    ) -> Vec<(DataType, Option<ClientId>)> {
+        let mut read: Vec<(DataType, Option<ClientId>)> = Vec::new();
+        for (series, client) in &self.custom {
             let kept = roll.is_none_or(|roll| series.root().is_some_and(|id| rolled_by(id, roll)));
             let data_type = series.at(time).data_type().clone();
-            if kept && !data_types.contains(&data_type) {
-                data_types.push(data_type);
+            if kept && !read.iter().any(|(of, _)| *of == data_type) {
+                read.push((data_type, *client));
             }
         }
-        data_types
+        read
     }
 
     /// Subscribes `actor` to the bars from `from`: those on a root with
@@ -597,25 +642,132 @@ mod tests {
         ))
     }
 
-    /// Custom series, each a data type keyed by its identifier, here the
-    /// 10-year and the 2-year US yields, are subscribed at the start by
-    /// their data type, naming no data client: on the message bus alone,
-    /// sending the data engine nothing.
+    /// The metadata of LSE's daily 10-year US yields among its rows.
+    fn us10y_metadata() -> Params {
+        Params::new(
+            [
+                ("source".to_string(), json!("bond_yields")),
+                ("symbol".to_string(), json!("US10Y")),
+            ]
+            .into(),
+        )
+    }
+
+    /// LSE's daily 10-year US yields under `identifier`, a custom series of
+    /// LSE's rows, whose type's row's live data source is LSE.
+    fn lse_yields(identifier: &str) -> CustomSeries {
+        CustomSeries::new("LseRow", identifier.to_string(), Some(us10y_metadata())).unwrap()
+    }
+
+    /// The data type of LSE's daily 10-year US yields under `identifier`,
+    /// as Nautilus builds it.
+    fn lse_yields_type(identifier: &str) -> DataType {
+        DataType::new(
+            "LseRow",
+            Some(us10y_metadata()),
+            Some(identifier.to_string()),
+        )
+    }
+
+    /// Custom series, each a data type keyed by its identifier, here
+    /// LSE's 10-year US yields, whose type's row has a live data client,
+    /// and the tests' 2-year US yields, of a type with no row, are
+    /// subscribed at the start of a replay by their data type, naming no
+    /// data client, whatever their type: on the message bus alone, where a
+    /// replay's rows arrive, sending the data engine nothing.
     #[test]
-    fn custom_series_are_subscribed_at_the_start_naming_no_client() {
-        let yields = |symbol: &str| CustomSeries::new("Yield", symbol.to_string(), None).unwrap();
-        let subscriptions =
-            Subscriptions::new(vec![], vec![], vec![yields("US10Y"), yields("US02Y")]);
+    fn a_replay_subscribes_custom_series_at_the_start_naming_no_client() {
+        let us02y = CustomSeries::new("Yield", "US02Y".to_string(), None).unwrap();
+        let subscriptions = Subscriptions::new(vec![], vec![], vec![lse_yields("US10Y"), us02y]);
         let (mut probe, _, commands) = registered(at("2026-08-10T14:30:00Z"));
 
         subscriptions.start(&mut probe, at("2026-08-10T14:30:00Z"));
 
-        let yields = |symbol: &str| DataType::new("Yield", None, Some(symbol.to_string()));
+        let us02y = DataType::new("Yield", None, Some("US02Y".to_string()));
         assert_eq!(
-            [subscribers(&yields("US10Y")), subscribers(&yields("US02Y"))],
+            [subscribers(&lse_yields_type("US10Y")), subscribers(&us02y)],
             [1, 1]
         );
         assert!(commands.get_messages().is_empty());
+    }
+
+    /// A custom data subscription a probe sent the data engine, or its
+    /// end: its data type and the data client it names.
+    #[derive(Debug, PartialEq, Eq)]
+    enum SentCustom {
+        Subscribe(DataType, Option<ClientId>),
+        Unsubscribe(DataType, Option<ClientId>),
+    }
+
+    /// The custom data subscriptions of `commands`, and their ends, in
+    /// order.
+    fn custom_sent(commands: &TypedIntoMessageSavingHandler<DataCommand>) -> Vec<SentCustom> {
+        commands
+            .get_messages()
+            .into_iter()
+            .filter_map(|command| match command {
+                DataCommand::Subscribe(SubscribeCommand::Data(cmd)) => {
+                    Some(SentCustom::Subscribe(cmd.data_type, cmd.client_id))
+                }
+                DataCommand::Unsubscribe(UnsubscribeCommand::Data(cmd)) => {
+                    Some(SentCustom::Unsubscribe(cmd.data_type, cmd.client_id))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// On a live node, LSE's yields are subscribed naming LSE's client, the
+    /// data client of their type's row's live data source, so Nautilus
+    /// sends it the subscription; the tests' imbalances, of a type with no
+    /// row, name none, subscribed on the message bus alone.
+    #[test]
+    fn a_live_custom_subscription_names_the_live_data_client_of_its_type_s_row() {
+        let subscriptions = Subscriptions::new(
+            vec![],
+            vec![],
+            vec![lse_yields("US10Y"), imbalances("GCZ26.GLBX")],
+        )
+        .live();
+        let (mut probe, _, commands) = registered(at("2026-08-10T14:30:00Z"));
+
+        subscriptions.start(&mut probe, at("2026-08-10T14:30:00Z"));
+
+        assert_eq!(
+            custom_sent(&commands),
+            [SentCustom::Subscribe(
+                lse_yields_type("US10Y"),
+                Some(ClientId::from("LSE"))
+            )]
+        );
+        assert_eq!(imbalance_subscribers("GCZ26.GLBX"), 1);
+    }
+
+    /// On a live node, LSE's yields under the root GC are subscribed on
+    /// GCZ26's data type, the contract standing for GC on 2026-08-10, and
+    /// moved to GCG27's at GC's roll on 2026-11-26, each subscription and
+    /// its end naming LSE's client.
+    #[test]
+    fn a_live_roll_moves_a_roots_custom_series_naming_the_same_client() {
+        let subscriptions = Subscriptions::new(vec![], vec![], vec![lse_yields("GC.GLBX")]).live();
+        let start = at("2026-08-10T14:30:00Z");
+        let (mut probe, clock, commands) = registered(start);
+        let roll = Transition::after(id("GC.GLBX"), start).unwrap();
+
+        subscriptions.start(&mut probe, start);
+        let alert = roll.time - SignedDuration::from_nanos(1);
+        clock.borrow_mut().advance_time(alert.into(), true);
+        subscriptions.roll(&mut probe, &roll);
+
+        let lse = Some(ClientId::from("LSE"));
+        assert_eq!(
+            custom_sent(&commands),
+            [
+                SentCustom::Subscribe(lse_yields_type("GCZ26.GLBX"), lse),
+                SentCustom::Unsubscribe(lse_yields_type("GCZ26.GLBX"), lse),
+                SentCustom::Subscribe(lse_yields_type("GCG27.GLBX"), lse),
+            ]
+        );
     }
 
     /// The imbalances under `identifier`, a custom series.
