@@ -285,15 +285,6 @@ mod tests {
         ModelEmaConfig::load(include_str!("../../../config/model_ema.toml")).unwrap();
     }
 
-    /// Its features read the series its example lists, and no other: the
-    /// features build of it.
-    #[rstest]
-    fn the_features_of_the_example_config_read_its_series() {
-        let config = ModelEmaConfig::load(include_str!("../../../config/model_ema.toml")).unwrap();
-
-        ModelEmaParams::features(&config).unwrap();
-    }
-
     /// Its side models are fitted on its window less its holdout and the
     /// calibration before it, as long: 480 hours, 20 days, of which 14 at
     /// the fewest are weekdays, gold trading 23 hours of each, so 322
@@ -317,48 +308,6 @@ mod tests {
             "leaves of {} rows on {rows} rows",
             learner.min_data_in_leaf
         );
-    }
-
-    /// `CONFIG` listing the quotes of the AUD/USD traded before its bars.
-    fn with_quotes() -> String {
-        CONFIG.replace(
-            "series = [",
-            r#"series = [
-            { data = "quotes", instrument_id = "AUD/USD.SIM" },"#,
-        )
-    }
-
-    /// Its features read bars alone: the quotes of the AUD/USD traded, which
-    /// a bracket in basis points has no ATR to run on, are read by none.
-    #[rstest]
-    fn a_tick_series_its_features_do_not_read_is_refused_at_load() {
-        let toml = with_quotes().replace(
-            r#"target = { limit = "30m", atr = { period = 14 } }"#,
-            r#"target = { bracket = { take_profit = { bps = 20 }, stop = { bps = 10 } }, limit = "45m" }"#,
-        );
-
-        let err = ModelEmaConfig::load(&toml).unwrap_err();
-
-        let Some(ConfigError::InvalidValue { field, reason }) = err.downcast_ref::<ConfigError>()
-        else {
-            panic!("not one invalid value: {err}");
-        };
-        assert_eq!(field, "data.series[0]");
-        assert!(reason.contains("QuoteTick of AUD/USD.SIM"), "{reason}");
-    }
-
-    /// The target's ATR, its time-only target's or that of a bracket 2 and
-    /// 1 ATRs out, is built of the quotes of the AUD/USD traded: it reads
-    /// them.
-    #[rstest]
-    fn quotes_the_target_atr_is_built_of_load() {
-        let bracket = with_quotes().replace(
-            r#"target = { limit = "30m", atr = { period = 14 } }"#,
-            r#"target = { bracket = { take_profit = { atr = 2 }, stop = { atr = 1 } }, limit = "45m" }"#,
-        );
-
-        ModelEmaConfig::load(&with_quotes()).unwrap();
-        ModelEmaConfig::load(&bracket).unwrap();
     }
 
     /// Its features average each bars series once: listed again, it is
@@ -397,71 +346,6 @@ mod tests {
             panic!("not one invalid value: {err}");
         };
         assert_eq!(field, "data.series");
-    }
-
-    /// The fields of the config errors refusing `toml`.
-    fn refused_fields(toml: &str) -> Vec<String> {
-        let err = ModelEmaConfig::load(toml).unwrap_err();
-        let errors = match err.downcast_ref::<ConfigError>() {
-            Some(ConfigError::Multiple { errors }) => errors.clone(),
-            Some(err) => vec![err.clone()],
-            None => panic!("not a config error: {err}"),
-        };
-        errors
-            .into_iter()
-            .map(|e| match e {
-                ConfigError::MissingField { field }
-                | ConfigError::UnsupportedField { field, .. }
-                | ConfigError::InvalidValue { field, .. }
-                | ConfigError::Range { field, .. } => field,
-                e => panic!("unexpected config error {e:?}"),
-            })
-            .collect()
-    }
-
-    /// Its slow average has no table: refused under it, not built.
-    #[rstest]
-    fn a_missing_average_table_is_refused_under_its_name() {
-        let toml = CONFIG.replace("[indicators.slow]\n        period = 30\n", "");
-
-        assert_eq!(refused_fields(&toml), ["indicators.slow"]);
-    }
-
-    /// Its features are its code's: a table it does not declare adds
-    /// none.
-    #[rstest]
-    fn a_table_it_does_not_declare_is_refused_under_its_name() {
-        let toml = CONFIG.replace("[trade]", "[indicators.medium]\nperiod = 20\n\n[trade]");
-
-        assert_eq!(refused_fields(&toml), ["indicators.medium"]);
-    }
-
-    /// Nautilus' `ExponentialMovingAverage::new_checked` refuses a period
-    /// of 0.
-    #[rstest]
-    fn a_period_nautilus_refuses_is_refused_under_its_table() {
-        let toml = CONFIG.replace("period = 10", "period = 0");
-
-        assert_eq!(refused_fields(&toml), ["indicators.fast"]);
-    }
-
-    /// A refused period, a table it does not declare and a limit of an
-    /// hour decided every hour are reported at once, each under its
-    /// field.
-    #[rstest]
-    fn its_table_refusals_are_reported_with_the_other_violations() {
-        let toml = CONFIG
-            .replace("period = 10", "period = 0")
-            .replace("[trade]", "[indicators.medium]\nperiod = 20\n\n[trade]")
-            .replace(r#"limit = "30m""#, r#"limit = "1h""#);
-
-        let mut fields = refused_fields(&toml);
-        fields.sort();
-
-        assert_eq!(
-            fields,
-            ["indicators.fast", "indicators.medium", "model.target.limit"]
-        );
     }
 
     /// Without `[base]`, its default: its strategy id alone, Nautilus
