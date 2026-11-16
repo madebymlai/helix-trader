@@ -1045,13 +1045,10 @@ mod tests {
     async fn connect_rejects_an_end_within_a_minute_of_now_before_starting_the_gateway() {
         let now = at("2024-06-10T12:00:00Z");
         let end = at("2024-06-10T11:59:30Z");
-        let Err(err) = IbHistory::connect(1, end, now).await else {
+        let Err(e) = IbHistory::connect(1, end, now).await else {
             panic!("connected");
         };
-        assert!(
-            err.to_string().contains("within a minute of now"),
-            "{err:#}"
-        );
+        assert!(e.to_string().contains("within a minute of now"), "{e:#}");
     }
 
     fn at(s: &str) -> Timestamp {

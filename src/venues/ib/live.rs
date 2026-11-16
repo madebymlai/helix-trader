@@ -362,9 +362,9 @@ mod tests {
     /// start a container: the client id is checked first.
     #[tokio::test]
     async fn rejects_a_client_id_ib_reserves_before_starting_the_gateway() {
-        let Err(err) = clients(&paper(), 2000, &[sxr8()]).await else {
+        let Err(e) = clients(&paper(), 2000, &[sxr8()]).await else {
             panic!("started");
         };
-        assert!(err.to_string().contains("1000"), "{err}");
+        assert!(e.to_string().contains("1000"), "{e}");
     }
 }

@@ -192,13 +192,13 @@ enum Awaiting {
 
 impl Awaiting {
     /// Tells the caller the request failed: it was never sent.
-    fn fail(self, error: CTraderError) {
+    fn fail(self, e: CTraderError) {
         match self {
             Self::Caller(reply) => {
-                let _ = reply.send(Err(error));
+                let _ = reply.send(Err(e));
             }
             Self::Trade { sent, .. } => {
-                let _ = sent.send(Err(error));
+                let _ = sent.send(Err(e));
             }
         }
     }
@@ -1144,23 +1144,23 @@ fn renewal_failure(error: &CTraderError, names: &CTraderSettingNames) -> String 
     }
 }
 
-/// A frame whose send failed with `error`: sent, as far as the session can
+/// A frame whose send failed with `e`: sent, as far as the session can
 /// tell, if its write may have begun, its outcome left to cTrader's answer
-/// or the reconciliation; else unsent, `error` saying why. A write that
+/// or the reconciliation; else unsent, `e` saying why. A write that
 /// timed out (`WriteTimeout`) or failed (`BrokenPipe`) may have begun, and
 /// Nautilus then reconnects; `BrokenPipe` also stands for the writer gone,
 /// with the frame or before it, which is no proof that it was never sent.
-fn failed_send(error: SendError) -> Result<(), SendError> {
-    match error {
+fn failed_send(e: SendError) -> Result<(), SendError> {
+    match e {
         SendError::WriteTimeout | SendError::BrokenPipe(_) => {
-            log::warn!("cTrader frame write failed ({error}): cTrader may have it");
+            log::warn!("cTrader frame write failed ({e}): cTrader may have it");
             Ok(())
         }
         SendError::ConnectionChanged
         | SendError::InvalidInput(_)
         | SendError::BufferFull
         | SendError::Closed
-        | SendError::Timeout => Err(error),
+        | SendError::Timeout => Err(e),
     }
 }
 

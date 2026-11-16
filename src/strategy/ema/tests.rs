@@ -55,13 +55,13 @@ fn error_fields(toml: &str) -> Vec<String> {
     };
     errors
         .into_iter()
-        .map(|err| match err {
+        .map(|e| match e {
             ConfigError::Range { field, .. }
             | ConfigError::MissingField { field }
             | ConfigError::UnsupportedField { field, .. }
             | ConfigError::InvalidReference { field, .. }
             | ConfigError::InvalidValue { field, .. } => field,
-            err => panic!("unexpected config error {err:?}"),
+            e => panic!("unexpected config error {e:?}"),
         })
         .collect()
 }

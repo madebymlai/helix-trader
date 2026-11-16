@@ -607,9 +607,9 @@ mod tests {
         };
         errors
             .into_iter()
-            .map(|err| match err {
+            .map(|e| match e {
                 ConfigError::InvalidValue { field, .. } => field,
-                err => panic!("unexpected config error {err:?}"),
+                e => panic!("unexpected config error {e:?}"),
             })
             .collect()
     }

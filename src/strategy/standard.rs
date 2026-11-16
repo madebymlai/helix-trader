@@ -1072,7 +1072,7 @@ mod tests {
     fn fields_of(err: &anyhow::Error) -> Vec<String> {
         errors_of(err)
             .iter()
-            .flat_map(|err| match err {
+            .flat_map(|e| match e {
                 ConfigError::InvalidValue { field, .. }
                 | ConfigError::Range { field, .. }
                 | ConfigError::EmptyField { field }
@@ -1080,7 +1080,7 @@ mod tests {
                 | ConfigError::Duplicate { field, .. }
                 | ConfigError::InvalidReference { field, .. } => vec![field.clone()],
                 ConfigError::MutuallyExclusiveFields { fields } => fields.clone(),
-                err => panic!("unexpected config error {err:?}"),
+                e => panic!("unexpected config error {e:?}"),
             })
             .collect()
     }

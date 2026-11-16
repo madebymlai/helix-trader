@@ -1438,7 +1438,7 @@ mod tests {
             custom: vec![],
             warmup: SignedDuration::ZERO,
         };
-        let Err(err) = live_clients(
+        let Err(e) = live_clients(
             &requirements,
             &[InstrumentId::from("SXR8.IBIS")],
             &venues,
@@ -1448,7 +1448,7 @@ mod tests {
         else {
             panic!("set up IB's clients without an account");
         };
-        let err = err.to_string();
+        let err = e.to_string();
         assert!(
             err.contains("IB account")
                 && err.contains("--account")
@@ -1980,7 +1980,7 @@ mod tests {
             .concat(),
             ..read
         };
-        let Err(err) = live_clients(
+        let Err(e) = live_clients(
             &requirements,
             &requirements.instrument_ids(),
             &live_args(),
@@ -1990,7 +1990,7 @@ mod tests {
         else {
             panic!("set up clients for {requirements:?}");
         };
-        format!("{err:#}")
+        format!("{e:#}")
     }
 
     /// A cTrader broker streams its quotes alone: each refused naming it
@@ -2152,19 +2152,16 @@ mod tests {
     /// the error naming it.
     fn assert_serves(served: &[CatalogSeries], refused: &[CatalogSeries]) {
         for source in served {
-            if let Err(err) = serves(source) {
-                panic!("{source} refused: {err:#}");
+            if let Err(e) = serves(source) {
+                panic!("{source} refused: {e:#}");
             }
         }
         for source in refused {
-            let Err(err) = serves(source) else {
+            let Err(e) = serves(source) else {
                 panic!("{source} served");
             };
             let (_, identifier) = source.key();
-            assert!(
-                format!("{err:#}").contains(&identifier),
-                "{source}: {err:#}"
-            );
+            assert!(format!("{e:#}").contains(&identifier), "{source}: {e:#}");
         }
     }
 
@@ -2289,19 +2286,16 @@ mod tests {
     /// refused, the error naming it.
     fn assert_streams(streamed: &[CatalogSeries], refused: &[CatalogSeries]) {
         for source in streamed {
-            if let Err(err) = streams(source) {
-                panic!("{source} refused: {err:#}");
+            if let Err(e) = streams(source) {
+                panic!("{source} refused: {e:#}");
             }
         }
         for source in refused {
-            let Err(err) = streams(source) else {
+            let Err(e) = streams(source) else {
                 panic!("{source} streamed");
             };
             let (_, identifier) = source.key();
-            assert!(
-                format!("{err:#}").contains(&identifier),
-                "{source}: {err:#}"
-            );
+            assert!(format!("{e:#}").contains(&identifier), "{source}: {e:#}");
         }
     }
 
@@ -3102,7 +3096,7 @@ mod tests {
     async fn a_run_reading_glbx_needs_the_ib_account_its_orders_go_to() {
         let requirements = ticks(&[(NautilusDataType::QuoteTick, "GCZ26.GLBX")]);
 
-        let Err(err) = live_clients(
+        let Err(e) = live_clients(
             &requirements,
             &requirements.instrument_ids(),
             &live_args(),
@@ -3113,7 +3107,7 @@ mod tests {
             panic!("set up GLBX's clients without IB's account");
         };
 
-        assert!(err.to_string().contains("IB account"), "{err:#}");
+        assert!(e.to_string().contains("IB account"), "{e:#}");
     }
 
     /// LSE's data client, routed GLBX, streams the contract.
@@ -3150,7 +3144,7 @@ mod tests {
     async fn a_run_reading_an_option_needs_the_ib_account_its_orders_go_to() {
         let requirements = ticks(&[(NautilusDataType::TradeTick, "AAPL  261120C00355000.OPRA")]);
 
-        let Err(err) = live_clients(
+        let Err(e) = live_clients(
             &requirements,
             &requirements.instrument_ids(),
             &live_args(),
@@ -3161,7 +3155,7 @@ mod tests {
             panic!("set up OPRA's clients without IB's account");
         };
 
-        assert!(err.to_string().contains("IB account"), "{err:#}");
+        assert!(e.to_string().contains("IB account"), "{e:#}");
     }
 
     /// LSE's data client, routed OPRA, streams the contracts, the trades of
@@ -3451,13 +3445,13 @@ mod tests {
                 InstrumentId::from("AAPL  261120C00355000.OPRA"),
             ];
 
-            let Err(err) =
+            let Err(e) =
                 live_clients(&requirements, &loaded, &live_args(), Path::new("catalog")).await
             else {
                 panic!("set up clients for {series}");
             };
 
-            let err = format!("{err:#}");
+            let err = format!("{e:#}");
             assert!(
                 err.contains(series) && err.contains("LSE streams no"),
                 "{series}: {err}"
@@ -3552,7 +3546,7 @@ mod tests {
             ..ticks(&[(NautilusDataType::QuoteTick, "BTC-USDT-SWAP.OKX")])
         };
 
-        let Err(err) = live_clients(
+        let Err(e) = live_clients(
             &requirements,
             &requirements.instrument_ids(),
             &live_args(),
@@ -3564,7 +3558,7 @@ mod tests {
         };
 
         let lse_s = ::lse::streams_custom(us10y.data_type()).unwrap_err();
-        assert_eq!(format!("{err:#}"), format!("{lse_s:#}"));
+        assert_eq!(format!("{e:#}"), format!("{lse_s:#}"));
     }
 
     /// Nothing streams the catalog's data: a custom series of a type with
@@ -3582,7 +3576,7 @@ mod tests {
                 ..ticks(&[(NautilusDataType::QuoteTick, "BTC-USDT-SWAP.OKX")])
             };
 
-            let Err(err) = live_clients(
+            let Err(e) = live_clients(
                 &requirements,
                 &requirements.instrument_ids(),
                 &live_args(),
@@ -3593,7 +3587,7 @@ mod tests {
                 panic!("set up clients for {series}, the catalog's");
             };
 
-            let err = format!("{err:#}");
+            let err = format!("{e:#}");
             assert!(err.contains(&series.to_string()), "{err}");
         }
     }

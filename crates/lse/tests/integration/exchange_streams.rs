@@ -538,7 +538,7 @@ async fn a_glbx_contract_streamed_with_no_cme_key_is_refused_naming_its_variable
     let factory = LseDataClientFactory::new();
     let clock: Rc<RefCell<dyn Clock>> = Rc::new(RefCell::new(VirtualClock::new()));
 
-    let Err(err) = factory.create(
+    let Err(e) = factory.create(
         factory.name(),
         &config,
         Rc::new(RefCell::new(Cache::default())).into(),
@@ -547,7 +547,7 @@ async fn a_glbx_contract_streamed_with_no_cme_key_is_refused_naming_its_variable
         panic!("created a client streaming GCZ26 with no CME key")
     };
 
-    let err = format!("{err:#}");
+    let err = format!("{e:#}");
     assert!(
         err.contains(GCZ26) && err.contains("LSE_CME_API_KEY"),
         "{err}"
@@ -1234,7 +1234,7 @@ async fn an_xnas_stock_streamed_with_no_nasdaq_key_is_refused_naming_its_variabl
     let factory = LseDataClientFactory::new();
     let clock: Rc<RefCell<dyn Clock>> = Rc::new(RefCell::new(VirtualClock::new()));
 
-    let Err(err) = factory.create(
+    let Err(e) = factory.create(
         factory.name(),
         &config,
         Rc::new(RefCell::new(Cache::default())).into(),
@@ -1243,7 +1243,7 @@ async fn an_xnas_stock_streamed_with_no_nasdaq_key_is_refused_naming_its_variabl
         panic!("created a client streaming NVDA with no Nasdaq key")
     };
 
-    let err = format!("{err:#}");
+    let err = format!("{e:#}");
     assert!(
         err.contains(NVDA) && err.contains("LSE_NASDAQ_API_KEY"),
         "{err}"

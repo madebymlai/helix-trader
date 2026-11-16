@@ -457,11 +457,11 @@ mod tests {
         };
         errors
             .into_iter()
-            .map(|err| match &err {
+            .map(|e| match &e {
                 ConfigError::InvalidValue { field, .. } | ConfigError::Duplicate { field, .. } => {
-                    (field.clone(), err.to_string())
+                    (field.clone(), e.to_string())
                 }
-                err => panic!("unexpected config error {err:?}"),
+                e => panic!("unexpected config error {e:?}"),
             })
             .collect()
     }
@@ -786,11 +786,11 @@ mod tests {
         };
         let mut fields: Vec<String> = errors
             .iter()
-            .map(|err| match err {
+            .map(|e| match e {
                 ConfigError::MissingField { field } | ConfigError::InvalidValue { field, .. } => {
                     field.clone()
                 }
-                err => panic!("unexpected config error {err:?}"),
+                e => panic!("unexpected config error {e:?}"),
             })
             .collect();
         fields.sort();

@@ -404,13 +404,13 @@ fn replayed_quotes(
         .and_then(|mut catalog| catalog.query_batch_session(&query, None));
     let mut session = match session {
         Ok(session) => session,
-        Err(err) => return Box::new(std::iter::once(Err(err))),
+        Err(e) => return Box::new(std::iter::once(Err(e))),
     };
     let batches = std::iter::from_fn(move || session.next_batch().transpose());
     Box::new(batches.flat_map(|batch| match batch {
         Ok(DataBatch::Quote(quotes)) => quotes.iter().copied().map(Ok).collect(),
         Ok(_) => vec![Err(anyhow::anyhow!("a quote query yielded other data"))],
-        Err(err) => vec![Err(err)],
+        Err(e) => vec![Err(e)],
     }))
 }
 
