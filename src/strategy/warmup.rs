@@ -1002,6 +1002,7 @@ pub fn finished(group: UUID4, response: &DataResponseEnvelope) -> anyhow::Result
     if *response.correlation_id() != group {
         return Ok(false);
     }
+
     match response.failure_reason() {
         Some(reason) => anyhow::bail!("the warmup is incomplete: {reason}"),
         None => Ok(true),

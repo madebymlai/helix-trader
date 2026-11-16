@@ -235,6 +235,7 @@ fn credential(
         .filter(|(_, value)| value.expose_secret().is_empty())
         .map(|(name, _)| *name)
         .collect();
+
     if !missing.is_empty() {
         anyhow::bail!(
             "the cTrader credential is incomplete: set {} (see {GUIDE})",

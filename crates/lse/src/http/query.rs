@@ -130,6 +130,7 @@ impl CandleWidth {
             spec.price_type == PriceType::Last,
             "{bar_type}: LSE's candles are of the LAST price, their one price"
         );
+
         if matches!(
             spec.aggregation,
             BarAggregation::Day | BarAggregation::Week | BarAggregation::Month

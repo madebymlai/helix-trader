@@ -516,6 +516,7 @@ impl Dataset {
                 let Data::Custom(custom) = data else {
                     anyhow::bail!("the dataset {identifier} holds {data:?}");
                 };
+
                 if custom.data_type.metadata() != want.metadata() {
                     anyhow::bail!(SchemaMismatch(format!(
                         "the dataset {identifier} holds rows of the features {:?}, not {:?} and \

@@ -442,6 +442,7 @@ impl NodeFill {
             failure,
             done,
         } = outcome.take();
+
         if let Some(failure) = failure {
             anyhow::bail!(failure);
         }

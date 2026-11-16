@@ -349,6 +349,7 @@ impl CTraderSession {
                         self.venue
                     )
                 })?;
+
             if page.has_more {
                 anyhow::ensure!(
                     to - from > 2,

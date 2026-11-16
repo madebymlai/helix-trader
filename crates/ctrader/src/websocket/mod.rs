@@ -392,6 +392,7 @@ impl CTraderWebSocketClient {
             client_msg_id,
             sent,
         };
+
         if let Err(tokio::sync::mpsc::error::SendError(HandlerCommand::Trade { sent, .. })) =
             self.cmd_tx.send(command)
         {

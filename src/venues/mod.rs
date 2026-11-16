@@ -2157,6 +2157,7 @@ mod tests {
                 panic!("{source} refused: {e:#}");
             }
         }
+
         for source in refused {
             let Err(e) = serves(source) else {
                 panic!("{source} served");
@@ -2291,6 +2292,7 @@ mod tests {
                 panic!("{source} refused: {e:#}");
             }
         }
+
         for source in refused {
             let Err(e) = streams(source) else {
                 panic!("{source} streamed");

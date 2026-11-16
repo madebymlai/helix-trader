@@ -83,6 +83,7 @@ pub(in crate::venues) const BOOK: BookFormat = BookFormat {
 /// saying why.
 pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
     use NautilusDataType as D;
+
     match source {
         CatalogSeries::Bars(bar_type) => anyhow::ensure!(
             is_candle(bar_type),

@@ -98,6 +98,7 @@ pub async fn fill_catalog(
         if items.is_empty() && resume_point.is_none() {
             anyhow::bail!("empty response for {} over [{from}, {end}]", named());
         }
+
         if let Some(foreign) = items
             .iter()
             .find(|item| !is_of(item, data_type, identifier))
@@ -161,6 +162,7 @@ pub(crate) fn resumed(
     let last = catalog
         .query_last_timestamp(&catalog_type, Some(identifier))
         .with_context(reading)?;
+
     if let (Some(first), Some(last)) = (first, last)
         && UnixNanos::from(start) < UnixNanos::from(first)
     {

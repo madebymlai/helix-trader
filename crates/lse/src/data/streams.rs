@@ -159,6 +159,7 @@ impl LseStreams {
         };
         let cme = exchange_streams(LseExchange::Cme, contracts, cme)?;
         let nasdaq = exchange_streams(LseExchange::Nasdaq, stocks, nasdaq)?;
+
         if credential.is_none() && !(streamed.is_empty() && options.is_empty()) {
             anyhow::bail!(
                 "streaming {} needs the LSE key: set {LSE_API_KEY}, or give the config's",

@@ -117,6 +117,7 @@ pub(super) fn row_source(data_type: &DataType) -> anyhow::Result<RowSource> {
             .with_context(|| format!("{data_type:?} names no {key}, a string, in its metadata"))
     };
     let (source, symbol) = (named(SOURCE)?, named(SYMBOL)?);
+
     if let Some(other) = data_type.metadata().and_then(|metadata| {
         metadata
             .borrowed_entries()
