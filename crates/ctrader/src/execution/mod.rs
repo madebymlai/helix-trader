@@ -87,7 +87,6 @@ use super::{
     },
     config::{CTraderConnection, CTraderCredential},
     session::CTraderSession,
-    websocket::HEARTBEAT_INTERVAL,
 };
 
 mod dispatch;
@@ -219,7 +218,6 @@ impl CTraderExecutionClient {
             &self.url,
             self.core.venue,
             self.credential.clone(),
-            HEARTBEAT_INTERVAL,
             Some(self.socket.clone()),
         )
         .await?;

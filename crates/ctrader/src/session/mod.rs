@@ -34,7 +34,7 @@ use super::{
         parse,
     },
     config::{CTraderAccountId, CTraderConnection, CTraderCredential, CTraderSettingNames},
-    websocket::{CTraderWebSocketClient, HEARTBEAT_INTERVAL, SpotEvents, TradeEvents, TradeSent},
+    websocket::{CTraderWebSocketClient, SpotEvents, TradeEvents, TradeSent},
 };
 
 pub(crate) mod ticks;
@@ -84,7 +84,6 @@ impl CTraderSession {
             environment.url(),
             venue,
             connection.credential.clone(),
-            HEARTBEAT_INTERVAL,
             None,
         )
         .await?;
@@ -99,12 +98,10 @@ impl CTraderSession {
         url: &str,
         venue: Venue,
         credential: CTraderCredential,
-        heartbeat: std::time::Duration,
         socket: Option<SocketControl>,
     ) -> anyhow::Result<(Self, SpotEvents)> {
         let (account_id, names) = (credential.account_id, credential.names);
-        let (client, spots) =
-            CTraderWebSocketClient::connect(url, credential, heartbeat, socket).await?;
+        let (client, spots) = CTraderWebSocketClient::connect(url, credential, socket).await?;
         let session = Self {
             client,
             venue,
@@ -638,14 +635,9 @@ impl CTraderSession {
         connection: &CTraderConnection,
         instrument_ids: &[InstrumentId],
     ) -> anyhow::Result<(Self, SpotEvents)> {
-        let (session, spots) = Self::connect_to(
-            url,
-            connection.venue,
-            connection.credential.clone(),
-            HEARTBEAT_INTERVAL,
-            None,
-        )
-        .await?;
+        let (session, spots) =
+            Self::connect_to(url, connection.venue, connection.credential.clone(), None).await?;
+
         for symbol in session.symbols(instrument_ids).await? {
             session.subscribe_spots(symbol.symbol_id)?;
         }
@@ -778,15 +770,9 @@ mod tests {
     ) -> (CTraderSession, Received) {
         let (url, received) = testing::start(peer);
         let (credential, _tokens) = testing::credential();
-        let (session, _) = CTraderSession::connect_to(
-            &url,
-            Venue::new(VENUE),
-            credential,
-            HEARTBEAT_INTERVAL,
-            None,
-        )
-        .await
-        .unwrap();
+        let (session, _) = CTraderSession::connect_to(&url, Venue::new(VENUE), credential, None)
+            .await
+            .unwrap();
         (session, received)
     }
 
@@ -1027,15 +1013,10 @@ mod tests {
             fixtures_peer(connection, request)
         });
         let (credential, _tokens) = testing::credential();
-        let (session, _) = CTraderSession::connect_to(
-            &url,
-            Venue::new(VENUE),
-            credential.clone(),
-            HEARTBEAT_INTERVAL,
-            None,
-        )
-        .await
-        .unwrap();
+        let (session, _) =
+            CTraderSession::connect_to(&url, Venue::new(VENUE), credential.clone(), None)
+                .await
+                .unwrap();
         let before = credential.stored_tokens().unwrap();
 
         let asked_at = testing::now();

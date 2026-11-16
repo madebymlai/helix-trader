@@ -45,7 +45,6 @@ use self::spots::SpotQuotes;
 use super::{
     config::{CTraderConnection, CTraderCredential},
     session::{CTraderSession, CTraderSymbol},
-    websocket::HEARTBEAT_INTERVAL,
 };
 
 mod spots;
@@ -146,7 +145,6 @@ impl CTraderDataClient {
             &self.url,
             self.venue,
             self.credential.clone(),
-            HEARTBEAT_INTERVAL,
             Some(self.socket.clone()),
         )
         .await?;
