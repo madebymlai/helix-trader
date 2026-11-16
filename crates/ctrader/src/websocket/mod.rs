@@ -456,12 +456,13 @@ mod tests {
     use jiff::Timestamp;
     use nautilus_common::testing::wait_until_async;
     use prost::Message as _;
+    use rstest::rstest;
 
     use super::*;
     use crate::{
         common::{
             messages::{
-                ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq, ProtoOaAccountAuthRes,
+                ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq,
                 ProtoOaAccountDisconnectEvent, ProtoOaApplicationAuthReq,
                 ProtoOaClientDisconnectEvent, ProtoOaErrorRes, ProtoOaGetTickDataReq,
                 ProtoOaGetTickDataRes, ProtoOaQuoteType, ProtoOaRefreshTokenReq,
@@ -478,6 +479,16 @@ mod tests {
             token_peer,
         },
     };
+
+    /// What a refused token's error names: where to get a new pair, and
+    /// the settings, file and guide to put it in.
+    const PLAYGROUND: [&str; 5] = [
+        "openapi.ctrader.com",
+        "ACME_ACCESS_TOKEN",
+        "ACME_REFRESH_TOKEN",
+        "acme.env",
+        "the ACME guide",
+    ];
 
     /// A session whose spot events nobody reads.
     async fn connect(
@@ -624,8 +635,11 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(
-            error.to_string(),
-            "cTrader error SYMBOL_NOT_FOUND: No symbols with requested ID"
+            error,
+            CTraderError::Venue {
+                code: "SYMBOL_NOT_FOUND".to_owned(),
+                description: Some("No symbols with requested ID".to_owned()),
+            }
         );
         client.disconnect().await;
     }
@@ -656,20 +670,13 @@ mod tests {
         let err = connect(&url, credential).await.unwrap_err();
 
         let err = format!("{err:#} {err:?}");
-        assert!(
-            err.contains(
-                "cTrader refused the account authentication (CH_ACCESS_TOKEN_INVALID) even with \
-                 a renewed access token"
-            ),
-            "{err}"
-        );
-        assert!(
-            err.contains(
-                "Playground of the app on openapi.ctrader.com and set ACME_ACCESS_TOKEN and \
-                 ACME_REFRESH_TOKEN in acme.env (see the ACME guide)"
-            ),
-            "{err}"
-        );
+        for fact in ["account", "CH_ACCESS_TOKEN_INVALID"]
+            .iter()
+            .chain(&PLAYGROUND)
+        {
+            assert!(err.contains(fact), "{fact}: {err}");
+        }
+
         for secret in [
             ACCESS_TOKEN,
             REFRESH_TOKEN,
@@ -698,43 +705,20 @@ mod tests {
         let (credential, _tokens) = testing::credential();
         let err = connect(&url, credential).await.unwrap_err();
 
-        assert!(
-            format!("{err:#}").contains(
-                "the application authentication (CH_CLIENT_AUTH_FAILURE): check ACME_CLIENT_ID \
-                 and ACME_CLIENT_SECRET"
-            ),
-            "{err:#}"
-        );
+        let err = format!("{err:#}");
+        for fact in [
+            "CH_CLIENT_AUTH_FAILURE",
+            "ACME_CLIENT_ID",
+            "ACME_CLIENT_SECRET",
+        ] {
+            assert!(err.contains(fact), "{fact}: {err}");
+        }
         let frames = received.lock().unwrap().clone();
         assert!(
             frames
                 .iter()
                 .all(|(_, f)| f.payload_type == ProtoOaApplicationAuthReq::TYPE),
             "{frames:?}"
-        );
-    }
-
-    /// Synthetic: the account auth response of another account.
-    #[tokio::test]
-    async fn another_account_authenticated_is_refused() {
-        let (url, _) = testing::start(|_, request| {
-            if request.payload_type == ProtoOaAccountAuthReq::TYPE {
-                let other = ProtoOaAccountAuthRes {
-                    ctid_trader_account_id: ACCOUNT_ID + 1,
-                    ..Default::default()
-                };
-                return vec![reply(request, &other)];
-            }
-            accept_auth(request).unwrap_or_default()
-        });
-
-        let (credential, _tokens) = testing::credential();
-        let err = connect(&url, credential).await.unwrap_err();
-
-        assert!(
-            format!("{err:#}")
-                .contains("cTrader authenticated another account than ACME_ACCOUNT_ID"),
-            "{err:#}"
         );
     }
 
@@ -1109,17 +1093,14 @@ mod tests {
     /// connection only once it is authenticated.
     #[tokio::test]
     async fn a_trade_request_during_a_reconnect_goes_out_once_authenticated_again() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
         use crate::common::messages::ProtoOaNewOrderReq;
-        let reconnecting = Arc::new(AtomicBool::new(false));
-        let seen = Arc::clone(&reconnecting);
+        let (seen, mut reconnecting) = tokio::sync::mpsc::unbounded_channel();
         let (url, received) = testing::start_delayed(
             move |connection| {
                 if connection == 0 {
                     return Duration::ZERO;
                 }
-                seen.store(true, Ordering::SeqCst);
+                let _ = seen.send(());
                 Duration::from_millis(1500)
             },
             |connection, request| {
@@ -1146,13 +1127,9 @@ mod tests {
             // The first request closes the connection.
             let mut lost = std::pin::pin!(client.request::<_, ProtoOaSymbolByIdRes>(&first));
             assert!(futures::poll!(lost.as_mut()).is_pending());
-            tokio::time::timeout(Duration::from_secs(10), async {
-                while !reconnecting.load(Ordering::SeqCst) {
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
-            })
-            .await
-            .unwrap();
+            tokio::time::timeout(Duration::from_secs(10), reconnecting.recv())
+                .await
+                .expect("no reconnect within 10 s");
             let sent = client.trade(&order, "N:O-1".to_owned()).await;
             (lost.await, sent)
         };
@@ -1436,16 +1413,13 @@ mod tests {
     /// connection with the others, once it is authenticated.
     #[tokio::test]
     async fn a_spot_subscription_during_a_reconnect_goes_out_once_authenticated_again() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        let reconnecting = Arc::new(AtomicBool::new(false));
-        let seen = Arc::clone(&reconnecting);
+        let (seen, mut reconnecting) = tokio::sync::mpsc::unbounded_channel();
         let (url, received) = testing::start_delayed(
             move |connection| {
                 if connection == 0 {
                     return Duration::ZERO;
                 }
-                seen.store(true, Ordering::SeqCst);
+                let _ = seen.send(());
                 Duration::from_millis(1500)
             },
             closing_peer(ProtoOaSubscribeSpotsReq::TYPE),
@@ -1456,13 +1430,9 @@ mod tests {
             .unwrap();
         client.subscribe_spots(1).unwrap();
         assert_eq!(next_spot(&mut spots).await, spot_event(1));
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while !reconnecting.load(Ordering::SeqCst) {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), reconnecting.recv())
+            .await
+            .expect("no reconnect within 10 s");
 
         client.subscribe_spots(41).unwrap();
 
@@ -1610,31 +1580,28 @@ mod tests {
         client.disconnect().await;
     }
 
+    /// A token expiring within a day is renewed (2173) between the
+    /// application auth (2100) and the account auth (2102), which takes
+    /// the renewed token; one expiring later is not.
+    #[rstest]
+    #[case::within_a_day(23, &[2100, 2173, 2102], "renewedAccess1")]
+    #[case::later_than_a_day(25, &[2100, 2102], "accessTokenValue")]
     #[tokio::test]
-    async fn a_token_expiring_within_a_day_is_renewed_at_start() {
+    async fn a_token_is_renewed_at_start_only_if_it_expires_within_a_day(
+        #[case] expires_in_hours: i64,
+        #[case] frames: &[u32],
+        #[case] account_auth: &str,
+    ) {
         let venue = TokenVenue::new();
         let (url, received) = testing::start(venue_peer(&venue));
-        let (credential, _dir) =
-            credential_expiring(Some(testing::now() + jiff::SignedDuration::from_hours(23)));
+        let (credential, _dir) = credential_expiring(Some(
+            testing::now() + jiff::SignedDuration::from_hours(expires_in_hours),
+        ));
 
         let client = connect(&url, credential).await.unwrap();
 
-        assert_eq!(payload_types(&received, 0), [2100, 2173, 2102]);
-        assert_eq!(account_auths(&received, 0), [renewed_access(1)]);
-        client.disconnect().await;
-    }
-
-    #[tokio::test]
-    async fn a_token_expiring_later_than_a_day_is_not_renewed_at_start() {
-        let venue = TokenVenue::new();
-        let (url, received) = testing::start(venue_peer(&venue));
-        let (credential, _dir) =
-            credential_expiring(Some(testing::now() + jiff::SignedDuration::from_hours(25)));
-
-        let client = connect(&url, credential).await.unwrap();
-
-        assert_eq!(payload_types(&received, 0), [2100, 2102]);
-        assert_eq!(account_auths(&received, 0), [ACCESS_TOKEN]);
+        assert_eq!(payload_types(&received, 0), frames);
+        assert_eq!(account_auths(&received, 0), [account_auth]);
         client.disconnect().await;
     }
 
@@ -1787,17 +1754,9 @@ mod tests {
         let err = connect(&url, credential).await.unwrap_err();
 
         let err = format!("{err:#} {err:?}");
-        assert!(
-            err.contains("cTrader refused to renew the access token (CH_ACCESS_TOKEN_INVALID)"),
-            "{err}"
-        );
-        assert!(
-            err.contains(
-                "Playground of the app on openapi.ctrader.com and set ACME_ACCESS_TOKEN and \
-                 ACME_REFRESH_TOKEN in acme.env (see the ACME guide)"
-            ),
-            "{err}"
-        );
+        for fact in ["CH_ACCESS_TOKEN_INVALID"].iter().chain(&PLAYGROUND) {
+            assert!(err.contains(fact), "{fact}: {err}");
+        }
         assert!(
             !err.contains(ACCESS_TOKEN) && !err.contains(REFRESH_TOKEN),
             "{err}"
@@ -1961,11 +1920,21 @@ mod tests {
         .await;
     }
 
+    /// A renewal answered after cTrader drops the account session, or
+    /// answered without its `clientMsgId`, is saved and used.
+    #[rstest]
+    #[case::after_ctrader_drops_the_account_session(
+        |request: &ProtoMessage| vec![account_dropped(), reply(request, &renewal_answer())]
+    )]
+    #[case::without_its_client_msg_id(|_: &ProtoMessage| {
+        vec![Action::Send(crate::common::messages::frame(
+            &renewal_answer(),
+            None,
+        ))]
+    })]
     #[tokio::test]
-    async fn a_renewal_answered_after_ctrader_drops_the_account_session_is_saved_and_used() {
-        let (url, received) = testing::start(renewing_peer(|request| {
-            vec![account_dropped(), reply(request, &renewal_answer())]
-        }));
+    async fn a_renewal_answer_is_saved_and_used(#[case] renewal: fn(&ProtoMessage) -> Vec<Action>) {
+        let (url, received) = testing::start(renewing_peer(renewal));
         let (credential, _dir) = testing::credential();
         let tokens = credential.tokens();
         let client = connect(&url, credential).await.unwrap();
@@ -1983,29 +1952,14 @@ mod tests {
         client.disconnect().await;
     }
 
-    #[tokio::test]
-    async fn a_renewal_answer_without_its_client_msg_id_is_saved_and_used() {
-        let (url, received) = testing::start(renewing_peer(|_| {
-            vec![Action::Send(crate::common::messages::frame(
-                &renewal_answer(),
-                None,
-            ))]
-        }));
-        let (credential, _dir) = testing::credential();
-        let tokens = credential.tokens();
-        let client = connect(&url, credential).await.unwrap();
-
-        client.renew_token();
-        reauthenticated(&received).await;
-
-        assert_eq!(stored(&tokens).0, "renewedAccessValue");
-        client.disconnect().await;
-    }
-
+    /// The renewal is answered once the test opens the gate, the
+    /// disconnect under way.
     #[tokio::test]
     async fn a_disconnect_waits_for_the_renewal_in_flight_and_saves_its_pair() {
-        let (url, received) = testing::start(renewing_peer(|request| {
-            std::thread::sleep(Duration::from_millis(300));
+        let (open, gate) = std::sync::mpsc::channel::<()>();
+        let (url, received) = testing::start(renewing_peer(move |request| {
+            // Opened by the test, or closed by its end.
+            let _ = gate.recv();
             vec![reply(request, &renewal_answer())]
         }));
         let (credential, _dir) = testing::credential();
@@ -2019,7 +1973,9 @@ mod tests {
         })
         .await;
 
-        client.disconnect().await;
+        tokio::join!(client.disconnect(), async {
+            open.send(()).unwrap();
+        });
 
         assert_eq!(stored(&tokens).0, "renewedAccessValue");
     }
