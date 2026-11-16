@@ -52,7 +52,8 @@
 //! Nautilus' GTD expiry on the bracket's legs does not fit: an expired leg
 //! leaves the position open, IC sends no leg's time in force (its legs
 //! become the position's stop loss and take profit), and OKX takes GTC
-//! orders alone in an order list.
+//! orders alone in an order list. OKX denies a bracket whole, its stop
+//! loss a stop order in an order list, until nautilus_trader#5668 is fixed.
 
 use std::{cmp::Ordering, collections::BTreeSet, str::FromStr};
 
@@ -469,6 +470,7 @@ impl Trade {
                     .call();
                 // Nautilus' bracket is the entry, then its legs.
                 let entry = orders[0].client_order_id();
+                // Denied whole on OKX until nautilus_trader#5668 is fixed.
                 strategy.submit_order_list(orders, None, None, None)?;
                 entry
             }

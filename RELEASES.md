@@ -29,6 +29,7 @@ Released on TBD (UTC).
 
 ### Documentation Updates
 
+- Added OKX's denial of a bracket to the OKX guide, until nautilus_trader#5668
 - Renamed `docs/ARCHITECTURE.md` to `docs/architecture.md`
 - Added `docs/releases.md`, the release notes standard and release steps
 - Changed spelling to American English
