@@ -20,7 +20,7 @@ use crate::common::{
 /// files each named by its rows' first and last stamps, the one closing
 /// 11:59:59.999999999 and the next opening a minute later: the catalog's
 /// intervals miss the sliver between them, and the run from 10:00 trades
-/// as on one file (`backtest_warmup.rs`).
+/// as on one file (`backtest_ema_time_exit.rs`).
 #[rstest]
 fn a_sliver_between_promoted_files_is_replayed_through() {
     let levels = trades::TIME_EXIT;
