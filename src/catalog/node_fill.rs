@@ -732,11 +732,8 @@ mod tests {
         )
     }
 
-    #[rstest]
-    fn a_stored_series_lacks_only_what_is_outside_its_stored_intervals() {
-        let dir = tempfile::tempdir().unwrap();
-        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        // Stored over Wednesday, a weekend inside it covered as well.
+    /// Stores GCZ26's trades over Wednesday 21 October, a trade at 10:00.
+    fn store_trades_over_wednesday(catalog: &ParquetDataCatalog) {
         catalog
             .write_to_parquet(
                 &[trade("GCZ26.GLBX", "2026-10-21T10:00:00Z")],
@@ -745,36 +742,83 @@ mod tests {
                 None,
             )
             .unwrap();
-        let slices = [slice(
+    }
+
+    /// Stores GCZ26's 1-minute bars over Wednesday 21 October, a bar
+    /// closing at 10:00.
+    fn store_bars_over_wednesday(catalog: &ParquetDataCatalog) {
+        let price = Price::from("4000.0");
+        let close = ts("2026-10-21T10:00:00Z");
+        let bar = Bar::new(
+            BarType::from(BARS),
+            price,
+            price,
+            price,
+            price,
+            Quantity::from(1),
+            (close - SignedDuration::from_mins(1)).into(),
+            close.into(),
+        );
+        catalog
+            .write_to_parquet(
+                &[bar],
+                Some(ts("2026-10-21T00:00:00Z").into()),
+                Some(ts("2026-10-21T23:59:59.999999999Z").into()),
+                None,
+            )
+            .unwrap();
+    }
+
+    /// A series stored over Wednesday, its trades or its bar type's bars:
+    /// a slice from Tuesday lacks Tuesday and what follows Wednesday, the
+    /// definition asked over the whole slice.
+    #[rstest]
+    #[case::trades(
+        store_trades_over_wednesday,
+        slice(
             NautilusDataType::TradeTick,
             "GCZ26.GLBX",
             "2026-10-20T00:00:00Z",
-            "2026-10-23T00:00:00Z",
-        )];
+            "2026-10-23T00:00:00Z"
+        ),
+        FillData::Trades,
+        "2026-10-23T00:00:00Z"
+    )]
+    #[case::bars(
+        store_bars_over_wednesday,
+        bars_slice(BARS, "GCZ26.GLBX", "2026-10-20T00:00:00Z", "2026-10-22T00:00:00Z"),
+        FillData::Bars(BarType::from(BARS)),
+        "2026-10-22T00:00:00Z"
+    )]
+    fn a_stored_series_lacks_only_what_is_outside_its_stored_intervals(
+        #[case] store: fn(&ParquetDataCatalog),
+        #[case] slice: SeriesSlice,
+        #[case] data: FillData,
+        #[case] to: &str,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        store(&catalog);
 
-        let asked = missing(&catalog, &slices).unwrap();
+        let asked = missing(&catalog, &[slice]).unwrap();
 
         assert_eq!(
-            asked[1..],
+            asked,
             [
                 request(
-                    FillData::Trades,
+                    FillData::Instrument,
+                    "GCZ26.GLBX",
+                    "2026-10-20T00:00:00Z",
+                    to
+                ),
+                request(
+                    data,
                     "GCZ26.GLBX",
                     "2026-10-20T00:00:00Z",
                     "2026-10-20T23:59:59.999999999Z"
                 ),
-                request(
-                    FillData::Trades,
-                    "GCZ26.GLBX",
-                    "2026-10-22T00:00:00Z",
-                    "2026-10-23T00:00:00Z"
-                ),
+                request(data, "GCZ26.GLBX", "2026-10-22T00:00:00Z", to),
             ]
-        );
-        assert_eq!(asked[0].data, FillData::Instrument);
-        assert_eq!(
-            (asked[0].from, asked[0].to),
-            (ts("2026-10-20T00:00:00Z"), ts("2026-10-23T00:00:00Z"))
         );
     }
 
@@ -870,73 +914,48 @@ mod tests {
         }
     }
 
+    /// An empty catalog lacks a series over its slice, asked as its kind,
+    /// after the definition over it: bars as their bar type, funding, and
+    /// book deltas as deltas.
     #[rstest]
-    fn bars_are_asked_as_their_bar_type_over_their_slice_after_the_definition() {
+    #[case::bars(
+        bars_slice(BARS, "GCZ26.GLBX", "2026-10-20T00:00:00Z", "2026-10-21T00:00:00Z"),
+        FillData::Bars(BarType::from(BARS))
+    )]
+    #[case::funding(
+        slice(
+            NautilusDataType::FundingRateUpdate,
+            "BTC-USDT-SWAP.OKX",
+            "2026-10-20T00:00:00Z",
+            "2026-10-21T00:00:00Z"
+        ),
+        FillData::Funding
+    )]
+    #[case::book_deltas(
+        slice(
+            NautilusDataType::OrderBookDelta,
+            "GCZ26.GLBX",
+            "2026-10-20T00:00:00Z",
+            "2026-10-21T00:00:00Z"
+        ),
+        FillData::Deltas
+    )]
+    fn a_series_is_asked_as_its_kind_over_its_slice_after_the_definition(
+        #[case] slice: SeriesSlice,
+        #[case] data: FillData,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let id = slice.slice.instrument_id.to_string();
         let (from, to) = ("2026-10-20T00:00:00Z", "2026-10-21T00:00:00Z");
-        let slices = [bars_slice(BARS, "GCZ26.GLBX", from, to)];
 
-        let asked = missing(&catalog, &slices).unwrap();
+        let asked = missing(&catalog, &[slice]).unwrap();
 
         assert_eq!(
             asked,
             [
-                request(FillData::Instrument, "GCZ26.GLBX", from, to),
-                request(FillData::Bars(BarType::from(BARS)), "GCZ26.GLBX", from, to),
-            ]
-        );
-    }
-
-    #[rstest]
-    fn stored_bars_lack_only_what_is_outside_their_bar_type_s_stored_interval() {
-        let dir = tempfile::tempdir().unwrap();
-        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        let price = Price::from("4000.0");
-        let close = ts("2026-10-21T10:00:00Z");
-        let bar = Bar::new(
-            BarType::from(BARS),
-            price,
-            price,
-            price,
-            price,
-            Quantity::from(1),
-            (close - SignedDuration::from_mins(1)).into(),
-            close.into(),
-        );
-        catalog
-            .write_to_parquet(
-                &[bar],
-                Some(ts("2026-10-21T00:00:00Z").into()),
-                Some(ts("2026-10-21T23:59:59.999999999Z").into()),
-                None,
-            )
-            .unwrap();
-        let slices = [bars_slice(
-            BARS,
-            "GCZ26.GLBX",
-            "2026-10-20T00:00:00Z",
-            "2026-10-22T00:00:00Z",
-        )];
-
-        let asked = missing(&catalog, &slices).unwrap();
-
-        let bars = FillData::Bars(BarType::from(BARS));
-        assert_eq!(
-            asked[1..],
-            [
-                request(
-                    bars,
-                    "GCZ26.GLBX",
-                    "2026-10-20T00:00:00Z",
-                    "2026-10-20T23:59:59.999999999Z"
-                ),
-                request(
-                    bars,
-                    "GCZ26.GLBX",
-                    "2026-10-22T00:00:00Z",
-                    "2026-10-22T00:00:00Z"
-                ),
+                request(FillData::Instrument, &id, from, to),
+                request(data, &id, from, to),
             ]
         );
     }
@@ -956,53 +975,6 @@ mod tests {
 
         assert!(err.contains(BARS), "{err}");
         assert!(err.contains("GCQ26.GLBX"), "{err}");
-    }
-
-    #[rstest]
-    fn funding_is_asked_over_its_slice_after_the_definition() {
-        let dir = tempfile::tempdir().unwrap();
-        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        let (from, to) = ("2026-10-20T00:00:00Z", "2026-10-21T00:00:00Z");
-        let slices = [slice(
-            NautilusDataType::FundingRateUpdate,
-            "BTC-USDT-SWAP.OKX",
-            from,
-            to,
-        )];
-
-        let asked = missing(&catalog, &slices).unwrap();
-
-        assert_eq!(
-            asked,
-            [
-                request(FillData::Instrument, "BTC-USDT-SWAP.OKX", from, to),
-                request(FillData::Funding, "BTC-USDT-SWAP.OKX", from, to),
-            ]
-        );
-    }
-
-    #[rstest]
-    fn book_deltas_are_asked_as_deltas_over_their_slice() {
-        let dir = tempfile::tempdir().unwrap();
-        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        let slices = [slice(
-            NautilusDataType::OrderBookDelta,
-            "GCZ26.GLBX",
-            "2026-10-21T00:00:00Z",
-            "2026-10-22T00:00:00Z",
-        )];
-
-        let asked = missing(&catalog, &slices).unwrap();
-
-        assert_eq!(
-            asked[1],
-            request(
-                FillData::Deltas,
-                "GCZ26.GLBX",
-                "2026-10-21T00:00:00Z",
-                "2026-10-22T00:00:00Z"
-            )
-        );
     }
 
     fn bond_yields_metadata() -> Params {
