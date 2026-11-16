@@ -54,7 +54,7 @@ fn trades() -> Vec<TradeTick> {
 /// Both contracts' trades and IC's gold quoted at 30 s past every minute
 /// from 22:00 Tuesday to 02:00 Wednesday, its mid 4000.10.
 fn catalog() -> tempfile::TempDir {
-    let catalog = rolls::catalog_of_trades(trades());
+    let catalog = rolls::catalog_of_trades(&trades());
     let (from, to) = (tuesday("22:00:00"), wednesday("02:00:00"));
     let mut quotes = vec![];
     let mut time = from + SignedDuration::from_secs(30);
@@ -126,7 +126,7 @@ fn rows(features: Rc<FeatureSet>) -> Vec<(Timestamp, Vec<f64>)> {
         features,
         &config(),
         &requirements,
-        Mode::Dataset {
+        &Mode::Dataset {
             rows: SettledRows::default(),
         },
     );

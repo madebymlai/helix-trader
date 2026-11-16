@@ -337,22 +337,25 @@ mod tests {
     impl ModelPart for ProbeParams {
         fn features(config: &StandardConfig<Self>) -> ConfigResult<Rc<FeatureSet>> {
             let tables = &config.indicators;
-            let builder = config.own.features.iter().enumerate().fold(
+            let builder = config.own.features.iter().enumerate().try_fold(
                 FeatureSet::builder(),
                 |builder, (i, series)| match series {
-                    Series::Bars(bar_type) => builder.bars(*bar_type, SPAN, tables),
+                    Series::Bars(bar_type) => Ok(builder.bars(*bar_type, SPAN, tables)),
                     Series::Ticks(ticks) => match &ticks.data {
                         NautilusDataType::QuoteTick => {
-                            builder.quotes(ticks.instrument_id, SPAN, tables)
+                            Ok(builder.quotes(ticks.instrument_id, SPAN, tables))
                         }
                         NautilusDataType::TradeTick => {
-                            builder.trades(ticks.instrument_id, SPAN, tables)
+                            Ok(builder.trades(ticks.instrument_id, SPAN, tables))
                         }
-                        data => panic!("the probe reads no {data}"),
+                        data => Err(ConfigError::invalid_value(
+                            "features",
+                            format!("the probe reads no {data}"),
+                        )),
                     },
-                    Series::Custom(custom) => builder.custom(custom, &i.to_string(), |_| 0.0),
+                    Series::Custom(custom) => Ok(builder.custom(custom, &i.to_string(), |_| 0.0)),
                 },
-            );
+            )?;
             builder
                 .build()
                 .map_err(|e| ConfigError::invalid_value("features", format!("{e:#}")))

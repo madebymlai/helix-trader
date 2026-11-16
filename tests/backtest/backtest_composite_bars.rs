@@ -192,11 +192,11 @@ fn a_decision_on_hour_bars_reads_the_bar_closing_on_its_grid() {
         features,
         &config,
         &requirements,
-        Mode::Dataset {
+        &Mode::Dataset {
             rows: SettledRows::default(),
         },
     );
-    backtest.bar_types = requirements.bar_types.clone();
+    backtest.bar_types = requirements.bar_types;
     backtest.venue_oms = |_| OmsType::Hedging;
 
     backtest.run_dataset(probe).unwrap();

@@ -398,7 +398,7 @@ impl ExchangeHandler {
                     inbound = self.raw_rx.recv() => match inbound {
                         Some(Inbound::Frame(epoch, message)) => self.receive(epoch, message).await,
                         Some(Inbound::Closed(close)) => {
-                            if !self.closed(close) {
+                            if !self.closed(close.as_ref()) {
                                 break;
                             }
                         }
@@ -578,7 +578,7 @@ impl ExchangeHandler {
     /// Carries `symbol` on every connection: if carried already and
     /// `reopen`, the new subscriber is passed on; if not, a new connection
     /// carries it.
-    fn subscribe(&mut self, symbol: String, reopen: bool) {
+    fn subscribe(&self, symbol: String, reopen: bool) {
         let newly = self.subscriptions.try_mark_subscribe(&symbol);
         if newly && self.carried.contains(&symbol) {
             // Named on this connection, the first, before it was subscribed:
@@ -603,7 +603,7 @@ impl ExchangeHandler {
     /// Carries `symbol` no longer: the subscription of the next connection
     /// leaves it out (Nautilus' `SubscriptionState`). LSE takes no
     /// unsubscription on a connection, so none is sent.
-    fn unsubscribe(&mut self, symbol: &str) {
+    fn unsubscribe(&self, symbol: &str) {
         self.subscriptions.mark_unsubscribe(symbol);
         self.subscriptions.confirm_unsubscribe(symbol);
     }
@@ -624,14 +624,12 @@ impl ExchangeHandler {
     /// subscription, its refusal goes to the opening; else it is logged.
     /// Whether the handler goes on: not after a close a new connection would
     /// not lift, which the transport does not reconnect.
-    fn closed(&mut self, close: Option<(u16, String)>) -> bool {
-        let described = close.as_ref().map_or_else(
+    fn closed(&mut self, close: Option<&(u16, String)>) -> bool {
+        let described = close.map_or_else(
             || "no close frame".to_string(),
             |(code, reason)| format!("{code} {reason}"),
         );
-        let terminal = close
-            .as_ref()
-            .is_some_and(|(code, _)| TERMINAL.contains(code));
+        let terminal = close.is_some_and(|(code, _)| TERMINAL.contains(code));
         if let Some(opening) = self.opening.take() {
             let mut symbols: Vec<&String> = self.carried.iter().collect();
             symbols.sort();

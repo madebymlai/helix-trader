@@ -93,7 +93,7 @@ struct BracketOnce {
 }
 
 impl BracketOnce {
-    fn note(&self, id: impl ToString, what: impl Into<String>) {
+    fn note(&self, id: &impl ToString, what: impl Into<String>) {
         let what = what.into();
         println!("order event: {} {what}", id.to_string());
         self.record
@@ -113,14 +113,14 @@ nautilus_strategy!(BracketOnce, {
 
     fn on_order_accepted(&mut self, event: OrderAccepted) {
         self.note(
-            event.client_order_id,
+            &event.client_order_id,
             format!("accepted {}", event.venue_order_id),
         );
     }
 
     fn on_order_filled(&mut self, event: &OrderFilled) {
         self.note(
-            event.client_order_id,
+            &event.client_order_id,
             format!(
                 "filled {} {} at {}, position {:?}, commission {:?}",
                 event.order_side,
@@ -134,16 +134,19 @@ nautilus_strategy!(BracketOnce, {
     }
 
     fn on_order_canceled(&mut self, event: &OrderCanceled) {
-        self.note(event.client_order_id, "canceled");
+        self.note(&event.client_order_id, "canceled");
     }
 
     fn on_order_rejected(&mut self, event: OrderRejected) {
-        self.note(event.client_order_id, format!("rejected: {}", event.reason));
+        self.note(
+            &event.client_order_id,
+            format!("rejected: {}", event.reason),
+        );
         self.done.store(true, Ordering::SeqCst);
     }
 
     fn on_order_denied(&mut self, event: OrderDenied) {
-        self.note(event.client_order_id, format!("denied: {}", event.reason));
+        self.note(&event.client_order_id, format!("denied: {}", event.reason));
         self.done.store(true, Ordering::SeqCst);
     }
 
@@ -152,11 +155,11 @@ nautilus_strategy!(BracketOnce, {
         self.record.lock().unwrap().opened = Some(event);
         let position = self.cache().position(&position_id);
         let Some(position) = position else {
-            self.note(position_id, "opened but not in the cache");
+            self.note(&position_id, "opened but not in the cache");
             return;
         };
         if let Err(e) = self.close_position(&position, None, None, None, None, None, None) {
-            self.note(position_id, format!("close failed: {e}"));
+            self.note(&position_id, format!("close failed: {e}"));
             self.done.store(true, Ordering::SeqCst);
         }
     }
@@ -270,10 +273,10 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
         assert!(status.success());
     });
 
-    let ran = tokio::time::timeout(
+    let ran = Box::pin(tokio::time::timeout(
         DEADLINE + Duration::from_secs(90),
         live.run(&requirements, &Warmup::live(&requirements), strategy, None),
-    )
+    ))
     .await;
 
     interrupt.abort();

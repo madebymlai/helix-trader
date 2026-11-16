@@ -523,13 +523,13 @@ mod tests {
     }
 
     fn walk(dir: &Path) -> WalkForward {
-        walk_of(dir, config())
+        walk_of(dir, &config())
     }
 
     /// The walk of `config` in `dir`, its catalog and store side by side.
-    fn walk_of(dir: &Path, config: ModelConfig) -> WalkForward {
+    fn walk_of(dir: &Path, config: &ModelConfig) -> WalkForward {
         std::fs::create_dir_all(dir.join("catalog")).unwrap();
-        blueprint(&config)
+        blueprint(config)
             .walk_forward(&dir.join("catalog"), &dir.join("models"))
             .unwrap()
     }
@@ -834,7 +834,7 @@ mod tests {
             },
             ..config()
         };
-        let walk = walk_of(dir, config.clone());
+        let walk = walk_of(dir, &config);
         let span = ("2026-01-07T00:00:00Z", "2026-01-09T00:00:00Z");
         prepared(dir, &walk, span, Some(&config)).unwrap();
         walk.scores(at(span.0), at(span.1)).unwrap()
@@ -1106,7 +1106,7 @@ mod tests {
     fn sides_expecting_the_same_r_tie_whatever_their_units() {
         let dir = tempfile::tempdir().unwrap();
         let config = with_exits();
-        let walk = walk_of(dir.path(), config.clone());
+        let walk = walk_of(dir.path(), &config);
         let (seventh, eighth) = (at("2026-01-07T00:00:00Z"), at("2026-01-08T00:00:00Z"));
         dataset(dir.path(), &config)
             .write(
@@ -1151,7 +1151,7 @@ mod tests {
     /// The scores of `opposed_meta_scores`, of a walk as `config` says on
     /// `rows`.
     fn opposed_meta_scores_of(dir: &Path, config: &ModelConfig, rows: &[TargetRow]) -> Scores {
-        let walk = walk_of(dir, config.clone());
+        let walk = walk_of(dir, config);
         dataset(dir, config)
             .write(rows, at("2026-01-06T00:00:00Z"), at("2026-01-09T01:00:00Z"))
             .unwrap();
@@ -1567,7 +1567,7 @@ Meta model scores, out of sample, over the span
 
     /// The walk of `with_meta` in `dir`, its catalog and store side by side.
     fn meta_walk(dir: &Path) -> WalkForward {
-        walk_of(dir, with_meta())
+        walk_of(dir, &with_meta())
     }
 
     /// The store of the meta models of `meta_walk(dir)`.
@@ -1738,7 +1738,7 @@ Meta model scores, out of sample, over the span
     #[test]
     fn a_backtest_never_retrained_builds_its_window_and_trains_at_its_start_alone() {
         let dir = tempfile::tempdir().unwrap();
-        let walk = walk_of(dir.path(), never());
+        let walk = walk_of(dir.path(), &never());
 
         let (built, trained) = prepared(
             dir.path(),
@@ -1760,7 +1760,7 @@ Meta model scores, out of sample, over the span
     #[test]
     fn a_second_backtest_never_retrained_of_the_span_or_from_later_trains_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let walk = walk_of(dir.path(), never());
+        let walk = walk_of(dir.path(), &never());
         let end = "2026-01-09T00:00:00Z";
         prepared(
             dir.path(),
@@ -1782,7 +1782,7 @@ Meta model scores, out of sample, over the span
     #[test]
     fn a_backtest_never_retrained_with_no_sides_model_at_its_start_is_refused_naming_the_sides() {
         let dir = tempfile::tempdir().unwrap();
-        let walk = walk_of(dir.path(), never());
+        let walk = walk_of(dir.path(), &never());
 
         let err = prepared(
             dir.path(),
@@ -1812,7 +1812,7 @@ Meta model scores, out of sample, over the span
     /// if `meta`, a meta model valid from it.
     fn prepared_two_time(dir: &Path, sides: bool, meta: bool) -> anyhow::Result<Asked> {
         let config = never_with_meta();
-        let walk = walk_of(dir, config.clone());
+        let walk = walk_of(dir, &config);
         let (built, trained) = (RefCell::new(vec![]), RefCell::new(vec![]));
         walk.prepare(
             at("2026-01-07T00:00:00Z"),
@@ -1914,7 +1914,7 @@ Meta model scores, out of sample, over the span
     #[test]
     fn a_backtest_never_retrained_scores_the_span_as_one_period() {
         let dir = tempfile::tempdir().unwrap();
-        let walk = walk_of(dir.path(), never());
+        let walk = walk_of(dir.path(), &never());
         let span = ("2026-01-07T00:00:00Z", "2026-01-09T00:00:00Z");
         prepared(dir.path(), &walk, span, Some(&never())).unwrap();
 
@@ -1941,7 +1941,7 @@ Meta model scores, out of sample, over the span
     #[test]
     fn a_backtest_never_retrained_with_its_models_in_use_builds_only_its_span() {
         let dir = tempfile::tempdir().unwrap();
-        let walk = walk_of(dir.path(), never());
+        let walk = walk_of(dir.path(), &never());
         publish(dir.path(), &never(), at("2026-01-07T00:00:00Z"));
 
         let (built, trained) = prepared(
@@ -1968,7 +1968,7 @@ Meta model scores, out of sample, over the span
     #[test]
     fn a_backtest_never_retrained_scores_a_model_beside_its_own_baseline() {
         let dir = tempfile::tempdir().unwrap();
-        let walk = walk_of(dir.path(), never());
+        let walk = walk_of(dir.path(), &never());
         publish(dir.path(), &never(), at("2026-01-07T00:00:00Z"));
         let span = ("2026-01-08T00:00:00Z", "2026-01-09T00:00:00Z");
         prepared(dir.path(), &walk, span, Some(&never())).unwrap();
@@ -1991,7 +1991,7 @@ Meta model scores, out of sample, over the span
     #[test]
     fn a_backtest_never_retrained_with_a_side_alone_at_its_start_is_refused_naming_the_sides() {
         let dir = tempfile::tempdir().unwrap();
-        let walk = walk_of(dir.path(), never());
+        let walk = walk_of(dir.path(), &never());
         let fingerprint = dataset(dir.path(), &never()).fingerprint().to_string();
         let seventh = at("2026-01-07T00:00:00Z");
         store(dir.path(), &never(), Side::Long)

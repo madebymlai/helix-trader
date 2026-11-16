@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [workspace]
 members = ["crates/ctrader", "crates/lse"]
 # Plain `cargo test` and `cargo clippy` at the root cover every crate.
@@ -61,6 +64,182 @@ sha2 = "0.11"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 ustr = "1"
+
+# Nautilus' workspace lints (nautilus_trader's Cargo.toml), so that helix
+# reads like the code it builds on; each crate takes them with
+# `[lints] workspace = true`.
+[workspace.lints.clippy]
+# Debug markers
+dbg_macro = "warn"
+
+# Performance optimizations
+redundant_clone = "warn"
+unnecessary_to_owned = "warn"
+inefficient_to_string = "warn"
+cloned_instead_of_copied = "warn"
+
+# Needless code
+needless_borrow = "warn"
+needless_bool = "warn"
+needless_borrows_for_generic_args = "warn"
+needless_collect = "warn"
+needless_continue = "warn"
+needless_late_init = "warn"
+needless_lifetimes = "warn"
+needless_match = "warn"
+needless_option_as_deref = "warn"
+needless_pass_by_ref_mut = "warn"
+needless_pass_by_value = "warn"
+needless_range_loop = "warn"
+needless_raw_strings = "warn"
+needless_raw_string_hashes = "warn"
+needless_return = "warn"
+needless_update = "warn"
+
+# Code simplification
+redundant_closure = "warn"
+# redundant_closure_for_method_calls = "warn" # Pending adapter cleanup; pedantic crates already enable it
+collapsible_if = "warn"
+collapsible_else_if = "warn"
+useless_conversion = "warn"
+unnecessary_safety_comment = "warn"
+unnecessary_safety_doc = "warn"
+unnecessary_self_imports = "warn"
+unnecessary_semicolon = "warn"
+unnecessary_sort_by = "warn"
+unnecessary_struct_initialization = "warn"
+unnecessary_debug_formatting = "warn"
+unnecessary_wraps = "warn"
+unnecessary_box_returns = "warn"
+unnecessary_join = "warn"
+unnecessary_literal_bound = "warn"
+map_identity = "warn"
+if_same_then_else = "warn"
+get_first = "warn"
+single_char_pattern = "warn"
+identity_op = "warn"
+
+# Iterator simplifications
+manual_flatten = "warn"
+iter_kv_map = "warn"
+bytes_count_to_len = "warn"
+unnecessary_filter_map = "warn"
+
+# Option/Result simplifications
+unnecessary_lazy_evaluations = "warn"
+option_as_ref_deref = "warn"
+
+# Manual pattern simplifications
+manual_filter = "warn"
+manual_find = "warn"
+manual_while_let_some = "warn"
+range_plus_one = "warn"
+checked_conversions = "warn"
+manual_strip = "warn"
+manual_split_once = "warn"
+manual_is_ascii_check = "warn"
+manual_range_contains = "warn"
+manual_string_new = "warn"
+manual_instant_elapsed = "warn"
+
+# Pointer casts
+ref_as_ptr = "warn"
+
+# Style/idioms
+use_self = "warn"
+# default_trait_access = "warn" # TODO: Enable (~170 warnings)
+redundant_field_names = "warn"
+match_like_matches_macro = "warn"
+manual_map = "warn"
+bool_to_int_with_if = "warn"
+explicit_iter_loop = "warn"
+uninlined_format_args = "warn"
+
+# Pedantic (explicitness and clarity)
+borrow_as_ptr = "warn"
+copy_iterator = "warn"
+expl_impl_clone_on_copy = "warn"
+inconsistent_struct_constructor = "warn"
+iter_nth_zero = "warn"
+map_flatten = "warn"
+match_bool = "warn"
+mut_mut = "warn"
+naive_bytecount = "warn"
+option_option = "warn"
+ptr_as_ptr = "warn"
+verbose_bit_mask = "warn"
+semicolon_if_nothing_returned = "warn"
+unnested_or_patterns = "warn"
+filter_map_next = "warn"
+flat_map_option = "warn"
+map_unwrap_or = "warn"
+implicit_clone = "warn"
+return_self_not_must_use = "warn"
+explicit_into_iter_loop = "warn"
+stable_sort_primitive = "warn"
+needless_for_each = "warn"
+manual_is_variant_and = "warn"
+equatable_if_let = "warn"
+manual_assert = "warn"
+items_after_statements = "warn"
+ignored_unit_patterns = "warn"
+if_not_else = "warn"
+
+# Security and robustness
+disallowed_methods = "warn"
+disallowed_types = "warn"
+exit = "warn"
+suspicious_doc_comments = "warn"
+large_stack_arrays = "warn"
+panic_in_result_fn = "warn"
+unimplemented = "warn"
+mem_forget = "warn"
+multiple_unsafe_ops_per_block = "warn"
+unchecked_time_subtraction = "warn"
+
+# Numeric correctness
+float_cmp_const = "warn"
+lossy_float_literal = "warn"
+invalid_upcast_comparisons = "warn"
+
+# API hygiene
+rc_mutex = "warn"
+rc_buffer = "warn"
+empty_drop = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+iter_not_returning_iterator = "warn"
+infallible_try_from = "warn"
+debug_assert_with_mut_call = "warn"
+
+# Async correctness
+await_holding_lock = "warn"
+await_holding_refcell_ref = "warn"
+let_underscore_future = "warn"
+large_futures = "warn"
+if_let_mutex = "warn"
+
+# TODO: Don't fail silently. Incremental rollout needed (~1400 sites workspace-wide)
+# let_underscore_must_use = "warn"
+# unused_result_ok = "warn"
+# assertions_on_result_states = "warn"
+# map_err_ignore = "warn"
+
+# Shared allowances, also generated after source pedantic opt-ins by
+# scripts/update-clippy-allowances.py because attributes override Cargo flags.
+redundant_else = "allow" # Sometimes explicit else blocks improve readability
+single_match_else = "allow" # Match can be clearer than if-let-else for some patterns
+manual_let_else = "allow" # Match can be clearer than let-else for some patterns
+or_fun_call = "allow" # Used consistently for display with map_or("None".to_string(), ...)
+option_if_let_else = "allow" # if-let can be clearer than map_or/map_or_else
+similar_names = "allow" # Domain terms like trade/trader and side/size are intentionally similar
+
+# TODO: Enable these incrementally (widespread usage in codebase)
+# unwrap_used = "warn"        # Forces explicit error handling instead of panics
+# expect_used = "warn"        # Forces explicit error handling instead of panics
+# indexing_slicing = "warn"   # Prevents panics from out-of-bounds access
+
+[workspace.lints.rust]
+unreachable_pub = "deny"
 
 [features]
 # Strategy unit tests, off by default (see the README's tests section).

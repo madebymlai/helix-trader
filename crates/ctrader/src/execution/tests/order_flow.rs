@@ -599,7 +599,7 @@ async fn an_unanswered_order_stays_in_flight_until_a_query_finds_its_outcome() {
                 request,
                 &ProtoOaOrderListRes {
                     ctid_trader_account_id: ACCOUNT_ID,
-                    order: vec![filled.order.clone().unwrap()],
+                    order: vec![filled.order.unwrap()],
                     has_more: false,
                     ..Default::default()
                 },
@@ -608,7 +608,7 @@ async fn an_unanswered_order_stays_in_flight_until_a_query_finds_its_outcome() {
                 request,
                 &ProtoOaOrderDetailsRes {
                     ctid_trader_account_id: ACCOUNT_ID,
-                    order: filled.order.clone().unwrap(),
+                    order: filled.order.unwrap(),
                     deal: vec![filled.deal.unwrap()],
                     ..Default::default()
                 },

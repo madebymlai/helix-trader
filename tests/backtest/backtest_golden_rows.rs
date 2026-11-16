@@ -123,13 +123,13 @@ fn the_rows_of_the_example_model_strategy_are_the_snapshots() {
 /// reading back to the same `f64`.
 fn print(features: &[String], payoff: &[String], rows: &[DatasetRow]) -> String {
     let mut out = String::from("ts_event,settled_at");
-    features
-        .iter()
-        .for_each(|name| write!(out, ",{name}").unwrap());
+    for name in features {
+        write!(out, ",{name}").unwrap();
+    }
     for side in ["long", "short"] {
-        payoff
-            .iter()
-            .for_each(|name| write!(out, ",{side}_{name}").unwrap());
+        for name in payoff {
+            write!(out, ",{side}_{name}").unwrap();
+        }
     }
     out.push_str(
         ",long_pnl,long_commission,long_exit,long_unit,short_pnl,short_commission,short_exit,\

@@ -931,7 +931,7 @@ fn a_trade_is_sized_on_the_account_of_the_client_its_venue_routes_to() {
 /// 1,000,000 of it bought at 0.70000, bid at 0.72000 now: 20,000 USD of
 /// open P&L.
 fn holding_open_pnl(
-    instrument: InstrumentAny,
+    instrument: &InstrumentAny,
     client: &str,
     account: AccountAny,
 ) -> Rc<RefCell<Cache>> {
@@ -944,7 +944,7 @@ fn holding_open_pnl(
         .build();
     let filled = TestOrderEventStubs::filled(
         &order,
-        &instrument,
+        instrument,
         Some(TradeId::from("OPEN-1")),
         Some(PositionId::from("OPEN-1")),
         Some(Price::from("0.70000")),
@@ -962,7 +962,7 @@ fn holding_open_pnl(
     held.add_client_account(ClientId::from(client), account.id());
     held.add_client_route(ClientId::from(client), id.venue);
     held.add_account(account).unwrap();
-    held.add_position_without_order(&Position::new(&instrument, fill), OmsType::Netting)
+    held.add_position_without_order(&Position::new(instrument, fill), OmsType::Netting)
         .unwrap();
     held.add_quote(QuoteTick::new(
         id,
@@ -998,7 +998,7 @@ fn sized_from(cache: &Rc<RefCell<Cache>>, instrument_id: InstrumentId) -> Quanti
 #[test]
 fn a_trade_on_ib_is_sized_on_the_balance_ib_reports_its_open_pnl_counted_once() {
     let account = reported_margin_account(AccountId::from("IB-DU1234567"), "200000 USD");
-    let cache = holding_open_pnl(ib_aud(), "IB", account);
+    let cache = holding_open_pnl(&ib_aud(), "IB", account);
 
     let quantity = sized_from(&cache, InstrumentId::from(IB_AUD));
 
@@ -1011,7 +1011,7 @@ fn a_trade_on_ib_is_sized_on_the_balance_ib_reports_its_open_pnl_counted_once() 
 #[test]
 fn a_trade_at_a_ctrader_broker_is_sized_on_its_balance_and_its_open_pnl() {
     let account = reported_margin_account(AccountId::from("PEPPERSTONE-001"), "200000 USD");
-    let cache = holding_open_pnl(aud(InstrumentId::from(AUD)), "PEPPERSTONE", account);
+    let cache = holding_open_pnl(&aud(InstrumentId::from(AUD)), "PEPPERSTONE", account);
 
     let quantity = sized_from(&cache, InstrumentId::from(AUD));
 
@@ -1025,7 +1025,7 @@ fn a_trade_at_a_ctrader_broker_is_sized_on_its_balance_and_its_open_pnl() {
 #[test]
 fn a_trade_on_ibs_simulated_account_is_sized_on_its_balance_and_its_open_pnl() {
     let account = margin_account(AccountId::from("IDEALPRO-001"), "200000 USD");
-    let cache = holding_open_pnl(ib_aud(), "IDEALPRO", account);
+    let cache = holding_open_pnl(&ib_aud(), "IDEALPRO", account);
 
     let quantity = sized_from(&cache, InstrumentId::from(IB_AUD));
 
@@ -1061,7 +1061,7 @@ fn defining_ib_eurusd(cache: &Rc<RefCell<Cache>>) {
 #[test]
 fn a_trade_on_an_account_without_a_base_currency_is_sized_on_each_currency_converted_and_summed() {
     let account = margin_account(AccountId::from("IDEALPRO-001"), "100000 EUR");
-    let cache = holding_open_pnl(ib_aud(), "IDEALPRO", account);
+    let cache = holding_open_pnl(&ib_aud(), "IDEALPRO", account);
     defining_ib_eurusd(&cache);
     cache
         .borrow_mut()

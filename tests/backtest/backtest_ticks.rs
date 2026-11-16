@@ -121,10 +121,10 @@ fn tick(data: NautilusDataType, instrument_id: &str) -> TickSeries {
 }
 
 /// The times of what `got` holds of `data` of `instrument_id`.
-fn times(got: &[Got], data: NautilusDataType, instrument_id: &str) -> Vec<UnixNanos> {
+fn times(got: &[Got], data: &NautilusDataType, instrument_id: &str) -> Vec<UnixNanos> {
     let id = InstrumentId::from(instrument_id);
     got.iter()
-        .filter(|(d, i, _)| *d == data && *i == id)
+        .filter(|(d, i, _)| d == data && *i == id)
         .map(|(_, _, ts)| *ts)
         .collect()
 }
@@ -148,18 +148,18 @@ fn a_strategy_declaring_ticks_and_no_bar_types_gets_the_declared_ticks_of_the_ru
 
     // Two IC quotes a minute, at :07.250 and :37.750, over the run's three
     // hours.
-    let quotes = times(&got, NautilusDataType::QuoteTick, ic::INSTRUMENT_ID);
+    let quotes = times(&got, &NautilusDataType::QuoteTick, ic::INSTRUMENT_ID);
     assert_eq!(quotes.len(), 360);
     assert_eq!(quotes[0], at("09:00:07.250"));
     assert_eq!(quotes[359], at("11:59:37.750"));
     // The run's window only: not the trade of 08:45 nor the snapshot of
     // 08:30.
     assert_eq!(
-        times(&got, NautilusDataType::TradeTick, glbx::INSTRUMENT_ID),
+        times(&got, &NautilusDataType::TradeTick, glbx::INSTRUMENT_ID),
         [at("09:10:00"), at("11:50:00")]
     );
     assert_eq!(
-        times(&got, NautilusDataType::OrderBookDepth, glbx::INSTRUMENT_ID),
+        times(&got, &NautilusDataType::OrderBookDepth, glbx::INSTRUMENT_ID),
         [at("09:00:30"), at("10:15:00"), at("11:45:00")]
     );
     // Nothing else: no IC trades or book, no CME quotes.
@@ -179,11 +179,11 @@ fn a_series_the_catalog_stores_but_the_strategy_does_not_declare_is_not_replayed
     );
 
     assert_eq!(
-        times(&got, NautilusDataType::OrderBookDepth, glbx::INSTRUMENT_ID),
+        times(&got, &NautilusDataType::OrderBookDepth, glbx::INSTRUMENT_ID),
         Vec::<UnixNanos>::new()
     );
     assert_eq!(
-        times(&got, NautilusDataType::TradeTick, glbx::INSTRUMENT_ID),
+        times(&got, &NautilusDataType::TradeTick, glbx::INSTRUMENT_ID),
         [at("09:10:00"), at("11:50:00")]
     );
     assert_eq!(got.len(), 360 + 2);

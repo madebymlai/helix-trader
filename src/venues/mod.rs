@@ -951,7 +951,7 @@ pub async fn fill_history(
     let okx_definitions = of_definitions_source(&slices, DefinitionsSource::Okx);
     if !okx_definitions.is_empty() {
         OkxHistory::default()
-            .write_definitions(&mut catalog, &okx_definitions)
+            .write_definitions(&catalog, &okx_definitions)
             .await?;
     }
     if !okx_ids.is_empty() {
@@ -1574,7 +1574,7 @@ mod tests {
 
     /// Stores the definition of the OKX swap `id`, so that a fill asks OKX's
     /// API for none.
-    fn store_okx_definition(catalog: &mut ParquetDataCatalog, id: &str) {
+    fn store_okx_definition(catalog: &ParquetDataCatalog, id: &str) {
         let mut swap = crypto_perpetual_ethusdt();
         swap.id = InstrumentId::from(id);
         catalog
@@ -1588,9 +1588,9 @@ mod tests {
     #[tokio::test]
     async fn a_complete_catalog_fills_with_no_credential_no_node_and_no_ib() {
         let dir = tempfile::tempdir().unwrap();
-        let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
         let (from, to) = (Some(at(FILL_START).into()), Some(at(FILL_END).into()));
-        store_okx_definition(&mut catalog, SWAP);
+        store_okx_definition(&catalog, SWAP);
         store_quotes(&catalog, &[quote("XAUUSD.ICMARKETS")]);
         store_quotes(&catalog, &[quote("XAUUSD.PEPPERSTONE")]);
         catalog
@@ -1686,8 +1686,8 @@ mod tests {
         let catalog_dir = dir.path().join(OsStr::from_bytes(b"not-utf8-\xFF"));
         // Where the catalog opens it: its path, made UTF-8.
         std::fs::create_dir(catalog_dir.to_string_lossy().as_ref()).unwrap();
-        let mut catalog = ParquetDataCatalog::new(&catalog_dir, None, None, None, None);
-        store_okx_definition(&mut catalog, SWAP);
+        let catalog = ParquetDataCatalog::new(&catalog_dir, None, None, None, None);
+        store_okx_definition(&catalog, SWAP);
         let requirements = ticks(&[
             (NautilusDataType::TradeTick, SWAP),
             (NautilusDataType::TradeTick, "SXR8.IBIS"),

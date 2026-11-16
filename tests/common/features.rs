@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// (`LAST` left out; bars give their close).
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SmaArgs {
+pub(crate) struct SmaArgs {
     pub period: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub price_type: Option<PriceType>,
@@ -28,6 +28,6 @@ impl IndicatorArgs for SmaArgs {
 }
 
 /// The `[indicators]` tables `toml` holds, each by its name.
-pub fn tables(toml: &str) -> IndicatorsConfig {
+pub(crate) fn tables(toml: &str) -> IndicatorsConfig {
     toml::from_str(toml).unwrap()
 }

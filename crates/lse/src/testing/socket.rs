@@ -32,7 +32,7 @@ pub enum SocketAction {
 
 /// The frames the peer received: the connection (0, 1, ... in the order
 /// they came) and the frame.
-pub type Received = Arc<Mutex<Vec<(usize, Value)>>>;
+pub(super) type Received = Arc<Mutex<Vec<(usize, Value)>>>;
 
 /// The peer: its address and the frames it received.
 #[derive(Debug)]

@@ -189,7 +189,7 @@ pub(crate) fn resumed(
 /// Returns an error if no instrument of `instruments` is a slice's
 /// contract, when that slice's turn comes, or as `fill_catalog`. The slices
 /// filled before stay stored.
-pub async fn fill_slices(
+pub(crate) async fn fill_slices(
     catalog: &mut ParquetDataCatalog,
     instruments: &[InstrumentAny],
     slices: &[SeriesSlice],

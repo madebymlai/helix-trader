@@ -197,7 +197,7 @@ impl LseDataClient {
             config,
             credentials.remove(&LseProduct::Global),
             exchanges,
-            Arc::clone(&listings),
+            &listings,
             data_sender.clone(),
             clock,
         )?;

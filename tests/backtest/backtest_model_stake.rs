@@ -76,7 +76,7 @@ fn traded(config: &ModelConfig, models: &Path, account: Account) -> Record {
             .publish(&baseline_of(&features(), &config, Side::Long, from, 8))
             .unwrap();
         let catalog = ic::catalog_of(hand_worked_quotes(), ic::at("08:00:00"), ic::at("13:00:00"));
-        trade_staking(&catalog, features(), (from, to), &config, &models, account)
+        trade_staking(&catalog, features(), (from, to), &config, &models, &account)
     })
     .join()
     .unwrap()

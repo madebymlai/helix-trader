@@ -201,7 +201,7 @@ impl LseWebSocketClient {
             authenticated: false,
             unanswered: VecDeque::new(),
             last_frame: None,
-            dropped: None,
+            gap: Gap::Closed,
         };
         let mut task = TaskSlot::new();
         task.spawn(handler.run())
@@ -367,6 +367,20 @@ enum Unanswered {
     Unsubscribe(Topic),
 }
 
+/// The gap a reconnect opens: from the dropped connection's last frame to
+/// the new connection's authentication.
+#[derive(Default)]
+enum Gap {
+    /// No connection dropped, or the last one's replacement is
+    /// authenticated.
+    #[default]
+    Closed,
+    /// A connection dropped and its replacement is not authenticated yet:
+    /// nothing came after `last`, the dropped connection's last frame, if
+    /// one came.
+    Open { last: Option<UnixNanos> },
+}
+
 /// The handler task: the one owner of the `WebSocketClient`.
 struct LseWsHandler {
     socket: LseSocket,
@@ -387,9 +401,9 @@ struct LseWsHandler {
     unanswered: VecDeque<Unanswered>,
     /// When the last frame came.
     last_frame: Option<UnixNanos>,
-    /// Between a reconnect and the new connection's authentication: the
-    /// dropped connection's last frame, if one came.
-    dropped: Option<Option<UnixNanos>>,
+    /// The gap of a reconnect, open until the new connection's
+    /// authentication.
+    gap: Gap,
 }
 
 impl LseWsHandler {
@@ -492,7 +506,7 @@ impl LseWsHandler {
         if let Some(waiting) = self.authenticating.take() {
             let _ = waiting.send(Ok(authenticated));
         }
-        if let Some(last) = self.dropped.take() {
+        if let Gap::Open { last } = std::mem::take(&mut self.gap) {
             self.pass(LseWsMessage::Reconnected {
                 last,
                 at: get_atomic_clock_realtime().get_time_ns(),
@@ -549,8 +563,10 @@ impl LseWsHandler {
         self.epoch = epoch;
         self.authenticated = false;
         self.unanswered.clear();
-        if self.dropped.is_none() {
-            self.dropped = Some(self.last_frame);
+        if matches!(self.gap, Gap::Closed) {
+            self.gap = Gap::Open {
+                last: self.last_frame,
+            };
         }
     }
 

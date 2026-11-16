@@ -28,12 +28,12 @@ use ustr::Ustr;
 
 use super::ic::at;
 
-pub const INSTRUMENT_ID: &str = "GC.v.0.GLBX";
+pub(crate) const INSTRUMENT_ID: &str = "GC.v.0.GLBX";
 /// Bars of gold the catalog holds no source of: left out of a backtest.
-pub const MINUTE_BARS: &str = "GC.v.0.GLBX-1-MINUTE-MID-INTERNAL";
+pub(crate) const MINUTE_BARS: &str = "GC.v.0.GLBX-1-MINUTE-MID-INTERNAL";
 
 /// The continuous gold contract, live through 2026.
-pub fn instrument() -> InstrumentAny {
+pub(crate) fn instrument() -> InstrumentAny {
     let mut gold = futures_contract_es(
         Some(UnixNanos::from(
             at("00:00:00") - jiff::SignedDuration::from_hours(24 * 300),
@@ -50,7 +50,7 @@ pub fn instrument() -> InstrumentAny {
 
 /// A snapshot of 10 levels a side at `time`, its best bid `best_bid`, the
 /// levels 1.00 apart, the best ask 1.00 above the best bid.
-pub fn depth(time: Timestamp, best_bid: &str) -> OrderBookDepth {
+pub(crate) fn depth(time: Timestamp, best_bid: &str) -> OrderBookDepth {
     let mut depth = stub_depth10();
     let shift = Price::from(best_bid) - depth.bids[0].price;
     for order in depth.bids.iter_mut().chain(depth.asks.iter_mut()) {
@@ -63,7 +63,7 @@ pub fn depth(time: Timestamp, best_bid: &str) -> OrderBookDepth {
 }
 
 /// The snapshots stored: one before the backtests' start, then three.
-pub fn depths() -> Vec<OrderBookDepth> {
+pub(crate) fn depths() -> Vec<OrderBookDepth> {
     vec![
         depth(at("08:30:00"), "4010.00"),
         depth(at("09:00:30"), "4011.00"),
@@ -74,7 +74,7 @@ pub fn depths() -> Vec<OrderBookDepth> {
 
 /// Writes gold and `depths()` into the catalog in `dir`, the book stored
 /// over 08:00 to 12:00.
-pub fn store(dir: &Path) {
+pub(crate) fn store(dir: &Path) {
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     catalog.write_instruments(vec![instrument()]).unwrap();
     catalog
@@ -89,7 +89,7 @@ pub fn store(dir: &Path) {
 
 /// A quote of the contract at `time`, as LSE streams CME Globex's Level
 /// 1, sized 10,000 contracts a side.
-pub fn quote(time: Timestamp, bid: &str, ask: &str) -> QuoteTick {
+pub(crate) fn quote(time: Timestamp, bid: &str, ask: &str) -> QuoteTick {
     let size = Quantity::from(10_000);
     QuoteTick::new(
         InstrumentId::from(INSTRUMENT_ID),
@@ -104,7 +104,7 @@ pub fn quote(time: Timestamp, bid: &str, ask: &str) -> QuoteTick {
 
 /// Writes gold and `quotes` into the catalog in `dir`, stored over `[from,
 /// to]`: no book.
-pub fn store_quotes(dir: &Path, quotes: &[QuoteTick], from: Timestamp, to: Timestamp) {
+pub(crate) fn store_quotes(dir: &Path, quotes: &[QuoteTick], from: Timestamp, to: Timestamp) {
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     catalog.write_instruments(vec![instrument()]).unwrap();
     catalog
@@ -113,7 +113,7 @@ pub fn store_quotes(dir: &Path, quotes: &[QuoteTick], from: Timestamp, to: Times
 }
 
 /// A trade of one contract at `time` and `price`, bought.
-pub fn trade(time: Timestamp, price: &str) -> TradeTick {
+pub(crate) fn trade(time: Timestamp, price: &str) -> TradeTick {
     TradeTick::new(
         InstrumentId::from(INSTRUMENT_ID),
         Price::from(price),
@@ -126,7 +126,7 @@ pub fn trade(time: Timestamp, price: &str) -> TradeTick {
 }
 
 /// The trades stored: one before the backtests' start, then two.
-pub fn trades() -> Vec<TradeTick> {
+pub(crate) fn trades() -> Vec<TradeTick> {
     vec![
         trade(at("08:45:00"), "4010.50"),
         trade(at("09:10:00"), "4011.50"),
@@ -136,7 +136,7 @@ pub fn trades() -> Vec<TradeTick> {
 
 /// Writes `trades()` into the catalog in `dir`, stored over 08:00 to
 /// 12:00.
-pub fn store_trades(dir: &Path) {
+pub(crate) fn store_trades(dir: &Path) {
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     catalog
         .write_to_parquet(
@@ -150,7 +150,7 @@ pub fn store_trades(dir: &Path) {
 
 /// A bid of one contract at `price`, order `order_id`, added to the book at
 /// `time`; the last delta of its event if `last`.
-pub fn delta(time: Timestamp, price: &str, order_id: u64, last: bool) -> OrderBookDelta {
+pub(crate) fn delta(time: Timestamp, price: &str, order_id: u64, last: bool) -> OrderBookDelta {
     OrderBookDelta::new(
         InstrumentId::from(INSTRUMENT_ID),
         BookAction::Add,
@@ -169,7 +169,7 @@ pub fn delta(time: Timestamp, price: &str, order_id: u64, last: bool) -> OrderBo
 
 /// The deltas stored: an event before the backtests' start, then an event
 /// of two deltas and an event of one.
-pub fn deltas() -> Vec<OrderBookDelta> {
+pub(crate) fn deltas() -> Vec<OrderBookDelta> {
     vec![
         delta(at("08:40:00"), "4010.00", 1, true),
         delta(at("09:20:00"), "4011.00", 2, false),
@@ -179,7 +179,7 @@ pub fn deltas() -> Vec<OrderBookDelta> {
 }
 
 /// Writes `deltas()` into the catalog in `dir`, stored over 08:00 to 12:00.
-pub fn store_deltas(dir: &Path) {
+pub(crate) fn store_deltas(dir: &Path) {
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     catalog
         .write_to_parquet(
@@ -201,16 +201,16 @@ pub struct Imbalance {
 }
 
 /// The type name `Imbalance` is stored and published under.
-pub const IMBALANCE: &str = "Imbalance";
+pub(crate) const IMBALANCE: &str = "Imbalance";
 
 /// The data type of gold's `Imbalance`s, keyed by its id, as Nautilus'
 /// Databento client keys its custom data.
-pub fn imbalance_type() -> DataType {
+pub(crate) fn imbalance_type() -> DataType {
     DataType::new(IMBALANCE, None, Some(INSTRUMENT_ID.to_string()))
 }
 
 /// The imbalances stored: one before the backtests' start, then two.
-pub fn imbalances() -> Vec<Imbalance> {
+pub(crate) fn imbalances() -> Vec<Imbalance> {
     [("08:50:00", 0.5), ("09:30:00", -0.25), ("11:00:00", 0.75)]
         .map(|(time, value)| Imbalance::new(value, at(time).into(), at(time).into()))
         .to_vec()
@@ -219,13 +219,13 @@ pub fn imbalances() -> Vec<Imbalance> {
 /// Writes `imbalances()` into the catalog in `dir`, stored over 08:00 to
 /// 12:00. Registers `Imbalance` with Nautilus first, as any reader of it
 /// must.
-pub fn store_imbalances(dir: &Path) {
+pub(crate) fn store_imbalances(dir: &Path) {
     store_imbalances_as(dir, &imbalance_type());
 }
 
 /// Writes `imbalances()` into the catalog in `dir` as `data_type`, stored
 /// under its identifier over 08:00 to 12:00, as `store_imbalances` does.
-pub fn store_imbalances_as(dir: &Path, data_type: &DataType) {
+pub(crate) fn store_imbalances_as(dir: &Path, data_type: &DataType) {
     nautilus_serialization::ensure_custom_data_registered::<Imbalance>();
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     let data: Vec<CustomData> = imbalances()

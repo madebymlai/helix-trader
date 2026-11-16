@@ -81,7 +81,7 @@ impl OkxHistory {
     /// leverage listed), or if the catalog cannot be read or written.
     pub async fn write_definitions(
         &self,
-        catalog: &mut ParquetDataCatalog,
+        catalog: &ParquetDataCatalog,
         slices: &[SeriesSlice],
     ) -> anyhow::Result<()> {
         let mut account: Option<Account> = None;
@@ -126,7 +126,7 @@ impl OkxHistory {
 /// Writes into `catalog` the definition of each instrument of `slices` it
 /// lacks, once, as `instrument` gives it.
 async fn write_definitions(
-    catalog: &mut ParquetDataCatalog,
+    catalog: &ParquetDataCatalog,
     slices: &[SeriesSlice],
     mut instrument: impl AsyncFnMut(InstrumentId) -> anyhow::Result<InstrumentAny>,
 ) -> anyhow::Result<()> {
@@ -525,7 +525,7 @@ mod tests {
     #[tokio::test]
     async fn each_definition_the_catalog_lacks_is_asked_once_and_written() {
         let dir = tempfile::tempdir().unwrap();
-        let mut catalog = new_catalog(&dir);
+        let catalog = new_catalog(&dir);
         catalog.write_instruments(vec![btc_instrument()]).unwrap();
         let xperp_minutes = "BTC-USD_UM_XPERP-310404.OKX-1-MINUTE-LAST-EXTERNAL";
         let slices: Vec<SeriesSlice> = btc_slices("2026-10-01T00:00:00Z", "2026-10-08T00:00:00Z")
@@ -550,7 +550,7 @@ mod tests {
         assert!(slices.iter().any(|s| s.series.1 == xperp_minutes));
         let mut asked = Vec::new();
 
-        write_definitions(&mut catalog, &slices, async |id| {
+        write_definitions(&catalog, &slices, async |id| {
             asked.push(id);
             Ok(xperp_instrument())
         })

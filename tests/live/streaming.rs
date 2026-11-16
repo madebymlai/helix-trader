@@ -869,11 +869,11 @@ impl DataClientFactory for StubFactory {
         }))
     }
 
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "STUB"
     }
 
-    fn config_type(&self) -> &str {
+    fn config_type(&self) -> &'static str {
         "StubConfig"
     }
 }

@@ -206,15 +206,15 @@ async fn a_key_lse_does_not_take_fails_the_connect_without_showing_the_key() {
 #[tokio::test]
 async fn a_contract_not_carried_yet_is_carried_from_a_new_connection() {
     let peer = MockExchangeStream::cme(|_, subscription| {
-        let carried: Vec<&str> = subscription["symbols"]
+        let carries_gcg7 = subscription["symbols"]
             .as_array()
             .unwrap()
             .iter()
             .map(|symbol| symbol.as_str().unwrap())
-            .collect();
+            .any(|symbol| symbol == "GCG7");
         // The captured frames of the contracts carried.
         let mut frames = frames(CME_GCZ6_GCG7);
-        if !carried.contains(&"GCG7") {
+        if !carries_gcg7 {
             frames.truncate(4);
         }
         sent(frames)

@@ -42,7 +42,7 @@ use rust_decimal::Decimal;
 
 /// What the recorder got, in order.
 #[derive(Debug, Default)]
-pub struct Record {
+pub(crate) struct Record {
     /// The bars of `on_bar`.
     pub bars: Vec<Bar>,
     /// Side, price and time of every fill.
@@ -61,7 +61,7 @@ pub struct Record {
 }
 
 #[derive(Debug)]
-pub struct Recorder {
+pub(crate) struct Recorder {
     core: StrategyCore,
     bar_type: BarType,
     /// The continuous bars of its bar type, if on a root.
@@ -83,7 +83,7 @@ pub struct Recorder {
 
 impl Recorder {
     /// A recorder of `bar_type`, and the record it fills.
-    pub fn new(bar_type: BarType) -> (Self, Rc<RefCell<Record>>) {
+    pub(crate) fn new(bar_type: BarType) -> (Self, Rc<RefCell<Record>>) {
         let record = Rc::new(RefCell::new(Record::default()));
         let recorder = Self {
             core: StrategyCore::new(StrategyConfig {
@@ -104,7 +104,7 @@ impl Recorder {
 
     /// A recorder of `bar_type`, on a root, its bars Nautilus' continuous
     /// bars of `continuous`, and the record it fills.
-    pub fn continuous(
+    pub(crate) fn continuous(
         bar_type: BarType,
         continuous: ContinuousBars,
     ) -> (Self, Rc<RefCell<Record>>) {
@@ -120,7 +120,7 @@ impl Recorder {
 
     /// A recorder of `bar_type` sending the market order `market[i]` on
     /// the `i`-th bar, and the record it fills.
-    pub fn trading(
+    pub(crate) fn trading(
         bar_type: BarType,
         market: Vec<(OrderSide, Quantity)>,
     ) -> (Self, Rc<RefCell<Record>>) {
@@ -131,7 +131,7 @@ impl Recorder {
     /// A recorder of `bar_type` sending on the `i`-th bar the trade of
     /// `staked[i]`, its side, one R from the bar's close and its stake, a
     /// market entry, and the record it fills.
-    pub fn staking(
+    pub(crate) fn staking(
         bar_type: BarType,
         staked: Vec<(OrderSide, Decimal, Stake)>,
     ) -> (Self, Rc<RefCell<Record>>) {
@@ -141,12 +141,12 @@ impl Recorder {
 
     /// The recorder closing its open positions, each by its id
     /// (`close_position`), on the bars of `close_on`.
-    pub fn closing_on(self, close_on: Vec<usize>) -> Self {
+    pub(crate) fn closing_on(self, close_on: Vec<usize>) -> Self {
         Self { close_on, ..self }
     }
 
     /// The recorder sizing its trades on equity converted at `rates`.
-    pub fn converting(self, rates: Rates) -> Self {
+    pub(crate) fn converting(self, rates: Rates) -> Self {
         Self { rates, ..self }
     }
 }
@@ -192,7 +192,7 @@ impl DataActor for Recorder {
         record.adjustments.extend(
             positions
                 .iter()
-                .flat_map(|position| position.adjustments.iter().cloned()),
+                .flat_map(|position| position.adjustments.iter().copied()),
         );
         record.positions = positions;
         Ok(())

@@ -122,7 +122,7 @@ repos:
   # nautilus-engineering: hooks end
 
   ##############################################################################
-  #  Rust formatting
+  #  Rust formatting and linting
   ##############################################################################
   - repo: local
     hooks:
@@ -137,6 +137,23 @@ repos:
             .*\.rs|
             (?:.*/)?Cargo\.toml|
             rustfmt\.toml
+          )$
+        types: [file]
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy
+        description: Run Clippy with Nautilus' workspace lints on every crate and target
+        entry: cargo clippy
+        language: system
+        args: ["--workspace", "--all-targets", "--features", "strategy-tests", "--", "-D", "warnings"]
+        files: >-
+          (?x)^(
+            .*\.rs|
+            (?:.*/)?Cargo\.toml|
+            Cargo\.lock|
+            clippy\.toml|
+            \.cargo/config\.toml
           )$
         types: [file]
         pass_filenames: false

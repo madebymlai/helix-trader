@@ -286,11 +286,11 @@ fn a_two_sided_strategy_with_no_pair_takes_no_trade() {
 /// of noon, its long of 9 beside the short `refused`, is refused as it
 /// loads: the whole pair is, and the pair of 10:00 stays in use, at noon and
 /// after, never the noon's long beside the short of 10:00.
-fn pair_kept_over(refused: StoredModel) {
+fn pair_kept_over(refused: &StoredModel) {
     let root = tempfile::tempdir().unwrap();
     publish_pair(root.path(), "2026-10-22T10:00:00Z", 7);
     publish_side(root.path(), Side::Long, &side_model(Side::Long, NOON, 9));
-    publish_side(root.path(), Side::Short, &refused);
+    publish_side(root.path(), Side::Short, refused);
     let mut models = listed(root.path(), &both_sides());
 
     for time in [
@@ -307,7 +307,7 @@ fn a_pair_with_a_side_failing_its_checks_is_refused_and_the_current_pair_kept() 
     let mut refused = side_model(Side::Short, NOON, 3);
     refused.manifest.fingerprint = "f".repeat(64);
 
-    pair_kept_over(refused);
+    pair_kept_over(&refused);
 }
 
 /// The pair's calibration is written once into each side's manifest: a pair
@@ -320,7 +320,7 @@ fn a_pair_whose_sides_hold_different_calibrations_is_refused_and_the_current_pai
     };
     calibration.lines.level.alpha = 0.1;
 
-    pair_kept_over(refused);
+    pair_kept_over(&refused);
 }
 
 /// The pair's calibration names the pair it was fitted on: a short whose copy
@@ -408,11 +408,11 @@ fn a_store_listing_again_is_listed_again() {
 
 /// The model valid from 10:00 is used at 11:00; `refused`, valid from
 /// 12:00, is not, at 12:00 nor after: the first is kept.
-fn kept_over(refused: StoredModel) {
+fn kept_over(refused: &StoredModel) {
     let root = tempfile::tempdir().unwrap();
     let store = store(root.path());
     store.publish(&baseline("2026-10-22T10:00:00Z", 7)).unwrap();
-    store.publish(&refused).unwrap();
+    store.publish(refused).unwrap();
     let mut models = listed(root.path(), &config());
 
     let expectations = [
@@ -430,7 +430,7 @@ fn a_model_of_other_feature_names_is_refused_and_the_current_kept() {
     let mut refused = baseline(NOON, 9);
     refused.manifest.feature_names = vec!["spread".to_string()];
 
-    kept_over(refused);
+    kept_over(&refused);
 }
 
 #[test]
@@ -438,7 +438,7 @@ fn a_model_of_another_fingerprint_is_refused_and_the_current_kept() {
     let mut refused = baseline(NOON, 9);
     refused.manifest.fingerprint = "f".repeat(64);
 
-    kept_over(refused);
+    kept_over(&refused);
 }
 
 /// A side's rows are two wide, the mid and the entry cost: a model of three
@@ -454,7 +454,7 @@ fn a_model_of_another_width_is_refused_and_the_current_kept() {
         .unwrap();
     refused.manifest.probes.clear();
 
-    kept_over(refused);
+    kept_over(&refused);
 }
 
 #[test]
@@ -462,7 +462,7 @@ fn a_model_not_predicting_its_probes_is_refused_and_the_current_kept() {
     let mut refused = baseline(NOON, 9);
     refused.manifest.probes[0].prediction = r(9) + f64::EPSILON;
 
-    kept_over(refused);
+    kept_over(&refused);
 }
 
 /// A side model trades by its pair's calibration: one whose manifest has a
@@ -472,7 +472,7 @@ fn a_side_model_without_its_pairs_calibration_is_refused_and_the_current_kept() 
     let mut refused = baseline(NOON, 9);
     refused.manifest.calibration = ModelCalibration::Meta(super::testing::CALIBRATION);
 
-    kept_over(refused);
+    kept_over(&refused);
 }
 
 /// A long expecting 0.1R, clearing its margin of nought; the short is not

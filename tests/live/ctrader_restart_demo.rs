@@ -165,10 +165,10 @@ async fn phase() {
         recording: crate::recording(staging.path()),
     };
     let probe = Probe::new(step, broker, PathBuf::from(std::env::var(STATE).unwrap()));
-    let ran = tokio::time::timeout(
+    let ran = Box::pin(tokio::time::timeout(
         Duration::from_secs(300),
         live.run(&requirements, &Warmup::live(&requirements), probe, None),
-    )
+    ))
     .await;
     ran.expect("the node stops within 5 minutes").unwrap();
     let report: Report =
@@ -664,7 +664,7 @@ impl Probe {
             status: order.as_ref().map(OrderAny::status),
             quantity: order.as_ref().map(|o| o.quantity().to_string()),
             filled: order.as_ref().map(|o| o.filled_qty().to_string()),
-            fills: order.as_ref().map(fills).unwrap_or_default(),
+            fills: order.as_ref().map_or_default(fills),
         }
     }
 

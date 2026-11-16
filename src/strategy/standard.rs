@@ -707,7 +707,7 @@ impl TryFrom<SeriesFields> for Series {
 /// `composite_*` arguments of Nautilus' `BarType::new_composite`.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CompositeSource {
+pub(super) struct CompositeSource {
     pub step: usize,
     pub aggregation: BarAggregation,
     pub aggregation_source: AggregationSource,
@@ -2603,10 +2603,7 @@ mod tests {
         #[test]
         fn a_target_naming_an_instrument_or_a_quantity_is_refused_at_load() {
             for key in [r#"instrument_id = "XAUUSD.ICMARKETS""#, r#"quantity = "1""#] {
-                let toml = TOML.replace(
-                    r#"target = { limit"#,
-                    &format!(r#"target = {{ {key}, limit"#),
-                );
+                let toml = TOML.replace("target = { limit", &format!("target = {{ {key}, limit"));
                 let name = key.split(' ').next().unwrap();
                 let err = shape_error(&toml);
                 assert!(err.contains(&format!("`{name}`")), "{name}: {err}");
@@ -2826,7 +2823,7 @@ mod tests {
         #[test]
         #[should_panic(expected = "period must be in 1..=")]
         fn a_target_atr_of_no_bars_panics_at_load() {
-            let _ = load(&with_atr(r#", atr = { period = 0 }"#));
+            let _ = load(&with_atr(", atr = { period = 0 }"));
         }
 
         /// The model's violations are its target's ATR of an hourly bar

@@ -1131,8 +1131,8 @@ mod tests {
     }
 
     /// A tick named `name` made at `time` on the 10th.
-    fn tick_at(time: &str, name: &'static str) -> anyhow::Result<Tick> {
-        Ok((UnixNanos::from(on_the_10th(time)), name))
+    fn tick_at(time: &str, name: &'static str) -> Tick {
+        (UnixNanos::from(on_the_10th(time)), name)
     }
 
     /// Answers the pages' requests with `pages` in turn, each a request's
@@ -1174,22 +1174,25 @@ mod tests {
         let mut cursors = Vec::new();
         let answers = vec![
             Ok(vec![
-                tick_at("10:00:07", "a"),
-                tick_at("10:00:08", "b"),
-                tick_at("10:00:09", "c"),
-                tick_at("10:00:10", "d"),
+                Ok(tick_at("10:00:07", "a")),
+                Ok(tick_at("10:00:08", "b")),
+                Ok(tick_at("10:00:09", "c")),
+                Ok(tick_at("10:00:10", "d")),
             ]),
             Ok(vec![
-                tick_at("10:00:05", "e"),
-                tick_at("10:00:05", "f"),
-                tick_at("10:00:06", "g"),
-                tick_at("10:00:07", "a"),
+                Ok(tick_at("10:00:05", "e")),
+                Ok(tick_at("10:00:05", "f")),
+                Ok(tick_at("10:00:06", "g")),
+                Ok(tick_at("10:00:07", "a")),
             ]),
-            Ok(vec![tick_at("10:00:03", "h"), tick_at("10:00:04", "i")]),
             Ok(vec![
-                tick_at("09:59:59", "j"),
-                tick_at("10:00:00", "k"),
-                tick_at("10:00:02", "l"),
+                Ok(tick_at("10:00:03", "h")),
+                Ok(tick_at("10:00:04", "i")),
+            ]),
+            Ok(vec![
+                Ok(tick_at("09:59:59", "j")),
+                Ok(tick_at("10:00:00", "k")),
+                Ok(tick_at("10:00:02", "l")),
             ]),
         ];
 
@@ -1216,7 +1219,10 @@ mod tests {
     async fn an_empty_page_ends_the_paging() {
         let mut cursors = Vec::new();
         let answers = vec![
-            Ok(vec![tick_at("10:00:09", "a"), tick_at("10:00:10", "b")]),
+            Ok(vec![
+                Ok(tick_at("10:00:09", "a")),
+                Ok(tick_at("10:00:10", "b")),
+            ]),
             Ok(vec![]),
         ];
 
@@ -1232,9 +1238,12 @@ mod tests {
     async fn an_error_ending_a_page_fails_the_paging() {
         let mut cursors = Vec::new();
         let answers = vec![
-            Ok(vec![tick_at("10:00:09", "a"), tick_at("10:00:10", "b")]),
             Ok(vec![
-                tick_at("10:00:05", "c"),
+                Ok(tick_at("10:00:09", "a")),
+                Ok(tick_at("10:00:10", "b")),
+            ]),
+            Ok(vec![
+                Ok(tick_at("10:00:05", "c")),
                 Err(anyhow::anyhow!("162: Historical Market Data Service error")),
             ]),
         ];
@@ -1253,7 +1262,10 @@ mod tests {
     async fn a_failed_request_fails_the_paging() {
         let mut cursors = Vec::new();
         let answers = vec![
-            Ok(vec![tick_at("10:00:09", "a"), tick_at("10:00:10", "b")]),
+            Ok(vec![
+                Ok(tick_at("10:00:09", "a")),
+                Ok(tick_at("10:00:10", "b")),
+            ]),
             Err(anyhow::anyhow!("not connected")),
         ];
 
@@ -1270,11 +1282,14 @@ mod tests {
     async fn a_second_holding_a_full_page_fails_the_paging_naming_it() {
         let mut cursors = Vec::new();
         let answers = vec![
-            Ok(vec![tick_at("10:00:08", "a"), tick_at("10:00:10", "b")]),
             Ok(vec![
-                tick_at("10:00:08", "a"),
-                tick_at("10:00:08", "c"),
-                tick_at("10:00:08", "d"),
+                Ok(tick_at("10:00:08", "a")),
+                Ok(tick_at("10:00:10", "b")),
+            ]),
+            Ok(vec![
+                Ok(tick_at("10:00:08", "a")),
+                Ok(tick_at("10:00:08", "c")),
+                Ok(tick_at("10:00:08", "d")),
             ]),
         ];
 

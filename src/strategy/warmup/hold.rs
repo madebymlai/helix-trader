@@ -124,7 +124,7 @@ impl Hold {
     /// # Errors
     ///
     /// Returns the first error of an indicator reading it.
-    pub(super) fn history(&self, tick: Tick) -> anyhow::Result<()> {
+    pub(super) fn history(&self, tick: &Tick) -> anyhow::Result<()> {
         self.seams
             .borrow_mut()
             .entry(tick.series())
@@ -144,7 +144,7 @@ impl Hold {
             held.push(tick);
             return Ok(());
         }
-        self.pass(tick)
+        self.pass(&tick)
     }
 
     /// Hands the ticks held over, in the order they came, but those the
@@ -165,7 +165,7 @@ impl Hold {
             if self.holds(&tick) {
                 dropped += 1;
             } else {
-                self.hand(tick)?;
+                self.hand(&tick)?;
             }
         }
         if count > 0 {
@@ -178,8 +178,8 @@ impl Hold {
     }
 
     /// Hands `tick` to the indicators unless the history holds it.
-    fn pass(&self, tick: Tick) -> anyhow::Result<()> {
-        if self.holds(&tick) {
+    fn pass(&self, tick: &Tick) -> anyhow::Result<()> {
+        if self.holds(tick) {
             return Ok(());
         }
         self.hand(tick)
@@ -194,8 +194,8 @@ impl Hold {
             .is_some_and(|seam| tick.ts_event() <= *seam)
     }
 
-    fn hand(&self, tick: Tick) -> anyhow::Result<()> {
-        match &tick {
+    fn hand(&self, tick: &Tick) -> anyhow::Result<()> {
+        match tick {
             Tick::Quote(quote) => {
                 for indicator in &self.indicators {
                     indicator.handle_quote(quote)?;

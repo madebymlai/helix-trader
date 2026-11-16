@@ -63,7 +63,7 @@ impl DataClientFactory for LseDataClientFactory {
         LSE_CLIENT
     }
 
-    fn config_type(&self) -> &str {
+    fn config_type(&self) -> &'static str {
         "LseDataClientConfig"
     }
 }

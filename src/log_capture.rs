@@ -32,7 +32,7 @@ const ALONE: &str = "HELIX_TRADER_TEST_ALONE";
 /// holds Nautilus' logger, which the first node of a test installs, and
 /// which a logger installed before would make it refuse. Else runs it so,
 /// and checks that it ran and passed.
-pub fn alone(module: &str, name: &str) -> bool {
+pub(crate) fn alone(module: &str, name: &str) -> bool {
     if std::env::var_os(ALONE).is_some() {
         return true;
     }
@@ -63,13 +63,13 @@ pub fn alone(module: &str, name: &str) -> bool {
 /// # Panics
 ///
 /// Panics if the process has a logger already.
-pub fn capture(level: log::LevelFilter) {
+pub(crate) fn capture(level: log::LevelFilter) {
     log::set_logger(&CAPTURED).unwrap();
     log::set_max_level(level);
 }
 
 /// The records kept so far, each its level and its message,
 /// `WARN the message`.
-pub fn lines() -> Vec<String> {
+pub(crate) fn lines() -> Vec<String> {
     CAPTURED.0.lock().unwrap().clone()
 }

@@ -295,6 +295,7 @@ impl ExportQuery {
     }
 
     /// The export's selection over `[from, to)`.
+    #[must_use]
     pub fn over(&self, from: Timestamp, to: Timestamp) -> Self {
         Self {
             from,

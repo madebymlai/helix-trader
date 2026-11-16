@@ -658,7 +658,7 @@ impl ActorIndicator for FeatureSet {
     }
 
     fn initialized(&self) -> anyhow::Result<bool> {
-        Ok(FeatureSet::initialized(self))
+        Ok(Self::initialized(self))
     }
 
     fn handle_quote(&self, quote: &QuoteTick) -> anyhow::Result<()> {
