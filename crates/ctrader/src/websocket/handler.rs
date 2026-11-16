@@ -58,7 +58,6 @@ use nautilus_network::{
     websocket::{AuthTracker, SubscriptionState, WebSocketClient},
 };
 use prost::Message as _;
-use tokio::sync::{mpsc, oneshot};
 use zeroize::Zeroize;
 
 use super::{AUTH_TIMEOUT, TradeEvent, TradeMessage, spot_subscribed, spot_symbol, spot_topic};
@@ -97,12 +96,12 @@ fn playground(names: &CTraderSettingNames) -> String {
 }
 
 /// Where a response goes: the caller awaiting it.
-pub(super) type Reply = oneshot::Sender<Result<ProtoMessage, CTraderError>>;
+pub(super) type Reply = tokio::sync::oneshot::Sender<Result<ProtoMessage, CTraderError>>;
 
 /// Where a trade request's sending goes: `Ok` once its frame is written
 /// (or its write timed out or failed after it began: cTrader may have
 /// it), an error if it never was.
-pub(super) type Sent = oneshot::Sender<Result<(), CTraderError>>;
+pub(super) type Sent = tokio::sync::oneshot::Sender<Result<(), CTraderError>>;
 
 /// Commands from the outer client to the handler.
 pub(super) enum HandlerCommand {
@@ -124,7 +123,7 @@ pub(super) enum HandlerCommand {
         sent: Sent,
     },
     /// The listener of the trade events, from now on.
-    TradeEvents(mpsc::UnboundedSender<TradeEvent>),
+    TradeEvents(tokio::sync::mpsc::UnboundedSender<TradeEvent>),
     /// Spot events of a symbol, from now on.
     SubscribeSpots(i64),
     /// No more spot events of a symbol.
@@ -229,12 +228,12 @@ pub(super) struct CTraderWsHandler {
     /// connection too, which keeps the historical requests from taking
     /// their slots meanwhile (see the outer client).
     auth: AuthTracker,
-    cmd_rx: mpsc::UnboundedReceiver<HandlerCommand>,
+    cmd_rx: tokio::sync::mpsc::UnboundedReceiver<HandlerCommand>,
     /// The transport's messages, each with its connection's epoch.
-    raw_rx: mpsc::UnboundedReceiver<(u64, Message)>,
-    spot_tx: mpsc::UnboundedSender<ProtoOaSpotEvent>,
+    raw_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, Message)>,
+    spot_tx: tokio::sync::mpsc::UnboundedSender<ProtoOaSpotEvent>,
     /// The listener of the trade events, once one asked.
-    trade_tx: Option<mpsc::UnboundedSender<TradeEvent>>,
+    trade_tx: Option<tokio::sync::mpsc::UnboundedSender<TradeEvent>>,
     heartbeat: Duration,
     session: Session,
     next_id: u64,
@@ -265,9 +264,9 @@ impl CTraderWsHandler {
         tokens: TokenPair,
         auth: AuthTracker,
         subscriptions: SubscriptionState,
-        cmd_rx: mpsc::UnboundedReceiver<HandlerCommand>,
-        raw_rx: mpsc::UnboundedReceiver<(u64, Message)>,
-        spot_tx: mpsc::UnboundedSender<ProtoOaSpotEvent>,
+        cmd_rx: tokio::sync::mpsc::UnboundedReceiver<HandlerCommand>,
+        raw_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, Message)>,
+        spot_tx: tokio::sync::mpsc::UnboundedSender<ProtoOaSpotEvent>,
         heartbeat: Duration,
     ) -> Self {
         Self {

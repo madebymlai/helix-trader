@@ -22,7 +22,6 @@
 
 use nautilus_live::execution::failure::CommandFailure;
 use nautilus_model::identifiers::Venue;
-use tokio::sync::oneshot::error::RecvError;
 
 use crate::common::messages::{CTraderError, ProtoOaDealStatus, ProtoOaExecutionEvent};
 
@@ -52,7 +51,7 @@ const UNKNOWN_OUTCOME: [&str; 6] = [
 /// write began; `NotSent` if the session says it never was; `Ambiguous` if
 /// the session is gone without a word.
 pub(super) fn sending(
-    sending: Result<Result<(), CTraderError>, RecvError>,
+    sending: Result<Result<(), CTraderError>, tokio::sync::oneshot::error::RecvError>,
     venue: Venue,
 ) -> Result<(), CommandFailure> {
     match sending {
@@ -120,8 +119,6 @@ fn joined(code: &str, description: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use tokio::sync::oneshot;
-
     use super::*;
 
     const VENUE: &str = "ACMEFX";
@@ -129,7 +126,7 @@ mod tests {
     /// What became of a request's frame, `sent` by the session, or not
     /// at all if `None`: the session's sender gone.
     async fn sent(sent: Option<Result<(), CTraderError>>) -> Result<(), CommandFailure> {
-        let (tx, rx) = oneshot::channel();
+        let (tx, rx) = tokio::sync::oneshot::channel();
         if let Some(sent) = sent {
             tx.send(sent).unwrap();
         } else {

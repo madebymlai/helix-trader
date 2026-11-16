@@ -21,7 +21,6 @@ use nautilus_network::{
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tokio::sync::Mutex;
 
 use super::{
     error::LseHttpError,
@@ -59,7 +58,7 @@ pub struct LseHttpClient {
     client: HttpClient,
     /// Held over an export: a key has one download open at a time (LSE's
     /// docs, "One download at a time").
-    downloads: Mutex<()>,
+    downloads: tokio::sync::Mutex<()>,
     retries: RetryManager<LseHttpError>,
 }
 
@@ -112,7 +111,7 @@ impl LseHttpClient {
         Ok(Self {
             base_url,
             client,
-            downloads: Mutex::default(),
+            downloads: tokio::sync::Mutex::default(),
             retries,
         })
     }

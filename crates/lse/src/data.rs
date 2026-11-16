@@ -1017,7 +1017,6 @@ mod tests {
     use nautilus_common::{cache::Cache, live::runner::replace_data_event_sender};
     use nautilus_core::string::secret::SecretString;
     use nautilus_model::instruments::InstrumentAny;
-    use tokio::sync::mpsc;
 
     use super::*;
     use crate::testing::{
@@ -1025,7 +1024,7 @@ mod tests {
         nvda,
     };
 
-    type Events = mpsc::UnboundedReceiver<DataEvent>;
+    type Events = tokio::sync::mpsc::UnboundedReceiver<DataEvent>;
 
     /// A request of a window, as Nautilus' constructors of them take it.
     type WindowRequest<R> = fn(
@@ -1062,7 +1061,7 @@ mod tests {
 
     /// The node's data events, as the client sends them.
     fn events() -> Events {
-        let (tx, events) = mpsc::unbounded_channel();
+        let (tx, events) = tokio::sync::mpsc::unbounded_channel();
         replace_data_event_sender(tx);
         events
     }

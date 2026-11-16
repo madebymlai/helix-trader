@@ -44,9 +44,8 @@ use nautilus_model::{
     types::{Price, Quantity},
 };
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
 
-type Events = mpsc::UnboundedReceiver<DataEvent>;
+type Events = tokio::sync::mpsc::UnboundedReceiver<DataEvent>;
 
 /// GCG7 of 2027, `GCG27.GLBX`, as GCZ26's definition with its id.
 const GCG27: &str = "GCG27.GLBX";
@@ -87,7 +86,7 @@ async fn streaming_with(
     config: &LseDataClientConfig,
     instruments: Vec<InstrumentAny>,
 ) -> (Box<dyn DataClient>, anyhow::Result<()>, Events) {
-    let (tx, events) = mpsc::unbounded_channel();
+    let (tx, events) = tokio::sync::mpsc::unbounded_channel();
     replace_data_event_sender(tx);
     let mut cache = Cache::default();
     for instrument in instruments {
@@ -530,7 +529,7 @@ async fn the_trades_of_an_lsedge_series_are_refused_naming_it() {
 
 #[tokio::test]
 async fn a_glbx_contract_streamed_with_no_cme_key_is_refused_naming_its_variable() {
-    let (tx, _events) = mpsc::unbounded_channel();
+    let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
     replace_data_event_sender(tx);
     let config = LseDataClientConfig::builder()
         .api_key(SecretString::from(API_KEY))
@@ -1225,7 +1224,7 @@ async fn lse_s_refusal_of_a_key_of_no_nasdaq_plan_fails_the_connect() {
 
 #[tokio::test]
 async fn an_xnas_stock_streamed_with_no_nasdaq_key_is_refused_naming_its_variable() {
-    let (tx, _events) = mpsc::unbounded_channel();
+    let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
     replace_data_event_sender(tx);
     let config = LseDataClientConfig::builder()
         .api_key(SecretString::from(API_KEY))

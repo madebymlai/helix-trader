@@ -1625,7 +1625,6 @@ mod tests {
     };
     use prost::Message as _;
     use rust_decimal::Decimal;
-    use tokio::sync::mpsc;
     use ustr::Ustr;
 
     use super::*;
@@ -1855,7 +1854,7 @@ mod tests {
         }
     }
 
-    type Events = mpsc::UnboundedReceiver<ExecutionEvent>;
+    type Events = tokio::sync::mpsc::UnboundedReceiver<ExecutionEvent>;
 
     /// A started client of XAUUSD and EURUSD on the peer of `venue`, its
     /// cache, the node's execution events, the frames received and its
@@ -1884,7 +1883,7 @@ mod tests {
         tempfile::TempDir,
     ) {
         let (url, received) = testing::start(peer(venue));
-        let (tx, events) = mpsc::unbounded_channel();
+        let (tx, events) = tokio::sync::mpsc::unbounded_channel();
         replace_exec_event_sender(tx);
         let cache = Rc::new(RefCell::new(Cache::default()));
         let core = ExecutionClientCore::new(
@@ -2064,7 +2063,7 @@ mod tests {
     /// registered for the node's reconnect until the client disconnects.
     #[tokio::test]
     async fn the_sessions_socket_state_goes_to_the_node_until_the_client_disconnects() {
-        let (system_tx, mut system) = mpsc::unbounded_channel();
+        let (system_tx, mut system) = tokio::sync::mpsc::unbounded_channel();
         replace_system_event_sender(system_tx);
         let registry = SocketReconnectRegistry::default();
         let (mut client, cache, mut events, _received, _tokens) =
@@ -2098,9 +2097,9 @@ mod tests {
     /// it replaces that transport alone, its session authenticating again.
     #[tokio::test]
     async fn a_brokers_data_and_trading_sockets_are_two_endpoints_each_reconnectable() {
-        let (system_tx, mut system) = mpsc::unbounded_channel();
+        let (system_tx, mut system) = tokio::sync::mpsc::unbounded_channel();
         replace_system_event_sender(system_tx);
-        let (data_tx, _data_events) = mpsc::unbounded_channel();
+        let (data_tx, _data_events) = tokio::sync::mpsc::unbounded_channel();
         replace_data_event_sender(data_tx);
         let registry = SocketReconnectRegistry::default();
         let (mut trading, cache, mut events, trading_received, _tokens) =
