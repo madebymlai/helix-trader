@@ -1,3 +1,13 @@
+# Helix Trader 0.2.0
+
+Released on TBD (UTC).
+
+### Documentation Updates
+
+- Changed the release steps to open the next release's version in `Cargo.toml` with its section, as Nautilus does
+
+---
+
 # Helix Trader 0.1.0
 
 Released on 2026-11-16 (UTC).
