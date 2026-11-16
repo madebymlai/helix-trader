@@ -25,6 +25,7 @@ use helix_trader::{
         ModelStrategy, dataset,
         handle::{Mode, SettledRows},
         launcher::{Launcher, RetrainActor},
+        schedule::Retrain,
         targets::TargetRow,
         train::Trained,
     },
@@ -63,10 +64,10 @@ enum Command {
     /// Runs the strategy on a live node with Interactive Brokers, IC
     /// Markets, Pepperstone or OKX; stops on Ctrl-C.
     Live(Box<LiveArgs>),
-    /// Trains the strategy's models at a time, those without one valid
-    /// from it, replaying the days its dataset lacks, and prints each
-    /// model published or in use, or fails with why a current one was
-    /// kept.
+    /// Trains the strategy's models at a time, or at each retrain time of
+    /// a span, those without one valid from it, replaying the days its
+    /// dataset lacks, and prints each model published or already
+    /// published, or fails with why a current one was kept.
     Train(Box<TrainArgs>),
 }
 
@@ -126,10 +127,9 @@ struct BacktestArgs {
     #[arg(long, value_parser = Latency::from_str)]
     latency: Option<Latency>,
     /// The model store a strategy trading on a model reads its models
-    /// from: at each decision, the latest valid then. The backtest first
-    /// trains at each retrain time of its span the models the store lacks;
-    /// never retrained, at its start alone, and refuses to run if its
-    /// sides or its meta then have no model in use there.
+    /// from: at each decision, the latest valid then. A backtest trains
+    /// none, `train` does: it refuses to run if the store holds no model
+    /// to trade on at its start.
     #[arg(long, default_value = "models")]
     models: PathBuf,
 }
@@ -141,16 +141,49 @@ struct TrainArgs {
     /// The strategy's TOML config.
     #[arg(long)]
     config: PathBuf,
-    /// The time trained at, the model's valid-from: same format as
-    /// --start.
-    #[arg(long, value_parser = parse_time)]
-    at: Timestamp,
+    /// The one time trained at, the models' valid-from: same format as
+    /// --start. A strategy never retrained is trained so alone.
+    #[arg(long, value_parser = parse_time, required_unless_present = "from", conflicts_with = "from")]
+    at: Option<Timestamp>,
+    /// The start of a span trained over instead, at each of its retrain
+    /// times in time order, those a backtest from --from to --to trades on:
+    /// from the last not after --from. Same format as --start.
+    #[arg(long, value_parser = parse_time, requires = "to")]
+    from: Option<Timestamp>,
+    /// The end of the span, same format: a retrain time at it is not
+    /// trained, as a backtest ending there trades no model valid from it.
+    #[arg(long, value_parser = parse_time, requires = "from")]
+    to: Option<Timestamp>,
     /// The catalog directory: the data replayed, and the dataset.
     #[arg(long, default_value = "catalog")]
     catalog: PathBuf,
     /// The model store the model is published in.
     #[arg(long, default_value = "models")]
     models: PathBuf,
+}
+
+/// When a train trains (`TrainArgs::trains`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Trains {
+    /// At one time, `--at`.
+    At(Timestamp),
+    /// At each retrain time of the span `[from, to)`, `--from` and `--to`.
+    Over { from: Timestamp, to: Timestamp },
+}
+
+impl TrainArgs {
+    /// When the train trains: at `--at`, or over `--from` to `--to`,
+    /// checked.
+    fn trains(&self) -> anyhow::Result<Trains> {
+        match (self.at, self.from, self.to) {
+            (Some(at), None, None) => Ok(Trains::At(at)),
+            (None, Some(from), Some(to)) => {
+                anyhow::ensure!(from < to, "--from {from} must be before --to {to}");
+                Ok(Trains::Over { from, to })
+            }
+            times => unreachable!("clap requires --at or both --from and --to: {times:?}"),
+        }
+    }
 }
 
 /// The commission of a run: exactly one of the flags.
@@ -354,12 +387,13 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
 /// catalog and prints the results to stdout, refusing first a balance
 /// whose currency the config's conversions do not reach a traded
 /// instrument's P&L currency from (`Backtest::refuse_balance`). A strategy
-/// trading on a model is first trained on its schedule (`model::walk`): its
-/// dataset built over the span and its models trained at each train time
-/// the store lacks one, in this process, on the backtest's catalog and
-/// store, at the commission, balance and latency of the config's `[model]
-/// dataset`; the out-of-sample scores of its models follow the results,
-/// after the costs of the run and of its models' dataset runs.
+/// trading on a model trades on the models in the store, which `train`
+/// published (`model::walk`): refused if the store holds none to trade on
+/// at its start, its dataset built over the span, in this process, on the
+/// backtest's catalog, at the commission, balance and latency of the
+/// config's `[model] dataset`; the out-of-sample scores of its models
+/// follow the results, after the costs of the run and of its models'
+/// dataset runs.
 fn run_backtest(args: &BacktestArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     // The node installs Nautilus' logger from its engine config: pass the
@@ -417,16 +451,16 @@ impl<B: FnOnce(DataRequirements, &[InstrumentId]) -> Backtest> Visitor for Backt
 
 /// The backtest of `args` of the model strategy `S`, its `Backtest` of
 /// its data requirements and the pairs of its `[trade] conversions` it
-/// does not trade `backtest`: retrained on its schedule first
-/// (`WalkForward::prepare`), then run, its results printed and the
-/// out-of-sample scores of its models after them. The dataset build, each
-/// train and the run are one after another in this process, a train as the
-/// `train` subcommand's (`Training::train_at`), each Nautilus node, a
-/// dataset run's (`DatasetRun`, logging as `logging` says) or the
-/// backtest's, disposed before the next starts, which Nautilus supports.
-/// The days built are printed, and each train's outcome: on standard
-/// output when it kept no model, on standard error, with its time, when
-/// it kept a current one, which does not stop the backtest.
+/// does not trade `backtest`, on the models in its store: refused, before
+/// any replay, if the store holds no model to trade on at its start
+/// (`WalkForward::untrained`), naming the retrain time there and the
+/// `train` that fills it; else its dataset built over the span, for the
+/// scores, then run, its results printed and the out-of-sample scores of
+/// its models after them. The dataset build and the run are one after
+/// another in this process, each Nautilus node, a dataset run's
+/// (`DatasetRun`, logging as `logging` says) or the backtest's, disposed
+/// before the next starts, which Nautilus supports. The days built are
+/// printed.
 fn backtest_on_models<S: ModelStrategy>(
     args: &BacktestArgs,
     logging: LoggerConfig,
@@ -443,30 +477,30 @@ fn backtest_on_models<S: ModelStrategy>(
     };
     run.refuse_balance::<S>(&config)?;
     let walk = S::walk_forward(&config, catalog, models)?;
+    if let Some(at) = walk.untrained(start, end)? {
+        let train = format!(
+            "helix-trader train {} --config {} --catalog {} --models {}",
+            strategy_name(args.run.strategy),
+            args.run.config.display(),
+            catalog.display(),
+            models.display()
+        );
+        let span = match config.model().retrain {
+            Retrain::Every(_) => format!(", or over its span, `{train} --from {start} --to {end}`"),
+            Retrain::Never => String::new(),
+        };
+        anyhow::bail!(
+            "the store {} holds no model to trade on at the backtest's start {start}, and a \
+             backtest trains none: train at its retrain time {at} first, `{train} --at {at}`{span}",
+            models.display()
+        );
+    }
     let dataset = S::dataset(&config, catalog)?;
-    let training = S::training(&config, catalog, models)?;
-    let replay = |from, to| run.replay::<S>(&config, from, to);
-    walk.prepare(
-        start,
-        end,
-        |from, to| {
-            let (first, last) = dataset::days(from, to);
-            let built = dataset.build(first, last, replay)?;
-            if let (Some(from), Some(to)) = (built.first(), built.last()) {
-                println!("built {} days of the dataset, {from} to {to}", built.len());
-            }
-            Ok(())
-        },
-        |at| {
-            let trained = training.train_at(at, replay);
-            if trained.succeeded() {
-                println!("{trained}");
-            } else {
-                eprintln!("the retrain at {at}: {trained}");
-            }
-            Ok(())
-        },
-    )?;
+    let (first, last) = dataset::days(start, end);
+    let built = dataset.build(first, last, |from, to| run.replay::<S>(&config, from, to))?;
+    if let (Some(from), Some(to)) = (built.first(), built.last()) {
+        println!("built {} days of the dataset, {from} to {to}", built.len());
+    }
     let mode = Mode::Backtest {
         models: models.clone(),
     };
@@ -663,9 +697,9 @@ impl DatasetRun {
 }
 
 /// Prints the outcome of a train that kept no model, each model published
-/// or its current one in use; one that kept a current model, refused,
-/// failed or a meta waiting, is an error, its reason: the command fails,
-/// so that the live node that started it knows why (`model::launcher`).
+/// or already published; one that kept a current model, refused, failed
+/// or a meta waiting, is an error, its reason: the command fails, so that
+/// the live node that started it knows why (`model::launcher`).
 ///
 /// # Errors
 ///
@@ -676,51 +710,106 @@ fn reported(trained: &Trained) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Trains the strategy's model at `--at` and reports the outcome (see
-/// `reported`): the days its dataset lacks are replayed by a dataset run
-/// (`DatasetRun`).
+/// Prints the outcome of each of `trains`, a train over a span, at its
+/// retrain time, as it comes: a train that kept a current model does not
+/// stop the next. Fails once all are done if any kept one, listing each
+/// such retrain time with its train's reason (`reported`).
+///
+/// # Errors
+///
+/// Returns an error if a train kept a current model.
+fn reported_over(trains: impl Iterator<Item = (Timestamp, Trained)>) -> anyhow::Result<()> {
+    let (mut count, mut failed) = (0, vec![]);
+    for (at, trained) in trains {
+        count += 1;
+        println!("the train at {at}: {trained}");
+        if !trained.succeeded() {
+            failed.push(format!("  {at}: {trained}"));
+        }
+    }
+    anyhow::ensure!(
+        failed.is_empty(),
+        "the trains at {} of the span's {count} retrain times kept a current model:\n{}",
+        failed.len(),
+        failed.join("\n")
+    );
+    Ok(())
+}
+
+/// Trains the strategy's models at `--at`, or over `--from` to `--to`, and
+/// reports the outcome (see `reported` and `reported_over`): the days its
+/// dataset lacks are replayed by a dataset run (`DatasetRun`).
 fn run_train(args: &TrainArgs) -> anyhow::Result<()> {
+    let trains = args.trains()?;
     let run = DatasetRun {
         catalog: args.catalog.clone(),
         logging: logger_config(std::env::var("NAUTILUS_LOG"))?,
     };
-    let outcome = args.strategy.visit(Training { args, run: &run })?;
-    reported(&outcome)
+    args.strategy.visit(Training {
+        args,
+        trains,
+        run: &run,
+    })
 }
 
 /// The visitor training a strategy's model (`train`): a strategy trading
 /// on no model has none.
 struct Training<'a> {
     args: &'a TrainArgs,
+    trains: Trains,
     run: &'a DatasetRun,
 }
 
 impl Visitor for Training<'_> {
-    type Output = anyhow::Result<Trained>;
+    type Output = anyhow::Result<()>;
 
     fn plain<S: PlainStrategy>(self) -> Self::Output {
-        let name = self
-            .args
-            .strategy
-            .to_possible_value()
-            .expect("every strategy has a name");
-        anyhow::bail!("the {} strategy trades on no model", name.get_name())
+        let name = strategy_name(self.args.strategy);
+        anyhow::bail!("the {name} strategy trades on no model")
     }
 
     fn model<S: ModelStrategy>(self) -> Self::Output {
-        train::<S>(self.args, self.run)
+        train::<S>(self.args, self.trains, self.run)
     }
 }
 
-/// Trains the model of the model strategy `S` of `args` at `--at`, the
-/// days its dataset lacks replayed by `run`, its dataset balance refused
-/// first if the pairs of `[trade] conversions` do not reach the traded
-/// instrument's P&L currency from it (`DatasetRun::refuse_balance`).
-fn train<S: ModelStrategy>(args: &TrainArgs, run: &DatasetRun) -> anyhow::Result<Trained> {
+/// Trains the model of the model strategy `S` of `args` as `trains` says,
+/// at each retrain time of a span in time order (`Training::retrain_times`),
+/// and reports the outcome, the days its dataset lacks replayed by `run`,
+/// its dataset balance refused first if the pairs of `[trade] conversions`
+/// do not reach the traded instrument's P&L currency from it
+/// (`DatasetRun::refuse_balance`).
+fn train<S: ModelStrategy>(
+    args: &TrainArgs,
+    trains: Trains,
+    run: &DatasetRun,
+) -> anyhow::Result<()> {
     let config = load_config::<S::Params>(&args.config)?;
     run.refuse_balance::<S>(&config)?;
     let training = S::training(&config, &args.catalog, &args.models)?;
-    Ok(training.train_at(args.at, |start, end| run.replay::<S>(&config, start, end)))
+    let replay = |start, end| run.replay::<S>(&config, start, end);
+    match trains {
+        Trains::At(at) => reported(&training.train_at(at, replay)),
+        Trains::Over { from, to } => {
+            let times = training
+                .retrain_times(from, to)
+                .context("training over --from to --to; train it --at its one time")?;
+            reported_over(
+                times
+                    .into_iter()
+                    .map(|at| (at, training.train_at(at, replay))),
+            )
+        }
+    }
+}
+
+/// The command-line name of `strategy`.
+fn strategy_name(strategy: StrategyName) -> String {
+    strategy
+        .to_possible_value()
+        .expect("every strategy has a name")
+        .get_name()
+        .to_string()
 }
 
 #[cfg(test)]
@@ -948,11 +1037,48 @@ mod tests {
         assert_eq!(args.strategy, StrategyName::ModelEma);
         assert_eq!(args.config, PathBuf::from("model_ema.toml"));
         assert_eq!(
-            args.at,
-            "2026-10-23T00:00:00Z".parse::<Timestamp>().unwrap()
+            args.trains().unwrap(),
+            Trains::At("2026-10-23T00:00:00Z".parse().unwrap())
         );
         assert_eq!(args.catalog, PathBuf::from("catalog"));
         assert_eq!(args.models, PathBuf::from("models"));
+    }
+
+    /// The arguments of a train over the span from `from` to `to`.
+    fn parse_train_over(from: &str, to: &str) -> Result<TrainArgs, clap::Error> {
+        let argv = [&TRAIN[..3], &["--from", from, "--to", to]].concat();
+        parse_train(&argv)
+    }
+
+    #[rstest]
+    fn parses_a_train_over_a_span() {
+        let args = parse_train_over("2026-10-21", "2026-10-23T12:00:00Z").unwrap();
+
+        assert_eq!(
+            args.trains().unwrap(),
+            Trains::Over {
+                from: "2026-10-21T00:00:00Z".parse().unwrap(),
+                to: "2026-10-23T12:00:00Z".parse().unwrap(),
+            }
+        );
+    }
+
+    /// A span ending at or before its start trains at no time: refused,
+    /// naming both ends.
+    #[rstest]
+    #[case::ending_before_it_starts("2026-10-23", "2026-10-21")]
+    #[case::ending_where_it_starts("2026-10-23", "2026-10-23")]
+    fn a_train_over_an_empty_span_is_refused(#[case] from: &str, #[case] to: &str) {
+        let err = parse_train_over(from, to)
+            .unwrap()
+            .trains()
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            err.contains(&format!("{from}T00:00:00Z")) && err.contains(&format!("{to}T00:00:00Z")),
+            "{err}"
+        );
     }
 
     #[rstest]

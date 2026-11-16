@@ -167,6 +167,36 @@ pub(crate) fn quote(time: Timestamp, bid: &str, ask: &str) -> QuoteTick {
     )
 }
 
+/// The price of gold at the bottom of each even hour of `edge_quotes`, and
+/// the rise over it.
+pub(crate) const EDGE_BOTTOM: f64 = 4000.0;
+pub(crate) const EDGE_RISE: f64 = 4.0;
+
+/// IC's gold's quotes over `[from, to)`, one every 45 s, the ask 0.20
+/// above the bid: over each even hour of the day the bid rises from
+/// 4000.00 by 0.05 a quote, to 4003.95, and over each odd hour falls from
+/// 4004.00 by as much, to 4000.05.
+pub(crate) fn edge_quotes(from: Timestamp, to: Timestamp) -> Vec<QuoteTick> {
+    let mut quotes = vec![];
+    let mut time = from;
+    while time < to {
+        let seconds = time.as_second();
+        let step = (seconds % 3600 / 45) as f64 * 0.05;
+        let bid = if seconds / 3600 % 2 == 0 {
+            EDGE_BOTTOM + step
+        } else {
+            EDGE_BOTTOM + EDGE_RISE - step
+        };
+        quotes.push(quote(
+            time,
+            &format!("{bid:.2}"),
+            &format!("{:.2}", bid + 0.2),
+        ));
+        time += SignedDuration::from_secs(45);
+    }
+    quotes
+}
+
 /// Quotes from 08:00 to 12:00, two a minute at :07.250 and :37.750, the
 /// bid stepping through 4000.00 to 4000.90 by the minute, the ask 0.20
 /// above; the last of the hours closing 10:00 and 11:00 set apart.

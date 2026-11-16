@@ -9,8 +9,8 @@
 //! module alone, so no caller tells them apart: the section's validation
 //! (`Retrain::validate`), a run's train times (`Schedule::times`), the
 //! current model at a train's time (`Retrain::current`), how a model kept
-//! in use reads (`Retrain::in_use`), and the refusal of a backtest that
-//! would trade nothing (`Schedule::ensure_trades`). The model store reads
+//! in use reads (`Retrain::in_use`), and the retrain times of a train over
+//! a span, none never retrained (`Schedule::retrain_times`). The model store reads
 //! it once more, as a key: models of another retrain, or of none, are
 //! another store's (`store`); and a live node once, building the retrain
 //! actor of a strategy only if it is retrained
@@ -20,13 +20,11 @@
 //! from an epoch-aligned time (`last_grid_time`): Nautilus fires it at
 //! that time plus whole intervals. Live, the retrain actor of a strategy,
 //! one per strategy retrained, sets it on the actor's own clock at its
-//! start, which fires it as it goes (`launcher`); a backtest, which trains
-//! before its run, takes the times the same timer fires over its span on a
-//! virtual clock of its own (`Schedule::times`). Never retrained, a live
-//! node has no retrain actor, so no timer is set, and a backtest trains at
-//! its start alone, then, should its sides have no pair or its meta no
-//! model in use there, is refused: it would trade nothing, and no train
-//! comes after.
+//! start, which fires it as it goes (`launcher`); a train over a span,
+//! and a backtest's periods, take the times the same timer fires over the
+//! span on a virtual clock of its own (`Schedule::times`). Never retrained,
+//! a live node has no retrain actor, so no timer is set, and the strategy
+//! is trained at one time alone (`train --at`).
 //!
 //! A train at `t` is planned (`Schedule::plan`) from the valid-froms of
 //! the stores alone, model by model (the long, the short and the meta,
@@ -50,7 +48,7 @@
 //! earlier time would be current at `t`, never so retrained, whose models
 //! stay on the grid. Should those sides publish no pair, the meta waits
 //! (`Plan::meta_after_sides`). The plan
-//! answers whether the train fits anything and where its one replay starts
+//! answers where the train's one replay starts, if it fits anything
 //! (`Plan::replay_from`), at the first row a fit reads: a kept model reads
 //! none, its baseline its own, published with it
 //! (`store::ModelManifest::baseline`).
@@ -162,6 +160,24 @@ impl Schedule {
         }
     }
 
+    /// The retrain times of a span `[from, to)` a train over it trains at:
+    /// those of a run over it (`times`), a retrain time at `to` not among
+    /// them, its models deciding no row of the span.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the strategy is never retrained, so has no
+    /// retrain time and trains at one time alone, or as `times`.
+    pub fn retrain_times(&self, from: Timestamp, to: Timestamp) -> anyhow::Result<Vec<Timestamp>> {
+        match self.retrain {
+            Retrain::Every(every) => times(every, from, to),
+            Retrain::Never => anyhow::bail!(
+                "the strategy is never retrained ([model] retrain): it has no retrain times over \
+                 {from} to {to}, and trains at one time alone"
+            ),
+        }
+    }
+
     /// The plan of a train at `at`, the stores of the models holding
     /// models valid from `valid_froms`: a model keeps its current model at
     /// `at`, if any (`Retrain::current`), the sides their pair's
@@ -226,45 +242,6 @@ impl Schedule {
             },
         }
     }
-
-    /// Refuses a run from `start` that could trade nothing, the stores of
-    /// the models holding models valid from `valid_froms`: never
-    /// retrained, no train comes after the start, so a strategy with
-    /// no pair of the sides in use there, or a meta with no model, would
-    /// trade nothing; retrained, a later retrain may publish one.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the sides, the meta, or both have no model in
-    /// use at `start`, never retrained, naming them.
-    pub fn ensure_trades(
-        &self,
-        start: Timestamp,
-        valid_froms: &Models<Vec<Timestamp>>,
-    ) -> anyhow::Result<()> {
-        if let Retrain::Every(_) = self.retrain {
-            return Ok(());
-        }
-        let in_use = |valid_froms: &[Timestamp]| self.retrain.current(valid_froms, start).is_some();
-        let mut idle = vec![];
-        if !in_use(&valid_froms.pairs()) {
-            idle.push("no side has a model in use");
-        }
-        if valid_froms
-            .meta
-            .as_deref()
-            .is_some_and(|meta| !in_use(meta))
-        {
-            idle.push("the meta has no model in use");
-        }
-        anyhow::ensure!(
-            idle.is_empty(),
-            "never retrained, the strategy would trade nothing from {start}, where {}: no \
-             train comes after it",
-            idle.join(" and ")
-        );
-        Ok(())
-    }
 }
 
 impl Plan {
@@ -288,12 +265,6 @@ impl Plan {
             }
             step => step,
         })
-    }
-
-    /// Whether the train fits a model.
-    #[must_use]
-    pub fn fits(&self) -> bool {
-        self.replay_from().is_some()
     }
 
     /// Where the train's one replay starts: at the first row a fit reads;
@@ -326,13 +297,15 @@ impl Retrain {
     }
 
     /// How a model a train kept in use reads, its current model valid from
-    /// `valid_from`: retrained, valid from then; never retrained, in use
-    /// since then.
+    /// `valid_from`, already published, so not trained again: retrained,
+    /// valid from then; never retrained, in use since then.
     #[must_use]
     pub fn in_use(self, valid_from: Timestamp) -> String {
         match self {
-            Self::Every(_) => format!("in use, valid from {valid_from}"),
-            Self::Never => format!("in use since {valid_from}, never retrained"),
+            Self::Every(_) => format!("already published, valid from {valid_from}"),
+            Self::Never => {
+                format!("already published, in use since {valid_from}, never retrained")
+            }
         }
     }
 
@@ -464,7 +437,7 @@ pub fn start<A: DataActor + DataActorNative>(
 /// after the clock's now, with its `allow_past` and `fire_immediately`) on
 /// a `VirtualClock`, which registers it as the live clock does
 /// (`validate_and_prepare_timer`) and fires it without waiting, so a
-/// backtest trains at the times a live node retrains by Nautilus' own
+/// train over a span trains at the times a live node retrains by Nautilus' own
 /// timer semantics, which this module does not restate. A `VirtualTimer`
 /// alone would skip that registration.
 ///
@@ -754,7 +727,6 @@ mod tests {
 
         let plan = daily().plan(at(SEVENTH), &stores(&[first], &[first], &[SEVENTH]));
 
-        assert!(plan.fits());
         assert_eq!(plan.replay_from(), Some(at(SIXTH)));
     }
 
@@ -765,7 +737,6 @@ mod tests {
             &stores(&[SIXTH, SEVENTH], &[SIXTH, SEVENTH], &[SEVENTH]),
         );
 
-        assert!(!plan.fits());
         assert_eq!(plan.replay_from(), None);
     }
 
@@ -941,16 +912,16 @@ mod tests {
         }
     }
 
-    /// Never retrained, a side's model in use at the start with no other
-    /// beside it is no pair: the run would trade nothing, and is refused,
-    /// naming the sides.
+    /// Retrained, a span's retrain times are a run's over it; never
+    /// retrained, a strategy has none, trained at one time alone.
     #[rstest]
-    fn never_retrained_a_run_whose_sides_have_no_pair_in_use_is_refused() {
-        let refused = never().ensure_trades(at(SEVENTH), &stores(&[SIXTH], &[], &[SIXTH]));
+    fn a_spans_retrain_times_are_a_runs_and_never_retrained_it_has_none() {
+        let (from, to) = (at("2026-01-06T12:00:00Z"), at(EIGHTH));
 
-        let err = refused.unwrap_err().to_string();
-        assert!(err.contains("no side has a model in use"), "{err}");
-        assert!(err.contains(SEVENTH), "{err}");
-        assert!(!err.contains("meta"), "{err}");
+        let retrained = daily().retrain_times(from, to).unwrap();
+        let err = never().retrain_times(from, to).unwrap_err().to_string();
+
+        assert_eq!(retrained, [at(SIXTH), at(SEVENTH)]);
+        assert!(err.contains("never retrained"), "{err}");
     }
 }
