@@ -1,6 +1,8 @@
 //! Training at a time: the one operation that turns a strategy's dataset
-//! into published models, or keeps the current ones, for retrains in a
-//! backtest and live alike.
+//! into published models, or keeps the current ones, for the binary's
+//! `train`, at one time or at each retrain time of a span
+//! (`Training::retrain_times`), and live retrains alike; a backtest trains
+//! nothing (`walk`).
 //!
 //! A strategy has a model for each side it trades (the sides of its
 //! margins, `ModelConfig::margins`): each a regression of its side's
@@ -277,6 +279,18 @@ impl Training {
             levels,
             target: config.target.clone(),
         }
+    }
+
+    /// The retrain times of a train over the span `[from, to)`, in time
+    /// order (`Schedule::retrain_times`), each trained at as `train_at`
+    /// trains, after those before it: each planned on the store they left.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the span is empty or the strategy is never
+    /// retrained, trained at one time alone.
+    pub fn retrain_times(&self, from: Timestamp, to: Timestamp) -> anyhow::Result<Vec<Timestamp>> {
+        self.schedule.retrain_times(from, to)
     }
 
     /// Trains at `at` as the schedule plans it (`Schedule::plan`), from
@@ -3026,23 +3040,23 @@ mod tests {
         assert!(!meta_waiting.succeeded());
     }
 
-    /// A model kept in use reads with its valid-from, and never retrained as
-    /// in use since it, and never retrained; a waiting meta as waiting for
-    /// the sides' decisions.
+    /// A model kept in use reads as already published, with its valid-from,
+    /// and never retrained as in use since it, and never retrained; a
+    /// waiting meta as waiting for the sides' decisions.
     #[rstest]
     #[case::in_use(
         Outcome::InUse {
             valid_from: at("2026-01-07T00:00:00Z"),
             retrain: Retrain::Every(SignedDuration::from_hours(24)),
         },
-        &["in use", "2026-01-07T00:00:00Z"]
+        &["already published, valid from 2026-01-07T00:00:00Z"]
     )]
     #[case::in_use_never_retrained(
         Outcome::InUse {
             valid_from: at("2026-01-06T00:00:00Z"),
             retrain: Retrain::Never,
         },
-        &["in use since 2026-01-06T00:00:00Z", "never retrained"]
+        &["already published", "in use since 2026-01-06T00:00:00Z", "never retrained"]
     )]
     #[case::waiting(Outcome::Kept(Kept::Waiting), &["waiting for the sides' decisions"])]
     fn a_model_in_use_reads_with_its_valid_from_and_a_waiting_meta_as_waiting(

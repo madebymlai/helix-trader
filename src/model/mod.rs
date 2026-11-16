@@ -27,8 +27,9 @@
 //! model is retrained, on a fixed UTC grid, or that it never is, and what
 //! each train does to each model; `launcher`
 //! starts a live strategy's retrains, one
-//! at a time, in a child process; `walk` is a backtest retraining on the
-//! schedule before its run and scoring its models out of sample after.
+//! at a time, in a child process; `walk` is a backtest on the models in the
+//! store, trained by `train`, refused before its run without one to trade
+//! on at its start and scoring its models out of sample after.
 //! `meta` is meta-labeling: a meta model deciding whether to take the
 //! trade of the side picked on the net R it expects of it, trained on the
 //! out-of-sample predictions of the strategy's side models.
@@ -229,7 +230,7 @@ pub trait ModelStrategy:
 
     /// The backtests of the model of the strategy `config` describes, on
     /// its dataset in the catalog at `catalog`, and its models in the store
-    /// under `models`: their retrains and their scores.
+    /// under `models`: the check of their start and their scores.
     ///
     /// # Errors
     ///

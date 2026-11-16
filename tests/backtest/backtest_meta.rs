@@ -1,7 +1,7 @@
 //! Meta-labeling on a fixture catalog (`model::meta`), the features a
 //! missing one (`common::dataset::Missing`).
-//! Over a span of three days retrained every midnight, the dataset is
-//! built and the models trained; the fixture's walk has no edge, so a
+//! Over a span of three days retrained every midnight, the models are
+//! trained at each retrain time; the fixture's walk has no edge, so a
 //! train refuses each model, and the models traded on are published
 //! straight, baselines whose predictions name them
 //! (`common::dataset::baseline_of`). In the run, a decision trades only if
@@ -22,7 +22,6 @@ use std::{path::Path, rc::Rc};
 use helix_trader::{
     model::{
         config::{Margins, MetaConfig, ModelConfig},
-        dataset,
         features::FeatureSet,
         handle::Decision,
         holdout::Earnings,
@@ -105,50 +104,37 @@ fn on_thread<T: Send>(run: impl FnOnce() -> T + Send) -> T {
     std::thread::scope(|scope| scope.spawn(run).join().unwrap())
 }
 
-/// Prepares the backtest of the span of `long_only`: the dataset built,
-/// then at each retrain time the long and its meta model trained, and
-/// the long model published straight after, a baseline predicting an R of
-/// `r(tenths)` (`tenths` 3 at the span's start and one more each day),
-/// which the train would keep in use had it been published before; what
-/// each train did.
-fn prepare_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> {
+/// Trains at each retrain time of the span of `long_only` the long and its
+/// meta model, as `train` over the span would, each train replaying the
+/// days its window lacks, then publishes the long model straight, a
+/// baseline predicting an R of `r(tenths)` (`tenths` 3 at the span's start
+/// and one more each day), which the train would keep in use had it been
+/// published before; what each train did.
+fn train_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> {
     let (start, end) = span();
+    let training = || {
+        blueprint(features(), long_only())
+            .training(catalog.path(), models)
+            .unwrap()
+    };
     let mut trained = vec![];
-    blueprint(features(), long_only())
-        .walk_forward(catalog.path(), models)
-        .unwrap()
-        .prepare(
-            start,
-            end,
-            |from, to| {
-                on_thread(|| {
-                    let dataset = blueprint(features(), long_only()).dataset(catalog.path())?;
-                    let (first, last) = dataset::days(from, to);
-                    dataset.build(first, last, |from, to| {
-                        replay_on(catalog, features(), from, to)
-                    })?;
-                    Ok(())
-                })
-            },
-            |at| {
-                let outcome = on_thread(|| {
-                    blueprint(features(), long_only())
-                        .training(catalog.path(), models)
-                        .unwrap()
-                        .train_at(at, |from, to| replay_on(catalog, features(), from, to))
-                });
-                trained.push((at, outcome));
-                let tenths = 3 + (at.duration_since(start).as_hours() / 24) as usize;
-                long_store(models).publish(&baseline_of(
-                    &features(),
-                    &long_only(),
-                    Side::Long,
-                    at,
-                    tenths,
-                ))
-            },
-        )
-        .unwrap();
+
+    for at in training().retrain_times(start, end).unwrap() {
+        let outcome = on_thread(|| {
+            training().train_at(at, |from, to| replay_on(catalog, features(), from, to))
+        });
+        trained.push((at, outcome));
+        let tenths = 3 + (at.duration_since(start).as_hours() / 24) as usize;
+        long_store(models)
+            .publish(&baseline_of(
+                &features(),
+                &long_only(),
+                Side::Long,
+                at,
+                tenths,
+            ))
+            .unwrap();
+    }
     trained
 }
 
@@ -187,7 +173,7 @@ fn a_meta_model_trains_on_the_sides_trades_and_takes_them_in_the_run() {
     let (start, end) = span();
     let retrains = [start, start + day(), start + day() * 2];
 
-    let trained = prepare_model(&catalog, models.path());
+    let trained = train_model(&catalog, models.path());
 
     let times: Vec<Timestamp> = trained.iter().map(|(at, _)| *at).collect();
     assert_eq!(times, retrains);

@@ -88,8 +88,8 @@ pub struct ModelConfig<T = TargetConfig> {
     /// commission their targets are net of, the balance their reference
     /// stake is of and, optionally, their latency (`latency = "150ms"`). It
     /// keys the dataset and the stores (`dataset::fingerprint`), so `train`,
-    /// a backtest's retrains and a live node all read the one store of the
-    /// config, whatever a backtest's own commission, balance and latency.
+    /// a backtest and a live node all read the one store of the config,
+    /// whatever a backtest's own commission, balance and latency.
     pub dataset: DatasetVenue,
 }
 
