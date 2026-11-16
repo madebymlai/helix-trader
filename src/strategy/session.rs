@@ -66,70 +66,63 @@ mod tests {
         xetra().contains(utc.parse().unwrap(), HOUR)
     }
 
+    /// An hourly bar counts when its whole hour lies inside 09:00 to 17:30
+    /// on one day: one starting at the open or ending at the close does, one
+    /// straddling either does not, by a second as by half an hour.
     #[rstest]
-    fn a_bar_inside_counts() {
-        assert!(counts("2026-01-07T12:00"));
+    #[case::inside("2026-01-07T12:00", true)]
+    #[case::before_the_open("2026-01-07T07:00", false)]
+    #[case::after_the_close("2026-01-07T20:00", false)]
+    #[case::starting_exactly_at_the_open("2026-01-07T10:00", true)]
+    #[case::straddling_the_open("2026-01-07T09:30", false)]
+    #[case::straddling_the_open_by_a_second("2026-01-07T09:59:59", false)]
+    #[case::ending_exactly_at_the_close("2026-01-07T17:30", true)]
+    #[case::straddling_the_close_by_a_second("2026-01-07T17:30:01", false)]
+    #[case::straddling_the_close("2026-01-07T18:00", false)]
+    // 23:30 to 00:30: each end alone is past the open or before the close.
+    #[case::spanning_midnight("2026-01-08T00:30", false)]
+    fn a_bar_counts_when_it_lies_inside_the_session(#[case] local: &str, #[case] expected: bool) {
+        assert_eq!(counts(local), expected);
     }
 
+    /// The session stays 09:00 to 17:30 in Frankfurt as daylight saving
+    /// moves it in UTC.
     #[rstest]
-    fn bars_outside_do_not_count() {
-        assert!(!counts("2026-01-07T07:00"));
-        assert!(!counts("2026-01-07T20:00"));
+    // Friday in CET (UTC+1), Monday in CEST (UTC+2).
+    #[case::march_friday_morning("2026-03-27T08:00Z", false)]
+    #[case::march_friday_afternoon("2026-03-27T16:00Z", true)]
+    #[case::march_monday_morning("2026-03-30T08:00Z", true)]
+    #[case::march_monday_afternoon("2026-03-30T16:00Z", false)]
+    // Friday in CEST (UTC+2), Monday in CET (UTC+1).
+    #[case::october_friday_morning("2026-10-23T08:00Z", true)]
+    #[case::october_friday_afternoon("2026-10-23T16:00Z", false)]
+    #[case::october_monday_morning("2026-10-26T08:00Z", false)]
+    #[case::october_monday_afternoon("2026-10-26T16:00Z", true)]
+    fn the_session_follows_daylight_saving(#[case] utc: &str, #[case] expected: bool) {
+        assert_eq!(counts_utc(utc), expected);
     }
 
+    /// A session opening at 09:00 is valid closing after it; closing at or
+    /// before it, it is refused naming the open and the close.
     #[rstest]
-    fn a_bar_starting_exactly_at_the_open_counts() {
-        assert!(counts("2026-01-07T10:00"));
-    }
+    #[case::closing_after_the_open(time(17, 30, 0, 0), None)]
+    #[case::closing_at_the_open(time(9, 0, 0, 0), Some("09:00"))]
+    #[case::closing_before_the_open(time(8, 0, 0, 0), Some("08:00"))]
+    fn a_session_not_opening_before_its_close_is_refused_naming_both(
+        #[case] close: Time,
+        #[case] refused_naming: Option<&str>,
+    ) {
+        let result = Session { close, ..xetra() }.validate();
 
-    #[rstest]
-    fn a_bar_straddling_the_open_does_not_count() {
-        assert!(!counts("2026-01-07T09:30"));
-        assert!(!counts("2026-01-07T09:59:59"));
-    }
-
-    #[rstest]
-    fn a_bar_ending_exactly_at_the_close_counts() {
-        assert!(counts("2026-01-07T17:30"));
-    }
-
-    #[rstest]
-    fn a_bar_straddling_the_close_does_not_count() {
-        assert!(!counts("2026-01-07T17:30:01"));
-        assert!(!counts("2026-01-07T18:00"));
-    }
-
-    #[rstest]
-    fn a_bar_spanning_midnight_does_not_count() {
-        // 23:30 to 00:30: each end alone is past the open or before the close.
-        assert!(!counts("2026-01-08T00:30"));
-    }
-
-    #[rstest]
-    fn the_session_follows_daylight_saving_in_march() {
-        // Friday in CET (UTC+1), Monday in CEST (UTC+2).
-        assert!(!counts_utc("2026-03-27T08:00Z"));
-        assert!(counts_utc("2026-03-27T16:00Z"));
-        assert!(counts_utc("2026-03-30T08:00Z"));
-        assert!(!counts_utc("2026-03-30T16:00Z"));
-    }
-
-    #[rstest]
-    fn the_session_follows_daylight_saving_in_october() {
-        // Friday in CEST (UTC+2), Monday in CET (UTC+1).
-        assert!(counts_utc("2026-10-23T08:00Z"));
-        assert!(!counts_utc("2026-10-23T16:00Z"));
-        assert!(!counts_utc("2026-10-26T08:00Z"));
-        assert!(counts_utc("2026-10-26T16:00Z"));
-    }
-
-    #[rstest]
-    fn validates_open_before_close() {
-        xetra().validate().unwrap();
-        let mut session = xetra();
-        session.close = session.open;
-        assert!(session.validate().is_err());
-        session.close = time(8, 0, 0, 0);
-        assert!(session.validate().is_err());
+        match refused_naming {
+            None => result.unwrap(),
+            Some(close) => {
+                let message = result.unwrap_err().to_string();
+                assert!(
+                    message.contains("09:00") && message.contains(close),
+                    "{message}"
+                );
+            }
+        }
     }
 }
