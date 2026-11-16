@@ -45,6 +45,7 @@ Released on TBD (UTC).
 - Changed the `# Errors` and `# Panics` sections to Nautilus' wording
 - Added each crate's feature flags to its README
 - Added `docs/testing.md`, Nautilus' testing standard adapted to helix: its testing policy, layers and conventions, and helix's seams from the binary's commands to the live tests
+- Documented the LSE book stream's panic on a non-book series and the target exits' error on a non-finite ATR
 
 ---
 

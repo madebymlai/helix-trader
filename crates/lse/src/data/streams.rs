@@ -743,6 +743,12 @@ fn check_stream(data: &NautilusDataType, id: InstrumentId) -> anyhow::Result<()>
 ///
 /// Returns an error if `id`, which it names, is neither (see
 /// `check_stream`).
+///
+/// # Panics
+///
+/// Panics if `data` is no book (`OrderBookDepth` or `OrderBookDelta`):
+/// `check_stream` passes a series' ticks of `LSEDGE` and `OPRA` too, which
+/// no exchange's stream carries.
 fn booked(id: InstrumentId, data: &NautilusDataType) -> anyhow::Result<LseExchange> {
     check_stream(data, id)?;
     Ok(LseExchange::of_venue(id.venue).expect("LSE streams a book of an exchange's alone"))
