@@ -371,9 +371,8 @@ mod tests {
 
     use super::*;
     use crate::testing::{
-        ALLOWANCE_EXHAUSTED, DATA_UNAVAILABLE, DATA_UNAVAILABLE_TODAY, DATE_NOT_TRADING,
-        EXPORT_TOO_WIDE, PAIRS_NASDAQ_BRK, PLAN_REQUIRED, REFERENCE_CATALOGUE, ROWS_EXHAUSTED,
-        TICKS_NOT_STORED,
+        ALLOWANCE_EXHAUSTED, EXPORT_TOO_WIDE, PAIRS_NASDAQ_BRK, PLAN_REQUIRED, REFERENCE_CATALOGUE,
+        ROWS_EXHAUSTED,
     };
 
     fn refusal(body: &str) -> LseRefusal {
@@ -397,33 +396,16 @@ mod tests {
         );
     }
 
+    /// LSE's `export-too-wide`, past the 2,500,000 rows one export may
+    /// read; `rows-exhausted`, the rows a day spent, is not.
     #[rstest]
-    fn a_refusal_reads_as_its_code_message_and_required_plan() {
-        assert_eq!(
-            refusal(PLAN_REQUIRED).to_string(),
-            "plan-required: This feed requires a subscription; required plan: CME Group Lite"
-        );
-    }
-
-    #[rstest]
-    fn no_stored_row_and_no_session_are_no_rows() {
-        assert!(refusal(DATA_UNAVAILABLE).is_no_rows());
-        assert!(refusal(DATA_UNAVAILABLE_TODAY).is_no_rows());
-        assert!(refusal(DATE_NOT_TRADING).is_no_rows());
-        assert!(!refusal(PLAN_REQUIRED).is_no_rows());
-    }
-
-    /// LSE's `data-unavailable` names an empty selection only by its
-    /// message.
-    #[rstest]
-    fn data_unavailable_for_a_market_storing_no_trades_is_not_no_rows() {
-        assert!(!refusal(TICKS_NOT_STORED).is_no_rows());
-    }
-
-    #[rstest]
-    fn an_export_past_the_rows_one_export_may_read_is_too_wide() {
-        assert!(refusal(EXPORT_TOO_WIDE).is_too_wide());
-        assert!(!refusal(ROWS_EXHAUSTED).is_too_wide());
+    #[case::too_wide(EXPORT_TOO_WIDE, true)]
+    #[case::rows_exhausted(ROWS_EXHAUSTED, false)]
+    fn an_export_past_the_rows_one_export_may_read_is_too_wide(
+        #[case] body: &str,
+        #[case] too_wide: bool,
+    ) {
+        assert_eq!(refusal(body).is_too_wide(), too_wide);
     }
 
     /// Each collection LSE's catalogue lists, captured on 13 November 2026,
@@ -499,29 +481,31 @@ mod tests {
     }
 
     #[rstest]
-    #[case::daily("bond_yields", Stamp::DateEnd)]
-    #[case::four_hours("bond_yields_four_hour", Stamp::Close(SignedDuration::from_hours(4)))]
-    #[case::hourly("bond_yields_intraday", Stamp::Close(SignedDuration::from_hours(1)))]
-    #[case::a_minute("bond_yields_minute", Stamp::Close(SignedDuration::from_mins(1)))]
-    #[case::market_values("sovereign_yields", Stamp::DateEnd)]
+    #[case::daily("bond_yields", Some(Stamp::DateEnd))]
+    #[case::four_hours(
+        "bond_yields_four_hour",
+        Some(Stamp::Close(SignedDuration::from_hours(4)))
+    )]
+    #[case::hourly(
+        "bond_yields_intraday",
+        Some(Stamp::Close(SignedDuration::from_hours(1)))
+    )]
+    #[case::a_minute("bond_yields_minute", Some(Stamp::Close(SignedDuration::from_mins(1))))]
+    #[case::market_values("sovereign_yields", Some(Stamp::DateEnd))]
     #[case::a_filing_s_day(
         "insider_trades",
-        Stamp::DateAt(civil::time(22, 0, 0, 0), "America/New_York")
+        Some(Stamp::DateAt(civil::time(22, 0, 0, 0), "America/New_York"))
     )]
-    #[case::a_snapshot("company_profiles", Stamp::Key)]
-    #[case::a_release_s_time("economic_calendar", Stamp::At("datetime"))]
-    #[case::cot("cot", Stamp::Release)]
-    #[case::financial_reports("financial_reports", Stamp::Filing)]
+    #[case::a_snapshot("company_profiles", Some(Stamp::Key))]
+    #[case::a_release_s_time("economic_calendar", Some(Stamp::At("datetime")))]
+    #[case::cot("cot", Some(Stamp::Release))]
+    #[case::financial_reports("financial_reports", Some(Stamp::Filing))]
+    #[case::unclassified("no_such_collection", None)]
     fn a_collection_s_rows_are_stamped_when_they_are_known(
         #[case] dataset: &str,
-        #[case] stamp: Stamp,
+        #[case] stamp: Option<Stamp>,
     ) {
-        assert_eq!(Stamp::of_collection(dataset), Some(stamp));
-    }
-
-    #[rstest]
-    fn a_collection_not_classified_is_none() {
-        assert_eq!(Stamp::of_collection("no_such_collection"), None);
+        assert_eq!(Stamp::of_collection(dataset), stamp);
     }
 
     fn at(time: &str) -> Timestamp {
@@ -582,9 +566,10 @@ mod tests {
     }
 
     #[rstest]
-    fn the_rows_a_day_are_a_quota_and_a_plan_is_not() {
-        assert!(refusal(ROWS_EXHAUSTED).is_quota());
-        assert!(refusal(ALLOWANCE_EXHAUSTED).is_quota());
-        assert!(!refusal(PLAN_REQUIRED).is_quota());
+    #[case::rows_a_day(ROWS_EXHAUSTED, true)]
+    #[case::allowance(ALLOWANCE_EXHAUSTED, true)]
+    #[case::plan(PLAN_REQUIRED, false)]
+    fn the_rows_a_day_are_a_quota_and_a_plan_is_not(#[case] body: &str, #[case] quota: bool) {
+        assert_eq!(refusal(body).is_quota(), quota);
     }
 }

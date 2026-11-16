@@ -546,30 +546,19 @@ mod tests {
         );
     }
 
+    /// A day halves at noon, three seconds at a second and a half.
     #[rstest]
-    fn an_export_halves_at_its_middle() {
-        let (first, second) = gold("2026-10-21T00:00:00Z", "2026-10-22T00:00:00Z")
-            .halves()
-            .unwrap();
+    #[case::a_day("2026-10-21T00:00:00Z", "2026-10-21T12:00:00Z", "2026-10-22T00:00:00Z")]
+    #[case::three_seconds(
+        "2026-10-21T10:00:00Z",
+        "2026-10-21T10:00:01.5Z",
+        "2026-10-21T10:00:03Z"
+    )]
+    fn an_export_halves_at_its_middle(#[case] from: &str, #[case] mid: &str, #[case] to: &str) {
+        let (first, second) = gold(from, to).halves().unwrap();
 
-        assert_eq!(first, gold("2026-10-21T00:00:00Z", "2026-10-21T12:00:00Z"));
-        assert_eq!(second, gold("2026-10-21T12:00:00Z", "2026-10-22T00:00:00Z"));
-    }
-
-    #[rstest]
-    fn an_export_of_three_seconds_halves_at_a_second_and_a_half() {
-        let (first, second) = gold("2026-10-21T10:00:00Z", "2026-10-21T10:00:03Z")
-            .halves()
-            .unwrap();
-
-        assert_eq!(
-            first,
-            gold("2026-10-21T10:00:00Z", "2026-10-21T10:00:01.5Z")
-        );
-        assert_eq!(
-            second,
-            gold("2026-10-21T10:00:01.5Z", "2026-10-21T10:00:03Z")
-        );
+        assert_eq!(first, gold(from, mid));
+        assert_eq!(second, gold(mid, to));
     }
 
     #[rstest]
