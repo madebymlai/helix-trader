@@ -50,7 +50,7 @@ use nautilus_model::{
     data::{OrderBookDelta, OrderBookDeltas, OrderBookDepth, QuoteTick, TradeTick},
     enums::{AggressorSide, BookAction, BookType, RecordFlag},
     identifiers::{ClientId, InstrumentId, TraderId},
-    instruments::InstrumentAny,
+    instruments::{Instrument, InstrumentAny},
     types::{Price, Quantity},
 };
 use nautilus_persistence::{
@@ -504,162 +504,80 @@ async fn an_actor_receives_lse_s_book_deltas_and_depth_of_a_contract(
     );
 }
 
-/// LSE's documented ESZ6 at Level 1, its definition in the node's catalog:
-/// the tester's quotes open with its best bid and offer; then the stream
-/// sends its live records, the last a trade, and the node stops once the
-/// trade reached the message bus.
-#[tokio::test]
-async fn the_data_tester_receives_a_cme_contract_s_quotes_and_trades_from_lse() {
-    let lse = MockLse::start(vec![Reply::json(PAIRS_ESZ6)]);
-    let stream = MockExchangeStream::cme(|_, _| held(dbn_frames(CME_ESZ6_DOCUMENTED), 4));
-    let dir = tempfile::tempdir().unwrap();
-    ParquetDataCatalog::new(dir.path(), None, None, None, None)
-        .write_instruments(vec![esz26()])
-        .unwrap();
-    let es = InstrumentId::from(ESZ26);
-    let config = LiveNodeConfig {
-        environment: Environment::Live,
-        trader_id: TraderId::from("TESTER-001"),
-        load_state: false,
-        save_state: false,
-        catalogs: vec![DataCatalogConfig::new(
-            dir.path().to_str().unwrap().to_string(),
-            None,
-            None,
-        )],
-        ..Default::default()
-    };
-    let lse = LseDataClientConfig::builder()
+/// ESZ26 streamed with the CME key, LSE's API on `lse` and its CME stream
+/// on `stream`.
+fn esz26_on_cme(lse: &MockLse, stream: &MockExchangeStream) -> LseDataClientConfig {
+    LseDataClientConfig::builder()
         .cme_api_key(SecretString::from(CME_API_KEY))
         .base_url_http(lse.url().to_string())
         .base_url_ws_cme(stream.url().to_string())
-        .stream_ids(vec![es])
-        .build();
-    let mut node = LiveNodeBuilder::from_config(config)
-        .unwrap()
-        .with_name("LSE-TESTER")
-        .with_delay_post_stop_secs(1)
-        .add_data_client(None, Box::new(LseDataClientFactory::new()), Box::new(lse))
-        .unwrap()
+        .stream_ids(vec![InstrumentId::from(ESZ26)])
         .build()
-        .unwrap();
-    let tester = DataTesterConfig::builder()
-        .client_id(ClientId::from("LSE"))
-        .instrument_ids(vec![es])
-        .request_instruments(true)
-        .subscribe_quotes(true)
-        .subscribe_trades(true)
-        .can_unsubscribe(true)
-        .build()
-        .unwrap();
-    node.add_actor(DataTester::new(tester)).unwrap();
-    let quotes: Rc<RefCell<Vec<QuoteTick>>> = Rc::default();
-    let trades: Rc<RefCell<Vec<TradeTick>>> = Rc::default();
-    let (seen_quotes, seen_trades) = (Rc::clone(&quotes), Rc::clone(&trades));
-    msgbus::subscribe_quotes(
-        get_quotes_topic(es).into(),
-        TypedHandler::from(move |quote: &QuoteTick| seen_quotes.borrow_mut().push(*quote)),
-        None,
-    );
-    msgbus::subscribe_trades(
-        get_trades_topic(es).into(),
-        TypedHandler::from(move |trade: &TradeTick| seen_trades.borrow_mut().push(*trade)),
-        None,
-    );
-    let handle = node.handle();
-    let stopped = async {
-        wait_until_async(
-            || {
-                let any = !quotes.borrow().is_empty();
-                async move { any }
-            },
-            Duration::from_secs(30),
-        )
-        .await;
-        stream.release();
-        wait_until_async(
-            || {
-                let any = !trades.borrow().is_empty();
-                async move { any }
-            },
-            Duration::from_secs(30),
-        )
-        .await;
-        handle.stop();
-    };
-
-    let (ran, ()) = tokio::time::timeout(Duration::from_secs(60), async {
-        tokio::join!(node.run(), stopped)
-    })
-    .await
-    .expect("the node stops within a minute");
-    ran.unwrap();
-    node.dispose();
-
-    let quotes = quotes.borrow();
-    let first = quotes[0];
-    assert_eq!(
-        (
-            first.bid_price,
-            first.bid_size,
-            first.ask_price,
-            first.ask_size
-        ),
-        (
-            Price::from("7569.75"),
-            Quantity::from(2),
-            Price::from("7570.00"),
-            Quantity::from(11)
-        )
-    );
-    assert!(quotes.iter().all(|quote| quote.bid_price < quote.ask_price));
-    let trade = trades.borrow()[0];
-    assert_eq!(
-        (trade.price, trade.size, trade.aggressor_side),
-        (
-            Price::from("7570.00"),
-            Quantity::from(1),
-            AggressorSide::NoAggressor
-        )
-    );
 }
 
-/// NVDA at Level 1 on LSE's Nasdaq stream, as LSE's documentation records
-/// the stream's messages, its definition in the node's catalog: the
-/// tester's quotes open with its best bid and offer; then the stream sends
-/// its live records, the last a trade, and the node stops once the trade
-/// reached the message bus.
+/// NVDA streamed with the Nasdaq key, on `lse` and `stream`.
+fn nvda_on_nasdaq(lse: &MockLse, stream: &MockExchangeStream) -> LseDataClientConfig {
+    Streamed::Nvda.config(lse, Some(stream))
+}
+
+/// A Level 1 session as LSE's documentation records the stream's
+/// messages, its instrument's definition in the node's catalog: ESZ6's on
+/// the CME stream, looked up in LSE's catalogue, and NVDA's on the Nasdaq
+/// stream, by its ticker, LSE's catalogue asked nothing. The tester's
+/// quotes open with the instrument's best bid and offer; then the stream
+/// sends its live records, the last a trade, of no aggressor side, and
+/// the node stops once the trade reached the message bus.
+#[rstest]
+#[case::a_cme_contract(
+    MockLse::start(vec![Reply::json(PAIRS_ESZ6)]),
+    MockExchangeStream::cme(|_, _| held(dbn_frames(CME_ESZ6_DOCUMENTED), 4)),
+    esz26_on_cme,
+    esz26(),
+    (("7569.75", 2), ("7570.00", 11)),
+    ("7570.00", 1),
+    &["ESZ6"],
+)]
+#[case::an_xnas_stock(
+    MockLse::start(vec![]),
+    MockExchangeStream::nasdaq(|_, _| held(dbn_frames(NASDAQ_NVDA_L1_DOCUMENTED), 4)),
+    nvda_on_nasdaq,
+    nvda(),
+    (("211.15", 200), ("211.17", 900)),
+    ("211.17", 100),
+    &[],
+)]
 #[tokio::test]
-async fn the_data_tester_receives_an_xnas_stock_s_quotes_and_trades_from_lse() {
-    let lse = MockLse::start(vec![]);
-    let stream = MockExchangeStream::nasdaq(|_, _| held(dbn_frames(NASDAQ_NVDA_L1_DOCUMENTED), 4));
+async fn the_data_tester_receives_an_instrument_s_quotes_and_trades_from_lse(
+    #[case] lse: MockLse,
+    #[case] stream: MockExchangeStream,
+    #[case] config: fn(&MockLse, &MockExchangeStream) -> LseDataClientConfig,
+    #[case] definition: InstrumentAny,
+    #[case] ((bid, bid_size), (ask, ask_size)): ((&str, u64), (&str, u64)),
+    #[case] (traded, traded_size): (&str, u64),
+    #[case] looked_up: &[&str],
+) {
     let dir = tempfile::tempdir().unwrap();
-    let nvda_id = InstrumentId::from(NVDA);
+    let id = definition.id();
     let tester = DataTesterConfig::builder()
         .client_id(ClientId::from("LSE"))
-        .instrument_ids(vec![nvda_id])
+        .instrument_ids(vec![id])
         .request_instruments(true)
         .subscribe_quotes(true)
         .subscribe_trades(true)
         .can_unsubscribe(true)
         .build()
         .unwrap();
-    let mut node = tester_node(
-        Streamed::Nvda.definition(),
-        Streamed::Nvda.config(&lse, Some(&stream)),
-        dir.path(),
-        tester,
-    );
+    let mut node = tester_node(definition, config(&lse, &stream), dir.path(), tester);
     let quotes: Rc<RefCell<Vec<QuoteTick>>> = Rc::default();
     let trades: Rc<RefCell<Vec<TradeTick>>> = Rc::default();
     let (seen_quotes, seen_trades) = (Rc::clone(&quotes), Rc::clone(&trades));
     msgbus::subscribe_quotes(
-        get_quotes_topic(nvda_id).into(),
+        get_quotes_topic(id).into(),
         TypedHandler::from(move |quote: &QuoteTick| seen_quotes.borrow_mut().push(*quote)),
         None,
     );
     msgbus::subscribe_trades(
-        get_trades_topic(nvda_id).into(),
+        get_trades_topic(id).into(),
         TypedHandler::from(move |trade: &TradeTick| seen_trades.borrow_mut().push(*trade)),
         None,
     );
@@ -682,10 +600,10 @@ async fn the_data_tester_receives_an_xnas_stock_s_quotes_and_trades_from_lse() {
             first.ask_size
         ),
         (
-            Price::from("211.15"),
-            Quantity::from(200),
-            Price::from("211.17"),
-            Quantity::from(900)
+            Price::from(bid),
+            Quantity::from(bid_size),
+            Price::from(ask),
+            Quantity::from(ask_size)
         )
     );
     assert!(quotes.iter().all(|quote| quote.bid_price < quote.ask_price));
@@ -693,12 +611,17 @@ async fn the_data_tester_receives_an_xnas_stock_s_quotes_and_trades_from_lse() {
     assert_eq!(
         (trade.price, trade.size, trade.aggressor_side),
         (
-            Price::from("211.17"),
-            Quantity::from(100),
+            Price::from(traded),
+            Quantity::from(traded_size),
             AggressorSide::NoAggressor
         )
     );
-    assert!(lse.calls().is_empty(), "{:?}", lse.calls());
+    let symbols: Vec<_> = lse
+        .calls()
+        .iter()
+        .map(|call| call.param("symbol").unwrap().to_string())
+        .collect();
+    assert_eq!(symbols, looked_up);
 }
 
 /// A node streaming a contract from LSE, its definition `definition` in
@@ -763,13 +686,34 @@ async fn run_until(node: &mut LiveNode, done: impl Fn() -> bool) {
 /// stream's messages, GCZ6's on the CME stream and NVDA's on the Nasdaq
 /// stream, its definition in the node's catalog: the tester's depth opens
 /// with the contract's last ten levels, then a depth a change of its book,
-/// each ten levels a side or fewer, bids falling and asks rising from the
-/// best; the node stops once the four reached the message bus.
+/// the best bid's size cut, an order joining the best ask, and the ninth
+/// ask level removed, each numbered by its sequence on the stream; the
+/// node stops once the four reached the message bus. Each case gives
+/// each depth's sequence and best bid and ask.
 #[rstest]
-#[case::cme_contract(Streamed::Gcz26)]
-#[case::nasdaq_stock(Streamed::Nvda)]
+#[case::cme_contract(
+    Streamed::Gcz26,
+    [
+        (1001, ("3908.10", 2), ("3908.30", 9)),
+        (1002, ("3908.10", 1), ("3908.30", 9)),
+        (1003, ("3908.10", 1), ("3908.30", 11)),
+        (1004, ("3908.10", 1), ("3908.30", 11)),
+    ],
+)]
+#[case::nasdaq_stock(
+    Streamed::Nvda,
+    [
+        (1001, ("211.15", 200), ("211.17", 900)),
+        (1002, ("211.15", 100), ("211.17", 900)),
+        (1003, ("211.15", 100), ("211.17", 1100)),
+        (1004, ("211.15", 100), ("211.17", 1100)),
+    ],
+)]
 #[tokio::test]
-async fn the_data_tester_receives_a_contract_s_book_depth_from_lse(#[case] streamed: Streamed) {
+async fn the_data_tester_receives_a_contract_s_book_depth_from_lse(
+    #[case] streamed: Streamed,
+    #[case] best: [(u64, (&str, u64), (&str, u64)); 4],
+) {
     let lse = streamed.lse(vec![]);
     let stream = streamed.stream();
     let dir = tempfile::tempdir().unwrap();
@@ -800,37 +744,40 @@ async fn the_data_tester_receives_a_contract_s_book_depth_from_lse(#[case] strea
 
     run_until(&mut node, || depths.borrow().len() == 4).await;
 
-    let depths = depths.borrow();
-    assert_eq!(
-        (depths[0].bids[0].price, depths[0].asks[0].price),
-        streamed.best()
-    );
-    for depth in depths.iter() {
-        let bids: Vec<Price> = depth
-            .bids
-            .iter()
-            .filter(|bid| bid.side.is_some())
-            .map(|bid| bid.price)
-            .collect();
-        let asks: Vec<Price> = depth
-            .asks
-            .iter()
-            .filter(|ask| ask.side.is_some())
-            .map(|ask| ask.price)
-            .collect();
-        assert!(bids.len() <= 10 && asks.len() <= 10);
-        assert!(bids.windows(2).all(|pair| pair[0] > pair[1]), "{bids:?}");
-        assert!(asks.windows(2).all(|pair| pair[0] < pair[1]), "{asks:?}");
-        assert!(bids[0] < asks[0]);
-    }
+    let received: Vec<_> = depths
+        .borrow()
+        .iter()
+        .map(|depth| {
+            (
+                depth.instrument_id,
+                depth.sequence,
+                (depth.bids[0].price, depth.bids[0].size),
+                (depth.asks[0].price, depth.asks[0].size),
+            )
+        })
+        .collect();
+    let expected: Vec<_> = best
+        .iter()
+        .map(|&(sequence, (bid, bid_size), (ask, ask_size))| {
+            (
+                id,
+                sequence,
+                (Price::from(bid), Quantity::from(bid_size)),
+                (Price::from(ask), Quantity::from(ask_size)),
+            )
+        })
+        .collect();
+    assert_eq!(received, expected);
 }
 
 /// A contract's book deltas at Level 3 as LSE's documentation records the
 /// stream's messages, GCZ6's on the CME stream and NVDA's on the Nasdaq
 /// stream, its definition in the node's catalog: the tester's deltas start
 /// at the first order event, no book opening them, each batch ending
-/// `F_LAST`, the first adding a bid and an ask; the node stops once the
-/// three batches reached the message bus.
+/// `F_LAST`: the first adding a bid and an ask at the best, the second
+/// changing the bid, the third removing the ask, numbered 7312 to 7315 on
+/// the stream; the node stops once the three batches reached the message
+/// bus.
 #[rstest]
 #[case::cme_contract(Streamed::Gcz26)]
 #[case::nasdaq_stock(Streamed::Nvda)]
@@ -865,23 +812,29 @@ async fn the_data_tester_receives_a_contract_s_book_deltas_from_lse(#[case] stre
 
     run_until(&mut node, || batches.borrow().len() == 3).await;
 
-    let batches = batches.borrow();
-    let first: Vec<(BookAction, Price)> = batches[0]
-        .deltas
+    let received: Vec<Vec<_>> = batches
+        .borrow()
         .iter()
-        .map(|delta| (delta.action, delta.order.price))
-        .collect();
-    let (bid, ask) = streamed.best();
-    assert_eq!(first, [(BookAction::Add, bid), (BookAction::Add, ask)]);
-    for batch in batches.iter() {
-        assert_eq!(batch.instrument_id, id);
-        assert!(RecordFlag::F_LAST.matches(batch.deltas.last().unwrap().flags));
-        assert!(
+        .map(|batch| {
+            assert_eq!(batch.instrument_id, id);
             batch
                 .deltas
                 .iter()
-                .all(|delta| delta.action != BookAction::Clear
-                    && !RecordFlag::F_SNAPSHOT.matches(delta.flags))
-        );
-    }
+                .map(|delta| (delta.sequence, delta.action, delta.order.price, delta.flags))
+                .collect()
+        })
+        .collect();
+    let (bid, ask) = streamed.best();
+    let last = RecordFlag::F_LAST as u8;
+    assert_eq!(
+        received,
+        [
+            vec![
+                (7312, BookAction::Add, bid, 0),
+                (7313, BookAction::Add, ask, last)
+            ],
+            vec![(7314, BookAction::Update, bid, last)],
+            vec![(7315, BookAction::Delete, ask, last)],
+        ]
+    );
 }
