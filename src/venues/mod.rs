@@ -98,6 +98,7 @@ use ctrader::{
 };
 use jiff::Timestamp;
 use nautilus_common::factories::DataClientFactory;
+use nautilus_core::time::get_atomic_clock_realtime;
 use nautilus_databento::types::register_databento_custom_data;
 use nautilus_interactive_brokers::factories::InteractiveBrokersDataClientFactory;
 use nautilus_live::config::RoutingConfig;
@@ -927,7 +928,11 @@ pub async fn fill_history(
     let slices = requirements.slices(start, end);
     let ib_slices = of_source(&slices, HistorySource::Ib);
     let mut catalog = ParquetDataCatalog::new(catalog_dir, None, None, None, None);
-    ib::check_held(&catalog, &ib_slices, Timestamp::now())?;
+    ib::check_held(
+        &catalog,
+        &ib_slices,
+        Timestamp::from(get_atomic_clock_realtime().get_time_ns()),
+    )?;
     let (mut okx_ids, mut ctrader_ids, mut lse_ids, mut ib_ids) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for id in requirements.instrument_ids() {
@@ -982,7 +987,12 @@ pub async fn fill_history(
     // Temporary until nautilus_trader#5472 is fixed: IB then fills through
     // the node.
     if !ib_ids.is_empty() {
-        let ib = IbHistory::connect(venues.ib.client_id, end, Timestamp::now()).await?;
+        let ib = IbHistory::connect(
+            venues.ib.client_id,
+            end,
+            Timestamp::from(get_atomic_clock_realtime().get_time_ns()),
+        )
+        .await?;
         ib.fill(&mut catalog, &ib_slices).await?;
     }
     Ok(())

@@ -24,6 +24,9 @@
 //! boundaries (`tests/`) drive them as a caller does; `testing`, the mock
 //! LSE peers and their captured payloads, comes with `test-support`.
 
+// Tests may read the wall clock and spawn on tokio (clippy.toml).
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 pub use self::{
     common::consts::{LSE_API_KEY, LSE_CME_API_KEY, LSE_NASDAQ_API_KEY, LSEDGE_VENUE},
     config::LseDataClientConfig,

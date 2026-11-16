@@ -19,6 +19,9 @@
 //! child processes, none in this one, so it claims nothing and runs beside
 //! any module.
 
+// Tests may read the wall clock and spawn on tokio (clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use std::{cell::RefCell, path::Path, sync::OnceLock};
 
 use clap::{Args, Command, FromArgMatches};

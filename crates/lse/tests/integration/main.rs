@@ -5,6 +5,9 @@
 //! crate's dev-dependency on itself enables (`test-support`). Pure protocol
 //! logic is tested in `src`.
 
+// Tests may read the wall clock and spawn on tokio (clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 mod data_client;
 mod data_tester;
 mod exchange_stream_client;

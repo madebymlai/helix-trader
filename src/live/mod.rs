@@ -28,6 +28,7 @@ use nautilus_common::{
     component::Component,
     logging::{bridge::init_tracing, init_logging, logger::LoggerConfig},
 };
+use nautilus_core::time::get_atomic_clock_realtime;
 use nautilus_model::identifiers::{InstrumentId, TraderId};
 use nautilus_trading::strategy::{Strategy, StrategyNative};
 pub use recording::Recording;
@@ -110,7 +111,10 @@ impl Live {
         let streaming = self.recording.streaming(&catalog)?;
         let instance_id = self.recording.instance_id(self.trader_id)?;
         let data_engine = warmup::live_data_engine_config(&requirements.bar_types);
-        let instrument_ids = loaded_instrument_ids(requirements, Timestamp::now())?;
+        let instrument_ids = loaded_instrument_ids(
+            requirements,
+            Timestamp::from(get_atomic_clock_realtime().get_time_ns()),
+        )?;
         // The node would install the logger when built, after the clients
         // are set up: install it now with the node's trader and config, and
         // the node keeps it. The adapters' `tracing` output goes to stdout

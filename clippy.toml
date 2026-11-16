@@ -1,5 +1,17 @@
 allow-expect-in-tests = true
 allow-unwrap-in-tests = true
+# Nautilus-native time, tasks and sockets: a call that bypasses Nautilus for
+# one of these is refused with its Nautilus replacement. Tests may use them
+# (each crate allows them under cfg(test)); production code that must cites
+# why in `#[expect(clippy::disallowed_methods, reason = "...")]`.
+disallowed-methods = [
+  { path = "jiff::Timestamp::now", reason = "reads the wall clock, past the clock Nautilus runs a backtest on", replacement = "the actor's clock, or nautilus_core::time::get_atomic_clock_realtime() outside a node" },
+  { path = "jiff::Zoned::now", reason = "reads the wall clock, past the clock Nautilus runs a backtest on", replacement = "the actor's clock, or nautilus_core::time::get_atomic_clock_realtime() outside a node" },
+  { path = "std::time::SystemTime::now", reason = "reads the wall clock, past the clock Nautilus runs a backtest on", replacement = "the actor's clock, or nautilus_core::time::get_atomic_clock_realtime() outside a node" },
+  { path = "tokio::task::spawn", reason = "spawns past Nautilus' runtime", replacement = "nautilus_common::live::get_runtime().spawn" },
+  { path = "tokio::task::spawn_blocking", reason = "spawns past Nautilus' runtime", replacement = "nautilus_common::live::get_runtime().spawn_blocking" },
+  { path = "tokio::net::TcpStream::connect", reason = "opens a socket past nautilus_network", replacement = "nautilus_network's socket and WebSocket clients" },
+]
 doc-valid-idents = [
   "DataFusion",
   "LightGBM",

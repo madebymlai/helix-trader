@@ -37,7 +37,7 @@ use jiff::Timestamp;
 use nautilus_common::logging::{
     bridge::init_tracing, init_logging, logger::LoggerConfig, writer::FileWriterConfig,
 };
-use nautilus_core::{UUID4, UnixNanos};
+use nautilus_core::{UUID4, UnixNanos, time::get_atomic_clock_realtime};
 use nautilus_model::{
     enums::OmsType,
     identifiers::{InstrumentId, TraderId},
@@ -561,7 +561,7 @@ async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyho
     backtest::refuse_balance(config.model().dataset.balance, &traded, &pairs)
         .context(DATASET_BALANCE)?;
     let models = S::blueprint(&config)?.model_set(&args.models)?;
-    if !models.trades_by(Timestamp::now())? {
+    if !models.trades_by(Timestamp::from(get_atomic_clock_realtime().get_time_ns()))? {
         eprintln!(
             "warning: no model to trade on yet in {}: the strategy makes no trade until one is \
              published there, by `train` or by a retrain",

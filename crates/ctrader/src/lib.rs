@@ -18,6 +18,9 @@
 //! trade requests of orders, the dispatch of trade events, the
 //! reconciliation reports) and `factories`.
 
+// Tests may read the wall clock and spawn on tokio (clippy.toml).
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 use jiff::SignedDuration;
 use nautilus_model::data::NautilusDataType;
 

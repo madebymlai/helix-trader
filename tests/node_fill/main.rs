@@ -11,6 +11,9 @@
 //! cargo test --test node_fill
 //! ```
 
+// Tests may read the wall clock and spawn on tokio (clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use std::{
     any::Any,
     cell::RefCell,

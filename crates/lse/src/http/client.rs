@@ -10,6 +10,7 @@ use std::{collections::HashMap, fmt, num::NonZeroU32, time::Duration};
 
 use bytes::Bytes;
 use jiff::Timestamp;
+use nautilus_core::time::get_atomic_clock_realtime;
 use nautilus_network::{
     http::{
         HttpClient, HttpRedirectPolicy, HttpResponse, Method, create_standard_nautilus_headers,
@@ -309,10 +310,12 @@ impl LseHttpClient {
         let Ok(refusal) = serde_json::from_slice::<LseRefusal>(&response.body) else {
             return Err(unexpected(&response));
         };
-        let retry_after = response
-            .headers
-            .get(RETRY_AFTER_HEADER)
-            .and_then(|value| parse_retry_after(value, Timestamp::now()));
+        let retry_after = response.headers.get(RETRY_AFTER_HEADER).and_then(|value| {
+            parse_retry_after(
+                value,
+                Timestamp::from(get_atomic_clock_realtime().get_time_ns()),
+            )
+        });
         Err(LseHttpError::Refusal {
             status: response.status.as_u16(),
             refusal: Box::new(refusal),

@@ -12,6 +12,9 @@
 //! cargo test --test backtest backtest_warmup::
 //! ```
 
+// Tests may read the wall clock and spawn on tokio (clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 #[path = "../common/mod.rs"]
 mod common;
 
