@@ -977,6 +977,7 @@ async fn a_level_lse_refused_is_asked_again_by_a_later_subscription() {
                 .received()
                 .iter()
                 .any(|(connection, _)| *connection == 2);
+
             if !asked_again {
                 client.subscribe_book_depth(depth_of(&[GCZ26], 10)).unwrap();
             }
