@@ -241,6 +241,34 @@ similar_names = "allow" # Domain terms like trade/trader and side/size are inten
 [workspace.lints.rust]
 unreachable_pub = "deny"
 
+# The typos spell checker's config (typos reads it here).
+[workspace.metadata.typos.default]
+locale = "en-us"
+
+[workspace.metadata.typos.default.extend-words]
+# A model's valid-from timestamps (`valid_froms`)
+froms = "froms"
+# Industry standard abbreviations and technical terms
+Pn = "Pn" # Part of PnL (Profit and Loss)
+PnL = "PnL" # Profit and Loss
+PnLs = "PnLs" # Plural of PnL
+ND = "ND" # Ordinal suffix (`ON_THE_22ND`)
+# Futures roots and contract symbols
+SIZ = "SIZ" # COMEX silver root with its month (`SIZ26`)
+# Misspelled config keys the tests refuse
+sesion = "sesion"
+spred = "spred"
+leafs = "leafs"
+
+[workspace.metadata.typos.files]
+# Preserve vendored code and verbatim data
+extend-exclude = [
+  "crates/ctrader/proto/",
+  "crates/lse/docs-snapshot/",
+  "**/test_data/**/*.json",
+  "**/test_data/**/*.txt",
+]
+
 [features]
 # Strategy unit tests, off by default (see the README's tests section).
 strategy-tests = []
