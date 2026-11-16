@@ -1,0 +1,123 @@
+# cargo-deny's policy (`cargo deny check`), after Nautilus' deny.toml:
+# advisories, licenses, banned and duplicate crates, and sources.
+
+[graph]
+all-features = true
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+[advisories]
+unused-ignored-advisory = "deny"
+# Nautilus' assessments (its deny.toml): the zstd 0.13 that Arrow IPC and
+# Parquet alone use, which Nautilus pins until Arrow moves to 0.14
+ignore = [
+  { id = "RUSTSEC-2026-0391", reason = "zstd borrowed streaming contexts are not used by Arrow IPC or Parquet" },
+  { id = "RUSTSEC-2026-0398", reason = "zstd-safe seekable feature is disabled" },
+  { id = "RUSTSEC-2026-0403", reason = "zstd-safe streaming decompression is not used by Arrow IPC or Parquet; bulk API is unaffected" },
+]
+
+[licenses]
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-2-Clause-Patent",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "ISC",
+  "MPL-2.0",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "Zlib",
+  "Unicode-DFS-2016",
+  "Unicode-3.0",
+  "0BSD",
+  "LGPL-3.0-only",
+  "Unlicense",
+  "bzip2-1.0.6",
+]
+confidence-threshold = 0.8
+
+[[licenses.clarify]]
+name = "implied-vol"
+version = "*"
+expression = "MIT"
+license-files = [{ path = "LICENSE", hash = 0x526ab6d5 }]
+
+[licenses.private]
+# helix's own crates are not published
+ignore = true
+registries = []
+
+[bans]
+multiple-versions = "deny"
+# helix's versionless dependencies are the rev-pinned Nautilus crates and
+# its own path crates
+wildcards = "allow"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+allow = []
+deny = []
+skip = [
+  # helix's own dependencies beside Nautilus': perpetual pulls sysinfo 0.38,
+  # lightgbm3's bindgen prettyplease 0.3
+  { crate = "sysinfo:<0.40" },
+  { crate = "prettyplease:<0.3" },
+
+  # RNG ecosystem - version-locked together, pulled by crypto and blockchain crates
+  { crate = "getrandom:<0.4" },
+  { crate = "r-efi:<6" },
+  { crate = "rand:<0.10" },
+  { crate = "rand_core:<0.10" },
+
+  # Tokio and DataFusion still require the parking_lot 0.12 dependency family
+  { crate = "lock_api:<0.5" },
+  { crate = "parking_lot:<0.13" },
+  { crate = "parking_lot_core:<0.10" },
+  { crate = "redox_syscall:<0.9" },
+
+  # Proc-macro support crates - transitive via derive macros in various crates
+  { crate = "darling:<0.24" },
+  { crate = "darling_core:<0.24" },
+  { crate = "darling_macro:<0.24" },
+
+  # syn 1 and strsim 0.10 - transitive via madsim -> darling 0.14 (dev-only simulator)
+  { crate = "syn:<3" },
+
+  # Common utility crates with version fragmentation across ecosystem
+  # base64 0.23 is used directly; upstream dependencies still require 0.22
+  { crate = "base64:<0.23" },
+  { crate = "hashbrown:<0.17" },
+  { crate = "itertools:<0.15" },
+  { crate = "foldhash:<0.2" },
+  { crate = "num-bigint:<0.5" },
+
+  # Perfect hash function crates - transitive
+  { crate = "phf:<0.14" },
+  { crate = "phf_shared:<0.14" },
+
+  # Error handling - thiserror 1.x vs 2.x transition in progress
+  { crate = "thiserror:<2" },
+  { crate = "thiserror-impl:<2" },
+
+  # Reqwest requires tower-http 0.6; the direct HTTP transport uses 0.7
+  { crate = "tower-http:<0.7" },
+
+  # TLS roots - version fragmentation in TLS ecosystem
+  { crate = "webpki-roots:<1" },
+
+  # Arrow and Parquet retain zstd 0.13 while compression-codecs and Databento use 0.14
+  { crate = "zstd:=0.13.3" },
+  { crate = "zstd-safe:=7.3.0" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# The Nautilus pin
+allow-git = ["https://github.com/nautechsystems/nautilus_trader"]
