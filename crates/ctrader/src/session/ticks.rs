@@ -409,14 +409,15 @@ mod tests {
         assert!(!res.has_more);
     }
 
-    /// Synthetic: a difference forward in time.
+    /// Synthetic: a difference forward in time. The ticks are at 1,000 ms,
+    /// 999 ms (-1), then 1,001 ms (+2): 2 ms after the one before.
     #[rstest]
     fn a_tick_newer_than_the_one_before_is_refused() {
         let data = |timestamp, tick| ProtoOaTickData { timestamp, tick };
 
         let err = decode(&[data(1_000, 5), data(-1, 1), data(2, 1)]).unwrap_err();
 
-        assert!(err.to_string().contains("not newest first"), "{err}");
+        assert!(err.to_string().contains("2 ms"), "{err}");
     }
 
     /// Answers like cTrader over `ticks` (oldest first), pages of 3, and
@@ -495,7 +496,7 @@ mod tests {
         let pages = side_ticks(0, 20, venue(&all, &mut vec![])).await;
 
         let err = pages.failure.unwrap();
-        assert!(err.to_string().contains('5'), "{err}");
+        assert!(err.to_string().contains("5 ms"), "{err}");
         assert_eq!(pages.ticks, []);
         assert_eq!(pages.from_ms, 20);
     }
