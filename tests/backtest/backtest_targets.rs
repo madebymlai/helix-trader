@@ -30,10 +30,6 @@
 
 use std::{cell::RefCell, collections::BTreeSet, path::PathBuf, rc::Rc, thread};
 
-use crate::common::{
-    features::{SmaArgs, tables},
-    ic,
-};
 use helix_trader::{
     backtest::{Backtest, Commission},
     model::{
@@ -75,6 +71,11 @@ use nautilus_trading::{
     strategy::{StrategyConfig, StrategyCore},
 };
 use rust_decimal::Decimal;
+
+use crate::common::{
+    features::{SmaArgs, tables},
+    ic,
+};
 
 const STRATEGY: &str = "TARGETS-001";
 

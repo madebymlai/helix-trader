@@ -9,10 +9,6 @@
 
 use std::{cell::RefCell, path::Path, rc::Rc};
 
-use crate::common::{
-    features::{SmaArgs, tables},
-    ic,
-};
 use helix_trader::{
     backtest::{Backtest, Commission},
     model::{
@@ -58,6 +54,11 @@ use nautilus_trading::{
     strategy::{StrategyConfig, StrategyCore},
 };
 use rust_decimal::Decimal;
+
+use crate::common::{
+    features::{SmaArgs, tables},
+    ic,
+};
 
 pub const STRATEGY: &str = "DATASET-001";
 

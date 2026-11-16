@@ -16,8 +16,6 @@
 //!
 //! Client id 46 for the node, 47 for the reference.
 
-use crate::common;
-
 use std::{cell::RefCell, collections::BTreeSet, rc::Rc, time::Duration};
 
 use helix_trader::{
@@ -39,6 +37,8 @@ use nautilus_trading::{
     nautilus_strategy,
     strategy::{StrategyConfig, StrategyCore},
 };
+
+use crate::common;
 
 const TRADER: &str = "HELIXTEST-046";
 const WARMUP: SignedDuration = SignedDuration::from_hours(72);

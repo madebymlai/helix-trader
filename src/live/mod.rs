@@ -19,8 +19,6 @@ pub mod node;
 mod recording;
 mod redis;
 
-pub use recording::Recording;
-
 use std::{fmt::Debug, path::PathBuf};
 
 use anyhow::{Context, bail};
@@ -32,6 +30,7 @@ use nautilus_common::{
 };
 use nautilus_model::identifiers::{InstrumentId, TraderId};
 use nautilus_trading::strategy::{Strategy, StrategyNative};
+pub use recording::Recording;
 
 use crate::{
     catalog::catalog_config,

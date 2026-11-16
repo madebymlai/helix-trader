@@ -7,7 +7,6 @@
 
 use std::{cell::RefCell, num::NonZeroUsize, rc::Rc};
 
-use crate::common::{glbx, ic};
 use helix_trader::backtest::report;
 use nautilus_common::actor::DataActor;
 use nautilus_core::UnixNanos;
@@ -21,6 +20,8 @@ use nautilus_trading::{
     nautilus_strategy,
     strategy::{Strategy, StrategyConfig, StrategyCore},
 };
+
+use crate::common::{glbx, ic};
 
 /// What the strategy got: the times of gold's snapshots, and whether it
 /// bought.

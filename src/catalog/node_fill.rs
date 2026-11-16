@@ -623,7 +623,6 @@ mod tests {
         identifiers::TradeId,
         types::{Price, Quantity},
     };
-
     use nautilus_persistence::backend::parquet::paths::timestamps_to_filename;
 
     use super::*;

@@ -5,8 +5,9 @@
 //! 10 shares, as `TIME_EXIT` does, not the 11 the nearest count would
 //! risk 34.10 EUR on. One node per thread, so one run per test.
 
-use crate::common::{self, trades};
 use helix_trader::strategy::ema::EmaCross;
+
+use crate::common::{self, trades};
 
 #[test]
 fn a_budget_off_the_share_grid_trades_the_shares_it_rounds_down_to() {

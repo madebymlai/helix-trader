@@ -8,13 +8,6 @@
 
 use std::path::Path;
 
-use crate::common::{
-    self, dataset,
-    features::{SmaArgs, tables},
-    instrument, ohlc,
-    recorder::Recorder,
-    ts,
-};
 use helix_trader::{
     catalog::fill_catalog,
     model::{
@@ -38,6 +31,14 @@ use nautilus_model::{
     types::{Price, Quantity},
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
+
+use crate::common::{
+    self, dataset,
+    features::{SmaArgs, tables},
+    instrument, ohlc,
+    recorder::Recorder,
+    ts,
+};
 
 const COMPOSITE: &str = "SXR8.IBIS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL";
 const MINUTE_BARS: &str = "SXR8.IBIS-1-MINUTE-LAST-EXTERNAL";

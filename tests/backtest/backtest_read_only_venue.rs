@@ -13,7 +13,6 @@ use std::{
     rc::Rc,
 };
 
-use crate::common::ic;
 use helix_trader::{
     catalog::{NodeClient, NodeFill, missing},
     strategy::requirements::{DataRequirements, TickSeries},
@@ -37,6 +36,8 @@ use nautilus_trading::{
     nautilus_strategy,
     strategy::{Strategy, StrategyConfig, StrategyCore},
 };
+
+use crate::common::ic;
 
 /// LSE's gold trades over the captured second, `[10:00:00, 10:00:01)`.
 fn gold_trades() -> DataRequirements {

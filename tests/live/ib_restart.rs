@@ -19,7 +19,6 @@
 
 use std::{path::PathBuf, process::Command, time::Duration};
 
-use crate::common::cache::delete_trader;
 use helix_trader::{
     live::Live,
     strategy::{requirements::DataRequirements, warmup::Warmup},
@@ -44,6 +43,8 @@ use nautilus_trading::{
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+
+use crate::common::cache::delete_trader;
 
 const CLIENT_ID: i32 = 44;
 const INSTRUMENT: &str = "EXS1.IBIS";

@@ -23,8 +23,6 @@
 //! NAUTILUS_CTRADER_RUN=pepperstone cargo test --test live ctrader_orders_demo:: -- --nocapture
 //! ```
 
-use crate::common;
-
 use std::{
     cell::RefCell,
     process::Command,
@@ -63,7 +61,10 @@ use nautilus_trading::{
     strategy::{Strategy, StrategyConfig, StrategyCore},
 };
 
-use crate::demo_broker::{DemoBroker, GOLD_OUNCES, opted_in};
+use crate::{
+    common,
+    demo_broker::{DemoBroker, GOLD_OUNCES, opted_in},
+};
 
 const TRADER: &str = "HELIXTEST-102";
 

@@ -104,10 +104,9 @@ fn ts_event(tick: &LseTick) -> anyhow::Result<UnixNanos> {
 
 #[cfg(test)]
 mod tests {
-    use rstest::rstest;
-
     use bytes::Bytes;
     use nautilus_model::{data::TradeTick, enums::AggressorSide};
+    use rstest::rstest;
 
     use super::*;
     use crate::{

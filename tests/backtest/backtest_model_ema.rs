@@ -19,10 +19,6 @@ use std::{
     process::Command,
 };
 
-use crate::common::{
-    dataset::{baseline_stored, r, walk},
-    ic,
-};
 use helix_trader::{
     backtest::Backtest,
     model::{
@@ -38,6 +34,11 @@ use helix_trader::{
 use jiff::{SignedDuration, Timestamp};
 use nautilus_model::types::{Currency, Money};
 use tempfile::TempDir;
+
+use crate::common::{
+    dataset::{baseline_stored, r, walk},
+    ic,
+};
 
 /// Hourly decisions on IC's gold's 1-minute bars, its averages of 10 and
 /// 30 of them, warmed up an hour, learning the net P&L of the long of a

@@ -18,8 +18,6 @@
 //! NAUTILUS_CTRADER_RUN=pepperstone cargo test --test live ctrader_live_demo:: -- --nocapture
 //! ```
 
-use crate::common;
-
 use std::{cell::RefCell, process::Command, rc::Rc, time::Duration};
 
 use helix_trader::{
@@ -42,7 +40,7 @@ use nautilus_trading::{
     strategy::{StrategyConfig, StrategyCore},
 };
 
-use crate::demo_broker::opted_in;
+use crate::{common, demo_broker::opted_in};
 
 /// How far before now the catalog's quotes end.
 const CATALOG_BEHIND: SignedDuration = SignedDuration::from_mins(10);

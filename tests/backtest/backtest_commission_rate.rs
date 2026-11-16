@@ -3,9 +3,10 @@
 //! value, and the report's costs. One node per thread, so one run per
 //! test.
 
-use crate::common::{self, trades};
 use helix_trader::backtest::{Commission, report};
 use rust_decimal::Decimal;
+
+use crate::common::{self, trades};
 
 #[test]
 fn a_commission_rate_charges_the_value_of_every_fill_and_the_report_shows_the_costs() {

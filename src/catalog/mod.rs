@@ -12,10 +12,6 @@ mod fill_catalog;
 pub use fill_catalog::fill_catalog;
 pub(crate) use fill_catalog::{fill_slices, resumed};
 mod node_fill;
-pub use node_fill::{
-    CustomFillRequest, FillData, FillRequest, NodeClient, NodeFill, missing, missing_custom,
-};
-
 use std::path::Path;
 
 use anyhow::Context;
@@ -25,6 +21,9 @@ use nautilus_model::{
 };
 use nautilus_persistence::{
     backend::parquet::catalog::ParquetDataCatalog, config::DataCatalogConfig,
+};
+pub use node_fill::{
+    CustomFillRequest, FillData, FillRequest, NodeClient, NodeFill, missing, missing_custom,
 };
 
 /// The config a node takes of the catalog in directory `dir`, by its path

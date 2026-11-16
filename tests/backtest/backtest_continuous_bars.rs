@@ -6,11 +6,6 @@
 //! LAST bars over a run from 23:00 to 01:00. One node per thread, so one
 //! run per test.
 
-use crate::common::{
-    Ohlc, ohlc,
-    recorder::Recorder,
-    rolls::{self, POST, tuesday, wednesday},
-};
 use helix_trader::{
     backtest::{Backtest, Commission},
     venues,
@@ -25,6 +20,12 @@ use nautilus_model::{
 };
 use rust_decimal::Decimal;
 use tempfile::TempDir;
+
+use crate::common::{
+    Ohlc, ohlc,
+    recorder::Recorder,
+    rolls::{self, POST, tuesday, wednesday},
+};
 
 const BARS: &str = "GC.GLBX-30-MINUTE-LAST-INTERNAL";
 

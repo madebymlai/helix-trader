@@ -6,6 +6,8 @@
 //! `fill_catalog`. Beside it, IC's FX pairs a strategy converts through
 //! (`pair`), with quotes of their own (`pair_quotes`).
 
+use std::path::Path;
+
 use helix_trader::{
     backtest::{Backtest, Commission},
     catalog::fill_catalog,
@@ -23,7 +25,6 @@ use nautilus_model::{
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use rust_decimal::Decimal;
-use std::path::Path;
 use tempfile::TempDir;
 
 use super::ts;

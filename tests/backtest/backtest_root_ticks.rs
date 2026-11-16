@@ -9,12 +9,6 @@
 
 use std::rc::Rc;
 
-use crate::common::{
-    dataset::{self, probe_reading},
-    features::{SmaArgs, tables},
-    ic,
-    rolls::{self, POST, PRE, ROOT, trade, tuesday, wednesday},
-};
 use helix_trader::{
     model::{
         config::ModelConfig,
@@ -31,6 +25,13 @@ use jiff::{SignedDuration, Timestamp};
 use nautilus_model::{
     data::{NautilusDataType, TradeTick},
     identifiers::InstrumentId,
+};
+
+use crate::common::{
+    dataset::{self, probe_reading},
+    features::{SmaArgs, tables},
+    ic,
+    rolls::{self, POST, PRE, ROOT, trade, tuesday, wednesday},
 };
 
 /// The contracts' trades: August's at 22:50 (before the run), 23:10, 23:20

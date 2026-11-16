@@ -17,10 +17,6 @@
 
 use std::{fmt::Write as _, fs, path::Path};
 
-use crate::common::{
-    dataset::{backtest, walk},
-    ic,
-};
 use helix_trader::{
     backtest::Backtest,
     model::{
@@ -31,6 +27,11 @@ use helix_trader::{
     strategy::model_ema::{ModelEma, ModelEmaConfig},
 };
 use jiff::{SignedDuration, Timestamp};
+
+use crate::common::{
+    dataset::{backtest, walk},
+    ic,
+};
 
 /// Hourly decisions on IC's gold's 1-minute bars, its averages of 10 and
 /// 30 of them, warmed up 4 hours; a bracket 1.5 ATRs of 3 hourly bars in

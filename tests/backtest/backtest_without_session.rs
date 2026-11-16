@@ -2,8 +2,9 @@
 //! the one spanning midnight included. One node per thread, so one run
 //! per test.
 
-use crate::common::{self, stepped_quotes, ts};
 use jiff::Timestamp;
+
+use crate::common::{self, stepped_quotes, ts};
 
 /// Quoted from Wednesday 7 January 2026, 19:00 UTC, to Thursday 02:00,
 /// all outside Xetra's session; the hour bars close at their level + 0.60:

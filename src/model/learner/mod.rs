@@ -42,10 +42,9 @@ mod perpetual;
 use std::fmt;
 
 use anyhow::{bail, ensure};
-use serde::{Deserialize, Serialize};
-
 pub use lightgbm::LightGbmConfig;
 pub use perpetual::PerpetualConfig;
+use serde::{Deserialize, Serialize};
 
 /// The learner of a strategy's model, loaded from TOML, such as
 /// `learner = { kind = "lightgbm", num_iterations = 200 }`.

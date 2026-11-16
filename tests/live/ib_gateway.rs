@@ -26,8 +26,6 @@
 //! running: the next run reuses it. Client ids 40 to 43, 48 and 49, apart
 //! from `fill-catalog`'s 10 and `live`'s 1.
 
-use crate::common;
-
 use std::{
     collections::{BTreeMap, BTreeSet},
     process::Command,
@@ -67,6 +65,8 @@ use nautilus_model::{
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use rust_decimal::Decimal;
 use tokio::sync::Mutex;
+
+use crate::common;
 
 /// One test at a time: the adapter's start is not safe against another
 /// process or task starting the same container at the same moment, and

@@ -19,12 +19,6 @@
 
 use std::{path::Path, rc::Rc};
 
-use crate::common::{
-    dataset::{
-        baseline_of, blueprint, config, meta_baseline_of, missing, replay_on, trade_on, walk,
-    },
-    ic,
-};
 use helix_trader::{
     model::{
         config::{Margins, MetaConfig, ModelConfig},
@@ -44,6 +38,13 @@ use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
 use nautilus_model::enums::OrderSide;
 use tempfile::TempDir;
+
+use crate::common::{
+    dataset::{
+        baseline_of, blueprint, config, meta_baseline_of, missing, replay_on, trade_on, walk,
+    },
+    ic,
+};
 
 /// The missing feature.
 fn features() -> Rc<FeatureSet> {

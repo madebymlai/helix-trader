@@ -10,8 +10,10 @@ use std::ops::RangeInclusive;
 
 use ctrader::CTraderConnection;
 use helix_trader::venues::{ic, pepperstone};
-use nautilus_model::identifiers::{AccountId, InstrumentId};
-use nautilus_model::types::Quantity;
+use nautilus_model::{
+    identifiers::{AccountId, InstrumentId},
+    types::Quantity,
+};
 use rust_decimal::Decimal;
 
 /// A cTrader broker's demo account, as measured on it.

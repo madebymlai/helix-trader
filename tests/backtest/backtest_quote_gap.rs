@@ -2,9 +2,10 @@
 //! holiday), so the data engine builds no bar for them. One node per
 //! thread, so one run per test.
 
-use crate::common::{self, hour_bars, minute_quotes, noise, ohlc, recorder::Recorder};
 use jiff::Timestamp;
 use nautilus_model::data::BarType;
+
+use crate::common::{self, hour_bars, minute_quotes, noise, ohlc, recorder::Recorder};
 
 #[test]
 fn an_hour_without_quotes_yields_no_bar() {

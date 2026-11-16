@@ -12,7 +12,6 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use crate::common::{glbx, ic};
 use helix_trader::{
     backtest::Backtest,
     model::features::FeatureSet,
@@ -33,6 +32,8 @@ use nautilus_trading::{
 };
 use serde::Deserialize;
 use tempfile::TempDir;
+
+use crate::common::{glbx, ic};
 
 /// A part reading every series its config lists, trading one instrument.
 #[derive(Debug, Clone, Deserialize)]

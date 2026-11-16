@@ -727,7 +727,6 @@ fn train<S: ModelStrategy>(args: &TrainArgs, run: &DatasetRun) -> anyhow::Result
 #[cfg(test)]
 mod tests {
 
-    use super::*;
     use helix_trader::{
         model::{
             holdout::{Earnings, Holdout, Refusal},
@@ -738,6 +737,8 @@ mod tests {
         strategy::{ema::EmaParams, risk::R},
     };
     use jiff::SignedDuration;
+
+    use super::*;
 
     fn parse_command(subcommand: &str, args: &[&str]) -> Result<Command, clap::Error> {
         let argv = ["helix-trader", subcommand]

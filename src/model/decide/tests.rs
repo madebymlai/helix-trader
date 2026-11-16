@@ -1,6 +1,7 @@
 use std::{cell::RefCell, rc::Rc};
 
 use nautilus_common::{
+    actor::indicators::ActorIndicator,
     cache::Cache,
     clock::{Clock, VirtualClock},
     msgbus::{self, ShareableMessageHandler, switchboard::get_custom_topic},
@@ -21,7 +22,6 @@ use nautilus_trading::{
 
 use super::*;
 use crate::strategy::{Declared, EmaArgs, IndicatorsConfig};
-use nautilus_common::actor::indicators::ActorIndicator;
 
 const STRATEGY: &str = "PROBE-001";
 const AUD: &str = "AUD/USD.SIM";

@@ -21,6 +21,17 @@
 
 use std::{cell::RefCell, num::NonZeroUsize, rc::Rc, time::Duration};
 
+use lse::{
+    LseDataClientConfig, LseDataClientFactory,
+    testing::{
+        AAPL_CALL, API_KEY, CME_API_KEY, CME_ESZ6_DOCUMENTED, CME_GCZ6_GCG7,
+        CME_GCZ6_L2_DOCUMENTED, CME_GCZ6_L3_DOCUMENTED, ESZ26, GCZ26, GCZ26_BOOK, GCZ26_ORDERS,
+        GOLD_FUTURES, MockExchangeStream, MockLse, MockLseSocket, NASDAQ_API_KEY,
+        NASDAQ_NVDA_L1_DOCUMENTED, NASDAQ_NVDA_L2_DOCUMENTED, NASDAQ_NVDA_L3_DOCUMENTED, NVDA,
+        NVDA_BOOK, NVDA_ORDERS, PAIRS_ESZ6, PAIRS_GCZ6, Reply, aapl_call, data_ws_answer,
+        dbn_frames, esz26, frames, gcz26, gold_futures, held, nvda, sent,
+    },
+};
 use nautilus_common::{
     actor::{DataActor, DataActorConfig, DataActorCore},
     enums::Environment,
@@ -48,18 +59,6 @@ use nautilus_persistence::{
 use nautilus_testkit::testers::{DataTester, DataTesterConfig};
 use rstest::rstest;
 use serde_json::json;
-
-use lse::{
-    LseDataClientConfig, LseDataClientFactory,
-    testing::{
-        AAPL_CALL, API_KEY, CME_API_KEY, CME_ESZ6_DOCUMENTED, CME_GCZ6_GCG7,
-        CME_GCZ6_L2_DOCUMENTED, CME_GCZ6_L3_DOCUMENTED, ESZ26, GCZ26, GCZ26_BOOK, GCZ26_ORDERS,
-        GOLD_FUTURES, MockExchangeStream, MockLse, MockLseSocket, NASDAQ_API_KEY,
-        NASDAQ_NVDA_L1_DOCUMENTED, NASDAQ_NVDA_L2_DOCUMENTED, NASDAQ_NVDA_L3_DOCUMENTED, NVDA,
-        NVDA_BOOK, NVDA_ORDERS, PAIRS_ESZ6, PAIRS_GCZ6, Reply, aapl_call, data_ws_answer,
-        dbn_frames, esz26, frames, gcz26, gold_futures, held, nvda, sent,
-    },
-};
 
 /// LSE's gold futures quotes, its definition in the node's catalog, until
 /// one reaches the message bus; then the node stops.

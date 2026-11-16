@@ -460,16 +460,18 @@ mod tests {
 
     use super::*;
     use crate::{
-        common::messages::{
-            ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq, ProtoOaAccountAuthRes,
-            ProtoOaAccountDisconnectEvent, ProtoOaApplicationAuthReq, ProtoOaClientDisconnectEvent,
-            ProtoOaErrorRes, ProtoOaGetTickDataReq, ProtoOaGetTickDataRes, ProtoOaQuoteType,
-            ProtoOaRefreshTokenReq, ProtoOaRefreshTokenRes, ProtoOaSpotEvent,
-            ProtoOaSubscribeSpotsReq, ProtoOaSubscribeSpotsRes, ProtoOaSymbol,
-            ProtoOaSymbolByIdReq, ProtoOaSymbolByIdRes, ProtoOaUnsubscribeSpotsReq,
-            ProtoOaUnsubscribeSpotsRes,
+        common::{
+            messages::{
+                ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq, ProtoOaAccountAuthRes,
+                ProtoOaAccountDisconnectEvent, ProtoOaApplicationAuthReq,
+                ProtoOaClientDisconnectEvent, ProtoOaErrorRes, ProtoOaGetTickDataReq,
+                ProtoOaGetTickDataRes, ProtoOaQuoteType, ProtoOaRefreshTokenReq,
+                ProtoOaRefreshTokenRes, ProtoOaSpotEvent, ProtoOaSubscribeSpotsReq,
+                ProtoOaSubscribeSpotsRes, ProtoOaSymbol, ProtoOaSymbolByIdReq,
+                ProtoOaSymbolByIdRes, ProtoOaUnsubscribeSpotsReq, ProtoOaUnsubscribeSpotsRes,
+            },
+            token::{RENEW_BEFORE, TokenStore},
         },
-        common::token::{RENEW_BEFORE, TokenStore},
         testing::{
             self, ACCESS_TOKEN, ACCOUNT_AUTH_TOKEN_INVALID, ACCOUNT_ID, APPLICATION_AUTH_REFUSED,
             Action, EXPIRES_IN, REFRESH_TOKEN, Received, SYMBOL_BY_ID_UNKNOWN, SharedVenue,

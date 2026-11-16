@@ -9,10 +9,6 @@
 
 use std::{cell::RefCell, num::NonZeroUsize, path::Path, rc::Rc, sync::Arc};
 
-use crate::common::{
-    glbx::{self, Imbalance},
-    rolls::{self, NANOSECOND, POST, PRE, ROOT, roll, tuesday, wednesday},
-};
 use helix_trader::{
     backtest::{Backtest, Commission},
     model::features::FeatureSet,
@@ -40,6 +36,11 @@ use nautilus_trading::{
     strategy::{StrategyConfig, StrategyCore},
 };
 use rust_decimal::Decimal;
+
+use crate::common::{
+    glbx::{self, Imbalance},
+    rolls::{self, NANOSECOND, POST, PRE, ROOT, roll, tuesday, wednesday},
+};
 
 /// What the probe got, in order.
 #[derive(Debug, Clone, PartialEq)]

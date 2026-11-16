@@ -5,9 +5,10 @@
 //! its stop loss (50 bps) or take profit (100 bps). One node per thread,
 //! so one run per test.
 
-use crate::common::{self, trades};
 use helix_trader::backtest::Backtest;
 use nautilus_model::enums::OmsType;
+
+use crate::common::{self, trades};
 
 /// - 13:00 at 610.60, above 605.60: cross up, buy 10 at 610.65, its stop
 ///   loss at 607.55 and take profit at 616.71 (610.60 less 0.5% and plus

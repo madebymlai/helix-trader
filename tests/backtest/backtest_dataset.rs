@@ -10,14 +10,6 @@
 
 use std::{collections::VecDeque, rc::Rc};
 
-use crate::common::{
-    dataset::{
-        Lcg, MID, blueprint, config, features, mid_tables, replay, replay_of, replay_on, target,
-        walk,
-    },
-    features::tables,
-    ic,
-};
 use helix_trader::{
     model::{
         config::ModelConfig,
@@ -37,6 +29,15 @@ use nautilus_model::{
     identifiers::InstrumentId,
 };
 use rust_decimal::Decimal;
+
+use crate::common::{
+    dataset::{
+        Lcg, MID, blueprint, config, features, mid_tables, replay, replay_of, replay_on, target,
+        walk,
+    },
+    features::tables,
+    ic,
+};
 
 /// Two days, the 21st and 22nd of October 2026, quotes from 23:00 the day
 /// before to 03:00 of the 23rd:

@@ -775,7 +775,6 @@ mod tests {
     use std::rc::Rc;
 
     use nautilus_model::identifiers::InstrumentId;
-
     use rust_decimal::Decimal;
 
     use super::*;

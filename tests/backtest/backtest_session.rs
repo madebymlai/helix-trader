@@ -2,8 +2,9 @@
 //! nor trade; overnight, without quotes, there are no bars at all. One node
 //! per thread, so one run per test.
 
-use crate::common::{self, stepped_quotes, ts};
 use jiff::Timestamp;
+
+use crate::common::{self, stepped_quotes, ts};
 
 /// Quoted from 07:00 to 17:00 UTC each day, nothing overnight; the hour
 /// bars close at their level + 0.60:

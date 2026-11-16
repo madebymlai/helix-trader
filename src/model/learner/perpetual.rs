@@ -3,9 +3,7 @@
 //! settings, which it has no equivalent of.
 
 use anyhow::{Context, anyhow, ensure};
-use perpetual::booster::config::BoosterIO;
-use perpetual::objective::Objective;
-use perpetual::{Matrix, PerpetualBooster};
+use perpetual::{Matrix, PerpetualBooster, booster::config::BoosterIO, objective::Objective};
 use serde::{Deserialize, Serialize};
 
 use super::{Learner, Predictor, SavedModel, TrainingSet};

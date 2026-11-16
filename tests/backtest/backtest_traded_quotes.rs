@@ -9,7 +9,6 @@
 
 use std::{cell::RefCell, num::NonZeroUsize, rc::Rc, sync::Arc};
 
-use crate::common::{glbx, ic};
 use helix_trader::{
     backtest::Backtest,
     strategy::{Part, StandardConfig},
@@ -30,6 +29,8 @@ use nautilus_trading::{
     strategy::{Strategy, StrategyConfig, StrategyCore},
 };
 use serde::Deserialize;
+
+use crate::common::{glbx, ic};
 
 /// A part reading every series its config lists, trading one instrument.
 #[derive(Debug, Clone, Deserialize)]

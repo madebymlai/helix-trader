@@ -941,7 +941,6 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-
     use crate::testing::{
         AAPL_DIVIDENDS, AAPL_EARNINGS_CALENDAR, AAPL_FINANCIAL_REPORTS, AAPL_STOCK_SPLITS,
         AHMA_COMPANY_PROFILES, AHMA_STOCK_FUNDAMENTALS, AT016322245_CORPORATE_BONDS,

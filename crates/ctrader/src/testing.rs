@@ -10,28 +10,33 @@ use std::{
 
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::testing::wait_until_async;
-use nautilus_core::string::secret::SecretString;
+use nautilus_core::{UnixNanos, string::secret::SecretString};
+use nautilus_model::{identifiers::Venue, instruments::Cfd};
 use prost::Message as _;
+use rust_decimal::Decimal;
 use tempfile::TempDir;
 use tungstenite::Message;
 
-use super::common::messages::{
-    Payload, ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq, ProtoOaAccountAuthRes,
-    ProtoOaAccountsTokenInvalidatedEvent, ProtoOaApplicationAuthReq, ProtoOaApplicationAuthRes,
-    ProtoOaAssetListRes, ProtoOaErrorRes, ProtoOaGetDynamicLeverageByIdReq,
-    ProtoOaGetDynamicLeverageByIdRes, ProtoOaGetTickDataReq, ProtoOaGetTickDataRes,
-    ProtoOaRefreshTokenReq, ProtoOaRefreshTokenRes, ProtoOaSubscribeSpotsReq,
-    ProtoOaSubscribeSpotsRes, ProtoOaSymbolByIdRes, ProtoOaSymbolsListRes, ProtoOaTickData, frame,
+use super::{
+    common::{
+        messages::{
+            Payload, ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq,
+            ProtoOaAccountAuthRes, ProtoOaAccountsTokenInvalidatedEvent, ProtoOaApplicationAuthReq,
+            ProtoOaApplicationAuthRes, ProtoOaAssetListRes, ProtoOaErrorRes,
+            ProtoOaGetDynamicLeverageByIdReq, ProtoOaGetDynamicLeverageByIdRes,
+            ProtoOaGetTickDataReq, ProtoOaGetTickDataRes, ProtoOaRefreshTokenReq,
+            ProtoOaRefreshTokenRes, ProtoOaSubscribeSpotsReq, ProtoOaSubscribeSpotsRes,
+            ProtoOaSymbolByIdRes, ProtoOaSymbolsListRes, ProtoOaTickData, frame,
+        },
+        parse,
+        token::TokenPair,
+    },
+    config::{
+        CTraderAccountId, CTraderConnection, CTraderCredential, CTraderEnvironment,
+        CTraderSettingNames,
+    },
+    session::ticks::Tick,
 };
-use super::common::{parse, token::TokenPair};
-use nautilus_core::UnixNanos;
-use nautilus_model::{identifiers::Venue, instruments::Cfd};
-use rust_decimal::Decimal;
-
-use super::config::{
-    CTraderAccountId, CTraderConnection, CTraderCredential, CTraderEnvironment, CTraderSettingNames,
-};
-use super::session::ticks::Tick;
 
 /// The made-up broker the tests configure: its venue and the name of its
 /// clients, so that a broker's name left in the adapter fails a test.

@@ -9,11 +9,6 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use crate::common::{
-    INSTRUMENT_ID, MID_BAR_TYPE, backtest, catalog,
-    features::{SmaArgs, tables},
-    minute_quotes, ts,
-};
 use helix_trader::{
     model::{
         decide::{self, DecisionRule, FeatureRow},
@@ -35,6 +30,12 @@ use nautilus_model::{
 use nautilus_trading::{
     nautilus_strategy,
     strategy::{StrategyConfig, StrategyCore},
+};
+
+use crate::common::{
+    INSTRUMENT_ID, MID_BAR_TYPE, backtest, catalog,
+    features::{SmaArgs, tables},
+    minute_quotes, ts,
 };
 
 const STRATEGY: &str = "FEATURES-001";

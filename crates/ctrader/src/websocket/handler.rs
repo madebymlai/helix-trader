@@ -63,16 +63,19 @@ use zeroize::Zeroize;
 
 use super::{AUTH_TIMEOUT, TradeEvent, TradeMessage, spot_subscribed, spot_symbol, spot_topic};
 use crate::{
-    common::messages::{
-        CTraderError, Payload, ProtoErrorRes, ProtoHeartbeatEvent, ProtoMessage,
-        ProtoOaAccountAuthReq, ProtoOaAccountAuthRes, ProtoOaAccountDisconnectEvent,
-        ProtoOaAccountsTokenInvalidatedEvent, ProtoOaApplicationAuthReq, ProtoOaApplicationAuthRes,
-        ProtoOaClientDisconnectEvent, ProtoOaErrorRes, ProtoOaExecutionEvent,
-        ProtoOaOrderErrorEvent, ProtoOaRefreshTokenReq, ProtoOaRefreshTokenRes, ProtoOaSpotEvent,
-        ProtoOaSubscribeSpotsReq, ProtoOaSubscribeSpotsRes, ProtoOaUnsubscribeSpotsReq,
-        ProtoOaUnsubscribeSpotsRes, frame, open, payload_name, secret_frame,
+    common::{
+        messages::{
+            CTraderError, Payload, ProtoErrorRes, ProtoHeartbeatEvent, ProtoMessage,
+            ProtoOaAccountAuthReq, ProtoOaAccountAuthRes, ProtoOaAccountDisconnectEvent,
+            ProtoOaAccountsTokenInvalidatedEvent, ProtoOaApplicationAuthReq,
+            ProtoOaApplicationAuthRes, ProtoOaClientDisconnectEvent, ProtoOaErrorRes,
+            ProtoOaExecutionEvent, ProtoOaOrderErrorEvent, ProtoOaRefreshTokenReq,
+            ProtoOaRefreshTokenRes, ProtoOaSpotEvent, ProtoOaSubscribeSpotsReq,
+            ProtoOaSubscribeSpotsRes, ProtoOaUnsubscribeSpotsReq, ProtoOaUnsubscribeSpotsRes,
+            frame, open, payload_name, secret_frame,
+        },
+        token::{TokenLock, TokenPair, TokenStore},
     },
-    common::token::{TokenLock, TokenPair, TokenStore},
     config::{CTraderCredential, CTraderSettingNames},
 };
 

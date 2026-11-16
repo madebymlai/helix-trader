@@ -19,10 +19,9 @@ use std::{
 use anyhow::Context;
 use async_trait::async_trait;
 use jiff::Timestamp;
-use nautilus_common::live::dst::time::Duration;
 use nautilus_common::{
     clients::{DataClient, execute_instrument_subscriptions},
-    live::{runner::get_data_event_sender, sender::EventSender},
+    live::{dst::time::Duration, runner::get_data_event_sender, sender::EventSender},
     messages::{
         DataEvent, DataResponse,
         data::{
@@ -472,11 +471,11 @@ fn send(sender: &EventSender<DataEvent>, event: DataEvent) {
 #[cfg(test)]
 mod tests {
     use std::{
+        cell::RefCell,
         num::NonZeroUsize,
+        rc::Rc,
         sync::atomic::{AtomicBool, Ordering},
     };
-
-    use std::{cell::RefCell, rc::Rc};
 
     use nautilus_common::{
         cache::Cache,
@@ -492,8 +491,8 @@ mod tests {
     use nautilus_core::{Params, UUID4, UnixNanos};
     use nautilus_data::{client::DataClientAdapter, engine::DataEngine};
     use nautilus_live::{SocketReconnectRegistry, SocketReconnectRequestOutcome};
-    use nautilus_model::identifiers::TraderId;
     use nautilus_model::{
+        identifiers::TraderId,
         instruments::{Instrument, InstrumentAny},
         types::{Price, Quantity},
     };

@@ -69,7 +69,6 @@ use nautilus_model::{
     identifiers::{ClientOrderId, InstrumentId},
     instruments::{Instrument, InstrumentAny},
 };
-
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use ustr::Ustr;
 
@@ -1044,8 +1043,9 @@ fn ensure_all_loaded(requested: &[InstrumentId], loaded: &[InstrumentAny]) -> an
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use nautilus_model::instruments::stubs::futures_contract_es;
+
+    use super::*;
 
     fn es() -> InstrumentAny {
         InstrumentAny::FuturesContract(futures_contract_es(None, None))
