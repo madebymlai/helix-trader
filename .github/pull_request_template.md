@@ -28,7 +28,8 @@
 
 - [ ] Nautilus-native: what Nautilus provides comes from Nautilus, or each workaround was agreed, is
   marked `Temporary` and cites its issue (`docs/architecture.md`)
-- [ ] `prek run --all-files` passes
+- [ ] `CHANGED_BASE_SHA=$(git merge-base origin/develop HEAD) prek run --all-files` passes, the
+  checks of changed lines reading the branch's changes as CI does
 - [ ] `cargo test` passes, and the strategy's unit tests (`--features strategy-tests`) if a
   strategy's folder changed
 - [ ] New or changed logic is covered by tests, or no logic changed
