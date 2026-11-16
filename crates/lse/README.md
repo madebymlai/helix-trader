@@ -92,7 +92,7 @@ The config's `stream_ids` may name Nasdaq TotalView stocks too, under `XNAS`: `c
 
 ## Feature flags
 
-- `test-support`: Exposes the mock LSE peers and their captured payloads (`testing`), for a caller's tests of its own fill and live node through the adapter, as the cTrader crate exposes its hooks, and the HTTP client asking again as a test's retry config says, for a test that cannot wait out the backoff (`LseHttpClient::with_retry`).
+- `test-support`: Exposes the mock LSE peers and their captured payloads (`testing`), for a caller's tests of its own fill and live node through the adapter, as the cTrader crate exposes its hooks.
 
 ## Tests
 
