@@ -179,7 +179,8 @@ fn time_only() -> ModelConfig {
 /// one R worth 3.20 USD, at 10:00, and of 4 / 2.40 = 1.67 oz, 1 oz, worth
 /// 2.40 USD, at 11:00. Trading on 25M USD at the config's stake, 10 USD,
 /// the entries are 10 / 1.60 = 6.25 oz, 6 oz, and 10 / 2.40 = 4.17 oz, 4
-/// oz, each one R worth 9.60 USD, and at 12:00 10 / 1.70 = 5.88 oz, 5 oz.
+/// oz, each one R worth 9.60 USD, and at 12:00 10 / 1.70 = 5.88 oz, 5 oz,
+/// its R worth 5 × 1.70 = 8.50 USD.
 #[rstest]
 fn a_model_strategys_time_only_trade_fills_at_its_stake_over_its_atr() {
     let config = time_only();
@@ -189,30 +190,29 @@ fn a_model_strategys_time_only_trade_fills_at_its_stake_over_its_atr() {
 
     let record = traded(&config, models.path(), account(1));
 
-    let filled: Vec<(Timestamp, Quantity, Decimal)> = entries(&record)
-        .into_iter()
-        .map(|(at, quantity, risk)| (at, quantity, risk.unwrap().multiple))
-        .collect();
+    let risk = |r: &str| {
+        Some(EntryRisk {
+            r: Money::from(r),
+            multiple: Decimal::ONE,
+        })
+    };
     assert_eq!(
-        filled,
+        entries(&record),
         [
-            (decided("10:00"), Quantity::from(6), Decimal::ONE),
-            (decided("11:00"), Quantity::from(4), Decimal::ONE),
-            (decided("12:00"), Quantity::from(5), Decimal::ONE),
+            (decided("10:00"), Quantity::from(6), risk("9.60 USD")),
+            (decided("11:00"), Quantity::from(4), risk("9.60 USD")),
+            (decided("12:00"), Quantity::from(5), risk("8.50 USD")),
         ]
     );
-    for (_, _, risk) in entries(&record).iter().take(2) {
-        let r = risk.unwrap().r.as_f64();
-        assert!((r - 9.6).abs() < 1e-6, "{r}");
-    }
-    let units: Vec<(f64, f64)> = units(&rows)
-        .into_iter()
-        .map(|(_, long, short)| (long.as_f64(), short.as_f64()))
-        .collect();
-    assert_eq!(units.len(), 2, "{units:?}");
-    for ((long, short), unit) in units.into_iter().zip([3.2, 2.4]) {
-        assert!((long - unit).abs() < 1e-6 && (short - unit).abs() < 1e-6);
-    }
+    let unit = |unit: &str| Money::from(unit);
+    let decision = |hour: &str| UnixNanos::from(decided(&format!("{hour}:00")));
+    assert_eq!(
+        units(&rows),
+        [
+            (decision("10"), unit("3.20 USD"), unit("3.20 USD")),
+            (decision("11"), unit("2.40 USD"), unit("2.40 USD")),
+        ]
+    );
 }
 
 /// At a reference stake of 3 USD of 10M, a stop of 3.00 buys exactly one
