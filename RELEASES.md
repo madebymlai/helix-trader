@@ -2,6 +2,21 @@
 
 Released on TBD (UTC).
 
+### Breaking Changes
+
+- Removed the `fake` learner from builds without the new `test-support` feature: a config with `learner = { kind = "fake" }` no longer loads; use `baseline`, `lightgbm` or `perpetual`
+- Removed the `heartbeat` argument of `ctrader`'s `CTraderWebSocketClient::connect` and `CTraderSession::connect_to`; drop it, the session heartbeats every 10 s
+- Removed the `keepalive_secs` argument of `lse`'s `LseWebSocketClient::connect`; drop it, the client pings every 25 s
+- Removed `Deserialize` from `TickSeries`; read tick series through a strategy config's `[data]` series
+- Removed `Launcher::in_process` outside the crate's own tests
+
+### Internal Improvements
+
+- Improved the tests to `docs/testing.md`'s standard: same-shape tests parametrized with `#[case]`, duplicates and tests of library logic removed, messages asserted by the facts they carry, waits bounded, expected values worked by hand, and each change checked by a mutation
+- Added binary tests of the command line's refusals (`tests/backtest/cli.rs`) in place of in-process parses
+- Changed the backtest fee model and the live recording to set Nautilus' `charge_commission_once` and `promote_on_close` explicitly rather than rely on their defaults
+- Removed `lse`'s `LseHttpClient::with_retry`, a test hook
+
 ### Documentation Updates
 
 - Changed the release steps to open the next release's version in `Cargo.toml` with its section, as Nautilus does
