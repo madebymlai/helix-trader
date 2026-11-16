@@ -902,14 +902,22 @@ mod tests {
         );
     }
 
-    /// Never retrained, the meta's model of the 6th in use: the sides fit
-    /// at the train.
+    /// Never retrained, a meta's model of the 6th with no pair of the sides
+    /// beside it: the sides fit at the train, and the meta, learned from
+    /// sides no longer stored, is not kept to filter new ones but waits, no
+    /// pair of the sides being valid before the 7th.
     #[rstest]
-    fn never_retrained_with_the_meta_in_use_the_sides_fit_at_the_train() {
+    fn never_retrained_a_meta_with_no_pair_waits_while_the_sides_fit_at_the_train() {
         let plan = never().plan(at(SEVENTH), &stores(&[], &[], &[SIXTH]));
 
-        assert_eq!(plan.steps.long, Some(fit(SIXTH, SEVENTH)));
-        assert_eq!(plan.steps.short, Some(fit(SIXTH, SEVENTH)));
+        assert_eq!(
+            plan.steps,
+            Models {
+                long: Some(fit(SIXTH, SEVENTH)),
+                short: Some(fit(SIXTH, SEVENTH)),
+                meta: Some(Step::Wait),
+            }
+        );
     }
 
     /// The sides of a two-time train fitted as of the 5th: the meta fits
