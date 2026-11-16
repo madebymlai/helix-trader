@@ -41,7 +41,7 @@ const VERSION: u32 = 1;
 ///
 /// Panics if `[indicators]` does not build both averages, which the load
 /// refuses.
-pub fn features(config: &ModelEmaConfig) -> anyhow::Result<Rc<FeatureSet>> {
+pub(super) fn features(config: &ModelEmaConfig) -> anyhow::Result<Rc<FeatureSet>> {
     config
         .data
         .bar_types()

@@ -65,7 +65,7 @@ impl DataClientFactory for CTraderDataClientFactory {
         self.name.as_str()
     }
 
-    fn config_type(&self) -> &str {
+    fn config_type(&self) -> &'static str {
         "CTraderDataClientConfig"
     }
 }
@@ -129,7 +129,7 @@ impl ExecutionClientFactory for CTraderExecutionClientFactory {
         self.name.as_str()
     }
 
-    fn config_type(&self) -> &str {
+    fn config_type(&self) -> &'static str {
         "CTraderExecutionClientConfig"
     }
 }

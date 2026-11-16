@@ -2712,10 +2712,10 @@ mod tests {
     /// holds them.
     fn tables() -> IndicatorsConfig {
         toml::from_str(
-            r#"
+            "
             gc_2_trades = { period = 2 }
             hourly_close = { period = 1 }
-            "#,
+            ",
         )
         .unwrap()
     }

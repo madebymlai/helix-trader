@@ -476,7 +476,9 @@ fn backtest_on_models<S: ModelStrategy>(
     let (commission, balance) = (args.commission.commission(), args.balance);
     match args.latency {
         None => {
-            println!("Run at: commission {commission}, balance {balance} (--commission, --balance)")
+            println!(
+                "Run at: commission {commission}, balance {balance} (--commission, --balance)"
+            );
         }
         Some(latency) => println!(
             "Run at: commission {commission}, balance {balance}, latency {latency} (--commission, \

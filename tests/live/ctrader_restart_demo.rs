@@ -664,7 +664,7 @@ impl Probe {
             status: order.as_ref().map(OrderAny::status),
             quantity: order.as_ref().map(|o| o.quantity().to_string()),
             filled: order.as_ref().map(|o| o.filled_qty().to_string()),
-            fills: order.as_ref().map(fills).unwrap_or_default(),
+            fills: order.as_ref().map_or_default(fills),
         }
     }
 

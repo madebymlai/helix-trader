@@ -1121,7 +1121,7 @@ mod tests {
         for series in [yields("GCQ26.GLBX"), yields("US10Y")] {
             assert_eq!(
                 series.slices(start, end),
-                [custom_slice(series.clone(), start, end)]
+                [custom_slice(series, start, end)]
             );
         }
     }

@@ -21,27 +21,27 @@ use ustr::Ustr;
 
 use super::ts;
 
-pub const ROOT: &str = "GC.GLBX";
+pub(crate) const ROOT: &str = "GC.GLBX";
 /// The front contract up to the roll.
-pub const PRE: &str = "GCQ26.GLBX";
+pub(crate) const PRE: &str = "GCQ26.GLBX";
 /// The front contract from the roll on.
-pub const POST: &str = "GCZ26.GLBX";
+pub(crate) const POST: &str = "GCZ26.GLBX";
 
 /// `hh:mm:ss.fffffffff` UTC on Tuesday 28 July 2026.
-pub fn tuesday(time: &str) -> Timestamp {
+pub(crate) fn tuesday(time: &str) -> Timestamp {
     ts(&format!("2026-07-28T{time}Z"))
 }
 
 /// `hh:mm:ss.fffffffff` UTC on Wednesday 29 July 2026.
-pub fn wednesday(time: &str) -> Timestamp {
+pub(crate) fn wednesday(time: &str) -> Timestamp {
     ts(&format!("2026-07-29T{time}Z"))
 }
 
 /// One nanosecond.
-pub const NANOSECOND: SignedDuration = SignedDuration::from_nanos(1);
+pub(crate) const NANOSECOND: SignedDuration = SignedDuration::from_nanos(1);
 
 /// The roll: 00:00 UTC on Wednesday 29 July 2026.
-pub fn roll() -> Timestamp {
+pub(crate) fn roll() -> Timestamp {
     wednesday("00:00:00")
 }
 
@@ -58,7 +58,7 @@ fn contract(id: &str, raw: &str, expiration: &str) -> InstrumentAny {
 }
 
 /// A trade of `id` at `time` and `price`, bought.
-pub fn trade(id: &str, time: Timestamp, price: &str) -> TradeTick {
+pub(crate) fn trade(id: &str, time: Timestamp, price: &str) -> TradeTick {
     TradeTick::new(
         InstrumentId::from(id),
         Price::from(price),
@@ -82,7 +82,7 @@ fn depth(id: &str, time: Timestamp) -> OrderBookDepth {
 /// The trades of August's contract: two before the backtests' start, not
 /// replayed, two in its slice (the last at its last nanosecond), two after
 /// the roll.
-pub fn pre_trades() -> Vec<TradeTick> {
+pub(crate) fn pre_trades() -> Vec<TradeTick> {
     vec![
         trade(PRE, tuesday("22:30:00"), "3990.00"),
         trade(PRE, tuesday("22:45:00"), "3989.00"),
@@ -95,7 +95,7 @@ pub fn pre_trades() -> Vec<TradeTick> {
 
 /// The trades of December's contract: one before the roll, two in its
 /// slice (the first at the roll), one after the backtests' end.
-pub fn post_trades() -> Vec<TradeTick> {
+pub(crate) fn post_trades() -> Vec<TradeTick> {
     vec![
         trade(POST, tuesday("23:15:00"), "4040.00"),
         trade(POST, roll(), "4041.00"),
@@ -105,7 +105,7 @@ pub fn post_trades() -> Vec<TradeTick> {
 }
 
 /// The snapshots of August's contract: one in its slice, one after.
-pub fn pre_depths() -> Vec<OrderBookDepth> {
+pub(crate) fn pre_depths() -> Vec<OrderBookDepth> {
     vec![
         depth(PRE, tuesday("23:45:00")),
         depth(PRE, wednesday("00:10:00")),
@@ -113,7 +113,7 @@ pub fn pre_depths() -> Vec<OrderBookDepth> {
 }
 
 /// The snapshots of December's contract: one before its slice, one in it.
-pub fn post_depths() -> Vec<OrderBookDepth> {
+pub(crate) fn post_depths() -> Vec<OrderBookDepth> {
     vec![
         depth(POST, tuesday("23:50:00")),
         depth(POST, wednesday("00:20:00")),
@@ -123,7 +123,7 @@ pub fn post_depths() -> Vec<OrderBookDepth> {
 /// A catalog of both contracts, their trades and their book depth, each
 /// stored over 22:00 Tuesday to 02:00 Wednesday; December's trades left out
 /// unless `post_trades_stored`.
-pub fn catalog_storing(post_trades_stored: bool) -> TempDir {
+pub(crate) fn catalog_storing(post_trades_stored: bool) -> TempDir {
     let dir = tempfile::tempdir().unwrap();
     let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
     catalog
@@ -150,13 +150,13 @@ pub fn catalog_storing(post_trades_stored: bool) -> TempDir {
 }
 
 /// A catalog of both contracts, their trades and their book depth.
-pub fn catalog() -> TempDir {
+pub(crate) fn catalog() -> TempDir {
     catalog_storing(true)
 }
 
 /// A catalog of both contracts and `trades`, of either, stored over 22:00
 /// Tuesday to 02:00 Wednesday.
-pub fn catalog_of_trades(trades: Vec<TradeTick>) -> TempDir {
+pub(crate) fn catalog_of_trades(trades: Vec<TradeTick>) -> TempDir {
     let dir = tempfile::tempdir().unwrap();
     let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
     catalog

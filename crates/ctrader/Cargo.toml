@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [features]
 # The hooks of a caller's end-to-end test of a session's token renewal on a
 # real cTrader server, as Nautilus' crates expose theirs: a forced renewal

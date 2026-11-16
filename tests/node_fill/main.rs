@@ -226,7 +226,7 @@ impl DataClientFactory for FakeFactory {
         self.1
     }
 
-    fn config_type(&self) -> &str {
+    fn config_type(&self) -> &'static str {
         "FakeConfig"
     }
 }

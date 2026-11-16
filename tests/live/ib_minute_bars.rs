@@ -131,8 +131,8 @@ impl DataActor for Probe {
         println!(
             "PROBE warmup response at {now}: {} minute bars, {} to {}",
             bars.len(),
-            bars.first().map(|bar| bar.ts_event).unwrap_or_default(),
-            bars.last().map(|bar| bar.ts_event).unwrap_or_default(),
+            bars.first().map_or_default(|bar| bar.ts_event),
+            bars.last().map_or_default(|bar| bar.ts_event),
         );
         Ok(())
     }

@@ -60,14 +60,14 @@ use crate::common::{
     ic,
 };
 
-pub const STRATEGY: &str = "DATASET-001";
+pub(crate) const STRATEGY: &str = "DATASET-001";
 
 /// Decides every hour on the last mid of IC's gold through its model
 /// handle; records the rows published for its decisions and the trades
 /// they make, which it sends at its stake, their entries' fills, and the
 /// positions they closed.
 #[derive(Debug)]
-pub struct ModelProbe {
+pub(crate) struct ModelProbe {
     core: StrategyCore,
     model: Rc<ModelHandle>,
     /// The stake its decisions' trades are sent at.
@@ -77,7 +77,7 @@ pub struct ModelProbe {
 
 /// What a trading probe decided.
 #[derive(Debug, Default)]
-pub struct Record {
+pub(crate) struct Record {
     /// The row of each decision on warm features.
     pub rows: Vec<FeatureRow>,
     /// Each decision to trade, and its time.
@@ -159,21 +159,21 @@ impl DataActor for ModelProbe {
     }
 }
 
-pub fn rule() -> DecisionRule {
+pub(crate) fn rule() -> DecisionRule {
     DecisionRule::Every(SignedDuration::from_hours(1))
 }
 
 /// The last mid of a quote, Nautilus' simple average of one,
 /// `[indicators.mid]`.
-pub const MID: Declared<SmaArgs> = Declared::new("mid");
+pub(crate) const MID: Declared<SmaArgs> = Declared::new("mid");
 
 /// `[indicators.mid]`, as `[indicators]` holds it.
-pub fn mid_tables() -> IndicatorsConfig {
+pub(crate) fn mid_tables() -> IndicatorsConfig {
     tables(r#"mid = { period = 1, price_type = "MID" }"#)
 }
 
 /// The probe's one feature, the last mid of IC's gold.
-pub fn features() -> Rc<FeatureSet> {
+pub(crate) fn features() -> Rc<FeatureSet> {
     FeatureSet::builder()
         .quotes(InstrumentId::from(ic::INSTRUMENT_ID), MID, &mid_tables())
         .build()
@@ -183,10 +183,10 @@ pub fn features() -> Rc<FeatureSet> {
 /// The reference stake of the probe's target: 4 USD of the dataset
 /// balance of 10M USD (`venue`), which buys one ounce, IC's whole ounces,
 /// on a stop worth from 2 to 4 USD on one, as 7.5 bps of gold near 4000 is.
-pub const RISK: &str = "0.00004%";
+pub(crate) const RISK: &str = "0.00004%";
 
 /// A bracket 7.5 bps away on both sides closed after 2 hours, at `RISK`.
-pub fn target() -> TargetConfig {
+pub(crate) fn target() -> TargetConfig {
     TargetConfig::builder()
         .instrument_id(InstrumentId::from(ic::INSTRUMENT_ID))
         .risk(RISK.parse().unwrap())
@@ -208,7 +208,7 @@ pub fn target() -> TargetConfig {
 /// 12 before them calibrated on, by the fake learner, published from
 /// nought per trade over a trade; each side traded from an expected net
 /// P&L of nought.
-pub fn config() -> ModelConfig {
+pub(crate) fn config() -> ModelConfig {
     ModelConfig::builder()
         .decision(rule())
         .target(target())
@@ -227,10 +227,10 @@ pub fn config() -> ModelConfig {
 }
 
 /// A deterministic random walk in [0, 1).
-pub struct Lcg(pub u64);
+pub(crate) struct Lcg(pub u64);
 
 impl Lcg {
-    pub fn next(&mut self) -> f64 {
+    pub(crate) fn next(&mut self) -> f64 {
         self.0 = self
             .0
             .wrapping_mul(6_364_136_223_846_793_005)
@@ -240,13 +240,13 @@ impl Lcg {
 }
 
 /// IC's gold over `[from, to)` in a catalog, the quotes of `walk_quotes`.
-pub fn walk(from: Timestamp, to: Timestamp) -> tempfile::TempDir {
+pub(crate) fn walk(from: Timestamp, to: Timestamp) -> tempfile::TempDir {
     ic::catalog_of(walk_quotes(from, to), from, to)
 }
 
 /// IC's gold's quotes over `[from, to)`, one every 5 s, the bid a random
 /// walk of up to 0.30 a step, the ask 0.20 above.
-pub fn walk_quotes(from: Timestamp, to: Timestamp) -> Vec<QuoteTick> {
+pub(crate) fn walk_quotes(from: Timestamp, to: Timestamp) -> Vec<QuoteTick> {
     let mut walk = Lcg(7);
     let mut bid = 4000.0_f64;
     let mut quotes = vec![];
@@ -273,7 +273,7 @@ fn probe(
 /// The probe deciding on `features` as `config` says, for a strategy of
 /// `requirements`, in `mode`, sending its trades at the config's stake,
 /// and what it records.
-pub fn probe_reading(
+pub(crate) fn probe_reading(
     features: Rc<FeatureSet>,
     config: &ModelConfig,
     requirements: &DataRequirements,
@@ -311,7 +311,7 @@ fn probe_staking(
 
 /// The model of the probe deciding on `features` as `config` says, of what
 /// it reads (`requirements`).
-pub fn blueprint(features: Rc<FeatureSet>, config: ModelConfig) -> ModelBlueprint {
+pub(crate) fn blueprint(features: Rc<FeatureSet>, config: ModelConfig) -> ModelBlueprint {
     blueprint_reading(features, config, requirements())
 }
 
@@ -326,7 +326,7 @@ fn blueprint_reading(
 }
 
 /// What the probe reads, as `backtest` replays it: IC's gold quotes.
-pub fn requirements() -> DataRequirements {
+pub(crate) fn requirements() -> DataRequirements {
     DataRequirements {
         bar_types: vec![],
         ticks: vec![TickSeries {
@@ -339,7 +339,7 @@ pub fn requirements() -> DataRequirements {
 }
 
 /// The venue of `backtest`, as given: 30 USD per million traded, 10M USD.
-pub fn venue() -> DatasetVenue {
+pub(crate) fn venue() -> DatasetVenue {
     DatasetVenue {
         commission: Commission::Rate(Decimal::new(3, 5)),
         balance: Money::from("10000000 USD"),
@@ -349,7 +349,7 @@ pub fn venue() -> DatasetVenue {
 
 /// The run of the probe over `[from, to]` on IC's hedging venue, 30 USD
 /// per million traded, 10M USD (`venue`).
-pub fn backtest(catalog: &Path, from: Timestamp, to: Timestamp) -> Backtest {
+pub(crate) fn backtest(catalog: &Path, from: Timestamp, to: Timestamp) -> Backtest {
     Backtest {
         catalog: catalog.to_path_buf(),
         bar_types: vec![],
@@ -368,7 +368,7 @@ pub fn backtest(catalog: &Path, from: Timestamp, to: Timestamp) -> Backtest {
 
 /// The replay of a build or a train: the probe's dataset run over
 /// `[from, to]`; the rows it settled.
-pub fn replay(
+pub(crate) fn replay(
     catalog: &tempfile::TempDir,
     from: Timestamp,
     to: Timestamp,
@@ -377,7 +377,7 @@ pub fn replay(
 }
 
 /// The replay of a build or a train of the probe deciding on `features`.
-pub fn replay_on(
+pub(crate) fn replay_on(
     catalog: &tempfile::TempDir,
     features: Rc<FeatureSet>,
     from: Timestamp,
@@ -388,7 +388,7 @@ pub fn replay_on(
 
 /// The replay of a build or a train of the probe deciding on `features`
 /// as `config` says.
-pub fn replay_of(
+pub(crate) fn replay_of(
     catalog: &tempfile::TempDir,
     features: Rc<FeatureSet>,
     config: &ModelConfig,
@@ -403,7 +403,7 @@ pub fn replay_of(
 
 /// The probe of `config` trading over `[from, to]` on the models of the
 /// store under `models`; what it decided.
-pub fn trade(
+pub(crate) fn trade(
     catalog: &tempfile::TempDir,
     from: Timestamp,
     to: Timestamp,
@@ -414,7 +414,7 @@ pub fn trade(
 }
 
 /// What the probe deciding on `features` decided, trading as `trade`.
-pub fn trade_on(
+pub(crate) fn trade_on(
     catalog: &tempfile::TempDir,
     features: Rc<FeatureSet>,
     from: Timestamp,
@@ -431,7 +431,7 @@ pub fn trade_on(
 
 /// The account a probe trades on and the multiple of the config's stake it
 /// sends its trades at.
-pub struct Account {
+pub(crate) struct Account {
     pub balance: Money,
     pub multiple: Decimal,
 }
@@ -439,7 +439,7 @@ pub struct Account {
 /// What the probe deciding on `features` decided trading over `[from,
 /// to]` on the models of `config` under `models`, its backtest's account
 /// and its stake `account`'s; the models' dataset venue `venue`'s.
-pub fn trade_staking(
+pub(crate) fn trade_staking(
     catalog: &tempfile::TempDir,
     features: Rc<FeatureSet>,
     (from, to): (Timestamp, Timestamp),
@@ -469,7 +469,7 @@ pub fn trade_staking(
 /// learner then predicts the mean of its training labels, so each model's
 /// prediction names it.
 #[derive(Default)]
-pub struct Missing {
+pub(crate) struct Missing {
     quoted: bool,
 }
 
@@ -505,7 +505,7 @@ impl Feature for Missing {
 /// The arguments of `Missing`: none.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MissingArgs {}
+pub(crate) struct MissingArgs {}
 
 impl IndicatorArgs for MissingArgs {
     type Indicator = Missing;
@@ -516,10 +516,10 @@ impl IndicatorArgs for MissingArgs {
 }
 
 /// The missing feature, `[indicators.missing]`.
-pub const MISSING: Declared<MissingArgs> = Declared::new("missing");
+pub(crate) const MISSING: Declared<MissingArgs> = Declared::new("missing");
 
 /// The features of the missing one alone on the quotes of IC's gold.
-pub fn missing() -> FeatureSetBuilder {
+pub(crate) fn missing() -> FeatureSetBuilder {
     FeatureSet::builder().quotes(
         InstrumentId::from(ic::INSTRUMENT_ID),
         MISSING,
@@ -529,14 +529,14 @@ pub fn missing() -> FeatureSetBuilder {
 
 /// The calibration of the baseline meta models, their level line `0.1 +
 /// 0.5 E`: a meta predicting an R of 0.1 expects 0.15.
-pub const CALIBRATION: Line = Line {
+pub(crate) const CALIBRATION: Line = Line {
     alpha: 0.1,
     beta: 0.5,
 };
 
 /// The R a side's baseline of `tenths` predicts: `tenths` less 5, over 10,
 /// so above 5 a gain, below a loss and 5 nought.
-pub fn r(tenths: usize) -> f64 {
+pub(crate) fn r(tenths: usize) -> f64 {
     (tenths as f64 - 5.0) / 10.0
 }
 
@@ -544,7 +544,7 @@ pub fn r(tenths: usize) -> f64 {
 /// `valid_from` leaving each side's prediction as it is, up to rounding,
 /// and to the bit on one side: the level line `C' = C`, and of two sides
 /// the side call `D' = D`.
-pub fn unchanged(config: &ModelConfig, valid_from: Timestamp) -> ModelCalibration {
+pub(crate) fn unchanged(config: &ModelConfig, valid_from: Timestamp) -> ModelCalibration {
     let sides: Vec<Side> = config.margins.sides().map(|(side, _)| side).collect();
     ModelCalibration::Pair(PairCalibration {
         valid_from,
@@ -566,7 +566,7 @@ pub fn unchanged(config: &ModelConfig, valid_from: Timestamp) -> ModelCalibratio
 /// (`unchanged`), as a train publishes one: above 5 a trade expected to gain.
 /// For a test whose models come from no train: the fixture's walk has no
 /// edge for a train to publish on (`backtest_train` trains on one).
-pub fn baseline_of(
+pub(crate) fn baseline_of(
     features: &Rc<FeatureSet>,
     config: &ModelConfig,
     side: Side,
@@ -583,7 +583,7 @@ pub fn baseline_of(
 /// says (the side picked, the decision's level and side call after their
 /// features), valid from `valid_from`, predicting an R of `r(tenths)`
 /// whatever the row, calibrated by `CALIBRATION`.
-pub fn meta_baseline_of(
+pub(crate) fn meta_baseline_of(
     features: &Rc<FeatureSet>,
     config: &ModelConfig,
     valid_from: Timestamp,
@@ -630,7 +630,7 @@ fn stored_baseline(
 /// the mean of its labels whatever the row, its manifest's baseline that
 /// mean, its holdout's skill 0.1: a meta's calibrated by `CALIBRATION`, a
 /// side's by its pair's calibration leaving it as it is (`unchanged`).
-pub fn baseline_stored(
+pub(crate) fn baseline_stored(
     strategy_id: StrategyId,
     fingerprint: String,
     feature_names: Vec<String>,

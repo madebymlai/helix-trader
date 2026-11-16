@@ -398,7 +398,7 @@ mod tests {
         .unwrap();
 
         let stored = ParquetDataCatalog::new(dir.path(), None, None, None, None)
-            .bars(Some(vec![bars.clone()]), None, None)
+            .bars(Some(vec![bars]), None, None)
             .unwrap();
         let rows: Vec<_> = stored
             .iter()
@@ -672,7 +672,7 @@ mod tests {
             .unwrap();
 
             let stored = ParquetDataCatalog::new(dir.path(), None, None, None, None)
-                .bars(Some(vec![bars.clone()]), None, None)
+                .bars(Some(vec![bars]), None, None)
                 .unwrap();
             let row = |b: &Bar| (b.ts_event, b.open, b.high, b.low, b.close, b.volume);
             let expected = |(close, [open, high, low, last]): Row| {

@@ -710,7 +710,7 @@ mod tests {
             ),
             (r#"limit = "90m", atr = { period = 1 }"#, "limit 1h 30m"),
         ] {
-            let toml = section(&format!(r#"target = {{ {target} }}"#));
+            let toml = section(&format!("target = {{ {target} }}"));
 
             let err = format!("{:#}", load_warming(&toml, warmup).unwrap_err());
 
@@ -812,9 +812,8 @@ mod tests {
 
     #[test]
     fn a_target_without_a_limit_is_refused() {
-        let toml = section(
-            r#"target = { bracket = { take_profit = { bps = 7.5 }, stop = { bps = 5 } } }"#,
-        );
+        let toml =
+            section("target = { bracket = { take_profit = { bps = 7.5 }, stop = { bps = 5 } } }");
 
         let err = refused(&toml);
 
@@ -1207,7 +1206,7 @@ mod tests {
     /// A bracket 2 ATRs away in the side's favor, 1.5 against it, its ATR
     /// `atr`, a table or none.
     fn atr_section(atr: Option<&str>) -> String {
-        let atr = atr.map(|atr| format!(", atr = {atr}")).unwrap_or_default();
+        let atr = atr.map_or_default(|atr| format!(", atr = {atr}"));
         section(&format!(
             r#"target = {{ bracket = {{ take_profit = {{ atr = 2.0 }}, stop = {{ atr = 1.5 }}{atr} }}, limit = "45m" }}"#
         ))

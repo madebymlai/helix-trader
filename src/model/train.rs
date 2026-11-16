@@ -484,7 +484,7 @@ impl Training {
         }
         let calibration = ModelCalibration::Pair(PairCalibration {
             valid_from: at,
-            sides: sides.clone(),
+            sides,
             lines: calibration,
         });
         let published = trained
@@ -3046,7 +3046,7 @@ mod tests {
             retrain: Retrain::Every(SignedDuration::from_hours(24)),
         };
         let fitted_or_in_use = Trained {
-            long: Some(published.clone()),
+            long: Some(published),
             short: Some(in_use.clone()),
             meta: Some(in_use.clone()),
         };

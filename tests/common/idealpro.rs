@@ -21,16 +21,16 @@ use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use super::ic::at;
 
 /// IB's euro in US dollars.
-pub const EURUSD: &str = "EUR/USD.IDEALPRO";
+pub(crate) const EURUSD: &str = "EUR/USD.IDEALPRO";
 
 /// EUR/USD on IDEALPRO, IB's cash FX pair, on 5 decimals.
-pub fn pair() -> InstrumentAny {
+pub(crate) fn pair() -> InstrumentAny {
     let id = InstrumentId::from(EURUSD);
     InstrumentAny::CurrencyPair(default_fx_ccy(id.symbol, Some(id.venue)))
 }
 
 /// The pair's 1-minute bars priced at `price_type`, IB's own.
-pub fn bar_type(price_type: PriceType) -> BarType {
+pub(crate) fn bar_type(price_type: PriceType) -> BarType {
     BarType::new(
         InstrumentId::from(EURUSD),
         BarSpecification::new(1, BarAggregation::Minute, price_type),
@@ -40,7 +40,7 @@ pub fn bar_type(price_type: PriceType) -> BarType {
 
 /// The pair's bars priced at `price_type`, flat at `price`, one a minute
 /// closing from `from` + 1 minute to 12:00.
-pub fn bars(price_type: PriceType, price: &str, from: Timestamp) -> Vec<Bar> {
+pub(crate) fn bars(price_type: PriceType, price: &str, from: Timestamp) -> Vec<Bar> {
     let price = Price::from(price);
     let mut bars = vec![];
     let mut close = from + SignedDuration::from_mins(1);
@@ -62,7 +62,7 @@ pub fn bars(price_type: PriceType, price: &str, from: Timestamp) -> Vec<Bar> {
 
 /// Stores the pair in the catalog in `dir`, and its BID bars at `bid` and
 /// ASK bars at `ask` from `from` to 12:00, stored over that window.
-pub fn store(dir: &Path, bid: &str, ask: &str, from: Timestamp) {
+pub(crate) fn store(dir: &Path, bid: &str, ask: &str, from: Timestamp) {
     store_definition(dir);
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     for (price_type, price) in [(PriceType::Bid, bid), (PriceType::Ask, ask)] {
@@ -79,7 +79,7 @@ pub fn store(dir: &Path, bid: &str, ask: &str, from: Timestamp) {
 
 /// Stores the pair's definition alone in the catalog in `dir`, none of its
 /// bars.
-pub fn store_definition(dir: &Path) {
+pub(crate) fn store_definition(dir: &Path) {
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     catalog.write_instruments(vec![pair()]).unwrap();
 }

@@ -201,11 +201,11 @@ impl DataClientFactory for FakeFactory {
         }))
     }
 
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "FAKE"
     }
 
-    fn config_type(&self) -> &str {
+    fn config_type(&self) -> &'static str {
         "FakeConfig"
     }
 }
@@ -1276,7 +1276,7 @@ fn warm_deltas(dir: &Path) -> (Rc<Books>, Vec<(u64, u64)>) {
     }];
     let requirements = DataRequirements {
         bar_types: vec![],
-        ticks: ticks.clone(),
+        ticks: ticks,
         custom: vec![],
         warmup: WARMUP,
     };

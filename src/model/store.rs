@@ -619,8 +619,10 @@ impl Pair {
         self.models
             .iter()
             .find(|(traded, _)| *traded == side)
-            .map(|(_, model)| model)
-            .unwrap_or_else(|| panic!("the pair holds no {} model", side.name()))
+            .map_or_else(
+                || panic!("the pair holds no {} model", side.name()),
+                |(_, model)| model,
+            )
     }
 }
 
@@ -966,14 +968,16 @@ mod values {
         }
     }
 
-    pub fn serialize<S: Serializer>(row: &[f64], serializer: S) -> Result<S::Ok, S::Error> {
+    pub(super) fn serialize<S: Serializer>(row: &[f64], serializer: S) -> Result<S::Ok, S::Error> {
         row.iter()
             .map(|&value| Value::from(value))
             .collect::<Vec<_>>()
             .serialize(serializer)
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<f64>, D::Error> {
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<f64>, D::Error> {
         Vec::<Value>::deserialize(deserializer)?
             .into_iter()
             .map(Value::read)
@@ -981,16 +985,21 @@ mod values {
     }
 
     /// One value as JSON, as a row's are.
-    pub mod one {
+    pub(super) mod one {
         use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
         use super::Value;
 
-        pub fn serialize<S: Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
+        pub(crate) fn serialize<S: Serializer>(
+            value: &f64,
+            serializer: S,
+        ) -> Result<S::Ok, S::Error> {
             Value::from(*value).serialize(serializer)
         }
 
-        pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f64, D::Error> {
+        pub(crate) fn deserialize<'de, D: Deserializer<'de>>(
+            deserializer: D,
+        ) -> Result<f64, D::Error> {
             Value::deserialize(deserializer)?.read()
         }
     }

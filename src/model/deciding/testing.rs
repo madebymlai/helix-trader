@@ -43,7 +43,7 @@ use crate::{
 
 /// The holdout of the models of the tests, as a train publishes it: a
 /// skill of 0.1.
-pub const HOLDOUT: Holdout = Holdout {
+pub(crate) const HOLDOUT: Holdout = Holdout {
     earnings: Earnings {
         taken: NO_TRADE,
         every: NO_TRADE,
@@ -65,13 +65,13 @@ const NO_TRADE: Trades = Trades {
     win_rate: None,
 };
 
-pub const STRATEGY: &str = "HANDLE-001";
-pub const AUD: &str = "AUD/USD.SIM";
-pub const GOLD: &str = "XAUUSD.ICMARKETS";
+pub(crate) const STRATEGY: &str = "HANDLE-001";
+pub(crate) const AUD: &str = "AUD/USD.SIM";
+pub(crate) const GOLD: &str = "XAUUSD.ICMARKETS";
 
 /// XAUUSD as IC defines it (`crates/ctrader/README.md`, "Instruments and
 /// account"): whole ounces quoted in USD on ticks of a cent.
-pub fn gold() -> InstrumentAny {
+pub(crate) fn gold() -> InstrumentAny {
     let margin = Decimal::ONE / Decimal::from(30);
     InstrumentAny::Cfd(
         Cfd::builder()
@@ -99,21 +99,21 @@ pub fn gold() -> InstrumentAny {
 /// The calibration of every meta model of the tests, its level line `0.1 +
 /// 0.5 E`: a meta predicting an R of 0.3 expects 0.25, one predicting nought
 /// 0.1.
-pub const CALIBRATION: Line = Line {
+pub(crate) const CALIBRATION: Line = Line {
     alpha: 0.1,
     beta: 0.5,
 };
 
 /// The R a side's baseline of `tenths` predicts: `tenths` less 5, over 10,
 /// so above 5 a gain, below a loss and 5 nought.
-pub fn r(tenths: usize) -> f64 {
+pub(crate) fn r(tenths: usize) -> f64 {
     (tenths as f64 - 5.0) / 10.0
 }
 
 /// The calibration of the pair of `config`'s sides valid from
 /// `valid_from` leaving each side's prediction as it is, up to rounding:
 /// the level line `C' = C`, and of two sides the side call `D' = D`.
-pub fn unchanged(config: &ModelConfig, valid_from: Timestamp) -> ModelCalibration {
+pub(crate) fn unchanged(config: &ModelConfig, valid_from: Timestamp) -> ModelCalibration {
     let sides: Vec<Side> = config.margins.sides().map(|(side, _)| side).collect();
     ModelCalibration::Pair(PairCalibration {
         valid_from,
@@ -128,12 +128,12 @@ pub fn unchanged(config: &ModelConfig, valid_from: Timestamp) -> ModelCalibratio
     })
 }
 
-pub fn at(time: &str) -> Timestamp {
+pub(crate) fn at(time: &str) -> Timestamp {
     time.parse().unwrap()
 }
 
 /// The last mid of AUD/USD, warm once a quote came.
-pub fn features() -> Rc<FeatureSet> {
+pub(crate) fn features() -> Rc<FeatureSet> {
     last_mid(InstrumentId::from(AUD)).build().unwrap()
 }
 
@@ -141,7 +141,7 @@ pub fn features() -> Rc<FeatureSet> {
 /// of 0.5%, its unit the worth of its ATR of one hourly bar of the mids on
 /// its size at the reference stake, the long traded from an expected net R
 /// of nought, the baseline learner.
-pub fn config() -> ModelConfig {
+pub(crate) fn config() -> ModelConfig {
     ModelConfig::builder()
         .decision(DecisionRule::Every(SignedDuration::from_hours(1)))
         .target(
@@ -174,7 +174,7 @@ pub fn config() -> ModelConfig {
 }
 
 /// `config`, the short traded too, from nought.
-pub fn both_sides() -> ModelConfig {
+pub(crate) fn both_sides() -> ModelConfig {
     ModelConfig {
         margins: Margins {
             long: Some(R::new(0.0)),
@@ -185,7 +185,7 @@ pub fn both_sides() -> ModelConfig {
 }
 
 /// The meta model taking a trade from an expected net R of 0.15.
-pub fn meta() -> MetaConfig {
+pub(crate) fn meta() -> MetaConfig {
     MetaConfig {
         window: SignedDuration::from_hours(48),
         holdout: SignedDuration::from_hours(12),
@@ -197,7 +197,7 @@ pub fn meta() -> MetaConfig {
 }
 
 /// `config`, its trades taken by `meta`.
-pub fn with_meta(meta: MetaConfig) -> ModelConfig {
+pub(crate) fn with_meta(meta: MetaConfig) -> ModelConfig {
     ModelConfig {
         meta: Some(meta),
         ..config()
@@ -205,7 +205,7 @@ pub fn with_meta(meta: MetaConfig) -> ModelConfig {
 }
 
 /// What the strategy reads: the quotes of AUD/USD.
-pub fn requirements() -> DataRequirements {
+pub(crate) fn requirements() -> DataRequirements {
     DataRequirements {
         bar_types: vec![],
         ticks: vec![TickSeries {
@@ -219,7 +219,7 @@ pub fn requirements() -> DataRequirements {
 
 /// The venue of the dataset runs: a commission rate of 30 per million,
 /// 10 million USD.
-pub fn venue() -> DatasetVenue {
+pub(crate) fn venue() -> DatasetVenue {
     DatasetVenue {
         commission: Commission::Rate(Decimal::new(3, 5)),
         balance: Money::from("10000000 USD"),
@@ -229,7 +229,7 @@ pub fn venue() -> DatasetVenue {
 
 /// The model of `features` and `config`, for a strategy of
 /// `requirements`.
-pub fn blueprint_of(
+pub(crate) fn blueprint_of(
     features: &Rc<FeatureSet>,
     config: &ModelConfig,
     requirements: DataRequirements,
@@ -244,7 +244,11 @@ pub fn blueprint_of(
 }
 
 /// The models of `features` and `config` under `models`.
-pub fn model_set(models: &Path, features: &Rc<FeatureSet>, config: &ModelConfig) -> ModelSet {
+pub(crate) fn model_set(
+    models: &Path,
+    features: &Rc<FeatureSet>,
+    config: &ModelConfig,
+) -> ModelSet {
     blueprint_of(features, config, requirements())
         .model_set(models)
         .unwrap()
@@ -252,7 +256,7 @@ pub fn model_set(models: &Path, features: &Rc<FeatureSet>, config: &ModelConfig)
 
 /// The store of the `side` models of `features` and `config` under
 /// `models`.
-pub fn side_store(
+pub(crate) fn side_store(
     models: &Path,
     features: &Rc<FeatureSet>,
     config: &ModelConfig,
@@ -266,13 +270,13 @@ pub fn side_store(
 }
 
 /// The store of the long models under `models`.
-pub fn store(models: &Path) -> ModelStore {
+pub(crate) fn store(models: &Path) -> ModelStore {
     side_store(models, &features(), &config(), Side::Long)
 }
 
 /// A baseline long model of `config` valid from `valid_from` predicting an
 /// R of `r(tenths)` whatever the row, as `baseline_for` says.
-pub fn baseline(valid_from: &str, tenths: usize) -> StoredModel {
+pub(crate) fn baseline(valid_from: &str, tenths: usize) -> StoredModel {
     baseline_for(&features(), &config(), Side::Long, valid_from, tenths)
 }
 
@@ -281,7 +285,7 @@ pub fn baseline(valid_from: &str, tenths: usize) -> StoredModel {
 /// of `r(tenths)` whatever the row, its pair's calibration leaving it as it
 /// is (`unchanged`), its baseline that R, as the store keeps it, probed on
 /// one row.
-pub fn baseline_for(
+pub(crate) fn baseline_for(
     features: &Rc<FeatureSet>,
     config: &ModelConfig,
     side: Side,
@@ -333,7 +337,7 @@ pub fn baseline_for(
 /// A baseline meta model of `config` valid from `valid_from` predicting an
 /// R of `r(tenths)` whatever the row, calibrated by `CALIBRATION`, on the
 /// meta's features of `features`, its baseline that R, with no probe.
-pub fn meta_baseline(
+pub(crate) fn meta_baseline(
     features: &Rc<FeatureSet>,
     config: &ModelConfig,
     valid_from: &str,

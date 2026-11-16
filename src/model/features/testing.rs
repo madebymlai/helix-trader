@@ -19,22 +19,22 @@ use crate::{
 
 /// The last mid of a quote, Nautilus' exponential average of one,
 /// `[indicators.mid]`.
-pub const MID: Declared<EmaArgs> = Declared::new("mid");
+pub(crate) const MID: Declared<EmaArgs> = Declared::new("mid");
 
 /// `[indicators.mid]`, as `[indicators]` holds it.
-pub fn tables() -> IndicatorsConfig {
+pub(crate) fn tables() -> IndicatorsConfig {
     toml::from_str(r#"mid = { period = 1, price_type = "MID" }"#).unwrap()
 }
 
 /// The features of one, `mid`, the last mid of `instrument_id`, warm once
 /// a quote came.
-pub fn last_mid(instrument_id: InstrumentId) -> FeatureSetBuilder {
+pub(crate) fn last_mid(instrument_id: InstrumentId) -> FeatureSetBuilder {
     FeatureSet::builder().quotes(instrument_id, MID, &tables())
 }
 
 /// The last mid of a quote over the bracket's width there: initialized once
 /// a quote came and the width has a length.
-pub struct MidOverWidth {
+pub(crate) struct MidOverWidth {
     mid: Option<f64>,
     width: Option<Rc<BracketWidth>>,
 }
@@ -79,7 +79,7 @@ impl OverBracket for MidOverWidth {
 /// The arguments of `MidOverWidth`: none.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MidOverWidthArgs {}
+pub(crate) struct MidOverWidthArgs {}
 
 impl IndicatorArgs for MidOverWidthArgs {
     type Indicator = MidOverWidth;
@@ -93,21 +93,21 @@ impl IndicatorArgs for MidOverWidthArgs {
 }
 
 /// `[indicators.over]`.
-pub const OVER: Declared<MidOverWidthArgs> = Declared::new("over");
+pub(crate) const OVER: Declared<MidOverWidthArgs> = Declared::new("over");
 
 /// The features of one, `over`, the last mid of `instrument_id` over the
 /// bracket's `width` there.
-pub fn mid_over(instrument_id: InstrumentId, width: &Rc<BracketWidth>) -> FeatureSetBuilder {
+pub(crate) fn mid_over(instrument_id: InstrumentId, width: &Rc<BracketWidth>) -> FeatureSetBuilder {
     let tables: IndicatorsConfig = toml::from_str("over = {}").unwrap();
     FeatureSet::builder().over_bracket(instrument_id, OVER, &tables, width)
 }
 
 /// A count of the depth and deltas a feature gets, `[indicators.book]`.
-pub const BOOK: Declared<BookCountArgs> = Declared::new("book");
+pub(crate) const BOOK: Declared<BookCountArgs> = Declared::new("book");
 
 /// The features of two, the count of `instrument_id`'s depth snapshots,
 /// then of its batches of deltas, each warm once one came.
-pub fn book_counts(instrument_id: InstrumentId) -> FeatureSetBuilder {
+pub(crate) fn book_counts(instrument_id: InstrumentId) -> FeatureSetBuilder {
     let tables: IndicatorsConfig = toml::from_str("book = {}").unwrap();
     FeatureSet::builder()
         .depth(instrument_id, BOOK, &tables)
@@ -116,7 +116,7 @@ pub fn book_counts(instrument_id: InstrumentId) -> FeatureSetBuilder {
 
 /// A feature counting the depth and deltas it gets, initialized by the
 /// first, its value the count.
-pub struct BookCount {
+pub(crate) struct BookCount {
     count: usize,
 }
 
@@ -155,7 +155,7 @@ impl Feature for BookCount {
 /// The arguments of `BookCount`: none.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct BookCountArgs {}
+pub(crate) struct BookCountArgs {}
 
 impl IndicatorArgs for BookCountArgs {
     type Indicator = BookCount;

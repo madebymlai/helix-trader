@@ -9,7 +9,7 @@ use redis::AsyncCommands;
 /// # Panics
 ///
 /// Panics if Redis on 127.0.0.1:6379 cannot be reached.
-pub async fn delete_trader(trader_id: &str) -> usize {
+pub(crate) async fn delete_trader(trader_id: &str) -> usize {
     let client = redis::Client::open("redis://127.0.0.1:6379").unwrap();
     let mut connection = client.get_multiplexed_async_connection().await.unwrap();
     let mut keys = Vec::new();

@@ -1477,7 +1477,7 @@ mod tests {
             ])
         );
         assert_eq!(parsed.rows.len(), 36);
-        let mut refused = parsed.refused.clone();
+        let mut refused = parsed.refused;
         refused.sort();
         assert_eq!(refused.len(), 2, "{refused:?}");
         for (refused, report_type) in refused.iter().zip(["metrics", "ratios"]) {
