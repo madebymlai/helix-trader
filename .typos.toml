@@ -24,6 +24,7 @@ leafs = "leafs"
 [files]
 # Preserve vendored code and verbatim data
 extend-exclude = [
+  ".codespellrc",
   "crates/ctrader/proto/",
   "crates/lse/docs-snapshot/",
   "**/test_data/**/*.json",
