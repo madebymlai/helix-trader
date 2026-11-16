@@ -35,6 +35,7 @@ Released on TBD (UTC).
 - Changed the pull request checklist to run the hooks against `develop`, as CI does, so the checks of changed lines read the branch's changes
 - Changed the pull request checklist to ask for tests as `docs/testing.md` sets them
 - Renamed the cTrader, Databento and OKX fixture folders `testdata/` to `test_data/`, as Nautilus and the LSE crate name them
+- Changed the tests that pin a library behavior helix relies on into drift tests, `drift_*`, each citing what it pins, and removed the assertions that only re-proved a library
 
 ### Documentation Updates
 
