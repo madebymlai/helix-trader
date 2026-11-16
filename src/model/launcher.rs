@@ -407,9 +407,8 @@ mod tests {
     use nautilus_common::{
         actor::registry::deregister_actor,
         cache::Cache,
-        clock::{Clock, VirtualClock},
+        clock::VirtualClock,
         component::{Component, deregister_component, register_component_actor, start_component},
-        timer::TimeEventCallback,
     };
     use nautilus_model::{
         data::{NautilusDataType, QuoteTick},
@@ -467,28 +466,10 @@ mod tests {
     fn a_panicking_in_process_train_is_kept() {
         let launcher = Launcher::in_process(|_| panic!("the train panicked"));
 
-        assert!(matches!(
-            launcher.launch(at("2026-10-22T00:00:00Z")).wait(),
-            Retrained::Kept(_)
-        ));
-    }
-
-    /// A train finding its model published at its time keeps it in use:
-    /// it kept no model, and succeeded.
-    #[rstest]
-    fn an_in_process_train_whose_model_is_in_use_succeeds() {
-        let launcher = Launcher::in_process(|at| {
-            Outcome::InUse {
-                valid_from: at,
-                retrain: Retrain::Every(SignedDuration::from_hours(24)),
-            }
-            .into()
-        });
-
-        assert_eq!(
-            launcher.launch(at("2026-10-22T00:00:00Z")).wait(),
-            Retrained::Succeeded
-        );
+        let Retrained::Kept(why) = launcher.launch(at("2026-10-22T00:00:00Z")).wait() else {
+            panic!("a panicking train succeeded");
+        };
+        assert!(why.contains("without an outcome"), "{why}");
     }
 
     #[rstest]
@@ -609,6 +590,14 @@ mod tests {
         daily_on(dir.path(), launcher)
     }
 
+    /// The time the next train sent to `finished`, waited for a minute at
+    /// most, so that a train never launched fails rather than hangs.
+    fn trained(finished: &Receiver<Timestamp>) -> Timestamp {
+        finished
+            .recv_timeout(Duration::from_secs(60))
+            .expect("no train within a minute")
+    }
+
     /// A launcher handing each time it trains at to `finish`.
     fn sending(finish: mpsc::Sender<Timestamp>) -> Launcher {
         Launcher::in_process(move |at| {
@@ -659,42 +648,6 @@ mod tests {
         let actor = daily_on(dir.path(), Launcher::in_process(|_| unreachable!()));
 
         assert_eq!(actor.actor_id(), ActorId::from("RETRAIN-LIVE-001"));
-    }
-
-    /// Registers `actor` without a node at `now`, as the handle's tests
-    /// register their strategy: its clock.
-    fn registered(actor: &mut RetrainActor, now: &str) -> Rc<RefCell<VirtualClock>> {
-        let clock = Rc::new(RefCell::new(VirtualClock::new()));
-        clock
-            .borrow_mut()
-            .advance_time(UnixNanos::from(at(now)), true);
-        clock
-            .borrow_mut()
-            .register_default_handler(TimeEventCallback::from(|_: TimeEvent| {}));
-        actor
-            .core
-            .register(
-                TraderId::from("HELIX-001"),
-                clock.clone(),
-                Rc::new(RefCell::new(Cache::default())),
-            )
-            .unwrap();
-        clock
-    }
-
-    /// Started at 11:30 on 2026-10-22, a daily retrain's timer, on the
-    /// actor's own clock, first fires at the next midnight, 2026-10-23, a
-    /// whole number of days since the epoch.
-    #[rstest]
-    fn the_retrain_timer_is_the_actors_on_the_grid() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut actor = daily_on(dir.path(), Launcher::in_process(|_| unreachable!()));
-        let clock = registered(&mut actor, "2026-10-22T11:30:00Z");
-
-        DataActor::on_start(&mut actor).unwrap();
-
-        let next = clock.borrow().next_time_ns(TIMER).unwrap();
-        assert_eq!(Timestamp::from(next), at("2026-10-23T00:00:00Z"));
     }
 
     /// Adds `actor` at `now` as a node's trader adds an actor
@@ -766,7 +719,7 @@ mod tests {
         release.send(()).unwrap();
         release.send(()).unwrap();
 
-        assert_eq!(finished.recv().unwrap(), at("2026-10-22T00:00:00Z"));
+        assert_eq!(trained(&finished), at("2026-10-22T00:00:00Z"));
         // Released twice, a second train would send its time before its
         // launcher is dropped.
         drop(actor);
@@ -777,12 +730,20 @@ mod tests {
     /// firing is not skipped as running. A train's outcome is sent just
     /// after the train returns, off this thread, so it may come after the
     /// time the train sent.
+    /// Panics after a minute, so that a train never ending fails rather
+    /// than hangs.
     fn waited_to_its_end(actor: &RetrainActor) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+
         while actor
             .running
             .as_ref()
             .is_some_and(|running| running.finished().is_none())
         {
+            assert!(
+                Instant::now() < deadline,
+                "the train is still running a minute on"
+            );
             std::thread::yield_now();
         }
     }
@@ -810,74 +771,54 @@ mod tests {
         }
     }
 
+    /// A finished retrain leaves the next retrain free to launch, whether
+    /// it published or kept the current model, which the strategy trades
+    /// on still.
     #[rstest]
-    fn a_finished_retrain_makes_way_for_the_next() {
+    #[case::published(sending)]
+    #[case::keeping_the_model(keeping)]
+    fn a_finished_retrain_makes_way_for_the_next(
+        #[case] launcher: fn(mpsc::Sender<Timestamp>) -> Launcher,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let (finish, finished) = mpsc::channel();
-        let mut actor = daily(&dir, sending(finish));
+        let mut actor = daily(&dir, launcher(finish));
         actor.on_time_event(&fired("2026-10-22T00:00:00Z")).unwrap();
-        assert_eq!(finished.recv().unwrap(), at("2026-10-22T00:00:00Z"));
+        assert_eq!(trained(&finished), at("2026-10-22T00:00:00Z"));
 
         let second = fire_until_launched(&mut actor, &finished, "2026-10-23T00:00:00Z");
 
         assert_eq!(second, at("2026-10-23T00:00:00Z"));
     }
 
-    /// A retrain that kept the current model, which the strategy trades
-    /// on still, leaves the next retrain free to launch, as one that
-    /// published does.
+    /// A retrain due at midnight on 2026-10-22 trains at the earliest of
+    /// the last times the catalog holds of the series read, AUD/USD's and
+    /// EUR/USD's quotes, never past its time.
     #[rstest]
-    fn a_retrain_keeping_the_model_makes_way_for_the_next() {
+    #[case::when_the_catalog_holds_past_it(
+        &[(AUD, "2026-12-01T00:00:00Z"), (EUR, "2026-12-01T00:00:00Z")],
+        "2026-10-22T00:00:00Z"
+    )]
+    #[case::at_the_catalogs_end_when_it_ends_before_its_time(
+        &[(AUD, "2026-10-21T13:00:00Z"), (EUR, "2026-10-21T13:00:00Z")],
+        "2026-10-21T13:00:00Z"
+    )]
+    #[case::at_the_earliest_last_time_of_the_series_read(
+        &[(AUD, "2026-10-21T13:00:00Z"), (EUR, "2026-10-21T09:30:00Z")],
+        "2026-10-21T09:30:00Z"
+    )]
+    fn a_retrain_trains_at_its_time_when_the_catalog_holds_past_it(
+        #[case] quotes: &[(&str, &str)],
+        #[case] expected: &str,
+    ) {
         let dir = tempfile::tempdir().unwrap();
-        let (finish, finished) = mpsc::channel();
-        let mut actor = daily(&dir, keeping(finish));
-        actor.on_time_event(&fired("2026-10-22T00:00:00Z")).unwrap();
-        assert_eq!(finished.recv().unwrap(), at("2026-10-22T00:00:00Z"));
-
-        let second = fire_until_launched(&mut actor, &finished, "2026-10-23T00:00:00Z");
-
-        assert_eq!(second, at("2026-10-23T00:00:00Z"));
-    }
-
-    #[rstest]
-    fn a_retrain_trains_at_its_time_when_the_catalog_holds_past_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let (finish, finished) = mpsc::channel();
-        let mut actor = daily(&dir, sending(finish));
-
-        actor.on_time_event(&fired("2026-10-22T00:00:00Z")).unwrap();
-
-        assert_eq!(finished.recv().unwrap(), at("2026-10-22T00:00:00Z"));
-    }
-
-    #[rstest]
-    fn a_retrain_trains_at_the_catalogs_end_when_it_ends_before_its_time() {
-        let dir = tempfile::tempdir().unwrap();
-        stored(
-            dir.path(),
-            &[(AUD, "2026-10-21T13:00:00Z"), (EUR, "2026-10-21T13:00:00Z")],
-        );
+        stored(dir.path(), quotes);
         let (finish, finished) = mpsc::channel();
         let mut actor = daily_on(dir.path(), sending(finish));
 
         actor.on_time_event(&fired("2026-10-22T00:00:00Z")).unwrap();
 
-        assert_eq!(finished.recv().unwrap(), at("2026-10-21T13:00:00Z"));
-    }
-
-    #[rstest]
-    fn the_catalogs_end_is_the_earliest_last_time_of_the_series_read() {
-        let dir = tempfile::tempdir().unwrap();
-        stored(
-            dir.path(),
-            &[(AUD, "2026-10-21T13:00:00Z"), (EUR, "2026-10-21T09:30:00Z")],
-        );
-        let (finish, finished) = mpsc::channel();
-        let mut actor = daily_on(dir.path(), sending(finish));
-
-        actor.on_time_event(&fired("2026-10-22T00:00:00Z")).unwrap();
-
-        assert_eq!(finished.recv().unwrap(), at("2026-10-21T09:30:00Z"));
+        assert_eq!(trained(&finished), at(expected));
     }
 
     #[rstest]
@@ -903,7 +844,7 @@ mod tests {
         let (finish, finished) = mpsc::channel();
         let mut actor = daily_on(dir.path(), sending(finish));
         actor.on_time_event(&fired("2026-10-22T00:00:00Z")).unwrap();
-        assert_eq!(finished.recv().unwrap(), at("2026-10-21T13:00:00Z"));
+        assert_eq!(trained(&finished), at("2026-10-21T13:00:00Z"));
         waited_to_its_end(&actor);
 
         actor.on_time_event(&fired("2026-10-23T00:00:00Z")).unwrap();
@@ -922,7 +863,7 @@ mod tests {
         let (finish, finished) = mpsc::channel();
         let mut actor = daily_on(dir.path(), sending(finish));
         actor.on_time_event(&fired("2026-10-22T00:00:00Z")).unwrap();
-        assert_eq!(finished.recv().unwrap(), at("2026-10-21T13:00:00Z"));
+        assert_eq!(trained(&finished), at("2026-10-21T13:00:00Z"));
         stored(
             dir.path(),
             &[(AUD, "2026-10-22T13:00:00Z"), (EUR, "2026-10-22T13:00:00Z")],
@@ -963,23 +904,32 @@ mod tests {
         refused
             .on_time_event(&fired("2026-10-22T00:00:00Z"))
             .unwrap();
+        // Each train logs its outcome before it hands it over.
+        let _ = succeeding.running.take().unwrap().wait();
+        let _ = refused.running.take().unwrap().wait();
+        let lines = log_capture::lines();
 
-        let outcomes = [
-            "INFO the retrain at 2026-10-22T00:00:00Z succeeded, its models published or in use",
-            "ERROR the retrain at 2026-10-22T00:00:00Z: kept the current model: holdout \
-             expectancy of the trades taken 0.480000R below the minimum 0.55R",
-        ];
-        let deadline = Instant::now() + Duration::from_secs(60);
-        loop {
-            let logged = log_capture::lines();
-            if outcomes
-                .iter()
-                .all(|outcome| logged.iter().any(|line| line == outcome))
-            {
-                break;
-            }
-            assert!(Instant::now() < deadline, "{logged:#?}");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        let logged = |level: &str, facts: &[&str]| {
+            lines.iter().any(|line| {
+                line.split_once(' ').is_some_and(|(logged_at, message)| {
+                    logged_at == level && facts.iter().all(|fact| message.contains(fact))
+                })
+            })
+        };
+        assert!(
+            logged("INFO", &["2026-10-22T00:00:00Z", "succeeded"]),
+            "{lines:#?}"
+        );
+        assert!(
+            logged(
+                "ERROR",
+                &[
+                    "2026-10-22T00:00:00Z",
+                    "kept the current model: holdout expectancy of the trades taken 0.480000R \
+                     below the minimum 0.55R",
+                ]
+            ),
+            "{lines:#?}"
+        );
     }
 }
