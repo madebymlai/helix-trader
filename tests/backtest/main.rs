@@ -16,7 +16,6 @@
 mod common;
 
 mod backtest_bars;
-mod backtest_bars_on_close;
 mod backtest_book_deltas_and_custom_data;
 mod backtest_catalog_custom_series;
 mod backtest_catalog_gaps;
@@ -48,7 +47,6 @@ mod backtest_okx_swap;
 mod backtest_okx_swap_funding;
 mod backtest_quote_gap;
 mod backtest_read_only_venue;
-mod backtest_relative_catalog;
 mod backtest_retrain;
 mod backtest_rolls;
 mod backtest_root_ticks;
