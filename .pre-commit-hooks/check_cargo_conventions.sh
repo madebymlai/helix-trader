@@ -416,6 +416,8 @@ fi
 #                 authors.workspace, license.workspace, description, categories.workspace,
 #                 keywords.workspace, documentation.workspace, repository.workspace, homepage.workspace
 # Optional fields (publish, build, include) can appear after homepage.workspace
+# helix publishes no crate and has no license, so it requires the fields up to
+# description less authors and license; the others keep Nautilus' order if added
 package_violations=$(rg --files -g "Cargo.toml" --glob "!target/*" . 2> /dev/null | while read -r file; do
   # Skip placeholder manifest
   [[ "$file" == "crates/Cargo.toml" ]] && continue
@@ -442,14 +444,7 @@ package_violations=$(rg --files -g "Cargo.toml" --glob "!target/*" . 2> /dev/nul
     required["version.workspace"] = 1
     required["edition.workspace"] = 1
     required["rust-version.workspace"] = 1
-    required["authors.workspace"] = 1
-    required["license.workspace"] = 1
     required["description"] = 1
-    required["categories.workspace"] = 1
-    required["keywords.workspace"] = 1
-    required["documentation.workspace"] = 1
-    required["repository.workspace"] = 1
-    required["homepage.workspace"] = 1
 
     in_package = 0
     prev_field = ""
@@ -555,8 +550,13 @@ if [[ -f "Cargo.toml" ]]; then
     print dep
   }
   ' Cargo.toml | while read -r dep; do
-    # Check if any crate uses this dependency with workspace = true
-    if ! grep -rq "^${dep}[[:space:]]*=" crates/*/Cargo.toml crates/adapters/*/Cargo.toml 2> /dev/null; then
+    # Check if any crate uses this dependency with workspace = true, the root
+    # package's tables included, in either form (`dep =` or `dep.workspace =`)
+    if ! {
+      awk '/^\[/ { ws = ($0 ~ /^\[workspace/) } !ws' Cargo.toml
+      cat crates/*/Cargo.toml
+    } 2> /dev/null |
+      grep -E "^${dep}[[:space:]]*(=|\.workspace)" > /dev/null; then
       echo "  Cargo.toml: [workspace.dependencies] '$dep' is not used by any crate"
     fi
   done) || true

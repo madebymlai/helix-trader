@@ -1,8 +1,9 @@
 [package]
 name = "lse"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "A NautilusTrader adapter for London Strategic Edge's market data"
 publish = false
 
 [lints]
@@ -56,17 +57,18 @@ sha2.workspace = true
 thiserror = "2"
 # The lock of the one download at a time.
 tokio = { workspace = true, features = ["sync"] }
+
 # The mock LSE socket of `testing`.
 tungstenite = { version = "0.30", optional = true }
 
 [dev-dependencies]
-# The crate itself with its test support, the mock LSE peers and their
-# captured payloads, for its tests of its public boundaries (`tests/`).
-lse = { path = ".", features = ["test-support"] }
 # The data tester's: the key from `.env`, the node's catalog (registered
 # through nautilus-live's `streaming`) and Nautilus' `DataTester`, which
 # the tests drive the data client with on a node too.
 dotenvy = "0.15"
+# The crate itself with its test support, the mock LSE peers and their
+# captured payloads, for its tests of its public boundaries (`tests/`).
+lse = { path = ".", features = ["test-support"] }
 nautilus-live = { workspace = true, features = ["streaming"] }
 nautilus-model = { workspace = true, features = ["test-support"] }
 nautilus-persistence.workspace = true
@@ -85,3 +87,4 @@ tungstenite = "0.30"
 name = "lse-data-tester"
 path = "examples/node_data_tester.rs"
 required-features = ["test-support"]
+doc = false

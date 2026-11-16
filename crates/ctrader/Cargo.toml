@@ -1,8 +1,9 @@
 [package]
 name = "ctrader"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "A NautilusTrader adapter for Spotware's cTrader Open API"
 publish = false
 
 [lints]
@@ -35,11 +36,7 @@ tokio.workspace = true
 ustr.workspace = true
 zeroize = "1"
 
-[build-dependencies]
-prost-build = { version = "0.14", default-features = false }
-
 [dev-dependencies]
-rstest.workspace = true
 futures = "0.3"
 # Nautilus' data engine and catalog (`streaming`), for the data client's
 # write-back.
@@ -49,6 +46,10 @@ nautilus-persistence.workspace = true
 # Nautilus' risk engine and the portfolio it takes, for the margin check.
 nautilus-portfolio.workspace = true
 nautilus-risk.workspace = true
+rstest.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 # The mock cTrader peer of the tests.
 tungstenite = "0.30"
+
+[build-dependencies]
+prost-build = { version = "0.14", default-features = false }
