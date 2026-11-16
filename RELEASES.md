@@ -6,6 +6,10 @@ Released on TBD (UTC).
 
 - Changed `ModelHandle::new` to take `&ModelBlueprint` and `&Mode`; pass references
 
+### Fixes
+
+- Fixed `ctrader` failing to build without its `test-support` feature; `TokenPair` and `SpotEvents` are public whatever the features
+
 ### Internal Improvements
 
 - Added Nautilus' rustfmt, taplo, markdownlint, yamllint and spelling standards, vendored from `nautilus_engineering`, and the pre-commit hooks that run them
@@ -15,6 +19,8 @@ Released on TBD (UTC).
 - Added CI: the hooks, clippy and the tests on every push and pull request, and a weekly run against Nautilus' `develop`, the workarounds' issues and `nautilus_engineering`
 - Added `RELEASES.md` and the release workflow that tags and publishes it
 - Added a pull request template: summary, type of change, migration and the Nautilus-native, tests and release-notes checklist
+- Added `cargo doc` with warnings denied, `cargo-machete` and a 3-day crate release cooldown to the hooks and CI
+- Added Nautilus' commit message check: a capitalized subject of 60 characters at most, a body wrapped at 79
 
 ### Documentation Updates
 
