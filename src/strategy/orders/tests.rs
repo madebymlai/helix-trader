@@ -496,67 +496,32 @@ fn exits(probe: &Probe) -> Vec<OrderAny> {
         .collect()
 }
 
-/// IB cancels or reduces the other exit itself, the node up or not: a
-/// trade sent on IB has its two exits in one OCA group reducing the other
-/// with block, IB's one-updates-the-other with overfill protection.
+/// IB links an API bracket's exits itself, in an OCA group named after the
+/// entry's permId that cancels the other exit when one fills (paper,
+/// 2026-11-14 and 2026-11-16): a trade on IB sends its exits in no OCA
+/// group of its own, and Nautilus' tags alone.
 #[test]
-fn a_trade_on_ib_links_its_exits_in_one_oca_group_each_reducing_the_other() {
-    let (mut probe, _) = registered();
-
-    on_ib(buy(bracket(4)))
-        .send(&mut probe, stake(), unconverted())
-        .unwrap();
-
-    let exits: Vec<(String, OcaType)> = exits(&probe).iter().map(oca_at_ib).collect();
-    let [take_profit, stop_loss] = exits.as_slice() else {
-        panic!("{exits:?}")
-    };
-    assert_eq!(take_profit, stop_loss);
-    assert_ne!(take_profit.0, "");
-    assert_eq!(take_profit.1, OcaType::ReduceWithBlock);
-}
-
-#[test]
-fn a_trade_on_ib_sends_its_entry_in_no_oca_group() {
+fn a_trade_on_ib_sends_its_exits_in_no_oca_group_of_its_own() {
     let (mut probe, _) = registered();
 
     on_ib(buy(bracket(4)))
         .send_at(&mut probe, stake(), equity(), ids("T-1"))
         .unwrap();
 
-    let entry = probe.cache().order(&id("T-1")).unwrap();
-    assert_eq!(oca_at_ib(&entry).0, "");
-}
-
-/// IB holds an OCA group's name once used: each trade's is its own.
-#[test]
-fn two_trades_on_ib_link_their_exits_in_two_groups() {
-    let (mut probe, _) = registered();
-    let trade = on_ib(buy(bracket(4)));
-
-    trade.send(&mut probe, stake(), unconverted()).unwrap();
-    trade.send(&mut probe, stake(), unconverted()).unwrap();
-
-    let groups: BTreeSet<String> = exits(&probe).iter().map(|exit| oca_at_ib(exit).0).collect();
-    assert_eq!(groups.len(), 2, "{groups:?}");
-}
-
-/// The OCA group's tag is added to Nautilus' tags of a bracket's exits,
-/// not in place of them.
-#[test]
-fn a_trade_on_ib_keeps_nautilus_tags_on_its_exits() {
-    let (mut probe, _) = registered();
-
-    on_ib(buy(bracket(4)))
-        .send_at(&mut probe, stake(), equity(), ids("T-1"))
-        .unwrap();
-
-    let tagged = |of: &str, tag: &str| {
-        let order = probe.cache().order(&id(of)).unwrap();
-        order.tags().unwrap().contains(&Ustr::from(tag))
+    let sent: Vec<(String, OcaType)> = exits(&probe).iter().map(oca_at_ib).collect();
+    let unlinked = (String::new(), OcaType::None);
+    assert_eq!(sent, [unlinked.clone(), unlinked]);
+    let tags = |of: &str| {
+        probe
+            .cache()
+            .order(&id(of))
+            .unwrap()
+            .tags()
+            .unwrap()
+            .to_vec()
     };
-    assert!(tagged("T-1-TP", "TAKE_PROFIT"));
-    assert!(tagged("T-1-SL", "STOP_LOSS"));
+    assert_eq!(tags("T-1-TP"), [Ustr::from("TAKE_PROFIT")]);
+    assert_eq!(tags("T-1-SL"), [Ustr::from("STOP_LOSS")]);
 }
 
 /// IC, a cTrader broker, links a bracket's exits itself as its position's
