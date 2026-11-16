@@ -3,8 +3,8 @@
 //! at a time, replaying the strategy's dataset run, and a backtest of the
 //! strategy then trades on the store. Its features are averages of 1-minute
 //! bars, warm from the bars replayed; the fake learner predicts the first,
-//! taking every trade, which earns no more than taking every trade: `train`
-//! refuses it, failing with the reason
+//! taking every trade, with no skill on the walk: `train` refuses it,
+//! failing with the reason
 //! and the holdout's figures, as does a live node's launcher
 //! (`model::launcher`) starting that `train` as its child. A model
 //! published straight to the store, a baseline (`common::dataset`), trades
@@ -109,23 +109,34 @@ fn train_refused(config: &Path, catalog: &Path, models: &Path, at: Timestamp) ->
     stderr
 }
 
-/// Whether `text` reports a long model kept with its holdout's figures:
-/// its trades taken and every trade, at the commission and at 1.5 times
-/// it, its skill, its mean R - E', its calibration slope and its top-decile
-/// gap.
-fn kept_with_its_figures(text: &str) -> bool {
-    [
-        "kept the current model: ",
-        "taken ",
-        "every trade ",
-        "at 1.5x the commission",
-        "skill ",
-        "mean R - E' ",
-        "calibration slope ",
-        "top-decile gap ",
-    ]
-    .iter()
-    .all(|figure| text.contains(figure))
+/// Asserts that `text` reports the fake long model kept on its holdout's
+/// figures, as `Kept::Refused` prints them: refused for its skill, the
+/// holdout's, not above nought; the holdout's 12 hours (`CONFIG`) 12 rows,
+/// each decision of which the fake takes, its margin below any expected
+/// P&L, so that the trades taken are every trade, 12 of them, alike at the
+/// commission and at 1.5 times it.
+fn assert_kept_with_its_figures(text: &str) {
+    let between = |after: &str, before: &str| -> &str {
+        let (_, rest) = text
+            .split_once(after)
+            .unwrap_or_else(|| panic!("no {after:?}: {text}"));
+        rest.split_once(before)
+            .unwrap_or_else(|| panic!("no {before:?} after {after:?}: {text}"))
+            .0
+    };
+    let skill = between(
+        "kept the current model: holdout skill ",
+        " not above nought",
+    );
+    assert!(skill.parse::<f64>().unwrap() <= 0.0, "{text}");
+    assert_eq!(between("; skill ", ", mean R - E' "), skill, "{text}");
+    let taken = between("(holdout taken ", "; every trade ");
+    assert!(taken.starts_with("12 trades, "), "{text}");
+    assert_eq!(between("; every trade ", "; at 1.5x"), taken, "{text}");
+    let stressed = between("at 1.5x the commission, taken ", "; skill ");
+    let (taken, every) = stressed.split_once(", every trade ").expect(text);
+    assert_eq!(taken, every, "{text}");
+    assert_eq!(between(" over ", " rows)"), "12", "{text}");
 }
 
 /// Publishes straight to the store under `models` a long model valid from
@@ -177,7 +188,7 @@ fn the_train_subcommand_refuses_a_model_without_an_edge_and_one_published_trades
 
     let stderr = train_refused(&config_path, catalog.path(), &models, t());
 
-    assert!(kept_with_its_figures(&stderr), "{stderr}");
+    assert_kept_with_its_figures(&stderr);
     assert_eq!(traded(&catalog, models.clone()), (0, 0));
     publish(&catalog, &models, t());
     assert_eq!(traded(&catalog, models), (6, 3));
@@ -255,7 +266,7 @@ fn a_live_retrain_through_the_train_subcommand_keeping_the_model_is_kept_with_it
     let Retrained::Kept(why) = retrained else {
         panic!("{retrained:?}");
     };
-    assert!(kept_with_its_figures(&why), "{why}");
+    assert_kept_with_its_figures(&why);
     assert_eq!(traded(&catalog, models), (0, 0));
 }
 
@@ -329,7 +340,7 @@ fn a_retrain_keeping_the_model_does_not_fail_the_binarys_backtest() {
             .lines()
             .find(|line| line.contains(&reason))
             .unwrap_or_else(|| panic!("{stderr}"));
-        assert!(kept_with_its_figures(line), "{line}");
+        assert_kept_with_its_figures(line);
     }
     assert!(stdout.contains("Orders: 0"), "{stdout}");
     assert!(stdout.contains("Model valid from: none"), "{stdout}");
@@ -447,50 +458,25 @@ fn eur_config() -> String {
 }
 
 /// A dataset balance in EUR, where IC's gold's P&L is in USD: the model's
-/// targets, sized on it, would be unconverted, so a backtest, whose own
-/// account is in USD, refuses it before building any day of the dataset,
-/// and `train` before replaying any, no node started, naming the dataset
-/// balance and both currencies.
+/// targets, sized on it, would be unconverted, and so would a live node's
+/// decisions' payoff features, so a backtest, whose own account is in USD,
+/// refuses it before building any day of the dataset, `train` before
+/// replaying any, and a live start before any node is built, its staging
+/// untouched, each naming the dataset balance and both currencies.
 #[rstest]
-fn a_dataset_balance_in_another_currency_than_the_pnl_is_refused_before_any_build() {
+#[case::backtest("backtest")]
+#[case::train("train")]
+#[case::live("live")]
+fn a_dataset_balance_in_another_currency_than_the_pnl_is_refused_before_any_node(
+    #[case] subcommand: &str,
+) {
     let catalog = walk(ic::at("00:00:00"), ic::at("06:00:00"));
     let dir = tempfile::tempdir().unwrap();
     let (config, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
     std::fs::write(&config, eur_config()).unwrap();
+    let args = usd_args(subcommand, dir.path());
 
-    for subcommand in ["backtest", "train"] {
-        let args = usd_args(subcommand, dir.path());
-
-        let (stdout, stderr) = refused(subcommand, &config, catalog.path(), &models, &args);
-
-        assert!(
-            ["dataset balance", "EUR", "USD", ic::INSTRUMENT_ID]
-                .iter()
-                .all(|named| stderr.contains(named)),
-            "{subcommand}: {stderr}"
-        );
-        assert!(!stdout.contains("BacktestEngine"), "{subcommand}: {stdout}");
-    }
-}
-
-/// A live node whose config's dataset balance is in EUR, where IC's gold's
-/// P&L is in USD: the decisions' payoff features would be sized on it
-/// unconverted, so the start refuses it before any node is built, its
-/// staging untouched, naming the dataset balance and both currencies.
-#[rstest]
-fn a_live_dataset_balance_in_another_currency_than_the_pnl_is_refused_before_any_node() {
-    let catalog = walk(ic::at("00:00:00"), ic::at("06:00:00"));
-    let dir = tempfile::tempdir().unwrap();
-    let (config, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
-    std::fs::write(&config, eur_config()).unwrap();
-
-    let (_, stderr) = refused(
-        "live",
-        &config,
-        catalog.path(),
-        &models,
-        &usd_args("live", dir.path()),
-    );
+    let (stdout, stderr) = refused(subcommand, &config, catalog.path(), &models, &args);
 
     assert!(
         ["dataset balance", "EUR", "USD", ic::INSTRUMENT_ID]
@@ -498,6 +484,7 @@ fn a_live_dataset_balance_in_another_currency_than_the_pnl_is_refused_before_any
             .all(|named| stderr.contains(named)),
         "{stderr}"
     );
+    assert!(!stdout.contains("BacktestEngine"), "{stdout}");
     assert!(!dir.path().join("staging").exists());
 }
 
@@ -532,31 +519,33 @@ fn walk_with_eurusd(from: Timestamp, to: Timestamp) -> TempDir {
 /// a backtest's balance, through the pair as the catalog defines it,
 /// naming the dataset balance, both currencies and the pair.
 #[rstest]
-fn a_dataset_balance_its_conversions_do_not_reach_the_pnl_from_is_refused_before_any_node() {
+#[case::live("live")]
+#[case::backtest("backtest")]
+#[case::train("train")]
+fn a_dataset_balance_its_conversions_do_not_reach_the_pnl_from_is_refused_before_any_node(
+    #[case] subcommand: &str,
+) {
     let catalog = walk_with_eurusd(ic::at("00:00:00"), ic::at("06:00:00"));
     let dir = tempfile::tempdir().unwrap();
     let (config, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
     std::fs::write(&config, converting_config("15000000 JPY")).unwrap();
+    let args = usd_args(subcommand, dir.path());
 
-    for subcommand in ["live", "backtest", "train"] {
-        let args = usd_args(subcommand, dir.path());
+    let (stdout, stderr) = refused(subcommand, &config, catalog.path(), &models, &args);
 
-        let (stdout, stderr) = refused(subcommand, &config, catalog.path(), &models, &args);
-
-        assert!(
-            [
-                "dataset balance",
-                "JPY",
-                "USD",
-                ic::INSTRUMENT_ID,
-                ic::EURUSD
-            ]
-            .iter()
-            .all(|named| stderr.contains(named)),
-            "{subcommand}: {stderr}"
-        );
-        assert!(!stdout.contains("BacktestEngine"), "{subcommand}: {stdout}");
-    }
+    assert!(
+        [
+            "dataset balance",
+            "JPY",
+            "USD",
+            ic::INSTRUMENT_ID,
+            ic::EURUSD
+        ]
+        .iter()
+        .all(|named| stderr.contains(named)),
+        "{stderr}"
+    );
+    assert!(!stdout.contains("BacktestEngine"), "{stdout}");
     assert!(!dir.path().join("staging").exists());
 }
 
@@ -578,7 +567,7 @@ fn the_train_subcommand_accepts_a_dataset_balance_its_conversions_reach_the_pnl_
     let stderr = train_refused(&config, catalog.path(), &models, t());
 
     assert!(!stderr.contains("dataset balance"), "{stderr}");
-    assert!(kept_with_its_figures(&stderr), "{stderr}");
+    assert_kept_with_its_figures(&stderr);
 }
 
 /// The arguments of `subcommand` of `refused` beyond its config, catalog
@@ -608,23 +597,20 @@ fn usd_args(subcommand: &str, dir: &Path) -> Vec<String> {
 /// A catalog directory that does not exist: `live`, `backtest` and
 /// `train` each refuse it with an error naming it, none panicking.
 #[rstest]
-fn a_missing_catalog_is_refused_with_an_error_not_a_panic() {
+#[case::live("live")]
+#[case::backtest("backtest")]
+#[case::train("train")]
+fn a_missing_catalog_is_refused_with_an_error_not_a_panic(#[case] subcommand: &str) {
     let dir = tempfile::tempdir().unwrap();
     let (config, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
     let catalog = dir.path().join("no-catalog");
     std::fs::write(&config, CONFIG).unwrap();
+    let args = usd_args(subcommand, dir.path());
 
-    for subcommand in ["live", "backtest", "train"] {
-        let args = usd_args(subcommand, dir.path());
+    let (_, stderr) = refused(subcommand, &config, &catalog, &models, &args);
 
-        let (_, stderr) = refused(subcommand, &config, &catalog, &models, &args);
-
-        assert!(!stderr.contains("panicked"), "{subcommand}: {stderr}");
-        assert!(
-            stderr.contains(&catalog.display().to_string()),
-            "{subcommand}: {stderr}"
-        );
-    }
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert!(stderr.contains(&catalog.display().to_string()), "{stderr}");
 }
 
 /// A live node of a model strategy on a catalog without IC's gold, which
