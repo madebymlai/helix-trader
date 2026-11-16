@@ -75,7 +75,7 @@ nautilus-persistence.workspace = true
 nautilus-testkit.workspace = true
 # Test functions, as Nautilus' adapter guide has them ("Rust testing"),
 # declared as Nautilus declares it.
-rstest = { version = "0.28.0", default-features = false }
+rstest.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 # The mock LSE socket of the crate's tests.

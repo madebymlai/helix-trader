@@ -44,6 +44,7 @@ zeroize = "1"
 prost-build = { version = "0.14", default-features = false }
 
 [dev-dependencies]
+rstest.workspace = true
 futures = "0.3"
 # Nautilus' data engine and catalog (`streaming`), for the data client's
 # write-back.

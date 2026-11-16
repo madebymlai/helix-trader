@@ -26,6 +26,8 @@ rust-version = "1.100.0"
 # against one copy of Nautilus' types; and the versions the crates share.
 # Each crate names the features it needs.
 [workspace.dependencies]
+# Fixtures and cases for every crate's tests (`#[rstest]`), as Nautilus'.
+rstest = { version = "0.28.0", default-features = false }
 anyhow = "1"
 # The arrow schema of Nautilus' custom data macros, and of LSE's exports.
 arrow = { version = "59.3", default-features = false }
@@ -357,6 +359,7 @@ toml = "1"
 ustr.workspace = true
 
 [dev-dependencies]
+rstest.workspace = true
 # The `DataClient` trait of the test venues' data clients.
 async-trait.workspace = true
 # The hooks of the demo test of the cTrader session's token renewal
