@@ -65,3 +65,4 @@ mod backtest_train;
 mod backtest_two_venues;
 mod backtest_warmup;
 mod backtest_without_session;
+mod cli;

@@ -733,7 +733,7 @@ mod tests {
             score::ExpectedScore,
             train::{Kept, Outcome},
         },
-        strategy::{ema::EmaParams, risk::R},
+        strategy::risk::R,
     };
     use jiff::SignedDuration;
     use rstest::rstest;
@@ -805,22 +805,11 @@ mod tests {
         assert_eq!(args.run.catalog, PathBuf::from("catalog"));
     }
 
-    /// Fill-catalog takes IB's client id, not live's account or leverage.
     #[rstest]
-    fn fill_catalog_takes_the_ib_client_id_but_not_lives_account_or_leverage() {
+    fn fill_catalog_takes_the_ib_client_id() {
         let mut argv = REQUIRED.to_vec();
         argv.extend(["--client-id", "12"]);
         assert!(parse(&argv).is_ok());
-        for flag in [["--account", "DU1234567"], ["--leverage", "2"]] {
-            let mut argv = REQUIRED.to_vec();
-            argv.extend(flag);
-            let err = parse(&argv).unwrap_err();
-            assert_eq!(
-                err.kind(),
-                clap::error::ErrorKind::UnknownArgument,
-                "{flag:?}: {err}"
-            );
-        }
     }
 
     #[rstest]
@@ -849,41 +838,11 @@ mod tests {
     }
 
     #[rstest]
-    fn a_backtest_requires_the_commission_and_the_balance() {
-        assert!(parse_backtest(&REQUIRED).is_err());
-        for flag in ["--commission", "--balance"] {
-            let argv = backtest_required();
-            let at = argv.iter().position(|&arg| arg == flag).unwrap();
-            let argv = [&argv[..at], &argv[at + 2..]].concat();
-            let err = parse_backtest(&argv).unwrap_err().to_string();
-            assert!(err.contains(flag), "{err}");
-        }
-    }
-
-    #[rstest]
-    fn a_backtest_takes_one_commission_of_the_three_kinds() {
-        let flags = [
-            ["--commission", "3 EUR"],
-            ["--commission-rate", "0.0005"],
-            ["--commission-per-quantity", "0.035 EUR"],
-        ];
-        for (i, one) in flags.iter().enumerate() {
-            assert!(parse_backtest(&backtest_with(one)).is_ok(), "{one:?}");
-            for other in &flags[i + 1..] {
-                let both = backtest_with(&[one[0], one[1], other[0], other[1]]);
-                let err = parse_backtest(&both).unwrap_err();
-                assert_eq!(
-                    err.kind(),
-                    clap::error::ErrorKind::ArgumentConflict,
-                    "{one:?} {other:?}: {err}"
-                );
-            }
-        }
-        let err = parse_backtest(&backtest_with(&[])).unwrap_err().to_string();
-        assert!(
-            err.contains("--commission-rate") && err.contains("--commission-per-quantity"),
-            "{err}"
-        );
+    #[case::an_amount(["--commission", "3 EUR"])]
+    #[case::a_rate(["--commission-rate", "0.0005"])]
+    #[case::an_amount_per_quantity(["--commission-per-quantity", "0.035 EUR"])]
+    fn a_backtest_takes_a_commission_of_any_of_the_three_kinds(#[case] one: [&str; 2]) {
+        assert!(parse_backtest(&backtest_with(&one)).is_ok());
     }
 
     /// Pepperstone's gold: 3.5 USD per 100 oz, so 0.035 USD an ounce, not
@@ -893,36 +852,7 @@ mod tests {
         let args =
             parse_backtest(&backtest_with(&["--commission-per-quantity", "0.035 USD"])).unwrap();
         let exact = Money::from_str_exact("0.035 USD").unwrap();
-        assert_ne!(exact, Money::from("0.04 USD"));
         assert_eq!(args.commission.commission(), Commission::PerQuantity(exact));
-    }
-
-    /// Each value joined to its flag, so that clap reads `-0.035 USD` as the
-    /// value, not as a flag of its own.
-    #[rstest]
-    fn rejects_a_commission_per_quantity_it_cannot_charge() {
-        for amount in ["-0.035 USD", "0.035", "USD", "0.035 XYZ"] {
-            let flag = format!("--commission-per-quantity={amount}");
-            let err = parse_backtest(&backtest_with(&[&flag])).unwrap_err();
-            assert_eq!(
-                err.kind(),
-                clap::error::ErrorKind::ValueValidation,
-                "{amount}: {err}"
-            );
-        }
-    }
-
-    #[rstest]
-    fn rejects_malformed_money() {
-        for flag in ["--commission", "--balance"] {
-            for money in ["3", "EUR", "3 XYZ", "three EUR"] {
-                let mut argv = backtest_required();
-                let at = argv.iter().position(|&arg| arg == flag).unwrap();
-                argv[at + 1] = money;
-                let err = parse_backtest(&argv).unwrap_err().to_string();
-                assert!(err.contains(flag), "{money}: {err}");
-            }
-        }
     }
 
     /// 150 ms, as jiff reads a duration: each command reaches the
@@ -945,34 +875,6 @@ mod tests {
         assert_eq!(parse_backtest(&backtest_required()).unwrap().latency, None);
     }
 
-    /// Each value joined to its flag, so that clap reads `-1s` as the
-    /// value; none is left out, not a latency of nothing.
-    #[rstest]
-    fn rejects_a_latency_that_is_no_positive_duration() {
-        for latency in ["-1s", "0s", "150", "fast"] {
-            let mut argv = backtest_required();
-            let flag = format!("--latency={latency}");
-            argv.push(&flag);
-            let err = parse_backtest(&argv).unwrap_err();
-            assert_eq!(
-                err.kind(),
-                clap::error::ErrorKind::ValueValidation,
-                "{latency}: {err}"
-            );
-        }
-    }
-
-    /// A backtest's margins are its instruments', each holding its
-    /// account's (an OKX definition the account's leverage), so it takes no
-    /// leverage.
-    #[rstest]
-    fn a_backtest_takes_no_leverage() {
-        let mut argv = backtest_required();
-        argv.extend(["--leverage", "10"]);
-        let err = parse_backtest(&argv).unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument, "{err}");
-    }
-
     /// The arguments of `command`, a live run.
     fn live_args(command: Command) -> LiveArgs {
         match command {
@@ -985,94 +887,38 @@ mod tests {
         parse_command("live", args).map(live_args)
     }
 
+    /// Its IB account and client id are the venues' (`LiveVenueArgs`). It
+    /// runs as trader HELIX-001, staging in `staging` and reading the
+    /// catalog `catalog`, unless given another.
     #[rstest]
-    fn live_runs_as_trader_helix_001_unless_given_another() {
-        let args = parse_live(&["ema", "--config", "ema.toml"]).unwrap();
-        assert_eq!(args.trader_id, TraderId::from("HELIX-001"));
-        let args =
-            parse_live(&["ema", "--config", "ema.toml", "--trader-id", "HELIX-002"]).unwrap();
-        assert_eq!(args.trader_id, TraderId::from("HELIX-002"));
-    }
-
-    #[rstest]
-    fn rejects_a_trader_id_nautilus_refuses() {
-        // Nautilus' trader id is a name and a tag joined by a hyphen.
-        assert!(parse_live(&["ema", "--config", "ema.toml", "--trader-id", "HELIX"]).is_err());
-    }
-
-    /// Its IB account and client id are the venues' (`LiveVenueArgs`).
-    #[rstest]
-    fn parses_live_with_its_strategy_config_and_catalog() {
-        let args = parse_live(&["ema", "--config", "ema.toml"]).unwrap();
+    #[case::by_default(&[], "HELIX-001", "staging", "catalog")]
+    #[case::as_another_trader(&["--trader-id", "HELIX-002"], "HELIX-002", "staging", "catalog")]
+    #[case::staging_elsewhere(&["--staging", "/data/staging"], "HELIX-001", "/data/staging", "catalog")]
+    #[case::on_another_catalog(&["--catalog", "/data/catalog"], "HELIX-001", "staging", "/data/catalog")]
+    fn parses_live_with_its_strategy_config_and_catalog(
+        #[case] given: &[&str],
+        #[case] trader_id: &str,
+        #[case] staging: &str,
+        #[case] catalog: &str,
+    ) {
+        let argv = [&["ema", "--config", "ema.toml"][..], given].concat();
+        let args = parse_live(&argv).unwrap();
         assert_eq!(args.strategy, StrategyName::Ema);
         assert_eq!(args.config, PathBuf::from("ema.toml"));
-        assert_eq!(args.catalog, PathBuf::from("catalog"));
+        assert_eq!(args.trader_id, TraderId::from(trader_id));
+        assert_eq!(args.staging, PathBuf::from(staging));
+        assert_eq!(args.catalog, PathBuf::from(catalog));
     }
 
-    /// Live checks each OKX account's leverage against its instruments'
-    /// definitions in the catalog, so it takes no leverage.
+    /// Unset, Nautilus' default; not Unicode, an error.
     #[rstest]
-    fn live_takes_no_leverage() {
-        let err = parse_live(&["ema", "--config", "ema.toml", "--leverage", "10"]).unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument, "{err}");
-    }
-
-    #[rstest]
-    fn live_stages_in_staging_unless_told_otherwise() {
-        let args = parse_live(&["ema", "--config", "ema.toml"]).unwrap();
-        assert_eq!(args.staging, PathBuf::from("staging"));
-        let args =
-            parse_live(&["ema", "--config", "ema.toml", "--staging", "/data/staging"]).unwrap();
-        assert_eq!(args.staging, PathBuf::from("/data/staging"));
-    }
-
-    #[rstest]
-    fn rejects_a_start_not_before_the_end() {
-        let mut argv = REQUIRED.to_vec();
-        argv[4] = "2024-03-01T12:30:00Z";
-        let err = parse(&argv).unwrap().run.window().unwrap_err().to_string();
-        assert!(err.contains("before"), "{err}");
-        assert!(parse(&REQUIRED).unwrap().run.window().is_ok());
-        let mut argv = backtest_required();
-        argv[4] = "2024-03-01T12:30:00Z";
-        let err = parse_backtest(&argv).unwrap().run.window().unwrap_err();
-        assert!(err.to_string().contains("before"), "{err}");
-    }
-
-    #[rstest]
-    fn a_config_error_names_the_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ema.toml");
-        std::fs::write(
-            &path,
-            r#"
-            [data]
-            series = []
-            warmup = "720h"
-
-            [trade]
-            instruments = [{ instrument_id = "ESM24.CME" }]
-            risk = "0.5%"
-            "#,
-        )
-        .unwrap();
-        let err = format!("{:#}", load_config::<EmaParams>(&path).unwrap_err());
-        assert!(
-            err.contains("ema.toml") && err.contains("data.series"),
-            "{err}"
+    fn logger_config_defaults_when_unset_and_rejects_a_spec_not_unicode() {
+        assert_eq!(
+            logger_config(Err(std::env::VarError::NotPresent)).unwrap(),
+            LoggerConfig::default()
         );
-        let missing = dir.path().join("missing.toml");
-        let err = format!("{:#}", load_config::<EmaParams>(&missing).unwrap_err());
-        assert!(err.contains("missing.toml"), "{err}");
-    }
-
-    #[rstest]
-    fn logger_config_defaults_when_unset_and_rejects_a_malformed_spec() {
-        assert!(logger_config(Err(std::env::VarError::NotPresent)).is_ok());
         let not_unicode = std::ffi::OsString::from("x");
         assert!(logger_config(Err(std::env::VarError::NotUnicode(not_unicode))).is_err());
-        assert!(logger_config(Ok("stdout=Debug".to_string())).is_ok());
-        assert!(logger_config(Ok("stdout=Loud".to_string())).is_err());
     }
 
     /// The arguments of `command`, a train.
@@ -1107,44 +953,6 @@ mod tests {
         );
         assert_eq!(args.catalog, PathBuf::from("catalog"));
         assert_eq!(args.models, PathBuf::from("models"));
-    }
-
-    /// A train's dataset runs margin nothing, so it takes no leverage.
-    #[rstest]
-    fn a_train_takes_no_leverage() {
-        let mut argv = TRAIN.to_vec();
-        argv.extend(["--leverage", "2"]);
-        let err = parse_train(&argv).unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument, "{err}");
-    }
-
-    /// The commission and balance of a train's dataset runs are its
-    /// config's (`[model] dataset`), so it takes none.
-    #[rstest]
-    fn a_train_takes_no_commission_or_balance() {
-        for flags in [
-            ["--commission", "3 EUR"],
-            ["--commission-rate", "0.00003"],
-            ["--commission-per-quantity", "0.035 USD"],
-            ["--balance", "10000 USD"],
-        ] {
-            let mut argv = TRAIN.to_vec();
-            argv.extend(flags);
-            let err = parse_train(&argv).unwrap_err();
-            assert_eq!(
-                err.kind(),
-                clap::error::ErrorKind::UnknownArgument,
-                "{flags:?}: {err}"
-            );
-        }
-    }
-
-    #[rstest]
-    fn a_train_requires_its_time() {
-        let at = TRAIN.iter().position(|&arg| arg == "--at").unwrap();
-        let argv = [&TRAIN[..at], &TRAIN[at + 2..]].concat();
-        let err = parse_train(&argv).unwrap_err().to_string();
-        assert!(err.contains("--at"), "{err}");
     }
 
     #[rstest]
@@ -1278,72 +1086,8 @@ mod tests {
         assert_eq!(train.models, PathBuf::from("/data/models"));
     }
 
-    /// The commission and balance of a live node's dataset runs, which key
-    /// the store it reads and its retrains train at, are its config's
-    /// (`[model] dataset`), so it takes none.
-    #[rstest]
-    fn live_takes_no_retrain_commission_or_balance() {
-        for flags in [
-            ["--retrain-commission", "3 USD"],
-            ["--retrain-commission-rate", "0.00003"],
-            ["--retrain-commission-per-quantity", "0.035 USD"],
-            ["--retrain-balance", "10000 USD"],
-        ] {
-            let mut argv = LIVE.to_vec();
-            argv.extend(flags);
-            let err = parse_live(&argv).unwrap_err();
-            assert_eq!(
-                err.kind(),
-                clap::error::ErrorKind::UnknownArgument,
-                "{flags:?}: {err}"
-            );
-        }
-    }
-
-    #[rstest]
-    fn the_ema_strategy_has_no_model_to_train() {
-        let mut argv = TRAIN.to_vec();
-        argv[0] = "ema";
-        let err = run_train(&parse_train(&argv).unwrap()).unwrap_err();
-        assert!(err.to_string().contains("no model"), "{err}");
-    }
-
-    /// Two spellings of one commission are one commission.
-    #[rstest]
-    fn two_spellings_of_a_commission_are_one() {
-        for (one, other) in [
-            (["--commission", "3 EUR"], ["--commission", "3.00 EUR"]),
-            (
-                ["--commission-rate", "0.00003"],
-                ["--commission-rate", "0.000030"],
-            ),
-            (
-                ["--commission-per-quantity", "0.035 USD"],
-                ["--commission-per-quantity", "0.0350 USD"],
-            ),
-        ] {
-            let commission = |flags: [&'static str; 2]| {
-                parse_backtest(&backtest_with(&flags))
-                    .unwrap()
-                    .commission
-                    .commission()
-            };
-            assert_eq!(commission(one), commission(other), "{one:?} {other:?}");
-        }
-    }
-
-    /// A model backtest's dataset runs are at its config's commission and
-    /// balance: it takes no balance of theirs.
-    #[rstest]
-    fn a_backtest_takes_no_dataset_balance() {
-        let mut argv = backtest_required();
-        argv.extend(["--dataset-balance", "10000000 EUR"]);
-        let err = parse_backtest(&argv).unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument, "{err}");
-    }
-
     /// Every subcommand takes the strategy first, by its command-line
-    /// name: without one, or with a name no strategy has, it is refused.
+    /// name.
     #[rstest]
     fn every_subcommand_takes_the_strategy_by_name() {
         let backtest = backtest_required();
@@ -1361,19 +1105,6 @@ mod tests {
                     "{subcommand} {name}"
                 );
             }
-            let err = parse_command(subcommand, &argv[1..]).unwrap_err();
-            assert_eq!(
-                err.kind(),
-                clap::error::ErrorKind::MissingRequiredArgument,
-                "{subcommand}: {err}"
-            );
-            let unknown = [&["EMA_CROSS"][..], &argv[1..]].concat();
-            let err = parse_command(subcommand, &unknown).unwrap_err();
-            assert_eq!(
-                err.kind(),
-                clap::error::ErrorKind::InvalidValue,
-                "{subcommand}: {err}"
-            );
         }
     }
 }
