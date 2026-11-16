@@ -711,7 +711,7 @@ impl Debug for Warmup {
 /// type as read now (see `custom_request`), of its type's row's live
 /// data client, catalog first and written back, if its type's history
 /// serves it, of the catalog alone if it is the catalog's
-/// (`venues::custom_data_client`). A series its venue's history does not
+/// (`venues::serves_custom`). A series its venue's history does not
 /// serve (`venues::serves`) is requested no history, logged as a warning,
 /// its instrument's definition asked all the same. The
 /// warmup of each request arrives a window at a time in

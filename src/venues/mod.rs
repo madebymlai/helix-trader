@@ -480,7 +480,7 @@ impl CustomRow {
 /// catalog's, data written into the catalog from outside helix, which
 /// fill-catalog hands to no source (`fill_history`), a replay reads as any
 /// other, and a live warmup asks of the catalog alone
-/// (`custom_data_client`). A config's custom series are checked here
+/// (`strategy::warmup::custom_request`). A config's custom series are checked here
 /// (`StandardConfig::validate`), and so are a fill's before anything
 /// connects.
 ///
