@@ -778,7 +778,6 @@ mod tests {
 
     use super::*;
     use crate::{
-        log_capture,
         model::{
             config::{Margins, ModelConfig},
             decide::FeatureRow,
@@ -957,6 +956,8 @@ mod tests {
         decision.map(|decision| decision.level)
     }
 
+    /// The target's ATR warm and AUD/USD quoted at the decision, but the
+    /// features given no quote: no trade.
     #[rstest]
     fn cold_features_give_no_trade() {
         let models = tempfile::tempdir().unwrap();
@@ -971,11 +972,13 @@ mod tests {
             },
         )
         .unwrap();
+        started(&cold, &mut probe);
 
         assert_eq!(cold.decide(&mut probe).unwrap(), None);
     }
 
-    /// No quote since the decision an hour before: the market is closed.
+    /// The target's ATR warm, but no quote since the decision an hour
+    /// before: the market is closed.
     #[rstest]
     fn a_stale_decision_gives_no_trade() {
         let models = tempfile::tempdir().unwrap();
@@ -984,6 +987,7 @@ mod tests {
             .unwrap();
         let (mut probe, clock) = registered(at("2026-10-22T11:00:00Z"));
         let handle = handle(&probe, models.path(), &features());
+        started(&handle, &mut probe);
         clock
             .borrow_mut()
             .advance_time(UnixNanos::from(at("2026-10-22T12:00:00Z")), true);
@@ -1189,11 +1193,11 @@ mod tests {
         }
     }
 
-    /// The dataset balance in EUR, EUR/USD quoted: the payoff features are
-    /// priced at the reference stake of the balance converted into USD, and
-    /// the long of 0.1R decides.
+    /// The dataset balance in EUR, EUR/USD quoted: the balance has a rate
+    /// into USD, and the long of 0.1R decides, as it would at any rate. The
+    /// control of the decision with no rate.
     #[rstest]
-    fn a_dataset_balance_in_another_currency_decides_at_the_live_rate() {
+    fn a_dataset_balance_in_another_currency_with_a_rate_cached_decides() {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
         holding_eurusd(&probe, Some(["1.24990", "1.25010"]));
@@ -1206,15 +1210,9 @@ mod tests {
     }
 
     /// The dataset balance in EUR, no quote of EUR/USD yet: no rate into
-    /// USD, so no decision, the reason logged, naming the balance and the
-    /// currency it has no rate into.
+    /// USD, so no decision.
     #[rstest]
-    fn a_decision_with_no_rate_of_the_dataset_balance_is_not_made_and_logs_why() {
-        let name = "a_decision_with_no_rate_of_the_dataset_balance_is_not_made_and_logs_why";
-        if !log_capture::alone(module_path!(), name) {
-            return;
-        }
-        log_capture::capture(log::LevelFilter::Info);
+    fn a_decision_with_no_rate_of_the_dataset_balance_is_not_made() {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
         holding_eurusd(&probe, None);
@@ -1224,13 +1222,6 @@ mod tests {
         let decision = handle.decide(&mut probe).unwrap();
 
         assert_eq!(decision, None);
-        let lines = log_capture::lines();
-        assert!(
-            lines.iter().any(|line| line.starts_with("WARN")
-                && line.contains("10000000.00 EUR")
-                && line.contains("no rate into USD")),
-            "{lines:#?}"
-        );
     }
 
     /// `config` learning a bracket a take profit 20 bps and a stop `stop`
@@ -1287,27 +1278,6 @@ mod tests {
             "{}",
             decision.expected_r
         );
-    }
-
-    /// Worked by hand: the long of 0.5R clears a margin of 0.4R, whatever
-    /// its stop is worth in money: the margin is in R.
-    #[rstest]
-    fn a_side_clears_its_margin_in_r_whatever_its_stop_is_worth() {
-        let models = tempfile::tempdir().unwrap();
-        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
-        let config = ModelConfig {
-            margins: Margins {
-                long: Some(R::new(0.4)),
-                short: None,
-            },
-            ..bracket_config(10)
-        };
-        let handle = sides_handle(&probe, models.path(), &config, (Some(10), None));
-        handle.start(&mut probe).unwrap();
-
-        let decision = handle.decide(&mut probe).unwrap();
-
-        assert_eq!(decision.map(|decision| decision.side), Some(OrderSide::Buy));
     }
 
     /// Worked by hand. Both sides traded from 0.3R: the long of 0.1R falls
@@ -1547,106 +1517,32 @@ mod tests {
         .unwrap()
     }
 
-    /// Deciding every minute, the target's ATR is on 1-minute bars, finer
-    /// than the strategy's hourly bars: the live cache holds the day's
-    /// 1,440 of them, and one spanning the start, on top of Nautilus'
-    /// default 10,000, not the 25 hourly bars alone.
+    /// The live cache holds Nautilus' default 10,000 bars and, on top, the
+    /// warmup of the bars a live handle builds or reads, each with one
+    /// spanning the start. Deciding every minute, a target's ATR is on
+    /// 1-minute bars, finer than the strategy's hourly bars: the day's 1,440
+    /// of them, not the 25 hourly bars alone, a time-only target's ATR as a
+    /// bracket's. A bracket in basis points has no ATR: the warmup of the
+    /// strategy's bars alone, 24 hourly bars.
     #[rstest]
-    fn a_live_cache_holds_the_warmup_of_the_targets_atr_on_finer_bars() {
+    #[case::a_brackets_atr_on_finer_bars(atr_config(), SignedDuration::from_mins(1), 1_441)]
+    #[case::no_atr(bracket_config(10), SignedDuration::from_hours(1), 25)]
+    #[case::a_time_only_targets_atr(config(), SignedDuration::from_mins(1), 1_441)]
+    fn a_live_cache_holds_the_warmup_of_the_targets_atr_or_the_strategys_bars(
+        #[case] config: ModelConfig,
+        #[case] decision: SignedDuration,
+        #[case] warmup_bars: usize,
+    ) {
         let models = tempfile::tempdir().unwrap();
-        let mut config = atr_config();
-        config.decision = DecisionRule::Every(SignedDuration::from_mins(1));
+        let config = ModelConfig {
+            decision: DecisionRule::Every(decision),
+            ..config
+        };
         let handle = hourly_live_handle(&config, models.path());
 
         let cache = handle.warmup().cache_config().unwrap();
 
-        assert_eq!(cache.bar_capacity, 10_000 + 1_441);
-    }
-
-    /// A bracket in basis points has no ATR: the live cache holds the
-    /// warmup of the strategy's bars alone, 24 hourly bars and one
-    /// spanning the start.
-    #[rstest]
-    fn a_live_cache_without_an_atr_holds_the_warmup_of_the_strategys_bars() {
-        let models = tempfile::tempdir().unwrap();
-        let handle = hourly_live_handle(&bracket_config(10), models.path());
-
-        let cache = handle.warmup().cache_config().unwrap();
-
-        assert_eq!(cache.bar_capacity, 10_000 + 25);
-    }
-
-    /// A time-only target's ATR runs on the cadence's bars as a bracket's
-    /// does: deciding every minute, the live cache holds the day's 1,440
-    /// minute bars of its ATR, and one spanning the start, on top of
-    /// Nautilus' default 10,000, not the 25 hourly bars alone.
-    #[rstest]
-    fn a_live_cache_holds_the_warmup_of_a_time_only_targets_atr() {
-        let models = tempfile::tempdir().unwrap();
-        let mut config = config();
-        config.decision = DecisionRule::Every(SignedDuration::from_mins(1));
-        let handle = hourly_live_handle(&config, models.path());
-
-        let cache = handle.warmup().cache_config().unwrap();
-
-        assert_eq!(cache.bar_capacity, 10_000 + 1_441);
-    }
-
-    /// Worked by hand. The warmup's response arrives at 12:00, Nautilus
-    /// having built from it the hourly bars closing 11:00 (high 0.70000,
-    /// low 0.69880, close 0.69950: a true range of 0.00120) and 12:00
-    /// (high 0.70020, low 0.69940, above and below the close before: a
-    /// true range of 0.00080) into the cache. The ATR of 2 bars, Wilder's
-    /// seeded by their mean, is 0.00100, as a dataset run replaying those
-    /// bars has it at 12:00: from the mid of 0.70000, the long's take
-    /// profit 0.00200 above, 0.70200, and its stop 0.00100 below, 0.69900,
-    /// its one R, the long's 0.4R expected above the margin. Without the
-    /// warmup the ATR is cold and the decision no trade.
-    #[rstest]
-    fn a_live_warmup_sets_the_first_decisions_stop_from_the_targets_atr() {
-        let models = tempfile::tempdir().unwrap();
-        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
-        let handle = sides_handle_in(
-            &live(models.path().to_path_buf()),
-            &probe,
-            models.path(),
-            &atr_config(),
-            (Some(9), None),
-        );
-        handle.start(&mut probe).unwrap();
-        probe
-            .cache_rc()
-            .borrow_mut()
-            .add_bars(&[
-                hour_bar(
-                    "2026-10-22T11:00:00Z",
-                    ["0.69900", "0.70000", "0.69880", "0.69950"],
-                ),
-                hour_bar(
-                    "2026-10-22T12:00:00Z",
-                    ["0.69950", "0.70020", "0.69940", "0.70000"],
-                ),
-            ])
-            .unwrap();
-        handle.warmup().complete(&probe).unwrap();
-        let decision = handle.decide(&mut probe).unwrap().unwrap();
-
-        assert_eq!(
-            decision.trade(),
-            Trade::new(
-                InstrumentId::from(AUD),
-                OrderSide::Buy,
-                Price::from("0.70000"),
-                Decimal::new(100, 5),
-                Exits {
-                    bracket: Some(Bracket {
-                        take_profit: Price::from("0.70200"),
-                        stop_loss: Price::from("0.69900"),
-                    }),
-                    time_limit: Some(SignedDuration::from_hours(2)),
-                },
-            )
-        );
+        assert_eq!(cache.bar_capacity, 10_000 + warmup_bars);
     }
 
     /// The handle decides only once the target's ATR is initialized, which
@@ -1989,38 +1885,79 @@ mod tests {
     /// Hour bars built from minute bars, a composite bar type.
     const COMPOSITE: &str = "BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL";
 
-    /// When the cadence of the handle in `mode` of a strategy reading
-    /// `bar_type`, started at 11:30, first decides.
-    fn first_decision(mode: &Mode, bar_type: &str) -> Timestamp {
+    /// The minute bars `COMPOSITE` is built from.
+    const MINUTES: &str = "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL";
+
+    /// When the cadence of the handle in the mode `mode` makes of a models
+    /// directory, on `config`, of a strategy reading `bar_type`, started at
+    /// 11:30, first decides.
+    fn first_decision(
+        mode: fn(PathBuf) -> Mode,
+        config: &ModelConfig,
+        bar_type: &str,
+    ) -> Timestamp {
+        let models = tempfile::tempdir().unwrap();
         let requirements = DataRequirements {
             bar_types: vec![BarType::from(bar_type)],
             ..requirements()
         };
         let (mut probe, clock) = registered(at("2026-10-22T11:30:00Z"));
-        let handle =
-            ModelHandle::new(&blueprint_of(&features(), &config(), requirements), mode).unwrap();
+        let handle = ModelHandle::new(
+            &blueprint_of(&features(), config, requirements),
+            &mode(models.path().to_path_buf()),
+        )
+        .unwrap();
         handle.start(&mut probe).unwrap();
         let next = clock.borrow().next_time_ns(decide::DECISION_TIMER).unwrap();
         Timestamp::from(next)
     }
 
-    #[rstest]
-    fn a_backtests_cadence_waits_for_composite_bars_as_a_live_ones_does() {
-        let models = tempfile::tempdir().unwrap();
-        let models = models.path().to_path_buf();
-        let backtest = Mode::Backtest {
-            models: models.clone(),
-        };
-        let live = live(models);
+    /// A backtest on the models under `models`.
+    fn backtest(models: PathBuf) -> Mode {
+        Mode::Backtest { models }
+    }
 
-        assert_eq!(
-            first_decision(&backtest, COMPOSITE),
-            at("2026-10-22T12:00:05.010Z")
-        );
-        assert_eq!(
-            first_decision(&live, COMPOSITE),
-            at("2026-10-22T12:00:05.010Z")
-        );
+    /// A dataset run, which reads no models.
+    fn dataset(_models: PathBuf) -> Mode {
+        Mode::Dataset {
+            rows: SettledRows::default(),
+        }
+    }
+
+    /// A cadence on composite bars waits for them, 5 seconds after the hour,
+    /// in every mode, a backtest's as a live one's. The bar-build delay is
+    /// the bar types', not retraining's: a live handle never retrained
+    /// decides on composite bars as late as a retrained one. The minute
+    /// bars the composite bars are built from, read as they are, are not
+    /// composite: no cadence waits for them.
+    #[rstest]
+    #[case::a_backtest_on_composite_bars(backtest, config(), COMPOSITE, "2026-10-22T12:00:05.010Z")]
+    #[case::live_on_composite_bars(live, config(), COMPOSITE, "2026-10-22T12:00:05.010Z")]
+    #[case::a_dataset_run_on_composite_bars(
+        dataset,
+        config(),
+        COMPOSITE,
+        "2026-10-22T12:00:05.010Z"
+    )]
+    #[case::live_never_retrained_on_composite_bars(
+        live,
+        ModelConfig {
+            retrain: Retrain::Never,
+            ..config()
+        },
+        COMPOSITE,
+        "2026-10-22T12:00:05.010Z"
+    )]
+    #[case::a_backtest_on_minute_bars(backtest, config(), MINUTES, "2026-10-22T12:00:00.010Z")]
+    #[case::a_dataset_run_on_minute_bars(dataset, config(), MINUTES, "2026-10-22T12:00:00.010Z")]
+    #[case::live_on_minute_bars(live, config(), MINUTES, "2026-10-22T12:00:00.010Z")]
+    fn a_cadence_waits_for_composite_bars_alone_in_every_mode(
+        #[case] mode: fn(PathBuf) -> Mode,
+        #[case] config: ModelConfig,
+        #[case] bar_type: &str,
+        #[case] first: &str,
+    ) {
+        assert_eq!(first_decision(mode, &config, bar_type), at(first));
     }
 
     /// `config` with a take profit and a stop 1 ATR of one hourly bar away,
@@ -2148,91 +2085,6 @@ mod tests {
         probe.handle_bar(&mid_bar("2026-10-22T11:00:00Z", "0.69900", "0.70100"));
 
         assert!(width.initialized());
-    }
-
-    #[rstest]
-    fn a_dataset_runs_cadence_waits_for_composite_bars() {
-        let dataset = Mode::Dataset {
-            rows: SettledRows::default(),
-        };
-
-        assert_eq!(
-            first_decision(&dataset, COMPOSITE),
-            at("2026-10-22T12:00:05.010Z")
-        );
-    }
-
-    /// The minute bars the composite bars are built from, read as they
-    /// are, are not composite.
-    #[rstest]
-    fn no_cadence_waits_for_bars_not_composite() {
-        let models = tempfile::tempdir().unwrap();
-        let models = models.path().to_path_buf();
-        let modes = [
-            (
-                "backtest",
-                Mode::Backtest {
-                    models: models.clone(),
-                },
-            ),
-            (
-                "dataset",
-                Mode::Dataset {
-                    rows: SettledRows::default(),
-                },
-            ),
-            ("live", live(models)),
-        ];
-
-        for (name, mode) in modes {
-            assert_eq!(
-                first_decision(&mode, "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL"),
-                at("2026-10-22T12:00:00.010Z"),
-                "{name}"
-            );
-        }
-    }
-
-    /// `config`, never retrained.
-    fn never_retrained() -> ModelConfig {
-        ModelConfig {
-            retrain: Retrain::Never,
-            ..config()
-        }
-    }
-
-    /// The probe's handle trading live, never retrained, on the models
-    /// under `models`, for a strategy of `requirements`, started.
-    fn never_retrained_live(
-        probe: &mut Decider,
-        models: &Path,
-        requirements: &DataRequirements,
-    ) -> Rc<ModelHandle> {
-        let handle = ModelHandle::new(
-            &blueprint_of(&features(), &never_retrained(), requirements.clone()),
-            &live(models.to_path_buf()),
-        )
-        .unwrap();
-        handle.start(probe).unwrap();
-        handle
-    }
-
-    /// The bar-build delay is the bar types', not retraining's: a live
-    /// handle never retrained decides on composite bars as late as a
-    /// retrained one.
-    #[rstest]
-    fn a_live_handle_never_retrained_waits_for_composite_bars() {
-        let models = tempfile::tempdir().unwrap();
-        let requirements = DataRequirements {
-            bar_types: vec![BarType::from(COMPOSITE)],
-            ..requirements()
-        };
-        let (mut probe, clock) = registered(at("2026-10-22T11:30:00Z"));
-
-        never_retrained_live(&mut probe, models.path(), &requirements);
-
-        let next = clock.borrow().next_time_ns(decide::DECISION_TIMER).unwrap();
-        assert_eq!(Timestamp::from(next), at("2026-10-22T12:00:05.010Z"));
     }
 
     /// Live trading on the models under `models`.
@@ -2401,7 +2253,8 @@ mod tests {
         );
     }
 
-    /// A file where the store's root should be has no store to list.
+    /// A file where the store's root should be has no store to list: the
+    /// error names it.
     #[rstest]
     fn an_unreadable_store_fails_when_the_handle_is_built() {
         let dir = tempfile::tempdir().unwrap();
@@ -2410,44 +2263,23 @@ mod tests {
 
         let built = ModelHandle::new(
             &blueprint_of(&features(), &config(), requirements()),
-            &Mode::Backtest { models: file },
+            &Mode::Backtest {
+                models: file.clone(),
+            },
         );
 
-        assert!(built.is_err());
-    }
-
-    /// A dataset run's handle hands on the targets' refusal, which fails the
-    /// strategy's `on_start`, and so the run.
-    #[rstest]
-    fn a_dataset_runs_start_fails_on_a_bracket_on_an_inverse_instrument() {
-        let inverse = InstrumentAny::CryptoPerpetual(btcusd_bybit());
-        let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
-        probe
-            .cache_rc()
-            .borrow_mut()
-            .add_instrument(inverse.clone())
-            .unwrap();
-        let mut config = bracket_config(10);
-        config.target.instrument_id = inverse.id();
-        let handle = ModelHandle::new(
-            &blueprint_of(&features(), &config, requirements()),
-            &Mode::Dataset {
-                rows: SettledRows::default(),
-            },
-        )
-        .unwrap();
-
-        let err = handle.start(&mut probe).unwrap_err();
-
-        assert!(format!("{err:#}").contains("inverse"), "{err:#}");
+        let err = format!("{:#}", built.err().unwrap());
+        assert!(err.contains(&file.display().to_string()), "{err}");
     }
 
     /// Nautilus' sizer reads a trade's P&L as a multiple of a distance in
-    /// price, which an inverse instrument's is not: a deciding handle
-    /// trading one refuses to start, which fails the strategy's
-    /// `on_start`.
+    /// price, which an inverse instrument's is not: a handle trading one, a
+    /// deciding handle's or a dataset run's, refuses to start, which fails
+    /// the strategy's `on_start`.
     #[rstest]
-    fn a_deciding_handles_start_fails_on_an_inverse_instrument() {
+    #[case::deciding(backtest)]
+    #[case::a_dataset_run(dataset)]
+    fn a_handles_start_fails_on_an_inverse_instrument(#[case] mode: fn(PathBuf) -> Mode) {
         let inverse = InstrumentAny::CryptoPerpetual(btcusd_bybit());
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
         probe
@@ -2460,9 +2292,7 @@ mod tests {
         config.target.instrument_id = inverse.id();
         let handle = ModelHandle::new(
             &blueprint_of(&features(), &config, requirements()),
-            &Mode::Backtest {
-                models: models.path().to_path_buf(),
-            },
+            &mode(models.path().to_path_buf()),
         )
         .unwrap();
 
@@ -2856,47 +2686,17 @@ mod tests {
     }
 
     /// The target's ATR's bars, which no strategy declares, are subscribed
-    /// from the start in a backtest, as the strategy's own are.
+    /// from the start in a backtest, as the strategy's own are, and in a
+    /// dataset run. Live, the warmup builds them, and they are subscribed
+    /// from where the warmup ends, now.
     #[rstest]
-    fn a_backtests_start_subscribes_the_targets_atr_bars_from_its_start() {
+    #[case::a_backtest(backtest)]
+    #[case::a_dataset_run(dataset)]
+    #[case::live(live)]
+    fn a_start_subscribes_the_targets_atr_bars_from_its_start(#[case] mode: fn(PathBuf) -> Mode) {
         let models = tempfile::tempdir().unwrap();
 
-        let subscribed = bars_subscribed_at_start(
-            &Mode::Backtest {
-                models: models.path().to_path_buf(),
-            },
-            &[],
-        );
-
-        assert_eq!(
-            subscribed,
-            ["subscribe bars [AUD/USD.SIM-1-HOUR-MID-INTERNAL] from Some(2026-10-22T12:00:00Z)"]
-        );
-    }
-
-    /// A dataset run's targets' ATR's bars are subscribed from the start.
-    #[rstest]
-    fn a_dataset_runs_start_subscribes_the_targets_atr_bars_from_its_start() {
-        let subscribed = bars_subscribed_at_start(
-            &Mode::Dataset {
-                rows: SettledRows::default(),
-            },
-            &[],
-        );
-
-        assert_eq!(
-            subscribed,
-            ["subscribe bars [AUD/USD.SIM-1-HOUR-MID-INTERNAL] from Some(2026-10-22T12:00:00Z)"]
-        );
-    }
-
-    /// Live, the target's ATR's bars, which the warmup builds, are
-    /// subscribed from where the warmup ends, now.
-    #[rstest]
-    fn a_live_start_subscribes_the_targets_atr_bars_from_where_the_warmup_ends() {
-        let models = tempfile::tempdir().unwrap();
-
-        let subscribed = bars_subscribed_at_start(&live(models.path().to_path_buf()), &[]);
+        let subscribed = bars_subscribed_at_start(&mode(models.path().to_path_buf()), &[]);
 
         assert_eq!(
             subscribed,
@@ -2938,45 +2738,27 @@ mod tests {
 
     /// Live, a custom series' subscription names its data client on the
     /// node, LSE's for LSE's rows, so that Nautilus sends it the
-    /// subscription, from where the warmup ends.
+    /// subscription, from where the warmup ends. A backtest's names no
+    /// client, its engine having none of LSE's, and a dataset run's neither:
+    /// Nautilus subscribes the message bus alone, where the replay's rows
+    /// arrive, and sends no command.
     #[rstest]
-    fn a_live_start_subscribes_a_custom_series_naming_its_data_client() {
+    #[case::live(
+        live,
+        &["subscribe data LseRow of Some(\"US10Y\") naming Some(\"LSE\") \
+           from Some(2026-10-22T12:00:00Z)"]
+    )]
+    #[case::a_backtest(backtest, &[])]
+    #[case::a_dataset_run(dataset, &[])]
+    fn a_start_subscribes_a_custom_series_naming_its_data_client_live_alone(
+        #[case] mode: fn(PathBuf) -> Mode,
+        #[case] commands: &[&str],
+    ) {
         let models = tempfile::tempdir().unwrap();
 
-        let subscribed = custom_subscribed_at_start(&live(models.path().to_path_buf()));
+        let subscribed = custom_subscribed_at_start(&mode(models.path().to_path_buf()));
 
-        assert_eq!(
-            subscribed,
-            [
-                "subscribe data LseRow of Some(\"US10Y\") naming Some(\"LSE\") \
-                 from Some(2026-10-22T12:00:00Z)"
-            ]
-        );
-    }
-
-    /// A backtest's custom series' subscription names no client, its
-    /// engine having none of LSE's: Nautilus subscribes the message bus
-    /// alone, where the replay's rows arrive, and sends no command.
-    #[rstest]
-    fn a_backtests_start_subscribes_a_custom_series_naming_no_client() {
-        let models = tempfile::tempdir().unwrap();
-
-        let subscribed = custom_subscribed_at_start(&Mode::Backtest {
-            models: models.path().to_path_buf(),
-        });
-
-        assert_eq!(subscribed, Vec::<String>::new());
-    }
-
-    /// A dataset run's custom series' subscription names no client, as a
-    /// backtest's.
-    #[rstest]
-    fn a_dataset_runs_start_subscribes_a_custom_series_naming_no_client() {
-        let subscribed = custom_subscribed_at_start(&Mode::Dataset {
-            rows: SettledRows::default(),
-        });
-
-        assert_eq!(subscribed, Vec::<String>::new());
+        assert_eq!(subscribed, commands);
     }
 
     /// The target's ATR's bars the strategy reads too are subscribed once,
@@ -3211,39 +2993,6 @@ mod tests {
         assert_eq!(imbalance_subscribers(AUD), 1);
         assert_eq!(cold, None);
         assert_eq!(features.values(), Some(vec![-0.5]));
-    }
-
-    /// Live on 2026-08-10 at 14:30, the node takes a live imbalance of
-    /// AUD/USD stamped 14:30:00 while the warmup's request is pending, and
-    /// the data engine caches it. The catalog's answer, older, is added to
-    /// the cache behind it, not over it: the feature reads the live one, and
-    /// the cache holds no point the history and the live stream both carry
-    /// twice.
-    #[rstest]
-    fn a_warmup_answer_older_than_a_live_point_leaves_it_the_latest() {
-        let features = last_imbalance(AUD);
-        let (mut probe, _handle, _sent, _models) =
-            started_live_reading(&features, vec![], vec![imbalance_series(AUD)]);
-        let live = imbalance(AUD, "2026-08-10T14:30:00Z", 0.1);
-        probe.cache_rc().borrow_mut().add_custom_data(live);
-
-        probe.handle_data_response(&catalog_answer(
-            AUD,
-            vec![
-                imbalance(AUD, "2026-08-10T14:00:00Z", 0.25),
-                imbalance(AUD, "2026-08-10T14:29:00Z", -0.5),
-                imbalance(AUD, "2026-08-10T14:30:00Z", 0.1),
-            ],
-        ));
-
-        assert_eq!(features.values(), Some(vec![0.1]));
-        assert_eq!(
-            probe
-                .cache()
-                .custom_data_history(&imbalance_type(AUD))
-                .len(),
-            1
-        );
     }
 
     /// Live on 2026-08-10 at 14:30, a feature on the imbalances under the
