@@ -1,0 +1,93 @@
+name: ci
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pre-commit:
+    name: pre-commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        # https://github.com/actions/checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check GitHub Action pins
+        run: bash scripts/check-github-actions.sh .github/workflows/*.yml
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Set up Rust toolchain
+        # https://github.com/actions-rust-lang/setup-rust-toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          cache: false
+
+      - name: Set up nightly rustfmt
+        # rustfmt.toml's import options need nightly; the fmt hook runs `cargo +nightly fmt`
+        run: rustup toolchain install nightly --profile minimal --component rustfmt
+
+      - name: Set up uv
+        # https://github.com/astral-sh/setup-uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.13.7"
+          enable-cache: false
+
+      - name: Install prek
+        run: uv tool install prek==0.5.10
+
+      - name: Cache prek environments
+        # https://github.com/actions/cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/prek
+          key: prek-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+
+      # Clippy runs in the rust job, on the build it shares with the tests
+      - name: Run pre-commit
+        run: prek run --all-files --show-diff-on-failure --skip cargo-clippy
+
+  rust:
+    name: rust
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout repository
+        # https://github.com/actions/checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Free disk space
+        # DataFusion and LightGBM make a large target directory
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+
+      - name: Install build dependencies
+        # mold is the linker .cargo/config.toml sets; clang and cmake build LightGBM; protoc the cTrader protos
+        run: sudo apt-get update && sudo apt-get install -y mold clang libclang-dev cmake protobuf-compiler
+
+      - name: Set up Rust toolchain
+        # https://github.com/actions-rust-lang/setup-rust-toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          components: clippy
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --features strategy-tests -- -D warnings
+
+      # The live tests skip without their venues' variables
+      - name: Test
+        run: cargo test
