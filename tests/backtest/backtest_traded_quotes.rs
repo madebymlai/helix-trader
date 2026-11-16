@@ -235,43 +235,19 @@ fn positions(catalog: &tempfile::TempDir, config: &StandardConfig<Reader>, reads
 }
 
 #[rstest]
-fn a_traded_instrument_read_only_through_its_custom_data_fills_its_orders() {
+#[case::custom_data(store_imbalances, "Custom:Imbalance", "identifier", Reads::Imbalances)]
+#[case::book_deltas(store_deltas, "order_book_deltas", "instrument_id", Reads::Deltas)]
+#[case::depth(store_depth, "order_book_depths", "instrument_id", Reads::Depth)]
+fn a_traded_instrument_read_only_through_data_giving_no_price_fills_its_orders(
+    #[case] store: fn(&tempfile::TempDir),
+    #[case] data: &str,
+    #[case] key: &str,
+    #[case] reads: Reads,
+) {
     let catalog = ic::catalog();
-    store_imbalances(&catalog);
+    store(&catalog);
 
-    let opened = positions(
-        &catalog,
-        &config("Custom:Imbalance", "identifier"),
-        Reads::Imbalances,
-    );
-
-    assert_eq!(opened, 1);
-}
-
-#[rstest]
-fn a_traded_instrument_read_only_through_its_book_deltas_fills_its_orders() {
-    let catalog = ic::catalog();
-    store_deltas(&catalog);
-
-    let opened = positions(
-        &catalog,
-        &config("order_book_deltas", "instrument_id"),
-        Reads::Deltas,
-    );
-
-    assert_eq!(opened, 1);
-}
-
-#[rstest]
-fn a_traded_instrument_read_only_through_its_depth_fills_its_orders() {
-    let catalog = ic::catalog();
-    store_depth(&catalog);
-
-    let opened = positions(
-        &catalog,
-        &config("order_book_depths", "instrument_id"),
-        Reads::Depth,
-    );
+    let opened = positions(&catalog, &config(data, key), reads);
 
     assert_eq!(opened, 1);
 }
