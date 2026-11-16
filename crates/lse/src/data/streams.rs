@@ -55,7 +55,7 @@ use crate::{
     config::LseDataClientConfig,
     http::{listing::CmeListings, parse::TradeIds},
     websocket::{
-        client::{KEEPALIVE_SECS, LseWebSocketClient, LseWsMessage},
+        client::{LseWebSocketClient, LseWsMessage},
         parse::{parse_quote, parse_trade},
     },
 };
@@ -242,8 +242,7 @@ impl LseStreams {
             .credential
             .as_ref()
             .context("an instrument streamed with no LSE key")?;
-        let client =
-            LseWebSocketClient::connect(socket, url, credential, KEEPALIVE_SECS, out_tx).await?;
+        let client = LseWebSocketClient::connect(socket, url, credential, out_tx).await?;
         let streamed: Vec<_> = self
             .streamed
             .iter()
