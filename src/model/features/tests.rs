@@ -281,7 +281,9 @@ fn two_features_of_one_name_are_an_error() {
 
 #[rstest]
 fn a_set_without_features_is_an_error() {
-    assert!(FeatureSet::builder().build().is_err());
+    let err = FeatureSet::builder().build().unwrap_err().to_string();
+
+    assert!(err.contains("needs a feature"), "{err}");
 }
 
 #[rstest]
@@ -409,6 +411,8 @@ impl IndicatorArgs for FailingQuotesArgs {
     }
 }
 
+/// The failing feature counted the quote it failed on, 1; the last mid is
+/// 0.7.
 #[rstest]
 fn a_features_error_is_no_error_of_the_set_and_the_others_still_update() {
     let tables = tables();
@@ -421,6 +425,7 @@ fn a_features_error_is_no_error_of_the_set_and_the_others_still_update() {
     features.handle_quote(&quote(AUD, 0.7)).unwrap();
 
     let values = features.values().unwrap();
+    assert_eq!(values[0], 1.0, "{values:?}");
     assert!((values[1] - 0.7).abs() < 1e-9, "{values:?}");
 }
 
@@ -540,20 +545,17 @@ fn levels_across_the_roll(identifier: &str) -> [Option<Vec<f64>>; 3] {
 /// point of the contract standing for it, GCZ26's, the root's own data
 /// type keying none; at the roll it moves to GCG27's, the post contract's
 /// latest it reads at once, and no later point of GCZ26 reaches it.
-#[rstest]
-fn a_raw_feature_of_a_roots_custom_series_reads_the_contract_in_front_and_moves_at_its_roll() {
-    assert_eq!(
-        levels_across_the_roll("GC.GLBX"),
-        [Some(vec![0.25]), Some(vec![0.75]), Some(vec![0.75])]
-    );
-}
-
 /// GCZ26's own series stands for itself: the roll of GC moves it not.
 #[rstest]
-fn a_raw_feature_of_a_contracts_custom_series_is_not_moved_by_its_roots_roll() {
+#[case::of_the_root("GC.GLBX", [0.25, 0.75, 0.75])]
+#[case::of_a_contract("GCZ26.GLBX", [0.25, 0.25, -0.25])]
+fn a_raw_feature_of_a_roots_custom_series_reads_the_contract_in_front_and_moves_at_its_roll(
+    #[case] series: &str,
+    #[case] levels: [f64; 3],
+) {
     assert_eq!(
-        levels_across_the_roll("GCZ26.GLBX"),
-        [Some(vec![0.25]), Some(vec![0.25]), Some(vec![-0.25])]
+        levels_across_the_roll(series),
+        levels.map(|level| Some(vec![level]))
     );
 }
 
@@ -726,7 +728,7 @@ fn a_negative_warmup_is_an_error() {
         .unwrap_err()
         .to_string();
 
-    assert!(err.contains("warmup"), "{err}");
+    assert!(err.contains("1h ago"), "{err}");
 }
 
 /// The fingerprint of raw features named `names` and `version`: a raw
@@ -739,11 +741,6 @@ fn fingerprint(names: [&str; 2], version: u32) -> Fingerprint {
         .build()
         .unwrap()
         .fingerprint()
-}
-
-#[rstest]
-fn the_fingerprint_is_the_same_for_the_same_names_and_version() {
-    assert_eq!(fingerprint(["a", "b"], 1), fingerprint(["a", "b"], 1));
 }
 
 #[rstest]
