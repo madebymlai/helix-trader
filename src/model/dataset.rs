@@ -88,7 +88,7 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use jiff::{SignedDuration, Timestamp, civil::Date, tz::TimeZone};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
@@ -513,10 +513,10 @@ impl Dataset {
         data.into_iter()
             .map(|data| {
                 let Data::Custom(custom) = data else {
-                    bail!("the dataset {identifier} holds {data:?}");
+                    anyhow::bail!("the dataset {identifier} holds {data:?}");
                 };
                 if custom.data_type.metadata() != want.metadata() {
-                    bail!(SchemaMismatch(format!(
+                    anyhow::bail!(SchemaMismatch(format!(
                         "the dataset {identifier} holds rows of the features {:?}, not {:?} and \
                          the payoff {:?}",
                         custom.data_type.metadata(),
@@ -531,7 +531,7 @@ impl Dataset {
                     .cloned()
                     .with_context(|| format!("the dataset {identifier} holds {custom:?}"))?;
                 if row.features.len() != self.feature_names.len() {
-                    bail!(SchemaMismatch(format!(
+                    anyhow::bail!(SchemaMismatch(format!(
                         "the dataset {identifier} holds a row of {} features, not {}",
                         row.features.len(),
                         self.feature_names.len()
@@ -539,7 +539,7 @@ impl Dataset {
                 }
                 for payoff in [&row.long_payoff, &row.short_payoff] {
                     if payoff.len() != self.payoff_names.len() {
-                        bail!(SchemaMismatch(format!(
+                        anyhow::bail!(SchemaMismatch(format!(
                             "the dataset {identifier} holds a row of {} payoff features, not {}",
                             payoff.len(),
                             self.payoff_names.len()

@@ -44,7 +44,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, ensure};
+use anyhow::Context;
 use jiff::SignedDuration;
 use nautilus_common::{
     actor::{DataActor, DataActorNative},
@@ -101,7 +101,7 @@ impl DecisionRule {
     /// Returns an error if a cadence's interval is not positive.
     pub fn validate(&self) -> anyhow::Result<()> {
         let Self::Every(interval) = self;
-        ensure!(
+        anyhow::ensure!(
             interval.is_positive(),
             "the decision interval {interval:#} is not positive"
         );

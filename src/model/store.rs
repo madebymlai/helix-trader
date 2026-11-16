@@ -71,7 +71,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use anyhow::{Context, ensure};
+use anyhow::Context;
 use jiff::Timestamp;
 use nautilus_model::identifiers::StrategyId;
 use serde::{Deserialize, Serialize};
@@ -285,26 +285,26 @@ impl StoredModel {
     /// Returns an error if the model cannot be loaded or fails a check.
     fn checked(&self, feature_names: &[String], fingerprint: &str) -> anyhow::Result<Model> {
         let manifest = &self.manifest;
-        ensure!(
+        anyhow::ensure!(
             manifest.feature_names == feature_names,
             "its features {:?} are not the strategy's {feature_names:?}",
             manifest.feature_names
         );
-        ensure!(
+        anyhow::ensure!(
             manifest.fingerprint == fingerprint,
             "its fingerprint {} is not the strategy's {fingerprint}",
             manifest.fingerprint
         );
         let model = manifest.learner.load(&self.model)?;
         let width = model.width();
-        ensure!(
+        anyhow::ensure!(
             width == manifest.feature_names.len(),
             "it takes {width} features, its manifest names {}",
             manifest.feature_names.len()
         );
         for probe in &manifest.probes {
             let prediction = model.predict(&probe.row)?;
-            ensure!(
+            anyhow::ensure!(
                 prediction.to_bits() == probe.prediction.to_bits(),
                 "it predicts {prediction} on the probe {:?}, not {} as when fitted",
                 probe.row,
@@ -501,12 +501,12 @@ impl ModelSet {
                 calibrations.push(calibration);
             }
             let calibration = calibrations.swap_remove(0);
-            ensure!(
+            anyhow::ensure!(
                 calibrations.iter().all(|other| *other == calibration),
                 "its sides hold different calibrations: {calibration:?} beside {calibrations:?}"
             );
             let traded: Vec<Side> = sides.iter().map(|level| level.side).collect();
-            ensure!(
+            anyhow::ensure!(
                 calibration.valid_from == valid_from && calibration.sides == traded,
                 "its calibration was fitted on the pair of {:?} valid from {}, not on its {traded:?} valid from {valid_from}",
                 calibration.sides,
@@ -578,7 +578,7 @@ impl Pair {
     /// Returns an error if `calibration` is not of as many sides: a side
     /// call of two, none of one.
     pub fn new(models: Vec<(Side, SideModel)>, calibration: Ksplit) -> anyhow::Result<Self> {
-        ensure!(
+        anyhow::ensure!(
             calibration.side_call.is_some() == (models.len() == 2),
             "a calibration of {} sides for a pair of {}",
             if calibration.side_call.is_some() {

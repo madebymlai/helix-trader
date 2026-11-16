@@ -2,7 +2,7 @@
 //! budget instead of tuned settings. Its budget stands in for LightGBM's
 //! settings, which it has no equivalent of.
 
-use anyhow::{Context, anyhow, ensure};
+use anyhow::Context;
 use perpetual::{Matrix, PerpetualBooster, booster::config::BoosterIO, objective::Objective};
 use serde::{Deserialize, Serialize};
 
@@ -61,7 +61,7 @@ impl PerpetualConfig {
 
 impl Learner for PerpetualConfig {
     fn fit(&self, set: &TrainingSet) -> anyhow::Result<Box<dyn Predictor>> {
-        ensure!(
+        anyhow::ensure!(
             self.memory_limit > 0.0,
             "a memory limit of {} GB leaves PerpetualBooster nothing to fit in",
             self.memory_limit
@@ -101,11 +101,11 @@ impl Perpetual {
         let width = booster
             .metadata
             .get(WIDTH)
-            .ok_or_else(|| anyhow!("a PerpetualBooster model without its width"))?
+            .ok_or_else(|| anyhow::anyhow!("a PerpetualBooster model without its width"))?
             .parse()
             .context("the width of a PerpetualBooster model")?;
-        ensure!(width > 0, "a PerpetualBooster model without features");
-        ensure!(
+        anyhow::ensure!(width > 0, "a PerpetualBooster model without features");
+        anyhow::ensure!(
             matches!(booster.cfg.objective, Objective::SquaredLoss),
             "a PerpetualBooster model of a loss other than squared loss"
         );

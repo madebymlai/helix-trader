@@ -12,7 +12,7 @@ mod report;
 
 use std::{collections::BTreeSet, fmt::Debug, path::PathBuf};
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::DataActorNative, component::Component, logging::logger::LoggerConfig,
@@ -355,7 +355,7 @@ pub fn refuse_balance(
             let ids: Vec<String> = pairs.iter().map(|pair| pair.id().to_string()).collect();
             format!("none of the pairs [{}]", ids.join(", "))
         };
-        bail!(
+        anyhow::bail!(
             "the balance {balance} is in {}, which {through} converts into {pnl}, the P&L \
              currency of {}, which the strategy trades: a trade is sized on the equity \
              converted into its P&L currency through the pairs of [trade] conversions",
@@ -391,7 +391,7 @@ fn refuse_unheld_pnl_currency(balance: Money, traded: &[InstrumentAny]) -> anyho
         if balance.currency == pnl || venues::has_base_currency(venue) {
             continue;
         }
-        bail!(
+        anyhow::bail!(
             "the balance {balance} is in {}, not in {pnl}, the P&L currency of {}, which the \
              strategy trades on {venue}, whose broker's account has no base currency: Nautilus \
              books a simulated account without one in each currency apart and books no loss or \

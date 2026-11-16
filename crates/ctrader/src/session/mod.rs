@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context, ensure};
+use anyhow::Context;
 use jiff::Timestamp;
 use nautilus_core::time::get_atomic_clock_realtime;
 use nautilus_live::SocketControl;
@@ -212,7 +212,7 @@ impl CTraderSession {
             if page.has_more {
                 // The halves overlap by a millisecond: whether cTrader's
                 // bounds are inclusive or not, no deal falls between them.
-                ensure!(
+                anyhow::ensure!(
                     to - from > 2,
                     "{} holds more deals over [{from}, {to}] ms than one answer carries",
                     self.venue
@@ -264,7 +264,7 @@ impl CTraderSession {
                 });
             }
         };
-        ensure!(
+        anyhow::ensure!(
             !page.has_more,
             "{} holds more deals of position {position_id} by {to_ms} ms than one answer carries",
             self.venue
@@ -350,7 +350,7 @@ impl CTraderSession {
                     )
                 })?;
             if page.has_more {
-                ensure!(
+                anyhow::ensure!(
                     to - from > 2,
                     "{} holds more orders over [{from}, {to}] ms than one answer carries",
                     self.venue

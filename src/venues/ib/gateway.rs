@@ -10,7 +10,6 @@
 
 use std::{fmt, str::FromStr};
 
-use anyhow::ensure;
 use nautilus_interactive_brokers::{
     config::{DockerizedIBGatewayConfig, TradingMode},
     gateway::DockerizedIBGateway,
@@ -39,7 +38,7 @@ impl FromStr for IbAccount {
     /// Takes the bare id: the execution factory prefixes it with the client
     /// name, and orders carry what follows the first `-`.
     fn from_str(s: &str) -> anyhow::Result<Self> {
-        ensure!(
+        anyhow::ensure!(
             !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric()),
             "{s:?} is not an IB account id like DU1234567"
         );

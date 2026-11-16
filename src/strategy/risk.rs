@@ -20,7 +20,7 @@
 
 use std::{fmt, str::FromStr};
 
-use anyhow::{Context, anyhow, ensure};
+use anyhow::Context;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
@@ -69,14 +69,14 @@ impl FromStr for R {
         let value: f64 = number
             .parse()
             .with_context(|| format!("{text} is not a number of R"))?;
-        ensure!(value.is_finite(), "{text} is not a finite number of R");
+        anyhow::ensure!(value.is_finite(), "{text} is not a finite number of R");
         Ok(Self(value))
     }
 }
 
 /// The refusal of `written`, a value without its R suffix.
 fn unsuffixed(written: impl fmt::Display) -> anyhow::Error {
-    anyhow!("{written} has no R suffix: the value is in R, written such as \"0.5R\"")
+    anyhow::anyhow!("{written} has no R suffix: the value is in R, written such as \"0.5R\"")
 }
 
 impl fmt::Display for R {
@@ -210,7 +210,7 @@ impl Stake {
     ///
     /// Returns an error if `multiple` is not positive.
     pub fn times(self, multiple: Decimal) -> anyhow::Result<Self> {
-        ensure!(
+        anyhow::ensure!(
             multiple.is_sign_positive() && !multiple.is_zero(),
             "a stake's multiple must be positive, not {multiple}"
         );

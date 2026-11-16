@@ -7,7 +7,7 @@ use std::{
     path::Path,
 };
 
-use anyhow::{Context, ensure};
+use anyhow::Context;
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
@@ -71,7 +71,7 @@ impl ContinuousBars {
             if table.contract_at(start) == instrument_id {
                 continue;
             }
-            ensure!(
+            anyhow::ensure!(
                 !table.transitions().is_empty(),
                 "no roll of {instrument_id} over [{start}, {end}]: Nautilus' continuous \
                  bars need one; read its contract {} instead",

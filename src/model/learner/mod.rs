@@ -41,7 +41,6 @@ mod perpetual;
 
 use std::fmt;
 
-use anyhow::{bail, ensure};
 pub use lightgbm::LightGbmConfig;
 pub use perpetual::PerpetualConfig;
 use serde::{Deserialize, Serialize};
@@ -137,11 +136,11 @@ impl TrainingSet {
     /// finite number.
     pub fn new(width: usize, features: Vec<f64>, labels: Vec<f64>) -> anyhow::Result<Self> {
         if let Some(label) = labels.iter().find(|label| !label.is_finite()) {
-            bail!("a label of {label} is not a finite number");
+            anyhow::bail!("a label of {label} is not a finite number");
         }
-        ensure!(!labels.is_empty(), "a training set needs a row");
-        ensure!(width > 0, "a training set needs a feature");
-        ensure!(
+        anyhow::ensure!(!labels.is_empty(), "a training set needs a row");
+        anyhow::ensure!(width > 0, "a training set needs a feature");
+        anyhow::ensure!(
             features.len() == width * labels.len(),
             "{} features are not {} rows of {width}",
             features.len(),
@@ -223,7 +222,7 @@ impl Model {
     /// Returns an error if `row` is not of the model's width, or the
     /// library fails to predict.
     pub fn predict(&self, row: &[f64]) -> anyhow::Result<f64> {
-        ensure!(
+        anyhow::ensure!(
             row.len() == self.width(),
             "a row of {} features, the {} model takes {}",
             row.len(),

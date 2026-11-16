@@ -8,7 +8,6 @@
 
 use std::{fmt, str::FromStr};
 
-use anyhow::{anyhow, ensure};
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::{ClosedInterval, Params, UnixNanos, correctness::check_valid_string_utf8};
 use nautilus_model::{
@@ -145,14 +144,14 @@ impl CustomSeries {
     ) -> anyhow::Result<Self> {
         let metadata = metadata.filter(|metadata| !metadata.is_empty());
         let folder = urisafe_instrument_id(&identifier);
-        ensure!(
+        anyhow::ensure!(
             !identifier.contains('\\'),
             "the identifier {identifier:?} holds a backslash, which Nautilus' catalog writes as a \
              folder separator and reads back as a character, so its series would be stored where \
              no read finds it"
         );
         check_valid_string_utf8(&folder, "identifier").map_err(|e| {
-            anyhow!("the identifier {identifier:?} keys the catalog folder {folder:?}: {e}")
+            anyhow::anyhow!("the identifier {identifier:?} keys the catalog folder {folder:?}: {e}")
         })?;
         Ok(Self(DataType::try_new(
             type_name,

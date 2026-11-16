@@ -26,7 +26,7 @@
 
 use std::{num::NonZeroUsize, path::Path};
 
-use anyhow::{Context, bail, ensure};
+use anyhow::Context;
 use nautilus_common::factories::{ClientConfig, DataClientFactory, ExecutionClientFactory};
 use nautilus_live::config::RoutingConfig;
 use nautilus_model::{
@@ -84,7 +84,7 @@ pub(in crate::venues) const BOOK: BookFormat = BookFormat {
 pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
     use NautilusDataType as D;
     match source {
-        CatalogSeries::Bars(bar_type) => ensure!(
+        CatalogSeries::Bars(bar_type) => anyhow::ensure!(
             is_candle(bar_type),
             "OKX streams its candles, EXTERNAL bars of the LAST price 1, 3, 5, 15 or 30 minutes, \
              1, 2, 4, 6 or 12 hours, 1, 2, 3 or 5 days, a week or 1, 3, 6 or 12 months wide, or \
@@ -95,7 +95,9 @@ pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
             ..
         }) => {}
         CatalogSeries::Ticks(ticks) => {
-            bail!("OKX streams its quotes, its trades, its candles and its book, not the {ticks}")
+            anyhow::bail!(
+                "OKX streams its quotes, its trades, its candles and its book, not the {ticks}"
+            )
         }
     }
     Ok(())
@@ -195,7 +197,7 @@ impl OkxClients {
 /// Fails unless the account is in net position mode: one position per
 /// instrument, as Nautilus' netting and the strategy's target book assume.
 fn ensure_net_mode(mode: OKXPositionMode) -> anyhow::Result<()> {
-    ensure!(
+    anyhow::ensure!(
         mode == OKXPositionMode::NetMode,
         "the OKX account is in {mode:?}, not in net mode: set it to one-way \
          (Settings, Trading preferences, Position mode: One-way) with no open \

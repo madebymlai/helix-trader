@@ -15,7 +15,7 @@ use std::{
     str::FromStr,
 };
 
-use anyhow::{Context, bail, ensure};
+use anyhow::Context;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use helix_trader::{
     backtest::{self, Backtest, Commission, Latency},
@@ -93,7 +93,7 @@ impl RunArgs {
     /// The window `[start, end]`, checked.
     fn window(&self) -> anyhow::Result<(Timestamp, Timestamp)> {
         let (start, end) = (self.start, self.end);
-        ensure!(start < end, "start {start} must be before end {end}");
+        anyhow::ensure!(start < end, "start {start} must be before end {end}");
         Ok((start, end))
     }
 }
@@ -671,7 +671,7 @@ impl DatasetRun {
 ///
 /// Returns an error if the train kept a current model.
 fn reported(trained: &Trained) -> anyhow::Result<()> {
-    ensure!(trained.succeeded(), "{trained}");
+    anyhow::ensure!(trained.succeeded(), "{trained}");
     println!("{trained}");
     Ok(())
 }
@@ -704,7 +704,7 @@ impl Visitor for Training<'_> {
             .strategy
             .to_possible_value()
             .expect("every strategy has a name");
-        bail!("the {} strategy trades on no model", name.get_name())
+        anyhow::bail!("the {} strategy trades on no model", name.get_name())
     }
 
     fn model<S: ModelStrategy>(self) -> Self::Output {

@@ -1,4 +1,3 @@
-use anyhow::ensure;
 use jiff::{SignedDuration, Timestamp, civil::Time, tz::TimeZone};
 use serde::Deserialize;
 
@@ -19,7 +18,7 @@ impl Session {
     ///
     /// Returns an error if the session does not open before it closes.
     pub fn validate(&self) -> anyhow::Result<()> {
-        ensure!(
+        anyhow::ensure!(
             self.open < self.close,
             "session open {} must be before its close {}",
             self.open,

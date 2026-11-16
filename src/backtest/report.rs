@@ -14,7 +14,7 @@ use std::{
     fmt::Write,
 };
 
-use anyhow::{Context, ensure};
+use anyhow::Context;
 use nautilus_backtest::result::BacktestResult;
 use nautilus_common::cache::Cache;
 use nautilus_model::{
@@ -92,7 +92,7 @@ impl Outcome {
             let instrument = cache
                 .instrument(&id)
                 .with_context(|| format!("instrument {id} of a fill not in the cache"))?;
-            ensure!(!instrument.is_inverse(), "{id} is inverse");
+            anyhow::ensure!(!instrument.is_inverse(), "{id} is inverse");
             let cost = costs.entry(fill.currency.code.to_string()).or_default();
             cost.trades += 1;
             if let Some(commission) = fill.commission {
@@ -179,7 +179,7 @@ where
             let ats = by_instrument.get(&id).map_or(&[][..], Vec::as_slice);
             let (next, last) = walk.entry(id).or_default();
             if let Some(last) = last {
-                ensure!(
+                anyhow::ensure!(
                     last.ts_init <= quote.ts_init,
                     "quotes of {id} out of time order: {} after {}",
                     quote.ts_init,

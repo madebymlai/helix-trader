@@ -7,7 +7,6 @@
 
 use std::fmt;
 
-use anyhow::{bail, ensure};
 use jiff::{SignedDuration, Timestamp, civil::Date};
 use nautilus_model::{
     data::{BarSpecification, BarType},
@@ -123,11 +122,11 @@ impl CandleWidth {
     /// why and that the bar is declared from a shorter LSE candle instead.
     pub fn of(bar_type: BarType) -> anyhow::Result<Self> {
         let spec = bar_type.spec();
-        ensure!(
+        anyhow::ensure!(
             bar_type.aggregation_source() == AggregationSource::External,
             "{bar_type}: LSE's candles are EXTERNAL bars"
         );
-        ensure!(
+        anyhow::ensure!(
             spec.price_type == PriceType::Last,
             "{bar_type}: LSE's candles are of the LAST price, their one price"
         );
@@ -135,14 +134,14 @@ impl CandleWidth {
             spec.aggregation,
             BarAggregation::Day | BarAggregation::Week | BarAggregation::Month
         ) {
-            bail!(
+            anyhow::bail!(
                 "{bar_type}: LSE stamps its daily, weekly and monthly candles at their \
                  session's first traded minute and gives no close, and builds them from its \
                  minute bars; declare the bar from a shorter LSE candle (1-MINUTE or 4-HOUR \
                  EXTERNAL) instead, which Nautilus aggregates"
             );
         }
-        ensure!(
+        anyhow::ensure!(
             CANDLE_WIDTHS.iter().any(|(aggregation, _, steps)| {
                 *aggregation == spec.aggregation && steps.contains(&spec.step.get())
             }),

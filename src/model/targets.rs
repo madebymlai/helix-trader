@@ -145,7 +145,7 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{Context, bail, ensure};
+use anyhow::Context;
 use jiff::SignedDuration;
 use nautilus_common::{
     actor::{
@@ -632,7 +632,7 @@ impl TargetConfig {
             .find(|(_, unit)| nanos % unit == 0)
             .map(|(aggregation, unit)| (aggregation, nanos / unit))
         else {
-            bail!(
+            anyhow::bail!(
                 "the target's ATR has no bars of the decision cadence {cadence:#}, not whole \
                  milliseconds"
             );
@@ -658,14 +658,14 @@ impl TargetConfig {
                 .into_iter()
                 .filter(|source| source.instrument_id() == traded)
                 .collect();
-            ensure!(
+            anyhow::ensure!(
                 !sources.is_empty(),
                 "the target's ATR has no bars of {traded} to be built from: the strategy reads \
                  neither its quotes, its trades nor its bars"
             );
             let Some(source) = longest_dividing(&sources, cadence) else {
                 let sources: Vec<String> = sources.iter().map(ToString::to_string).collect();
-                bail!(
+                anyhow::bail!(
                     "the target's ATR has no bars of the decision cadence {cadence:#}: it is \
                      not a whole multiple of the bars of {traded} the strategy reads, {}",
                     sources.join(", ")
@@ -752,9 +752,9 @@ impl TargetConfig {
         requirements: &DataRequirements,
     ) -> anyhow::Result<BracketWidth> {
         let Some(bracket) = self.spec.bracket else {
-            bail!("the target has no bracket to have a width");
+            anyhow::bail!("the target has no bracket to have a width");
         };
-        ensure!(
+        anyhow::ensure!(
             bracket.take_profit == bracket.stop,
             "the target's take profit, {}, and stop, {}, are not one distance: its bracket has \
              no one width",
@@ -1117,7 +1117,7 @@ impl TargetSetter {
             None => bars.map(TargetAtr::new).transpose()?.map(Rc::new),
             Some(width) => {
                 let shared = width.atr.as_ref().map(|atr| atr.bars);
-                ensure!(
+                anyhow::ensure!(
                     shared == bars,
                     "the width the features read has the ATR {shared:?}, the target {bars:?}"
                 );
@@ -1349,7 +1349,7 @@ impl TargetSetter {
             self.commission.currency(instrument),
             instrument.cost_currency(),
         );
-        ensure!(
+        anyhow::ensure!(
             charged == pnl,
             "the commission {} is charged in {charged}, not in {pnl}, the currency of the P&L \
              of {}: a target's costs are not converted",

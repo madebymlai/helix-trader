@@ -58,7 +58,6 @@
 
 use std::{collections::BTreeSet, fmt};
 
-use anyhow::ensure;
 use jiff::Timestamp;
 use nautilus_core::UnixNanos;
 
@@ -191,7 +190,7 @@ impl WalkForward {
         let times = self.schedule.times(start, end)?;
         let (first, last) = dataset::days(start, end);
         let missing = self.dataset.missing(first, last)?;
-        ensure!(
+        anyhow::ensure!(
             missing.is_empty(),
             "the dataset lacks the days {missing:?} of the backtest: build it first"
         );

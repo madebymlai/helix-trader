@@ -3,7 +3,7 @@
 //! name naming a contract every ten years (see `CmeContract`), and streamed
 //! under the listing's symbol, the name LSE's CME stream takes it by.
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use nautilus_core::collections::AtomicMap;
 use nautilus_model::identifiers::InstrumentId;
 
@@ -52,7 +52,7 @@ impl CmeListings {
             }
             listed.extend(pairs);
         }
-        bail!(
+        anyhow::bail!(
             "LSE lists no listing of {contract} in its {CME_MARKET} market: under {} it lists {}",
             names.join(" and "),
             if listed.is_empty() {

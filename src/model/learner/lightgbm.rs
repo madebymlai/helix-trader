@@ -1,6 +1,6 @@
 //! LightGBM: gradient-boosted trees under L2 regression.
 
-use anyhow::{Context, ensure};
+use anyhow::Context;
 use lightgbm3::{Booster, Dataset};
 use serde::{Deserialize, Serialize};
 
@@ -77,7 +77,7 @@ impl LightGbmConfig {
     /// builds LightGBM's dataset without parameters, so LightGBM's default
     /// of 20 applies there whatever the setting.
     pub fn validate(&self) -> anyhow::Result<()> {
-        ensure!(
+        anyhow::ensure!(
             self.min_data_in_leaf >= DATASET_MIN_DATA_IN_LEAF,
             "min_data_in_leaf {} is below {DATASET_MIN_DATA_IN_LEAF}: lightgbm3 builds \
              LightGBM's dataset without parameters, so LightGBM's default of \
@@ -134,7 +134,7 @@ struct LightGbm {
 impl LightGbm {
     fn new(booster: Booster) -> anyhow::Result<Self> {
         let width = booster.num_features();
-        ensure!(width > 0, "a LightGBM model without features");
+        anyhow::ensure!(width > 0, "a LightGBM model without features");
         Ok(Self { booster, width })
     }
 }

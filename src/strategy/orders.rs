@@ -56,7 +56,7 @@
 
 use std::{cmp::Ordering, collections::BTreeSet, str::FromStr};
 
-use anyhow::{Context, bail, ensure};
+use anyhow::Context;
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::{DataActor, DataActorNative},
@@ -164,7 +164,7 @@ pub fn nearest_tick(
         instrument.next_bid_price(value, 0),
         instrument.next_ask_price(value, 0),
     ) else {
-        bail!("the exit {price} is outside the prices of {id}");
+        anyhow::bail!("the exit {price} is outside the prices of {id}");
     };
     let (down, up) = (price - below.as_decimal(), above.as_decimal() - price);
     Ok(match down.cmp(&up) {
@@ -615,7 +615,7 @@ where
 ///
 /// Returns an error if it is inverse.
 pub(crate) fn ensure_linear(instrument: &InstrumentAny) -> anyhow::Result<()> {
-    ensure!(
+    anyhow::ensure!(
         !instrument.is_inverse(),
         "{} is inverse: a trade on it can neither be sized at a stake nor have its R in money, \
          a model target's unit, worked out, Nautilus' fixed-risk sizer reading its P&L as a \

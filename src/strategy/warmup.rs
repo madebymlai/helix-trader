@@ -213,7 +213,7 @@ use std::{
     rc::Rc,
 };
 
-use anyhow::{Context, bail, ensure};
+use anyhow::Context;
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::{DataActor, DataActorNative, indicators::SharedActorIndicator},
@@ -1003,7 +1003,7 @@ pub fn finished(group: UUID4, response: &DataResponseEnvelope) -> anyhow::Result
         return Ok(false);
     }
     match response.failure_reason() {
-        Some(reason) => bail!("the warmup is incomplete: {reason}"),
+        Some(reason) => anyhow::bail!("the warmup is incomplete: {reason}"),
         None => Ok(true),
     }
 }
@@ -1142,7 +1142,7 @@ fn build_delay_micros(bar_types: &[BarType]) -> u64 {
 /// length, and one for the bar spanning the warmup start.
 fn warmup_bars(bar_type: &BarType, warmup: SignedDuration) -> anyhow::Result<usize> {
     let spec = bar_type.spec();
-    ensure!(
+    anyhow::ensure!(
         spec.is_time_aggregated(),
         "bar type {bar_type} is not aggregated on time: no bar count for its warmup"
     );

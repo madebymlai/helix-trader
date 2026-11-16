@@ -5,7 +5,7 @@
 
 use std::sync::LazyLock;
 
-use anyhow::{Context, bail, ensure};
+use anyhow::Context;
 use jiff::{Timestamp, civil, tz::TimeZone};
 use nautilus_model::identifiers::{InstrumentId, Symbol};
 use serde::Deserialize;
@@ -47,12 +47,12 @@ fn parse(toml: &str) -> anyhow::Result<Vec<Product>> {
     }
     let Calendar { product: products } = toml::from_str(toml)?;
     for (i, product) in products.iter().enumerate() {
-        ensure!(
+        anyhow::ensure!(
             !product.months.is_empty(),
             "{} lists no months",
             product.root
         );
-        ensure!(
+        anyhow::ensure!(
             products[..i].iter().all(|other| other.root != product.root),
             "{} is listed twice",
             product.root
@@ -151,18 +151,18 @@ impl TryFrom<String> for ContractTemplate {
                 "y" => Part::Y,
                 "yy" => Part::Yy,
                 "yyyy" => Part::Yyyy,
-                _ => bail!("contract {template:?} has an unknown placeholder {{{name}}}"),
+                _ => anyhow::bail!("contract {template:?} has an unknown placeholder {{{name}}}"),
             });
             rest = after;
         }
         if !rest.is_empty() {
             parts.push(Part::Text(rest.to_owned()));
         }
-        ensure!(
+        anyhow::ensure!(
             parts.iter().any(|part| matches!(part, Part::Month)),
             "contract {template:?} has no {{month}}"
         );
-        ensure!(
+        anyhow::ensure!(
             parts
                 .iter()
                 .any(|part| matches!(part, Part::Y | Part::Yy | Part::Yyyy)),

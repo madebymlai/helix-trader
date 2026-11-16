@@ -24,7 +24,7 @@
 
 use std::fmt;
 
-use anyhow::{Context, bail, ensure};
+use anyhow::Context;
 use jiff::{ToSpan, civil::Date};
 use nautilus_model::{
     enums::OptionKind,
@@ -62,15 +62,15 @@ impl LseSymbol {
     /// derived market's name: empty, holding anything but lower-case
     /// letters, digits and underscores, or an exchange market's.
     pub fn new(market: &str, symbol: &str) -> anyhow::Result<Self> {
-        ensure!(!symbol.is_empty(), "an LSE symbol is not empty");
-        ensure!(
+        anyhow::ensure!(!symbol.is_empty(), "an LSE symbol is not empty");
+        anyhow::ensure!(
             !market.is_empty()
                 && market
                     .chars()
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
             "{market:?} is not an LSE market's name: lower-case letters, digits and underscores"
         );
-        ensure!(
+        anyhow::ensure!(
             !EXCHANGE_MARKETS.contains(&market),
             "{market} is an LSE exchange market: its listings are not LSEDGE series"
         );
@@ -88,12 +88,14 @@ impl LseSymbol {
     /// its symbol is not an LSE symbol, a hyphen and its market in capitals.
     pub fn from_instrument_id(id: InstrumentId) -> anyhow::Result<Self> {
         if id.venue != *LSEDGE_VENUE {
-            bail!("{id} is not an LSEDGE instrument");
+            anyhow::bail!("{id} is not an LSEDGE instrument");
         }
         let Some((symbol, market)) = id.symbol.as_str().rsplit_once('-') else {
-            bail!("{id} names no LSE market: its symbol is an LSE symbol, a hyphen and its market");
+            anyhow::bail!(
+                "{id} names no LSE market: its symbol is an LSE symbol, a hyphen and its market"
+            );
         };
-        ensure!(
+        anyhow::ensure!(
             market.chars().all(|c| !c.is_ascii_lowercase()),
             "{id} names its LSE market in lower case: write it in capitals"
         );
@@ -143,7 +145,7 @@ impl LseSymbol {
             "indices" => (LseSocket::Data, format!("{symbol}.IDX")),
             "crypto" => {
                 let Some(base) = symbol.strip_suffix("USDT") else {
-                    bail!(
+                    anyhow::bail!(
                         "{symbol} in LSE's crypto is not quoted in Tether, as LSE's crypto \
                          symbols are (BTCUSDT): london-ws names no pair of it"
                     );
@@ -152,7 +154,7 @@ impl LseSymbol {
             }
             "uk_stocks" => (LseSocket::London, format!("{}.L", hyphenated(symbol))),
             "ca_stocks" => (LseSocket::Tsx, format!("{}.TO", hyphenated(symbol))),
-            market => bail!("the series of LSE's {market} stream on no LSE socket"),
+            market => anyhow::bail!("the series of LSE's {market} stream on no LSE socket"),
         })
     }
 }
@@ -203,7 +205,7 @@ impl LseInstrument {
         } else if id.venue == *OPRA_VENUE {
             OpraContract::from_instrument_id(id).map(Self::Opra)
         } else {
-            bail!(
+            anyhow::bail!(
                 "{id} is on {}, which LSE does not serve: LSE serves LSEDGE, its own series, \
                  GLBX, CME Globex, XNAS, Nasdaq TotalView, and OPRA, US options",
                 id.venue
@@ -252,7 +254,7 @@ impl CmeContract {
     /// futures contract's symbol with a two-digit year, a one-digit year
     /// standing for contracts ten years apart.
     pub fn from_instrument_id(id: InstrumentId, reference_year: i16) -> anyhow::Result<Self> {
-        ensure!(
+        anyhow::ensure!(
             id.venue == Venue::GLBX(),
             "{id} is not a CME Globex contract, under GLBX"
         );
@@ -330,7 +332,7 @@ impl CmeContract {
         match listings[..] {
             [] => Ok(None),
             [listing] => Ok(Some(listing)),
-            _ => bail!(
+            _ => anyhow::bail!(
                 "LSE lists {} listings of {self}: {}",
                 listings.len(),
                 listings
@@ -392,12 +394,12 @@ impl NasdaqStock {
     /// LSE would match, or a class after a dot, Nasdaq's spelling, would
     /// make a second id of one stock.
     pub fn from_instrument_id(id: InstrumentId) -> anyhow::Result<Self> {
-        ensure!(
+        anyhow::ensure!(
             id.venue == *XNAS_VENUE,
             "{id} is not a Nasdaq TotalView stock, under XNAS"
         );
         let symbol = id.symbol.as_str();
-        ensure!(
+        anyhow::ensure!(
             symbol.split(' ').all(|part| {
                 !part.is_empty()
                     && !part
@@ -460,12 +462,12 @@ impl OpraContract {
     /// its root in capitals, as Nautilus' OSI function writes one
     /// (`osi_option_symbol`), not as LSE's sockets do, unpadded.
     pub fn from_instrument_id(id: InstrumentId) -> anyhow::Result<Self> {
-        ensure!(
+        anyhow::ensure!(
             id.venue == *OPRA_VENUE,
             "{id} is not a US option contract, under OPRA"
         );
         let osi = id.symbol.as_str();
-        ensure!(
+        anyhow::ensure!(
             is_osi(osi),
             "{id} is not an OSI symbol under OPRA, as AAPL  261120C00355000.OPRA: its root in \
              capitals padded to six characters, its expiry's YYMMDD, C or P, and its strike in \

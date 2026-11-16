@@ -124,7 +124,6 @@ use std::{
     rc::Rc,
 };
 
-use anyhow::{bail, ensure};
 use jiff::SignedDuration;
 use nautilus_common::{
     actor::{
@@ -920,7 +919,7 @@ impl FeatureSetBuilder {
     /// Returns an error if no feature is declared, two share a name, or
     /// the warmup is negative.
     pub fn build(self) -> anyhow::Result<Rc<FeatureSet>> {
-        ensure!(!self.names.is_empty(), "a feature set needs a feature");
+        anyhow::ensure!(!self.names.is_empty(), "a feature set needs a feature");
         let names: Vec<String> = self
             .names
             .iter()
@@ -935,9 +934,9 @@ impl FeatureSetBuilder {
             .collect();
         let mut seen = BTreeSet::new();
         if let Some(name) = names.iter().find(|name| !seen.insert(*name)) {
-            bail!("two features are named {name}");
+            anyhow::bail!("two features are named {name}");
         }
-        ensure!(
+        anyhow::ensure!(
             !self.warmup.is_negative(),
             "the features' warmup {:#} is negative",
             self.warmup

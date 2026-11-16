@@ -12,7 +12,7 @@
 //! (`DefaultFillModel`), at the market with no slippage of its own: at the
 //! quote, so the spread is the cost, or, on bars, at the bar's prices.
 
-use anyhow::{Context, ensure};
+use anyhow::Context;
 use nautilus_execution::models::fee::{
     FeeModelAny, FixedFeeModel, MakerTakerFeeModel, PerContractFeeModel,
 };
@@ -132,7 +132,7 @@ impl Commission {
         Ok(match *self {
             Self::PerOrder(commission) => FeeModelAny::Fixed(FixedFeeModel::new(commission, None)?),
             Self::Rate(rate) => {
-                ensure!(
+                anyhow::ensure!(
                     !rate.is_sign_negative(),
                     "commission rate {rate} must not be negative"
                 );

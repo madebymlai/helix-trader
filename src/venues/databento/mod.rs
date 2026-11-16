@@ -10,7 +10,7 @@
 
 use std::{collections::BTreeMap, path::PathBuf};
 
-use anyhow::{Context, ensure};
+use anyhow::Context;
 use jiff::{SignedDuration, Timestamp, tz::TimeZone};
 use nautilus_core::time::get_atomic_clock_realtime;
 use nautilus_databento::{
@@ -109,7 +109,7 @@ impl DatabentoHistory {
         let mut datasets = Vec::new();
         for request in requests {
             let venue = request.instrument_id.venue;
-            ensure!(
+            anyhow::ensure!(
                 request.data == FillData::Instrument
                     && Row::of(venue).definitions == DefinitionsSource::Databento,
                 "Databento gives the definitions of GLBX, XNAS and OPRA instruments here, not \

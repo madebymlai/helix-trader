@@ -7,7 +7,6 @@
 //! gateway of the account's trading mode (`IbGateway`); the account id
 //! goes in the execution config.
 
-use anyhow::{bail, ensure};
 use clap::Args;
 use jiff::SignedDuration;
 use nautilus_interactive_brokers::{
@@ -69,7 +68,7 @@ pub(crate) async fn clients(
     client_id: i32,
     instrument_ids: &[InstrumentId],
 ) -> anyhow::Result<IbClients> {
-    ensure!(
+    anyhow::ensure!(
         client_id % 1000 != 0,
         "client id {client_id} is a multiple of 1000, which the IB execution client rejects"
     );
@@ -183,7 +182,7 @@ pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
     use NautilusDataType as D;
     match source {
         CatalogSeries::Bars(bar_type) => {
-            ensure!(
+            anyhow::ensure!(
                 bar_type.is_externally_aggregated()
                     && BAR_PRICES.contains(&bar_type.spec().price_type)
                     && streamed_size(bar_type),
@@ -191,7 +190,7 @@ pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
                  {}, priced LAST, BID, ASK or MID, not {bar_type}",
                 streamed_sizes(bar_type.instrument_id()).join(", ")
             );
-            ensure!(
+            anyhow::ensure!(
                 !(bar_type.spec().price_type == PriceType::Last
                     && bar_type.instrument_id().venue.as_str() == FOREX_VENUE),
                 "IB has no TRADES bars of a forex pair, so it streams no {bar_type}: read its \
@@ -205,7 +204,7 @@ pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
         CatalogSeries::Ticks(TickSeries {
             data: D::TradeTick,
             instrument_id,
-        }) => ensure!(
+        }) => anyhow::ensure!(
             !CURRENCY_PAIR_VENUES.contains(&instrument_id.venue.as_str()),
             "Nautilus' IB client streams no trades of a currency pair, so IB streams no trades \
              of {instrument_id}: read its quotes"
@@ -213,12 +212,12 @@ pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
         CatalogSeries::Ticks(TickSeries {
             data: D::OrderBookDepth,
             instrument_id,
-        }) => bail!(
+        }) => anyhow::bail!(
             "Nautilus' IB client streams no book depth, so IB streams none of {instrument_id}: \
              read its book deltas"
         ),
         CatalogSeries::Ticks(ticks) => {
-            bail!(
+            anyhow::bail!(
                 "Nautilus' IB client streams quotes, trades, bars and book deltas, not the {ticks}"
             )
         }

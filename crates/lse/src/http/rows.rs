@@ -22,7 +22,7 @@
 
 use std::fmt;
 
-use anyhow::{Context, bail, ensure};
+use anyhow::Context;
 use bytes::Bytes;
 use jiff::{SignedDuration, Timestamp, civil::Date, tz::TimeZone};
 use nautilus_core::UnixNanos;
@@ -166,11 +166,11 @@ impl RowSource {
     /// Each fails before LSE is asked.
     pub fn of(source: &str, symbol: &str) -> anyhow::Result<Self> {
         let call = match source {
-            OPTIONS_CHAIN => bail!(
+            OPTIONS_CHAIN => anyhow::bail!(
                 "LSE serves no history of its {OPTIONS_CHAIN}: /v3/options/chain answers the \
                  chain as it stands, a current snapshot, and takes no dates"
             ),
-            MACRO_OBSERVATION => bail!(
+            MACRO_OBSERVATION => anyhow::bail!(
                 "LSE's {source} {symbol} is refused: an observation is keyed by the day of its \
                  period, not when it came out (US core inflation's September at 1 September, out \
                  on 14 October), so it would be read weeks early; ask its releases, \
@@ -420,7 +420,7 @@ fn factor_rows(
                 .filter_map(|row| row.get(day_field).and_then(Value::as_str))
                 .min()
                 .context("LSE cut the dividends to none")?;
-            ensure!(
+            anyhow::ensure!(
                 start > midnight_of(oldest)? + DAY,
                 "LSE gives the {} newest of the {} dividends of {symbol}, from {oldest}, and the \
                  window from {start} reaches before them: the reference collection dividends \

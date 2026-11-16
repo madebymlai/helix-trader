@@ -6,7 +6,7 @@
 //! (`hasMore`). A tick carries a time and a price, no size. Quotes are
 //! made by merging the two series (see `merge`).
 
-use anyhow::{Context, ensure};
+use anyhow::Context;
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::QuoteTick,
@@ -54,7 +54,7 @@ pub(super) fn decode(tick_data: &[ProtoOaTickData]) -> anyhow::Result<Vec<Tick>>
                 price: data.tick,
             },
             Some(newer) => {
-                ensure!(
+                anyhow::ensure!(
                     data.timestamp <= 0,
                     "cTrader's ticks are not newest first: a tick {} ms after the one before",
                     data.timestamp
@@ -362,7 +362,7 @@ fn quote_size(instrument: &InstrumentAny) -> anyhow::Result<Quantity> {
 /// The price of `tick` at `precision`.
 fn price(tick: i64, precision: u8) -> anyhow::Result<Price> {
     let value = Decimal::new(tick, PRICE_SCALE);
-    ensure!(
+    anyhow::ensure!(
         value.normalize().scale() <= u32::from(precision),
         "cTrader price {value} is finer than the instrument's {precision} decimals"
     );

@@ -34,7 +34,7 @@
 
 use std::{collections::HashMap, str::FromStr};
 
-use anyhow::{Context, ensure};
+use anyhow::Context;
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::NautilusDataType,
@@ -93,7 +93,7 @@ pub(crate) fn margin(
                     leverage.leverage_id
                 )
             })?;
-            ensure!(
+            anyhow::ensure!(
                 tier.leverage > 0,
                 "{name}: {venue} leverage {} is not positive",
                 leverage.leverage_id
@@ -119,7 +119,7 @@ pub(crate) fn cfd(
         .symbol_name
         .as_deref()
         .with_context(|| format!("cTrader symbol {} has no name", light.symbol_id))?;
-    ensure!(
+    anyhow::ensure!(
         light.symbol_id == symbol.symbol_id,
         "{name}: the details are of symbol {}, not {}",
         symbol.symbol_id,
@@ -159,9 +159,9 @@ pub(crate) fn cfd(
         let Some(cents) = cents else {
             return Ok(None);
         };
-        ensure!(cents > 0, "{name}: {field} {cents} is not positive");
+        anyhow::ensure!(cents > 0, "{name}: {field} {cents} is not positive");
         let value = units(cents);
-        ensure!(
+        anyhow::ensure!(
             value.scale() <= u32::from(size_precision),
             "{name}: {field} of {value} units is finer than the step of {size_increment_units}"
         );
@@ -215,7 +215,7 @@ pub(crate) fn assets_by_id(assets: Vec<ProtoOaAsset>) -> HashMap<i64, ProtoOaAss
 
 /// Fails unless `id` is on `venue`, an instrument of the broker.
 pub(crate) fn ensure_on(id: InstrumentId, venue: Venue) -> anyhow::Result<()> {
-    ensure!(id.venue == venue, "{id} is not on {venue}");
+    anyhow::ensure!(id.venue == venue, "{id} is not on {venue}");
     Ok(())
 }
 
@@ -234,7 +234,7 @@ pub fn quoted(
     series
         .iter()
         .map(|(data_type, identifier)| {
-            ensure!(
+            anyhow::ensure!(
                 *data_type == SERVED_DATA,
                 "{venue} serves quotes only, not the {data_type} of {identifier}"
             );

@@ -28,7 +28,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::string::secret::SecretString;
 use serde::{Deserialize, Serialize};
@@ -162,7 +162,7 @@ impl TokenStore {
     pub(crate) fn read(&self) -> anyhow::Result<TokenPair> {
         match self.stored()? {
             Some(stored) => Ok(pair_of(&stored)),
-            None => bail!("the token file {} is gone", self.path.display()),
+            None => anyhow::bail!("the token file {} is gone", self.path.display()),
         }
     }
 

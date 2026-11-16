@@ -88,7 +88,7 @@ pub mod pepperstone;
 use std::{num::NonZeroUsize, path::Path};
 
 use ::lse::{LseDataClientConfig, LseDataClientFactory, LseRow};
-use anyhow::{Context, bail};
+use anyhow::Context;
 use clap::Args;
 use ctrader::{
     CTraderAccountVars, CTraderConnection, CTraderDataClientConfig, CTraderDataClientFactory,
@@ -482,12 +482,12 @@ pub(crate) fn serves_custom(series: &CustomSeries) -> anyhow::Result<Option<Hist
     };
     match source {
         HistorySource::Lse => ::lse::serves_custom(data_type)?,
-        HistorySource::Okx => bail!("OKX's history serves no custom data, {data_type}"),
-        HistorySource::CTrader(broker) => bail!(
+        HistorySource::Okx => anyhow::bail!("OKX's history serves no custom data, {data_type}"),
+        HistorySource::CTrader(broker) => anyhow::bail!(
             "{}'s history serves no custom data, {data_type}",
             broker.venue
         ),
-        HistorySource::Ib => bail!("IB's history serves no custom data, {data_type}"),
+        HistorySource::Ib => anyhow::bail!("IB's history serves no custom data, {data_type}"),
     }
     Ok(Some(source))
 }
@@ -510,13 +510,17 @@ pub(crate) fn streams_custom(series: &CustomSeries) -> anyhow::Result<()> {
     let data_type = series.data_type();
     match CustomRow::of(series).live_data {
         Some(LiveDataSource::Lse) => ::lse::streams_custom(data_type),
-        Some(LiveDataSource::Okx) => bail!("OKX's live data streams no custom data, {data_type}"),
-        Some(LiveDataSource::CTrader(broker)) => bail!(
+        Some(LiveDataSource::Okx) => {
+            anyhow::bail!("OKX's live data streams no custom data, {data_type}")
+        }
+        Some(LiveDataSource::CTrader(broker)) => anyhow::bail!(
             "{}'s live data streams no custom data, {data_type}",
             broker.venue
         ),
-        Some(LiveDataSource::Ib) => bail!("IB's live data streams no custom data, {data_type}"),
-        None => bail!(
+        Some(LiveDataSource::Ib) => {
+            anyhow::bail!("IB's live data streams no custom data, {data_type}")
+        }
+        None => anyhow::bail!(
             "no live data source streams the custom series {series}: none streams custom data \
              of the type {}",
             series.type_name()
@@ -625,7 +629,7 @@ pub fn rate_series(pair: InstrumentId) -> anyhow::Result<Vec<Series>> {
         Ok(()) => return Ok(vec![Series::Ticks(quotes)]),
         Err(e) => e,
     };
-    bail!(
+    anyhow::bail!(
         "no rate of {pair} can be read: {venue}'s history serves neither its 1-minute BID and \
          ASK bars ({no_bars:#}) nor its quotes ({no_quotes:#})",
         venue = pair.venue

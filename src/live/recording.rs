@@ -26,7 +26,7 @@
 
 use std::{io::ErrorKind, path::PathBuf};
 
-use anyhow::{Context, anyhow, ensure};
+use anyhow::Context;
 use jiff::SignedDuration;
 use nautilus_core::UUID4;
 use nautilus_live::node::LiveNode;
@@ -68,7 +68,7 @@ impl Recording {
             .with_context(|| format!("resolving the staging directory {staging}"))?;
         let promoted = normalize_storage_location(&catalog.connect_config().uri)
             .with_context(|| format!("resolving the catalog {}", catalog.path()))?;
-        ensure!(
+        anyhow::ensure!(
             staged != promoted && !staged.starts_with(&format!("{promoted}/")),
             "the staging directory {staging} is inside the catalog {}: give one outside it",
             catalog.path()
@@ -104,7 +104,7 @@ impl Recording {
         let file = self.staging.join(format!("{trader_id}.instance-id"));
         match std::fs::read_to_string(&file) {
             Ok(kept) => kept.trim().parse::<UUID4>().map_err(|e| {
-                anyhow!(
+                anyhow::anyhow!(
                     "the instance id of {trader_id} in {} is not one ({e}): restore it, \
                      or delete it to strand what its runs left unpromoted",
                     file.display()

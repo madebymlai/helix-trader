@@ -52,7 +52,7 @@ mod streams;
 
 use std::{collections::HashMap, future::Future, num::NonZeroUsize, sync::Arc};
 
-use anyhow::{Context, bail, ensure};
+use anyhow::Context;
 use async_trait::async_trait;
 use bytes::Bytes;
 use jiff::{SignedDuration, Timestamp, tz::TimeZone};
@@ -179,7 +179,7 @@ impl LseDataClient {
             http.insert(product, Arc::new(client));
             credentials.insert(product, credential);
         }
-        ensure!(
+        anyhow::ensure!(
             !http.is_empty(),
             "no LSE key: set {}, or give the config's",
             LseProduct::ALL.map(LseProduct::api_key_var).join(" or ")
@@ -560,7 +560,7 @@ impl DataClient for LseDataClient {
     ///   does not stream or the cache does not define.
     fn subscribe_book_depth(&mut self, cmd: SubscribeBookDepth) -> anyhow::Result<()> {
         if let Some(depth) = cmd.depth.filter(|depth| depth.get() != DEPTH10_LEN) {
-            bail!(
+            anyhow::bail!(
                 "{}: LSE's exchange streams hold ten levels a side at Level 2, not a depth of \
                  {depth}",
                 cmd.instrument_ids
@@ -664,7 +664,7 @@ impl DataClient for LseDataClient {
             (request.start, request.end),
             request.limit,
             |instrument| match instrument {
-                LseInstrument::Series(series) if series.is_index() => bail!(
+                LseInstrument::Series(series) if series.is_index() => anyhow::bail!(
                     "{id} is an index, which has no trades: its ticks are quotes, its candles \
                      bars"
                 ),
@@ -937,11 +937,11 @@ impl DataClient for LseDataClient {
                 LseInstrument::Opra(contract) => candles.map(|(from, to)| {
                     ExportQuery::option(&contract, Rows::Candles(width), from, to)
                 }),
-                LseInstrument::Cme(contract) => bail!(
+                LseInstrument::Cme(contract) => anyhow::bail!(
                     "{bar_type}: the client asks LSE for the candles of LSEDGE series and OPRA \
                      contracts, not of {contract}"
                 ),
-                LseInstrument::Nasdaq(stock) => bail!(
+                LseInstrument::Nasdaq(stock) => anyhow::bail!(
                     "{bar_type}: the client asks LSE for the candles of LSEDGE series and OPRA \
                      contracts, not of {stock}, a Nasdaq TotalView stock"
                 ),

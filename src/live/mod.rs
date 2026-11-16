@@ -21,7 +21,7 @@ mod redis;
 
 use std::{fmt::Debug, path::PathBuf};
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use jiff::Timestamp;
 use nautilus_common::{
     actor::DataActorNative,
@@ -171,7 +171,7 @@ fn loaded_instrument_ids(
     for bar_type in &requirements.bar_types {
         let instrument_id = bar_type.instrument_id();
         if let Some(next) = Transition::after(instrument_id, now) {
-            bail!(
+            anyhow::bail!(
                 "bars {bar_type} on the root {instrument_id}: live builds no continuous \
                  bars, whose rolls Nautilus prices up front; read bars on its contract {} \
                  or the root's ticks",

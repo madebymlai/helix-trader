@@ -64,7 +64,7 @@
 use std::{fmt, sync::Arc};
 
 use ahash::AHashMap;
-use anyhow::{Context, bail};
+use anyhow::Context;
 use dbn::{MboMsg, Mbp1Msg, Mbp10Msg};
 use jiff::{Timestamp, tz::TimeZone};
 use nautilus_common::{
@@ -199,7 +199,7 @@ impl ExchangeInstrument {
             LseInstrument::Cme(contract) => Ok(Self::Cme(contract)),
             LseInstrument::Nasdaq(stock) => Ok(Self::Nasdaq(stock)),
             LseInstrument::Series(_) | LseInstrument::Opra(_) => {
-                bail!("{id} streams on no exchange stream of LSE's, of GLBX and XNAS")
+                anyhow::bail!("{id} streams on no exchange stream of LSE's, of GLBX and XNAS")
             }
         }
     }
@@ -238,7 +238,7 @@ impl ExchangeInstrument {
             Self::Cme(contract) => {
                 let listing = listings.listing(http, contract).await?;
                 if listing.delisted_date.is_some() {
-                    bail!(
+                    anyhow::bail!(
                         "{contract} is LSE's listing {listing}, delisted: LSE's CME stream takes \
                          a contract by its listing's symbol, {}, which names a contract every ten \
                          years, so it would stream a later contract's records as {contract}'s; \
@@ -308,7 +308,7 @@ impl ExchangeStreams {
     ) -> anyhow::Result<Self> {
         if access.is_none() && !streamed.is_empty() {
             let product = exchange.product();
-            bail!(
+            anyhow::bail!(
                 "streaming {} needs a {product} key: set {}, or give the config's",
                 streamed
                     .iter()
@@ -570,7 +570,7 @@ impl ExchangeStreams {
     ) -> anyhow::Result<()> {
         // `open` opens Level 1 for the contracts the config streams.
         if !self.clients.contains_key(&ExchangeLevel::Mbp1) {
-            bail!(
+            anyhow::bail!(
                 "{id} is not streamed: LSE's {} stream opens only for the contracts of its \
                  venue the LSE client's config streams (its stream_ids)",
                 self.exchange

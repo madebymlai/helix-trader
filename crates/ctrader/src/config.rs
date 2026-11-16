@@ -17,7 +17,7 @@
 
 use std::{any::Any, fmt, path::PathBuf};
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use nautilus_common::factories::ClientConfig;
 use nautilus_core::string::secret::{REDACTED, SecretString};
 use nautilus_model::identifiers::{AccountId, ClientId, InstrumentId, Venue};
@@ -208,7 +208,7 @@ fn environment(
     match var(account.environment).as_deref() {
         Some("demo") => Ok(CTraderEnvironment::Demo),
         Some("live") => Ok(CTraderEnvironment::Live),
-        value => bail!(
+        value => anyhow::bail!(
             "{} must be `demo` or `live` (got {value:?}): set it to the environment of the \
              {venue} account, `demo` for a demo account",
             account.environment
@@ -236,7 +236,7 @@ fn credential(
         .map(|(name, _)| *name)
         .collect();
     if !missing.is_empty() {
-        bail!(
+        anyhow::bail!(
             "the cTrader credential is incomplete: set {} (see {GUIDE})",
             missing.join(", ")
         );
@@ -290,7 +290,7 @@ fn token_file(var: impl Fn(&str) -> Option<String>) -> anyhow::Result<PathBuf> {
     match absolute("HOME") {
         Some(home) => Ok(home.join(".local/state").join(TOKEN_FILE)),
         None => {
-            bail!(
+            anyhow::bail!(
                 "no place for cTrader's token file: set HOME, or XDG_STATE_HOME, to an absolute \
                  path"
             )

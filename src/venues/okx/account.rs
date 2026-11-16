@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context, ensure};
+use anyhow::Context;
 use nautilus_core::time::get_atomic_clock_realtime;
 use nautilus_model::identifiers::InstrumentId;
 use nautilus_network::http::{HttpClient, HttpRedirectPolicy};
@@ -172,7 +172,7 @@ impl Account {
             )
             .await
             .with_context(|| format!("asking OKX the leverage of {id}"))?;
-        ensure!(
+        anyhow::ensure!(
             response.status.is_success(),
             "OKX answered HTTP {} for the leverage of {id}",
             response.status.as_u16()
@@ -202,7 +202,7 @@ struct LeverageInfo {
 fn leverage_of(id: InstrumentId, body: &[u8]) -> anyhow::Result<Decimal> {
     let answer: LeverageAnswer =
         serde_json::from_slice(body).with_context(|| format!("parsing OKX's leverage of {id}"))?;
-    ensure!(
+    anyhow::ensure!(
         answer.code == "0",
         "OKX refused the leverage of {id}: code {}, {}",
         answer.code,
@@ -210,7 +210,7 @@ fn leverage_of(id: InstrumentId, body: &[u8]) -> anyhow::Result<Decimal> {
     );
     let symbol = id.symbol.as_str();
     let mut levers = answer.data.iter().map(|info| {
-        ensure!(
+        anyhow::ensure!(
             info.inst_id == symbol,
             "OKX answered the leverage of {} for {id}",
             info.inst_id
@@ -222,7 +222,7 @@ fn leverage_of(id: InstrumentId, body: &[u8]) -> anyhow::Result<Decimal> {
         .with_context(|| format!("OKX listed no leverage for {id}"))??;
     for other in levers {
         let other = other?;
-        ensure!(
+        anyhow::ensure!(
             other == lever,
             "OKX lists leverages {lever} and {other} for {id}"
         );

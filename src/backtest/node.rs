@@ -18,7 +18,7 @@
 
 use std::{collections::BTreeSet, fmt::Debug, str::FromStr, sync::Arc};
 
-use anyhow::{Context, anyhow, bail, ensure};
+use anyhow::Context;
 use nautilus_analysis::statistics::max_drawdown::MaxDrawdown;
 use nautilus_backtest::{
     config::{BacktestDataConfig, BacktestEngineConfig, BacktestRunConfig, BacktestVenueConfig},
@@ -136,13 +136,13 @@ fn config(backtest: &Backtest, run: Run) -> anyhow::Result<BacktestRunConfig> {
     // Nautilus only checks the engine start against the end, which lets a
     // run starting on its end through.
     let (start, end) = (backtest.start, backtest.end);
-    ensure!(
+    anyhow::ensure!(
         start < end,
         "backtest start {start} must be before its end {end}"
     );
     // A root's contracts are on its venue.
     let venues: BTreeSet<Venue> = backtest.declared().iter().map(|id| id.venue).collect();
-    ensure!(!venues.is_empty(), "no instruments");
+    anyhow::ensure!(!venues.is_empty(), "no instruments");
     let catalog = catalog_config(&backtest.catalog)?;
     let venues = venues
         .into_iter()
@@ -329,7 +329,7 @@ pub(super) fn custom_data(backtest: &Backtest) -> anyhow::Result<Vec<Data>> {
             Data::Custom(custom) if custom.data_type != *data_type => Some(&custom.data_type),
             _ => None,
         }) {
-            bail!(
+            anyhow::bail!(
                 "the catalog stores the rows of {data_type} under its identifier as \
                  {stored}, of other metadata: the run would replay them under that data \
                  type, which its strategy does not read; name the data type they were \
@@ -359,7 +359,7 @@ where
     on_node(config, custom, strategy, |node| {
         let results = node.run()?;
         let [result] = <[BacktestResult; 1]>::try_from(results)
-            .map_err(|results| anyhow!("{} results from one run", results.len()))?;
+            .map_err(|results| anyhow::anyhow!("{} results from one run", results.len()))?;
         let config = &node.configs()[0];
         let quotes = config
             .data()
@@ -409,7 +409,7 @@ fn replayed_quotes(
     let batches = std::iter::from_fn(move || session.next_batch().transpose());
     Box::new(batches.flat_map(|batch| match batch {
         Ok(DataBatch::Quote(quotes)) => quotes.iter().copied().map(Ok).collect(),
-        Ok(_) => vec![Err(anyhow!("a quote query yielded other data"))],
+        Ok(_) => vec![Err(anyhow::anyhow!("a quote query yielded other data"))],
         Err(err) => vec![Err(err)],
     }))
 }

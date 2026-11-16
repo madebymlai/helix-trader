@@ -13,7 +13,6 @@
 
 use std::{fmt, str::FromStr};
 
-use anyhow::ensure;
 use jiff::SignedDuration;
 use nautilus_core::DurationNanos;
 use nautilus_execution::models::latency::{LatencyModelAny, StaticLatencyModel};
@@ -33,7 +32,7 @@ impl TryFrom<SignedDuration> for Latency {
     type Error = anyhow::Error;
 
     fn try_from(latency: SignedDuration) -> anyhow::Result<Self> {
-        ensure!(
+        anyhow::ensure!(
             latency.is_positive(),
             "a latency must be positive, not {latency:#}: leave it out for none"
         );

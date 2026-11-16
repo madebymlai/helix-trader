@@ -29,7 +29,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, bail, ensure};
+use anyhow::Context;
 use clap::Args;
 use ibapi::{
     Client, SUBSCRIPTION_LAG_CODE,
@@ -630,7 +630,7 @@ fn served(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<Serv
         NautilusDataType::Bar => {
             let bar_type = BarType::from_str(identifier)?;
             let spec = bar_type.spec();
-            ensure!(
+            anyhow::ensure!(
                 bar_type.is_externally_aggregated()
                     && BAR_PRICES.contains(&spec.price_type)
                     && bar_type_to_ib_bar_size(&bar_type).is_ok()
@@ -640,7 +640,7 @@ fn served(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<Serv
                  15, 20 or 30 minutes, 1, 2, 3, 4 or 8 hours, a day or a week, priced LAST, \
                  BID, ASK or MID, not {identifier}"
             );
-            ensure!(
+            anyhow::ensure!(
                 !(bar_type.spec().price_type == PriceType::Last
                     && bar_type.instrument_id().venue.as_str() == FOREX_VENUE),
                 "IB has no TRADES bars of a forex pair, so its history serves no {identifier}: \
@@ -653,7 +653,7 @@ fn served(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<Serv
         }
         NautilusDataType::TradeTick => {
             let instrument_id = instrument()?;
-            ensure!(
+            anyhow::ensure!(
                 !CURRENCY_PAIR_VENUES.contains(&instrument_id.venue.as_str()),
                 "Nautilus' IB client serves no trades of a currency pair, so IB's history \
                  serves no trades of {identifier}: read its quotes"
@@ -661,7 +661,9 @@ fn served(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<Serv
             Ok(Served::Ticks(IbHistoricalTickType::Trades, instrument_id))
         }
         other => {
-            bail!("IB's history serves bars, quotes and trades, not the {other} of {identifier}")
+            anyhow::bail!(
+                "IB's history serves bars, quotes and trades, not the {other} of {identifier}"
+            )
         }
     }
 }
@@ -843,7 +845,7 @@ pub(crate) fn check_held(
         if bar_type.spec().aggregation == BarAggregation::Second
             && let (Some(from), _) = resumed(catalog, data_type, identifier, slice.from, slice.to)?
         {
-            ensure!(
+            anyhow::ensure!(
                 from >= oldest,
                 "IB holds no bars of 30 seconds or less older than six months: {bar_type}, \
                  asked from {from}, reaches before {oldest}"
@@ -859,7 +861,7 @@ pub(crate) fn check_held(
 /// progress; stored, it would never be replaced.
 fn ensure_bars_closed(end: Timestamp, now: Timestamp) -> anyhow::Result<()> {
     let latest = IbHistory::latest_end(now)?;
-    ensure!(
+    anyhow::ensure!(
         end <= latest,
         "end {end} is within a minute of now: IB would return the minute still in progress; \
          use an end at or before {latest}"
@@ -910,7 +912,7 @@ async fn page_back<T>(
             .filter(|tick| ts_event(tick) <= UnixNanos::from(cursor))
             .collect();
         let Some(earliest) = held.iter().map(&ts_event).min() else {
-            bail!(
+            anyhow::bail!(
                 "the second of {} holds a full page of ticks, which IB cannot page past: the \
                  ticks up to {cursor} cannot be asked",
                 Timestamp::from(earliest_sent)
@@ -1010,7 +1012,7 @@ fn ensure_all_loaded(requested: &[InstrumentId], loaded: &[InstrumentAny]) -> an
         .iter()
         .map(ToString::to_string)
         .collect();
-    ensure!(
+    anyhow::ensure!(
         missing.is_empty(),
         "IB returned no instrument for {} (unknown or expired contract)",
         missing.join(", ")

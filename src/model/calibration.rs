@@ -14,7 +14,6 @@
 //! parameters has a closed form: a calibration refitted on the same rows is
 //! the same to the bit. Nautilus has no calibration.
 
-use anyhow::ensure;
 use serde::{Deserialize, Serialize};
 
 use super::targets::Side;
@@ -88,7 +87,7 @@ impl Ksplit {
     /// Returns an error if there is no row, or a row has neither one side
     /// nor two.
     pub fn fit(rows: &[Vec<(f64, f64)>]) -> anyhow::Result<Self> {
-        ensure!(!rows.is_empty(), "no row to calibrate the models on");
+        anyhow::ensure!(!rows.is_empty(), "no row to calibrate the models on");
         let pair = match rows[0].len() {
             1 => false,
             2 => true,

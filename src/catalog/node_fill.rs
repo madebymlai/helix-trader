@@ -30,7 +30,7 @@
 
 use std::{cell::RefCell, collections::VecDeque, fmt, path::Path, rc::Rc};
 
-use anyhow::{Context, bail, ensure};
+use anyhow::Context;
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::{DataActor, DataActorConfig, DataActorCore},
@@ -89,7 +89,9 @@ impl FillData {
             NautilusDataType::OrderBookDelta => Self::Deltas,
             NautilusDataType::Bar => Self::Bars(identifier.parse()?),
             NautilusDataType::FundingRateUpdate => Self::Funding,
-            other => bail!("no source filled through the node serves the {other} of an instrument"),
+            other => anyhow::bail!(
+                "no source filled through the node serves the {other} of an instrument"
+            ),
         })
     }
 
@@ -166,7 +168,7 @@ pub fn missing(
         let id = slice.instrument_id;
         let data = FillData::of(data_type, identifier)
             .with_context(|| format!("the {data_type} of {identifier}"))?;
-        ensure!(
+        anyhow::ensure!(
             data.instrument_of(identifier) == id.to_string(),
             "the {data} of {identifier} on a slice of {id}"
         );
@@ -441,9 +443,9 @@ impl NodeFill {
             done,
         } = outcome.take();
         if let Some(failure) = failure {
-            bail!(failure);
+            anyhow::bail!(failure);
         }
-        ensure!(
+        anyhow::ensure!(
             done,
             "the node stopped with {answered} of {total} requests answered"
         );
