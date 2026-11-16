@@ -366,6 +366,13 @@ mod tests {
 
     const GOLD_BARS: &str = r#"{ data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" } }"#;
     const GC_TRADES: &str = r#"{ data = "trades", instrument_id = "GC.GLBX" }"#;
+    /// The MID bars of the GC root, which Nautilus never builds: it builds
+    /// a root's bars from its contracts' trades.
+    const GC_ROOT_BARS: &str = r#"{ data = "bars", instrument_id = "GC.GLBX", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } }"#;
+    /// Gold's hourly bars of mids.
+    const GOLD_HOURS: &str = r#"{ data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } }"#;
+    /// Gold's quotes.
+    const GOLD_QUOTES: &str = r#"{ data = "quotes", instrument_id = "XAUUSD.ICMARKETS" }"#;
 
     /// The probe's tables: a span of 15 minutes, a filter of 5.
     const TABLES: &str = r#"
@@ -467,31 +474,102 @@ mod tests {
             .collect()
     }
 
+    /// Features reading every series `[data]` lists, in another order,
+    /// gold's bars and GC's trades, or gold's bars and the 10-year yields,
+    /// a custom series.
     #[rstest]
-    fn features_reading_every_series_of_data_and_no_other_load() {
-        load(&[GOLD_BARS, GC_TRADES], &[GC_TRADES, GOLD_BARS], TIME_ONLY).unwrap();
+    #[case::of_bars_and_trades(&[GOLD_BARS, GC_TRADES], &[GC_TRADES, GOLD_BARS])]
+    #[case::of_a_custom_series(&[GOLD_BARS, US10Y], &[GOLD_BARS, US10Y])]
+    fn features_reading_every_series_of_data_and_no_other_load(
+        #[case] features: &[&str],
+        #[case] series: &[&str],
+    ) {
+        load(features, series, TIME_ONLY).unwrap();
     }
 
+    /// One series mismatched, refused under its field, naming it and no
+    /// other:
+    ///
+    /// - GC's trades, which `[data]` lists and no feature reads, under
+    ///   their listing; nor does a bracket's ATR read them, built of the
+    ///   quotes of the gold traded.
+    /// - GC's trades, which the features read and `[data]` does not list,
+    ///   under `data.series`.
+    /// - The MID bars of the GC root, listed and read: Nautilus builds a
+    ///   root's bars from its contracts' trades, so these would never come,
+    ///   refused under their listing.
+    /// - The 2-year yields, which the features read and `[data]` does not
+    ///   list beside the 10-year, by their identifier.
+    /// - The 2-year yields, which `[data]` lists beside the 10-year the
+    ///   features read, as any series read by none: a strategy reading
+    ///   custom data in its `on_data` declares it in what it reads.
     #[rstest]
-    fn a_series_of_data_no_feature_reads_is_refused_under_its_field_naming_it() {
-        let [(field, message)] = &refusals(&[GOLD_BARS], &[GOLD_BARS, GC_TRADES], TIME_ONLY)[..]
-        else {
-            panic!("not one refusal");
+    #[case::listed_and_read_by_no_feature(
+        &[GOLD_BARS],
+        &[GOLD_BARS, GC_TRADES],
+        TIME_ONLY,
+        "data.series[1]",
+        "TradeTick of GC.GLBX",
+        None
+    )]
+    #[case::listed_and_read_by_neither_a_feature_nor_the_target_atr(
+        &[GOLD_BARS],
+        &[GOLD_BARS, GC_TRADES],
+        BRACKET,
+        "data.series[1]",
+        "TradeTick of GC.GLBX",
+        None
+    )]
+    #[case::read_and_not_listed(
+        &[GOLD_BARS, GC_TRADES],
+        &[GOLD_BARS],
+        TIME_ONLY,
+        "data.series",
+        "TradeTick of GC.GLBX",
+        None
+    )]
+    #[case::bars_on_a_root_not_built_from_its_trades(
+        &[GC_ROOT_BARS],
+        &[GC_ROOT_BARS],
+        TIME_ONLY,
+        "data.series[0]",
+        "GC.GLBX-1-HOUR-MID-INTERNAL",
+        None
+    )]
+    #[case::a_custom_series_read_and_not_listed(
+        &[GOLD_BARS, US10Y, US2Y],
+        &[GOLD_BARS, US10Y],
+        TIME_ONLY,
+        "data.series",
+        "TREASURY-2Y",
+        Some("TREASURY-10Y")
+    )]
+    #[case::a_custom_series_listed_and_read_by_no_feature(
+        &[GOLD_BARS, US10Y],
+        &[GOLD_BARS, US2Y, US10Y],
+        TIME_ONLY,
+        "data.series[1]",
+        "TREASURY-2Y",
+        None
+    )]
+    fn a_series_of_data_no_feature_reads_is_refused_under_its_field_naming_it(
+        #[case] features: &[&str],
+        #[case] series: &[&str],
+        #[case] target: &str,
+        #[case] field: &str,
+        #[case] named: &str,
+        #[case] unnamed: Option<&str>,
+    ) {
+        let refusals = refusals(features, series, target);
+
+        let [(refused, message)] = &refusals[..] else {
+            panic!("not one refusal: {refusals:?}");
         };
-
-        assert_eq!(field, "data.series[1]");
-        assert!(message.contains("TradeTick of GC.GLBX"), "{message}");
-    }
-
-    #[rstest]
-    fn a_series_the_features_read_that_data_does_not_list_is_refused_naming_it() {
-        let [(field, message)] = &refusals(&[GOLD_BARS, GC_TRADES], &[GOLD_BARS], TIME_ONLY)[..]
-        else {
-            panic!("not one refusal");
-        };
-
-        assert_eq!(field, "data.series");
-        assert!(message.contains("TradeTick of GC.GLBX"), "{message}");
+        assert_eq!(refused, field);
+        assert!(message.contains(named), "{message}");
+        if let Some(unnamed) = unnamed {
+            assert!(!message.contains(unnamed), "{message}");
+        }
     }
 
     /// Hourly bars of silver the features read and `[data]` does not list,
@@ -524,82 +602,34 @@ mod tests {
         assert!(of_unread.contains("TradeTick of GC.GLBX"), "{of_unread}");
     }
 
-    /// Features on the MID bars of the GC root, listed: Nautilus builds a
-    /// root's bars from its contracts' trades, so these would never come,
-    /// refused under their series, naming them.
-    #[rstest]
-    fn bars_on_a_root_not_built_from_its_trades_are_refused_under_their_series() {
-        let root_bars = r#"{ data = "bars", instrument_id = "GC.GLBX", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } }"#;
-
-        let refusals = refusals(&[root_bars], &[root_bars], TIME_ONLY);
-
-        let [(field, message)] = &refusals[..] else {
-            panic!("not one refusal: {refusals:?}");
-        };
-        assert_eq!(field, "data.series[0]");
-        assert!(message.contains("GC.GLBX-1-HOUR-MID-INTERNAL"), "{message}");
-    }
-
     /// The features read GC's trades alone; the target's ATR, a bracket's
-    /// or a time-only target's, is built of the quotes of the gold traded,
-    /// which `[data]` lists for it; a bracket in basis points has no ATR to
-    /// read them.
+    /// or a time-only target's, is built of what `[data]` lists for it,
+    /// the quotes of the gold traded, or, deciding hourly, runs on gold's
+    /// hourly bars of mids; a bracket in basis points has no ATR to read
+    /// them.
     #[rstest]
-    fn ticks_the_target_atr_reads_alone_are_read() {
-        let gold_quotes = r#"{ data = "quotes", instrument_id = "XAUUSD.ICMARKETS" }"#;
-
-        load(&[GC_TRADES], &[GC_TRADES, gold_quotes], BRACKET).unwrap();
-        load(&[GC_TRADES], &[GC_TRADES, gold_quotes], TIME_ONLY).unwrap();
-        let refusals = refusals(&[GC_TRADES], &[GC_TRADES, gold_quotes], IN_BPS);
+    #[case::ticks(GOLD_QUOTES, "QuoteTick of XAUUSD.ICMARKETS")]
+    #[case::bars(GOLD_HOURS, "XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL")]
+    fn ticks_the_target_atr_reads_alone_are_read(#[case] read: &str, #[case] named: &str) {
+        load(&[GC_TRADES], &[GC_TRADES, read], BRACKET).unwrap();
+        load(&[GC_TRADES], &[GC_TRADES, read], TIME_ONLY).unwrap();
+        let refusals = refusals(&[GC_TRADES], &[GC_TRADES, read], IN_BPS);
         let [(field, message)] = &refusals[..] else {
             panic!("not one refusal: {refusals:?}");
         };
         assert_eq!(field, "data.series[1]");
-        assert!(
-            message.contains("QuoteTick of XAUUSD.ICMARKETS"),
-            "{message}"
-        );
+        assert!(message.contains(named), "{message}");
     }
 
-    /// Deciding hourly, the target's ATR, a bracket's or a time-only
-    /// target's, runs on gold's hourly bars of mids, which `[data]` lists and
-    /// no feature reads; a bracket in basis points has no ATR to read them.
+    /// An unread series, or one listed twice, and a limit of an hour
+    /// decided every hour are both reported, each under its field.
     #[rstest]
-    fn bars_the_target_atr_runs_on_alone_are_read() {
-        let gold_hours = GOLD_BARS.replace("MINUTE", "HOUR");
-
-        load(&[GC_TRADES], &[GC_TRADES, &gold_hours], BRACKET).unwrap();
-        load(&[GC_TRADES], &[GC_TRADES, &gold_hours], TIME_ONLY).unwrap();
-        let refusals = refusals(&[GC_TRADES], &[GC_TRADES, &gold_hours], IN_BPS);
-        let [(field, message)] = &refusals[..] else {
-            panic!("not one refusal: {refusals:?}");
-        };
-        assert_eq!(field, "data.series[1]");
-        assert!(
-            message.contains("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL"),
-            "{message}"
-        );
-    }
-
-    /// The target's ATR reads what it is built from, and nothing more:
-    /// its bars of gold's quotes leave the trades of GC unread.
-    #[rstest]
-    fn a_series_neither_the_features_nor_the_target_atr_read_is_refused() {
-        let refusals = refusals(&[GOLD_BARS], &[GOLD_BARS, GC_TRADES], BRACKET);
-        let [(field, message)] = &refusals[..] else {
-            panic!("not one refusal: {refusals:?}");
-        };
-        assert_eq!(field, "data.series[1]");
-        assert!(message.contains("TradeTick of GC.GLBX"), "{message}");
-    }
-
-    /// An unread series and a limit of an hour decided every hour are
-    /// both reported, each under its field.
-    #[rstest]
-    fn the_series_refusals_are_reported_with_the_other_violations() {
+    #[case::unread(&[GOLD_BARS, GC_TRADES])]
+    #[case::listed_twice(&[GOLD_BARS, GOLD_BARS])]
+    fn the_series_refusals_are_reported_with_the_other_violations(#[case] series: &[&str]) {
         let mut fields: Vec<String> = refusals(
             &[GOLD_BARS],
-            &[GOLD_BARS, GC_TRADES],
+            series,
             r#"{ limit = "1h", atr = { period = 14 } }"#,
         )
         .into_iter()
@@ -632,23 +662,6 @@ mod tests {
         assert!(value.contains("TradeTick of GC.GLBX"), "{value}");
     }
 
-    /// A series listed twice and a limit of an hour decided every hour
-    /// are both reported, each under its field.
-    #[rstest]
-    fn a_series_listed_twice_is_reported_with_the_other_violations() {
-        let mut fields: Vec<String> = refusals(
-            &[GOLD_BARS],
-            &[GOLD_BARS, GOLD_BARS],
-            r#"{ limit = "1h", atr = { period = 14 } }"#,
-        )
-        .into_iter()
-        .map(|(field, _)| field)
-        .collect();
-        fields.sort();
-
-        assert_eq!(fields, ["data.series[1]", "model.target.limit"]);
-    }
-
     /// The part's own error building the features is the answer: no
     /// series is then refused for it.
     #[rstest]
@@ -662,43 +675,6 @@ mod tests {
     const US10Y: &str = r#"{ data = "Custom:LseRow", identifier = "TREASURY-10Y", metadata = { source = "bond_yields", symbol = "US10Y" } }"#;
     /// LSE's daily 2-year US yield, under the identifier `TREASURY-2Y`.
     const US2Y: &str = r#"{ data = "Custom:LseRow", identifier = "TREASURY-2Y", metadata = { source = "bond_yields", symbol = "US2Y" } }"#;
-
-    /// Features on gold's bars and the 10-year yields, which `[data]`
-    /// lists beside the bars.
-    #[rstest]
-    fn features_reading_a_custom_series_data_lists_load() {
-        load(&[GOLD_BARS, US10Y], &[GOLD_BARS, US10Y], TIME_ONLY).unwrap();
-    }
-
-    /// The features read the 2-year yields, which `[data]` does not list
-    /// beside the 10-year: refused, naming them by their identifier.
-    #[rstest]
-    fn a_custom_series_the_features_read_that_data_does_not_list_is_refused_naming_it() {
-        let [(field, message)] =
-            &refusals(&[GOLD_BARS, US10Y, US2Y], &[GOLD_BARS, US10Y], TIME_ONLY)[..]
-        else {
-            panic!("not one refusal");
-        };
-
-        assert_eq!(field, "data.series");
-        assert!(message.contains("TREASURY-2Y"), "{message}");
-        assert!(!message.contains("TREASURY-10Y"), "{message}");
-    }
-
-    /// The 2-year yields `[data]` lists beside the 10-year the features
-    /// read: refused as any series read by none, a strategy reading custom
-    /// data in its `on_data` declaring it in what it reads.
-    #[rstest]
-    fn a_custom_series_data_lists_that_no_feature_reads_is_refused_naming_it() {
-        let [(field, message)] =
-            &refusals(&[GOLD_BARS, US10Y], &[GOLD_BARS, US2Y, US10Y], TIME_ONLY)[..]
-        else {
-            panic!("not one refusal");
-        };
-
-        assert_eq!(field, "data.series[1]");
-        assert!(message.contains("TREASURY-2Y"), "{message}");
-    }
 
     /// The 2-year yields listed under the 10-year's identifier are another
     /// data type than the 10-year's the features read there: the cache keys
@@ -742,25 +718,20 @@ mod tests {
         );
     }
 
-    /// 15 minutes written as 900 seconds is the same span.
+    /// The rows are the same, and so is the fingerprint: of 15 minutes
+    /// written as 900 seconds, the same span; and of another filter, which
+    /// the part declares for its own logic and never hands to its features.
     #[rstest]
-    fn a_features_argument_written_otherwise_keeps_the_fingerprint() {
-        let otherwise = TABLES.replace(r#""15m""#, r#""900s""#);
+    #[case::an_argument_written_otherwise(r#""15m""#, r#""900s""#)]
+    #[case::an_indicator_of_the_parts_own_logic("period = 5", "period = 6")]
+    fn a_features_argument_written_otherwise_keeps_the_fingerprint(
+        #[case] written: &str,
+        #[case] otherwise: &str,
+    ) {
+        let otherwise = TABLES.replace(written, otherwise);
 
         assert_eq!(
             features_of(&otherwise).fingerprint(),
-            features_of(TABLES).fingerprint()
-        );
-    }
-
-    /// The rows do not depend on the filter, which the part declares for
-    /// its own logic and never hands to its features.
-    #[rstest]
-    fn an_indicator_of_the_parts_own_logic_is_not_in_the_fingerprint() {
-        let changed = TABLES.replace("period = 5", "period = 6");
-
-        assert_eq!(
-            features_of(&changed).fingerprint(),
             features_of(TABLES).fingerprint()
         );
     }
