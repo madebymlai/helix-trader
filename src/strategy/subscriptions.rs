@@ -406,6 +406,7 @@ mod tests {
         nautilus_strategy,
         strategy::{StrategyConfig, StrategyCore},
     };
+    use rstest::rstest;
 
     use super::*;
 
@@ -548,7 +549,7 @@ mod tests {
     /// month before delivery (`rolls/calendar.toml`): the root's trades are
     /// subscribed on GCZ26, standing for it on 2026-08-10, then moved at
     /// each roll.
-    #[test]
+    #[rstest]
     fn a_roots_series_are_subscribed_on_its_front_contract_and_moved_at_each_roll() {
         use NautilusDataType as D;
 
@@ -572,7 +573,7 @@ mod tests {
 
     /// A plain instrument stands for itself: subscribed once, and no roll
     /// of GC moves it.
-    #[test]
+    #[rstest]
     fn a_plain_instruments_series_are_subscribed_once_and_never_moved() {
         use NautilusDataType as D;
 
@@ -600,7 +601,7 @@ mod tests {
     /// which nothing reads there any more, not. Nautilus keeps one
     /// subscription per topic and actor (`DataActorCore::add_subscription_any`),
     /// so GCZ26's own trades, subscribed after the root's, send none.
-    #[test]
+    #[rstest]
     fn a_roll_keeps_the_series_another_instrument_still_reads_on_the_pre_contract() {
         use NautilusDataType as D;
 
@@ -676,7 +677,7 @@ mod tests {
     /// subscribed at the start of a replay by their data type, naming no
     /// data client, whatever their type: on the message bus alone, where a
     /// replay's rows arrive, sending the data engine nothing.
-    #[test]
+    #[rstest]
     fn a_replay_subscribes_custom_series_at_the_start_naming_no_client() {
         let us02y = CustomSeries::new("Yield", "US02Y".to_string(), None).unwrap();
         let subscriptions = Subscriptions::new(vec![], vec![], vec![lse_yields("US10Y"), us02y]);
@@ -722,7 +723,7 @@ mod tests {
     /// data client of their type's row's live data source, so Nautilus
     /// sends it the subscription; the tests' imbalances, of a type with no
     /// row, name none, subscribed on the message bus alone.
-    #[test]
+    #[rstest]
     fn a_live_custom_subscription_names_the_live_data_client_of_its_type_s_row() {
         let subscriptions = Subscriptions::new(
             vec![],
@@ -748,7 +749,7 @@ mod tests {
     /// GCZ26's data type, the contract standing for GC on 2026-08-10, and
     /// moved to GCG27's at GC's roll on 2026-11-26, each subscription and
     /// its end naming LSE's client.
-    #[test]
+    #[rstest]
     fn a_live_roll_moves_a_roots_custom_series_naming_the_same_client() {
         let subscriptions = Subscriptions::new(vec![], vec![], vec![lse_yields("GC.GLBX")]).live();
         let start = at("2026-08-10T14:30:00Z");
@@ -809,7 +810,7 @@ mod tests {
     /// A custom series on the root GC is subscribed on GCZ26's data type,
     /// the contract standing for GC on 2026-08-10, not the root's, and
     /// moved to GCG27's at the roll, naming no client either time.
-    #[test]
+    #[rstest]
     fn a_roots_custom_series_is_subscribed_on_its_front_contract_and_moved_at_its_roll() {
         let (started, rolled, sent) = imbalances_across_the_roll(
             vec![imbalances("GC.GLBX")],
@@ -824,7 +825,7 @@ mod tests {
 
     /// GCZ26's own imbalances, listed beside the root's, are still read
     /// on GCZ26 at the roll: they stay subscribed, the root's moving on.
-    #[test]
+    #[rstest]
     fn a_roll_keeps_a_custom_series_another_still_reads_on_the_pre_contract() {
         let (started, rolled, _) = imbalances_across_the_roll(
             vec![imbalances("GC.GLBX"), imbalances("GCZ26.GLBX")],
@@ -836,7 +837,7 @@ mod tests {
 
     /// A contract's custom series and one of no instrument stand for
     /// themselves: subscribed at the start, and no roll of GC moves them.
-    #[test]
+    #[rstest]
     fn custom_series_of_no_root_are_never_moved() {
         let (started, rolled, _) = imbalances_across_the_roll(
             vec![imbalances("GCZ26.GLBX"), imbalances("US10Y")],
@@ -870,7 +871,7 @@ mod tests {
     /// A start subscribes from the time it is given, where a live warmup's
     /// requests end, not from the clock's time when it subscribes, a few
     /// moments later live: bars and ticks alike.
-    #[test]
+    #[rstest]
     fn a_start_subscribes_from_the_time_it_is_given() {
         use NautilusDataType as D;
         let subscriptions = Subscriptions::new(
@@ -892,7 +893,7 @@ mod tests {
 
     /// At a roll the post contract is subscribed from the clock's time
     /// then, the roll's.
-    #[test]
+    #[rstest]
     fn a_roll_subscribes_the_post_contract_from_the_time_of_the_roll() {
         let subscriptions = Subscriptions::new(
             vec![],
@@ -927,7 +928,7 @@ mod tests {
     /// Bars on plain instruments are subscribed one subscription per
     /// venue: Nautilus routes a list of bar types to the client of their
     /// one venue.
-    #[test]
+    #[rstest]
     fn bars_are_subscribed_one_subscription_per_venue() {
         let gold = BarType::from("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL");
         let euro = BarType::from("EURUSD.ICMARKETS-1-HOUR-MID-INTERNAL");
@@ -982,7 +983,7 @@ mod tests {
     /// (L2_MBP) and its depth five levels a side. Deltas of the whole book
     /// each client streams, no depth asked; depth snapshots of price
     /// levels.
-    #[test]
+    #[rstest]
     fn each_book_is_subscribed_in_its_venue_s_format() {
         use NautilusDataType as D;
         let swap = "BTC-USDT-SWAP.OKX";
@@ -1025,7 +1026,7 @@ mod tests {
     /// (`venues::streams`), so only a replay subscribes to it, which reads
     /// neither the book type nor the levels, and it replays as declared.
     /// Deltas as L2_MBP, depth with no levels.
-    #[test]
+    #[rstest]
     fn a_book_its_venue_streams_none_of_is_subscribed_as_l2_mbp_with_no_levels() {
         use NautilusDataType as D;
         let subscriptions = Subscriptions::new(

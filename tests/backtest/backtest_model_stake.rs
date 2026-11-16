@@ -23,6 +23,7 @@ use helix_trader::{
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
 use nautilus_model::types::{Money, Quantity};
+use rstest::rstest;
 use rust_decimal::Decimal;
 
 use crate::{
@@ -117,7 +118,7 @@ fn units(rows: &[TargetRow]) -> Vec<(UnixNanos, Money, Money)> {
 /// oz rounded down, 3 oz, its R 9 USD; at twice the stake, 20 USD, 6.67
 /// rounded down, 6 oz, its R 18 USD. The trades' P&L before an entry moves
 /// the account's equity by a few dollars, not the size.
-#[test]
+#[rstest]
 fn a_model_strategys_bracket_trade_fills_at_its_stake_of_the_accounts_equity() {
     let config = hand_worked(Side::Long);
     let (from, to) = window();
@@ -179,7 +180,7 @@ fn time_only() -> ModelConfig {
 /// 2.40 USD, at 11:00. Trading on 25M USD at the config's stake, 10 USD,
 /// the entries are 10 / 1.60 = 6.25 oz, 6 oz, and 10 / 2.40 = 4.17 oz, 4
 /// oz, each one R worth 9.60 USD, and at 12:00 10 / 1.70 = 5.88 oz, 5 oz.
-#[test]
+#[rstest]
 fn a_model_strategys_time_only_trade_fills_at_its_stake_over_its_atr() {
     let config = time_only();
     let (from, to) = window();
@@ -221,7 +222,7 @@ fn a_model_strategys_time_only_trade_fills_at_its_stake_over_its_atr() {
 /// and 11:00 rows are one ounce, one R worth 3 USD, and the same row by row
 /// whether the replay started at 08:30, before that loss, or at 09:30,
 /// after it.
-#[test]
+#[rstest]
 fn the_rows_are_at_the_reference_stake_whatever_the_runs_pnl_and_its_start() {
     let config = ModelConfig {
         target: TargetConfig {

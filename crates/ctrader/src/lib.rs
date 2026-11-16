@@ -17,6 +17,11 @@
 //! quotes from the spot events), `execution` (the execution client: the
 //! trade requests of orders, the dispatch of trade events, the
 //! reconciliation reports) and `factories`.
+//!
+//! # Feature Flags
+//!
+//! - `test-support`: Exposes the hooks of a caller's end-to-end test of a
+//!   session's token renewal on a real cTrader server (see `README.md`).
 
 use jiff::SignedDuration;
 use nautilus_model::data::NautilusDataType;
@@ -30,8 +35,8 @@ pub use self::{
     factories::{CTraderDataClientFactory, CTraderExecutionClientFactory},
     session::CTraderSession,
 };
-// The types of the hooks of a caller's test on a real server.
-#[cfg(feature = "test-support")]
+// The types the hooks of a caller's test on a real server return; the
+// hooks themselves come with the `test-support` feature.
 pub use self::{common::token::TokenPair, websocket::SpotEvents};
 
 mod common;

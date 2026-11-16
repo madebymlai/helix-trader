@@ -142,6 +142,7 @@ mod tests {
         live::runner::{replace_data_event_sender, replace_exec_event_sender},
     };
     use nautilus_model::identifiers::{AccountId, InstrumentId, Venue};
+    use rstest::rstest;
 
     use super::*;
     use crate::testing::{self, CLIENT, VENUE};
@@ -152,7 +153,7 @@ mod tests {
 
     /// As the node does: the client created by its factory, under the
     /// factory's name, from its config.
-    #[test]
+    #[rstest]
     fn the_data_client_is_named_after_its_config_on_the_venue_of_its_connection() {
         let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
         replace_data_event_sender(tx);
@@ -182,7 +183,7 @@ mod tests {
 
     /// As the node does, for the execution client: a hedging margin
     /// account named after the venue and the environment.
-    #[test]
+    #[rstest]
     fn the_execution_client_is_named_after_its_config_on_a_hedging_account_of_the_venue() {
         let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
         replace_exec_event_sender(tx);

@@ -34,6 +34,7 @@ use nautilus_trading::{
     nautilus_strategy,
     strategy::{StrategyConfig, StrategyCore},
 };
+use rstest::rstest;
 
 use super::*;
 use crate::{log_capture, strategy::conversions::Conversions};
@@ -393,7 +394,7 @@ fn close() -> (OrderSide, Quantity, bool, bool) {
 
 // ------------------------------------------------------------------ send
 
-#[test]
+#[rstest]
 fn a_trade_with_both_exits_is_a_bracket_its_legs_on_them() {
     let (mut probe, _) = registered();
 
@@ -447,7 +448,7 @@ fn a_trade_with_both_exits_is_a_bracket_its_legs_on_them() {
 }
 
 /// IB's execution client denies a reduce-only or post-only order.
-#[test]
+#[rstest]
 fn a_trade_on_ib_has_legs_neither_reduce_only_nor_post_only() {
     let (mut probe, _) = registered();
     let trade = Trade {
@@ -496,73 +497,38 @@ fn exits(probe: &Probe) -> Vec<OrderAny> {
         .collect()
 }
 
-/// IB cancels or reduces the other exit itself, the node up or not: a
-/// trade sent on IB has its two exits in one OCA group reducing the other
-/// with block, IB's one-updates-the-other with overfill protection.
-#[test]
-fn a_trade_on_ib_links_its_exits_in_one_oca_group_each_reducing_the_other() {
-    let (mut probe, _) = registered();
-
-    on_ib(buy(bracket(4)))
-        .send(&mut probe, stake(), unconverted())
-        .unwrap();
-
-    let exits: Vec<(String, OcaType)> = exits(&probe).iter().map(oca_at_ib).collect();
-    let [take_profit, stop_loss] = exits.as_slice() else {
-        panic!("{exits:?}")
-    };
-    assert_eq!(take_profit, stop_loss);
-    assert_ne!(take_profit.0, "");
-    assert_eq!(take_profit.1, OcaType::ReduceWithBlock);
-}
-
-#[test]
-fn a_trade_on_ib_sends_its_entry_in_no_oca_group() {
+/// IB links an API bracket's exits itself, in an OCA group named after the
+/// entry's permId that cancels the other exit when one fills (paper,
+/// 2026-11-14 and 2026-11-16): a trade on IB sends its exits in no OCA
+/// group of its own, and Nautilus' tags alone.
+#[rstest]
+fn a_trade_on_ib_sends_its_exits_in_no_oca_group_of_its_own() {
     let (mut probe, _) = registered();
 
     on_ib(buy(bracket(4)))
         .send_at(&mut probe, stake(), equity(), ids("T-1"))
         .unwrap();
 
-    let entry = probe.cache().order(&id("T-1")).unwrap();
-    assert_eq!(oca_at_ib(&entry).0, "");
-}
-
-/// IB holds an OCA group's name once used: each trade's is its own.
-#[test]
-fn two_trades_on_ib_link_their_exits_in_two_groups() {
-    let (mut probe, _) = registered();
-    let trade = on_ib(buy(bracket(4)));
-
-    trade.send(&mut probe, stake(), unconverted()).unwrap();
-    trade.send(&mut probe, stake(), unconverted()).unwrap();
-
-    let groups: BTreeSet<String> = exits(&probe).iter().map(|exit| oca_at_ib(exit).0).collect();
-    assert_eq!(groups.len(), 2, "{groups:?}");
-}
-
-/// The OCA group's tag is added to Nautilus' tags of a bracket's exits,
-/// not in place of them.
-#[test]
-fn a_trade_on_ib_keeps_nautilus_tags_on_its_exits() {
-    let (mut probe, _) = registered();
-
-    on_ib(buy(bracket(4)))
-        .send_at(&mut probe, stake(), equity(), ids("T-1"))
-        .unwrap();
-
-    let tagged = |of: &str, tag: &str| {
-        let order = probe.cache().order(&id(of)).unwrap();
-        order.tags().unwrap().contains(&Ustr::from(tag))
+    let sent: Vec<(String, OcaType)> = exits(&probe).iter().map(oca_at_ib).collect();
+    let unlinked = (String::new(), OcaType::None);
+    assert_eq!(sent, [unlinked.clone(), unlinked]);
+    let tags = |of: &str| {
+        probe
+            .cache()
+            .order(&id(of))
+            .unwrap()
+            .tags()
+            .unwrap()
+            .to_vec()
     };
-    assert!(tagged("T-1-TP", "TAKE_PROFIT"));
-    assert!(tagged("T-1-SL", "STOP_LOSS"));
+    assert_eq!(tags("T-1-TP"), [Ustr::from("TAKE_PROFIT")]);
+    assert_eq!(tags("T-1-SL"), [Ustr::from("STOP_LOSS")]);
 }
 
 /// IC, a cTrader broker, links a bracket's exits itself as its position's
 /// protections: its exits carry Nautilus' tags alone
 /// (`OrderFactory::bracket`).
-#[test]
+#[rstest]
 fn a_trade_at_ic_tags_its_exits_as_nautilus_does() {
     let cache = cache();
     cache
@@ -592,7 +558,7 @@ fn a_trade_at_ic_tags_its_exits_as_nautilus_does() {
     assert_eq!(tags("T-1-SL"), [Ustr::from("STOP_LOSS")]);
 }
 
-#[test]
+#[rstest]
 fn a_trade_without_exits_is_one_market_entry() {
     let (mut probe, _) = registered();
 
@@ -641,7 +607,7 @@ fn entry_quantity(probe: &Probe) -> Quantity {
 /// USD on one AUD/USD: 138,888.9 of it, rounded down to whole units,
 /// 138,888, which risk 499.9968 USD. Rounded to the nearest, 138,889,
 /// they would risk 500.0004 USD.
-#[test]
+#[rstest]
 fn a_trade_risks_its_stake_of_equity_over_its_one_r_rounded_down_to_its_size() {
     let (mut probe, _) = registered();
     let trade = Trade::new(
@@ -662,7 +628,7 @@ fn a_trade_risks_its_stake_of_equity_over_its_one_r_rounded_down_to_its_size() {
 /// away, and of a sell, at 0.7043215, at the tick above, 0.70433, so 500
 /// USD buys 115,473, which risk 499.02 USD over one R. At the nearer
 /// ticks, 0.00432 away, 115,740 would risk 500.17 USD.
-#[test]
+#[rstest]
 fn a_trade_is_sized_at_its_stop_on_the_tick_away_from_its_price() {
     for side in [OrderSide::Buy, OrderSide::Sell] {
         let (mut probe, _) = registered();
@@ -680,7 +646,7 @@ fn a_trade_is_sized_at_its_stop_on_the_tick_away_from_its_price() {
     }
 }
 
-#[test]
+#[rstest]
 fn a_trade_at_twice_the_stake_is_twice_the_size() {
     let (mut probe, _) = registered();
 
@@ -693,7 +659,7 @@ fn a_trade_at_twice_the_stake_is_twice_the_size() {
 /// Its 100,000 AUD/USD are worth 500 USD over one R of 0.00500, and its
 /// stake is the config's, multiple 1: the bracket's entry carries both,
 /// beside its time limit.
-#[test]
+#[rstest]
 fn a_trades_entry_is_tagged_with_its_r_in_money_and_its_stakes_multiple() {
     let (mut probe, _) = registered();
 
@@ -712,7 +678,7 @@ fn a_trades_entry_is_tagged_with_its_r_in_money_and_its_stakes_multiple() {
 
 /// A market entry at twice the stake: 200,000 AUD/USD, worth 1,000 USD
 /// over one R, multiple 2.
-#[test]
+#[rstest]
 fn a_trades_entry_at_a_multiple_of_the_stake_is_tagged_with_it() {
     let (mut probe, _) = registered();
 
@@ -732,7 +698,7 @@ fn a_trades_entry_at_a_multiple_of_the_stake_is_tagged_with_it() {
 /// 0.5% of 0.50 USD is 0.0025 USD, half of one AUD/USD's worth over one
 /// R: its size rounds down to none, and it sends nothing, no order and no
 /// time alert, and says why.
-#[test]
+#[rstest]
 fn a_trade_whose_size_rounds_to_none_sends_nothing_and_logs_why() {
     let name = "a_trade_whose_size_rounds_to_none_sends_nothing_and_logs_why";
     if !log_capture::alone(module_path!(), name) {
@@ -759,7 +725,7 @@ fn a_trade_whose_size_rounds_to_none_sends_nothing_and_logs_why() {
 /// Pepperstone's account holds 100,000 EUR, and no USD, the currency of
 /// AUD/USD's P&L: the trade is not sized on EUR, and it sends nothing,
 /// saying so.
-#[test]
+#[rstest]
 fn a_trade_without_equity_in_its_pnl_currency_sends_nothing_and_logs_why() {
     let name = "a_trade_without_equity_in_its_pnl_currency_sends_nothing_and_logs_why";
     if !log_capture::alone(module_path!(), name) {
@@ -787,7 +753,7 @@ fn a_trade_without_equity_in_its_pnl_currency_sends_nothing_and_logs_why() {
 /// client reports one: there is no equity to size the trade on, and it
 /// sends nothing, saying the account holds none, not that its size rounds
 /// down to zero.
-#[test]
+#[rstest]
 fn a_trade_on_an_account_holding_no_equity_sends_nothing_and_logs_why() {
     let name = "a_trade_on_an_account_holding_no_equity_sends_nothing_and_logs_why";
     if !log_capture::alone(module_path!(), name) {
@@ -845,7 +811,7 @@ fn through_eurusd() -> Rates {
 /// EUR/USD, whose first quote has not come yet, as at a live start: there
 /// is no rate, and the trade sends nothing, no order and no time alert,
 /// and says why.
-#[test]
+#[rstest]
 fn a_trade_sent_before_its_pairs_first_quote_sends_nothing_and_logs_why() {
     let name = "a_trade_sent_before_its_pairs_first_quote_sends_nothing_and_logs_why";
     if !log_capture::alone(module_path!(), name) {
@@ -872,7 +838,7 @@ fn a_trade_sent_before_its_pairs_first_quote_sends_nothing_and_logs_why() {
 /// Once EUR/USD's first quote is cached, 1.24990 / 1.25010, its mid 1.25:
 /// the same trade is sized on 125,000 USD, 0.5% of it, 625 USD, over one
 /// R of 0.00500, 125,000 AUD/USD.
-#[test]
+#[rstest]
 fn a_trade_sent_after_its_pairs_first_quote_is_sized_on_the_equity_converted() {
     let cache = cache_converting();
     cache
@@ -902,7 +868,7 @@ fn a_trade_sent_after_its_pairs_first_quote_is_sized_on_the_equity_converted() {
 /// Nautilus' risk engine picks an order's account: the trade is sized on
 /// its 200,000 USD, 0.5% of it, 1,000 USD, over one R of 0.00500, 200,000
 /// AUD/USD.
-#[test]
+#[rstest]
 fn a_trade_is_sized_on_the_account_of_the_client_its_venue_routes_to() {
     let cache = Rc::new(RefCell::new(Cache::default()));
     let account = AccountId::from("IB-DU1234567");
@@ -995,7 +961,7 @@ fn sized_from(cache: &Rc<RefCell<Cache>>, instrument_id: InstrumentId) -> Quanti
 /// the open position's 20,000 USD of P&L already: the trade is sized on
 /// the 200,000 USD it reports, 200,000 AUD/USD, not on 220,000 USD with
 /// that P&L counted again.
-#[test]
+#[rstest]
 fn a_trade_on_ib_is_sized_on_the_balance_ib_reports_its_open_pnl_counted_once() {
     let account = reported_margin_account(AccountId::from("IB-DU1234567"), "200000 USD");
     let cache = holding_open_pnl(&ib_aud(), "IB", account);
@@ -1008,7 +974,7 @@ fn a_trade_on_ib_is_sized_on_the_balance_ib_reports_its_open_pnl_counted_once() 
 /// A cTrader broker reports its account's balance without its open
 /// positions: the trade is sized on its 200,000 USD and the open
 /// position's 20,000 USD of P&L, 220,000 AUD/USD.
-#[test]
+#[rstest]
 fn a_trade_at_a_ctrader_broker_is_sized_on_its_balance_and_its_open_pnl() {
     let account = reported_margin_account(AccountId::from("PEPPERSTONE-001"), "200000 USD");
     let cache = holding_open_pnl(&aud(InstrumentId::from(AUD)), "PEPPERSTONE", account);
@@ -1022,7 +988,7 @@ fn a_trade_at_a_ctrader_broker_is_sized_on_its_balance_and_its_open_pnl() {
 /// from its fills and holding no open P&L, whatever IB reports live: the
 /// trade is sized on its 200,000 USD and the open position's 20,000 USD of
 /// P&L, 220,000 AUD/USD.
-#[test]
+#[rstest]
 fn a_trade_on_ibs_simulated_account_is_sized_on_its_balance_and_its_open_pnl() {
     let account = margin_account(AccountId::from("IDEALPRO-001"), "200000 USD");
     let cache = holding_open_pnl(&ib_aud(), "IDEALPRO", account);
@@ -1058,7 +1024,7 @@ fn defining_ib_eurusd(cache: &Rc<RefCell<Cache>>) {
 /// summed: 145,000 USD, 0.5% of it, 725 USD, over one R of 0.00500,
 /// 145,000 AUD/USD. On the EUR alone it would be 125,000, on the P&L alone
 /// 20,000.
-#[test]
+#[rstest]
 fn a_trade_on_an_account_without_a_base_currency_is_sized_on_each_currency_converted_and_summed() {
     let account = margin_account(AccountId::from("IDEALPRO-001"), "100000 EUR");
     let cache = holding_open_pnl(&ib_aud(), "IDEALPRO", account);
@@ -1092,7 +1058,7 @@ fn a_trade_on_an_account_without_a_base_currency_is_sized_on_each_currency_conve
 /// yet: the account's 100,000 EUR are not converted into USD, and the
 /// trade sends nothing, no order and no time alert, and says why, naming
 /// the currencies and the venue whose rates it lacks.
-#[test]
+#[rstest]
 fn a_trade_converting_through_an_ib_pair_before_its_first_bars_sends_nothing_and_logs_why() {
     let name =
         "a_trade_converting_through_an_ib_pair_before_its_first_bars_sends_nothing_and_logs_why";
@@ -1126,7 +1092,7 @@ fn a_trade_converting_through_an_ib_pair_before_its_first_bars_sends_nothing_and
 
 /// Nautilus' sizer is linear: an inverse instrument's P&L is no multiple
 /// of a distance in price.
-#[test]
+#[rstest]
 fn an_inverse_instrument_is_refused_naming_it() {
     let cache = cache();
     let btc: CryptoPerpetual = btcusd_bybit();
@@ -1149,7 +1115,7 @@ fn an_inverse_instrument_is_refused_naming_it() {
 /// A dataset run's trade is sized at its balance, not at the account's
 /// equity: 0.5% of 40,000 USD, 200 USD, over one R of 0.00500 buys 40,000
 /// AUD/USD, where the account's 100,000 USD would buy 100,000.
-#[test]
+#[rstest]
 fn a_trade_sent_at_an_equity_is_sized_on_it_not_on_the_accounts() {
     let (mut probe, _) = registered();
 
@@ -1171,7 +1137,7 @@ fn a_trade_sent_at_an_equity_is_sized_on_it_not_on_the_accounts() {
 /// What sending sizes it at, without sending: 0.5% of 100,000 USD over
 /// one R of 0.00500 is 100,000 AUD/USD, whose R is 500 USD; of 0.50 USD,
 /// none.
-#[test]
+#[rstest]
 fn a_trades_size_and_its_r_are_those_it_is_sent_at() {
     let instrument = aud(InstrumentId::from(AUD));
     let trade = buy(held(1));
@@ -1193,7 +1159,7 @@ fn a_trades_size_and_its_r_are_those_it_is_sent_at() {
 
 /// Sent at 10:00 and held 4 hours: its alert is the module's at 14:00, not
 /// a nanosecond earlier.
-#[test]
+#[rstest]
 fn a_trades_time_limit_runs_from_its_send() {
     let (mut probe, clock) = registered();
     sent(&mut probe, "T-1", buy(bracket(4)));
@@ -1202,7 +1168,7 @@ fn a_trades_time_limit_runs_from_its_send() {
     assert_eq!(advance(&mut probe, &clock, NOW + 240 * MINUTE).len(), 1);
 }
 
-#[test]
+#[rstest]
 fn a_trade_without_a_time_limit_has_no_alert() {
     let (mut probe, clock) = registered();
     let trade = buy(Exits {
@@ -1214,7 +1180,7 @@ fn a_trade_without_a_time_limit_has_no_alert() {
     assert!(advance(&mut probe, &clock, NOW + 1000 * 60 * MINUTE).is_empty());
 }
 
-#[test]
+#[rstest]
 fn another_time_event_is_not_the_modules() {
     let (mut probe, clock) = registered();
     clock
@@ -1228,7 +1194,7 @@ fn another_time_event_is_not_the_modules() {
 /// Filled into a position of its own on a hedging venue, neither leg
 /// filled: at its time the legs are cancelled and its position closed by
 /// a market sell of its 100,000, a time close.
-#[test]
+#[rstest]
 fn at_its_time_an_open_trade_is_closed_and_its_legs_cancelled() {
     let (mut probe, clock) = registered();
     sent(&mut probe, "T-1", buy(bracket(4)));
@@ -1243,7 +1209,7 @@ fn at_its_time_an_open_trade_is_closed_and_its_legs_cancelled() {
 
 /// On IB, whose execution client denies a reduce-only order, the time
 /// close is not one.
-#[test]
+#[rstest]
 fn at_its_time_a_trade_on_ib_is_closed_by_an_order_not_reduce_only() {
     let (mut probe, clock) = registered();
     let trade = Trade {
@@ -1264,7 +1230,7 @@ fn at_its_time_a_trade_on_ib_is_closed_by_an_order_not_reduce_only() {
 /// A dataset run purges closed orders a minute after they close (Nautilus'
 /// `purge_closed_orders`), the filled entry with them: its open legs and
 /// its open position still end the trade at its time.
-#[test]
+#[rstest]
 fn at_its_time_a_trade_its_filled_entry_purged_is_closed_and_its_legs_cancelled() {
     let (mut probe, clock) = registered();
     sent(&mut probe, "T-1", buy(bracket(4)));
@@ -1282,7 +1248,7 @@ fn at_its_time_a_trade_its_filled_entry_purged_is_closed_and_its_legs_cancelled(
     assert_eq!(closes(&probe), [close()]);
 }
 
-#[test]
+#[rstest]
 fn at_its_time_an_unfilled_entry_is_cancelled_and_nothing_closed() {
     let (mut probe, clock) = registered();
     sent(&mut probe, "T-1", buy(held(1)));
@@ -1296,7 +1262,7 @@ fn at_its_time_an_unfilled_entry_is_cancelled_and_nothing_closed() {
 /// On a netting venue two trades, sent at 10:00 and 10:30, add into one
 /// position: the first's time closes it whole, 200,000, and the second's
 /// then finds it closed.
-#[test]
+#[rstest]
 fn on_a_netting_venue_a_trades_time_closes_the_position_with_the_trades_it_holds() {
     let (mut probe, clock) = registered();
     sent(&mut probe, "T-1", buy(held(1)));
@@ -1329,7 +1295,7 @@ fn on_a_netting_venue_a_trades_time_closes_the_position_with_the_trades_it_holds
 /// On a netting venue the first of two trades in the position ended at
 /// its stop loss: its time closes nothing, the second's closes the
 /// position, its 100,000 left.
-#[test]
+#[rstest]
 fn a_trade_its_leg_ended_is_not_closed_at_its_time() {
     let (mut probe, clock) = registered();
     sent(&mut probe, "T-1", buy(bracket(1)));
@@ -1354,7 +1320,7 @@ fn a_trade_its_leg_ended_is_not_closed_at_its_time() {
 /// Its take profit filled 40,000 of its 100,000 on a hedging venue: the
 /// trade is not ended, a leg closed alone ends it, so at its time the legs
 /// are cancelled and its position, the 60,000 left, closed.
-#[test]
+#[rstest]
 fn a_trade_its_leg_partly_filled_is_closed_at_its_time() {
     let (mut probe, clock) = registered();
     sent(&mut probe, "T-1", buy(bracket(4)));
@@ -1381,7 +1347,7 @@ fn a_trade_its_leg_partly_filled_is_closed_at_its_time() {
 /// On a netting venue the first trade's position closed at 10:20 by
 /// another order and opened again by a third trade at 10:30: the first's
 /// time leaves the third's position open.
-#[test]
+#[rstest]
 fn a_trade_whose_position_closed_and_opened_again_is_not_closed_at_its_time() {
     let (mut probe, clock) = registered();
     sent(&mut probe, "T-1", buy(held(1)));
@@ -1425,7 +1391,7 @@ fn before_a_restart(cache: &Rc<RefCell<Cache>>) {
 /// The trade sent 20 minutes before the restart, filled a minute later, is
 /// closed 3 hours 40 minutes after it, 4 hours after its send; the one
 /// sent 5 hours before at once.
-#[test]
+#[rstest]
 fn a_restart_sets_each_open_trades_time_again_from_its_send() {
     let cache = cache();
     before_a_restart(&cache);
@@ -1441,7 +1407,7 @@ fn a_restart_sets_each_open_trades_time_again_from_its_send() {
 }
 
 /// The trade whose 4 hours are over at the restart is closed at once.
-#[test]
+#[rstest]
 fn a_trade_open_at_a_restart_is_closed_at_its_time() {
     let cache = cache();
     before_a_restart(&cache);
@@ -1453,7 +1419,7 @@ fn a_trade_open_at_a_restart_is_closed_at_its_time() {
     assert_eq!(closes(&probe), [close()]);
 }
 
-#[test]
+#[rstest]
 fn a_restart_sets_no_time_for_another_strategys_trade() {
     let cache = cache();
     before_a_restart(&cache);
@@ -1464,7 +1430,7 @@ fn a_restart_sets_no_time_for_another_strategys_trade() {
     assert_eq!(clock.borrow().timer_names(), Vec::<&str>::new());
 }
 
-#[test]
+#[rstest]
 fn a_restart_sets_no_time_for_a_trade_without_a_time_limit() {
     let cache = cache();
     let (mut before, _) = registered_on(&cache, STRATEGY, NOW - 20 * MINUTE);
@@ -1483,7 +1449,7 @@ fn a_restart_sets_no_time_for_a_trade_without_a_time_limit() {
 
 /// On a netting venue two trades, sent 50 and 20 minutes before the
 /// restart, in one position: each its own time again.
-#[test]
+#[rstest]
 fn a_restart_sets_the_time_of_each_trade_in_a_netting_position_again() {
     let cache = cache();
     let (mut before, clock) = registered_on(&cache, STRATEGY, NOW - 50 * MINUTE);
@@ -1510,7 +1476,7 @@ fn a_restart_sets_the_time_of_each_trade_in_a_netting_position_again() {
 
 /// The first of two trades in a netting position ended at its stop loss
 /// before the restart: the second's time alone is set again.
-#[test]
+#[rstest]
 fn a_restart_sets_no_time_for_a_trade_its_leg_ended() {
     let cache = cache();
     let (mut before, clock) = registered_on(&cache, STRATEGY, NOW - 50 * MINUTE);
@@ -1541,7 +1507,7 @@ fn a_restart_sets_no_time_for_a_trade_its_leg_ended() {
 
 /// A trade sent 20 minutes before the restart, its take profit since
 /// filled 40,000 of its 100,000: still open, its time is set again.
-#[test]
+#[rstest]
 fn a_restart_sets_the_time_of_a_trade_its_leg_partly_filled_again() {
     let cache = cache();
     let (mut before, _) = registered_on(&cache, STRATEGY, NOW - 20 * MINUTE);
@@ -1567,7 +1533,7 @@ fn a_restart_sets_the_time_of_a_trade_its_leg_partly_filled_again() {
 
 /// A trade sent 20 minutes before the restart, its entry still unfilled:
 /// its time is set again, 4 hours after its send.
-#[test]
+#[rstest]
 fn a_restart_sets_the_time_of_an_unfilled_entry_again() {
     let cache = cache();
     let (mut before, _) = registered_on(&cache, STRATEGY, NOW - 20 * MINUTE);
@@ -1585,7 +1551,7 @@ fn a_restart_sets_the_time_of_an_unfilled_entry_again() {
 /// A trade sent 20 minutes before the restart, its entry filled 40,000 of
 /// its 100,000, open as an order and held by a position: its time is set
 /// again.
-#[test]
+#[rstest]
 fn a_restart_sets_the_time_of_a_partly_filled_entry_again() {
     let cache = cache();
     let (mut before, _) = registered_on(&cache, STRATEGY, NOW - 20 * MINUTE);
@@ -1611,7 +1577,7 @@ fn a_restart_sets_the_time_of_a_partly_filled_entry_again() {
 /// The first trade's netting position closed 30 minutes before the
 /// restart, inside its 4 hours, and opened again by a later trade: the
 /// later trade's time alone is set again.
-#[test]
+#[rstest]
 fn a_restart_sets_no_time_for_a_trade_whose_position_closed_since() {
     let cache = cache();
     let (mut before, clock) = registered_on(&cache, STRATEGY, NOW - 90 * MINUTE);

@@ -16,13 +16,14 @@
 //!   `failed_send`): its outcome is unknown too, and like any sent request
 //!   it waits for its events.
 //! - **Rejected** (`VenueRejected`): cTrader refused the request, by an
-//!   order error event or an error answer of any other code.
+//!   order error event or an error answer of any other code; or refused
+//!   the order at execution, by its `ORDER_REJECTED` event or by
+//!   cancelling it unfilled with its deal rejected.
 
 use nautilus_live::execution::failure::CommandFailure;
 use nautilus_model::identifiers::Venue;
-use tokio::sync::oneshot::error::RecvError;
 
-use crate::common::messages::CTraderError;
+use crate::common::messages::{CTraderError, ProtoOaDealStatus, ProtoOaExecutionEvent};
 
 /// The codes of cTrader's refusals that do not say the request was not
 /// carried out (Spotware's `ProtoErrorCode` and `ProtoOAErrorCode`): a
@@ -50,7 +51,7 @@ const UNKNOWN_OUTCOME: [&str; 6] = [
 /// write began; `NotSent` if the session says it never was; `Ambiguous` if
 /// the session is gone without a word.
 pub(super) fn sending(
-    sending: Result<Result<(), CTraderError>, RecvError>,
+    sending: Result<Result<(), CTraderError>, tokio::sync::oneshot::error::RecvError>,
     venue: Venue,
 ) -> Result<(), CommandFailure> {
     match sending {
@@ -68,10 +69,7 @@ pub(super) fn sending(
 /// (an order error event's, or an error answer's); its reason, the code
 /// and the description.
 pub(super) fn refusal(code: &str, description: Option<&str>) -> CommandFailure {
-    let reason = match description.filter(|d| !d.is_empty()) {
-        Some(description) => format!("{code}: {description}"),
-        None => code.to_owned(),
-    };
+    let reason = joined(code, description);
     if UNKNOWN_OUTCOME.contains(&code) {
         CommandFailure::Ambiguous(reason)
     } else {
@@ -79,9 +77,49 @@ pub(super) fn refusal(code: &str, description: Option<&str>) -> CommandFailure {
     }
 }
 
+/// An order's rejection by its `ORDER_REJECTED` execution event: its
+/// `errorCode`, and the `rejectReason` of its deal if it carries one.
+/// Rejected whatever the code, the event saying the order is done.
+pub(super) fn rejected(event: &ProtoOaExecutionEvent) -> CommandFailure {
+    let code = event.error_code.as_deref().unwrap_or("ORDER_REJECTED");
+    let description = event.deal.as_ref().and_then(|d| d.reject_reason.as_deref());
+    CommandFailure::VenueRejected(joined(code, description))
+}
+
+/// The rejection of an order closed unfilled with its deal rejected, if
+/// its cancellation or expiry `event` is one: cTrader refuses an order at
+/// execution (an IOC order out of its range, no price, the liquidity
+/// provider's refusal) by cancelling it with the rejected deal, its
+/// `dealStatus` other than `FILLED` and `PARTIALLY_FILLED` (demo,
+/// 2026-11-16), not by `ORDER_REJECTED`. Its reason, the deal's status and
+/// `rejectReason`. None for an order that filled in part, which its
+/// cancellation closes.
+pub(super) fn deal_rejected(event: &ProtoOaExecutionEvent) -> Option<CommandFailure> {
+    let unfilled = event
+        .order
+        .as_ref()
+        .is_some_and(|o| o.executed_volume.unwrap_or(0) == 0);
+    let deal = event.deal.as_ref().filter(|_| unfilled)?;
+    match deal.deal_status() {
+        ProtoOaDealStatus::Filled | ProtoOaDealStatus::PartiallyFilled => None,
+        status => Some(CommandFailure::VenueRejected(joined(
+            status.as_str_name(),
+            deal.reject_reason.as_deref(),
+        ))),
+    }
+}
+
+/// A refusal's reason: its `code`, then its `description` if any.
+fn joined(code: &str, description: Option<&str>) -> String {
+    match description.filter(|d| !d.is_empty()) {
+        Some(description) => format!("{code}: {description}"),
+        None => code.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use tokio::sync::oneshot;
+    use rstest::rstest;
 
     use super::*;
 
@@ -90,7 +128,7 @@ mod tests {
     /// What became of a request's frame, `sent` by the session, or not
     /// at all if `None`: the session's sender gone.
     async fn sent(sent: Option<Result<(), CTraderError>>) -> Result<(), CommandFailure> {
-        let (tx, rx) = oneshot::channel();
+        let (tx, rx) = tokio::sync::oneshot::channel();
         if let Some(sent) = sent {
             tx.send(sent).unwrap();
         } else {
@@ -130,9 +168,9 @@ mod tests {
         ));
     }
 
-    /// The refusals the demo answered (`testdata/order_error_*`), and the
+    /// The refusals the demo answered (`test_data/order_error_*`), and the
     /// deal timeout Spotware documents as "rejected".
-    #[test]
+    #[rstest]
     fn a_refusal_ctrader_explains_is_a_venue_rejection() {
         for code in [
             "TRADING_BAD_VOLUME",
@@ -154,7 +192,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_rate_limit_or_an_unavailable_server_leaves_the_outcome_unknown() {
         for code in [
             "UNKNOWN_ERROR",

@@ -1,6 +1,6 @@
 //! LSE's names and addresses, and the adapter's.
 
-use std::{fmt, num::NonZeroU32, sync::LazyLock};
+use std::{fmt::Display, num::NonZeroU32, sync::LazyLock};
 
 use nautilus_model::identifiers::Venue;
 
@@ -99,8 +99,8 @@ impl LseExchange {
 }
 
 /// The exchange's name, as LSE names its stream.
-impl fmt::Display for LseExchange {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for LseExchange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Cme => "CME",
             Self::Nasdaq => "Nasdaq",

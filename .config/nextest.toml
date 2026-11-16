@@ -1,0 +1,9 @@
+# cargo-nextest's profiles. CI runs `--profile ci` (`.github/workflows/ci.yml`);
+# locally the tests run with plain `cargo test`.
+
+[profile.ci]
+# A hung test fails after 10 minutes, named, rather than stalling the job
+# until its timeout, as Nautilus' ci profile has it
+slow-timeout = { period = "120s", terminate-after = 5 }
+# Every failure listed at the end, the run going on past the first
+fail-fast = false

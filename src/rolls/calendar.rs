@@ -5,7 +5,7 @@
 
 use std::sync::LazyLock;
 
-use anyhow::{Context, bail, ensure};
+use anyhow::Context;
 use jiff::{Timestamp, civil, tz::TimeZone};
 use nautilus_model::identifiers::{InstrumentId, Symbol};
 use serde::Deserialize;
@@ -47,12 +47,12 @@ fn parse(toml: &str) -> anyhow::Result<Vec<Product>> {
     }
     let Calendar { product: products } = toml::from_str(toml)?;
     for (i, product) in products.iter().enumerate() {
-        ensure!(
+        anyhow::ensure!(
             !product.months.is_empty(),
             "{} lists no months",
             product.root
         );
-        ensure!(
+        anyhow::ensure!(
             products[..i].iter().all(|other| other.root != product.root),
             "{} is listed twice",
             product.root
@@ -151,18 +151,18 @@ impl TryFrom<String> for ContractTemplate {
                 "y" => Part::Y,
                 "yy" => Part::Yy,
                 "yyyy" => Part::Yyyy,
-                _ => bail!("contract {template:?} has an unknown placeholder {{{name}}}"),
+                _ => anyhow::bail!("contract {template:?} has an unknown placeholder {{{name}}}"),
             });
             rest = after;
         }
         if !rest.is_empty() {
             parts.push(Part::Text(rest.to_owned()));
         }
-        ensure!(
+        anyhow::ensure!(
             parts.iter().any(|part| matches!(part, Part::Month)),
             "contract {template:?} has no {{month}}"
         );
-        ensure!(
+        anyhow::ensure!(
             parts
                 .iter()
                 .any(|part| matches!(part, Part::Y | Part::Yy | Part::Yyyy)),
@@ -325,10 +325,11 @@ fn weekday_before(date: civil::Date) -> civil::Date {
 #[cfg(test)]
 mod tests {
     use nautilus_model::identifiers::Venue;
+    use rstest::rstest;
 
     use super::*;
 
-    #[test]
+    #[rstest]
     fn the_embedded_calendar_parses() {
         let products = parse(CALENDAR).unwrap();
         assert!(
@@ -338,7 +339,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn rejects_a_root_listed_twice() {
         let product = r#"
             [[product]]
@@ -353,7 +354,7 @@ mod tests {
         assert!(err.to_string().contains("GC.GLBX"), "{err}");
     }
 
-    #[test]
+    #[rstest]
     fn rejects_a_product_without_months() {
         let err = parse(
             r#"
@@ -392,7 +393,7 @@ mod tests {
         gold.roll_out_of(Contract { year, month })
     }
 
-    #[test]
+    #[rstest]
     fn rolls_on_the_rule_day_with_no_days_before() {
         // The last weekday of July 2026 is Friday the 31st.
         let gold = gold_rolling("0");
@@ -402,7 +403,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn counts_days_before_in_weekdays_across_a_weekend() {
         // The last weekday of March 2026 is Tuesday the 31st; three
         // weekdays before it are Monday the 30th, Friday the 27th and
@@ -437,7 +438,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn names_a_contract_by_month_code_and_the_years_last_digit() {
         let gold = gold_named("GC{month}{y}").unwrap();
         assert_eq!(
@@ -450,7 +451,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn names_a_contract_by_the_two_digit_year_with_literal_text() {
         let gold = gold_named("GC.{month}{yy}").unwrap();
         assert_eq!(
@@ -463,7 +464,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn names_a_contract_by_the_four_digit_year_in_any_order() {
         let gold = gold_named("GC-{yyyy}-{month}").unwrap();
         assert_eq!(
@@ -472,22 +473,22 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn rejects_an_unknown_placeholder() {
         assert!(gold_named("GC{month}{yyy}").is_err());
     }
 
-    #[test]
+    #[rstest]
     fn rejects_an_unclosed_brace() {
         assert!(gold_named("GC{month}{y").is_err());
     }
 
-    #[test]
+    #[rstest]
     fn rejects_a_contract_without_a_month() {
         assert!(gold_named("GC{y}").is_err());
     }
 
-    #[test]
+    #[rstest]
     fn rejects_a_contract_without_a_year() {
         assert!(gold_named("GC{month}").is_err());
     }

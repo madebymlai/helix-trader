@@ -47,12 +47,7 @@
 //! trims a response to the warmup's end by `ts_init`. A series with no
 //! history drops nothing; a new warmup forgets the seams of the one before.
 
-use std::{
-    cell::RefCell,
-    collections::HashMap,
-    fmt::{self, Debug},
-    rc::Rc,
-};
+use std::{cell::RefCell, collections::HashMap, fmt::Debug, rc::Rc};
 
 use nautilus_common::actor::indicators::SharedActorIndicator;
 use nautilus_core::UnixNanos;
@@ -123,7 +118,8 @@ impl Hold {
     ///
     /// # Errors
     ///
-    /// Returns the first error of an indicator reading it.
+    /// Returns an error if an indicator reading it fails: the first such
+    /// error.
     pub(super) fn history(&self, tick: &Tick) -> anyhow::Result<()> {
         self.seams
             .borrow_mut()
@@ -138,7 +134,8 @@ impl Hold {
     ///
     /// # Errors
     ///
-    /// Returns the first error of an indicator reading it.
+    /// Returns an error if an indicator reading it fails: the first such
+    /// error.
     pub(super) fn live(&self, tick: Tick) -> anyhow::Result<()> {
         if let Some(held) = self.held.borrow_mut().as_mut() {
             held.push(tick);
@@ -153,8 +150,8 @@ impl Hold {
     ///
     /// # Errors
     ///
-    /// Returns the first error of an indicator reading a tick, which ends
-    /// the hand-over: the ticks after it are lost.
+    /// Returns an error if an indicator reading a tick fails, the first of
+    /// which ends the hand-over: the ticks after it are lost.
     pub(super) fn release(&self) -> anyhow::Result<()> {
         let Some(held) = self.held.take() else {
             return Ok(());
@@ -243,7 +240,7 @@ impl Tick {
 }
 
 impl Debug for Hold {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct(stringify!(Hold))
             .field("indicators", &self.indicators.len())
             .field("books", &self.books.len())

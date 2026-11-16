@@ -24,6 +24,7 @@ use nautilus_model::{
     types::{Currency, Money, Price, Quantity},
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
+use rstest::rstest;
 use rust_decimal::Decimal;
 
 use crate::common::{Ohlc, ohlc, recorder::Recorder, ts};
@@ -147,7 +148,7 @@ fn backtest(dir: &Path) -> Backtest {
     }
 }
 
-#[test]
+#[rstest]
 fn each_hour_bar_of_okx_candles_holds_the_minutes_opening_in_its_hour() {
     let dir = tempfile::tempdir().unwrap();
     catalog(dir.path());
@@ -177,7 +178,7 @@ fn each_hour_bar_of_okx_candles_holds_the_minutes_opening_in_its_hour() {
 
 /// A buy on the first hour bar fills on a candle, with no quote to measure
 /// a spread on.
-#[test]
+#[rstest]
 fn a_run_on_candles_alone_reports_its_spread_as_not_applicable() {
     let dir = tempfile::tempdir().unwrap();
     catalog(dir.path());

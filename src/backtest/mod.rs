@@ -12,7 +12,7 @@ mod report;
 
 use std::{collections::BTreeSet, fmt::Debug, path::PathBuf};
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::DataActorNative, component::Component, logging::logger::LoggerConfig,
@@ -140,7 +140,8 @@ impl Backtest {
     ///
     /// # Errors
     ///
-    /// Returns an error as `run` does, but for the costs of the fills.
+    /// Returns an error if the inputs are inconsistent or the node fails to
+    /// build or run, as `run` does but for the costs of the fills.
     pub fn run_dataset<S>(&self, strategy: S) -> anyhow::Result<()>
     where
         S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
@@ -164,8 +165,8 @@ impl Backtest {
     ///
     /// # Errors
     ///
-    /// Returns an error as `catalog::instruments`,
-    /// `refuse_unheld_pnl_currency` and `refuse_balance` do.
+    /// Returns an error if `catalog::instruments`,
+    /// `refuse_unheld_pnl_currency` or `refuse_balance` fails.
     pub fn refuse_balance(&self, trade: &TradeConfig) -> anyhow::Result<()> {
         let traded = crate::catalog::instruments(&self.catalog, &trade.instrument_ids())
             .context("reading the instruments traded")?;
@@ -182,7 +183,7 @@ impl Backtest {
     ///
     /// # Errors
     ///
-    /// Returns an error as `ContinuousBars::read` does: a root without a
+    /// Returns an error if `ContinuousBars::read` fails: a root without a
     /// roll over `[start, end]`, a roll without a trade to price it. A bar
     /// type on a root not built from trades is refused by the config's
     /// load (see `strategy::DataConfig`).
@@ -334,10 +335,10 @@ impl Backtest {
 ///
 /// # Errors
 ///
-/// Returns an error naming a pair of `pairs` defined without a base
-/// currency, which gives no rate (`conversions::reaches`), or naming both
-/// currencies if the pairs do not reach the P&L currency of an instrument
-/// of `traded` from the balance's.
+/// Returns an error if a pair of `pairs`, which it names, is defined
+/// without a base currency, which gives no rate (`conversions::reaches`),
+/// or if the pairs do not reach the P&L currency of an instrument of
+/// `traded` from the balance's, naming both currencies.
 pub fn refuse_balance(
     balance: Money,
     traded: &[InstrumentAny],
@@ -354,7 +355,7 @@ pub fn refuse_balance(
             let ids: Vec<String> = pairs.iter().map(|pair| pair.id().to_string()).collect();
             format!("none of the pairs [{}]", ids.join(", "))
         };
-        bail!(
+        anyhow::bail!(
             "the balance {balance} is in {}, which {through} converts into {pnl}, the P&L \
              currency of {}, which the strategy trades: a trade is sized on the equity \
              converted into its P&L currency through the pairs of [trade] conversions",
@@ -381,7 +382,8 @@ pub fn refuse_balance(
 ///
 /// # Errors
 ///
-/// Returns an error naming the instrument, its venue, the balance's
+/// Returns an error if the balance's currency is not the P&L currency of
+/// such an instrument, naming the instrument, its venue, the balance's
 /// currency, the P&L currency and the Nautilus limitation.
 fn refuse_unheld_pnl_currency(balance: Money, traded: &[InstrumentAny]) -> anyhow::Result<()> {
     for instrument in traded {
@@ -389,7 +391,7 @@ fn refuse_unheld_pnl_currency(balance: Money, traded: &[InstrumentAny]) -> anyho
         if balance.currency == pnl || venues::has_base_currency(venue) {
             continue;
         }
-        bail!(
+        anyhow::bail!(
             "the balance {balance} is in {}, not in {pnl}, the P&L currency of {}, which the \
              strategy trades on {venue}, whose broker's account has no base currency: Nautilus \
              books a simulated account without one in each currency apart and books no loss or \
@@ -412,6 +414,7 @@ mod tests {
         data::{FundingRateUpdate, QuoteTick, stubs::stub_depth10},
         types::{Money, Price, Quantity},
     };
+    use rstest::rstest;
     use rust_decimal::Decimal;
 
     use super::*;
@@ -470,7 +473,7 @@ mod tests {
             .collect()
     }
 
-    #[test]
+    #[rstest]
     fn the_funding_a_catalog_stores_of_a_traded_instrument_is_replayed_and_none_without() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -530,7 +533,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn an_instrument_read_for_its_book_alone_replays_its_book_and_no_bar_source() {
         let dir = tempfile::tempdir().unwrap();
         let backtest = gold(dir.path(), false);
@@ -543,7 +546,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn the_book_of_an_instrument_is_replayed_beside_the_source_of_its_bars() {
         let dir = tempfile::tempdir().unwrap();
         let backtest = gold(dir.path(), true);
@@ -561,7 +564,7 @@ mod tests {
 
     /// GC.GLBX rolls from GCQ26.GLBX to GCZ26.GLBX at 00:00 UTC on 29 July
     /// 2026; its bars are built from the trades of each contract.
-    #[test]
+    #[rstest]
     fn the_trades_of_a_contract_read_beside_the_bars_of_its_root_are_replayed_once() {
         let dir = tempfile::tempdir().unwrap();
         let backtest = Backtest {
@@ -596,7 +599,7 @@ mod tests {
     /// GC.GLBX's bars over July and August 2026, a book of August's
     /// contract stored, and its book read as ticks: GC.GLBX rolls from
     /// GCQ26.GLBX to GCZ26.GLBX at 00:00 UTC on 29 July 2026.
-    #[test]
+    #[rstest]
     fn the_book_of_a_contract_read_beside_the_bars_of_its_root_is_replayed_once() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -631,7 +634,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_catalog_without_funding_replays_the_series_the_bars_are_built_from() {
         let dir = tempfile::tempdir().unwrap();
         let backtest = backtest(dir.path(), &[XPERP, SWAP]);
@@ -661,7 +664,7 @@ mod tests {
     /// simulated account on a balance in EUR would book none of a USD
     /// contract's losses. Refused, naming the contract, its venue, both
     /// currencies and the Nautilus code that books such an account.
-    #[test]
+    #[rstest]
     fn a_balance_off_the_pnl_currency_of_an_instrument_on_a_broker_without_a_base_currency_is_refused()
      {
         let err = refuse_unheld_pnl_currency(Money::from("100000 EUR"), &[future("GCZ6.GLBX")])
@@ -683,7 +686,7 @@ mod tests {
     /// P&L currency is accepted on a broker without a base currency, any
     /// balance on a broker whose account has one, a cTrader broker's, as
     /// Nautilus books it in that base.
-    #[test]
+    #[rstest]
     fn a_balance_in_the_pnl_currency_or_on_a_broker_with_a_base_currency_is_accepted() {
         for (balance, instrument) in [
             ("100000 USD", future("GCZ6.GLBX")),
@@ -699,7 +702,7 @@ mod tests {
 
     /// Every instrument traded is checked, one of them refusing the
     /// balance.
-    #[test]
+    #[rstest]
     fn a_balance_is_refused_for_any_instrument_traded_it_is_not_the_pnl_currency_of() {
         let traded = [cfd("XAUUSD.ICMARKETS"), future("GCZ6.GLBX")];
 

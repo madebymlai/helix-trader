@@ -1,4 +1,3 @@
-use anyhow::ensure;
 use jiff::{SignedDuration, Timestamp, civil::Time, tz::TimeZone};
 use serde::Deserialize;
 
@@ -19,7 +18,7 @@ impl Session {
     ///
     /// Returns an error if the session does not open before it closes.
     pub fn validate(&self) -> anyhow::Result<()> {
-        ensure!(
+        anyhow::ensure!(
             self.open < self.close,
             "session open {} must be before its close {}",
             self.open,
@@ -40,6 +39,7 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use jiff::civil::{DateTime, time};
+    use rstest::rstest;
 
     use super::*;
 
@@ -66,46 +66,46 @@ mod tests {
         xetra().contains(utc.parse().unwrap(), HOUR)
     }
 
-    #[test]
+    #[rstest]
     fn a_bar_inside_counts() {
         assert!(counts("2026-01-07T12:00"));
     }
 
-    #[test]
+    #[rstest]
     fn bars_outside_do_not_count() {
         assert!(!counts("2026-01-07T07:00"));
         assert!(!counts("2026-01-07T20:00"));
     }
 
-    #[test]
+    #[rstest]
     fn a_bar_starting_exactly_at_the_open_counts() {
         assert!(counts("2026-01-07T10:00"));
     }
 
-    #[test]
+    #[rstest]
     fn a_bar_straddling_the_open_does_not_count() {
         assert!(!counts("2026-01-07T09:30"));
         assert!(!counts("2026-01-07T09:59:59"));
     }
 
-    #[test]
+    #[rstest]
     fn a_bar_ending_exactly_at_the_close_counts() {
         assert!(counts("2026-01-07T17:30"));
     }
 
-    #[test]
+    #[rstest]
     fn a_bar_straddling_the_close_does_not_count() {
         assert!(!counts("2026-01-07T17:30:01"));
         assert!(!counts("2026-01-07T18:00"));
     }
 
-    #[test]
+    #[rstest]
     fn a_bar_spanning_midnight_does_not_count() {
         // 23:30 to 00:30: each end alone is past the open or before the close.
         assert!(!counts("2026-01-08T00:30"));
     }
 
-    #[test]
+    #[rstest]
     fn the_session_follows_daylight_saving_in_march() {
         // Friday in CET (UTC+1), Monday in CEST (UTC+2).
         assert!(!counts_utc("2026-03-27T08:00Z"));
@@ -114,7 +114,7 @@ mod tests {
         assert!(!counts_utc("2026-03-30T16:00Z"));
     }
 
-    #[test]
+    #[rstest]
     fn the_session_follows_daylight_saving_in_october() {
         // Friday in CEST (UTC+2), Monday in CET (UTC+1).
         assert!(counts_utc("2026-10-23T08:00Z"));
@@ -123,7 +123,7 @@ mod tests {
         assert!(counts_utc("2026-10-26T16:00Z"));
     }
 
-    #[test]
+    #[rstest]
     fn validates_open_before_close() {
         xetra().validate().unwrap();
         let mut session = xetra();

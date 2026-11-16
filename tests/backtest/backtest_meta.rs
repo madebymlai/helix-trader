@@ -37,6 +37,7 @@ use helix_trader::{
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
 use nautilus_model::enums::OrderSide;
+use rstest::rstest;
 use tempfile::TempDir;
 
 use crate::common::{
@@ -204,7 +205,7 @@ fn meta_store(models: &Path) -> ModelStore {
 /// every trade.
 /// With meta models published straight, a day's decisions trade only as
 /// the meta model in use takes the trade of the side picked.
-#[test]
+#[rstest]
 fn a_meta_model_trains_on_the_sides_trades_and_takes_them_in_the_run() {
     let catalog = catalog();
     let models = tempfile::tempdir().unwrap();

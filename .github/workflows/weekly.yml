@@ -1,0 +1,113 @@
+name: weekly
+
+permissions:
+  contents: read
+
+on:
+  schedule:
+    # Mondays 06:00 UTC
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  nautilus-develop:
+    name: nautilus develop
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout repository
+        # https://github.com/actions/checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Free disk space
+        # DataFusion and LightGBM make a large target directory
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+
+      - name: Install build dependencies
+        # mold is the linker .cargo/config.toml sets; clang and cmake build LightGBM; protoc the cTrader protos
+        run: sudo apt-get update && sudo apt-get install -y mold clang libclang-dev cmake protobuf-compiler
+
+      # The workspace's one Nautilus pin, moved to develop's head: a failure
+      # here is a change upstream helix must follow before its next pin bump
+      - name: Point the Nautilus pin at develop
+        run: |
+          rev="$(grep -oE 'rev = "[0-9a-f]{40}"' Cargo.toml | head -1 | grep -oE '[0-9a-f]{40}')"
+          sed -i "s/rev = \"$rev\"/branch = \"develop\"/" Cargo.toml
+          git diff --stat
+
+      - name: Set up Rust toolchain
+        # https://github.com/actions-rust-lang/setup-rust-toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          components: clippy
+          cache: false
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --features strategy-tests -- -D warnings
+
+      - name: Test
+        run: cargo test
+
+  advisories:
+    name: advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        # https://github.com/actions/checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install cargo-deny
+        # https://github.com/taiki-e/install-action
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-deny@0.20.2
+
+      # Advisories published since Cargo.lock last changed
+      - name: Check advisories
+        run: cargo deny check advisories
+
+  workarounds:
+    name: workarounds
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: read
+    steps:
+      - name: Checkout repository
+        # https://github.com/actions/checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # A workaround whose cited issues are all closed is due to go
+      - name: Check each workaround's issues are open
+        run: python3 -B .pre-commit-hooks/check_workarounds.py --open
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  nautilus-engineering:
+    name: nautilus_engineering
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        # https://github.com/actions/checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Fails when nautilus_engineering changed a file helix vendors: run
+      # the same update from a checkout of it, then the renderer, and commit
+      - name: Check the vendored files are current
+        run: |-
+          git clone --quiet --depth 1 \
+            https://github.com/nautechsystems/nautilus_engineering "$RUNNER_TEMP/nautilus_engineering"
+          bash "$RUNNER_TEMP/nautilus_engineering/sync/sync.bash" update --consumer "$GITHUB_WORKSPACE"
+          python3 scripts/manage-nautilus-engineering-pre-commit.py render
+          git diff --stat --exit-code

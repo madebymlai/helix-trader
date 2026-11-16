@@ -101,7 +101,8 @@ impl ModelPart for ModelEmaParams {
     ///
     /// # Errors
     ///
-    /// Returns an error under `data.series` if it lists no bars series.
+    /// Returns an error if `data.series` lists no bars series, under that
+    /// field.
     fn features(config: &ModelEmaConfig) -> ConfigResult<Rc<FeatureSet>> {
         features::features(config)
             .map_err(|e| ConfigError::invalid_value("data.series", format!("{e:#}")))
@@ -129,7 +130,7 @@ impl ModelStrategy for ModelEma {
     ///
     /// # Errors
     ///
-    /// Returns an error as `ModelHandle::new` does, or if Nautilus refuses
+    /// Returns an error if `ModelHandle::new` fails, or if Nautilus refuses
     /// the base (`StrategyCore::new_checked`).
     fn with_blueprint(
         config: ModelEmaConfig,
@@ -216,6 +217,7 @@ impl DataActor for ModelEma {
 #[cfg(all(test, feature = "strategy-tests"))]
 mod tests {
     use std::{cell::RefCell, path::Path};
+    use rstest::rstest;
 
     use jiff::SignedDuration;
     use nautilus_common::{
@@ -278,14 +280,14 @@ mod tests {
         learner = { kind = "baseline" }
     "#;
 
-    #[test]
+    #[rstest]
     fn the_example_config_loads() {
         ModelEmaConfig::load(include_str!("../../../config/model_ema.toml")).unwrap();
     }
 
     /// Its features read the series its example lists, and no other: the
     /// features build of it.
-    #[test]
+    #[rstest]
     fn the_features_of_the_example_config_read_its_series() {
         let config = ModelEmaConfig::load(include_str!("../../../config/model_ema.toml")).unwrap();
 
@@ -297,7 +299,7 @@ mod tests {
     /// the fewest are weekdays, gold trading 23 hours of each, so 322
     /// hourly decisions. A split leaves `min_data_in_leaf` rows each side
     /// at least: its leaves split on those rows.
-    #[test]
+    #[rstest]
     fn the_example_configs_leaves_split_on_the_rows_its_window_fits_on() {
         let model = ModelEmaConfig::load(include_str!("../../../config/model_ema.toml"))
             .unwrap()
@@ -328,7 +330,7 @@ mod tests {
 
     /// Its features read bars alone: the quotes of the AUD/USD traded, which
     /// a bracket in basis points has no ATR to run on, are read by none.
-    #[test]
+    #[rstest]
     fn a_tick_series_its_features_do_not_read_is_refused_at_load() {
         let toml = with_quotes().replace(
             r#"target = { limit = "30m", atr = { period = 14 } }"#,
@@ -348,7 +350,7 @@ mod tests {
     /// The target's ATR, its time-only target's or that of a bracket 2 and
     /// 1 ATRs out, is built of the quotes of the AUD/USD traded: it reads
     /// them.
-    #[test]
+    #[rstest]
     fn quotes_the_target_atr_is_built_of_load() {
         let bracket = with_quotes().replace(
             r#"target = { limit = "30m", atr = { period = 14 } }"#,
@@ -362,7 +364,7 @@ mod tests {
     /// Its features average each bars series once: listed again, it is
     /// refused under its second listing, naming it, and not as features
     /// of one name.
-    #[test]
+    #[rstest]
     fn a_bars_series_listed_twice_is_refused_under_its_second_listing() {
         let bars = r#"{ data = "bars", instrument_id = "AUD/USD.SIM", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },"#;
         let toml = CONFIG.replace(bars, &[bars; 2].join("\n"));
@@ -381,7 +383,7 @@ mod tests {
     }
 
     /// Its features are averages of bars: ticks alone give it none.
-    #[test]
+    #[rstest]
     fn a_config_without_bars_series_is_refused_under_the_series() {
         let toml = CONFIG.replace(
             r#"{ data = "bars", instrument_id = "AUD/USD.SIM", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },"#,
@@ -407,18 +409,18 @@ mod tests {
         };
         errors
             .into_iter()
-            .map(|err| match err {
+            .map(|e| match e {
                 ConfigError::MissingField { field }
                 | ConfigError::UnsupportedField { field, .. }
                 | ConfigError::InvalidValue { field, .. }
                 | ConfigError::Range { field, .. } => field,
-                err => panic!("unexpected config error {err:?}"),
+                e => panic!("unexpected config error {e:?}"),
             })
             .collect()
     }
 
     /// Its slow average has no table: refused under it, not built.
-    #[test]
+    #[rstest]
     fn a_missing_average_table_is_refused_under_its_name() {
         let toml = CONFIG.replace("[indicators.slow]\n        period = 30\n", "");
 
@@ -427,7 +429,7 @@ mod tests {
 
     /// Its features are its code's: a table it does not declare adds
     /// none.
-    #[test]
+    #[rstest]
     fn a_table_it_does_not_declare_is_refused_under_its_name() {
         let toml = CONFIG.replace("[trade]", "[indicators.medium]\nperiod = 20\n\n[trade]");
 
@@ -436,7 +438,7 @@ mod tests {
 
     /// Nautilus' `ExponentialMovingAverage::new_checked` refuses a period
     /// of 0.
-    #[test]
+    #[rstest]
     fn a_period_nautilus_refuses_is_refused_under_its_table() {
         let toml = CONFIG.replace("period = 10", "period = 0");
 
@@ -446,7 +448,7 @@ mod tests {
     /// A refused period, a table it does not declare and a limit of an
     /// hour decided every hour are reported at once, each under its
     /// field.
-    #[test]
+    #[rstest]
     fn its_table_refusals_are_reported_with_the_other_violations() {
         let toml = CONFIG
             .replace("period = 10", "period = 0")
@@ -464,7 +466,7 @@ mod tests {
 
     /// Without `[base]`, its default: its strategy id alone, Nautilus
     /// tagging its orders with the id's tag.
-    #[test]
+    #[rstest]
     fn defaults_its_base_to_its_strategy_id_alone() {
         let base = ModelEmaConfig::load(CONFIG).unwrap().base;
         assert_eq!(base.strategy_id, Some(StrategyId::from("MODEL_EMA-001")));
@@ -474,7 +476,7 @@ mod tests {
 
     /// It claims the external orders of the instrument it trades, as its
     /// config does: the live node registers them as it adds it.
-    #[test]
+    #[rstest]
     fn claims_the_external_orders_of_the_instrument_it_trades() {
         let models = tempfile::tempdir().unwrap();
         let mode = Mode::Backtest {
@@ -531,7 +533,7 @@ mod tests {
     /// A market entry held 30 minutes, sent and filled 20 minutes before a
     /// restart: started again, the strategy sets its time again, 10
     /// minutes after the restart.
-    #[test]
+    #[rstest]
     fn a_restart_sets_the_time_of_its_open_trade_again() {
         let aud = InstrumentAny::CurrencyPair(audusd_sim());
         let cache = Rc::new(RefCell::new(Cache::default()));

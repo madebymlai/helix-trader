@@ -32,7 +32,7 @@ pub trait IndicatorArgs: DeserializeOwned + Serialize {
 
     /// # Errors
     ///
-    /// Returns the error of an argument the indicator refuses.
+    /// Returns an error if the indicator refuses an argument.
     fn build(self) -> anyhow::Result<Self::Indicator>;
 }
 
@@ -70,8 +70,8 @@ pub trait Declaration {
 
     /// # Errors
     ///
-    /// Returns the error parsing `table` into the arguments, or building
-    /// the indicator of them.
+    /// Returns an error if `table` does not parse into the arguments, or
+    /// the indicator of them does not build.
     fn check(&self, table: &toml::Table) -> anyhow::Result<()>;
 }
 
@@ -179,7 +179,8 @@ impl IndicatorsConfig {
     ///
     /// # Panics
     ///
-    /// As `canonical_args`.
+    /// Panics if its table is missing or does not parse (see
+    /// `canonical_args`).
     fn parsed<A: IndicatorArgs>(&self, declared: Declared<A>) -> A {
         parse(&self.0[declared.name])
             .unwrap_or_else(|e| panic!("indicator {} validated: {e}", declared.name))
@@ -261,6 +262,7 @@ mod tests {
     use nautilus_common::config::ConfigResult;
     use nautilus_model::data::Bar;
     use nautilus_trading::strategy::StrategyConfig;
+    use rstest::rstest;
 
     use super::*;
     use crate::strategy::{Part, Series, StandardConfig};
@@ -386,17 +388,17 @@ mod tests {
         };
         errors
             .into_iter()
-            .map(|err| match err {
+            .map(|e| match e {
                 ConfigError::MissingField { field }
                 | ConfigError::UnsupportedField { field, .. }
                 | ConfigError::InvalidValue { field, .. }
                 | ConfigError::Range { field, .. } => field,
-                err => panic!("unexpected config error {err:?}"),
+                e => panic!("unexpected config error {e:?}"),
             })
             .collect()
     }
 
-    #[test]
+    #[rstest]
     fn the_strategy_receives_nautilus_indicators_built_from_their_tables() {
         let config = load(TOML).unwrap();
         let fast = config.indicators.build(FAST);
@@ -413,15 +415,23 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_custom_indicator_is_received_built_from_its_table() {
         let config = load(TOML).unwrap();
         let breakout = config.indicators.build(BREAKOUT);
         assert_eq!(breakout.level, 100.5);
     }
 
-    #[test]
-    fn arguments_left_out_take_nautilus_defaults() {
+    /// Pins the defaults Nautilus' indicators take for an argument left
+    /// out, an EMA's `LAST` price (`crates/indicators/src/average/
+    /// ema.rs:119`) and an ATR's Wilder average using the previous close
+    /// (`crates/indicators/src/volatility/atr.rs:131-132`): `EmaArgs` and
+    /// `AtrArgs` hand a left-out argument over as none, and
+    /// `canonical_args` leaves it out of a feature's fingerprint, so a
+    /// changed default changes the features under the same fingerprint
+    /// unless `model::dataset::VERSION` is bumped.
+    #[rstest]
+    fn drift_arguments_left_out_take_nautilus_defaults() {
         let toml = TOML
             .replace("price_type = \"BID\"\n", "")
             .replace("ma_type = \"SIMPLE\"\n", "")
@@ -435,7 +445,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn the_strategy_reads_an_indicator_s_arguments() {
         let config = load(TOML).unwrap();
         assert_eq!(
@@ -444,18 +454,18 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_missing_indicator_is_refused_naming_it() {
         assert_eq!(error_fields(&without("breakout")), ["indicators.breakout"]);
     }
 
-    #[test]
+    #[rstest]
     fn an_indicator_the_strategy_does_not_declare_is_refused_naming_it() {
         let toml = TOML.replace("[trade]", "[indicators.slow]\nperiod = 30\n\n[trade]");
         assert_eq!(error_fields(&toml), ["indicators.slow"]);
     }
 
-    #[test]
+    #[rstest]
     fn an_argument_nautilus_refuses_is_refused_naming_the_indicator() {
         let toml = TOML.replace("period = 5", "period = 0");
         let err = load(&toml).unwrap_err();
@@ -463,7 +473,7 @@ mod tests {
         assert_eq!(error_fields(&toml), ["indicators.fast"]);
     }
 
-    #[test]
+    #[rstest]
     fn an_argument_a_custom_builder_refuses_is_refused_naming_the_indicator() {
         let toml = TOML.replace("level = 100.5", "level = -1.0");
         let err = load(&toml).unwrap_err();
@@ -472,13 +482,13 @@ mod tests {
     }
 
     /// `AverageTrueRange::new_checked` is not public: its `new` panics.
-    #[test]
+    #[rstest]
     #[should_panic(expected = "period must be in")]
     fn an_average_true_range_argument_nautilus_refuses_panics_at_load() {
         let _ = load(&TOML.replace("period = 14", "period = 0"));
     }
 
-    #[test]
+    #[rstest]
     fn an_unknown_argument_is_refused_naming_the_indicator_and_the_argument() {
         let toml = TOML.replace("period = 5", "period = 5\nperiods = 6");
         let err = load(&toml).unwrap_err();
@@ -486,7 +496,7 @@ mod tests {
         assert_eq!(error_fields(&toml), ["indicators.fast"]);
     }
 
-    #[test]
+    #[rstest]
     fn a_kind_is_an_unknown_argument() {
         let toml = TOML.replace(
             "period = 5",
@@ -495,13 +505,13 @@ mod tests {
         assert_eq!(error_fields(&toml), ["indicators.fast"]);
     }
 
-    #[test]
+    #[rstest]
     fn an_argument_of_the_wrong_type_is_refused_naming_the_indicator() {
         let toml = TOML.replace("level = 100.5", "level = \"high\"");
         assert_eq!(error_fields(&toml), ["indicators.breakout"]);
     }
 
-    #[test]
+    #[rstest]
     fn an_unknown_moving_average_type_is_refused_naming_it() {
         let toml = TOML.replace("\"SIMPLE\"", "\"TRIANGULAR\"");
         let err = load(&toml).unwrap_err();
@@ -509,7 +519,7 @@ mod tests {
         assert_eq!(error_fields(&toml), ["indicators.range"]);
     }
 
-    #[test]
+    #[rstest]
     fn indicator_violations_are_reported_with_the_others_at_once() {
         let toml = without("breakout")
             .replace("period = 5", "period = 0")

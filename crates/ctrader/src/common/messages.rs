@@ -8,7 +8,7 @@
 //! Protobuf messages"). Errors come back as `ProtoOAErrorRes` (or the
 //! proxy's `ProtoErrorRes`) under the request's `clientMsgId`.
 
-use std::fmt;
+use std::fmt::Display;
 
 use prost::Message as _;
 use zeroize::Zeroize;
@@ -216,7 +216,7 @@ pub(crate) fn open<M: Payload>(envelope: &ProtoMessage) -> Result<M, CTraderErro
             })
         }
         other => Err(CTraderError::Protocol(format!(
-            "expected {}, got {}",
+            "expected {}, received {}",
             payload_name(M::TYPE),
             payload_name(other)
         ))),
@@ -245,8 +245,8 @@ pub(crate) enum CTraderError {
     Protocol(String),
 }
 
-impl fmt::Display for CTraderError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for CTraderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Venue {
                 code,
@@ -269,6 +269,8 @@ impl std::error::Error for CTraderError {}
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
     use crate::testing::SYMBOL_BY_ID_UNKNOWN;
 
@@ -276,7 +278,7 @@ mod tests {
         ProtoMessage::decode(frame(message, Some("7".to_owned())).as_slice()).unwrap()
     }
 
-    #[test]
+    #[rstest]
     fn a_frame_is_the_envelope_of_the_message_and_its_id() {
         let request = ProtoOaSymbolByIdReq {
             ctid_trader_account_id: 1_000_001,
@@ -291,7 +293,7 @@ mod tests {
         assert_eq!(open::<ProtoOaSymbolByIdReq>(&envelope), Ok(request));
     }
 
-    #[test]
+    #[rstest]
     fn a_secret_frame_is_the_same_frame() {
         let request = ProtoOaApplicationAuthReq {
             client_id: "12345_clientIdValue".to_owned(),
@@ -306,7 +308,7 @@ mod tests {
     }
 
     /// The error is the fixture `symbol_by_id_unknown`.
-    #[test]
+    #[rstest]
     fn an_error_response_opens_as_the_venue_error() {
         let envelope = ProtoMessage {
             payload_type: ProtoOaErrorRes::TYPE,
@@ -325,7 +327,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_proxy_error_response_opens_as_the_venue_error() {
         let error = ProtoErrorRes {
             error_code: "BLOCKED_PAYLOAD_TYPE".to_owned(),
@@ -343,20 +345,20 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn another_message_is_a_protocol_error_naming_both() {
         let opened = open::<ProtoOaAssetListRes>(&envelope(&ProtoOaSymbolsListRes::default()));
 
         assert_eq!(
             opened,
             Err(CTraderError::Protocol(
-                "expected PROTO_OA_ASSET_LIST_RES, got PROTO_OA_SYMBOLS_LIST_RES".to_owned()
+                "expected PROTO_OA_ASSET_LIST_RES, received PROTO_OA_SYMBOLS_LIST_RES".to_owned()
             ))
         );
     }
 
     /// Synthetic: bytes that are no protobuf message.
-    #[test]
+    #[rstest]
     fn a_malformed_payload_is_a_protocol_error() {
         let envelope = ProtoMessage {
             payload_type: ProtoOaAssetListRes::TYPE,
@@ -372,7 +374,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn tick_deal_and_order_list_requests_are_historical_others_not() {
         assert!(is_historical(ProtoOaGetTickDataReq::TYPE));
         assert!(is_historical(ProtoOaDealListReq::TYPE));
@@ -383,7 +385,7 @@ mod tests {
         assert!(!is_historical(ProtoOaSymbolByIdReq::TYPE));
     }
 
-    #[test]
+    #[rstest]
     fn a_payload_type_is_named_as_the_proto_spells_it_or_by_its_number() {
         assert_eq!(payload_name(2131), "PROTO_OA_SPOT_EVENT");
         assert_eq!(payload_name(51), "HEARTBEAT_EVENT");

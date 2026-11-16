@@ -14,7 +14,6 @@
 //! parameters has a closed form: a calibration refitted on the same rows is
 //! the same to the bit. Nautilus has no calibration.
 
-use anyhow::ensure;
 use serde::{Deserialize, Serialize};
 
 use super::targets::Side;
@@ -88,7 +87,7 @@ impl Ksplit {
     /// Returns an error if there is no row, or a row has neither one side
     /// nor two.
     pub fn fit(rows: &[Vec<(f64, f64)>]) -> anyhow::Result<Self> {
-        ensure!(!rows.is_empty(), "no row to calibrate the models on");
+        anyhow::ensure!(!rows.is_empty(), "no row to calibrate the models on");
         let pair = match rows[0].len() {
             1 => false,
             2 => true,
@@ -176,6 +175,8 @@ fn slope(numerator: f64, denominator: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
     fn near(actual: f64, expected: f64) {
@@ -204,7 +205,7 @@ mod tests {
     /// 0.5, -0.5 and 1: (0.5 + 0.5 + 2) / (1 + 1 + 4), beta_D = 0.5. At a
     /// long's prediction of 1 and a short's of 0, C = 0.5 and D = 1: C' =
     /// 0.2 + 0.3 = 0.5, D' = 0.5, the long's E' 0.75 and the short's 0.25.
-    #[test]
+    #[rstest]
     fn a_pairs_level_and_side_call_are_fitted_by_least_squares() {
         let rows = pair_rows(
             [0.0, 1.0, 2.0],
@@ -231,7 +232,7 @@ mod tests {
     /// against R long less R short of -0.5, 0.5 and -1, is clipped to
     /// nought. At predictions of 1 and 0, C' = 0.5 + 1.5 x 0.5 = 1.25 and D'
     /// = 0: each side's E' is the level.
-    #[test]
+    #[rstest]
     fn a_slope_above_one_and_a_half_is_clipped_to_it_and_one_below_nought_to_nought() {
         let rows = pair_rows(
             [0.0, 1.0, 2.0],
@@ -253,7 +254,7 @@ mod tests {
     /// The level's slope, -0.5 on C of 0, 1 and 2 against a mean R of 1,
     /// 0.5 and 0, is clipped to nought, alpha_C then the mean R, 0.5; the
     /// side call's, 2 on D of 1, -1 and 2 against 2, -2 and 4, to 1.5.
-    #[test]
+    #[rstest]
     fn a_level_slope_below_nought_leaves_the_mean_and_a_side_call_above_one_and_a_half_is_clipped()
     {
         let rows = pair_rows(
@@ -274,7 +275,7 @@ mod tests {
     /// and 2 against 0.3, 0.6 and 1.5: alpha 0.2 and beta 0.6, no side
     /// call. At a prediction of 0.5 its E' is the level, 0.5, whichever the
     /// side.
-    #[test]
+    #[rstest]
     fn one_side_fits_the_level_line_alone_on_its_own_r() {
         let rows: Vec<Vec<(f64, f64)>> = [(0.0, 0.3), (1.0, 0.6), (2.0, 1.5)]
             .into_iter()
@@ -294,7 +295,7 @@ mod tests {
 
     /// One side's slope is clipped too: 2 on 0, 1 and 2 against 0, 2 and 4
     /// becomes 1.5, its alpha 2 - 1.5 = 0.5.
-    #[test]
+    #[rstest]
     fn one_sides_slope_is_clipped_and_its_alpha_refitted() {
         let rows: Vec<Vec<(f64, f64)>> = [(0.0, 0.0), (1.0, 2.0), (2.0, 4.0)]
             .into_iter()
@@ -312,7 +313,7 @@ mod tests {
     /// exceeds the short's: no slope, the level the mean R, 0.5, and no
     /// side call, each side's E' the level. Least squares through nought
     /// would give the side call 0.2 / 0.02, clipped to 1.5.
-    #[test]
+    #[rstest]
     fn predictions_that_never_vary_fit_no_slope() {
         let rows: Vec<Vec<(f64, f64)>> = [(0.5, -0.5), (1.5, 0.5)]
             .into_iter()
@@ -330,7 +331,7 @@ mod tests {
 
     /// Many rows of one level, 0.1 a side, whose mean in floating point is
     /// not 0.1 to the bit: still no slope, the level the mean R.
-    #[test]
+    #[rstest]
     fn a_level_that_never_varies_over_many_rows_has_no_slope() {
         for count in [24, 30, 37, 50] {
             let rows: Vec<Vec<(f64, f64)>> = (0..count)
@@ -343,7 +344,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn no_row_has_no_ksplit() {
         assert!(Ksplit::fit(&[]).is_err());
     }

@@ -18,6 +18,7 @@ use nautilus_model::{
     identifiers::InstrumentId,
     types::{Money, Price, Quantity},
 };
+use rstest::rstest;
 use rust_decimal::Decimal;
 use tempfile::TempDir;
 
@@ -72,7 +73,7 @@ fn run(backtest: &Backtest, mode: ContinuousFutureAdjustmentType) -> Got {
     }
 }
 
-#[test]
+#[rstest]
 fn a_contract_is_plain_and_has_no_params() {
     let catalog = rolls::catalog();
     let mut backtest = backtest(&catalog);
@@ -85,7 +86,7 @@ fn a_contract_is_plain_and_has_no_params() {
     assert_eq!(continuous.params(InstrumentId::from(POST)), None);
 }
 
-#[test]
+#[rstest]
 fn backward_spread_bars_shift_the_pre_roll_bars_by_the_spread() {
     let catalog = rolls::catalog();
 
@@ -110,7 +111,7 @@ fn backward_spread_bars_shift_the_pre_roll_bars_by_the_spread() {
     assert_eq!(got.volumes, [Quantity::from(1); 3]);
 }
 
-#[test]
+#[rstest]
 fn forward_spread_bars_shift_the_post_roll_bars_by_the_spread() {
     let catalog = rolls::catalog();
 
@@ -130,7 +131,7 @@ fn forward_spread_bars_shift_the_post_roll_bars_by_the_spread() {
     );
 }
 
-#[test]
+#[rstest]
 fn forward_ratio_bars_scale_the_post_roll_bars_by_the_ratio() {
     let catalog = rolls::catalog();
 
@@ -151,7 +152,7 @@ fn forward_ratio_bars_scale_the_post_roll_bars_by_the_ratio() {
     );
 }
 
-#[test]
+#[rstest]
 fn a_roll_without_a_trade_of_the_post_contract_in_its_slice_is_refused() {
     let catalog = rolls::catalog_storing(false);
 

@@ -61,13 +61,15 @@ use nautilus_live::{
 };
 use nautilus_model::{
     accounts::AccountAny,
-    enums::{AccountType, ContingencyType, OmsType, OrderType},
+    enums::{AccountType, ContingencyType, OmsType, OrderType, TimeInForce},
     events::{AccountState, OrderDeniedReason},
-    identifiers::{AccountId, ClientId, ClientOrderId, InstrumentId, Venue, VenueOrderId},
+    identifiers::{
+        AccountId, ClientId, ClientOrderId, InstrumentId, PositionId, Venue, VenueOrderId,
+    },
     instruments::{Instrument, InstrumentAny},
     orders::{Order, OrderAny},
     reports::{ExecutionMassStatus, FillReport, OrderStatusReport, PositionStatusReport},
-    types::{AccountBalance, MarginBalance, Price},
+    types::{AccountBalance, MarginBalance, Price, Quantity},
 };
 
 use self::{
@@ -591,7 +593,7 @@ impl CTraderExecutionClient {
         &self,
         session: &Session,
         order: &OrderAny,
-        cmd_position: Option<nautilus_model::identifiers::PositionId>,
+        cmd_position: Option<PositionId>,
         protection: Protection,
         role: Role,
     ) -> Result<(), OrderDeniedReason> {
@@ -618,13 +620,13 @@ impl CTraderExecutionClient {
 
     /// Submits the bracket of `orders`: an entry (market, limit or stop
     /// market) whose protections are its children, a stop market stop
-    /// loss and a limit take profit, each for the entry's quantity on the
-    /// other side.
+    /// loss and a limit take profit, each GTC, for the entry's quantity on
+    /// the other side.
     fn submit_bracket(
         &self,
         session: &Session,
         orders: &[OrderAny],
-        cmd_position: Option<nautilus_model::identifiers::PositionId>,
+        cmd_position: Option<PositionId>,
     ) -> Result<(), OrderDeniedReason> {
         let unsupported = |detail: &str| OrderDeniedReason::UnsupportedOrderList {
             detail: detail.to_owned(),
@@ -638,10 +640,17 @@ impl CTraderExecutionClient {
         };
         let mut protection = Protection::default();
         let (mut stop_loss, mut take_profit) = (None, None);
+
         for leg in orders
             .iter()
             .filter(|o| o.client_order_id() != entry.client_order_id())
         {
+            // A protection lasts as long as its position (GOOD_TILL_CANCEL).
+            if leg.time_in_force() != TimeInForce::Gtc {
+                return Err(OrderDeniedReason::UnsupportedTimeInForce(
+                    leg.time_in_force(),
+                ));
+            }
             let protects = leg.parent_order_id() == Some(entry.client_order_id())
                 && leg.order_side() != entry.order_side()
                 && leg.quantity() == entry.quantity();
@@ -742,7 +751,7 @@ impl CTraderExecutionClient {
     fn amend_order(
         order: &OrderAny,
         venue: i64,
-        quantity: nautilus_model::types::Quantity,
+        quantity: Quantity,
         price: Option<Price>,
         trigger_price: Option<Price>,
         protection: Protection,
@@ -1625,7 +1634,6 @@ mod tests {
     };
     use prost::Message as _;
     use rust_decimal::Decimal;
-    use tokio::sync::mpsc;
     use ustr::Ustr;
 
     use super::*;
@@ -1855,7 +1863,7 @@ mod tests {
         }
     }
 
-    type Events = mpsc::UnboundedReceiver<ExecutionEvent>;
+    type Events = tokio::sync::mpsc::UnboundedReceiver<ExecutionEvent>;
 
     /// A started client of XAUUSD and EURUSD on the peer of `venue`, its
     /// cache, the node's execution events, the frames received and its
@@ -1884,7 +1892,7 @@ mod tests {
         tempfile::TempDir,
     ) {
         let (url, received) = testing::start(peer(venue));
-        let (tx, events) = mpsc::unbounded_channel();
+        let (tx, events) = tokio::sync::mpsc::unbounded_channel();
         replace_exec_event_sender(tx);
         let cache = Rc::new(RefCell::new(Cache::default()));
         let core = ExecutionClientCore::new(
@@ -2064,7 +2072,7 @@ mod tests {
     /// registered for the node's reconnect until the client disconnects.
     #[tokio::test]
     async fn the_sessions_socket_state_goes_to_the_node_until_the_client_disconnects() {
-        let (system_tx, mut system) = mpsc::unbounded_channel();
+        let (system_tx, mut system) = tokio::sync::mpsc::unbounded_channel();
         replace_system_event_sender(system_tx);
         let registry = SocketReconnectRegistry::default();
         let (mut client, cache, mut events, _received, _tokens) =
@@ -2098,9 +2106,9 @@ mod tests {
     /// it replaces that transport alone, its session authenticating again.
     #[tokio::test]
     async fn a_brokers_data_and_trading_sockets_are_two_endpoints_each_reconnectable() {
-        let (system_tx, mut system) = mpsc::unbounded_channel();
+        let (system_tx, mut system) = tokio::sync::mpsc::unbounded_channel();
         replace_system_event_sender(system_tx);
-        let (data_tx, _data_events) = mpsc::unbounded_channel();
+        let (data_tx, _data_events) = tokio::sync::mpsc::unbounded_channel();
         replace_data_event_sender(data_tx);
         let registry = SocketReconnectRegistry::default();
         let (mut trading, cache, mut events, trading_received, _tokens) =

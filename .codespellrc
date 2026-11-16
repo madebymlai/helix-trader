@@ -1,6 +1,0 @@
-# Configuration for codespell spell checker
-# Checks for common misspellings in code, documentation, and configuration files
-
-[codespell]
-# Comma-separated list of words to ignore
-ignore-words-list = froms,leafs,ser,sesion,spred

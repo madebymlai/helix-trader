@@ -1,0 +1,74 @@
+# Captured from a cTrader broker's demo (2026-11-16), protobuf port 5035:
+# that MARKET_RANGE buy filled at the ask, 3866.20, better than its base
+# 3869.20, by deal 961302364 into position 697001028, charged 0.11 EUR:
+# cTrader bounds a MARKET_RANGE's slippage on the worse side only.
+# Scrubbed: ctidTraderAccountId replaced by the fake 1000001; re-encoded
+# from the decoded event, fields as served.
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOAExecutionEvent OpenApiMessages.proto < execution_market_range_buy_better_filled.bin
+# Message: ProtoOAExecutionEvent
+ctidTraderAccountId: 1000001
+executionType: ORDER_FILLED
+position {
+  positionId: 697001028
+  tradeData {
+    symbolId: 41
+    volume: 100
+    tradeSide: BUY
+    openTimestamp: 1794849386733
+    guaranteedStopLoss: false
+    measurementUnits: "Oz"
+  }
+  positionStatus: POSITION_STATUS_OPEN
+  swap: 0
+  price: 3866.2
+  utcLastUpdateTimestamp: 1794849386733
+  commission: -11
+  marginRate: 3511.29
+  mirroringCommission: 0
+  guaranteedStopLoss: false
+  usedMargin: 11704
+  moneyDigits: 2
+}
+order {
+  orderId: 1040675363
+  tradeData {
+    symbolId: 41
+    volume: 100
+    tradeSide: BUY
+    openTimestamp: 1794849386520
+    guaranteedStopLoss: false
+    measurementUnits: "Oz"
+    closeTimestamp: 1794849386733
+  }
+  orderType: MARKET_RANGE
+  orderStatus: ORDER_STATUS_FILLED
+  executionPrice: 3866.2
+  executedVolume: 100
+  utcLastUpdateTimestamp: 1794849386733
+  baseSlippagePrice: 3869.2
+  slippageInPoints: 0
+  closingOrder: false
+  clientOrderId: "PROBE-IOC-1"
+  timeInForce: IMMEDIATE_OR_CANCEL
+  positionId: 697001028
+}
+deal {
+  dealId: 961302364
+  orderId: 1040675363
+  positionId: 697001028
+  volume: 100
+  filledVolume: 100
+  symbolId: 41
+  createTimestamp: 1794849386520
+  executionTimestamp: 1794849386733
+  utcLastUpdateTimestamp: 1794849386733
+  executionPrice: 3866.2
+  tradeSide: BUY
+  dealStatus: FILLED
+  marginRate: 3511.29
+  commission: -11
+  baseToUsdConversionRate: 3866.2
+  moneyDigits: 2
+}
+isServerEvent: false

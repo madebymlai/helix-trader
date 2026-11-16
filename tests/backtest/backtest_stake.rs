@@ -11,6 +11,7 @@ use helix_trader::strategy::{
     orders::{EntryRisk, entry_risk},
     risk::Stake,
 };
+use nautilus_backtest::result::BacktestResult;
 use nautilus_model::{
     data::BarType,
     enums::OrderSide,
@@ -19,6 +20,7 @@ use nautilus_model::{
     types::{Money, Quantity},
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
+use rstest::rstest;
 use rust_decimal::Decimal;
 
 use crate::common::{self, glbx, recorder::Recorder, trades};
@@ -28,7 +30,7 @@ fn decimal(s: &str) -> Decimal {
 }
 
 /// The crossover's trade of `trades::TIME_EXIT` at `risk`: its result.
-fn crossover_at(risk: &str) -> nautilus_backtest::result::BacktestResult {
+fn crossover_at(risk: &str) -> BacktestResult {
     let mut config = common::ema_config(1, 2, Some(common::session()));
     config.trade.risk = Some(risk.parse().unwrap());
     let levels = trades::TIME_EXIT;
@@ -44,7 +46,7 @@ fn crossover_at(risk: &str) -> nautilus_backtest::result::BacktestResult {
 /// share. At 0.45% of 10,000 EUR, 45 EUR, it buys 45 / 3.10 = 14.5
 /// shares, 14 rounded down, and its time exit gains 4.20 a share: 58.80
 /// EUR.
-#[test]
+#[rstest]
 fn the_crossovers_trade_risks_its_stake_of_the_balance_over_its_stop() {
     let result = crossover_at("0.45%");
 
@@ -54,7 +56,7 @@ fn the_crossovers_trade_risks_its_stake_of_the_balance_over_its_stop() {
 
 /// At 0.01% of 10,000 EUR, 1 EUR, a stop 3.10 EUR a share away buys a
 /// third of a share: the trade sends nothing, and the run completes.
-#[test]
+#[rstest]
 fn a_stake_buying_less_than_a_share_sends_nothing() {
     let result = crossover_at("0.01%");
 
@@ -88,7 +90,7 @@ fn staked(
 /// the stake, on about 9,970 EUR once the first long is 30 EUR down, buys
 /// 6.6, 6: twice as many. Each entry is tagged with its R in money, 90 and
 /// 180 EUR, and its stake's multiple.
-#[test]
+#[rstest]
 fn a_trade_at_twice_the_stake_fills_twice_the_size_tagged_with_its_multiple() {
     let catalog = trades::catalog(&trades::TIME_EXIT);
 
@@ -118,7 +120,7 @@ fn a_trade_at_twice_the_stake_fills_twice_the_size_tagged_with_its_multiple() {
 /// SXR8 defined with a minimum of 5 shares: the first trade's 3 shares
 /// are below it, and Nautilus' risk engine denies its order; the run goes
 /// on, and the second trade's 6, on the 10,000 EUR untouched, fill.
-#[test]
+#[rstest]
 fn a_size_below_the_instruments_minimum_is_denied_and_the_run_goes_on() {
     let InstrumentAny::Equity(mut sxr8) = common::instrument() else {
         unreachable!("SXR8 is an equity")
@@ -202,7 +204,7 @@ fn crossover_command(
 /// 10,000 USD: its trades would be sized on equity in EUR, which the
 /// account would not hold, and the backtest command refuses to run,
 /// naming both currencies, before printing any result.
-#[test]
+#[rstest]
 fn a_backtest_whose_balance_is_not_in_a_traded_instruments_pnl_currency_is_refused() {
     let levels = trades::TIME_EXIT;
     let catalog = trades::catalog(&levels);
@@ -225,7 +227,7 @@ fn a_backtest_whose_balance_is_not_in_a_traded_instruments_pnl_currency_is_refus
 /// and the backtest command refuses to run, naming it, before printing
 /// any result, even on a balance in SXR8's own P&L currency, which needs
 /// no rate.
-#[test]
+#[rstest]
 fn a_backtest_converting_through_a_pair_defined_without_a_base_currency_is_refused() {
     let levels = trades::TIME_EXIT;
     let catalog = trades::catalog(&levels);

@@ -1,5 +1,5 @@
 //! The order flow of `CTraderExecutionClient` against the mock peer, on the
-//! trade events captured on the demo (`testdata/execution_*`,
+//! trade events captured on the demo (`test_data/execution_*`,
 //! `order_error_*`): the peer answers each trade request with them, as the
 //! demo answered the same request, mutated where a test says so. The
 //! node's side is played here: orders go into the cache before they are
@@ -9,7 +9,7 @@
 use nautilus_common::messages::ExecutionReport;
 use nautilus_model::{
     enums::{ContingencyType, OmsType},
-    events::OrderEventAny,
+    events::{OrderEventAny, OrderFilled},
     identifiers::{ClientOrderId, OrderListId, StrategyId},
     orders::{OrderList, OrderTestBuilder, stubs::TestOrderEventStubs},
     position::Position,
@@ -26,10 +26,15 @@ use crate::{
     testing::{
         EXECUTION_CLOSE_ACCEPTED, EXECUTION_CLOSE_FILLED, EXECUTION_LIMIT_ACCEPTED,
         EXECUTION_LIMIT_CANCELLED, EXECUTION_LIMIT_REPLACED, EXECUTION_MARKET_ACCEPTED,
-        EXECUTION_MARKET_FILLED, EXECUTION_PROTECTION_ACCEPTED, EXECUTION_PROTECTION_CANCELLED,
-        EXECUTION_PROTECTION_REPLACED, EXECUTION_STOP_LOSS_ACCEPTED,
-        EXECUTION_STOP_LOSS_ENTRY_FILLED, EXECUTION_STOP_LOSS_FILLED, ORDER_ERROR_BAD_VOLUME,
-        ORDER_ERROR_ORDER_NOT_FOUND, ORDER_ERROR_POSITION_NOT_FOUND, event,
+        EXECUTION_MARKET_FILLED, EXECUTION_MARKET_RANGE_ACCEPTED,
+        EXECUTION_MARKET_RANGE_BRACKET_ACCEPTED, EXECUTION_MARKET_RANGE_BRACKET_FILLED,
+        EXECUTION_MARKET_RANGE_BRACKET_PROTECTION_ACCEPTED,
+        EXECUTION_MARKET_RANGE_BUY_BETTER_ACCEPTED, EXECUTION_MARKET_RANGE_BUY_BETTER_FILLED,
+        EXECUTION_MARKET_RANGE_DEAL_REJECTED, EXECUTION_MARKET_RANGE_SELL_BETTER_ACCEPTED,
+        EXECUTION_MARKET_RANGE_SELL_BETTER_FILLED, EXECUTION_PROTECTION_ACCEPTED,
+        EXECUTION_PROTECTION_CANCELLED, EXECUTION_PROTECTION_REPLACED,
+        EXECUTION_STOP_LOSS_ACCEPTED, EXECUTION_STOP_LOSS_ENTRY_FILLED, EXECUTION_STOP_LOSS_FILLED,
+        ORDER_ERROR_BAD_VOLUME, ORDER_ERROR_ORDER_NOT_FOUND, ORDER_ERROR_POSITION_NOT_FOUND, event,
     },
 };
 
@@ -343,7 +348,7 @@ fn row(id: &str, kind: &'static str) -> (String, &'static str) {
 }
 
 /// The fill of `events` of order `id`.
-fn fill_of(events: &[OrderEventAny], id: &str) -> nautilus_model::events::OrderFilled {
+fn fill_of(events: &[OrderEventAny], id: &str) -> OrderFilled {
     events
         .iter()
         .find_map(|e| match e {
@@ -443,6 +448,104 @@ async fn a_limit_order_is_accepted_amended_and_cancelled() {
     assert_eq!(node.tags::<ProtoOaAmendOrderReq>(), ["A:PROBE-2"]);
     let cancel = node.requests::<ProtoOaCancelOrderReq>();
     assert_eq!(cancel[0].order_id, 1_031_776_354);
+    node.client.disconnect().await.unwrap();
+}
+
+/// The captured MARKET_RANGE orders based 3.00 on the better side of the
+/// market, as a limit IOC at that price: each filled at the market,
+/// better than its limit, as Nautilus' limit order.
+#[tokio::test]
+async fn a_limit_ioc_order_is_a_market_range_filled_at_its_price_or_better() {
+    for (id, side, limit, accepted, filled, price, deal) in [
+        (
+            "PROBE-IOC-1",
+            OrderSide::Buy,
+            "3869.20",
+            EXECUTION_MARKET_RANGE_BUY_BETTER_ACCEPTED,
+            EXECUTION_MARKET_RANGE_BUY_BETTER_FILLED,
+            "3866.20",
+            "961302364",
+        ),
+        (
+            "PROBE-IOC-2",
+            OrderSide::Sell,
+            "3863.09",
+            EXECUTION_MARKET_RANGE_SELL_BETTER_ACCEPTED,
+            EXECUTION_MARKET_RANGE_SELL_BETTER_FILLED,
+            "3866.09",
+            "961302463",
+        ),
+    ] {
+        let mut node = Node::start(move |request| {
+            vec![
+                answer(request, &execution(accepted)),
+                answer(request, &execution(filled)),
+            ]
+        })
+        .await;
+        let order = order(OrderType::Limit, id, side, 1)
+            .price(Price::from(limit))
+            .time_in_force(TimeInForce::Ioc)
+            .build();
+
+        node.submit(&order, None);
+
+        let events = node.order_events(3).await;
+        assert_eq!(
+            kinds(&events),
+            [row(id, "submitted"), row(id, "accepted"), row(id, "filled")]
+        );
+        let fill = fill_of(&events, id);
+        assert_eq!(fill.order_type, OrderType::Limit, "{id}");
+        assert_eq!(fill.last_px, Price::from(price));
+        assert_eq!(fill.trade_id.to_string(), deal);
+        assert_eq!(fill.commission, Some(eur(0.11)));
+        let sent = node.requests::<ProtoOaNewOrderReq>();
+        assert_eq!(sent[0].order_type(), ProtoOaOrderType::MarketRange);
+        assert_eq!(
+            sent[0].base_slippage_price,
+            Some(Price::from(limit).as_f64())
+        );
+        assert_eq!(sent[0].slippage_in_points, Some(0));
+        node.client.disconnect().await.unwrap();
+    }
+}
+
+/// The captured MARKET_RANGE buy based 5.00 under the ask, as a limit IOC
+/// buy at that price: cTrader cancels it with its deal rejected, which
+/// rejects it with the deal's reason.
+#[tokio::test]
+async fn a_limit_ioc_order_ctrader_cannot_fill_at_its_price_is_rejected() {
+    let mut node = Node::start(|request| {
+        vec![
+            answer(request, &execution(EXECUTION_MARKET_RANGE_ACCEPTED)),
+            answer(request, &execution(EXECUTION_MARKET_RANGE_DEAL_REJECTED)),
+        ]
+    })
+    .await;
+    let order = order(OrderType::Limit, "PROBE-REJECT-1", OrderSide::Buy, 1)
+        .price(Price::from("3868.88"))
+        .time_in_force(TimeInForce::Ioc)
+        .build();
+
+    node.submit(&order, None);
+
+    let events = node.order_events(3).await;
+    assert_eq!(
+        kinds(&events),
+        [
+            row("PROBE-REJECT-1", "submitted"),
+            row("PROBE-REJECT-1", "accepted"),
+            row("PROBE-REJECT-1", "rejected")
+        ]
+    );
+    let OrderEventAny::Rejected(rejected) = events[2] else {
+        panic!("not a rejection: {events:?}");
+    };
+    assert_eq!(
+        rejected.reason.as_str(),
+        "INTERNALLY_REJECTED: Market VWAP is worse than Limit price"
+    );
     node.client.disconnect().await.unwrap();
 }
 
@@ -636,10 +739,7 @@ async fn an_unanswered_order_stays_in_flight_until_a_query_finds_its_outcome() {
         ))
         .unwrap();
 
-    let ExecutionEvent::Report(nautilus_common::messages::ExecutionReport::OrderWithFills(
-        status,
-        fills,
-    )) = node.next().await
+    let ExecutionEvent::Report(ExecutionReport::OrderWithFills(status, fills)) = node.next().await
     else {
         panic!("not an order report with fills");
     };
@@ -787,10 +887,23 @@ fn bracket(entry: &str, stop_loss: &str, take_profit: &str) -> [OrderAny; 3] {
 /// The entry of `builder`, `entry`, protected by a stop loss and a take
 /// profit.
 fn bracket_on(
+    builder: OrderTestBuilder,
+    entry: &str,
+    stop_loss: &str,
+    take_profit: &str,
+) -> [OrderAny; 3] {
+    bracket_lasting(builder, entry, stop_loss, take_profit, TimeInForce::Gtc)
+}
+
+/// The entry of `builder`, `entry`, protected by a stop loss and a take
+/// profit of time in force `lasting`, a GTD's expiring 2026-11-16 23:00
+/// UTC.
+fn bracket_lasting(
     mut builder: OrderTestBuilder,
     entry: &str,
     stop_loss: &str,
     take_profit: &str,
+    lasting: TimeInForce,
 ) -> [OrderAny; 3] {
     let (sl, tp) = (format!("{entry}-SL"), format!("{entry}-TP"));
     let legs = vec![
@@ -810,7 +923,11 @@ fn bracket_on(
             .linked_order_ids(vec![ClientOrderId::from(other)])
             .parent_order_id(ClientOrderId::from(entry))
             .order_list_id(list)
-            .reduce_only(true);
+            .reduce_only(true)
+            .time_in_force(lasting);
+        if lasting == TimeInForce::Gtd {
+            builder.expire_time(UnixNanos::from(1_794_870_000_000_000_000));
+        }
         builder
     };
     let stop = leg(OrderType::StopMarket, &sl, &tp)
@@ -870,6 +987,91 @@ async fn a_bracket_entry_carries_its_protections_which_the_position_then_holds()
     assert_eq!(sent[0].stop_loss, Some(3992.78));
     assert_eq!(sent[0].take_profit, Some(4052.78));
     node.client.disconnect().await.unwrap();
+}
+
+/// The captured MARKET_RANGE entry PROBE-IOC-5 with its absolute stop
+/// loss and take profit, as a limit IOC entry: cTrader set them on the
+/// position it opened, as a market entry's.
+#[tokio::test]
+async fn a_limit_ioc_bracket_entry_carries_its_protections_which_the_position_then_holds() {
+    let mut node = Node::start(|request| {
+        vec![
+            answer(request, &execution(EXECUTION_MARKET_RANGE_BRACKET_ACCEPTED)),
+            answer(request, &execution(EXECUTION_MARKET_RANGE_BRACKET_FILLED)),
+            event(
+                &execution(EXECUTION_MARKET_RANGE_BRACKET_PROTECTION_ACCEPTED),
+                Some("PROBE-IOC-5"),
+            ),
+        ]
+    })
+    .await;
+    let mut limit = order(OrderType::Limit, "PROBE-IOC-5", OrderSide::Buy, 1);
+    limit
+        .price(Price::from("3871.58"))
+        .time_in_force(TimeInForce::Ioc);
+    let [entry, stop_loss, take_profit] = bracket_on(limit, "PROBE-IOC-5", "3851.58", "3891.58");
+
+    node.submit_list(&[&entry, &stop_loss, &take_profit]);
+
+    let events = node.order_events(7).await;
+    assert_eq!(
+        kinds(&events)[3..],
+        [
+            row("PROBE-IOC-5", "accepted"),
+            row("PROBE-IOC-5", "filled"),
+            row("PROBE-IOC-5-SL", "accepted"),
+            row("PROBE-IOC-5-TP", "accepted"),
+        ]
+    );
+    assert_eq!(
+        node.cached("PROBE-IOC-5-SL").venue_order_id(),
+        Some(VenueOrderId::from("697002710-SL"))
+    );
+    let sent = node.requests::<ProtoOaNewOrderReq>();
+    assert_eq!(sent[0].order_type(), ProtoOaOrderType::MarketRange);
+    assert_eq!(sent[0].base_slippage_price, Some(3871.58));
+    assert_eq!(sent[0].stop_loss, Some(3851.58));
+    assert_eq!(sent[0].take_profit, Some(3891.58));
+    node.client.disconnect().await.unwrap();
+}
+
+/// A bracket's legs are the protections of its position, which cTrader
+/// holds as long as the position (GOOD_TILL_CANCEL): a leg of any other
+/// time in force is denied with the list.
+#[tokio::test]
+async fn a_bracket_whose_legs_are_not_gtc_is_denied_and_nothing_is_sent() {
+    for lasting in [TimeInForce::Ioc, TimeInForce::Gtd, TimeInForce::Day] {
+        let mut node = Node::start(|_| vec![]).await;
+        let [entry, stop_loss, take_profit] = bracket_lasting(
+            order(OrderType::Market, "PROBE-1", OrderSide::Buy, 1),
+            "PROBE-1",
+            "3992.78",
+            "4052.78",
+            lasting,
+        );
+
+        node.submit_list(&[&entry, &stop_loss, &take_profit]);
+
+        let events = node.order_events(3).await;
+        assert_eq!(
+            kinds(&events),
+            [
+                row("PROBE-1", "denied"),
+                row("PROBE-1-SL", "denied"),
+                row("PROBE-1-TP", "denied"),
+            ],
+            "{lasting}"
+        );
+        let OrderEventAny::Denied(denied) = events[0] else {
+            panic!("not a denial: {events:?}");
+        };
+        assert_eq!(
+            denied.reason.as_str(),
+            OrderDeniedReason::UnsupportedTimeInForce(lasting).to_string()
+        );
+        assert!(node.requests::<ProtoOaNewOrderReq>().is_empty());
+        node.client.disconnect().await.unwrap();
+    }
 }
 
 /// Moving the stop loss sends both prices: cTrader drops one left out.
@@ -1415,9 +1617,7 @@ async fn an_unanswered_order_the_broker_holds_nowhere_is_reported_rejected_by_a_
         ))
         .unwrap();
 
-    let ExecutionEvent::Report(nautilus_common::messages::ExecutionReport::Order(status)) =
-        node.next().await
-    else {
+    let ExecutionEvent::Report(ExecutionReport::Order(status)) = node.next().await else {
         panic!("not an order report");
     };
     assert_eq!(status.client_order_id, Some(ClientOrderId::from("PROBE-1")));

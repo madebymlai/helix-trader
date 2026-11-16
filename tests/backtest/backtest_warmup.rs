@@ -3,13 +3,15 @@
 //! initialized, so a run trades from the bars it replays (`common::trades`).
 //! One node per thread, so one run per test.
 
+use rstest::rstest;
+
 use crate::common::{self, trades};
 
 /// From 10:00 the run replays the bars closing 11:00 at 610.60 and 12:00
 /// at 600.60: the shortest crossover is initialized at 12:00, short, its
 /// first decision, no cross; at 13:00 it trades the time exit as worked
 /// out in `trades::TIME_EXIT`.
-#[test]
+#[rstest]
 fn a_run_started_before_the_trade_warms_the_crossover_on_its_own_bars() {
     let levels = trades::TIME_EXIT;
     let catalog = trades::catalog(&levels);
@@ -28,7 +30,7 @@ fn a_run_started_before_the_trade_warms_the_crossover_on_its_own_bars() {
 /// decision; 15:00 stays long (624.80 above 622.60), the slow EMA going to
 /// 624.07, and 16:00 too (624.80 above 624.07); 17:00 and 18:00 are out of
 /// the session. No cross, no order.
-#[test]
+#[rstest]
 fn a_run_started_at_the_trade_is_cold_there_and_does_not_trade() {
     let levels = trades::TIME_EXIT;
     let catalog = trades::catalog(&levels);

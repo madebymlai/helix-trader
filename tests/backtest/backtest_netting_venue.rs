@@ -4,11 +4,12 @@
 //! their average price. One node per thread, so one run per test.
 
 use nautilus_model::enums::PositionSide;
+use rstest::rstest;
 use rust_decimal::Decimal;
 
 use crate::common::overlap;
 
-#[test]
+#[rstest]
 fn two_overlapping_trades_add_into_one_position_at_their_average_price() {
     let record = overlap::run();
 

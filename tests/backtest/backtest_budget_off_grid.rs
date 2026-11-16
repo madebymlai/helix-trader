@@ -6,10 +6,11 @@
 //! risk 34.10 EUR on. One node per thread, so one run per test.
 
 use helix_trader::strategy::ema::EmaCross;
+use rstest::rstest;
 
 use crate::common::{self, trades};
 
-#[test]
+#[rstest]
 fn a_budget_off_the_share_grid_trades_the_shares_it_rounds_down_to() {
     let mut config = common::ema_config(1, 2, Some(common::session()));
     config.trade.risk = Some("0.33%".parse().unwrap());

@@ -1,6 +1,6 @@
 //! LightGBM: gradient-boosted trees under L2 regression.
 
-use anyhow::{Context, ensure};
+use anyhow::Context;
 use lightgbm3::{Booster, Dataset};
 use serde::{Deserialize, Serialize};
 
@@ -77,7 +77,7 @@ impl LightGbmConfig {
     /// builds LightGBM's dataset without parameters, so LightGBM's default
     /// of 20 applies there whatever the setting.
     pub fn validate(&self) -> anyhow::Result<()> {
-        ensure!(
+        anyhow::ensure!(
             self.min_data_in_leaf >= DATASET_MIN_DATA_IN_LEAF,
             "min_data_in_leaf {} is below {DATASET_MIN_DATA_IN_LEAF}: lightgbm3 builds \
              LightGBM's dataset without parameters, so LightGBM's default of \
@@ -134,7 +134,7 @@ struct LightGbm {
 impl LightGbm {
     fn new(booster: Booster) -> anyhow::Result<Self> {
         let width = booster.num_features();
-        ensure!(width > 0, "a LightGBM model without features");
+        anyhow::ensure!(width > 0, "a LightGBM model without features");
         Ok(Self { booster, width })
     }
 }
@@ -155,6 +155,8 @@ impl Predictor for LightGbm {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
     use crate::model::learner::LearnerConfig;
 
@@ -177,7 +179,7 @@ mod tests {
         TrainingSet::new(2, features, labels).unwrap()
     }
 
-    #[test]
+    #[rstest]
     fn a_missing_feature_is_learned_apart_from_every_value() {
         let config = LearnerConfig::LightGbm(LightGbmConfig::builder().build());
         let model = config.fit(&missing_is_one()).unwrap();
@@ -200,7 +202,7 @@ mod tests {
 
     /// Below 200 rows a side, the split is not made: the model predicts
     /// the mean label, one half, on either side of it.
-    #[test]
+    #[rstest]
     fn a_leaf_holds_200_rows_at_least_by_default() {
         let model = LearnerConfig::LightGbm(LightGbmConfig::builder().build())
             .fit(&halves())
@@ -211,7 +213,7 @@ mod tests {
     }
 
     /// The same split is made with leaves of 150 rows allowed.
-    #[test]
+    #[rstest]
     fn a_leaf_of_fewer_rows_is_set() {
         let config = LightGbmConfig::builder().min_data_in_leaf(150).build();
         let model = LearnerConfig::LightGbm(config).fit(&halves()).unwrap();
@@ -235,7 +237,7 @@ mod tests {
     /// takes 0.05 of what is left on each side. After 100 rounds 1.5 *
     /// 0.95^100 = 0.008881 is left: the model predicts 1.991119 below the
     /// step and -0.991119 from it.
-    #[test]
+    #[rstest]
     fn a_step_of_real_labels_is_learned_at_the_default_rate_over_the_default_rounds() {
         let model = LearnerConfig::LightGbm(LightGbmConfig::builder().build())
             .fit(&step())
@@ -248,7 +250,7 @@ mod tests {
     }
 
     /// On 2,000 rows, enough for leaves of 200 rows.
-    #[test]
+    #[rstest]
     fn the_seed_reaches_lightgbm() {
         let fit = |seed| {
             let config = LightGbmConfig::builder()

@@ -9,11 +9,12 @@ use nautilus_model::{
     enums::{OrderSide, PositionSide},
     types::Quantity,
 };
+use rstest::rstest;
 use rust_decimal::Decimal;
 
 use crate::common::{ic, recorder::Recorder};
 
-#[test]
+#[rstest]
 fn two_overlapping_ic_trades_are_two_positions_at_their_own_prices() {
     let catalog = ic::catalog();
     let (recorder, record) = Recorder::trading(

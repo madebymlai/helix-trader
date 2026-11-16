@@ -3,7 +3,7 @@
 //! (`LseWsFrame`), each an object tagged by its `type`, the fields the
 //! client does not read left out.
 
-use std::fmt;
+use std::fmt::Display;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -110,10 +110,10 @@ pub struct LseWsRefusal {
     pub details: Map<String, Value>,
 }
 
-impl fmt::Display for LseWsRefusal {
+impl Display for LseWsRefusal {
     /// `LIMIT_REACHED: Max 16 symbols on this key.`, then its details, as
     /// `(max_connections 1, open_connections 1)`.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}: {}", self.code, self.message)?;
         if !self.details.is_empty() {
             let details: Vec<String> = self

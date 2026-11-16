@@ -25,6 +25,7 @@ use nautilus_model::{
     orders::Order,
     types::{Currency, Money, Quantity},
 };
+use rstest::rstest;
 use rust_decimal::Decimal;
 
 use crate::common::{
@@ -89,7 +90,7 @@ fn filled(record: &Rc<RefCell<Record>>) -> Vec<(Quantity, Option<EntryRisk>)> {
 /// EUR: 125,000 USD. 1% of it, 1,250 USD, over one R of 10.00 USD an
 /// ounce buys 125 oz, whose R is 1,250 USD, in the gold's P&L currency.
 /// At the bid it would buy 124, taken as USD 100, at the rate swapped 80.
-#[test]
+#[rstest]
 fn a_trade_is_sized_on_the_equity_converted_into_its_pnl_currency_at_the_mid() {
     let eurusd = (ic::EURUSD, Currency::EUR(), Currency::USD(), 5);
 
@@ -119,7 +120,7 @@ fn a_trade_is_sized_on_the_equity_converted_into_its_pnl_currency_at_the_mid() {
 /// R of 7.00 USD an ounce buys 142 oz. At the rate swapped, 2,250,000,000
 /// USD, it would buy the gold's maximum, 10,000 oz, whose margin the
 /// account cannot hold.
-#[test]
+#[rstest]
 fn a_rate_into_the_pnl_currency_is_read_in_its_direction_on_a_pair_far_from_one() {
     let usdjpy = (ic::USDJPY, Currency::USD(), Currency::JPY(), 3);
 
@@ -144,7 +145,7 @@ fn a_rate_into_the_pnl_currency_is_read_in_its_direction_on_a_pair_far_from_one(
 /// 4012.15, charged 3.20 EUR: the balance is 100,000 less 9.60 plus 580
 /// EUR, and the position open at the end holds IC's margin, 1/30 of
 /// 501,518.75 USD, 16,717.29 USD, in EUR: 13,373.83.
-#[test]
+#[rstest]
 fn the_account_books_its_margin_commissions_and_pnl_in_the_balances_currency() {
     let eurusd = (ic::EURUSD, Currency::EUR(), Currency::USD(), 5);
 
@@ -232,7 +233,7 @@ fn catalog_with_eurusd() -> tempfile::TempDir {
 /// EUR reaches USD, the gold's P&L currency, through EURUSD, as the
 /// catalog defines it: the backtest command runs on a balance in EUR,
 /// IC's account keeping it in EUR.
-#[test]
+#[rstest]
 fn a_backtest_runs_on_a_balance_its_conversions_reach_the_pnl_currency_from() {
     let catalog = catalog_with_eurusd();
 
@@ -251,7 +252,7 @@ fn a_backtest_runs_on_a_balance_its_conversions_reach_the_pnl_currency_from() {
 
 /// EURUSD reaches no yen: a balance in JPY is refused before the run,
 /// naming the yen and the dollar, the gold's P&L currency.
-#[test]
+#[rstest]
 fn a_backtest_on_a_balance_its_conversions_do_not_reach_the_pnl_currency_from_is_refused() {
     let catalog = catalog_with_eurusd();
 
@@ -276,7 +277,7 @@ fn a_backtest_on_a_balance_its_conversions_do_not_reach_the_pnl_currency_from_is
 /// trades on, starts with the balance, not with nothing, as a venue read
 /// for its pairs alone does. Its quotes, flat, cross no average: nothing
 /// is traded, and the balance ends as it starts.
-#[test]
+#[rstest]
 fn a_venue_trading_one_of_its_pairs_starts_with_the_balance() {
     let catalog = catalog_with_eurusd();
 

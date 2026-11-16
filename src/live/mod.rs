@@ -21,7 +21,7 @@ mod redis;
 
 use std::{fmt::Debug, path::PathBuf};
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use jiff::Timestamp;
 use nautilus_common::{
     actor::DataActorNative,
@@ -171,7 +171,7 @@ fn loaded_instrument_ids(
     for bar_type in &requirements.bar_types {
         let instrument_id = bar_type.instrument_id();
         if let Some(next) = Transition::after(instrument_id, now) {
-            bail!(
+            anyhow::bail!(
                 "bars {bar_type} on the root {instrument_id}: live builds no continuous \
                  bars, whose rolls Nautilus prices up front; read bars on its contract {} \
                  or the root's ticks",
@@ -196,6 +196,7 @@ fn loaded_instrument_ids(
 mod tests {
     use jiff::SignedDuration;
     use nautilus_model::data::{BarType, NautilusDataType};
+    use rstest::rstest;
 
     use super::*;
     use crate::strategy::requirements::TickSeries;
@@ -226,7 +227,7 @@ mod tests {
     /// GC rolls into GCZ26 on 2026-07-29 and out of it into GCG27 on
     /// 2026-11-26 (`rolls/README.md`, "GC against Databento"): the roller
     /// requests the contracts of the later rolls (`rolls::Roller::live`).
-    #[test]
+    #[rstest]
     fn a_root_loads_the_contract_in_front_and_the_next() {
         let requirements = DataRequirements {
             bar_types: vec![BarType::from("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL")],
@@ -241,7 +242,7 @@ mod tests {
     /// A start just before a roll loads the roll's post contract too, so
     /// the strategy subscribes to it even if the roll passes before it
     /// starts or the roller's request for it is still in flight.
-    #[test]
+    #[rstest]
     fn a_root_loads_just_before_its_roll_the_pre_and_post_contracts() {
         let requirements = ticks(&NautilusDataType::OrderBookDepth, &["GC.GLBX"]);
         assert_eq!(
@@ -254,7 +255,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_root_loads_at_its_roll_the_post_contract_and_the_next() {
         let requirements = ticks(&NautilusDataType::OrderBookDepth, &["GC.GLBX"]);
         assert_eq!(
@@ -263,7 +264,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_contract_read_beside_its_root_loads_once() {
         let requirements = ticks(&NautilusDataType::TradeTick, &["GCZ26.GLBX", "GC.GLBX"]);
         assert_eq!(
@@ -272,7 +273,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn plain_instruments_load_as_they_are_read() {
         let requirements = DataRequirements {
             bar_types: vec![
@@ -295,7 +296,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn bars_on_a_root_are_refused_naming_the_bar_type_and_its_contract() {
         let requirements = DataRequirements {
             bar_types: vec![BarType::from("GC.GLBX-1-MINUTE-LAST-INTERNAL")],

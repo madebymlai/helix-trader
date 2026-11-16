@@ -29,6 +29,7 @@ use helix_trader::{
 use jiff::SignedDuration;
 use nautilus_core::UnixNanos;
 use nautilus_model::types::Money;
+use rstest::rstest;
 use rust_decimal::Decimal;
 
 use crate::{
@@ -56,7 +57,7 @@ fn store(models: &Path, config: &ModelConfig, side: Side) -> ModelStore {
 /// tenths, 0.2R), 04:00 (8), 04:30 (9) and 09:00 (after the run), each
 /// decision's level its model's R, the strategy's one side calibrated to
 /// the bit as it is. Before 02:00 no model is valid: no trade.
-#[test]
+#[rstest]
 fn each_decision_uses_the_latest_model_valid_at_or_before_it() {
     let catalog = walk(
         ic::at("00:00:00") - SignedDuration::from_hours(1),
@@ -131,7 +132,7 @@ fn each_decision_uses_the_latest_model_valid_at_or_before_it() {
 /// the node give the bits they gave when fitted, on several predictions. The
 /// walk has no edge to earn, so no train would publish it: it is published
 /// straight.
-#[test]
+#[rstest]
 fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
     let catalog = walk(
         ic::at("00:00:00") - SignedDuration::from_hours(1),
@@ -229,7 +230,7 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
 /// prediction on the long's row of that dataset row, to the bit, and the
 /// predictions are not all one, so what they read of the payoff is what the
 /// rows hold.
-#[test]
+#[rstest]
 fn a_decision_reads_each_sides_row_as_its_dataset_row_holds_it() {
     let catalog = walk(
         ic::at("00:00:00") - SignedDuration::from_hours(1),
@@ -359,7 +360,7 @@ pub(crate) fn hand_worked(side: Side) -> ModelConfig {
 /// taking profit (2.66), stopped (-3.64) and closed by time (-1.44). The
 /// 12:00 decision's trade is still open at the end, as its row is
 /// unsettled.
-#[test]
+#[rstest]
 fn a_model_strategy_realizes_per_trade_the_pnl_its_dataset_row_recorded() {
     let catalog = ic::catalog_of(hand_worked_quotes(), ic::at("08:00:00"), ic::at("13:00:00"));
     let (from, to) = (ic::at("08:30:00"), ic::at("12:30:00"));

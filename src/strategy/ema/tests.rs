@@ -1,4 +1,5 @@
 use std::{cell::RefCell, rc::Rc};
+use rstest::rstest;
 
 use nautilus_common::{
     cache::Cache,
@@ -55,18 +56,18 @@ fn error_fields(toml: &str) -> Vec<String> {
     };
     errors
         .into_iter()
-        .map(|err| match err {
+        .map(|e| match e {
             ConfigError::Range { field, .. }
             | ConfigError::MissingField { field }
             | ConfigError::UnsupportedField { field, .. }
             | ConfigError::InvalidReference { field, .. }
             | ConfigError::InvalidValue { field, .. } => field,
-            err => panic!("unexpected config error {err:?}"),
+            e => panic!("unexpected config error {e:?}"),
         })
         .collect()
 }
 
-#[test]
+#[rstest]
 fn loads_from_toml() {
     let config = EmaCrossConfig::load(TOML).unwrap();
     assert_eq!(config.stake(), Stake::new("0.5%".parse().unwrap()));
@@ -80,12 +81,12 @@ fn loads_from_toml() {
     );
 }
 
-#[test]
+#[rstest]
 fn the_example_config_loads() {
     EmaCrossConfig::load(include_str!("../../../config/ema.toml")).unwrap();
 }
 
-#[test]
+#[rstest]
 fn reads_its_emas_from_the_indicators() {
     let toml = TOML
         .replace("period = 10", "period = 5")
@@ -97,7 +98,7 @@ fn reads_its_emas_from_the_indicators() {
     );
 }
 
-#[test]
+#[rstest]
 fn defaults_its_base_and_leaves_the_oms_to_the_venue() {
     let config = EmaCrossConfig::load(TOML).unwrap();
     assert_eq!(
@@ -109,21 +110,21 @@ fn defaults_its_base_and_leaves_the_oms_to_the_venue() {
     assert_eq!(config.base.oms_type, None);
 }
 
-#[test]
+#[rstest]
 fn rejects_a_period_at_the_top_level() {
     let toml = format!("fast_period = 5\n{TOML}");
     let err = EmaCrossConfig::load(&toml).unwrap_err();
     assert!(err.to_string().contains("fast_period"), "{err}");
 }
 
-#[test]
+#[rstest]
 fn rejects_exits_in_the_toml() {
     let toml = format!("hold = \"1h\"\n{TOML}");
     let err = EmaCrossConfig::load(&toml).unwrap_err();
     assert!(err.to_string().contains("hold"), "{err}");
 }
 
-#[test]
+#[rstest]
 fn rejects_a_missing_ema() {
     let start = TOML.find("[indicators.slow]").unwrap();
     let end = TOML.find("[trade]").unwrap();
@@ -131,7 +132,7 @@ fn rejects_a_missing_ema() {
     assert_eq!(error_fields(&toml), ["indicators.slow"]);
 }
 
-#[test]
+#[rstest]
 fn rejects_an_ema_of_average_true_range_arguments() {
     let toml = TOML.replacen(
         "period = 10",
@@ -141,19 +142,19 @@ fn rejects_an_ema_of_average_true_range_arguments() {
     assert_eq!(error_fields(&toml), ["indicators.fast"]);
 }
 
-#[test]
+#[rstest]
 fn rejects_a_zero_period_by_nautilus_check() {
     let toml = TOML.replace("period = 10", "period = 0");
     assert_eq!(error_fields(&toml), ["indicators.fast"]);
 }
 
-#[test]
+#[rstest]
 fn rejects_fast_period_not_below_slow() {
     let toml = TOML.replace("period = 10", "period = 30");
     assert_eq!(error_fields(&toml), ["indicators.fast.period"]);
 }
 
-#[test]
+#[rstest]
 fn rejects_two_traded_instruments() {
     let toml = TOML.replace(
         "instruments = [{ instrument_id = \"ESM24.CME\" }]",
@@ -165,7 +166,7 @@ fn rejects_two_traded_instruments() {
 
 /// With no instrument traded, nothing is asked of the series: the count
 /// is the violation.
-#[test]
+#[rstest]
 fn rejects_no_traded_instrument_alone() {
     let toml = TOML.replace(
         "instruments = [{ instrument_id = \"ESM24.CME\" }]",
@@ -174,7 +175,7 @@ fn rejects_no_traded_instrument_alone() {
     assert_eq!(error_fields(&toml), ["trade.instruments"]);
 }
 
-#[test]
+#[rstest]
 fn rejects_a_trade_instrument_without_bars() {
     let toml = TOML.replace(
         "{ instrument_id = \"ESM24.CME\" }",
@@ -194,7 +195,7 @@ fn listing(series: &str) -> String {
 
 /// The crossover reads the first bars series of the traded instrument: a
 /// second one is read by nothing.
-#[test]
+#[rstest]
 fn rejects_a_second_bars_series_of_the_trade_instrument_as_unread() {
     let toml = listing(
         r#"{ data = "bars", instrument_id = "ESM24.CME", bar_spec = { step = 2, aggregation = "HOUR", price_type = "MID" } }"#,
@@ -208,7 +209,7 @@ fn rejects_a_second_bars_series_of_the_trade_instrument_as_unread() {
 /// custom series listed beside its bars, its type registered as the
 /// process does at its start, is read by nothing, refused under its
 /// listing, naming it.
-#[test]
+#[rstest]
 fn rejects_a_custom_series_as_unread() {
     crate::venues::register_custom_data();
     let toml = listing(
@@ -219,7 +220,7 @@ fn rejects_a_custom_series_as_unread() {
     assert!(err.contains("LseRow") && err.contains("US10Y"), "{err}");
 }
 
-#[test]
+#[rstest]
 fn rejects_bars_of_another_instrument_as_unread() {
     let toml = listing(
         r#"{ data = "bars", instrument_id = "ESH24.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } }"#,
@@ -231,7 +232,7 @@ fn rejects_bars_of_another_instrument_as_unread() {
 
 /// The crossover reads its bars series once: listed again, it is refused
 /// under its second listing, naming it.
-#[test]
+#[rstest]
 fn rejects_its_bars_series_listed_twice() {
     let toml = listing(
         r#"{ data = "bars", instrument_id = "ESM24.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } }"#,
@@ -249,7 +250,7 @@ fn rejects_its_bars_series_listed_twice() {
 }
 
 /// The crossover reads bars alone, even of the instrument it trades.
-#[test]
+#[rstest]
 fn rejects_ticks_of_the_trade_instrument_as_unread() {
     let toml = listing(r#"{ data = "quotes", instrument_id = "ESM24.CME" }"#);
     assert_eq!(error_fields(&toml), ["data.series[1]"]);
@@ -259,7 +260,7 @@ fn rejects_ticks_of_the_trade_instrument_as_unread() {
 
 /// The traded instrument without bars, its own error, is reported with
 /// the standard ones.
-#[test]
+#[rstest]
 fn reports_a_trade_instrument_without_bars_with_the_standard_violations() {
     let toml = TOML
         .replace(
@@ -277,7 +278,7 @@ fn reports_a_trade_instrument_without_bars_with_the_standard_violations() {
 
 /// Each series read by nothing is reported under its field, with the
 /// standard violations and the crossover's own.
-#[test]
+#[rstest]
 fn reports_every_unread_series_with_the_other_violations() {
     let toml = listing(
         r#"{ data = "bars", instrument_id = "ESH24.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
@@ -301,7 +302,7 @@ fn reports_every_unread_series_with_the_other_violations() {
 /// The crossover reading the bars of the GC root, the one series of it,
 /// and trading the root: no order goes to a root, which the shared trade
 /// rules refuse under its field.
-#[test]
+#[rstest]
 fn rejects_a_futures_root_traded() {
     let toml = TOML
         .replace("ESM24.CME", "GC.GLBX")
@@ -313,7 +314,7 @@ fn rejects_a_futures_root_traded() {
 /// trade to read them: Nautilus builds a root's bars from its contracts'
 /// trades, so these would never come, refused under the series with the
 /// root traded.
-#[test]
+#[rstest]
 fn rejects_bars_on_a_root_not_built_from_its_trades() {
     let toml = TOML.replace("ESM24.CME", "GC.GLBX");
     let mut fields = error_fields(&toml);
@@ -328,13 +329,13 @@ fn rejects_bars_on_a_root_not_built_from_its_trades() {
 
 /// Its bars of the instrument traded give execution its prices: no
 /// quotes of it are added.
-#[test]
+#[rstest]
 fn requires_no_quotes_of_the_instrument_its_bars_read() {
     let config = EmaCrossConfig::load(TOML).unwrap();
     assert_eq!(config.data_requirements().ticks, []);
 }
 
-#[test]
+#[rstest]
 fn reports_its_own_violations_with_the_standard_ones() {
     let toml = TOML
         .replace("period = 10", "period = 30")
@@ -349,7 +350,7 @@ fn price(s: &str) -> Decimal {
     s.parse().unwrap()
 }
 
-#[test]
+#[rstest]
 fn a_long_takes_profit_a_percent_above_the_close_and_stops_half_a_percent_below() {
     // 620.60 plus 1%, less 0.5%.
     assert_eq!(
@@ -358,7 +359,7 @@ fn a_long_takes_profit_a_percent_above_the_close_and_stops_half_a_percent_below(
     );
 }
 
-#[test]
+#[rstest]
 fn a_short_takes_profit_a_percent_below_the_close_and_stops_half_a_percent_above() {
     // 600.60 less 1%, plus 0.5%.
     assert_eq!(
@@ -464,7 +465,7 @@ fn holding(instrument: InstrumentAny) -> Rc<RefCell<Cache>> {
 /// its entry filled into a position of its own: started again at the
 /// restart, the strategy sets the trade's time again, 4 hours after its
 /// send.
-#[test]
+#[rstest]
 fn a_restart_sets_the_time_of_its_open_trade_again() {
     let aud = InstrumentAny::CurrencyPair(audusd_sim());
     let cache = holding(aud.clone());
@@ -558,7 +559,7 @@ fn aud_in_quarter_ticks() -> InstrumentAny {
 /// and its stop, 0.6965995, are on the nearest of the instrument's ticks,
 /// not merely at its precision (0.70710, 0.69660), and its one R is the
 /// close's distance to that stop, 0.00360.
-#[test]
+#[rstest]
 fn a_trade_takes_profit_and_stops_on_the_nearest_ticks_its_one_r_to_its_stop() {
     let cache = holding(aud_in_quarter_ticks());
     let (strategy, _) = started(&cache, NOW);
@@ -597,7 +598,7 @@ fn a_trade_takes_profit_and_stops_on_the_nearest_ticks_its_one_r_to_its_stop() {
 /// Nautilus' sizer reads a trade's P&L as a multiple of a distance in
 /// price, which an inverse instrument's is not: the crossover trading
 /// Bybit's inverse BTC/USD perpetual refuses to start.
-#[test]
+#[rstest]
 fn trading_an_inverse_instrument_it_refuses_to_start() {
     let btc = btcusd_bybit();
     let config = CONFIG.replace("AUD/USD.SIM", &btc.id.to_string());
@@ -629,7 +630,7 @@ fn converting() -> EmaCrossConfig {
 /// conversion pair, IC's EURUSD, over its warmup, ending now, so that the
 /// cache holds a rate when it sizes a trade at the start, then subscribes
 /// to them from now.
-#[test]
+#[rstest]
 fn live_it_warms_up_its_conversion_pairs_quotes_then_subscribes_to_them_from_its_start() {
     let (handler, sent) = get_typed_into_message_saving_handler::<DataCommand>(None);
     msgbus::register_data_command_endpoint(

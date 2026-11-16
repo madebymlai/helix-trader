@@ -35,6 +35,7 @@ use helix_trader::{
     venues,
 };
 use jiff::{RoundMode, SignedDuration, Timestamp, TimestampRound, Unit, civil::time, tz::TimeZone};
+use nautilus_backtest::result::BacktestResult;
 use nautilus_common::logging::logger::LoggerConfig;
 use nautilus_core::UnixNanos;
 use nautilus_model::{
@@ -301,7 +302,7 @@ pub(crate) fn shortest_ema_cross() -> EmaCross {
 }
 
 /// The final EUR balance of the account.
-pub(crate) fn balance(result: &nautilus_backtest::result::BacktestResult) -> String {
+pub(crate) fn balance(result: &BacktestResult) -> String {
     result.summary["account.IBIS.balance.EUR.total"].clone()
 }
 

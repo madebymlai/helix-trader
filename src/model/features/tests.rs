@@ -3,9 +3,9 @@ use std::sync::Arc;
 use nautilus_common::{actor::DataActor, cache::Cache, clock::VirtualClock};
 use nautilus_core::Params;
 use nautilus_model::{
-    data::{BookOrder, DataType, HasTsInit, OrderBookDelta, stubs::stub_depth10},
+    data::{BookOrder, CustomDataTrait, DataType, HasTsInit, OrderBookDelta, stubs::stub_depth10},
     enums::{AggressorSide, BookAction, OrderSide},
-    identifiers::{TradeId, TraderId},
+    identifiers::{StrategyId, TradeId, TraderId},
     types::{Price, Quantity},
 };
 use nautilus_portfolio::portfolio::Portfolio;
@@ -13,6 +13,7 @@ use nautilus_trading::{
     nautilus_strategy,
     strategy::{StrategyConfig, StrategyCore},
 };
+use rstest::rstest;
 use rust_decimal::Decimal;
 
 use super::{testing::BOOK, *};
@@ -121,7 +122,7 @@ impl HasTsInit for Level {
     }
 }
 
-impl nautilus_model::data::CustomDataTrait for Level {
+impl CustomDataTrait for Level {
     fn type_name(&self) -> &'static str {
         "Level"
     }
@@ -138,11 +139,11 @@ impl nautilus_model::data::CustomDataTrait for Level {
         Ok(serde_json::to_string(self)?)
     }
 
-    fn clone_arc(&self) -> Arc<dyn nautilus_model::data::CustomDataTrait> {
+    fn clone_arc(&self) -> Arc<dyn CustomDataTrait> {
         Arc::new(self.clone())
     }
 
-    fn eq_arc(&self, other: &dyn nautilus_model::data::CustomDataTrait) -> bool {
+    fn eq_arc(&self, other: &dyn CustomDataTrait) -> bool {
         other.as_any().downcast_ref::<Self>() == Some(self)
     }
 }
@@ -189,7 +190,7 @@ fn read_level(data: &CustomData) -> f64 {
         .map_or(f64::NAN, |level| level.level)
 }
 
-#[test]
+#[rstest]
 fn a_table_feeding_one_feature_names_it_after_the_table() {
     let tables = tables();
 
@@ -202,7 +203,7 @@ fn a_table_feeding_one_feature_names_it_after_the_table() {
 }
 
 /// Bars by their bar type, ticks by their kind and instrument.
-#[test]
+#[rstest]
 fn a_table_feeding_several_features_names_each_after_its_series_and_the_table() {
     let tables = tables();
 
@@ -228,7 +229,7 @@ fn a_table_feeding_several_features_names_each_after_its_series_and_the_table() 
 }
 
 /// `last` feeds two features, `two` one.
-#[test]
+#[rstest]
 fn each_table_is_named_by_the_features_it_feeds_itself() {
     let tables = tables();
 
@@ -249,7 +250,7 @@ fn each_table_is_named_by_the_features_it_feeds_itself() {
     );
 }
 
-#[test]
+#[rstest]
 fn the_names_keep_the_order_of_their_declaration() {
     let tables = tables();
 
@@ -264,7 +265,7 @@ fn the_names_keep_the_order_of_their_declaration() {
 }
 
 /// A table read twice on one series names two features alike.
-#[test]
+#[rstest]
 fn two_features_of_one_name_are_an_error() {
     let tables = tables();
 
@@ -278,12 +279,12 @@ fn two_features_of_one_name_are_an_error() {
     assert!(err.contains("QuoteTick of AUD/USD.SIM:last"), "{err}");
 }
 
-#[test]
+#[rstest]
 fn a_set_without_features_is_an_error() {
     assert!(FeatureSet::builder().build().is_err());
 }
 
-#[test]
+#[rstest]
 fn a_quote_reaches_only_the_features_on_the_quotes_of_its_instrument() {
     let tables = tables();
     let features = FeatureSet::builder()
@@ -305,7 +306,7 @@ fn a_quote_reaches_only_the_features_on_the_quotes_of_its_instrument() {
     assert!((values[2] - 0.65).abs() < 1e-9, "{values:?}");
 }
 
-#[test]
+#[rstest]
 fn a_bar_reaches_only_the_features_on_its_bar_type() {
     let tables = tables();
     let features = FeatureSet::builder()
@@ -325,7 +326,7 @@ fn a_bar_reaches_only_the_features_on_its_bar_type() {
 
 /// Each feature counts what reaches it: the deltas feature is cold until
 /// deltas of its instrument come, and each counts one.
-#[test]
+#[rstest]
 fn depth_and_deltas_reach_only_the_features_on_their_kind_and_instrument() {
     let tables = tables();
     let depth = stub_depth10();
@@ -345,7 +346,7 @@ fn depth_and_deltas_reach_only_the_features_on_their_kind_and_instrument() {
 
 /// A moving average has no depth, deltas or trade handler of its own:
 /// Nautilus' defaults panic.
-#[test]
+#[rstest]
 fn an_update_of_a_kind_no_feature_reads_is_a_no_op() {
     let features = FeatureSet::builder()
         .bars(BarType::from(AUD_BARS), LAST, &tables())
@@ -408,7 +409,7 @@ impl IndicatorArgs for FailingQuotesArgs {
     }
 }
 
-#[test]
+#[rstest]
 fn a_features_error_is_no_error_of_the_set_and_the_others_still_update() {
     let tables = tables();
     let features = FeatureSet::builder()
@@ -423,7 +424,7 @@ fn a_features_error_is_no_error_of_the_set_and_the_others_still_update() {
     assert!((values[1] - 0.7).abs() < 1e-9, "{values:?}");
 }
 
-#[test]
+#[rstest]
 fn the_values_wait_for_every_feature() {
     let tables = tables();
     let features = FeatureSet::builder()
@@ -452,7 +453,7 @@ fn cached(probe: &Probe, data: CustomData) {
 /// Cold before the set is registered, whatever the cache holds; then the
 /// latest level under AUD/USD's id the cache holds, from one cached before
 /// the registration on, another instrument's not read.
-#[test]
+#[rstest]
 fn a_raw_feature_reads_the_latest_point_of_its_data_type_in_the_cache() {
     let mut probe = registered();
     let features = FeatureSet::builder()
@@ -478,7 +479,7 @@ fn a_raw_feature_reads_the_latest_point_of_its_data_type_in_the_cache() {
 /// Cold before the set is registered, and registered until the cache holds
 /// a point of its data type, a point of another identifier not read; then
 /// the latest point of its data type the cache holds.
-#[test]
+#[rstest]
 fn a_raw_feature_of_a_custom_series_reads_the_latest_point_of_its_data_type_in_the_cache() {
     let mut probe = registered();
     let yields = levels("yields", "US10Y");
@@ -539,7 +540,7 @@ fn levels_across_the_roll(identifier: &str) -> [Option<Vec<f64>>; 3] {
 /// point of the contract standing for it, GCZ26's, the root's own data
 /// type keying none; at the roll it moves to GCG27's, the post contract's
 /// latest it reads at once, and no later point of GCZ26 reaches it.
-#[test]
+#[rstest]
 fn a_raw_feature_of_a_roots_custom_series_reads_the_contract_in_front_and_moves_at_its_roll() {
     assert_eq!(
         levels_across_the_roll("GC.GLBX"),
@@ -548,7 +549,7 @@ fn a_raw_feature_of_a_roots_custom_series_reads_the_contract_in_front_and_moves_
 }
 
 /// GCZ26's own series stands for itself: the roll of GC moves it not.
-#[test]
+#[rstest]
 fn a_raw_feature_of_a_contracts_custom_series_is_not_moved_by_its_roots_roll() {
     assert_eq!(
         levels_across_the_roll("GCZ26.GLBX"),
@@ -565,7 +566,7 @@ macro_rules! at {
     }};
 }
 
-#[test]
+#[rstest]
 fn an_instruments_last_update_is_the_latest_a_feature_read_of_any_kind() {
     let depth = stub_depth10();
     let tables = tables();
@@ -593,7 +594,7 @@ fn an_instruments_last_update_is_the_latest_a_feature_read_of_any_kind() {
 
 /// A custom series under an instrument's id is no update of the
 /// instrument: it brings none.
-#[test]
+#[rstest]
 fn an_update_no_feature_reads_and_custom_data_are_no_update_of_an_instrument() {
     let features = FeatureSet::builder()
         .quotes(id(AUD), LAST, &tables())
@@ -614,7 +615,7 @@ fn an_update_no_feature_reads_and_custom_data_are_no_update_of_an_instrument() {
 /// A strategy subscribes these and a live warmup requests them: each kind of
 /// tick of each instrument once, in the order declared, and no bars, nor
 /// the custom series under an instrument's id a raw feature reads.
-#[test]
+#[rstest]
 fn a_sets_ticks_are_those_of_its_tick_features_each_once() {
     let tables = tables();
     let features = FeatureSet::builder()
@@ -646,7 +647,7 @@ fn a_sets_ticks_are_those_of_its_tick_features_each_once() {
 /// A model strategy reads these (`model::reads`): each custom series a raw
 /// feature reads once, in the order declared, one under an instrument's
 /// id among them; none is a tick series.
-#[test]
+#[rstest]
 fn a_sets_custom_series_are_those_of_its_raw_features_each_once() {
     let (us10y, us2y, aud) = (
         levels("yields", "US10Y"),
@@ -667,7 +668,7 @@ fn a_sets_custom_series_are_those_of_its_raw_features_each_once() {
 
 /// The bars of AUD's mids read by two features, its bids by one: each bar
 /// type once, in the order declared, and no ticks.
-#[test]
+#[rstest]
 fn a_sets_bar_types_are_those_of_its_bar_features_each_once() {
     let tables = tables();
     let features = FeatureSet::builder()
@@ -695,7 +696,7 @@ fn warming(warmup: Option<SignedDuration>) -> Rc<FeatureSet> {
     .unwrap()
 }
 
-#[test]
+#[rstest]
 fn a_set_declares_no_warmup_unless_given_one() {
     assert_eq!(warming(None).warmup(), SignedDuration::ZERO);
     assert_eq!(
@@ -704,7 +705,7 @@ fn a_set_declares_no_warmup_unless_given_one() {
     );
 }
 
-#[test]
+#[rstest]
 fn the_fingerprint_changes_with_the_warmup() {
     assert_ne!(
         warming(Some(SignedDuration::from_hours(2))).fingerprint(),
@@ -716,7 +717,7 @@ fn the_fingerprint_changes_with_the_warmup() {
     );
 }
 
-#[test]
+#[rstest]
 fn a_negative_warmup_is_an_error() {
     let err = FeatureSet::builder()
         .quotes(id(AUD), LAST, &tables())
@@ -740,12 +741,12 @@ fn fingerprint(names: [&str; 2], version: u32) -> Fingerprint {
         .fingerprint()
 }
 
-#[test]
+#[rstest]
 fn the_fingerprint_is_the_same_for_the_same_names_and_version() {
     assert_eq!(fingerprint(["a", "b"], 1), fingerprint(["a", "b"], 1));
 }
 
-#[test]
+#[rstest]
 fn the_fingerprint_changes_with_a_name_their_order_or_the_version() {
     let base = fingerprint(["a", "b"], 1);
 
@@ -759,7 +760,7 @@ fn the_fingerprint_changes_with_a_name_their_order_or_the_version() {
 /// Pointed at another series, a raw feature of a custom series rebuilds
 /// the dataset and the models: its data type's identifier, metadata and
 /// type name are in the fingerprint beside its name.
-#[test]
+#[rstest]
 fn the_fingerprint_changes_with_the_custom_series_a_raw_feature_reads() {
     let reading = |series: CustomSeries| {
         FeatureSet::builder()
@@ -777,7 +778,7 @@ fn the_fingerprint_changes_with_the_custom_series_a_raw_feature_reads() {
 }
 
 /// A set without a version is of version 0, as one given it.
-#[test]
+#[rstest]
 fn a_set_without_a_version_is_of_version_nought() {
     let unversioned = FeatureSet::builder()
         .custom(&level_series(AUD), "a", read_level)
@@ -789,7 +790,7 @@ fn a_set_without_a_version_is_of_version_nought() {
     assert_eq!(unversioned, fingerprint(["a", "b"], 0));
 }
 
-#[test]
+#[rstest]
 fn a_fingerprint_extended_with_a_part_changes_with_the_part() {
     let base = fingerprint(["a", "b"], 1);
 
@@ -817,7 +818,7 @@ fn registered() -> Probe {
 fn registered_at(now: UnixNanos) -> Probe {
     let mut probe = Probe {
         core: StrategyCore::new(StrategyConfig {
-            strategy_id: Some(nautilus_model::identifiers::StrategyId::from("PROBE-001")),
+            strategy_id: Some(StrategyId::from("PROBE-001")),
             order_id_tag: Some("001".to_string()),
             ..Default::default()
         }),
@@ -843,7 +844,7 @@ fn registered_at(now: UnixNanos) -> Probe {
 /// warmup (`Warmup::feeding_ticks`). Through Nautilus, the features on
 /// GBP/USD's quotes and trades read neither, and the one on AUD/USD's bars
 /// reads its bar.
-#[test]
+#[rstest]
 fn registered_features_get_their_bars_through_nautilus_and_not_their_quotes_or_trades() {
     let mut probe = registered();
     let tables = tables();
@@ -865,7 +866,7 @@ fn registered_features_get_their_bars_through_nautilus_and_not_their_quotes_or_t
 
 /// Registered twice, as on a restart: each bar still counts once, and the
 /// average of two is cold after one.
-#[test]
+#[rstest]
 fn a_set_registered_twice_gets_each_update_once() {
     let mut probe = registered();
     let features = FeatureSet::builder()
@@ -904,7 +905,7 @@ fn width_of(distance: Distance) -> Rc<BracketWidth> {
     let requirements = DataRequirements {
         bar_types: vec![],
         ticks: vec![crate::strategy::requirements::TickSeries {
-            data: nautilus_model::data::NautilusDataType::QuoteTick,
+            data: NautilusDataType::QuoteTick,
             instrument_id: id(AUD),
         }],
         custom: vec![],
@@ -920,7 +921,7 @@ fn over(width: &Rc<BracketWidth>) -> Rc<FeatureSet> {
 }
 
 /// 10 bps of the mid 0.7 is 0.0007: the mid is 1000 of it.
-#[test]
+#[rstest]
 fn a_feature_over_the_bracket_reads_its_quotes_over_its_width() {
     let features = over(&width_of(Distance::BasisPoints(Decimal::from(10))));
 
@@ -940,7 +941,7 @@ fn over_tables() -> IndicatorsConfig {
 
 /// Two features over one width read it, the one the target's setter is
 /// handed (`bracket_width`).
-#[test]
+#[rstest]
 fn features_over_one_width_hand_it_to_the_target() {
     let width = width_of(Distance::BasisPoints(Decimal::from(10)));
 
@@ -955,7 +956,7 @@ fn features_over_one_width_hand_it_to_the_target() {
 
 /// The target's setter runs on the ATR of one width: features over two
 /// are refused as they are declared.
-#[test]
+#[rstest]
 #[should_panic(expected = "two widths")]
 fn features_over_two_widths_panic() {
     let in_bps = || width_of(Distance::BasisPoints(Decimal::from(10)));

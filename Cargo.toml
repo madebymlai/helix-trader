@@ -1,8 +1,9 @@
 [package]
 name = "helix-trader"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "A systematic trading system built on NautilusTrader"
 publish = false
 
 [lints]
@@ -14,6 +15,7 @@ members = ["crates/ctrader", "crates/lse"]
 default-members = [".", "crates/ctrader", "crates/lse"]
 
 [workspace.package]
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.100.0"
 
@@ -56,6 +58,8 @@ nautilus-testkit = { git = "https://github.com/nautechsystems/nautilus_trader", 
   "testers",
 ] }
 nautilus-trading = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "97ecbafd6621241a2222ef5a31cf887c6d96d950" }
+# Fixtures and cases for every crate's tests (`#[rstest]`), as Nautilus'.
+rstest = { version = "0.28.0", default-features = false }
 rust_decimal = "1"
 serde = { version = "1", features = ["derive"] }
 # Floats read back to the bit: the probes of a stored model.
@@ -241,9 +245,48 @@ similar_names = "allow" # Domain terms like trade/trader and side/size are inten
 [workspace.lints.rust]
 unreachable_pub = "deny"
 
+# The crate release cooldown (scripts/check-cargo-cooldown.sh, as Nautilus
+# sets it): a crates.io version enters Cargo.lock 3 days after publication.
+[workspace.metadata.cooldown]
+days = 3
+trusted-base = "origin/develop"
+
+# The typos spell checker's config (typos reads it here).
+[workspace.metadata.typos.default]
+locale = "en-us"
+
+[workspace.metadata.typos.default.extend-words]
+# A model's valid-from timestamps (`valid_froms`)
+froms = "froms"
+# Industry standard abbreviations and technical terms
+Pn = "Pn" # Part of PnL (Profit and Loss)
+PnL = "PnL" # Profit and Loss
+PnLs = "PnLs" # Plural of PnL
+ND = "ND" # Ordinal suffix (`ON_THE_22ND`)
+# Futures roots and contract symbols
+SIZ = "SIZ" # COMEX silver root with its month (`SIZ26`)
+# Misspelled config keys the tests refuse
+sesion = "sesion"
+spred = "spred"
+leafs = "leafs"
+
+[workspace.metadata.typos.files]
+# Preserve vendored code and verbatim data
+extend-exclude = [
+  "crates/ctrader/proto/",
+  "crates/lse/docs-snapshot/",
+  "**/test_data/**/*.json",
+  "**/test_data/**/*.txt",
+]
+
 [features]
 # Strategy unit tests, off by default (see the README's tests section).
 strategy-tests = []
+
+# cargo-machete reads source for a dependency's name: the arrow schema of the
+# custom data macros is in their expansion alone.
+[package.metadata.cargo-machete]
+ignored = ["arrow"]
 
 [dependencies]
 # The quote maps of Nautilus' exchange-rate path search
@@ -264,6 +307,7 @@ clap = { version = "4", features = ["derive", "env"] }
 # The cTrader Open API adapter, which the IC Markets and Pepperstone venues wire in.
 ctrader.workspace = true
 dotenvy = "0.15"
+ibapi = "=5.0.0"
 jiff.workspace = true
 # LightGBM, built from its C++ sources (needs cmake and clang) without OpenMP:
 # one thread, so training is deterministic. Cargo.lock gives its bindgen
@@ -289,12 +333,11 @@ nautilus-databento = { workspace = true, features = ["arrow", "live"] }
 nautilus-execution.workspace = true
 nautilus-indicators.workspace = true
 nautilus-infrastructure.workspace = true
-nautilus-live = { workspace = true, features = ["streaming"] }
-ibapi = "=5.0.0"
 nautilus-interactive-brokers = { workspace = true, features = [
   "execution",
   "gateway",
 ] }
+nautilus-live = { workspace = true, features = ["streaming"] }
 nautilus-model.workspace = true
 nautilus-network.workspace = true
 nautilus-okx.workspace = true
@@ -325,13 +368,14 @@ async-trait.workspace = true
 ctrader = { workspace = true, features = ["test-support"] }
 # The mock LSE peer and its captured payloads, for the tests of the LSE fill.
 lse = { workspace = true, features = ["test-support"] }
+nautilus-model = { workspace = true, features = ["test-support"] }
+# Nautilus' portfolio, to register a strategy in a unit test.
+nautilus-portfolio.workspace = true
 # Nautilus' Redis client, to delete what the live tests leave in the cache.
 redis = { version = "1.7.1", default-features = false, features = [
   "tokio-comp",
 ] }
-nautilus-model = { workspace = true, features = ["test-support"] }
-# Nautilus' portfolio, to register a strategy in a unit test.
-nautilus-portfolio.workspace = true
+rstest.workspace = true
 
 # Line tables only for the workspace's crates, enough for file:line in
 # backtraces, and no debug info for dependencies: Nautilus and DataFusion's full debug info made

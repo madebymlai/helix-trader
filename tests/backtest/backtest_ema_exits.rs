@@ -4,6 +4,8 @@
 //! take profit, a short at its stop loss, each on the first minute quote
 //! reaching it. One node per thread, so one run per test.
 
+use rstest::rstest;
+
 use crate::common::{self, trades};
 
 /// - 13:00 at 620.60, a cross up (above 605.60): buy 10 at 620.65, the
@@ -21,7 +23,7 @@ use crate::common::{self, trades};
 ///   cancelled. The bar closes at 603.80, below 608.16: short, no cross.
 const LEVELS: [f64; 4] = [620.0, 626.5, 600.0, 603.2];
 
-#[test]
+#[rstest]
 fn a_long_ends_at_its_take_profit_and_a_short_at_its_stop_loss() {
     let catalog = trades::catalog(&LEVELS);
 

@@ -27,6 +27,7 @@ use nautilus_trading::{
     nautilus_strategy,
     strategy::{StrategyConfig, StrategyCore},
 };
+use rstest::rstest;
 
 use crate::common::{glbx, ic};
 
@@ -170,7 +171,7 @@ fn unquoted(got: &[Got]) -> Vec<Got> {
         .collect()
 }
 
-#[test]
+#[rstest]
 fn declared_deltas_and_custom_data_of_the_run_reach_the_handlers_in_time_order() {
     let catalog = catalog();
 
@@ -200,7 +201,7 @@ fn declared_deltas_and_custom_data_of_the_run_reach_the_handlers_in_time_order()
     assert!(times.is_sorted(), "{got:?}");
 }
 
-#[test]
+#[rstest]
 fn deltas_and_custom_data_the_strategy_does_not_declare_are_not_replayed() {
     let catalog = catalog();
 
@@ -216,7 +217,7 @@ fn deltas_and_custom_data_the_strategy_does_not_declare_are_not_replayed() {
 
 /// The feature reads each imbalance the run replays as the strategy gets
 /// it, the data engine having cached it first, from no strategy code.
-#[test]
+#[rstest]
 fn a_raw_feature_reads_each_replayed_imbalance_from_the_cache() {
     let catalog = catalog();
     let features = FeatureSet::builder()

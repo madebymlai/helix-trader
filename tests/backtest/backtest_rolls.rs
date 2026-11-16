@@ -35,6 +35,7 @@ use nautilus_trading::{
     nautilus_strategy,
     strategy::{StrategyConfig, StrategyCore},
 };
+use rstest::rstest;
 use rust_decimal::Decimal;
 
 use crate::common::{
@@ -81,8 +82,8 @@ struct RollProbe {
 nautilus_strategy!(RollProbe);
 
 impl RollProbe {
-    fn record(&self, got: Got) {
-        self.got.borrow_mut().push(got);
+    fn record(&self, observed: Got) {
+        self.got.borrow_mut().push(observed);
     }
 }
 
@@ -271,7 +272,7 @@ fn before_roll() -> UnixNanos {
     (roll() - NANOSECOND).into()
 }
 
-#[test]
+#[rstest]
 fn a_rolled_root_replays_each_contract_only_within_its_slice() {
     let catalog = rolls::catalog();
 
@@ -295,7 +296,7 @@ fn a_rolled_root_replays_each_contract_only_within_its_slice() {
     );
 }
 
-#[test]
+#[rstest]
 fn the_roller_tells_the_strategy_of_the_roll_at_which_its_subscriptions_switch() {
     let catalog = rolls::catalog();
     let backtest = backtest(&catalog, ticks(ROOT));
@@ -326,7 +327,7 @@ fn the_roller_tells_the_strategy_of_the_roll_at_which_its_subscriptions_switch()
     );
 }
 
-#[test]
+#[rstest]
 fn the_subscriptions_alone_keep_the_strategy_on_the_contract_standing_for_the_root() {
     let catalog = rolls::catalog();
     // Both contracts declared as themselves: each replayed over the whole
@@ -359,7 +360,7 @@ fn the_subscriptions_alone_keep_the_strategy_on_the_contract_standing_for_the_ro
     );
 }
 
-#[test]
+#[rstest]
 fn a_plain_instrument_is_subscribed_once_and_gets_no_roll_alert() {
     let catalog = rolls::catalog();
     let backtest = backtest(&catalog, ticks(POST));
@@ -404,7 +405,7 @@ fn pre_ticks_of_the_run() -> Vec<Got> {
     ]
 }
 
-#[test]
+#[rstest]
 fn a_contract_declared_beside_its_root_is_replayed_once() {
     let catalog = rolls::catalog();
     let backtest = backtest(&catalog, [ticks(ROOT), ticks(PRE)].concat());
@@ -416,7 +417,7 @@ fn a_contract_declared_beside_its_root_is_replayed_once() {
     assert_eq!(ticks_of(&got, PRE), pre_ticks_of_the_run());
 }
 
-#[test]
+#[rstest]
 fn the_subscriptions_keep_a_contract_declared_beside_its_root_after_the_root_rolls_off_it() {
     let catalog = rolls::catalog();
     let declared = [ticks(ROOT), ticks(PRE)].concat();
@@ -515,7 +516,7 @@ fn store_imbalances(dir: &Path, instrument_id: &str, values: &[(&str, f64)]) {
 /// The root's book deltas and its imbalances, a custom series under its
 /// id, through subscriptions moved at the roll by a roller of the root,
 /// as a strategy's are.
-#[test]
+#[rstest]
 fn the_subscriptions_roll_book_deltas_and_custom_data_keyed_by_the_contract() {
     let catalog = rolls::catalog();
     store_deltas_and_imbalances(
@@ -589,7 +590,7 @@ fn backtest_of(catalog: &tempfile::TempDir, custom: Vec<CustomSeries>) -> Backte
     }
 }
 
-#[test]
+#[rstest]
 fn a_roots_custom_series_replays_each_contracts_imbalances_only_within_its_slice() {
     let catalog = rolls::catalog();
     store_both_contracts_imbalances(catalog.path());
@@ -610,7 +611,7 @@ fn a_roots_custom_series_replays_each_contracts_imbalances_only_within_its_slice
     );
 }
 
-#[test]
+#[rstest]
 fn a_feature_over_a_roots_custom_series_reads_the_pre_then_the_post_contract() {
     let catalog = rolls::catalog();
     store_both_contracts_imbalances(catalog.path());

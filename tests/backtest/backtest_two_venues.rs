@@ -20,6 +20,7 @@ use nautilus_trading::{
     nautilus_strategy,
     strategy::{Strategy, StrategyConfig, StrategyCore},
 };
+use rstest::rstest;
 
 use crate::common::{glbx, ic};
 
@@ -79,7 +80,7 @@ impl DataActor for BookReader {
     }
 }
 
-#[test]
+#[rstest]
 fn golds_book_from_glbx_and_a_trade_on_ic_each_venue_with_its_account() {
     let catalog = ic::catalog();
     glbx::store(catalog.path());

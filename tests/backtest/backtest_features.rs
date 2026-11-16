@@ -31,6 +31,7 @@ use nautilus_trading::{
     nautilus_strategy,
     strategy::{StrategyConfig, StrategyCore},
 };
+use rstest::rstest;
 
 use crate::common::{
     INSTRUMENT_ID, MID_BAR_TYPE, backtest, catalog,
@@ -134,7 +135,7 @@ impl DataActor for FeatureProbe {
     }
 }
 
-#[test]
+#[rstest]
 fn each_decision_publishes_the_features_of_the_data_up_to_it() {
     let quotes = minute_quotes(at("09:00"), at("13:00"), |close| Some(mid(close)));
     let catalog = catalog(&quotes, at("08:00"), at("13:00"));

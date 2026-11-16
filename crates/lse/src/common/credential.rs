@@ -2,7 +2,7 @@
 //! LSE's own markets and one for each exchange plan's market, each given
 //! or read from its variable, and never printed.
 
-use std::fmt;
+use std::fmt::Display;
 
 use nautilus_core::string::secret::SecretString;
 
@@ -38,8 +38,8 @@ impl LseProduct {
     }
 }
 
-impl fmt::Display for LseProduct {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for LseProduct {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Global => "LSE",
             Self::Cme => "CME Group",

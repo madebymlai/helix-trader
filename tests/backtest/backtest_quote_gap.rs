@@ -4,10 +4,11 @@
 
 use jiff::Timestamp;
 use nautilus_model::data::BarType;
+use rstest::rstest;
 
 use crate::common::{self, hour_bars, minute_quotes, noise, ohlc, recorder::Recorder};
 
-#[test]
+#[rstest]
 fn an_hour_without_quotes_yields_no_bar() {
     // A quote a minute from 06:00 to 15:00 UTC on Wednesday 7 January
     // 2026, none in the hours closing 09:00 and 13:00. The run starts at

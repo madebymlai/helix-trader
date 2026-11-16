@@ -87,7 +87,7 @@ impl ModelBlueprint {
     ///
     /// # Errors
     ///
-    /// Returns an error as `dataset::fingerprint` does.
+    /// Returns an error if `dataset::fingerprint` fails.
     pub fn fingerprint(&self) -> anyhow::Result<Fingerprint> {
         dataset::fingerprint(
             &self.features,
@@ -102,7 +102,7 @@ impl ModelBlueprint {
     ///
     /// # Errors
     ///
-    /// Returns an error as `fingerprint` does.
+    /// Returns an error if `fingerprint` fails.
     pub fn dataset(&self, catalog: &Path) -> anyhow::Result<Dataset> {
         Ok(Dataset::new(catalog, self, self.fingerprint()?))
     }
@@ -111,7 +111,7 @@ impl ModelBlueprint {
     ///
     /// # Errors
     ///
-    /// Returns an error as `fingerprint` does, or if a learner cannot be
+    /// Returns an error if `fingerprint` fails, or if a learner cannot be
     /// written as JSON (`ModelSet::new`).
     pub fn model_set(&self, models: &Path) -> anyhow::Result<ModelSet> {
         ModelSet::new(models, self, self.fingerprint()?)
@@ -122,7 +122,7 @@ impl ModelBlueprint {
     ///
     /// # Errors
     ///
-    /// Returns an error as `model_set` does.
+    /// Returns an error if `model_set` would.
     pub fn training(&self, catalog: &Path, models: &Path) -> anyhow::Result<Training> {
         Ok(Training::new(self.stored(catalog, models)?))
     }
@@ -133,7 +133,7 @@ impl ModelBlueprint {
     ///
     /// # Errors
     ///
-    /// Returns an error as `model_set` does.
+    /// Returns an error if `model_set` would.
     pub fn walk_forward(&self, catalog: &Path, models: &Path) -> anyhow::Result<WalkForward> {
         Ok(WalkForward::new(self.stored(catalog, models)?))
     }
@@ -144,7 +144,7 @@ impl ModelBlueprint {
     ///
     /// # Errors
     ///
-    /// Returns an error as `model_set` does.
+    /// Returns an error if `model_set` would.
     pub(super) fn stored(&self, catalog: &Path, models: &Path) -> anyhow::Result<Stored<'_>> {
         let fingerprint = self.fingerprint()?;
         Ok(Stored {
@@ -177,6 +177,7 @@ impl ModelBlueprint {
 mod tests {
     use jiff::SignedDuration;
     use nautilus_model::identifiers::InstrumentId;
+    use rstest::rstest;
 
     use super::*;
     use crate::model::{
@@ -197,7 +198,7 @@ mod tests {
     /// A cadence not positive is refused as the blueprint is built, with
     /// the decision rule's error, before the target's ATR, which has no
     /// bars of that cadence.
-    #[test]
+    #[rstest]
     fn a_decision_cadence_not_positive_is_refused() {
         let config = ModelConfig {
             decision: DecisionRule::Every(SignedDuration::ZERO),
@@ -215,7 +216,7 @@ mod tests {
     /// The target is checked against what the strategy reads: an ATR of an
     /// instrument whose prices it does not read is refused as the
     /// blueprint is built, under the ATR's field.
-    #[test]
+    #[rstest]
     fn a_target_whose_atr_has_no_bars_to_be_built_from_is_refused() {
         let mut config = config();
         config.target.instrument_id = InstrumentId::from("EUR/USD.SIM");
@@ -232,7 +233,7 @@ mod tests {
     /// The dataset and the model set of a model stored carry one
     /// fingerprint: a model published under the dataset's, as a train
     /// publishes it, is the one the model set swaps in.
-    #[test]
+    #[rstest]
     fn the_dataset_and_the_model_set_of_a_model_stored_carry_one_fingerprint() {
         let dir = tempfile::tempdir().unwrap();
         let blueprint = blueprint(config()).unwrap();

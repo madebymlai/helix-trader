@@ -48,10 +48,12 @@ impl Predictor for Saved {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use crate::model::learner::{LearnerConfig, TrainingSet};
 
     /// (2.5 - 1.0 + 3.5 + 2.0) / 4 = 1.75.
-    #[test]
+    #[rstest]
     fn predicts_the_mean_of_the_labels_whatever_the_row() {
         let set = TrainingSet::new(
             2,

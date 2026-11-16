@@ -3,18 +3,12 @@ repository = "https://github.com/nautechsystems/nautilus_engineering"
 revision = "6c0e1ec051fddde11979a864c0d05aa6e1697af1"
 manifest_sha256 = "e4b3be265c62ccd21a5655dc5b68e98e9e69549acc767310c0d9d9d59f813961"
 marker_file = ".nautilus-engineering.syncing"
-profiles = ["pre-commit", "secrets", "spelling"]
+profiles = ["pre-commit", "secrets"]
 
 [[file]]
 artifact = "markdownlint-config"
 path = ".markdownlint.jsonc"
 sha256 = "cd378aae2eb91d098732b00df44c565b7f61460b562ce47af1ab2e155d2a78c6"
-executable = false
-
-[[file]]
-artifact = "pre-commit-codespell"
-path = ".nautilus-engineering/pre-commit/codespell.yaml"
-sha256 = "47af37eee741467b64de0098d6a541a3fa56f9e6897866ef629c4d958ff978e4"
 executable = false
 
 [[file]]
@@ -82,6 +76,18 @@ artifact = "rustfmt-config"
 path = "rustfmt.toml"
 sha256 = "a8d6b13a334b7ed058811f355e4d6601dfe5f0f32280c0a055a5c36f5a7b1076"
 executable = false
+
+[[file]]
+artifact = "cargo-cooldown-check"
+path = "scripts/check-cargo-cooldown.sh"
+sha256 = "c720cf227000413a9f2cdbba26ea869b225065fec461cdd2b77d4f265e74ca8d"
+executable = true
+
+[[file]]
+artifact = "github-action-pin-check"
+path = "scripts/check-github-actions.sh"
+sha256 = "1bb731e945822869fcb3d9a835e56e067cf6f5a241ebfe3d7cd262d59367e676"
+executable = true
 
 [[file]]
 artifact = "markdown-table-check"

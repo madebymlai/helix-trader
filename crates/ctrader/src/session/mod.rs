@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context, ensure};
+use anyhow::Context;
 use jiff::Timestamp;
 use nautilus_core::time::get_atomic_clock_realtime;
 use nautilus_live::SocketControl;
@@ -212,7 +212,7 @@ impl CTraderSession {
             if page.has_more {
                 // The halves overlap by a millisecond: whether cTrader's
                 // bounds are inclusive or not, no deal falls between them.
-                ensure!(
+                anyhow::ensure!(
                     to - from > 2,
                     "{} holds more deals over [{from}, {to}] ms than one answer carries",
                     self.venue
@@ -264,7 +264,7 @@ impl CTraderSession {
                 });
             }
         };
-        ensure!(
+        anyhow::ensure!(
             !page.has_more,
             "{} holds more deals of position {position_id} by {to_ms} ms than one answer carries",
             self.venue
@@ -300,8 +300,8 @@ impl CTraderSession {
     ///
     /// # Errors
     ///
-    /// Returns cTrader's error for an order it does not hold
-    /// (`ORDER_NOT_FOUND`), or an error if the request fails.
+    /// Returns an error if cTrader does not hold the order, cTrader's
+    /// `ORDER_NOT_FOUND`, or if the request fails.
     pub(crate) async fn order_details(
         &self,
         order_id: i64,
@@ -349,8 +349,9 @@ impl CTraderSession {
                         self.venue
                     )
                 })?;
+
             if page.has_more {
-                ensure!(
+                anyhow::ensure!(
                     to - from > 2,
                     "{} holds more orders over [{from}, {to}] ms than one answer carries",
                     self.venue
@@ -620,7 +621,8 @@ impl CTraderSession {
     ///
     /// # Errors
     ///
-    /// As `connect`, and as `instruments` for `instrument_ids`.
+    /// Returns an error if `connect` fails, or if `instruments` fails for
+    /// `instrument_ids`.
     #[cfg(feature = "test-support")]
     pub async fn connect_with_spots(
         connection: &CTraderConnection,
@@ -1006,7 +1008,7 @@ mod tests {
             stamped.push((spot.symbol_id, spot.timestamp));
         }
         stamped.sort_unstable();
-        // The symbol ids and times of `testdata/spot_event_*_first.txtpb`.
+        // The symbol ids and times of `test_data/spot_event_*_first.txtpb`.
         assert_eq!(
             stamped,
             [(1, Some(1_793_017_476_361)), (41, Some(1_793_017_475_790))]
@@ -1055,7 +1057,7 @@ mod tests {
 
     /// What Nautilus' risk engine makes of a market buy of 1 oz of gold,
     /// `xau` here, on a margin account of 1,000 EUR, at the demo's first
-    /// captured spots (`testdata/spot_event_*_first`): XAUUSD 4017.96 /
+    /// captured spots (`test_data/spot_event_*_first`): XAUUSD 4017.96 /
     /// 4018.01, EURUSD 1.11964 / 1.11965 (the account is in EUR, gold in
     /// USD). The order's value, about 3,590 EUR, is above the balance; the
     /// broker's margin at 1:30, about 120 EUR, is below it. The order events

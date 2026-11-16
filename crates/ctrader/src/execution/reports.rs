@@ -27,7 +27,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context, bail, ensure};
+use anyhow::Context;
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     enums::{
@@ -248,7 +248,7 @@ impl Reports<'_> {
     ///
     /// # Errors
     ///
-    /// As `protection_status` and `fill`.
+    /// Returns an error if `protection_status` or `fill` fails.
     pub(super) fn protection_fill(
         &self,
         order: &ProtoOaOrder,
@@ -277,7 +277,7 @@ impl Reports<'_> {
     ///
     /// # Errors
     ///
-    /// As `protection_status` and `fill`.
+    /// Returns an error if `protection_status` or `fill` fails.
     pub(super) fn protection_closed(
         &self,
         order: &ProtoOaOrder,
@@ -379,7 +379,7 @@ impl Reports<'_> {
             ProtoOaOrderType::Market | ProtoOaOrderType::MarketRange => OrderType::Market,
             ProtoOaOrderType::Limit => OrderType::Limit,
             ProtoOaOrderType::Stop => OrderType::StopMarket,
-            other => bail!(
+            other => anyhow::bail!(
                 "{}: cTrader {} orders are not mapped",
                 what(),
                 other.as_str_name()
@@ -612,7 +612,7 @@ pub(super) fn trigger_type(method: ProtoOaOrderTriggerMethod) -> TriggerType {
 
 /// The decimal a double was written from: its shortest round-trip form.
 pub(super) fn decimal(value: f64) -> anyhow::Result<Decimal> {
-    ensure!(value.is_finite(), "price {value} is not finite");
+    anyhow::ensure!(value.is_finite(), "price {value} is not finite");
     value
         .to_string()
         .parse()
@@ -623,7 +623,7 @@ pub(super) fn decimal(value: f64) -> anyhow::Result<Decimal> {
 pub(super) fn price(instrument: &InstrumentAny, value: f64) -> anyhow::Result<Price> {
     let precision = instrument.price_precision();
     let value = decimal(value)?.normalize();
-    ensure!(
+    anyhow::ensure!(
         value.scale() <= u32::from(precision),
         "price {value} is finer than {}'s {precision} decimals",
         instrument.id()
@@ -633,10 +633,10 @@ pub(super) fn price(instrument: &InstrumentAny, value: f64) -> anyhow::Result<Pr
 
 /// A volume, in cents of a unit, as a quantity of `instrument`.
 pub(super) fn quantity(instrument: &InstrumentAny, cents: i64) -> anyhow::Result<Quantity> {
-    ensure!(cents > 0, "volume {cents} is not positive");
+    anyhow::ensure!(cents > 0, "volume {cents} is not positive");
     let precision = instrument.size_precision();
     let units = Decimal::new(cents, 2).normalize();
-    ensure!(
+    anyhow::ensure!(
         units.scale() <= u32::from(precision),
         "volume of {units} units is finer than {}'s {precision} decimals",
         instrument.id()

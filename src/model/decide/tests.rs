@@ -19,6 +19,7 @@ use nautilus_trading::{
     nautilus_strategy,
     strategy::{StrategyConfig, StrategyCore},
 };
+use rstest::rstest;
 
 use super::*;
 use crate::strategy::{Declared, EmaArgs, IndicatorsConfig};
@@ -137,14 +138,14 @@ fn published() -> Rc<RefCell<Vec<FeatureRow>>> {
     rows
 }
 
-#[test]
+#[rstest]
 fn a_cadence_must_be_positive() {
     assert!(every(0).validate().is_err());
     assert!(every(-15).validate().is_err());
     assert!(every(15).validate().is_ok());
 }
 
-#[test]
+#[rstest]
 fn a_cadence_decides_just_after_the_grid_of_its_interval() {
     let (probe, clock) = registered(NOW);
 
@@ -158,7 +159,7 @@ fn a_cadence_decides_just_after_the_grid_of_its_interval() {
 
 /// Started on a grid time, before its decision: that decision is still
 /// to come.
-#[test]
+#[rstest]
 fn a_cadence_started_on_the_grid_keeps_its_decision() {
     let (probe, clock) = registered(QUARTER);
 
@@ -170,7 +171,7 @@ fn a_cadence_started_on_the_grid_keeps_its_decision() {
     );
 }
 
-#[test]
+#[rstest]
 fn a_delayed_cadence_decides_its_delay_after_the_grid() {
     let (probe, clock) = registered(NOW);
 
@@ -184,7 +185,7 @@ fn a_delayed_cadence_decides_its_delay_after_the_grid() {
 
 /// What is made up to a decision's firing, its grid time plus the margin,
 /// is that decision's to read first; what comes after, the next one's.
-#[test]
+#[rstest]
 fn data_is_read_first_by_the_first_decision_firing_at_or_after_it() {
     let quarter = UnixNanos::from(QUARTER);
     let of = |ns: u64| decision_of(every(15), SignedDuration::ZERO, UnixNanos::from(ns));
@@ -200,7 +201,7 @@ fn data_is_read_first_by_the_first_decision_firing_at_or_after_it() {
 
 /// A delayed cadence's decision fires its delay later: it reads first what
 /// is made until then.
-#[test]
+#[rstest]
 fn data_inside_a_delay_is_read_first_by_the_delayed_decision() {
     let of = |ns: u64| decision_of(every(15), SignedDuration::from_secs(5), UnixNanos::from(ns));
 
@@ -213,7 +214,7 @@ fn data_inside_a_delay_is_read_first_by_the_delayed_decision() {
 
 /// The grid starts at the epoch: what is made up to the firing of its
 /// decision there is that decision's to read first.
-#[test]
+#[rstest]
 fn data_up_to_the_firing_of_the_epochs_decision_is_read_by_it() {
     let of = |ns: u64| decision_of(every(15), SignedDuration::ZERO, UnixNanos::from(ns));
 
@@ -224,7 +225,7 @@ fn data_up_to_the_firing_of_the_epochs_decision_is_read_by_it() {
 
 /// A cadence of 4 ms, shorter than its margin: what is made less than an
 /// interval before the epoch's decision fires is that decision's.
-#[test]
+#[rstest]
 fn data_within_an_interval_before_the_epochs_decision_fires_is_read_by_it() {
     let every_4_ms = DecisionRule::Every(SignedDuration::from_millis(4));
 
@@ -237,7 +238,7 @@ fn data_within_an_interval_before_the_epochs_decision_fires_is_read_by_it() {
 /// A cadence of 4 ms: what is made 6 ms after the epoch, a whole interval
 /// before the epoch's decision fires, would be read first by a decision
 /// before the epoch.
-#[test]
+#[rstest]
 #[should_panic(expected = "a decision after the epoch")]
 fn data_read_first_by_a_decision_before_the_epoch_is_refused() {
     let every_4_ms = DecisionRule::Every(SignedDuration::from_millis(4));
@@ -247,7 +248,7 @@ fn data_read_first_by_a_decision_before_the_epoch_is_refused() {
 
 /// Started between a grid time and its delayed decision: that decision
 /// is still to come.
-#[test]
+#[rstest]
 fn a_delayed_cadence_started_inside_its_delay_keeps_the_next_decision() {
     let (probe, clock) = registered(QUARTER + 2 * SECOND);
 
@@ -261,7 +262,7 @@ fn a_delayed_cadence_started_inside_its_delay_keeps_the_next_decision() {
 
 /// Nautilus fires the timer at its start plus whole intervals: the
 /// decisions after the first stay on the grid.
-#[test]
+#[rstest]
 fn the_cadence_keeps_the_grid_after_its_first_decision() {
     let (probe, clock) = registered(NOW);
     start(&probe, every(15), SignedDuration::ZERO).unwrap();
@@ -278,7 +279,7 @@ fn the_cadence_keeps_the_grid_after_its_first_decision() {
     assert!(events.iter().all(is_decision));
 }
 
-#[test]
+#[rstest]
 fn another_timer_is_no_decision() {
     let event = TimeEvent::new(
         "EMA-HOLD:O-1".into(),
@@ -290,7 +291,7 @@ fn another_timer_is_no_decision() {
     assert!(!is_decision(&event));
 }
 
-#[test]
+#[rstest]
 fn cold_features_give_no_decision_and_publish_nothing() {
     let (probe, _clock) = registered(NOW);
     let rows = published();
@@ -301,7 +302,7 @@ fn cold_features_give_no_decision_and_publish_nothing() {
     assert!(rows.borrow().is_empty());
 }
 
-#[test]
+#[rstest]
 fn a_decision_publishes_the_features_keyed_by_the_strategy() {
     let (probe, _clock) = registered(NOW);
     let rows = published();
@@ -330,7 +331,7 @@ fn warm_until(ns: u64) -> Rc<FeatureSet> {
 
 /// A market closed for the last 16 minutes: its last quote is older
 /// than the decision 15 minutes ago.
-#[test]
+#[rstest]
 fn a_cadence_without_data_since_its_previous_decision_skips_and_publishes_nothing() {
     let (probe, _clock) = registered(NOW);
     let rows = published();
@@ -342,7 +343,7 @@ fn a_cadence_without_data_since_its_previous_decision_skips_and_publishes_nothin
 
 /// The decision 15 minutes ago saw the data up to it: a quote made then
 /// is stale, one a nanosecond later fresh.
-#[test]
+#[rstest]
 fn data_since_the_previous_decision_is_fresh_and_data_up_to_it_stale() {
     let (probe, _clock) = registered(NOW);
     let previous = NOW - 15 * 60 * SECOND;
@@ -356,7 +357,7 @@ fn data_since_the_previous_decision_is_fresh_and_data_up_to_it_stale() {
 
 /// The decision an interval after the epoch has the epoch's before it: a
 /// quote made at the epoch is stale, one a nanosecond later fresh.
-#[test]
+#[rstest]
 fn the_decision_an_interval_after_the_epoch_judges_its_data_from_the_epoch() {
     let (probe, _clock) = registered(900 * SECOND);
     let warm_at = |ns: u64| {
@@ -372,7 +373,7 @@ fn the_decision_an_interval_after_the_epoch_judges_its_data_from_the_epoch() {
 
 /// A decision less than an interval after the epoch has no previous
 /// decision to judge its data from.
-#[test]
+#[rstest]
 #[should_panic(expected = "a decision an interval after the epoch")]
 fn a_decision_within_an_interval_of_the_epoch_is_refused() {
     let (probe, _clock) = registered(600 * SECOND);
@@ -382,7 +383,7 @@ fn a_decision_within_an_interval_of_the_epoch_is_refused() {
 
 /// The traded instrument's market is closed, another's open: the
 /// decision would trade on stale prices.
-#[test]
+#[rstest]
 fn data_of_another_instrument_makes_no_decision_fresh() {
     let (probe, _clock) = registered(NOW);
     let tables = tables();
@@ -405,7 +406,7 @@ fn data_of_another_instrument_makes_no_decision_fresh() {
 /// No feature reads AUD/USD, which the strategy reads as trades alone:
 /// its last trade in the cache, made a second ago, makes the decision
 /// fresh.
-#[test]
+#[rstest]
 fn a_trade_of_the_traded_instrument_in_the_cache_makes_the_decision_fresh() {
     let (probe, _clock) = registered(NOW);
     let features = FeatureSet::builder()
@@ -434,7 +435,7 @@ fn a_trade_of_the_traded_instrument_in_the_cache_makes_the_decision_fresh() {
     assert!(decide(&probe, &features, every(15), aud()).is_some());
 }
 
-#[test]
+#[rstest]
 fn the_fingerprint_changes_with_the_rule() {
     let features = features();
 
@@ -454,7 +455,7 @@ fn the_fingerprint_changes_with_the_rule() {
 
 /// A cadence decides its build delay after the grid (`start`): another
 /// delay, 5 s for composite bars or none, is another fingerprint.
-#[test]
+#[rstest]
 fn the_fingerprint_changes_with_the_build_delay() {
     let features = features();
     let delayed = |secs| fingerprint(&features, every(15), SignedDuration::from_secs(secs));
@@ -466,7 +467,7 @@ fn the_fingerprint_changes_with_the_build_delay() {
 /// Without a build delay the rule's part is as it was before the delay
 /// was keyed, so the datasets and stores of strategies reading no
 /// composite bars keep their fingerprints.
-#[test]
+#[rstest]
 fn a_fingerprint_without_a_build_delay_keeps_the_rules_part_as_it_was() {
     let features = features();
 

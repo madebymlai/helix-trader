@@ -33,6 +33,7 @@ use helix_trader::{
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_model::types::{Currency, Money};
+use rstest::rstest;
 use tempfile::TempDir;
 
 use crate::common::{
@@ -163,7 +164,7 @@ fn publish(catalog: &TempDir, models: &Path, at: Timestamp) {
 /// With a model published straight, valid from t, the decisions at 22:00
 /// and 23:00 have no model; those of 00:00, 01:00 and 02:00 each a long
 /// and its close.
-#[test]
+#[rstest]
 fn the_train_subcommand_refuses_a_model_without_an_edge_and_one_published_trades_from_its_valid_from()
  {
     let catalog = walk(
@@ -186,7 +187,7 @@ fn the_train_subcommand_refuses_a_model_without_an_edge_and_one_published_trades
 /// features on its own 1-minute bars: at the decision of 00:00 it has none,
 /// and decides first at 01:00, its slow average of 30 bars initialized at
 /// 00:30. The decisions of 01:00 and 02:00 each a long and its close.
-#[test]
+#[rstest]
 fn a_backtest_from_the_valid_from_first_decides_once_its_features_are_initialized() {
     let catalog = walk(
         ic::at("00:00:00") - SignedDuration::from_hours(3),
@@ -226,7 +227,7 @@ fn traded_from(catalog: &TempDir, models: PathBuf, start: Timestamp) -> (usize, 
     (outcome.result.total_orders, outcome.result.total_positions)
 }
 
-#[test]
+#[rstest]
 fn a_live_retrain_through_the_train_subcommand_keeping_the_model_is_kept_with_its_figures() {
     let catalog = walk(
         ic::at("00:00:00") - SignedDuration::from_hours(3),
@@ -308,7 +309,7 @@ fn backtest_at(
 /// keeps the current model, there being none, and the backtest goes on,
 /// each reason printed with its figures, to a run with no model: no
 /// period is scored, by a model or by a baseline, which is a model's.
-#[test]
+#[rstest]
 fn a_retrain_keeping_the_model_does_not_fail_the_binarys_backtest() {
     let catalog = walk(
         ic::at("00:00:00") - SignedDuration::from_hours(3),
@@ -348,7 +349,7 @@ fn a_retrain_keeping_the_model_does_not_fail_the_binarys_backtest() {
 /// simulated account's alone: its models are the config's
 /// (`[model] dataset`), whose costs it reports, followed by the scores of
 /// both periods, each of its model.
-#[test]
+#[rstest]
 fn the_binarys_backtest_on_a_store_holding_each_retrains_model_builds_and_trains_nothing() {
     let catalog = walk(
         ic::at("00:00:00") - SignedDuration::from_hours(3),
@@ -450,7 +451,7 @@ fn eur_config() -> String {
 /// account is in USD, refuses it before building any day of the dataset,
 /// and `train` before replaying any, no node started, naming the dataset
 /// balance and both currencies.
-#[test]
+#[rstest]
 fn a_dataset_balance_in_another_currency_than_the_pnl_is_refused_before_any_build() {
     let catalog = walk(ic::at("00:00:00"), ic::at("06:00:00"));
     let dir = tempfile::tempdir().unwrap();
@@ -476,7 +477,7 @@ fn a_dataset_balance_in_another_currency_than_the_pnl_is_refused_before_any_buil
 /// P&L is in USD: the decisions' payoff features would be sized on it
 /// unconverted, so the start refuses it before any node is built, its
 /// staging untouched, naming the dataset balance and both currencies.
-#[test]
+#[rstest]
 fn a_live_dataset_balance_in_another_currency_than_the_pnl_is_refused_before_any_node() {
     let catalog = walk(ic::at("00:00:00"), ic::at("06:00:00"));
     let dir = tempfile::tempdir().unwrap();
@@ -530,7 +531,7 @@ fn walk_with_eurusd(from: Timestamp, to: Timestamp) -> TempDir {
 /// `backtest` and `train` each refuse it before any node, by the check of
 /// a backtest's balance, through the pair as the catalog defines it,
 /// naming the dataset balance, both currencies and the pair.
-#[test]
+#[rstest]
 fn a_dataset_balance_its_conversions_do_not_reach_the_pnl_from_is_refused_before_any_node() {
     let catalog = walk_with_eurusd(ic::at("00:00:00"), ic::at("06:00:00"));
     let dir = tempfile::tempdir().unwrap();
@@ -564,7 +565,7 @@ fn a_dataset_balance_its_conversions_do_not_reach_the_pnl_from_is_refused_before
 /// it, builds the dataset at the balance converted at each row's rate and
 /// refuses the fake learner on its holdout's figures, as it does a dataset
 /// balance in USD.
-#[test]
+#[rstest]
 fn the_train_subcommand_accepts_a_dataset_balance_its_conversions_reach_the_pnl_from() {
     let catalog = walk_with_eurusd(
         ic::at("00:00:00") - SignedDuration::from_hours(3),
@@ -606,7 +607,7 @@ fn usd_args(subcommand: &str, dir: &Path) -> Vec<String> {
 
 /// A catalog directory that does not exist: `live`, `backtest` and
 /// `train` each refuse it with an error naming it, none panicking.
-#[test]
+#[rstest]
 fn a_missing_catalog_is_refused_with_an_error_not_a_panic() {
     let dir = tempfile::tempdir().unwrap();
     let (config, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
@@ -630,7 +631,7 @@ fn a_missing_catalog_is_refused_with_an_error_not_a_panic() {
 /// it trades: its models and retrains are built from the catalog, so the
 /// start refuses it before any node is built, naming `--catalog` and the
 /// instrument, not the dataset balance, which is in its P&L currency.
-#[test]
+#[rstest]
 fn a_live_model_strategy_on_a_catalog_without_its_traded_instrument_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let (config, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));

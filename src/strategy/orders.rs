@@ -15,10 +15,7 @@
 //! entry, a take-profit limit and a stop-market, one-updates-the-other,
 //! the legs reduce-only and the take profit post-only where the
 //! instrument's live broker takes such orders, in a backtest as live:
-//! `venues::takes_reduce_only_and_post_only`, the legs tagged besides
-//! Nautilus' tags with the venue's tag linking them at its broker, named
-//! after the entry: `venues::bracket_exits_tag`, IB's OCA group), without
-//! one a market entry.
+//! `venues::takes_reduce_only_and_post_only`), without one a market entry.
 //! A time limit sets a time alert named after the entry, `TIME_ALERT` and
 //! its client order id, the time limit after the send, and tags the entry
 //! with it (`TIME_LIMIT_TAG`), where the cache, persisted live, keeps it.
@@ -55,11 +52,12 @@
 //! Nautilus' GTD expiry on the bracket's legs does not fit: an expired leg
 //! leaves the position open, IC sends no leg's time in force (its legs
 //! become the position's stop loss and take profit), and OKX takes GTC
-//! orders alone in an order list.
+//! orders alone in an order list. OKX denies a bracket whole, its stop
+//! loss a stop order in an order list, until nautilus_trader#5668 is fixed.
 
 use std::{cmp::Ordering, collections::BTreeSet, str::FromStr};
 
-use anyhow::{Context, bail, ensure};
+use anyhow::Context;
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::{DataActor, DataActorNative},
@@ -96,14 +94,6 @@ const TIME_CLOSE_TAG: &str = "TIME_CLOSE";
 
 /// The tag of a bracket's entry, Nautilus' default (`OrderFactory::bracket`).
 const ENTRY_TAG: &str = "ENTRY";
-
-/// The tag of a bracket's take profit, Nautilus' default, which the venue's
-/// tag of its exits joins (`venues::bracket_exits_tag`).
-const TAKE_PROFIT_TAG: &str = "TAKE_PROFIT";
-
-/// The tag of a bracket's stop loss, Nautilus' default, which the venue's
-/// tag of its exits joins (`venues::bracket_exits_tag`).
-const STOP_LOSS_TAG: &str = "STOP_LOSS";
 
 /// The prefix of the tag of an entry sent at a stake with its R in money,
 /// what its quantity is worth over one R in the instrument's P&L
@@ -175,7 +165,7 @@ pub fn nearest_tick(
         instrument.next_bid_price(value, 0),
         instrument.next_ask_price(value, 0),
     ) else {
-        bail!("the exit {price} is outside the prices of {id}");
+        anyhow::bail!("the exit {price} is outside the prices of {id}");
     };
     let (down, up) = (price - below.as_decimal(), above.as_decimal() - price);
     Ok(match down.cmp(&up) {
@@ -293,7 +283,10 @@ impl Trade {
     ///
     /// # Errors
     ///
-    /// As `send`.
+    /// Returns an error if the instrument is not in the cache or is
+    /// inverse (as `refuse_inverse` refuses it), its stop is outside its
+    /// prices, Nautilus fails to size it, or Nautilus refuses an order or
+    /// the alert (see `send`).
     pub fn send_at<S>(
         &self,
         strategy: &mut S,
@@ -461,19 +454,7 @@ impl Trade {
                 take_profit,
                 stop_loss,
             }) => {
-                let venue = instrument_id.venue;
-                let takes = venues::takes_reduce_only_and_post_only(venue);
-                // The factory's entry id is drawn here, first, as the
-                // bracket would draw it, so that the venue's tag of the
-                // exits can name it.
-                let entry = ids.map_or_else(
-                    || strategy.order().generate_client_order_id(),
-                    |ids| ids.entry,
-                );
-                let linked = venues::bracket_exits_tag(venue, entry);
-                let exit_tags = |tag: &str| -> Vec<Ustr> {
-                    std::iter::once(Ustr::from(tag)).chain(linked).collect()
-                };
+                let takes = venues::takes_reduce_only_and_post_only(instrument_id.venue);
                 let orders = strategy
                     .order()
                     .bracket()
@@ -481,17 +462,18 @@ impl Trade {
                     .order_side(self.side)
                     .quantity(quantity)
                     .entry_tags(tagged(Some(Ustr::from(ENTRY_TAG))))
-                    .entry_client_order_id(entry)
+                    .maybe_entry_client_order_id(ids.map(|ids| ids.entry))
                     .maybe_tp_client_order_id(ids.map(|ids| ids.take_profit))
                     .maybe_sl_client_order_id(ids.map(|ids| ids.stop_loss))
                     .tp_price(take_profit)
                     .tp_post_only(takes)
                     .tp_reduce_only(takes)
-                    .tp_tags(exit_tags(TAKE_PROFIT_TAG))
                     .sl_trigger_price(stop_loss)
                     .sl_reduce_only(takes)
-                    .sl_tags(exit_tags(STOP_LOSS_TAG))
                     .call();
+                // Nautilus' bracket is the entry, then its legs.
+                let entry = orders[0].client_order_id();
+                // Denied whole on OKX until nautilus_trader#5668 is fixed.
                 strategy.submit_order_list(orders, None, None, None)?;
                 entry
             }
@@ -635,7 +617,7 @@ where
 ///
 /// Returns an error if it is inverse.
 pub(crate) fn ensure_linear(instrument: &InstrumentAny) -> anyhow::Result<()> {
-    ensure!(
+    anyhow::ensure!(
         !instrument.is_inverse(),
         "{} is inverse: a trade on it can neither be sized at a stake nor have its R in money, \
          a model target's unit, worked out, Nautilus' fixed-risk sizer reading its P&L as a \

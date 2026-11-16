@@ -1,6 +1,6 @@
 //! A mock Databento historical API for the tests: an HTTP server on
 //! 127.0.0.1 answering the two calls a definitions fill makes with what
-//! Databento answered of the call's dataset (`testdata/`), whatever else
+//! Databento answered of the call's dataset (`test_data/`), whatever else
 //! they ask, and recording each call it receives.
 //!
 //! - `metadata.get_dataset_range`: the range of `GLBX.MDP3`, captured on
@@ -27,6 +27,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use nautilus_network::http::Url;
+
 /// Databento's answers of each dataset: its range, and its definition of
 /// an instrument, GCZ6 of 2026, `GCZ26.GLBX`, of `GLBX.MDP3`, AAPL's 355
 /// call of 20 November 2026, `AAPL  261120C00355000.OPRA`, of
@@ -34,18 +36,18 @@ use std::{
 const DATASETS: [(&str, &[u8], &[u8]); 3] = [
     (
         "GLBX.MDP3",
-        include_bytes!("testdata/dataset_range_glbx.json"),
-        include_bytes!("testdata/definition_gcz6.dbn.zst"),
+        include_bytes!("test_data/dataset_range_glbx.json"),
+        include_bytes!("test_data/definition_gcz6.dbn.zst"),
     ),
     (
         "OPRA.PILLAR",
-        include_bytes!("testdata/dataset_range_opra.json"),
-        include_bytes!("testdata/definition_aapl_call.dbn.zst"),
+        include_bytes!("test_data/dataset_range_opra.json"),
+        include_bytes!("test_data/definition_aapl_call.dbn.zst"),
     ),
     (
         "XNAS.ITCH",
-        include_bytes!("testdata/dataset_range_xnas.json"),
-        include_bytes!("testdata/definition_nvda.dbn.zst"),
+        include_bytes!("test_data/dataset_range_xnas.json"),
+        include_bytes!("test_data/definition_nvda.dbn.zst"),
     ),
 ];
 
@@ -133,7 +135,7 @@ fn serve(stream: TcpStream, log: &Mutex<Vec<DatabentoCall>>) {
     let params = [query.as_bytes(), &body]
         .into_iter()
         .flat_map(|encoded| {
-            nautilus_network::http::Url::parse(&format!(
+            Url::parse(&format!(
                 "http://databento/?{}",
                 String::from_utf8_lossy(encoded)
             ))

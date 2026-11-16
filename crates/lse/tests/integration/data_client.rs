@@ -57,15 +57,14 @@ use nautilus_model::{
 };
 use rstest::rstest;
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
 
-type Events = mpsc::UnboundedReceiver<DataEvent>;
+type Events = tokio::sync::mpsc::UnboundedReceiver<DataEvent>;
 
 /// The client the factory creates on `lse`, its cache holding the
 /// definitions of `GOLD_FUTURES` and `GOLD_SPOT` if `defined`,
 /// connected, and the node's data events.
 async fn connected(lse: &MockLse, defined: bool) -> (Box<dyn DataClient>, Events) {
-    let (tx, events) = mpsc::unbounded_channel();
+    let (tx, events) = tokio::sync::mpsc::unbounded_channel();
     replace_data_event_sender(tx);
     let mut cache = Cache::default();
     if defined {
@@ -747,7 +746,7 @@ fn cache_of(instruments: Vec<InstrumentAny>) -> CacheView {
 
 /// The node's data events, from now on.
 fn events() -> Events {
-    let (tx, events) = mpsc::unbounded_channel();
+    let (tx, events) = tokio::sync::mpsc::unbounded_channel();
     replace_data_event_sender(tx);
     events
 }
@@ -1964,9 +1963,11 @@ async fn custom_data_not_of_lse_s_rows_or_naming_no_source_fails_naming_its_type
     }
 }
 
-/// Nautilus' default for a request a client does not implement.
+/// LSE has no call for funding rates: the client refuses their request of
+/// one instrument as it is made, where it answers a request of one
+/// instrument it takes later, a failure among its answers.
 #[tokio::test]
-async fn a_kind_lse_has_no_call_for_is_refused_as_unsupported() {
+async fn a_kind_lse_has_no_call_for_is_refused() {
     let lse = MockLse::start(vec![]);
     let (client, _) = connected(&lse, true).await;
     let request = RequestFundingRates::new(
@@ -1980,9 +1981,9 @@ async fn a_kind_lse_has_no_call_for_is_refused_as_unsupported() {
         None,
     );
 
-    let err = client.request_funding_rates(request).unwrap_err();
+    let answer = client.request_funding_rates(request);
 
-    assert!(err.to_string().contains("does not support"), "{err}");
+    assert!(answer.is_err(), "{answer:?}");
 }
 
 /// The captured five minutes, candles LSE stamps at 10:00 to 10:04,

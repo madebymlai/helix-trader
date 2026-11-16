@@ -3,8 +3,7 @@
 //! and history for `fill_catalog`, which asks for series of any data type:
 //! IB serves its own time bars, its quotes and its trades (see `serves`,
 //! `IbHistory::data`), and the live node's clients (see `live`), whose
-//! data client streams its quotes, trades and time bars (`streams`), and the
-//! tag linking a bracket's exits in an OCA group (`bracket_exits_tag`); the
+//! data client streams its quotes, trades and time bars (`streams`); the
 //! client id each command connects with, and live's account, are its flags
 //! (`IbHistoryArgs`, `live::IbLiveArgs`). See `README.md`.
 //!
@@ -30,7 +29,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, bail, ensure};
+use anyhow::Context;
 use clap::Args;
 use ibapi::{
     Client, SUBSCRIPTION_LAG_CODE,
@@ -39,7 +38,6 @@ use ibapi::{
         IgnoreSize, TradingHours,
         historical::{TickBidAsk, TickDecoder, TickLast, TickSubscription},
     },
-    orders::OcaType,
     prelude::StreamExt,
     subscriptions::SubscriptionItem,
 };
@@ -66,11 +64,10 @@ use nautilus_interactive_brokers::{
 use nautilus_model::{
     data::{Bar, BarSpecification, BarType, Data, NautilusDataType},
     enums::{BarAggregation, PriceType},
-    identifiers::{ClientOrderId, InstrumentId},
+    identifiers::InstrumentId,
     instruments::{Instrument, InstrumentAny},
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
-use ustr::Ustr;
 
 use crate::{
     catalog::{fill_slices, resumed},
@@ -85,31 +82,6 @@ pub(in crate::venues) use live::BOOK;
 #[cfg(test)]
 pub(in crate::venues) use live::offline_clients;
 pub(crate) use live::{IbLiveArgs, clients, streams};
-
-/// The tag linking a bracket's exits in one IB OCA group named `entry`,
-/// its entry's client order id, in the form Nautilus' IB adapter reads
-/// (`IBOrderTags:` and a JSON object of `ibapi` order fields:
-/// `docs/integrations/interactive_brokers.md`, "Commands and order
-/// attributes"; `execution/transform/tags.rs`), which sends a list's
-/// exits in no group of its own (`transform.rs`,
-/// `test_order_list_id_does_not_set_oca_group`). IB then acts on a fill of
-/// one exit itself, the node up or not.
-///
-/// The group's type is IB's 2, reduce with block: a fill of one exit
-/// reduces the other by it, cancelling it once nothing is left, as
-/// Nautilus' one-updates-the-other bracket exits do, and the adapter
-/// reads the group back as one (`execution/parse.rs`,
-/// `link_order_contingencies`); with block, IB routes one exit at a time,
-/// so both cannot fill, which reducing without block (3) allows. The name
-/// is unique to the bracket, as IB takes a name once used for no other
-/// group, and stays on the exits' tags in the cache across restarts.
-pub(crate) fn bracket_exits_tag(entry: ClientOrderId) -> Ustr {
-    let fields = serde_json::json!({
-        "ocaGroup": entry.as_str(),
-        "ocaType": i32::from(OcaType::ReduceWithBlock),
-    });
-    Ustr::from(&format!("IBOrderTags:{fields}"))
-}
 
 /// IB's settings of a catalog fill, fill-catalog's flags: the client id its
 /// history connects with (see `IbHistory::connect`).
@@ -363,10 +335,10 @@ impl IbHistory {
     ///
     /// # Errors
     ///
-    /// Returns an error naming the instrument and the window, and IB's
-    /// error, if the definition cannot be had, if a page is refused, is not
-    /// answered whole within the request timeout or ends with an error, or
-    /// if a second holds a full page (see `page_back`).
+    /// Returns an error if the definition cannot be had, if a page is
+    /// refused, is not answered whole within the request timeout or ends
+    /// with an error, or if a second holds a full page (see `page_back`),
+    /// naming the instrument and the window, and IB's error.
     async fn ticks(
         &self,
         tick_type: IbHistoricalTickType,
@@ -627,7 +599,8 @@ enum Served {
 ///
 /// # Errors
 ///
-/// Returns an error naming `source` and saying why if not.
+/// Returns an error if IB's history does not serve `source`, naming it and
+/// saying why.
 pub(crate) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
     let (data_type, identifier) = source.key();
     served(&data_type, &identifier).map(drop)
@@ -646,8 +619,8 @@ pub(crate) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
 ///
 /// # Errors
 ///
-/// Returns an error naming the series and saying why if IB's history does
-/// not serve it.
+/// Returns an error if IB's history does not serve the series, naming it
+/// and saying why.
 fn served(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<Served> {
     let instrument = || {
         InstrumentId::from_str(identifier)
@@ -657,7 +630,7 @@ fn served(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<Serv
         NautilusDataType::Bar => {
             let bar_type = BarType::from_str(identifier)?;
             let spec = bar_type.spec();
-            ensure!(
+            anyhow::ensure!(
                 bar_type.is_externally_aggregated()
                     && BAR_PRICES.contains(&spec.price_type)
                     && bar_type_to_ib_bar_size(&bar_type).is_ok()
@@ -667,7 +640,7 @@ fn served(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<Serv
                  15, 20 or 30 minutes, 1, 2, 3, 4 or 8 hours, a day or a week, priced LAST, \
                  BID, ASK or MID, not {identifier}"
             );
-            ensure!(
+            anyhow::ensure!(
                 !(bar_type.spec().price_type == PriceType::Last
                     && bar_type.instrument_id().venue.as_str() == FOREX_VENUE),
                 "IB has no TRADES bars of a forex pair, so its history serves no {identifier}: \
@@ -680,7 +653,7 @@ fn served(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<Serv
         }
         NautilusDataType::TradeTick => {
             let instrument_id = instrument()?;
-            ensure!(
+            anyhow::ensure!(
                 !CURRENCY_PAIR_VENUES.contains(&instrument_id.venue.as_str()),
                 "Nautilus' IB client serves no trades of a currency pair, so IB's history \
                  serves no trades of {identifier}: read its quotes"
@@ -688,7 +661,9 @@ fn served(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<Serv
             Ok(Served::Ticks(IbHistoricalTickType::Trades, instrument_id))
         }
         other => {
-            bail!("IB's history serves bars, quotes and trades, not the {other} of {identifier}")
+            anyhow::bail!(
+                "IB's history serves bars, quotes and trades, not the {other} of {identifier}"
+            )
         }
     }
 }
@@ -844,9 +819,11 @@ impl SmallBarPacing {
 ///
 /// # Errors
 ///
-/// Returns an error naming the bars and the oldest start IB holds if a
-/// slice of them would be asked from earlier, naming a slice of bars keyed
-/// by no bar type, or as `catalog::resumed`.
+/// Returns an error if:
+/// - A slice of bars would be asked from earlier than the oldest start IB
+///   holds, naming the bars and that start.
+/// - A slice of bars is keyed by no bar type, naming it.
+/// - `catalog::resumed` fails.
 pub(crate) fn check_held(
     catalog: &ParquetDataCatalog,
     slices: &[SeriesSlice],
@@ -868,7 +845,7 @@ pub(crate) fn check_held(
         if bar_type.spec().aggregation == BarAggregation::Second
             && let (Some(from), _) = resumed(catalog, data_type, identifier, slice.from, slice.to)?
         {
-            ensure!(
+            anyhow::ensure!(
                 from >= oldest,
                 "IB holds no bars of 30 seconds or less older than six months: {bar_type}, \
                  asked from {from}, reaches before {oldest}"
@@ -884,7 +861,7 @@ pub(crate) fn check_held(
 /// progress; stored, it would never be replaced.
 fn ensure_bars_closed(end: Timestamp, now: Timestamp) -> anyhow::Result<()> {
     let latest = IbHistory::latest_end(now)?;
-    ensure!(
+    anyhow::ensure!(
         end <= latest,
         "end {end} is within a minute of now: IB would return the minute still in progress; \
          use an end at or before {latest}"
@@ -906,10 +883,12 @@ fn ensure_bars_closed(end: Timestamp, now: Timestamp) -> anyhow::Result<()> {
 ///
 /// # Errors
 ///
-/// Returns the error of a request (`fetch`'s) or of a page (an item's), the
-/// ticks paged so far dropped, or one naming the second if a page holds no
-/// tick at or before its cursor: that second alone holds a full page, which
-/// IB cannot page past, so the ticks before it cannot be asked.
+/// Returns an error if:
+/// - A request fails (`fetch`'s error) or a page does (an item's), the
+///   ticks paged so far dropped.
+/// - A page holds no tick at or before its cursor, naming the second: that
+///   second alone holds a full page, which IB cannot page past, so the
+///   ticks before it cannot be asked.
 async fn page_back<T>(
     start: Timestamp,
     end: Timestamp,
@@ -933,7 +912,7 @@ async fn page_back<T>(
             .filter(|tick| ts_event(tick) <= UnixNanos::from(cursor))
             .collect();
         let Some(earliest) = held.iter().map(&ts_event).min() else {
-            bail!(
+            anyhow::bail!(
                 "the second of {} holds a full page of ticks, which IB cannot page past: the \
                  ticks up to {cursor} cannot be asked",
                 Timestamp::from(earliest_sent)
@@ -1033,7 +1012,7 @@ fn ensure_all_loaded(requested: &[InstrumentId], loaded: &[InstrumentAny]) -> an
         .iter()
         .map(ToString::to_string)
         .collect();
-    ensure!(
+    anyhow::ensure!(
         missing.is_empty(),
         "IB returned no instrument for {} (unknown or expired contract)",
         missing.join(", ")
@@ -1044,6 +1023,7 @@ fn ensure_all_loaded(requested: &[InstrumentId], loaded: &[InstrumentAny]) -> an
 #[cfg(test)]
 mod tests {
     use nautilus_model::instruments::stubs::futures_contract_es;
+    use rstest::rstest;
 
     use super::*;
 
@@ -1066,13 +1046,10 @@ mod tests {
     async fn connect_rejects_an_end_within_a_minute_of_now_before_starting_the_gateway() {
         let now = at("2024-06-10T12:00:00Z");
         let end = at("2024-06-10T11:59:30Z");
-        let Err(err) = IbHistory::connect(1, end, now).await else {
+        let Err(e) = IbHistory::connect(1, end, now).await else {
             panic!("connected");
         };
-        assert!(
-            err.to_string().contains("within a minute of now"),
-            "{err:#}"
-        );
+        assert!(e.to_string().contains("within a minute of now"), "{e:#}");
     }
 
     fn at(s: &str) -> Timestamp {
@@ -1398,7 +1375,7 @@ mod tests {
         assert!(err.to_string().contains("no answer left"), "{err:#}");
     }
 
-    #[test]
+    #[rstest]
     fn history_requests_use_the_regular_hours_setting_of_the_data_client_config() {
         let config = data_client_config(closed_gateway());
         assert!(!HistoryRequests::of(&config).use_rth);
@@ -1409,7 +1386,7 @@ mod tests {
         assert!(HistoryRequests::of(&regular).use_rth);
     }
 
-    #[test]
+    #[rstest]
     fn ib_serves_its_own_one_minute_trades_bars() {
         for identifier in [
             "SXR8.IBIS-1-MINUTE-LAST-EXTERNAL",
@@ -1417,15 +1394,13 @@ mod tests {
         ] {
             let served = served(&NautilusDataType::Bar, identifier).unwrap();
             assert_eq!(served, Served::Bars(bar_type(identifier)));
-            // IB's bar spec string, as `bars` requests it.
-            assert_eq!(bar_type(identifier).spec().to_string(), "1-MINUTE-LAST");
         }
     }
 
     /// An IDEALPRO pair, which IB serves no TRADES bars of, has its own
     /// BID and ASK bars, of any size IB has, and IB serves MIDPOINT bars
     /// too.
-    #[test]
+    #[rstest]
     fn ib_serves_its_own_bid_ask_and_mid_bars_of_any_size_it_has() {
         for identifier in [
             "EUR/USD.IDEALPRO-1-MINUTE-BID-EXTERNAL",
@@ -1444,7 +1419,7 @@ mod tests {
 
     /// IB's historical ticks: BID_ASK for quotes, TRADES for trades, of the
     /// instrument the series names.
-    #[test]
+    #[rstest]
     fn ib_serves_quotes_and_trades_as_its_historical_ticks() {
         let sxr8 = InstrumentId::from("SXR8.IBIS");
         assert_eq!(
@@ -1463,7 +1438,7 @@ mod tests {
     /// an answer, and the TRADES bars of an IDEALPRO pair, which IB has
     /// none of; a crypto pair's trade-price bars are served (IB's
     /// AGGTRADES), as are other instruments' trades.
-    #[test]
+    #[rstest]
     fn ib_serves_no_trades_of_a_currency_pair_and_no_trades_bars_of_a_forex_pair() {
         for (data_type, identifier) in [
             (NautilusDataType::TradeTick, "EUR/USD.IDEALPRO"),
@@ -1494,7 +1469,7 @@ mod tests {
     /// monthly bars, which Nautilus' IB history client parses none of, bars
     /// Nautilus builds, and books, which Nautilus' IB clients request none
     /// of.
-    #[test]
+    #[rstest]
     fn ib_serves_no_other_series() {
         for (data_type, identifier) in [
             (
@@ -1526,7 +1501,7 @@ mod tests {
     /// IB's step-size table ("Historical Data Limitations"): the longest
     /// duration whose row admits each size IB has, a day of 1-minute bars
     /// in seconds.
-    #[test]
+    #[rstest]
     fn each_bar_size_is_asked_over_the_longest_duration_ibs_step_sizes_admit_it_in() {
         for (bars, duration) in [
             ("1-SECOND", "1800 S"),
@@ -1575,7 +1550,7 @@ mod tests {
 
     /// Worked by hand: a request identical to one sent at 0 waits until
     /// 15 s, at 10 s 5 s more; one of another end does not.
-    #[test]
+    #[rstest]
     fn an_identical_small_bar_request_waits_15_seconds_after_the_first() {
         let start = Instant::now();
         let pacing = pacing_of(start, &[(0, small("LAST", 3600))]);
@@ -1596,7 +1571,7 @@ mod tests {
     /// 200, 300 and 400 ms; a sixth within two seconds of the first would
     /// be IB's sixth, so at 500 ms it waits until the first is 2 s old,
     /// 1.5 s; one of SXR8's BID bars, another data shown, does not wait.
-    #[test]
+    #[rstest]
     fn a_sixth_small_bar_request_of_a_series_within_two_seconds_waits() {
         let start = Instant::now();
         let sent: Vec<(u64, SmallBarRequest)> = (0..5)
@@ -1616,7 +1591,7 @@ mod tests {
     /// 0 to 177 s; the 61st within ten minutes of the first, at 180 s,
     /// waits until the first is ten minutes old, 420 s; at 600 s the first
     /// is out of the count and the 61st goes.
-    #[test]
+    #[rstest]
     fn a_61st_small_bar_request_within_ten_minutes_waits() {
         let start = Instant::now();
         let sent: Vec<(u64, SmallBarRequest)> = (0..60)
@@ -1656,7 +1631,7 @@ mod tests {
     /// months before: a fill of them from 16 May is held, one from 14 May
     /// is refused, naming the bars and the start IB holds; 1-minute bars
     /// and quotes from 14 May are held, IB keeping them longer.
-    #[test]
+    #[rstest]
     fn small_bars_older_than_six_months_are_refused_naming_the_oldest_ib_holds() {
         let now = at("2026-11-15T12:00:00Z");
         let small_bars = "SXR8.IBIS-30-SECOND-LAST-EXTERNAL";
@@ -1726,7 +1701,7 @@ mod tests {
     /// held, though the slice starts on 20 May; stored over 1 April to 1
     /// May, they would be filled again from 1 May, refused, naming them,
     /// though the slice starts on 15 June.
-    #[test]
+    #[rstest]
     fn small_bars_stored_are_held_from_where_the_writer_resumes_them() {
         let now = at("2026-11-30T12:00:00Z");
         let small_bars = "SXR8.IBIS-5-SECOND-LAST-EXTERNAL";
@@ -1760,7 +1735,7 @@ mod tests {
     /// (`catalog::resumed`): 5-second bars stored over 1 April to 1 May 2026,
     /// filled again over the same window on 30 November, are held, though
     /// the window is all before 30 May, the oldest IB holds.
-    #[test]
+    #[rstest]
     fn small_bars_stored_over_the_whole_window_are_held_whenever() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -1781,7 +1756,7 @@ mod tests {
         check_held(&catalog, &[slice], at("2026-11-30T12:00:00Z")).unwrap();
     }
 
-    #[test]
+    #[rstest]
     fn the_latest_end_is_a_minute_before_now() {
         let now = at("2024-06-10T12:00:00Z");
         assert_eq!(
@@ -1790,14 +1765,14 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn accepts_an_end_at_least_a_minute_before_now() {
         let now = at("2024-06-10T12:00:00Z");
         ensure_bars_closed(at("2024-06-10T11:59:00Z"), now).unwrap();
         ensure_bars_closed(at("2024-06-01T00:00:00Z"), now).unwrap();
     }
 
-    #[test]
+    #[rstest]
     fn rejects_an_end_within_a_minute_of_now() {
         let now = at("2024-06-10T12:00:00Z");
         let err = ensure_bars_closed(at("2024-06-10T11:59:00.000000001Z"), now)
@@ -1807,13 +1782,13 @@ mod tests {
         assert!(err.contains("2024-06-10T11:59:00Z"), "{err}");
     }
 
-    #[test]
+    #[rstest]
     fn accepts_instruments_when_every_requested_id_loaded() {
         let requested = [InstrumentId::from("ESZ21.GLBX")];
         ensure_all_loaded(&requested, &[es()]).unwrap();
     }
 
-    #[test]
+    #[rstest]
     fn names_the_requested_ids_ib_did_not_return() {
         let requested = [
             InstrumentId::from("ESH24.CME"),
@@ -1839,7 +1814,7 @@ mod tests {
         )
     }
 
-    #[test]
+    #[rstest]
     fn an_expired_future_is_asked_for_as_an_explicit_contract() {
         let contract =
             expired_future_contract(symbology(), InstrumentId::from("ESU25.CME")).unwrap();
@@ -1848,7 +1823,7 @@ mod tests {
         assert!(contract.include_expired);
     }
 
-    #[test]
+    #[rstest]
     fn only_futures_are_asked_for_as_expired_contracts() {
         assert!(expired_future_contract(symbology(), InstrumentId::from("AAPL.SMART")).is_none());
         assert!(

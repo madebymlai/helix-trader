@@ -692,14 +692,16 @@ impl Dispatch {
                 }
             }
             ProtoOaExecutionType::OrderCancelled | ProtoOaExecutionType::OrderExpired => {
-                let expired = event.execution_type() == ProtoOaExecutionType::OrderExpired;
-                out.push(self.closing(id, &tracked, Some(venue), expired, ts));
-                out.extend(self.cancel_legs(id, ts));
+                if let Some(failure) = failure::deal_rejected(event) {
+                    out.extend(self.fail(Tag::New(id), &[], failure, ts));
+                } else {
+                    let expired = event.execution_type() == ProtoOaExecutionType::OrderExpired;
+                    out.push(self.closing(id, &tracked, Some(venue), expired, ts));
+                    out.extend(self.cancel_legs(id, ts));
+                }
             }
             ProtoOaExecutionType::OrderRejected => {
-                let code = event.error_code.as_deref().unwrap_or("ORDER_REJECTED");
-                let failure = CommandFailure::venue_rejected(code);
-                out.extend(self.fail(Tag::New(id), &[], failure, ts));
+                out.extend(self.fail(Tag::New(id), &[], failure::rejected(event), ts));
             }
             ProtoOaExecutionType::OrderCancelRejected => {
                 let code = event
@@ -1227,16 +1229,18 @@ mod tests {
     use nautilus_model::{
         enums::{OrderSide, OrderType},
         identifiers::InstrumentId,
-        orders::OrderTestBuilder,
+        orders::{OrderTestBuilder, stubs::TestOrderEventStubs},
         types::{Money, Quantity},
     };
     use prost::Message as _;
+    use rstest::rstest;
 
     use super::*;
     use crate::{
         common::messages::ProtoOaOrderErrorEvent,
         testing::{
             self, EXECUTION_LIMIT_ACCEPTED, EXECUTION_LIMIT_CANCELLED, EXECUTION_MARKET_FILLED,
+            EXECUTION_MARKET_RANGE_ACCEPTED, EXECUTION_MARKET_RANGE_DEAL_REJECTED,
             EXECUTION_STOP_LOSS_FILLED, ORDER_ERROR_BAD_VOLUME,
         },
     };
@@ -1400,7 +1404,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn an_order_whose_request_may_still_wait_to_go_out_is_not_concluded_absent() {
         let mut dispatch = dispatch();
         dispatch.track(&order("O-1", OrderType::Market), Role::Order);
@@ -1413,7 +1417,7 @@ mod tests {
     // Each wire condition's class, by the events of a request it fails.
 
     /// The captured refusal: cTrader's code and description.
-    #[test]
+    #[rstest]
     fn an_order_error_rejects_the_order_with_ctraders_code_and_description() {
         let mut dispatch = dispatch();
         dispatch.track(&order("PROBE-3", OrderType::Market), Role::Order);
@@ -1433,7 +1437,7 @@ mod tests {
 
     /// An error answer is the same evidence as an order error: the same
     /// reason, with no envelope of the client's.
-    #[test]
+    #[rstest]
     fn an_error_answer_rejects_with_ctraders_code_and_description() {
         let mut dispatch = dispatch();
         dispatch.track(&order("PROBE-4", OrderType::Market), Role::Order);
@@ -1458,7 +1462,7 @@ mod tests {
 
     /// A rate limit does not say the order was not placed: it stays in
     /// flight, and its fill then applies.
-    #[test]
+    #[rstest]
     fn a_rate_limited_order_stays_in_flight_until_its_events_come() {
         let mut dispatch = dispatch();
         dispatch.track(&order("PROBE-1", OrderType::Market), Role::Order);
@@ -1479,18 +1483,14 @@ mod tests {
 
     /// A removal of a protection the broker may have made stays asked:
     /// the next amendment of the other protection carries it.
-    #[test]
+    #[rstest]
     fn a_removal_of_a_protection_with_an_unknown_outcome_stays_wanted() {
         let mut dispatch = dispatch();
         let mut stop_loss = order("O-SL", OrderType::StopMarket);
         let account = AccountId::from("ACMEFX-DEMO");
         for event in [
-            nautilus_model::orders::stubs::TestOrderEventStubs::submitted(&stop_loss, account),
-            nautilus_model::orders::stubs::TestOrderEventStubs::accepted(
-                &stop_loss,
-                account,
-                VenueOrderId::from("690004734-SL"),
-            ),
+            TestOrderEventStubs::submitted(&stop_loss, account),
+            TestOrderEventStubs::accepted(&stop_loss, account, VenueOrderId::from("690004734-SL")),
         ] {
             stop_loss.apply(event).unwrap();
         }
@@ -1511,7 +1511,7 @@ mod tests {
 
     /// cTrader's `ORDER_CANCEL_REJECTED`: the order stays working, and its
     /// cancellation then cancels it.
-    #[test]
+    #[rstest]
     fn a_cancel_rejected_by_execution_event_leaves_the_order_working() {
         let mut dispatch = dispatch();
         accepted_limit(&mut dispatch, "PROBE-2");
@@ -1528,9 +1528,94 @@ mod tests {
         assert_eq!(kinds(&out), [row("PROBE-2", "canceled")]);
     }
 
+    /// The captured refusal at execution: cTrader cancels the order with
+    /// its deal rejected, which rejects it with the deal's status and
+    /// `rejectReason`, and its bracket's legs with it.
+    #[rstest]
+    fn an_order_cancelled_with_its_deal_rejected_is_rejected_with_the_deals_reason() {
+        let mut dispatch = dispatch();
+        bracket(&mut dispatch, "PROBE-REJECT-1");
+        let tag = Tag::New(id("PROBE-REJECT-1"));
+        dispatch.sent(tag);
+        let out = dispatch.handle(
+            answering(tag, execution(EXECUTION_MARKET_RANGE_ACCEPTED)),
+            ts(),
+        );
+        assert_eq!(kinds(&out), [row("PROBE-REJECT-1", "accepted")]);
+
+        let out = dispatch.handle(
+            answering(tag, execution(EXECUTION_MARKET_RANGE_DEAL_REJECTED)),
+            ts(),
+        );
+
+        assert_eq!(
+            kinds(&out),
+            [
+                row("PROBE-REJECT-1", "rejected"),
+                row("PROBE-REJECT-1-SL", "rejected"),
+                row("PROBE-REJECT-1-TP", "rejected"),
+            ]
+        );
+        assert_eq!(
+            reason(&out[..1]),
+            "INTERNALLY_REJECTED: Market VWAP is worse than Limit price"
+        );
+    }
+
+    /// An order cancelled with its deal rejected after part of it filled
+    /// is cancelled: its fill stands.
+    #[rstest]
+    fn an_order_filled_in_part_and_cancelled_with_its_deal_rejected_is_cancelled() {
+        let mut dispatch = dispatch();
+        dispatch.track(&order("PROBE-REJECT-1", OrderType::Market), Role::Order);
+        let tag = Tag::New(id("PROBE-REJECT-1"));
+        dispatch.sent(tag);
+        dispatch.handle(
+            answering(tag, execution(EXECUTION_MARKET_RANGE_ACCEPTED)),
+            ts(),
+        );
+        let mut cancelled =
+            ProtoOaExecutionEvent::decode(EXECUTION_MARKET_RANGE_DEAL_REJECTED).unwrap();
+        cancelled.order.as_mut().unwrap().executed_volume = Some(50);
+
+        let out = dispatch.handle(answering(tag, TradeMessage::Execution(cancelled)), ts());
+
+        assert_eq!(kinds(&out), [row("PROBE-REJECT-1", "canceled")]);
+    }
+
+    /// `ORDER_REJECTED` rejects the order with its code, and its deal's
+    /// `rejectReason` when it carries one.
+    #[rstest]
+    fn an_order_rejected_by_execution_event_carries_its_deals_reject_reason() {
+        for (deal, expected) in [
+            (false, "NOT_ENOUGH_MONEY"),
+            (
+                true,
+                "NOT_ENOUGH_MONEY: Market VWAP is worse than Limit price",
+            ),
+        ] {
+            let mut dispatch = dispatch();
+            dispatch.track(&order("PROBE-REJECT-1", OrderType::Market), Role::Order);
+            let tag = Tag::New(id("PROBE-REJECT-1"));
+            dispatch.sent(tag);
+            let mut rejected =
+                ProtoOaExecutionEvent::decode(EXECUTION_MARKET_RANGE_DEAL_REJECTED).unwrap();
+            rejected.set_execution_type(ProtoOaExecutionType::OrderRejected);
+            rejected.error_code = Some("NOT_ENOUGH_MONEY".to_owned());
+            if !deal {
+                rejected.deal = None;
+            }
+
+            let out = dispatch.handle(answering(tag, TradeMessage::Execution(rejected)), ts());
+
+            assert_eq!(kinds(&out), [row("PROBE-REJECT-1", "rejected")]);
+            assert_eq!(reason(&out), expected);
+        }
+    }
+
     // Each class's events, by the request it fails.
 
-    #[test]
+    #[rstest]
     fn a_new_order_not_sent_is_rejected_with_its_brackets_legs() {
         let mut dispatch = dispatch();
         bracket(&mut dispatch, "PROBE-1");
@@ -1552,7 +1637,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_modify_not_sent_is_denied_by_its_command() {
         let mut dispatch = dispatch();
         accepted_limit(&mut dispatch, "PROBE-2");
@@ -1578,7 +1663,7 @@ mod tests {
 
     /// One amendment removes both protections of a position: neither
     /// cancel was sent.
-    #[test]
+    #[rstest]
     fn a_removal_of_protections_not_sent_denies_each_cancel_by_its_command() {
         let mut dispatch = dispatch();
         bracket(&mut dispatch, "PROBE-1");
@@ -1614,7 +1699,7 @@ mod tests {
 
     /// The broker refused the modification: the order stays working, and
     /// its cancellation then cancels it.
-    #[test]
+    #[rstest]
     fn a_modify_the_broker_rejects_is_rejected_and_the_order_stays_working() {
         let mut dispatch = dispatch();
         accepted_limit(&mut dispatch, "PROBE-2");
@@ -1638,7 +1723,7 @@ mod tests {
         assert_eq!(kinds(&out), [row("PROBE-2", "canceled")]);
     }
 
-    #[test]
+    #[rstest]
     fn a_cancel_the_broker_rejects_is_rejected_and_the_order_stays_working() {
         let mut dispatch = dispatch();
         accepted_limit(&mut dispatch, "PROBE-2");
@@ -1658,7 +1743,7 @@ mod tests {
 
     /// No definitive event, whatever the request: the trade events, a
     /// query or reconciliation resolve it.
-    #[test]
+    #[rstest]
     fn an_ambiguous_failure_emits_nothing_whatever_the_request() {
         let mut dispatch = dispatch();
         accepted_limit(&mut dispatch, "PROBE-2");
@@ -1687,7 +1772,7 @@ mod tests {
 
     // What became of a request's frame.
 
-    #[test]
+    #[rstest]
     fn a_new_order_the_session_never_sent_is_rejected() {
         let mut dispatch = dispatch();
         dispatch.track(&order("PROBE-1", OrderType::Market), Role::Order);
@@ -1706,7 +1791,7 @@ mod tests {
 
     /// Written, or maybe: its request waits no more, and a query finding
     /// the broker holds no such order concludes it absent.
-    #[test]
+    #[rstest]
     fn an_order_whose_request_was_written_or_maybe_waits_no_more() {
         for sending in [
             Ok(()),
@@ -1732,7 +1817,7 @@ mod tests {
     /// The first delivery emits nothing and touches nothing: neither the
     /// acceptance the fill proves nor the deal is spent, and the order is
     /// not closed; the repaired replay applies them once.
-    #[test]
+    #[rstest]
     fn a_fill_without_its_commission_is_left_and_its_repaired_replay_fills_once() {
         let mut dispatch = dispatch();
         dispatch.track(&order("PROBE-1", OrderType::Market), Role::Order);
@@ -1764,7 +1849,7 @@ mod tests {
 
     /// An order not tracked: no report until the deal states its
     /// commission.
-    #[test]
+    #[rstest]
     fn a_deal_of_an_order_not_tracked_without_its_commission_is_reported_once_repaired() {
         let mut dispatch = dispatch();
         let event = |message| TradeEvent {
@@ -1785,7 +1870,7 @@ mod tests {
 
     /// The captured stop loss hit of the bracket PROBE-5's position: no
     /// leg filled or accepted, until the deal states its commission.
-    #[test]
+    #[rstest]
     fn a_protection_hit_without_its_commission_fills_no_leg_until_repaired() {
         let mut dispatch = dispatch();
         bracket(&mut dispatch, "PROBE-5");

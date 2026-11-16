@@ -140,12 +140,12 @@ use std::{
     any::Any,
     cell::RefCell,
     collections::BTreeMap,
-    fmt::{self, Debug, Display, Write as _},
+    fmt::{Debug, Display, Write as _},
     rc::Rc,
     sync::Arc,
 };
 
-use anyhow::{Context, bail, ensure};
+use anyhow::Context;
 use jiff::SignedDuration;
 use nautilus_common::{
     actor::{
@@ -514,16 +514,17 @@ enum Leg {
 }
 
 impl TargetConfig {
+    // panics-doc-ok (transitive via AverageTrueRange::new)
     /// # Errors
     ///
-    /// Returns every violation, each Nautilus' `ConfigError` under its
-    /// field of `[model]` (`model.target…`), as one
-    /// `ConfigError::Multiple` if there are several: a distance or the
-    /// limit not positive, an `atr` table no distance uses,
-    /// a time-only target without an `atr` table or a bracket beside one, or
-    /// an ATR without bars at the cadence of `rule` built from what a strategy
-    /// of `requirements` reads (see `atr_bars`), each ATR's under its own
-    /// table's field (`Target::atr_field`).
+    /// Returns an error if the target violates a rule, with every
+    /// violation, each Nautilus' `ConfigError` under its field of `[model]`
+    /// (`model.target…`), as one `ConfigError::Multiple` if there are
+    /// several: a distance or the limit not positive, an `atr` table no
+    /// distance uses, a time-only target without an `atr` table or a
+    /// bracket beside one, or an ATR without bars at the cadence of `rule`
+    /// built from what a strategy of `requirements` reads (see `atr_bars`),
+    /// each ATR's under its own table's field (`Target::atr_field`).
     ///
     /// # Panics
     ///
@@ -631,7 +632,7 @@ impl TargetConfig {
             .find(|(_, unit)| nanos % unit == 0)
             .map(|(aggregation, unit)| (aggregation, nanos / unit))
         else {
-            bail!(
+            anyhow::bail!(
                 "the target's ATR has no bars of the decision cadence {cadence:#}, not whole \
                  milliseconds"
             );
@@ -657,14 +658,14 @@ impl TargetConfig {
                 .into_iter()
                 .filter(|source| source.instrument_id() == traded)
                 .collect();
-            ensure!(
+            anyhow::ensure!(
                 !sources.is_empty(),
                 "the target's ATR has no bars of {traded} to be built from: the strategy reads \
                  neither its quotes, its trades nor its bars"
             );
             let Some(source) = longest_dividing(&sources, cadence) else {
                 let sources: Vec<String> = sources.iter().map(ToString::to_string).collect();
-                bail!(
+                anyhow::bail!(
                     "the target's ATR has no bars of the decision cadence {cadence:#}: it is \
                      not a whole multiple of the bars of {traded} the strategy reads, {}",
                     sources.join(", ")
@@ -751,9 +752,9 @@ impl TargetConfig {
         requirements: &DataRequirements,
     ) -> anyhow::Result<BracketWidth> {
         let Some(bracket) = self.spec.bracket else {
-            bail!("the target has no bracket to have a width");
+            anyhow::bail!("the target has no bracket to have a width");
         };
-        ensure!(
+        anyhow::ensure!(
             bracket.take_profit == bracket.stop,
             "the target's take profit, {}, and stop, {}, are not one distance: its bracket has \
              no one width",
@@ -866,7 +867,7 @@ impl Distance {
 }
 
 impl Display for Distance {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::BasisPoints(bps) => write!(f, "{bps} bps"),
             Self::Atr(multiple) => write!(f, "{multiple} atr"),
@@ -874,6 +875,7 @@ impl Display for Distance {
     }
 }
 
+// panics-doc-ok (transitive via Distance::length)
 /// The take profit and stop of each side of `bracket`, from `reference` and,
 /// if a distance is in ATRs, the ATR's value `atr`, each on the nearest tick
 /// of `instrument`; none at all if an exit rounds onto `reference`, no
@@ -882,7 +884,8 @@ impl Display for Distance {
 ///
 /// # Errors
 ///
-/// Returns an error if an exit is outside the instrument's prices.
+/// Returns an error if `atr` is not finite, or an exit is outside the
+/// instrument's prices.
 ///
 /// # Panics
 ///
@@ -1043,8 +1046,8 @@ impl BracketWidth {
 }
 
 impl Debug for BracketWidth {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("BracketWidth")
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct(stringify!(BracketWidth))
             .field("distance", &self.distance)
             .field("atr", &self.atr.as_ref().map(|atr| atr.bars))
             .field("limit", &self.limit)
@@ -1099,9 +1102,10 @@ impl TargetSetter {
     ///
     /// # Errors
     ///
-    /// As `new`, or if `width`'s ATR is not the one the target runs: of
-    /// other arguments or bars, or none where the target has one or the
-    /// reverse.
+    /// Returns an error if the target's ATR has no bars (see
+    /// `TargetConfig::atr_bars`), or if `width`'s ATR is not the one the
+    /// target runs: of other arguments or bars, or none where the target
+    /// has one or the reverse.
     pub fn sharing(
         config: &TargetConfig,
         rule: DecisionRule,
@@ -1114,7 +1118,7 @@ impl TargetSetter {
             None => bars.map(TargetAtr::new).transpose()?.map(Rc::new),
             Some(width) => {
                 let shared = width.atr.as_ref().map(|atr| atr.bars);
-                ensure!(
+                anyhow::ensure!(
                     shared == bars,
                     "the width the features read has the ATR {shared:?}, the target {bars:?}"
                 );
@@ -1346,7 +1350,7 @@ impl TargetSetter {
             self.commission.currency(instrument),
             instrument.cost_currency(),
         );
-        ensure!(
+        anyhow::ensure!(
             charged == pnl,
             "the commission {} is charged in {charged}, not in {pnl}, the currency of the P&L \
              of {}: a target's costs are not converted",
@@ -1358,8 +1362,8 @@ impl TargetSetter {
 }
 
 impl Debug for TargetSetter {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TargetSetter")
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct(stringify!(TargetSetter))
             .field("spec", &self.spec)
             .finish_non_exhaustive()
     }
@@ -1467,7 +1471,7 @@ impl Targets {
     ///
     /// # Errors
     ///
-    /// Returns an error as `TargetSetter::new` does.
+    /// Returns an error if `TargetSetter::new` would.
     pub fn new(
         config: TargetConfig,
         rule: DecisionRule,
@@ -1482,7 +1486,8 @@ impl Targets {
     ///
     /// # Errors
     ///
-    /// As `new`, or if the setter refuses `width`.
+    /// Returns an error if `new` would, or if the setter refuses `width`
+    /// (`TargetSetter::sharing`).
     pub fn sharing(
         config: TargetConfig,
         rule: DecisionRule,
@@ -1564,9 +1569,10 @@ impl Targets {
     ///
     /// # Errors
     ///
-    /// Returns an error as the setter does, before any order; or if the
-    /// instrument is not in the cache or Nautilus refuses an order or an
-    /// alert, as the orders are sent, which unsettles the decision.
+    /// Returns an error if:
+    /// - The setter fails (`TargetSetter::at`), before any order.
+    /// - The instrument is not in the cache, or Nautilus refuses an order
+    ///   or an alert, as the orders are sent, which unsettles the decision.
     pub fn open<S>(&self, strategy: &mut S, row: FeatureRow) -> anyhow::Result<()>
     where
         S: Strategy + StrategyNative + DataActor + DataActorNative,
@@ -1815,9 +1821,9 @@ impl Targets {
 }
 
 impl Debug for Targets {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let state = self.state.borrow();
-        f.debug_struct("Targets")
+        f.debug_struct(stringify!(Targets))
             .field("config", &self.config)
             .field("next", &state.next)
             .field("open", &state.open.len())

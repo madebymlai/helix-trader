@@ -3,9 +3,11 @@
 //! quotes as it does from an absolute path. One node per thread, so one run
 //! per test.
 
+use rstest::rstest;
+
 use crate::common::{noise, ohlc, relative};
 
-#[test]
+#[rstest]
 fn a_catalog_given_relative_to_the_working_directory_is_replayed() {
     let start = noise::at("12:30");
     let catalog = noise::catalog();

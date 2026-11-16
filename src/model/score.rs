@@ -61,6 +61,8 @@ impl ExpectedScore {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
     fn close(actual: Option<f64>, expected: f64) {
@@ -76,7 +78,7 @@ mod tests {
     /// 0.0425 and 0.0275, 0.22, over a variance of 0.05, 4.4. The top
     /// decile, a tenth of four rows rounded up, is the row expected 0.4,
     /// which realized 1: a gap of 0.6.
-    #[test]
+    #[rstest]
     fn expectations_score_their_skill_mean_error_slope_and_top_decile_gap() {
         let rows = [
             (0.1, 0.0, 0.25),
@@ -96,7 +98,7 @@ mod tests {
 
     /// Eleven rows expected 0 to 10: the top decile, a tenth rounded up, is
     /// the two expected 10 and 9, which realized 12 and 10, a gap of 1.5.
-    #[test]
+    #[rstest]
     fn the_top_decile_is_the_tenth_of_the_rows_expected_the_most_rounded_up() {
         let rows: Vec<(f64, f64, f64)> = (0..11)
             .map(|i| {
@@ -114,7 +116,7 @@ mod tests {
 
     /// Realized values all at the baseline leave it no error to beat: no
     /// skill. One expectation for every row has no slope.
-    #[test]
+    #[rstest]
     fn no_baseline_error_has_no_skill_and_no_spread_has_no_slope() {
         let score = ExpectedScore::of(&[(0.5, 1.0, 1.0), (0.5, 1.0, 1.0)]);
 
@@ -124,7 +126,7 @@ mod tests {
 
     /// Many rows of one expectation, -0.2, whose mean in floating point is not
     /// -0.2 to the bit: still no slope.
-    #[test]
+    #[rstest]
     fn one_expectation_over_many_rows_has_no_slope() {
         let rows: Vec<(f64, f64, f64)> = (0..24)
             .map(|i| (-0.2, f64::from(i % 3) - 1.0, 0.0))
@@ -133,7 +135,7 @@ mod tests {
         assert_eq!(ExpectedScore::of(&rows).slope, None);
     }
 
-    #[test]
+    #[rstest]
     fn no_row_has_no_expected_score() {
         assert_eq!(ExpectedScore::of(&[]), ExpectedScore::default());
     }

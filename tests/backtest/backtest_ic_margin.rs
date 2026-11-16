@@ -12,10 +12,11 @@ use nautilus_model::{
     enums::OrderSide,
     types::{Money, Quantity},
 };
+use rstest::rstest;
 
 use crate::common::{ic, recorder::Recorder};
 
-#[test]
+#[rstest]
 fn an_ic_position_locks_ic_s_margin_and_an_order_beyond_it_is_denied() {
     let catalog = ic::catalog();
     let mut backtest = ic::backtest(&catalog);

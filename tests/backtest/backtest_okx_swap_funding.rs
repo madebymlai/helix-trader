@@ -26,6 +26,7 @@ use nautilus_model::{
     types::{Currency, Money, Price, Quantity},
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
+use rstest::rstest;
 use rust_decimal::Decimal;
 
 use crate::common::{recorder::Recorder, ts};
@@ -152,7 +153,7 @@ fn backtest(dir: &Path, end: &str) -> Backtest {
     }
 }
 
-#[test]
+#[rstest]
 fn a_held_swap_pays_and_receives_funding_on_its_notional_at_each_funding_time() {
     let dir = tempfile::tempdir().unwrap();
     catalog(dir.path(), "17:00", "17:00");

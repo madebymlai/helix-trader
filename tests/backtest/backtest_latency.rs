@@ -14,13 +14,14 @@ use nautilus_model::{
     enums::OrderSide,
     types::{Price, Quantity},
 };
+use rstest::rstest;
 
 use crate::common::{
     ic::{self, at},
     recorder::Recorder,
 };
 
-#[test]
+#[rstest]
 fn at_a_latency_a_market_order_fills_on_the_first_quote_after_its_arrival() {
     // The quote at 10:00:07.250 set apart from the one at 10:00:37.750,
     // 4000.00 / 4000.20, as at 11:00:37.750.

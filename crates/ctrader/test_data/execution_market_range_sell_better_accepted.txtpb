@@ -1,0 +1,53 @@
+# Captured from a cTrader broker's demo (2026-11-16), protobuf port 5035:
+# a MARKET_RANGE sell of 1 oz of XAUUSD (volume 100), clientOrderId
+# PROBE-IOC-2, its base slippage price 3863.09, 3.00 under the bid, with no
+# slippage allowed (a limit IOC sell at 3863.09), accepted: its position
+# created empty.
+# Scrubbed: ctidTraderAccountId replaced by the fake 1000001; re-encoded
+# from the decoded event, fields as served.
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOAExecutionEvent OpenApiMessages.proto < execution_market_range_sell_better_accepted.bin
+# Message: ProtoOAExecutionEvent
+ctidTraderAccountId: 1000001
+executionType: ORDER_ACCEPTED
+position {
+  positionId: 697001451
+  tradeData {
+    symbolId: 41
+    volume: 0
+    tradeSide: SELL
+    guaranteedStopLoss: false
+    measurementUnits: "Oz"
+  }
+  positionStatus: POSITION_STATUS_CREATED
+  swap: 0
+  price: 0
+  commission: 0
+  marginRate: 0
+  mirroringCommission: 0
+  guaranteedStopLoss: false
+  usedMargin: 0
+  moneyDigits: 2
+}
+order {
+  orderId: 1040675536
+  tradeData {
+    symbolId: 41
+    volume: 100
+    tradeSide: SELL
+    openTimestamp: 1794849432423
+    guaranteedStopLoss: false
+    measurementUnits: "Oz"
+  }
+  orderType: MARKET_RANGE
+  orderStatus: ORDER_STATUS_ACCEPTED
+  executedVolume: 0
+  utcLastUpdateTimestamp: 1794849432423
+  baseSlippagePrice: 3863.09
+  slippageInPoints: 0
+  closingOrder: false
+  clientOrderId: "PROBE-IOC-2"
+  timeInForce: IMMEDIATE_OR_CANCEL
+  positionId: 697001451
+}
+isServerEvent: false

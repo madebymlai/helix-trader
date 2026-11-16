@@ -20,7 +20,7 @@
 
 use std::collections::HashSet;
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
@@ -96,13 +96,14 @@ pub async fn fill_catalog(
             .await
             .with_context(|| format!("fetching {}", named()))?;
         if items.is_empty() && resume_point.is_none() {
-            bail!("empty response for {} over [{from}, {end}]", named());
+            anyhow::bail!("empty response for {} over [{from}, {end}]", named());
         }
+
         if let Some(foreign) = items
             .iter()
             .find(|item| !is_of(item, data_type, identifier))
         {
-            bail!(
+            anyhow::bail!(
                 "response for {} holds {} of {}",
                 named(),
                 data_path_prefix(&NautilusDataType::from_data(foreign)),
@@ -161,10 +162,11 @@ pub(crate) fn resumed(
     let last = catalog
         .query_last_timestamp(&catalog_type, Some(identifier))
         .with_context(reading)?;
+
     if let (Some(first), Some(last)) = (first, last)
         && UnixNanos::from(start) < UnixNanos::from(first)
     {
-        bail!(
+        anyhow::bail!(
             "{} are stored over [{}, {}] and {start} is before it: \
              extending history backwards is not supported; use a new catalog",
             named(),
@@ -699,7 +701,7 @@ mod tests {
         let both = || vec![instrument(), aapl()];
         let (r, _) = fill(&mut catalog, both(), 0, 100, |id| {
             if id == aapl_id {
-                bail!("source down")
+                anyhow::bail!("source down")
             }
             Ok(vec![quote_at(id, 10)])
         })

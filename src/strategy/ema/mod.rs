@@ -109,8 +109,8 @@ impl Part for EmaParams {
     ///
     /// # Errors
     ///
-    /// Returns an error under the traded instrument if `[data]` lists no
-    /// bars series of it.
+    /// Returns an error if `[data]` lists no bars series of the traded
+    /// instrument, under the instrument's field.
     fn reads(config: &EmaCrossConfig) -> ConfigResult<Vec<Series>> {
         let id = config.trade_instrument_id();
         config
@@ -164,7 +164,8 @@ impl EmaCrossConfig {
     ///
     /// # Panics
     ///
-    /// As `fast_ema`.
+    /// Panics if it is missing or of arguments it or Nautilus refuses (see
+    /// `fast_ema`).
     #[must_use]
     pub fn slow_ema(&self) -> ExponentialMovingAverage {
         self.indicators.build(SLOW)
