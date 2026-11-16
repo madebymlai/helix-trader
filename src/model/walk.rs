@@ -726,31 +726,6 @@ mod tests {
     }
 
     #[rstest]
-    fn a_backtest_builds_from_its_first_window_then_trains_at_each_retrain_time() {
-        let dir = tempfile::tempdir().unwrap();
-
-        let (built, trained) = prepare(dir.path(), &walk(dir.path()));
-
-        assert_eq!(
-            built,
-            [(at("2026-01-06T00:00:00Z"), at("2026-01-09T00:00:00Z"))]
-        );
-        assert_eq!(
-            trained,
-            [at("2026-01-07T00:00:00Z"), at("2026-01-08T00:00:00Z")]
-        );
-    }
-
-    #[rstest]
-    fn a_second_backtest_of_the_span_builds_and_trains_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let walk = walk(dir.path());
-        prepare(dir.path(), &walk);
-
-        assert_eq!(prepare(dir.path(), &walk), (vec![], vec![]));
-    }
-
-    #[rstest]
     fn a_model_in_the_store_is_reused() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk(dir.path());
@@ -850,40 +825,71 @@ mod tests {
     /// 0.5. The 7th, the long takes the win at 0.8 and the loss at 0.6,
     /// nought per trade, every trade (with the loss at 0.3) -1/3; the 8th, the
     /// win at 0.9, every trade (with the win at 0.2) 1; the span, two wins and
-    /// a loss taken, 1/3, of five trades, 1/5. At 1.5 times the commission of
-    /// 0.1 each trade makes 0.05 less.
+    /// a loss taken, 1/3, of five trades, 1/5. The short alone, the reverse
+    /// trades of the same decisions: the 7th, a loss at 0.8 and a win at 0.6,
+    /// nought, every trade 1/3; the 8th, the loss at 0.9, every trade (with
+    /// the loss at 0.2) -1; the span, a win and two losses taken, -1/3, of
+    /// five trades, -1/5. At 1.5 times the commission of 0.1 each trade makes
+    /// 0.05 less. Each count and expectancy in order: the 7th's trades taken
+    /// and every trade, stressed and not, the 8th's, the span's.
     #[rstest]
-    fn each_period_reports_what_the_models_decisions_earned_beside_every_trade() {
+    #[case::the_long(
+        Side::Long,
+        [
+            (2, 0.0),
+            (3, -1.0 / 3.0),
+            (2, -0.05),
+            (3, -1.0 / 3.0 - 0.05),
+            (1, 1.0),
+            (2, 1.0),
+            (3, 1.0 / 3.0),
+            (5, 0.2),
+        ]
+    )]
+    #[case::the_short(
+        Side::Short,
+        [
+            (2, 0.0),
+            (3, 1.0 / 3.0),
+            (2, -0.05),
+            (3, 1.0 / 3.0 - 0.05),
+            (1, -1.0),
+            (2, -1.0),
+            (3, -1.0 / 3.0),
+            (5, -0.2),
+        ]
+    )]
+    fn each_period_reports_what_the_models_decisions_earned_beside_every_trade(
+        #[case] side: Side,
+        #[case] expected: [(usize, f64); 8],
+    ) {
         let dir = tempfile::tempdir().unwrap();
 
-        let scores = one_sided_scores(dir.path(), Side::Long);
+        let scores = one_sided_scores(dir.path(), side);
 
-        let long = scores.long.as_ref().unwrap();
-        let [first, second] = &long.periods[..] else {
+        let traded = match side {
+            Side::Long => scores.long.as_ref(),
+            Side::Short => scores.short.as_ref(),
+        }
+        .unwrap();
+        let [first, second] = &traded.periods[..] else {
             panic!("{scores:?}");
         };
-        trades_are(first.earnings.taken, 2, 0.0);
+        let earned = [
+            first.earnings.taken,
+            first.earnings.every,
+            first.earnings.taken_stressed,
+            first.earnings.every_stressed,
+            second.earnings.taken,
+            second.earnings.every,
+            traded.earnings.taken,
+            traded.earnings.every,
+        ];
+
+        for (trades, (count, expectancy)) in earned.into_iter().zip(expected) {
+            trades_are(trades, count, expectancy);
+        }
         close(first.earnings.taken.win_rate, 0.5);
-        trades_are(first.earnings.every, 3, -1.0 / 3.0);
-        trades_are(first.earnings.taken_stressed, 2, -0.05);
-        trades_are(first.earnings.every_stressed, 3, -1.0 / 3.0 - 0.05);
-        trades_are(second.earnings.taken, 1, 1.0);
-        trades_are(second.earnings.every, 2, 1.0);
-        trades_are(long.earnings.taken, 3, 1.0 / 3.0);
-        trades_are(long.earnings.every, 5, 0.2);
-    }
-
-    /// The short alone, the reverse trades of the same decisions, takes on the
-    /// 7th a loss at 0.8 and a win at 0.6, nought, every trade 1/3.
-    #[rstest]
-    fn a_short_only_strategy_reports_what_its_decisions_earned_beside_every_trade() {
-        let dir = tempfile::tempdir().unwrap();
-
-        let scores = one_sided_scores(dir.path(), Side::Short);
-
-        let short = &scores.short.as_ref().unwrap().periods[0];
-        trades_are(short.earnings.taken, 2, 0.0);
-        trades_are(short.earnings.every, 3, 1.0 / 3.0);
     }
 
     /// Publishes for `side` of a walk in `dir` as `config` says a model valid
@@ -1347,15 +1353,21 @@ mod tests {
         close(first.skill, 1.0 - 4.29 / (20.0 / 9.0 + 25.0 / 16.0));
     }
 
+    /// No dataset built: the refusal lists the days of the span it lacks,
+    /// the 7th and the 8th.
     #[rstest]
     fn scores_of_a_span_the_dataset_lacks_are_refused() {
         let dir = tempfile::tempdir().unwrap();
 
         let err = walk(dir.path())
             .scores(at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"))
-            .unwrap_err();
+            .unwrap_err()
+            .to_string();
 
-        assert!(err.to_string().contains("lacks"), "{err}");
+        assert!(
+            err.contains("2026-01-07") && err.contains("2026-01-08"),
+            "{err}"
+        );
     }
 
     #[rstest]
@@ -1763,7 +1775,11 @@ Meta model scores, out of sample, over the span
     /// The models trained at the first backtest's start, 12:00 of the 7th,
     /// are in use at a second's of the same span, and at one from the 8th.
     #[rstest]
-    fn a_second_backtest_never_retrained_of_the_span_or_from_later_trains_nothing() {
+    #[case::of_the_span("2026-01-07T12:00:00Z")]
+    #[case::from_later("2026-01-08T00:00:00Z")]
+    fn a_second_backtest_never_retrained_of_the_span_or_from_later_trains_nothing(
+        #[case] start: &str,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk_of(dir.path(), &never());
         let end = "2026-01-09T00:00:00Z";
@@ -1775,11 +1791,9 @@ Meta model scores, out of sample, over the span
         )
         .unwrap();
 
-        for start in ["2026-01-07T12:00:00Z", "2026-01-08T00:00:00Z"] {
-            let (_, trained) = prepared(dir.path(), &walk, (start, end), Some(&never())).unwrap();
+        let (_, trained) = prepared(dir.path(), &walk, (start, end), Some(&never())).unwrap();
 
-            assert_eq!(trained, [], "from {start}");
-        }
+        assert_eq!(trained, []);
     }
 
     /// Never retrained, the train at the start published no side: the
