@@ -66,10 +66,9 @@ use nautilus_persistence::{
     backend::parquet::catalog::ParquetDataCatalog, catalog::types::data_path_prefix,
 };
 
-use super::{
-    schedule::{self, Retrain},
-    train::Trained,
-};
+use super::schedule::{self, Retrain};
+#[cfg(test)]
+use super::train::Trained;
 use crate::strategy::requirements::DataRequirements;
 
 /// The most lines of a child's standard error kept for the reason it
@@ -124,6 +123,7 @@ impl Launcher {
 
     /// Trains on a thread of this process, by `train`: for tests, which
     /// hold no node on that thread or replay none.
+    #[cfg(test)]
     #[must_use]
     pub fn in_process(train: impl Fn(Timestamp) -> Trained + Send + Sync + 'static) -> Self {
         Self {
