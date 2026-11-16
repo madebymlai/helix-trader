@@ -127,6 +127,14 @@ repos:
         language: system
         types_or: [rust, markdown]
 
+      - id: check-links-offline
+        name: check links (offline)
+        description: Verifies all tracked internal markdown links resolve on disk via lychee
+        entry: bash .pre-commit-hooks/check_links_offline.sh
+        language: system
+        always_run: true
+        pass_filenames: false
+
       - id: test-check-workarounds
         name: test check-workarounds
         entry: python3 -B .pre-commit-hooks/test_check_workarounds.py
@@ -218,5 +226,17 @@ repos:
             (?:.*/)?Cargo\.(lock|toml)|
             \.supply-chain/crate-dates\.json|
             scripts/check-cargo-cooldown\.sh
+          )$
+        pass_filenames: false
+
+      - id: cargo-deny
+        name: cargo deny
+        description: Advisories, licenses, banned and duplicate crates, and sources (deny.toml)
+        entry: cargo deny check
+        language: system
+        files: >-
+          (?x)^(
+            (?:.*/)?Cargo\.(lock|toml)|
+            deny\.toml
           )$
         pass_filenames: false

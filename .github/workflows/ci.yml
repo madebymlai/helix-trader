@@ -60,11 +60,11 @@ jobs:
       - name: Install prek
         run: uv tool install prek==0.5.10
 
-      - name: Install cargo-machete
+      - name: Install cargo-machete, cargo-deny and lychee
         # https://github.com/taiki-e/install-action
         uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
-          tool: cargo-machete@0.9.2
+          tool: cargo-machete@0.9.2,cargo-deny@0.20.2,lychee@0.24.2
 
       - name: Cache prek environments
         # https://github.com/actions/cache
@@ -110,6 +110,17 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-      # The live tests skip without their venues' variables
+      - name: Install cargo-nextest
+        # https://github.com/taiki-e/install-action
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-nextest@0.9.151
+
+      # The live tests skip without their venues' variables; a hung test fails
+      # after 10 minutes (.config/nextest.toml)
       - name: Test
-        run: cargo test
+        run: cargo nextest run --workspace --profile ci
+
+      # nextest runs no doctests
+      - name: Doctests
+        run: cargo test --doc --workspace
