@@ -238,44 +238,23 @@ mod tests {
         assert!(ActorIndicator::initialized(&signal).unwrap());
     }
 
+    /// The cross of the last of `closes` inside the session: none while
+    /// cold; none on the first warm bar, 101 above the slow EMA of 100.5,
+    /// long, but nothing before it; up on 102, above 100.5, long after 100
+    /// below it, short; down on 99, below 100.5, short after 101 above it,
+    /// long; none on 102, above 100.5, still long after 101.
     #[rstest]
-    fn no_cross_while_cold() {
+    #[case::while_cold(&["100"], None)]
+    #[case::on_the_first_warm_bar(&["100", "101"], None)]
+    #[case::turning_above_the_slow_ema(&["101", "100", "102"], Some(OrderSide::Buy))]
+    #[case::turning_below_the_slow_ema(&["100", "101", "99"], Some(OrderSide::Sell))]
+    #[case::keeping_the_side(&["100", "101", "102"], None)]
+    fn a_close_turning_the_side_of_the_slow_ema_crosses_to_it(
+        #[case] closes: &[&str],
+        #[case] cross: Option<OrderSide>,
+    ) {
         let signal = Signal::new(&config());
-        assert_eq!(feed(&signal, &["100"], inside), None);
-    }
-
-    #[rstest]
-    fn the_first_warm_bar_sets_the_side_without_a_cross() {
-        // 101 above the slow EMA of 100.5: long, but nothing before it.
-        let signal = Signal::new(&config());
-        assert_eq!(feed(&signal, &["100", "101"], inside), None);
-    }
-
-    #[rstest]
-    fn a_close_turning_above_the_slow_ema_crosses_up() {
-        // 100 below 100.5, short; 102 above 100.5, long.
-        let signal = Signal::new(&config());
-        assert_eq!(
-            feed(&signal, &["101", "100", "102"], inside),
-            Some(OrderSide::Buy)
-        );
-    }
-
-    #[rstest]
-    fn a_close_turning_below_the_slow_ema_crosses_down() {
-        // 101 above 100.5, long; 99 below 100.5, short.
-        let signal = Signal::new(&config());
-        assert_eq!(
-            feed(&signal, &["100", "101", "99"], inside),
-            Some(OrderSide::Sell)
-        );
-    }
-
-    #[rstest]
-    fn keeping_the_side_is_no_cross() {
-        // 101 above 100.5, long; 102 above 100.5, still long.
-        let signal = Signal::new(&config());
-        assert_eq!(feed(&signal, &["100", "101", "102"], inside), None);
+        assert_eq!(feed(&signal, closes, inside), cross);
     }
 
     #[rstest]
@@ -314,26 +293,28 @@ mod tests {
         assert_eq!(signal.cross(&bar), Some(OrderSide::Buy));
     }
 
+    /// Bars outside the session neither warm nor move the EMAs. Had the 100
+    /// outside counted after 101 inside, the EMAs would be warm and short
+    /// (100 below 100.5), and 102 the next morning a cross up; without it,
+    /// 102 is the first warm bar. Had the 102 outside counted after 101 and
+    /// 100 inside, it would be long, the slow EMA going to 101.5, and 99
+    /// the next morning a cross down; without it, 99 stays below 100.5,
+    /// short as 100 was.
     #[rstest]
-    fn bars_outside_the_session_do_not_warm_the_emas() {
-        // Had the 100 outside counted, the EMAs would be warm and short
-        // (100 below 100.5), and 102 the next morning a cross up; without
-        // it, 102 is the first warm bar.
+    #[case::do_not_warm_the_emas(&["101"], "100", "102")]
+    #[case::do_not_move_the_emas(&["101", "100"], "102", "99")]
+    fn bars_outside_the_session_count_for_nothing(
+        #[case] inside_closes: &[&str],
+        #[case] outside_close: &str,
+        #[case] next_morning_close: &str,
+    ) {
         let signal = Signal::new(&config());
-        feed(&signal, &["101"], inside);
-        feed(&signal, &["100"], outside);
-        assert_eq!(feed(&signal, &["102"], |_| next_morning()), None);
-    }
-
-    #[rstest]
-    fn bars_outside_the_session_do_not_move_the_emas() {
-        // Had the 102 outside counted, it would be long, the slow EMA going
-        // to 101.5, and 99 the next morning a cross down; without it, 99
-        // stays below 100.5, short as 100 was.
-        let signal = Signal::new(&config());
-        feed(&signal, &["101", "100"], inside);
-        feed(&signal, &["102"], outside);
-        assert_eq!(feed(&signal, &["99"], |_| next_morning()), None);
+        feed(&signal, inside_closes, inside);
+        feed(&signal, &[outside_close], outside);
+        assert_eq!(
+            feed(&signal, &[next_morning_close], |_| next_morning()),
+            None
+        );
     }
 
     #[rstest]

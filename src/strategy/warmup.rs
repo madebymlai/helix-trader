@@ -1515,49 +1515,6 @@ mod tests {
         );
     }
 
-    /// Every series of the requirements its venue's history serves is
-    /// requested, whatever reads it: IC's EURUSD quotes, a conversion
-    /// pair's no feature reads, over the window, building nothing, beside
-    /// IC's gold quotes, which build the strategy's bars; IDEALPRO's
-    /// EUR/USD BID and ASK bars, an IB pair's, as they are.
-    #[rstest]
-    fn a_live_warmup_requests_the_series_its_conversion_pairs_are_read_from() {
-        let bars = BarType::from("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL");
-        let warmup = Warmup::live(&reading_ticks(
-            &[
-                "XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL",
-                "EUR/USD.IDEALPRO-1-MINUTE-BID-EXTERNAL",
-                "EUR/USD.IDEALPRO-1-MINUTE-ASK-EXTERNAL",
-            ],
-            vec![tick(NautilusDataType::QuoteTick, "EURUSD.ICMARKETS")],
-        ));
-        let (mut probe, commands) = registered();
-
-        warmup.start(&mut probe).unwrap();
-
-        assert_eq!(
-            requested(&commands),
-            [
-                (
-                    CatalogSeries::Ticks(tick(NautilusDataType::QuoteTick, "XAUUSD.ICMARKETS")),
-                    vec![bars],
-                ),
-                (
-                    CatalogSeries::Bars(BarType::from("EUR/USD.IDEALPRO-1-MINUTE-BID-EXTERNAL")),
-                    vec![],
-                ),
-                (
-                    CatalogSeries::Bars(BarType::from("EUR/USD.IDEALPRO-1-MINUTE-ASK-EXTERNAL")),
-                    vec![],
-                ),
-                (
-                    CatalogSeries::Ticks(tick(NautilusDataType::QuoteTick, "EURUSD.ICMARKETS")),
-                    vec![],
-                ),
-            ]
-        );
-    }
-
     /// A series its venue's history does not serve is requested no history
     /// (`venues::serves`): OKX's client requests no quotes, so neither the
     /// quotes OKX's MID bars are built from nor OKX's quotes as ticks are
@@ -1647,7 +1604,23 @@ mod tests {
                 ),
             ]
         );
-        assert_eq!(sent_requests(&commands).len(), 3);
+        assert_eq!(
+            requested(&commands),
+            [
+                (
+                    CatalogSeries::Ticks(tick(NautilusDataType::QuoteTick, "XAUUSD.ICMARKETS")),
+                    vec![BarType::from("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL")],
+                ),
+                (
+                    CatalogSeries::Ticks(tick(NautilusDataType::QuoteTick, "GOLD-FUTURES.LSEDGE")),
+                    vec![],
+                ),
+                (
+                    CatalogSeries::Ticks(tick(NautilusDataType::TradeTick, "SXR8.IBIS")),
+                    vec![],
+                ),
+            ]
+        );
     }
 
     /// The imbalances under `identifier`, a custom series of a type no row
@@ -1710,28 +1683,6 @@ mod tests {
                 true,
             )
         );
-    }
-
-    /// Custom data a source's history serves is asked of that source's
-    /// live data client, which fills what the catalog lacks, its answers
-    /// written back.
-    #[rstest]
-    fn custom_data_a_source_serves_is_asked_of_its_live_data_client_written_back() {
-        let (client, params) = custom_request(&us10y_under("US10Y")).unwrap();
-
-        assert_eq!(client, ClientId::from("LSE"));
-        let update_catalog = params.and_then(|params| params.get_bool("update_catalog"));
-        assert_eq!(update_catalog, Some(true));
-    }
-
-    /// Custom data no source's history serves, of a type with no row, is
-    /// asked of `CATALOG`, the catalog alone, with no params.
-    #[rstest]
-    fn custom_data_no_source_serves_is_asked_of_the_catalog() {
-        let (client, params) = custom_request(&imbalances("AUD/USD.SIM")).unwrap();
-
-        assert_eq!(client, ClientId::from("CATALOG"));
-        assert!(params.is_none(), "{params:?}");
     }
 
     /// The metadata of LSE's daily 10-year US yields.
@@ -1815,45 +1766,6 @@ mod tests {
         assert_eq!(update_catalog, Some(true));
     }
 
-    /// Live on 2026-08-10 at 14:30, a custom series of a type with no row,
-    /// the catalog's, written into it from outside helix, is requested over
-    /// the day of warmup ending now, by its data type, naming `CATALOG`,
-    /// which the catalog alone answers, with no params, no client
-    /// answering anything to write back.
-    #[rstest]
-    fn a_live_warmup_requests_a_custom_series_of_a_type_with_no_row_of_the_catalog() {
-        let signal = CustomSeries::new("Signal", "GOLD-SIGNAL".to_string(), None).unwrap();
-        let warmup = Warmup::live(&DataRequirements {
-            custom: vec![signal],
-            ..reading(&[])
-        });
-        let (mut probe, commands) = registered();
-
-        warmup.start(&mut probe).unwrap();
-
-        let requests = custom_requests(&commands);
-        let [request] = requests.as_slice() else {
-            panic!("{} custom data requests", requests.len())
-        };
-        let at = |time: &str| -> Timestamp { time.parse().unwrap() };
-        assert_eq!(
-            (
-                &request.data_type,
-                request.client_id,
-                request.start,
-                request.end,
-                request.params.is_none(),
-            ),
-            (
-                &DataType::new("Signal", None, Some("GOLD-SIGNAL".to_string())),
-                ClientId::from("CATALOG"),
-                Some(at("2026-08-09T14:30:00Z")),
-                Some(at("2026-08-10T14:30:00Z")),
-                true,
-            )
-        );
-    }
-
     /// LSE's daily 10-year US yields under `identifier`, a custom series.
     fn us10y_under(identifier: &str) -> CustomSeries {
         CustomSeries::new("LseRow", identifier.to_string(), Some(us10y_metadata())).unwrap()
@@ -1878,66 +1790,93 @@ mod tests {
 
     /// The yields under GC's id, a root GC rolls into GCZ26 on 2026-07-29
     /// (`rolls/README.md`), are requested as GCZ26's, the contract standing
-    /// for GC on 2026-08-10, their type and metadata kept.
+    /// for GC on 2026-08-10, their type and metadata kept; GCZ26's own
+    /// yields, listed beside the root's, are the same data type now:
+    /// requested once.
     #[rstest]
-    fn a_live_warmup_requests_a_roots_custom_series_on_the_contract_standing_for_it() {
+    #[case::the_root_alone(&["GC.GLBX"])]
+    #[case::the_root_and_its_contract(&["GC.GLBX", "GCZ26.GLBX"])]
+    fn a_live_warmup_requests_a_roots_custom_series_once_on_the_contract_standing_for_it(
+        #[case] identifiers: &[&str],
+    ) {
+        let custom = identifiers.iter().map(|&id| us10y_under(id)).collect();
+
         assert_eq!(
-            requested_custom(vec![us10y_under("GC.GLBX")]),
+            requested_custom(custom),
             [us10y_under("GCZ26.GLBX").data_type().clone()]
         );
     }
 
-    /// GCZ26's own yields, listed beside the root's, are the same data type
-    /// now: requested once.
-    #[rstest]
-    fn a_live_warmup_requests_a_contract_s_custom_series_listed_beside_its_root_s_once() {
-        assert_eq!(
-            requested_custom(vec![us10y_under("GC.GLBX"), us10y_under("GCZ26.GLBX")]),
-            [us10y_under("GCZ26.GLBX").data_type().clone()]
+    /// A row of `us10y()` made at midnight on 2026-08-`day`, its close
+    /// `close`.
+    fn us10y_row(day: &str, close: f64) -> CustomData {
+        let ts = UnixNanos::from(
+            format!("2026-08-{day}T00:00:00Z")
+                .parse::<Timestamp>()
+                .unwrap(),
         );
+        let fields = [("close".to_string(), json!(close))].into_iter().collect();
+        let row = ::lse::LseRow::new("bond_yields".into(), "US10Y".into(), fields, ts, ts);
+        CustomData::new(Arc::new(row), us10y())
     }
 
-    /// Its request is of the warmup's group, which goes on until it is
-    /// answered: a warmup of it alone is warming once started.
-    #[rstest]
-    fn a_live_warmup_of_a_custom_series_alone_goes_on_until_its_group_ends() {
-        let warmup = Warmup::live(&reading_us10y());
-        let (mut probe, _commands) = registered();
-
-        warmup.start(&mut probe).unwrap();
-
-        assert!(warmup.is_warming());
+    /// The closes of the rows of `us10y()` `probe`'s cache holds, the
+    /// latest added first, as Nautilus' cache keeps them.
+    fn cached_us10y_closes(probe: &Probe) -> Vec<Value> {
+        probe
+            .cache()
+            .custom_data_history(&us10y())
+            .iter()
+            .map(|point| {
+                point
+                    .data
+                    .as_any()
+                    .downcast_ref::<::lse::LseRow>()
+                    .unwrap()
+                    .fields["close"]
+                    .clone()
+            })
+            .collect()
     }
 
     /// The response's rows reach the cache, where the data engine puts no
-    /// response's: the latest of `us10y()` is its newest.
+    /// response's, oldest first: the cache holds them the latest first.
     #[rstest]
     fn the_rows_of_a_warmup_s_custom_series_land_in_the_cache() {
         let warmup = Warmup::live(&reading_us10y());
         let (mut probe, _commands) = registered();
         warmup.start(&mut probe).unwrap();
-        let row = |day: &str, close: f64| {
-            let ts = UnixNanos::from(
-                format!("2026-08-{day}T00:00:00Z")
-                    .parse::<Timestamp>()
-                    .unwrap(),
-            );
-            let fields = [("close".to_string(), json!(close))].into_iter().collect();
-            let row = ::lse::LseRow::new("bond_yields".into(), "US10Y".into(), fields, ts, ts);
-            CustomData::new(Arc::new(row), us10y())
-        };
 
-        warmup.on_historical_data(&probe, &vec![row("09", 4.25), row("10", 4.5)]);
+        warmup.on_historical_data(&probe, &vec![us10y_row("09", 4.25), us10y_row("10", 4.5)]);
 
-        let cache = probe.cache();
-        let latest = cache.custom_data(&us10y()).expect("a row of US10Y");
-        let close = &latest
-            .data
-            .as_any()
-            .downcast_ref::<::lse::LseRow>()
-            .unwrap()
-            .fields["close"];
-        assert_eq!(close, &json!(4.5));
+        assert_eq!(cached_us10y_closes(&probe), [json!(4.5), json!(4.25)]);
+    }
+
+    /// The node takes a live row of 2026-08-10, closing at 4.40, while the
+    /// warmup's request is pending, and caches it. The response's rows, of
+    /// 2026-08-08, 2026-08-09 and 2026-08-10, no later than it, are left
+    /// out: the live row stays the latest, and the cache holds the row the
+    /// history and the live stream both carry once.
+    #[rstest]
+    fn a_warmup_response_older_than_a_live_row_leaves_it_the_latest() {
+        let warmup = Warmup::live(&reading_us10y());
+        let (mut probe, _commands) = registered();
+        warmup.start(&mut probe).unwrap();
+        probe
+            .cache_rc()
+            .borrow_mut()
+            .add_custom_data(us10y_row("10", 4.4));
+
+        warmup.on_historical_data(
+            &probe,
+            &vec![
+                us10y_row("08", 4.1),
+                us10y_row("09", 4.25),
+                us10y_row("10", 4.4),
+            ],
+        );
+
+        assert_eq!(cached_us10y_closes(&probe), [json!(4.4)]);
     }
 
     /// What a warmup hands books to, recording them.
@@ -1998,25 +1937,6 @@ mod tests {
         assert_eq!(batches, [vec![1, 2], vec![3], vec![4]]);
     }
 
-    /// Nautilus routes no depth to indicators: the warmup hands each
-    /// snapshot of a response over, in order.
-    #[rstest]
-    fn the_warmup_hands_book_depth_over_in_order() {
-        let books = Rc::new(Books::default());
-        let warmup = Warmup::live(&reading(&[])).feeding_books(Rc::clone(&books) as _);
-        let depth = |sequence| OrderBookDepth {
-            sequence,
-            ..stub_depth10()
-        };
-
-        warmup
-            .on_historical_book_depth(&[depth(7), depth(8)])
-            .unwrap();
-
-        let sequences: Vec<u64> = books.depths.borrow().iter().map(|d| d.sequence).collect();
-        assert_eq!(sequences, [7, 8]);
-    }
-
     /// A snapshot of a book's depth made, and numbered, at `at`.
     fn depth_at(at: u64) -> OrderBookDepth {
         OrderBookDepth {
@@ -2071,22 +1991,6 @@ mod tests {
         assert_eq!(pending, (2, 1));
         assert_eq!(depths, [1, 2, 5]);
         assert_eq!(batches, [3, 6]);
-    }
-
-    /// A replay holds nothing: the live depth and deltas the strategy
-    /// hands its warmup reach the book indicators as they come.
-    #[rstest]
-    fn in_a_replay_live_book_depth_and_deltas_go_straight_through() {
-        let books = Rc::new(Books::default());
-        let warmup = Warmup::replayed(&reading(&[])).feeding_books(Rc::clone(&books) as _);
-
-        warmup.on_book_depth(&depth_at(5)).unwrap();
-        warmup.on_book_deltas(&deltas_at(6)).unwrap();
-
-        assert_eq!(
-            (books.depths.borrow().len(), books.deltas.borrow().len()),
-            (1, 1)
-        );
     }
 
     /// The cache holds the warmup of the harness's bars too: 1,440
@@ -2262,13 +2166,25 @@ mod tests {
     }
 
     /// A live start's warmup goes on until its group ends, whatever its
-    /// requests answered by then; a replay's makes no request and so none.
+    /// requests answered by then: warming once started, still once its
+    /// first series' request is answered, SXR8's quotes or the custom
+    /// series of LSE's yields alone, and no longer once the group ends.
     #[rstest]
-    fn a_warmup_goes_on_until_its_group_ends() {
-        let warmup = Warmup::live(&reading(&["SXR8.IBIS-1-HOUR-MID-INTERNAL"]));
+    #[case::of_bars(reading(&["SXR8.IBIS-1-HOUR-MID-INTERNAL"]))]
+    #[case::of_a_custom_series_alone(reading_us10y())]
+    fn a_warmup_goes_on_until_its_group_ends(#[case] requirements: DataRequirements) {
+        let warmup = Warmup::live(&requirements);
         let (mut probe, commands) = registered();
         warmup.start(&mut probe).unwrap();
-        let (_, request, _) = sent_requests(&commands).remove(0);
+        let request = commands
+            .get_messages()
+            .into_iter()
+            .find_map(|command| match command {
+                DataCommand::Request(RequestCommand::Instrument(_)) => None,
+                DataCommand::Request(request) => Some(*request.request_id()),
+                _ => None,
+            })
+            .expect("a series requested");
 
         let started = warmup.is_warming();
         warmup
@@ -2281,10 +2197,16 @@ mod tests {
             (started, answered, warmup.is_warming()),
             (true, true, false)
         );
+    }
 
+    /// A replay's warmup makes no request, and so never goes on.
+    #[rstest]
+    fn a_replays_warmup_never_goes_on() {
         let replayed = Warmup::replayed(&reading(&["SXR8.IBIS-1-HOUR-MID-INTERNAL"]));
         let (mut probe, _) = registered();
+
         replayed.start(&mut probe).unwrap();
+
         assert!(!replayed.is_warming());
     }
 
@@ -2579,40 +2501,28 @@ mod tests {
         );
     }
 
-    /// Once the group has ended, a live quote, made at 14:30:05, is read as
-    /// it comes.
+    /// Once the group has ended, with the history's last quote made at
+    /// 14:29:59, a live quote made at 14:30:05 is read as it comes; the
+    /// venue's resend of that last quote, made at 14:29:59 and received at
+    /// 14:30:00.200, can come after a warmup the catalog answered at once,
+    /// and is dropped then too.
     #[rstest]
-    fn after_the_warmup_live_ticks_reach_the_features_as_they_come() {
+    #[case::after_the_history("14:30:05", "14:30:05.050", &["14:29:59", "14:30:05"])]
+    #[case::held_by_the_history("14:29:59", "14:30:00.200", &["14:29:59"])]
+    fn after_the_warmup_live_ticks_reach_the_features_as_they_come_unless_the_history_holds_them(
+        #[case] made: &str,
+        #[case] received: &str,
+        #[case] read: &[&str],
+    ) {
         let ticks = Rc::new(Ticks::default());
         let (warmup, probe) = warming(&ticks);
         warmup.on_historical_quotes(&[quote("14:29:59")]).unwrap();
         warmup.complete(&probe).unwrap();
 
-        warmup
-            .on_quote(&quote_of(XAU, "14:30:05", "14:30:05.050"))
-            .unwrap();
+        warmup.on_quote(&quote_of(XAU, made, received)).unwrap();
 
-        assert_eq!(
-            *ticks.read.borrow(),
-            [read_quote(XAU, "14:29:59"), read_quote(XAU, "14:30:05")]
-        );
-    }
-
-    /// The venue's resend of the history's last quote, made at 14:29:59,
-    /// can come after a warmup the catalog answered at once: dropped then
-    /// too.
-    #[rstest]
-    fn after_the_warmup_a_live_quote_the_history_holds_is_dropped() {
-        let ticks = Rc::new(Ticks::default());
-        let (warmup, probe) = warming(&ticks);
-        warmup.on_historical_quotes(&[quote("14:29:59")]).unwrap();
-        warmup.complete(&probe).unwrap();
-
-        warmup
-            .on_quote(&quote_of(XAU, "14:29:59", "14:30:00.200"))
-            .unwrap();
-
-        assert_eq!(*ticks.read.borrow(), [read_quote(XAU, "14:29:59")]);
+        let read: Vec<Read> = read.iter().map(|&made| read_quote(XAU, made)).collect();
+        assert_eq!(*ticks.read.borrow(), read);
     }
 
     /// A group ending failed ends the warmup all the same: the live quote
@@ -2638,22 +2548,31 @@ mod tests {
         );
     }
 
-    /// A replay requests no warmup and holds nothing: a quote is read as it
-    /// comes.
+    /// A replay requests no warmup and holds nothing: a quote, a snapshot
+    /// of depth made at 5 and a batch of deltas made at 6 reach the
+    /// features and the book indicators as they come.
     #[rstest]
-    fn a_replays_ticks_reach_the_features_as_they_come() {
+    fn a_replays_ticks_and_books_reach_the_features_as_they_come() {
         let ticks = Rc::new(Ticks::default());
+        let books = Rc::new(Books::default());
         let replayed = Warmup::replayed(&reading_ticks(
             &[],
             vec![tick(NautilusDataType::QuoteTick, XAU)],
         ))
-        .feeding_ticks(Rc::clone(&ticks) as SharedActorIndicator);
+        .feeding_ticks(Rc::clone(&ticks) as SharedActorIndicator)
+        .feeding_books(Rc::clone(&books) as _);
         let (mut probe, _) = registered();
         replayed.start(&mut probe).unwrap();
 
         replayed.on_quote(&quote("14:30:01")).unwrap();
+        replayed.on_book_depth(&depth_at(5)).unwrap();
+        replayed.on_book_deltas(&deltas_at(6)).unwrap();
 
+        let depths: Vec<u64> = books.depths.borrow().iter().map(|d| d.sequence).collect();
+        let batches: Vec<u64> = books.deltas.borrow().iter().map(|b| b.sequence).collect();
         assert_eq!(*ticks.read.borrow(), [read_quote(XAU, "14:30:01")]);
+        assert_eq!(depths, [5]);
+        assert_eq!(batches, [6]);
     }
 
     /// Custom data of the tests: an imbalance of a book.
@@ -2754,25 +2673,27 @@ mod tests {
         assert_eq!(values, [-0.25, 0.75]);
     }
 
+    /// The warmup finishes on its group's response alone, another's,
+    /// failed or not, ending nothing; its group failed is an error naming
+    /// the reason.
     #[rstest]
-    fn the_warmup_finishes_on_its_groups_response_alone() {
+    #[case::another_groups_failed(false, Some("lost"), Ok(false))]
+    #[case::its_group_complete(true, None, Ok(true))]
+    #[case::its_group_failed(true, Some("page timed out"), Err("page timed out"))]
+    fn the_warmup_finishes_on_its_groups_response_alone(
+        #[case] its_group: bool,
+        #[case] failure: Option<&str>,
+        #[case] finishes: Result<bool, &str>,
+    ) {
         let group = UUID4::new();
+        let correlation = if its_group { group } else { UUID4::new() };
+        let response = DataResponseEnvelope::terminal(correlation, failure.map(str::to_string));
 
-        let other = DataResponseEnvelope::terminal(UUID4::new(), Some("lost".to_string()));
-        let complete = DataResponseEnvelope::terminal(group, None);
-
-        assert!(!finished(group, &other).unwrap());
-        assert!(finished(group, &complete).unwrap());
-    }
-
-    #[rstest]
-    fn a_failed_warmup_is_an_error_naming_the_reason() {
-        let group = UUID4::new();
-        let failed = DataResponseEnvelope::terminal(group, Some("page timed out".to_string()));
-
-        let err = finished(group, &failed).unwrap_err().to_string();
-
-        assert!(err.contains("page timed out"), "{err}");
+        match (finished(group, &response), finishes) {
+            (Ok(finished), Ok(expected)) => assert_eq!(finished, expected),
+            (Err(e), Err(reason)) => assert!(e.to_string().contains(reason), "{e}"),
+            (finished, expected) => panic!("{finished:?}, not {expected:?}"),
+        }
     }
 
     #[rstest]
@@ -2780,11 +2701,13 @@ mod tests {
         assert_eq!(cache_config(&[], DAY).unwrap(), CacheConfig::default());
     }
 
+    /// The error names the warmup, -24h, which jiff's friendly format
+    /// writes `24h ago`.
     #[rstest]
     fn a_negative_warmup_is_an_error() {
         let bar_types = [BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL")];
         let err = cache_config(&bar_types, -DAY).unwrap_err().to_string();
-        assert!(err.contains("negative warmup"), "{err}");
+        assert!(err.contains("24h ago"), "{err}");
     }
 
     #[rstest]
@@ -2817,56 +2740,43 @@ mod tests {
         }
     }
 
+    /// Bars built from quotes close on time; bars built from source bars
+    /// wait 5 seconds, 5,000,000 microseconds, for the last one, and so do
+    /// all bars of a strategy reading one of them. The delay a decision
+    /// waits for (`bar_build_delay`) is the one a backtest, a dataset run
+    /// and a live node build their bars with, none building a bar for a
+    /// period without updates.
     #[rstest]
-    fn bars_built_from_quotes_close_on_time_in_a_backtest_as_live() {
-        let bar_types = [BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL")];
-        let backtest = data_engine_config(&bar_types);
-        let live = live_data_engine_config(&bar_types);
-        assert_eq!(
-            (backtest.time_bars_build_delay, live.time_bars_build_delay),
-            (0, 0)
-        );
-        assert!(!backtest.time_bars_build_with_no_updates);
-        assert!(!live.time_bars_build_with_no_updates);
-    }
-
-    #[rstest]
-    fn bars_built_from_source_bars_wait_for_the_last_one_in_a_backtest_as_live() {
-        let bar_types = [BarType::from(
+    #[case::of_quotes(&["SXR8.IBIS-1-HOUR-MID-INTERNAL"], SignedDuration::ZERO, 0)]
+    #[case::of_source_bars(
+        &["BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL"],
+        SignedDuration::from_secs(5),
+        5_000_000
+    )]
+    #[case::of_both(
+        &[
+            "SXR8.IBIS-1-HOUR-MID-INTERNAL",
             "BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
-        )];
+        ],
+        SignedDuration::from_secs(5),
+        5_000_000
+    )]
+    fn bars_are_built_as_late_after_their_close_in_a_backtest_as_live(
+        #[case] bar_types: &[&str],
+        #[case] delay: SignedDuration,
+        #[case] delay_micros: u64,
+    ) {
+        let bar_types: Vec<BarType> = bar_types.iter().map(|&b| BarType::from(b)).collect();
+
         let backtest = data_engine_config(&bar_types);
         let live = live_data_engine_config(&bar_types);
+
+        assert_eq!(bar_build_delay(&bar_types), delay);
         assert_eq!(
             (backtest.time_bars_build_delay, live.time_bars_build_delay),
-            (5_000_000, 5_000_000)
+            (delay_micros, delay_micros)
         );
         assert!(!backtest.time_bars_build_with_no_updates);
         assert!(!live.time_bars_build_with_no_updates);
-    }
-
-    /// The delay a decision waits for is the one a backtest, a dataset run
-    /// and a live node build its bars with.
-    #[rstest]
-    fn the_bar_build_delay_is_every_nodes() {
-        for bar_types in [
-            vec![
-                BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL"),
-                BarType::from("BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL"),
-            ],
-            vec![BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL")],
-        ] {
-            let delay = u64::try_from(bar_build_delay(&bar_types).as_micros()).unwrap();
-            assert_eq!(
-                data_engine_config(&bar_types).time_bars_build_delay,
-                delay,
-                "{bar_types:?}"
-            );
-            assert_eq!(
-                live_data_engine_config(&bar_types).time_bars_build_delay,
-                delay,
-                "{bar_types:?}"
-            );
-        }
     }
 }
