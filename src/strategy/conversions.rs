@@ -408,11 +408,16 @@ mod tests {
         )
     }
 
+    /// Pins that Nautilus' exchange rate reads a pair no quote of which is
+    /// cached at the closes of its latest BID and ASK bars
+    /// (`Cache::build_quote_table`, `crates/common/src/cache/
+    /// mod.rs:7463-7472`): `venues::rate_series` reads an IB pair as those
+    /// bars alone, and `Rates::convert` takes its rate from `get_xrate`.
+    ///
     /// IB serves an FX pair's history as BID and ASK bars, not quotes:
-    /// Nautilus reads a pair no quote of which is cached at the closes of
-    /// its BID and ASK bars, 1.24990 and 1.25010, the mid 1.25 USD per EUR.
+    /// here closing at 1.24990 and 1.25010, the mid 1.25 USD per EUR.
     #[rstest]
-    fn a_pair_without_quotes_is_read_at_its_bid_and_ask_bars() {
+    fn drift_a_pair_without_quotes_is_read_at_its_bid_and_ask_bars() {
         let mut cache = defining(&[EURUSD]);
         cache
             .add_bar(bar(EURUSD, PriceType::Bid, "1.24990"))

@@ -2622,6 +2622,16 @@ mod tests {
         answer.is_err_and(|e| e.to_string().contains("does not support"))
     }
 
+    /// Pins the kinds of history request Nautilus' OKX and IB data clients
+    /// implement, OKX's trades and bars
+    /// (`crates/adapters/okx/src/data.rs:3005`, `:3055`) and IB's quotes,
+    /// trades and bars (`crates/adapters/interactive_brokers/src/data/
+    /// core.rs:1693`, `:1876`, `:2077`), every other kind refused by the
+    /// `DataClient` default (`crates/common/src/clients/data.rs:622-699`):
+    /// `serves` copies them (`okx::serves`, `ib::serves`), which a fill
+    /// checks before anything connects and a live warmup before it
+    /// requests a series.
+    ///
     /// `serves` against the data clients its answers copy: each history
     /// source's client, built as its fill builds it and unconnected, on
     /// unreachable addresses, refuses as a kind it does not take exactly
@@ -2632,7 +2642,7 @@ mod tests {
     /// a client takes but `serves` refuses (a price, a width) is not
     /// checked here.
     #[tokio::test]
-    async fn each_history_source_s_client_takes_the_kinds_of_request_its_history_serves() {
+    async fn drift_each_history_source_s_client_takes_the_kinds_of_request_its_history_serves() {
         let (data_tx, _data_events) = tokio::sync::mpsc::unbounded_channel();
         replace_data_event_sender(data_tx);
         let cache = Rc::new(RefCell::new(Cache::default()));

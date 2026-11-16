@@ -671,12 +671,18 @@ mod tests {
         assert_eq!(latencies(&dataset_run_config(&backtest).unwrap()), [None]);
     }
 
-    /// The venue matches as Nautilus does by default, which the backtest
-    /// and model guides rely on: resting orders match on external bars,
-    /// replayed open, high, low, close, without consuming liquidity, and a
-    /// stop whose trigger is in the market is rejected.
+    /// Pins the matching defaults of Nautilus' `BacktestVenueConfig`
+    /// builder, bar execution and the rejection of a stop in the market on,
+    /// adaptive bar ordering and liquidity consumption off
+    /// (`crates/backtest/src/config.rs:489-491`, `:468-470`, `:498-499`,
+    /// `:506-508`): `venue_config` sets none of them, and the backtest and
+    /// model guides rely on them.
+    ///
+    /// The venue matches as Nautilus does by default: resting orders match
+    /// on external bars, replayed open, high, low, close, without consuming
+    /// liquidity, and a stop whose trigger is in the market is rejected.
     #[rstest]
-    fn the_venue_keeps_nautilus_default_matching() {
+    fn drift_the_venue_keeps_nautilus_default_matching() {
         let dir = tempfile::tempdir().unwrap();
         let config = run_config(&backtest(dir.path())).unwrap();
         let venue = &config.venues()[0];

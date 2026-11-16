@@ -2665,12 +2665,18 @@ mod tests {
         pub ts_init: UnixNanos,
     }
 
+    /// Pins that Nautilus' data engine with a catalog answers a request
+    /// naming a client it has not registered from the catalog alone,
+    /// asking no client for what the catalog lacks
+    /// (`dispatch_date_range_request`, `crates/data/src/engine/
+    /// streaming.rs:489-497`): `custom_request` names `CATALOG`, which no
+    /// node registers, for a custom series no source serves.
+    ///
     /// No data client serves the catalog's custom series, GCZ26's
-    /// imbalances: Nautilus' data engine, with a catalog and no data
-    /// client, answers a request of it naming `CATALOG` from the catalog
-    /// alone, with the points in its window, and fails none of it.
+    /// imbalances: the request of it naming `CATALOG` is answered with the
+    /// points in its window, and fails none of it.
     #[rstest]
-    fn a_custom_data_request_naming_the_catalog_is_answered_from_the_catalog_alone() {
+    fn drift_a_custom_data_request_naming_the_catalog_is_answered_from_the_catalog_alone() {
         MessageBus::new(TraderId::from("TRADER-001"), UUID4::new(), None, None)
             .register_message_bus();
         nautilus_serialization::ensure_custom_data_registered::<Imbalance>();

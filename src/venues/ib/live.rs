@@ -301,10 +301,15 @@ mod tests {
         InstrumentId::from("SXR8.IBIS")
     }
 
+    /// Pins that Nautilus' IB execution client keeps positions netting,
+    /// whatever its config (`crates/adapters/interactive_brokers/src/
+    /// factories.rs:182`): `Broker::oms_type` copies it, which a backtest
+    /// simulates every venue IB trades by (`venues::oms_type`).
+    ///
     /// Against the adapter's client: the broker's answer is our copy of it.
     /// The client needs no credential and connects to nothing.
     #[rstest]
-    fn the_execution_client_keeps_positions_as_the_broker_answers() {
+    fn drift_the_execution_client_keeps_positions_as_the_broker_answers() {
         let clients = configs(&gateway(), &paper(), &[sxr8()]);
 
         let created = created_oms_type(clients.into_node_clients(&[]));
