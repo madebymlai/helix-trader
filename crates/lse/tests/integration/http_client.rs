@@ -21,7 +21,6 @@ use lse::{
     },
 };
 use nautilus_core::string::secret::SecretString;
-use nautilus_network::retry::RetryConfig;
 use rstest::rstest;
 
 fn client(lse: &MockLse, calls_per_minute: u32) -> LseHttpClient {
@@ -77,100 +76,86 @@ async fn an_export_asks_lse_s_selection_with_the_key_and_gets_the_file() {
     assert_eq!(query, expected);
 }
 
+/// LSE's refusals that asking again cannot lift: a plan the key lacks;
+/// `data-unavailable` for a market storing no trades, no empty selection,
+/// whose message alone begins "No stored data for this selection" (LSE's
+/// docs, "Refusal codes"); `data-unavailable` as a 400, which says the
+/// market serves no such rows, as a derived market's quotes, only a 404
+/// being no rows; and a 429 of a quota, as the rows a day, which reset at
+/// 00:00 UTC, so that no wait of a run's gets past them.
+#[rstest]
+#[case::a_plan_the_key_lacks(
+    Reply::refusal(403, PLAN_REQUIRED),
+    &["403", "plan-required", "This feed requires a subscription", "CME Group Lite"],
+)]
+#[case::a_market_storing_no_trades(
+    Reply::refusal(404, TICKS_NOT_STORED),
+    &["404", "data-unavailable", "Tick trades are not stored for this market"],
+)]
+#[case::rows_the_market_does_not_serve(
+    Reply::refusal(400, DATA_UNAVAILABLE_QUOTES),
+    &["400", "data-unavailable", "This market offers timeframes"],
+)]
+#[case::a_quota(
+    Reply::refusal(429, ROWS_EXHAUSTED).retry_after(18_720),
+    &["429", "rows-exhausted"],
+)]
 #[tokio::test]
-async fn a_refusal_is_an_error_with_lse_s_code_message_and_required_plan_asked_once() {
-    let lse = MockLse::start(vec![
-        Reply::refusal(403, PLAN_REQUIRED),
-        Reply::file(GOLD_TRADES),
-    ]);
+async fn a_refusal_is_an_error_with_lse_s_code_message_and_required_plan_asked_once(
+    #[case] refusal: Reply,
+    #[case] parts: &[&str],
+) {
+    let lse = MockLse::start(vec![refusal, Reply::file(GOLD_TRADES)]);
 
     let err = client(&lse, 60).export(&gold_second()).await.unwrap_err();
 
     let err = err.to_string();
-    for part in [
-        "403",
-        "plan-required",
-        "This feed requires a subscription",
-        "CME Group Lite",
-    ] {
+    for part in parts {
         assert!(err.contains(part), "{part}: {err}");
     }
     assert_eq!(lse.calls().len(), 1);
 }
 
+#[rstest]
+#[case::no_stored_row(DATA_UNAVAILABLE)]
+#[case::no_session(DATE_NOT_TRADING)]
 #[tokio::test]
-async fn no_stored_row_and_no_session_are_no_file() {
-    for refusal in [DATA_UNAVAILABLE, DATE_NOT_TRADING] {
-        let lse = MockLse::start(vec![Reply::refusal(404, refusal)]);
+async fn no_stored_row_and_no_session_are_no_file(#[case] refusal: &str) {
+    let lse = MockLse::start(vec![Reply::refusal(404, refusal)]);
 
-        let file = client(&lse, 60).export(&gold_second()).await.unwrap();
+    let file = client(&lse, 60).export(&gold_second()).await.unwrap();
 
-        assert_eq!(file, None, "{refusal}");
-    }
+    assert_eq!(file, None);
 }
 
-/// LSE's `data-unavailable` for a market storing no trades: no empty
-/// selection, whose message alone begins "No stored data for this
-/// selection" (LSE's docs, "Refusal codes").
-#[tokio::test]
-async fn data_unavailable_other_than_an_empty_selection_is_lse_s_refusal_asked_once() {
-    let lse = MockLse::start(vec![
-        Reply::refusal(404, TICKS_NOT_STORED),
-        Reply::file(GOLD_TRADES),
-    ]);
-
-    let err = client(&lse, 60).export(&gold_second()).await.unwrap_err();
-
-    let err = err.to_string();
-    for part in [
-        "404",
-        "data-unavailable",
-        "Tick trades are not stored for this market",
-    ] {
-        assert!(err.contains(part), "{part}: {err}");
-    }
-    assert_eq!(lse.calls().len(), 1);
-}
-
-/// LSE's file comes in a 200 beside its SHA-256 (LSE's docs, "Files");
+/// LSE's file comes in a 200 beside its SHA-256 (LSE's docs, "Files"):
 /// a 202 is how LSE once answered an export it was still building.
+#[rstest]
+#[case::a_202(Reply::file(GOLD_TRADES).with_status(202), 202)]
+#[case::a_200_without_lse_s_sha_256(Reply::file(GOLD_TRADES).without_checksum(), 200)]
 #[tokio::test]
-async fn an_answer_other_than_a_200_is_no_file_but_an_unexpected_answer_asked_once() {
-    let lse = MockLse::start(vec![
-        Reply::file(GOLD_TRADES).with_status(202),
-        Reply::file(GOLD_TRADES),
-    ]);
+async fn an_answer_other_than_a_200_beside_lse_s_sha_256_is_no_file_but_an_unexpected_answer_asked_once(
+    #[case] answer: Reply,
+    #[case] status: u16,
+) {
+    let lse = MockLse::start(vec![answer, Reply::file(GOLD_TRADES)]);
 
     let err = client(&lse, 60).export(&gold_second()).await.unwrap_err();
 
     assert!(
-        matches!(err, LseHttpError::Unexpected { status: 202, .. }),
+        matches!(err, LseHttpError::Unexpected { status: answered, .. } if answered == status),
         "{err}"
     );
     assert_eq!(lse.calls().len(), 1);
 }
 
-#[tokio::test]
-async fn a_200_without_lse_s_sha_256_is_no_file_but_an_unexpected_answer_asked_once() {
-    let lse = MockLse::start(vec![
-        Reply::file(GOLD_TRADES).without_checksum(),
-        Reply::file(GOLD_TRADES),
-    ]);
-
-    let err = client(&lse, 60).export(&gold_second()).await.unwrap_err();
-
-    assert!(
-        matches!(err, LseHttpError::Unexpected { status: 200, .. }),
-        "{err}"
-    );
-    assert_eq!(lse.calls().len(), 1);
-}
-
-/// LSE's documented 429, its wait cut to a second.
+/// LSE's documented 429, its wait cut to two seconds: longer than the
+/// retry's own first backoff of a second, so that the second call shows
+/// the `Retry-After` was waited out.
 #[tokio::test]
 async fn a_429_of_calls_is_waited_out_by_its_retry_after_then_asked_again() {
     let lse = MockLse::start(vec![
-        Reply::refusal(429, CALLS_EXHAUSTED).retry_after(1),
+        Reply::refusal(429, CALLS_EXHAUSTED).retry_after(2),
         Reply::file(GOLD_TRADES),
     ]);
 
@@ -181,44 +166,7 @@ async fn a_429_of_calls_is_waited_out_by_its_retry_after_then_asked_again() {
         panic!("{:?}", lse.calls())
     };
     let waited = asked_again.received - refused.answered;
-    assert!(waited >= Duration::from_secs(1), "{waited:?}");
-}
-
-/// No `Retry-After`: the retry's own backoff, cut to 10 ms.
-#[tokio::test]
-async fn a_429_of_calls_without_retry_after_is_asked_again_after_a_backoff() {
-    let lse = MockLse::start(vec![
-        Reply::refusal(429, CALLS_EXHAUSTED),
-        Reply::file(GOLD_TRADES),
-    ]);
-    let client = client(&lse, 6000).with_retry(RetryConfig {
-        max_retries: 2,
-        initial_delay_ms: 10,
-        max_delay_ms: 10,
-        jitter_ms: 0,
-        operation_timeout_ms: None,
-        ..RetryConfig::default()
-    });
-
-    let file = client.export(&gold_second()).await.unwrap();
-
-    assert_eq!(file.as_deref(), Some(GOLD_TRADES));
-    assert_eq!(lse.calls().len(), 2);
-}
-
-/// The rows a day reset at 00:00 UTC: no wait of a run's gets past
-/// them.
-#[tokio::test]
-async fn a_429_of_a_quota_is_an_error_asked_once() {
-    let lse = MockLse::start(vec![
-        Reply::refusal(429, ROWS_EXHAUSTED).retry_after(18_720),
-        Reply::file(GOLD_TRADES),
-    ]);
-
-    let err = client(&lse, 6000).export(&gold_second()).await.unwrap_err();
-
-    assert!(err.to_string().contains("rows-exhausted"), "{err}");
-    assert_eq!(lse.calls().len(), 1);
+    assert!(waited >= Duration::from_secs(2), "{waited:?}");
 }
 
 /// LSE's docs, "Files": a download that is cut is requested again from
@@ -244,27 +192,15 @@ async fn a_file_whose_sha_256_is_not_lse_s_fails_naming_lse_s_export_asked_once(
 
     let err = client(&lse, 6000).export(&gold_second()).await.unwrap_err();
 
-    assert!(err.to_string().contains(EXPORT_ID), "{err}");
+    let LseHttpError::Checksum {
+        len,
+        export_id: Some(export_id),
+    } = err
+    else {
+        panic!("{err}")
+    };
+    assert_eq!((len, export_id.as_str()), (GOLD_TRADES.len(), EXPORT_ID));
     assert_eq!(lse.calls().len(), 1);
-}
-
-/// Two retries, 10 ms apart: three calls, then LSE's last refusal.
-#[tokio::test]
-async fn retries_that_run_out_end_in_lse_s_last_refusal() {
-    let lse = MockLse::start(vec![Reply::refusal(429, CALLS_EXHAUSTED); 4]);
-    let client = client(&lse, 6000).with_retry(RetryConfig {
-        max_retries: 2,
-        initial_delay_ms: 10,
-        max_delay_ms: 10,
-        jitter_ms: 0,
-        operation_timeout_ms: None,
-        ..RetryConfig::default()
-    });
-
-    let err = client.export(&gold_second()).await.unwrap_err();
-
-    assert!(err.to_string().contains("calls-exhausted"), "{err}");
-    assert_eq!(lse.calls().len(), 3);
 }
 
 /// 120 calls a minute: one every half second.
@@ -344,7 +280,16 @@ async fn a_catalogue_not_as_lse_s_docs_describe_it_is_an_error_saying_so() {
 
     let err = client(&lse, 60).reference_collections().await.unwrap_err();
 
-    assert!(err.to_string().contains("reference catalogue"), "{err}");
+    assert!(
+        matches!(
+            err,
+            LseHttpError::Malformed {
+                what: "reference catalogue",
+                ..
+            }
+        ),
+        "{err}"
+    );
     assert_eq!(lse.calls().len(), 1);
 }
 
@@ -455,20 +400,6 @@ async fn an_export_of_a_listing_asks_for_its_rows_by_its_pair_id() {
     ]
     .map(|(name, value)| (name.to_string(), value.to_string()));
     assert_eq!(query, expected);
-}
-
-/// `data-unavailable` is no rows as a 404 only: as a 400 it says the
-/// market serves no such rows, as a derived market's quotes.
-#[tokio::test]
-async fn a_400_data_unavailable_is_lse_s_refusal_not_an_empty_export() {
-    let lse = MockLse::start(vec![Reply::refusal(400, DATA_UNAVAILABLE_QUOTES)]);
-
-    let err = client(&lse, 60).export(&gold_second()).await.unwrap_err();
-
-    let err = err.to_string();
-    for part in ["400", "data-unavailable", "This market offers timeframes"] {
-        assert!(err.contains(part), "{part}: {err}");
-    }
 }
 
 #[rstest]

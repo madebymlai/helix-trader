@@ -14,7 +14,7 @@ use jiff::Timestamp;
 use lse::{
     LseDataClientConfig, LseDataClientFactory,
     testing::{
-        API_KEY, CME_API_KEY, CME_ESZ6_DOCUMENTED, CME_GCZ6_GCG7, CME_GCZ6_L2_DOCUMENTED,
+        CME_API_KEY, CME_ESZ6_DOCUMENTED, CME_GCZ6_GCG7, CME_GCZ6_L2_DOCUMENTED,
         CME_GCZ6_L3_DOCUMENTED, CME_LEVEL_REQUIRED, CME_SYMBOL_UNAVAILABLE, ESZ26, GCZ26,
         MockExchangeStream, MockLse, NASDAQ_API_KEY, NASDAQ_NVDA_L1_DOCUMENTED,
         NASDAQ_NVDA_L2_DOCUMENTED, NASDAQ_NVDA_L3_DOCUMENTED, NVDA, PAIRS_ESZ6, PAIRS_GCG7,
@@ -34,15 +34,17 @@ use nautilus_common::{
             UnsubscribeBookDepth, UnsubscribeQuotes,
         },
     },
+    testing::wait_until_async,
 };
 use nautilus_core::{UUID4, UnixNanos, string::secret::SecretString};
 use nautilus_model::{
     data::{BookOrder, Data, OrderBookDelta, QuoteTick, TradeTick},
     enums::{AggressorSide, BookAction, BookType, OrderSide, RecordFlag},
     identifiers::{ClientId, InstrumentId, Symbol, TradeId},
-    instruments::InstrumentAny,
+    instruments::{Instrument, InstrumentAny},
     types::{Price, Quantity},
 };
+use rstest::rstest;
 use serde_json::{Value, json};
 
 type Events = tokio::sync::mpsc::UnboundedReceiver<DataEvent>;
@@ -69,14 +71,50 @@ async fn streaming(
     streamed: &[&str],
     instruments: Vec<InstrumentAny>,
 ) -> (Box<dyn DataClient>, anyhow::Result<()>, Events) {
-    let config = LseDataClientConfig::builder()
+    streaming_with(&cme_config(lse, stream, streamed), instruments).await
+}
+
+/// The config with the CME key alone, LSE's API on `lse` and its CME
+/// stream on `stream`, streaming `streamed`.
+fn cme_config(
+    lse: &MockLse,
+    stream: &MockExchangeStream,
+    streamed: &[&str],
+) -> LseDataClientConfig {
+    LseDataClientConfig::builder()
         .cme_api_key(SecretString::from(CME_API_KEY))
         .base_url_http(lse.url().to_string())
         .base_url_ws_cme(stream.url().to_string())
         .cme_calls_per_minute(NonZeroU32::new(6000).unwrap())
         .stream_ids(ids(streamed))
-        .build();
-    streaming_with(&config, instruments).await
+        .build()
+}
+
+/// The config with the Nasdaq key `key` alone, LSE's API on `lse` and its
+/// Nasdaq stream on `stream`, streaming NVDA.
+fn nasdaq_config(lse: &MockLse, stream: &MockExchangeStream, key: &str) -> LseDataClientConfig {
+    LseDataClientConfig::builder()
+        .nasdaq_api_key(SecretString::from(key))
+        .base_url_http(lse.url().to_string())
+        .base_url_ws_nasdaq(stream.url().to_string())
+        .stream_ids(ids(&[NVDA]))
+        .build()
+}
+
+/// A venue's case of a test: the config of its instrument streamed with
+/// its exchange's key, on the mock LSE and the mock exchange stream.
+type Configured = fn(&MockLse, &MockExchangeStream) -> LseDataClientConfig;
+
+fn esz26_on_cme(lse: &MockLse, stream: &MockExchangeStream) -> LseDataClientConfig {
+    cme_config(lse, stream, &[ESZ26])
+}
+
+fn gcz26_on_cme(lse: &MockLse, stream: &MockExchangeStream) -> LseDataClientConfig {
+    cme_config(lse, stream, &[GCZ26])
+}
+
+fn nvda_on_nasdaq(lse: &MockLse, stream: &MockExchangeStream) -> LseDataClientConfig {
+    nasdaq_config(lse, stream, NASDAQ_API_KEY)
 }
 
 /// The client the factory creates on `config`, its cache holding
@@ -165,92 +203,126 @@ fn es_quote(
     ))
 }
 
-fn ts_init(data: &Data) -> UnixNanos {
+/// A quote or a trade, stamped as made at nought: when the client made it
+/// is its own clock's, no fact of LSE's.
+fn made_at_nought(data: Data) -> Data {
     match data {
-        Data::Quote(quote) => quote.ts_init,
-        Data::Trade(trade) => trade.ts_init,
+        Data::Quote(quote) => Data::Quote(QuoteTick {
+            ts_init: UnixNanos::default(),
+            ..quote
+        }),
+        Data::Trade(trade) => Data::Trade(TradeTick {
+            ts_init: UnixNanos::default(),
+            ..trade
+        }),
         other => panic!("neither a quote nor a trade: {other:?}"),
     }
 }
 
-/// LSE's documented ESZ6 at Level 1: its opening, bid 7569.75 x 2, ask
-/// 7570.00 x 11, comes with the quotes subscription; its next records,
-/// a change of the best bid and offer and a trade, come after: a quote,
-/// then the trade's record's quote and its trade, 1 lot at 7570.00, of
-/// no aggressor side, its id the record's sequence. Each is stamped when
-/// LSE received the record (`ts_recv`), as Nautilus' Databento decoder
-/// stamps it.
+/// LSE's documented ESZ6 at Level 1 on its CME stream: its opening, bid
+/// 7569.75 x 2, ask 7570.00 x 11, comes with the quotes subscription; its
+/// next records, a change of the best bid and offer and a trade, come
+/// after: a quote, then the trade's record's quote and its trade, 1 lot
+/// at 7570.00, of no aggressor side, its id the record's sequence. ESZ6
+/// is looked up in LSE's catalogue with the CME key. NVDA at Level 1 on
+/// LSE's Nasdaq stream, as LSE's documentation records the stream's
+/// messages: its opening, bid 211.15 x 200, ask 211.17 x 900, then a
+/// change of its best bid, and a trade of 100 at 211.17; the stream takes
+/// NVDA by its ticker, LSE's catalogue asked nothing. Each is stamped
+/// when LSE received the record (`ts_recv`), as Nautilus' Databento
+/// decoder stamps it, and streamed with its exchange's key.
+#[rstest]
+#[case::a_glbx_contract(
+    MockLse::start(vec![Reply::json(PAIRS_ESZ6)]),
+    MockExchangeStream::cme(|_, _| held(dbn_frames(CME_ESZ6_DOCUMENTED), 4)),
+    esz26_on_cme,
+    esz26(),
+    [
+        es_quote(("7569.75", 2), ("7570.00", 11), 1_794_272_217_707_781_000, UnixNanos::default()),
+        es_quote(("7569.50", 18), ("7570.00", 12), 1_794_272_218_208_093_000, UnixNanos::default()),
+        es_quote(("7569.50", 18), ("7570.00", 12), 1_794_272_218_213_015_000, UnixNanos::default()),
+        Data::Trade(TradeTick::new(
+            InstrumentId::from(ESZ26),
+            Price::from("7570.00"),
+            Quantity::from(1),
+            AggressorSide::NoAggressor,
+            TradeId::new("556"),
+            UnixNanos::from(1_794_272_218_213_015_000),
+            UnixNanos::default(),
+        )),
+    ],
+    &[("/v3/pairs", Some("ESZ6"), Some(CME_API_KEY))],
+    ("ESZ6", CME_API_KEY),
+)]
+#[case::an_xnas_stock(
+    MockLse::start(vec![]),
+    MockExchangeStream::nasdaq(|_, _| held(dbn_frames(NASDAQ_NVDA_L1_DOCUMENTED), 4)),
+    nvda_on_nasdaq,
+    nvda(),
+    [
+        nvda_quote(("211.15", 200), ("211.17", 900), "14:30:00.000471", UnixNanos::default()),
+        nvda_quote(("211.15", 100), ("211.17", 900), "14:30:00.001706", UnixNanos::default()),
+        nvda_quote(("211.15", 100), ("211.17", 800), "14:30:00.001862", UnixNanos::default()),
+        Data::Trade(TradeTick::new(
+            InstrumentId::from(NVDA),
+            Price::from("211.17"),
+            Quantity::from(100),
+            AggressorSide::NoAggressor,
+            TradeId::new("503"),
+            on_the_12th("14:30:00.001862"),
+            UnixNanos::default(),
+        )),
+    ],
+    &[],
+    ("NVDA", NASDAQ_API_KEY),
+)]
 #[tokio::test]
-async fn a_glbx_contract_receives_its_opening_best_bid_and_offer_then_its_quotes_and_trades() {
-    let lse = MockLse::start(vec![Reply::json(PAIRS_ESZ6)]);
-    let stream = MockExchangeStream::cme(|_, _| held(dbn_frames(CME_ESZ6_DOCUMENTED), 4));
+async fn an_instrument_receives_its_opening_best_bid_and_offer_then_its_quotes_and_trades(
+    #[case] lse: MockLse,
+    #[case] stream: MockExchangeStream,
+    #[case] config: Configured,
+    #[case] instrument: InstrumentAny,
+    #[case] expected: [Data; 4],
+    #[case] looked_up: &[(&str, Option<&str>, Option<&str>)],
+    #[case] (symbol, key): (&str, &str),
+) {
+    let id = instrument.id().to_string();
     let (mut client, connected, mut events) =
-        streaming(&lse, &stream, &[ESZ26], vec![esz26()]).await;
+        streaming_with(&config(&lse, &stream), vec![instrument]).await;
     connected.unwrap();
 
-    client.subscribe_quotes(quotes_of(&[ESZ26])).unwrap();
-    client.subscribe_trades(trades_of(&[ESZ26])).unwrap();
+    client.subscribe_quotes(quotes_of(&[&id])).unwrap();
+    client.subscribe_trades(trades_of(&[&id])).unwrap();
     let opening = next(&mut events).await;
     stream.release();
-    let live = [
+    let received = [
+        opening,
         next(&mut events).await,
         next(&mut events).await,
         next(&mut events).await,
     ];
 
-    assert_eq!(
-        opening,
-        es_quote(
-            ("7569.75", 2),
-            ("7570.00", 11),
-            1_794_272_217_707_781_000,
-            ts_init(&opening)
-        )
-    );
-    assert_eq!(
-        live,
-        [
-            es_quote(
-                ("7569.50", 18),
-                ("7570.00", 12),
-                1_794_272_218_208_093_000,
-                ts_init(&live[0])
-            ),
-            es_quote(
-                ("7569.50", 18),
-                ("7570.00", 12),
-                1_794_272_218_213_015_000,
-                ts_init(&live[1])
-            ),
-            Data::Trade(TradeTick::new(
-                InstrumentId::from(ESZ26),
-                Price::from("7570.00"),
-                Quantity::from(1),
-                AggressorSide::NoAggressor,
-                TradeId::new("556"),
-                UnixNanos::from(1_794_272_218_213_015_000),
-                ts_init(&live[2]),
-            )),
-        ]
-    );
-    let [lookup] = &lse.calls()[..] else {
-        panic!("{:?}", lse.calls())
-    };
-    assert_eq!(
-        (
-            lookup.path.as_str(),
-            lookup.param("symbol"),
-            lookup.api_key.as_deref()
-        ),
-        ("/v3/pairs", Some("ESZ6"), Some(CME_API_KEY))
-    );
+    assert_eq!(received.map(made_at_nought), expected);
+    let calls = lse.calls();
+    let lookups: Vec<_> = calls
+        .iter()
+        .map(|call| {
+            (
+                call.path.as_str(),
+                call.param("symbol"),
+                call.api_key.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(lookups, looked_up);
     assert_eq!(
         stream.received(),
         [(
             0,
-            json!({"op": "subscribe", "symbols": ["ESZ6"], "level": 1, "encoding": "dbn"})
+            json!({"op": "subscribe", "symbols": [symbol], "level": 1, "encoding": "dbn"})
         )]
     );
+    assert_eq!(stream.keys(), [Some(key.to_string())]);
 }
 
 /// Synthetic: LSE's documented session without its record 555. The gap
@@ -509,51 +581,6 @@ async fn a_delisted_contract_is_refused_for_streaming_naming_it() {
     assert_eq!(stream.received(), []);
 }
 
-/// LSE's sockets stream quotes alone.
-#[tokio::test]
-async fn the_trades_of_an_lsedge_series_are_refused_naming_it() {
-    let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6)]);
-    let stream = MockExchangeStream::cme(|_, _| sent(frames(CME_GCZ6_GCG7)));
-    let (mut client, connected, _) = streaming(&lse, &stream, &[GCZ26], vec![gcz26()]).await;
-    connected.unwrap();
-
-    let err = client
-        .subscribe_trades(trades_of(&["GOLD-FUTURES.LSEDGE"]))
-        .unwrap_err();
-
-    assert!(
-        format!("{err:#}").contains("GOLD-FUTURES.LSEDGE"),
-        "{err:#}"
-    );
-}
-
-#[tokio::test]
-async fn a_glbx_contract_streamed_with_no_cme_key_is_refused_naming_its_variable() {
-    let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
-    replace_data_event_sender(tx);
-    let config = LseDataClientConfig::builder()
-        .api_key(SecretString::from(API_KEY))
-        .stream_ids(ids(&[GCZ26]))
-        .build();
-    let factory = LseDataClientFactory::new();
-    let clock: Rc<RefCell<dyn Clock>> = Rc::new(RefCell::new(VirtualClock::new()));
-
-    let Err(e) = factory.create(
-        factory.name(),
-        &config,
-        Rc::new(RefCell::new(Cache::default())).into(),
-        clock,
-    ) else {
-        panic!("created a client streaming GCZ26 with no CME key")
-    };
-
-    let err = format!("{e:#}");
-    assert!(
-        err.contains(GCZ26) && err.contains("LSE_CME_API_KEY"),
-        "{err}"
-    );
-}
-
 /// The book depth of `of`, `depth` levels, as the data engine asks the
 /// client for it.
 fn depth_of(of: &[&str], depth: usize) -> SubscribeBookDepth {
@@ -616,21 +643,118 @@ fn level(order: &BookOrder, count: u32) -> (Price, Quantity, u32) {
     (order.price, order.size, count)
 }
 
-/// GCZ6 at Level 2 as LSE's documentation records it: its opening, its
-/// last ten levels a side, then the book after each of three changes,
-/// the best bid's size cut to 1, an order of 2 joining the best ask,
-/// and the ninth ask level removed, each a depth of ten levels, its
-/// counts of orders, stamped when LSE received the record and numbered
-/// by its sequence on the stream.
+/// A level of a depth as `level` gives it.
+type Level = (Price, Quantity, u32);
+
+/// Level 2 as LSE's documentation records it, of GCZ6 on its CME stream
+/// and of NVDA on its Nasdaq stream: the opening, the last ten levels a
+/// side, then the book after each of three changes, the best bid's size
+/// cut, an order joining the best ask, and the ninth ask level removed,
+/// each a depth of ten levels, its counts of orders, stamped when LSE
+/// received the record and numbered by its sequence on the stream. Each
+/// case gives the opening's tenth bid and ask, then each depth's
+/// sequence, stamp, best bid and ask, and count of asks.
+#[rstest]
+#[case::a_glbx_contract(
+    MockLse::start(vec![Reply::json(PAIRS_GCZ6)]),
+    by_level(|_| sent(dbn_frames(CME_GCZ6_L2_DOCUMENTED)), |_| Vec::new()),
+    gcz26_on_cme,
+    gcz26(),
+    (
+        (Price::from("3907.20"), Quantity::from(8), 6),
+        (Price::from("3909.20"), Quantity::from(7), 4),
+    ),
+    [
+        (
+            1001,
+            UnixNanos::from(1_794_493_800_000_471_000),
+            (Price::from("3908.10"), Quantity::from(2), 1),
+            (Price::from("3908.30"), Quantity::from(9), 4),
+            10,
+        ),
+        (
+            1002,
+            UnixNanos::from(1_794_493_800_001_706_000),
+            (Price::from("3908.10"), Quantity::from(1), 1),
+            (Price::from("3908.30"), Quantity::from(9), 4),
+            10,
+        ),
+        (
+            1003,
+            UnixNanos::from(1_794_493_800_001_707_000),
+            (Price::from("3908.10"), Quantity::from(1), 1),
+            (Price::from("3908.30"), Quantity::from(11), 5),
+            10,
+        ),
+        (
+            1004,
+            UnixNanos::from(1_794_493_800_999_131_000),
+            (Price::from("3908.10"), Quantity::from(1), 1),
+            (Price::from("3908.30"), Quantity::from(11), 5),
+            8,
+        ),
+    ],
+    "GCZ6",
+)]
+#[case::an_xnas_stock(
+    MockLse::start(vec![]),
+    nvda_by_level(),
+    nvda_on_nasdaq,
+    nvda(),
+    (
+        (Price::from("211.06"), Quantity::from(800), 6),
+        (Price::from("211.26"), Quantity::from(700), 4),
+    ),
+    [
+        (
+            1001,
+            on_the_12th("14:30:00.000471"),
+            (Price::from("211.15"), Quantity::from(200), 1),
+            (Price::from("211.17"), Quantity::from(900), 4),
+            10,
+        ),
+        (
+            1002,
+            on_the_12th("14:30:00.001706"),
+            (Price::from("211.15"), Quantity::from(100), 1),
+            (Price::from("211.17"), Quantity::from(900), 4),
+            10,
+        ),
+        (
+            1003,
+            on_the_12th("14:30:00.001707"),
+            (Price::from("211.15"), Quantity::from(100), 1),
+            (Price::from("211.17"), Quantity::from(1100), 5),
+            10,
+        ),
+        (
+            1004,
+            on_the_12th("14:30:00.999131"),
+            (Price::from("211.15"), Quantity::from(100), 1),
+            (Price::from("211.17"), Quantity::from(1100), 5),
+            8,
+        ),
+    ],
+    "NVDA",
+)]
 #[tokio::test]
-async fn a_level_2_subscription_delivers_the_contract_s_ten_levels_then_its_depths() {
-    let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6)]);
-    let stream = by_level(|_| sent(dbn_frames(CME_GCZ6_L2_DOCUMENTED)), |_| Vec::new());
+async fn a_level_2_subscription_delivers_the_instrument_s_ten_levels_then_its_depths(
+    #[case] lse: MockLse,
+    #[case] stream: MockExchangeStream,
+    #[case] config: Configured,
+    #[case] instrument: InstrumentAny,
+    #[case] tenth: (Level, Level),
+    #[case] expected: [(u64, UnixNanos, Level, Level, usize); 4],
+    #[case] symbol: &str,
+) {
+    let id = instrument.id();
     let (mut client, connected, mut events) =
-        streaming(&lse, &stream, &[GCZ26], vec![gcz26()]).await;
+        streaming_with(&config(&lse, &stream), vec![instrument]).await;
     connected.unwrap();
 
-    client.subscribe_book_depth(depth_of(&[GCZ26], 10)).unwrap();
+    client
+        .subscribe_book_depth(depth_of(&[&id.to_string()], 10))
+        .unwrap();
 
     let mut depths = Vec::new();
     for _ in 0..4 {
@@ -640,27 +764,22 @@ async fn a_level_2_subscription_delivers_the_contract_s_ten_levels_then_its_dept
         depths.push(depth);
     }
     let opening = &depths[0];
-    assert_eq!(opening.instrument_id, InstrumentId::from(GCZ26));
     assert_eq!(
         (
-            opening.ts_event,
-            opening.sequence,
-            level(&opening.bids[0], opening.bid_counts[0]),
-            level(&opening.asks[0], opening.ask_counts[0]),
             level(&opening.bids[9], opening.bid_counts[9]),
             level(&opening.asks[9], opening.ask_counts[9]),
         ),
-        (
-            UnixNanos::from(1_794_493_800_000_471_000),
-            1001,
-            (Price::from("3908.10"), Quantity::from(2), 1),
-            (Price::from("3908.30"), Quantity::from(9), 4),
-            (Price::from("3907.20"), Quantity::from(8), 6),
-            (Price::from("3909.20"), Quantity::from(7), 4),
-        )
+        tenth
     );
     assert_eq!(
-        depths[1..]
+        depths
+            .iter()
+            .map(|depth| depth.instrument_id)
+            .collect::<Vec<_>>(),
+        [id; 4]
+    );
+    assert_eq!(
+        depths
             .iter()
             .map(|depth| (
                 depth.sequence,
@@ -670,29 +789,7 @@ async fn a_level_2_subscription_delivers_the_contract_s_ten_levels_then_its_dept
                 depth.asks.iter().filter(|ask| ask.side.is_some()).count(),
             ))
             .collect::<Vec<_>>(),
-        [
-            (
-                1002,
-                UnixNanos::from(1_794_493_800_001_706_000),
-                (Price::from("3908.10"), Quantity::from(1), 1),
-                (Price::from("3908.30"), Quantity::from(9), 4),
-                10
-            ),
-            (
-                1003,
-                UnixNanos::from(1_794_493_800_001_707_000),
-                (Price::from("3908.10"), Quantity::from(1), 1),
-                (Price::from("3908.30"), Quantity::from(11), 5),
-                10
-            ),
-            (
-                1004,
-                UnixNanos::from(1_794_493_800_999_131_000),
-                (Price::from("3908.10"), Quantity::from(1), 1),
-                (Price::from("3908.30"), Quantity::from(11), 5),
-                8
-            ),
-        ]
+        expected
     );
     let subscriptions: Vec<Value> = stream
         .received()
@@ -702,28 +799,60 @@ async fn a_level_2_subscription_delivers_the_contract_s_ten_levels_then_its_dept
     assert_eq!(
         subscriptions,
         [
-            json!({"op": "subscribe", "symbols": ["GCZ6"], "level": 1, "encoding": "dbn"}),
-            json!({"op": "subscribe", "symbols": ["GCZ6"], "level": 2, "encoding": "dbn"}),
+            json!({"op": "subscribe", "symbols": [symbol], "level": 1, "encoding": "dbn"}),
+            json!({"op": "subscribe", "symbols": [symbol], "level": 2, "encoding": "dbn"}),
         ]
     );
 }
 
-/// GCZ6 at Level 3 as LSE's documentation records it: no opening book,
-/// so the deltas start at the first order event; each exchange message's
-/// events, up to the one LSE flags 128, its last, come as one batch
-/// ending `F_LAST`: the two orders added at one time, the change of one,
-/// then its removal, whose message LSE ends with an event of no action,
-/// which changes no order and gives no delta. Each is stamped when LSE
-/// received the record and numbered by its sequence on the stream.
+/// Level 3 as LSE's documentation records it, of GCZ6 on its CME stream
+/// and of NVDA on its Nasdaq stream: no opening book, so the deltas start
+/// at the first order event; each exchange message's events, up to the
+/// one LSE flags 128, its last, come as one batch ending `F_LAST`: a buy
+/// and a sell order added at one time, the change of the buy's size,
+/// then the sell's removal, whose message LSE ends with an event of no
+/// action, which changes no order and gives no delta. Each is stamped
+/// when LSE received the record and numbered by its sequence on the
+/// stream, the two sessions sharing their times and sequences. Each case
+/// gives the buy's order id, price, size and changed size, and the
+/// sell's order id, price and size.
+#[rstest]
+#[case::a_glbx_contract(
+    MockLse::start(vec![Reply::json(PAIRS_GCZ6)]),
+    by_level(|_| Vec::new(), |_| sent(dbn_frames(CME_GCZ6_L3_DOCUMENTED))),
+    gcz26_on_cme,
+    gcz26(),
+    (6_411_893_001, "3908.10", 1, 3),
+    (6_411_893_002, "3908.30", 2),
+    "GCZ6",
+)]
+#[case::an_xnas_stock(
+    MockLse::start(vec![]),
+    nvda_by_level(),
+    nvda_on_nasdaq,
+    nvda(),
+    (382_910_001, "211.15", 100, 300),
+    (382_910_002, "211.17", 200),
+    "NVDA",
+)]
 #[tokio::test]
-async fn a_level_3_subscription_delivers_order_book_deltas_from_the_first_live_record() {
-    let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6)]);
-    let stream = by_level(|_| Vec::new(), |_| sent(dbn_frames(CME_GCZ6_L3_DOCUMENTED)));
+async fn a_level_3_subscription_delivers_order_book_deltas_from_the_first_live_record(
+    #[case] lse: MockLse,
+    #[case] stream: MockExchangeStream,
+    #[case] config: Configured,
+    #[case] instrument: InstrumentAny,
+    #[case] (buy, buy_price, buy_size, changed_size): (u64, &str, u64, u64),
+    #[case] (sell, sell_price, sell_size): (u64, &str, u64),
+    #[case] symbol: &str,
+) {
+    let id = instrument.id();
     let (mut client, connected, mut events) =
-        streaming(&lse, &stream, &[GCZ26], vec![gcz26()]).await;
+        streaming_with(&config(&lse, &stream), vec![instrument]).await;
     connected.unwrap();
 
-    client.subscribe_book_deltas(deltas_of(GCZ26)).unwrap();
+    client
+        .subscribe_book_deltas(deltas_of(&id.to_string()))
+        .unwrap();
 
     let mut batches = Vec::new();
     for _ in 0..3 {
@@ -733,11 +862,11 @@ async fn a_level_3_subscription_delivers_order_book_deltas_from_the_first_live_r
         batches.push(deltas);
     }
     let last = RecordFlag::F_LAST as u8;
-    let delta = |action, side, id: u64, price: &str, size: u64, flags, sequence, ts: u64| {
+    let delta = |action, side, order_id, price, size, flags, sequence, ts: u64| {
         OrderBookDelta::new(
-            InstrumentId::from(GCZ26),
+            id,
             action,
-            BookOrder::new(side, Price::from(price), Quantity::from(size), id),
+            BookOrder::new(side, Price::from(price), Quantity::from(size), order_id),
             flags,
             sequence,
             UnixNanos::from(ts),
@@ -747,7 +876,7 @@ async fn a_level_3_subscription_delivers_order_book_deltas_from_the_first_live_r
     let received: Vec<Vec<OrderBookDelta>> = batches
         .iter()
         .map(|batch| {
-            assert_eq!(batch.instrument_id, InstrumentId::from(GCZ26));
+            assert_eq!(batch.instrument_id, id);
             batch
                 .deltas
                 .iter()
@@ -765,9 +894,9 @@ async fn a_level_3_subscription_delivers_order_book_deltas_from_the_first_live_r
                 delta(
                     BookAction::Add,
                     OrderSide::Buy,
-                    6_411_893_001,
-                    "3908.10",
-                    1,
+                    buy,
+                    buy_price,
+                    buy_size,
                     0,
                     7312,
                     1_794_493_800_000_471_000
@@ -775,9 +904,9 @@ async fn a_level_3_subscription_delivers_order_book_deltas_from_the_first_live_r
                 delta(
                     BookAction::Add,
                     OrderSide::Sell,
-                    6_411_893_002,
-                    "3908.30",
-                    2,
+                    sell,
+                    sell_price,
+                    sell_size,
                     last,
                     7313,
                     1_794_493_800_000_472_000
@@ -786,9 +915,9 @@ async fn a_level_3_subscription_delivers_order_book_deltas_from_the_first_live_r
             vec![delta(
                 BookAction::Update,
                 OrderSide::Buy,
-                6_411_893_001,
-                "3908.10",
-                3,
+                buy,
+                buy_price,
+                changed_size,
                 last,
                 7314,
                 1_794_493_800_001_706_000
@@ -796,18 +925,26 @@ async fn a_level_3_subscription_delivers_order_book_deltas_from_the_first_live_r
             vec![delta(
                 BookAction::Delete,
                 OrderSide::Sell,
-                6_411_893_002,
-                "3908.30",
-                2,
+                sell,
+                sell_price,
+                sell_size,
                 last,
                 7315,
                 1_794_493_800_027_391_000
             )],
         ]
     );
+    let subscriptions: Vec<Value> = stream
+        .received()
+        .into_iter()
+        .map(|(_, frame)| frame)
+        .collect();
     assert_eq!(
-        stream.received().last().unwrap().1,
-        json!({"op": "subscribe", "symbols": ["GCZ6"], "level": 3, "encoding": "dbn"})
+        subscriptions,
+        [
+            json!({"op": "subscribe", "symbols": [symbol], "level": 1, "encoding": "dbn"}),
+            json!({"op": "subscribe", "symbols": [symbol], "level": 3, "encoding": "dbn"}),
+        ]
     );
 }
 
@@ -834,19 +971,21 @@ async fn a_level_lse_refused_is_asked_again_by_a_later_subscription() {
     client.subscribe_book_depth(depth_of(&[GCZ26], 10)).unwrap();
     stream.wait_until(|received| received.len() == 2).await;
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while !stream
-        .received()
-        .iter()
-        .any(|(connection, _)| *connection == 2)
-    {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "LSE not asked again"
-        );
-        client.subscribe_book_depth(depth_of(&[GCZ26], 10)).unwrap();
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    wait_until_async(
+        || {
+            let asked_again = stream
+                .received()
+                .iter()
+                .any(|(connection, _)| *connection == 2);
+
+            if !asked_again {
+                client.subscribe_book_depth(depth_of(&[GCZ26], 10)).unwrap();
+            }
+            async move { asked_again }
+        },
+        Duration::from_secs(10),
+    )
+    .await;
 
     let Data::BookDepth(depth) = next(&mut events).await else {
         panic!("not a depth")
@@ -879,12 +1018,17 @@ async fn a_depth_of_other_than_ten_levels_is_refused_unasked() {
     assert_eq!(stream.received().len(), 1);
 }
 
-/// LSE's sockets stream a series' ticks alone, no book.
+/// LSE's sockets stream a series' ticks alone, no book: no Level 2 or 3
+/// connection opens. A connection opens after the call asking it, so
+/// GCG7's quotes, asked after the refusals, open a Level 1 connection
+/// the peer receives last, naming GCG7 alone, as GCZ6 is taken at no
+/// level: what it received by then is GCZ6's Level 1 subscription alone.
 #[tokio::test]
 async fn the_book_of_an_lsedge_series_is_refused_naming_it() {
-    let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6)]);
+    let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6), Reply::json(PAIRS_GCG7)]);
     let stream = by_level(|_| Vec::new(), |_| Vec::new());
-    let (mut client, connected, _) = streaming(&lse, &stream, &[GCZ26], vec![gcz26()]).await;
+    let (mut client, connected, _events) =
+        streaming(&lse, &stream, &[GCZ26], vec![gcz26(), gcg27()]).await;
     connected.unwrap();
 
     let depth = client
@@ -893,6 +1037,7 @@ async fn the_book_of_an_lsedge_series_is_refused_naming_it() {
     let deltas = client
         .subscribe_book_deltas(deltas_of("GOLD-FUTURES.LSEDGE"))
         .unwrap_err();
+    client.subscribe_quotes(quotes_of(&[GCG27])).unwrap();
 
     for err in [depth, deltas] {
         assert!(
@@ -900,6 +1045,20 @@ async fn the_book_of_an_lsedge_series_is_refused_naming_it() {
             "{err:#}"
         );
     }
+    let received = stream.wait_until(|received| received.len() == 2).await;
+    assert_eq!(
+        received,
+        [
+            (
+                0,
+                json!({"op": "subscribe", "symbols": ["GCZ6"], "level": 1, "encoding": "dbn"})
+            ),
+            (
+                1,
+                json!({"op": "subscribe", "symbols": ["GCG7"], "level": 1, "encoding": "dbn"})
+            ),
+        ]
+    );
 }
 
 /// The client with the Nasdaq key alone, its Nasdaq stream on `stream`
@@ -910,13 +1069,7 @@ async fn streaming_nvda(
     stream: &MockExchangeStream,
     key: &str,
 ) -> (Box<dyn DataClient>, anyhow::Result<()>, Events) {
-    let config = LseDataClientConfig::builder()
-        .nasdaq_api_key(SecretString::from(key))
-        .base_url_http(lse.url().to_string())
-        .base_url_ws_nasdaq(stream.url().to_string())
-        .stream_ids(ids(&[NVDA]))
-        .build();
-    streaming_with(&config, vec![nvda()]).await
+    streaming_with(&nasdaq_config(lse, stream, key), vec![nvda()]).await
 }
 
 /// LSE's Nasdaq stream answering each connection by its level: NVDA's
@@ -953,260 +1106,6 @@ fn nvda_quote(
     ))
 }
 
-/// NVDA at Level 1 on LSE's Nasdaq stream, as LSE's documentation
-/// records the stream's messages: its opening, bid 211.15 x 200, ask
-/// 211.17 x 900, comes with the quotes subscription; then a change of its
-/// best bid, and a trade of 100 at 211.17, of no aggressor side, its id
-/// the record's sequence, each stamped when LSE received the record. The
-/// stream takes NVDA by its ticker, with the Nasdaq key, LSE's
-/// catalogue asked nothing.
-#[tokio::test]
-async fn an_xnas_stock_receives_its_opening_best_bid_and_offer_then_its_quotes_and_trades() {
-    let lse = MockLse::start(vec![]);
-    let stream = MockExchangeStream::nasdaq(|_, _| held(dbn_frames(NASDAQ_NVDA_L1_DOCUMENTED), 4));
-    let (mut client, connected, mut events) = streaming_nvda(&lse, &stream, NASDAQ_API_KEY).await;
-    connected.unwrap();
-
-    client.subscribe_quotes(quotes_of(&[NVDA])).unwrap();
-    client.subscribe_trades(trades_of(&[NVDA])).unwrap();
-    let opening = next(&mut events).await;
-    stream.release();
-    let live = [
-        next(&mut events).await,
-        next(&mut events).await,
-        next(&mut events).await,
-    ];
-
-    assert_eq!(
-        opening,
-        nvda_quote(
-            ("211.15", 200),
-            ("211.17", 900),
-            "14:30:00.000471",
-            ts_init(&opening)
-        )
-    );
-    assert_eq!(
-        live,
-        [
-            nvda_quote(
-                ("211.15", 100),
-                ("211.17", 900),
-                "14:30:00.001706",
-                ts_init(&live[0])
-            ),
-            nvda_quote(
-                ("211.15", 100),
-                ("211.17", 800),
-                "14:30:00.001862",
-                ts_init(&live[1])
-            ),
-            Data::Trade(TradeTick::new(
-                InstrumentId::from(NVDA),
-                Price::from("211.17"),
-                Quantity::from(100),
-                AggressorSide::NoAggressor,
-                TradeId::new("503"),
-                on_the_12th("14:30:00.001862"),
-                ts_init(&live[2]),
-            )),
-        ]
-    );
-    assert_eq!(
-        stream.received(),
-        [(
-            0,
-            json!({"op": "subscribe", "symbols": ["NVDA"], "level": 1, "encoding": "dbn"})
-        )]
-    );
-    assert_eq!(stream.keys(), [Some(NASDAQ_API_KEY.to_string())]);
-    assert!(lse.calls().is_empty(), "{:?}", lse.calls());
-}
-
-/// NVDA at Level 2 on LSE's Nasdaq stream: its opening, its last ten
-/// levels a side, then the book after each of three changes, each a
-/// depth of ten levels with its counts of orders, numbered by its
-/// sequence on the stream.
-#[tokio::test]
-async fn an_xnas_stock_s_level_2_subscription_delivers_its_ten_levels_then_its_depths() {
-    let lse = MockLse::start(vec![]);
-    let stream = nvda_by_level();
-    let (mut client, connected, mut events) = streaming_nvda(&lse, &stream, NASDAQ_API_KEY).await;
-    connected.unwrap();
-
-    client.subscribe_book_depth(depth_of(&[NVDA], 10)).unwrap();
-
-    let mut depths = Vec::new();
-    for _ in 0..4 {
-        let Data::BookDepth(depth) = next(&mut events).await else {
-            panic!("not a depth")
-        };
-        depths.push(depth);
-    }
-    let opening = &depths[0];
-    assert_eq!(
-        (
-            opening.instrument_id,
-            level(&opening.bids[9], opening.bid_counts[9]),
-            level(&opening.asks[9], opening.ask_counts[9]),
-        ),
-        (
-            InstrumentId::from(NVDA),
-            (Price::from("211.06"), Quantity::from(800), 6),
-            (Price::from("211.26"), Quantity::from(700), 4),
-        )
-    );
-    assert_eq!(
-        depths
-            .iter()
-            .map(|depth| (
-                depth.sequence,
-                depth.ts_event,
-                level(&depth.bids[0], depth.bid_counts[0]),
-                level(&depth.asks[0], depth.ask_counts[0]),
-                depth.asks.iter().filter(|ask| ask.side.is_some()).count(),
-            ))
-            .collect::<Vec<_>>(),
-        [
-            (
-                1001,
-                on_the_12th("14:30:00.000471"),
-                (Price::from("211.15"), Quantity::from(200), 1),
-                (Price::from("211.17"), Quantity::from(900), 4),
-                10
-            ),
-            (
-                1002,
-                on_the_12th("14:30:00.001706"),
-                (Price::from("211.15"), Quantity::from(100), 1),
-                (Price::from("211.17"), Quantity::from(900), 4),
-                10
-            ),
-            (
-                1003,
-                on_the_12th("14:30:00.001707"),
-                (Price::from("211.15"), Quantity::from(100), 1),
-                (Price::from("211.17"), Quantity::from(1100), 5),
-                10
-            ),
-            (
-                1004,
-                on_the_12th("14:30:00.999131"),
-                (Price::from("211.15"), Quantity::from(100), 1),
-                (Price::from("211.17"), Quantity::from(1100), 5),
-                8
-            ),
-        ]
-    );
-    assert_eq!(
-        stream.received().last().unwrap().1,
-        json!({"op": "subscribe", "symbols": ["NVDA"], "level": 2, "encoding": "dbn"})
-    );
-}
-
-/// NVDA at Level 3 on LSE's Nasdaq stream: no opening book, so the
-/// deltas start at the first order event, each exchange message's
-/// events, up to the one LSE flags 128, one batch ending `F_LAST`: the
-/// two orders added at one time, the change of one, then the removal of
-/// the other, whose message ends with an event of no action.
-#[tokio::test]
-async fn an_xnas_stock_s_level_3_subscription_delivers_its_order_events_as_deltas() {
-    let lse = MockLse::start(vec![]);
-    let stream = nvda_by_level();
-    let (mut client, connected, mut events) = streaming_nvda(&lse, &stream, NASDAQ_API_KEY).await;
-    connected.unwrap();
-
-    client.subscribe_book_deltas(deltas_of(NVDA)).unwrap();
-
-    let mut batches = Vec::new();
-    for _ in 0..3 {
-        let Data::BookDeltas(deltas) = next(&mut events).await else {
-            panic!("not book deltas")
-        };
-        batches.push(deltas);
-    }
-    let received: Vec<Vec<_>> = batches
-        .iter()
-        .map(|batch| {
-            batch
-                .deltas
-                .iter()
-                .map(|delta| {
-                    (
-                        delta.instrument_id,
-                        delta.action,
-                        delta.order.side,
-                        delta.order.order_id,
-                        delta.order.price,
-                        delta.order.size,
-                        RecordFlag::F_LAST.matches(delta.flags),
-                        delta.sequence,
-                    )
-                })
-                .collect()
-        })
-        .collect();
-    let delta = |action, side, id: u64, price: &str, size: u64, last, sequence| {
-        (
-            InstrumentId::from(NVDA),
-            action,
-            Some(side),
-            id,
-            Price::from(price),
-            Quantity::from(size),
-            last,
-            sequence,
-        )
-    };
-    assert_eq!(
-        received,
-        [
-            vec![
-                delta(
-                    BookAction::Add,
-                    OrderSide::Buy,
-                    382_910_001,
-                    "211.15",
-                    100,
-                    false,
-                    7312
-                ),
-                delta(
-                    BookAction::Add,
-                    OrderSide::Sell,
-                    382_910_002,
-                    "211.17",
-                    200,
-                    true,
-                    7313
-                ),
-            ],
-            vec![delta(
-                BookAction::Update,
-                OrderSide::Buy,
-                382_910_001,
-                "211.15",
-                300,
-                true,
-                7314
-            )],
-            vec![delta(
-                BookAction::Delete,
-                OrderSide::Sell,
-                382_910_002,
-                "211.17",
-                200,
-                true,
-                7315
-            )],
-        ]
-    );
-    assert_eq!(
-        stream.received().last().unwrap().1,
-        json!({"op": "subscribe", "symbols": ["NVDA"], "level": 3, "encoding": "dbn"})
-    );
-}
-
 /// LSE's Nasdaq stream answers a key of no Nasdaq plan, the free key
 /// and the CME Group Lite+ key alike, with HTTP 401 (captured), which
 /// fails the connect.
@@ -1220,34 +1119,6 @@ async fn lse_s_refusal_of_a_key_of_no_nasdaq_plan_fails_the_connect() {
     let err = format!("{:#}", connected.unwrap_err());
     assert!(err.contains("401"), "{err}");
     assert!(stream.received().is_empty(), "{:?}", stream.received());
-}
-
-#[tokio::test]
-async fn an_xnas_stock_streamed_with_no_nasdaq_key_is_refused_naming_its_variable() {
-    let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
-    replace_data_event_sender(tx);
-    let config = LseDataClientConfig::builder()
-        .api_key(SecretString::from(API_KEY))
-        .cme_api_key(SecretString::from(CME_API_KEY))
-        .stream_ids(ids(&[NVDA]))
-        .build();
-    let factory = LseDataClientFactory::new();
-    let clock: Rc<RefCell<dyn Clock>> = Rc::new(RefCell::new(VirtualClock::new()));
-
-    let Err(e) = factory.create(
-        factory.name(),
-        &config,
-        Rc::new(RefCell::new(Cache::default())).into(),
-        clock,
-    ) else {
-        panic!("created a client streaming NVDA with no Nasdaq key")
-    };
-
-    let err = format!("{e:#}");
-    assert!(
-        err.contains(NVDA) && err.contains("LSE_NASDAQ_API_KEY"),
-        "{err}"
-    );
 }
 
 /// One client streaming a CME contract and a Nasdaq stock: each on its

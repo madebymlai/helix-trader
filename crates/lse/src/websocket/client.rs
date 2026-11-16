@@ -57,7 +57,7 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
 /// How often the keepalive goes: as LSE's Python client sends it, which
 /// keeps a connection open on every socket (LSE's WebSocket
 /// documentation, "The Python client").
-pub const KEEPALIVE_SECS: u64 = 25;
+const KEEPALIVE_SECS: u64 = 25;
 
 /// The close code LSE refuses a connection with (LSE's WebSocket
 /// documentation, "Error codes").
@@ -122,7 +122,7 @@ pub struct LseWebSocketClient {
 
 impl LseWebSocketClient {
     /// Connects to `socket` at `url` and authenticates with the key of
-    /// `credential`, sending the keepalive every `keepalive_secs`, and
+    /// `credential`, sending the keepalive every `KEEPALIVE_SECS`, and
     /// passing ticks, refusals and reconnects to `out`.
     ///
     /// # Errors
@@ -134,7 +134,6 @@ impl LseWebSocketClient {
         socket: LseSocket,
         url: &str,
         credential: &LseCredential,
-        keepalive_secs: u64,
         out: tokio::sync::mpsc::UnboundedSender<LseWsMessage>,
     ) -> anyhow::Result<Self> {
         let name = socket.name();
@@ -167,7 +166,7 @@ impl LseWebSocketClient {
         });
         let config = WebSocketConfig::builder()
             .url(url.to_owned())
-            .heartbeat_interval_secs(keepalive_secs)
+            .heartbeat_interval_secs(KEEPALIVE_SECS)
             .heartbeat_payload(LseWsAction::Ping.to_json())
             .reconnect_delay_initial_ms(RECONNECT_DELAY_INITIAL_MS)
             .reconnect_delay_max_ms(RECONNECT_DELAY_MAX_MS)

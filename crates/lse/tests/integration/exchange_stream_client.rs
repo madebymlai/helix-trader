@@ -17,8 +17,8 @@ use lse::{
         messages::{ExchangeLevel, ExchangeRecord},
     },
 };
-use nautilus_common::testing::wait_until_async;
 use nautilus_core::string::secret::SecretString;
+use rstest::rstest;
 use serde_json::{Value, json};
 
 type Out = tokio::sync::mpsc::UnboundedReceiver<ExchangeWsMessage>;
@@ -56,7 +56,12 @@ async fn connect_at(
 /// LSE's captured close of a subscription at a level the key's plan
 /// lacks, as a script's answer.
 fn level_required() -> Vec<StreamAction> {
-    let close: Value = serde_json::from_str(CME_LEVEL_REQUIRED).unwrap();
+    captured_close(CME_LEVEL_REQUIRED)
+}
+
+/// LSE's captured close `close`, as a script's answer.
+fn captured_close(close: &str) -> Vec<StreamAction> {
+    let close: Value = serde_json::from_str(close).unwrap();
     vec![StreamAction::Close(
         u16::try_from(close["code"].as_u64().unwrap()).unwrap(),
         close["reason"].as_str().unwrap().to_string(),
@@ -111,26 +116,68 @@ async fn the_key_goes_in_the_header_and_each_contract_opens_with_its_best_bid_an
     assert_eq!(peer.received(), [(0, subscription(&["GCG7", "GCZ6"]))]);
 }
 
-/// LSE's documented opening of ESZ6, then a change of its best bid and
-/// offer and a trade.
+/// Each level as LSE's documentation records it: at Level 1 ESZ6's
+/// opening, then a change of its best bid and offer and a trade; at
+/// Level 2 GCZ6's opening, its last ten levels, then three changes of its
+/// book; at Level 3 GCZ6's order events alone, its opening holding no
+/// record ("the stream carries order events and no opening book").
+#[rstest]
+#[case::level_1(
+    ExchangeLevel::Mbp1,
+    CME_ESZ6_DOCUMENTED,
+    "ESZ6",
+    1,
+    &[
+        ("ESZ6", 554, true, b'M'),
+        ("ESZ6", 555, false, b'M'),
+        ("ESZ6", 556, false, b'T'),
+    ],
+)]
+#[case::level_2(
+    ExchangeLevel::Mbp10,
+    CME_GCZ6_L2_DOCUMENTED,
+    "GCZ6",
+    2,
+    &[
+        ("GCZ6", 1001, true, b'M'),
+        ("GCZ6", 1002, false, b'M'),
+        ("GCZ6", 1003, false, b'A'),
+        ("GCZ6", 1004, false, b'C'),
+    ],
+)]
+#[case::level_3(
+    ExchangeLevel::Mbo,
+    CME_GCZ6_L3_DOCUMENTED,
+    "GCZ6",
+    3,
+    &[
+        ("GCZ6", 7312, false, b'A'),
+        ("GCZ6", 7313, false, b'A'),
+        ("GCZ6", 7314, false, b'M'),
+        ("GCZ6", 7315, false, b'C'),
+        ("GCZ6", 7316, false, b'N'),
+    ],
+)]
 #[tokio::test]
-async fn a_contract_s_live_records_follow_its_opening_in_sequence() {
-    let peer = MockExchangeStream::cme(|_, _| sent(dbn_frames(CME_ESZ6_DOCUMENTED)));
+async fn a_contract_s_live_records_follow_its_opening_in_sequence(
+    #[case] level: ExchangeLevel,
+    #[case] documented: &'static str,
+    #[case] contract: &str,
+    #[case] level_number: u8,
+    #[case] records: &[(&str, u64, bool, u8)],
+) {
+    let peer = MockExchangeStream::cme(move |_, _| sent(dbn_frames(documented)));
 
-    let (_client, mut out) = connect(&peer, &["ESZ6"]).await.unwrap();
+    let (_client, mut out) = connect_at(&peer, level, &[contract]).await.unwrap();
 
-    let passed = [
-        next(&mut out).await,
-        next(&mut out).await,
-        next(&mut out).await,
-    ];
+    let mut passed = Vec::new();
+    for _ in records {
+        passed.push(next(&mut out).await);
+    }
+    assert_eq!(passed.iter().map(record).collect::<Vec<_>>(), records);
     assert_eq!(
-        passed.iter().map(record).collect::<Vec<_>>(),
-        [
-            ("ESZ6", 554, true, b'M'),
-            ("ESZ6", 555, false, b'M'),
-            ("ESZ6", 556, false, b'T'),
-        ]
+        peer.received(),
+        [(0, subscription_at(level_number, &[contract]))]
     );
 }
 
@@ -158,23 +205,46 @@ async fn a_jump_of_a_contract_s_sequence_is_passed_on_as_a_gap() {
     assert_eq!(record(&next(&mut out).await), ("ESZ6", 556, false, b'T'));
 }
 
-/// LSE's close of a subscription naming NGZ6, which the stream does not
-/// carry, captured.
+/// LSE's captured closes of a subscription: at Level 1 naming NGZ6,
+/// which the stream does not carry, and at Level 2 or 3 on the CME Group
+/// Lite+ key, which holds Level 1 alone. Each fails the connect with the
+/// subscription's level, LSE's code and its reason.
+#[rstest]
+#[case::a_contract_the_stream_does_not_carry(
+    ExchangeLevel::Mbp1,
+    &["GCZ6", "NGZ6"],
+    CME_SYMBOL_UNAVAILABLE,
+    &["Level 1 subscription", "1008 symbol unavailable: NGZ6"],
+)]
+#[case::level_2_the_key_s_plan_lacks(
+    ExchangeLevel::Mbp10,
+    &["GCZ6"],
+    CME_LEVEL_REQUIRED,
+    &["Level 2 subscription", "1008 CME Levels 2 and 3 need CME Standard or above"],
+)]
+#[case::level_3_the_key_s_plan_lacks(
+    ExchangeLevel::Mbo,
+    &["GCZ6"],
+    CME_LEVEL_REQUIRED,
+    &["Level 3 subscription", "1008 CME Levels 2 and 3 need CME Standard or above"],
+)]
 #[tokio::test]
-async fn lse_s_refusal_of_the_subscription_fails_the_connect_with_its_code_and_reason() {
-    let close: Value = serde_json::from_str(CME_SYMBOL_UNAVAILABLE).unwrap();
-    let (code, reason) = (
-        u16::try_from(close["code"].as_u64().unwrap()).unwrap(),
-        close["reason"].as_str().unwrap().to_string(),
-    );
-    let peer = MockExchangeStream::cme(move |_, _| vec![StreamAction::Close(code, reason.clone())]);
+async fn lse_s_refusal_of_the_subscription_fails_the_connect_with_its_level_code_and_reason(
+    #[case] level: ExchangeLevel,
+    #[case] contracts: &[&str],
+    #[case] close: &'static str,
+    #[case] facts: &[&str],
+) {
+    let peer = MockExchangeStream::cme(move |_, _| captured_close(close));
 
-    let err = connect(&peer, &["GCZ6", "NGZ6"])
+    let err = connect_at(&peer, level, contracts)
         .await
         .unwrap_err()
         .to_string();
 
-    assert!(err.contains("1008 symbol unavailable: NGZ6"), "{err}");
+    for fact in facts {
+        assert!(err.contains(fact), "{fact}: {err}");
+    }
 }
 
 /// LSE answers a key that is no CME Group key with HTTP 401.
@@ -329,82 +399,6 @@ async fn a_dropped_connection_subscribes_again_and_passes_on_only_what_is_new() 
     );
 }
 
-/// GCZ6 at Level 2, as LSE's documentation records the level: its
-/// opening, its last ten levels, then three changes of its book.
-#[tokio::test]
-async fn a_level_2_contract_opens_with_its_ten_levels_then_streams_its_book_s_changes() {
-    let peer = MockExchangeStream::cme(|_, _| sent(dbn_frames(CME_GCZ6_L2_DOCUMENTED)));
-
-    let (_client, mut out) = connect_at(&peer, ExchangeLevel::Mbp10, &["GCZ6"])
-        .await
-        .unwrap();
-
-    let mut passed = Vec::new();
-    for _ in 0..4 {
-        passed.push(next(&mut out).await);
-    }
-    assert_eq!(
-        passed.iter().map(record).collect::<Vec<_>>(),
-        [
-            ("GCZ6", 1001, true, b'M'),
-            ("GCZ6", 1002, false, b'M'),
-            ("GCZ6", 1003, false, b'A'),
-            ("GCZ6", 1004, false, b'C'),
-        ]
-    );
-    assert_eq!(peer.received(), [(0, subscription_at(2, &["GCZ6"]))]);
-}
-
-/// GCZ6 at Level 3: its opening holds no record ("the stream carries
-/// order events and no opening book"), so its order events come first.
-#[tokio::test]
-async fn a_level_3_contract_opens_with_no_book_and_streams_its_order_events() {
-    let peer = MockExchangeStream::cme(|_, _| sent(dbn_frames(CME_GCZ6_L3_DOCUMENTED)));
-
-    let (_client, mut out) = connect_at(&peer, ExchangeLevel::Mbo, &["GCZ6"])
-        .await
-        .unwrap();
-
-    let mut passed = Vec::new();
-    for _ in 0..5 {
-        passed.push(next(&mut out).await);
-    }
-    assert_eq!(
-        passed.iter().map(record).collect::<Vec<_>>(),
-        [
-            ("GCZ6", 7312, false, b'A'),
-            ("GCZ6", 7313, false, b'A'),
-            ("GCZ6", 7314, false, b'M'),
-            ("GCZ6", 7315, false, b'C'),
-            ("GCZ6", 7316, false, b'N'),
-        ]
-    );
-    assert_eq!(peer.received(), [(0, subscription_at(3, &["GCZ6"]))]);
-}
-
-/// LSE's captured close of a Level 2 and of a Level 3 subscription on
-/// the CME Group Lite+ key, which holds Level 1 alone.
-#[rstest::rstest]
-#[case::level_2(ExchangeLevel::Mbp10)]
-#[case::level_3(ExchangeLevel::Mbo)]
-#[tokio::test]
-async fn lse_s_refusal_of_a_level_the_key_s_plan_lacks_fails_the_connect_with_its_reason(
-    #[case] level: ExchangeLevel,
-) {
-    let peer = MockExchangeStream::cme(|_, _| level_required());
-
-    let err = connect_at(&peer, level, &["GCZ6"])
-        .await
-        .unwrap_err()
-        .to_string();
-
-    assert!(
-        err.contains(&format!("{level} subscription"))
-            && err.contains("1008 CME Levels 2 and 3 need CME Standard or above"),
-        "{err}"
-    );
-}
-
 /// Started with no contract, the client connects with its first
 /// subscription; another made before the connection opened joins it.
 #[tokio::test]
@@ -432,11 +426,12 @@ async fn a_client_started_with_no_contract_connects_with_those_subscribed_by_the
 }
 
 /// A client started on its own learns LSE's refusal from its opening,
-/// and stops: a later subscription fails, the connection being closed.
+/// and stops, letting go of what it passes on, having passed on nothing:
+/// a later subscription fails, the connection being closed.
 #[tokio::test]
 async fn a_client_whose_first_subscription_lse_refuses_stops() {
     let peer = MockExchangeStream::cme(|_, _| level_required());
-    let (out_tx, _out) = tokio::sync::mpsc::unbounded_channel();
+    let (out_tx, mut out) = tokio::sync::mpsc::unbounded_channel();
     let (client, opening) = ExchangeStreamClient::start(
         LseExchange::Cme,
         peer.url(),
@@ -453,14 +448,10 @@ async fn a_client_whose_first_subscription_lse_refuses_stops() {
         refused.contains("1008 CME Levels 2 and 3 need CME Standard or above"),
         "{refused}"
     );
-    wait_until_async(
-        || {
-            let closed = client.is_closed();
-            async move { closed }
-        },
-        std::time::Duration::from_secs(10),
-    )
-    .await;
+    let passed = tokio::time::timeout(std::time::Duration::from_secs(10), out.recv())
+        .await
+        .expect("the client did not stop within 10 s");
+    assert!(passed.is_none(), "{passed:?}");
     assert!(client.subscriber().subscribe("GCZ6", false).is_err());
 }
 
