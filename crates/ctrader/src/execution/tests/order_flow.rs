@@ -1,5 +1,5 @@
 //! The order flow of `CTraderExecutionClient` against the mock peer, on the
-//! trade events captured on the demo (`testdata/execution_*`,
+//! trade events captured on the demo (`test_data/execution_*`,
 //! `order_error_*`): the peer answers each trade request with them, as the
 //! demo answered the same request, mutated where a test says so. The
 //! node's side is played here: orders go into the cache before they are

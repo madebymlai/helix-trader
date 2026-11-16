@@ -168,7 +168,7 @@ mod tests {
         ));
     }
 
-    /// The refusals the demo answered (`testdata/order_error_*`), and the
+    /// The refusals the demo answered (`test_data/order_error_*`), and the
     /// deal timeout Spotware documents as "rejected".
     #[rstest]
     fn a_refusal_ctrader_explains_is_a_venue_rejection() {

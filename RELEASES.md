@@ -31,6 +31,7 @@ Released on TBD (UTC).
 - Changed every test to `#[rstest]`, as Nautilus writes its tests
 - Changed the crates to share one version, in `[workspace.package]`
 - Changed the pull request checklist to run the hooks against `develop`, as CI does, so the checks of changed lines read the branch's changes
+- Renamed the cTrader, Databento and OKX fixture folders `testdata/` to `test_data/`, as Nautilus and the LSE crate name them
 
 ### Documentation Updates
 

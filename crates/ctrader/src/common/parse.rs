@@ -317,7 +317,7 @@ mod tests {
         assert!(err.contains("EUR/USD.IDEALPRO"), "{err}");
     }
 
-    /// The captured symbols, assets and details (see `testdata/`).
+    /// The captured symbols, assets and details (see `test_data/`).
     struct Fixtures {
         light: HashMap<String, ProtoOaLightSymbol>,
         details: HashMap<i64, ProtoOaSymbol>,
