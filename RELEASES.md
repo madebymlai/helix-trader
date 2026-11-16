@@ -5,6 +5,7 @@ Released on TBD (UTC).
 ### Breaking Changes
 
 - Changed `ModelHandle::new` to take `&ModelBlueprint` and `&Mode`; pass references
+- Removed `venues::bracket_exits_tag`: IB links a bracket's exits in its own OCA group, so they carry Nautilus' tags alone; drop its calls
 
 ### Fixes
 

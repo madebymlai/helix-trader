@@ -3,8 +3,7 @@
 //! and history for `fill_catalog`, which asks for series of any data type:
 //! IB serves its own time bars, its quotes and its trades (see `serves`,
 //! `IbHistory::data`), and the live node's clients (see `live`), whose
-//! data client streams its quotes, trades and time bars (`streams`), and the
-//! tag linking a bracket's exits in an OCA group (`bracket_exits_tag`); the
+//! data client streams its quotes, trades and time bars (`streams`); the
 //! client id each command connects with, and live's account, are its flags
 //! (`IbHistoryArgs`, `live::IbLiveArgs`). See `README.md`.
 //!
@@ -39,7 +38,6 @@ use ibapi::{
         IgnoreSize, TradingHours,
         historical::{TickBidAsk, TickDecoder, TickLast, TickSubscription},
     },
-    orders::OcaType,
     prelude::StreamExt,
     subscriptions::SubscriptionItem,
 };
@@ -66,11 +64,10 @@ use nautilus_interactive_brokers::{
 use nautilus_model::{
     data::{Bar, BarSpecification, BarType, Data, NautilusDataType},
     enums::{BarAggregation, PriceType},
-    identifiers::{ClientOrderId, InstrumentId},
+    identifiers::InstrumentId,
     instruments::{Instrument, InstrumentAny},
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
-use ustr::Ustr;
 
 use crate::{
     catalog::{fill_slices, resumed},
@@ -85,31 +82,6 @@ pub(in crate::venues) use live::BOOK;
 #[cfg(test)]
 pub(in crate::venues) use live::offline_clients;
 pub(crate) use live::{IbLiveArgs, clients, streams};
-
-/// The tag linking a bracket's exits in one IB OCA group named `entry`,
-/// its entry's client order id, in the form Nautilus' IB adapter reads
-/// (`IBOrderTags:` and a JSON object of `ibapi` order fields:
-/// `docs/integrations/interactive_brokers.md`, "Commands and order
-/// attributes"; `execution/transform/tags.rs`), which sends a list's
-/// exits in no group of its own (`transform.rs`,
-/// `test_order_list_id_does_not_set_oca_group`). IB then acts on a fill of
-/// one exit itself, the node up or not.
-///
-/// The group's type is IB's 2, reduce with block: a fill of one exit
-/// reduces the other by it, cancelling it once nothing is left, as
-/// Nautilus' one-updates-the-other bracket exits do, and the adapter
-/// reads the group back as one (`execution/parse.rs`,
-/// `link_order_contingencies`); with block, IB routes one exit at a time,
-/// so both cannot fill, which reducing without block (3) allows. The name
-/// is unique to the bracket, as IB takes a name once used for no other
-/// group, and stays on the exits' tags in the cache across restarts.
-pub(crate) fn bracket_exits_tag(entry: ClientOrderId) -> Ustr {
-    let fields = serde_json::json!({
-        "ocaGroup": entry.as_str(),
-        "ocaType": i32::from(OcaType::ReduceWithBlock),
-    });
-    Ustr::from(&format!("IBOrderTags:{fields}"))
-}
 
 /// IB's settings of a catalog fill, fill-catalog's flags: the client id its
 /// history connects with (see `IbHistory::connect`).
