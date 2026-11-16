@@ -30,6 +30,7 @@ Released on TBD (UTC).
 - Added actionlint and yamlfmt to the hooks
 - Changed every test to `#[rstest]`, as Nautilus writes its tests
 - Changed the crates to share one version, in `[workspace.package]`
+- Changed the pull request checklist to run the hooks against `develop`, as CI does, so the checks of changed lines read the branch's changes
 
 ### Documentation Updates
 
