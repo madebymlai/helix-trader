@@ -8,9 +8,8 @@
 //! which the adapter reads from the environment; the Docker socket from
 //! `DOCKER_HOST`, else the local default.
 
-use std::{fmt, str::FromStr};
+use std::{fmt::Display, str::FromStr};
 
-use anyhow::ensure;
 use nautilus_interactive_brokers::{
     config::{DockerizedIBGatewayConfig, TradingMode},
     gateway::DockerizedIBGateway,
@@ -39,7 +38,7 @@ impl FromStr for IbAccount {
     /// Takes the bare id: the execution factory prefixes it with the client
     /// name, and orders carry what follows the first `-`.
     fn from_str(s: &str) -> anyhow::Result<Self> {
-        ensure!(
+        anyhow::ensure!(
             !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric()),
             "{s:?} is not an IB account id like DU1234567"
         );
@@ -47,8 +46,8 @@ impl FromStr for IbAccount {
     }
 }
 
-impl fmt::Display for IbAccount {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for IbAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
 }
@@ -66,7 +65,7 @@ impl IbGateway {
     ///
     /// # Errors
     ///
-    /// See `start`.
+    /// Returns an error if `start` fails.
     pub(super) async fn of_account(account: &IbAccount, client_id: i32) -> anyhow::Result<Self> {
         Self::start(account.trading_mode(), client_id).await
     }
@@ -75,7 +74,7 @@ impl IbGateway {
     ///
     /// # Errors
     ///
-    /// See `start`.
+    /// Returns an error if `start` fails.
     pub(super) async fn paper(client_id: i32) -> anyhow::Result<Self> {
         Self::start(TradingMode::Paper, client_id).await
     }
@@ -125,9 +124,11 @@ fn gateway_config(trading_mode: TradingMode) -> DockerizedIBGatewayConfig {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
-    #[test]
+    #[rstest]
     fn a_d_account_is_paper_and_any_other_live() {
         let mode = |account: &str| account.parse::<IbAccount>().unwrap().trading_mode();
         assert_eq!(mode("DU1234567"), TradingMode::Paper);
@@ -135,7 +136,7 @@ mod tests {
         assert_eq!(mode("U1234567"), TradingMode::Live);
     }
 
-    #[test]
+    #[rstest]
     fn rejects_a_malformed_account() {
         for account in ["", "IB-DU1234567", "DU 123"] {
             assert!(account.parse::<IbAccount>().is_err(), "{account:?}");
@@ -145,7 +146,7 @@ mod tests {
     /// The port is the adapter's, by trading mode (its own tests cover
     /// it): building its gateway needs a Docker socket, so this checks the
     /// mode the config of each account asks for.
-    #[test]
+    #[rstest]
     fn the_container_of_an_account_has_its_trading_mode() {
         let mode = |account: &str| {
             let account: IbAccount = account.parse().unwrap();
@@ -155,7 +156,7 @@ mod tests {
         assert_eq!(mode("U1234567"), TradingMode::Live);
     }
 
-    #[test]
+    #[rstest]
     fn every_container_accepts_orders() {
         assert!(!gateway_config(TradingMode::Paper).read_only_api);
         assert!(!gateway_config(TradingMode::Live).read_only_api);

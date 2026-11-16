@@ -4,9 +4,11 @@
 //! with a commission of 3 EUR per order, a run that loses. One node per
 //! thread, so one run per test.
 
+use rstest::rstest;
+
 use crate::common::wave;
 
-#[test]
+#[rstest]
 fn the_result_holds_the_max_drawdown_of_its_returns() {
     let catalog = wave::catalog();
     let result = wave::backtest(catalog.path(), "3 EUR")

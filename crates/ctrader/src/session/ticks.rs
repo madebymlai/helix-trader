@@ -6,7 +6,7 @@
 //! (`hasMore`). A tick carries a time and a price, no size. Quotes are
 //! made by merging the two series (see `merge`).
 
-use anyhow::{Context, ensure};
+use anyhow::Context;
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::QuoteTick,
@@ -54,7 +54,7 @@ pub(super) fn decode(tick_data: &[ProtoOaTickData]) -> anyhow::Result<Vec<Tick>>
                 price: data.tick,
             },
             Some(newer) => {
-                ensure!(
+                anyhow::ensure!(
                     data.timestamp <= 0,
                     "cTrader's ticks are not newest first: a tick {} ms after the one before",
                     data.timestamp
@@ -362,7 +362,7 @@ fn quote_size(instrument: &InstrumentAny) -> anyhow::Result<Quantity> {
 /// The price of `tick` at `precision`.
 fn price(tick: i64, precision: u8) -> anyhow::Result<Price> {
     let value = Decimal::new(tick, PRICE_SCALE);
-    ensure!(
+    anyhow::ensure!(
         value.normalize().scale() <= u32::from(precision),
         "cTrader price {value} is finer than the instrument's {precision} decimals"
     );
@@ -372,6 +372,7 @@ fn price(tick: i64, precision: u8) -> anyhow::Result<Price> {
 #[cfg(test)]
 mod tests {
     use prost::Message as _;
+    use rstest::rstest;
 
     use super::*;
     use crate::{
@@ -393,7 +394,7 @@ mod tests {
         pages.ticks
     }
 
-    #[test]
+    #[rstest]
     fn a_captured_response_decodes_newest_first_from_its_differences() {
         let res = ProtoOaGetTickDataRes::decode(TICK_DATA_BID_RES).unwrap();
 
@@ -409,7 +410,7 @@ mod tests {
     }
 
     /// Synthetic: a difference forward in time.
-    #[test]
+    #[rstest]
     fn a_tick_newer_than_the_one_before_is_refused() {
         let data = |timestamp, tick| ProtoOaTickData { timestamp, tick };
 
@@ -578,7 +579,7 @@ mod tests {
         (ms, bid.to_owned(), ask.to_owned())
     }
 
-    #[test]
+    #[rstest]
     fn a_quote_per_tick_time_with_the_other_side_carried_and_none_before_both_sides() {
         let bid = side(
             None,
@@ -599,7 +600,7 @@ mod tests {
         assert_eq!(merged.one_sided, 1);
     }
 
-    #[test]
+    #[rstest]
     fn the_ticks_before_the_window_seed_both_sides() {
         let bid = side(Some(tick(-5, 116_000)), &[tick(1, 116_010)]);
         let ask = side(Some(tick(-9, 116_020)), &[tick(2, 116_030)]);
@@ -616,7 +617,7 @@ mod tests {
         assert_eq!(merged.one_sided, 0);
     }
 
-    #[test]
+    #[rstest]
     fn quotes_start_where_both_sides_ticks_do_the_side_reaching_further_seeding() {
         let bid = side(
             Some(tick(-5, 116_000)),
@@ -641,7 +642,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn ticks_of_one_millisecond_make_one_quote_the_last_of_each_side_winning() {
         let bid = side(None, &[tick(1, 116_000), tick(1, 116_005)]);
         let ask = side(
@@ -660,7 +661,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_crossed_quote_is_dropped_and_counted_a_locked_one_kept() {
         let bid = side(
             None,
@@ -680,7 +681,7 @@ mod tests {
         assert_eq!(merged.crossed, 1);
     }
 
-    #[test]
+    #[rstest]
     fn quotes_are_stamped_at_their_millisecond_with_a_size_of_100000() {
         let bid = side(None, &[tick(1_792_591_200_040, 116_000)]);
         let ask = side(None, &[tick(1_792_591_200_040, 116_010)]);
@@ -697,7 +698,7 @@ mod tests {
         assert_eq!(q.ask_size, Quantity::from(100_000));
     }
 
-    #[test]
+    #[rstest]
     fn the_size_is_the_maximum_order_where_that_is_smaller() {
         let bid = side(None, &[tick(1, 116_000)]);
         let ask = side(None, &[tick(1, 116_010)]);
@@ -711,7 +712,7 @@ mod tests {
         assert_eq!(merged.quotes[0].ask_size, Quantity::from(10_000));
     }
 
-    #[test]
+    #[rstest]
     fn a_captured_bid_and_ask_merge_into_gold_quotes() {
         let side_of = |bytes| {
             let res = ProtoOaGetTickDataRes::decode(bytes).unwrap();
@@ -742,7 +743,7 @@ mod tests {
     }
 
     /// Synthetic: a price finer than the instrument's precision.
-    #[test]
+    #[rstest]
     fn a_price_off_the_instruments_precision_is_refused() {
         let bid = side(None, &[tick(1, 116_000)]);
         let ask = side(None, &[tick(1, 116_011)]);

@@ -61,10 +61,10 @@
 //! stream's sequence of its record instead, one of its contract's and
 //! level's alone. A gap of a contract's sequence is logged and left.
 
-use std::{fmt, sync::Arc};
+use std::{fmt::Display, sync::Arc};
 
 use ahash::AHashMap;
-use anyhow::{Context, bail};
+use anyhow::Context;
 use dbn::{MboMsg, Mbp1Msg, Mbp10Msg};
 use jiff::{Timestamp, tz::TimeZone};
 use nautilus_common::{
@@ -192,14 +192,14 @@ impl ExchangeInstrument {
     ///
     /// # Errors
     ///
-    /// Returns an error naming `id` if it is neither a `GLBX` contract nor
-    /// an `XNAS` stock (see `LseInstrument::from_instrument_id`).
+    /// Returns an error if `id`, which it names, is neither a `GLBX`
+    /// contract nor an `XNAS` stock (see `LseInstrument::from_instrument_id`).
     fn of(id: InstrumentId, reference_year: i16) -> anyhow::Result<Self> {
         match LseInstrument::from_instrument_id(id, reference_year)? {
             LseInstrument::Cme(contract) => Ok(Self::Cme(contract)),
             LseInstrument::Nasdaq(stock) => Ok(Self::Nasdaq(stock)),
             LseInstrument::Series(_) | LseInstrument::Opra(_) => {
-                bail!("{id} streams on no exchange stream of LSE's, of GLBX and XNAS")
+                anyhow::bail!("{id} streams on no exchange stream of LSE's, of GLBX and XNAS")
             }
         }
     }
@@ -227,17 +227,18 @@ impl ExchangeInstrument {
     ///
     /// # Errors
     ///
-    /// Returns an error naming a CME contract whose listing LSE delisted:
-    /// its symbol names a contract every ten years, so the stream would
-    /// carry the later one's records under its id (`ESZ16.GLBX`, delisted
-    /// in 2016, is `ESZ6`, which names 2026's contract). Or as
-    /// `CmeListings::listing`.
+    /// Returns an error if:
+    /// - LSE delisted a CME contract's listing, naming the contract: its
+    ///   symbol names a contract every ten years, so the stream would carry
+    ///   the later one's records under its id (`ESZ16.GLBX`, delisted in
+    ///   2016, is `ESZ6`, which names 2026's contract).
+    /// - `CmeListings::listing` fails.
     async fn name(&self, listings: &CmeListings, http: &LseHttpClient) -> anyhow::Result<String> {
         match self {
             Self::Cme(contract) => {
                 let listing = listings.listing(http, contract).await?;
                 if listing.delisted_date.is_some() {
-                    bail!(
+                    anyhow::bail!(
                         "{contract} is LSE's listing {listing}, delisted: LSE's CME stream takes \
                          a contract by its listing's symbol, {}, which names a contract every ten \
                          years, so it would stream a later contract's records as {contract}'s; \
@@ -252,11 +253,11 @@ impl ExchangeInstrument {
     }
 }
 
-impl fmt::Display for ExchangeInstrument {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for ExchangeInstrument {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Cme(contract) => fmt::Display::fmt(contract, f),
-            Self::Nasdaq(stock) => fmt::Display::fmt(stock, f),
+            Self::Cme(contract) => Display::fmt(contract, f),
+            Self::Nasdaq(stock) => Display::fmt(stock, f),
         }
     }
 }
@@ -294,8 +295,8 @@ impl ExchangeStreams {
     ///
     /// # Errors
     ///
-    /// Returns an error naming the variable of the plan's key and the
-    /// contracts if any is streamed with no such key.
+    /// Returns an error if any contract is streamed with no key of the
+    /// plan, naming the variable of the key and the contracts.
     pub(super) fn new(
         exchange: LseExchange,
         streamed: Vec<ExchangeInstrument>,
@@ -307,7 +308,7 @@ impl ExchangeStreams {
     ) -> anyhow::Result<Self> {
         if access.is_none() && !streamed.is_empty() {
             let product = exchange.product();
-            bail!(
+            anyhow::bail!(
                 "streaming {} needs a {product} key: set {}, or give the config's",
                 streamed
                     .iter()
@@ -429,7 +430,7 @@ impl ExchangeStreams {
     ///
     /// # Errors
     ///
-    /// Returns an error naming the exchange if the client has no such key.
+    /// Returns an error if the client has no such key, naming the exchange.
     fn access(&self) -> anyhow::Result<&ExchangeAccess> {
         self.access.as_ref().with_context(|| {
             format!(
@@ -554,10 +555,13 @@ impl ExchangeStreams {
     ///
     /// # Errors
     ///
-    /// Returns an error naming it if the stream is not open, if it is no
-    /// contract of an exchange stream, or if `cache` has no definition of
-    /// it: LSE publishes none, and its prices are read at the definition's
-    /// precision.
+    /// Returns an error if:
+    /// - The stream is not open.
+    /// - `id` is no contract of an exchange stream.
+    /// - `cache` has no definition of `id`: LSE publishes none, and its
+    ///   prices are read at the definition's precision.
+    ///
+    /// Each names `id`.
     pub(super) fn subscribe(
         &mut self,
         id: InstrumentId,
@@ -566,7 +570,7 @@ impl ExchangeStreams {
     ) -> anyhow::Result<()> {
         // `open` opens Level 1 for the contracts the config streams.
         if !self.clients.contains_key(&ExchangeLevel::Mbp1) {
-            bail!(
+            anyhow::bail!(
                 "{id} is not streamed: LSE's {} stream opens only for the contracts of its \
                  venue the LSE client's config streams (its stream_ids)",
                 self.exchange
@@ -617,7 +621,7 @@ impl ExchangeStreams {
     ///
     /// # Errors
     ///
-    /// Returns an error naming it if it is not subscribed.
+    /// Returns an error if `id`, which it names, is not subscribed.
     pub(super) fn unsubscribe(&self, id: InstrumentId, kind: StreamKind) -> anyhow::Result<()> {
         let symbol = self
             .names

@@ -105,7 +105,7 @@ jobs:
       # Fails when nautilus_engineering changed a file helix vendors: run
       # the same update from a checkout of it, then the renderer, and commit
       - name: Check the vendored files are current
-        run: |
+        run: |-
           git clone --quiet --depth 1 \
             https://github.com/nautechsystems/nautilus_engineering "$RUNNER_TEMP/nautilus_engineering"
           bash "$RUNNER_TEMP/nautilus_engineering/sync/sync.bash" update --consumer "$GITHUB_WORKSPACE"

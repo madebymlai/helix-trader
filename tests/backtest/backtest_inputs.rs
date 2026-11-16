@@ -2,9 +2,11 @@
 //! catalog could serve the run. No test here builds a node, so several
 //! share the file.
 
+use rstest::rstest;
+
 use crate::common::trades;
 
-#[test]
+#[rstest]
 fn a_start_on_or_after_the_end_is_refused() {
     let levels = trades::TIME_EXIT;
     let catalog = trades::catalog(&levels);

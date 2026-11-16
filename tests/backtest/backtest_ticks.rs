@@ -19,6 +19,7 @@ use nautilus_trading::{
     nautilus_strategy,
     strategy::{StrategyConfig, StrategyCore},
 };
+use rstest::rstest;
 
 use crate::common::{glbx, ic};
 
@@ -133,7 +134,7 @@ fn at(time: &str) -> UnixNanos {
     ic::at(time).into()
 }
 
-#[test]
+#[rstest]
 fn a_strategy_declaring_ticks_and_no_bar_types_gets_the_declared_ticks_of_the_run() {
     let catalog = catalog();
 
@@ -166,7 +167,7 @@ fn a_strategy_declaring_ticks_and_no_bar_types_gets_the_declared_ticks_of_the_ru
     assert_eq!(got.len(), 360 + 2 + 3);
 }
 
-#[test]
+#[rstest]
 fn a_series_the_catalog_stores_but_the_strategy_does_not_declare_is_not_replayed() {
     let catalog = catalog();
 

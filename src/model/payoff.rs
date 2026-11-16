@@ -41,10 +41,12 @@ pub fn pick<T>(sides: impl IntoIterator<Item = (T, R, R)>) -> Option<T> {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
     use crate::model::targets::Side;
 
-    #[test]
+    #[rstest]
     fn a_side_trades_from_its_margin() {
         assert_eq!(
             pick([(Side::Short, R::new(1.0), R::new(1.0))]),
@@ -53,7 +55,7 @@ mod tests {
         assert_eq!(pick([(Side::Short, R::new(0.99), R::new(1.0))]), None);
     }
 
-    #[test]
+    #[rstest]
     fn of_two_sides_clearing_their_margins_the_larger_trades() {
         assert_eq!(
             pick([
@@ -71,7 +73,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn two_sides_tied_trade_neither() {
         assert_eq!(
             pick([
@@ -82,7 +84,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn no_side_trades_nothing() {
         assert_eq!(pick::<Side>([]), None);
     }

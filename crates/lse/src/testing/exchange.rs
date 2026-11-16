@@ -115,7 +115,7 @@ pub enum StreamFrame {
 ///
 /// # Panics
 ///
-/// Panics on a line that is neither.
+/// Panics if a line is neither.
 #[must_use]
 pub fn frames(captured: &str) -> Vec<StreamFrame> {
     captured
@@ -144,8 +144,8 @@ pub fn frames(captured: &str) -> Vec<StreamFrame> {
 ///
 /// # Panics
 ///
-/// Panics on a message that is not JSON, or a record `dbn_frame` cannot
-/// write.
+/// Panics if a message is not JSON, or if `dbn_frame` cannot write a
+/// record.
 #[must_use]
 pub fn dbn_frames(json_encoded: &str) -> Vec<StreamFrame> {
     json_encoded

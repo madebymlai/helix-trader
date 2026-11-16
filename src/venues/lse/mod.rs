@@ -185,6 +185,7 @@ mod tests {
         instruments::{IndexInstrument, InstrumentAny},
         types::{Currency, Price, Quantity},
     };
+    use rstest::rstest;
 
     use super::*;
     use crate::{
@@ -330,7 +331,7 @@ mod tests {
     }
 
     /// The captured second, as pyarrow reads LSE's file.
-    #[test]
+    #[rstest]
     fn the_trades_lse_exports_are_written_back_to_the_catalog() {
         let dir = tempfile::tempdir().unwrap();
         let lse = MockLse::start(vec![Reply::file(GOLD_TRADES)]);
@@ -375,7 +376,7 @@ mod tests {
     /// The captured five minutes of gold spot, candles LSE stamps at 10:00
     /// to 10:04, their open, as pyarrow reads them; the bars closing over
     /// `[10:01, 10:05]`.
-    #[test]
+    #[rstest]
     fn lse_s_candles_are_written_back_to_the_catalog_as_bars_stamped_at_their_close() {
         let dir = tempfile::tempdir().unwrap();
         let lse = MockLse::start(vec![Reply::file(GOLD_SPOT_MINUTES)]);
@@ -470,7 +471,7 @@ mod tests {
     /// count, the first and last times, the total size and the lowest and
     /// highest prices. LSE is asked the slice of its market and symbol.
     /// Futures' are `the_trades_lse_exports_are_written_back_to_the_catalog`'s.
-    #[test]
+    #[rstest]
     fn the_trades_of_a_series_of_each_derived_market_fill_under_its_lsedge_id() {
         struct Case {
             id: &'static str,
@@ -604,7 +605,7 @@ mod tests {
     /// them stamped at their close. LSE stores no trades of forex, and an
     /// index has none. Commodities' bars are gold spot's
     /// (`lse_s_candles_are_written_back_to_the_catalog_as_bars_stamped_at_their_close`).
-    #[test]
+    #[rstest]
     fn the_bars_of_a_forex_pair_and_an_index_fill_under_their_lsedge_ids() {
         /// A bar's close, then its open, high, low and last prices.
         type Row = (&'static str, [&'static str; 4]);
@@ -711,7 +712,7 @@ mod tests {
     /// `LSEDGE` id, as pyarrow reads LSE's file: each a quote whose bid and
     /// ask are the value, with no sizes, as data-ws sends an index's ticks.
     /// LSE is asked the index's tick slice.
-    #[test]
+    #[rstest]
     fn an_index_s_quotes_fill_from_its_tick_slice_under_its_lsedge_id() {
         const SPX: &str = "SPX-INDICES.LSEDGE";
         let dir = tempfile::tempdir().unwrap();
@@ -773,7 +774,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn lse_s_symbol_unknown_fails_the_fill_naming_the_request() {
         let dir = tempfile::tempdir().unwrap();
         let lse = MockLse::start(vec![Reply::refusal(404, SYMBOL_UNKNOWN)]);
@@ -788,7 +789,7 @@ mod tests {
 
     /// The definition request fails, LSE publishing none, and LSE is never
     /// asked.
-    #[test]
+    #[rstest]
     fn a_fill_of_an_lsedge_instrument_with_no_definition_fails_naming_it() {
         let dir = tempfile::tempdir().unwrap();
         let lse = MockLse::start(vec![Reply::file(GOLD_TRADES)]);
@@ -855,7 +856,7 @@ mod tests {
     /// The captured rows, as pyarrow reads LSE's file: the 9th's, the
     /// 10th's and the 12th's, read back as Nautilus decodes custom data,
     /// each stamped at its date's end.
-    #[test]
+    #[rstest]
     fn the_bond_yields_lse_exports_are_written_back_as_custom_data_of_their_series() {
         let dir = tempfile::tempdir().unwrap();
         let lse = MockLse::start(vec![
@@ -896,7 +897,7 @@ mod tests {
 
     /// The window is stored whole, the days without a row too: a second
     /// fill asks LSE nothing.
-    #[test]
+    #[rstest]
     fn a_filled_window_of_bond_yields_is_not_asked_again() {
         let dir = tempfile::tempdir().unwrap();
         let lse = MockLse::start(vec![
@@ -916,7 +917,7 @@ mod tests {
     /// row yet. The fill ends without recording the window beside the
     /// stored rows, as an empty answer would be, so that the next run asks
     /// for it again.
-    #[test]
+    #[rstest]
     fn a_window_of_bond_yields_reaching_into_a_day_lse_has_not_loaded_is_asked_again() {
         let dir = tempfile::tempdir().unwrap();
         let stored = MockLse::start(vec![
@@ -954,7 +955,7 @@ mod tests {
     /// series, over the slice it stands for GC, each date's close known at
     /// its end. GCQ26's slice, the 28th, holds the 27th's close; GCZ26's,
     /// from the 29th to the 30th, the 28th's and the 29th's.
-    #[test]
+    #[rstest]
     fn a_roots_custom_series_fills_contract_by_contract_over_each_slice() {
         let dir = tempfile::tempdir().unwrap();
         let lse = MockLse::start(vec![
@@ -1042,7 +1043,7 @@ mod tests {
     /// Traders known in September 2026; and AAPL's dividends of 2026 to
     /// October, from its factors. The window is stored whole: a second
     /// fill asks LSE nothing.
-    #[test]
+    #[rstest]
     fn each_kind_of_lse_s_other_sources_fills_written_back_at_the_times_its_rows_are_known() {
         let utc = |time: &str| UnixNanos::from(time.parse::<Timestamp>().unwrap());
         let cpi = [
@@ -1112,7 +1113,7 @@ mod tests {
 
     /// LSE has not filled the release of 11 February 2026, past: the window
     /// is not written back, and the next run asks for it again.
-    #[test]
+    #[rstest]
     fn a_window_of_releases_lse_has_not_filled_is_asked_again() {
         let dir = tempfile::tempdir().unwrap();
         let calendar = lse_rows("economic_calendar", "US.Core Inflation Rate YoY");
@@ -1135,7 +1136,7 @@ mod tests {
     }
 
     /// Refused by LSE's client before LSE is asked, naming the releases.
-    #[test]
+    #[rstest]
     fn a_fill_of_macro_observations_fails_naming_the_releases() {
         let dir = tempfile::tempdir().unwrap();
         let lse = MockLse::start(vec![]);
@@ -1152,7 +1153,7 @@ mod tests {
         assert!(lse.calls().is_empty(), "{:?}", lse.calls());
     }
 
-    #[test]
+    #[rstest]
     fn lse_s_refusal_fails_the_fill_with_its_code_message_and_required_plan() {
         let dir = tempfile::tempdir().unwrap();
         let lse = MockLse::start(vec![Reply::refusal(403, PLAN_REQUIRED)]);
@@ -1173,7 +1174,7 @@ mod tests {
     /// fill with LSE's message. The next run asks for the 22nd alone, of
     /// which LSE holds no row as on a date with no session, and the run
     /// after asks for nothing.
-    #[test]
+    #[rstest]
     fn a_quota_stops_the_fill_with_lse_s_message_and_the_next_run_asks_only_what_is_missing() {
         let day = |time: &str| -> Timestamp { time.parse().unwrap() };
         let (from, to) = (
@@ -1233,7 +1234,7 @@ mod tests {
     /// reaches into the current UTC day, LSE storing a day the morning after
     /// it. The fill ends, but the window is not recorded as stored beside
     /// the stored trades, so that the next run asks for it again.
-    #[test]
+    #[rstest]
     fn a_window_lse_has_not_loaded_is_left_missing_for_the_next_run() {
         let dir = tempfile::tempdir().unwrap();
         let now = november("16T12:00:00");
@@ -1288,7 +1289,7 @@ mod tests {
     /// the CME key. Neither client claims a venue: each request reaches the
     /// client it names. The definition is the one Databento's client wrote
     /// into this repository's catalog before.
-    #[test]
+    #[rstest]
     fn a_glbx_fill_takes_its_definition_from_databento_and_its_trades_and_quotes_from_lse() {
         let dir = tempfile::tempdir().unwrap();
         let lse = MockLse::start(vec![
@@ -1420,7 +1421,7 @@ mod tests {
     /// the last whole UTC day before it, a day Databento defines every
     /// instrument active in, and the fill goes on, LSE answering no rows of
     /// the day yet.
-    #[test]
+    #[rstest]
     fn a_glbx_fill_past_databento_s_dataset_end_asks_its_definition_up_to_that_end() {
         let dir = tempfile::tempdir().unwrap();
         let lse = MockLse::start(vec![
@@ -1481,7 +1482,7 @@ mod tests {
     /// LSE's docs record its book and orders (the adapter's `test_data/`):
     /// asked of LSE's client by client id, its definition of Databento's,
     /// and written back to the catalog, each delta event ending `F_LAST`.
-    #[test]
+    #[rstest]
     fn a_glbx_fill_takes_its_book_depths_and_deltas_from_lse() {
         let dir = tempfile::tempdir().unwrap();
         let lse = MockLse::start(vec![
@@ -1552,7 +1553,7 @@ mod tests {
     /// opens LSE's US options. The captured minute of trades stands for the
     /// window's, and the four candles of 14:30 to 14:33 for the bars
     /// closing over it, LSE having none of 14:34.
-    #[test]
+    #[rstest]
     fn an_opra_fill_takes_its_definition_from_databento_and_its_trades_and_bars_from_lse() {
         let dir = tempfile::tempdir().unwrap();
         let lse = MockLse::start(vec![
@@ -1696,7 +1697,7 @@ mod tests {
     /// client by NVDA's ticker in LSE's `nasdaq` with the Nasdaq key, each
     /// written back to the catalog under `NVDA.XNAS`, each delta event
     /// ending `F_LAST`.
-    #[test]
+    #[rstest]
     fn an_xnas_fill_takes_its_definition_from_databento_and_its_data_from_lse() {
         let dir = tempfile::tempdir().unwrap();
         let lse = MockLse::start(vec![

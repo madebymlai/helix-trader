@@ -12,7 +12,9 @@
 //! (`DefaultFillModel`), at the market with no slippage of its own: at the
 //! quote, so the spread is the cost, or, on bars, at the bar's prices.
 
-use anyhow::{Context, ensure};
+use std::fmt::Display;
+
+use anyhow::Context;
 use nautilus_execution::models::fee::{
     FeeModelAny, FixedFeeModel, MakerTakerFeeModel, PerContractFeeModel,
 };
@@ -70,7 +72,7 @@ impl TryFrom<CommissionFields> for Commission {
 
 /// Its kind and its amount normalized (`normalized`), such as `rate
 /// 0.00003`, `per order 3 EUR` or `per quantity 0.035 USD`.
-impl std::fmt::Display for Commission {
+impl Display for Commission {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let kind = match self {
             Self::PerOrder(_) => "per order",
@@ -132,7 +134,7 @@ impl Commission {
         Ok(match *self {
             Self::PerOrder(commission) => FeeModelAny::Fixed(FixedFeeModel::new(commission, None)?),
             Self::Rate(rate) => {
-                ensure!(
+                anyhow::ensure!(
                     !rate.is_sign_negative(),
                     "commission rate {rate} must not be negative"
                 );
@@ -217,6 +219,7 @@ mod tests {
         },
         types::Currency,
     };
+    use rstest::rstest;
 
     use super::*;
 
@@ -284,20 +287,20 @@ mod tests {
         Commission::PerQuantity(Money::from_str_exact("0.035 USD").unwrap())
     }
 
-    #[test]
+    #[rstest]
     fn a_commission_per_order_costs_its_amount_whatever_the_fill() {
         assert_eq!(cost(per_order(), 1), Money::from("3 USD"));
         assert_eq!(cost(per_order(), 100), Money::from("3 USD"));
     }
 
-    #[test]
+    #[rstest]
     fn a_commission_rate_costs_its_share_of_the_fills_value_to_the_cent() {
         // 0.00003 × 1 × 4000.20 = 0.120006, and × 100 = 12.0006.
         assert_eq!(cost(rate(), 1), Money::from("0.12 USD"));
         assert_eq!(cost(rate(), 100), Money::from("12.00 USD"));
     }
 
-    #[test]
+    #[rstest]
     fn a_commission_per_quantity_costs_its_amount_on_each_unit_to_the_cent() {
         // 0.035 × 100, Pepperstone's lot, and × 50; × 1 = 0.035, to the
         // cent 0.04, as Pepperstone charges a side of an ounce.
@@ -306,7 +309,7 @@ mod tests {
         assert_eq!(cost(per_ounce(), 1), Money::from("0.04 USD"));
     }
 
-    #[test]
+    #[rstest]
     fn a_commission_per_quantity_costs_the_same_at_any_price() {
         let at = |price: &str| {
             per_ounce()
@@ -317,7 +320,7 @@ mod tests {
         assert_eq!(at("4000.20"), Money::from("3.50 USD"));
     }
 
-    #[test]
+    #[rstest]
     fn a_half_cent_of_a_commission_per_quantity_goes_to_the_even_cent() {
         // 0.035 × 3 = 0.105, × 5 = 0.175, × 7 = 0.245.
         assert_eq!(cost(per_ounce(), 3), Money::from("0.10 USD"));
@@ -327,7 +330,7 @@ mod tests {
 
     /// The cost of a fill is what a backtest's and a dataset run's venue
     /// charge it, on each kind of commission.
-    #[test]
+    #[rstest]
     fn the_fee_model_charges_an_orders_first_fill_what_the_commission_costs() {
         for commission in [per_order(), rate(), per_ounce()] {
             for oz in [1, 3, 100] {
@@ -340,20 +343,20 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn a_commission_per_order_charges_nothing_on_later_fills_of_the_same_order() {
         let order = filled(order(), 40);
         assert_eq!(charged(per_order(), &order, 60), Money::from("0 USD"));
     }
 
-    #[test]
+    #[rstest]
     fn a_commission_per_quantity_charges_every_fill_of_an_order() {
         // 0.035 × 60.
         let order = filled(order(), 40);
         assert_eq!(charged(per_ounce(), &order, 60), Money::from("2.10 USD"));
     }
 
-    #[test]
+    #[rstest]
     fn a_commission_rate_charges_maker_and_taker_alike() {
         let mut order = order();
         order.set_liquidity_side(LiquiditySide::Maker);
@@ -361,7 +364,7 @@ mod tests {
         assert_eq!(charged(rate(), &order, 100), Money::from("12.00 USD"));
     }
 
-    #[test]
+    #[rstest]
     fn a_negative_commission_has_no_fee_model() {
         for commission in [
             Commission::PerOrder(Money::from("-3 USD")),
@@ -374,7 +377,7 @@ mod tests {
 
     /// An amount is charged in its own currency, a rate in the currency of
     /// the fill's value: gold's USD; an inverse perpetual's BTC, its base.
-    #[test]
+    #[rstest]
     fn a_commission_is_charged_in_its_amounts_currency_or_the_currency_of_the_value() {
         let inverse =
             InstrumentAny::CryptoPerpetual(nautilus_model::instruments::stubs::btcusd_bybit());
@@ -389,7 +392,7 @@ mod tests {
     }
 
     /// Every spelling of one commission reads the same.
-    #[test]
+    #[rstest]
     fn a_commission_normalized_has_no_trailing_zeros() {
         assert_eq!(
             Commission::PerOrder(Money::from("3.00 EUR")).normalized(),

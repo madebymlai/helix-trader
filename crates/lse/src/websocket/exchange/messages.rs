@@ -7,9 +7,9 @@
 //! a record in the `dbn` encoding, LSE's 24-byte header then the record in
 //! Databento's DBN format, of the level's schema.
 
-use std::fmt;
+use std::fmt::Display;
 
-use anyhow::{Context, bail, ensure};
+use anyhow::Context;
 use dbn::{
     HasRType, MboMsg, Mbp1Msg, Mbp10Msg,
     decode::{DecodeRecord, dbn::RecordDecoder},
@@ -64,8 +64,8 @@ impl ExchangeLevel {
     }
 }
 
-impl fmt::Display for ExchangeLevel {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for ExchangeLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Level {}", self.number())
     }
 }
@@ -150,23 +150,23 @@ impl ExchangeRecordFrame {
     /// Returns an error if `frame` is not such a frame of one record of
     /// `level`.
     pub fn parse(frame: &[u8], level: ExchangeLevel) -> anyhow::Result<Self> {
-        ensure!(
+        anyhow::ensure!(
             frame.len() >= HEADER_LEN,
             "{} bytes, short of LSE's {HEADER_LEN}-byte header",
             frame.len()
         );
         let (header, records) = frame.split_at(HEADER_LEN);
-        ensure!(header[..4] == *MAGIC, "not an L3DB frame");
-        ensure!(header[4] == VERSION, "L3DB version {}", header[4]);
+        anyhow::ensure!(header[..4] == *MAGIC, "not an L3DB frame");
+        anyhow::ensure!(header[4] == VERSION, "L3DB version {}", header[4]);
         let snapshot = match header[5] {
             SNAPSHOT => true,
             LIVE => false,
-            kind => bail!("a frame of kind {kind}, neither a snapshot (1) nor live (2)"),
+            kind => anyhow::bail!("a frame of kind {kind}, neither a snapshot (1) nor live (2)"),
         };
         let sequence = u64::from_le_bytes(header[8..16].try_into().expect("8 bytes"));
         let instrument_id = u32::from_le_bytes(header[16..20].try_into().expect("4 bytes"));
         let count = u32::from_le_bytes(header[20..24].try_into().expect("4 bytes"));
-        ensure!(
+        anyhow::ensure!(
             count == 1 && records.len() == level.record_len(),
             "{count} records in {} bytes, not one {level} record of {}",
             records.len(),

@@ -11,9 +11,8 @@
 //! after its arrival, not on the one it was sent on. Without one, a command
 //! reaches the venue as it is sent, Nautilus' default.
 
-use std::{fmt, str::FromStr};
+use std::{fmt::Display, str::FromStr};
 
-use anyhow::ensure;
 use jiff::SignedDuration;
 use nautilus_core::DurationNanos;
 use nautilus_execution::models::latency::{LatencyModelAny, StaticLatencyModel};
@@ -33,7 +32,7 @@ impl TryFrom<SignedDuration> for Latency {
     type Error = anyhow::Error;
 
     fn try_from(latency: SignedDuration) -> anyhow::Result<Self> {
-        ensure!(
+        anyhow::ensure!(
             latency.is_positive(),
             "a latency must be positive, not {latency:#}: leave it out for none"
         );
@@ -52,8 +51,8 @@ impl FromStr for Latency {
 
 /// The duration in jiff's friendly format, its largest units first, such
 /// as `150ms` or `1s 500ms`: one text for every spelling of one latency.
-impl fmt::Display for Latency {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for Latency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:#}", SignedDuration::from(self.0))
     }
 }

@@ -34,7 +34,7 @@
 
 use std::{collections::HashMap, str::FromStr};
 
-use anyhow::{Context, ensure};
+use anyhow::Context;
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::NautilusDataType,
@@ -93,7 +93,7 @@ pub(crate) fn margin(
                     leverage.leverage_id
                 )
             })?;
-            ensure!(
+            anyhow::ensure!(
                 tier.leverage > 0,
                 "{name}: {venue} leverage {} is not positive",
                 leverage.leverage_id
@@ -119,7 +119,7 @@ pub(crate) fn cfd(
         .symbol_name
         .as_deref()
         .with_context(|| format!("cTrader symbol {} has no name", light.symbol_id))?;
-    ensure!(
+    anyhow::ensure!(
         light.symbol_id == symbol.symbol_id,
         "{name}: the details are of symbol {}, not {}",
         symbol.symbol_id,
@@ -159,9 +159,9 @@ pub(crate) fn cfd(
         let Some(cents) = cents else {
             return Ok(None);
         };
-        ensure!(cents > 0, "{name}: {field} {cents} is not positive");
+        anyhow::ensure!(cents > 0, "{name}: {field} {cents} is not positive");
         let value = units(cents);
-        ensure!(
+        anyhow::ensure!(
             value.scale() <= u32::from(size_precision),
             "{name}: {field} of {value} units is finer than the step of {size_increment_units}"
         );
@@ -215,7 +215,7 @@ pub(crate) fn assets_by_id(assets: Vec<ProtoOaAsset>) -> HashMap<i64, ProtoOaAss
 
 /// Fails unless `id` is on `venue`, an instrument of the broker.
 pub(crate) fn ensure_on(id: InstrumentId, venue: Venue) -> anyhow::Result<()> {
-    ensure!(id.venue == venue, "{id} is not on {venue}");
+    anyhow::ensure!(id.venue == venue, "{id} is not on {venue}");
     Ok(())
 }
 
@@ -224,8 +224,9 @@ pub(crate) fn ensure_on(id: InstrumentId, venue: Venue) -> anyhow::Result<()> {
 ///
 /// # Errors
 ///
-/// Returns an error naming the first series that is not the quotes of an
-/// instrument on `venue`: the adapter serves nothing else (`SERVED_DATA`).
+/// Returns an error if a series is not the quotes of an instrument on
+/// `venue`, naming the first: the adapter serves nothing else
+/// (`SERVED_DATA`).
 pub fn quoted(
     venue: Venue,
     series: &[(NautilusDataType, String)],
@@ -233,7 +234,7 @@ pub fn quoted(
     series
         .iter()
         .map(|(data_type, identifier)| {
-            ensure!(
+            anyhow::ensure!(
                 *data_type == SERVED_DATA,
                 "{venue} serves quotes only, not the {data_type} of {identifier}"
             );
@@ -249,6 +250,7 @@ pub fn quoted(
 mod tests {
     use nautilus_model::{enums::InstrumentClass, instruments::Instrument};
     use prost::Message as _;
+    use rstest::rstest;
 
     use super::*;
     use crate::{
@@ -272,7 +274,7 @@ mod tests {
         (NautilusDataType::QuoteTick, format!("XAUUSD.{VENUE}"))
     }
 
-    #[test]
+    #[rstest]
     fn the_quotes_of_the_venue_s_instruments_are_those_it_loads() {
         let eurusd = (NautilusDataType::QuoteTick, format!("EURUSD.{VENUE}"));
 
@@ -287,7 +289,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_series_not_of_quotes_is_refused_naming_it() {
         let bars = format!("XAUUSD.{VENUE}-1-MINUTE-BID-EXTERNAL");
         for data_type in [
@@ -306,7 +308,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn the_quotes_of_an_instrument_on_another_venue_are_refused_naming_it() {
         let elsewhere = (NautilusDataType::QuoteTick, "EUR/USD.IDEALPRO".to_owned());
 
@@ -371,7 +373,7 @@ mod tests {
             .leverage
     }
 
-    #[test]
+    #[rstest]
     fn gold_on_the_demo_takes_the_account_s_1_30_under_its_own_1_200() {
         let margin = margin(
             "XAUUSD",
@@ -385,7 +387,7 @@ mod tests {
     }
 
     /// Synthetic: gold's tier at 1:20, under the demo account's 1:30.
-    #[test]
+    #[rstest]
     fn a_symbol_leverage_below_the_account_s_sets_the_margin() {
         let mut leverage = gold_leverage();
         leverage.tiers[0].leverage = 2_000;
@@ -396,7 +398,7 @@ mod tests {
     }
 
     /// Synthetic: gold's leverage with a second tier, 1:20 above 1,000,000 USD.
-    #[test]
+    #[rstest]
     fn the_first_tier_applies_whatever_the_tiers_above_it() {
         let mut leverage = gold_leverage();
         leverage.tiers.push(ProtoOaDynamicLeverageTier {
@@ -410,7 +412,7 @@ mod tests {
     }
 
     /// Synthetic: a symbol without a dynamic leverage.
-    #[test]
+    #[rstest]
     fn a_symbol_without_a_leverage_of_its_own_takes_the_account_s() {
         let margin = margin("XAUUSD", venue(), Some(2_000), None).unwrap();
 
@@ -419,7 +421,7 @@ mod tests {
 
     /// Synthetic: gold's leverage without tiers, and a trader without
     /// leverage.
-    #[test]
+    #[rstest]
     fn a_leverage_missing_is_refused_naming_the_symbol() {
         let mut leverage = gold_leverage();
         leverage.tiers.clear();
@@ -435,7 +437,7 @@ mod tests {
 
     /// The broker's own estimate on the demo: 1,000 EUR of EURUSD locks
     /// 33.33 EUR.
-    #[test]
+    #[rstest]
     fn the_margin_of_1000_euros_is_the_broker_s_estimate() {
         let leverage = ProtoOaGetDynamicLeverageByIdRes::decode(DYNAMIC_LEVERAGE_EURUSD_RES)
             .unwrap()
@@ -451,7 +453,7 @@ mod tests {
         assert_eq!((Decimal::from(1000) * margin).round_dp(2), broker);
     }
 
-    #[test]
+    #[rstest]
     fn xauusd_is_a_commodity_cfd_on_gold_in_ounces_quoted_in_dollars() {
         let xau = instrument(&fixtures(), "XAUUSD").unwrap();
 
@@ -477,7 +479,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn eurusd_is_an_fx_cfd_in_euros_by_the_thousand() {
         let eur = instrument(&fixtures(), "EURUSD").unwrap();
 
@@ -498,7 +500,7 @@ mod tests {
     }
 
     /// Synthetic: the EURUSD fixture with its base asset renamed BTC.
-    #[test]
+    #[rstest]
     fn a_crypto_base_makes_a_cryptocurrency_cfd() {
         let mut fixtures = fixtures();
         let base = fixtures.light["EURUSD"].base_asset_id.unwrap();
@@ -510,7 +512,7 @@ mod tests {
         assert_eq!(btc.base_currency, Some(Currency::from("BTC")));
     }
 
-    #[test]
+    #[rstest]
     fn an_index_is_refused_naming_its_asset() {
         let err = instrument(&fixtures(), "US500").unwrap_err().to_string();
 
@@ -522,7 +524,7 @@ mod tests {
     }
 
     /// Synthetic: the XAUUSD fixture mutated.
-    #[test]
+    #[rstest]
     fn a_symbol_without_a_step_volume_is_refused() {
         let mut fixtures = fixtures();
         let id = fixtures.light["XAUUSD"].symbol_id;
@@ -534,7 +536,7 @@ mod tests {
     }
 
     /// Synthetic: the XAUUSD fixture mutated.
-    #[test]
+    #[rstest]
     fn a_minimum_finer_than_the_step_is_refused() {
         let mut fixtures = fixtures();
         let id = fixtures.light["XAUUSD"].symbol_id;
@@ -549,7 +551,7 @@ mod tests {
     }
 
     /// Synthetic: the EURUSD fixture mutated.
-    #[test]
+    #[rstest]
     fn digits_out_of_range_are_refused() {
         let mut fixtures = fixtures();
         let id = fixtures.light["EURUSD"].symbol_id;
@@ -561,7 +563,7 @@ mod tests {
     }
 
     /// Synthetic: the EURUSD fixture with an unlisted quote asset.
-    #[test]
+    #[rstest]
     fn an_unlisted_asset_is_refused() {
         let mut fixtures = fixtures();
         fixtures.light.get_mut("EURUSD").unwrap().quote_asset_id = Some(999);
@@ -571,7 +573,7 @@ mod tests {
         assert_eq!(err, "EURUSD: the quote asset 999 is not listed");
     }
 
-    #[test]
+    #[rstest]
     fn details_of_another_symbol_are_refused() {
         let fixtures = fixtures();
         let eur = &fixtures.light["EURUSD"];
@@ -594,7 +596,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_symbol_name_and_its_instrument_id_on_the_venue_round_trip() {
         for name in ["XAUUSD", "EURUSD"] {
             let id = instrument_id(name, venue()).unwrap();
@@ -605,7 +607,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn an_id_on_another_venue_is_refused_naming_the_venue() {
         let err = ensure_on(InstrumentId::from("XAUUSD.ELSEWHERE"), venue()).unwrap_err();
 

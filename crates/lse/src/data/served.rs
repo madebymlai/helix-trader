@@ -5,7 +5,7 @@
 
 use std::str::FromStr;
 
-use anyhow::{Context, bail, ensure};
+use anyhow::Context;
 use nautilus_model::{
     data::{BarType, CustomDataTrait, DataType, NautilusDataType},
     identifiers::InstrumentId,
@@ -35,8 +35,8 @@ use crate::{
 ///
 /// # Errors
 ///
-/// Returns an error naming the series and saying why if the client does
-/// not serve it.
+/// Returns an error if the client does not serve the series, naming it and
+/// saying why.
 pub fn serves(series: &(NautilusDataType, String)) -> anyhow::Result<()> {
     let (data, identifier) = series;
     if *data == NautilusDataType::Bar {
@@ -44,7 +44,7 @@ pub fn serves(series: &(NautilusDataType, String)) -> anyhow::Result<()> {
             .with_context(|| format!("the bars {identifier}, no bar type"))?;
         CandleWidth::of(bar_type)?;
         let venue = bar_type.instrument_id().venue;
-        ensure!(
+        anyhow::ensure!(
             venue == *LSEDGE_VENUE || venue == *OPRA_VENUE,
             "{bar_type}: the client asks LSE for the candles of LSEDGE series and OPRA \
              contracts alone"
@@ -54,7 +54,7 @@ pub fn serves(series: &(NautilusDataType, String)) -> anyhow::Result<()> {
     let id = InstrumentId::from_str(identifier)
         .with_context(|| format!("the {data} of {identifier}, no instrument id"))?;
     let venue = id.venue;
-    ensure!(
+    anyhow::ensure!(
         venue == *LSEDGE_VENUE || venue == *OPRA_VENUE || LseExchange::of_venue(venue).is_some(),
         "LSE serves nothing of {id}: {venue} is none of its venues, {LSEDGE}, GLBX, XNAS and \
          OPRA",
@@ -64,13 +64,15 @@ pub fn serves(series: &(NautilusDataType, String)) -> anyhow::Result<()> {
         NautilusDataType::TradeTick
             if venue == *LSEDGE_VENUE && LseSymbol::from_instrument_id(id)?.is_index() =>
         {
-            bail!("{id} is an index, which has no trades: its ticks are quotes, its candles bars")
+            anyhow::bail!(
+                "{id} is an index, which has no trades: its ticks are quotes, its candles bars"
+            )
         }
         NautilusDataType::QuoteTick
         | NautilusDataType::TradeTick
         | NautilusDataType::OrderBookDepth
         | NautilusDataType::OrderBookDelta => Ok(()),
-        other => bail!(
+        other => anyhow::bail!(
             "LSE's history serves no {other} of {id}: an instrument's quotes, trades, book \
              depths and book deltas, and its candles as bars"
         ),
@@ -84,8 +86,8 @@ pub fn serves(series: &(NautilusDataType, String)) -> anyhow::Result<()> {
 ///
 /// # Errors
 ///
-/// Returns an error naming the data type and saying why if the client does
-/// not serve it (see `row_source`).
+/// Returns an error if the client does not serve the data type, naming it
+/// and saying why (see `row_source`).
 pub fn serves_custom(data_type: &DataType) -> anyhow::Result<()> {
     row_source(data_type).map(drop)
 }
@@ -98,12 +100,12 @@ pub fn serves_custom(data_type: &DataType) -> anyhow::Result<()> {
 ///
 /// # Errors
 ///
-/// Returns an error naming the data type if it is not `LseRow`'s, if its
-/// metadata names no source or symbol, a key not a string, or another
-/// key, or as `RowSource::of`.
+/// Returns an error if the data type, which it names, is not `LseRow`'s,
+/// if its metadata names no source or symbol, a key not a string, or
+/// another key, or if `RowSource::of` fails.
 pub(super) fn row_source(data_type: &DataType) -> anyhow::Result<RowSource> {
     let rows = LseRow::type_name_static();
-    ensure!(
+    anyhow::ensure!(
         data_type.type_name() == rows,
         "LSE serves no custom data {}: only its rows, {rows}",
         data_type.type_name()
@@ -115,13 +117,14 @@ pub(super) fn row_source(data_type: &DataType) -> anyhow::Result<RowSource> {
             .with_context(|| format!("{data_type:?} names no {key}, a string, in its metadata"))
     };
     let (source, symbol) = (named(SOURCE)?, named(SYMBOL)?);
+
     if let Some(other) = data_type.metadata().and_then(|metadata| {
         metadata
             .borrowed_entries()
             .map(|(key, _)| key)
             .find(|key| ![SOURCE, SYMBOL].contains(&key.as_str()))
     }) {
-        bail!(
+        anyhow::bail!(
             "{data_type:?} names {other} in its metadata: LSE's rows are asked by a {SOURCE} \
              and a {SYMBOL} alone"
         );

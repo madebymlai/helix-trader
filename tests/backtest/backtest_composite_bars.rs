@@ -31,6 +31,7 @@ use nautilus_model::{
     types::{Price, Quantity},
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
+use rstest::rstest;
 
 use crate::common::{
     self, dataset,
@@ -116,7 +117,7 @@ fn fill(dir: &Path) {
         .unwrap();
 }
 
-#[test]
+#[rstest]
 fn hour_bars_built_from_stored_minute_bars_have_the_prices_of_their_minutes() {
     let dir = tempfile::tempdir().unwrap();
     let bar_types = [BarType::from(COMPOSITE)];
@@ -160,7 +161,7 @@ const CLOSE: Declared<SmaArgs> = Declared::new("close");
 /// live, so each decision reads the hour bar closing on its grid, whose
 /// close is that minute's. The hour closing 15:00 is built after the
 /// run's end.
-#[test]
+#[rstest]
 fn a_decision_on_hour_bars_reads_the_bar_closing_on_its_grid() {
     let dir = tempfile::tempdir().unwrap();
     fill(dir.path());

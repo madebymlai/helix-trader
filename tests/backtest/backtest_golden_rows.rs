@@ -27,6 +27,7 @@ use helix_trader::{
     strategy::model_ema::{ModelEma, ModelEmaConfig},
 };
 use jiff::{SignedDuration, Timestamp};
+use rstest::rstest;
 
 use crate::common::{
     dataset::{backtest, walk},
@@ -78,7 +79,7 @@ const SNAPSHOT: &str = concat!(
 const WRITE: &str = "GOLDEN_ROWS";
 
 /// The rows of the 21st to the 23rd of October 2026 are the snapshot's.
-#[test]
+#[rstest]
 fn the_rows_of_the_example_model_strategy_are_the_snapshots() {
     let config = ModelEmaConfig::load(CONFIG).unwrap();
     let (from, to) = (
@@ -174,14 +175,16 @@ fn compare(printed: &str, snapshot: &Path) {
     if printed == committed {
         return;
     }
-    let (want, got): (Vec<_>, Vec<_>) = (committed.lines().collect(), printed.lines().collect());
-    let lines = want.len().max(got.len());
+    let (committed, printed): (Vec<_>, Vec<_>) =
+        (committed.lines().collect(), printed.lines().collect());
+    let lines = committed.len().max(printed.len());
     let line = (0..lines)
-        .find(|&i| want.get(i) != got.get(i))
+        .find(|&i| committed.get(i) != printed.get(i))
         .unwrap_or(lines);
-    let [want, got] = [&want, &got].map(|text| text.get(line).copied().unwrap_or("(none)"));
+    let [committed, printed] =
+        [&committed, &printed].map(|text| text.get(line).copied().unwrap_or("(none)"));
     panic!(
-        "the dataset rows differ from the snapshot {} at line {}:\n  snapshot: {want}\n  rows:     {got}\n\
+        "the dataset rows differ from the snapshot {} at line {}:\n  snapshot: {committed}\n  rows:     {printed}\n\
          A change of the rows needs a new fingerprint: bump the dataset version \
          (`model::dataset::VERSION`) for a change of the decisions, the targets, the shared \
          feature code or Nautilus' indicators or fills, or the strategy's feature version for \

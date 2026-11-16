@@ -58,7 +58,6 @@ use nautilus_network::{
     websocket::{AuthTracker, SubscriptionState, WebSocketClient},
 };
 use prost::Message as _;
-use tokio::sync::{mpsc, oneshot};
 use zeroize::Zeroize;
 
 use super::{AUTH_TIMEOUT, TradeEvent, TradeMessage, spot_subscribed, spot_symbol, spot_topic};
@@ -97,12 +96,12 @@ fn playground(names: &CTraderSettingNames) -> String {
 }
 
 /// Where a response goes: the caller awaiting it.
-pub(super) type Reply = oneshot::Sender<Result<ProtoMessage, CTraderError>>;
+pub(super) type Reply = tokio::sync::oneshot::Sender<Result<ProtoMessage, CTraderError>>;
 
 /// Where a trade request's sending goes: `Ok` once its frame is written
 /// (or its write timed out or failed after it began: cTrader may have
 /// it), an error if it never was.
-pub(super) type Sent = oneshot::Sender<Result<(), CTraderError>>;
+pub(super) type Sent = tokio::sync::oneshot::Sender<Result<(), CTraderError>>;
 
 /// Commands from the outer client to the handler.
 pub(super) enum HandlerCommand {
@@ -124,7 +123,7 @@ pub(super) enum HandlerCommand {
         sent: Sent,
     },
     /// The listener of the trade events, from now on.
-    TradeEvents(mpsc::UnboundedSender<TradeEvent>),
+    TradeEvents(tokio::sync::mpsc::UnboundedSender<TradeEvent>),
     /// Spot events of a symbol, from now on.
     SubscribeSpots(i64),
     /// No more spot events of a symbol.
@@ -193,13 +192,13 @@ enum Awaiting {
 
 impl Awaiting {
     /// Tells the caller the request failed: it was never sent.
-    fn fail(self, error: CTraderError) {
+    fn fail(self, e: CTraderError) {
         match self {
             Self::Caller(reply) => {
-                let _ = reply.send(Err(error));
+                let _ = reply.send(Err(e));
             }
             Self::Trade { sent, .. } => {
-                let _ = sent.send(Err(error));
+                let _ = sent.send(Err(e));
             }
         }
     }
@@ -229,12 +228,12 @@ pub(super) struct CTraderWsHandler {
     /// connection too, which keeps the historical requests from taking
     /// their slots meanwhile (see the outer client).
     auth: AuthTracker,
-    cmd_rx: mpsc::UnboundedReceiver<HandlerCommand>,
+    cmd_rx: tokio::sync::mpsc::UnboundedReceiver<HandlerCommand>,
     /// The transport's messages, each with its connection's epoch.
-    raw_rx: mpsc::UnboundedReceiver<(u64, Message)>,
-    spot_tx: mpsc::UnboundedSender<ProtoOaSpotEvent>,
+    raw_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, Message)>,
+    spot_tx: tokio::sync::mpsc::UnboundedSender<ProtoOaSpotEvent>,
     /// The listener of the trade events, once one asked.
-    trade_tx: Option<mpsc::UnboundedSender<TradeEvent>>,
+    trade_tx: Option<tokio::sync::mpsc::UnboundedSender<TradeEvent>>,
     heartbeat: Duration,
     session: Session,
     next_id: u64,
@@ -265,9 +264,9 @@ impl CTraderWsHandler {
         tokens: TokenPair,
         auth: AuthTracker,
         subscriptions: SubscriptionState,
-        cmd_rx: mpsc::UnboundedReceiver<HandlerCommand>,
-        raw_rx: mpsc::UnboundedReceiver<(u64, Message)>,
-        spot_tx: mpsc::UnboundedSender<ProtoOaSpotEvent>,
+        cmd_rx: tokio::sync::mpsc::UnboundedReceiver<HandlerCommand>,
+        raw_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, Message)>,
+        spot_tx: tokio::sync::mpsc::UnboundedSender<ProtoOaSpotEvent>,
         heartbeat: Duration,
     ) -> Self {
         Self {
@@ -1145,23 +1144,23 @@ fn renewal_failure(error: &CTraderError, names: &CTraderSettingNames) -> String 
     }
 }
 
-/// A frame whose send failed with `error`: sent, as far as the session can
+/// A frame whose send failed with `e`: sent, as far as the session can
 /// tell, if its write may have begun, its outcome left to cTrader's answer
-/// or the reconciliation; else unsent, `error` saying why. A write that
+/// or the reconciliation; else unsent, `e` saying why. A write that
 /// timed out (`WriteTimeout`) or failed (`BrokenPipe`) may have begun, and
 /// Nautilus then reconnects; `BrokenPipe` also stands for the writer gone,
 /// with the frame or before it, which is no proof that it was never sent.
-fn failed_send(error: SendError) -> Result<(), SendError> {
-    match error {
+fn failed_send(e: SendError) -> Result<(), SendError> {
+    match e {
         SendError::WriteTimeout | SendError::BrokenPipe(_) => {
-            log::warn!("cTrader frame write failed ({error}): cTrader may have it");
+            log::warn!("cTrader frame write failed ({e}): cTrader may have it");
             Ok(())
         }
         SendError::ConnectionChanged
         | SendError::InvalidInput(_)
         | SendError::BufferFull
         | SendError::Closed
-        | SendError::Timeout => Err(error),
+        | SendError::Timeout => Err(e),
     }
 }
 
@@ -1196,12 +1195,14 @@ fn auth_failure(stage: &str, error: &CTraderError, names: &CTraderSettingNames) 
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
     /// A write that began and failed, the transport broken under it, may
     /// have reached cTrader, as one that timed out may: Nautilus' adapter
     /// guide leaves such an outcome unknown, never a rejection.
-    #[test]
+    #[rstest]
     fn a_frame_whose_write_failed_after_it_began_counts_as_sent() {
         assert!(failed_send(SendError::BrokenPipe("connection reset".to_owned())).is_ok());
         assert!(failed_send(SendError::WriteTimeout).is_ok());
@@ -1209,7 +1210,7 @@ mod tests {
 
     /// Refused before its write began, or its connection changed: never
     /// sent, for the transport's reason.
-    #[test]
+    #[rstest]
     fn a_frame_refused_before_its_write_is_unsent() {
         for refused in [
             SendError::InvalidInput("empty".to_owned()),

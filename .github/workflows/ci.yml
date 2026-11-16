@@ -60,6 +60,12 @@ jobs:
       - name: Install prek
         run: uv tool install prek==0.5.10
 
+      - name: Install ripgrep
+        # The convention hooks search with rg and skip without it
+        run: |
+          sudo apt-get update -o Acquire::Retries=5
+          sudo apt-get install -y ripgrep -o Acquire::Retries=5
+
       - name: Install cargo-machete, cargo-deny and lychee
         # https://github.com/taiki-e/install-action
         uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28

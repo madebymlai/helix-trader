@@ -141,6 +141,7 @@ impl Crossover {
 #[cfg(all(test, feature = "strategy-tests"))]
 mod tests {
     use jiff::{SignedDuration, Timestamp};
+    use rstest::rstest;
     use nautilus_model::data::BarType;
 
     use super::*;
@@ -223,7 +224,7 @@ mod tests {
 
     /// The slow EMA, of 2 bars, is initialized by the second bar inside the
     /// session; a bar outside it or of another instrument does not count.
-    #[test]
+    #[rstest]
     fn the_indicator_is_initialized_by_the_bars_that_count_alone() {
         let signal = Signal::new(&config());
         feed(&signal, &["101"], inside);
@@ -237,20 +238,20 @@ mod tests {
         assert!(ActorIndicator::initialized(&signal).unwrap());
     }
 
-    #[test]
+    #[rstest]
     fn no_cross_while_cold() {
         let signal = Signal::new(&config());
         assert_eq!(feed(&signal, &["100"], inside), None);
     }
 
-    #[test]
+    #[rstest]
     fn the_first_warm_bar_sets_the_side_without_a_cross() {
         // 101 above the slow EMA of 100.5: long, but nothing before it.
         let signal = Signal::new(&config());
         assert_eq!(feed(&signal, &["100", "101"], inside), None);
     }
 
-    #[test]
+    #[rstest]
     fn a_close_turning_above_the_slow_ema_crosses_up() {
         // 100 below 100.5, short; 102 above 100.5, long.
         let signal = Signal::new(&config());
@@ -260,7 +261,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_close_turning_below_the_slow_ema_crosses_down() {
         // 101 above 100.5, long; 99 below 100.5, short.
         let signal = Signal::new(&config());
@@ -270,14 +271,14 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn keeping_the_side_is_no_cross() {
         // 101 above 100.5, long; 102 above 100.5, still long.
         let signal = Signal::new(&config());
         assert_eq!(feed(&signal, &["100", "101", "102"], inside), None);
     }
 
-    #[test]
+    #[rstest]
     fn each_turn_is_a_cross() {
         // Short at 100 (below 100.5), long at 102 (above 100.5, the slow EMA
         // going to 101.5), short at 99 (below 101.5).
@@ -297,7 +298,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn bars_of_an_instrument_not_traded_neither_move_the_emas_nor_cross() {
         // ESH24 turning long and short in between leaves ESM24 short at 100
         // then long at 102.
@@ -313,7 +314,7 @@ mod tests {
         assert_eq!(signal.cross(&bar), Some(OrderSide::Buy));
     }
 
-    #[test]
+    #[rstest]
     fn bars_outside_the_session_do_not_warm_the_emas() {
         // Had the 100 outside counted, the EMAs would be warm and short
         // (100 below 100.5), and 102 the next morning a cross up; without
@@ -324,7 +325,7 @@ mod tests {
         assert_eq!(feed(&signal, &["102"], |_| next_morning()), None);
     }
 
-    #[test]
+    #[rstest]
     fn bars_outside_the_session_do_not_move_the_emas() {
         // Had the 102 outside counted, it would be long, the slow EMA going
         // to 101.5, and 99 the next morning a cross down; without it, 99
@@ -335,7 +336,7 @@ mod tests {
         assert_eq!(feed(&signal, &["99"], |_| next_morning()), None);
     }
 
-    #[test]
+    #[rstest]
     fn no_cross_on_a_bar_outside_the_session() {
         // 102 outside would cross up from 100 inside.
         let signal = Signal::new(&config());

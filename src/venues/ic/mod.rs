@@ -31,7 +31,7 @@ pub(super) const BROKER: CTraderBroker = CTraderBroker {
 ///
 /// # Errors
 ///
-/// As `CTraderConnection::from_vars`.
+/// Returns an error if `CTraderConnection::from_vars` fails.
 pub fn connection() -> anyhow::Result<CTraderConnection> {
     BROKER.connection()
 }

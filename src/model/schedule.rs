@@ -235,8 +235,8 @@ impl Schedule {
     ///
     /// # Errors
     ///
-    /// Returns an error naming the sides, the meta, or both, with no
-    /// model in use at `start`, never retrained.
+    /// Returns an error if the sides, the meta, or both have no model in
+    /// use at `start`, never retrained, naming them.
     pub fn ensure_trades(
         &self,
         start: Timestamp,
@@ -514,6 +514,8 @@ pub fn last_grid_time(now: UnixNanos, every: SignedDuration) -> anyhow::Result<U
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
     fn at(time: &str) -> Timestamp {
@@ -524,7 +526,7 @@ mod tests {
         SignedDuration::from_hours(24)
     }
 
-    #[test]
+    #[rstest]
     fn retrains_sit_on_midnights_from_the_last_before_the_start_to_the_end() {
         let times = times(
             day(),
@@ -544,7 +546,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_start_on_the_grid_retrains_at_the_start_and_an_end_on_it_does_not() {
         let times = times(
             day(),
@@ -559,7 +561,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn the_grid_does_not_move_with_the_start() {
         let end = at("2026-10-27T00:00:00Z");
         let a = times(day() * 3, at("2026-10-20T01:00:00Z"), end).unwrap();
@@ -578,7 +580,7 @@ mod tests {
         assert_eq!(b, a[1..]);
     }
 
-    #[test]
+    #[rstest]
     fn the_grid_time_is_the_last_multiple_since_the_epoch() {
         let last = |now: &str| {
             Timestamp::from(
@@ -591,7 +593,7 @@ mod tests {
         assert_eq!(last("2026-10-21T23:59:59Z"), at("2026-10-21T00:00:00Z"));
     }
 
-    #[test]
+    #[rstest]
     fn a_non_positive_interval_is_refused() {
         let err = times(
             SignedDuration::ZERO,
@@ -655,7 +657,7 @@ mod tests {
     const SEVENTH: &str = "2026-01-07T00:00:00Z";
     const EIGHTH: &str = "2026-01-08T00:00:00Z";
 
-    #[test]
+    #[rstest]
     fn on_an_empty_store_the_sides_fit_on_their_window_and_the_meta_waits() {
         let plan = daily().plan(at(SEVENTH), &stores(&[], &[], &[]));
 
@@ -672,7 +674,7 @@ mod tests {
     /// Retrained, the current model at the train is the one valid exactly
     /// from it, the sides' their pair's: the pair of the 7th is kept, the
     /// meta's of the 6th is not.
-    #[test]
+    #[rstest]
     fn a_model_valid_from_the_train_is_kept_and_one_valid_before_it_is_not() {
         let plan = daily().plan(
             at(SEVENTH),
@@ -687,7 +689,7 @@ mod tests {
     /// The short's model of the 7th, with no long beside it, is no pair:
     /// retrained at the 7th, the sides have none valid from it, and both
     /// fit, the long's of the 6th and its pair not current either.
-    #[test]
+    #[rstest]
     fn a_side_without_the_other_at_the_train_is_no_pair_and_both_sides_fit() {
         let plan = daily().plan(
             at(SEVENTH),
@@ -703,7 +705,7 @@ mod tests {
     /// valid from: of the long's 4th, 5th and 6th and the short's 5th, 6th
     /// and 7th, the 5th and the 6th; a side traded alone, every one of its
     /// own.
-    #[test]
+    #[rstest]
     fn the_pairs_are_the_times_every_side_traded_has_a_model_valid_from() {
         let both = stores(&[FOURTH, FIFTH, SIXTH], &[FIFTH, SIXTH, SEVENTH], &[]);
         let long_only = Models {
@@ -719,7 +721,7 @@ mod tests {
     /// first pair valid from 12:00 of the 6th, its rows start there, not at
     /// the long's of 06:00, which has no short beside it; with their first
     /// pair valid from the 4th, at the window's start.
-    #[test]
+    #[rstest]
     fn the_metas_rows_start_at_the_sides_first_pair_at_the_earliest() {
         let (six, noon) = ("2026-01-06T06:00:00Z", "2026-01-06T12:00:00Z");
         for (stores, from) in [
@@ -734,7 +736,7 @@ mod tests {
 
     /// The sides' models valid from the train's time alone are no
     /// decisions before it: the meta waits.
-    #[test]
+    #[rstest]
     fn a_meta_waits_for_a_sides_model_before_the_train() {
         let plan = daily().plan(at(SEVENTH), &stores(&[SEVENTH], &[SEVENTH], &[]));
 
@@ -743,7 +745,7 @@ mod tests {
 
     /// The sides fit on the 6th; the meta, kept, reads no row, though its
     /// window starts on the 5th, after the sides' first model, the 4th.
-    #[test]
+    #[rstest]
     fn the_replay_starts_at_the_first_row_fitted_a_kept_model_reading_none() {
         let first = "2026-01-04T00:00:00Z";
 
@@ -753,7 +755,7 @@ mod tests {
         assert_eq!(plan.replay_from(), Some(at(SIXTH)));
     }
 
-    #[test]
+    #[rstest]
     fn a_plan_keeping_every_model_fits_none_and_replays_nothing() {
         let plan = daily().plan(
             at(SEVENTH),
@@ -765,14 +767,14 @@ mod tests {
     }
 
     /// A waiting meta reads no row: the replay starts at the sides' window.
-    #[test]
+    #[rstest]
     fn a_waiting_meta_does_not_replay_its_window() {
         let plan = daily().plan(at(SEVENTH), &stores(&[], &[], &[]));
 
         assert_eq!(plan.replay_from(), Some(at(SIXTH)));
     }
 
-    #[test]
+    #[rstest]
     fn a_run_never_retrained_trains_at_its_start_alone() {
         let times = never()
             .times(at("2026-10-21T15:20:00Z"), at("2026-10-24T00:00:01Z"))
@@ -795,7 +797,7 @@ mod tests {
     /// beside it. The meta's only model, of the 8th, is after the train: it
     /// has none, and fits, from the sides' first pair, the 6th, not the
     /// long's of the 5th alone.
-    #[test]
+    #[rstest]
     fn never_retrained_the_latest_model_valid_by_the_train_is_kept_and_the_others_fitted() {
         let plan = never().plan(
             at(SEVENTH),
@@ -814,7 +816,7 @@ mod tests {
     /// Never retrained, the sides' models of the 6th are in use at the
     /// train of the 7th: kept, they give the meta its rows from the 6th,
     /// and the meta fits alone.
-    #[test]
+    #[rstest]
     fn never_retrained_a_meta_whose_sides_are_in_use_fits_alone() {
         let plan = never().plan(at(SEVENTH), &stores(&[SIXTH], &[SIXTH], &[]));
 
@@ -829,7 +831,7 @@ mod tests {
     /// of the 5th, the meta's window of 48 hours before the train, on
     /// their window of 24 hours back from there, and the meta at the 7th,
     /// on its window, the decisions of the sides from the 5th.
-    #[test]
+    #[rstest]
     fn never_retrained_with_no_model_in_use_the_sides_fit_as_of_the_metas_window_before_the_train_and_the_meta_at_it()
      {
         for stores in [
@@ -852,7 +854,7 @@ mod tests {
 
     /// The sides fitted as of the 5th read their window back from there:
     /// the one replay starts on the 4th.
-    #[test]
+    #[rstest]
     fn a_two_time_train_replays_from_the_sides_window_back_from_their_time() {
         let plan = never().plan(at(SEVENTH), &stores(&[], &[], &[]));
 
@@ -863,7 +865,7 @@ mod tests {
     /// it, so whatever the stores hold every model fits as of the train,
     /// if at all: on an empty store or one of models after the train, the
     /// meta waiting; with the sides' models of the 5th, the meta too.
-    #[test]
+    #[rstest]
     fn retrained_every_model_fits_as_of_the_train() {
         for (stores, meta) in [
             (stores(&[], &[], &[]), Step::Wait),
@@ -887,7 +889,7 @@ mod tests {
     /// Never retrained, the long's model of the 6th has no short beside it:
     /// no pair is in use, nor a meta, so the train is at two times, as on
     /// an empty store.
-    #[test]
+    #[rstest]
     fn never_retrained_a_side_without_the_other_is_no_pair_in_use() {
         let plan = never().plan(at(SEVENTH), &stores(&[SIXTH], &[], &[]));
 
@@ -903,7 +905,7 @@ mod tests {
 
     /// Never retrained, the meta's model of the 6th in use: the sides fit
     /// at the train.
-    #[test]
+    #[rstest]
     fn never_retrained_with_the_meta_in_use_the_sides_fit_at_the_train() {
         let plan = never().plan(at(SEVENTH), &stores(&[], &[], &[SIXTH]));
 
@@ -915,7 +917,7 @@ mod tests {
     /// as planned once they published their pair, and waits, with no
     /// decision of the sides to learn from, if they did not, a side
     /// published without the other being no pair.
-    #[test]
+    #[rstest]
     fn a_two_time_trains_meta_fits_once_the_sides_published_their_pair_and_waits_if_not() {
         let plan = never().plan(at(SEVENTH), &stores(&[], &[], &[]));
 
@@ -935,7 +937,7 @@ mod tests {
     /// Never retrained, a side's model in use at the start with no other
     /// beside it is no pair: the run would trade nothing, and is refused,
     /// naming the sides.
-    #[test]
+    #[rstest]
     fn never_retrained_a_run_whose_sides_have_no_pair_in_use_is_refused() {
         let refused = never().ensure_trades(at(SEVENTH), &stores(&[SIXTH], &[], &[SIXTH]));
 

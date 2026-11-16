@@ -57,15 +57,14 @@ use nautilus_model::{
 };
 use rstest::rstest;
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
 
-type Events = mpsc::UnboundedReceiver<DataEvent>;
+type Events = tokio::sync::mpsc::UnboundedReceiver<DataEvent>;
 
 /// The client the factory creates on `lse`, its cache holding the
 /// definitions of `GOLD_FUTURES` and `GOLD_SPOT` if `defined`,
 /// connected, and the node's data events.
 async fn connected(lse: &MockLse, defined: bool) -> (Box<dyn DataClient>, Events) {
-    let (tx, events) = mpsc::unbounded_channel();
+    let (tx, events) = tokio::sync::mpsc::unbounded_channel();
     replace_data_event_sender(tx);
     let mut cache = Cache::default();
     if defined {
@@ -747,7 +746,7 @@ fn cache_of(instruments: Vec<InstrumentAny>) -> CacheView {
 
 /// The node's data events, from now on.
 fn events() -> Events {
-    let (tx, events) = mpsc::unbounded_channel();
+    let (tx, events) = tokio::sync::mpsc::unbounded_channel();
     replace_data_event_sender(tx);
     events
 }

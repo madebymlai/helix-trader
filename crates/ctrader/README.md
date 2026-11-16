@@ -40,6 +40,10 @@ A failed order command is one of Nautilus' `CommandFailure` classes and follows 
 
 A fill's commission is the charge its deal states. A deal that states none is not booked at zero: a report request that needs it fails, and its trade event emits nothing and is applied by a later replay or reconciliation. The demo accounts the fixtures come from charge commission, so every deal there states it; a live run on a commission-free account must confirm that its deals state a commission of zero rather than omit it, since otherwise none of its fills is booked.
 
+## Feature flags
+
+- `test-support`: Exposes the hooks of a caller's end-to-end test of a session's token renewal on a real cTrader server, as Nautilus' crates expose theirs: a forced renewal (`CTraderSession::renew_token`), a session's spot events as cTrader sends them (`CTraderSession::connect_with_spots`) and the pair the token file holds (`CTraderCredential::stored_tokens`). The types they return, `SpotEvents` and `TokenPair`, are public whatever the features.
+
 ## Tests
 
 The tests run against a mock cTrader peer replaying payloads captured from a broker's demo (`testdata/`, scrubbed), under a made-up venue, client id and setting names, so a broker's name left in the adapter fails a test. They run with the workspace's, or alone:
@@ -48,4 +52,4 @@ The tests run against a mock cTrader peer replaying payloads captured from a bro
 cargo test -p ctrader
 ```
 
-The end-to-end test of a session's token renewal on a real demo needs a broker's credential, so its caller holds and gates it, as this repository's caller does in its tests; it **rotates the real token pair**. The `test-support` feature exposes the hooks it needs, as Nautilus' crates expose theirs: a forced renewal (`CTraderSession::renew_token`), a session's spot events as cTrader sends them (`CTraderSession::connect_with_spots`) and the pair the token file holds (`CTraderCredential::stored_tokens`).
+The end-to-end test of a session's token renewal on a real demo needs a broker's credential, so its caller holds and gates it, as this repository's caller does in its tests; it **rotates the real token pair**. The `test-support` feature exposes the hooks it needs (see [feature flags](#feature-flags)).

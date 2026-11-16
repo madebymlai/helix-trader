@@ -3,9 +3,11 @@
 //! quotes replayed, the first only those from the run start on. One node
 //! per thread, so one run per test.
 
+use rstest::rstest;
+
 use crate::common::{noise, ohlc};
 
-#[test]
+#[rstest]
 fn every_bar_has_the_prices_of_its_minute_quotes_from_the_run_start() {
     let start = noise::at("12:30");
     let catalog = noise::catalog();

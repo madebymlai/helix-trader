@@ -5,6 +5,8 @@
 //! triggered, so it fills at that quote. One node per thread, so one run
 //! per test.
 
+use rstest::rstest;
+
 use crate::common::{self, trades};
 
 /// - 13:00 at 620.60, above 605.60: cross up, buy 10 at 620.65, its stop
@@ -24,7 +26,7 @@ use crate::common::{self, trades};
 ///   open.
 const LEVELS: [f64; 4] = [620.0, 600.0, 610.0, 611.0];
 
-#[test]
+#[rstest]
 fn each_cross_opens_one_trade_in_its_direction() {
     let catalog = trades::catalog(&LEVELS);
 

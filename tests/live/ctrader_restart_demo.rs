@@ -30,9 +30,9 @@ use helix_trader::{
 };
 use jiff::SignedDuration;
 use nautilus_common::{
-    actor::DataActor, cache::Cache, clock::VirtualClock, factories::ExecutionClientFactory,
-    live::runner::replace_exec_event_sender, logging::logger::LoggerConfig,
-    messages::ExecutionEvent,
+    actor::DataActor, cache::Cache, clients::ExecutionClient, clock::VirtualClock,
+    factories::ExecutionClientFactory, live::runner::replace_exec_event_sender,
+    logging::logger::LoggerConfig, messages::ExecutionEvent,
 };
 use nautilus_core::UnixNanos;
 use nautilus_model::{
@@ -433,7 +433,7 @@ impl Drop for Run {
 
 /// The broker's execution client on the demo account, connected, as the
 /// node's is.
-async fn connected(broker: &DemoBroker) -> Box<dyn nautilus_common::clients::ExecutionClient> {
+async fn connected(broker: &DemoBroker) -> Box<dyn ExecutionClient> {
     let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
     replace_exec_event_sender(tx);
     let cache = Rc::new(RefCell::new(Cache::default()));

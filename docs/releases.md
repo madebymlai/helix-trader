@@ -20,7 +20,7 @@ An entry is one line: what changed, not how, code in backticks. A breaking chang
 
 ## Shipping a release
 
-1. On a branch from `develop`: set `[package] version` in `Cargo.toml`, give the top section of `RELEASES.md` that version and its date (`Released on 2026-11-20 (UTC).`), and merge it into `develop`.
+1. On a branch from `develop`: set `[workspace.package] version` in `Cargo.toml`, give the top section of `RELEASES.md` that version and its date (`Released on 2026-11-20 (UTC).`), and merge it into `develop`.
 2. Open the pull request from `develop` into `main`. Once its CI passes and it merges, the release workflow (`.github/workflows/release.yml`) tags `v<version>` on `main` and publishes a GitHub release whose notes are the top section of `RELEASES.md`, up to its `---`.
 3. On a branch from `develop`: open the next release's section above it, `# Helix Trader <next version>` and `Released on TBD (UTC).`, ended by `---`.
 

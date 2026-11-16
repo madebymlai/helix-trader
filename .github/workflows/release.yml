@@ -30,7 +30,9 @@ jobs:
       - name: Read the release in RELEASES.md
         id: notes
         run: |
-          version="$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['package']['version'])")"
+          version="$(python3 -c "import tomllib
+          manifest = tomllib.load(open('Cargo.toml', 'rb'))
+          print(manifest['workspace']['package']['version'])")"
           if [[ "$(sed -n '1p' RELEASES.md)" != "# Helix Trader ${version}" ]]; then
             echo "::error::RELEASES.md does not start with Helix Trader ${version}, Cargo.toml's version."
             exit 1

@@ -492,13 +492,13 @@ mod tests {
     use nautilus_data::{client::DataClientAdapter, engine::DataEngine};
     use nautilus_live::{SocketReconnectRegistry, SocketReconnectRequestOutcome};
     use nautilus_model::{
+        data::QuoteTick,
         identifiers::TraderId,
         instruments::{Instrument, InstrumentAny},
         types::{Price, Quantity},
     };
     use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
     use prost::Message as _;
-    use tokio::sync::mpsc;
     use ustr::Ustr;
 
     use super::*;
@@ -591,7 +591,7 @@ mod tests {
         }
     }
 
-    type Events = mpsc::UnboundedReceiver<DataEvent>;
+    type Events = tokio::sync::mpsc::UnboundedReceiver<DataEvent>;
 
     /// A client of XAUUSD and EURUSD on the peer `script` plays, connected,
     /// the node's data events, the frames received and its token file's
@@ -608,7 +608,7 @@ mod tests {
         clock: &'static AtomicTime,
     ) -> (CTraderDataClient, Events, Received, tempfile::TempDir) {
         let (url, received) = testing::start(script);
-        let (tx, events) = mpsc::unbounded_channel();
+        let (tx, events) = tokio::sync::mpsc::unbounded_channel();
         replace_data_event_sender(tx);
         let (credential, tokens) = testing::credential();
         let mut client = CTraderDataClient::with_endpoint(
@@ -631,7 +631,7 @@ mod tests {
     }
 
     /// The next event, a quote.
-    async fn next_quote(events: &mut Events) -> nautilus_model::data::QuoteTick {
+    async fn next_quote(events: &mut Events) -> QuoteTick {
         match next_event(events).await {
             DataEvent::Data(Data::Quote(quote)) => quote,
             other => panic!("not a quote: {other:?}"),
@@ -722,7 +722,7 @@ mod tests {
 
     /// The next socket state the node is told of.
     async fn next_socket_state(
-        system: &mut mpsc::UnboundedReceiver<SystemEvent>,
+        system: &mut tokio::sync::mpsc::UnboundedReceiver<SystemEvent>,
     ) -> SocketStateChange {
         let event = tokio::time::timeout(Duration::from_secs(10), system.recv())
             .await
@@ -739,9 +739,9 @@ mod tests {
     /// authenticates again; a disconnect deregisters it.
     #[tokio::test]
     async fn the_sessions_socket_state_goes_to_the_node_which_can_reconnect_it() {
-        let (system_tx, mut system) = mpsc::unbounded_channel();
+        let (system_tx, mut system) = tokio::sync::mpsc::unbounded_channel();
         replace_system_event_sender(system_tx);
-        let (data_tx, _events) = mpsc::unbounded_channel();
+        let (data_tx, _events) = tokio::sync::mpsc::unbounded_channel();
         replace_data_event_sender(data_tx);
         let (url, received) = testing::start(peer(vec![], vec![]));
         let (credential, _tokens) = testing::credential();
@@ -881,7 +881,7 @@ mod tests {
     }
 
     /// (ms, bid, ask) of `quotes`.
-    fn prices(quotes: &[nautilus_model::data::QuoteTick]) -> Vec<(u64, String, String)> {
+    fn prices(quotes: &[QuoteTick]) -> Vec<(u64, String, String)> {
         quotes
             .iter()
             .map(|q| {
@@ -1046,7 +1046,7 @@ mod tests {
         events: &mut Events,
         start: &str,
         end: &str,
-    ) -> Vec<nautilus_model::data::QuoteTick> {
+    ) -> Vec<QuoteTick> {
         let mut asked = request(Some(at(start)), at(end), None);
         asked.params = Some(Params::new(
             [("update_catalog".to_string(), serde_json::json!(true))].into(),
@@ -1327,7 +1327,7 @@ mod tests {
             }
             answer(connection, request)
         });
-        let (tx, _events) = mpsc::unbounded_channel();
+        let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
         replace_data_event_sender(tx);
         let (credential, _dir) = testing::credential();
         let mut client = CTraderDataClient::with_endpoint(

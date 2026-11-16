@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context, ensure};
+use anyhow::Context;
 use nautilus_core::time::get_atomic_clock_realtime;
 use nautilus_model::identifiers::InstrumentId;
 use nautilus_network::http::{HttpClient, HttpRedirectPolicy};
@@ -69,7 +69,7 @@ impl Account {
     ///
     /// # Errors
     ///
-    /// As `environment_of` and `connect`.
+    /// Returns an error if `environment_of` or `connect` fails.
     pub(super) fn of_environment() -> anyhow::Result<Self> {
         let environment = environment_of(std::env::var(ENVIRONMENT_VAR).ok().as_deref())?;
         Self::connect(&OKXExecutionClientConfig {
@@ -172,7 +172,7 @@ impl Account {
             )
             .await
             .with_context(|| format!("asking OKX the leverage of {id}"))?;
-        ensure!(
+        anyhow::ensure!(
             response.status.is_success(),
             "OKX answered HTTP {} for the leverage of {id}",
             response.status.as_u16()
@@ -202,7 +202,7 @@ struct LeverageInfo {
 fn leverage_of(id: InstrumentId, body: &[u8]) -> anyhow::Result<Decimal> {
     let answer: LeverageAnswer =
         serde_json::from_slice(body).with_context(|| format!("parsing OKX's leverage of {id}"))?;
-    ensure!(
+    anyhow::ensure!(
         answer.code == "0",
         "OKX refused the leverage of {id}: code {}, {}",
         answer.code,
@@ -210,7 +210,7 @@ fn leverage_of(id: InstrumentId, body: &[u8]) -> anyhow::Result<Decimal> {
     );
     let symbol = id.symbol.as_str();
     let mut levers = answer.data.iter().map(|info| {
-        ensure!(
+        anyhow::ensure!(
             info.inst_id == symbol,
             "OKX answered the leverage of {} for {id}",
             info.inst_id
@@ -222,7 +222,7 @@ fn leverage_of(id: InstrumentId, body: &[u8]) -> anyhow::Result<Decimal> {
         .with_context(|| format!("OKX listed no leverage for {id}"))??;
     for other in levers {
         let other = other?;
-        ensure!(
+        anyhow::ensure!(
             other == lever,
             "OKX lists leverages {lever} and {other} for {id}"
         );
@@ -232,19 +232,21 @@ fn leverage_of(id: InstrumentId, body: &[u8]) -> anyhow::Result<Decimal> {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
     fn xperp() -> InstrumentId {
         InstrumentId::from("BTC-USD_UM_XPERP-310328.OKX")
     }
 
-    #[test]
+    #[rstest]
     fn the_environment_is_demo_or_live_by_its_lowercase_name() {
         assert_eq!(environment_of(Some("demo")).unwrap(), OKXEnvironment::Demo);
         assert_eq!(environment_of(Some("live")).unwrap(), OKXEnvironment::Live);
     }
 
-    #[test]
+    #[rstest]
     fn a_missing_empty_or_other_environment_is_refused_naming_the_variable_and_values() {
         for value in [None, Some(""), Some("Demo"), Some("real"), Some(" demo")] {
             let err = environment_of(value).unwrap_err().to_string();
@@ -253,13 +255,13 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn the_leverage_is_read_from_okxs_answer() {
         let body = br#"{"code":"0","msg":"","data":[{"ccy":"","instId":"BTC-USD_UM_XPERP-310328","lever":"3","mgnMode":"cross","posSide":"net"}]}"#;
         assert_eq!(leverage_of(xperp(), body).unwrap(), Decimal::from(3));
     }
 
-    #[test]
+    #[rstest]
     fn a_refused_empty_or_foreign_leverage_answer_is_an_error() {
         let error = |body: &[u8]| leverage_of(xperp(), body).unwrap_err().to_string();
         let refused = br#"{"code":"51001","msg":"Instrument ID doesn't exist","data":[]}"#;

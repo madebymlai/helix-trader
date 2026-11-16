@@ -57,7 +57,7 @@
 
 mod handler;
 
-use std::{sync::Arc, time::Duration};
+use std::{fmt::Debug, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use nautilus_common::live::dst::time;
@@ -73,7 +73,6 @@ use nautilus_network::{
         split_topic,
     },
 };
-use tokio::sync::{mpsc, oneshot};
 use ustr::Ustr;
 
 use self::handler::{CTraderWsHandler, HandlerCommand, LOCK_RETRY};
@@ -147,10 +146,10 @@ fn spot_symbol(topic: &str) -> i64 {
 }
 
 /// The spot events of the symbols subscribed, as cTrader sends them.
-pub type SpotEvents = mpsc::UnboundedReceiver<ProtoOaSpotEvent>;
+pub type SpotEvents = tokio::sync::mpsc::UnboundedReceiver<ProtoOaSpotEvent>;
 
 /// The trade events of the account, as cTrader sends them.
-pub(crate) type TradeEvents = mpsc::UnboundedReceiver<TradeEvent>;
+pub(crate) type TradeEvents = tokio::sync::mpsc::UnboundedReceiver<TradeEvent>;
 
 /// A trade event: what cTrader sent, and the `clientMsgId` it came under,
 /// the trade request's when it answers one.
@@ -183,11 +182,11 @@ pub(crate) enum TradeMessage {
 /// Whether a trade request was sent: `Ok` once its frame is written, an
 /// error if it never was (the session failed, the connection closed, or
 /// the frame could not be written).
-pub(crate) type TradeSent = oneshot::Receiver<Result<(), CTraderError>>;
+pub(crate) type TradeSent = tokio::sync::oneshot::Receiver<Result<(), CTraderError>>;
 
 /// An authenticated cTrader session on one account.
 pub(super) struct CTraderWebSocketClient {
-    cmd_tx: mpsc::UnboundedSender<HandlerCommand>,
+    cmd_tx: tokio::sync::mpsc::UnboundedSender<HandlerCommand>,
     /// The handler task, explicitly singular: `disconnect` joins it.
     handler: TaskSlot<()>,
     /// The spot subscriptions, which the handler marks, confirms and fails.
@@ -201,9 +200,9 @@ pub(super) struct CTraderWebSocketClient {
     socket: Option<SocketControl>,
 }
 
-impl std::fmt::Debug for CTraderWebSocketClient {
+impl Debug for CTraderWebSocketClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CTraderWebSocketClient")
+        f.debug_struct(stringify!(CTraderWebSocketClient))
             .field("confirmed_spots", &self.subscriptions.len())
             .finish_non_exhaustive()
     }
@@ -236,7 +235,7 @@ impl CTraderWebSocketClient {
             }
             time::sleep(LOCK_RETRY).await;
         };
-        let (raw_tx, raw_rx) = mpsc::unbounded_channel::<(u64, Message)>();
+        let (raw_tx, raw_rx) = tokio::sync::mpsc::unbounded_channel::<(u64, Message)>();
         let message_handler: EpochMessageHandler = Arc::new(move |epoch, message| {
             // The receiver is gone only once the handler has stopped.
             let _ = raw_tx.send((epoch, message));
@@ -267,12 +266,12 @@ impl CTraderWebSocketClient {
         client.set_auth_tracker(auth.clone(), true);
         let subscriptions = SubscriptionState::new(TOPIC_DELIMITER);
         let authenticated = auth.begin();
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
         cmd_tx
             .send(HandlerCommand::SetClient(client))
             .ok()
             .context("the cTrader handler is gone")?;
-        let (spot_tx, spot_rx) = mpsc::unbounded_channel();
+        let (spot_tx, spot_rx) = tokio::sync::mpsc::unbounded_channel();
         let handler = CTraderWsHandler::new(
             credential,
             tokens,
@@ -315,9 +314,9 @@ impl CTraderWebSocketClient {
     ///
     /// # Errors
     ///
-    /// Returns cTrader's error response, or an error if the session cannot
-    /// serve requests, the connection is lost first, or no response comes
-    /// within `REQUEST_TIMEOUT`.
+    /// Returns an error if cTrader answers with an error response, which it
+    /// passes on, or if the session cannot serve requests, the connection
+    /// is lost first, or no response comes within `REQUEST_TIMEOUT`.
     pub(super) async fn request<Req: Payload, Res: Payload>(
         &self,
         request: &Req,
@@ -326,7 +325,7 @@ impl CTraderWebSocketClient {
             if is_historical(Req::TYPE) {
                 self.historical_slot().await;
             }
-            let (reply, response) = oneshot::channel();
+            let (reply, response) = tokio::sync::oneshot::channel();
             self.cmd_tx
                 .send(HandlerCommand::Request {
                     payload_type: Req::TYPE,
@@ -386,14 +385,15 @@ impl CTraderWebSocketClient {
     /// session is ready; its outcome comes as trade events under that id.
     /// The answer says whether it was sent.
     pub(super) fn trade<Req: Payload>(&self, request: &Req, client_msg_id: String) -> TradeSent {
-        let (sent, sending) = oneshot::channel();
+        let (sent, sending) = tokio::sync::oneshot::channel();
         let command = HandlerCommand::Trade {
             payload_type: Req::TYPE,
             payload: request.encode_to_vec(),
             client_msg_id,
             sent,
         };
-        if let Err(mpsc::error::SendError(HandlerCommand::Trade { sent, .. })) =
+
+        if let Err(tokio::sync::mpsc::error::SendError(HandlerCommand::Trade { sent, .. })) =
             self.cmd_tx.send(command)
         {
             let _ = sent.send(Err(CTraderError::ConnectionLost));
@@ -408,7 +408,7 @@ impl CTraderWebSocketClient {
     ///
     /// Returns an error if the connection is closed.
     pub(super) fn trade_events(&self) -> Result<TradeEvents, CTraderError> {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         self.cmd_tx
             .send(HandlerCommand::TradeEvents(tx))
             .map_err(|_| CTraderError::ConnectionLost)?;

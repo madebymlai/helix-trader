@@ -52,7 +52,7 @@ pub struct Exported {
 ///
 /// # Errors
 ///
-/// Returns an error naming the export that failed: LSE refused it, LSE's
+/// Returns an error if an export fails, naming it: LSE refused it, LSE's
 /// file of it does not have the SHA-256 LSE gave for it, or LSE could not
 /// be reached (see `LseHttpClient::export`).
 pub async fn fetch(

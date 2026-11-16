@@ -5,9 +5,8 @@
 //! (`/v3/factors`), and a lookup of LSE's catalogue (`/v3/pairs`), as LSE's
 //! docs name their parameters.
 
-use std::fmt;
+use std::fmt::Display;
 
-use anyhow::{bail, ensure};
 use jiff::{SignedDuration, Timestamp, civil::Date};
 use nautilus_model::{
     data::{BarSpecification, BarType},
@@ -70,8 +69,8 @@ impl Serialize for Rows {
     }
 }
 
-impl fmt::Display for Rows {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for Rows {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::TradeSlice => f.write_str("trade slice"),
             Self::Candles(width) => write!(f, "{width} candles"),
@@ -93,8 +92,8 @@ enum Selection {
     PairId(u64),
 }
 
-impl fmt::Display for Selection {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for Selection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Symbol(symbol) => f.write_str(symbol),
             Self::PairId(pair_id) => write!(f, "pair {pair_id}"),
@@ -118,31 +117,32 @@ impl CandleWidth {
     ///
     /// # Errors
     ///
-    /// Returns an error naming `bar_type` if its bars are not those of
-    /// LSE's candles; for daily, weekly and monthly bars, saying why and
-    /// that the bar is declared from a shorter LSE candle instead.
+    /// Returns an error if the bars of `bar_type`, which it names, are not
+    /// those of LSE's candles; for daily, weekly and monthly bars, saying
+    /// why and that the bar is declared from a shorter LSE candle instead.
     pub fn of(bar_type: BarType) -> anyhow::Result<Self> {
         let spec = bar_type.spec();
-        ensure!(
+        anyhow::ensure!(
             bar_type.aggregation_source() == AggregationSource::External,
             "{bar_type}: LSE's candles are EXTERNAL bars"
         );
-        ensure!(
+        anyhow::ensure!(
             spec.price_type == PriceType::Last,
             "{bar_type}: LSE's candles are of the LAST price, their one price"
         );
+
         if matches!(
             spec.aggregation,
             BarAggregation::Day | BarAggregation::Week | BarAggregation::Month
         ) {
-            bail!(
+            anyhow::bail!(
                 "{bar_type}: LSE stamps its daily, weekly and monthly candles at their \
                  session's first traded minute and gives no close, and builds them from its \
                  minute bars; declare the bar from a shorter LSE candle (1-MINUTE or 4-HOUR \
                  EXTERNAL) instead, which Nautilus aggregates"
             );
         }
-        ensure!(
+        anyhow::ensure!(
             CANDLE_WIDTHS.iter().any(|(aggregation, _, steps)| {
                 *aggregation == spec.aggregation && steps.contains(&spec.step.get())
             }),
@@ -182,8 +182,8 @@ impl CandleWidth {
 }
 
 /// LSE's name of the width, such as `5m`.
-impl fmt::Display for CandleWidth {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for CandleWidth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let (_, unit, _) = CANDLE_WIDTHS
             .iter()
             .find(|(aggregation, _, _)| *aggregation == self.0.aggregation)
@@ -325,8 +325,8 @@ impl ExportQuery {
     }
 }
 
-impl fmt::Display for ExportQuery {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for ExportQuery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let Self {
             market,
             instrument,
@@ -353,8 +353,8 @@ pub struct Dates {
     pub to: Date,
 }
 
-impl fmt::Display for Dates {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for Dates {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.from {
             Some(from) => write!(f, "over [{from}, {}]", self.to),
             None => write!(f, "up to {}", self.to),
@@ -385,8 +385,8 @@ impl ReferenceQuery {
     }
 }
 
-impl fmt::Display for ReferenceQuery {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for ReferenceQuery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let Self {
             dataset,
             symbol,
@@ -423,8 +423,8 @@ impl MacroQuery {
     }
 }
 
-impl fmt::Display for MacroQuery {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for MacroQuery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let Self {
             kind, code, dates, ..
         } = self;
@@ -450,8 +450,8 @@ impl FactorsQuery {
     }
 }
 
-impl fmt::Display for FactorsQuery {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for FactorsQuery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "the splits and dividends of {} in LSE's {}",
@@ -478,8 +478,8 @@ impl PairsQuery {
     }
 }
 
-impl fmt::Display for PairsQuery {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for PairsQuery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "the listings of {} in LSE's {}",

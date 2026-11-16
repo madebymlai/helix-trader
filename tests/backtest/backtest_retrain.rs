@@ -30,6 +30,7 @@ use helix_trader::{
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
+use rstest::rstest;
 use tempfile::TempDir;
 
 use crate::common::{
@@ -124,7 +125,7 @@ fn prepare(catalog: &TempDir, models: &Path) -> (Vec<(Timestamp, Timestamp)>, Ve
     (built, trained)
 }
 
-#[test]
+#[rstest]
 fn each_period_trades_on_the_model_trained_at_its_start_and_a_second_backtest_trains_nothing() {
     let catalog = catalog();
     let models = tempfile::tempdir().unwrap();
@@ -195,7 +196,7 @@ fn predicts(store: &ModelStore, at: Timestamp) -> f64 {
 /// baseline does, a skill of nought, its expectation never varies, no
 /// slope, and its mean R - E' is the mean R of the period's longs, read from
 /// the dataset, less its constant.
-#[test]
+#[rstest]
 fn each_period_scores_its_model_beside_that_models_own_baseline() {
     let catalog = catalog();
     let models = tempfile::tempdir().unwrap();

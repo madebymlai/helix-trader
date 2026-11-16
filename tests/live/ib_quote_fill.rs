@@ -32,13 +32,12 @@ use nautilus_model::{
     identifiers::InstrumentId,
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
-use tokio::sync::Mutex;
 
 /// EUR/USD on IDEALPRO, IB's cash FX pair, quoted through the hour.
 const EUR_USD: &str = "EUR/USD.IDEALPRO";
 
 /// Held by each test while it fills on client id 51.
-static GATEWAY: Mutex<()> = Mutex::const_new(());
+static GATEWAY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Whether the run is opted in, from the shell, before `.env` is read, so
 /// that the file cannot opt in. An opted-in run claims the process for this

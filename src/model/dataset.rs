@@ -83,12 +83,13 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt, fs,
+    fmt::Display,
+    fs,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use jiff::{SignedDuration, Timestamp, civil::Date, tz::TimeZone};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
@@ -180,8 +181,8 @@ pub struct DatasetRow {
 #[derive(Debug)]
 pub struct SchemaMismatch(String);
 
-impl fmt::Display for SchemaMismatch {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for SchemaMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
 }
@@ -257,8 +258,8 @@ impl DatasetVenue {
 /// The settings as the fingerprint reads them (`fingerprint_part`), such as
 /// `commission rate 0.00003, balance 10000 USD`, or `commission rate
 /// 0.00003, balance 10000 USD, latency 150ms`.
-impl fmt::Display for DatasetVenue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for DatasetVenue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "commission {}, balance {} {}",
@@ -513,10 +514,11 @@ impl Dataset {
         data.into_iter()
             .map(|data| {
                 let Data::Custom(custom) = data else {
-                    bail!("the dataset {identifier} holds {data:?}");
+                    anyhow::bail!("the dataset {identifier} holds {data:?}");
                 };
+
                 if custom.data_type.metadata() != want.metadata() {
-                    bail!(SchemaMismatch(format!(
+                    anyhow::bail!(SchemaMismatch(format!(
                         "the dataset {identifier} holds rows of the features {:?}, not {:?} and \
                          the payoff {:?}",
                         custom.data_type.metadata(),
@@ -531,7 +533,7 @@ impl Dataset {
                     .cloned()
                     .with_context(|| format!("the dataset {identifier} holds {custom:?}"))?;
                 if row.features.len() != self.feature_names.len() {
-                    bail!(SchemaMismatch(format!(
+                    anyhow::bail!(SchemaMismatch(format!(
                         "the dataset {identifier} holds a row of {} features, not {}",
                         row.features.len(),
                         self.feature_names.len()
@@ -539,7 +541,7 @@ impl Dataset {
                 }
                 for payoff in [&row.long_payoff, &row.short_payoff] {
                     if payoff.len() != self.payoff_names.len() {
-                        bail!(SchemaMismatch(format!(
+                        anyhow::bail!(SchemaMismatch(format!(
                             "the dataset {identifier} holds a row of {} payoff features, not {}",
                             payoff.len(),
                             self.payoff_names.len()
@@ -705,7 +707,7 @@ impl DatasetRow {
 ///
 /// # Errors
 ///
-/// Returns an error as `targets::fingerprint` does.
+/// Returns an error if `targets::fingerprint` fails.
 pub(super) fn fingerprint(
     features: &FeatureSet,
     rule: DecisionRule,
@@ -774,7 +776,8 @@ fn end_of(day: Date) -> anyhow::Result<UnixNanos> {
 mod tests {
     use std::rc::Rc;
 
-    use nautilus_model::identifiers::InstrumentId;
+    use nautilus_model::{data::BarType, identifiers::InstrumentId};
+    use rstest::rstest;
     use rust_decimal::Decimal;
 
     use super::*;
@@ -846,7 +849,7 @@ mod tests {
         DataRequirements {
             bar_types: vec![],
             ticks: vec![crate::strategy::requirements::TickSeries {
-                data: nautilus_model::data::NautilusDataType::QuoteTick,
+                data: NautilusDataType::QuoteTick,
                 instrument_id: InstrumentId::from(GOLD),
             }],
             custom: vec![],
@@ -1011,7 +1014,7 @@ mod tests {
     /// A row of a long at its take profit and a short at its time, worked by
     /// hand: every value of a side under that side's names, whatever the
     /// target, each side's its own.
-    #[test]
+    #[rstest]
     fn a_row_stores_each_sides_payoff_pnl_commission_exit_and_unit_under_its_names() {
         let mut settled = row("2026-01-05T09:00:00Z", vec![1.5], "2.5");
         settled.outcomes.short = Outcome {
@@ -1042,7 +1045,7 @@ mod tests {
     /// A long gaining 0.25 net of 0.75 and a short at nought: each answers
     /// its own trade and unit, and its row, the decision's features then its
     /// own payoff features.
-    #[test]
+    #[rstest]
     fn a_row_answers_each_sides_trade_row_and_unit() {
         let row = DatasetRow {
             long_pnl: 0.25,
@@ -1085,7 +1088,7 @@ mod tests {
 
     /// The target's payoff names are three, a bracket's: a row of a payoff
     /// of one under them is refused as read.
-    #[test]
+    #[rstest]
     fn a_row_of_another_payoff_width_is_a_schema_mismatch() {
         let dir = tempfile::tempdir().unwrap();
         let dataset = dataset(dir.path(), STRATEGY, 1);
@@ -1102,7 +1105,7 @@ mod tests {
         assert!(err.downcast_ref::<SchemaMismatch>().is_some(), "{err:#}");
     }
 
-    #[test]
+    #[rstest]
     fn rows_read_back_bit_for_bit() {
         let dir = tempfile::tempdir().unwrap();
         let dataset = dataset(dir.path(), STRATEGY, 3);
@@ -1134,7 +1137,7 @@ mod tests {
         date.parse().unwrap()
     }
 
-    #[test]
+    #[rstest]
     fn every_day_is_missing_from_an_empty_catalog() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -1146,7 +1149,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_day_is_written_once_replay_has_passed_its_end_plus_its_longest_target() {
         let dir = tempfile::tempdir().unwrap();
         let dataset = dataset(dir.path(), STRATEGY, 1);
@@ -1183,7 +1186,7 @@ mod tests {
     /// settlement point, at most a minute after: its execution engine's
     /// purge timer. The day is settled 2 hours, 30 s and a minute after its
     /// end, not before.
-    #[test]
+    #[rstest]
     fn at_a_latency_a_day_is_written_once_replay_has_passed_its_end_its_limit_its_latency_and_a_minute()
      {
         let dir = tempfile::tempdir().unwrap();
@@ -1220,7 +1223,7 @@ mod tests {
 
     /// A build at a latency of 30 s replays its last day to its end plus
     /// the target's limit of 2 hours, the latency and a minute.
-    #[test]
+    #[rstest]
     fn at_a_latency_a_build_replays_past_the_last_day_by_its_limit_its_latency_and_a_minute() {
         let dir = tempfile::tempdir().unwrap();
         let dataset = blueprint_on(
@@ -1251,7 +1254,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_day_the_replay_started_within_is_not_written() {
         let dir = tempfile::tempdir().unwrap();
         let dataset = dataset(dir.path(), STRATEGY, 1);
@@ -1275,7 +1278,7 @@ mod tests {
             [day("2026-01-05")]
         );
     }
-    #[test]
+    #[rstest]
     fn recomputing_a_day_replaces_its_rows() {
         let dir = tempfile::tempdir().unwrap();
         let dataset = dataset(dir.path(), STRATEGY, 1);
@@ -1294,7 +1297,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn days_without_rows_are_covered_by_the_files_of_the_days_beside_them() {
         let dir = tempfile::tempdir().unwrap();
         let dataset = dataset(dir.path(), STRATEGY, 1);
@@ -1328,7 +1331,7 @@ mod tests {
             ],
         );
     }
-    #[test]
+    #[rstest]
     fn strategies_with_different_feature_widths_coexist() {
         let dir = tempfile::tempdir().unwrap();
         let (narrow, wide) = (
@@ -1357,7 +1360,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_change_of_the_features_the_decisions_the_target_or_the_commission_finds_an_empty_cache() {
         let dir = tempfile::tempdir().unwrap();
         let (from, to) = (at("2026-01-05T00:00:00Z"), at("2026-01-06T02:00:00Z"));
@@ -1428,7 +1431,7 @@ mod tests {
             assert!(dataset.read(from, to).unwrap().is_empty(), "{dataset:?}");
         }
     }
-    #[test]
+    #[rstest]
     fn the_manifest_names_the_features_the_payoff_the_target_and_the_fingerprint() {
         let dir = tempfile::tempdir().unwrap();
         let dataset = dataset(dir.path(), STRATEGY, 2);
@@ -1468,7 +1471,7 @@ mod tests {
 
     /// Bumping the dataset version is a new fingerprint, so every dataset
     /// and model is rebuilt.
-    #[test]
+    #[rstest]
     fn bumping_the_dataset_version_changes_the_fingerprint() {
         let rule = DecisionRule::Every(SignedDuration::from_hours(1));
         let at = |version| {
@@ -1498,7 +1501,7 @@ mod tests {
     /// literal here, and the pinned directory of a store, which the
     /// fingerprint keys too
     /// (`store::tests::a_fixed_strategys_side_store_keeps_its_directory`).
-    #[test]
+    #[rstest]
     fn a_fixed_strategys_dataset_keeps_its_identifier() {
         let dataset = dataset(Path::new("catalog"), STRATEGY, 1);
 
@@ -1513,7 +1516,7 @@ mod tests {
     /// those of the same strategy with the delay ignored: the one reading
     /// gold's quotes alone, its requirements keying nothing else, the
     /// target having no ATR.
-    #[test]
+    #[rstest]
     fn a_strategy_on_composite_bars_is_keyed_by_its_build_delay() {
         let of = |requirements: &DataRequirements| {
             blueprint(
@@ -1527,7 +1530,7 @@ mod tests {
             .unwrap()
         };
         let composite = DataRequirements {
-            bar_types: vec![nautilus_model::data::BarType::from(
+            bar_types: vec![BarType::from(
                 "XAUUSD.ICMARKETS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
             )],
             ..requirements()
@@ -1539,7 +1542,7 @@ mod tests {
     /// A dataset run's balance is the equity of the reference stake its
     /// targets are sized at, so it can change their rows: another balance
     /// is another fingerprint, another spelling of one is not.
-    #[test]
+    #[rstest]
     fn another_balance_of_the_dataset_run_is_another_fingerprint() {
         let of = |venue: DatasetVenue| {
             blueprint_on(
@@ -1574,7 +1577,7 @@ mod tests {
     /// built: a commission reads as its kind and its amount without
     /// trailing zeros, beside the balance; a dataset run's accounts
     /// margin nothing, so no leverage keys it.
-    #[test]
+    #[rstest]
     fn a_dataset_runs_venue_is_keyed_by_its_commissions_kind_and_amount() {
         let of = |commission| {
             DatasetVenue {
@@ -1608,7 +1611,7 @@ mod tests {
     /// A latency keys the venue, after its commission and balance, only
     /// when declared: every venue declaring none keeps the text, so the
     /// datasets and stores, it was keyed by before.
-    #[test]
+    #[rstest]
     fn a_dataset_runs_latency_keys_its_venue_only_when_declared() {
         let at = |latency| DatasetVenue { latency, ..venue() }.fingerprint_part();
 
@@ -1625,7 +1628,7 @@ mod tests {
 
     /// A dataset run's latency moves its fills, so its rows: another
     /// latency, or one where there was none, is another fingerprint.
-    #[test]
+    #[rstest]
     fn another_latency_of_the_dataset_run_is_another_fingerprint() {
         let of = |latency| {
             blueprint_on(
@@ -1656,7 +1659,7 @@ mod tests {
                 pairs
                     .iter()
                     .map(|&instrument_id| crate::strategy::requirements::TickSeries {
-                        data: nautilus_model::data::NautilusDataType::QuoteTick,
+                        data: NautilusDataType::QuoteTick,
                         instrument_id,
                     }),
             );
@@ -1680,7 +1683,7 @@ mod tests {
     /// declaring them, or other pairs, is another fingerprint. Declaring
     /// none keeps the fingerprint the config had before it could declare
     /// any (`a_fixed_strategys_dataset_keeps_its_identifier`).
-    #[test]
+    #[rstest]
     fn the_conversions_key_the_dataset_only_when_declared() {
         let none = converting(&[]);
         let eurusd = converting(&["EURUSD.ICMARKETS"]);
@@ -1705,13 +1708,13 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_dataset_never_written_has_no_manifest() {
         let dir = tempfile::tempdir().unwrap();
 
         assert!(dataset(dir.path(), STRATEGY, 1).manifest().is_err());
     }
-    #[test]
+    #[rstest]
     fn a_build_replays_the_missing_days_once_through_their_settling() {
         let dir = tempfile::tempdir().unwrap();
         let dataset = dataset(dir.path(), STRATEGY, 1);
@@ -1766,7 +1769,7 @@ mod tests {
         .unwrap()
     }
 
-    #[test]
+    #[rstest]
     fn a_build_replays_the_features_warmup_before_its_first_day_and_stores_none_of_it() {
         let dir = tempfile::tempdir().unwrap();
         let dataset = warmed(dir.path());
@@ -1802,7 +1805,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_train_replays_the_features_warmup_before_the_first_missing_day() {
         let dir = tempfile::tempdir().unwrap();
         let dataset = warmed(dir.path());
@@ -1830,7 +1833,7 @@ mod tests {
         assert_bits_eq(&settled, &[stored("2026-01-05T09:00:00Z", vec![2.0], 1.0)]);
     }
 
-    #[test]
+    #[rstest]
     fn a_second_build_of_the_same_span_replays_no_day() {
         let dir = tempfile::tempdir().unwrap();
         let dataset = dataset(dir.path(), STRATEGY, 1);
@@ -1850,7 +1853,7 @@ mod tests {
         assert!(built.is_empty());
     }
 
-    #[test]
+    #[rstest]
     fn rows_of_another_width_than_the_names_are_a_schema_mismatch() {
         let dir = tempfile::tempdir().unwrap();
         let dataset = dataset(dir.path(), STRATEGY, 1);
@@ -1868,7 +1871,7 @@ mod tests {
         assert!(err.downcast_ref::<SchemaMismatch>().is_some(), "{err:#}");
     }
 
-    #[test]
+    #[rstest]
     fn the_settled_rows_are_those_of_the_span_settled_at_its_end() {
         let dir = tempfile::tempdir().unwrap();
         let dataset = dataset(dir.path(), STRATEGY, 1);
@@ -1905,7 +1908,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn the_days_settled_at_the_end_are_cached_and_the_others_replayed_again() {
         let dir = tempfile::tempdir().unwrap();
         let dataset = dataset(dir.path(), STRATEGY, 1);
@@ -1943,7 +1946,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn settled_rows_of_cached_days_replay_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let dataset = dataset(dir.path(), STRATEGY, 1);

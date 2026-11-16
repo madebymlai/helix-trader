@@ -173,7 +173,7 @@ impl MockLseSocket {
 ///
 /// # Panics
 ///
-/// Panics on a frame data-ws has no answer for here.
+/// Panics if data-ws has no answer for `frame` here.
 #[must_use]
 pub fn data_ws_answer(frame: &Value) -> Vec<SocketAction> {
     socket_answer(WS_AUTHENTICATED_FUTURES, WS_TICKS_GOLD, frame)
@@ -190,8 +190,8 @@ pub fn data_ws_answer(frame: &Value) -> Vec<SocketAction> {
 ///
 /// # Panics
 ///
-/// Panics on a frame the socket has no answer for here, or on a line of
-/// `ticks` that is no tick.
+/// Panics if the socket has no answer for `frame` here, or if a line of
+/// `ticks` is no tick.
 #[must_use]
 pub fn socket_answer(authenticated: &str, ticks: &str, frame: &Value) -> Vec<SocketAction> {
     let send = |text: &str| SocketAction::Send(text.trim().to_string());

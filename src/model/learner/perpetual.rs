@@ -2,7 +2,7 @@
 //! budget instead of tuned settings. Its budget stands in for LightGBM's
 //! settings, which it has no equivalent of.
 
-use anyhow::{Context, anyhow, ensure};
+use anyhow::Context;
 use perpetual::{Matrix, PerpetualBooster, booster::config::BoosterIO, objective::Objective};
 use serde::{Deserialize, Serialize};
 
@@ -61,7 +61,7 @@ impl PerpetualConfig {
 
 impl Learner for PerpetualConfig {
     fn fit(&self, set: &TrainingSet) -> anyhow::Result<Box<dyn Predictor>> {
-        ensure!(
+        anyhow::ensure!(
             self.memory_limit > 0.0,
             "a memory limit of {} GB leaves PerpetualBooster nothing to fit in",
             self.memory_limit
@@ -101,11 +101,11 @@ impl Perpetual {
         let width = booster
             .metadata
             .get(WIDTH)
-            .ok_or_else(|| anyhow!("a PerpetualBooster model without its width"))?
+            .ok_or_else(|| anyhow::anyhow!("a PerpetualBooster model without its width"))?
             .parse()
             .context("the width of a PerpetualBooster model")?;
-        ensure!(width > 0, "a PerpetualBooster model without features");
-        ensure!(
+        anyhow::ensure!(width > 0, "a PerpetualBooster model without features");
+        anyhow::ensure!(
             matches!(booster.cfg.objective, Objective::SquaredLoss),
             "a PerpetualBooster model of a loss other than squared loss"
         );
@@ -130,6 +130,8 @@ impl Predictor for Perpetual {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
     use crate::model::learner::LearnerConfig;
 
@@ -160,7 +162,7 @@ mod tests {
     /// the training mean of `missing_is_one`'s labels, a third, throughout:
     /// learned apart, the missing feature is predicted above it, toward its
     /// label of 1, and every value below it, toward their 0.
-    #[test]
+    #[rstest]
     fn a_missing_feature_is_learned_apart_from_every_value() {
         let model = LearnerConfig::Perpetual(config())
             .fit(&missing_is_one())
@@ -183,7 +185,7 @@ mod tests {
         TrainingSet::new(1, features, labels).unwrap()
     }
 
-    #[test]
+    #[rstest]
     fn a_step_of_real_labels_is_learned_on_its_squared_loss() {
         let model = LearnerConfig::Perpetual(config()).fit(&step()).unwrap();
         for (value, expected) in [(0.2, 2.0), (0.7, -1.0)] {
@@ -192,7 +194,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn a_memory_limit_of_nothing_is_refused_at_fit() {
         for memory_limit in [0.0, -1.0] {
             let config = PerpetualConfig::builder()
@@ -209,7 +211,7 @@ mod tests {
 
     // PerpetualBooster draws only on a large set, where it fits each tree
     // on a sample of the rows: 50,000 rows of 6 features are one.
-    #[test]
+    #[rstest]
     fn the_seed_reaches_perpetual() {
         let set = TrainingSet::new(
             6,

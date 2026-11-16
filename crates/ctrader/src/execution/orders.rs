@@ -25,7 +25,7 @@
 //! cTrader makes a close request's `clientMsgId` the `clientOrderId` of the
 //! closing order it creates (demo, 2026-10-26).
 
-use std::{fmt, str::FromStr};
+use std::{fmt::Display, str::FromStr};
 
 use nautilus_core::UnixNanos;
 use nautilus_model::{
@@ -75,8 +75,8 @@ impl Tag {
     }
 }
 
-impl fmt::Display for Tag {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for Tag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let op = match self {
             Self::New(_) => "N",
             Self::Amend(_) => "A",
@@ -173,9 +173,15 @@ pub(super) enum Placement {
 ///
 /// # Errors
 ///
-/// Returns why the order is denied: a type, time in force or flag cTrader
-/// lacks, a reduce-only order without a position, a closing order larger
-/// than its position, a volume off the cent grid.
+/// Returns an error if:
+/// - The order has a type, time in force, trigger or flag cTrader lacks, or
+///   is good till a date it does not name.
+/// - It is reduce-only without a position.
+/// - It closes `position` and is larger than it, or carries protection.
+/// - `position` is not a cTrader position.
+/// - Its volume is off the cent grid.
+///
+/// The error is why the order is denied.
 pub(super) fn placement(
     order: &OrderAny,
     symbol_id: i64,
@@ -269,7 +275,8 @@ fn validate(order: &OrderAny) -> Result<(), OrderDeniedReason> {
 ///
 /// # Errors
 ///
-/// Returns a denial if the quantity is finer than a cent of a unit.
+/// Returns an error if the quantity is finer than a cent of a unit: the
+/// order is denied.
 pub(super) fn volume(quantity: Quantity) -> Result<i64, OrderDeniedReason> {
     let cents = quantity.as_decimal() * Decimal::ONE_HUNDRED;
     (cents.fract().is_zero())
@@ -347,6 +354,7 @@ mod tests {
         identifiers::InstrumentId,
         orders::OrderTestBuilder,
     };
+    use rstest::rstest;
 
     use super::*;
 
@@ -361,7 +369,7 @@ mod tests {
         request
     }
 
-    #[test]
+    #[rstest]
     fn a_tag_is_the_op_and_the_client_order_id_and_reads_back() {
         let id = ClientOrderId::from("O-20261026-150000-001-001-1");
         for tag in [
@@ -379,7 +387,7 @@ mod tests {
         assert!("7".parse::<Tag>().is_err());
     }
 
-    #[test]
+    #[rstest]
     fn a_protection_id_is_the_position_and_the_leg() {
         let sl = protection_id(690_004_734, Leg::StopLoss);
         assert_eq!(sl, VenueOrderId::from("690004734-SL"));
@@ -391,7 +399,7 @@ mod tests {
         assert_eq!(parse_protection_id(VenueOrderId::from("1031776265")), None);
     }
 
-    #[test]
+    #[rstest]
     fn a_market_order_of_one_ounce_is_a_volume_of_100_with_its_client_order_id() {
         let order = OrderTestBuilder::new(OrderType::Market)
             .instrument_id(gold())
@@ -413,7 +421,7 @@ mod tests {
         assert_eq!(request.position_id, None);
     }
 
-    #[test]
+    #[rstest]
     fn a_bracket_entry_carries_its_absolute_stop_loss_and_take_profit() {
         let order = OrderTestBuilder::new(OrderType::Limit)
             .instrument_id(gold())
@@ -435,7 +443,7 @@ mod tests {
         assert_eq!(request.time_in_force(), ProtoOaTimeInForce::GoodTillCancel);
     }
 
-    #[test]
+    #[rstest]
     fn a_stop_market_order_is_a_stop_triggered_as_its_trigger_type() {
         let order = OrderTestBuilder::new(OrderType::StopMarket)
             .instrument_id(gold())
@@ -456,7 +464,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn order_types_and_flags_ctrader_lacks_are_denied() {
         let stop_limit = OrderTestBuilder::new(OrderType::StopLimit)
             .instrument_id(gold())

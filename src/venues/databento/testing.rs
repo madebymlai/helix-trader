@@ -27,6 +27,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use nautilus_network::http::Url;
+
 /// Databento's answers of each dataset: its range, and its definition of
 /// an instrument, GCZ6 of 2026, `GCZ26.GLBX`, of `GLBX.MDP3`, AAPL's 355
 /// call of 20 November 2026, `AAPL  261120C00355000.OPRA`, of
@@ -133,7 +135,7 @@ fn serve(stream: TcpStream, log: &Mutex<Vec<DatabentoCall>>) {
     let params = [query.as_bytes(), &body]
         .into_iter()
         .flat_map(|encoded| {
-            nautilus_network::http::Url::parse(&format!(
+            Url::parse(&format!(
                 "http://databento/?{}",
                 String::from_utf8_lossy(encoded)
             ))

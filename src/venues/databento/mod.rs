@@ -10,7 +10,7 @@
 
 use std::{collections::BTreeMap, path::PathBuf};
 
-use anyhow::{Context, ensure};
+use anyhow::Context;
 use jiff::{SignedDuration, Timestamp, tz::TimeZone};
 use nautilus_core::time::get_atomic_clock_realtime;
 use nautilus_databento::{
@@ -109,7 +109,7 @@ impl DatabentoHistory {
         let mut datasets = Vec::new();
         for request in requests {
             let venue = request.instrument_id.venue;
-            ensure!(
+            anyhow::ensure!(
                 request.data == FillData::Instrument
                     && Row::of(venue).definitions == DefinitionsSource::Databento,
                 "Databento gives the definitions of GLBX, XNAS and OPRA instruments here, not \
@@ -226,6 +226,7 @@ mod tests {
         types::{Price, Quantity},
     };
     use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
+    use rstest::rstest;
 
     use super::*;
     use crate::{
@@ -257,7 +258,7 @@ mod tests {
     /// window's start if it holds the last whole UTC day before the end, 12
     /// November, Databento's day of every definition active, else from
     /// that day's midnight; one starting past the end too is asked so.
-    #[test]
+    #[rstest]
     fn a_definition_is_asked_within_its_dataset_s_end() {
         let end = ts("2026-11-13T09:31:40.093383Z");
         let up_to_end = "2026-11-13T09:31:40.093382999Z";
@@ -294,7 +295,7 @@ mod tests {
     /// The ends Nautilus' client gives, as Databento's `time` crate writes
     /// them (`time::OffsetDateTime`'s `Display` at the locked version, of the
     /// instants on the right), read as the instants they are.
-    #[test]
+    #[rstest]
     fn the_dataset_end_nautilus_gives_reads_as_its_instant() {
         for (end, instant) in [
             ("2023-07-20 0:00:00.0 +00:00:00", "2023-07-20T00:00:00Z"),
@@ -423,7 +424,7 @@ mod tests {
     const Z6_FROM: &str = "2026-07-29T00:00:00Z";
     const Z6_TO: &str = "2026-07-29T12:00:00Z";
 
-    #[test]
+    #[rstest]
     fn a_rolled_root_is_asked_contract_by_contract_over_each_slice() {
         let (_dir, catalog) = new_catalog();
         assert_eq!(
@@ -440,7 +441,7 @@ mod tests {
     }
 
     /// GCQ26's trades stored up to 13:00 on the 28th, its book not at all.
-    #[test]
+    #[rstest]
     fn each_contract_of_a_rolled_root_lacks_only_what_it_does_not_store() {
         let (_dir, catalog) = new_catalog();
         let trade = TradeTick::new(
@@ -477,7 +478,7 @@ mod tests {
 
     /// GCZ26.GLBX declared as itself is one slice over the window; with
     /// GC.GLBX it is also the root's contract from the roll on.
-    #[test]
+    #[rstest]
     fn a_contract_declared_as_itself_and_through_its_root_is_asked_once_over_both() {
         let (_dir, catalog) = new_catalog();
         assert_eq!(

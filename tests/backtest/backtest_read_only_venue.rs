@@ -36,6 +36,7 @@ use nautilus_trading::{
     nautilus_strategy,
     strategy::{Strategy, StrategyConfig, StrategyCore},
 };
+use rstest::rstest;
 
 use crate::common::ic;
 
@@ -172,7 +173,7 @@ fn pnls(result: &BacktestResult) -> HashMap<String, BTreeMap<String, u64>> {
         .collect()
 }
 
-#[test]
+#[rstest]
 fn reading_an_lsedge_series_leaves_the_balances_and_returns_of_ic_s_trade_alone() {
     let catalog = ic::catalog();
     let dir = catalog.path().to_path_buf();

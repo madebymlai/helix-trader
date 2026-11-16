@@ -7,7 +7,7 @@
 
 use std::{collections::HashMap, str::FromStr};
 
-use anyhow::{Context, bail, ensure};
+use anyhow::Context;
 use arrow::{
     array::{
         Array, ArrayRef, AsArray, Float64Array, RecordBatch, StringArray, TimestampNanosecondArray,
@@ -66,7 +66,7 @@ pub fn parse_trade_slice(
         let kinds = column::<StringArray>(&batch, "kind")?;
         for row in 0..batch.num_rows() {
             let kind = kinds.value(row);
-            ensure!(kind == TRADE, "a row of kind {kind:?}, not a {TRADE}");
+            anyhow::ensure!(kind == TRADE, "a row of kind {kind:?}, not a {TRADE}");
             let time = UnixNanos::from(time(&times, row)?);
             let price = Price::from_decimal_dp(
                 decimal(prices.value(row), price_precision, "price")?,
@@ -120,7 +120,7 @@ pub fn parse_index_quotes(
         let kinds = column::<StringArray>(&batch, "kind")?;
         for row in 0..batch.num_rows() {
             let kind = kinds.value(row);
-            ensure!(kind == TRADE, "a row of kind {kind:?}, not a {TRADE}");
+            anyhow::ensure!(kind == TRADE, "a row of kind {kind:?}, not a {TRADE}");
             let time = UnixNanos::from(time(&times, row)?);
             let value = Price::from_decimal_dp(
                 decimal(values.value(row), price_precision, "value")?,
@@ -236,7 +236,7 @@ pub fn parse_book(
         let batch = batch.context("reading LSE's Parquet file")?;
         let times = times(&batch)?;
         let sequences = cast_column(&batch, "sequence", &DataType::UInt64)?;
-        ensure!(
+        anyhow::ensure!(
             sequences.null_count() == 0,
             "the column sequence of LSE's file has empty rows"
         );
@@ -314,16 +314,18 @@ pub fn parse_orders(
                 "C" => BookAction::Delete,
                 "N" => continue,
                 other => {
-                    bail!("an order of action {other:?}, none of LSE's at Level 3: A, M, C and N")
+                    anyhow::bail!(
+                        "an order of action {other:?}, none of LSE's at Level 3: A, M, C and N"
+                    )
                 }
             };
             let side = match sides.value(row) {
                 "B" => Some(OrderSide::Buy),
                 "A" => Some(OrderSide::Sell),
                 "N" => None,
-                other => bail!("an order of side {other:?}, none of LSE's: B, A and N"),
+                other => anyhow::bail!("an order of side {other:?}, none of LSE's: B, A and N"),
             };
-            ensure!(
+            anyhow::ensure!(
                 !order_ids.is_null(row) && !prices.is_null(row),
                 "an order of action {} with no id or price",
                 actions.value(row)
@@ -417,7 +419,7 @@ impl BookSide {
             if prices.is_null(row) {
                 continue;
             }
-            ensure!(
+            anyhow::ensure!(
                 !sizes.is_null(row) && !count.is_null(row),
                 "a {} level {level} of LSE's book with a price and no size or orders",
                 self.side
@@ -757,7 +759,7 @@ fn column_times(
         .with_context(|| format!("no column {name} in LSE's file"))?;
     match (date, column.data_type()) {
         (true, DataType::Date32 | DataType::Date64) | (false, DataType::Timestamp(_, _)) => {}
-        (date, other) => bail!(
+        (date, other) => anyhow::bail!(
             "the column {name} of LSE's file is {other}, not {}",
             if date { "dates" } else { "times" }
         ),
@@ -786,7 +788,7 @@ fn column_times(
 /// The column `name` of `batch`, LSE's type `A` checked, with no empty row.
 fn column<'a, A: Array + 'static>(batch: &'a RecordBatch, name: &str) -> anyhow::Result<&'a A> {
     let column = nullable_column::<A>(batch, name)?;
-    ensure!(
+    anyhow::ensure!(
         column.null_count() == 0,
         "the column {name} of LSE's file has empty rows"
     );
@@ -834,13 +836,13 @@ fn times(batch: &RecordBatch) -> anyhow::Result<TimestampNanosecondArray> {
         .context("no column time in LSE's file")?;
     match column.data_type() {
         DataType::Timestamp(_, Some(zone)) if zone.as_ref() == "UTC" => {}
-        other => bail!("the times of LSE's file are {other}, not UTC timestamps"),
+        other => anyhow::bail!("the times of LSE's file are {other}, not UTC timestamps"),
     }
     let nanos = cast(
         column,
         &DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
     )?;
-    ensure!(
+    anyhow::ensure!(
         nanos.null_count() == 0,
         "the column time of LSE's file has empty rows, or times past 2262"
     );
@@ -855,11 +857,11 @@ fn time(times: &TimestampNanosecondArray, row: usize) -> anyhow::Result<u64> {
 /// `value`, a double, as the decimal it is written as at its shortest,
 /// which must have at most `precision` decimals.
 pub fn decimal(value: f64, precision: u8, what: &str) -> anyhow::Result<Decimal> {
-    ensure!(value.is_finite(), "a {what} of {value}");
+    anyhow::ensure!(value.is_finite(), "a {what} of {value}");
     let decimal = Decimal::from_str(&value.to_string())
         .with_context(|| format!("a {what} of {value}"))?
         .normalize();
-    ensure!(
+    anyhow::ensure!(
         decimal.scale() <= u32::from(precision),
         "a {what} of {value}, finer than the instrument's precision, {precision}"
     );

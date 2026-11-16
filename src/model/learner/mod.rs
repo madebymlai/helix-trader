@@ -39,9 +39,8 @@ mod fake;
 mod lightgbm;
 mod perpetual;
 
-use std::fmt;
+use std::fmt::Debug;
 
-use anyhow::{bail, ensure};
 pub use lightgbm::LightGbmConfig;
 pub use perpetual::PerpetualConfig;
 use serde::{Deserialize, Serialize};
@@ -137,11 +136,11 @@ impl TrainingSet {
     /// finite number.
     pub fn new(width: usize, features: Vec<f64>, labels: Vec<f64>) -> anyhow::Result<Self> {
         if let Some(label) = labels.iter().find(|label| !label.is_finite()) {
-            bail!("a label of {label} is not a finite number");
+            anyhow::bail!("a label of {label} is not a finite number");
         }
-        ensure!(!labels.is_empty(), "a training set needs a row");
-        ensure!(width > 0, "a training set needs a feature");
-        ensure!(
+        anyhow::ensure!(!labels.is_empty(), "a training set needs a row");
+        anyhow::ensure!(width > 0, "a training set needs a feature");
+        anyhow::ensure!(
             features.len() == width * labels.len(),
             "{} features are not {} rows of {width}",
             features.len(),
@@ -223,7 +222,7 @@ impl Model {
     /// Returns an error if `row` is not of the model's width, or the
     /// library fails to predict.
     pub fn predict(&self, row: &[f64]) -> anyhow::Result<f64> {
-        ensure!(
+        anyhow::ensure!(
             row.len() == self.width(),
             "a row of {} features, the {} model takes {}",
             row.len(),
@@ -243,9 +242,9 @@ impl Model {
     }
 }
 
-impl fmt::Debug for Model {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Model")
+impl Debug for Model {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct(stringify!(Model))
             .field("kind", &self.kind)
             .field("width", &self.width())
             .finish()
@@ -271,6 +270,8 @@ trait Predictor {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
     const ROWS: usize = 600;
@@ -353,13 +354,15 @@ mod tests {
     macro_rules! contract {
         ($adapter:ident, $config:expr) => {
             mod $adapter {
+                use rstest::rstest;
+
                 use super::*;
 
                 fn config() -> LearnerConfig {
                     $config
                 }
 
-                #[test]
+                #[rstest]
                 fn a_reloaded_model_predicts_bit_identically() {
                     let set = synthetic();
                     let model = config().fit(&set).unwrap();
@@ -368,7 +371,7 @@ mod tests {
                     assert_eq!(predictions(&reloaded, &rows), predictions(&model, &rows));
                 }
 
-                #[test]
+                #[rstest]
                 fn the_same_settings_fit_the_same_predictions() {
                     let set = synthetic();
                     let rows = probes(&set);
@@ -378,7 +381,7 @@ mod tests {
                     );
                 }
 
-                #[test]
+                #[rstest]
                 fn a_row_of_the_wrong_width_is_an_error() {
                     let set = synthetic();
                     let model = config().fit(&set).unwrap();
@@ -387,7 +390,7 @@ mod tests {
                     }
                 }
 
-                #[test]
+                #[rstest]
                 fn a_reloaded_model_keeps_its_width() {
                     let set = synthetic();
                     let model = config().fit(&set).unwrap();
@@ -395,7 +398,7 @@ mod tests {
                     assert_eq!(reloaded.width(), set.width());
                 }
 
-                #[test]
+                #[rstest]
                 fn a_model_saved_by_another_learner_is_refused() {
                     let set = synthetic();
                     for other in others(&config()) {
@@ -420,22 +423,22 @@ mod tests {
     contract!(baseline, LearnerConfig::Baseline {});
     contract!(fake, LearnerConfig::Fake {});
 
-    #[test]
+    #[rstest]
     fn a_set_without_rows_is_refused() {
         assert!(TrainingSet::new(2, vec![], vec![]).is_err());
     }
 
-    #[test]
+    #[rstest]
     fn a_set_without_features_is_refused() {
         assert!(TrainingSet::new(0, vec![], vec![1.0]).is_err());
     }
 
-    #[test]
+    #[rstest]
     fn a_set_with_a_short_row_is_refused() {
         assert!(TrainingSet::new(2, vec![1.0, 2.0, 3.0], vec![1.0, -1.0]).is_err());
     }
 
-    #[test]
+    #[rstest]
     fn a_label_not_a_number_is_refused() {
         for label in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             assert!(
@@ -454,7 +457,7 @@ mod tests {
         Ok(toml::from_str::<Section>(toml)?.learner)
     }
 
-    #[test]
+    #[rstest]
     fn loads_lightgbm_from_toml_with_defaults() {
         let config = learner(r#"learner = { kind = "lightgbm", feature_fraction = 0.5 }"#).unwrap();
         assert_eq!(
@@ -470,7 +473,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn loads_perpetual_from_toml_with_defaults() {
         let config = learner(r#"learner = { kind = "perpetual", memory_limit = 2.5 }"#).unwrap();
         assert_eq!(
@@ -484,13 +487,13 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn rejects_perpetual_without_a_memory_limit_at_load() {
         let err = learner(r#"learner = { kind = "perpetual", budget = 1.0 }"#).unwrap_err();
         assert!(err.to_string().contains("memory_limit"), "{err}");
     }
 
-    #[test]
+    #[rstest]
     fn loads_the_baseline_and_the_fake_from_toml() {
         assert_eq!(
             learner(r#"learner = { kind = "baseline" }"#).unwrap(),
@@ -502,19 +505,19 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn rejects_an_unknown_kind_at_load() {
         let err = learner(r#"learner = { kind = "xgboost" }"#).unwrap_err();
         assert!(err.to_string().contains("xgboost"), "{err}");
     }
 
-    #[test]
+    #[rstest]
     fn rejects_a_misspelt_setting_at_load() {
         let err = learner(r#"learner = { kind = "lightgbm", num_leafs = 7 }"#).unwrap_err();
         assert!(err.to_string().contains("num_leafs"), "{err}");
     }
 
-    #[test]
+    #[rstest]
     fn rejects_a_setting_of_the_baseline_at_load() {
         let err = learner(r#"learner = { kind = "baseline", seed = 7 }"#).unwrap_err();
         assert!(err.to_string().contains("seed"), "{err}");

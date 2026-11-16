@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::{Context, ensure};
+use anyhow::Context;
 use nautilus_model::{
     identifiers::Venue,
     types::{AccountBalance, Currency, MarginBalance, Money},
@@ -48,13 +48,13 @@ impl CTraderAccount {
         names: &CTraderSettingNames,
         assets: &HashMap<i64, ProtoOaAsset>,
     ) -> anyhow::Result<Self> {
-        ensure!(
+        anyhow::ensure!(
             trader.ctid_trader_account_id == account_id.get(),
             "cTrader returned the trader of another account than {}",
             names.account_id
         );
         let account_type = trader.account_type();
-        ensure!(
+        anyhow::ensure!(
             account_type == ProtoOaAccountType::Hedged,
             "the {venue} account is {}, not HEDGED: the adapter trades a hedging account only, \
              each cTrader position one Nautilus position (a netting account is refused)",
@@ -111,6 +111,6 @@ impl CTraderAccount {
 /// absent, as on the demo's account).
 fn money(value: i64, digits: Option<u32>) -> anyhow::Result<Decimal> {
     let digits = digits.unwrap_or(2);
-    ensure!(digits <= 28, "moneyDigits {digits} out of range");
+    anyhow::ensure!(digits <= 28, "moneyDigits {digits} out of range");
     Ok(Decimal::new(value, digits))
 }

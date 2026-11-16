@@ -28,9 +28,9 @@
 //! a failure envelope) and stops the node; `run` returns it. See
 //! `README.md`, "Fill paths".
 
-use std::{cell::RefCell, collections::VecDeque, fmt, path::Path, rc::Rc};
+use std::{cell::RefCell, collections::VecDeque, fmt::Display, path::Path, rc::Rc};
 
-use anyhow::{Context, bail, ensure};
+use anyhow::Context;
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::{DataActor, DataActorConfig, DataActorCore},
@@ -89,7 +89,9 @@ impl FillData {
             NautilusDataType::OrderBookDelta => Self::Deltas,
             NautilusDataType::Bar => Self::Bars(identifier.parse()?),
             NautilusDataType::FundingRateUpdate => Self::Funding,
-            other => bail!("no source filled through the node serves the {other} of an instrument"),
+            other => anyhow::bail!(
+                "no source filled through the node serves the {other} of an instrument"
+            ),
         })
     }
 
@@ -102,8 +104,8 @@ impl FillData {
     }
 }
 
-impl fmt::Display for FillData {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for FillData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Instrument => f.write_str("definition"),
             Self::Quotes => f.write_str("quotes"),
@@ -131,8 +133,8 @@ pub struct FillRequest {
     pub to: Timestamp,
 }
 
-impl fmt::Display for FillRequest {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for FillRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "the {} of {} over [{}, {}]",
@@ -166,7 +168,7 @@ pub fn missing(
         let id = slice.instrument_id;
         let data = FillData::of(data_type, identifier)
             .with_context(|| format!("the {data_type} of {identifier}"))?;
-        ensure!(
+        anyhow::ensure!(
             data.instrument_of(identifier) == id.to_string(),
             "the {data} of {identifier} on a slice of {id}"
         );
@@ -218,8 +220,8 @@ pub struct CustomFillRequest {
     pub to: Timestamp,
 }
 
-impl fmt::Display for CustomFillRequest {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for CustomFillRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "the {} over [{}, {}]",
@@ -306,11 +308,11 @@ enum Request {
     Custom(CustomFillRequest),
 }
 
-impl fmt::Display for Request {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Series(request) => fmt::Display::fmt(request, f),
-            Self::Custom(request) => fmt::Display::fmt(request, f),
+            Self::Series(request) => Display::fmt(request, f),
+            Self::Custom(request) => Display::fmt(request, f),
         }
     }
 }
@@ -440,10 +442,11 @@ impl NodeFill {
             failure,
             done,
         } = outcome.take();
+
         if let Some(failure) = failure {
-            bail!(failure);
+            anyhow::bail!(failure);
         }
-        ensure!(
+        anyhow::ensure!(
             done,
             "the node stopped with {answered} of {total} requests answered"
         );
@@ -624,6 +627,7 @@ mod tests {
         types::{Price, Quantity},
     };
     use nautilus_persistence::backend::parquet::paths::timestamps_to_filename;
+    use rstest::rstest;
 
     use super::*;
     use crate::{rolls::Slice, strategy::requirements::CustomSeries};
@@ -652,7 +656,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn an_empty_catalog_lacks_each_series_over_its_slice_after_the_definition() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -728,7 +732,7 @@ mod tests {
         )
     }
 
-    #[test]
+    #[rstest]
     fn a_stored_series_lacks_only_what_is_outside_its_stored_intervals() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -774,7 +778,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_covered_window_asks_for_nothing_not_even_the_definition() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -813,7 +817,7 @@ mod tests {
     /// The slivers a live node's daily promotions leave between their files
     /// are what the catalog lacks, each asked with the definition over it.
     /// A run-start directory an older node left is ignored.
-    #[test]
+    #[rstest]
     fn a_sliver_between_promoted_files_is_asked_with_its_definition() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("live-runs/1792540800000000000")).unwrap();
@@ -866,7 +870,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn bars_are_asked_as_their_bar_type_over_their_slice_after_the_definition() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -884,7 +888,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn stored_bars_lack_only_what_is_outside_their_bar_type_s_stored_interval() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -937,7 +941,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn bars_on_a_slice_of_another_contract_are_refused_naming_both() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -954,7 +958,7 @@ mod tests {
         assert!(err.contains("GCQ26.GLBX"), "{err}");
     }
 
-    #[test]
+    #[rstest]
     fn funding_is_asked_over_its_slice_after_the_definition() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -977,7 +981,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn book_deltas_are_asked_as_deltas_over_their_slice() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -1007,7 +1011,7 @@ mod tests {
 
     /// No definition: a custom series brings no instrument. Asked by its
     /// data type as Nautilus builds it.
-    #[test]
+    #[rstest]
     fn a_custom_series_is_lacking_over_its_window_alone() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -1038,7 +1042,7 @@ mod tests {
     /// at 00:00 UTC on 29 July 2026 (`rolls/README.md`): each contract's
     /// series lacks over its slice, asked by its data type, the
     /// contract's id its identifier, the type and metadata kept.
-    #[test]
+    #[rstest]
     fn a_roots_custom_series_is_lacking_contract_by_contract_over_its_slices() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);

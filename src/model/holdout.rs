@@ -32,7 +32,7 @@
 //! the trades its margin takes. The slope and the gap are reported, never
 //! required.
 
-use std::fmt;
+use std::fmt::Display;
 
 use nautilus_analysis::{
     statistic::PortfolioStatistic,
@@ -252,8 +252,8 @@ pub(super) fn in_r(r: Option<f64>) -> String {
     r.map_or_else(|| "n/a".to_string(), |r| format!("{r:.6}R"))
 }
 
-impl fmt::Display for Trades {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for Trades {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "{} trades, expectancy {}, win rate {}",
@@ -264,8 +264,8 @@ impl fmt::Display for Trades {
     }
 }
 
-impl fmt::Display for Holdout {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for Holdout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let Earnings {
             taken,
             every,
@@ -289,8 +289,8 @@ impl fmt::Display for Holdout {
     }
 }
 
-impl fmt::Display for Refusal {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Skill { skill } => {
                 write!(f, "holdout skill {} not above nought", value(*skill))
@@ -318,6 +318,8 @@ impl fmt::Display for Refusal {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
     fn close(actual: Option<f64>, expected: f64) {
@@ -336,7 +338,7 @@ mod tests {
 
     /// A margin of 0.25R, and one below nought, which a trade expected to
     /// lose a little clears.
-    #[test]
+    #[rstest]
     fn a_meta_margin_takes_an_expected_r_at_or_above_it() {
         let margin = MetaMargin(R::new(0.25));
         let below_nought = MetaMargin(R::new(-0.5));
@@ -356,7 +358,7 @@ mod tests {
     /// more, 0.15 of its unit's R: the trades taken 0.075R, 0.0375R and
     /// 0.075R, 0.0625R a trade; every trade 0.15R and 0.075R besides,
     /// 0.0825R a trade.
-    #[test]
+    #[rstest]
     fn the_earnings_are_nautilus_expectancy_and_win_rate_of_the_r_of_the_trades_taken_and_of_every_trade()
      {
         let rows = [
@@ -381,7 +383,7 @@ mod tests {
 
     /// A trade at nought is neither a win nor a loss in Nautilus'
     /// expectancy, a win of 2 and a loss of 1 making 0.5, not a third.
-    #[test]
+    #[rstest]
     fn a_trade_at_nought_is_counted_and_weighs_in_no_expectancy() {
         let trades = Trades::of(&[2.0, -1.0, 0.0]);
 
@@ -389,7 +391,7 @@ mod tests {
         close(trades.expectancy, 0.5);
     }
 
-    #[test]
+    #[rstest]
     fn no_trade_earns_nothing_to_report() {
         assert_eq!(
             Trades::of(&[]),
@@ -433,7 +435,7 @@ mod tests {
         min_trades: 3,
     };
 
-    #[test]
+    #[rstest]
     fn a_holdout_beating_the_baseline_over_enough_trades_earning_the_minimum_and_more_than_every_trade_is_published()
      {
         assert_eq!(holdout().refusal(MINIMUMS), None);
@@ -446,7 +448,7 @@ mod tests {
 
     /// A model whose expected R errs no less than the training mean, or has
     /// no skill to read, is refused whatever its trades earned.
-    #[test]
+    #[rstest]
     fn a_skill_not_above_nought_is_refused() {
         for skill in [Some(0.0), Some(-0.2), None] {
             let worse = Holdout {
@@ -462,7 +464,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn fewer_trades_than_the_minimum_are_refused() {
         let minimums = Minimums {
             min_trades: 4,
@@ -478,7 +480,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_net_pnl_per_trade_below_the_minimum_is_refused() {
         let minimums = Minimums {
             min_expectancy: R::new(1.5),
@@ -504,7 +506,7 @@ mod tests {
 
     /// The trades taken win 3 each, over units of 4: 0.75R a trade, below a
     /// minimum of 1R, however far above 1 their money is.
-    #[test]
+    #[rstest]
     fn a_net_r_per_trade_below_the_minimum_is_refused_whatever_its_money() {
         let wins = earning(&[(true, trade(3.0, 4.0)), (true, trade(3.0, 4.0))]);
         let minimums = Minimums {
@@ -524,7 +526,7 @@ mod tests {
     /// The trade taken wins 3 over a unit of 4, 0.75R; the trade left, 1
     /// over a unit of 1, 1R: every trade's 0.875R is above the trade taken,
     /// whose money, 3 a trade, is above every trade's, 2.
-    #[test]
+    #[rstest]
     fn a_net_r_per_trade_not_above_every_trades_is_refused_whatever_its_money() {
         let taken_less = earning(&[(true, trade(3.0, 4.0)), (false, trade(1.0, 1.0))]);
         let minimums = Minimums {
@@ -545,7 +547,7 @@ mod tests {
     /// the trades of `a_net_r_per_trade_not_above_every_trades_is_refused…`,
     /// 0.75R taken and 0.875R every trade, and at 1.5 times the commission,
     /// 2.85 over 4, 0.7125R, beside 0.85 over 1, 0.78125R a trade.
-    #[test]
+    #[rstest]
     fn a_refusal_and_a_holdout_say_their_figures_in_r() {
         let below = Refusal::MinExpectancy {
             expectancy: 0.75,
@@ -577,7 +579,7 @@ mod tests {
     }
 
     /// No trade taken has no expectancy: below any minimum.
-    #[test]
+    #[rstest]
     fn no_trade_taken_is_refused() {
         let mut none = holdout();
         none.earnings.taken = Trades::of(&[]);
@@ -593,7 +595,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_net_pnl_per_trade_not_above_every_trades_is_refused() {
         let mut no_better = holdout();
         no_better.earnings.every.expectancy = Some(1.2);

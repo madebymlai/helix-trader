@@ -28,6 +28,7 @@ use helix_trader::{
 use jiff::{SignedDuration, Timestamp};
 use nautilus_indicators::indicator::Indicator;
 use nautilus_model::{data::QuoteTick, identifiers::InstrumentId};
+use rstest::rstest;
 use tempfile::TempDir;
 
 use crate::common::{
@@ -229,7 +230,7 @@ fn published(outcome: Option<Outcome>) -> Holdout {
 /// a skill above nought. Both manifests hold the pair's one calibration,
 /// naming it, and each side's model, reloaded by its learner, predicts its
 /// probes to the bit.
-#[test]
+#[rstest]
 fn train_at_t_publishes_each_side_earning_on_the_edge_whose_probes_reload_to_identical_predictions()
 {
     let catalog = catalog();
@@ -305,7 +306,7 @@ fn train_at_t_publishes_each_side_earning_on_the_edge_whose_probes_reload_to_ide
 /// An hour later the holdout is the decisions of 13:00 to 00:00: each
 /// row picks the side that wins it, 2.66 / 3 R each, short of a minimum of
 /// 1R, however far above it their money is.
-#[test]
+#[rstest]
 fn a_minimum_above_what_the_holdout_earns_keeps_each_current_model() {
     let catalog = catalog();
     let models = tempfile::tempdir().unwrap();

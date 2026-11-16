@@ -120,11 +120,10 @@ use std::{
     any::Any,
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
-    fmt::{self, Debug, Display},
+    fmt::{Debug, Display},
     rc::Rc,
 };
 
-use anyhow::{bail, ensure};
 use jiff::SignedDuration;
 use nautilus_common::{
     actor::{
@@ -637,8 +636,8 @@ impl Reading {
 }
 
 impl Debug for FeatureSet {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FeatureSet")
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct(stringify!(FeatureSet))
             .field("names", &self.names)
             .field("fingerprint", &self.fingerprint)
             .finish_non_exhaustive()
@@ -733,7 +732,8 @@ impl FeatureSetBuilder {
     ///
     /// # Panics
     ///
-    /// As `quotes`.
+    /// Panics if its table is missing, does not parse or is refused (see
+    /// `quotes`).
     #[must_use]
     pub fn trades<A>(
         self,
@@ -755,7 +755,8 @@ impl FeatureSetBuilder {
     ///
     /// # Panics
     ///
-    /// As `quotes`.
+    /// Panics if its table is missing, does not parse or is refused (see
+    /// `quotes`).
     #[must_use]
     pub fn bars<A>(
         self,
@@ -777,7 +778,8 @@ impl FeatureSetBuilder {
     ///
     /// # Panics
     ///
-    /// As `quotes`.
+    /// Panics if its table is missing, does not parse or is refused (see
+    /// `quotes`).
     #[must_use]
     pub fn depth<A>(
         self,
@@ -799,7 +801,8 @@ impl FeatureSetBuilder {
     ///
     /// # Panics
     ///
-    /// As `quotes`.
+    /// Panics if its table is missing, does not parse or is refused (see
+    /// `quotes`).
     #[must_use]
     pub fn deltas<A>(
         self,
@@ -823,8 +826,9 @@ impl FeatureSetBuilder {
     ///
     /// # Panics
     ///
-    /// As `quotes`, or if a feature declared before reads another width:
-    /// the setter runs on one.
+    /// Panics if its table is missing, does not parse or is refused (see
+    /// `quotes`), or if a feature declared before reads another width: the
+    /// setter runs on one.
     #[must_use]
     pub fn over_bracket<A>(
         mut self,
@@ -915,7 +919,7 @@ impl FeatureSetBuilder {
     /// Returns an error if no feature is declared, two share a name, or
     /// the warmup is negative.
     pub fn build(self) -> anyhow::Result<Rc<FeatureSet>> {
-        ensure!(!self.names.is_empty(), "a feature set needs a feature");
+        anyhow::ensure!(!self.names.is_empty(), "a feature set needs a feature");
         let names: Vec<String> = self
             .names
             .iter()
@@ -930,9 +934,9 @@ impl FeatureSetBuilder {
             .collect();
         let mut seen = BTreeSet::new();
         if let Some(name) = names.iter().find(|name| !seen.insert(*name)) {
-            bail!("two features are named {name}");
+            anyhow::bail!("two features are named {name}");
         }
-        ensure!(
+        anyhow::ensure!(
             !self.warmup.is_negative(),
             "the features' warmup {:#} is negative",
             self.warmup
@@ -1019,7 +1023,7 @@ impl Fingerprint {
 }
 
 impl Display for Fingerprint {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.iter().try_for_each(|byte| write!(f, "{byte:02x}"))
     }
 }

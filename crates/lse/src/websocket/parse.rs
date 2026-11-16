@@ -3,7 +3,7 @@
 //! sizes as doubles, each converted once through its shortest decimal
 //! form, which must fit the precision, as an export's are.
 
-use anyhow::{Context, ensure};
+use anyhow::Context;
 use jiff::Timestamp;
 use nautilus_core::UnixNanos;
 use nautilus_model::{
@@ -75,7 +75,7 @@ pub fn parse_trade(
         .price
         .with_context(|| format!("a tick of {symbol} with no price"))?;
     let volume = tick.volume.unwrap_or_default();
-    ensure!(
+    anyhow::ensure!(
         volume > 0.0,
         "a tick of {symbol} with no trade size: no volume or a volume of 0, a quote's"
     );

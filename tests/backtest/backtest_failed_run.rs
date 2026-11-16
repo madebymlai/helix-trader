@@ -10,6 +10,7 @@ use nautilus_trading::{
     nautilus_strategy,
     strategy::{StrategyConfig, StrategyCore},
 };
+use rstest::rstest;
 
 use crate::common::trades;
 
@@ -48,7 +49,7 @@ fn assert_no_node_left() {
     assert!(endpoints.is_empty(), "endpoints left: {endpoints}");
 }
 
-#[test]
+#[rstest]
 fn a_run_failing_at_the_start_of_its_strategy_disposes_its_node() {
     let levels = trades::TIME_EXIT;
     let catalog = trades::catalog(&levels);
@@ -60,7 +61,7 @@ fn a_run_failing_at_the_start_of_its_strategy_disposes_its_node() {
     assert_no_node_left();
 }
 
-#[test]
+#[rstest]
 fn a_dataset_run_failing_at_the_start_of_its_strategy_disposes_its_node() {
     let levels = trades::TIME_EXIT;
     let catalog = trades::catalog(&levels);

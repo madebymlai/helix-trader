@@ -115,6 +115,20 @@ repos:
         pass_filenames: false
   # nautilus-engineering: hooks end
 
+  - repo: https://github.com/google/yamlfmt
+    rev: v0.21.0
+    hooks:
+      - id: yamlfmt
+        # The vendored files stay as nautilus_engineering writes them
+        exclude: ^(\.nautilus-engineering/|\.yamllint\.yaml$)
+
+  - repo: https://github.com/Mateusz-Grzelinski/actionlint-py
+    rev: v1.7.12.24
+    hooks:
+      - id: actionlint
+        name: actionlint (syntax/structure)
+        description: Checks GitHub Actions workflow syntax and structural correctness
+
   ##############################################################################
   #  Custom hooks
   ##############################################################################
@@ -126,6 +140,37 @@ repos:
         entry: python3 -B .pre-commit-hooks/check_workarounds.py
         language: system
         types_or: [rust, markdown]
+
+      - id: check-hidden-chars
+        name: check hidden unicode/control chars
+        description: Fail on hidden control or zero-width unicode characters in source
+        entry: bash .pre-commit-hooks/check_hidden_chars.sh
+        language: system
+        types_or: [rust, python, toml, markdown, yaml, json, text]
+        files: "\\.(rs|py|toml|md|yml|yaml|json|sh|bash|dockerfile)$|Dockerfile.*"
+
+      - id: check-unicode-typography
+        name: check Unicode typography
+        description: Reject non-breaking hyphens, typographic dashes, curly quotes, and emoji-style check/cross marks
+        entry: bash .pre-commit-hooks/check_unicode_typography.sh
+        language: system
+        types: [text]
+
+      - id: check-non-latin-text
+        name: check non-Latin text
+        description: Detect non-Latin characters (CJK, Cyrillic, Arabic, etc.) to enforce English-only
+        entry: bash .pre-commit-hooks/check_non_latin_text.sh
+        language: system
+        types: [text]
+        files: "\\.(rs|py|md|toml|yaml|yml)$"
+
+      - id: check-error-conventions
+        name: check error conventions
+        description: Enforces error variable naming conventions
+        entry: bash .pre-commit-hooks/check_error_conventions.sh
+        language: system
+        types_or: [rust, python]
+        pass_filenames: false
 
       - id: check-links-offline
         name: check links (offline)
@@ -155,6 +200,70 @@ repos:
   ##############################################################################
   - repo: local
     hooks:
+      - id: check-anyhow-usage
+        name: check anyhow usage
+        description: Enforces anyhow conventions
+        entry: bash .pre-commit-hooks/check_anyhow_usage.sh
+        language: system
+        files: "\\.rs$"
+        pass_filenames: false
+
+      - id: check-logging-conventions
+        name: check logging conventions
+        description: Enforces logging and process termination conventions
+        entry: bash .pre-commit-hooks/check_logging_conventions.sh
+        language: system
+        files: "\\.rs$"
+        pass_filenames: false
+
+      - id: check-tokio-usage
+        name: check tokio usage
+        description: Enforces tokio usage conventions
+        entry: bash .pre-commit-hooks/check_tokio_usage.sh
+        language: system
+        files: "\\.rs$|Cargo\\.toml$"
+        pass_filenames: false
+
+      - id: check-testing-conventions
+        name: check testing conventions
+        description: Enforces testing standardizations and conventions
+        entry: bash .pre-commit-hooks/check_testing_conventions.sh
+        language: system
+        types_or: [rust, python]
+        pass_filenames: false
+
+      - id: check-nautilus-conventions
+        name: check nautilus conventions
+        description: Enforces Nautilus type usage conventions
+        entry: bash .pre-commit-hooks/check_nautilus_conventions.sh
+        language: system
+        files: "\\.rs$"
+        pass_filenames: false
+
+      - id: check-formatting-rs
+        name: check formatting (Rust)
+        description: Enforces formatting conventions in Rust code
+        entry: bash .pre-commit-hooks/check_formatting_rs.sh
+        language: system
+        files: "\\.rs$"
+        pass_filenames: false
+
+      - id: check-docs-conventions
+        name: check docs conventions
+        description: Enforces documentation conventions
+        entry: bash .pre-commit-hooks/check_docs_conventions.sh
+        language: system
+        files: "(Cargo\\.toml|\\.(rs|md))$"
+        pass_filenames: false
+
+      - id: check-cargo-conventions
+        name: check cargo conventions
+        description: Enforces Cargo.toml dependency ordering conventions
+        entry: bash .pre-commit-hooks/check_cargo_conventions.sh
+        language: system
+        files: "Cargo\\.toml$"
+        pass_filenames: false
+
       - id: fmt
         name: cargo fmt
         description: Check formatting with the nightly rustfmt that rustfmt.toml's import options need

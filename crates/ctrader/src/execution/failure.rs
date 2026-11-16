@@ -22,7 +22,6 @@
 
 use nautilus_live::execution::failure::CommandFailure;
 use nautilus_model::identifiers::Venue;
-use tokio::sync::oneshot::error::RecvError;
 
 use crate::common::messages::{CTraderError, ProtoOaDealStatus, ProtoOaExecutionEvent};
 
@@ -52,7 +51,7 @@ const UNKNOWN_OUTCOME: [&str; 6] = [
 /// write began; `NotSent` if the session says it never was; `Ambiguous` if
 /// the session is gone without a word.
 pub(super) fn sending(
-    sending: Result<Result<(), CTraderError>, RecvError>,
+    sending: Result<Result<(), CTraderError>, tokio::sync::oneshot::error::RecvError>,
     venue: Venue,
 ) -> Result<(), CommandFailure> {
     match sending {
@@ -120,7 +119,7 @@ fn joined(code: &str, description: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use tokio::sync::oneshot;
+    use rstest::rstest;
 
     use super::*;
 
@@ -129,7 +128,7 @@ mod tests {
     /// What became of a request's frame, `sent` by the session, or not
     /// at all if `None`: the session's sender gone.
     async fn sent(sent: Option<Result<(), CTraderError>>) -> Result<(), CommandFailure> {
-        let (tx, rx) = oneshot::channel();
+        let (tx, rx) = tokio::sync::oneshot::channel();
         if let Some(sent) = sent {
             tx.send(sent).unwrap();
         } else {
@@ -171,7 +170,7 @@ mod tests {
 
     /// The refusals the demo answered (`testdata/order_error_*`), and the
     /// deal timeout Spotware documents as "rejected".
-    #[test]
+    #[rstest]
     fn a_refusal_ctrader_explains_is_a_venue_rejection() {
         for code in [
             "TRADING_BAD_VOLUME",
@@ -193,7 +192,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_rate_limit_or_an_unavailable_server_leaves_the_outcome_unknown() {
         for code in [
             "UNKNOWN_ERROR",

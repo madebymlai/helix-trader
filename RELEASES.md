@@ -26,6 +26,10 @@ Released on TBD (UTC).
 - Added `cargo-deny` with Nautilus' policy (advisories, licenses, duplicate crates, sources) to the hooks, CI and the weekly run
 - Added the offline check that internal markdown links resolve (lychee)
 - Changed CI to run the tests with `cargo-nextest`, a hung test failing after 10 minutes
+- Added Nautilus' convention checks to the hooks: tests, `anyhow`, tokio, error and logging use, `std::fmt` and Nautilus imports, Rust formatting, `# Errors` and `# Panics` docs, `Cargo.toml` layout, hidden characters, Unicode typography and non-Latin text
+- Added actionlint and yamlfmt to the hooks
+- Changed every test to `#[rstest]`, as Nautilus writes its tests
+- Changed the crates to share one version, in `[workspace.package]`
 
 ### Documentation Updates
 
@@ -33,6 +37,8 @@ Released on TBD (UTC).
 - Renamed `docs/ARCHITECTURE.md` to `docs/architecture.md`
 - Added `docs/releases.md`, the release notes standard and release steps
 - Changed spelling to American English
+- Changed the `# Errors` and `# Panics` sections to Nautilus' wording
+- Added each crate's feature flags to its README
 
 ---
 

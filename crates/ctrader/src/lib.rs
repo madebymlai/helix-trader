@@ -17,6 +17,11 @@
 //! quotes from the spot events), `execution` (the execution client: the
 //! trade requests of orders, the dispatch of trade events, the
 //! reconciliation reports) and `factories`.
+//!
+//! # Feature Flags
+//!
+//! - `test-support`: Exposes the hooks of a caller's end-to-end test of a
+//!   session's token renewal on a real cTrader server (see `README.md`).
 
 use jiff::SignedDuration;
 use nautilus_model::data::NautilusDataType;

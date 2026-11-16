@@ -64,14 +64,13 @@ use nautilus_model::{
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use rust_decimal::Decimal;
-use tokio::sync::Mutex;
 
 use crate::common;
 
 /// One test at a time: the adapter's start is not safe against another
 /// process or task starting the same container at the same moment, and
 /// one node per process.
-static GATEWAY: Mutex<()> = Mutex::const_new(());
+static GATEWAY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Whether the run is opted in, as the IB examples check it: from the
 /// shell, before `.env` is read, so that the file cannot opt in.
