@@ -1,0 +1,52 @@
+# Captured from a cTrader broker's demo (2026-11-16), protobuf port 5035:
+# a MARKET_RANGE buy of 1 oz of XAUUSD (volume 100), clientOrderId
+# PROBE-REJECT-1, its base slippage price 5.00 under the ask with no
+# slippage allowed, accepted: its position created empty.
+# Scrubbed: ctidTraderAccountId replaced by the fake 1000001; re-encoded
+# from the decoded event, fields as served.
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOAExecutionEvent OpenApiMessages.proto < execution_market_range_accepted.bin
+# Message: ProtoOAExecutionEvent
+ctidTraderAccountId: 1000001
+executionType: ORDER_ACCEPTED
+position {
+  positionId: 696911475
+  tradeData {
+    symbolId: 41
+    volume: 0
+    tradeSide: BUY
+    guaranteedStopLoss: false
+    measurementUnits: "Oz"
+  }
+  positionStatus: POSITION_STATUS_CREATED
+  swap: 0
+  price: 0
+  commission: 0
+  marginRate: 0
+  mirroringCommission: 0
+  guaranteedStopLoss: false
+  usedMargin: 0
+  moneyDigits: 2
+}
+order {
+  orderId: 1040620401
+  tradeData {
+    symbolId: 41
+    volume: 100
+    tradeSide: BUY
+    openTimestamp: 1794842122732
+    guaranteedStopLoss: false
+    measurementUnits: "Oz"
+  }
+  orderType: MARKET_RANGE
+  orderStatus: ORDER_STATUS_ACCEPTED
+  executedVolume: 0
+  utcLastUpdateTimestamp: 1794842122732
+  baseSlippagePrice: 3868.88
+  slippageInPoints: 0
+  closingOrder: false
+  clientOrderId: "PROBE-REJECT-1"
+  timeInForce: IMMEDIATE_OR_CANCEL
+  positionId: 696911475
+}
+isServerEvent: false

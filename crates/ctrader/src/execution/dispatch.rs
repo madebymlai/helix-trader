@@ -692,14 +692,16 @@ impl Dispatch {
                 }
             }
             ProtoOaExecutionType::OrderCancelled | ProtoOaExecutionType::OrderExpired => {
-                let expired = event.execution_type() == ProtoOaExecutionType::OrderExpired;
-                out.push(self.closing(id, &tracked, Some(venue), expired, ts));
-                out.extend(self.cancel_legs(id, ts));
+                if let Some(failure) = failure::deal_rejected(event) {
+                    out.extend(self.fail(Tag::New(id), &[], failure, ts));
+                } else {
+                    let expired = event.execution_type() == ProtoOaExecutionType::OrderExpired;
+                    out.push(self.closing(id, &tracked, Some(venue), expired, ts));
+                    out.extend(self.cancel_legs(id, ts));
+                }
             }
             ProtoOaExecutionType::OrderRejected => {
-                let code = event.error_code.as_deref().unwrap_or("ORDER_REJECTED");
-                let failure = CommandFailure::venue_rejected(code);
-                out.extend(self.fail(Tag::New(id), &[], failure, ts));
+                out.extend(self.fail(Tag::New(id), &[], failure::rejected(event), ts));
             }
             ProtoOaExecutionType::OrderCancelRejected => {
                 let code = event
@@ -1237,6 +1239,7 @@ mod tests {
         common::messages::ProtoOaOrderErrorEvent,
         testing::{
             self, EXECUTION_LIMIT_ACCEPTED, EXECUTION_LIMIT_CANCELLED, EXECUTION_MARKET_FILLED,
+            EXECUTION_MARKET_RANGE_ACCEPTED, EXECUTION_MARKET_RANGE_DEAL_REJECTED,
             EXECUTION_STOP_LOSS_FILLED, ORDER_ERROR_BAD_VOLUME,
         },
     };
@@ -1526,6 +1529,91 @@ mod tests {
 
         let out = dispatch.handle(answering(tag, execution(EXECUTION_LIMIT_CANCELLED)), ts());
         assert_eq!(kinds(&out), [row("PROBE-2", "canceled")]);
+    }
+
+    /// The captured refusal at execution: cTrader cancels the order with
+    /// its deal rejected, which rejects it with the deal's status and
+    /// `rejectReason`, and its bracket's legs with it.
+    #[test]
+    fn an_order_cancelled_with_its_deal_rejected_is_rejected_with_the_deals_reason() {
+        let mut dispatch = dispatch();
+        bracket(&mut dispatch, "PROBE-REJECT-1");
+        let tag = Tag::New(id("PROBE-REJECT-1"));
+        dispatch.sent(tag);
+        let out = dispatch.handle(
+            answering(tag, execution(EXECUTION_MARKET_RANGE_ACCEPTED)),
+            ts(),
+        );
+        assert_eq!(kinds(&out), [row("PROBE-REJECT-1", "accepted")]);
+
+        let out = dispatch.handle(
+            answering(tag, execution(EXECUTION_MARKET_RANGE_DEAL_REJECTED)),
+            ts(),
+        );
+
+        assert_eq!(
+            kinds(&out),
+            [
+                row("PROBE-REJECT-1", "rejected"),
+                row("PROBE-REJECT-1-SL", "rejected"),
+                row("PROBE-REJECT-1-TP", "rejected"),
+            ]
+        );
+        assert_eq!(
+            reason(&out[..1]),
+            "INTERNALLY_REJECTED: Market VWAP is worse than Limit price"
+        );
+    }
+
+    /// An order cancelled with its deal rejected after part of it filled
+    /// is cancelled: its fill stands.
+    #[test]
+    fn an_order_filled_in_part_and_cancelled_with_its_deal_rejected_is_cancelled() {
+        let mut dispatch = dispatch();
+        dispatch.track(&order("PROBE-REJECT-1", OrderType::Market), Role::Order);
+        let tag = Tag::New(id("PROBE-REJECT-1"));
+        dispatch.sent(tag);
+        dispatch.handle(
+            answering(tag, execution(EXECUTION_MARKET_RANGE_ACCEPTED)),
+            ts(),
+        );
+        let mut cancelled =
+            ProtoOaExecutionEvent::decode(EXECUTION_MARKET_RANGE_DEAL_REJECTED).unwrap();
+        cancelled.order.as_mut().unwrap().executed_volume = Some(50);
+
+        let out = dispatch.handle(answering(tag, TradeMessage::Execution(cancelled)), ts());
+
+        assert_eq!(kinds(&out), [row("PROBE-REJECT-1", "canceled")]);
+    }
+
+    /// `ORDER_REJECTED` rejects the order with its code, and its deal's
+    /// `rejectReason` when it carries one.
+    #[test]
+    fn an_order_rejected_by_execution_event_carries_its_deals_reject_reason() {
+        for (deal, expected) in [
+            (false, "NOT_ENOUGH_MONEY"),
+            (
+                true,
+                "NOT_ENOUGH_MONEY: Market VWAP is worse than Limit price",
+            ),
+        ] {
+            let mut dispatch = dispatch();
+            dispatch.track(&order("PROBE-REJECT-1", OrderType::Market), Role::Order);
+            let tag = Tag::New(id("PROBE-REJECT-1"));
+            dispatch.sent(tag);
+            let mut rejected =
+                ProtoOaExecutionEvent::decode(EXECUTION_MARKET_RANGE_DEAL_REJECTED).unwrap();
+            rejected.set_execution_type(ProtoOaExecutionType::OrderRejected);
+            rejected.error_code = Some("NOT_ENOUGH_MONEY".to_owned());
+            if !deal {
+                rejected.deal = None;
+            }
+
+            let out = dispatch.handle(answering(tag, TradeMessage::Execution(rejected)), ts());
+
+            assert_eq!(kinds(&out), [row("PROBE-REJECT-1", "rejected")]);
+            assert_eq!(reason(&out), expected);
+        }
     }
 
     // Each class's events, by the request it fails.

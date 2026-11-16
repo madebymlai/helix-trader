@@ -118,6 +118,10 @@ pub(crate) const EXECUTION_LIMIT_REPLACED: &[u8] =
     include_bytes!("../testdata/execution_limit_replaced.bin");
 pub(crate) const EXECUTION_LIMIT_CANCELLED: &[u8] =
     include_bytes!("../testdata/execution_limit_cancelled.bin");
+pub(crate) const EXECUTION_MARKET_RANGE_ACCEPTED: &[u8] =
+    include_bytes!("../testdata/execution_market_range_accepted.bin");
+pub(crate) const EXECUTION_MARKET_RANGE_DEAL_REJECTED: &[u8] =
+    include_bytes!("../testdata/execution_market_range_deal_rejected.bin");
 pub(crate) const EXECUTION_STOP_LOSS_ENTRY_FILLED: &[u8] =
     include_bytes!("../testdata/execution_stop_loss_entry_filled.bin");
 pub(crate) const EXECUTION_STOP_LOSS_ACCEPTED: &[u8] =
