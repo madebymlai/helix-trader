@@ -49,7 +49,9 @@ nautilus-portfolio = { git = "https://github.com/nautechsystems/nautilus_trader"
 nautilus-risk = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "97ecbafd6621241a2222ef5a31cf887c6d96d950" }
 nautilus-serialization = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "97ecbafd6621241a2222ef5a31cf887c6d96d950" }
 # Nautilus' testers (`DataTester`), without its datasets.
-nautilus-testkit = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "97ecbafd6621241a2222ef5a31cf887c6d96d950", default-features = false, features = ["testers"] }
+nautilus-testkit = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "97ecbafd6621241a2222ef5a31cf887c6d96d950", default-features = false, features = [
+  "testers",
+] }
 nautilus-trading = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "97ecbafd6621241a2222ef5a31cf887c6d96d950" }
 rust_decimal = "1"
 serde = { version = "1", features = ["derive"] }
@@ -74,7 +76,10 @@ anyhow.workspace = true
 # rows and the custom data of the backtest tests.
 arrow.workspace = true
 # The version and features of Nautilus' IB gateway.
-bollard = { version = "0.21.1", default-features = false, features = ["http", "pipe"] }
+bollard = { version = "0.21.1", default-features = false, features = [
+  "http",
+  "pipe",
+] }
 bon.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 # The cTrader Open API adapter, which the IC Markets and Pepperstone venues wire in.
@@ -91,7 +96,11 @@ log.workspace = true
 lse.workspace = true
 nautilus-analysis.workspace = true
 nautilus-backtest = { workspace = true, features = ["streaming"] }
-nautilus-common = { workspace = true, features = ["indicators", "live", "tracing-bridge"] }
+nautilus-common = { workspace = true, features = [
+  "indicators",
+  "live",
+  "tracing-bridge",
+] }
 nautilus-core.workspace = true
 nautilus-data.workspace = true
 # `live` for its data client, which fill-catalog's node asks for history;
@@ -103,7 +112,10 @@ nautilus-indicators.workspace = true
 nautilus-infrastructure.workspace = true
 nautilus-live = { workspace = true, features = ["streaming"] }
 ibapi = "=5.0.0"
-nautilus-interactive-brokers = { workspace = true, features = ["execution", "gateway"] }
+nautilus-interactive-brokers = { workspace = true, features = [
+  "execution",
+  "gateway",
+] }
 nautilus-model.workspace = true
 nautilus-network.workspace = true
 nautilus-okx.workspace = true
@@ -135,7 +147,9 @@ ctrader = { workspace = true, features = ["test-support"] }
 # The mock LSE peer and its captured payloads, for the tests of the LSE fill.
 lse = { workspace = true, features = ["test-support"] }
 # Nautilus' Redis client, to delete what the live tests leave in the cache.
-redis = { version = "1.7.1", default-features = false, features = ["tokio-comp"] }
+redis = { version = "1.7.1", default-features = false, features = [
+  "tokio-comp",
+] }
 nautilus-model = { workspace = true, features = ["test-support"] }
 # Nautilus' portfolio, to register a strategy in a unit test.
 nautilus-portfolio.workspace = true

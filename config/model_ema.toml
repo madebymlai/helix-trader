@@ -22,8 +22,8 @@
 # model its two averages. A model strategy lists the series its features
 # or its target's ATR read, and no other, or no run starts.
 series = [
-    { data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
-    { data = "bars", instrument_id = "EURUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
+  { data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
+  { data = "bars", instrument_id = "EURUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } },
 ]
 # How far back a live node's warmup request goes at start, and a dataset
 # build's lead-in: enough for the slow average's 30 bars and the target's
