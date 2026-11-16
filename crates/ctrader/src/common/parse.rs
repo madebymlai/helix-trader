@@ -584,8 +584,15 @@ mod tests {
         let err = instrument(&fixtures, name).unwrap_err().to_string();
 
         for fact in facts {
-            assert!(err.contains(fact), "{fact}: {err}");
+            assert!(words(&err).contains(fact), "{fact}: {err}");
         }
+    }
+
+    /// The words of `err`, its numbers among them, a decimal one word.
+    fn words(err: &str) -> Vec<&str> {
+        err.split(|c: char| !(c.is_ascii_alphanumeric() || c == '.'))
+            .filter(|word| !word.is_empty())
+            .collect()
     }
 
     /// EURUSD is symbol 1 of the captured list, XAUUSD symbol 41.
