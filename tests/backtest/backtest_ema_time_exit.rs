@@ -8,6 +8,10 @@ use rstest::rstest;
 
 use crate::common::{self, trades};
 
+/// From `trades::start()`, 10:00, the run replays the bars closing 11:00 at
+/// 610.60 and 12:00 at 600.60: the crossover warms up on them, the replay
+/// alone, initialized at 12:00, short, its first decision, no cross; at
+/// 13:00 it crosses up and buys.
 #[rstest]
 fn a_trade_is_closed_its_hold_after_its_send() {
     let levels = trades::TIME_EXIT;

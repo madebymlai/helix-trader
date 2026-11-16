@@ -27,10 +27,7 @@ use std::{
     cell::RefCell,
     process::Command,
     rc::Rc,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -84,14 +81,16 @@ struct Record {
 }
 
 /// Sends one bracket on gold's first quote after a EUR/USD quote, and
-/// closes the position it opens.
+/// closes the position it opens; notifies `done` once the position has
+/// closed and both legs are canceled, the last events of the run, or the
+/// bracket failed.
 #[derive(Debug)]
 struct BracketOnce {
     core: StrategyCore,
     gold: InstrumentId,
     eurusd: InstrumentId,
     record: Arc<Mutex<Record>>,
-    done: Arc<AtomicBool>,
+    done: Arc<tokio::sync::Notify>,
     rate_known: bool,
     sent: bool,
 }
@@ -105,6 +104,21 @@ impl BracketOnce {
             .unwrap()
             .events
             .push((id.to_string(), what));
+    }
+
+    /// Notifies `done` once the position has closed and both its legs are
+    /// canceled.
+    fn done_if_flat(&self) {
+        let record = self.record.lock().unwrap();
+        let canceled = record
+            .events
+            .iter()
+            .filter(|(_, what)| what == "canceled")
+            .count();
+
+        if record.closed.is_some() && canceled == 2 {
+            self.done.notify_one();
+        }
     }
 }
 
@@ -139,6 +153,7 @@ nautilus_strategy!(BracketOnce, {
 
     fn on_order_canceled(&mut self, event: &OrderCanceled) {
         self.note(&event.client_order_id, "canceled");
+        self.done_if_flat();
     }
 
     fn on_order_rejected(&mut self, event: OrderRejected) {
@@ -146,12 +161,12 @@ nautilus_strategy!(BracketOnce, {
             &event.client_order_id,
             format!("rejected: {}", event.reason),
         );
-        self.done.store(true, Ordering::SeqCst);
+        self.done.notify_one();
     }
 
     fn on_order_denied(&mut self, event: OrderDenied) {
         self.note(&event.client_order_id, format!("denied: {}", event.reason));
-        self.done.store(true, Ordering::SeqCst);
+        self.done.notify_one();
     }
 
     fn on_position_opened(&mut self, event: PositionOpened) {
@@ -164,13 +179,13 @@ nautilus_strategy!(BracketOnce, {
         };
         if let Err(e) = self.close_position(&position, None, None, None, None, None, None) {
             self.note(&position_id, format!("close failed: {e}"));
-            self.done.store(true, Ordering::SeqCst);
+            self.done.notify_one();
         }
     }
 
     fn on_position_closed(&mut self, event: PositionClosed) {
         self.record.lock().unwrap().closed = Some(event);
-        self.done.store(true, Ordering::SeqCst);
+        self.done_if_flat();
     }
 });
 
@@ -233,7 +248,7 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
         warmup: SignedDuration::from_mins(5),
     };
     let record = Arc::new(Mutex::new(Record::default()));
-    let done = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(tokio::sync::Notify::new());
     // The gold alone is traded, EUR/USD read for its rate.
     let gold = broker.gold();
     let strategy = BracketOnce {
@@ -261,15 +276,10 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
         catalog: catalog.path().to_path_buf(),
         recording: crate::recording(staging.path()),
     };
-    // As Ctrl-C would, once the position closed or the deadline passed.
+    // As Ctrl-C would, once the strategy is done or the deadline passed.
     let finished = Arc::clone(&done);
     let interrupt = get_runtime().spawn(async move {
-        let deadline = tokio::time::Instant::now() + DEADLINE;
-        while !finished.load(Ordering::SeqCst) && tokio::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-        // The last events out first.
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        let _ = tokio::time::timeout(DEADLINE, finished.notified()).await;
         let status = Command::new("kill")
             .args(["-INT", &std::process::id().to_string()])
             .status()

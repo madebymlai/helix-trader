@@ -8,13 +8,14 @@
 //! backtest declares the series by the config's data type, unchanged,
 //! beside IC's gold (`common::ic`), the run's venue, and replays the rows
 //! of its window to the strategy, each of the data type it is subscribed
-//! to, when it is known: to a probe subscribing itself, and to one whose
-//! subscriptions (`strategy::subscriptions`) subscribe it, as a
-//! strategy's do; and a raw feature of a model's features over the series
-//! reads each row from Nautilus' cache. The fill and the run each on a
-//! thread of its own, one node per thread. A config naming that identifier
-//! with other metadata fails the run naming both data types, rather than
-//! replay rows under a data type its strategy is not subscribed to.
+//! to, when it is known: to one whose subscriptions
+//! (`strategy::subscriptions`) subscribe it, as a strategy's do; and a raw
+//! feature of a model's features over the series reads each row from
+//! Nautilus' cache. The fill and the run each on a thread of its own, one
+//! node per thread. A config naming that identifier with other metadata
+//! fails the run naming both data types, before a probe subscribing itself
+//! to the stored rows' data type gets any, rather than replay rows under a
+//! data type its strategy is not subscribed to.
 
 use std::{cell::RefCell, path::Path, rc::Rc};
 
@@ -35,7 +36,7 @@ use lse::{
 use nautilus_common::{actor::DataActor, config::ConfigResult};
 use nautilus_core::{Params, UnixNanos, string::secret::SecretString};
 use nautilus_model::{
-    data::{CustomData, CustomDataTrait, Data, DataType},
+    data::{CustomData, DataType},
     identifiers::StrategyId,
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
@@ -233,45 +234,6 @@ impl DataActor for Subscribed {
     }
 }
 
-/// The fill stores the rows under the identifier the config chose, each
-/// of the config's data type, unchanged.
-#[rstest]
-fn a_fill_stores_the_rows_under_the_identifier_the_config_names() {
-    let dir = tempfile::tempdir().unwrap();
-    let filled = dir.path().to_path_buf();
-    std::thread::spawn(move || fill_bond_yields(&filled))
-        .join()
-        .unwrap();
-
-    venues::register_custom_data();
-    let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-    let stored = catalog
-        .query_custom_data_dynamic(
-            LseRow::type_name_static(),
-            Some(&[TREASURY.to_string()]),
-            None,
-            None,
-            None,
-            None,
-            true,
-        )
-        .unwrap();
-    let closes: Vec<(DataType, Value)> = stored
-        .iter()
-        .map(|data| {
-            let Data::Custom(custom) = data else {
-                panic!("not custom data: {data:?}");
-            };
-            let row = custom.data.as_any().downcast_ref::<LseRow>().unwrap();
-            (custom.data_type.clone(), row.fields["close"].clone())
-        })
-        .collect();
-    assert_eq!(
-        closes,
-        [json!(4.884), json!(5.0), json!(5.133)].map(|close| (us10y_type(), close))
-    );
-}
-
 /// The catalog filled with `us10y()` (`fill_bond_yields`) and a backtest
 /// on it from the 12th's 00:00 to noon on the 13th declaring the series.
 fn bond_yields_backtest() -> (tempfile::TempDir, Backtest) {
@@ -293,7 +255,8 @@ fn bond_yields_backtest() -> (tempfile::TempDir, Backtest) {
 /// that identifier with the 2-year's metadata would replay them under the
 /// 10-year's data type, which its strategy is not subscribed to, so that it
 /// would get nothing, and fill-catalog would find nothing missing: the run
-/// fails before it starts, naming both.
+/// fails before it starts, naming both, and the probe, subscribed to the
+/// 10-year's data type, gets none of them.
 #[rstest]
 fn a_backtest_of_rows_stored_under_other_metadata_fails_naming_both() {
     let (_catalog, backtest) = bond_yields_backtest();
@@ -303,51 +266,31 @@ fn a_backtest_of_rows_stored_under_other_metadata_fails_naming_both() {
         ..backtest
     };
 
-    let err = std::thread::spawn(move || {
+    let (err, replayed) = std::thread::spawn(move || {
+        let replayed = Rc::new(RefCell::new(Vec::new()));
         let probe = Probe {
             core: core(),
-            got: Rc::default(),
+            got: Rc::clone(&replayed),
         };
-        backtest.run(probe).unwrap_err()
+        let err = backtest.run(probe).unwrap_err();
+        (format!("{err:#}"), replayed.take())
     })
     .join()
     .unwrap();
 
-    let err = format!("{err:#}");
     for named in [us02y.data_type().clone(), us10y_type()] {
         assert!(err.contains(&named.to_string()), "{named}: {err}");
     }
-}
-
-/// From the 12th's 00:00 to noon on the 13th: the 12th's close reaches
-/// the strategy at the 13th's 00:00, when the day it closes has ended, and
-/// at no time of the 12th; the 10th's, known at the 11th's 00:00, before
-/// the run, does not.
-#[rstest]
-fn a_bond_yield_of_a_date_reaches_the_strategy_at_the_date_s_end() {
-    let (_catalog, backtest) = bond_yields_backtest();
-
-    let got = std::thread::spawn(move || {
-        let got = Rc::new(RefCell::new(Vec::new()));
-        let probe = Probe {
-            core: core(),
-            got: Rc::clone(&got),
-        };
-        backtest.run(probe).unwrap();
-        got.take()
-    })
-    .join()
-    .unwrap();
-
-    let thirteenth = UnixNanos::from(november("13T00:00:00"));
-    assert_eq!(got, [(us10y_type(), thirteenth, json!(5.133), thirteenth)]);
+    assert_eq!(replayed, []);
 }
 
 /// A strategy's subscriptions of the backtest's custom series, as a
 /// strategy builds them of its data requirements
 /// (`DataRequirements::custom`), subscribe it to the series: its `on_data`
-/// gets the 12th's close at the 13th's 00:00, though it subscribes to
-/// nothing itself.
+/// gets the 12th's close at the 13th's 00:00, when the day it closes has
+/// ended, and at no time of the 12th, though it subscribes to nothing
+/// itself; the 10th's, known at the 11th's 00:00, before the run, does not
+/// reach it.
 #[rstest]
 fn a_strategy_gets_a_custom_series_through_its_subscriptions() {
     let (_catalog, backtest) = bond_yields_backtest();

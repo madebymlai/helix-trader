@@ -289,11 +289,11 @@ async fn live_runs_on_the_paper_gateway_and_stops_cleanly_on_sigint() {
     .await;
     let interrupted = interrupt.is_finished();
     interrupt.abort();
+    // The node's records in Redis, under the test's trader.
+    common::cache::delete_trader("HELIXTEST-043").await;
     ran.expect("the node stops within a minute of SIGINT")
         .unwrap();
     assert!(interrupted, "the node stopped before SIGINT");
-    // The node's records in Redis, under the test's trader.
-    common::cache::delete_trader("HELIXTEST-043").await;
 }
 
 /// The client id the account tests start or reuse the gateway with,

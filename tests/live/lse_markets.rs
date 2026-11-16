@@ -96,7 +96,8 @@ fn index(id: &str, raw: &str) -> InstrumentAny {
 }
 
 /// Asks each series' definition of LSE's client, as a live warmup does,
-/// then subscribes to its quotes, keeping the first of each.
+/// then subscribes to its quotes, keeping the first of each, and stops the
+/// node once every series has quoted.
 #[derive(Debug)]
 struct Quotes {
     core: DataActorCore,
@@ -116,10 +117,15 @@ impl DataActor for Quotes {
     }
 
     fn on_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
-        self.first
-            .borrow_mut()
-            .entry(quote.instrument_id)
-            .or_insert(*quote);
+        let quoted = {
+            let mut first = self.first.borrow_mut();
+            first.entry(quote.instrument_id).or_insert(*quote);
+            first.len()
+        };
+
+        if quoted == SERIES.len() {
+            self.shutdown_system(Some("every series quoted".to_string()));
+        }
         Ok(())
     }
 }
@@ -178,14 +184,19 @@ async fn a_series_of_each_derived_market_quotes_from_its_socket() {
     .unwrap();
     let handle = node.handle();
 
-    let watched = Rc::clone(&first);
-    let (ran, ()) = tokio::join!(node.run(), async move {
-        let started = tokio::time::Instant::now();
-        while watched.borrow().len() < SERIES.len() && started.elapsed() < WAITED {
-            tokio::time::sleep(Duration::from_millis(250)).await;
+    let ran = {
+        let run = node.run();
+        tokio::pin!(run);
+        // The actor stops the node once every series has quoted; past the
+        // wait, the test does.
+        tokio::select! {
+            ran = &mut run => ran,
+            () = tokio::time::sleep(WAITED) => {
+                handle.stop();
+                run.await
+            }
         }
-        handle.stop();
-    });
+    };
     ran.unwrap();
     node.dispose();
 

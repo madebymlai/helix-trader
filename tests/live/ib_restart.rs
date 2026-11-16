@@ -208,22 +208,6 @@ async fn an_order_in_flight_when_the_node_died_that_ib_rejected() {
     assert_flat(&account).await;
 }
 
-/// IB's state in EXS1, read directly: a check to run by hand after a
-/// failed run, with `NAUTILUS_IB_RUN=1` and `--ignored`.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "run by hand with --ignored"]
-async fn ib_state_in_exs1() {
-    if std::env::var("NAUTILUS_IB_RUN").is_err() {
-        return;
-    }
-    dotenvy::dotenv().ok();
-    let client = Client::connect("127.0.0.1:4002", CLIENT_ID + 1)
-        .await
-        .unwrap();
-    let (position, orders) = ib_state(&client, &account()).await;
-    println!("IB in {SYMBOL}: position {position}, {orders} open orders");
-}
-
 /// Whether the test is opted in, from the shell, before `.env` is read;
 /// then the paper account. An opted-in test claims the process for this
 /// module (`claim_process`).

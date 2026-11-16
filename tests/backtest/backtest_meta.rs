@@ -42,7 +42,7 @@ use tempfile::TempDir;
 
 use crate::common::{
     dataset::{
-        baseline_of, blueprint, config, meta_baseline_of, missing, replay_on, trade_on, walk,
+        baseline_of, blueprint, config, meta_baseline_of, missing, r, replay_on, trade_on, walk,
     },
     ic,
 };
@@ -103,35 +103,6 @@ fn day() -> SignedDuration {
 /// Runs `run` on a thread of its own, a node's.
 fn on_thread<T: Send>(run: impl FnOnce() -> T + Send) -> T {
     std::thread::scope(|scope| scope.spawn(run).join().unwrap())
-}
-
-/// The R the long model of `store` valid from `at` predicts on `row`, its
-/// calibration, of the strategy's one side, leaving it as it is: the
-/// decision's level.
-fn expects(store: &ModelStore, at: Timestamp, row: &[f64]) -> f64 {
-    let stored = store.read(at).unwrap();
-    stored
-        .manifest
-        .learner
-        .load(&stored.model)
-        .unwrap()
-        .predict(row)
-        .unwrap()
-}
-
-/// The calibrated expected R of the meta model of `store` valid from `at`
-/// on `row`, as a strategy of `features` loads it.
-fn predicts(store: &ModelStore, features: Rc<FeatureSet>, at: Timestamp, row: &[f64]) -> f64 {
-    let stored = store.read(at).unwrap();
-    let fingerprint = blueprint(features, long_only())
-        .fingerprint()
-        .unwrap()
-        .to_string();
-    stored
-        .load(&stored.manifest.feature_names, &fingerprint)
-        .unwrap()
-        .predict(row)
-        .unwrap()
 }
 
 /// Prepares the backtest of the span of `long_only`: the dataset built,
@@ -204,7 +175,11 @@ fn meta_store(models: &Path) -> ModelStore {
 /// holdout, the longs, refused on its skill or for earning no more than
 /// every trade.
 /// With meta models published straight, a day's decisions trade only as
-/// the meta model in use takes the trade of the side picked.
+/// the meta model in use takes the trade of the side picked: each of the
+/// second and third days a long at every decision, at the level of the
+/// long's baseline published at its start, r(4) = -0.1 then r(5) = 0, and
+/// at the expected R of the meta published then, a baseline of r(6) = 0.1
+/// then r(8) = 0.3 through `CALIBRATION`, 0.1 + 0.5 r: 0.15 then 0.25.
 #[rstest]
 fn a_meta_model_trains_on_the_sides_trades_and_takes_them_in_the_run() {
     let catalog = catalog();
@@ -236,15 +211,8 @@ fn a_meta_model_trains_on_the_sides_trades_and_takes_them_in_the_run() {
         assert!(every.count > 0, "{at}: {holdout:?}");
         assert_eq!(taken, every, "{at}: every trade taken");
     }
-    let long = long_store(models.path());
     let meta = meta_store(models.path());
     assert!(meta.valid_froms().unwrap().is_empty());
-    let means: Vec<f64> = retrains
-        .iter()
-        // The long's row: the feature missing, then the bracket's three payoff
-        // features, which the fake does not read.
-        .map(|&at| expects(&long, at, &[f64::NAN, 0.0, 0.0, 0.0]))
-        .collect();
     for (&at, tenths) in retrains[1..].iter().zip([6, 8]) {
         meta.publish(&meta_baseline_of(&features(), &long_only(), at, tenths))
             .unwrap();
@@ -261,6 +229,8 @@ fn a_meta_model_trains_on_the_sides_trades_and_takes_them_in_the_run() {
         )
     });
 
+    let expected = [(r(4), 0.1 + 0.5 * r(6)), (r(5), 0.1 + 0.5 * r(8))];
+
     for (period, &from) in retrains.iter().enumerate() {
         let (from_ns, to_ns) = (UnixNanos::from(from), UnixNanos::from(from + day()));
         let trades: Vec<Decision> = record
@@ -276,20 +246,13 @@ fn a_meta_model_trains_on_the_sides_trades_and_takes_them_in_the_run() {
             );
             continue;
         }
-        // The meta's row: the feature missing, the long picked, the
-        // decision's level and no side call.
-        let taken = predicts(
-            &meta,
-            features(),
-            from,
-            &[f64::NAN, 1.0, means[period], 0.0],
-        );
+        let (level, taken) = expected[period - 1];
         assert_eq!(trades.len(), 24, "period {period}");
         assert!(
             trades.iter().all(|trade| trade.side == OrderSide::Buy
-                && trade.level == means[period]
+                && trade.level == level
                 && trade.meta_expected_r == Some(R::new(taken))),
-            "period {period}: {trades:?}, not longs at {taken}"
+            "period {period}: {trades:?}, not longs at {level} taken at {taken}"
         );
     }
 }

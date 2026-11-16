@@ -45,23 +45,20 @@ fn crossover_at(risk: &str) -> BacktestResult {
 /// set from the close, 620.60, its stop at 617.50: one R of 3.10 EUR a
 /// share. At 0.45% of 10,000 EUR, 45 EUR, it buys 45 / 3.10 = 14.5
 /// shares, 14 rounded down, and its time exit gains 4.20 a share: 58.80
-/// EUR.
+/// EUR. At 0.01%, 1 EUR, it buys a third of a share: the trade sends
+/// nothing, and the run completes.
 #[rstest]
-fn the_crossovers_trade_risks_its_stake_of_the_balance_over_its_stop() {
-    let result = crossover_at("0.45%");
+#[case::fourteen_shares("0.45%", trades::TIME_EXIT_ORDERS, "10058.80 EUR")]
+#[case::less_than_a_share("0.01%", 0, "10000.00 EUR")]
+fn the_crossovers_trade_risks_its_stake_of_the_balance_over_its_stop(
+    #[case] risk: &str,
+    #[case] orders: usize,
+    #[case] balance: &str,
+) {
+    let result = crossover_at(risk);
 
-    assert_eq!(result.total_orders, trades::TIME_EXIT_ORDERS);
-    assert_eq!(common::balance(&result), "10058.80 EUR");
-}
-
-/// At 0.01% of 10,000 EUR, 1 EUR, a stop 3.10 EUR a share away buys a
-/// third of a share: the trade sends nothing, and the run completes.
-#[rstest]
-fn a_stake_buying_less_than_a_share_sends_nothing() {
-    let result = crossover_at("0.01%");
-
-    assert_eq!(result.total_orders, 0);
-    assert_eq!(common::balance(&result), "10000.00 EUR");
+    assert_eq!(result.total_orders, orders);
+    assert_eq!(common::balance(&result), balance);
 }
 
 /// The recorder's trades on `bar_type`'s bars of `trades::TIME_EXIT`'s

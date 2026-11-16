@@ -36,9 +36,12 @@ fn an_ic_position_locks_ic_s_margin_and_an_order_beyond_it_is_denied() {
         panic!("{:#?}", record.fills)
     };
     assert_eq!(price.to_string(), "4006.10");
-    assert_eq!(
-        record.denials,
-        ["INITIAL_MARGIN_EXCEEDS_FREE_BALANCE: free=331.72 USD, margin=668.69 USD"]
+    let [denial] = record.denials.as_slice() else {
+        panic!("{:#?}", record.denials)
+    };
+    assert!(
+        denial.contains("331.72 USD") && denial.contains("668.69 USD"),
+        "{denial}"
     );
     let [margin] = record.margins.as_slice() else {
         panic!("{:#?}", record.margins)

@@ -922,9 +922,15 @@ fn a_window_failing_ends_the_warmup_with_what_was_built_handed_over() {
 /// The usual start, on a catalog already filled: the first warmup's answers
 /// are written back window by window, and the second reads them from the
 /// catalog, asking the venue only for the time since, and hands over the
-/// same bars once each.
+/// same bars once each; so it does with the catalog given by a path relative
+/// to the working directory, as `live --catalog` takes one and `Live` hands
+/// it to the node.
 #[rstest]
-fn a_warmup_the_catalog_holds_asks_the_venue_only_for_the_rest() {
+#[case::absolute(Path::to_path_buf)]
+#[case::relative(relative)]
+fn a_warmup_the_catalog_holds_asks_the_venue_only_for_the_rest(
+    #[case] catalog_path: fn(&Path) -> PathBuf,
+) {
     let dir = tempfile::tempdir().unwrap();
     let first = FakeVenue::new(Answer::Envelope);
     warm(
@@ -937,7 +943,7 @@ fn a_warmup_the_catalog_holds_asks_the_venue_only_for_the_rest() {
     let second = FakeVenue::new(Answer::Envelope);
 
     let warmed = warm(
-        dir.path(),
+        &catalog_path(dir.path()),
         &second,
         MID_MINUTES,
         SignedDuration::from_hours(30),
@@ -960,38 +966,6 @@ fn relative(dir: &Path) -> PathBuf {
     let mut relative: PathBuf = std::iter::repeat_n("..", cwd.components().count() - 1).collect();
     relative.push(dir.strip_prefix("/").unwrap());
     relative
-}
-
-/// So it does with the catalog given by a path relative to the working
-/// directory, as `live --catalog` takes one and `Live` hands it to the node.
-#[rstest]
-fn a_warmup_reads_what_a_catalog_given_relative_to_the_working_directory_holds() {
-    let dir = tempfile::tempdir().unwrap();
-    let first = FakeVenue::new(Answer::Envelope);
-    warm(
-        dir.path(),
-        &first,
-        MID_MINUTES,
-        SignedDuration::from_hours(30),
-    );
-    let first_end = first.borrow().asked.last().unwrap().1;
-    let second = FakeVenue::new(Answer::Envelope);
-
-    let warmed = warm(
-        &relative(dir.path()),
-        &second,
-        MID_MINUTES,
-        SignedDuration::from_hours(30),
-    );
-
-    assert_eq!(warmed.failure, None);
-    let asked = second.borrow().asked.clone();
-    assert!(
-        asked.iter().all(|&(from, _)| from > first_end),
-        "{asked:?} after {first_end}"
-    );
-    assert!(warmed.bars.len() >= 29 * 60, "{} bars", warmed.bars.len());
-    assert!(one_every(&warmed.bars, MINUTE_NS));
 }
 
 /// The long side's target when a warmup of 72 hours of `requirements`' ends,
@@ -1055,25 +1029,17 @@ fn assert_three_atrs_wide(exits: &SideTarget) {
 }
 
 /// A strategy reading quotes: the ATR's bars are built from them, by the one
-/// request of the quotes, across its windows.
+/// request of the quotes, across its windows. A strategy reading composite
+/// bars: the ATR is on the same hour bars, which a node caches under their
+/// standard type.
 #[rstest]
-fn a_warmup_of_quotes_warms_the_atr_of_a_bracket() {
-    let exits = bracket_of(
-        vec![],
-        vec![TickSeries {
-            data: NautilusDataType::QuoteTick,
-            instrument_id: InstrumentId::from(GCZ26),
-        }],
-    );
-
-    assert_three_atrs_wide(&exits);
-}
-
-/// A strategy reading composite bars: the ATR is on the same hour bars, which
-/// a node caches under their standard type.
-#[rstest]
-fn a_warmup_of_composite_bars_warms_the_atr_of_a_bracket() {
-    let exits = bracket_of(vec![BarType::from(COMPOSITE)], vec![]);
+#[case::quotes(vec![], vec![of_gcz26(NautilusDataType::QuoteTick)])]
+#[case::composite_bars(vec![BarType::from(COMPOSITE)], vec![])]
+fn a_warmup_warms_the_atr_of_a_bracket(
+    #[case] bar_types: Vec<BarType>,
+    #[case] ticks: Vec<TickSeries>,
+) {
+    let exits = bracket_of(bar_types, ticks);
 
     assert_three_atrs_wide(&exits);
 }
@@ -1124,11 +1090,16 @@ fn assert_live_before_the_last_window(venue: &FakeVenue) {
 }
 
 /// The venue answers each window after a while, as over a network, and sends
-/// a quote at once on the subscription, while the warmup is not answered yet:
-/// the features read every quote of the warmup, two windows of 23 hours over
-/// 30, then the live one, in time order.
+/// a tick at once on the subscription, while the warmup is not answered yet:
+/// the features read every quote, or every trade, of the warmup, two windows
+/// of 23 hours over 30, then the live one, in time order.
 #[rstest]
-fn features_read_every_warmup_quote_before_a_live_one() {
+#[case::quotes(NautilusDataType::QuoteTick, |fed: &Fed| fed.quotes.borrow().clone())]
+#[case::trades(NautilusDataType::TradeTick, |fed: &Fed| fed.trades.borrow().clone())]
+fn features_read_every_warmup_tick_before_a_live_one(
+    #[case] data: NautilusDataType,
+    #[case] ticks_read: fn(&Fed) -> Vec<u64>,
+) {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::Envelope);
     venue.borrow_mut().latency = Some(Duration::from_millis(20));
@@ -1136,45 +1107,17 @@ fn features_read_every_warmup_quote_before_a_live_one() {
     let features = read_live(
         dir.path(),
         &venue,
-        of_gcz26(NautilusDataType::QuoteTick),
+        of_gcz26(data),
         SignedDuration::from_hours(30),
     );
 
     let venue = venue.borrow();
     assert_eq!(venue.asked.len(), 2);
     assert_live_before_the_last_window(&venue);
-    let read = features.quotes.borrow();
-    assert!(read.len() >= 29 * 60, "{} quotes", read.len());
+    let read = ticks_read(&features);
+    assert!(read.len() >= 29 * 60, "{} ticks", read.len());
     let older = read.windows(2).position(|pair| pair[1] < pair[0]);
-    assert_eq!(older, None, "a quote older than the one read before it");
-    assert_eq!(
-        read.last().copied(),
-        venue.live.first().map(|live| live.made)
-    );
-}
-
-/// So with trades: the features read every trade of the warmup, then the
-/// live one the venue sends on the subscription.
-#[rstest]
-fn features_read_every_warmup_trade_before_a_live_one() {
-    let dir = tempfile::tempdir().unwrap();
-    let venue = FakeVenue::new(Answer::Envelope);
-    venue.borrow_mut().latency = Some(Duration::from_millis(20));
-
-    let features = read_live(
-        dir.path(),
-        &venue,
-        of_gcz26(NautilusDataType::TradeTick),
-        SignedDuration::from_hours(30),
-    );
-
-    let venue = venue.borrow();
-    assert_eq!(venue.asked.len(), 2);
-    assert_live_before_the_last_window(&venue);
-    let read = features.trades.borrow();
-    assert!(read.len() >= 29 * 60, "{} trades", read.len());
-    let older = read.windows(2).position(|pair| pair[1] < pair[0]);
-    assert_eq!(older, None, "a trade older than the one read before it");
+    assert_eq!(older, None, "a tick older than the one read before it");
     assert_eq!(
         read.last().copied(),
         venue.live.first().map(|live| live.made)

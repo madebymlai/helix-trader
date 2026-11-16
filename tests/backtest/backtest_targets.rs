@@ -1201,26 +1201,22 @@ fn inverse_run() -> (tempfile::TempDir, Backtest) {
 /// unit, its ATR's worth, is no multiple of a distance in price on an inverse
 /// instrument, as a stop's is not.
 #[rstest]
-fn a_target_on_an_inverse_instrument_fails_the_dataset_run() {
-    for target in [
-        bracket(INVERSE, risking("1"), Decimal::from(10)),
-        time_only(INVERSE, risking("1")),
-    ] {
-        let spec = target.spec;
-        // One node per thread.
-        let (err, decisions) = thread::spawn(move || {
-            let (_catalog, backtest) = inverse_run();
-            let source = Source::Bars(BarType::from(INVERSE_MINUTE));
-            let (probe, record) = TargetProbe::new(source, target, &backtest);
-            let err = backtest.run_dataset(probe).unwrap_err();
-            (format!("{err:#}"), record.borrow().decisions)
-        })
-        .join()
-        .unwrap();
+#[case::bracket(bracket(INVERSE, risking("1"), Decimal::from(10)))]
+#[case::time_only(time_only(INVERSE, risking("1")))]
+fn a_target_on_an_inverse_instrument_fails_the_dataset_run(#[case] target: TargetConfig) {
+    // One node per thread.
+    let (err, decisions) = thread::spawn(move || {
+        let (_catalog, backtest) = inverse_run();
+        let source = Source::Bars(BarType::from(INVERSE_MINUTE));
+        let (probe, record) = TargetProbe::new(source, target, &backtest);
+        let err = backtest.run_dataset(probe).unwrap_err();
+        (format!("{err:#}"), record.borrow().decisions)
+    })
+    .join()
+    .unwrap();
 
-        assert!(err.contains("inverse"), "{spec:?}: {err}");
-        assert_eq!(decisions, 0, "{spec:?}");
-    }
+    assert!(err.contains(INVERSE), "{err}");
+    assert_eq!(decisions, 0);
 }
 
 // ------------------------------------------------------------------- atr
@@ -1309,7 +1305,8 @@ fn targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand() {
 /// The ATR of `targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand`,
 /// 0.40 at 10:00, with a stop of a hundredth of it, 0.004 from 4000.10:
 /// on gold's cent ticks the stop rounds onto the decision's price, no
-/// distance, so the decision opens no target, as one on a cold ATR: no
+/// distance, so the decision opens no target, as the 09:00 one on a cold
+/// ATR does: both decisions reach the targets, and neither opens one, no
 /// row and no order.
 #[rstest]
 fn a_stop_rounding_onto_the_decisions_price_opens_no_target() {
@@ -1338,6 +1335,7 @@ fn a_stop_rounding_onto_the_decisions_price_opens_no_target() {
     backtest.run_dataset(probe).unwrap();
 
     let record = record.borrow();
+    assert_eq!(record.decisions, 2);
     assert_eq!(record.rows, []);
     assert!(record.fills.is_empty(), "{:?}", record.fills);
 }
