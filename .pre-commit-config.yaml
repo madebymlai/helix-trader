@@ -1,0 +1,141 @@
+default_install_hook_types: [pre-commit]
+default_stages: [pre-commit]
+
+repos:
+  # nautilus-engineering: sync begin
+  - repo: local
+    hooks:
+      - id: check-nautilus-engineering-sync
+        name: check nautilus_engineering sync
+        entry: bash scripts/check-nautilus-engineering-sync.bash --staged
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: check-nautilus-engineering-pre-commit
+        name: check nautilus_engineering pre-commit section
+        entry: python3 scripts/manage-nautilus-engineering-pre-commit.py check --staged
+        language: system
+        pass_filenames: false
+        always_run: true
+  # nautilus-engineering: sync end
+
+  ##############################################################################
+  #  General checks
+  ##############################################################################
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: forbid-new-submodules
+      - id: end-of-file-fixer
+        types_or: [rust, markdown, toml]
+      - id: mixed-line-ending
+      - id: trailing-whitespace
+      - id: detect-private-key
+      - id: check-added-large-files
+      - id: check-case-conflict
+      - id: check-executables-have-shebangs
+      - id: check-illegal-windows-names
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-symlinks
+      - id: check-toml
+      - id: check-yaml
+
+  # nautilus-engineering: hooks begin
+  - repo: https://github.com/codespell-project/codespell
+    rev: v2.4.3
+    hooks:
+      - id: codespell
+        types_or: [rust, python, toml, yaml, rst, markdown, javascript]
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+        args: ["--staged", "--redact"]
+
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: v0.24.1
+    hooks:
+      - id: markdownlint-cli2
+        name: markdownlint
+        entry: markdownlint-cli2
+        args:
+          - --config
+          - .markdownlint.jsonc
+          - --fix
+        files: "\\.md$"
+
+  - repo: local
+    hooks:
+      - id: check-markdown-tables
+        name: normalize markdown table padding
+        description: Pads GFM table columns to their widest cell, which MD060 does not check
+        entry: python3 -B scripts/check-markdown-tables.py
+        language: system
+        types: [markdown]
+
+  - repo: https://github.com/scop/pre-commit-shfmt
+    rev: v3.14.1-1
+    hooks:
+      - id: shfmt
+        args: ["-i", "2", "-ci", "-sr", "-ln", "bash", "-w"]
+
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1-1
+    hooks:
+      - id: shellcheck
+
+  - repo: local
+    hooks:
+      - id: taplo-format
+        name: taplo-format
+        entry: taplo format
+        language: rust
+        types: [toml]
+        additional_dependencies:
+          - cli:taplo-cli:0.10.0
+
+  - repo: https://github.com/crate-ci/typos
+    rev: v1.52.2
+    hooks:
+      - id: typos
+        args: ["--force-exclude"]
+        types: [text]
+
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.38.0
+    hooks:
+      - id: yamllint
+        args: [--strict]
+
+  - repo: https://github.com/zizmorcore/zizmor-pre-commit
+    rev: v1.32.0
+    hooks:
+      - id: zizmor
+        name: zizmor (security)
+        description: Scans GitHub Actions workflows for security misconfigurations
+        args: ["--no-online-audits", "--strict-collection", "--min-severity", "informational", ".github/"]
+        files: ^\.github/(workflows/[^/]+|(?:.*/)?action|dependabot)\.ya?ml$
+        pass_filenames: false
+  # nautilus-engineering: hooks end
+
+  ##############################################################################
+  #  Rust formatting
+  ##############################################################################
+  - repo: local
+    hooks:
+      - id: fmt
+        name: cargo fmt
+        description: Check formatting with the nightly rustfmt that rustfmt.toml's import options need
+        entry: cargo +nightly fmt
+        language: system
+        args: ["--all", "--", "--check"]
+        files: >-
+          (?x)^(
+            .*\.rs|
+            (?:.*/)?Cargo\.toml|
+            rustfmt\.toml
+          )$
+        types: [file]
+        pass_filenames: false
