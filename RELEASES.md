@@ -9,6 +9,7 @@ Released on TBD (UTC).
 ### Fixes
 
 - Fixed `ctrader` failing to build without its `test-support` feature; `TokenPair` and `SpotEvents` are public whatever the features
+- Fixed `ctrader` reporting an order refused at execution as cancelled: an order cancelled unfilled with its deal rejected is rejected, with the deal's status and `rejectReason`
 
 ### Internal Improvements
 
