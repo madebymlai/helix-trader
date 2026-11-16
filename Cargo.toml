@@ -282,6 +282,11 @@ extend-exclude = [
 [features]
 # Strategy unit tests, off by default (see the README's tests section).
 strategy-tests = []
+# The fake learner (`learner = { kind = "fake" }`), test support: the self
+# dev-dependency below turns it on in every test build, so the binary the
+# integration tests run selects it, while a build of the binary alone refuses
+# it.
+test-support = []
 
 # cargo-machete reads source for a dependency's name: the arrow schema of the
 # custom data macros is in their expansion alone.
@@ -366,6 +371,9 @@ async-trait.workspace = true
 # The hooks of the demo test of the cTrader session's token renewal
 # (`tests/live/ctrader_token_demo.rs`).
 ctrader = { workspace = true, features = ["test-support"] }
+# The crate's own `test-support`, for the unit tests and the binary the
+# integration tests run.
+helix-trader = { path = ".", features = ["test-support"] }
 # The mock LSE peer and its captured payloads, for the tests of the LSE fill.
 lse = { workspace = true, features = ["test-support"] }
 nautilus-model = { workspace = true, features = ["test-support"] }

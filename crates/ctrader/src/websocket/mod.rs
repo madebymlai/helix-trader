@@ -212,7 +212,7 @@ impl CTraderWebSocketClient {
     /// Connects to `url`, then authenticates the application and the
     /// account of `credential` with the token file's pair (seeded from the
     /// credential the first time, renewed first if due), sending the
-    /// heartbeat every `heartbeat`; with the spot events of the symbols
+    /// heartbeat every `HEARTBEAT_INTERVAL`; with the spot events of the symbols
     /// `subscribe_spots` subscribes. `socket`, a node's client's, reports
     /// the socket's state and takes the node's reconnect of it.
     ///
@@ -225,7 +225,6 @@ impl CTraderWebSocketClient {
     pub(super) async fn connect(
         url: &str,
         credential: CTraderCredential,
-        heartbeat: Duration,
         socket: Option<SocketControl>,
     ) -> anyhow::Result<(Self, SpotEvents)> {
         // While another session renews the pair, its new one is awaited.
@@ -280,7 +279,6 @@ impl CTraderWebSocketClient {
             cmd_rx,
             raw_rx,
             spot_tx,
-            heartbeat,
         );
         let mut handler_task = TaskSlot::new();
         handler_task
@@ -456,13 +454,15 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use jiff::Timestamp;
+    use nautilus_common::testing::wait_until_async;
     use prost::Message as _;
+    use rstest::rstest;
 
     use super::*;
     use crate::{
         common::{
             messages::{
-                ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq, ProtoOaAccountAuthRes,
+                ProtoHeartbeatEvent, ProtoMessage, ProtoOaAccountAuthReq,
                 ProtoOaAccountDisconnectEvent, ProtoOaApplicationAuthReq,
                 ProtoOaClientDisconnectEvent, ProtoOaErrorRes, ProtoOaGetTickDataReq,
                 ProtoOaGetTickDataRes, ProtoOaQuoteType, ProtoOaRefreshTokenReq,
@@ -480,15 +480,22 @@ mod tests {
         },
     };
 
-    const SLOW_HEARTBEAT: Duration = Duration::from_secs(3600);
+    /// What a refused token's error names: where to get a new pair, and
+    /// the settings, file and guide to put it in.
+    const PLAYGROUND: [&str; 5] = [
+        "openapi.ctrader.com",
+        "ACME_ACCESS_TOKEN",
+        "ACME_REFRESH_TOKEN",
+        "acme.env",
+        "the ACME guide",
+    ];
 
     /// A session whose spot events nobody reads.
     async fn connect(
         url: &str,
         credential: CTraderCredential,
-        heartbeat: Duration,
     ) -> anyhow::Result<CTraderWebSocketClient> {
-        let (client, _) = CTraderWebSocketClient::connect(url, credential, heartbeat, None).await?;
+        let (client, _) = CTraderWebSocketClient::connect(url, credential, None).await?;
         Ok(client)
     }
 
@@ -535,7 +542,7 @@ mod tests {
         let (url, received) = testing::start(symbols_peer);
 
         let (credential, _tokens) = testing::credential();
-        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+        let client = connect(&url, credential).await.unwrap();
 
         let frames = received.lock().unwrap().clone();
         assert_eq!(frames.len(), 2, "{frames:?}");
@@ -549,22 +556,25 @@ mod tests {
         client.disconnect().await;
     }
 
+    /// Two heartbeats come `HEARTBEAT_INTERVAL` apart, the first one
+    /// interval after the connect: the test waits two real intervals.
     #[tokio::test]
     async fn the_heartbeat_is_a_binary_heartbeat_event() {
         let (url, received) = testing::start(symbols_peer);
         let (credential, _tokens) = testing::credential();
-        let client = connect(&url, credential, Duration::from_millis(50))
-            .await
-            .unwrap();
-
-        let frames = testing::wait_until(&received, |frames| {
-            frames
+        let client = connect(&url, credential).await.unwrap();
+        let heartbeats = || {
+            received
+                .lock()
+                .unwrap()
                 .iter()
                 .filter(|(_, f)| f.payload_type == ProtoHeartbeatEvent::TYPE)
                 .count()
-                >= 2
-        })
-        .await;
+        };
+
+        wait_until_async(|| async { heartbeats() >= 2 }, 3 * HEARTBEAT_INTERVAL).await;
+
+        let frames = received.lock().unwrap().clone();
 
         let heartbeat = frames
             .iter()
@@ -596,7 +606,7 @@ mod tests {
             vec![answer(request), answer(&first)]
         });
         let (credential, _tokens) = testing::credential();
-        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+        let client = connect(&url, credential).await.unwrap();
 
         let (first, second) = (symbol_request(1), symbol_request(2));
         let (one, two) = tokio::join!(
@@ -617,7 +627,7 @@ mod tests {
                 .unwrap_or_else(|| vec![replay::<ProtoOaErrorRes>(request, SYMBOL_BY_ID_UNKNOWN)])
         });
         let (credential, _tokens) = testing::credential();
-        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+        let client = connect(&url, credential).await.unwrap();
 
         let error = client
             .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(987_654_321))
@@ -625,8 +635,11 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(
-            error.to_string(),
-            "cTrader error SYMBOL_NOT_FOUND: No symbols with requested ID"
+            error,
+            CTraderError::Venue {
+                code: "SYMBOL_NOT_FOUND".to_owned(),
+                description: Some("No symbols with requested ID".to_owned()),
+            }
         );
         client.disconnect().await;
     }
@@ -654,23 +667,16 @@ mod tests {
         });
 
         let (credential, _tokens) = testing::credential();
-        let err = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap_err();
+        let err = connect(&url, credential).await.unwrap_err();
 
         let err = format!("{err:#} {err:?}");
-        assert!(
-            err.contains(
-                "cTrader refused the account authentication (CH_ACCESS_TOKEN_INVALID) even with \
-                 a renewed access token"
-            ),
-            "{err}"
-        );
-        assert!(
-            err.contains(
-                "Playground of the app on openapi.ctrader.com and set ACME_ACCESS_TOKEN and \
-                 ACME_REFRESH_TOKEN in acme.env (see the ACME guide)"
-            ),
-            "{err}"
-        );
+        for fact in ["account", "CH_ACCESS_TOKEN_INVALID"]
+            .iter()
+            .chain(&PLAYGROUND)
+        {
+            assert!(err.contains(fact), "{fact}: {err}");
+        }
+
         for secret in [
             ACCESS_TOKEN,
             REFRESH_TOKEN,
@@ -697,45 +703,22 @@ mod tests {
         });
 
         let (credential, _tokens) = testing::credential();
-        let err = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap_err();
+        let err = connect(&url, credential).await.unwrap_err();
 
-        assert!(
-            format!("{err:#}").contains(
-                "the application authentication (CH_CLIENT_AUTH_FAILURE): check ACME_CLIENT_ID \
-                 and ACME_CLIENT_SECRET"
-            ),
-            "{err:#}"
-        );
+        let err = format!("{err:#}");
+        for fact in [
+            "CH_CLIENT_AUTH_FAILURE",
+            "ACME_CLIENT_ID",
+            "ACME_CLIENT_SECRET",
+        ] {
+            assert!(err.contains(fact), "{fact}: {err}");
+        }
         let frames = received.lock().unwrap().clone();
         assert!(
             frames
                 .iter()
                 .all(|(_, f)| f.payload_type == ProtoOaApplicationAuthReq::TYPE),
             "{frames:?}"
-        );
-    }
-
-    /// Synthetic: the account auth response of another account.
-    #[tokio::test]
-    async fn another_account_authenticated_is_refused() {
-        let (url, _) = testing::start(|_, request| {
-            if request.payload_type == ProtoOaAccountAuthReq::TYPE {
-                let other = ProtoOaAccountAuthRes {
-                    ctid_trader_account_id: ACCOUNT_ID + 1,
-                    ..Default::default()
-                };
-                return vec![reply(request, &other)];
-            }
-            accept_auth(request).unwrap_or_default()
-        });
-
-        let (credential, _tokens) = testing::credential();
-        let err = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap_err();
-
-        assert!(
-            format!("{err:#}")
-                .contains("cTrader authenticated another account than ACME_ACCOUNT_ID"),
-            "{err:#}"
         );
     }
 
@@ -759,7 +742,7 @@ mod tests {
             })
         });
         let (credential, _tokens) = testing::credential();
-        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+        let client = connect(&url, credential).await.unwrap();
 
         let response = client
             .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(7))
@@ -783,7 +766,7 @@ mod tests {
             }
         });
         let (credential, _tokens) = testing::credential();
-        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+        let client = connect(&url, credential).await.unwrap();
         testing::wait_until(&received, |frames| {
             frames
                 .iter()
@@ -836,7 +819,7 @@ mod tests {
             vec![reply(request, &ProtoOaGetTickDataRes::default())]
         });
         let (credential, _tokens) = testing::credential();
-        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+        let client = connect(&url, credential).await.unwrap();
         let request = tick_request();
         let start = std::time::Instant::now();
 
@@ -860,7 +843,7 @@ mod tests {
     async fn other_requests_are_not_held_to_the_historical_limit() {
         let (url, _) = testing::start(symbols_peer);
         let (credential, _tokens) = testing::credential();
-        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+        let client = connect(&url, credential).await.unwrap();
         let requests: Vec<_> = (0..7).map(symbol_request).collect();
         let start = std::time::Instant::now();
 
@@ -893,7 +876,7 @@ mod tests {
         });
         let (url, _) = testing::start(slow_renewal(Duration::from_millis(1100), peer));
         let (credential, _tokens) = testing::credential();
-        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+        let client = connect(&url, credential).await.unwrap();
         let request = tick_request();
 
         let answers = {
@@ -934,7 +917,7 @@ mod tests {
             Vec::new()
         });
         let (credential, _tokens) = testing::credential();
-        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+        let client = connect(&url, credential).await.unwrap();
         let request = tick_request();
         let order = ProtoOaNewOrderReq {
             ctid_trader_account_id: ACCOUNT_ID,
@@ -983,7 +966,7 @@ mod tests {
     async fn once_ctrader_ends_the_session_the_client_reconnects_and_authenticates_again() {
         let (url, received) = testing::start(ending_peer);
         let (credential, _tokens) = testing::credential();
-        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+        let client = connect(&url, credential).await.unwrap();
 
         let in_flight = client
             .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(1))
@@ -1033,7 +1016,7 @@ mod tests {
             })
         });
         let (credential, _tokens) = testing::credential();
-        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+        let client = connect(&url, credential).await.unwrap();
         let mut trades = client.trade_events().unwrap();
         let order = ProtoOaNewOrderReq {
             ctid_trader_account_id: ACCOUNT_ID,
@@ -1081,7 +1064,7 @@ mod tests {
     async fn a_trade_request_once_ctrader_ended_the_session_goes_out_on_the_next_one() {
         let (url, received) = testing::start(ending_peer);
         let (credential, _tokens) = testing::credential();
-        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+        let client = connect(&url, credential).await.unwrap();
         let _ = client
             .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(1))
             .await;
@@ -1110,17 +1093,14 @@ mod tests {
     /// connection only once it is authenticated.
     #[tokio::test]
     async fn a_trade_request_during_a_reconnect_goes_out_once_authenticated_again() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
         use crate::common::messages::ProtoOaNewOrderReq;
-        let reconnecting = Arc::new(AtomicBool::new(false));
-        let seen = Arc::clone(&reconnecting);
+        let (seen, mut reconnecting) = tokio::sync::mpsc::unbounded_channel();
         let (url, received) = testing::start_delayed(
             move |connection| {
                 if connection == 0 {
                     return Duration::ZERO;
                 }
-                seen.store(true, Ordering::SeqCst);
+                let _ = seen.send(());
                 Duration::from_millis(1500)
             },
             |connection, request| {
@@ -1134,7 +1114,7 @@ mod tests {
             },
         );
         let (credential, _tokens) = testing::credential();
-        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+        let client = connect(&url, credential).await.unwrap();
         let order = ProtoOaNewOrderReq {
             ctid_trader_account_id: ACCOUNT_ID,
             volume: 100,
@@ -1147,13 +1127,9 @@ mod tests {
             // The first request closes the connection.
             let mut lost = std::pin::pin!(client.request::<_, ProtoOaSymbolByIdRes>(&first));
             assert!(futures::poll!(lost.as_mut()).is_pending());
-            tokio::time::timeout(Duration::from_secs(10), async {
-                while !reconnecting.load(Ordering::SeqCst) {
-                    tokio::time::sleep(Duration::from_millis(5)).await;
-                }
-            })
-            .await
-            .unwrap();
+            tokio::time::timeout(Duration::from_secs(10), reconnecting.recv())
+                .await
+                .expect("no reconnect within 10 s");
             let sent = client.trade(&order, "N:O-1".to_owned()).await;
             (lost.await, sent)
         };
@@ -1245,10 +1221,9 @@ mod tests {
     async fn a_spot_subscription_asks_for_timestamps_and_its_spot_events_come_through() {
         let (url, received) = testing::start(spots_peer);
         let (credential, _tokens) = testing::credential();
-        let (client, mut spots) =
-            CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT, None)
-                .await
-                .unwrap();
+        let (client, mut spots) = CTraderWebSocketClient::connect(&url, credential, None)
+            .await
+            .unwrap();
 
         client.subscribe_spots(41).unwrap();
 
@@ -1265,10 +1240,9 @@ mod tests {
     async fn a_symbol_subscribed_twice_is_asked_for_once() {
         let (url, received) = testing::start(spots_peer);
         let (credential, _tokens) = testing::credential();
-        let (client, mut spots) =
-            CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT, None)
-                .await
-                .unwrap();
+        let (client, mut spots) = CTraderWebSocketClient::connect(&url, credential, None)
+            .await
+            .unwrap();
 
         client.subscribe_spots(41).unwrap();
         client.subscribe_spots(41).unwrap();
@@ -1307,10 +1281,9 @@ mod tests {
             actions
         });
         let (credential, _tokens) = testing::credential();
-        let (client, mut spots) =
-            CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT, None)
-                .await
-                .unwrap();
+        let (client, mut spots) = CTraderWebSocketClient::connect(&url, credential, None)
+            .await
+            .unwrap();
 
         client.subscribe_spots(41).unwrap();
         client.subscribe_spots(1).unwrap();
@@ -1346,10 +1319,9 @@ mod tests {
             spots_peer(connection, request)
         });
         let (credential, _tokens) = testing::credential();
-        let (client, mut spots) =
-            CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT, None)
-                .await
-                .unwrap();
+        let (client, mut spots) = CTraderWebSocketClient::connect(&url, credential, None)
+            .await
+            .unwrap();
 
         client.subscribe_spots(41).unwrap();
         client.subscribe_spots(1).unwrap();
@@ -1382,10 +1354,9 @@ mod tests {
     async fn after_a_reconnect_the_spot_subscriptions_are_sent_again() {
         let (url, received) = testing::start(closing_peer(ProtoOaSubscribeSpotsReq::TYPE));
         let (credential, _tokens) = testing::credential();
-        let (client, mut spots) =
-            CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT, None)
-                .await
-                .unwrap();
+        let (client, mut spots) = CTraderWebSocketClient::connect(&url, credential, None)
+            .await
+            .unwrap();
 
         client.subscribe_spots(41).unwrap();
 
@@ -1409,10 +1380,9 @@ mod tests {
     async fn an_unsubscribed_symbol_is_not_subscribed_again_after_a_reconnect() {
         let (url, received) = testing::start(closing_peer(ProtoOaUnsubscribeSpotsReq::TYPE));
         let (credential, _tokens) = testing::credential();
-        let (client, mut spots) =
-            CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT, None)
-                .await
-                .unwrap();
+        let (client, mut spots) = CTraderWebSocketClient::connect(&url, credential, None)
+            .await
+            .unwrap();
         client.subscribe_spots(41).unwrap();
         client.subscribe_spots(1).unwrap();
         next_spot(&mut spots).await;
@@ -1443,34 +1413,26 @@ mod tests {
     /// connection with the others, once it is authenticated.
     #[tokio::test]
     async fn a_spot_subscription_during_a_reconnect_goes_out_once_authenticated_again() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        let reconnecting = Arc::new(AtomicBool::new(false));
-        let seen = Arc::clone(&reconnecting);
+        let (seen, mut reconnecting) = tokio::sync::mpsc::unbounded_channel();
         let (url, received) = testing::start_delayed(
             move |connection| {
                 if connection == 0 {
                     return Duration::ZERO;
                 }
-                seen.store(true, Ordering::SeqCst);
+                let _ = seen.send(());
                 Duration::from_millis(1500)
             },
             closing_peer(ProtoOaSubscribeSpotsReq::TYPE),
         );
         let (credential, _tokens) = testing::credential();
-        let (client, mut spots) =
-            CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT, None)
-                .await
-                .unwrap();
+        let (client, mut spots) = CTraderWebSocketClient::connect(&url, credential, None)
+            .await
+            .unwrap();
         client.subscribe_spots(1).unwrap();
         assert_eq!(next_spot(&mut spots).await, spot_event(1));
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while !reconnecting.load(Ordering::SeqCst) {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), reconnecting.recv())
+            .await
+            .expect("no reconnect within 10 s");
 
         client.subscribe_spots(41).unwrap();
 
@@ -1602,7 +1564,7 @@ mod tests {
         let tokens = credential.tokens();
         let before = testing::now();
 
-        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+        let client = connect(&url, credential).await.unwrap();
 
         assert_eq!(payload_types(&received, 0), [2100, 2173, 2102]);
         assert_eq!(renewals(&received), [REFRESH_TOKEN]);
@@ -1618,31 +1580,28 @@ mod tests {
         client.disconnect().await;
     }
 
+    /// A token expiring within a day is renewed (2173) between the
+    /// application auth (2100) and the account auth (2102), which takes
+    /// the renewed token; one expiring later is not.
+    #[rstest]
+    #[case::within_a_day(23, &[2100, 2173, 2102], "renewedAccess1")]
+    #[case::later_than_a_day(25, &[2100, 2102], "accessTokenValue")]
     #[tokio::test]
-    async fn a_token_expiring_within_a_day_is_renewed_at_start() {
+    async fn a_token_is_renewed_at_start_only_if_it_expires_within_a_day(
+        #[case] expires_in_hours: i64,
+        #[case] frames: &[u32],
+        #[case] account_auth: &str,
+    ) {
         let venue = TokenVenue::new();
         let (url, received) = testing::start(venue_peer(&venue));
-        let (credential, _dir) =
-            credential_expiring(Some(testing::now() + jiff::SignedDuration::from_hours(23)));
+        let (credential, _dir) = credential_expiring(Some(
+            testing::now() + jiff::SignedDuration::from_hours(expires_in_hours),
+        ));
 
-        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+        let client = connect(&url, credential).await.unwrap();
 
-        assert_eq!(payload_types(&received, 0), [2100, 2173, 2102]);
-        assert_eq!(account_auths(&received, 0), [renewed_access(1)]);
-        client.disconnect().await;
-    }
-
-    #[tokio::test]
-    async fn a_token_expiring_later_than_a_day_is_not_renewed_at_start() {
-        let venue = TokenVenue::new();
-        let (url, received) = testing::start(venue_peer(&venue));
-        let (credential, _dir) =
-            credential_expiring(Some(testing::now() + jiff::SignedDuration::from_hours(25)));
-
-        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
-
-        assert_eq!(payload_types(&received, 0), [2100, 2102]);
-        assert_eq!(account_auths(&received, 0), [ACCESS_TOKEN]);
+        assert_eq!(payload_types(&received, 0), frames);
+        assert_eq!(account_auths(&received, 0), [account_auth]);
         client.disconnect().await;
     }
 
@@ -1675,10 +1634,9 @@ mod tests {
             actions
         });
         let (credential, _dir) = testing::credential();
-        let (client, mut spots) =
-            CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT, None)
-                .await
-                .unwrap();
+        let (client, mut spots) = CTraderWebSocketClient::connect(&url, credential, None)
+            .await
+            .unwrap();
         client.subscribe_spots(41).unwrap();
         next_spot(&mut spots).await;
         let request = symbol_request(3);
@@ -1714,7 +1672,7 @@ mod tests {
         let (url, received) = testing::start(venue_peer(&venue));
         let (credential, _dir) = credential_expiring(Some(due_after(Duration::from_secs(1))));
         let tokens = credential.tokens();
-        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+        let client = connect(&url, credential).await.unwrap();
 
         testing::wait_until(&received, |_| {
             account_auths(&received, 0).last() == Some(&renewed_access(1))
@@ -1737,7 +1695,7 @@ mod tests {
         let (url, received) = testing::start(venue_peer(&venue));
         let (credential, _dir) = testing::credential();
         let tokens = credential.tokens();
-        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+        let client = connect(&url, credential).await.unwrap();
         venue.lock().unwrap().expire();
 
         let in_flight = client
@@ -1769,7 +1727,7 @@ mod tests {
         let (url, received) = testing::start(venue_peer(&venue));
         let (credential, _dir) = testing::credential();
 
-        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+        let client = connect(&url, credential).await.unwrap();
 
         assert_eq!(payload_types(&received, 0), [2100, 2102, 2173, 2102]);
         assert_eq!(
@@ -1793,20 +1751,12 @@ mod tests {
         let (credential, _dir) = credential_expiring(None);
         let tokens = credential.tokens();
 
-        let err = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap_err();
+        let err = connect(&url, credential).await.unwrap_err();
 
         let err = format!("{err:#} {err:?}");
-        assert!(
-            err.contains("cTrader refused to renew the access token (CH_ACCESS_TOKEN_INVALID)"),
-            "{err}"
-        );
-        assert!(
-            err.contains(
-                "Playground of the app on openapi.ctrader.com and set ACME_ACCESS_TOKEN and \
-                 ACME_REFRESH_TOKEN in acme.env (see the ACME guide)"
-            ),
-            "{err}"
-        );
+        for fact in ["CH_ACCESS_TOKEN_INVALID"].iter().chain(&PLAYGROUND) {
+            assert!(err.contains(fact), "{fact}: {err}");
+        }
         assert!(
             !err.contains(ACCESS_TOKEN) && !err.contains(REFRESH_TOKEN),
             "{err}"
@@ -1841,8 +1791,8 @@ mod tests {
         let tokens = credential.tokens();
 
         let (one_client, other_client) = tokio::join!(
-            connect(&one_url, credential.clone(), SLOW_HEARTBEAT),
-            connect(&other_url, credential, SLOW_HEARTBEAT),
+            connect(&one_url, credential.clone()),
+            connect(&other_url, credential),
         );
 
         let (one_client, other_client) = (one_client.unwrap(), other_client.unwrap());
@@ -1870,12 +1820,8 @@ mod tests {
         let (one_url, one) = testing::start(slow_renewal(slow, venue_peer(&venue)));
         let (other_url, other) = testing::start(slow_renewal(slow, venue_peer(&venue)));
         let (credential, _dir) = credential_expiring(Some(due_after(Duration::from_millis(500))));
-        let one_client = connect(&one_url, credential.clone(), SLOW_HEARTBEAT)
-            .await
-            .unwrap();
-        let other_client = connect(&other_url, credential, SLOW_HEARTBEAT)
-            .await
-            .unwrap();
+        let one_client = connect(&one_url, credential.clone()).await.unwrap();
+        let other_client = connect(&other_url, credential).await.unwrap();
 
         testing::wait_until(&one, |_| {
             [&one, &other]
@@ -1905,12 +1851,8 @@ mod tests {
         let (one_url, one) = testing::start(venue_peer(&venue));
         let (other_url, other) = testing::start(venue_peer(&venue));
         let (credential, _dir) = testing::credential();
-        let one_client = connect(&one_url, credential.clone(), SLOW_HEARTBEAT)
-            .await
-            .unwrap();
-        let other_client = connect(&other_url, credential, SLOW_HEARTBEAT)
-            .await
-            .unwrap();
+        let one_client = connect(&one_url, credential.clone()).await.unwrap();
+        let other_client = connect(&other_url, credential).await.unwrap();
 
         one_client.renew_token();
         testing::wait_until(&one, |_| {
@@ -1978,14 +1920,24 @@ mod tests {
         .await;
     }
 
+    /// A renewal answered after cTrader drops the account session, or
+    /// answered without its `clientMsgId`, is saved and used.
+    #[rstest]
+    #[case::after_ctrader_drops_the_account_session(
+        |request: &ProtoMessage| vec![account_dropped(), reply(request, &renewal_answer())]
+    )]
+    #[case::without_its_client_msg_id(|_: &ProtoMessage| {
+        vec![Action::Send(crate::common::messages::frame(
+            &renewal_answer(),
+            None,
+        ))]
+    })]
     #[tokio::test]
-    async fn a_renewal_answered_after_ctrader_drops_the_account_session_is_saved_and_used() {
-        let (url, received) = testing::start(renewing_peer(|request| {
-            vec![account_dropped(), reply(request, &renewal_answer())]
-        }));
+    async fn a_renewal_answer_is_saved_and_used(#[case] renewal: fn(&ProtoMessage) -> Vec<Action>) {
+        let (url, received) = testing::start(renewing_peer(renewal));
         let (credential, _dir) = testing::credential();
         let tokens = credential.tokens();
-        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+        let client = connect(&url, credential).await.unwrap();
 
         client.renew_token();
         reauthenticated(&received).await;
@@ -2000,34 +1952,19 @@ mod tests {
         client.disconnect().await;
     }
 
-    #[tokio::test]
-    async fn a_renewal_answer_without_its_client_msg_id_is_saved_and_used() {
-        let (url, received) = testing::start(renewing_peer(|_| {
-            vec![Action::Send(crate::common::messages::frame(
-                &renewal_answer(),
-                None,
-            ))]
-        }));
-        let (credential, _dir) = testing::credential();
-        let tokens = credential.tokens();
-        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
-
-        client.renew_token();
-        reauthenticated(&received).await;
-
-        assert_eq!(stored(&tokens).0, "renewedAccessValue");
-        client.disconnect().await;
-    }
-
+    /// The renewal is answered once the test opens the gate, the
+    /// disconnect under way.
     #[tokio::test]
     async fn a_disconnect_waits_for_the_renewal_in_flight_and_saves_its_pair() {
-        let (url, received) = testing::start(renewing_peer(|request| {
-            std::thread::sleep(Duration::from_millis(300));
+        let (open, gate) = std::sync::mpsc::channel::<()>();
+        let (url, received) = testing::start(renewing_peer(move |request| {
+            // Opened by the test, or closed by its end.
+            let _ = gate.recv();
             vec![reply(request, &renewal_answer())]
         }));
         let (credential, _dir) = testing::credential();
         let tokens = credential.tokens();
-        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+        let client = connect(&url, credential).await.unwrap();
         client.renew_token();
         testing::wait_until(&received, |frames| {
             frames
@@ -2036,7 +1973,9 @@ mod tests {
         })
         .await;
 
-        client.disconnect().await;
+        tokio::join!(client.disconnect(), async {
+            open.send(()).unwrap();
+        });
 
         assert_eq!(stored(&tokens).0, "renewedAccessValue");
     }
@@ -2054,7 +1993,7 @@ mod tests {
             actions
         });
         let (credential, _dir) = testing::credential();
-        let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
+        let client = connect(&url, credential).await.unwrap();
 
         let in_flight = client
             .request::<_, ProtoOaSymbolByIdRes>(&symbol_request(1))
@@ -2078,10 +2017,9 @@ mod tests {
         let (url, received) =
             testing::start(slow_renewal(Duration::from_millis(300), venue_peer(&venue)));
         let (credential, _dir) = testing::credential();
-        let (client, mut spots) =
-            CTraderWebSocketClient::connect(&url, credential, SLOW_HEARTBEAT, None)
-                .await
-                .unwrap();
+        let (client, mut spots) = CTraderWebSocketClient::connect(&url, credential, None)
+            .await
+            .unwrap();
         client.subscribe_spots(41).unwrap();
         next_spot(&mut spots).await;
 

@@ -137,75 +137,137 @@ mod tests {
         sending(rx.await, Venue::from(VENUE))
     }
 
+    /// A frame written has not failed. The session answers an error only
+    /// for a frame it never wrote (see `websocket::handler`): not sent,
+    /// for the session's reason. A session gone without a word, its
+    /// handler aborted maybe mid-write, leaves cTrader maybe holding the
+    /// frame.
+    #[rstest]
+    #[case::written(Some(Ok(())), None, &[])]
+    #[case::connection_lost(
+        Some(Err(CTraderError::ConnectionLost)),
+        Some(CommandFailure::NotSent as fn(String) -> CommandFailure),
+        &["the cTrader connection was lost"],
+    )]
+    #[case::session_failed(
+        Some(Err(CTraderError::Session("the account auth failed".to_owned()))),
+        Some(CommandFailure::NotSent as fn(String) -> CommandFailure),
+        &["the account auth failed"],
+    )]
+    #[case::transport_refused(
+        Some(Err(CTraderError::Transport(
+            "send failed: client closed or disconnecting".to_owned()
+        ))),
+        Some(CommandFailure::NotSent as fn(String) -> CommandFailure),
+        &["client closed or disconnecting"],
+    )]
+    #[case::session_gone(
+        None,
+        Some(CommandFailure::Ambiguous as fn(String) -> CommandFailure),
+        &[],
+    )]
     #[tokio::test]
-    async fn a_request_whose_frame_is_written_has_not_failed() {
-        assert_eq!(sent(Some(Ok(()))).await, Ok(()));
-    }
+    async fn a_request_fails_only_as_its_session_says_of_its_frame(
+        #[case] said: Option<Result<(), CTraderError>>,
+        #[case] class: Option<fn(String) -> CommandFailure>,
+        #[case] facts: &[&str],
+    ) {
+        let failure = sent(said).await;
 
-    /// The session answers an error only for a frame it never wrote (see
-    /// `websocket::handler`).
-    #[tokio::test]
-    async fn a_request_the_session_says_it_never_sent_is_not_sent() {
-        for error in [
-            CTraderError::ConnectionLost,
-            CTraderError::Session("the account auth failed".to_owned()),
-            CTraderError::Transport("send failed: client closed or disconnecting".to_owned()),
-        ] {
-            let failure = sent(Some(Err(error.clone()))).await;
-            assert!(
-                matches!(&failure, Err(CommandFailure::NotSent(reason)) if reason.contains(VENUE)),
-                "{error:?}: {failure:?}"
-            );
+        let Some(class) = class else {
+            assert_eq!(failure, Ok(()));
+            return;
+        };
+        let reason = match &failure {
+            Err(
+                CommandFailure::NotSent(reason)
+                | CommandFailure::Ambiguous(reason)
+                | CommandFailure::VenueRejected(reason),
+            ) => reason.clone(),
+            Ok(()) => panic!("no failure"),
+        };
+        assert_eq!(failure, Err(class(reason.clone())));
+        assert!(reason.contains(VENUE), "{reason}");
+        for fact in facts {
+            assert!(reason.contains(fact), "{fact}: {reason}");
         }
-    }
-
-    /// Its handler aborted, maybe mid-write: cTrader may have the frame.
-    #[tokio::test]
-    async fn a_request_whose_session_went_without_a_word_is_ambiguous() {
-        assert!(matches!(
-            sent(None).await,
-            Err(CommandFailure::Ambiguous(_))
-        ));
     }
 
     /// The refusals the demo answered (`test_data/order_error_*`), and the
-    /// deal timeout Spotware documents as "rejected".
+    /// deal timeout Spotware documents as "rejected", are rejections, their
+    /// reason the code and the description. A rate limit, or the server
+    /// unreachable or under maintenance, leaves the outcome unknown.
     #[rstest]
-    fn a_refusal_ctrader_explains_is_a_venue_rejection() {
-        for code in [
-            "TRADING_BAD_VOLUME",
-            "ORDER_NOT_FOUND",
-            "POSITION_NOT_FOUND",
-            "NOT_ENOUGH_MONEY",
-            "MARKET_CLOSED",
-            "TIMEOUT_ERROR",
-        ] {
-            assert_eq!(
-                refusal(code, Some("as cTrader put it")),
-                CommandFailure::VenueRejected(format!("{code}: as cTrader put it")),
-                "{code}"
-            );
-        }
-        assert_eq!(
-            refusal("TRADING_BAD_VOLUME", None),
-            CommandFailure::VenueRejected("TRADING_BAD_VOLUME".to_owned())
-        );
-    }
-
-    #[rstest]
-    fn a_rate_limit_or_an_unavailable_server_leaves_the_outcome_unknown() {
-        for code in [
-            "UNKNOWN_ERROR",
-            "CANT_ROUTE_REQUEST",
-            "BLOCKED_PAYLOAD_TYPE",
-            "REQUEST_FREQUENCY_EXCEEDED",
-            "CH_SERVER_NOT_REACHABLE",
-            "SERVER_IS_UNDER_MAINTENANCE",
-        ] {
-            assert!(
-                matches!(refusal(code, None), CommandFailure::Ambiguous(_)),
-                "{code}"
-            );
-        }
+    #[case::bad_volume(
+        "TRADING_BAD_VOLUME",
+        Some("as cTrader put it"),
+        CommandFailure::VenueRejected("TRADING_BAD_VOLUME: as cTrader put it".to_owned())
+    )]
+    #[case::order_not_found(
+        "ORDER_NOT_FOUND",
+        Some("as cTrader put it"),
+        CommandFailure::VenueRejected("ORDER_NOT_FOUND: as cTrader put it".to_owned())
+    )]
+    #[case::position_not_found(
+        "POSITION_NOT_FOUND",
+        Some("as cTrader put it"),
+        CommandFailure::VenueRejected("POSITION_NOT_FOUND: as cTrader put it".to_owned())
+    )]
+    #[case::not_enough_money(
+        "NOT_ENOUGH_MONEY",
+        Some("as cTrader put it"),
+        CommandFailure::VenueRejected("NOT_ENOUGH_MONEY: as cTrader put it".to_owned())
+    )]
+    #[case::market_closed(
+        "MARKET_CLOSED",
+        Some("as cTrader put it"),
+        CommandFailure::VenueRejected("MARKET_CLOSED: as cTrader put it".to_owned())
+    )]
+    #[case::timeout(
+        "TIMEOUT_ERROR",
+        Some("as cTrader put it"),
+        CommandFailure::VenueRejected("TIMEOUT_ERROR: as cTrader put it".to_owned())
+    )]
+    #[case::no_description(
+        "TRADING_BAD_VOLUME",
+        None,
+        CommandFailure::VenueRejected("TRADING_BAD_VOLUME".to_owned())
+    )]
+    #[case::unknown_error(
+        "UNKNOWN_ERROR",
+        None,
+        CommandFailure::Ambiguous("UNKNOWN_ERROR".to_owned())
+    )]
+    #[case::cant_route(
+        "CANT_ROUTE_REQUEST",
+        None,
+        CommandFailure::Ambiguous("CANT_ROUTE_REQUEST".to_owned())
+    )]
+    #[case::blocked_payload_type(
+        "BLOCKED_PAYLOAD_TYPE",
+        None,
+        CommandFailure::Ambiguous("BLOCKED_PAYLOAD_TYPE".to_owned())
+    )]
+    #[case::request_frequency_exceeded(
+        "REQUEST_FREQUENCY_EXCEEDED",
+        None,
+        CommandFailure::Ambiguous("REQUEST_FREQUENCY_EXCEEDED".to_owned())
+    )]
+    #[case::server_not_reachable(
+        "CH_SERVER_NOT_REACHABLE",
+        None,
+        CommandFailure::Ambiguous("CH_SERVER_NOT_REACHABLE".to_owned())
+    )]
+    #[case::under_maintenance(
+        "SERVER_IS_UNDER_MAINTENANCE",
+        None,
+        CommandFailure::Ambiguous("SERVER_IS_UNDER_MAINTENANCE".to_owned())
+    )]
+    fn a_refusal_is_a_venue_rejection_unless_its_code_leaves_the_outcome_unknown(
+        #[case] code: &str,
+        #[case] description: Option<&str>,
+        #[case] expected: CommandFailure,
+    ) {
+        assert_eq!(refusal(code, description), expected);
     }
 }

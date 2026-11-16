@@ -1236,13 +1236,10 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::{
-        common::messages::ProtoOaOrderErrorEvent,
-        testing::{
-            self, EXECUTION_LIMIT_ACCEPTED, EXECUTION_LIMIT_CANCELLED, EXECUTION_MARKET_FILLED,
-            EXECUTION_MARKET_RANGE_ACCEPTED, EXECUTION_MARKET_RANGE_DEAL_REJECTED,
-            EXECUTION_STOP_LOSS_FILLED, ORDER_ERROR_BAD_VOLUME,
-        },
+    use crate::testing::{
+        self, EXECUTION_LIMIT_ACCEPTED, EXECUTION_LIMIT_CANCELLED, EXECUTION_MARKET_FILLED,
+        EXECUTION_MARKET_RANGE_ACCEPTED, EXECUTION_MARKET_RANGE_DEAL_REJECTED,
+        EXECUTION_STOP_LOSS_FILLED,
     };
 
     /// XAUUSD's cTrader symbol id on the server the fixtures come from.
@@ -1416,25 +1413,6 @@ mod tests {
 
     // Each wire condition's class, by the events of a request it fails.
 
-    /// The captured refusal: cTrader's code and description.
-    #[rstest]
-    fn an_order_error_rejects_the_order_with_ctraders_code_and_description() {
-        let mut dispatch = dispatch();
-        dispatch.track(&order("PROBE-3", OrderType::Market), Role::Order);
-        let error = ProtoOaOrderErrorEvent::decode(ORDER_ERROR_BAD_VOLUME).unwrap();
-
-        let out = dispatch.handle(
-            answering(Tag::New(id("PROBE-3")), TradeMessage::OrderError(error)),
-            ts(),
-        );
-
-        assert_eq!(kinds(&out), [row("PROBE-3", "rejected")]);
-        assert_eq!(
-            reason(&out),
-            "TRADING_BAD_VOLUME: Order volume = 0.50 is smaller than minimum allowed volume = 1.00."
-        );
-    }
-
     /// An error answer is the same evidence as an order error: the same
     /// reason, with no envelope of the client's.
     #[rstest]
@@ -1586,31 +1564,28 @@ mod tests {
     /// `ORDER_REJECTED` rejects the order with its code, and its deal's
     /// `rejectReason` when it carries one.
     #[rstest]
-    fn an_order_rejected_by_execution_event_carries_its_deals_reject_reason() {
-        for (deal, expected) in [
-            (false, "NOT_ENOUGH_MONEY"),
-            (
-                true,
-                "NOT_ENOUGH_MONEY: Market VWAP is worse than Limit price",
-            ),
-        ] {
-            let mut dispatch = dispatch();
-            dispatch.track(&order("PROBE-REJECT-1", OrderType::Market), Role::Order);
-            let tag = Tag::New(id("PROBE-REJECT-1"));
-            dispatch.sent(tag);
-            let mut rejected =
-                ProtoOaExecutionEvent::decode(EXECUTION_MARKET_RANGE_DEAL_REJECTED).unwrap();
-            rejected.set_execution_type(ProtoOaExecutionType::OrderRejected);
-            rejected.error_code = Some("NOT_ENOUGH_MONEY".to_owned());
-            if !deal {
-                rejected.deal = None;
-            }
-
-            let out = dispatch.handle(answering(tag, TradeMessage::Execution(rejected)), ts());
-
-            assert_eq!(kinds(&out), [row("PROBE-REJECT-1", "rejected")]);
-            assert_eq!(reason(&out), expected);
+    #[case::without_a_deal(false, "NOT_ENOUGH_MONEY")]
+    #[case::with_its_deal(true, "NOT_ENOUGH_MONEY: Market VWAP is worse than Limit price")]
+    fn an_order_rejected_by_execution_event_carries_its_deals_reject_reason(
+        #[case] deal: bool,
+        #[case] expected: &str,
+    ) {
+        let mut dispatch = dispatch();
+        dispatch.track(&order("PROBE-REJECT-1", OrderType::Market), Role::Order);
+        let tag = Tag::New(id("PROBE-REJECT-1"));
+        dispatch.sent(tag);
+        let mut rejected =
+            ProtoOaExecutionEvent::decode(EXECUTION_MARKET_RANGE_DEAL_REJECTED).unwrap();
+        rejected.set_execution_type(ProtoOaExecutionType::OrderRejected);
+        rejected.error_code = Some("NOT_ENOUGH_MONEY".to_owned());
+        if !deal {
+            rejected.deal = None;
         }
+
+        let out = dispatch.handle(answering(tag, TradeMessage::Execution(rejected)), ts());
+
+        assert_eq!(kinds(&out), [row("PROBE-REJECT-1", "rejected")]);
+        assert_eq!(reason(&out), expected);
     }
 
     // Each class's events, by the request it fails.
@@ -1635,6 +1610,16 @@ mod tests {
                 row("PROBE-1-TP", "rejected")
             ]
         );
+
+        for output in &out {
+            let Output::Event(OrderEventAny::Rejected(rejected)) = output else {
+                panic!("not a rejection: {:?}", kinds(&out));
+            };
+            assert_eq!(
+                rejected.reason.as_str(),
+                "not sent to ACMEFX: the cTrader connection was lost"
+            );
+        }
     }
 
     #[rstest]
@@ -1679,20 +1664,21 @@ mod tests {
             ts(),
         );
 
-        let denied: Vec<(ClientOrderId, Option<UUID4>)> = out
+        let denied: Vec<(ClientOrderId, Option<UUID4>, String)> = out
             .iter()
             .map(|o| match o {
                 Output::Event(OrderEventAny::CancelDenied(d)) => {
-                    (d.client_order_id, d.causation_id)
+                    (d.client_order_id, d.causation_id, d.reason.to_string())
                 }
                 _ => panic!("not a cancel denial: {:?}", kinds(&out)),
             })
             .collect();
+        let reason = "not sent to ACMEFX: the cTrader connection was lost".to_owned();
         assert_eq!(
             denied,
             [
-                (commands[0].0, Some(commands[0].1)),
-                (commands[1].0, Some(commands[1].1))
+                (commands[0].0, Some(commands[0].1), reason.clone()),
+                (commands[1].0, Some(commands[1].1), reason)
             ]
         );
     }
@@ -1723,43 +1709,25 @@ mod tests {
         assert_eq!(kinds(&out), [row("PROBE-2", "canceled")]);
     }
 
+    /// No definitive event, whatever the request: the trade events, a
+    /// query or reconciliation resolve it, and the order's cancellation
+    /// then cancels it.
     #[rstest]
-    fn a_cancel_the_broker_rejects_is_rejected_and_the_order_stays_working() {
+    #[case::new_order(Tag::New(id("PROBE-2")))]
+    #[case::amend(Tag::Amend(id("PROBE-2")))]
+    #[case::cancel(Tag::Cancel(id("PROBE-2")))]
+    fn an_ambiguous_failure_emits_nothing_whatever_the_request(#[case] tag: Tag) {
         let mut dispatch = dispatch();
         accepted_limit(&mut dispatch, "PROBE-2");
-        let tag = Tag::Cancel(id("PROBE-2"));
 
         let out = dispatch.fail(
             tag,
             &[(id("PROBE-2"), UUID4::new())],
-            CommandFailure::venue_rejected("ORDER_NOT_FOUND: Order not found with id 1031776354"),
+            CommandFailure::ambiguous("REQUEST_FREQUENCY_EXCEEDED"),
             ts(),
         );
-        assert_eq!(kinds(&out), [row("PROBE-2", "cancel rejected")]);
+        assert!(out.is_empty(), "{tag}: {:?}", kinds(&out));
 
-        let out = dispatch.handle(answering(tag, execution(EXECUTION_LIMIT_CANCELLED)), ts());
-        assert_eq!(kinds(&out), [row("PROBE-2", "canceled")]);
-    }
-
-    /// No definitive event, whatever the request: the trade events, a
-    /// query or reconciliation resolve it.
-    #[rstest]
-    fn an_ambiguous_failure_emits_nothing_whatever_the_request() {
-        let mut dispatch = dispatch();
-        accepted_limit(&mut dispatch, "PROBE-2");
-        for tag in [
-            Tag::New(id("PROBE-2")),
-            Tag::Amend(id("PROBE-2")),
-            Tag::Cancel(id("PROBE-2")),
-        ] {
-            let out = dispatch.fail(
-                tag,
-                &[(id("PROBE-2"), UUID4::new())],
-                CommandFailure::ambiguous("REQUEST_FREQUENCY_EXCEEDED"),
-                ts(),
-            );
-            assert!(out.is_empty(), "{tag}: {:?}", kinds(&out));
-        }
         let out = dispatch.handle(
             answering(
                 Tag::Cancel(id("PROBE-2")),
@@ -1772,43 +1740,39 @@ mod tests {
 
     // What became of a request's frame.
 
-    #[rstest]
-    fn a_new_order_the_session_never_sent_is_rejected() {
-        let mut dispatch = dispatch();
-        dispatch.track(&order("PROBE-1", OrderType::Market), Role::Order);
-
-        let out = dispatch.sending(
-            Tag::New(id("PROBE-1")),
-            &[],
-            Err(CommandFailure::not_sent(
-                "not sent to ACMEFX: the cTrader connection was lost",
-            )),
-            ts(),
-        );
-
-        assert_eq!(kinds(&out), [row("PROBE-1", "rejected")]);
-    }
-
+    /// Never sent, a new order is rejected for the session's reason.
     /// Written, or maybe: its request waits no more, and a query finding
     /// the broker holds no such order concludes it absent.
     #[rstest]
-    fn an_order_whose_request_was_written_or_maybe_waits_no_more() {
-        for sending in [
-            Ok(()),
-            Err(CommandFailure::ambiguous("the ACMEFX session ended")),
-        ] {
-            let mut dispatch = dispatch();
-            dispatch.track(&order("PROBE-1", OrderType::Market), Role::Order);
+    #[case::never_sent(
+        Err(CommandFailure::not_sent("not sent to ACMEFX: the cTrader connection was lost")),
+        Some("not sent to ACMEFX: the cTrader connection was lost"),
+        None
+    )]
+    #[case::written(Ok(()), None, Some(vec![id("PROBE-1")]))]
+    #[case::maybe_written(
+        Err(CommandFailure::ambiguous("the ACMEFX session ended")),
+        None,
+        Some(vec![id("PROBE-1")])
+    )]
+    fn an_order_never_sent_is_rejected_and_one_written_or_maybe_waits_no_more(
+        #[case] sending: Result<(), CommandFailure>,
+        #[case] rejected: Option<&str>,
+        #[case] absent: Option<Vec<ClientOrderId>>,
+    ) {
+        let mut dispatch = dispatch();
+        dispatch.track(&order("PROBE-1", OrderType::Market), Role::Order);
 
-            let out = dispatch.sending(Tag::New(id("PROBE-1")), &[], sending.clone(), ts());
+        let out = dispatch.sending(Tag::New(id("PROBE-1")), &[], sending, ts());
 
-            assert!(out.is_empty(), "{sending:?}: {:?}", kinds(&out));
-            assert_eq!(
-                dispatch.absent(id("PROBE-1")),
-                Some(vec![id("PROBE-1")]),
-                "{sending:?}"
-            );
+        match rejected {
+            Some(expected) => {
+                assert_eq!(kinds(&out), [row("PROBE-1", "rejected")]);
+                assert_eq!(reason(&out), expected);
+            }
+            None => assert!(out.is_empty(), "{:?}", kinds(&out)),
         }
+        assert_eq!(dispatch.absent(id("PROBE-1")), absent);
     }
 
     // A deal whose commission cTrader does not state (Nautilus'

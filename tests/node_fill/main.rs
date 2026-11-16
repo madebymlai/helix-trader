@@ -20,6 +20,7 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
+    time::Duration,
 };
 
 use helix_trader::{
@@ -530,13 +531,16 @@ fn fill_slices(
     run(node, dir)
 }
 
-/// Runs `node` into the catalog in `dir`.
+/// Runs `node` into the catalog in `dir`, failing the test unless it ends
+/// within a minute: `NodeFill` sets no deadline of its own, so a client that
+/// never answers would hold it.
 fn run(node: NodeFill, dir: &Path) -> anyhow::Result<()> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap()
-        .block_on(node.run(dir))
+        .block_on(async { tokio::time::timeout(Duration::from_secs(60), node.run(dir)).await })
+        .expect("the fill ends within a minute")
 }
 
 /// A client of the fake `venue` named `name`, on no venue.
@@ -800,38 +804,35 @@ fn a_window_failing_keeps_those_before_it_and_the_next_fill_asks_only_from_it() 
     );
 }
 
+/// The venue's reason, whether it fails the request or answers it with a
+/// failure envelope; Nautilus' reason, not the client's, when it refuses it.
 #[rstest]
-fn a_failed_request_fails_the_fill_naming_it_and_writes_nothing() {
+#[case::failed(Answer::Failed, "failed: venue cut the history")]
+#[case::failure_envelope(Answer::FailureEnvelope, "failed: venue cut the history")]
+#[case::refused(Answer::Refused, "failed: ")]
+fn a_failed_request_fails_the_fill_naming_it_and_writes_nothing(
+    #[case] answer: Answer,
+    #[case] failure: &str,
+) {
     let friday_on = "the book depths of GCZ26.GLBX over \
                      [2025-10-17T00:00:00Z, 2025-10-18T23:59:59.999999999Z]";
-    for (answer, failure) in [
-        // The venue's reason.
-        (Answer::Failed, "failed: venue cut the history"),
-        (Answer::FailureEnvelope, "failed: venue cut the history"),
-        // Nautilus' reason, not the client's.
-        (Answer::Refused, "failed: "),
-    ] {
-        let dir = tempfile::tempdir().unwrap();
-        let venue = FakeVenue::new(answer);
+    let dir = tempfile::tempdir().unwrap();
+    let venue = FakeVenue::new(answer);
 
-        let err = fill(
-            dir.path(),
-            &venue,
-            &reading(NautilusDataType::OrderBookDepth),
-            (ts(FRI), end_before(SUN)),
-            DAY,
-        )
-        .unwrap_err()
-        .to_string();
+    let err = fill(
+        dir.path(),
+        &venue,
+        &reading(NautilusDataType::OrderBookDepth),
+        (ts(FRI), end_before(SUN)),
+        DAY,
+    )
+    .unwrap_err()
+    .to_string();
 
-        assert!(
-            err.contains(&format!("{friday_on} {failure}")),
-            "{answer:?}: {err}"
-        );
-        // The first window failed: the second never asked.
-        assert_eq!(venue.borrow().asked.len(), 2, "{answer:?}");
-        assert_eq!(depth_intervals(dir.path()), [], "{answer:?}");
-    }
+    assert!(err.contains(&format!("{friday_on} {failure}")), "{err}");
+    // The first window failed: the second never asked.
+    assert_eq!(venue.borrow().asked.len(), 2);
+    assert_eq!(depth_intervals(dir.path()), []);
 }
 
 /// GCZ26's definition asked of one client and its book of another, both on

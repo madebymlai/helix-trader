@@ -641,34 +641,30 @@ mod tests {
     /// 150 ms, Nautilus' static model of that base latency and no extra:
     /// a submit, a modify and a cancel each reach the venue 150 ms after
     /// they are sent, in a trading run as in a dataset run, on every venue.
+    /// No latency, Nautilus' default: each command reaches the venue as it
+    /// is sent.
     #[rstest]
-    fn a_backtest_at_a_latency_delays_every_command_by_it_on_every_venue() {
+    #[case::at_150_ms(Some(SignedDuration::from_millis(150)), Some([150_000_000; 4]))]
+    #[case::without_a_latency(None, None)]
+    fn a_backtest_at_a_latency_delays_every_command_by_it_on_every_venue(
+        #[case] latency: Option<SignedDuration>,
+        #[case] delayed: Option<[u64; 4]>,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let backtest = Backtest {
             bar_types: vec![
                 BarType::from("XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL"),
                 BarType::from("GC.v.0.GLBX-1-MINUTE-MID-INTERNAL"),
             ],
-            latency: Some(Latency::try_from(SignedDuration::from_millis(150)).unwrap()),
+            latency: latency.map(|latency| Latency::try_from(latency).unwrap()),
             ..backtest(dir.path())
         };
-        let delayed = Some([150_000_000; 4]);
 
         assert_eq!(latencies(&run_config(&backtest).unwrap()), [delayed; 2]);
         assert_eq!(
             latencies(&dataset_run_config(&backtest).unwrap()),
             [delayed; 2]
         );
-    }
-
-    /// Nautilus' default: each command reaches the venue as it is sent.
-    #[rstest]
-    fn a_backtest_without_a_latency_has_no_latency_model() {
-        let dir = tempfile::tempdir().unwrap();
-        let backtest = backtest(dir.path());
-
-        assert_eq!(latencies(&run_config(&backtest).unwrap()), [None]);
-        assert_eq!(latencies(&dataset_run_config(&backtest).unwrap()), [None]);
     }
 
     /// Pins two matching defaults of Nautilus' `BacktestVenueConfig`
@@ -893,6 +889,24 @@ mod tests {
         let config = run_config(&backtest(dir.path())).unwrap();
         assert!(config.raise_exception());
         assert!(!config.dispose_on_completion());
+    }
+
+    /// The backtest's window ends on 1 October 2026: a start on its end or
+    /// after it is refused before the catalog is read, naming both.
+    #[rstest]
+    #[case::on_the_end("2026-10-01T00:00:00Z")]
+    #[case::after_the_end("2026-10-01T19:00:00Z")]
+    fn rejects_a_start_on_or_after_the_end_naming_both(#[case] start: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let backtest = Backtest {
+            start: start.parse().unwrap(),
+            ..backtest(dir.path())
+        };
+        let err = run_config(&backtest).unwrap_err().to_string();
+        assert!(
+            err.contains(start) && err.contains("2026-10-01T00:00:00Z"),
+            "{err}"
+        );
     }
 
     #[rstest]

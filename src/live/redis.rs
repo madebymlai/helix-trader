@@ -134,6 +134,10 @@ mod tests {
     fn redis_keeps_its_data_in_an_append_only_file_on_the_volume() {
         let container = container();
         assert_eq!(
+            container.image.as_deref(),
+            Some("docker.io/library/redis:7.4.11-alpine")
+        );
+        assert_eq!(
             container.cmd.unwrap(),
             ["redis-server", "--appendonly", "yes"]
         );

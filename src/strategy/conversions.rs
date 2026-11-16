@@ -362,27 +362,16 @@ mod tests {
         assert_eq!(converted, Some(Money::from("125000 USD")));
     }
 
-    /// No pair reaches GBP, and 5 GBP are held: the equity is not
-    /// converted, rather than converted without them.
+    /// An amount but zero without a rate converts nothing, rather than
+    /// the equity converting without it: 5 GBP held, which no pair
+    /// reaches, or 100,000 EUR, whose pair EUR/USD is defined but not
+    /// quoted yet.
     #[rstest]
-    fn an_amount_no_pair_reaches_converts_nothing() {
-        let equity = money(&["100000 EUR", "5 GBP"]);
-
+    #[case::of_a_currency_no_pair_reaches(quoted(), &["100000 EUR", "5 GBP"])]
+    #[case::of_a_pair_not_quoted_yet(defining(&[EURUSD]), &["100000 EUR"])]
+    fn an_amount_without_a_rate_converts_nothing(#[case] cache: Cache, #[case] equity: &[&str]) {
         let converted = through(&[EURUSD])
-            .convert(&quoted(), equity, Currency::USD())
-            .unwrap();
-
-        assert_eq!(converted, None);
-    }
-
-    /// An amount of a currency with a pair but no rate cached yet converts
-    /// nothing either.
-    #[rstest]
-    fn an_amount_of_a_pair_not_quoted_yet_converts_nothing() {
-        let equity = money(&["100000 EUR"]);
-
-        let converted = through(&[EURUSD])
-            .convert(&defining(&[EURUSD]), equity, Currency::USD())
+            .convert(&cache, money(equity), Currency::USD())
             .unwrap();
 
         assert_eq!(converted, None);

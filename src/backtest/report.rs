@@ -500,7 +500,12 @@ mod tests {
             quote(&sxr8, "99.90", "100.10", 1),
         ];
         let err = Outcome::new(empty_result(), &cache, [stream.map(Ok)]).unwrap_err();
-        assert!(err.to_string().contains("out of time order"), "{err}");
+        // The quote of 1 ns after that of 3 ns.
+        let err = err.to_string();
+        assert!(
+            err.contains("SXR8.IBIS") && err.contains("1 after 3"),
+            "{err}"
+        );
     }
 
     #[rstest]

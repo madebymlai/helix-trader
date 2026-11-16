@@ -222,9 +222,55 @@ mod tests {
         )
         .unwrap();
 
-        let [(_, transitions), _] = continuous.params(InstrumentId::from("GC.GLBX")).unwrap();
-        assert_eq!(transitions[0]["pre_price"], json!("3985.00"));
-        assert_eq!(transitions[0]["post_price"], json!("4040.00"));
+        // The roll at 2026-07-29T00:00Z is 1_785_283_200 s after the epoch.
+        assert_eq!(
+            continuous.params(InstrumentId::from("GC.GLBX")).unwrap(),
+            [
+                (
+                    "continuous_future_transitions".to_string(),
+                    json!([{
+                        "transition_time_ns": 1_785_283_200_000_000_000_u64,
+                        "pre_instrument_id": "GCQ26.GLBX",
+                        "post_instrument_id": "GCZ26.GLBX",
+                        "pre_price": "3985.00",
+                        "post_price": "4040.00",
+                    }])
+                ),
+                (
+                    "continuous_future_adjustment_mode".to_string(),
+                    json!("BACKWARD_SPREAD")
+                ),
+            ]
+        );
+    }
+
+    /// The roll at 00:00 on Wednesday 29 July hands GC to December's
+    /// contract, whose slice runs from the roll to the span's end and holds
+    /// none of its trades: the catalog stores August's alone.
+    #[rstest]
+    fn a_roll_without_a_trade_of_the_post_contract_in_its_slice_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
+        let pre = [
+            trade("GCQ26.GLBX", "2026-07-24T10:00Z", "3980.00"),
+            trade("GCQ26.GLBX", "2026-07-27T10:00Z", "3985.00"),
+        ];
+        catalog.write_to_parquet(&pre, None, None, None).unwrap();
+
+        let err = ContinuousBars::read(
+            dir.path(),
+            &[BarType::from("GC.GLBX-1-MINUTE-LAST-INTERNAL")],
+            at("2026-07-24T00:00Z"),
+            at("2026-08-07T00:00Z"),
+            ContinuousFutureAdjustmentType::BackwardSpread,
+        )
+        .unwrap_err();
+
+        let err = format!("{err:#}");
+        assert!(
+            err.contains("GCZ26.GLBX in its slice [2026-07-29T00:00:00Z, 2026-08-07T00:00:00Z]"),
+            "{err}"
+        );
     }
 
     /// Reads the continuous bars of `bar_type` over July 2026 from an

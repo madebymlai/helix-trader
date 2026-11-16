@@ -195,15 +195,17 @@ mod tests {
         assert!(err.contains(why), "{err}");
     }
     /// The client asks LSE for no other data of an instrument, of any of
-    /// its venues, a contract's funding say: each refused naming LSE's
-    /// history and the series.
+    /// its venues, a contract's funding say: each refused naming the data
+    /// and the series.
     #[rstest]
     #[case::of_an_lsedge_series("GOLD-FUTURES.LSEDGE")]
     #[case::of_an_lsedge_index("SPX-INDICES.LSEDGE")]
     #[case::of_a_cme_globex_contract("GCZ26.GLBX")]
     #[case::of_a_nasdaq_stock("NVDA.XNAS")]
     #[case::of_an_option_contract("AAPL  261120C00355000.OPRA")]
-    fn other_data_of_an_instrument_is_refused_naming_lse_s_history(#[case] identifier: &str) {
+    fn other_data_of_an_instrument_is_refused_naming_the_data_and_the_series(
+        #[case] identifier: &str,
+    ) {
         let funding = NautilusDataType::FundingRateUpdate;
 
         let err = serves(&(funding, identifier.to_string()))
@@ -211,9 +213,7 @@ mod tests {
             .to_string();
 
         assert!(
-            err.contains("LSE's history")
-                && err.contains("FundingRateUpdate")
-                && err.contains(identifier),
+            err.contains("FundingRateUpdate") && err.contains(identifier),
             "{err}"
         );
     }

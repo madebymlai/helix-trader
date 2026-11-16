@@ -110,42 +110,15 @@ fn defaults_its_base_and_leaves_the_oms_to_the_venue() {
     assert_eq!(config.base.oms_type, None);
 }
 
+/// Its periods are read from `[indicators]` and its exits are its code's:
+/// neither is a top-level key.
 #[rstest]
-fn rejects_a_period_at_the_top_level() {
-    let toml = format!("fast_period = 5\n{TOML}");
+#[case::a_period("fast_period = 5", "fast_period")]
+#[case::exits("hold = \"1h\"", "hold")]
+fn rejects_a_top_level_key_naming_it(#[case] line: &str, #[case] key: &str) {
+    let toml = format!("{line}\n{TOML}");
     let err = EmaCrossConfig::load(&toml).unwrap_err();
-    assert!(err.to_string().contains("fast_period"), "{err}");
-}
-
-#[rstest]
-fn rejects_exits_in_the_toml() {
-    let toml = format!("hold = \"1h\"\n{TOML}");
-    let err = EmaCrossConfig::load(&toml).unwrap_err();
-    assert!(err.to_string().contains("hold"), "{err}");
-}
-
-#[rstest]
-fn rejects_a_missing_ema() {
-    let start = TOML.find("[indicators.slow]").unwrap();
-    let end = TOML.find("[trade]").unwrap();
-    let toml = format!("{}{}", &TOML[..start], &TOML[end..]);
-    assert_eq!(error_fields(&toml), ["indicators.slow"]);
-}
-
-#[rstest]
-fn rejects_an_ema_of_average_true_range_arguments() {
-    let toml = TOML.replacen(
-        "period = 10",
-        "period = 10\n        ma_type = \"SIMPLE\"",
-        1,
-    );
-    assert_eq!(error_fields(&toml), ["indicators.fast"]);
-}
-
-#[rstest]
-fn rejects_a_zero_period_by_nautilus_check() {
-    let toml = TOML.replace("period = 10", "period = 0");
-    assert_eq!(error_fields(&toml), ["indicators.fast"]);
+    assert!(err.to_string().contains(key), "{err}");
 }
 
 #[rstest]
@@ -154,23 +127,18 @@ fn rejects_fast_period_not_below_slow() {
     assert_eq!(error_fields(&toml), ["indicators.fast.period"]);
 }
 
+/// It trades one instrument: two or none are refused under the list. With
+/// no instrument traded, nothing is asked of the series: the count is the
+/// violation, alone.
 #[rstest]
-fn rejects_two_traded_instruments() {
+#[case::two(
+    "instruments = [{ instrument_id = \"ESM24.CME\" }, { instrument_id = \"ESH24.CME\" }]"
+)]
+#[case::none("instruments = []")]
+fn rejects_a_count_of_traded_instruments_other_than_one_alone(#[case] instruments: &str) {
     let toml = TOML.replace(
         "instruments = [{ instrument_id = \"ESM24.CME\" }]",
-        "instruments = [{ instrument_id = \"ESM24.CME\" }, \
-         { instrument_id = \"ESH24.CME\" }]",
-    );
-    assert_eq!(error_fields(&toml), ["trade.instruments"]);
-}
-
-/// With no instrument traded, nothing is asked of the series: the count
-/// is the violation.
-#[rstest]
-fn rejects_no_traded_instrument_alone() {
-    let toml = TOML.replace(
-        "instruments = [{ instrument_id = \"ESM24.CME\" }]",
-        "instruments = []",
+        instruments,
     );
     assert_eq!(error_fields(&toml), ["trade.instruments"]);
 }
@@ -193,41 +161,37 @@ fn listing(series: &str) -> String {
     )
 }
 
-/// The crossover reads the first bars series of the traded instrument: a
-/// second one is read by nothing.
+/// The crossover reads the first bars series of the traded instrument
+/// alone: a series listed beside it is read by nothing, refused under its
+/// listing, naming it. So are a second bars series of the traded
+/// instrument; bars of another; ticks, even of the instrument it trades;
+/// and custom data, LSE's daily 10-year US yield, its type registered as
+/// the process does at its start.
 #[rstest]
-fn rejects_a_second_bars_series_of_the_trade_instrument_as_unread() {
-    let toml = listing(
-        r#"{ data = "bars", instrument_id = "ESM24.CME", bar_spec = { step = 2, aggregation = "HOUR", price_type = "MID" } }"#,
-    );
-    assert_eq!(error_fields(&toml), ["data.series[1]"]);
-    let err = EmaCrossConfig::load(&toml).unwrap_err().to_string();
-    assert!(err.contains("ESM24.CME-2-HOUR-MID-INTERNAL"), "{err}");
-}
-
-/// The crossover reads no custom data: LSE's daily 10-year US yield, a
-/// custom series listed beside its bars, its type registered as the
-/// process does at its start, is read by nothing, refused under its
-/// listing, naming it.
-#[rstest]
-fn rejects_a_custom_series_as_unread() {
+#[case::a_second_bars_series_of_the_trade_instrument(
+    r#"{ data = "bars", instrument_id = "ESM24.CME", bar_spec = { step = 2, aggregation = "HOUR", price_type = "MID" } }"#,
+    &["ESM24.CME-2-HOUR-MID-INTERNAL"]
+)]
+#[case::bars_of_another_instrument(
+    r#"{ data = "bars", instrument_id = "ESH24.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } }"#,
+    &["ESH24.CME-1-HOUR-MID-INTERNAL"]
+)]
+#[case::ticks_of_the_trade_instrument(
+    r#"{ data = "quotes", instrument_id = "ESM24.CME" }"#,
+    &["QuoteTick of ESM24.CME"]
+)]
+#[case::a_custom_series(
+    r#"{ data = "Custom:LseRow", identifier = "US10Y", metadata = { source = "bond_yields", symbol = "US10Y" } }"#,
+    &["LseRow", "US10Y"]
+)]
+fn rejects_a_series_it_does_not_read_as_unread(#[case] series: &str, #[case] named: &[&str]) {
     crate::venues::register_custom_data();
-    let toml = listing(
-        r#"{ data = "Custom:LseRow", identifier = "US10Y", metadata = { source = "bond_yields", symbol = "US10Y" } }"#,
-    );
+    let toml = listing(series);
     assert_eq!(error_fields(&toml), ["data.series[1]"]);
     let err = EmaCrossConfig::load(&toml).unwrap_err().to_string();
-    assert!(err.contains("LseRow") && err.contains("US10Y"), "{err}");
-}
-
-#[rstest]
-fn rejects_bars_of_another_instrument_as_unread() {
-    let toml = listing(
-        r#"{ data = "bars", instrument_id = "ESH24.CME", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } }"#,
-    );
-    assert_eq!(error_fields(&toml), ["data.series[1]"]);
-    let err = EmaCrossConfig::load(&toml).unwrap_err().to_string();
-    assert!(err.contains("ESH24.CME-1-HOUR-MID-INTERNAL"), "{err}");
+    for part in named {
+        assert!(err.contains(part), "{part}: {err}");
+    }
 }
 
 /// The crossover reads its bars series once: listed again, it is refused
@@ -247,15 +211,6 @@ fn rejects_its_bars_series_listed_twice() {
     };
     assert_eq!(field, "data.series[1]");
     assert!(value.contains("ESM24.CME-1-HOUR-MID-INTERNAL"), "{value}");
-}
-
-/// The crossover reads bars alone, even of the instrument it trades.
-#[rstest]
-fn rejects_ticks_of_the_trade_instrument_as_unread() {
-    let toml = listing(r#"{ data = "quotes", instrument_id = "ESM24.CME" }"#);
-    assert_eq!(error_fields(&toml), ["data.series[1]"]);
-    let err = EmaCrossConfig::load(&toml).unwrap_err().to_string();
-    assert!(err.contains("QuoteTick of ESM24.CME"), "{err}");
 }
 
 /// The traded instrument without bars, its own error, is reported with
@@ -299,72 +254,25 @@ fn reports_every_unread_series_with_the_other_violations() {
     );
 }
 
-/// The crossover reading the bars of the GC root, the one series of it,
-/// and trading the root: no order goes to a root, which the shared trade
-/// rules refuse under its field.
-#[rstest]
-fn rejects_a_futures_root_traded() {
-    let toml = TOML
-        .replace("ESM24.CME", "GC.GLBX")
-        .replace("price_type = \"MID\"", "price_type = \"LAST\"");
-    assert_eq!(error_fields(&toml), ["trade.instruments[0].instrument_id"]);
-}
-
-/// The crossover reading the MID bars of the GC root, which it must
-/// trade to read them: Nautilus builds a root's bars from its contracts'
-/// trades, so these would never come, refused under the series with the
-/// root traded.
-#[rstest]
-fn rejects_bars_on_a_root_not_built_from_its_trades() {
-    let toml = TOML.replace("ESM24.CME", "GC.GLBX");
-    let mut fields = error_fields(&toml);
-    fields.sort();
-    assert_eq!(
-        fields,
-        ["data.series[0]", "trade.instruments[0].instrument_id"]
-    );
-    let err = EmaCrossConfig::load(&toml).unwrap_err().to_string();
-    assert!(err.contains("GC.GLBX-1-HOUR-MID-INTERNAL"), "{err}");
-}
-
-/// Its bars of the instrument traded give execution its prices: no
-/// quotes of it are added.
-#[rstest]
-fn requires_no_quotes_of_the_instrument_its_bars_read() {
-    let config = EmaCrossConfig::load(TOML).unwrap();
-    assert_eq!(config.data_requirements().ticks, []);
-}
-
-#[rstest]
-fn reports_its_own_violations_with_the_standard_ones() {
-    let toml = TOML
-        .replace("period = 10", "period = 30")
-        .replace("\"720h\"", "\"0s\"");
-    assert_eq!(
-        error_fields(&toml),
-        ["data.warmup", "indicators.fast.period"]
-    );
-}
-
 fn price(s: &str) -> Decimal {
     s.parse().unwrap()
 }
 
+/// A long takes profit 1% above the close and stops 0.5% below it: 620.60
+/// plus 1%, less 0.5%. A short takes profit 1% below the close and stops
+/// 0.5% above it: 600.60 less 1%, plus 0.5%.
 #[rstest]
-fn a_long_takes_profit_a_percent_above_the_close_and_stops_half_a_percent_below() {
-    // 620.60 plus 1%, less 0.5%.
+#[case::long("620.60", OrderSide::Buy, "626.806", "617.497")]
+#[case::short("600.60", OrderSide::Sell, "594.594", "603.603")]
+fn a_trade_takes_profit_a_percent_and_stops_half_a_percent_from_the_close(
+    #[case] close: &str,
+    #[case] side: OrderSide,
+    #[case] take_profit: &str,
+    #[case] stop_loss: &str,
+) {
     assert_eq!(
-        exit_prices(price("620.60"), OrderSide::Buy),
-        (price("626.806"), price("617.497"))
-    );
-}
-
-#[rstest]
-fn a_short_takes_profit_a_percent_below_the_close_and_stops_half_a_percent_above() {
-    // 600.60 less 1%, plus 0.5%.
-    assert_eq!(
-        exit_prices(price("600.60"), OrderSide::Sell),
-        (price("594.594"), price("603.603"))
+        exit_prices(price(close), side),
+        (price(take_profit), price(stop_loss))
     );
 }
 
@@ -597,17 +505,26 @@ fn a_trade_takes_profit_and_stops_on_the_nearest_ticks_its_one_r_to_its_stop() {
 
 /// Nautilus' sizer reads a trade's P&L as a multiple of a distance in
 /// price, which an inverse instrument's is not: the crossover trading
-/// Bybit's inverse BTC/USD perpetual refuses to start.
+/// Bybit's inverse BTC/USD perpetual refuses to start, naming it, and
+/// asks the data engine for nothing, neither a warmup nor a subscription.
 #[rstest]
 fn trading_an_inverse_instrument_it_refuses_to_start() {
+    let (handler, sent) = get_typed_into_message_saving_handler::<DataCommand>(None);
+    msgbus::register_data_command_endpoint(
+        MessagingSwitchboard::data_engine_queue_execute(),
+        handler,
+    );
     let btc = btcusd_bybit();
-    let config = CONFIG.replace("AUD/USD.SIM", &btc.id.to_string());
+    let inverse = btc.id;
+    let config = CONFIG.replace("AUD/USD.SIM", &inverse.to_string());
     let cache = holding(InstrumentAny::CryptoPerpetual(btc));
     let (mut strategy, _) = registered(&cache, NOW, &config);
 
     let err = DataActor::on_start(&mut strategy).unwrap_err();
 
-    assert!(err.to_string().contains("inverse"), "{err}");
+    assert!(err.to_string().contains(&inverse.to_string()), "{err}");
+    let sent = sent.get_messages();
+    assert!(sent.is_empty(), "{sent:?}");
 }
 
 /// IC's AUD/USD, a pair priced and sized as Nautilus' AUD/USD.

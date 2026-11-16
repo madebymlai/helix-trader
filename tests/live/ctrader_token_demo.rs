@@ -20,11 +20,12 @@ use std::{os::unix::fs::PermissionsExt, sync::Mutex, time::Duration};
 
 use ctrader::{CTraderSession, SpotEvents};
 use jiff::{SignedDuration, Timestamp};
+use nautilus_common::testing::wait_until_async;
 
 use crate::demo_broker::opted_in;
 
-/// The log records of the cTrader adapter at info and above, for the test
-/// to show: none holds a token.
+/// The log records of the cTrader adapter at info and above, which must
+/// hold no token.
 struct Captured(Mutex<Vec<String>>);
 
 impl log::Log for Captured {
@@ -86,11 +87,14 @@ async fn the_demo_session_renews_its_token_and_keeps_receiving_quotes() {
     let before = stored();
 
     session.renew_token();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    while stored().same_access_token(&before) {
-        assert!(tokio::time::Instant::now() < deadline, "no renewal in 30 s");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    wait_until_async(
+        || {
+            let renewed = !stored().same_access_token(&before);
+            async move { renewed }
+        },
+        Duration::from_secs(30),
+    )
+    .await;
     let renewed_at = crate::now();
     let after = loop {
         let at = next_spot_at(&mut spots, Duration::from_secs(60)).await;
@@ -135,4 +139,17 @@ async fn the_demo_session_renews_its_token_and_keeps_receiving_quotes() {
 
     account.unwrap();
     assert!(stored().same_access_token(&renewed));
+    let tokens = [
+        &before.access_token,
+        &before.refresh_token,
+        &renewed.access_token,
+        &renewed.refresh_token,
+    ];
+    let logged = CAPTURED.0.lock().unwrap();
+    assert!(
+        logged.iter().all(|line| tokens
+            .iter()
+            .all(|token| !line.contains(token.expose_secret()))),
+        "a log record holds a token"
+    );
 }

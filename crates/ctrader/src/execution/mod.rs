@@ -87,7 +87,6 @@ use super::{
     },
     config::{CTraderConnection, CTraderCredential},
     session::CTraderSession,
-    websocket::HEARTBEAT_INTERVAL,
 };
 
 mod dispatch;
@@ -219,7 +218,6 @@ impl CTraderExecutionClient {
             &self.url,
             self.core.venue,
             self.credential.clone(),
-            HEARTBEAT_INTERVAL,
             Some(self.socket.clone()),
         )
         .await?;
@@ -1633,6 +1631,7 @@ mod tests {
         types::{Currency, Money, Price, Quantity},
     };
     use prost::Message as _;
+    use rstest::rstest;
     use rust_decimal::Decimal;
     use ustr::Ustr;
 
@@ -1666,7 +1665,7 @@ mod tests {
     const EURUSD_SYMBOL_ID: i64 = 1;
     const US500_SYMBOL_ID: i64 = 10013;
 
-    /// 2026-10-26T10:00:00Z, in ms.
+    /// 2026-10-25T10:00:00Z, in ms.
     const T0: i64 = 1_792_922_400_000;
 
     /// How the peer answers trade requests and order queries.
@@ -2066,44 +2065,11 @@ mod tests {
             .collect()
     }
 
-    /// The session's socket under Nautilus' `SocketControl` (`live.md`,
-    /// "Socket transport state"): its availability goes to the node as the
-    /// client's, on its venue, endpoint `ctrader-open-api-trading`,
-    /// registered for the node's reconnect until the client disconnects.
-    #[tokio::test]
-    async fn the_sessions_socket_state_goes_to_the_node_until_the_client_disconnects() {
-        let (system_tx, mut system) = tokio::sync::mpsc::unbounded_channel();
-        replace_system_event_sender(system_tx);
-        let registry = SocketReconnectRegistry::default();
-        let (mut client, cache, mut events, _received, _tokens) =
-            registry.scope(|| started(Script::default()));
-        let endpoint = Ustr::from("ctrader-open-api-trading");
-
-        connect(&mut client, &mut events, &cache).await;
-
-        let event = tokio::time::timeout(Duration::from_secs(10), system.recv())
-            .await
-            .expect("no socket state within 10 s")
-            .expect("the system events ended");
-        let SystemEvent::SocketState(connected) = event;
-        assert_eq!(
-            connected,
-            SocketStateChange::new(
-                ClientId::from(CLIENT),
-                Some(Venue::new(VENUE)),
-                endpoint,
-                SocketState::Connected
-            )
-        );
-        assert!(registry.handle(ClientId::from(CLIENT), endpoint).is_some());
-        client.disconnect().await.unwrap();
-        assert!(registry.handle(ClientId::from(CLIENT), endpoint).is_none());
-    }
-
     /// A broker's data and execution clients under its one client id, as
     /// the factories name them and a node's caller makes them: each socket
-    /// is its own endpoint, registered once, and the node's reconnect of
-    /// it replaces that transport alone, its session authenticating again.
+    /// is its own endpoint on the venue, registered once, and the node's
+    /// reconnect of it replaces that transport alone, its session
+    /// authenticating again; a disconnect deregisters it.
     #[tokio::test]
     async fn a_brokers_data_and_trading_sockets_are_two_endpoints_each_reconnectable() {
         let (system_tx, mut system) = tokio::sync::mpsc::unbounded_channel();
@@ -2141,26 +2107,26 @@ mod tests {
             );
         }
 
-        let mut states: HashMap<Ustr, Vec<SocketState>> = HashMap::new();
+        let mut changes: HashMap<Ustr, Vec<SocketStateChange>> = HashMap::new();
+
         for _ in 0..6 {
             let event = tokio::time::timeout(Duration::from_secs(10), system.recv())
                 .await
                 .expect("no socket state within 10 s")
                 .expect("the system events ended");
             let SystemEvent::SocketState(change) = event;
-            assert_eq!(change.client_id, client);
-            states
-                .entry(change.endpoint)
-                .or_default()
-                .push(change.state);
+            changes.entry(change.endpoint).or_default().push(change);
         }
+
         for endpoint in endpoints {
+            let change =
+                |state| SocketStateChange::new(client, Some(Venue::new(VENUE)), endpoint, state);
             assert_eq!(
-                states[&endpoint],
+                changes[&endpoint],
                 [
-                    SocketState::Connected,
-                    SocketState::Disconnected,
-                    SocketState::Connected
+                    change(SocketState::Connected),
+                    change(SocketState::Disconnected),
+                    change(SocketState::Connected)
                 ],
                 "{endpoint}"
             );
@@ -2181,6 +2147,10 @@ mod tests {
         }
         trading.disconnect().await.unwrap();
         data.disconnect().await.unwrap();
+
+        for endpoint in endpoints {
+            assert!(registry.handle(client, endpoint).is_none(), "{endpoint}");
+        }
     }
 
     #[tokio::test]
@@ -2283,10 +2253,9 @@ mod tests {
 
         let err = client.connect().await.unwrap_err().to_string();
 
-        assert!(
-            err.contains("the ACMEFX account is NETTED, not HEDGED"),
-            "{err}"
-        );
+        for fact in ["ACMEFX", "NETTED", "HEDGED"] {
+            assert!(err.contains(fact), "{fact}: {err}");
+        }
         assert!(!client.is_connected());
         assert!(events.try_recv().is_err(), "an account state was published");
     }
@@ -2303,11 +2272,17 @@ mod tests {
 
         let err = format!("{:#}", client.connect().await.unwrap_err());
 
-        assert!(
-            err.contains("cTrader refused to renew the access token (CH_ACCESS_TOKEN_INVALID)"),
-            "{err}"
-        );
-        assert!(err.contains("Playground"), "{err}");
+        for fact in [
+            "CH_ACCESS_TOKEN_INVALID",
+            "Playground",
+            "openapi.ctrader.com",
+            "ACME_ACCESS_TOKEN",
+            "ACME_REFRESH_TOKEN",
+            "acme.env",
+            "the ACME guide",
+        ] {
+            assert!(err.contains(fact), "{fact}: {err}");
+        }
         assert!(!client.is_connected());
     }
 
@@ -2645,9 +2620,15 @@ mod tests {
 
         let (mass_status, _) = mass_status(venue, None).await;
 
-        let orders = mass_status.order_reports();
-        assert!(!orders.contains_key(&VenueOrderId::from("105-SL")));
-        assert!(!orders.contains_key(&VenueOrderId::from("105-TP")));
+        // `gold_venue`'s: the protections of positions 101 and 102, and the
+        // pending order 201.
+        let mut orders: Vec<String> = mass_status
+            .order_reports()
+            .keys()
+            .map(ToString::to_string)
+            .collect();
+        orders.sort_unstable();
+        assert_eq!(orders, ["101-SL", "101-TP", "102-SL", "201"]);
     }
 
     /// The client's clock stopped at `T0` + 1 h.
@@ -3002,8 +2983,13 @@ mod tests {
     /// 76919226, cancelled when it was set again as 76919228, which the
     /// stop loss then hit: the leg it filled is reported filled, whatever
     /// order the two protections are read in.
+    #[rstest]
+    #[case::read_before_the_hit_one(true)]
+    #[case::read_after_the_hit_one(false)]
     #[tokio::test]
-    async fn a_leg_hit_stays_filled_when_an_earlier_protection_of_its_position_was_cancelled() {
+    async fn a_leg_hit_stays_filled_when_an_earlier_protection_of_its_position_was_cancelled(
+        #[case] cancelled_first: bool,
+    ) {
         let mut venue = stopped_out();
         let mut replaced = venue.orders[1].clone();
         replaced.order_id = 76_919_226;
@@ -3011,7 +2997,11 @@ mod tests {
         replaced.execution_price = None;
         replaced.executed_volume = None;
         replaced.utc_last_update_timestamp = Some(1_794_443_800_000);
-        venue.orders.push(replaced);
+        if cancelled_first {
+            venue.orders.insert(1, replaced);
+        } else {
+            venue.orders.push(replaced);
+        }
         let (mut client, cache, mut events, _, _tokens) = started(venue);
         connect(&mut client, &mut events, &cache).await;
         hold_open(&client, &cache, "59793251", ns(1_794_443_791_943));
@@ -3380,7 +3370,12 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(positions.len(), 2);
+        let mut held: Vec<String> = positions
+            .iter()
+            .filter_map(|r| r.venue_position_id.map(|p| p.to_string()))
+            .collect();
+        held.sort();
+        assert_eq!(held, ["101", "102"]);
         let mut ids: Vec<String> = orders
             .iter()
             .map(|r| r.venue_order_id.to_string())

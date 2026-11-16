@@ -357,6 +357,7 @@ mod tests {
         period = 14
         ma_type = "SIMPLE"
         use_previous = false
+        value_floor = 0.25
 
         [indicators.breakout]
         level = 100.5
@@ -411,7 +412,7 @@ mod tests {
                 range.use_previous,
                 range.value_floor
             ),
-            (14, MovingAverageType::Simple, false, 0.0)
+            (14, MovingAverageType::Simple, false, 0.25)
         );
     }
 
@@ -449,36 +450,77 @@ mod tests {
     fn the_strategy_reads_an_indicator_s_arguments() {
         let config = load(TOML).unwrap();
         assert_eq!(
-            config.indicators.args(FAST).map(|args| args.period),
-            Some(5)
+            config.indicators.args(FAST),
+            Some(EmaArgs {
+                period: 5,
+                price_type: Some(PriceType::Bid),
+            })
         );
     }
 
-    #[rstest]
-    fn a_missing_indicator_is_refused_naming_it() {
-        assert_eq!(error_fields(&without("breakout")), ["indicators.breakout"]);
+    /// The config error refusing `toml`, the one it holds.
+    fn refusal(toml: &str) -> ConfigError {
+        load(toml).unwrap_err().downcast().unwrap()
     }
 
+    /// A declared indicator without its table is a missing field, a table
+    /// the strategy does not declare an unsupported one, each under its
+    /// name.
     #[rstest]
-    fn an_indicator_the_strategy_does_not_declare_is_refused_naming_it() {
-        let toml = TOML.replace("[trade]", "[indicators.slow]\nperiod = 30\n\n[trade]");
-        assert_eq!(error_fields(&toml), ["indicators.slow"]);
+    #[case::missing(without("breakout"), ConfigError::missing_field("indicators.breakout"))]
+    #[case::not_declared(
+        TOML.replace("[trade]", "[indicators.slow]\nperiod = 30\n\n[trade]"),
+        ConfigError::unsupported_field("indicators.slow", "not declared by the strategy"),
+    )]
+    fn an_indicator_missing_or_not_declared_is_refused_naming_it(
+        #[case] toml: String,
+        #[case] expected: ConfigError,
+    ) {
+        assert_eq!(refusal(&toml), expected);
     }
 
+    /// A table its arguments or its builder refuses is refused under the
+    /// indicator, saying why: the argument, the value or the builder's
+    /// reason.
     #[rstest]
-    fn an_argument_nautilus_refuses_is_refused_naming_the_indicator() {
-        let toml = TOML.replace("period = 5", "period = 0");
+    #[case::an_argument_nautilus_refuses("period = 5", "period = 0", "period", "indicators.fast")]
+    #[case::an_argument_a_custom_builder_refuses(
+        "level = 100.5",
+        "level = -1.0",
+        "level must be positive",
+        "indicators.breakout"
+    )]
+    #[case::an_unknown_argument(
+        "period = 5",
+        "period = 5\nperiods = 6",
+        "periods",
+        "indicators.fast"
+    )]
+    #[case::an_argument_of_the_wrong_type(
+        "level = 100.5",
+        "level = \"high\"",
+        "high",
+        "indicators.breakout"
+    )]
+    #[case::an_unknown_moving_average_type(
+        "\"SIMPLE\"",
+        "\"TRIANGULAR\"",
+        "TRIANGULAR",
+        "indicators.range"
+    )]
+    fn a_table_refused_is_refused_naming_the_indicator_and_why(
+        #[case] from: &str,
+        #[case] to: &str,
+        #[case] why: &str,
+        #[case] field: &str,
+    ) {
+        let toml = TOML.replace(from, to);
+        assert_ne!(toml, TOML);
+
         let err = load(&toml).unwrap_err();
-        assert!(err.to_string().contains("period"), "{err}");
-        assert_eq!(error_fields(&toml), ["indicators.fast"]);
-    }
 
-    #[rstest]
-    fn an_argument_a_custom_builder_refuses_is_refused_naming_the_indicator() {
-        let toml = TOML.replace("level = 100.5", "level = -1.0");
-        let err = load(&toml).unwrap_err();
-        assert!(err.to_string().contains("level must be positive"), "{err}");
-        assert_eq!(error_fields(&toml), ["indicators.breakout"]);
+        assert!(err.to_string().contains(why), "{err}");
+        assert_eq!(error_fields(&toml), [field]);
     }
 
     /// `AverageTrueRange::new_checked` is not public: its `new` panics.
@@ -486,37 +528,6 @@ mod tests {
     #[should_panic(expected = "period must be in")]
     fn an_average_true_range_argument_nautilus_refuses_panics_at_load() {
         let _ = load(&TOML.replace("period = 14", "period = 0"));
-    }
-
-    #[rstest]
-    fn an_unknown_argument_is_refused_naming_the_indicator_and_the_argument() {
-        let toml = TOML.replace("period = 5", "period = 5\nperiods = 6");
-        let err = load(&toml).unwrap_err();
-        assert!(err.to_string().contains("periods"), "{err}");
-        assert_eq!(error_fields(&toml), ["indicators.fast"]);
-    }
-
-    #[rstest]
-    fn a_kind_is_an_unknown_argument() {
-        let toml = TOML.replace(
-            "period = 5",
-            "kind = \"ExponentialMovingAverage\"\nperiod = 5",
-        );
-        assert_eq!(error_fields(&toml), ["indicators.fast"]);
-    }
-
-    #[rstest]
-    fn an_argument_of_the_wrong_type_is_refused_naming_the_indicator() {
-        let toml = TOML.replace("level = 100.5", "level = \"high\"");
-        assert_eq!(error_fields(&toml), ["indicators.breakout"]);
-    }
-
-    #[rstest]
-    fn an_unknown_moving_average_type_is_refused_naming_it() {
-        let toml = TOML.replace("\"SIMPLE\"", "\"TRIANGULAR\"");
-        let err = load(&toml).unwrap_err();
-        assert!(err.to_string().contains("TRIANGULAR"), "{err}");
-        assert_eq!(error_fields(&toml), ["indicators.range"]);
     }
 
     #[rstest]

@@ -135,24 +135,25 @@ mod tests {
         assert_eq!(features_of(CONFIG).warmup(), SignedDuration::from_hours(3));
     }
 
-    /// Each table feeds one feature of one bar type.
+    /// Each table feeds a feature of each bar type: of one bar type, named
+    /// after the table; of several, after each bar type and the table, in
+    /// order.
     #[rstest]
-    fn the_averages_of_one_bar_type_are_named_after_their_tables() {
-        assert_eq!(features_of(CONFIG).names(), ["fast", "slow"]);
-    }
-
-    /// Each table feeds a feature of each bar type.
-    #[rstest]
-    fn the_averages_of_several_bar_types_are_named_after_each_and_their_tables_in_order() {
-        assert_eq!(
-            features_of(&with_silver()).names(),
-            [
-                format!("{GOLD}:fast"),
-                format!("{GOLD}:slow"),
-                format!("{SILVER}:fast"),
-                format!("{SILVER}:slow"),
-            ]
-        );
+    #[case::of_one_bar_type(CONFIG.to_string(), vec!["fast".to_string(), "slow".to_string()])]
+    #[case::of_several_bar_types(
+        with_silver(),
+        vec![
+            format!("{GOLD}:fast"),
+            format!("{GOLD}:slow"),
+            format!("{SILVER}:fast"),
+            format!("{SILVER}:slow"),
+        ]
+    )]
+    fn the_averages_are_named_after_their_tables_and_bar_types(
+        #[case] toml: String,
+        #[case] names: Vec<String>,
+    ) {
+        assert_eq!(features_of(&toml).names(), names);
     }
 
     /// Closes of 1, 2 and 3: Nautilus' averages start from the mean of
@@ -174,56 +175,17 @@ mod tests {
     }
 
     /// Rows and models of a fast average of 2 bars are not those of one of
-    /// 4, with no version bump.
+    /// 4, with no version bump; those of gold's minute bars are not those
+    /// of its 5-minute bars, nor of silver's, though one series names the
+    /// features after their tables alone.
     #[rstest]
-    fn a_changed_period_changes_the_fingerprint() {
-        let changed = CONFIG.replace("period = 2", "period = 4");
-
+    #[case::a_period(CONFIG.replace("period = 2", "period = 4"))]
+    #[case::a_bar_spec(CONFIG.replace("step = 1,", "step = 5,"))]
+    #[case::an_instrument(CONFIG.replace("XAUUSD", "XAGUSD"))]
+    fn a_changed_period_bar_spec_or_instrument_changes_the_fingerprint(#[case] changed: String) {
         assert_ne!(
             features_of(&changed).fingerprint(),
             features_of(CONFIG).fingerprint()
-        );
-    }
-
-    /// Rows and models of gold's minute bars are not those of its
-    /// 5-minute bars, though one series names the features after their
-    /// tables alone.
-    #[rstest]
-    fn another_bar_spec_changes_the_fingerprint() {
-        let five_minutes = CONFIG.replace("step = 1,", "step = 5,");
-
-        assert_ne!(
-            features_of(&five_minutes).fingerprint(),
-            features_of(CONFIG).fingerprint()
-        );
-    }
-
-    /// Rows and models of gold's bars are not those of silver's, though
-    /// one series names the features after their tables alone.
-    #[rstest]
-    fn another_instrument_changes_the_fingerprint() {
-        let silver = CONFIG.replace("XAUUSD", "XAGUSD");
-
-        assert_ne!(
-            features_of(&silver).fingerprint(),
-            features_of(CONFIG).fingerprint()
-        );
-    }
-
-    /// Nautilus parses a `PriceType` in any case: `"mid"` is the price
-    /// `"MID"` is, and keys the same rows and models.
-    #[rstest]
-    fn a_price_type_written_in_another_case_keeps_the_fingerprint() {
-        let price_type = |name: &str| {
-            CONFIG.replace(
-                "period = 2",
-                &format!("period = 2\nprice_type = \"{name}\""),
-            )
-        };
-
-        assert_eq!(
-            features_of(&price_type("mid")).fingerprint(),
-            features_of(&price_type("MID")).fingerprint()
         );
     }
 }

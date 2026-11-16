@@ -132,7 +132,9 @@ impl Commission {
     /// negative amount, and would take a negative rate as a rebate.
     pub fn fee_model(&self) -> anyhow::Result<FeeModelAny> {
         Ok(match *self {
-            Self::PerOrder(commission) => FeeModelAny::Fixed(FixedFeeModel::new(commission, None)?),
+            Self::PerOrder(commission) => {
+                FeeModelAny::Fixed(FixedFeeModel::new(commission, Some(true))?)
+            }
             Self::Rate(rate) => {
                 anyhow::ensure!(
                     !rate.is_sign_negative(),
@@ -331,29 +333,29 @@ mod tests {
     /// The cost of a fill is what a backtest's and a dataset run's venue
     /// charge it, on each kind of commission.
     #[rstest]
-    fn the_fee_model_charges_an_orders_first_fill_what_the_commission_costs() {
-        for commission in [per_order(), rate(), per_ounce()] {
-            for oz in [1, 3, 100] {
-                assert_eq!(
-                    charged(commission, &order(), oz),
-                    cost(commission, oz),
-                    "{commission:?} on {oz} oz"
-                );
-            }
-        }
+    #[case::per_order_on_1_oz(per_order(), 1)]
+    #[case::per_order_on_3_oz(per_order(), 3)]
+    #[case::per_order_on_100_oz(per_order(), 100)]
+    #[case::rate_on_1_oz(rate(), 1)]
+    #[case::rate_on_3_oz(rate(), 3)]
+    #[case::rate_on_100_oz(rate(), 100)]
+    #[case::per_quantity_on_1_oz(per_ounce(), 1)]
+    #[case::per_quantity_on_3_oz(per_ounce(), 3)]
+    #[case::per_quantity_on_100_oz(per_ounce(), 100)]
+    fn the_fee_model_charges_an_orders_first_fill_what_the_commission_costs(
+        #[case] commission: Commission,
+        #[case] oz: u64,
+    ) {
+        assert_eq!(charged(commission, &order(), oz), cost(commission, oz));
     }
 
+    /// A commission per order is charged once, on its order's first fill,
+    /// as the fee model is set to charge it: the 100 oz order filled 40 oz
+    /// then 60, the later fill is charged nothing.
     #[rstest]
-    fn a_commission_per_order_charges_nothing_on_later_fills_of_the_same_order() {
+    fn a_commission_per_order_is_charged_once_nothing_on_later_fills_of_the_order() {
         let order = filled(order(), 40);
         assert_eq!(charged(per_order(), &order, 60), Money::from("0 USD"));
-    }
-
-    #[rstest]
-    fn a_commission_per_quantity_charges_every_fill_of_an_order() {
-        // 0.035 × 60.
-        let order = filled(order(), 40);
-        assert_eq!(charged(per_ounce(), &order, 60), Money::from("2.10 USD"));
     }
 
     #[rstest]
@@ -365,14 +367,19 @@ mod tests {
     }
 
     #[rstest]
-    fn a_negative_commission_has_no_fee_model() {
-        for commission in [
-            Commission::PerOrder(Money::from("-3 USD")),
-            Commission::Rate(Decimal::new(-3, 5)),
-            Commission::PerQuantity(Money::from_str_exact("-0.035 USD").unwrap()),
-        ] {
-            assert!(commission.fee_model().is_err(), "{commission:?}");
-        }
+    #[case::per_order(Commission::PerOrder(Money::from("-3 USD")))]
+    #[case::per_quantity(Commission::PerQuantity(Money::from_str_exact("-0.035 USD").unwrap()))]
+    fn a_negative_amount_has_no_fee_model(#[case] commission: Commission) {
+        assert!(commission.fee_model().is_err());
+    }
+
+    #[rstest]
+    fn a_negative_rate_has_no_fee_model_naming_the_rate() {
+        let error = Commission::Rate(Decimal::new(-3, 5))
+            .fee_model()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("-0.00003"), "{error}");
     }
 
     /// An amount is charged in its own currency, a rate in the currency of

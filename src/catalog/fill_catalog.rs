@@ -254,6 +254,7 @@ mod tests {
         types::{Price, Quantity},
     };
     use nautilus_persistence::catalog::types::{CatalogDataType, HasCatalogDataType};
+    use rstest::rstest;
 
     use super::*;
     use crate::{
@@ -530,7 +531,10 @@ mod tests {
         r.unwrap();
         let ids = vec!["ESZ21.GLBX".to_string()];
         let stored = catalog.instruments(Some(&ids), None, None).unwrap();
-        assert_eq!(stored.len(), 1);
+        let [kept] = &stored[..] else {
+            panic!("{stored:?}")
+        };
+        assert_eq!(Instrument::ts_init(kept), UnixNanos::from(1));
     }
 
     #[tokio::test]
@@ -706,7 +710,11 @@ mod tests {
             Ok(vec![quote_at(id, 10)])
         })
         .await;
-        r.unwrap_err();
+        let err = format!("{:#}", r.unwrap_err());
+        assert!(
+            err.contains(&format!("quotes of {aapl_id}")) && err.contains("source down"),
+            "{err}"
+        );
         assert_eq!(stored_quotes(&mut catalog, es_id()), vec![10]);
         let (r, asked) = fill(&mut catalog, both(), 0, 100, |id| {
             Ok(vec![quote_at(id, 20)])
@@ -764,7 +772,12 @@ mod tests {
         .await;
         let err = r.unwrap_err().to_string();
         assert!(err.contains("quotes of ESZ21.GLBX"), "{err}");
-        assert!(err.contains("backwards"), "{err}");
+        // Stored over the first fill's window, 100 to 200 ns, and asked
+        // from 50 ns.
+        assert!(
+            err.contains("[100, 200]") && err.contains("1970-01-01T00:00:00.00000005Z"),
+            "{err}"
+        );
         assert_eq!(asked, vec![]);
         assert_eq!(stored_quotes(&mut catalog, es_id()), vec![150]);
     }
@@ -961,33 +974,32 @@ mod tests {
         );
     }
 
+    /// A quote, or bars of another bar type, in a response for bars: the
+    /// error names both series, and nothing is stored.
+    #[rstest]
+    #[case::a_quote(
+        vec![Data::Bar(bar_at(10)), Data::Quote(quote_at(es_id(), 20))],
+        "quotes of ESZ21.GLBX"
+    )]
+    #[case::bars_of_another_bar_type(
+        vec![Data::Bar(Bar {
+            bar_type: BarType::from("ESZ21.GLBX-1-HOUR-LAST-EXTERNAL"),
+            ..bar_at(10)
+        })],
+        "bars of ESZ21.GLBX-1-HOUR-LAST-EXTERNAL"
+    )]
     #[tokio::test]
-    async fn a_quote_in_a_response_for_bars_is_an_error_naming_both() {
+    async fn a_foreign_item_in_a_response_for_bars_is_an_error_naming_both(
+        #[case] response: Vec<Data>,
+        #[case] foreign: &str,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let mut catalog = new_catalog(&dir);
-        let (r, _) = fill_bars(&mut catalog, 0, 100, |_, _| {
-            vec![Data::Bar(bar_at(10)), Data::Quote(quote_at(es_id(), 20))]
-        })
-        .await;
+        let (r, _) = fill_bars(&mut catalog, 0, 100, |_, _| response.clone()).await;
         let err = r.unwrap_err().to_string();
         assert!(err.contains(&format!("bars of {BARS}")), "{err}");
-        assert!(err.contains("quotes of ESZ21.GLBX"), "{err}");
+        assert!(err.contains(foreign), "{err}");
         assert!(stored_bars(&mut catalog).is_empty());
-    }
-
-    #[tokio::test]
-    async fn bars_of_another_bar_type_are_an_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut catalog = new_catalog(&dir);
-        let other = "ESZ21.GLBX-1-HOUR-LAST-EXTERNAL";
-        let (r, _) = fill_bars(&mut catalog, 0, 100, |_, _| {
-            let mut bar = bar_at(10);
-            bar.bar_type = BarType::from(other);
-            vec![Data::Bar(bar)]
-        })
-        .await;
-        let err = r.unwrap_err().to_string();
-        assert!(err.contains(&format!("bars of {other}")), "{err}");
     }
 
     #[tokio::test]

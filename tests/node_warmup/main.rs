@@ -922,9 +922,15 @@ fn a_window_failing_ends_the_warmup_with_what_was_built_handed_over() {
 /// The usual start, on a catalog already filled: the first warmup's answers
 /// are written back window by window, and the second reads them from the
 /// catalog, asking the venue only for the time since, and hands over the
-/// same bars once each.
+/// same bars once each; so it does with the catalog given by a path relative
+/// to the working directory, as `live --catalog` takes one and `Live` hands
+/// it to the node.
 #[rstest]
-fn a_warmup_the_catalog_holds_asks_the_venue_only_for_the_rest() {
+#[case::absolute(Path::to_path_buf)]
+#[case::relative(relative)]
+fn a_warmup_the_catalog_holds_asks_the_venue_only_for_the_rest(
+    #[case] catalog_path: fn(&Path) -> PathBuf,
+) {
     let dir = tempfile::tempdir().unwrap();
     let first = FakeVenue::new(Answer::Envelope);
     warm(
@@ -937,7 +943,7 @@ fn a_warmup_the_catalog_holds_asks_the_venue_only_for_the_rest() {
     let second = FakeVenue::new(Answer::Envelope);
 
     let warmed = warm(
-        dir.path(),
+        &catalog_path(dir.path()),
         &second,
         MID_MINUTES,
         SignedDuration::from_hours(30),
@@ -960,38 +966,6 @@ fn relative(dir: &Path) -> PathBuf {
     let mut relative: PathBuf = std::iter::repeat_n("..", cwd.components().count() - 1).collect();
     relative.push(dir.strip_prefix("/").unwrap());
     relative
-}
-
-/// So it does with the catalog given by a path relative to the working
-/// directory, as `live --catalog` takes one and `Live` hands it to the node.
-#[rstest]
-fn a_warmup_reads_what_a_catalog_given_relative_to_the_working_directory_holds() {
-    let dir = tempfile::tempdir().unwrap();
-    let first = FakeVenue::new(Answer::Envelope);
-    warm(
-        dir.path(),
-        &first,
-        MID_MINUTES,
-        SignedDuration::from_hours(30),
-    );
-    let first_end = first.borrow().asked.last().unwrap().1;
-    let second = FakeVenue::new(Answer::Envelope);
-
-    let warmed = warm(
-        &relative(dir.path()),
-        &second,
-        MID_MINUTES,
-        SignedDuration::from_hours(30),
-    );
-
-    assert_eq!(warmed.failure, None);
-    let asked = second.borrow().asked.clone();
-    assert!(
-        asked.iter().all(|&(from, _)| from > first_end),
-        "{asked:?} after {first_end}"
-    );
-    assert!(warmed.bars.len() >= 29 * 60, "{} bars", warmed.bars.len());
-    assert!(one_every(&warmed.bars, MINUTE_NS));
 }
 
 /// The long side's target when a warmup of 72 hours of `requirements`' ends,
@@ -1055,25 +1029,17 @@ fn assert_three_atrs_wide(exits: &SideTarget) {
 }
 
 /// A strategy reading quotes: the ATR's bars are built from them, by the one
-/// request of the quotes, across its windows.
+/// request of the quotes, across its windows. A strategy reading composite
+/// bars: the ATR is on the same hour bars, which a node caches under their
+/// standard type.
 #[rstest]
-fn a_warmup_of_quotes_warms_the_atr_of_a_bracket() {
-    let exits = bracket_of(
-        vec![],
-        vec![TickSeries {
-            data: NautilusDataType::QuoteTick,
-            instrument_id: InstrumentId::from(GCZ26),
-        }],
-    );
-
-    assert_three_atrs_wide(&exits);
-}
-
-/// A strategy reading composite bars: the ATR is on the same hour bars, which
-/// a node caches under their standard type.
-#[rstest]
-fn a_warmup_of_composite_bars_warms_the_atr_of_a_bracket() {
-    let exits = bracket_of(vec![BarType::from(COMPOSITE)], vec![]);
+#[case::quotes(vec![], vec![of_gcz26(NautilusDataType::QuoteTick)])]
+#[case::composite_bars(vec![BarType::from(COMPOSITE)], vec![])]
+fn a_warmup_warms_the_atr_of_a_bracket(
+    #[case] bar_types: Vec<BarType>,
+    #[case] ticks: Vec<TickSeries>,
+) {
+    let exits = bracket_of(bar_types, ticks);
 
     assert_three_atrs_wide(&exits);
 }
@@ -1124,11 +1090,16 @@ fn assert_live_before_the_last_window(venue: &FakeVenue) {
 }
 
 /// The venue answers each window after a while, as over a network, and sends
-/// a quote at once on the subscription, while the warmup is not answered yet:
-/// the features read every quote of the warmup, two windows of 23 hours over
-/// 30, then the live one, in time order.
+/// a tick at once on the subscription, while the warmup is not answered yet:
+/// the features read every quote, or every trade, of the warmup, two windows
+/// of 23 hours over 30, then the live one, in time order.
 #[rstest]
-fn features_read_every_warmup_quote_before_a_live_one() {
+#[case::quotes(NautilusDataType::QuoteTick, |fed: &Fed| fed.quotes.borrow().clone())]
+#[case::trades(NautilusDataType::TradeTick, |fed: &Fed| fed.trades.borrow().clone())]
+fn features_read_every_warmup_tick_before_a_live_one(
+    #[case] data: NautilusDataType,
+    #[case] ticks_read: fn(&Fed) -> Vec<u64>,
+) {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::Envelope);
     venue.borrow_mut().latency = Some(Duration::from_millis(20));
@@ -1136,45 +1107,17 @@ fn features_read_every_warmup_quote_before_a_live_one() {
     let features = read_live(
         dir.path(),
         &venue,
-        of_gcz26(NautilusDataType::QuoteTick),
+        of_gcz26(data),
         SignedDuration::from_hours(30),
     );
 
     let venue = venue.borrow();
     assert_eq!(venue.asked.len(), 2);
     assert_live_before_the_last_window(&venue);
-    let read = features.quotes.borrow();
-    assert!(read.len() >= 29 * 60, "{} quotes", read.len());
+    let read = ticks_read(&features);
+    assert!(read.len() >= 29 * 60, "{} ticks", read.len());
     let older = read.windows(2).position(|pair| pair[1] < pair[0]);
-    assert_eq!(older, None, "a quote older than the one read before it");
-    assert_eq!(
-        read.last().copied(),
-        venue.live.first().map(|live| live.made)
-    );
-}
-
-/// So with trades: the features read every trade of the warmup, then the
-/// live one the venue sends on the subscription.
-#[rstest]
-fn features_read_every_warmup_trade_before_a_live_one() {
-    let dir = tempfile::tempdir().unwrap();
-    let venue = FakeVenue::new(Answer::Envelope);
-    venue.borrow_mut().latency = Some(Duration::from_millis(20));
-
-    let features = read_live(
-        dir.path(),
-        &venue,
-        of_gcz26(NautilusDataType::TradeTick),
-        SignedDuration::from_hours(30),
-    );
-
-    let venue = venue.borrow();
-    assert_eq!(venue.asked.len(), 2);
-    assert_live_before_the_last_window(&venue);
-    let read = features.trades.borrow();
-    assert!(read.len() >= 29 * 60, "{} trades", read.len());
-    let older = read.windows(2).position(|pair| pair[1] < pair[0]);
-    assert_eq!(older, None, "a trade older than the one read before it");
+    assert_eq!(older, None, "a tick older than the one read before it");
     assert_eq!(
         read.last().copied(),
         venue.live.first().map(|live| live.made)
@@ -1779,4 +1722,293 @@ fn glbx_data_comes_from_lse_s_cme_stream_routed_glbx_beside_another_client() {
         other.asked,
         other.live
     );
+}
+
+#[path = "../common/mod.rs"]
+mod common;
+
+/// A model strategy's first decision on a live node: its model handle's own
+/// warmup, warming the features and the target's ATR, through Nautilus' data
+/// engine from the fake venue's quotes of GCZ26, and its decision as the
+/// warmup ends.
+mod model_handle {
+    use helix_trader::{
+        model::{
+            blueprint::ModelBlueprint,
+            config::{Margins, ModelConfig},
+            features::{FeatureSet, side_names},
+            handle::{Decision, Mode, ModelHandle},
+            learner::{LearnerConfig, TrainingSet},
+            targets::Side,
+        },
+        strategy::{Declared, EmaArgs, IndicatorsConfig, risk::R},
+    };
+    use nautilus_common::messages::data::DataResponseEnvelope;
+    use nautilus_model::identifiers::StrategyId;
+    use nautilus_trading::{
+        nautilus_strategy,
+        strategy::{StrategyConfig, StrategyCore},
+    };
+
+    use super::*;
+    use crate::common::dataset::baseline_stored;
+
+    const STRATEGY: &str = "WARMUP-MODEL-001";
+
+    /// The last mid of GCZ26, Nautilus' exponential average of one,
+    /// `[indicators.mid_0]`.
+    const MID: Declared<EmaArgs> = Declared::new("mid_0");
+
+    /// Decides once, as its handle's warmup ends, and stops the node.
+    #[derive(Debug)]
+    struct Deciding {
+        core: StrategyCore,
+        model: Rc<ModelHandle>,
+        /// Each decision made, a trade or none: the one when the warmup ended.
+        decisions: Rc<RefCell<Vec<Option<Decision>>>>,
+        failure: Rc<RefCell<Option<String>>>,
+    }
+
+    nautilus_strategy!(Deciding);
+
+    impl DataActor for Deciding {
+        fn on_start(&mut self) -> anyhow::Result<()> {
+            self.cache_rc().borrow_mut().add_instrument(gcz26())?;
+            Rc::clone(&self.model).start(self)
+        }
+
+        /// The quotes, of the warmup and live, go to the warmup, as a model
+        /// strategy hands them (`model_data_hooks!`).
+        fn on_historical_quotes(&mut self, quotes: &[QuoteTick]) -> anyhow::Result<()> {
+            self.model.warmup().on_historical_quotes(quotes)
+        }
+
+        fn on_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
+            self.model.warmup().on_quote(quote)
+        }
+
+        fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
+            let warmup = self.model.warmup();
+            if let Err(e) = Rc::clone(&warmup).on_data_response(self, response) {
+                *self.failure.borrow_mut() = Some(format!("{e:#}"));
+            }
+
+            if !warmup.is_warming() {
+                match Rc::clone(&self.model).decide(self) {
+                    Ok(decision) => self.decisions.borrow_mut().push(decision),
+                    Err(e) => *self.failure.borrow_mut() = Some(format!("{e:#}")),
+                }
+                self.shutdown_system(Some("the warmup ended".to_string()));
+            }
+            Ok(())
+        }
+    }
+
+    /// Hourly decisions on GCZ26 of a bracket whose take profit is two ATRs
+    /// away and its stop one, the ATR of model_ema's config, on hourly bars,
+    /// the long traded from an expected R of nought, on the baseline learner,
+    /// never retrained.
+    fn config() -> ModelConfig {
+        let spec: Target = toml::from_str(
+            r#"
+            limit = "45m"
+            [bracket]
+            take_profit = { atr = 2.0 }
+            stop = { atr = 1.0 }
+            atr = { period = 14, ma_type = "WILDER" }
+            "#,
+        )
+        .unwrap();
+        ModelConfig::builder()
+            .decision(DecisionRule::Every(SignedDuration::from_hours(1)))
+            .target(
+                TargetConfig::builder()
+                    .instrument_id(InstrumentId::from(GCZ26))
+                    .risk("0.5%".parse().unwrap())
+                    .spec(spec)
+                    .build(),
+            )
+            .dataset(DatasetVenue {
+                // No order is sent: nothing is charged.
+                commission: Commission::PerOrder(Money::from("0 USD")),
+                balance: Money::from("100000 USD"),
+                latency: None,
+            })
+            .window(SignedDuration::from_hours(48))
+            .holdout(SignedDuration::from_hours(12))
+            .margins(Margins {
+                long: Some(R::new(0.0)),
+                short: None,
+            })
+            .min_expectancy(R::new(0.0))
+            .min_trades(1)
+            .learner(LearnerConfig::Baseline {})
+            .build()
+    }
+
+    /// The strategy's one feature, the last mid of GCZ26.
+    fn features() -> Rc<FeatureSet> {
+        let tables: IndicatorsConfig =
+            toml::from_str(r#"mid_0 = { period = 1, price_type = "MID" }"#).unwrap();
+        FeatureSet::builder()
+            .quotes(InstrumentId::from(GCZ26), MID, &tables)
+            .build()
+            .unwrap()
+    }
+
+    /// What the strategy reads: the quotes of GCZ26, with a warmup of 72
+    /// hours.
+    fn requirements() -> DataRequirements {
+        DataRequirements {
+            bar_types: vec![],
+            ticks: vec![TickSeries {
+                data: NautilusDataType::QuoteTick,
+                instrument_id: InstrumentId::from(GCZ26),
+            }],
+            custom: vec![],
+            warmup: WARMUP,
+        }
+    }
+
+    /// The model of the strategy deciding on `features` as `config` says.
+    fn blueprint() -> ModelBlueprint {
+        ModelBlueprint::new(
+            StrategyId::from(STRATEGY),
+            features(),
+            config(),
+            requirements(),
+        )
+        .unwrap()
+    }
+
+    /// Publishes under `models` the long model of `blueprint`, valid from
+    /// the epoch, a baseline expecting 0.4R of every row.
+    fn publish_long(blueprint: &ModelBlueprint, models: &Path) {
+        let config = config();
+        let names = side_names(features().names(), &config.target.payoff_names());
+        let set = TrainingSet::new(names.len(), vec![0.5; names.len()], vec![0.4]).unwrap();
+        let long = baseline_stored(
+            StrategyId::from(STRATEGY),
+            blueprint.fingerprint().unwrap().to_string(),
+            names,
+            &config,
+            Some(Side::Long),
+            Timestamp::UNIX_EPOCH,
+            &set,
+        );
+        blueprint
+            .model_set(models)
+            .unwrap()
+            .side(Side::Long)
+            .unwrap()
+            .store()
+            .publish(&long)
+            .unwrap();
+    }
+
+    /// Runs the model strategy of `blueprint`, trading live on the models
+    /// under `dir`, on a node with the catalog in `dir`, its history asked of
+    /// `venue`: why it failed, if it did, and the decisions it made, the one
+    /// when its warmup ended.
+    fn first_decision(
+        dir: &Path,
+        venue: &Rc<RefCell<FakeVenue>>,
+        blueprint: &ModelBlueprint,
+    ) -> (Option<String>, Vec<Option<Decision>>) {
+        let model = ModelHandle::new(
+            blueprint,
+            &Mode::Live {
+                models: dir.join("models"),
+            },
+        )
+        .unwrap();
+        let config = LiveNodeConfig {
+            environment: Environment::Live,
+            trader_id: TraderId::from("WARMUP-001"),
+            load_state: false,
+            save_state: false,
+            catalogs: vec![DataCatalogConfig::new(
+                dir.to_str().unwrap().to_string(),
+                None,
+                None,
+            )],
+            cache: Some(model.warmup().cache_config().unwrap()),
+            data_engine: warmup::live_data_engine_config(&requirements().bar_types),
+            ..Default::default()
+        };
+        let failure = Rc::new(RefCell::new(None));
+        let decisions = Rc::new(RefCell::new(vec![]));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let mut node = LiveNodeBuilder::from_config(config)
+                .unwrap()
+                .with_name("WARMUP")
+                .with_delay_post_stop_secs(0)
+                .add_data_client_with_routing(
+                    None,
+                    Box::new(FakeFactory(Rc::clone(venue))),
+                    Box::new(FakeConfig),
+                    RoutingConfig {
+                        default: false,
+                        venues: Some(vec!["GLBX".to_string()]),
+                    },
+                )
+                .unwrap()
+                .build()
+                .unwrap();
+            node.add_strategy(Deciding {
+                core: StrategyCore::new(StrategyConfig {
+                    strategy_id: Some(StrategyId::from(STRATEGY)),
+                    order_id_tag: Some("001".to_string()),
+                    ..Default::default()
+                }),
+                model,
+                decisions: Rc::clone(&decisions),
+                failure: Rc::clone(&failure),
+            })
+            .unwrap();
+            tokio::time::timeout(Duration::from_secs(60), node.run())
+                .await
+                .expect("the warmup ends within a minute")
+                .unwrap();
+            node.dispose();
+        });
+        let failure = failure.borrow().clone();
+        let decisions = decisions.take();
+        (failure, decisions)
+    }
+
+    /// Worked by hand. The venue's mids rise by one a minute, so every hour's
+    /// true range is 60, and Wilder's ATR of 14 hourly bars, warmed over the
+    /// 72 hours of the handle's warmup, is 60 within a third of a dollar, the
+    /// weight the first bar's range, 59, still has (as
+    /// `assert_three_atrs_wide` reads its bracket of 3 ATRs within a dollar
+    /// of 180). The first decision, as the warmup ends, trades the long, of
+    /// 0.4R, its stop one ATR from the mid: one R on one contract of GCZ26,
+    /// whose multiplier is 1, is worth the ATR in USD. Without the warmup
+    /// the ATR would be cold and the decision no trade.
+    #[rstest]
+    fn a_live_warmup_sets_the_first_decisions_stop_from_the_targets_atr() {
+        let dir = tempfile::tempdir().unwrap();
+        let venue = FakeVenue::new(Answer::Envelope);
+        let blueprint = blueprint();
+        publish_long(&blueprint, &dir.path().join("models"));
+
+        let (failure, decisions) = first_decision(dir.path(), &venue, &blueprint);
+
+        assert_eq!(failure, None);
+        let [Some(decision)] = decisions[..] else {
+            panic!("not one trade, the target's ATR warm: {decisions:?}");
+        };
+        assert_eq!(decision.side, OrderSide::Buy);
+        let one_r = decision
+            .trade()
+            .risk(&gcz26(), Quantity::from(1))
+            .unwrap()
+            .as_f64();
+        assert!((59.66..=60.34).contains(&one_r), "{one_r}: {decision:?}");
+    }
 }

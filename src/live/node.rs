@@ -300,7 +300,7 @@ mod tests {
         let strategy = EmaCross::live(config).unwrap();
         let gold = InstrumentId::from("XAUUSD.ICMARKETS");
 
-        add(&mut node, strategy, None).unwrap();
+        let added = add(&mut node, strategy, None);
 
         let claimed = node
             .kernel()
@@ -308,6 +308,7 @@ mod tests {
             .borrow()
             .external_order_claim_instrument_ids(None);
         node.dispose();
+        added.unwrap();
         assert_eq!(claimed, AHashSet::from_iter([gold]));
     }
 
@@ -328,9 +329,11 @@ mod tests {
     }
 
     #[rstest]
-    fn closed_orders_positions_and_account_events_are_purged_hourly_after_a_week() {
+    fn open_orders_and_positions_are_checked_and_closed_ones_purged_hourly_after_a_week() {
         let exec = node_config().exec_engine;
         let week = Some(7 * 24 * 60);
+        assert_eq!(exec.open_check_interval_secs, Some(10.0));
+        assert_eq!(exec.position_check_interval_secs, Some(30.0));
         assert_eq!(exec.purge_closed_orders_interval_mins, Some(60));
         assert_eq!(exec.purge_closed_orders_buffer_mins, week);
         assert_eq!(exec.purge_closed_positions_interval_mins, Some(60));

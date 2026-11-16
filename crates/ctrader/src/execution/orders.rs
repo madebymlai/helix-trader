@@ -404,34 +404,62 @@ mod tests {
         request
     }
 
+    const ORDER: &str = "O-20261026-150000-001-001-1";
+
+    /// A tag reads back as itself; a `clientMsgId` of no op and client
+    /// order id, as a probe's, is no tag.
     #[rstest]
-    fn a_tag_is_the_op_and_the_client_order_id_and_reads_back() {
-        let id = ClientOrderId::from("O-20261026-150000-001-001-1");
-        for tag in [
-            Tag::New(id),
-            Tag::Amend(id),
-            Tag::Cancel(id),
-            Tag::Close(id),
-            Tag::Protect(id),
-            Tag::Unprotect(id),
-        ] {
-            assert_eq!(tag.to_string().parse::<Tag>(), Ok(tag));
+    #[case::new(
+        "N:O-20261026-150000-001-001-1",
+        Ok(Tag::New(ClientOrderId::from(ORDER)))
+    )]
+    #[case::amend(
+        "A:O-20261026-150000-001-001-1",
+        Ok(Tag::Amend(ClientOrderId::from(ORDER)))
+    )]
+    #[case::cancel(
+        "X:O-20261026-150000-001-001-1",
+        Ok(Tag::Cancel(ClientOrderId::from(ORDER)))
+    )]
+    #[case::close(
+        "C:O-20261026-150000-001-001-1",
+        Ok(Tag::Close(ClientOrderId::from(ORDER)))
+    )]
+    #[case::protect(
+        "P:O-20261026-150000-001-001-1",
+        Ok(Tag::Protect(ClientOrderId::from(ORDER)))
+    )]
+    #[case::unprotect(
+        "U:O-20261026-150000-001-001-1",
+        Ok(Tag::Unprotect(ClientOrderId::from(ORDER)))
+    )]
+    #[case::no_op("PROBE-5", Err(()))]
+    #[case::no_client_order_id("7", Err(()))]
+    fn a_tag_is_the_op_and_the_client_order_id_and_reads_back(
+        #[case] text: &str,
+        #[case] expected: Result<Tag, ()>,
+    ) {
+        assert_eq!(text.parse::<Tag>().map_err(|_| ()), expected);
+        if let Ok(tag) = expected {
+            assert_eq!(tag.to_string(), text);
         }
-        assert_eq!(Tag::Close(id).to_string(), "C:O-20261026-150000-001-001-1");
-        assert!("PROBE-5".parse::<Tag>().is_err());
-        assert!("7".parse::<Tag>().is_err());
     }
 
+    /// A protection's venue order id is its position's id and its leg; a
+    /// cTrader order's id is none.
     #[rstest]
-    fn a_protection_id_is_the_position_and_the_leg() {
-        let sl = protection_id(690_004_734, Leg::StopLoss);
-        assert_eq!(sl, VenueOrderId::from("690004734-SL"));
-        assert_eq!(parse_protection_id(sl), Some((690_004_734, Leg::StopLoss)));
-        assert_eq!(
-            parse_protection_id(VenueOrderId::from("690004734-TP")),
-            Some((690_004_734, Leg::TakeProfit))
-        );
-        assert_eq!(parse_protection_id(VenueOrderId::from("1031776265")), None);
+    #[case::stop_loss("690004734-SL", Some((690_004_734, Leg::StopLoss)))]
+    #[case::take_profit("690004734-TP", Some((690_004_734, Leg::TakeProfit)))]
+    #[case::an_order("1031776265", None)]
+    fn a_protection_id_is_the_position_and_the_leg(
+        #[case] venue_order_id: &str,
+        #[case] expected: Option<(i64, Leg)>,
+    ) {
+        let id = VenueOrderId::from(venue_order_id);
+        assert_eq!(parse_protection_id(id), expected);
+        if let Some((position_id, leg)) = expected {
+            assert_eq!(protection_id(position_id, leg), id);
+        }
     }
 
     #[rstest]
@@ -519,8 +547,10 @@ mod tests {
 
         let request = new_order(placement(&order, 41, None, Protection::default()).unwrap());
 
+        assert_eq!(request.symbol_id, 41);
         assert_eq!(request.order_type(), ProtoOaOrderType::Stop);
         assert_eq!(request.trade_side(), ProtoOaTradeSide::Sell);
+        assert_eq!(request.volume, 200, "2 ounces, in cents");
         assert_eq!(request.stop_price, Some(3990.5));
         assert_eq!(
             request.stop_trigger_method(),
@@ -625,37 +655,59 @@ mod tests {
         );
     }
 
-    #[rstest]
-    fn order_types_and_flags_ctrader_lacks_are_denied() {
-        let stop_limit = OrderTestBuilder::new(OrderType::StopLimit)
+    fn stop_limit() -> OrderAny {
+        OrderTestBuilder::new(OrderType::StopLimit)
             .instrument_id(gold())
             .quantity(Quantity::from(1))
             .price(Price::from("4000.00"))
             .trigger_price(Price::from("3999.00"))
-            .build();
-        let post_only = OrderTestBuilder::new(OrderType::Limit)
+            .build()
+    }
+
+    fn post_only() -> OrderAny {
+        OrderTestBuilder::new(OrderType::Limit)
             .instrument_id(gold())
             .quantity(Quantity::from(1))
             .price(Price::from("4000.00"))
             .post_only(true)
-            .build();
-        let day = OrderTestBuilder::new(OrderType::Limit)
-            .instrument_id(gold())
-            .quantity(Quantity::from(1))
-            .price(Price::from("4000.00"))
-            .time_in_force(TimeInForce::Day)
-            .build();
-        let reduce_only = OrderTestBuilder::new(OrderType::Market)
+            .build()
+    }
+
+    fn reduce_only() -> OrderAny {
+        OrderTestBuilder::new(OrderType::Market)
             .instrument_id(gold())
             .quantity(Quantity::from(1))
             .reduce_only(true)
-            .build();
+            .build()
+    }
 
-        for order in [stop_limit, post_only, day, reduce_only] {
-            assert!(
-                placement(&order, 41, None, Protection::default()).is_err(),
-                "{order:?}"
-            );
+    /// Why an order is denied: its type, or a flag the detail names.
+    #[derive(Debug)]
+    enum Denial {
+        OrderType(OrderType),
+        Flag(&'static str),
+    }
+
+    /// cTrader has no stop limit nor post-only orders, and a reduce-only
+    /// order on a hedging account needs the position it reduces.
+    #[rstest]
+    #[case::stop_limit(stop_limit(), Denial::OrderType(OrderType::StopLimit))]
+    #[case::post_only(post_only(), Denial::Flag("post-only"))]
+    #[case::reduce_only(reduce_only(), Denial::Flag("reduce-only"))]
+    fn order_types_and_flags_ctrader_lacks_are_denied(
+        #[case] order: OrderAny,
+        #[case] expected: Denial,
+    ) {
+        let denied = placement(&order, 41, None, Protection::default());
+
+        match (&denied, &expected) {
+            (Err(OrderDeniedReason::UnsupportedOrderType { order_type }), Denial::OrderType(t)) => {
+                assert_eq!(order_type, t);
+            }
+            (Err(OrderDeniedReason::ValidationFailed { detail }), Denial::Flag(flag)) => {
+                assert!(detail.contains(flag), "{detail}");
+            }
+            _ => panic!("{expected:?}: {denied:?}"),
         }
     }
 }

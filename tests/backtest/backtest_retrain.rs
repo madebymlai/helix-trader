@@ -34,7 +34,7 @@ use rstest::rstest;
 use tempfile::TempDir;
 
 use crate::common::{
-    dataset::{baseline_of, blueprint, config, missing, replay_on, trade_on, walk},
+    dataset::{baseline_of, blueprint, config, missing, r, replay_on, trade_on, walk},
     ic,
 };
 
@@ -139,12 +139,8 @@ fn each_period_trades_on_the_model_trained_at_its_start_and_a_second_backtest_tr
     // 21st.
     assert_eq!(built, [(start - SignedDuration::from_hours(46), end)]);
     assert_eq!(trained, retrains);
-    let store = long_store(models.path());
-    let means: Vec<f64> = retrains.iter().map(|&at| predicts(&store, at)).collect();
-    assert!(
-        means[0] != means[1] && means[1] != means[2] && means[0] != means[2],
-        "the models must differ to be told apart: {means:?}"
-    );
+    // The baselines published at each retrain (`prepare`): -0.2, -0.1, 0.
+    let means = [r(3), r(4), r(5)];
 
     let record = trade_on(
         &catalog,
@@ -174,21 +170,6 @@ fn each_period_trades_on_the_model_trained_at_its_start_and_a_second_backtest_tr
     assert_eq!(prepare(&catalog, models.path()), (vec![], vec![]));
 }
 
-/// The R the long model of `store` valid from `at` predicts on the missing
-/// feature, then the bracket's payoff features, which the baseline does not
-/// read: the same on every row, its calibration, of the strategy's one side,
-/// leaving it as it is.
-fn predicts(store: &ModelStore, at: Timestamp) -> f64 {
-    let stored = store.read(at).unwrap();
-    stored
-        .manifest
-        .learner
-        .load(&stored.model)
-        .unwrap()
-        .predict(&[f64::NAN, 0.0, 0.0, 0.0])
-        .unwrap()
-}
-
 /// The model of each period expects one R on every decision of the period,
 /// its constant, which its own baseline, the training mean its manifest has
 /// (`common::dataset::baseline_of`), is too: -0.2, -0.1 and nought from the
@@ -207,7 +188,6 @@ fn each_period_scores_its_model_beside_that_models_own_baseline() {
         .scores(start, end)
         .unwrap();
 
-    let store = long_store(models.path());
     let rows = blueprint(features(), config_daily())
         .dataset(catalog.path())
         .unwrap()
@@ -233,7 +213,7 @@ fn each_period_scores_its_model_beside_that_models_own_baseline() {
         let score = period.score;
         assert_eq!(score.rows, realized.len());
         assert_eq!((score.skill, score.slope), (Some(0.0), None), "{period:?}");
-        let error = score.mean_error.unwrap() - (mean - predicts(&store, from));
+        let error = score.mean_error.unwrap() - (mean - r(3 + usize::try_from(day).unwrap()));
         assert!(error.abs() < 1e-12, "{period:?}: {mean}");
     }
     let rows: usize = long.periods.iter().map(|period| period.score.rows).sum();

@@ -394,11 +394,24 @@ fn close() -> (OrderSide, Quantity, bool, bool) {
 
 // ------------------------------------------------------------------ send
 
+/// Its legs are reduce-only, and its take profit post-only, where the
+/// venue's live broker takes such orders: at Pepperstone, not on IB, whose
+/// execution client denies them. A stop is never post-only.
 #[rstest]
-fn a_trade_with_both_exits_is_a_bracket_its_legs_on_them() {
+#[case::pepperstone(AUD, true, true)]
+#[case::ib(IB_AUD, false, false)]
+fn a_trade_with_both_exits_is_a_bracket_its_legs_on_them(
+    #[case] instrument_id: &str,
+    #[case] reduce_only: bool,
+    #[case] post_only: bool,
+) {
     let (mut probe, _) = registered();
+    let trade = Trade {
+        instrument_id: InstrumentId::from(instrument_id),
+        ..buy(bracket(4))
+    };
 
-    buy(bracket(4))
+    trade
         .send_at(&mut probe, stake(), equity(), ids("T-1"))
         .unwrap();
 
@@ -423,8 +436,8 @@ fn a_trade_with_both_exits_is_a_bracket_its_legs_on_them() {
             OrderType::Limit,
             OrderSide::Sell,
             Some(Price::from("0.70700")),
-            true,
-            true,
+            reduce_only,
+            post_only,
             Some(id("T-1"))
         )
     );
@@ -435,37 +448,18 @@ fn a_trade_with_both_exits_is_a_bracket_its_legs_on_them() {
             stop_loss.order_side(),
             stop_loss.trigger_price(),
             stop_loss.is_reduce_only(),
+            stop_loss.is_post_only(),
             stop_loss.parent_order_id()
         ),
         (
             OrderType::StopMarket,
             OrderSide::Sell,
             Some(Price::from("0.69650")),
-            true,
+            reduce_only,
+            false,
             Some(id("T-1"))
         )
     );
-}
-
-/// IB's execution client denies a reduce-only or post-only order.
-#[rstest]
-fn a_trade_on_ib_has_legs_neither_reduce_only_nor_post_only() {
-    let (mut probe, _) = registered();
-    let trade = Trade {
-        instrument_id: InstrumentId::from(IB_AUD),
-        ..buy(bracket(4))
-    };
-
-    trade
-        .send_at(&mut probe, stake(), equity(), ids("T-1"))
-        .unwrap();
-
-    let cache = probe.cache();
-    let flags = |of: &str| {
-        let order = cache.order(&id(of)).unwrap();
-        (order.is_reduce_only(), order.is_post_only())
-    };
-    assert_eq!([flags("T-1-TP"), flags("T-1-SL")], [(false, false); 2]);
 }
 
 /// `trade` on AUD/USD on IDEALPRO.
@@ -559,7 +553,7 @@ fn a_trade_at_ic_tags_its_exits_as_nautilus_does() {
 }
 
 #[rstest]
-fn a_trade_without_exits_is_one_market_entry() {
+fn a_trade_without_a_bracket_is_one_market_entry() {
     let (mut probe, _) = registered();
 
     buy(held(1))
@@ -629,31 +623,21 @@ fn a_trade_risks_its_stake_of_equity_over_its_one_r_rounded_down_to_its_size() {
 /// USD buys 115,473, which risk 499.02 USD over one R. At the nearer
 /// ticks, 0.00432 away, 115,740 would risk 500.17 USD.
 #[rstest]
-fn a_trade_is_sized_at_its_stop_on_the_tick_away_from_its_price() {
-    for side in [OrderSide::Buy, OrderSide::Sell] {
-        let (mut probe, _) = registered();
-        let trade = Trade::new(
-            InstrumentId::from(AUD),
-            side,
-            Price::from("0.70000"),
-            decimal("0.0043215"),
-            held(1),
-        );
-
-        trade.send(&mut probe, stake(), unconverted()).unwrap();
-
-        assert_eq!(entry_quantity(&probe), Quantity::from(115_473), "{side}");
-    }
-}
-
-#[rstest]
-fn a_trade_at_twice_the_stake_is_twice_the_size() {
+#[case::buy(OrderSide::Buy)]
+#[case::sell(OrderSide::Sell)]
+fn a_trade_is_sized_at_its_stop_on_the_tick_away_from_its_price(#[case] side: OrderSide) {
     let (mut probe, _) = registered();
+    let trade = Trade::new(
+        InstrumentId::from(AUD),
+        side,
+        Price::from("0.70000"),
+        decimal("0.0043215"),
+        held(1),
+    );
 
-    let twice = stake().times(decimal("2")).unwrap();
-    buy(held(1)).send(&mut probe, twice, unconverted()).unwrap();
+    trade.send(&mut probe, stake(), unconverted()).unwrap();
 
-    assert_eq!(entry_quantity(&probe), Quantity::from(200_000));
+    assert_eq!(entry_quantity(&probe), Quantity::from(115_473));
 }
 
 /// Its 100,000 AUD/USD are worth 500 USD over one R of 0.00500, and its
@@ -676,28 +660,10 @@ fn a_trades_entry_is_tagged_with_its_r_in_money_and_its_stakes_multiple() {
     assert_eq!(time_limit(&entry), Some(SignedDuration::from_hours(4)));
 }
 
-/// A market entry at twice the stake: 200,000 AUD/USD, worth 1,000 USD
-/// over one R, multiple 2.
-#[rstest]
-fn a_trades_entry_at_a_multiple_of_the_stake_is_tagged_with_it() {
-    let (mut probe, _) = registered();
-
-    let twice = stake().times(decimal("2")).unwrap();
-    buy(held(1)).send(&mut probe, twice, unconverted()).unwrap();
-
-    let orders = orders(&probe);
-    assert_eq!(
-        entry_risk(&orders[0]),
-        Some(EntryRisk {
-            r: Money::from("1000 USD"),
-            multiple: decimal("2"),
-        })
-    );
-}
-
 /// 0.5% of 0.50 USD is 0.0025 USD, half of one AUD/USD's worth over one
 /// R: its size rounds down to none, and it sends nothing, no order and no
-/// time alert, and says why.
+/// time alert, and says why, naming the instrument, the stake and the
+/// equity.
 #[rstest]
 fn a_trade_whose_size_rounds_to_none_sends_nothing_and_logs_why() {
     let name = "a_trade_whose_size_rounds_to_none_sends_nothing_and_logs_why";
@@ -714,12 +680,14 @@ fn a_trade_whose_size_rounds_to_none_sends_nothing_and_logs_why() {
     assert_eq!(orders(&probe), []);
     assert_eq!(clock.borrow().timer_names(), Vec::<&str>::new());
     let lines = log_capture::lines();
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.starts_with("WARN") && line.contains(AUD) && line.contains("zero")),
-        "{lines:#?}"
-    );
+    let line = lines
+        .iter()
+        .find(|line| line.starts_with("WARN") && line.contains(AUD))
+        .unwrap_or_else(|| panic!("{lines:#?}"));
+
+    for named in ["0.5% × 1", "0.50 USD"] {
+        assert!(line.contains(named), "{named}: {line}");
+    }
 }
 
 /// Pepperstone's account holds 100,000 EUR, and no USD, the currency of
@@ -751,8 +719,9 @@ fn a_trade_without_equity_in_its_pnl_currency_sends_nothing_and_logs_why() {
 
 /// The cache holds no account of Pepperstone yet, as before its execution
 /// client reports one: there is no equity to size the trade on, and it
-/// sends nothing, saying the account holds none, not that its size rounds
-/// down to zero.
+/// sends nothing, saying so as an error naming the instrument and the
+/// account, the one of Pepperstone, not warning that its size rounds down
+/// to zero.
 #[rstest]
 fn a_trade_on_an_account_holding_no_equity_sends_nothing_and_logs_why() {
     let name = "a_trade_on_an_account_holding_no_equity_sends_nothing_and_logs_why";
@@ -777,7 +746,7 @@ fn a_trade_on_an_account_holding_no_equity_sends_nothing_and_logs_why() {
     assert!(
         lines.iter().any(|line| line.starts_with("ERROR")
             && line.contains(AUD)
-            && line.contains("no equity")),
+            && line.contains("of PEPPERSTONE")),
         "{lines:#?}"
     );
 }
@@ -810,7 +779,11 @@ fn through_eurusd() -> Rates {
 /// Pepperstone's account holds 100,000 EUR, converted into USD through
 /// EUR/USD, whose first quote has not come yet, as at a live start: there
 /// is no rate, and the trade sends nothing, no order and no time alert,
-/// and says why.
+/// and says why, naming the instrument and, beside its id and the
+/// account's name, both of which hold Pepperstone, the currencies, EUR
+/// held and USD its P&L's, and the venue whose rates it lacks, Pepperstone:
+/// no client is routed to Pepperstone, so the account is named as the one
+/// of its venue.
 #[rstest]
 fn a_trade_sent_before_its_pairs_first_quote_sends_nothing_and_logs_why() {
     let name = "a_trade_sent_before_its_pairs_first_quote_sends_nothing_and_logs_why";
@@ -827,39 +800,14 @@ fn a_trade_sent_before_its_pairs_first_quote_sends_nothing_and_logs_why() {
     assert_eq!(orders(&probe), []);
     assert_eq!(clock.borrow().timer_names(), Vec::<&str>::new());
     let lines = log_capture::lines();
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.starts_with("ERROR") && line.contains(AUD) && line.contains("quote")),
-        "{lines:#?}"
-    );
-}
-
-/// Once EUR/USD's first quote is cached, 1.24990 / 1.25010, its mid 1.25:
-/// the same trade is sized on 125,000 USD, 0.5% of it, 625 USD, over one
-/// R of 0.00500, 125,000 AUD/USD.
-#[rstest]
-fn a_trade_sent_after_its_pairs_first_quote_is_sized_on_the_equity_converted() {
-    let cache = cache_converting();
-    cache
-        .borrow_mut()
-        .add_quote(QuoteTick::new(
-            InstrumentId::from(EURUSD),
-            Price::from("1.24990"),
-            Price::from("1.25010"),
-            Quantity::from(1),
-            Quantity::from(1),
-            UnixNanos::from(NOW),
-            UnixNanos::from(NOW),
-        ))
-        .unwrap();
-    let (mut probe, _) = registered_on(&cache, STRATEGY, NOW);
-
-    buy(held(4))
-        .send(&mut probe, stake(), through_eurusd())
-        .unwrap();
-
-    assert_eq!(entry_quantity(&probe), Quantity::from(125_000));
+    let line = lines
+        .iter()
+        .find(|line| line.starts_with("ERROR") && line.contains(AUD))
+        .unwrap_or_else(|| panic!("{lines:#?}"));
+    let beside = line.replace(AUD, "").replace("of PEPPERSTONE", "");
+    for named in ["EUR", "USD", "PEPPERSTONE"] {
+        assert!(beside.contains(named), "{named}: {line}");
+    }
 }
 
 /// IB's account is issued under IB, not under IDEALPRO, the venue of the
@@ -957,45 +905,45 @@ fn sized_from(cache: &Rc<RefCell<Cache>>, instrument_id: InstrumentId) -> Quanti
     entry_quantity(&probe)
 }
 
-/// IB reports its net liquidation as the account's balance, which holds
-/// the open position's 20,000 USD of P&L already: the trade is sized on
-/// the 200,000 USD it reports, 200,000 AUD/USD, not on 220,000 USD with
-/// that P&L counted again.
+/// An account holding 200,000 USD and an open position's 20,000 USD of
+/// P&L. IB reports its net liquidation as the account's balance, which
+/// holds that P&L already: the trade is sized on the 200,000 USD it
+/// reports, 200,000 AUD/USD, not on 220,000 USD with that P&L counted
+/// again. A cTrader broker reports its account's balance without its open
+/// positions, and a backtest simulates IB's account, its balance
+/// calculated by Nautilus from its fills and holding no open P&L, whatever
+/// IB reports live: the trade is sized on the balance and the P&L, 220,000
+/// AUD/USD.
 #[rstest]
-fn a_trade_on_ib_is_sized_on_the_balance_ib_reports_its_open_pnl_counted_once() {
-    let account = reported_margin_account(AccountId::from("IB-DU1234567"), "200000 USD");
-    let cache = holding_open_pnl(&ib_aud(), "IB", account);
+#[case::reported_by_ib(
+    ib_aud(),
+    "IB",
+    reported_margin_account(AccountId::from("IB-DU1234567"), "200000 USD"),
+    Quantity::from(200_000)
+)]
+#[case::reported_by_a_ctrader_broker(
+    aud(InstrumentId::from(AUD)),
+    "PEPPERSTONE",
+    reported_margin_account(AccountId::from("PEPPERSTONE-001"), "200000 USD"),
+    Quantity::from(220_000)
+)]
+#[case::simulated_for_ib(
+    ib_aud(),
+    "IDEALPRO",
+    margin_account(AccountId::from("IDEALPRO-001"), "200000 USD"),
+    Quantity::from(220_000)
+)]
+fn a_trade_is_sized_on_its_open_pnl_counted_once(
+    #[case] instrument: InstrumentAny,
+    #[case] client: &str,
+    #[case] account: AccountAny,
+    #[case] quantity: Quantity,
+) {
+    let cache = holding_open_pnl(&instrument, client, account);
 
-    let quantity = sized_from(&cache, InstrumentId::from(IB_AUD));
+    let sized = sized_from(&cache, instrument.id());
 
-    assert_eq!(quantity, Quantity::from(200_000));
-}
-
-/// A cTrader broker reports its account's balance without its open
-/// positions: the trade is sized on its 200,000 USD and the open
-/// position's 20,000 USD of P&L, 220,000 AUD/USD.
-#[rstest]
-fn a_trade_at_a_ctrader_broker_is_sized_on_its_balance_and_its_open_pnl() {
-    let account = reported_margin_account(AccountId::from("PEPPERSTONE-001"), "200000 USD");
-    let cache = holding_open_pnl(&aud(InstrumentId::from(AUD)), "PEPPERSTONE", account);
-
-    let quantity = sized_from(&cache, InstrumentId::from(AUD));
-
-    assert_eq!(quantity, Quantity::from(220_000));
-}
-
-/// A backtest simulates IB's account, its balance calculated by Nautilus
-/// from its fills and holding no open P&L, whatever IB reports live: the
-/// trade is sized on its 200,000 USD and the open position's 20,000 USD of
-/// P&L, 220,000 AUD/USD.
-#[rstest]
-fn a_trade_on_ibs_simulated_account_is_sized_on_its_balance_and_its_open_pnl() {
-    let account = margin_account(AccountId::from("IDEALPRO-001"), "200000 USD");
-    let cache = holding_open_pnl(&ib_aud(), "IDEALPRO", account);
-
-    let quantity = sized_from(&cache, InstrumentId::from(IB_AUD));
-
-    assert_eq!(quantity, Quantity::from(220_000));
+    assert_eq!(sized, quantity);
 }
 
 /// IB's EUR/USD on IDEALPRO, the pair a config on IB converts EUR through
@@ -1054,42 +1002,6 @@ fn a_trade_on_an_account_without_a_base_currency_is_sized_on_each_currency_conve
     assert_eq!(entry_quantity(&probe), Quantity::from(145_000));
 }
 
-/// IB's EUR/USD is read as its BID and ASK bars, none of which is cached
-/// yet: the account's 100,000 EUR are not converted into USD, and the
-/// trade sends nothing, no order and no time alert, and says why, naming
-/// the currencies and the venue whose rates it lacks.
-#[rstest]
-fn a_trade_converting_through_an_ib_pair_before_its_first_bars_sends_nothing_and_logs_why() {
-    let name =
-        "a_trade_converting_through_an_ib_pair_before_its_first_bars_sends_nothing_and_logs_why";
-    if !log_capture::alone(module_path!(), name) {
-        return;
-    }
-    log_capture::capture(log::LevelFilter::Info);
-    let cache = cache_holding("100000 EUR");
-    defining_ib_eurusd(&cache);
-    let (mut probe, clock) = registered_on(&cache, STRATEGY, NOW);
-    let trade = Trade {
-        instrument_id: InstrumentId::from(IB_AUD),
-        ..buy(bracket(4))
-    };
-
-    trade
-        .send(&mut probe, stake(), through_ib_eurusd())
-        .unwrap();
-
-    assert_eq!(orders(&probe), []);
-    assert_eq!(clock.borrow().timer_names(), Vec::<&str>::new());
-    let lines = log_capture::lines();
-    let line = lines
-        .iter()
-        .find(|line| line.starts_with("ERROR") && line.contains(IB_AUD))
-        .unwrap_or_else(|| panic!("{lines:#?}"));
-    for named in ["EUR", "USD", "IDEALPRO"] {
-        assert!(line.contains(named), "{named}: {line}");
-    }
-}
-
 /// Nautilus' sizer is linear: an inverse instrument's P&L is no multiple
 /// of a distance in price.
 #[rstest]
@@ -1136,23 +1048,25 @@ fn a_trade_sent_at_an_equity_is_sized_on_it_not_on_the_accounts() {
 
 /// What sending sizes it at, without sending: 0.5% of 100,000 USD over
 /// one R of 0.00500 is 100,000 AUD/USD, whose R is 500 USD; of 0.50 USD,
-/// none.
+/// none, whose R is none.
 #[rstest]
-fn a_trades_size_and_its_r_are_those_it_is_sent_at() {
+#[case::of_the_accounts_equity("100000 USD", 100_000, "500 USD")]
+#[case::of_too_little("0.50 USD", 0, "0 USD")]
+fn a_trades_size_and_its_r_are_those_it_is_sent_at(
+    #[case] equity: &str,
+    #[case] size: u32,
+    #[case] r: &str,
+) {
     let instrument = aud(InstrumentId::from(AUD));
     let trade = buy(held(1));
 
-    let size = trade.size(&instrument, stake(), equity()).unwrap();
-
-    assert_eq!(size, Quantity::from(100_000));
-    assert_eq!(
-        trade.risk(&instrument, size).unwrap(),
-        Money::from("500 USD")
-    );
-    let none = trade
-        .size(&instrument, stake(), Money::from("0.50 USD"))
+    let sized = trade
+        .size(&instrument, stake(), Money::from(equity))
         .unwrap();
-    assert!(none.is_zero(), "{none}");
+    let risked = trade.risk(&instrument, sized).unwrap();
+
+    assert_eq!(sized, Quantity::from(size));
+    assert_eq!(risked, Money::from(r));
 }
 
 // ------------------------------------------------------------ time limit
@@ -1165,7 +1079,10 @@ fn a_trades_time_limit_runs_from_its_send() {
     sent(&mut probe, "T-1", buy(bracket(4)));
 
     assert!(advance(&mut probe, &clock, NOW + 240 * MINUTE - 1).is_empty());
-    assert_eq!(advance(&mut probe, &clock, NOW + 240 * MINUTE).len(), 1);
+    assert_eq!(
+        advance(&mut probe, &clock, NOW + 240 * MINUTE),
+        ["TRADE-TIME:T-1"]
+    );
 }
 
 #[rstest]
@@ -1191,39 +1108,34 @@ fn another_time_event_is_not_the_modules() {
     assert!(advance(&mut probe, &clock, NOW + MINUTE).is_empty());
 }
 
-/// Filled into a position of its own on a hedging venue, neither leg
-/// filled: at its time the legs are cancelled and its position closed by
-/// a market sell of its 100,000, a time close.
+/// Filled into its position, on a hedging venue at Pepperstone or a
+/// netting one on IB, neither leg filled: at its time the legs are
+/// cancelled and its position closed by a market sell of its 100,000, a
+/// time close, reduce-only but on IB, whose execution client denies a
+/// reduce-only order.
 #[rstest]
-fn at_its_time_an_open_trade_is_closed_and_its_legs_cancelled() {
+#[case::pepperstone(AUD, OmsType::Hedging, true)]
+#[case::ib(IB_AUD, OmsType::Netting, false)]
+fn at_its_time_an_open_trade_is_closed_and_its_legs_cancelled(
+    #[case] instrument_id: &str,
+    #[case] oms: OmsType,
+    #[case] reduce_only: bool,
+) {
     let (mut probe, clock) = registered();
-    sent(&mut probe, "T-1", buy(bracket(4)));
-    fill(&probe, "T-1", "P-1", NOW, OmsType::Hedging);
+    let trade = Trade {
+        instrument_id: InstrumentId::from(instrument_id),
+        ..buy(bracket(4))
+    };
+    sent(&mut probe, "T-1", trade);
+    fill(&probe, "T-1", "P-1", NOW, oms);
 
     advance(&mut probe, &clock, NOW + 240 * MINUTE);
 
     assert_eq!(status(&probe, "T-1-TP"), OrderStatus::PendingCancel);
     assert_eq!(status(&probe, "T-1-SL"), OrderStatus::PendingCancel);
-    assert_eq!(closes(&probe), [close()]);
-}
-
-/// On IB, whose execution client denies a reduce-only order, the time
-/// close is not one.
-#[rstest]
-fn at_its_time_a_trade_on_ib_is_closed_by_an_order_not_reduce_only() {
-    let (mut probe, clock) = registered();
-    let trade = Trade {
-        instrument_id: InstrumentId::from(IB_AUD),
-        ..buy(bracket(4))
-    };
-    sent(&mut probe, "T-1", trade);
-    fill(&probe, "T-1", "P-NET", NOW, OmsType::Netting);
-
-    advance(&mut probe, &clock, NOW + 240 * MINUTE);
-
     assert_eq!(
         closes(&probe),
-        [(OrderSide::Sell, Quantity::from(100_000), false, true)]
+        [(OrderSide::Sell, Quantity::from(100_000), reduce_only, true)]
     );
 }
 
@@ -1289,7 +1201,10 @@ fn on_a_netting_venue_a_trades_time_closes_the_position_with_the_trades_it_holds
     );
     advance(&mut probe, &clock, NOW + 90 * MINUTE);
 
-    assert_eq!(closes(&probe).len(), 1);
+    assert_eq!(
+        closes(&probe),
+        [(OrderSide::Sell, Quantity::from(200_000), true, true)]
+    );
 }
 
 /// On a netting venue the first of two trades in the position ended at

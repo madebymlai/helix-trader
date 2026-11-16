@@ -49,21 +49,8 @@ fn looked_up(lse: &MockLse) -> Vec<String> {
         .collect()
 }
 
-/// LSE's GCZ6 of 2026 is its listing 4000000002.
-#[tokio::test]
-async fn a_contract_is_its_listing_under_its_exchange_name() {
-    let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6)]);
-
-    let pair_id = CmeListings::default()
-        .listing(&client(&lse), &contract("GCZ26.GLBX"))
-        .await
-        .unwrap()
-        .pair_id;
-
-    assert_eq!(pair_id, 4_000_000_002);
-    assert_eq!(looked_up(&lse), ["GCZ6"]);
-}
-
+/// LSE's GCZ6 of 2026 is its listing 4000000002, looked up under its
+/// exchange name once.
 #[tokio::test]
 async fn a_contract_is_looked_up_once() {
     let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6), Reply::json(PAIRS_GCZ6)]);

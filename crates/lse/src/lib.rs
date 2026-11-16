@@ -26,8 +26,8 @@
 //!
 //! # Feature Flags
 //!
-//! - `test-support`: Exposes `testing` and `LseHttpClient::with_retry` for
-//!   a caller's tests (see `README.md`).
+//! - `test-support`: Exposes `testing` for a caller's tests (see
+//!   `README.md`).
 
 pub use self::{
     common::consts::{LSE_API_KEY, LSE_CME_API_KEY, LSE_NASDAQ_API_KEY, LSEDGE_VENUE},

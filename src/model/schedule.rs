@@ -526,38 +526,35 @@ mod tests {
         SignedDuration::from_hours(24)
     }
 
+    /// A run retrains at the midnight before its start and every midnight
+    /// before its end: a start on the grid retrains at the start, and an
+    /// end on it does not.
     #[rstest]
-    fn retrains_sit_on_midnights_from_the_last_before_the_start_to_the_end() {
-        let times = times(
-            day(),
-            at("2026-10-21T15:20:00Z"),
-            at("2026-10-24T00:00:01Z"),
-        )
-        .unwrap();
+    #[case::off_the_grid(
+        "2026-10-21T15:20:00Z",
+        "2026-10-24T00:00:01Z",
+        &[
+            "2026-10-21T00:00:00Z",
+            "2026-10-22T00:00:00Z",
+            "2026-10-23T00:00:00Z",
+            "2026-10-24T00:00:00Z",
+        ]
+    )]
+    #[case::on_the_grid(
+        "2026-10-21T00:00:00Z",
+        "2026-10-23T00:00:00Z",
+        &["2026-10-21T00:00:00Z", "2026-10-22T00:00:00Z"]
+    )]
+    fn retrains_sit_on_midnights_from_the_last_before_the_start_to_the_end(
+        #[case] from: &str,
+        #[case] to: &str,
+        #[case] expected: &[&str],
+    ) {
+        let times = times(day(), at(from), at(to)).unwrap();
 
         assert_eq!(
             times,
-            [
-                at("2026-10-21T00:00:00Z"),
-                at("2026-10-22T00:00:00Z"),
-                at("2026-10-23T00:00:00Z"),
-                at("2026-10-24T00:00:00Z"),
-            ]
-        );
-    }
-
-    #[rstest]
-    fn a_start_on_the_grid_retrains_at_the_start_and_an_end_on_it_does_not() {
-        let times = times(
-            day(),
-            at("2026-10-21T00:00:00Z"),
-            at("2026-10-23T00:00:00Z"),
-        )
-        .unwrap();
-
-        assert_eq!(
-            times,
-            [at("2026-10-21T00:00:00Z"), at("2026-10-22T00:00:00Z")]
+            expected.iter().map(|time| at(time)).collect::<Vec<_>>()
         );
     }
 
@@ -581,16 +578,13 @@ mod tests {
     }
 
     #[rstest]
-    fn the_grid_time_is_the_last_multiple_since_the_epoch() {
-        let last = |now: &str| {
-            Timestamp::from(
-                last_grid_time(UnixNanos::from(at(now)), SignedDuration::from_hours(24)).unwrap(),
-            )
-        };
+    #[case::after_a_multiple("2026-10-22T13:00:00Z", "2026-10-22T00:00:00Z")]
+    #[case::on_a_multiple("2026-10-22T00:00:00Z", "2026-10-22T00:00:00Z")]
+    #[case::just_before_a_multiple("2026-10-21T23:59:59Z", "2026-10-21T00:00:00Z")]
+    fn the_grid_time_is_the_last_multiple_since_the_epoch(#[case] now: &str, #[case] last: &str) {
+        let grid_time = last_grid_time(UnixNanos::from(at(now)), SignedDuration::from_hours(24));
 
-        assert_eq!(last("2026-10-22T13:00:00Z"), at("2026-10-22T00:00:00Z"));
-        assert_eq!(last("2026-10-22T00:00:00Z"), at("2026-10-22T00:00:00Z"));
-        assert_eq!(last("2026-10-21T23:59:59Z"), at("2026-10-21T00:00:00Z"));
+        assert_eq!(Timestamp::from(grid_time.unwrap()), at(last));
     }
 
     #[rstest]
@@ -602,7 +596,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(err.to_string().contains("retrain interval"), "{err}");
+        assert!(err.to_string().contains("0s"), "{err}");
     }
 
     fn hours(hours: i64) -> SignedDuration {
@@ -722,25 +716,34 @@ mod tests {
     /// the long's of 06:00, which has no short beside it; with their first
     /// pair valid from the 4th, at the window's start.
     #[rstest]
-    fn the_metas_rows_start_at_the_sides_first_pair_at_the_earliest() {
-        let (six, noon) = ("2026-01-06T06:00:00Z", "2026-01-06T12:00:00Z");
-        for (stores, from) in [
-            (stores(&[six, noon], &[noon], &[]), noon),
-            (stores(&[FOURTH], &[FOURTH], &[]), FIFTH),
-        ] {
-            let plan = daily().plan(at(SEVENTH), &stores);
+    #[case::after_the_windows_start(
+        stores(&["2026-01-06T06:00:00Z", "2026-01-06T12:00:00Z"], &["2026-01-06T12:00:00Z"], &[]),
+        "2026-01-06T12:00:00Z"
+    )]
+    #[case::before_the_windows_start(stores(&[FOURTH], &[FOURTH], &[]), FIFTH)]
+    fn the_metas_rows_start_at_the_sides_first_pair_at_the_earliest(
+        #[case] stores: Models<Vec<Timestamp>>,
+        #[case] from: &str,
+    ) {
+        let plan = daily().plan(at(SEVENTH), &stores);
 
-            assert_eq!(plan.steps.meta, Some(fit(from, SEVENTH)), "{stores:?}");
-        }
+        assert_eq!(plan.steps.meta, Some(fit(from, SEVENTH)));
     }
 
     /// The sides' models valid from the train's time alone are no
-    /// decisions before it: the meta waits.
+    /// decisions before it: the sides keep that pair, and the meta waits.
     #[rstest]
     fn a_meta_waits_for_a_sides_model_before_the_train() {
         let plan = daily().plan(at(SEVENTH), &stores(&[SEVENTH], &[SEVENTH], &[]));
 
-        assert_eq!(plan.steps.meta, Some(Step::Wait));
+        assert_eq!(
+            plan.steps,
+            Models {
+                long: Some(keep(SEVENTH)),
+                short: Some(keep(SEVENTH)),
+                meta: Some(Step::Wait),
+            }
+        );
     }
 
     /// The sides fit on the 6th; the meta, kept, reads no row, though its
@@ -832,24 +835,21 @@ mod tests {
     /// their window of 24 hours back from there, and the meta at the 7th,
     /// on its window, the decisions of the sides from the 5th.
     #[rstest]
-    fn never_retrained_with_no_model_in_use_the_sides_fit_as_of_the_metas_window_before_the_train_and_the_meta_at_it()
-     {
-        for stores in [
-            stores(&[], &[], &[]),
-            stores(&[EIGHTH], &[EIGHTH], &[EIGHTH]),
-        ] {
-            let plan = never().plan(at(SEVENTH), &stores);
+    #[case::on_an_empty_store(stores(&[], &[], &[]))]
+    #[case::on_a_store_of_models_after_the_train(stores(&[EIGHTH], &[EIGHTH], &[EIGHTH]))]
+    fn never_retrained_with_no_model_in_use_the_sides_fit_as_of_the_metas_window_before_the_train_and_the_meta_at_it(
+        #[case] stores: Models<Vec<Timestamp>>,
+    ) {
+        let plan = never().plan(at(SEVENTH), &stores);
 
-            assert_eq!(
-                plan.steps,
-                Models {
-                    long: Some(fit(FOURTH, FIFTH)),
-                    short: Some(fit(FOURTH, FIFTH)),
-                    meta: Some(fit(FIFTH, SEVENTH)),
-                },
-                "{stores:?}"
-            );
-        }
+        assert_eq!(
+            plan.steps,
+            Models {
+                long: Some(fit(FOURTH, FIFTH)),
+                short: Some(fit(FOURTH, FIFTH)),
+                meta: Some(fit(FIFTH, SEVENTH)),
+            }
+        );
     }
 
     /// The sides fitted as of the 5th read their window back from there:
@@ -866,24 +866,23 @@ mod tests {
     /// if at all: on an empty store or one of models after the train, the
     /// meta waiting; with the sides' models of the 5th, the meta too.
     #[rstest]
-    fn retrained_every_model_fits_as_of_the_train() {
-        for (stores, meta) in [
-            (stores(&[], &[], &[]), Step::Wait),
-            (stores(&[EIGHTH], &[EIGHTH], &[EIGHTH]), Step::Wait),
-            (stores(&[FIFTH], &[FIFTH], &[]), fit(FIFTH, SEVENTH)),
-        ] {
-            let plan = daily().plan(at(SEVENTH), &stores);
+    #[case::on_an_empty_store(stores(&[], &[], &[]), Step::Wait)]
+    #[case::on_a_store_of_models_after_the_train(stores(&[EIGHTH], &[EIGHTH], &[EIGHTH]), Step::Wait)]
+    #[case::on_the_sides_models_of_the_fifth(stores(&[FIFTH], &[FIFTH], &[]), fit(FIFTH, SEVENTH))]
+    fn retrained_every_model_fits_as_of_the_train(
+        #[case] stores: Models<Vec<Timestamp>>,
+        #[case] meta: Step,
+    ) {
+        let plan = daily().plan(at(SEVENTH), &stores);
 
-            assert_eq!(
-                plan.steps,
-                Models {
-                    long: Some(fit(SIXTH, SEVENTH)),
-                    short: Some(fit(SIXTH, SEVENTH)),
-                    meta: Some(meta),
-                },
-                "{stores:?}"
-            );
-        }
+        assert_eq!(
+            plan.steps,
+            Models {
+                long: Some(fit(SIXTH, SEVENTH)),
+                short: Some(fit(SIXTH, SEVENTH)),
+                meta: Some(meta),
+            }
+        );
     }
 
     /// Never retrained, the long's model of the 6th has no short beside it:
@@ -903,14 +902,22 @@ mod tests {
         );
     }
 
-    /// Never retrained, the meta's model of the 6th in use: the sides fit
-    /// at the train.
+    /// Never retrained, a meta's model of the 6th with no pair of the sides
+    /// beside it: the sides fit at the train, and no pair of them is valid
+    /// before the 7th, so the meta waits though a model of its own is
+    /// current.
     #[rstest]
-    fn never_retrained_with_the_meta_in_use_the_sides_fit_at_the_train() {
+    fn never_retrained_a_meta_with_no_pair_waits_while_the_sides_fit_at_the_train() {
         let plan = never().plan(at(SEVENTH), &stores(&[], &[], &[SIXTH]));
 
-        assert_eq!(plan.steps.long, Some(fit(SIXTH, SEVENTH)));
-        assert_eq!(plan.steps.short, Some(fit(SIXTH, SEVENTH)));
+        assert_eq!(
+            plan.steps,
+            Models {
+                long: Some(fit(SIXTH, SEVENTH)),
+                short: Some(fit(SIXTH, SEVENTH)),
+                meta: Some(Step::Wait),
+            }
+        );
     }
 
     /// The sides of a two-time train fitted as of the 5th: the meta fits
@@ -943,6 +950,7 @@ mod tests {
 
         let err = refused.unwrap_err().to_string();
         assert!(err.contains("no side has a model in use"), "{err}");
+        assert!(err.contains(SEVENTH), "{err}");
         assert!(!err.contains("meta"), "{err}");
     }
 }

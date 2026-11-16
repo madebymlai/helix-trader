@@ -15,7 +15,7 @@
 //! - `baseline`: the training mean, the benchmark every score is read
 //!   against.
 //! - `fake`: the row's first feature, for tests that need to steer the
-//!   prediction.
+//!   prediction; test support, behind the crate's `test-support` feature.
 //!
 //! A training set's labels are real values, fitted on their squared error:
 //! the model predicts a row's expected label. A model predicts from a row of
@@ -35,9 +35,11 @@
 //! booster is neither), so a model stays on the thread that loaded it.
 
 mod baseline;
-mod fake;
 mod lightgbm;
 mod perpetual;
+
+#[cfg(feature = "test-support")]
+mod fake;
 
 use std::fmt::Debug;
 
@@ -58,7 +60,8 @@ pub enum LearnerConfig {
     /// The mean of the training labels, whatever the row.
     Baseline {},
     /// The row's first feature; the mean of the training labels where it is
-    /// missing. For tests.
+    /// missing. Test support, behind the crate's `test-support` feature.
+    #[cfg(feature = "test-support")]
     Fake {},
 }
 
@@ -72,7 +75,9 @@ impl LearnerConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
         match self {
             Self::LightGbm(config) => config.validate(),
-            Self::Perpetual(_) | Self::Baseline {} | Self::Fake {} => Ok(()),
+            Self::Perpetual(_) | Self::Baseline {} => Ok(()),
+            #[cfg(feature = "test-support")]
+            Self::Fake {} => Ok(()),
         }
     }
 
@@ -100,6 +105,7 @@ impl LearnerConfig {
             Self::LightGbm(_) => "lightgbm",
             Self::Perpetual(_) => "perpetual",
             Self::Baseline {} => "baseline",
+            #[cfg(feature = "test-support")]
             Self::Fake {} => "fake",
         }
     }
@@ -109,6 +115,7 @@ impl LearnerConfig {
             Self::LightGbm(config) => config,
             Self::Perpetual(config) => config,
             Self::Baseline {} => &baseline::Baseline,
+            #[cfg(feature = "test-support")]
             Self::Fake {} => &fake::Fake,
         }
     }
@@ -350,9 +357,10 @@ mod tests {
     }
 
     /// The contract every adapter meets, run by `contract!` against one
-    /// learner config.
+    /// learner config, `$name` the name its refusal of another's saved
+    /// model gives the adapter's models.
     macro_rules! contract {
-        ($adapter:ident, $config:expr) => {
+        ($adapter:ident, $config:expr, $name:literal) => {
             mod $adapter {
                 use rstest::rstest;
 
@@ -382,12 +390,16 @@ mod tests {
                 }
 
                 #[rstest]
-                fn a_row_of_the_wrong_width_is_an_error() {
-                    let set = synthetic();
-                    let model = config().fit(&set).unwrap();
-                    for width in [0, set.width() - 1, set.width() + 1] {
-                        assert!(model.predict(&vec![0.5; width]).is_err(), "{width}");
-                    }
+                #[case::of_no_feature(0)]
+                #[case::one_feature_short(WIDTH - 1)]
+                #[case::one_feature_over(WIDTH + 1)]
+                fn a_row_of_the_wrong_width_is_an_error(#[case] width: usize) {
+                    let model = config().fit(&synthetic()).unwrap();
+
+                    let err = model.predict(&vec![0.5; width]).unwrap_err().to_string();
+
+                    assert!(err.contains(&format!("of {width} features")), "{err}");
+                    assert!(err.contains(&format!("takes {WIDTH}")), "{err}");
                 }
 
                 #[rstest]
@@ -403,7 +415,8 @@ mod tests {
                     let set = synthetic();
                     for other in others(&config()) {
                         let saved = other.fit(&set).unwrap().save().unwrap();
-                        assert!(config().load(&saved).is_err(), "{other:?}");
+                        let err = config().load(&saved).unwrap_err().to_string();
+                        assert!(err.contains($name), "{other:?}: {err}");
                     }
                 }
             }
@@ -414,37 +427,38 @@ mod tests {
     // pins LightGBM's draws too.
     contract!(
         lightgbm,
-        LearnerConfig::LightGbm(LightGbmConfig::builder().feature_fraction(0.5).build())
+        LearnerConfig::LightGbm(LightGbmConfig::builder().feature_fraction(0.5).build()),
+        "LightGBM"
     );
     contract!(
         perpetual,
-        LearnerConfig::Perpetual(PerpetualConfig::builder().memory_limit(1.0).build())
+        LearnerConfig::Perpetual(PerpetualConfig::builder().memory_limit(1.0).build()),
+        "PerpetualBooster"
     );
-    contract!(baseline, LearnerConfig::Baseline {});
-    contract!(fake, LearnerConfig::Fake {});
+    contract!(baseline, LearnerConfig::Baseline {}, "baseline");
+    contract!(fake, LearnerConfig::Fake {}, "fake");
 
+    /// A set is refused naming its fault: no row, no feature, features not
+    /// whole rows of its width, or a label not a finite number.
     #[rstest]
-    fn a_set_without_rows_is_refused() {
-        assert!(TrainingSet::new(2, vec![], vec![]).is_err());
-    }
+    #[case::without_rows(2, vec![], vec![], &["needs a row"])]
+    #[case::without_features(0, vec![], vec![1.0], &["needs a feature"])]
+    #[case::with_a_short_row(2, vec![1.0, 2.0, 3.0], vec![1.0, -1.0], &["3 features", "2 rows of 2"])]
+    #[case::with_a_label_not_a_number(1, vec![1.0, 2.0], vec![0.5, f64::NAN], &["NaN"])]
+    #[case::with_an_infinite_label(1, vec![1.0, 2.0], vec![0.5, f64::INFINITY], &["inf"])]
+    #[case::with_a_label_infinitely_low(1, vec![1.0, 2.0], vec![0.5, f64::NEG_INFINITY], &["-inf"])]
+    fn a_set_is_refused_naming_its_fault(
+        #[case] width: usize,
+        #[case] features: Vec<f64>,
+        #[case] labels: Vec<f64>,
+        #[case] facts: &[&str],
+    ) {
+        let err = TrainingSet::new(width, features, labels)
+            .unwrap_err()
+            .to_string();
 
-    #[rstest]
-    fn a_set_without_features_is_refused() {
-        assert!(TrainingSet::new(0, vec![], vec![1.0]).is_err());
-    }
-
-    #[rstest]
-    fn a_set_with_a_short_row_is_refused() {
-        assert!(TrainingSet::new(2, vec![1.0, 2.0, 3.0], vec![1.0, -1.0]).is_err());
-    }
-
-    #[rstest]
-    fn a_label_not_a_number_is_refused() {
-        for label in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            assert!(
-                TrainingSet::new(1, vec![1.0, 2.0], vec![0.5, label]).is_err(),
-                "{label}"
-            );
+        for fact in facts {
+            assert!(err.contains(fact), "{fact}: {err}");
         }
     }
 
@@ -457,69 +471,66 @@ mod tests {
         Ok(toml::from_str::<Section>(toml)?.learner)
     }
 
+    /// A learner loads with the settings its section sets, each setting
+    /// unset at its default: LightGBM's 100 rounds at a rate of 0.05, 7
+    /// leaves of 200 rows at least, every feature and a seed of 1;
+    /// PerpetualBooster's budget of 0.5, no limit of rounds and a seed of 1.
     #[rstest]
-    fn loads_lightgbm_from_toml_with_defaults() {
-        let config = learner(r#"learner = { kind = "lightgbm", feature_fraction = 0.5 }"#).unwrap();
-        assert_eq!(
-            config,
-            LearnerConfig::LightGbm(LightGbmConfig {
-                num_iterations: 100,
-                learning_rate: 0.05,
-                num_leaves: 7,
-                min_data_in_leaf: 200,
-                feature_fraction: 0.5,
-                seed: 1,
-            })
-        );
+    #[case::lightgbm_with_defaults(
+        r#"learner = { kind = "lightgbm", feature_fraction = 0.5 }"#,
+        LearnerConfig::LightGbm(LightGbmConfig {
+            num_iterations: 100,
+            learning_rate: 0.05,
+            num_leaves: 7,
+            min_data_in_leaf: 200,
+            feature_fraction: 0.5,
+            seed: 1,
+        })
+    )]
+    #[case::lightgbm_setting_each_of_its_settings(
+        r#"learner = { kind = "lightgbm", num_iterations = 300, learning_rate = 0.02, num_leaves = 15, min_data_in_leaf = 50 }"#,
+        LearnerConfig::LightGbm(LightGbmConfig {
+            num_iterations: 300,
+            learning_rate: 0.02,
+            num_leaves: 15,
+            min_data_in_leaf: 50,
+            feature_fraction: 1.0,
+            seed: 1,
+        })
+    )]
+    #[case::perpetual_with_defaults(
+        r#"learner = { kind = "perpetual", memory_limit = 2.5 }"#,
+        LearnerConfig::Perpetual(PerpetualConfig {
+            memory_limit: 2.5,
+            budget: 0.5,
+            iteration_limit: None,
+            seed: 1,
+        })
+    )]
+    fn a_learner_loads_from_toml_its_unset_settings_at_their_defaults(
+        #[case] toml: &str,
+        #[case] expected: LearnerConfig,
+    ) {
+        assert_eq!(learner(toml).unwrap(), expected);
     }
 
+    /// A learner is rejected at load naming the key at fault: a setting
+    /// required and missing, a kind no adapter has, a setting misspelt, or
+    /// a setting of a learner that has none.
     #[rstest]
-    fn loads_perpetual_from_toml_with_defaults() {
-        let config = learner(r#"learner = { kind = "perpetual", memory_limit = 2.5 }"#).unwrap();
-        assert_eq!(
-            config,
-            LearnerConfig::Perpetual(PerpetualConfig {
-                memory_limit: 2.5,
-                budget: 0.5,
-                iteration_limit: None,
-                seed: 1,
-            })
-        );
-    }
+    #[case::perpetual_without_a_memory_limit(
+        r#"learner = { kind = "perpetual", budget = 1.0 }"#,
+        "memory_limit"
+    )]
+    #[case::an_unknown_kind(r#"learner = { kind = "xgboost" }"#, "xgboost")]
+    #[case::a_misspelt_setting(r#"learner = { kind = "lightgbm", num_leafs = 7 }"#, "num_leafs")]
+    #[case::a_setting_of_the_baseline(r#"learner = { kind = "baseline", seed = 7 }"#, "seed")]
+    fn a_learner_is_rejected_at_load_naming_the_key_at_fault(
+        #[case] toml: &str,
+        #[case] key: &str,
+    ) {
+        let err = learner(toml).unwrap_err();
 
-    #[rstest]
-    fn rejects_perpetual_without_a_memory_limit_at_load() {
-        let err = learner(r#"learner = { kind = "perpetual", budget = 1.0 }"#).unwrap_err();
-        assert!(err.to_string().contains("memory_limit"), "{err}");
-    }
-
-    #[rstest]
-    fn loads_the_baseline_and_the_fake_from_toml() {
-        assert_eq!(
-            learner(r#"learner = { kind = "baseline" }"#).unwrap(),
-            LearnerConfig::Baseline {}
-        );
-        assert_eq!(
-            learner(r#"learner = { kind = "fake" }"#).unwrap(),
-            LearnerConfig::Fake {}
-        );
-    }
-
-    #[rstest]
-    fn rejects_an_unknown_kind_at_load() {
-        let err = learner(r#"learner = { kind = "xgboost" }"#).unwrap_err();
-        assert!(err.to_string().contains("xgboost"), "{err}");
-    }
-
-    #[rstest]
-    fn rejects_a_misspelt_setting_at_load() {
-        let err = learner(r#"learner = { kind = "lightgbm", num_leafs = 7 }"#).unwrap_err();
-        assert!(err.to_string().contains("num_leafs"), "{err}");
-    }
-
-    #[rstest]
-    fn rejects_a_setting_of_the_baseline_at_load() {
-        let err = learner(r#"learner = { kind = "baseline", seed = 7 }"#).unwrap_err();
-        assert!(err.to_string().contains("seed"), "{err}");
+        assert!(err.to_string().contains(key), "{err}");
     }
 }

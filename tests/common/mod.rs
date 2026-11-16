@@ -5,9 +5,8 @@
 //! Kinds of quotes: a wave, so that a fast and a slow EMA cross several
 //! times over days; trades, a level per hour bar chosen by the test, so
 //! that a run with the shortest crossover trades and exits at times and
-//! prices worked out by hand; steps, for the recording strategy's
-//! overlapping trades; noise, for the recording strategy of `recorder.rs`
-//! to check every price of the bars.
+//! prices worked out by hand; noise, for the recording strategy of
+//! `recorder.rs` to check every price of the bars.
 
 #![allow(dead_code, reason = "each test module uses part of the fixture")]
 
@@ -348,47 +347,6 @@ pub(crate) mod wave {
     }
 }
 
-/// Steps on Wednesday 7 January 2026, all hours inside the session: the
-/// hour bars close at 700.60 (11:00 UTC), 600.60 (12:00), 620.60 (13:00)
-/// and 580.60 (14:00 and 15:00), quoted from 10:00 to 15:00, for the
-/// recorder's overlapping trades (`overlap`).
-pub(crate) mod steps {
-    use super::*;
-
-    /// `hh:mm` UTC on the day of the steps.
-    pub(crate) fn at(hh_mm: &str) -> Timestamp {
-        ts(&format!("2026-01-07T{hh_mm}:00Z"))
-    }
-
-    pub(crate) fn end() -> Timestamp {
-        at("15:00")
-    }
-
-    pub(crate) fn quotes() -> Vec<QuoteTick> {
-        stepped_quotes(at("10:00"), end(), |close| {
-            Some(if close <= at("11:00") {
-                700.0
-            } else if close == at("12:00") {
-                600.0
-            } else if close == at("13:00") {
-                620.0
-            } else {
-                580.0
-            })
-        })
-    }
-
-    /// The instrument and the steps, stored from 10:00 to the end.
-    pub(crate) fn catalog() -> TempDir {
-        super::catalog(&quotes(), at("10:00"), end())
-    }
-
-    /// A backtest of the steps without commission, from `start`.
-    pub(crate) fn backtest(catalog: &Path, start: Timestamp) -> Backtest {
-        super::backtest(catalog, start, end(), "0 EUR")
-    }
-}
-
 /// The EMA's trades on Wednesday 7 January 2026, all hours inside the
 /// session, quoted from 09:00 UTC in steps (each hour bar closes at its
 /// level + 0.60). A run from 10:00 replays no quote before it, so not the
@@ -523,33 +481,5 @@ pub(crate) mod noise {
         std::rc::Rc<std::cell::RefCell<recorder::Record>>,
     ) {
         recorder::Recorder::new(BarType::from(MID_BAR_TYPE))
-    }
-}
-
-/// Two overlapping trades on the steps, from 12:30: a
-/// recorder, its `oms_type` unset, buys 10 shares on the 13:00 bar, at the
-/// ask of the quote closing it, 620.65, and 10 more on the 14:00 bar, at
-/// 580.65, and closes neither. A netting venue, as IB's, holds them as one
-/// long position of 20 at their average, 600.65.
-pub(crate) mod overlap {
-    use std::{cell::RefCell, rc::Rc};
-
-    use nautilus_model::enums::OrderSide;
-
-    use super::*;
-
-    /// Runs the recorder on the backtest's venue and returns its record.
-    pub(crate) fn run() -> Rc<RefCell<recorder::Record>> {
-        let catalog = steps::catalog();
-        let backtest = steps::backtest(catalog.path(), steps::at("12:30"));
-        let (recorder, record) = recorder::Recorder::trading(
-            BarType::from(MID_BAR_TYPE),
-            vec![
-                (OrderSide::Buy, Quantity::from(10)),
-                (OrderSide::Buy, Quantity::from(10)),
-            ],
-        );
-        backtest.run(recorder).unwrap();
-        record
     }
 }

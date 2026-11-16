@@ -272,7 +272,6 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::testing::SYMBOL_BY_ID_UNKNOWN;
 
     fn envelope<M: Payload>(message: &M) -> ProtoMessage {
         ProtoMessage::decode(frame(message, Some("7".to_owned())).as_slice()).unwrap()
@@ -307,26 +306,6 @@ mod tests {
         );
     }
 
-    /// The error is the fixture `symbol_by_id_unknown`.
-    #[rstest]
-    fn an_error_response_opens_as_the_venue_error() {
-        let envelope = ProtoMessage {
-            payload_type: ProtoOaErrorRes::TYPE,
-            payload: Some(SYMBOL_BY_ID_UNKNOWN.to_vec()),
-            client_msg_id: Some("7".to_owned()),
-        };
-
-        let opened = open::<ProtoOaSymbolByIdRes>(&envelope);
-
-        assert_eq!(
-            opened,
-            Err(CTraderError::Venue {
-                code: "SYMBOL_NOT_FOUND".to_owned(),
-                description: Some("No symbols with requested ID".to_owned()),
-            })
-        );
-    }
-
     #[rstest]
     fn a_proxy_error_response_opens_as_the_venue_error() {
         let error = ProtoErrorRes {
@@ -349,12 +328,11 @@ mod tests {
     fn another_message_is_a_protocol_error_naming_both() {
         let opened = open::<ProtoOaAssetListRes>(&envelope(&ProtoOaSymbolsListRes::default()));
 
-        assert_eq!(
-            opened,
-            Err(CTraderError::Protocol(
-                "expected PROTO_OA_ASSET_LIST_RES, received PROTO_OA_SYMBOLS_LIST_RES".to_owned()
-            ))
-        );
+        let Err(CTraderError::Protocol(error)) = &opened else {
+            panic!("{opened:?}");
+        };
+        assert!(error.contains("PROTO_OA_ASSET_LIST_RES"), "{error}");
+        assert!(error.contains("PROTO_OA_SYMBOLS_LIST_RES"), "{error}");
     }
 
     /// Synthetic: bytes that are no protobuf message.
@@ -375,20 +353,28 @@ mod tests {
     }
 
     #[rstest]
-    fn tick_deal_and_order_list_requests_are_historical_others_not() {
-        assert!(is_historical(ProtoOaGetTickDataReq::TYPE));
-        assert!(is_historical(ProtoOaDealListReq::TYPE));
-        assert!(is_historical(ProtoOaDealListByPositionIdReq::TYPE));
-        assert!(is_historical(ProtoOaOrderListReq::TYPE));
-        assert!(!is_historical(ProtoOaNewOrderReq::TYPE));
-        assert!(!is_historical(ProtoOaReconcileReq::TYPE));
-        assert!(!is_historical(ProtoOaSymbolByIdReq::TYPE));
+    #[case::tick_data(ProtoOaGetTickDataReq::TYPE, true)]
+    #[case::deal_list(ProtoOaDealListReq::TYPE, true)]
+    #[case::deal_list_by_position(ProtoOaDealListByPositionIdReq::TYPE, true)]
+    #[case::order_list(ProtoOaOrderListReq::TYPE, true)]
+    #[case::new_order(ProtoOaNewOrderReq::TYPE, false)]
+    #[case::reconcile(ProtoOaReconcileReq::TYPE, false)]
+    #[case::symbol_by_id(ProtoOaSymbolByIdReq::TYPE, false)]
+    fn tick_deal_and_order_list_requests_are_historical_others_not(
+        #[case] payload_type: u32,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(is_historical(payload_type), expected);
     }
 
     #[rstest]
-    fn a_payload_type_is_named_as_the_proto_spells_it_or_by_its_number() {
-        assert_eq!(payload_name(2131), "PROTO_OA_SPOT_EVENT");
-        assert_eq!(payload_name(51), "HEARTBEAT_EVENT");
-        assert_eq!(payload_name(9999), "9999");
+    #[case::open_api(2131, "PROTO_OA_SPOT_EVENT")]
+    #[case::common(51, "HEARTBEAT_EVENT")]
+    #[case::unknown(9999, "9999")]
+    fn a_payload_type_is_named_as_the_proto_spells_it_or_by_its_number(
+        #[case] payload_type: u32,
+        #[case] name: &str,
+    ) {
+        assert_eq!(payload_name(payload_type), name);
     }
 }

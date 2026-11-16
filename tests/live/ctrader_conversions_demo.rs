@@ -219,10 +219,10 @@ async fn a_live_run_caches_its_conversion_pairs_quotes_after_its_start() {
 
     let interrupted = interrupt.is_finished();
     interrupt.abort();
+    common::cache::delete_trader(TRADER).await;
     ran.expect("the node stops within a minute of SIGINT")
         .unwrap();
     assert!(interrupted, "the node stopped before SIGINT");
-    common::cache::delete_trader(TRADER).await;
     let record = record.borrow();
     println!(
         "warmup quotes of {:?}; {} live quotes of {eurusd}, first {:?}; cached {:?}; \

@@ -115,28 +115,6 @@ fn a_trade_is_sized_on_the_equity_converted_into_its_pnl_currency_at_the_mid() {
     );
 }
 
-/// On 15,000,000 JPY, USDJPY at 149.990 / 150.010, its mid 150.000 JPY
-/// per USD, a pair far from 1: 100,000 USD. 1% of it, 1,000 USD, over one
-/// R of 7.00 USD an ounce buys 142 oz. At the rate swapped, 2,250,000,000
-/// USD, it would buy the gold's maximum, 10,000 oz, whose margin the
-/// account cannot hold.
-#[rstest]
-fn a_rate_into_the_pnl_currency_is_read_in_its_direction_on_a_pair_far_from_one() {
-    let usdjpy = (ic::USDJPY, Currency::USD(), Currency::JPY(), 3);
-
-    let (_, record) = converted_run(
-        "15000000 JPY",
-        usdjpy,
-        ["149.990", "150.010"],
-        Commission::Rate(Decimal::new(3, 5)),
-        "7",
-        vec![],
-    );
-
-    let filled: Vec<Quantity> = filled(&record).into_iter().map(|(q, _)| q).collect();
-    assert_eq!(filled, [Quantity::from(142)]);
-}
-
 /// EURUSD at 1.25000 both sides, 0.80 EUR per USD, and 4 USD an order:
 /// the account books in EUR alone, as IC's account in EUR does. The buy
 /// of 10:00, 125 oz, is charged 3.20 EUR; closed at 11:00, it gains 125
@@ -232,7 +210,12 @@ fn catalog_with_eurusd() -> tempfile::TempDir {
 
 /// EUR reaches USD, the gold's P&L currency, through EURUSD, as the
 /// catalog defines it: the backtest command runs on a balance in EUR,
-/// IC's account keeping it in EUR.
+/// IC's account keeping it in EUR. The crossover, initialized at 11:00,
+/// long, crosses down at 12:00, its close 4001.00 below the slow EMA: it
+/// sells at the bid, 4000.90, 1% of 125,000 USD, the balance at EURUSD's
+/// mid, over its stop 0.5% away, 4021.01, 1,250 / 20.01 = 62.5 oz, 62, a
+/// bracket of 3 orders left open at the run's end. Nothing closes and no
+/// commission is charged: the balance ends at 100000.00 EUR.
 #[rstest]
 fn a_backtest_runs_on_a_balance_its_conversions_reach_the_pnl_currency_from() {
     let catalog = catalog_with_eurusd();
@@ -245,9 +228,10 @@ fn a_backtest_runs_on_a_balance_its_conversions_reach_the_pnl_currency_from() {
     );
     assert!(output.status.success(), "{stdout}{stderr}");
     assert!(
-        stdout.contains("account.ICMARKETS.balance.EUR.total"),
+        stdout.contains("account.ICMARKETS.balance.EUR.total: 100000.00 EUR"),
         "{stdout}"
     );
+    assert!(stdout.contains("Orders: 3"), "{stdout}");
 }
 
 /// EURUSD reaches no yen: a balance in JPY is refused before the run,

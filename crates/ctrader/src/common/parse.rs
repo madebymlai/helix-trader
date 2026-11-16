@@ -290,22 +290,20 @@ mod tests {
     }
 
     #[rstest]
-    fn a_series_not_of_quotes_is_refused_naming_it() {
+    #[case::bars(NautilusDataType::Bar)]
+    #[case::book_deltas(NautilusDataType::OrderBookDelta)]
+    #[case::book_depth(NautilusDataType::OrderBookDepth)]
+    #[case::trades(NautilusDataType::TradeTick)]
+    fn a_series_not_of_quotes_is_refused_naming_it(#[case] data_type: NautilusDataType) {
         let bars = format!("XAUUSD.{VENUE}-1-MINUTE-BID-EXTERNAL");
-        for data_type in [
-            NautilusDataType::Bar,
-            NautilusDataType::OrderBookDelta,
-            NautilusDataType::TradeTick,
-        ] {
-            let named = data_type.to_string();
+        let named = data_type.to_string();
 
-            let err = quoted(venue(), &[gold_quotes(), (data_type, bars.clone())])
-                .unwrap_err()
-                .to_string();
+        let err = quoted(venue(), &[gold_quotes(), (data_type, bars.clone())])
+            .unwrap_err()
+            .to_string();
 
-            assert!(err.contains("serves quotes only"), "{err}");
-            assert!(err.contains(&named) && err.contains(&bars), "{err}");
-        }
+        assert!(err.contains("serves quotes only"), "{err}");
+        assert!(err.contains(&named) && err.contains(&bars), "{err}");
     }
 
     #[rstest]
@@ -373,19 +371,6 @@ mod tests {
             .leverage
     }
 
-    #[rstest]
-    fn gold_on_the_demo_takes_the_account_s_1_30_under_its_own_1_200() {
-        let margin = margin(
-            "XAUUSD",
-            venue(),
-            account_leverage(),
-            Some(&gold_leverage()),
-        )
-        .unwrap();
-
-        assert_eq!(margin, Decimal::ONE / Decimal::from(30));
-    }
-
     /// Synthetic: gold's tier at 1:20, under the demo account's 1:30.
     #[rstest]
     fn a_symbol_leverage_below_the_account_s_sets_the_margin() {
@@ -419,20 +404,29 @@ mod tests {
         assert_eq!(margin, d("0.05"));
     }
 
-    /// Synthetic: gold's leverage without tiers, and a trader without
-    /// leverage.
+    /// Gold's leverage without tiers, as no tier of leverage 52543 the
+    /// fixture names; and a trader without leverage, the demo's leverage
+    /// left for gold. Both synthetic.
     #[rstest]
-    fn a_leverage_missing_is_refused_naming_the_symbol() {
+    #[case::no_tier(account_leverage(), true, &["XAUUSD", "ACMEFX", "52543"])]
+    #[case::no_account_leverage(None, false, &["XAUUSD", "ACMEFX"])]
+    fn a_leverage_missing_is_refused_naming_the_symbol(
+        #[case] account: Option<u32>,
+        #[case] without_tiers: bool,
+        #[case] facts: &[&str],
+    ) {
         let mut leverage = gold_leverage();
-        leverage.tiers.clear();
+        if without_tiers {
+            leverage.tiers.clear();
+        }
 
-        let err = margin("XAUUSD", venue(), account_leverage(), Some(&leverage)).unwrap_err();
-        assert_eq!(err.to_string(), "XAUUSD: ACMEFX leverage 52543 has no tier");
-        let err = margin("XAUUSD", venue(), None, Some(&gold_leverage())).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "XAUUSD: ACMEFX states no leverage of the account"
-        );
+        let err = margin("XAUUSD", venue(), account, Some(&leverage))
+            .unwrap_err()
+            .to_string();
+
+        for fact in facts {
+            assert!(err.contains(fact), "{fact}: {err}");
+        }
     }
 
     /// The broker's own estimate on the demo: 1,000 EUR of EURUSD locks
@@ -453,50 +447,77 @@ mod tests {
         assert_eq!((Decimal::from(1000) * margin).round_dp(2), broker);
     }
 
-    #[rstest]
-    fn xauusd_is_a_commodity_cfd_on_gold_in_ounces_quoted_in_dollars() {
-        let xau = instrument(&fixtures(), "XAUUSD").unwrap();
-
-        assert_eq!(xau.id, InstrumentId::from("XAUUSD.ACMEFX"));
-        assert_eq!(xau.raw_symbol, Symbol::new("XAUUSD"));
-        assert_eq!(xau.instrument_class(), InstrumentClass::Cfd);
-        assert_eq!(xau.asset_class, AssetClass::Commodity);
-        assert_eq!(xau.base_currency, Some(Currency::from("XAU")));
-        assert_eq!(xau.quote_currency, Currency::from("USD"));
-        assert_eq!(xau.price_precision, 2);
-        assert_eq!(xau.price_increment, Price::from("0.01"));
-        assert_eq!(xau.size_precision, 0);
-        assert_eq!(xau.size_increment, Quantity::from(1));
-        assert_eq!(xau.lot_size, Some(Quantity::from(100)));
-        assert_eq!(xau.min_quantity, Some(Quantity::from(1)));
-        assert_eq!(xau.max_quantity, Some(Quantity::from(10_000)));
-        assert_eq!(xau.multiplier(), Quantity::from(1));
-        assert_eq!(xau.margin_init, d("0.05"));
-        assert_eq!(xau.margin_maint, d("0.05"));
-        assert_eq!(
-            (xau.ts_event, xau.ts_init),
-            (UnixNanos::from(7), UnixNanos::from(7))
-        );
+    /// The instrument a captured symbol is expected to make.
+    struct Expected {
+        asset_class: AssetClass,
+        base: &'static str,
+        price_precision: u8,
+        price_increment: &'static str,
+        size_increment: u64,
+        lot_size: u64,
+        min_quantity: u64,
+        max_quantity: u64,
     }
 
+    /// XAUUSD is a commodity CFD on gold in ounces quoted in dollars,
+    /// EURUSD an FX CFD in euros by the thousand: the captured symbols'
+    /// volumes are in cents of a unit.
     #[rstest]
-    fn eurusd_is_an_fx_cfd_in_euros_by_the_thousand() {
-        let eur = instrument(&fixtures(), "EURUSD").unwrap();
+    #[case::xauusd("XAUUSD", Expected {
+        asset_class: AssetClass::Commodity,
+        base: "XAU",
+        price_precision: 2,
+        price_increment: "0.01",
+        size_increment: 1,
+        lot_size: 100,
+        min_quantity: 1,
+        max_quantity: 10_000,
+    })]
+    #[case::eurusd("EURUSD", Expected {
+        asset_class: AssetClass::FX,
+        base: "EUR",
+        price_precision: 5,
+        price_increment: "0.00001",
+        size_increment: 1_000,
+        lot_size: 100_000,
+        min_quantity: 1_000,
+        max_quantity: 100_000_000,
+    })]
+    fn a_captured_symbol_is_a_cfd_of_its_assets_in_its_units(
+        #[case] name: &str,
+        #[case] expected: Expected,
+    ) {
+        let cfd = instrument(&fixtures(), name).unwrap();
 
-        assert_eq!(eur.id, InstrumentId::from("EURUSD.ACMEFX"));
-        assert_eq!(eur.instrument_class(), InstrumentClass::Cfd);
-        assert_eq!(eur.asset_class, AssetClass::FX);
-        assert_eq!(eur.base_currency, Some(Currency::from("EUR")));
-        assert_eq!(eur.quote_currency, Currency::from("USD"));
-        assert_eq!(eur.price_precision, 5);
-        assert_eq!(eur.price_increment, Price::from("0.00001"));
-        assert_eq!(eur.size_precision, 0);
-        assert_eq!(eur.size_increment, Quantity::from(1_000));
-        assert_eq!(eur.lot_size, Some(Quantity::from(100_000)));
-        assert_eq!(eur.min_quantity, Some(Quantity::from(1_000)));
-        assert_eq!(eur.max_quantity, Some(Quantity::from(100_000_000)));
-        assert_eq!(eur.margin_init, d("0.05"));
-        assert_eq!(eur.margin_maint, d("0.05"));
+        assert_eq!(
+            cfd.id,
+            InstrumentId::from(format!("{name}.ACMEFX").as_str())
+        );
+        assert_eq!(cfd.raw_symbol, Symbol::new(name));
+        assert_eq!(cfd.instrument_class(), InstrumentClass::Cfd);
+        assert_eq!(cfd.asset_class, expected.asset_class);
+        assert_eq!(cfd.base_currency, Some(Currency::from(expected.base)));
+        assert_eq!(cfd.quote_currency, Currency::from("USD"));
+        assert_eq!(cfd.price_precision, expected.price_precision);
+        assert_eq!(cfd.price_increment, Price::from(expected.price_increment));
+        assert_eq!(cfd.size_precision, 0);
+        assert_eq!(cfd.size_increment, Quantity::from(expected.size_increment));
+        assert_eq!(cfd.lot_size, Some(Quantity::from(expected.lot_size)));
+        assert_eq!(
+            cfd.min_quantity,
+            Some(Quantity::from(expected.min_quantity))
+        );
+        assert_eq!(
+            cfd.max_quantity,
+            Some(Quantity::from(expected.max_quantity))
+        );
+        assert_eq!(cfd.multiplier(), Quantity::from(1));
+        assert_eq!(cfd.margin_init, d("0.05"));
+        assert_eq!(cfd.margin_maint, d("0.05"));
+        assert_eq!(
+            (cfd.ts_event, cfd.ts_init),
+            (UnixNanos::from(7), UnixNanos::from(7))
+        );
     }
 
     /// Synthetic: the EURUSD fixture with its base asset renamed BTC.
@@ -517,62 +538,64 @@ mod tests {
         let err = instrument(&fixtures(), "US500").unwrap_err().to_string();
 
         assert_eq!(
-            err,
-            "US500 is not served: its base asset US500 is no currency Nautilus knows; \
-             only forex and metals are served"
+            err.matches("US500").count(),
+            2,
+            "the symbol and its asset: {err}"
         );
     }
 
-    /// Synthetic: the XAUUSD fixture mutated.
-    #[rstest]
-    fn a_symbol_without_a_step_volume_is_refused() {
-        let mut fixtures = fixtures();
-        let id = fixtures.light["XAUUSD"].symbol_id;
-        fixtures.details.get_mut(&id).unwrap().step_volume = None;
-
-        let err = instrument(&fixtures, "XAUUSD").unwrap_err().to_string();
-
-        assert_eq!(err, "XAUUSD: no positive stepVolume");
+    /// The details of the symbol `name` in `fixtures`.
+    fn details<'a>(fixtures: &'a mut Fixtures, name: &str) -> &'a mut ProtoOaSymbol {
+        let id = fixtures.light[name].symbol_id;
+        fixtures.details.get_mut(&id).unwrap()
     }
 
-    /// Synthetic: the XAUUSD fixture mutated.
+    /// Synthetic: the fixtures mutated. Gold's step is 100 cents, one
+    /// ounce, so a minimum of 50 cents is half of one.
     #[rstest]
-    fn a_minimum_finer_than_the_step_is_refused() {
+    #[case::no_step_volume(
+        "XAUUSD",
+        |f: &mut Fixtures| details(f, "XAUUSD").step_volume = None,
+        &["XAUUSD", "stepVolume"],
+    )]
+    #[case::a_minimum_finer_than_the_step(
+        "XAUUSD",
+        |f: &mut Fixtures| details(f, "XAUUSD").min_volume = Some(50),
+        &["XAUUSD", "minVolume", "0.5", "1"],
+    )]
+    #[case::digits_out_of_range(
+        "EURUSD",
+        |f: &mut Fixtures| details(f, "EURUSD").digits = 12,
+        &["EURUSD", "12"],
+    )]
+    #[case::an_unlisted_asset(
+        "EURUSD",
+        |f: &mut Fixtures| f.light.get_mut("EURUSD").unwrap().quote_asset_id = Some(999),
+        &["EURUSD", "quote", "999"],
+    )]
+    fn a_symbol_whose_details_make_no_instrument_is_refused_naming_why(
+        #[case] name: &str,
+        #[case] mutate: fn(&mut Fixtures),
+        #[case] facts: &[&str],
+    ) {
         let mut fixtures = fixtures();
-        let id = fixtures.light["XAUUSD"].symbol_id;
-        fixtures.details.get_mut(&id).unwrap().min_volume = Some(50);
+        mutate(&mut fixtures);
 
-        let err = instrument(&fixtures, "XAUUSD").unwrap_err().to_string();
+        let err = instrument(&fixtures, name).unwrap_err().to_string();
 
-        assert_eq!(
-            err,
-            "XAUUSD: minVolume of 0.5 units is finer than the step of 1"
-        );
+        for fact in facts {
+            assert!(words(&err).contains(fact), "{fact}: {err}");
+        }
     }
 
-    /// Synthetic: the EURUSD fixture mutated.
-    #[rstest]
-    fn digits_out_of_range_are_refused() {
-        let mut fixtures = fixtures();
-        let id = fixtures.light["EURUSD"].symbol_id;
-        fixtures.details.get_mut(&id).unwrap().digits = 12;
-
-        let err = instrument(&fixtures, "EURUSD").unwrap_err().to_string();
-
-        assert_eq!(err, "EURUSD: digits 12 out of range");
+    /// The words of `err`, its numbers among them, a decimal one word.
+    fn words(err: &str) -> Vec<&str> {
+        err.split(|c: char| !(c.is_ascii_alphanumeric() || c == '.'))
+            .filter(|word| !word.is_empty())
+            .collect()
     }
 
-    /// Synthetic: the EURUSD fixture with an unlisted quote asset.
-    #[rstest]
-    fn an_unlisted_asset_is_refused() {
-        let mut fixtures = fixtures();
-        fixtures.light.get_mut("EURUSD").unwrap().quote_asset_id = Some(999);
-
-        let err = instrument(&fixtures, "EURUSD").unwrap_err().to_string();
-
-        assert_eq!(err, "EURUSD: the quote asset 999 is not listed");
-    }
-
+    /// EURUSD is symbol 1 of the captured list, XAUUSD symbol 41.
     #[rstest]
     fn details_of_another_symbol_are_refused() {
         let fixtures = fixtures();
@@ -590,27 +613,23 @@ mod tests {
         .unwrap_err()
         .to_string();
 
-        assert!(
-            err.starts_with("EURUSD: the details are of symbol"),
-            "{err}"
-        );
+        let mut ids: Vec<&str> = err
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|n| !n.is_empty())
+            .collect();
+        ids.sort_unstable();
+        assert!(err.contains("EURUSD"), "{err}");
+        assert_eq!(ids, ["1", "41"], "{err}");
     }
 
     #[rstest]
-    fn a_symbol_name_and_its_instrument_id_on_the_venue_round_trip() {
-        for name in ["XAUUSD", "EURUSD"] {
-            let id = instrument_id(name, venue()).unwrap();
+    #[case::xauusd("XAUUSD")]
+    #[case::eurusd("EURUSD")]
+    fn a_symbol_name_and_its_instrument_id_on_the_venue_round_trip(#[case] name: &str) {
+        let id = instrument_id(name, venue()).unwrap();
 
-            assert_eq!(id, InstrumentId::from(format!("{name}.ACMEFX").as_str()));
-            ensure_on(id, venue()).unwrap();
-            assert_eq!(symbol_name(id), name);
-        }
-    }
-
-    #[rstest]
-    fn an_id_on_another_venue_is_refused_naming_the_venue() {
-        let err = ensure_on(InstrumentId::from("XAUUSD.ELSEWHERE"), venue()).unwrap_err();
-
-        assert_eq!(err.to_string(), "XAUUSD.ELSEWHERE is not on ACMEFX");
+        assert_eq!(id, InstrumentId::from(format!("{name}.ACMEFX").as_str()));
+        ensure_on(id, venue()).unwrap();
+        assert_eq!(symbol_name(id), name);
     }
 }

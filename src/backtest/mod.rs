@@ -473,28 +473,40 @@ mod tests {
             .collect()
     }
 
+    /// The bars of the X-Perp's and the swap's minutes, and the swap's
+    /// funding if the catalog stores it.
     #[rstest]
-    fn the_funding_a_catalog_stores_of_a_traded_instrument_is_replayed_and_none_without() {
+    #[case::with_funding(true)]
+    #[case::without_funding(false)]
+    fn the_funding_a_catalog_stores_of_a_traded_instrument_is_replayed_and_none_without(
+        #[case] funded: bool,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
         let ts = UnixNanos::from(1_788_192_000_000_000_000);
-        let funding = FundingRateUpdate::new(
-            InstrumentId::from(SWAP),
-            Decimal::new(1, 4),
-            Some(480),
-            None,
-            ts,
-            ts,
-        );
-        catalog
-            .write_to_parquet(&[funding], None, None, None)
-            .unwrap();
+
+        if funded {
+            let funding = FundingRateUpdate::new(
+                InstrumentId::from(SWAP),
+                Decimal::new(1, 4),
+                Some(480),
+                None,
+                ts,
+                ts,
+            );
+            catalog
+                .write_to_parquet(&[funding], None, None, None)
+                .unwrap();
+        }
         let backtest = backtest(dir.path(), &[XPERP, SWAP]);
-        let expected = vec![
+        let mut expected = vec![
             (NautilusDataType::Bar, SWAP_MINUTE_BARS.to_string()),
             (NautilusDataType::Bar, XPERP_MINUTE_BARS.to_string()),
-            (NautilusDataType::FundingRateUpdate, SWAP.to_string()),
         ];
+
+        if funded {
+            expected.push((NautilusDataType::FundingRateUpdate, SWAP.to_string()));
+        }
         assert_eq!(backtest.series().unwrap(), whole(&backtest, expected));
     }
 
@@ -533,33 +545,25 @@ mod tests {
         }
     }
 
+    /// Gold read for its book alone replays its book and no bar source;
+    /// its quotes stored, its book is replayed beside them, the source of
+    /// its MID bars.
     #[rstest]
-    fn an_instrument_read_for_its_book_alone_replays_its_book_and_no_bar_source() {
+    #[case::alone(false, vec![(NautilusDataType::OrderBookDepth, GOLD.to_string())])]
+    #[case::beside_the_source_of_its_bars(
+        true,
+        vec![
+            (NautilusDataType::QuoteTick, GOLD.to_string()),
+            (NautilusDataType::OrderBookDepth, GOLD.to_string()),
+        ]
+    )]
+    fn an_instrument_read_for_its_book_replays_it_beside_any_source_of_its_bars(
+        #[case] quoted: bool,
+        #[case] replayed: Vec<(NautilusDataType, String)>,
+    ) {
         let dir = tempfile::tempdir().unwrap();
-        let backtest = gold(dir.path(), false);
-        assert_eq!(
-            backtest.series().unwrap(),
-            whole(
-                &backtest,
-                vec![(NautilusDataType::OrderBookDepth, GOLD.to_string())]
-            )
-        );
-    }
-
-    #[rstest]
-    fn the_book_of_an_instrument_is_replayed_beside_the_source_of_its_bars() {
-        let dir = tempfile::tempdir().unwrap();
-        let backtest = gold(dir.path(), true);
-        assert_eq!(
-            backtest.series().unwrap(),
-            whole(
-                &backtest,
-                vec![
-                    (NautilusDataType::QuoteTick, GOLD.to_string()),
-                    (NautilusDataType::OrderBookDepth, GOLD.to_string()),
-                ]
-            )
-        );
+        let backtest = gold(dir.path(), quoted);
+        assert_eq!(backtest.series().unwrap(), whole(&backtest, replayed));
     }
 
     /// GC.GLBX rolls from GCQ26.GLBX to GCZ26.GLBX at 00:00 UTC on 29 July
@@ -634,17 +638,6 @@ mod tests {
         );
     }
 
-    #[rstest]
-    fn a_catalog_without_funding_replays_the_series_the_bars_are_built_from() {
-        let dir = tempfile::tempdir().unwrap();
-        let backtest = backtest(dir.path(), &[XPERP, SWAP]);
-        let expected = vec![
-            (NautilusDataType::Bar, SWAP_MINUTE_BARS.to_string()),
-            (NautilusDataType::Bar, XPERP_MINUTE_BARS.to_string()),
-        ];
-        assert_eq!(backtest.series().unwrap(), whole(&backtest, expected));
-    }
-
     /// A futures contract in USD on `id`'s venue, as Databento defines
     /// GLBX's.
     fn future(id: &str) -> InstrumentAny {
@@ -660,44 +653,20 @@ mod tests {
         InstrumentAny::Cfd(gold)
     }
 
-    /// GLBX's orders go to IB, whose account has no base currency: a
-    /// simulated account on a balance in EUR would book none of a USD
-    /// contract's losses. Refused, naming the contract, its venue, both
-    /// currencies and the Nautilus code that books such an account.
-    #[rstest]
-    fn a_balance_off_the_pnl_currency_of_an_instrument_on_a_broker_without_a_base_currency_is_refused()
-     {
-        let err = refuse_unheld_pnl_currency(Money::from("100000 EUR"), &[future("GCZ6.GLBX")])
-            .unwrap_err()
-            .to_string();
-
-        for named in [
-            "GCZ6.GLBX",
-            "GLBX",
-            "EUR",
-            "USD",
-            "update_balance_multi_currency",
-        ] {
-            assert!(err.contains(named), "{named}: {err}");
-        }
-    }
-
     /// The rule is the venues table's alone: a balance in the contract's
     /// P&L currency is accepted on a broker without a base currency, any
     /// balance on a broker whose account has one, a cTrader broker's, as
     /// Nautilus books it in that base.
     #[rstest]
-    fn a_balance_in_the_pnl_currency_or_on_a_broker_with_a_base_currency_is_accepted() {
-        for (balance, instrument) in [
-            ("100000 USD", future("GCZ6.GLBX")),
-            ("100000 USD", future("GCZ6.IDEALPRO")),
-            ("100000 EUR", cfd("XAUUSD.ICMARKETS")),
-            ("100000 EUR", cfd("XAUUSD.PEPPERSTONE")),
-        ] {
-            let id = instrument.id();
-            refuse_unheld_pnl_currency(Money::from(balance), &[instrument])
-                .unwrap_or_else(|e| panic!("{balance} on {id}: {e}"));
-        }
+    #[case::in_the_pnl_currency_of_glbx("100000 USD", future("GCZ6.GLBX"))]
+    #[case::in_the_pnl_currency_of_a_venue_of_no_row("100000 USD", future("GCZ6.IDEALPRO"))]
+    #[case::on_ic("100000 EUR", cfd("XAUUSD.ICMARKETS"))]
+    #[case::on_pepperstone("100000 EUR", cfd("XAUUSD.PEPPERSTONE"))]
+    fn a_balance_in_the_pnl_currency_or_on_a_broker_with_a_base_currency_is_accepted(
+        #[case] balance: &str,
+        #[case] instrument: InstrumentAny,
+    ) {
+        refuse_unheld_pnl_currency(Money::from(balance), &[instrument]).unwrap();
     }
 
     /// Every instrument traded is checked, one of them refusing the

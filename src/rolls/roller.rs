@@ -404,41 +404,55 @@ mod tests {
     /// resolves GLBX contracts, not of LSE's, which streams GLBX's data and
     /// publishes no definitions.
     #[rstest]
-    fn a_live_roller_rolls_twice_requesting_each_post_contract_before_its_roll() {
-        let (sent, rolls) = run(
-            &Roller::live(vec![id("GC.GLBX")]),
-            "2026-08-10T14:30:00Z",
-            "2027-02-01T00:00:00Z",
-        );
+    #[case::live_requesting_each_post_contract_before_its_roll(
+        Roller::live(vec![id("GC.GLBX")]),
+        gc_rolls(),
+        gc_post_contracts()
+    )]
+    #[case::replayed_requesting_nothing(Roller::replayed(vec![id("GC.GLBX")]), gc_rolls(), vec![])]
+    #[case::live_on_a_custom_series_root_requesting_no_contract(
+        Roller::live(vec![]).custom_roots([id("GC.GLBX")]),
+        gc_rolls(),
+        vec![]
+    )]
+    #[case::live_on_a_root_read_for_its_ticks_and_its_custom_series_once(
+        Roller::live(vec![id("GC.GLBX")]).custom_roots([id("GC.GLBX")]),
+        gc_rolls(),
+        gc_post_contracts()
+    )]
+    #[case::live_on_a_plain_instrument_never(Roller::live(vec![id("GCZ26.GLBX")]), vec![], vec![])]
+    fn a_roller_rolls_a_root_and_requests_the_post_contracts_its_ticks_need(
+        #[case] roller: Roller,
+        #[case] expected_rolls: Vec<(InstrumentId, InstrumentId)>,
+        #[case] expected_sent: Vec<Sent>,
+    ) {
+        let (sent, rolls) = run(&roller, "2026-08-10T14:30:00Z", "2027-02-01T00:00:00Z");
         assert_eq!(
             rolls
                 .iter()
                 .map(|roll| (roll.pre, roll.post))
                 .collect::<Vec<_>>(),
-            [
-                (id("GCZ26.GLBX"), id("GCG27.GLBX")),
-                (id("GCG27.GLBX"), id("GCJ27.GLBX"))
-            ]
+            expected_rolls
         );
-        assert_eq!(
-            sent,
-            [
-                Sent::Request(id("GCG27.GLBX"), true, Some(ClientId::from("IB"))),
-                Sent::Request(id("GCJ27.GLBX"), true, Some(ClientId::from("IB"))),
-                Sent::Request(id("GCM27.GLBX"), true, Some(ClientId::from("IB"))),
-            ]
-        );
+        assert_eq!(sent, expected_sent);
     }
 
-    #[rstest]
-    fn a_replayed_roller_rolls_twice_requesting_nothing() {
-        let (sent, rolls) = run(
-            &Roller::replayed(vec![id("GC.GLBX")]),
-            "2026-08-10T14:30:00Z",
-            "2027-02-01T00:00:00Z",
-        );
-        assert_eq!(rolls.len(), 2);
-        assert_eq!(sent, []);
+    /// GC's two rolls between 2026-08-10 and 2027-02-01.
+    fn gc_rolls() -> Vec<(InstrumentId, InstrumentId)> {
+        vec![
+            (id("GCZ26.GLBX"), id("GCG27.GLBX")),
+            (id("GCG27.GLBX"), id("GCJ27.GLBX")),
+        ]
+    }
+
+    /// The requests, of IB's client and past the catalog, of the post
+    /// contracts of GC's two rolls and of the roll after them.
+    fn gc_post_contracts() -> Vec<Sent> {
+        vec![
+            Sent::Request(id("GCG27.GLBX"), true, Some(ClientId::from("IB"))),
+            Sent::Request(id("GCJ27.GLBX"), true, Some(ClientId::from("IB"))),
+            Sent::Request(id("GCM27.GLBX"), true, Some(ClientId::from("IB"))),
+        ]
     }
 
     /// A live start a minute before GC rolls from GCZ26 into GCG27, at
@@ -469,52 +483,5 @@ mod tests {
             .collect();
 
         assert_eq!(rolls, [(id("GCZ26.GLBX"), id("GCG27.GLBX"))]);
-    }
-
-    /// GC as the root of a custom series alone rolls as a root read for its
-    /// ticks does, live too, but its contracts are asked of no client: a
-    /// custom series brings no instrument.
-    #[rstest]
-    fn a_live_roller_rolls_a_custom_series_root_requesting_no_contract() {
-        let (sent, rolls) = run(
-            &Roller::live(vec![]).custom_roots([id("GC.GLBX")]),
-            "2026-08-10T14:30:00Z",
-            "2027-02-01T00:00:00Z",
-        );
-        assert_eq!(
-            rolls
-                .iter()
-                .map(|roll| (roll.pre, roll.post))
-                .collect::<Vec<_>>(),
-            [
-                (id("GCZ26.GLBX"), id("GCG27.GLBX")),
-                (id("GCG27.GLBX"), id("GCJ27.GLBX"))
-            ]
-        );
-        assert_eq!(sent, []);
-    }
-
-    /// GC read for its ticks and as a custom series' root rolls once a
-    /// roll, its contracts loaded as its ticks need.
-    #[rstest]
-    fn a_root_read_for_its_ticks_and_its_custom_series_rolls_once_loading_its_contracts() {
-        let (sent, rolls) = run(
-            &Roller::live(vec![id("GC.GLBX")]).custom_roots([id("GC.GLBX")]),
-            "2026-08-10T14:30:00Z",
-            "2027-02-01T00:00:00Z",
-        );
-        assert_eq!(rolls.len(), 2);
-        assert_eq!(sent.len(), 3, "{sent:?}");
-    }
-
-    #[rstest]
-    fn a_live_roller_requests_nothing_for_a_plain_instrument() {
-        let (sent, rolls) = run(
-            &Roller::live(vec![id("GCZ26.GLBX")]),
-            "2026-08-10T14:30:00Z",
-            "2027-02-01T00:00:00Z",
-        );
-        assert!(rolls.is_empty());
-        assert_eq!(sent, []);
     }
 }

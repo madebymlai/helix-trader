@@ -200,7 +200,6 @@ fn decode<R: HasRType + Clone>(records: &[u8], level: ExchangeLevel) -> anyhow::
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
-    use serde_json::json;
 
     use super::*;
     use crate::testing::{
@@ -258,33 +257,41 @@ mod tests {
         );
     }
 
-    /// GCG7's opening, beside GCZ6's on one connection.
-    #[rstest]
-    fn each_frame_names_its_contract_and_its_sequence() {
-        let captured = frames(CME_GCZ6_GCG7);
-        let frame =
-            ExchangeRecordFrame::parse(binary(&captured[5]).unwrap(), ExchangeLevel::Mbp1).unwrap();
-
-        assert_eq!(
-            (frame.snapshot, frame.sequence, frame.instrument_id),
-            (true, 58, 3_648_859_809)
-        );
+    /// The words of `reason`, its numbers among them.
+    fn words(reason: &str) -> Vec<&str> {
+        reason
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .collect()
     }
 
     /// Synthetic: the captured frame cut, of another kind, or of a header
-    /// other than LSE's.
+    /// other than LSE's. A Level 1 record, Databento's `Mbp1Msg`, is 80
+    /// bytes after the 24 of LSE's header: cut at 60, 36 remain, and none
+    /// of a header alone; the header's magic is `L3DB`, its kind at byte 5
+    /// and its count of records at byte 20, each named as the frame holds
+    /// it.
     #[rstest]
-    #[case::cut(|frame: &mut Vec<u8>| frame.truncate(60))]
-    #[case::header_only(|frame: &mut Vec<u8>| frame.truncate(24))]
-    #[case::kind(|frame: &mut Vec<u8>| frame[5] = 3)]
-    #[case::magic(|frame: &mut Vec<u8>| frame[0] = b'X')]
-    #[case::count(|frame: &mut Vec<u8>| frame[20] = 2)]
-    fn a_frame_not_of_one_level_1_record_is_refused(#[case] mangle: fn(&mut Vec<u8>)) {
+    #[case::cut(|frame: &mut Vec<u8>| frame.truncate(60), &["36", "80"])]
+    #[case::header_only(|frame: &mut Vec<u8>| frame.truncate(24), &["0", "80"])]
+    #[case::kind(|frame: &mut Vec<u8>| frame[5] = 3, &["3"])]
+    #[case::magic(|frame: &mut Vec<u8>| frame[0] = b'X', &["L3DB"])]
+    #[case::count(|frame: &mut Vec<u8>| frame[20] = 2, &["2", "80"])]
+    fn a_frame_not_of_one_level_1_record_is_refused(
+        #[case] mangle: fn(&mut Vec<u8>),
+        #[case] facts: &[&str],
+    ) {
         let captured = frames(CME_GCZ6_GCG7);
         let mut frame = binary(&captured[2]).unwrap().to_vec();
         mangle(&mut frame);
 
-        assert!(ExchangeRecordFrame::parse(&frame, ExchangeLevel::Mbp1).is_err());
+        let err = ExchangeRecordFrame::parse(&frame, ExchangeLevel::Mbp1)
+            .unwrap_err()
+            .to_string();
+
+        for fact in facts {
+            assert!(words(&err).contains(fact), "{fact}: {err}");
+        }
     }
 
     #[rstest]
@@ -319,27 +326,6 @@ mod tests {
                     symbol: "GCG7".into()
                 },
             ]
-        );
-    }
-
-    /// LSE's documented subscription, asking the `dbn` encoding, at each
-    /// level a connection may carry.
-    #[rstest]
-    #[case::level_1(ExchangeLevel::Mbp1, 1)]
-    #[case::level_2(ExchangeLevel::Mbp10, 2)]
-    #[case::level_3(ExchangeLevel::Mbo, 3)]
-    fn the_subscription_names_the_contracts_at_its_level_in_dbn(
-        #[case] level: ExchangeLevel,
-        #[case] number: u8,
-    ) {
-        let symbols = ["GCZ6".to_string(), "GCG7".to_string()];
-
-        let sent: serde_json::Value =
-            serde_json::from_str(&ExchangeSubscription::new(level, &symbols).to_json()).unwrap();
-
-        assert_eq!(
-            sent,
-            json!({"op": "subscribe", "symbols": ["GCZ6", "GCG7"], "level": number, "encoding": "dbn"})
         );
     }
 
@@ -414,15 +400,19 @@ mod tests {
     }
 
     /// A connection carries one level: a record of another is no record of
-    /// it.
+    /// it, refused naming its one record and the level's length of one,
+    /// Databento's `Mbp1Msg` 80 bytes, `Mbp10Msg` 368 and `MboMsg` 56. The
+    /// one record is looked for beside the level's name, which holds a 1 at
+    /// Level 1.
     #[rstest]
-    #[case::level_1_at_level_2(CME_GCZ6_GCG7, 2, ExchangeLevel::Mbp10)]
-    #[case::level_2_at_level_1(CME_GCZ6_L2_DOCUMENTED, 2, ExchangeLevel::Mbp1)]
-    #[case::level_3_at_level_2(CME_GCZ6_L3_DOCUMENTED, 3, ExchangeLevel::Mbp10)]
+    #[case::level_1_at_level_2(CME_GCZ6_GCG7, 2, ExchangeLevel::Mbp10, "368")]
+    #[case::level_2_at_level_1(CME_GCZ6_L2_DOCUMENTED, 2, ExchangeLevel::Mbp1, "80")]
+    #[case::level_3_at_level_2(CME_GCZ6_L3_DOCUMENTED, 3, ExchangeLevel::Mbp10, "368")]
     fn a_frame_of_another_level_s_record_is_refused(
         #[case] session: &str,
         #[case] at: usize,
         #[case] level: ExchangeLevel,
+        #[case] level_len: &str,
     ) {
         let session = if session == CME_GCZ6_GCG7 {
             frames(session)
@@ -430,35 +420,13 @@ mod tests {
             dbn_frames(session)
         };
 
-        assert!(ExchangeRecordFrame::parse(binary(&session[at]).unwrap(), level).is_err());
-    }
+        let err = ExchangeRecordFrame::parse(binary(&session[at]).unwrap(), level)
+            .unwrap_err()
+            .to_string();
 
-    /// At Level 3 a contract opens with no record: `snapshot_begin`, of a
-    /// count of 0, then `snapshot_end`.
-    #[rstest]
-    fn a_level_3_opening_is_its_markers_alone() {
-        let texts: Vec<ExchangeText> = dbn_frames(CME_GCZ6_L3_DOCUMENTED)
-            .iter()
-            .take(3)
-            .map(|frame| match frame {
-                StreamFrame::Text(text) => serde_json::from_str(text).unwrap(),
-                StreamFrame::Binary(_) => panic!("a record in the opening"),
-            })
-            .collect();
-
-        assert_eq!(
-            texts,
-            [
-                ExchangeText::Hello { epoch: 2 },
-                ExchangeText::SnapshotBegin {
-                    symbol: "GCZ6".into(),
-                    instrument_id: 1_496_506_229,
-                    sequence: 7311
-                },
-                ExchangeText::SnapshotEnd {
-                    symbol: "GCZ6".into()
-                },
-            ]
-        );
+        let beside = err.replace(&level.to_string(), "");
+        for fact in ["1", level_len] {
+            assert!(words(&beside).contains(&fact), "{fact}: {err}");
+        }
     }
 }

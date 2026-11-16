@@ -544,33 +544,6 @@ mod tests {
         sent(&commands)
     }
 
-    /// GC rolls into GCG27 at 00:00 UTC on 2026-11-26 and into GCJ27 on
-    /// 2027-01-27, two business days before the last business day of the
-    /// month before delivery (`rolls/calendar.toml`): the root's trades are
-    /// subscribed on GCZ26, standing for it on 2026-08-10, then moved at
-    /// each roll.
-    #[rstest]
-    fn a_roots_series_are_subscribed_on_its_front_contract_and_moved_at_each_roll() {
-        use NautilusDataType as D;
-
-        let sent = rolled(
-            ticks(&[(D::TradeTick, "GC.GLBX")]),
-            "2026-08-10T14:30:00Z",
-            "2027-02-01T00:00:00Z",
-        );
-
-        assert_eq!(
-            sent,
-            [
-                Sent::Subscribe(D::TradeTick, id("GCZ26.GLBX")),
-                Sent::Unsubscribe(D::TradeTick, id("GCZ26.GLBX")),
-                Sent::Subscribe(D::TradeTick, id("GCG27.GLBX")),
-                Sent::Unsubscribe(D::TradeTick, id("GCG27.GLBX")),
-                Sent::Subscribe(D::TradeTick, id("GCJ27.GLBX")),
-            ]
-        );
-    }
-
     /// A plain instrument stands for itself: subscribed once, and no roll
     /// of GC moves it.
     #[rstest]
@@ -807,44 +780,44 @@ mod tests {
         (started, counts(), !commands.get_messages().is_empty())
     }
 
-    /// A custom series on the root GC is subscribed on GCZ26's data type,
-    /// the contract standing for GC on 2026-08-10, not the root's, and
-    /// moved to GCG27's at the roll, naming no client either time.
+    /// The handlers subscribed to the imbalances of each identifier at
+    /// the start and after GC's roll into GCG27, naming no client either
+    /// time:
+    /// - On the root GC, subscribed on GCZ26's data type, the contract
+    ///   standing for GC on 2026-08-10, not the root's, and moved to
+    ///   GCG27's at the roll.
+    /// - GCZ26's own, listed beside the root's, still read on GCZ26 at the
+    ///   roll: they stay subscribed, the root's moving on.
+    /// - A contract's and one of no instrument stand for themselves:
+    ///   subscribed at the start, and no roll of GC moves them.
     #[rstest]
-    fn a_roots_custom_series_is_subscribed_on_its_front_contract_and_moved_at_its_roll() {
-        let (started, rolled, sent) = imbalances_across_the_roll(
-            vec![imbalances("GC.GLBX")],
-            &["GC.GLBX", "GCZ26.GLBX", "GCG27.GLBX"],
-        );
+    #[case::of_a_root_moved_at_its_roll(
+        vec![imbalances("GC.GLBX")],
+        &["GC.GLBX", "GCZ26.GLBX", "GCG27.GLBX"],
+        vec![0, 1, 0],
+        vec![0, 0, 1]
+    )]
+    #[case::kept_while_another_reads_it_on_the_pre_contract(
+        vec![imbalances("GC.GLBX"), imbalances("GCZ26.GLBX")],
+        &["GCZ26.GLBX", "GCG27.GLBX"],
+        vec![1, 0],
+        vec![1, 1]
+    )]
+    #[case::of_no_root_never_moved(
+        vec![imbalances("GCZ26.GLBX"), imbalances("US10Y")],
+        &["GCZ26.GLBX", "US10Y", "GCG27.GLBX"],
+        vec![1, 1, 0],
+        vec![1, 1, 0]
+    )]
+    fn a_custom_series_is_subscribed_on_the_contract_standing_for_its_root_and_moved_at_its_roll(
+        #[case] custom: Vec<CustomSeries>,
+        #[case] identifiers: &[&str],
+        #[case] started: Vec<usize>,
+        #[case] rolled: Vec<usize>,
+    ) {
+        let subscribed = imbalances_across_the_roll(custom, identifiers);
 
-        assert_eq!(
-            (started, rolled, sent),
-            (vec![0, 1, 0], vec![0, 0, 1], false)
-        );
-    }
-
-    /// GCZ26's own imbalances, listed beside the root's, are still read
-    /// on GCZ26 at the roll: they stay subscribed, the root's moving on.
-    #[rstest]
-    fn a_roll_keeps_a_custom_series_another_still_reads_on_the_pre_contract() {
-        let (started, rolled, _) = imbalances_across_the_roll(
-            vec![imbalances("GC.GLBX"), imbalances("GCZ26.GLBX")],
-            &["GCZ26.GLBX", "GCG27.GLBX"],
-        );
-
-        assert_eq!((started, rolled), (vec![1, 0], vec![1, 1]));
-    }
-
-    /// A contract's custom series and one of no instrument stand for
-    /// themselves: subscribed at the start, and no roll of GC moves them.
-    #[rstest]
-    fn custom_series_of_no_root_are_never_moved() {
-        let (started, rolled, _) = imbalances_across_the_roll(
-            vec![imbalances("GCZ26.GLBX"), imbalances("US10Y")],
-            &["GCZ26.GLBX", "US10Y", "GCG27.GLBX"],
-        );
-
-        assert_eq!((started, rolled), (vec![1, 1, 0], vec![1, 1, 0]));
+        assert_eq!(subscribed, (started, rolled, false));
     }
 
     /// The `start_ns` param of each subscription of `commands`, bars and
@@ -983,43 +956,7 @@ mod tests {
     /// (L2_MBP) and its depth five levels a side. Deltas of the whole book
     /// each client streams, no depth asked; depth snapshots of price
     /// levels.
-    #[rstest]
-    fn each_book_is_subscribed_in_its_venue_s_format() {
-        use NautilusDataType as D;
-        let swap = "BTC-USDT-SWAP.OKX";
-        let subscriptions = Subscriptions::new(
-            vec![],
-            ticks(&[
-                (D::OrderBookDelta, "GCZ26.GLBX"),
-                (D::OrderBookDepth, "GCZ26.GLBX"),
-                (D::OrderBookDelta, "ESZ26.CME"),
-                (D::OrderBookDelta, swap),
-                (D::OrderBookDepth, swap),
-            ]),
-            vec![],
-        );
-        let (mut probe, _, commands) = registered(at("2026-08-10T14:30:00Z"));
-
-        subscriptions.start(&mut probe, at("2026-08-10T14:30:00Z"));
-
-        let levels = NonZeroUsize::new;
-        assert_eq!(
-            books_subscribed(&commands),
-            [
-                (id("GCZ26.GLBX"), D::OrderBookDelta, BookType::L3_MBO, None),
-                (
-                    id("GCZ26.GLBX"),
-                    D::OrderBookDepth,
-                    BookType::L2_MBP,
-                    levels(10)
-                ),
-                (id("ESZ26.CME"), D::OrderBookDelta, BookType::L2_MBP, None),
-                (id(swap), D::OrderBookDelta, BookType::L2_MBP, None),
-                (id(swap), D::OrderBookDepth, BookType::L2_MBP, levels(5)),
-            ]
-        );
-    }
-
+    ///
     /// A book its venue's live data streams none of, a cTrader broker's
     /// deltas, its venue having no book, and an IB instrument's depth,
     /// IB's having none: a live start refuses it first
@@ -1027,31 +964,52 @@ mod tests {
     /// neither the book type nor the levels, and it replays as declared.
     /// Deltas as L2_MBP, depth with no levels.
     #[rstest]
-    fn a_book_its_venue_streams_none_of_is_subscribed_as_l2_mbp_with_no_levels() {
-        use NautilusDataType as D;
-        let subscriptions = Subscriptions::new(
-            vec![],
-            ticks(&[
-                (D::OrderBookDelta, "XAUUSD.ICMARKETS"),
-                (D::OrderBookDepth, "SXR8.IBIS"),
-            ]),
-            vec![],
-        );
+    #[case::streamed_by_its_venue(
+        &[
+            (NautilusDataType::OrderBookDelta, "GCZ26.GLBX"),
+            (NautilusDataType::OrderBookDepth, "GCZ26.GLBX"),
+            (NautilusDataType::OrderBookDelta, "ESZ26.CME"),
+            (NautilusDataType::OrderBookDelta, "BTC-USDT-SWAP.OKX"),
+            (NautilusDataType::OrderBookDepth, "BTC-USDT-SWAP.OKX"),
+        ],
+        &[
+            ("GCZ26.GLBX", NautilusDataType::OrderBookDelta, BookType::L3_MBO, None),
+            ("GCZ26.GLBX", NautilusDataType::OrderBookDepth, BookType::L2_MBP, Some(10)),
+            ("ESZ26.CME", NautilusDataType::OrderBookDelta, BookType::L2_MBP, None),
+            ("BTC-USDT-SWAP.OKX", NautilusDataType::OrderBookDelta, BookType::L2_MBP, None),
+            ("BTC-USDT-SWAP.OKX", NautilusDataType::OrderBookDepth, BookType::L2_MBP, Some(5)),
+        ],
+    )]
+    #[case::streamed_by_none(
+        &[
+            (NautilusDataType::OrderBookDelta, "XAUUSD.ICMARKETS"),
+            (NautilusDataType::OrderBookDepth, "SXR8.IBIS"),
+        ],
+        &[
+            ("XAUUSD.ICMARKETS", NautilusDataType::OrderBookDelta, BookType::L2_MBP, None),
+            ("SXR8.IBIS", NautilusDataType::OrderBookDepth, BookType::L2_MBP, None),
+        ],
+    )]
+    fn each_book_is_subscribed_in_its_venue_s_format_or_as_l2_mbp_with_no_levels(
+        #[case] books: &[(NautilusDataType, &str)],
+        #[case] expected: &[(&str, NautilusDataType, BookType, Option<usize>)],
+    ) {
+        let subscriptions = Subscriptions::new(vec![], ticks(books), vec![]);
         let (mut probe, _, commands) = registered(at("2026-08-10T14:30:00Z"));
 
         subscriptions.start(&mut probe, at("2026-08-10T14:30:00Z"));
 
-        assert_eq!(
-            books_subscribed(&commands),
-            [
+        let expected: Vec<_> = expected
+            .iter()
+            .map(|(instrument_id, data, book_type, levels)| {
                 (
-                    id("XAUUSD.ICMARKETS"),
-                    D::OrderBookDelta,
-                    BookType::L2_MBP,
-                    None
-                ),
-                (id("SXR8.IBIS"), D::OrderBookDepth, BookType::L2_MBP, None),
-            ]
-        );
+                    id(instrument_id),
+                    data.clone(),
+                    *book_type,
+                    levels.and_then(NonZeroUsize::new),
+                )
+            })
+            .collect();
+        assert_eq!(books_subscribed(&commands), expected);
     }
 }

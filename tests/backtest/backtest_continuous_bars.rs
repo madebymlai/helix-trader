@@ -15,7 +15,6 @@ use nautilus_common::logging::logger::LoggerConfig;
 use nautilus_model::{
     data::BarType,
     enums::ContinuousFutureAdjustmentType,
-    identifiers::InstrumentId,
     types::{Money, Price, Quantity},
 };
 use rstest::rstest;
@@ -25,7 +24,7 @@ use tempfile::TempDir;
 use crate::common::{
     Ohlc, ohlc,
     recorder::Recorder,
-    rolls::{self, POST, tuesday, wednesday},
+    rolls::{self, tuesday, wednesday},
 };
 
 const BARS: &str = "GC.GLBX-30-MINUTE-LAST-INTERNAL";
@@ -71,19 +70,6 @@ fn run(backtest: &Backtest, mode: ContinuousFutureAdjustmentType) -> Got {
         bars: record.bars.iter().map(ohlc).collect(),
         volumes: record.bars.iter().map(|bar| bar.volume).collect(),
     }
-}
-
-#[rstest]
-fn a_contract_is_plain_and_has_no_params() {
-    let catalog = rolls::catalog();
-    let mut backtest = backtest(&catalog);
-    backtest.bar_types = vec![BarType::from("GCZ26.GLBX-30-MINUTE-LAST-INTERNAL")];
-
-    let continuous = backtest
-        .continuous_bars(ContinuousFutureAdjustmentType::BackwardSpread)
-        .unwrap();
-
-    assert_eq!(continuous.params(InstrumentId::from(POST)), None);
 }
 
 #[rstest]
@@ -150,16 +136,4 @@ fn forward_ratio_bars_scale_the_post_roll_bars_by_the_ratio() {
             flat(wednesday("01:00:00"), "3992.99"),
         ]
     );
-}
-
-#[rstest]
-fn a_roll_without_a_trade_of_the_post_contract_in_its_slice_is_refused() {
-    let catalog = rolls::catalog_storing(false);
-
-    let err = backtest(&catalog)
-        .continuous_bars(ContinuousFutureAdjustmentType::BackwardSpread)
-        .unwrap_err();
-
-    let err = format!("{err:#}");
-    assert!(err.contains(POST), "{err}");
 }

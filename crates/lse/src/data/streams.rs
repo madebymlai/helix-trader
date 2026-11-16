@@ -55,7 +55,7 @@ use crate::{
     config::LseDataClientConfig,
     http::{listing::CmeListings, parse::TradeIds},
     websocket::{
-        client::{KEEPALIVE_SECS, LseWebSocketClient, LseWsMessage},
+        client::{LseWebSocketClient, LseWsMessage},
         parse::{parse_quote, parse_trade},
     },
 };
@@ -242,8 +242,7 @@ impl LseStreams {
             .credential
             .as_ref()
             .context("an instrument streamed with no LSE key")?;
-        let client =
-            LseWebSocketClient::connect(socket, url, credential, KEEPALIVE_SECS, out_tx).await?;
+        let client = LseWebSocketClient::connect(socket, url, credential, out_tx).await?;
         let streamed: Vec<_> = self
             .streamed
             .iter()
@@ -798,26 +797,33 @@ mod tests {
 
     /// Each refused naming the series and saying what LSE streams instead.
     #[rstest]
-    #[case::a_contract_s_bars(Data::Bar, "GCZ26.GLBX-1-MINUTE-LAST-EXTERNAL", "INTERNAL")]
-    #[case::a_series_bars(Data::Bar, "GOLD-FUTURES.LSEDGE-1-MINUTE-LAST-EXTERNAL", "INTERNAL")]
-    #[case::a_series_trades(Data::TradeTick, "GOLD-FUTURES.LSEDGE", "quotes")]
-    #[case::an_option_s_quotes(Data::QuoteTick, "AAPL  261120C00355000.OPRA", "trades")]
-    #[case::a_series_book(Data::OrderBookDepth, "GOLD-FUTURES.LSEDGE", "GLBX")]
-    #[case::an_option_s_book(Data::OrderBookDelta, "AAPL  261120C00355000.OPRA", "GLBX")]
+    #[case::a_contract_s_bars(Data::Bar, "GCZ26.GLBX-1-MINUTE-LAST-EXTERNAL", &["INTERNAL"])]
+    #[case::a_series_bars(Data::Bar, "GOLD-FUTURES.LSEDGE-1-MINUTE-LAST-EXTERNAL", &["INTERNAL"])]
+    #[case::a_series_trades(Data::TradeTick, "GOLD-FUTURES.LSEDGE", &["quotes"])]
+    #[case::an_option_s_quotes(Data::QuoteTick, "AAPL  261120C00355000.OPRA", &["trades"])]
+    #[case::a_series_book(Data::OrderBookDepth, "GOLD-FUTURES.LSEDGE", &["GLBX"])]
+    #[case::an_option_s_book(Data::OrderBookDelta, "AAPL  261120C00355000.OPRA", &["GLBX"])]
     #[case::a_contract_s_mark_prices(
         Data::MarkPriceUpdate,
         "GCZ26.GLBX",
-        "quotes, trades, book depth and book deltas"
+        &["quotes", "trades", "book depth", "book deltas"]
     )]
-    #[case::another_venue(Data::QuoteTick, "SXR8.IBIS", "IBIS")]
+    #[case::another_venue(
+        Data::QuoteTick,
+        "SXR8.IBIS",
+        &["LSEDGE", "GLBX", "XNAS", "OPRA"]
+    )]
     fn a_series_lse_does_not_stream_is_refused_naming_it(
         #[case] data: Data,
         #[case] identifier: &str,
-        #[case] instead: &str,
+        #[case] instead: &[&str],
     ) {
         let err = streams(&series(data, identifier)).unwrap_err().to_string();
 
-        assert!(err.contains(identifier) && err.contains(instead), "{err}");
+        assert!(err.contains(identifier), "{err}");
+        for streamed in instead {
+            assert!(err.contains(streamed), "{streamed}: {err}");
+        }
     }
 
     /// LSE's rows are history alone: the client subscribes to none.

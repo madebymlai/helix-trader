@@ -121,15 +121,6 @@ impl LseHttpClient {
         })
     }
 
-    /// The client, asking again as `retry` says, for a test that cannot
-    /// wait out the backoff.
-    #[cfg(feature = "test-support")]
-    #[must_use]
-    pub fn with_retry(mut self, retry: RetryConfig) -> Self {
-        self.retries = RetryManager::new(retry);
-        self
-    }
-
     /// The file of the export `query` selects, LSE's 200 beside its SHA-256,
     /// or `None` if LSE holds no row of it (see `LseRefusal::is_no_rows`).
     /// One download at a time: a second export waits for the first. A call

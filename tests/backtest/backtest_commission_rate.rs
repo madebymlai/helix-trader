@@ -1,5 +1,5 @@
 //! A commission rate on the EMA's time exit: the orders of the run without
-//! commission (backtest_warmup.rs), each fill charged the rate on its
+//! commission (backtest_ema_time_exit.rs), each fill charged the rate on its
 //! value, and the report's costs. One node per thread, so one run per
 //! test.
 

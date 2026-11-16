@@ -250,32 +250,44 @@ mod tests {
     use super::*;
 
     #[rstest]
-    fn a_value_in_r_reads_from_its_text_with_an_r_suffix() {
-        for (text, value) in [("0.5R", 0.5), ("0R", 0.0), ("-1e9R", -1e9), ("2R", 2.0)] {
-            assert_eq!(text.parse::<R>().unwrap(), R::new(value), "{text}");
-        }
+    #[case::half("0.5R", 0.5)]
+    #[case::nought("0R", 0.0)]
+    #[case::exponent("-1e9R", -1e9)]
+    #[case::whole("2R", 2.0)]
+    fn a_value_in_r_reads_from_its_text_with_an_r_suffix(#[case] text: &str, #[case] value: f64) {
+        assert_eq!(text.parse::<R>().unwrap(), R::new(value));
     }
 
     /// A number without its suffix is not taken for R, nor a suffix
-    /// without its number, nor an R that is not finite.
+    /// without its number, nor an R that is not finite; the refusal opens
+    /// with the text written, which the example it offers, `"0.5R"`, would
+    /// otherwise hold for `0.5`.
     #[rstest]
-    fn a_value_without_an_r_suffix_or_not_a_finite_number_is_refused() {
-        for text in [
-            "0.5", "0.5r", "0.5 R", "R", "halfR", "nanR", "infR", "-infR",
-        ] {
-            assert!(text.parse::<R>().is_err(), "{text}");
-        }
+    #[case::bare("0.5")]
+    #[case::lowercase("0.5r")]
+    #[case::spaced("0.5 R")]
+    #[case::suffix_alone("R")]
+    #[case::word("halfR")]
+    #[case::nan("nanR")]
+    #[case::infinity("infR")]
+    #[case::negative_infinity("-infR")]
+    fn a_value_without_an_r_suffix_or_not_a_finite_number_is_refused(#[case] text: &str) {
+        let err = text.parse::<R>().unwrap_err();
+
+        assert!(err.to_string().starts_with(&format!("{text} ")), "{err}");
     }
 
     /// Its text reads back to it, so a store keyed by its text is keyed
     /// by its value.
     #[rstest]
-    fn a_value_in_r_is_written_with_its_suffix() {
-        assert_eq!(R::new(0.5).to_string(), "0.5R");
-        assert_eq!(R::new(-1e9).to_string(), "-1000000000R");
-        for r in [R::new(0.5), R::new(-0.25), R::new(1e-7), R::new(3.0)] {
-            assert_eq!(r.to_string().parse::<R>().unwrap(), r);
-        }
+    #[case::half(R::new(0.5), "0.5R")]
+    #[case::negative(R::new(-0.25), "-0.25R")]
+    #[case::large(R::new(-1e9), "-1000000000R")]
+    #[case::small(R::new(1e-7), "0.0000001R")]
+    #[case::whole(R::new(3.0), "3R")]
+    fn a_value_in_r_is_written_with_its_suffix(#[case] r: R, #[case] text: &str) {
+        assert_eq!(r.to_string(), text);
+        assert_eq!(text.parse::<R>().unwrap(), r);
     }
 
     #[rstest]
@@ -286,21 +298,29 @@ mod tests {
 
     /// A prediction not finite is no value in R, rather than a panic.
     #[rstest]
-    fn a_finite_value_is_an_r_and_nan_or_an_infinity_none() {
-        assert_eq!(R::finite(0.25), Some(R::new(0.25)));
-        assert_eq!(R::finite(0.25).map(R::as_f64), Some(0.25));
-        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            assert_eq!(R::finite(value), None, "{value}");
-        }
+    #[case::finite(0.25, Some(0.25))]
+    #[case::nan(f64::NAN, None)]
+    #[case::infinity(f64::INFINITY, None)]
+    #[case::negative_infinity(f64::NEG_INFINITY, None)]
+    fn a_finite_value_is_an_r_and_nan_or_an_infinity_none(
+        #[case] value: f64,
+        #[case] r: Option<f64>,
+    ) {
+        assert_eq!(R::finite(value).map(R::as_f64), r);
     }
 
     #[rstest]
-    fn a_value_reaches_an_r_at_or_above_it_and_nan_does_not() {
-        let r = R::new(0.25);
-
-        assert!(r.reached_by(0.25) && r.reached_by(0.3));
-        assert!(!r.reached_by(0.2) && !r.reached_by(f64::NAN));
-        assert!(R::new(-0.5).reached_by(-0.5));
+    #[case::at(0.25, 0.25, true)]
+    #[case::above(0.25, 0.3, true)]
+    #[case::below(0.25, 0.2, false)]
+    #[case::nan(0.25, f64::NAN, false)]
+    #[case::at_a_negative(-0.5, -0.5, true)]
+    fn a_value_reaches_an_r_at_or_above_it_and_nan_does_not(
+        #[case] r: f64,
+        #[case] value: f64,
+        #[case] reached: bool,
+    ) {
+        assert_eq!(R::new(r).reached_by(value), reached);
     }
 
     /// The message of deserializing `deserializer` as an R.
@@ -315,16 +335,17 @@ mod tests {
         assert_eq!(R::deserialize(text).unwrap(), R::new(0.5));
     }
 
-    /// A bare number, an old margin in money say, is refused saying that
-    /// the value is in R, an integer as a float.
+    /// A bare number, an old margin in money say, is refused naming it and
+    /// showing the value written in R, an integer as a float.
     #[rstest]
-    fn a_bare_number_is_refused_saying_the_value_is_in_r() {
-        let float: F64Deserializer<Error> = 0.5.into_deserializer();
-        let integer: I64Deserializer<Error> = 1_i64.into_deserializer();
-
-        for err in [refusal(float), refusal(integer)] {
-            assert!(err.contains("in R") && err.contains("\"0.5R\""), "{err}");
-        }
+    #[case::float(refusal::<F64Deserializer<Error>>(0.5.into_deserializer()), "0.5")]
+    #[case::integer(refusal::<I64Deserializer<Error>>(1_i64.into_deserializer()), "1")]
+    fn a_bare_number_is_refused_saying_the_value_is_in_r(
+        #[case] err: String,
+        #[case] number: &str,
+    ) {
+        assert!(err.starts_with(&format!("{number} ")), "{err}");
+        assert!(err.contains("\"0.5R\""), "{err}");
     }
 
     fn risk(s: &str) -> Risk {
@@ -336,26 +357,50 @@ mod tests {
     }
 
     #[rstest]
-    fn a_risk_is_its_percentage_of_equity() {
-        assert_eq!(Stake::new(risk("0.5%")).fraction(), decimal("0.005"));
-        assert_eq!(Stake::new(risk("2%")).fraction(), decimal("0.02"));
+    #[case::half("0.5%", "0.005")]
+    #[case::whole("2%", "0.02")]
+    fn a_risk_is_its_percentage_of_equity(#[case] written: &str, #[case] fraction: &str) {
+        assert_eq!(Stake::new(risk(written)).fraction(), decimal(fraction));
+    }
+
+    /// The refusal quotes the text written.
+    #[rstest]
+    #[case::fraction("0.005")]
+    #[case::bare("0.5")]
+    #[case::sign_alone("%")]
+    #[case::spaced("0.5 %")]
+    #[case::word("half%")]
+    #[case::empty("")]
+    fn a_risk_not_written_as_a_percentage_is_refused(#[case] written: &str) {
+        let err = written.parse::<Risk>().unwrap_err();
+
+        assert!(err.contains(&format!("{written:?}")), "{err}");
+    }
+
+    /// A bare number could be a fraction or a percentage: it is refused
+    /// naming it and showing a risk written as a percentage.
+    #[rstest]
+    fn a_bare_number_is_refused_saying_a_risk_is_a_percentage() {
+        let float: F64Deserializer<Error> = 0.005.into_deserializer();
+
+        let err = Risk::deserialize(float).unwrap_err().to_string();
+
+        assert!(err.contains("0.005"), "{err}");
+        assert!(err.contains("\"0.5%\""), "{err}");
     }
 
     #[rstest]
-    fn a_risk_not_written_as_a_percentage_is_refused() {
-        for written in ["0.005", "0.5", "%", "0.5 %", "half%", ""] {
-            let err = written.parse::<Risk>().unwrap_err();
-            assert!(err.contains("percentage of equity"), "{written}: {err}");
-        }
-    }
-
-    #[rstest]
-    fn a_risk_is_proper_above_none_and_below_all_of_equity() {
-        assert!(risk("0.01%").is_proper());
-        assert!(risk("99.9%").is_proper());
-        for improper in ["0%", "-0.5%", "100%", "150%"] {
-            assert!(!risk(improper).is_proper(), "{improper}");
-        }
+    #[case::least("0.01%", true)]
+    #[case::most("99.9%", true)]
+    #[case::none("0%", false)]
+    #[case::negative("-0.5%", false)]
+    #[case::all("100%", false)]
+    #[case::more_than_all("150%", false)]
+    fn a_risk_is_proper_above_none_and_below_all_of_equity(
+        #[case] written: &str,
+        #[case] proper: bool,
+    ) {
+        assert_eq!(risk(written).is_proper(), proper);
     }
 
     #[rstest]
@@ -368,14 +413,16 @@ mod tests {
         assert_eq!(again.multiple(), decimal("3"));
     }
 
+    /// The refusal names the multiple.
     #[rstest]
-    fn a_stake_times_a_multiple_not_positive_is_refused() {
-        for multiple in ["0", "-1"] {
-            let err = Stake::new(risk("0.5%"))
-                .times(decimal(multiple))
-                .unwrap_err();
-            assert!(err.to_string().contains("positive"), "{multiple}: {err}");
-        }
+    #[case::nought("0")]
+    #[case::negative("-1")]
+    fn a_stake_times_a_multiple_not_positive_is_refused(#[case] multiple: &str) {
+        let err = Stake::new(risk("0.5%"))
+            .times(decimal(multiple))
+            .unwrap_err();
+
+        assert!(err.to_string().contains(multiple), "{err}");
     }
 
     /// A target's manifest holds its risk as the config writes it.

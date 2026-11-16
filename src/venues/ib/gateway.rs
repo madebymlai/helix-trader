@@ -129,18 +129,20 @@ mod tests {
     use super::*;
 
     #[rstest]
-    fn a_d_account_is_paper_and_any_other_live() {
-        let mode = |account: &str| account.parse::<IbAccount>().unwrap().trading_mode();
-        assert_eq!(mode("DU1234567"), TradingMode::Paper);
-        assert_eq!(mode("DF1234567"), TradingMode::Paper);
-        assert_eq!(mode("U1234567"), TradingMode::Live);
+    #[case::an_individual_paper_account("DU1234567", TradingMode::Paper)]
+    #[case::an_advisor_s_paper_account("DF1234567", TradingMode::Paper)]
+    #[case::a_live_account("U1234567", TradingMode::Live)]
+    fn a_d_account_is_paper_and_any_other_live(#[case] account: &str, #[case] mode: TradingMode) {
+        assert_eq!(account.parse::<IbAccount>().unwrap().trading_mode(), mode);
     }
 
     #[rstest]
-    fn rejects_a_malformed_account() {
-        for account in ["", "IB-DU1234567", "DU 123"] {
-            assert!(account.parse::<IbAccount>().is_err(), "{account:?}");
-        }
+    #[case::empty("")]
+    #[case::prefixed_with_the_client_name("IB-DU1234567")]
+    #[case::with_a_space("DU 123")]
+    fn rejects_a_malformed_account_naming_it(#[case] account: &str) {
+        let err = account.parse::<IbAccount>().unwrap_err().to_string();
+        assert!(err.contains(&format!("{account:?}")), "{err}");
     }
 
     /// The port is the adapter's, by trading mode (its own tests cover
