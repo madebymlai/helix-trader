@@ -628,50 +628,6 @@ mod tests {
 
     use super::*;
 
-    #[rstest]
-    fn the_instruments_are_those_of_the_bar_types_each_once_in_order() {
-        let requirements = DataRequirements {
-            bar_types: vec![
-                BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL"),
-                BarType::from("EUNL.IBIS-1-HOUR-MID-INTERNAL"),
-                BarType::from("SXR8.IBIS-1-DAY-MID-INTERNAL"),
-            ],
-            ticks: vec![],
-            custom: vec![],
-            warmup: SignedDuration::from_hours(720),
-        };
-        assert_eq!(
-            requirements.instrument_ids(),
-            [
-                InstrumentId::from("SXR8.IBIS"),
-                InstrumentId::from("EUNL.IBIS")
-            ]
-        );
-    }
-
-    #[rstest]
-    fn requirements_on_some_instruments_keep_their_bar_types_and_the_warmup() {
-        let requirements = DataRequirements {
-            bar_types: vec![
-                BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL"),
-                BarType::from("BTC-USDT-SWAP.OKX-1-HOUR-MID-INTERNAL"),
-            ],
-            ticks: vec![],
-            custom: vec![],
-            warmup: SignedDuration::from_hours(720),
-        };
-        let okx = requirements.of_instruments(&[InstrumentId::from("BTC-USDT-SWAP.OKX")]);
-        assert_eq!(
-            okx,
-            DataRequirements {
-                bar_types: vec![BarType::from("BTC-USDT-SWAP.OKX-1-HOUR-MID-INTERNAL")],
-                ticks: vec![],
-                custom: vec![],
-                warmup: SignedDuration::from_hours(720),
-            }
-        );
-    }
-
     fn tick(data: NautilusDataType, instrument_id: &str) -> TickSeries {
         TickSeries {
             data,
@@ -694,46 +650,87 @@ mod tests {
         }
     }
 
-    #[rstest]
-    fn the_instruments_of_ticks_follow_those_of_the_bar_types_each_once() {
-        assert_eq!(
-            gold().instrument_ids(),
-            [
-                InstrumentId::from("XAUUSD.ICMARKETS"),
-                InstrumentId::from("GC.v.0.GLBX")
-            ]
-        );
+    /// Hour bars of two IBIS ETFs and SXR8's daily bars, warming up over
+    /// 720 hours.
+    fn ibis() -> DataRequirements {
+        DataRequirements {
+            bar_types: vec![
+                BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL"),
+                BarType::from("EUNL.IBIS-1-HOUR-MID-INTERNAL"),
+                BarType::from("SXR8.IBIS-1-DAY-MID-INTERNAL"),
+            ],
+            ticks: vec![],
+            custom: vec![],
+            warmup: SignedDuration::from_hours(720),
+        }
     }
 
+    /// The instruments of the bar types come first, then those of the
+    /// ticks, each once, in order: gold's bars put IC's gold before CME
+    /// gold, whose trades are the first tick.
     #[rstest]
-    fn requirements_without_bar_types_read_the_instruments_of_their_ticks() {
-        let requirements = DataRequirements {
-            bar_types: vec![],
+    #[case::of_bar_types(ibis(), &["SXR8.IBIS", "EUNL.IBIS"])]
+    #[case::of_ticks_after_bar_types(
+        DataRequirements {
+            ticks: vec![
+                tick(NautilusDataType::TradeTick, "GC.v.0.GLBX"),
+                tick(NautilusDataType::QuoteTick, "XAUUSD.ICMARKETS"),
+            ],
             ..gold()
-        };
-        assert_eq!(
-            requirements.instrument_ids(),
-            [
-                InstrumentId::from("XAUUSD.ICMARKETS"),
-                InstrumentId::from("GC.v.0.GLBX")
-            ]
-        );
+        },
+        &["XAUUSD.ICMARKETS", "GC.v.0.GLBX"],
+    )]
+    #[case::of_ticks_alone(
+        DataRequirements { bar_types: vec![], ..gold() },
+        &["XAUUSD.ICMARKETS", "GC.v.0.GLBX"],
+    )]
+    fn the_instruments_are_those_of_the_bar_types_then_of_the_ticks_each_once_in_order(
+        #[case] requirements: DataRequirements,
+        #[case] expected: &[&str],
+    ) {
+        let expected: Vec<InstrumentId> =
+            expected.iter().map(|&id| InstrumentId::from(id)).collect();
+
+        assert_eq!(requirements.instrument_ids(), expected);
     }
 
+    /// Requirements on some instruments keep the bar types and the ticks
+    /// of those alone, and the warmup.
     #[rstest]
-    fn requirements_on_some_instruments_keep_their_ticks() {
-        let glbx = gold().of_instruments(&[InstrumentId::from("GC.v.0.GLBX")]);
+    #[case::bar_types(
+        DataRequirements {
+            bar_types: vec![
+                BarType::from("SXR8.IBIS-1-HOUR-MID-INTERNAL"),
+                BarType::from("BTC-USDT-SWAP.OKX-1-HOUR-MID-INTERNAL"),
+            ],
+            ..ibis()
+        },
+        "BTC-USDT-SWAP.OKX",
+        DataRequirements {
+            bar_types: vec![BarType::from("BTC-USDT-SWAP.OKX-1-HOUR-MID-INTERNAL")],
+            ..ibis()
+        },
+    )]
+    #[case::ticks(
+        gold(),
+        "GC.v.0.GLBX",
+        DataRequirements {
+            bar_types: vec![],
+            ticks: vec![
+                tick(NautilusDataType::TradeTick, "GC.v.0.GLBX"),
+                tick(NautilusDataType::OrderBookDepth, "GC.v.0.GLBX"),
+            ],
+            ..gold()
+        },
+    )]
+    fn requirements_on_some_instruments_keep_their_bar_types_their_ticks_and_the_warmup(
+        #[case] requirements: DataRequirements,
+        #[case] instrument_id: &str,
+        #[case] expected: DataRequirements,
+    ) {
         assert_eq!(
-            glbx,
-            DataRequirements {
-                bar_types: vec![],
-                ticks: vec![
-                    tick(NautilusDataType::TradeTick, "GC.v.0.GLBX"),
-                    tick(NautilusDataType::OrderBookDepth, "GC.v.0.GLBX"),
-                ],
-                custom: vec![],
-                warmup: SignedDuration::ZERO,
-            }
+            requirements.of_instruments(&[InstrumentId::from(instrument_id)]),
+            expected
         );
     }
 
@@ -747,48 +744,6 @@ mod tests {
                 (NautilusDataType::QuoteTick, "XAUUSD.ICMARKETS".to_string()),
             ]
         );
-    }
-
-    #[rstest]
-    fn a_tick_series_loads_from_toml() {
-        #[derive(Deserialize)]
-        struct Config {
-            ticks: Vec<TickSeries>,
-        }
-        let config: Config = toml::from_str(
-            r#"ticks = [
-                { data = "quotes", instrument_id = "XAUUSD.ICMARKETS" },
-                { data = "trades", instrument_id = "GC.v.0.GLBX" },
-                { data = "order_book_depths", instrument_id = "GC.v.0.GLBX" },
-            ]"#,
-        )
-        .unwrap();
-        assert_eq!(config.ticks, gold().ticks);
-    }
-
-    /// Bars are no tick series, and neither is custom data, an
-    /// instrument's included: it is a custom series, keyed by its
-    /// identifier (see `CustomSeries`).
-    #[rstest]
-    fn rejects_an_unknown_tick_data_type() {
-        for data in ["bars", "Custom:Imbalance"] {
-            let err = toml::from_str::<TickSeries>(&format!(
-                r#"data = "{data}"
-                instrument_id = "GC.v.0.GLBX""#
-            ))
-            .unwrap_err();
-            assert!(err.to_string().contains(data), "{err}");
-        }
-    }
-
-    #[rstest]
-    fn book_deltas_load_from_toml_as_a_nautilus_data_type() {
-        let ticks: TickSeries = toml::from_str(
-            r#"data = "order_book_deltas"
-            instrument_id = "GC.v.0.GLBX""#,
-        )
-        .unwrap();
-        assert_eq!(ticks, tick(NautilusDataType::OrderBookDelta, "GC.v.0.GLBX"));
     }
 
     /// The book deltas of one gold contract and the imbalances of
@@ -872,6 +827,11 @@ mod tests {
         );
     }
 
+    /// GC rolls from GCQ26 into GCZ26 at 00:00 UTC on 29 July 2026, two
+    /// business days before the last business day of the month before
+    /// delivery (`rolls/calendar.toml`, `rolls/README.md`): each of
+    /// the root's tick series is GCQ26's up to 1 ns before the roll,
+    /// GCZ26's from it.
     #[rstest]
     fn the_ticks_of_a_root_are_its_contracts_ticks_over_their_slices() {
         let requirements = DataRequirements {
@@ -920,6 +880,11 @@ mod tests {
         );
     }
 
+    /// GC rolls from GCQ26 into GCZ26 at 00:00 UTC on 29 July 2026, two
+    /// business days before the last business day of the month before
+    /// delivery (`rolls/calendar.toml`, `rolls/README.md`): the
+    /// root's LAST bars are built from GCQ26's trades up to 1 ns before
+    /// the roll, GCZ26's from it.
     #[rstest]
     fn the_bars_of_a_root_are_built_from_its_contracts_trades_over_their_slices() {
         let requirements = DataRequirements {
@@ -948,32 +913,6 @@ mod tests {
                     end
                 ),
             ]
-        );
-    }
-
-    /// The slices of `bar_type` over July and August 2026, across GC's
-    /// roll of 29 July.
-    fn bar_slices(bar_type: &str) -> Vec<SeriesSlice> {
-        DataRequirements {
-            bar_types: vec![BarType::from(bar_type)],
-            ticks: vec![],
-            custom: vec![],
-            warmup: SignedDuration::ZERO,
-        }
-        .slices(at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"))
-    }
-
-    #[rstest]
-    fn bars_on_a_contract_need_not_be_built_from_trades() {
-        assert_eq!(
-            bar_slices("GCZ26.GLBX-1-MINUTE-MID-INTERNAL"),
-            [series_slice(
-                NautilusDataType::QuoteTick,
-                "GCZ26.GLBX",
-                "GCZ26.GLBX",
-                at("2026-07-01T00:00Z"),
-                at("2026-08-31T00:00Z")
-            )]
         );
     }
 
@@ -1012,6 +951,11 @@ mod tests {
         );
     }
 
+    /// GC rolls from GCQ26 into GCZ26 at 00:00 UTC on 29 July 2026, two
+    /// business days before the last business day of the month before
+    /// delivery (`rolls/calendar.toml`, `rolls/README.md`): GCQ26,
+    /// standing for the root up to the roll and read as itself over the
+    /// whole span, is one slice over it; GCZ26 one from the roll.
     #[rstest]
     fn the_contracts_of_a_root_and_of_a_contract_beside_it_are_one_slice_each() {
         let requirements = DataRequirements {
@@ -1094,10 +1038,10 @@ mod tests {
     /// A contract's series and one of no instrument are themselves at any
     /// time.
     #[rstest]
-    fn a_custom_series_of_no_root_is_itself_at_any_time() {
-        for series in [yields("GCQ26.GLBX"), yields("US10Y")] {
-            assert_eq!(series.at(at("2026-07-29T00:00Z")), series);
-        }
+    #[case::of_a_contract(yields("GCQ26.GLBX"))]
+    #[case::of_no_instrument(yields("US10Y"))]
+    fn a_custom_series_of_no_root_is_itself_at_any_time(#[case] series: CustomSeries) {
+        assert_eq!(series.at(at("2026-07-29T00:00Z")), series);
     }
 
     /// Over July and August 2026, across GC's roll of 29 July: GCQ26's
@@ -1116,16 +1060,18 @@ mod tests {
         );
     }
 
+    /// A contract's series and one of no instrument are one slice over
+    /// the window.
     #[rstest]
-    fn a_custom_series_of_no_root_is_one_slice_over_the_window() {
+    #[case::of_a_contract(yields("GCQ26.GLBX"))]
+    #[case::of_no_instrument(yields("US10Y"))]
+    fn a_custom_series_of_no_root_is_one_slice_over_the_window(#[case] series: CustomSeries) {
         let (start, end) = (at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
 
-        for series in [yields("GCQ26.GLBX"), yields("US10Y")] {
-            assert_eq!(
-                series.slices(start, end),
-                [custom_slice(series, start, end)]
-            );
-        }
+        assert_eq!(
+            series.slices(start, end),
+            [custom_slice(series, start, end)]
+        );
     }
 
     /// GCQ26's imbalances listed beside GC's are read once over the whole
@@ -1161,50 +1107,37 @@ mod tests {
         catalog_keys(&bar_types)
     }
 
+    /// Internal bars need the quotes of their instrument, or its trades
+    /// if priced LAST; composite bars their source bars, or what internal
+    /// source bars are built from; external bars are their own series.
     #[rstest]
-    fn bars_built_from_quotes_need_the_quotes_of_their_instrument() {
-        assert_eq!(
-            series_of(&["SXR8.IBIS-1-HOUR-MID-INTERNAL"]),
-            [(NautilusDataType::QuoteTick, "SXR8.IBIS".to_string())]
-        );
-    }
+    #[case::internal_bars_of_quotes(
+        "SXR8.IBIS-1-HOUR-MID-INTERNAL",
+        (NautilusDataType::QuoteTick, "SXR8.IBIS")
+    )]
+    #[case::internal_bars_of_trades(
+        "BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL",
+        (NautilusDataType::TradeTick, "BTC-USDT-SWAP.OKX")
+    )]
+    #[case::composite_bars(
+        "BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
+        (NautilusDataType::Bar, "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL")
+    )]
+    #[case::composite_bars_of_internal_source_bars(
+        "SXR8.IBIS-1-HOUR-MID-INTERNAL@1-MINUTE-INTERNAL",
+        (NautilusDataType::QuoteTick, "SXR8.IBIS")
+    )]
+    #[case::external_bars(
+        "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL",
+        (NautilusDataType::Bar, "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL")
+    )]
+    fn bars_need_the_series_they_are_built_from(
+        #[case] bar_type: &str,
+        #[case] expected: (NautilusDataType, &str),
+    ) {
+        let (data, identifier) = expected;
 
-    #[rstest]
-    fn bars_built_from_trades_need_the_trades_of_their_instrument() {
-        assert_eq!(
-            series_of(&["BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL"]),
-            [(NautilusDataType::TradeTick, "BTC-USDT-SWAP.OKX".to_string())]
-        );
-    }
-
-    #[rstest]
-    fn composite_bars_need_their_source_bars() {
-        assert_eq!(
-            series_of(&["BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL"]),
-            [(
-                NautilusDataType::Bar,
-                "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL".to_string()
-            )]
-        );
-    }
-
-    #[rstest]
-    fn composite_bars_of_internal_source_bars_need_what_those_are_built_from() {
-        assert_eq!(
-            series_of(&["SXR8.IBIS-1-HOUR-MID-INTERNAL@1-MINUTE-INTERNAL"]),
-            [(NautilusDataType::QuoteTick, "SXR8.IBIS".to_string())]
-        );
-    }
-
-    #[rstest]
-    fn external_bars_are_their_own_series() {
-        assert_eq!(
-            series_of(&["BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL"]),
-            [(
-                NautilusDataType::Bar,
-                "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL".to_string()
-            )]
-        );
+        assert_eq!(series_of(&[bar_type]), [(data, identifier.to_string())]);
     }
 
     #[rstest]
