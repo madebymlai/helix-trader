@@ -75,15 +75,22 @@ fn a_window_reaching_past_the_stored_quotes_runs_on_what_is_stored() {
 }
 
 /// A catalog storing the instrument and no quotes: Nautilus warns the
-/// series has no data, and the run completes.
+/// series has no data, and the run completes on none, in no iteration, the
+/// recorder getting no bar and sending no order.
 #[rstest]
 fn a_catalog_without_quotes_runs_to_completion() {
     let catalog = common::catalog_without_quotes();
-    let (recorder, _) = Recorder::new(BarType::from(common::MID_BAR_TYPE));
+    let (recorder, record) = Recorder::new(BarType::from(common::MID_BAR_TYPE));
 
-    let run = noise::backtest(catalog.path(), noise::at("07:00")).run(recorder);
+    let result = noise::backtest(catalog.path(), noise::at("07:00"))
+        .run(recorder)
+        .unwrap()
+        .result;
 
-    assert!(run.is_ok(), "{run:?}");
+    assert_eq!(record.borrow().bars, []);
+    assert_eq!(result.iterations, 0);
+    assert_eq!(result.total_orders, 0);
+    assert_eq!(result.total_positions, 0);
 }
 
 /// A dataset build over quotes written as a live node promotes them, in
