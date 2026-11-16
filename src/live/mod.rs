@@ -241,26 +241,22 @@ mod tests {
 
     /// A start just before a roll loads the roll's post contract too, so
     /// the strategy subscribes to it even if the roll passes before it
-    /// starts or the roller's request for it is still in flight.
+    /// starts or the roller's request for it is still in flight; a start at
+    /// the roll has the post contract in front, and loads the next.
     #[rstest]
-    fn a_root_loads_just_before_its_roll_the_pre_and_post_contracts() {
+    #[case::just_before_it(
+        at("2026-07-29T00:00Z") - SignedDuration::from_nanos(1),
+        &["GCQ26.GLBX", "GCZ26.GLBX"],
+    )]
+    #[case::at_it(at("2026-07-29T00:00Z"), &["GCZ26.GLBX", "GCG27.GLBX"])]
+    fn a_root_loads_around_its_roll_the_contract_in_front_and_the_next(
+        #[case] start: Timestamp,
+        #[case] loaded: &[&str],
+    ) {
         let requirements = ticks(&NautilusDataType::OrderBookDepth, &["GC.GLBX"]);
         assert_eq!(
-            loaded_instrument_ids(
-                &requirements,
-                at("2026-07-29T00:00Z") - SignedDuration::from_nanos(1)
-            )
-            .unwrap(),
-            ids(&["GCQ26.GLBX", "GCZ26.GLBX"])
-        );
-    }
-
-    #[rstest]
-    fn a_root_loads_at_its_roll_the_post_contract_and_the_next() {
-        let requirements = ticks(&NautilusDataType::OrderBookDepth, &["GC.GLBX"]);
-        assert_eq!(
-            loaded_instrument_ids(&requirements, at("2026-07-29T00:00Z")).unwrap(),
-            ids(&["GCZ26.GLBX", "GCG27.GLBX"])
+            loaded_instrument_ids(&requirements, start).unwrap(),
+            ids(loaded)
         );
     }
 

@@ -254,166 +254,124 @@ mod tests {
         );
     }
 
+    /// The table spans July and August 2026, over GC's roll from GCQ26 to
+    /// GCZ26 at 2026-07-29T00:00Z.
     #[rstest]
-    fn the_contract_before_a_transition_is_its_pre_contract() {
+    #[case::before_a_transition_its_pre_contract(before("2026-07-29T00:00Z"), "GCQ26.GLBX")]
+    #[case::at_a_transition_its_post_contract(at("2026-07-29T00:00Z"), "GCZ26.GLBX")]
+    #[case::after_a_transition_its_post_contract(at("2026-08-10T14:30Z"), "GCZ26.GLBX")]
+    #[case::before_the_span_the_first_transition_s_pre_contract(
+        at("2026-01-02T00:00Z"),
+        "GCQ26.GLBX"
+    )]
+    fn the_contract_at_a_time_is_the_one_the_transitions_leave_in_front(
+        #[case] time: Timestamp,
+        #[case] contract: &str,
+    ) {
         let table = TransitionTable::of(gc(), at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
-        assert_eq!(
-            table.contract_at(before("2026-07-29T00:00Z")),
-            id("GCQ26.GLBX")
-        );
+        assert_eq!(table.contract_at(time), id(contract));
+    }
+
+    /// A span with rolls in it slices on each; one without is the span on
+    /// the front contract; a roll at the span's end gives its post
+    /// contract the last instant.
+    #[rstest]
+    #[case::with_rolls(
+        "2026-05-01T00:00Z",
+        "2026-08-15T12:00Z",
+        vec![
+            slice("GCM26.GLBX", at("2026-05-01T00:00Z"), before("2026-05-27T00:00Z")),
+            slice("GCQ26.GLBX", at("2026-05-27T00:00Z"), before("2026-07-29T00:00Z")),
+            slice("GCZ26.GLBX", at("2026-07-29T00:00Z"), at("2026-08-15T12:00Z")),
+        ],
+    )]
+    #[case::without_rolls(
+        "2026-08-31T00:00Z",
+        "2026-10-23T00:00Z",
+        vec![slice("GCZ26.GLBX", at("2026-08-31T00:00Z"), at("2026-10-23T00:00Z"))],
+    )]
+    #[case::with_a_roll_at_its_end(
+        "2026-07-01T00:00Z",
+        "2026-07-29T00:00Z",
+        vec![
+            slice("GCQ26.GLBX", at("2026-07-01T00:00Z"), before("2026-07-29T00:00Z")),
+            slice("GCZ26.GLBX", at("2026-07-29T00:00Z"), at("2026-07-29T00:00Z")),
+        ],
+    )]
+    fn the_slices_of_a_span_end_1_ns_before_each_transition(
+        #[case] from: &str,
+        #[case] to: &str,
+        #[case] slices: Vec<Slice>,
+    ) {
+        let table = TransitionTable::of(gc(), at(from), at(to));
+        assert_eq!(table.slices(), slices);
     }
 
     #[rstest]
-    fn the_contract_at_a_transition_is_its_post_contract() {
-        let table = TransitionTable::of(gc(), at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
-        assert_eq!(table.contract_at(at("2026-07-29T00:00Z")), id("GCZ26.GLBX"));
-    }
-
-    #[rstest]
-    fn the_contract_after_a_transition_is_its_post_contract() {
-        let table = TransitionTable::of(gc(), at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
-        assert_eq!(table.contract_at(at("2026-08-10T14:30Z")), id("GCZ26.GLBX"));
-    }
-
-    #[rstest]
-    fn the_contract_before_the_first_transition_holds_before_the_span() {
-        let table = TransitionTable::of(gc(), at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
-        assert_eq!(table.contract_at(at("2026-01-02T00:00Z")), id("GCQ26.GLBX"));
-    }
-
-    #[rstest]
-    fn the_slices_of_a_span_with_rolls_end_1_ns_before_each_transition() {
-        let table = TransitionTable::of(gc(), at("2026-05-01T00:00Z"), at("2026-08-15T12:00Z"));
-        assert_eq!(
-            table.slices(),
-            [
-                slice(
-                    "GCM26.GLBX",
-                    at("2026-05-01T00:00Z"),
-                    before("2026-05-27T00:00Z")
-                ),
-                slice(
-                    "GCQ26.GLBX",
-                    at("2026-05-27T00:00Z"),
-                    before("2026-07-29T00:00Z")
-                ),
-                slice(
-                    "GCZ26.GLBX",
-                    at("2026-07-29T00:00Z"),
-                    at("2026-08-15T12:00Z")
-                ),
-            ]
-        );
-    }
-
-    #[rstest]
-    fn the_slice_of_a_span_without_rolls_is_the_span_on_the_front_contract() {
-        let table = TransitionTable::of(gc(), at("2026-08-31T00:00Z"), at("2026-10-23T00:00Z"));
+    #[case::a_cfd("XAUUSD.ICMARKETS")]
+    #[case::a_contract("GCZ26.GLBX")]
+    #[case::a_continuous_series("GC.v.0.GLBX")]
+    fn an_id_without_a_calendar_entry_is_one_slice_on_itself(#[case] plain: &str) {
+        let table =
+            TransitionTable::of(id(plain), at("2026-01-01T00:00Z"), at("2026-12-31T00:00Z"));
+        assert_eq!(table.transitions(), []);
         assert_eq!(
             table.slices(),
             [slice(
-                "GCZ26.GLBX",
-                at("2026-08-31T00:00Z"),
-                at("2026-10-23T00:00Z")
+                plain,
+                at("2026-01-01T00:00Z"),
+                at("2026-12-31T00:00Z")
             )]
         );
-    }
-
-    #[rstest]
-    fn a_roll_at_the_end_of_the_span_gives_its_post_contract_the_last_instant() {
-        let table = TransitionTable::of(gc(), at("2026-07-01T00:00Z"), at("2026-07-29T00:00Z"));
-        assert_eq!(
-            table.slices(),
-            [
-                slice(
-                    "GCQ26.GLBX",
-                    at("2026-07-01T00:00Z"),
-                    before("2026-07-29T00:00Z")
-                ),
-                slice(
-                    "GCZ26.GLBX",
-                    at("2026-07-29T00:00Z"),
-                    at("2026-07-29T00:00Z")
-                ),
-            ]
-        );
-    }
-
-    #[rstest]
-    fn an_id_without_a_calendar_entry_is_one_slice_on_itself() {
-        for plain in ["XAUUSD.ICMARKETS", "GCZ26.GLBX", "GC.v.0.GLBX"] {
-            let table =
-                TransitionTable::of(id(plain), at("2026-01-01T00:00Z"), at("2026-12-31T00:00Z"));
-            assert_eq!(table.transitions(), [], "{plain}");
-            assert_eq!(
-                table.slices(),
-                [slice(
-                    plain,
-                    at("2026-01-01T00:00Z"),
-                    at("2026-12-31T00:00Z")
-                )],
-                "{plain}"
-            );
-            assert_eq!(table.contract_at(at("2026-07-29T00:00Z")), id(plain));
-        }
+        assert_eq!(table.contract_at(at("2026-07-29T00:00Z")), id(plain));
     }
 
     /// GC's contracts are `GC{month}{yy}` on GLBX, of February, April,
-    /// June, August and December.
+    /// June, August and December: a contract of one of those months of any
+    /// year stands for GC, and no other id stands for a root.
     #[rstest]
-    fn a_contract_of_a_liquid_month_of_any_year_stands_for_its_root() {
-        for contract in ["GCZ26.GLBX", "GCG27.GLBX", "GCQ99.GLBX"] {
-            assert_eq!(root_of(id(contract)), Some(gc()), "{contract}");
-        }
+    #[case::december_26("GCZ26.GLBX", Some("GC.GLBX"))]
+    #[case::february_27("GCG27.GLBX", Some("GC.GLBX"))]
+    #[case::august_99("GCQ99.GLBX", Some("GC.GLBX"))]
+    #[case::an_illiquid_month("GCV26.GLBX", None)]
+    #[case::the_root("GC.GLBX", None)]
+    #[case::a_one_digit_year("GCZ6.GLBX", None)]
+    #[case::a_three_digit_year("GCZ026.GLBX", None)]
+    #[case::another_venue("GCZ26.XCME", None)]
+    #[case::a_lowercase_month("GCz26.GLBX", None)]
+    #[case::another_product("SIZ26.GLBX", None)]
+    #[case::a_continuous_series("GC.v.0.GLBX", None)]
+    #[case::a_cfd("XAUUSD.ICMARKETS", None)]
+    fn only_a_contract_of_a_liquid_month_of_any_year_stands_for_its_root(
+        #[case] contract: &str,
+        #[case] root: Option<&str>,
+    ) {
+        assert_eq!(root_of(id(contract)), root.map(id));
     }
 
     #[rstest]
-    fn no_other_id_stands_for_a_root() {
-        for other in [
-            "GCV26.GLBX",
-            "GC.GLBX",
-            "GCZ6.GLBX",
-            "GCZ026.GLBX",
-            "GCZ26.XCME",
-            "GCz26.GLBX",
-            "SIZ26.GLBX",
-            "GC.v.0.GLBX",
-            "XAUUSD.ICMARKETS",
-        ] {
-            assert_eq!(root_of(id(other)), None, "{other}");
-        }
-    }
-
-    #[rstest]
-    fn the_transition_after_a_time_is_the_next_roll_of_its_root() {
-        assert_eq!(
-            Transition::after(gc(), at("2026-07-28T12:00Z")),
-            Some(transition("2026-07-29T00:00Z", "GCQ26.GLBX", "GCZ26.GLBX"))
-        );
-    }
-
-    #[rstest]
-    fn the_transition_after_a_transition_is_the_one_after_it() {
-        assert_eq!(
-            Transition::after(gc(), at("2026-07-29T00:00Z")),
-            Some(transition("2026-11-26T00:00Z", "GCZ26.GLBX", "GCG27.GLBX"))
-        );
-    }
-
-    #[rstest]
-    fn the_transition_after_the_last_nanosecond_before_a_roll_is_that_roll() {
-        assert_eq!(
-            Transition::after(gc(), before("2026-07-29T00:00Z")),
-            Some(transition("2026-07-29T00:00Z", "GCQ26.GLBX", "GCZ26.GLBX"))
-        );
-    }
-
-    #[rstest]
-    fn an_id_without_a_calendar_entry_has_no_transition_after_any_time() {
-        assert_eq!(
-            Transition::after(id("GCZ26.GLBX"), at("2026-07-28T12:00Z")),
-            None
-        );
+    #[case::a_time_before_it(
+        gc(),
+        at("2026-07-28T12:00Z"),
+        Some(transition("2026-07-29T00:00Z", "GCQ26.GLBX", "GCZ26.GLBX"))
+    )]
+    #[case::a_transition_the_one_after_it(
+        gc(),
+        at("2026-07-29T00:00Z"),
+        Some(transition("2026-11-26T00:00Z", "GCZ26.GLBX", "GCG27.GLBX"))
+    )]
+    #[case::the_last_nanosecond_before_a_roll_that_roll(
+        gc(),
+        before("2026-07-29T00:00Z"),
+        Some(transition("2026-07-29T00:00Z", "GCQ26.GLBX", "GCZ26.GLBX"))
+    )]
+    #[case::an_id_without_a_calendar_entry_none(id("GCZ26.GLBX"), at("2026-07-28T12:00Z"), None)]
+    fn the_transition_after_a_time_is_the_next_roll_of_its_root(
+        #[case] id: InstrumentId,
+        #[case] time: Timestamp,
+        #[case] next: Option<Transition>,
+    ) {
+        assert_eq!(Transition::after(id, time), next);
     }
 
     /// One nanosecond after `time`.
@@ -421,74 +379,59 @@ mod tests {
         at(time) + SignedDuration::from_nanos(1)
     }
 
-    #[rstest]
-    fn the_transition_before_a_time_between_rolls_is_the_earlier_roll() {
-        assert_eq!(
-            Transition::before(gc(), at("2026-08-10T14:30Z")),
-            Some(transition("2026-07-29T00:00Z", "GCQ26.GLBX", "GCZ26.GLBX"))
-        );
-    }
-
-    #[rstest]
-    fn the_transition_before_a_roll_exactly_at_its_time_is_that_roll() {
-        assert_eq!(
-            Transition::before(gc(), at("2026-07-29T00:00Z")),
-            Some(transition("2026-07-29T00:00Z", "GCQ26.GLBX", "GCZ26.GLBX"))
-        );
-    }
-
-    #[rstest]
-    fn the_transition_before_the_nanosecond_after_a_roll_is_that_roll() {
-        assert_eq!(
-            Transition::before(gc(), just_after("2026-07-29T00:00Z")),
-            Some(transition("2026-07-29T00:00Z", "GCQ26.GLBX", "GCZ26.GLBX"))
-        );
-    }
-
-    #[rstest]
-    fn the_transition_before_the_last_nanosecond_before_a_roll_is_the_roll_before() {
-        assert_eq!(
-            Transition::before(gc(), before("2026-07-29T00:00Z")),
-            Some(transition("2026-05-27T00:00Z", "GCM26.GLBX", "GCQ26.GLBX"))
-        );
-    }
-
     /// GC's Z5 rolls two weekdays before the last weekday of November
     /// 2025: Nov 30 is a Sunday, so the last weekday is Fri Nov 28 and
     /// the roll Wed Nov 26.
     #[rstest]
-    fn the_transition_before_the_first_roll_of_a_year_is_the_last_roll_of_the_year_before() {
-        assert_eq!(
-            Transition::before(gc(), at("2026-01-27T12:00Z")),
-            Some(transition("2025-11-26T00:00Z", "GCZ25.GLBX", "GCG26.GLBX"))
-        );
+    #[case::a_time_between_rolls_the_earlier_roll(
+        gc(),
+        at("2026-08-10T14:30Z"),
+        Some(transition("2026-07-29T00:00Z", "GCQ26.GLBX", "GCZ26.GLBX"))
+    )]
+    #[case::a_roll_exactly_at_its_time_that_roll(
+        gc(),
+        at("2026-07-29T00:00Z"),
+        Some(transition("2026-07-29T00:00Z", "GCQ26.GLBX", "GCZ26.GLBX"))
+    )]
+    #[case::the_nanosecond_after_a_roll_that_roll(
+        gc(),
+        just_after("2026-07-29T00:00Z"),
+        Some(transition("2026-07-29T00:00Z", "GCQ26.GLBX", "GCZ26.GLBX"))
+    )]
+    #[case::the_last_nanosecond_before_a_roll_the_roll_before(
+        gc(),
+        before("2026-07-29T00:00Z"),
+        Some(transition("2026-05-27T00:00Z", "GCM26.GLBX", "GCQ26.GLBX"))
+    )]
+    #[case::the_first_roll_of_a_year_the_last_roll_of_the_year_before(
+        gc(),
+        at("2026-01-27T12:00Z"),
+        Some(transition("2025-11-26T00:00Z", "GCZ25.GLBX", "GCG26.GLBX"))
+    )]
+    #[case::an_id_without_a_calendar_entry_none(id("GCZ26.GLBX"), at("2026-08-10T14:30Z"), None)]
+    fn the_transition_before_a_time_is_the_last_roll_of_its_root_up_to_it(
+        #[case] id: InstrumentId,
+        #[case] time: Timestamp,
+        #[case] previous: Option<Transition>,
+    ) {
+        assert_eq!(Transition::before(id, time), previous);
     }
 
     /// Around a roll, the transition before a time hands the root to the
     /// contract standing at that time, and the transition after it comes
     /// after that time.
     #[rstest]
-    fn the_transition_before_a_time_ends_on_the_contract_standing_then_and_the_next_comes_after_it()
-    {
+    #[case::the_last_nanosecond_before_the_roll(before("2026-07-29T00:00Z"))]
+    #[case::the_roll(at("2026-07-29T00:00Z"))]
+    #[case::the_nanosecond_after_the_roll(just_after("2026-07-29T00:00Z"))]
+    fn the_transition_before_a_time_ends_on_the_contract_standing_then_and_the_next_comes_after_it(
+        #[case] time: Timestamp,
+    ) {
         let table = TransitionTable::of(gc(), at("2026-07-01T00:00Z"), at("2026-08-31T00:00Z"));
-        for time in [
-            before("2026-07-29T00:00Z"),
-            at("2026-07-29T00:00Z"),
-            just_after("2026-07-29T00:00Z"),
-        ] {
-            let previous = Transition::before(gc(), time).unwrap();
-            let next = Transition::after(gc(), time).unwrap();
-            assert_eq!(previous.post, table.contract_at(time), "{time}");
-            assert!(previous.time <= time && time < next.time, "{time}");
-        }
-    }
-
-    #[rstest]
-    fn an_id_without_a_calendar_entry_has_no_transition_before_any_time() {
-        assert_eq!(
-            Transition::before(id("GCZ26.GLBX"), at("2026-08-10T14:30Z")),
-            None
-        );
+        let previous = Transition::before(gc(), time).unwrap();
+        let next = Transition::after(gc(), time).unwrap();
+        assert_eq!(previous.post, table.contract_at(time));
+        assert!(previous.time <= time && time < next.time);
     }
 
     /// Databento's GC.v.0 switches over the stored span, 2026-01-26 to

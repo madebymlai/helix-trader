@@ -84,6 +84,9 @@ impl Recording {
             u64::try_from(PROMOTION_INTERVAL.as_millis())
                 .expect("a day of milliseconds fits in u64"),
         );
+        // Closing the writer promotes what it staged, which `promote_staged`
+        // relies on.
+        streaming.promote_on_close = true;
         streaming.delete_feather_after_promotion = true;
         streaming.data_types = Some(STREAMED.to_vec());
         streaming
@@ -220,9 +223,8 @@ mod tests {
             streaming.catalog.unwrap().path(),
             dir.path().join("catalog").to_str().unwrap()
         );
+        assert_eq!(streaming.flush_interval_ms, 1_000);
         assert_eq!(streaming.promotion_interval_ms, Some(24 * 60 * 60 * 1_000));
-        // Nautilus' default, which `promote_staged` relies on.
-        assert!(streaming.promote_on_close);
         assert!(streaming.delete_feather_after_promotion);
     }
 
@@ -261,18 +263,6 @@ mod tests {
         assert_eq!(streaming.record_filters, None);
     }
 
-    #[rstest]
-    fn a_staging_directory_inside_the_catalog_is_refused() {
-        let dir = tempfile::tempdir().unwrap();
-        let catalog_dir = dir.path().join("catalog");
-        std::fs::create_dir(&catalog_dir).unwrap();
-        let err = recording(catalog_dir.join("staging"))
-            .streaming(&catalog(&catalog_dir))
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("inside the catalog"), "{err}");
-    }
-
     /// `dir` by a path relative to the working directory: up to the root,
     /// then down to it.
     fn relative(dir: &Path) -> PathBuf {
@@ -283,26 +273,43 @@ mod tests {
         relative
     }
 
-    /// Either directory by a path relative to the working directory, as
-    /// `--catalog` and `--staging` take them, the other absolute or
-    /// relative too.
+    /// `dir` by its absolute path.
+    fn absolute(dir: &Path) -> PathBuf {
+        dir.to_path_buf()
+    }
+
+    /// Either directory by its absolute path or by a path relative to the
+    /// working directory, as `--catalog` and `--staging` take them; the
+    /// refusal names each as given.
     #[rstest]
-    fn a_staging_directory_inside_the_catalog_is_refused_however_either_is_given() {
+    #[case::both_absolute(absolute, absolute)]
+    #[case::the_catalog_relative(relative, absolute)]
+    #[case::the_staging_relative(absolute, relative)]
+    #[case::both_relative(relative, relative)]
+    fn a_staging_directory_inside_the_catalog_is_refused_however_either_is_given(
+        #[case] catalog_given: fn(&Path) -> PathBuf,
+        #[case] staging_given: fn(&Path) -> PathBuf,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let catalog_dir = dir.path().join("catalog");
         std::fs::create_dir(&catalog_dir).unwrap();
-        let staging = catalog_dir.join("staging");
-        for (catalog_dir, staging) in [
-            (relative(&catalog_dir), staging.clone()),
-            (catalog_dir.clone(), relative(&staging)),
-            (relative(&catalog_dir), relative(&staging)),
-        ] {
-            let err = recording(staging)
-                .streaming(&catalog(&catalog_dir))
-                .unwrap_err()
-                .to_string();
-            assert!(err.contains("inside the catalog"), "{err}");
-        }
+        let (catalog_dir, staging) = (
+            catalog_given(&catalog_dir),
+            staging_given(&catalog_dir.join("staging")),
+        );
+        let err = recording(staging.clone())
+            .streaming(&catalog(&catalog_dir))
+            .unwrap_err()
+            .to_string();
+        // The catalog's path is the start of the staging directory's: it
+        // is named apart from it.
+        let staging = staging.to_str().unwrap();
+        assert!(err.contains(staging), "{err}");
+        assert!(
+            err.replace(staging, "")
+                .contains(catalog_dir.to_str().unwrap()),
+            "{err}"
+        );
     }
 
     #[rstest]

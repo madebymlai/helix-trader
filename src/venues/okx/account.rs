@@ -247,12 +247,17 @@ mod tests {
     }
 
     #[rstest]
-    fn a_missing_empty_or_other_environment_is_refused_naming_the_variable_and_values() {
-        for value in [None, Some(""), Some("Demo"), Some("real"), Some(" demo")] {
-            let err = environment_of(value).unwrap_err().to_string();
-            assert!(err.contains("OKX_ENVIRONMENT"), "{value:?}: {err}");
-            assert!(err.contains("`demo` or `live`"), "{value:?}: {err}");
-        }
+    #[case::missing(None)]
+    #[case::empty(Some(""))]
+    #[case::capitalized(Some("Demo"))]
+    #[case::another_name(Some("real"))]
+    #[case::with_a_space(Some(" demo"))]
+    fn a_missing_empty_or_other_environment_is_refused_naming_the_variable_and_values(
+        #[case] value: Option<&str>,
+    ) {
+        let err = environment_of(value).unwrap_err().to_string();
+        assert!(err.contains("OKX_ENVIRONMENT"), "{err}");
+        assert!(err.contains("`demo` or `live`"), "{err}");
     }
 
     #[rstest]
@@ -261,20 +266,28 @@ mod tests {
         assert_eq!(leverage_of(xperp(), body).unwrap(), Decimal::from(3));
     }
 
+    /// OKX's refusal, named by its code; an empty answer, naming the
+    /// instrument asked; another instrument's leverage, naming it; and two
+    /// leverages of the instrument, naming both.
     #[rstest]
-    fn a_refused_empty_or_foreign_leverage_answer_is_an_error() {
-        let error = |body: &[u8]| leverage_of(xperp(), body).unwrap_err().to_string();
-        let refused = br#"{"code":"51001","msg":"Instrument ID doesn't exist","data":[]}"#;
-        let err = error(refused);
-        assert!(err.contains("51001"), "{err}");
-        let empty = br#"{"code":"0","msg":"","data":[]}"#;
-        let err = error(empty);
-        assert!(err.contains("no leverage"), "{err}");
-        let foreign = br#"{"code":"0","msg":"","data":[{"ccy":"","instId":"BTC-USDT-SWAP","lever":"3","mgnMode":"cross","posSide":"net"}]}"#;
-        let err = error(foreign);
-        assert!(err.contains("BTC-USDT-SWAP"), "{err}");
-        let split = br#"{"code":"0","msg":"","data":[{"ccy":"","instId":"BTC-USD_UM_XPERP-310328","lever":"3","mgnMode":"cross","posSide":"net"},{"ccy":"","instId":"BTC-USD_UM_XPERP-310328","lever":"5","mgnMode":"cross","posSide":"net"}]}"#;
-        let err = error(split);
-        assert!(err.contains("3 and 5"), "{err}");
+    #[case::refused(
+        br#"{"code":"51001","msg":"Instrument ID doesn't exist","data":[]}"#,
+        "51001"
+    )]
+    #[case::empty(br#"{"code":"0","msg":"","data":[]}"#, "BTC-USD_UM_XPERP-310328.OKX")]
+    #[case::foreign(
+        br#"{"code":"0","msg":"","data":[{"ccy":"","instId":"BTC-USDT-SWAP","lever":"3","mgnMode":"cross","posSide":"net"}]}"#,
+        "BTC-USDT-SWAP"
+    )]
+    #[case::split(
+        br#"{"code":"0","msg":"","data":[{"ccy":"","instId":"BTC-USD_UM_XPERP-310328","lever":"3","mgnMode":"cross","posSide":"net"},{"ccy":"","instId":"BTC-USD_UM_XPERP-310328","lever":"5","mgnMode":"cross","posSide":"net"}]}"#,
+        "3 and 5"
+    )]
+    fn a_refused_empty_or_foreign_leverage_answer_is_an_error(
+        #[case] body: &[u8],
+        #[case] named: &str,
+    ) {
+        let err = leverage_of(xperp(), body).unwrap_err().to_string();
+        assert!(err.contains(named), "{err}");
     }
 }

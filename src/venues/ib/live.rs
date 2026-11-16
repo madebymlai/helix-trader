@@ -372,6 +372,6 @@ mod tests {
         let Err(e) = clients(&paper(), 2000, &[sxr8()]).await else {
             panic!("started");
         };
-        assert!(e.to_string().contains("1000"), "{e}");
+        assert!(e.to_string().contains("client id 2000"), "{e}");
     }
 }

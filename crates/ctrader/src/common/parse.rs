@@ -292,6 +292,7 @@ mod tests {
     #[rstest]
     #[case::bars(NautilusDataType::Bar)]
     #[case::book_deltas(NautilusDataType::OrderBookDelta)]
+    #[case::book_depth(NautilusDataType::OrderBookDepth)]
     #[case::trades(NautilusDataType::TradeTick)]
     fn a_series_not_of_quotes_is_refused_naming_it(#[case] data_type: NautilusDataType) {
         let bars = format!("XAUUSD.{VENUE}-1-MINUTE-BID-EXTERNAL");

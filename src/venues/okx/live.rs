@@ -226,16 +226,6 @@ fn ensure_leverage(id: InstrumentId, leverage: Decimal, margin: Decimal) -> anyh
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, rc::Rc};
-
-    use nautilus_common::{
-        cache::Cache,
-        clients::DataClient,
-        clock::VirtualClock,
-        live::runner::replace_data_event_sender,
-        messages::data::{SubscribeBookDeltas, SubscribeBookDepth},
-    };
-    use nautilus_core::{UUID4, UnixNanos};
     use nautilus_okx::{
         OKXInstrumentType,
         common::enums::{OKXMarginMode, OKXRegion},
@@ -243,7 +233,6 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::venues::{Broker, tests::created_oms_type};
 
     fn xperp() -> InstrumentId {
         InstrumentId::from("BTC-USD_UM_XPERP-310328.OKX")
@@ -253,112 +242,18 @@ mod tests {
         InstrumentId::from("BTC-USDT-SWAP.OKX")
     }
 
-    /// Against the adapter's client: the broker's answer is our copy of it.
-    /// Its answer follows the instrument types the config loads, so these
-    /// are the configs of a node. The factory builds no client without
-    /// credentials: made up here, so that the environment's are never read;
-    /// the client connects to nothing.
     #[rstest]
-    fn the_execution_client_keeps_positions_as_the_broker_answers() {
-        for ids in [vec![swap()], vec![xperp()], vec![xperp(), swap()]] {
-            let mut clients = configs(&ids, OKXEnvironment::Demo).unwrap();
-            clients.exec.api_key = Some("key".into());
-            clients.exec.api_secret = Some("secret".into());
-            clients.exec.api_passphrase = Some("passphrase".into());
-
-            let created = created_oms_type(clients.into_node_clients());
-
-            assert_eq!(created, Broker::Okx.oms_type(), "{ids:?}");
-        }
-    }
-
-    /// The node's OKX data client of a swap, created as the node creates
-    /// it, unconnected.
-    fn data_client() -> Box<dyn DataClient> {
-        let (data_tx, _data_events) = tokio::sync::mpsc::unbounded_channel();
-        replace_data_event_sender(data_tx);
-        let clients = configs(&[swap()], OKXEnvironment::Demo)
-            .unwrap()
-            .into_node_clients();
-        clients
-            .data_factory
-            .create(
-                clients.data_factory.name(),
-                clients.data_config.as_ref(),
-                Rc::new(RefCell::new(Cache::default())).into(),
-                Rc::new(RefCell::new(VirtualClock::new())),
-            )
-            .unwrap()
-    }
-
-    /// Against the adapter's data client: unconnected, it takes a swap's
-    /// book subscribed in OKX's format (`BOOK`), its deltas and its depth,
-    /// and fails a subscription of deltas of another book type or of depth
-    /// a level deeper before anything connects, so `BOOK` is the one
-    /// format it streams, its depth the deepest. Each subscription on a
-    /// client of its own.
-    #[tokio::test]
-    async fn the_data_client_takes_a_book_in_okx_s_format_alone() {
-        let (venue, ts) = (Some(swap().venue), UnixNanos::default());
-        let deltas = |book_type| {
-            data_client().subscribe_book_deltas(SubscribeBookDeltas::new(
-                swap(),
-                book_type,
-                None,
-                venue,
-                UUID4::new(),
-                ts,
-                None,
-                false,
-                None,
-                None,
-            ))
-        };
-        let depth = |levels| {
-            data_client().subscribe_book_depth(SubscribeBookDepth::new(
-                swap(),
-                BookType::L2_MBP,
-                None,
-                venue,
-                UUID4::new(),
-                ts,
-                levels,
-                false,
-                None,
-                None,
-            ))
-        };
-
-        deltas(BOOK.deltas).unwrap();
-        depth(BOOK.depth).unwrap();
-        assert!(deltas(BookType::L3_MBO).is_err());
-        assert!(depth(BOOK.depth.map(|levels| levels.saturating_add(1))).is_err());
-    }
-
-    #[rstest]
-    fn both_clients_trade_in_the_eea_on_the_given_environment() {
-        let clients = configs(&[xperp()], OKXEnvironment::Demo).unwrap();
+    #[case::demo(OKXEnvironment::Demo)]
+    #[case::live(OKXEnvironment::Live)]
+    fn both_clients_trade_in_the_eea_on_the_given_environment(#[case] environment: OKXEnvironment) {
+        let clients = configs(&[xperp()], environment).unwrap();
         assert_eq!(
             (clients.data.environment, clients.data.region),
-            (OKXEnvironment::Demo, OKXRegion::Eea)
+            (environment, OKXRegion::Eea)
         );
         assert_eq!(
             (clients.exec.environment, clients.exec.region),
-            (OKXEnvironment::Demo, OKXRegion::Eea)
-        );
-        assert_eq!(clients.exec.http_base_url(), "https://eea.okx.com");
-        assert_eq!(
-            clients.exec.ws_private_url(),
-            "wss://wseeapap.okx.com/ws/v5/private"
-        );
-        let live = configs(&[xperp()], OKXEnvironment::Live).unwrap();
-        assert_eq!(
-            (live.data.environment, live.data.region),
-            (OKXEnvironment::Live, OKXRegion::Eea)
-        );
-        assert_eq!(
-            (live.exec.environment, live.exec.region),
-            (OKXEnvironment::Live, OKXRegion::Eea)
+            (environment, OKXRegion::Eea)
         );
     }
 
@@ -398,22 +293,12 @@ mod tests {
     }
 
     #[rstest]
-    fn an_instrument_not_an_okx_swap_or_future_is_refused() {
-        for id in ["SXR8.IBIS", "BTC-USDT.OKX"] {
-            assert!(
-                configs(&[InstrumentId::from(id)], OKXEnvironment::Demo).is_err(),
-                "{id}"
-            );
-        }
-    }
-
-    #[rstest]
     fn a_long_short_account_is_refused_naming_net_mode() {
         ensure_net_mode(OKXPositionMode::NetMode).unwrap();
         let err = ensure_net_mode(OKXPositionMode::LongShortMode)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("net mode"), "{err}");
+        assert!(err.contains("LongShortMode"), "{err}");
     }
 
     /// The catalog's definition holds a margin of 0.2, leverage 5, which

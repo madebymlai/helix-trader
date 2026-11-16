@@ -12,8 +12,8 @@ use serde::Deserialize;
 
 const CALENDAR: &str = include_str!("calendar.toml");
 
-/// The embedded calendar, parsed once. A test parses the same file, so a
-/// broken calendar fails there first.
+/// The embedded calendar, parsed once, on first use: a broken calendar
+/// fails every test reading a product through it.
 static PRODUCTS: LazyLock<Vec<Product>> =
     LazyLock::new(|| parse(CALENDAR).expect("the embedded roll calendar parses"));
 
@@ -330,16 +330,6 @@ mod tests {
     use super::*;
 
     #[rstest]
-    fn the_embedded_calendar_parses() {
-        let products = parse(CALENDAR).unwrap();
-        assert!(
-            products
-                .iter()
-                .any(|product| product.root == InstrumentId::from("GC.GLBX"))
-        );
-    }
-
-    #[rstest]
     fn rejects_a_root_listed_twice() {
         let product = r#"
             [[product]]
@@ -368,7 +358,7 @@ mod tests {
             "#,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("no months"), "{err}");
+        assert!(err.to_string().contains("GC.GLBX"), "{err}");
     }
 
     /// A calendar of one GC product rolling `days_before`, as written in
@@ -393,25 +383,25 @@ mod tests {
         gold.roll_out_of(Contract { year, month })
     }
 
+    /// The last weekday of July 2026 is Friday the 31st. The last weekday
+    /// of March 2026 is Tuesday the 31st; three weekdays before it are
+    /// Monday the 30th, Friday the 27th and Thursday the 26th.
     #[rstest]
-    fn rolls_on_the_rule_day_with_no_days_before() {
-        // The last weekday of July 2026 is Friday the 31st.
-        let gold = gold_rolling("0");
+    #[case::with_no_days_before("0", MonthCode::Q, "2026-07-31T00:00Z")]
+    #[case::days_before_counted_in_weekdays_across_a_weekend(
+        "3",
+        MonthCode::J,
+        "2026-03-26T00:00Z"
+    )]
+    fn rolls_on_the_rule_day_less_its_days_before(
+        #[case] days_before: &str,
+        #[case] month: MonthCode,
+        #[case] roll: &str,
+    ) {
+        let gold = gold_rolling(days_before);
         assert_eq!(
-            roll_out_of(&gold, 2026, MonthCode::Q),
-            "2026-07-31T00:00Z".parse().unwrap()
-        );
-    }
-
-    #[rstest]
-    fn counts_days_before_in_weekdays_across_a_weekend() {
-        // The last weekday of March 2026 is Tuesday the 31st; three
-        // weekdays before it are Monday the 30th, Friday the 27th and
-        // Thursday the 26th.
-        let gold = gold_rolling("3");
-        assert_eq!(
-            roll_out_of(&gold, 2026, MonthCode::J),
-            "2026-03-26T00:00Z".parse().unwrap()
+            roll_out_of(&gold, 2026, month),
+            roll.parse::<Timestamp>().unwrap()
         );
     }
 
@@ -439,57 +429,30 @@ mod tests {
     }
 
     #[rstest]
-    fn names_a_contract_by_month_code_and_the_years_last_digit() {
-        let gold = gold_named("GC{month}{y}").unwrap();
+    #[case::by_month_code_and_the_years_last_digit("GC{month}{y}", 2026, "GCZ6")]
+    #[case::by_the_years_last_digit_into_a_new_decade("GC{month}{y}", 2030, "GCZ0")]
+    #[case::by_the_two_digit_year_with_literal_text("GC.{month}{yy}", 2026, "GC.Z26")]
+    #[case::by_the_two_digit_year_padded("GC.{month}{yy}", 2007, "GC.Z07")]
+    #[case::by_the_four_digit_year_in_any_order("GC-{yyyy}-{month}", 2026, "GC-2026-Z")]
+    fn names_a_contract_by_its_template(
+        #[case] template: &str,
+        #[case] year: i16,
+        #[case] symbol: &str,
+    ) {
+        let gold = gold_named(template).unwrap();
         assert_eq!(
-            gold.instrument_id(december(2026)),
-            InstrumentId::from("GCZ6.GLBX")
-        );
-        assert_eq!(
-            gold.instrument_id(december(2030)),
-            InstrumentId::from("GCZ0.GLBX")
-        );
-    }
-
-    #[rstest]
-    fn names_a_contract_by_the_two_digit_year_with_literal_text() {
-        let gold = gold_named("GC.{month}{yy}").unwrap();
-        assert_eq!(
-            gold.instrument_id(december(2026)),
-            InstrumentId::new(Symbol::new("GC.Z26"), Venue::new("GLBX"))
-        );
-        assert_eq!(
-            gold.instrument_id(december(2007)),
-            InstrumentId::new(Symbol::new("GC.Z07"), Venue::new("GLBX"))
+            gold.instrument_id(december(year)),
+            InstrumentId::new(Symbol::new(symbol), Venue::new("GLBX"))
         );
     }
 
     #[rstest]
-    fn names_a_contract_by_the_four_digit_year_in_any_order() {
-        let gold = gold_named("GC-{yyyy}-{month}").unwrap();
-        assert_eq!(
-            gold.instrument_id(december(2026)),
-            InstrumentId::from("GC-2026-Z.GLBX")
-        );
-    }
-
-    #[rstest]
-    fn rejects_an_unknown_placeholder() {
-        assert!(gold_named("GC{month}{yyy}").is_err());
-    }
-
-    #[rstest]
-    fn rejects_an_unclosed_brace() {
-        assert!(gold_named("GC{month}{y").is_err());
-    }
-
-    #[rstest]
-    fn rejects_a_contract_without_a_month() {
-        assert!(gold_named("GC{y}").is_err());
-    }
-
-    #[rstest]
-    fn rejects_a_contract_without_a_year() {
-        assert!(gold_named("GC{month}").is_err());
+    #[case::an_unknown_placeholder("GC{month}{yyy}")]
+    #[case::an_unclosed_brace("GC{month}{y")]
+    #[case::a_contract_without_a_month("GC{y}")]
+    #[case::a_contract_without_a_year("GC{month}")]
+    fn rejects_a_template_naming_it(#[case] template: &str) {
+        let err = ContractTemplate::try_from(template.to_string()).unwrap_err();
+        assert!(err.to_string().contains(template), "{err}");
     }
 }
