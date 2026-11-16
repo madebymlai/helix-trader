@@ -9,9 +9,7 @@ publish = false
 workspace = true
 
 [features]
-# The mock LSE peer and its captured payloads (`testing`), for a caller's
-# tests of its own fill through the adapter, as the cTrader crate exposes
-# its hooks.
+# See the README, "Feature flags".
 test-support = ["dep:tungstenite"]
 
 [dependencies]

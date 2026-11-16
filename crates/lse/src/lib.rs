@@ -23,6 +23,11 @@
 //! Nautilus' adapters make theirs, so that the tests of the clients'
 //! boundaries (`tests/`) drive them as a caller does; `testing`, the mock
 //! LSE peers and their captured payloads, comes with `test-support`.
+//!
+//! # Feature Flags
+//!
+//! - `test-support`: Exposes `testing` and `LseHttpClient::with_retry` for
+//!   a caller's tests (see `README.md`).
 
 pub use self::{
     common::consts::{LSE_API_KEY, LSE_CME_API_KEY, LSE_NASDAQ_API_KEY, LSEDGE_VENUE},
