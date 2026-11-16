@@ -1229,7 +1229,7 @@ mod tests {
     use nautilus_model::{
         enums::{OrderSide, OrderType},
         identifiers::InstrumentId,
-        orders::OrderTestBuilder,
+        orders::{OrderTestBuilder, stubs::TestOrderEventStubs},
         types::{Money, Quantity},
     };
     use prost::Message as _;
@@ -1489,12 +1489,8 @@ mod tests {
         let mut stop_loss = order("O-SL", OrderType::StopMarket);
         let account = AccountId::from("ACMEFX-DEMO");
         for event in [
-            nautilus_model::orders::stubs::TestOrderEventStubs::submitted(&stop_loss, account),
-            nautilus_model::orders::stubs::TestOrderEventStubs::accepted(
-                &stop_loss,
-                account,
-                VenueOrderId::from("690004734-SL"),
-            ),
+            TestOrderEventStubs::submitted(&stop_loss, account),
+            TestOrderEventStubs::accepted(&stop_loss, account, VenueOrderId::from("690004734-SL")),
         ] {
             stop_loss.apply(event).unwrap();
         }

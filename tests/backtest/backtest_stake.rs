@@ -11,6 +11,7 @@ use helix_trader::strategy::{
     orders::{EntryRisk, entry_risk},
     risk::Stake,
 };
+use nautilus_backtest::result::BacktestResult;
 use nautilus_model::{
     data::BarType,
     enums::OrderSide,
@@ -29,7 +30,7 @@ fn decimal(s: &str) -> Decimal {
 }
 
 /// The crossover's trade of `trades::TIME_EXIT` at `risk`: its result.
-fn crossover_at(risk: &str) -> nautilus_backtest::result::BacktestResult {
+fn crossover_at(risk: &str) -> BacktestResult {
     let mut config = common::ema_config(1, 2, Some(common::session()));
     config.trade.risk = Some(risk.parse().unwrap());
     let levels = trades::TIME_EXIT;

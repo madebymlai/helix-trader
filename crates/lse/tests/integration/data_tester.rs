@@ -45,7 +45,7 @@ use nautilus_common::{
     testing::wait_until_async,
 };
 use nautilus_core::{UnixNanos, string::secret::SecretString};
-use nautilus_live::{builder::LiveNodeBuilder, config::LiveNodeConfig};
+use nautilus_live::{builder::LiveNodeBuilder, config::LiveNodeConfig, node::LiveNode};
 use nautilus_model::{
     data::{OrderBookDelta, OrderBookDeltas, OrderBookDepth, QuoteTick, TradeTick},
     enums::{AggressorSide, BookAction, BookType, RecordFlag},
@@ -708,7 +708,7 @@ fn tester_node(
     lse: LseDataClientConfig,
     dir: &std::path::Path,
     tester: DataTesterConfig,
-) -> nautilus_live::node::LiveNode {
+) -> LiveNode {
     ParquetDataCatalog::new(dir, None, None, None, None)
         .write_instruments(vec![definition])
         .unwrap();
@@ -737,7 +737,7 @@ fn tester_node(
 }
 
 /// Runs `node` until `done` holds, then stops it.
-async fn run_until(node: &mut nautilus_live::node::LiveNode, done: impl Fn() -> bool) {
+async fn run_until(node: &mut LiveNode, done: impl Fn() -> bool) {
     let handle = node.handle();
     let stopped = async {
         wait_until_async(

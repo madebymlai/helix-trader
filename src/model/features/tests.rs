@@ -3,9 +3,9 @@ use std::sync::Arc;
 use nautilus_common::{actor::DataActor, cache::Cache, clock::VirtualClock};
 use nautilus_core::Params;
 use nautilus_model::{
-    data::{BookOrder, DataType, HasTsInit, OrderBookDelta, stubs::stub_depth10},
+    data::{BookOrder, CustomDataTrait, DataType, HasTsInit, OrderBookDelta, stubs::stub_depth10},
     enums::{AggressorSide, BookAction, OrderSide},
-    identifiers::{TradeId, TraderId},
+    identifiers::{StrategyId, TradeId, TraderId},
     types::{Price, Quantity},
 };
 use nautilus_portfolio::portfolio::Portfolio;
@@ -122,7 +122,7 @@ impl HasTsInit for Level {
     }
 }
 
-impl nautilus_model::data::CustomDataTrait for Level {
+impl CustomDataTrait for Level {
     fn type_name(&self) -> &'static str {
         "Level"
     }
@@ -139,11 +139,11 @@ impl nautilus_model::data::CustomDataTrait for Level {
         Ok(serde_json::to_string(self)?)
     }
 
-    fn clone_arc(&self) -> Arc<dyn nautilus_model::data::CustomDataTrait> {
+    fn clone_arc(&self) -> Arc<dyn CustomDataTrait> {
         Arc::new(self.clone())
     }
 
-    fn eq_arc(&self, other: &dyn nautilus_model::data::CustomDataTrait) -> bool {
+    fn eq_arc(&self, other: &dyn CustomDataTrait) -> bool {
         other.as_any().downcast_ref::<Self>() == Some(self)
     }
 }
@@ -818,7 +818,7 @@ fn registered() -> Probe {
 fn registered_at(now: UnixNanos) -> Probe {
     let mut probe = Probe {
         core: StrategyCore::new(StrategyConfig {
-            strategy_id: Some(nautilus_model::identifiers::StrategyId::from("PROBE-001")),
+            strategy_id: Some(StrategyId::from("PROBE-001")),
             order_id_tag: Some("001".to_string()),
             ..Default::default()
         }),
@@ -905,7 +905,7 @@ fn width_of(distance: Distance) -> Rc<BracketWidth> {
     let requirements = DataRequirements {
         bar_types: vec![],
         ticks: vec![crate::strategy::requirements::TickSeries {
-            data: nautilus_model::data::NautilusDataType::QuoteTick,
+            data: NautilusDataType::QuoteTick,
             instrument_id: id(AUD),
         }],
         custom: vec![],

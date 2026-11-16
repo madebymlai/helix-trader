@@ -989,6 +989,7 @@ impl<'de, P: Part> DeserializeSeed<'de> for TradeKeys<P> {
 #[cfg(test)]
 mod tests {
     use nautilus_model::data::DataType;
+    use nautilus_trading::strategy::StrategyCore;
     use rstest::rstest;
     use rust_decimal::Decimal;
 
@@ -1153,7 +1154,7 @@ mod tests {
     fn a_base_naming_the_strategy_id_alone_tags_its_orders_with_its_tag() {
         let config = load(TOML).unwrap();
         assert_eq!(config.base.order_id_tag, None);
-        let core = nautilus_trading::strategy::StrategyCore::new_checked(config.base).unwrap();
+        let core = StrategyCore::new_checked(config.base).unwrap();
         assert_eq!(core.order_id_tag(), Some("001"));
     }
 

@@ -775,7 +775,7 @@ fn end_of(day: Date) -> anyhow::Result<UnixNanos> {
 mod tests {
     use std::rc::Rc;
 
-    use nautilus_model::identifiers::InstrumentId;
+    use nautilus_model::{data::BarType, identifiers::InstrumentId};
     use rstest::rstest;
     use rust_decimal::Decimal;
 
@@ -848,7 +848,7 @@ mod tests {
         DataRequirements {
             bar_types: vec![],
             ticks: vec![crate::strategy::requirements::TickSeries {
-                data: nautilus_model::data::NautilusDataType::QuoteTick,
+                data: NautilusDataType::QuoteTick,
                 instrument_id: InstrumentId::from(GOLD),
             }],
             custom: vec![],
@@ -1529,7 +1529,7 @@ mod tests {
             .unwrap()
         };
         let composite = DataRequirements {
-            bar_types: vec![nautilus_model::data::BarType::from(
+            bar_types: vec![BarType::from(
                 "XAUUSD.ICMARKETS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
             )],
             ..requirements()
@@ -1658,7 +1658,7 @@ mod tests {
                 pairs
                     .iter()
                     .map(|&instrument_id| crate::strategy::requirements::TickSeries {
-                        data: nautilus_model::data::NautilusDataType::QuoteTick,
+                        data: NautilusDataType::QuoteTick,
                         instrument_id,
                     }),
             );

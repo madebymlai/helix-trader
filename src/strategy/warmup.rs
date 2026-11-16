@@ -1171,8 +1171,9 @@ mod tests {
     use nautilus_data::engine::DataEngine;
     use nautilus_model::{
         data::{BookOrder, DataType, QuoteTick, TradeTick, stubs::stub_depth10},
-        enums::{BookAction, OrderSide, RecordFlag},
-        identifiers::{InstrumentId, StrategyId, TraderId},
+        enums::{AggressorSide, BookAction, OrderSide, RecordFlag},
+        identifiers::{InstrumentId, StrategyId, TradeId, TraderId},
+        instruments::{InstrumentAny, stubs::futures_contract_es},
         types::{Price, Quantity},
     };
     use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
@@ -1599,10 +1600,10 @@ mod tests {
     }
 
     /// A definition of `id`, as a broker's client puts one in the cache.
-    fn defined(id: &str) -> nautilus_model::instruments::InstrumentAny {
-        let mut contract = nautilus_model::instruments::stubs::futures_contract_es(None, None);
+    fn defined(id: &str) -> InstrumentAny {
+        let mut contract = futures_contract_es(None, None);
         contract.id = InstrumentId::from(id);
-        nautilus_model::instruments::InstrumentAny::FuturesContract(contract)
+        InstrumentAny::FuturesContract(contract)
     }
 
     /// LSE's gold futures quotes, SXR8's trades and book depth and IC's
@@ -2362,8 +2363,8 @@ mod tests {
             InstrumentId::from(XAU),
             Price::from("4000.00"),
             Quantity::from(1),
-            nautilus_model::enums::AggressorSide::Buy,
-            nautilus_model::identifiers::TradeId::from(made),
+            AggressorSide::Buy,
+            TradeId::from(made),
             on_the_day(made),
             on_the_day(received),
         )

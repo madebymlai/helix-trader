@@ -423,6 +423,7 @@ mod tests {
 
     use jiff::SignedDuration;
     use nautilus_model::{
+        data::NautilusDataType,
         identifiers::{InstrumentId, StrategyId},
         types::{Currency, Money},
     };
@@ -497,7 +498,7 @@ mod tests {
         DataRequirements {
             bar_types: vec![],
             ticks: vec![crate::strategy::requirements::TickSeries {
-                data: nautilus_model::data::NautilusDataType::QuoteTick,
+                data: NautilusDataType::QuoteTick,
                 instrument_id: InstrumentId::from(GOLD),
             }],
             custom: vec![],

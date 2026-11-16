@@ -1009,7 +1009,7 @@ mod values {
 #[cfg(test)]
 mod tests {
     use jiff::SignedDuration;
-    use nautilus_model::{identifiers::InstrumentId, types::Money};
+    use nautilus_model::{data::NautilusDataType, identifiers::InstrumentId, types::Money};
     use rstest::rstest;
     use rust_decimal::Decimal;
 
@@ -1094,7 +1094,7 @@ mod tests {
         DataRequirements {
             bar_types: vec![],
             ticks: vec![crate::strategy::requirements::TickSeries {
-                data: nautilus_model::data::NautilusDataType::QuoteTick,
+                data: NautilusDataType::QuoteTick,
                 instrument_id: InstrumentId::from(GOLD),
             }],
             custom: vec![],

@@ -54,7 +54,8 @@ use nautilus_common::{
     nautilus_actor,
 };
 use nautilus_core::{
-    UUID4, UnixNanos, datetime::datetime_to_unix_nanos, time::get_atomic_clock_realtime,
+    UUID4, UnixNanos, datetime::datetime_to_unix_nanos, string::secret::SecretString,
+    time::get_atomic_clock_realtime,
 };
 use nautilus_live::{
     builder::LiveNodeBuilder,
@@ -63,7 +64,7 @@ use nautilus_live::{
 use nautilus_model::{
     data::{
         Bar, BarType, BookOrder, Data, NautilusDataType, OrderBookDelta, OrderBookDeltas,
-        QuoteTick, TradeTick,
+        OrderBookDepth, QuoteTick, TradeTick,
     },
     enums::{AggressorSide, BookAction, BookType, OrderSide, RecordFlag},
     identifiers::{ClientId, InstrumentId, TradeId, TraderId, Venue},
@@ -534,7 +535,7 @@ struct Books {
 }
 
 impl BookIndicator for Books {
-    fn handle_depth(&self, _depth: &nautilus_model::data::OrderBookDepth) {}
+    fn handle_depth(&self, _depth: &OrderBookDepth) {}
 
     fn handle_deltas(&self, deltas: &OrderBookDeltas) {
         let of_the_feed = deltas
@@ -1465,9 +1466,7 @@ fn an_lsedge_definition_the_cache_lacks_comes_from_the_catalog_before_lse_stream
         ..Default::default()
     };
     let lse = lse::LseDataClientConfig::builder()
-        .api_key(nautilus_core::string::secret::SecretString::from(
-            lse::testing::API_KEY,
-        ))
+        .api_key(SecretString::from(lse::testing::API_KEY))
         .base_url_http(history.url().to_string())
         .base_url_ws_data(socket.url().to_string())
         .stream_ids(vec![gold])
@@ -1665,9 +1664,7 @@ fn glbx_data_comes_from_lse_s_cme_stream_routed_glbx_beside_another_client() {
     };
     let lse = lse::LseDataClientConfig::builder()
         .cme_calls_per_minute(std::num::NonZeroU32::new(6000).unwrap())
-        .cme_api_key(nautilus_core::string::secret::SecretString::from(
-            lse::testing::CME_API_KEY,
-        ))
+        .cme_api_key(SecretString::from(lse::testing::CME_API_KEY))
         .base_url_http(history.url().to_string())
         .base_url_ws_cme(stream.url().to_string())
         .stream_ids(vec![es])

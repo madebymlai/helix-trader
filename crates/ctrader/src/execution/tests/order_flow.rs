@@ -9,7 +9,7 @@
 use nautilus_common::messages::ExecutionReport;
 use nautilus_model::{
     enums::{ContingencyType, OmsType},
-    events::OrderEventAny,
+    events::{OrderEventAny, OrderFilled},
     identifiers::{ClientOrderId, OrderListId, StrategyId},
     orders::{OrderList, OrderTestBuilder, stubs::TestOrderEventStubs},
     position::Position,
@@ -343,7 +343,7 @@ fn row(id: &str, kind: &'static str) -> (String, &'static str) {
 }
 
 /// The fill of `events` of order `id`.
-fn fill_of(events: &[OrderEventAny], id: &str) -> nautilus_model::events::OrderFilled {
+fn fill_of(events: &[OrderEventAny], id: &str) -> OrderFilled {
     events
         .iter()
         .find_map(|e| match e {
@@ -636,10 +636,7 @@ async fn an_unanswered_order_stays_in_flight_until_a_query_finds_its_outcome() {
         ))
         .unwrap();
 
-    let ExecutionEvent::Report(nautilus_common::messages::ExecutionReport::OrderWithFills(
-        status,
-        fills,
-    )) = node.next().await
+    let ExecutionEvent::Report(ExecutionReport::OrderWithFills(status, fills)) = node.next().await
     else {
         panic!("not an order report with fills");
     };
@@ -1415,9 +1412,7 @@ async fn an_unanswered_order_the_broker_holds_nowhere_is_reported_rejected_by_a_
         ))
         .unwrap();
 
-    let ExecutionEvent::Report(nautilus_common::messages::ExecutionReport::Order(status)) =
-        node.next().await
-    else {
+    let ExecutionEvent::Report(ExecutionReport::Order(status)) = node.next().await else {
         panic!("not an order report");
     };
     assert_eq!(status.client_order_id, Some(ClientOrderId::from("PROBE-1")));

@@ -492,6 +492,7 @@ mod tests {
     use nautilus_data::{client::DataClientAdapter, engine::DataEngine};
     use nautilus_live::{SocketReconnectRegistry, SocketReconnectRequestOutcome};
     use nautilus_model::{
+        data::QuoteTick,
         identifiers::TraderId,
         instruments::{Instrument, InstrumentAny},
         types::{Price, Quantity},
@@ -630,7 +631,7 @@ mod tests {
     }
 
     /// The next event, a quote.
-    async fn next_quote(events: &mut Events) -> nautilus_model::data::QuoteTick {
+    async fn next_quote(events: &mut Events) -> QuoteTick {
         match next_event(events).await {
             DataEvent::Data(Data::Quote(quote)) => quote,
             other => panic!("not a quote: {other:?}"),
@@ -880,7 +881,7 @@ mod tests {
     }
 
     /// (ms, bid, ask) of `quotes`.
-    fn prices(quotes: &[nautilus_model::data::QuoteTick]) -> Vec<(u64, String, String)> {
+    fn prices(quotes: &[QuoteTick]) -> Vec<(u64, String, String)> {
         quotes
             .iter()
             .map(|q| {
@@ -1045,7 +1046,7 @@ mod tests {
         events: &mut Events,
         start: &str,
         end: &str,
-    ) -> Vec<nautilus_model::data::QuoteTick> {
+    ) -> Vec<QuoteTick> {
         let mut asked = request(Some(at(start)), at(end), None);
         asked.params = Some(Params::new(
             [("update_catalog".to_string(), serde_json::json!(true))].into(),

@@ -63,11 +63,13 @@ use nautilus_model::{
     accounts::AccountAny,
     enums::{AccountType, ContingencyType, OmsType, OrderType},
     events::{AccountState, OrderDeniedReason},
-    identifiers::{AccountId, ClientId, ClientOrderId, InstrumentId, Venue, VenueOrderId},
+    identifiers::{
+        AccountId, ClientId, ClientOrderId, InstrumentId, PositionId, Venue, VenueOrderId,
+    },
     instruments::{Instrument, InstrumentAny},
     orders::{Order, OrderAny},
     reports::{ExecutionMassStatus, FillReport, OrderStatusReport, PositionStatusReport},
-    types::{AccountBalance, MarginBalance, Price},
+    types::{AccountBalance, MarginBalance, Price, Quantity},
 };
 
 use self::{
@@ -591,7 +593,7 @@ impl CTraderExecutionClient {
         &self,
         session: &Session,
         order: &OrderAny,
-        cmd_position: Option<nautilus_model::identifiers::PositionId>,
+        cmd_position: Option<PositionId>,
         protection: Protection,
         role: Role,
     ) -> Result<(), OrderDeniedReason> {
@@ -624,7 +626,7 @@ impl CTraderExecutionClient {
         &self,
         session: &Session,
         orders: &[OrderAny],
-        cmd_position: Option<nautilus_model::identifiers::PositionId>,
+        cmd_position: Option<PositionId>,
     ) -> Result<(), OrderDeniedReason> {
         let unsupported = |detail: &str| OrderDeniedReason::UnsupportedOrderList {
             detail: detail.to_owned(),
@@ -742,7 +744,7 @@ impl CTraderExecutionClient {
     fn amend_order(
         order: &OrderAny,
         venue: i64,
-        quantity: nautilus_model::types::Quantity,
+        quantity: Quantity,
         price: Option<Price>,
         trigger_price: Option<Price>,
         protection: Protection,

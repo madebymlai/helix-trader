@@ -602,7 +602,10 @@ impl ModelHandle {
 /// and then hands to the features (`strategy::warmup`).
 #[macro_export]
 macro_rules! model_data_hooks {
+    // The hooks expand in the strategy's module, which need not import the
+    // types they name, so each names them by their full path.
     ($model:ident) => {
+        // nautilus-import-ok
         fn on_data_response(
             &mut self,
             response: &::nautilus_common::messages::data::DataResponseEnvelope,
@@ -610,6 +613,7 @@ macro_rules! model_data_hooks {
             self.$model.warmup().on_data_response(self, response)
         }
 
+        // nautilus-import-ok
         fn on_historical_quotes(
             &mut self,
             quotes: &[::nautilus_model::data::QuoteTick],
@@ -617,6 +621,7 @@ macro_rules! model_data_hooks {
             self.$model.warmup().on_historical_quotes(quotes)
         }
 
+        // nautilus-import-ok
         fn on_historical_trades(
             &mut self,
             trades: &[::nautilus_model::data::TradeTick],
@@ -624,6 +629,7 @@ macro_rules! model_data_hooks {
             self.$model.warmup().on_historical_trades(trades)
         }
 
+        // nautilus-import-ok
         fn on_historical_book_depth(
             &mut self,
             depths: &[::nautilus_model::data::OrderBookDepth],
@@ -631,6 +637,7 @@ macro_rules! model_data_hooks {
             self.$model.warmup().on_historical_book_depth(depths)
         }
 
+        // nautilus-import-ok
         fn on_historical_book_deltas(
             &mut self,
             deltas: &[::nautilus_model::data::OrderBookDelta],
@@ -638,6 +645,7 @@ macro_rules! model_data_hooks {
             self.$model.warmup().on_historical_book_deltas(deltas)
         }
 
+        // nautilus-import-ok
         fn on_book_depth(
             &mut self,
             depth: &::nautilus_model::data::OrderBookDepth,
@@ -645,6 +653,7 @@ macro_rules! model_data_hooks {
             self.$model.warmup().on_book_depth(depth)
         }
 
+        // nautilus-import-ok
         fn on_book_deltas(
             &mut self,
             deltas: &::nautilus_model::data::OrderBookDeltas,
@@ -657,10 +666,12 @@ macro_rules! model_data_hooks {
             Ok(())
         }
 
+        // nautilus-import-ok
         fn on_quote(&mut self, quote: &::nautilus_model::data::QuoteTick) -> ::anyhow::Result<()> {
             self.$model.warmup().on_quote(quote)
         }
 
+        // nautilus-import-ok
         fn on_trade(&mut self, trade: &::nautilus_model::data::TradeTick) -> ::anyhow::Result<()> {
             self.$model.warmup().on_trade(trade)
         }
@@ -745,8 +756,11 @@ mod tests {
     };
     use nautilus_core::{UUID4, UnixNanos};
     use nautilus_model::{
-        data::{Bar, BarType, NautilusDataType, QuoteTick, TradeTick},
-        enums::AggressorSide,
+        data::{
+            Bar, BarType, BookOrder, DataType, NautilusDataType, OrderBookDelta, OrderBookDeltas,
+            OrderBookDepth, QuoteTick, TradeTick, stubs::stub_depth10,
+        },
+        enums::{AggressorSide, BookAction, RecordFlag},
         identifiers::{ClientId, InstrumentId, Symbol, TradeId, TraderId, Venue},
         instruments::{
             Instrument, InstrumentAny,
@@ -1947,22 +1961,17 @@ mod tests {
         register(&mut hooked.core, at("2026-08-10T14:30:00Z"));
         model.start(&mut hooked).unwrap();
         let ts = UnixNanos::from(at("2026-08-10T14:30:01Z"));
-        let depth = nautilus_model::data::OrderBookDepth {
+        let depth = OrderBookDepth {
             instrument_id: gcz26,
             ts_event: ts,
             ts_init: ts,
-            ..nautilus_model::data::stubs::stub_depth10()
+            ..stub_depth10()
         };
-        let delta = nautilus_model::data::OrderBookDelta::new(
+        let delta = OrderBookDelta::new(
             gcz26,
-            nautilus_model::enums::BookAction::Add,
-            nautilus_model::data::BookOrder::new(
-                nautilus_model::enums::OrderSide::Buy,
-                Price::from("4000.0"),
-                Quantity::from(1),
-                1,
-            ),
-            nautilus_model::enums::RecordFlag::F_LAST as u8,
+            BookAction::Add,
+            BookOrder::new(OrderSide::Buy, Price::from("4000.0"), Quantity::from(1), 1),
+            RecordFlag::F_LAST as u8,
             1,
             ts,
             ts,
@@ -1970,11 +1979,7 @@ mod tests {
         let cold = features.values();
 
         DataActor::on_book_depth(&mut hooked, &depth).unwrap();
-        DataActor::on_book_deltas(
-            &mut hooked,
-            &nautilus_model::data::OrderBookDeltas::new(gcz26, vec![delta]),
-        )
-        .unwrap();
+        DataActor::on_book_deltas(&mut hooked, &OrderBookDeltas::new(gcz26, vec![delta])).unwrap();
 
         assert_eq!(cold, None);
         assert_eq!(features.values(), Some(vec![1.0, 1.0]));
@@ -3084,8 +3089,8 @@ mod tests {
     }
 
     /// The data type of the imbalances of `instrument_id`, keyed by its id.
-    fn imbalance_type(instrument_id: &str) -> nautilus_model::data::DataType {
-        nautilus_model::data::DataType::new("Imbalance", None, Some(instrument_id.to_string()))
+    fn imbalance_type(instrument_id: &str) -> DataType {
+        DataType::new("Imbalance", None, Some(instrument_id.to_string()))
     }
 
     /// An imbalance of `value` of `instrument_id` at `time`, keyed by its
@@ -3355,8 +3360,8 @@ mod tests {
     }
 
     /// The data type of the yields of `symbol`, keyed by its identifier.
-    fn yields(symbol: &str) -> nautilus_model::data::DataType {
-        nautilus_model::data::DataType::new("Yield", None, Some(symbol.to_string()))
+    fn yields(symbol: &str) -> DataType {
+        DataType::new("Yield", None, Some(symbol.to_string()))
     }
 
     /// The custom series of the requirements, the 10-year and the 2-year

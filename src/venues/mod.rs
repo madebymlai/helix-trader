@@ -1204,7 +1204,7 @@ mod tests {
         orders::OrderTestBuilder,
         types::{Price, Quantity},
     };
-    use nautilus_okx::common::consts::OKX_VENUE;
+    use nautilus_okx::{common::consts::OKX_VENUE, config::OKXDataClientConfig};
     use nautilus_portfolio::portfolio::Portfolio;
     use nautilus_trading::{
         nautilus_strategy,
@@ -2643,7 +2643,7 @@ mod tests {
         };
         let okx = NodeClient {
             factory: Box::new(OKXDataClientFactory::new()),
-            config: Box::new(nautilus_okx::config::OKXDataClientConfig {
+            config: Box::new(OKXDataClientConfig {
                 base_url_http: Some(unreachable.clone()),
                 ..Default::default()
             }),
