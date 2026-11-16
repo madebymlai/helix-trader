@@ -61,7 +61,7 @@
 //! stream's sequence of its record instead, one of its contract's and
 //! level's alone. A gap of a contract's sequence is logged and left.
 
-use std::{fmt, sync::Arc};
+use std::{fmt::Display, sync::Arc};
 
 use ahash::AHashMap;
 use anyhow::Context;
@@ -253,11 +253,11 @@ impl ExchangeInstrument {
     }
 }
 
-impl fmt::Display for ExchangeInstrument {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for ExchangeInstrument {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Cme(contract) => fmt::Display::fmt(contract, f),
-            Self::Nasdaq(stock) => fmt::Display::fmt(stock, f),
+            Self::Cme(contract) => Display::fmt(contract, f),
+            Self::Nasdaq(stock) => Display::fmt(stock, f),
         }
     }
 }

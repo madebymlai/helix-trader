@@ -32,7 +32,7 @@
 //! the trades its margin takes. The slope and the gap are reported, never
 //! required.
 
-use std::fmt;
+use std::fmt::Display;
 
 use nautilus_analysis::{
     statistic::PortfolioStatistic,
@@ -252,8 +252,8 @@ pub(super) fn in_r(r: Option<f64>) -> String {
     r.map_or_else(|| "n/a".to_string(), |r| format!("{r:.6}R"))
 }
 
-impl fmt::Display for Trades {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for Trades {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "{} trades, expectancy {}, win rate {}",
@@ -264,8 +264,8 @@ impl fmt::Display for Trades {
     }
 }
 
-impl fmt::Display for Holdout {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for Holdout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let Earnings {
             taken,
             every,
@@ -289,8 +289,8 @@ impl fmt::Display for Holdout {
     }
 }
 
-impl fmt::Display for Refusal {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Skill { skill } => {
                 write!(f, "holdout skill {} not above nought", value(*skill))

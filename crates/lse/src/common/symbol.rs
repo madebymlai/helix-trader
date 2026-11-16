@@ -22,7 +22,7 @@
 //! LSE lists too (see `NasdaqStock`), and a US option Databento's `OPRA`
 //! id, its OSI symbol, which LSE lists too (see `OpraContract`).
 
-use std::fmt;
+use std::fmt::Display;
 
 use anyhow::Context;
 use jiff::{ToSpan, civil::Date};
@@ -159,8 +159,8 @@ impl LseSymbol {
     }
 }
 
-impl fmt::Display for LseSymbol {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for LseSymbol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} in LSE's {}", self.symbol, self.market)
     }
 }
@@ -430,8 +430,8 @@ impl NasdaqStock {
     }
 }
 
-impl fmt::Display for NasdaqStock {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for NasdaqStock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.instrument_id())
     }
 }
@@ -507,8 +507,8 @@ impl OpraContract {
     }
 }
 
-impl fmt::Display for OpraContract {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for OpraContract {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.instrument_id())
     }
 }
@@ -541,8 +541,8 @@ fn is_osi(symbol: &str) -> bool {
     written.is_some_and(|written| written == symbol)
 }
 
-impl fmt::Display for CmeContract {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for CmeContract {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "{}, the {} futures of {}",

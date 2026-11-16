@@ -66,7 +66,8 @@
 //! the infinities as strings, and so does a probe's prediction.
 
 use std::{
-    fmt, fs,
+    fmt::Debug,
+    fs,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -921,8 +922,8 @@ impl<M> Swap<M> {
 }
 
 /// A swap reads as the model in use and the valid-from last read.
-impl<M: fmt::Debug> fmt::Debug for Swap<M> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl<M: Debug> Debug for Swap<M> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Swap")
             .field("current", &self.current)
             .field("read", &self.read)

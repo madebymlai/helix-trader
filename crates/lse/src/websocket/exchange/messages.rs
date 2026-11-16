@@ -7,7 +7,7 @@
 //! a record in the `dbn` encoding, LSE's 24-byte header then the record in
 //! Databento's DBN format, of the level's schema.
 
-use std::fmt;
+use std::fmt::Display;
 
 use anyhow::Context;
 use dbn::{
@@ -64,8 +64,8 @@ impl ExchangeLevel {
     }
 }
 
-impl fmt::Display for ExchangeLevel {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for ExchangeLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Level {}", self.number())
     }
 }

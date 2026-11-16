@@ -57,7 +57,7 @@
 
 mod handler;
 
-use std::{sync::Arc, time::Duration};
+use std::{fmt::Debug, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use nautilus_common::live::dst::time;
@@ -200,7 +200,7 @@ pub(super) struct CTraderWebSocketClient {
     socket: Option<SocketControl>,
 }
 
-impl std::fmt::Debug for CTraderWebSocketClient {
+impl Debug for CTraderWebSocketClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CTraderWebSocketClient")
             .field("confirmed_spots", &self.subscriptions.len())

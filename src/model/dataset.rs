@@ -83,7 +83,8 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt, fs,
+    fmt::Display,
+    fs,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -180,8 +181,8 @@ pub struct DatasetRow {
 #[derive(Debug)]
 pub struct SchemaMismatch(String);
 
-impl fmt::Display for SchemaMismatch {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for SchemaMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
 }
@@ -257,8 +258,8 @@ impl DatasetVenue {
 /// The settings as the fingerprint reads them (`fingerprint_part`), such as
 /// `commission rate 0.00003, balance 10000 USD`, or `commission rate
 /// 0.00003, balance 10000 USD, latency 150ms`.
-impl fmt::Display for DatasetVenue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for DatasetVenue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "commission {}, balance {} {}",

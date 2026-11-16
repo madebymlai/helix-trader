@@ -20,7 +20,7 @@
 //! October. A release LSE has not filled yet is a row of no actual: a
 //! window of releases holding one, past, is not loaded either.
 
-use std::fmt;
+use std::fmt::Display;
 
 use anyhow::Context;
 use bytes::Bytes;
@@ -233,8 +233,8 @@ impl RowSource {
     }
 }
 
-impl fmt::Display for RowSource {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for RowSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "the rows of {} in LSE's {}", self.symbol, self.source)
     }
 }
@@ -360,7 +360,7 @@ pub async fn fetch(
 /// naming `query`.
 fn read(
     file: Result<Option<Bytes>, LseHttpError>,
-    query: &impl fmt::Display,
+    query: &impl Display,
     source: &RowSource,
     time_column: &str,
     stamp: Stamp,

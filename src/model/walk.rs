@@ -56,7 +56,7 @@
 //! trade: no section adds the sides up, as the backtest's report gives what the
 //! strategy actually traded, which can differ whenever it filters its decisions.
 
-use std::{collections::BTreeSet, fmt};
+use std::{collections::BTreeSet, fmt::Display};
 
 use jiff::Timestamp;
 use nautilus_core::UnixNanos;
@@ -331,8 +331,8 @@ fn score<M>(
 /// The scores as text, in the sections of the backtest's report: of each
 /// model, the long's, the short's, then the meta's, one per period, then
 /// the span.
-impl fmt::Display for Scores {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for Scores {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for (model, scores) in [
             ("Long model", &self.long),
             ("Short model", &self.short),
@@ -347,7 +347,11 @@ impl fmt::Display for Scores {
 }
 
 /// The sections of `scores`, each headed by `model`, the model's name.
-fn sections(f: &mut fmt::Formatter<'_>, model: &str, scores: &ModelScores) -> fmt::Result {
+fn sections(
+    f: &mut std::fmt::Formatter<'_>,
+    model: &str,
+    scores: &ModelScores,
+) -> std::fmt::Result {
     for period in &scores.periods {
         writeln!(
             f,
@@ -371,7 +375,7 @@ fn sections(f: &mut fmt::Formatter<'_>, model: &str, scores: &ModelScores) -> fm
 
 /// The lines of `score`: its skill, mean `R - E'`, calibration slope and
 /// top-decile gap.
-fn lines(f: &mut fmt::Formatter<'_>, score: ExpectedScore) -> fmt::Result {
+fn lines(f: &mut std::fmt::Formatter<'_>, score: ExpectedScore) -> std::fmt::Result {
     let value = |value: Option<f64>| value.map_or_else(|| "n/a".to_string(), |v| format!("{v:.6}"));
     writeln!(f, "  Skill: {}", value(score.skill))?;
     writeln!(f, "  Mean R - E': {}", value(score.mean_error))?;
@@ -383,7 +387,7 @@ fn lines(f: &mut fmt::Formatter<'_>, score: ExpectedScore) -> fmt::Result {
 /// The lines of `earnings`: the trades taken, a side's those picked for it,
 /// every trade of the rows the model decided, and both at `STRESS` times the
 /// commission, the expectancy in R.
-fn earned(f: &mut fmt::Formatter<'_>, earnings: &Earnings) -> fmt::Result {
+fn earned(f: &mut std::fmt::Formatter<'_>, earnings: &Earnings) -> std::fmt::Result {
     let value = |value: Option<f64>| value.map_or_else(|| "n/a".to_string(), |v| format!("{v:.6}"));
     let Earnings {
         taken,

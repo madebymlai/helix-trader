@@ -28,7 +28,7 @@
 //! a failure envelope) and stops the node; `run` returns it. See
 //! `README.md`, "Fill paths".
 
-use std::{cell::RefCell, collections::VecDeque, fmt, path::Path, rc::Rc};
+use std::{cell::RefCell, collections::VecDeque, fmt::Display, path::Path, rc::Rc};
 
 use anyhow::Context;
 use jiff::{SignedDuration, Timestamp};
@@ -104,8 +104,8 @@ impl FillData {
     }
 }
 
-impl fmt::Display for FillData {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for FillData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Instrument => f.write_str("definition"),
             Self::Quotes => f.write_str("quotes"),
@@ -133,8 +133,8 @@ pub struct FillRequest {
     pub to: Timestamp,
 }
 
-impl fmt::Display for FillRequest {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for FillRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "the {} of {} over [{}, {}]",
@@ -220,8 +220,8 @@ pub struct CustomFillRequest {
     pub to: Timestamp,
 }
 
-impl fmt::Display for CustomFillRequest {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for CustomFillRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "the {} over [{}, {}]",
@@ -308,11 +308,11 @@ enum Request {
     Custom(CustomFillRequest),
 }
 
-impl fmt::Display for Request {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Series(request) => fmt::Display::fmt(request, f),
-            Self::Custom(request) => fmt::Display::fmt(request, f),
+            Self::Series(request) => Display::fmt(request, f),
+            Self::Custom(request) => Display::fmt(request, f),
         }
     }
 }

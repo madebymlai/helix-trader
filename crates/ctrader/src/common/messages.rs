@@ -8,7 +8,7 @@
 //! Protobuf messages"). Errors come back as `ProtoOAErrorRes` (or the
 //! proxy's `ProtoErrorRes`) under the request's `clientMsgId`.
 
-use std::fmt;
+use std::fmt::Display;
 
 use prost::Message as _;
 use zeroize::Zeroize;
@@ -245,8 +245,8 @@ pub(crate) enum CTraderError {
     Protocol(String),
 }
 
-impl fmt::Display for CTraderError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for CTraderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Venue {
                 code,

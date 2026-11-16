@@ -1,4 +1,8 @@
-use std::{fmt, marker::PhantomData, str::FromStr};
+use std::{
+    fmt::{Debug, Display},
+    marker::PhantomData,
+    str::FromStr,
+};
 
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::config::{ConfigError, ConfigErrorCollector, ConfigResult};
@@ -72,7 +76,7 @@ pub struct StandardConfig<P: Part> {
 /// trades on a model, whether it sizes its trades by risk, its default
 /// `[base]`, the series it reads and its own rules. The standard tables
 /// are not its to drop or rename.
-pub trait Part: DeserializeOwned + fmt::Debug + Clone {
+pub trait Part: DeserializeOwned + Debug + Clone {
     /// How many instruments it trades: `[trade] instruments` lists as many.
     const INSTRUMENTS: usize;
     /// The indicators its code reads, each by name and arguments
@@ -598,8 +602,8 @@ pub enum Series {
 /// A series by its bar type, `bars XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL`,
 /// as its ticks (see `TickSeries`), or by its data type (see
 /// `CustomSeries`).
-impl fmt::Display for Series {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for Series {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Bars(bar_type) => write!(f, "bars {bar_type}"),
             Self::Ticks(ticks) => write!(f, "{ticks}"),
@@ -889,7 +893,7 @@ struct Keys<P>(PhantomData<P>);
 impl<'de, P: Part> Visitor<'de> for Keys<P> {
     type Value = StandardConfig<P>;
 
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(
             "the tables base, data, indicators, trade and, of a strategy trading on a model, \
              model, and the strategy's own fields",

@@ -47,12 +47,7 @@
 //! trims a response to the warmup's end by `ts_init`. A series with no
 //! history drops nothing; a new warmup forgets the seams of the one before.
 
-use std::{
-    cell::RefCell,
-    collections::HashMap,
-    fmt::{self, Debug},
-    rc::Rc,
-};
+use std::{cell::RefCell, collections::HashMap, fmt::Debug, rc::Rc};
 
 use nautilus_common::actor::indicators::SharedActorIndicator;
 use nautilus_core::UnixNanos;
@@ -245,7 +240,7 @@ impl Tick {
 }
 
 impl Debug for Hold {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct(stringify!(Hold))
             .field("indicators", &self.indicators.len())
             .field("books", &self.books.len())

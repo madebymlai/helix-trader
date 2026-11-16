@@ -15,7 +15,7 @@
 //! secret material, the client id and the account id credential identity:
 //! none of them appears in `Debug`, errors or logs.
 
-use std::{any::Any, fmt, path::PathBuf};
+use std::{any::Any, fmt::Debug, path::PathBuf};
 
 use anyhow::Context;
 use nautilus_common::factories::ClientConfig;
@@ -72,8 +72,8 @@ impl CTraderAccountId {
     }
 }
 
-impl fmt::Debug for CTraderAccountId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Debug for CTraderAccountId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(REDACTED)
     }
 }

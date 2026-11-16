@@ -25,7 +25,7 @@
 //! cTrader makes a close request's `clientMsgId` the `clientOrderId` of the
 //! closing order it creates (demo, 2026-10-26).
 
-use std::{fmt, str::FromStr};
+use std::{fmt::Display, str::FromStr};
 
 use nautilus_core::UnixNanos;
 use nautilus_model::{
@@ -75,8 +75,8 @@ impl Tag {
     }
 }
 
-impl fmt::Display for Tag {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for Tag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let op = match self {
             Self::New(_) => "N",
             Self::Amend(_) => "A",

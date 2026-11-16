@@ -6,7 +6,12 @@
 //! collection's exports, a macro series' exports, and an instrument's
 //! splits and dividends.
 
-use std::{collections::HashMap, fmt, num::NonZeroU32, time::Duration};
+use std::{
+    collections::HashMap,
+    fmt::{Debug, Display},
+    num::NonZeroU32,
+    time::Duration,
+};
 
 use bytes::Bytes;
 use jiff::Timestamp;
@@ -62,8 +67,8 @@ pub struct LseHttpClient {
     retries: RetryManager<LseHttpError>,
 }
 
-impl fmt::Debug for LseHttpClient {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Debug for LseHttpClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct(stringify!(LseHttpClient))
             .field("base_url", &self.base_url)
             .finish_non_exhaustive()
@@ -236,7 +241,7 @@ impl LseHttpClient {
     /// (see `export`), one download at a time.
     async fn download<Q>(&self, path: &str, query: &Q) -> Result<Option<Bytes>, LseHttpError>
     where
-        Q: Serialize + fmt::Display + Sync,
+        Q: Serialize + Display + Sync,
     {
         let _download = self.downloads.lock().await;
         let retry_after = |e: &LseHttpError| e.retry_after();
@@ -254,7 +259,7 @@ impl LseHttpClient {
 
     async fn download_once<Q>(&self, path: &str, query: &Q) -> Result<Option<Bytes>, LseHttpError>
     where
-        Q: Serialize + fmt::Display + Sync,
+        Q: Serialize + Display + Sync,
     {
         let response = match self.get(path, Some(query)).await {
             Err(LseHttpError::Refusal { refusal, .. }) if refusal.is_no_rows() => {

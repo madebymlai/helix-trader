@@ -18,7 +18,7 @@
 //! taken for R, and a risk with a percent sign, since a bare number could
 //! be a fraction or a percentage.
 
-use std::{fmt, str::FromStr};
+use std::{fmt::Display, str::FromStr};
 
 use anyhow::Context;
 use rust_decimal::Decimal;
@@ -75,12 +75,12 @@ impl FromStr for R {
 }
 
 /// The refusal of `written`, a value without its R suffix.
-fn unsuffixed(written: impl fmt::Display) -> anyhow::Error {
+fn unsuffixed(written: impl Display) -> anyhow::Error {
     anyhow::anyhow!("{written} has no R suffix: the value is in R, written such as \"0.5R\"")
 }
 
-impl fmt::Display for R {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for R {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}R", self.0)
     }
 }
@@ -99,7 +99,7 @@ struct Written;
 impl de::Visitor<'_> for Written {
     type Value = R;
 
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("a value in R, written such as \"0.5R\"")
     }
 
@@ -149,8 +149,8 @@ impl FromStr for Risk {
 }
 
 /// As it is written, `0.5%`.
-impl fmt::Display for Risk {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for Risk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}%", (self.0 * Decimal::ONE_HUNDRED).normalize())
     }
 }
@@ -175,7 +175,7 @@ struct Percentage;
 impl de::Visitor<'_> for Percentage {
     type Value = Risk;
 
-    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("a percentage of equity, such as \"0.5%\"")
     }
 
@@ -233,8 +233,8 @@ impl Stake {
 }
 
 /// The risk and its multiple, `0.5% × 2`.
-impl fmt::Display for Stake {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for Stake {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} × {}", self.risk, self.multiple.normalize())
     }
 }

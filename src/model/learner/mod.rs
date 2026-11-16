@@ -39,7 +39,7 @@ mod fake;
 mod lightgbm;
 mod perpetual;
 
-use std::fmt;
+use std::fmt::Debug;
 
 pub use lightgbm::LightGbmConfig;
 pub use perpetual::PerpetualConfig;
@@ -242,8 +242,8 @@ impl Model {
     }
 }
 
-impl fmt::Debug for Model {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Debug for Model {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Model")
             .field("kind", &self.kind)
             .field("width", &self.width())

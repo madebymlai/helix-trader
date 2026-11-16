@@ -8,7 +8,7 @@
 //! which the adapter reads from the environment; the Docker socket from
 //! `DOCKER_HOST`, else the local default.
 
-use std::{fmt, str::FromStr};
+use std::{fmt::Display, str::FromStr};
 
 use nautilus_interactive_brokers::{
     config::{DockerizedIBGatewayConfig, TradingMode},
@@ -46,8 +46,8 @@ impl FromStr for IbAccount {
     }
 }
 
-impl fmt::Display for IbAccount {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for IbAccount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
 }

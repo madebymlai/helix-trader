@@ -2,7 +2,7 @@
 //! listings, its reference catalogue and an instrument's factors; and when
 //! the rows of each of LSE's reference collections are known (`Stamp`).
 
-use std::fmt;
+use std::fmt::Display;
 
 use anyhow::Context;
 use jiff::{
@@ -69,8 +69,8 @@ pub struct LsePair {
     pub delisted_date: Option<Date>,
 }
 
-impl fmt::Display for LsePair {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for LsePair {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} (", self.symbol)?;
         if let Some(name) = &self.name {
             write!(f, "{name}, ")?;
@@ -355,8 +355,8 @@ impl LseRefusal {
     }
 }
 
-impl fmt::Display for LseRefusal {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for LseRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}: {}", self.code, self.message)?;
         if let Some(plan) = &self.required_plan {
             write!(f, "; required plan: {}", plan.name)?;

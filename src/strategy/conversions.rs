@@ -43,7 +43,7 @@
 //! a pair off the venue of an instrument traded whose broker's account has
 //! a base currency.
 
-use std::fmt;
+use std::fmt::Display;
 
 use ahash::AHashMap;
 use anyhow::Context;
@@ -218,8 +218,8 @@ impl Rates {
 }
 
 /// Where the rates come from, and why one may be missing.
-impl fmt::Display for Rates {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for Rates {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.venue {
             Some(venue) => write!(
                 f,

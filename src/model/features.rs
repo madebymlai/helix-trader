@@ -120,7 +120,7 @@ use std::{
     any::Any,
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
-    fmt::{self, Debug, Display},
+    fmt::{Debug, Display},
     rc::Rc,
 };
 
@@ -636,7 +636,7 @@ impl Reading {
 }
 
 impl Debug for FeatureSet {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FeatureSet")
             .field("names", &self.names)
             .field("fingerprint", &self.fingerprint)
@@ -1023,7 +1023,7 @@ impl Fingerprint {
 }
 
 impl Display for Fingerprint {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.iter().try_for_each(|byte| write!(f, "{byte:02x}"))
     }
 }

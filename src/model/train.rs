@@ -94,7 +94,7 @@
 //! kept with the reason (`Kept`), for each model trained. It succeeds when
 //! it kept no model (`Trained::succeeded`).
 
-use std::fmt;
+use std::fmt::Display;
 
 use anyhow::Context;
 use jiff::{SignedDuration, Timestamp};
@@ -844,8 +844,8 @@ fn spread(len: usize) -> impl Iterator<Item = usize> {
 }
 
 /// A train of one model reads as its outcome; of more, each model's.
-impl fmt::Display for Trained {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for Trained {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let outcomes: Vec<(&str, &Outcome)> = [
             ("the long model", &self.long),
             ("the short model", &self.short),
@@ -867,8 +867,8 @@ impl fmt::Display for Trained {
     }
 }
 
-impl fmt::Display for Outcome {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for Outcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Published {
                 valid_from,
@@ -888,8 +888,8 @@ impl fmt::Display for Outcome {
     }
 }
 
-impl fmt::Display for Kept {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for Kept {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Refused { why, holdout } => write!(f, "{why} (holdout {holdout})"),
             Self::Failed(why) => write!(f, "failed: {why}"),

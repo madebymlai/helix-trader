@@ -12,6 +12,8 @@
 //! (`DefaultFillModel`), at the market with no slippage of its own: at the
 //! quote, so the spread is the cost, or, on bars, at the bar's prices.
 
+use std::fmt::Display;
+
 use anyhow::Context;
 use nautilus_execution::models::fee::{
     FeeModelAny, FixedFeeModel, MakerTakerFeeModel, PerContractFeeModel,
@@ -70,7 +72,7 @@ impl TryFrom<CommissionFields> for Commission {
 
 /// Its kind and its amount normalized (`normalized`), such as `rate
 /// 0.00003`, `per order 3 EUR` or `per quantity 0.035 USD`.
-impl std::fmt::Display for Commission {
+impl Display for Commission {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let kind = match self {
             Self::PerOrder(_) => "per order",

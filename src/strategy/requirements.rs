@@ -6,7 +6,7 @@
 //! over the slices its contracts stand for its instruments (`SeriesSlice`).
 //! Filling the catalog, backtesting and going live all read them from here.
 
-use std::{fmt, str::FromStr};
+use std::{fmt::Display, str::FromStr};
 
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::{ClosedInterval, Params, UnixNanos, correctness::check_valid_string_utf8};
@@ -289,8 +289,8 @@ pub struct CustomSlice {
 /// The series by its data type as Nautilus writes it, its topic of its
 /// type's name, metadata and identifier
 /// (`LseRow.source=bond_yields.symbol=US10Y.identifier=US10Y`).
-impl fmt::Display for CustomSeries {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for CustomSeries {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }
 }
@@ -502,8 +502,8 @@ impl SeriesSlice {
 
 /// The ticks by their Nautilus data type and instrument,
 /// `QuoteTick of XAUUSD.ICMARKETS`.
-impl fmt::Display for TickSeries {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for TickSeries {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} of {}", self.data, self.instrument_id)
     }
 }
@@ -541,8 +541,8 @@ pub(crate) enum CatalogSeries {
 }
 
 /// The bars by their bar type, the ticks as `TickSeries` names them.
-impl fmt::Display for CatalogSeries {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for CatalogSeries {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Bars(bar_type) => write!(f, "{bar_type}"),
             Self::Ticks(tick) => write!(f, "{tick}"),

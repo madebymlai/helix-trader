@@ -140,7 +140,7 @@ use std::{
     any::Any,
     cell::RefCell,
     collections::BTreeMap,
-    fmt::{self, Debug, Display, Write as _},
+    fmt::{Debug, Display, Write as _},
     rc::Rc,
     sync::Arc,
 };
@@ -867,7 +867,7 @@ impl Distance {
 }
 
 impl Display for Distance {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::BasisPoints(bps) => write!(f, "{bps} bps"),
             Self::Atr(multiple) => write!(f, "{multiple} atr"),
@@ -1045,7 +1045,7 @@ impl BracketWidth {
 }
 
 impl Debug for BracketWidth {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BracketWidth")
             .field("distance", &self.distance)
             .field("atr", &self.atr.as_ref().map(|atr| atr.bars))
@@ -1361,7 +1361,7 @@ impl TargetSetter {
 }
 
 impl Debug for TargetSetter {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TargetSetter")
             .field("spec", &self.spec)
             .finish_non_exhaustive()
@@ -1820,7 +1820,7 @@ impl Targets {
 }
 
 impl Debug for Targets {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let state = self.state.borrow();
         f.debug_struct("Targets")
             .field("config", &self.config)

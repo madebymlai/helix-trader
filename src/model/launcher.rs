@@ -43,7 +43,7 @@
 use std::{
     collections::VecDeque,
     ffi::OsString,
-    fmt,
+    fmt::{Debug, Display},
     io::{BufRead, BufReader, Write},
     path::PathBuf,
     process::{Command, Stdio},
@@ -379,14 +379,14 @@ impl DataActor for RetrainActor {
 
 nautilus_actor!(RetrainActor);
 
-impl fmt::Debug for Launcher {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Debug for Launcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Launcher").finish_non_exhaustive()
     }
 }
 
-impl fmt::Display for Retrained {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for Retrained {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Succeeded => write!(f, "succeeded"),
             Self::Kept(why) => write!(f, "{why}"),
