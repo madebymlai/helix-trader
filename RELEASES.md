@@ -33,6 +33,9 @@ Released on TBD (UTC).
 - Changed every test to `#[rstest]`, as Nautilus writes its tests
 - Changed the crates to share one version, in `[workspace.package]`
 - Changed the pull request checklist to run the hooks against `develop`, as CI does, so the checks of changed lines read the branch's changes
+- Changed the pull request checklist to ask for tests as `docs/testing.md` sets them
+- Renamed the cTrader, Databento and OKX fixture folders `testdata/` to `test_data/`, as Nautilus and the LSE crate name them
+- Changed the tests that pin a library behavior helix relies on into drift tests, `drift_*`, each citing what it pins, and removed the assertions that only re-proved a library
 
 ### Documentation Updates
 
@@ -42,6 +45,8 @@ Released on TBD (UTC).
 - Changed spelling to American English
 - Changed the `# Errors` and `# Panics` sections to Nautilus' wording
 - Added each crate's feature flags to its README
+- Added `docs/testing.md`, Nautilus' testing standard adapted to helix: its testing policy, layers and conventions, and helix's seams from the binary's commands to the live tests
+- Documented the LSE book stream's panic on a non-book series and the target exits' error on a non-finite ATR
 
 ---
 

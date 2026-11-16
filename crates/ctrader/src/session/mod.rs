@@ -1008,7 +1008,7 @@ mod tests {
             stamped.push((spot.symbol_id, spot.timestamp));
         }
         stamped.sort_unstable();
-        // The symbol ids and times of `testdata/spot_event_*_first.txtpb`.
+        // The symbol ids and times of `test_data/spot_event_*_first.txtpb`.
         assert_eq!(
             stamped,
             [(1, Some(1_793_017_476_361)), (41, Some(1_793_017_475_790))]
@@ -1057,7 +1057,7 @@ mod tests {
 
     /// What Nautilus' risk engine makes of a market buy of 1 oz of gold,
     /// `xau` here, on a margin account of 1,000 EUR, at the demo's first
-    /// captured spots (`testdata/spot_event_*_first`): XAUUSD 4017.96 /
+    /// captured spots (`test_data/spot_event_*_first`): XAUUSD 4017.96 /
     /// 4018.01, EURUSD 1.11964 / 1.11965 (the account is in EUR, gold in
     /// USD). The order's value, about 3,590 EUR, is above the balance; the
     /// broker's margin at 1:30, about 120 EUR, is below it. The order events

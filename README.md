@@ -29,7 +29,7 @@ Check the config and venue requirements when changing instruments. Before runnin
 cargo test
 ```
 
-`cargo test` runs the harness and the integration tests that run a strategy, such as the golden rows. After changing a strategy, also run its unit tests: `cargo test --features strategy-tests --lib strategy::<name>::`.
+`cargo test` runs the harness and the integration tests that run a strategy, such as the golden rows. What a test must prove, and where it goes, is in [testing](docs/testing.md). After changing a strategy, also run its unit tests: `cargo test --features strategy-tests --lib strategy::<name>::`.
 
 Lint with `cargo clippy --all-targets --all-features`; `--all-features` is for clippy only.
 
@@ -38,6 +38,7 @@ Real-venue live tests are gated by `NAUTILUS_IB_RUN=1`, `NAUTILUS_OKX_RUN=1`, `N
 ## Documentation
 
 - [Architecture](docs/architecture.md): design and process constraints.
+- [Testing](docs/testing.md): the test seams, where expected values come from, and the live tests.
 - [Catalog](src/catalog/README.md): catalog filling; each venue's history and live clients are documented in its module under `src/venues`.
 - [cTrader](crates/ctrader/README.md): the cTrader Open API adapter, a crate of the workspace, which [IC Markets](src/venues/ic) and [Pepperstone](src/venues/pepperstone/README.md) run on.
 - [LSE](crates/lse/README.md): the London Strategic Edge adapter, a crate of the workspace, a data client only.

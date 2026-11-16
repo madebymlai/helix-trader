@@ -422,8 +422,16 @@ mod tests {
         assert_eq!(breakout.level, 100.5);
     }
 
+    /// Pins the defaults Nautilus' indicators take for an argument left
+    /// out, an EMA's `LAST` price (`crates/indicators/src/average/
+    /// ema.rs:119`) and an ATR's Wilder average using the previous close
+    /// (`crates/indicators/src/volatility/atr.rs:131-132`): `EmaArgs` and
+    /// `AtrArgs` hand a left-out argument over as none, and
+    /// `canonical_args` leaves it out of a feature's fingerprint, so a
+    /// changed default changes the features under the same fingerprint
+    /// unless `model::dataset::VERSION` is bumped.
     #[rstest]
-    fn arguments_left_out_take_nautilus_defaults() {
+    fn drift_arguments_left_out_take_nautilus_defaults() {
         let toml = TOML
             .replace("price_type = \"BID\"\n", "")
             .replace("ma_type = \"SIMPLE\"\n", "")

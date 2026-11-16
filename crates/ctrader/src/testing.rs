@@ -60,94 +60,97 @@ pub(crate) const NAMES: CTraderSettingNames = CTraderSettingNames {
 pub(crate) const ACCOUNT_ID: i64 = 1_000_001;
 
 // Responses captured from a broker's cTrader demo, scrubbed: the
-// payloads, as served (see the `.txtpb` beside each in `testdata/`).
+// payloads, as served (see the `.txtpb` beside each in `test_data/`).
 pub(crate) const APPLICATION_AUTH_RES: &[u8] =
-    include_bytes!("../testdata/application_auth_res.bin");
+    include_bytes!("../test_data/application_auth_res.bin");
 pub(crate) const APPLICATION_AUTH_REFUSED: &[u8] =
-    include_bytes!("../testdata/application_auth_refused.bin");
-pub(crate) const ACCOUNT_AUTH_RES: &[u8] = include_bytes!("../testdata/account_auth_res.bin");
+    include_bytes!("../test_data/application_auth_refused.bin");
+pub(crate) const ACCOUNT_AUTH_RES: &[u8] = include_bytes!("../test_data/account_auth_res.bin");
 pub(crate) const ACCOUNT_AUTH_TOKEN_INVALID: &[u8] =
-    include_bytes!("../testdata/account_auth_token_invalid.bin");
-pub(crate) const ASSET_LIST_RES: &[u8] = include_bytes!("../testdata/asset_list_res.bin");
-pub(crate) const SYMBOLS_LIST_RES: &[u8] = include_bytes!("../testdata/symbols_list_res.bin");
-pub(crate) const SYMBOL_BY_ID_RES: &[u8] = include_bytes!("../testdata/symbol_by_id_res.bin");
+    include_bytes!("../test_data/account_auth_token_invalid.bin");
+pub(crate) const ASSET_LIST_RES: &[u8] = include_bytes!("../test_data/asset_list_res.bin");
+pub(crate) const SYMBOLS_LIST_RES: &[u8] = include_bytes!("../test_data/symbols_list_res.bin");
+pub(crate) const SYMBOL_BY_ID_RES: &[u8] = include_bytes!("../test_data/symbol_by_id_res.bin");
 pub(crate) const DYNAMIC_LEVERAGE_XAUUSD_RES: &[u8] =
-    include_bytes!("../testdata/dynamic_leverage_xauusd_res.bin");
+    include_bytes!("../test_data/dynamic_leverage_xauusd_res.bin");
 pub(crate) const DYNAMIC_LEVERAGE_EURUSD_RES: &[u8] =
-    include_bytes!("../testdata/dynamic_leverage_eurusd_res.bin");
+    include_bytes!("../test_data/dynamic_leverage_eurusd_res.bin");
 pub(crate) const EXPECTED_MARGIN_EURUSD_RES: &[u8] =
-    include_bytes!("../testdata/expected_margin_eurusd_res.bin");
+    include_bytes!("../test_data/expected_margin_eurusd_res.bin");
 pub(crate) const SYMBOL_BY_ID_UNKNOWN: &[u8] =
-    include_bytes!("../testdata/symbol_by_id_unknown.bin");
-pub(crate) const TICK_DATA_BID_RES: &[u8] = include_bytes!("../testdata/tick_data_bid_res.bin");
-pub(crate) const TICK_DATA_ASK_RES: &[u8] = include_bytes!("../testdata/tick_data_ask_res.bin");
-pub(crate) const SUBSCRIBE_SPOTS_RES: &[u8] = include_bytes!("../testdata/subscribe_spots_res.bin");
+    include_bytes!("../test_data/symbol_by_id_unknown.bin");
+pub(crate) const TICK_DATA_BID_RES: &[u8] = include_bytes!("../test_data/tick_data_bid_res.bin");
+pub(crate) const TICK_DATA_ASK_RES: &[u8] = include_bytes!("../test_data/tick_data_ask_res.bin");
+pub(crate) const SUBSCRIBE_SPOTS_RES: &[u8] =
+    include_bytes!("../test_data/subscribe_spots_res.bin");
 pub(crate) const UNSUBSCRIBE_SPOTS_RES: &[u8] =
-    include_bytes!("../testdata/unsubscribe_spots_res.bin");
+    include_bytes!("../test_data/unsubscribe_spots_res.bin");
 pub(crate) const SPOT_EVENT_EURUSD_FIRST: &[u8] =
-    include_bytes!("../testdata/spot_event_eurusd_first.bin");
+    include_bytes!("../test_data/spot_event_eurusd_first.bin");
 pub(crate) const SPOT_EVENT_EURUSD_BID: &[u8] =
-    include_bytes!("../testdata/spot_event_eurusd_bid.bin");
+    include_bytes!("../test_data/spot_event_eurusd_bid.bin");
 pub(crate) const SPOT_EVENT_EURUSD_ASK: &[u8] =
-    include_bytes!("../testdata/spot_event_eurusd_ask.bin");
+    include_bytes!("../test_data/spot_event_eurusd_ask.bin");
 pub(crate) const SPOT_EVENT_XAUUSD_FIRST: &[u8] =
-    include_bytes!("../testdata/spot_event_xauusd_first.bin");
-pub(crate) const TRADER_RES: &[u8] = include_bytes!("../testdata/trader_res.bin");
-pub(crate) const RECONCILE_RES_EMPTY: &[u8] = include_bytes!("../testdata/reconcile_res_empty.bin");
-pub(crate) const DEAL_LIST_RES_EMPTY: &[u8] = include_bytes!("../testdata/deal_list_res_empty.bin");
+    include_bytes!("../test_data/spot_event_xauusd_first.bin");
+pub(crate) const TRADER_RES: &[u8] = include_bytes!("../test_data/trader_res.bin");
+pub(crate) const RECONCILE_RES_EMPTY: &[u8] =
+    include_bytes!("../test_data/reconcile_res_empty.bin");
+pub(crate) const DEAL_LIST_RES_EMPTY: &[u8] =
+    include_bytes!("../test_data/deal_list_res_empty.bin");
 
 // Trade events captured on the demo with 1 oz orders of XAUUSD (see
 // each `.txtpb`).
 pub(crate) const EXECUTION_MARKET_ACCEPTED: &[u8] =
-    include_bytes!("../testdata/execution_market_accepted.bin");
+    include_bytes!("../test_data/execution_market_accepted.bin");
 pub(crate) const EXECUTION_MARKET_FILLED: &[u8] =
-    include_bytes!("../testdata/execution_market_filled.bin");
+    include_bytes!("../test_data/execution_market_filled.bin");
 pub(crate) const EXECUTION_PROTECTION_ACCEPTED: &[u8] =
-    include_bytes!("../testdata/execution_protection_accepted.bin");
+    include_bytes!("../test_data/execution_protection_accepted.bin");
 pub(crate) const EXECUTION_PROTECTION_REPLACED: &[u8] =
-    include_bytes!("../testdata/execution_protection_replaced.bin");
+    include_bytes!("../test_data/execution_protection_replaced.bin");
 pub(crate) const EXECUTION_CLOSE_ACCEPTED: &[u8] =
-    include_bytes!("../testdata/execution_close_accepted.bin");
+    include_bytes!("../test_data/execution_close_accepted.bin");
 pub(crate) const EXECUTION_CLOSE_FILLED: &[u8] =
-    include_bytes!("../testdata/execution_close_filled.bin");
+    include_bytes!("../test_data/execution_close_filled.bin");
 pub(crate) const EXECUTION_PROTECTION_CANCELLED: &[u8] =
-    include_bytes!("../testdata/execution_protection_cancelled.bin");
+    include_bytes!("../test_data/execution_protection_cancelled.bin");
 pub(crate) const EXECUTION_LIMIT_ACCEPTED: &[u8] =
-    include_bytes!("../testdata/execution_limit_accepted.bin");
+    include_bytes!("../test_data/execution_limit_accepted.bin");
 pub(crate) const EXECUTION_LIMIT_REPLACED: &[u8] =
-    include_bytes!("../testdata/execution_limit_replaced.bin");
+    include_bytes!("../test_data/execution_limit_replaced.bin");
 pub(crate) const EXECUTION_LIMIT_CANCELLED: &[u8] =
-    include_bytes!("../testdata/execution_limit_cancelled.bin");
+    include_bytes!("../test_data/execution_limit_cancelled.bin");
 pub(crate) const EXECUTION_MARKET_RANGE_ACCEPTED: &[u8] =
-    include_bytes!("../testdata/execution_market_range_accepted.bin");
+    include_bytes!("../test_data/execution_market_range_accepted.bin");
 pub(crate) const EXECUTION_MARKET_RANGE_DEAL_REJECTED: &[u8] =
-    include_bytes!("../testdata/execution_market_range_deal_rejected.bin");
+    include_bytes!("../test_data/execution_market_range_deal_rejected.bin");
 pub(crate) const EXECUTION_MARKET_RANGE_BUY_BETTER_ACCEPTED: &[u8] =
-    include_bytes!("../testdata/execution_market_range_buy_better_accepted.bin");
+    include_bytes!("../test_data/execution_market_range_buy_better_accepted.bin");
 pub(crate) const EXECUTION_MARKET_RANGE_BUY_BETTER_FILLED: &[u8] =
-    include_bytes!("../testdata/execution_market_range_buy_better_filled.bin");
+    include_bytes!("../test_data/execution_market_range_buy_better_filled.bin");
 pub(crate) const EXECUTION_MARKET_RANGE_SELL_BETTER_ACCEPTED: &[u8] =
-    include_bytes!("../testdata/execution_market_range_sell_better_accepted.bin");
+    include_bytes!("../test_data/execution_market_range_sell_better_accepted.bin");
 pub(crate) const EXECUTION_MARKET_RANGE_SELL_BETTER_FILLED: &[u8] =
-    include_bytes!("../testdata/execution_market_range_sell_better_filled.bin");
+    include_bytes!("../test_data/execution_market_range_sell_better_filled.bin");
 pub(crate) const EXECUTION_MARKET_RANGE_BRACKET_ACCEPTED: &[u8] =
-    include_bytes!("../testdata/execution_market_range_bracket_accepted.bin");
+    include_bytes!("../test_data/execution_market_range_bracket_accepted.bin");
 pub(crate) const EXECUTION_MARKET_RANGE_BRACKET_FILLED: &[u8] =
-    include_bytes!("../testdata/execution_market_range_bracket_filled.bin");
+    include_bytes!("../test_data/execution_market_range_bracket_filled.bin");
 pub(crate) const EXECUTION_MARKET_RANGE_BRACKET_PROTECTION_ACCEPTED: &[u8] =
-    include_bytes!("../testdata/execution_market_range_bracket_protection_accepted.bin");
+    include_bytes!("../test_data/execution_market_range_bracket_protection_accepted.bin");
 pub(crate) const EXECUTION_STOP_LOSS_ENTRY_FILLED: &[u8] =
-    include_bytes!("../testdata/execution_stop_loss_entry_filled.bin");
+    include_bytes!("../test_data/execution_stop_loss_entry_filled.bin");
 pub(crate) const EXECUTION_STOP_LOSS_ACCEPTED: &[u8] =
-    include_bytes!("../testdata/execution_stop_loss_accepted.bin");
+    include_bytes!("../test_data/execution_stop_loss_accepted.bin");
 pub(crate) const EXECUTION_STOP_LOSS_FILLED: &[u8] =
-    include_bytes!("../testdata/execution_stop_loss_filled.bin");
+    include_bytes!("../test_data/execution_stop_loss_filled.bin");
 pub(crate) const ORDER_ERROR_BAD_VOLUME: &[u8] =
-    include_bytes!("../testdata/order_error_bad_volume.bin");
+    include_bytes!("../test_data/order_error_bad_volume.bin");
 pub(crate) const ORDER_ERROR_ORDER_NOT_FOUND: &[u8] =
-    include_bytes!("../testdata/order_error_order_not_found.bin");
+    include_bytes!("../test_data/order_error_order_not_found.bin");
 pub(crate) const ORDER_ERROR_POSITION_NOT_FOUND: &[u8] =
-    include_bytes!("../testdata/order_error_position_not_found.bin");
+    include_bytes!("../test_data/order_error_position_not_found.bin");
 
 /// What the peer does after a frame.
 pub(crate) enum Action {

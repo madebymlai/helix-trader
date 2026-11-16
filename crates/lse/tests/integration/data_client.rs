@@ -1963,9 +1963,11 @@ async fn custom_data_not_of_lse_s_rows_or_naming_no_source_fails_naming_its_type
     }
 }
 
-/// Nautilus' default for a request a client does not implement.
+/// LSE has no call for funding rates: the client refuses their request of
+/// one instrument as it is made, where it answers a request of one
+/// instrument it takes later, a failure among its answers.
 #[tokio::test]
-async fn a_kind_lse_has_no_call_for_is_refused_as_unsupported() {
+async fn a_kind_lse_has_no_call_for_is_refused() {
     let lse = MockLse::start(vec![]);
     let (client, _) = connected(&lse, true).await;
     let request = RequestFundingRates::new(
@@ -1979,9 +1981,9 @@ async fn a_kind_lse_has_no_call_for_is_refused_as_unsupported() {
         None,
     );
 
-    let err = client.request_funding_rates(request).unwrap_err();
+    let answer = client.request_funding_rates(request);
 
-    assert!(err.to_string().contains("does not support"), "{err}");
+    assert!(answer.is_err(), "{answer:?}");
 }
 
 /// The captured five minutes, candles LSE stamps at 10:00 to 10:04,

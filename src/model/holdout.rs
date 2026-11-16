@@ -381,14 +381,29 @@ mod tests {
         close(earnings.every_stressed.expectancy, 0.4 - 0.0825);
     }
 
+    /// Pins that Nautilus' `Expectancy` weighs its wins and losses by their
+    /// rates among the trades that gained or lost, a trade at nought in
+    /// neither (`crates/analysis/src/statistics/expectancy.rs:75-92`):
+    /// `Trades::of` takes its expectancy, which a model's publication holds
+    /// against the least expectancy (`Holdout::refusal`), and the module
+    /// states that rule.
+    ///
     /// A trade at nought is neither a win nor a loss in Nautilus'
     /// expectancy, a win of 2 and a loss of 1 making 0.5, not a third.
     #[rstest]
-    fn a_trade_at_nought_is_counted_and_weighs_in_no_expectancy() {
+    fn drift_a_trade_at_nought_weighs_in_no_expectancy() {
+        let trades = Trades::of(&[2.0, -1.0, 0.0]);
+
+        close(trades.expectancy, 0.5);
+    }
+
+    /// A trade at nought, neither a win nor a loss, is a trade all the
+    /// same: a win, a loss and one at nought are three.
+    #[rstest]
+    fn a_trade_at_nought_is_counted() {
         let trades = Trades::of(&[2.0, -1.0, 0.0]);
 
         assert_eq!(trades.count, 3);
-        close(trades.expectancy, 0.5);
     }
 
     #[rstest]

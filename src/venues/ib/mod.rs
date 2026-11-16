@@ -1394,8 +1394,6 @@ mod tests {
         ] {
             let served = served(&NautilusDataType::Bar, identifier).unwrap();
             assert_eq!(served, Served::Bars(bar_type(identifier)));
-            // IB's bar spec string, as `bars` requests it.
-            assert_eq!(bar_type(identifier).spec().to_string(), "1-MINUTE-LAST");
         }
     }
 

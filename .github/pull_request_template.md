@@ -32,7 +32,8 @@
   checks of changed lines reading the branch's changes as CI does
 - [ ] `cargo test` passes, and the strategy's unit tests (`--features strategy-tests`) if a
   strategy's folder changed
-- [ ] New or changed logic is covered by tests, or no logic changed
+- [ ] New or changed logic is covered by tests as `docs/testing.md` sets them, or no logic
+  changed
 - [ ] The gated live tests of each venue whose code changed were run (`tests/live`), or this says
   why not
 - [ ] `RELEASES.md` has this change's entries in its top section (`docs/releases.md`)

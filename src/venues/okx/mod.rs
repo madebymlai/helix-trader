@@ -359,7 +359,7 @@ mod tests {
     use super::*;
     use crate::strategy::requirements::DataRequirements;
 
-    const INSTRUMENT: &str = include_str!("testdata/BTC-USDT-SWAP-instrument.json");
+    const INSTRUMENT: &str = include_str!("test_data/BTC-USDT-SWAP-instrument.json");
 
     fn raw_instrument() -> OKXInstrument {
         serde_json::from_str(INSTRUMENT).unwrap()
@@ -371,7 +371,8 @@ mod tests {
         instrument_from(&raw_instrument(), Decimal::TEN, UnixNanos::default()).unwrap()
     }
 
-    const XPERP_INSTRUMENT: &str = include_str!("testdata/BTC-USD_UM_XPERP-310404-instrument.json");
+    const XPERP_INSTRUMENT: &str =
+        include_str!("test_data/BTC-USD_UM_XPERP-310404-instrument.json");
 
     fn raw_xperp() -> OKXInstrument {
         serde_json::from_str(XPERP_INSTRUMENT).unwrap()
