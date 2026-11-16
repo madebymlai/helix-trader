@@ -1199,29 +1199,27 @@ mod tests {
     /// have reached cTrader, as one that timed out may: Nautilus' adapter
     /// guide leaves such an outcome unknown, never a rejection.
     #[rstest]
-    fn a_frame_whose_write_failed_after_it_began_counts_as_sent() {
-        assert!(failed_send(SendError::BrokenPipe("connection reset".to_owned())).is_ok());
-        assert!(failed_send(SendError::WriteTimeout).is_ok());
+    #[case::broken_pipe(SendError::BrokenPipe("connection reset".to_owned()))]
+    #[case::write_timeout(SendError::WriteTimeout)]
+    fn a_frame_whose_write_failed_after_it_began_counts_as_sent(#[case] failed: SendError) {
+        assert!(failed_send(failed).is_ok());
     }
 
     /// Refused before its write began, or its connection changed: never
     /// sent, for the transport's reason.
     #[rstest]
-    fn a_frame_refused_before_its_write_is_unsent() {
-        for refused in [
-            SendError::InvalidInput("empty".to_owned()),
-            SendError::BufferFull,
-            SendError::Closed,
-            SendError::Timeout,
-            SendError::ConnectionChanged,
-        ] {
-            let unsent = failed_send(refused.clone());
-            assert!(
-                unsent
-                    .as_ref()
-                    .is_err_and(|e| std::mem::discriminant(e) == std::mem::discriminant(&refused)),
-                "{refused:?}: {unsent:?}"
-            );
-        }
+    #[case::invalid_input(SendError::InvalidInput("empty".to_owned()))]
+    #[case::buffer_full(SendError::BufferFull)]
+    #[case::closed(SendError::Closed)]
+    #[case::timeout(SendError::Timeout)]
+    #[case::connection_changed(SendError::ConnectionChanged)]
+    fn a_frame_refused_before_its_write_is_unsent(#[case] refused: SendError) {
+        let unsent = failed_send(refused.clone());
+        assert!(
+            unsent
+                .as_ref()
+                .is_err_and(|e| std::mem::discriminant(e) == std::mem::discriminant(&refused)),
+            "{refused:?}: {unsent:?}"
+        );
     }
 }
