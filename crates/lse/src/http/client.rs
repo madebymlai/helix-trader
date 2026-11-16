@@ -147,7 +147,7 @@ impl LseHttpClient {
     ///
     /// # Errors
     ///
-    /// As `export`.
+    /// Returns an error if the download fails, as with `export`.
     pub async fn reference_export(
         &self,
         query: &ReferenceQuery,
@@ -160,7 +160,7 @@ impl LseHttpClient {
     ///
     /// # Errors
     ///
-    /// As `export`.
+    /// Returns an error if the download fails, as with `export`.
     pub async fn macro_export(&self, query: &MacroQuery) -> Result<Option<Bytes>, LseHttpError> {
         self.download(MACRO_EXPORT_PATH, query).await
     }
@@ -200,7 +200,7 @@ impl LseHttpClient {
     ///
     /// # Errors
     ///
-    /// As `pairs`.
+    /// Returns an error if the call fails, as with `pairs`.
     pub async fn factors(&self, query: &FactorsQuery) -> Result<LseFactors, LseHttpError> {
         self.json("factors", FACTORS_PATH, Some(query)).await
     }

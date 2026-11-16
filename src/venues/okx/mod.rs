@@ -164,7 +164,7 @@ async fn write_definitions(
 ///
 /// # Errors
 ///
-/// Returns an error naming `source` and saying why if not served.
+/// Returns an error if `source` is not served, naming it and saying why.
 pub(super) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
     match source {
         CatalogSeries::Bars(bar_type) => ensure!(
@@ -200,7 +200,7 @@ fn is_candle(bar_type: &BarType) -> bool {
 ///
 /// # Errors
 ///
-/// As `catalog::missing`.
+/// Returns an error if `catalog::missing` fails.
 pub fn requests(
     catalog: &ParquetDataCatalog,
     slices: &[SeriesSlice],

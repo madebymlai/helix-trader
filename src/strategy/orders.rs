@@ -282,7 +282,10 @@ impl Trade {
     ///
     /// # Errors
     ///
-    /// As `send`.
+    /// Returns an error if the instrument is not in the cache or is
+    /// inverse (as `refuse_inverse` refuses it), its stop is outside its
+    /// prices, Nautilus fails to size it, or Nautilus refuses an order or
+    /// the alert (see `send`).
     pub fn send_at<S>(
         &self,
         strategy: &mut S,

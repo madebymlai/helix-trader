@@ -213,7 +213,7 @@ impl SettledRows {
     ///
     /// # Errors
     ///
-    /// Returns the denial that failed the run, if one did.
+    /// Returns an error if a denial failed the run: the denial.
     pub fn take(&self) -> anyhow::Result<Vec<TargetRow>> {
         let Settled { rows, denial } = self.0.take();
         match denial {
@@ -334,7 +334,8 @@ impl ModelHandle {
     ///
     /// # Errors
     ///
-    /// Returns an error if, deciding, a store cannot be keyed or read.
+    /// Returns an error if the mode decides and a store cannot be keyed or
+    /// read.
     pub fn new(blueprint: &ModelBlueprint, mode: &Mode) -> anyhow::Result<Rc<Self>> {
         let (features, requirements) = (blueprint.features(), blueprint.requirements());
         let (rule, target) = (blueprint.config().decision, &blueprint.config().target);

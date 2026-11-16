@@ -87,8 +87,8 @@ pub trait ModelPart: Part {
     ///
     /// # Errors
     ///
-    /// Returns the strategy's own errors building them of `config`, each
-    /// under its field.
+    /// Returns an error if the strategy cannot build them of `config`: its
+    /// own errors, each under its field.
     fn features(config: &StandardConfig<Self>) -> ConfigResult<Rc<FeatureSet>>;
 }
 
@@ -105,7 +105,8 @@ pub trait ModelPart: Part {
 ///
 /// # Errors
 ///
-/// Returns the part's errors building the features.
+/// Returns an error if the part fails to build the features
+/// (`ModelPart::features`).
 pub fn reads<P: ModelPart>(config: &StandardConfig<P>) -> ConfigResult<Vec<Series>> {
     let features = P::features(config)?;
     let mut read: Vec<Series> = features
@@ -176,7 +177,7 @@ pub trait ModelStrategy:
     ///
     /// # Errors
     ///
-    /// Returns an error as `blueprint` and `with_blueprint` do.
+    /// Returns an error if `blueprint` or `with_blueprint` fails.
     fn new(config: StandardConfig<Self::Params>, mode: Mode) -> anyhow::Result<Self> {
         let blueprint = Self::blueprint(&config)?;
         Self::with_blueprint(config, blueprint, mode)
@@ -189,8 +190,8 @@ pub trait ModelStrategy:
     ///
     /// # Errors
     ///
-    /// Returns an error as `ModelPart::features` and `ModelBlueprint::new`
-    /// do.
+    /// Returns an error if `ModelPart::features` or `ModelBlueprint::new`
+    /// fails.
     fn blueprint(config: &StandardConfig<Self::Params>) -> anyhow::Result<ModelBlueprint> {
         let features = Self::Params::features(config)?;
         ModelBlueprint::new(
@@ -206,7 +207,7 @@ pub trait ModelStrategy:
     ///
     /// # Errors
     ///
-    /// Returns an error as `blueprint` and `ModelBlueprint::dataset` do.
+    /// Returns an error if `blueprint` or `ModelBlueprint::dataset` fails.
     fn dataset(config: &StandardConfig<Self::Params>, catalog: &Path) -> anyhow::Result<Dataset> {
         Self::blueprint(config)?.dataset(catalog)
     }
@@ -217,7 +218,7 @@ pub trait ModelStrategy:
     ///
     /// # Errors
     ///
-    /// Returns an error as `blueprint` and `ModelBlueprint::training` do.
+    /// Returns an error if `blueprint` or `ModelBlueprint::training` fails.
     fn training(
         config: &StandardConfig<Self::Params>,
         catalog: &Path,
@@ -232,8 +233,8 @@ pub trait ModelStrategy:
     ///
     /// # Errors
     ///
-    /// Returns an error as `blueprint` and `ModelBlueprint::walk_forward`
-    /// do.
+    /// Returns an error if `blueprint` or `ModelBlueprint::walk_forward`
+    /// fails.
     fn walk_forward(
         config: &StandardConfig<Self::Params>,
         catalog: &Path,

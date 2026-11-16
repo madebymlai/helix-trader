@@ -79,7 +79,7 @@ impl SpotQuotes {
     ///
     /// # Errors
     ///
-    /// As `symbol_id`.
+    /// Returns an error if `symbol_id` fails.
     pub(super) fn subscribe(&mut self, id: InstrumentId) -> anyhow::Result<i64> {
         let symbol_id = self.symbol_id(id)?;
         self.stream(symbol_id).subscribed = true;
@@ -90,7 +90,7 @@ impl SpotQuotes {
     ///
     /// # Errors
     ///
-    /// As `symbol_id`.
+    /// Returns an error if `symbol_id` fails.
     pub(super) fn unsubscribe(&mut self, id: InstrumentId) -> anyhow::Result<i64> {
         let symbol_id = self.symbol_id(id)?;
         self.stream(symbol_id).subscribed = false;

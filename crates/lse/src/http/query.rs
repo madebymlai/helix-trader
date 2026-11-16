@@ -118,9 +118,9 @@ impl CandleWidth {
     ///
     /// # Errors
     ///
-    /// Returns an error naming `bar_type` if its bars are not those of
-    /// LSE's candles; for daily, weekly and monthly bars, saying why and
-    /// that the bar is declared from a shorter LSE candle instead.
+    /// Returns an error if the bars of `bar_type`, which it names, are not
+    /// those of LSE's candles; for daily, weekly and monthly bars, saying
+    /// why and that the bar is declared from a shorter LSE candle instead.
     pub fn of(bar_type: BarType) -> anyhow::Result<Self> {
         let spec = bar_type.spec();
         ensure!(

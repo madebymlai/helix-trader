@@ -135,7 +135,7 @@ impl CTraderBroker {
     ///
     /// # Errors
     ///
-    /// As `CTraderConnection::from_vars`.
+    /// Returns an error if `CTraderConnection::from_vars` fails.
     fn connection(self) -> anyhow::Result<CTraderConnection> {
         CTraderConnection::from_vars(Venue::new(self.venue), self.account, |name| {
             std::env::var(name).ok()
@@ -473,8 +473,8 @@ impl CustomRow {
 ///
 /// # Errors
 ///
-/// Returns an error naming its data type and why if its type's history
-/// source does not serve it.
+/// Returns an error if its type's history source does not serve `series`,
+/// naming its data type and why.
 pub(crate) fn serves_custom(series: &CustomSeries) -> anyhow::Result<Option<HistorySource>> {
     let data_type = series.data_type();
     let Some(source) = CustomRow::of(series).history else {
@@ -501,9 +501,11 @@ pub(crate) fn serves_custom(series: &CustomSeries) -> anyhow::Result<Option<Hist
 ///
 /// # Errors
 ///
-/// Returns an error naming `series` and its type if its type has no row,
-/// or one with no live data source, or naming its data type and why if its
-/// live data source does not stream it.
+/// Returns an error if:
+/// - Its type has no row, or one with no live data source, naming `series`
+///   and its type.
+/// - Its live data source does not stream it, naming its data type and
+///   why.
 pub(crate) fn streams_custom(series: &CustomSeries) -> anyhow::Result<()> {
     let data_type = series.data_type();
     match CustomRow::of(series).live_data {
@@ -598,8 +600,8 @@ pub fn has_base_currency(venue: Venue) -> bool {
 ///
 /// # Errors
 ///
-/// Returns an error naming the pair and its venue, and why, if its venue's
-/// history serves neither form, OKX's: no rate of it could be read.
+/// Returns an error if its venue's history serves neither form, OKX's,
+/// naming the pair and its venue, and why: no rate of it could be read.
 pub fn rate_series(pair: InstrumentId) -> anyhow::Result<Vec<Series>> {
     let bars = [PriceType::Bid, PriceType::Ask].map(|price_type| {
         BarType::new(
@@ -645,8 +647,8 @@ pub fn rate_series(pair: InstrumentId) -> anyhow::Result<Vec<Series>> {
 ///
 /// # Errors
 ///
-/// Returns an error naming `source` and saying why if its venue's history
-/// does not serve it.
+/// Returns an error if its venue's history does not serve `source`, naming
+/// it and saying why.
 pub(crate) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
     match Row::of(source.instrument_id().venue).history {
         HistorySource::CTrader(broker) => {
@@ -679,8 +681,8 @@ pub(crate) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
 ///
 /// # Errors
 ///
-/// Returns an error naming `source` and saying why if its venue's live
-/// data does not stream it.
+/// Returns an error if its venue's live data does not stream `source`,
+/// naming it and saying why.
 pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
     match Row::of(source.instrument_id().venue).live_data {
         LiveDataSource::CTrader(broker) => {
@@ -1053,7 +1055,8 @@ impl LiveRoutes {
     ///
     /// # Errors
     ///
-    /// As `live_clients`, past its checks of what the run reads.
+    /// Returns an error if `live_clients` would, past its checks of what
+    /// the run reads.
     async fn clients(self, venues: &LiveVenueArgs, catalog: &Path) -> anyhow::Result<Vec<Clients>> {
         let Self {
             okx: okx_ids,
@@ -1127,18 +1130,18 @@ impl LiveRoutes {
 ///
 /// # Errors
 ///
-/// Returns an error naming them if `requirements` reads a series its
-/// venue's live data does not stream (see `streams`) or a custom series its
-/// type's live data does not stream (see `streams_custom`),
-/// or if a cTrader broker's environment or credential is
-/// missing (see `CTraderConnection::from_vars`), each before anything
-/// connects, if OKX's clients cannot be set up or the OKX
-/// account does not suit the run (see `okx::clients`), if cTrader is
-/// unreachable or a broker's account is not hedging or not the
-/// credential's (see
-/// `CTraderConnection::check_account`), if the strategy trades IB
-/// instruments and no account is given, or if IB's clients cannot be set up
-/// (see `ib::clients`).
+/// Returns an error if:
+/// - `requirements` reads a series its venue's live data does not stream
+///   (see `streams`) or a custom series its type's live data does not
+///   stream (see `streams_custom`), naming them, before anything connects.
+/// - A cTrader broker's environment or credential is missing (see
+///   `CTraderConnection::from_vars`), before anything connects.
+/// - OKX's clients cannot be set up or the OKX account does not suit the
+///   run (see `okx::clients`).
+/// - cTrader is unreachable or a broker's account is not hedging or not the
+///   credential's (see `CTraderConnection::check_account`).
+/// - The strategy trades IB instruments and no account is given, or IB's
+///   clients cannot be set up (see `ib::clients`).
 pub(crate) async fn live_clients(
     requirements: &DataRequirements,
     instrument_ids: &[InstrumentId],

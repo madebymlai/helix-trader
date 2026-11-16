@@ -29,6 +29,7 @@ pub(super) const SLOW: Declared<EmaArgs> = Declared::new("slow");
 /// without a bump.
 const VERSION: u32 = 1;
 
+// panics-doc-ok (transitive via FeatureSetBuilder::bars)
 /// The features of `config`: the averages of each of its bar types in
 /// turn, the fast then the slow, warmed by the strategy's warmup, which a
 /// dataset build replays before its first day.

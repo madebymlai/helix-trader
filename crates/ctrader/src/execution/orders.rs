@@ -173,9 +173,15 @@ pub(super) enum Placement {
 ///
 /// # Errors
 ///
-/// Returns why the order is denied: a type, time in force or flag cTrader
-/// lacks, a reduce-only order without a position, a closing order larger
-/// than its position, a volume off the cent grid.
+/// Returns an error if:
+/// - The order has a type, time in force, trigger or flag cTrader lacks, or
+///   is good till a date it does not name.
+/// - It is reduce-only without a position.
+/// - It closes `position` and is larger than it, or carries protection.
+/// - `position` is not a cTrader position.
+/// - Its volume is off the cent grid.
+///
+/// The error is why the order is denied.
 pub(super) fn placement(
     order: &OrderAny,
     symbol_id: i64,
@@ -269,7 +275,8 @@ fn validate(order: &OrderAny) -> Result<(), OrderDeniedReason> {
 ///
 /// # Errors
 ///
-/// Returns a denial if the quantity is finer than a cent of a unit.
+/// Returns an error if the quantity is finer than a cent of a unit: the
+/// order is denied.
 pub(super) fn volume(quantity: Quantity) -> Result<i64, OrderDeniedReason> {
     let cents = quantity.as_decimal() * Decimal::ONE_HUNDRED;
     (cents.fract().is_zero())

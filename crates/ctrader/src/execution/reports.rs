@@ -248,7 +248,7 @@ impl Reports<'_> {
     ///
     /// # Errors
     ///
-    /// As `protection_status` and `fill`.
+    /// Returns an error if `protection_status` or `fill` fails.
     pub(super) fn protection_fill(
         &self,
         order: &ProtoOaOrder,
@@ -277,7 +277,7 @@ impl Reports<'_> {
     ///
     /// # Errors
     ///
-    /// As `protection_status` and `fill`.
+    /// Returns an error if `protection_status` or `fill` fails.
     pub(super) fn protection_closed(
         &self,
         order: &ProtoOaOrder,

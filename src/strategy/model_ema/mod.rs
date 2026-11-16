@@ -101,7 +101,8 @@ impl ModelPart for ModelEmaParams {
     ///
     /// # Errors
     ///
-    /// Returns an error under `data.series` if it lists no bars series.
+    /// Returns an error if `data.series` lists no bars series, under that
+    /// field.
     fn features(config: &ModelEmaConfig) -> ConfigResult<Rc<FeatureSet>> {
         features::features(config)
             .map_err(|e| ConfigError::invalid_value("data.series", format!("{e:#}")))
@@ -129,7 +130,7 @@ impl ModelStrategy for ModelEma {
     ///
     /// # Errors
     ///
-    /// Returns an error as `ModelHandle::new` does, or if Nautilus refuses
+    /// Returns an error if `ModelHandle::new` fails, or if Nautilus refuses
     /// the base (`StrategyCore::new_checked`).
     fn with_blueprint(
         config: ModelEmaConfig,

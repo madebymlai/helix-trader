@@ -235,8 +235,8 @@ impl Schedule {
     ///
     /// # Errors
     ///
-    /// Returns an error naming the sides, the meta, or both, with no
-    /// model in use at `start`, never retrained.
+    /// Returns an error if the sides, the meta, or both have no model in
+    /// use at `start`, never retrained, naming them.
     pub fn ensure_trades(
         &self,
         start: Timestamp,

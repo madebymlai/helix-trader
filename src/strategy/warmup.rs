@@ -534,12 +534,9 @@ impl Warmup {
 
     /// Hands the book depth of `response`, a response to the warmup's
     /// request, to the book indicators it feeds, oldest first, from the
-    /// actor's `on_historical_book_depth`.
-    ///
-    /// # Errors
-    ///
-    /// None: a book indicator reads depth without failing. Returned as the
-    /// tick hand-overs' are.
+    /// actor's `on_historical_book_depth`. It returns no error: a book
+    /// indicator reads depth without failing, and the result is returned as
+    /// the tick hand-overs' are.
     pub fn on_historical_book_depth(&self, response: &[OrderBookDepth]) -> anyhow::Result<()> {
         response
             .iter()
@@ -549,11 +546,8 @@ impl Warmup {
     /// Hands the book deltas of `response`, a response to the warmup's
     /// request, to the book indicators it feeds, in the batches the live
     /// stream carries (see `batches`), oldest first, from the actor's
-    /// `on_historical_book_deltas`.
-    ///
-    /// # Errors
-    ///
-    /// As `on_historical_book_depth`.
+    /// `on_historical_book_deltas`. It returns no error, as
+    /// `on_historical_book_depth`.
     pub fn on_historical_book_deltas(&self, response: &[OrderBookDelta]) -> anyhow::Result<()> {
         batches(response)
             .into_iter()
@@ -562,21 +556,15 @@ impl Warmup {
 
     /// Takes `depth`, a live snapshot, from the actor's `on_book_depth`: the
     /// book indicators read it once a live start's group has ended, held
-    /// until then, and never if the history holds it (see `hold`).
-    ///
-    /// # Errors
-    ///
-    /// As `on_historical_book_depth`.
+    /// until then, and never if the history holds it (see `hold`). It
+    /// returns no error, as `on_historical_book_depth`.
     pub fn on_book_depth(&self, depth: &OrderBookDepth) -> anyhow::Result<()> {
         self.hold.live(Tick::Depth(Box::new(depth.clone())))
     }
 
     /// Takes `deltas`, a live batch, from the actor's `on_book_deltas`, as
-    /// `on_book_depth` does a snapshot.
-    ///
-    /// # Errors
-    ///
-    /// As `on_historical_book_depth`.
+    /// `on_book_depth` does a snapshot. It returns no error, as
+    /// `on_historical_book_depth`.
     pub fn on_book_deltas(&self, deltas: &OrderBookDeltas) -> anyhow::Result<()> {
         self.hold.live(Tick::Deltas(deltas.clone()))
     }
@@ -615,8 +603,8 @@ impl Warmup {
     ///
     /// # Errors
     ///
-    /// Returns the first error of an indicator reading a quote, which ends
-    /// the hand-over.
+    /// Returns an error if an indicator reading a quote fails, the first of
+    /// which ends the hand-over.
     pub fn on_historical_quotes(&self, response: &[QuoteTick]) -> anyhow::Result<()> {
         response
             .iter()
@@ -628,7 +616,8 @@ impl Warmup {
     ///
     /// # Errors
     ///
-    /// As `on_historical_quotes`.
+    /// Returns an error if an indicator reading a trade fails, the first of
+    /// which ends the hand-over.
     pub fn on_historical_trades(&self, response: &[TradeTick]) -> anyhow::Result<()> {
         response
             .iter()
@@ -642,7 +631,7 @@ impl Warmup {
     ///
     /// # Errors
     ///
-    /// Returns the error of an indicator reading it.
+    /// Returns an error if an indicator reading it fails.
     pub fn on_quote(&self, quote: &QuoteTick) -> anyhow::Result<()> {
         self.hold.live(Tick::Quote(*quote))
     }
@@ -652,7 +641,7 @@ impl Warmup {
     ///
     /// # Errors
     ///
-    /// As `on_quote`.
+    /// Returns an error if an indicator reading it fails.
     pub fn on_trade(&self, trade: &TradeTick) -> anyhow::Result<()> {
         self.hold.live(Tick::Trade(*trade))
     }
@@ -662,7 +651,7 @@ impl Warmup {
     ///
     /// # Errors
     ///
-    /// As `cache_config`.
+    /// Returns an error if `cache_config` fails.
     pub fn cache_config(&self) -> anyhow::Result<CacheConfig> {
         cache_config(&self.built(), self.length)
     }
@@ -890,9 +879,9 @@ where
 ///
 /// # Errors
 ///
-/// Returns an error as `venues::serves_custom` does, or naming its type if
-/// its type's history serves it and its row names no live data source,
-/// whose client the node would ask.
+/// Returns an error if `venues::serves_custom` fails, or if its type's
+/// history serves it and its row names no live data source, whose client
+/// the node would ask, naming its type.
 fn custom_request(series: &CustomSeries) -> anyhow::Result<(ClientId, Option<Params>)> {
     if venues::serves_custom(series)?.is_none() {
         return Ok((ClientId::new(CATALOG), None));
@@ -1006,8 +995,9 @@ fn request_params<'a>(
 ///
 /// # Errors
 ///
-/// Returns an error naming the reason if `response` ends the group and a
-/// request of it failed: the warmup holds what the requests got before.
+/// Returns an error if `response` ends the group and a request of it
+/// failed, naming the reason: the warmup holds what the requests got
+/// before.
 pub fn finished(group: UUID4, response: &DataResponseEnvelope) -> anyhow::Result<bool> {
     if *response.correlation_id() != group {
         return Ok(false);

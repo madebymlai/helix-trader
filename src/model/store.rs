@@ -257,8 +257,8 @@ impl StoredModel {
     ///
     /// # Errors
     ///
-    /// Returns an error as `load` does, or if its manifest has no pair's
-    /// calibration.
+    /// Returns an error if the model cannot be loaded or fails a check (see
+    /// `checked`), or if its manifest has no pair's calibration.
     fn load_side(
         &self,
         feature_names: &[String],
@@ -341,7 +341,7 @@ impl LoadedModel {
     ///
     /// # Errors
     ///
-    /// As `Model::predict`.
+    /// Returns an error if `Model::predict` fails.
     pub fn predict(&self, row: &[f64]) -> anyhow::Result<f64> {
         Ok(self.calibration.apply(self.model.predict(row)?))
     }
@@ -368,7 +368,7 @@ impl SideModel {
     ///
     /// # Errors
     ///
-    /// As `Model::predict`.
+    /// Returns an error if `Model::predict` fails.
     pub fn predict(&self, row: &[f64]) -> anyhow::Result<f64> {
         self.model.predict(row)
     }

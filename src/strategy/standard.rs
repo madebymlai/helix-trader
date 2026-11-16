@@ -104,8 +104,9 @@ pub trait Part: DeserializeOwned + fmt::Debug + Clone {
     ///
     /// # Errors
     ///
-    /// Returns the strategy's own errors reading `config`, each under its
-    /// field, as one `ConfigError::Multiple` if there are several.
+    /// Returns an error if the strategy cannot read `config`: its own
+    /// errors, each under its field, as one `ConfigError::Multiple` if
+    /// there are several.
     fn reads(config: &StandardConfig<Self>) -> ConfigResult<Vec<Series>>;
     /// Pushes onto `errors` every violation of its own rules in `config`,
     /// each under its field: none unless it says.
@@ -117,8 +118,8 @@ impl<P: Part> StandardConfig<P> {
     ///
     /// # Errors
     ///
-    /// Returns serde's error if the TOML is not of the config's shape or
-    /// types, or the `ConfigError` of `validate`.
+    /// Returns an error if the TOML is not of the config's shape or types,
+    /// serde's, or if `validate` fails, its `ConfigError`.
     pub fn load(toml: &str) -> anyhow::Result<Self> {
         let config: Self = toml::from_str(toml)?;
         config.validate()?;
@@ -127,15 +128,16 @@ impl<P: Part> StandardConfig<P> {
 
     /// # Errors
     ///
-    /// Returns every violation of the rules of `[data]` (see
-    /// `DataConfig`), of `[indicators]` (those the strategy declares, each
-    /// table parsed and built by its declaration; see `IndicatorsConfig`),
-    /// of `[trade]` (as many instruments as the strategy trades, none a
-    /// futures root, a `risk` a proper fraction; see `TradeConfig`), of a
-    /// strategy trading on a model (see `validate_model`), of the series
-    /// read (see `validate_series`) and of the strategy's own
-    /// (`Part::validate`): Nautilus' `ConfigError` of each, with its field,
-    /// as one `ConfigError::Multiple` if there are several.
+    /// Returns an error if the config violates a rule, with every violation
+    /// of the rules of `[data]` (see `DataConfig`), of `[indicators]`
+    /// (those the strategy declares, each table parsed and built by its
+    /// declaration; see `IndicatorsConfig`), of `[trade]` (as many
+    /// instruments as the strategy trades, none a futures root, a `risk` a
+    /// proper fraction; see `TradeConfig`), of a strategy trading on a
+    /// model (see `validate_model`), of the series read (see
+    /// `validate_series`) and of the strategy's own (`Part::validate`):
+    /// Nautilus' `ConfigError` of each, with its field, as one
+    /// `ConfigError::Multiple` if there are several.
     pub fn validate(&self) -> ConfigResult<()> {
         let mut errors = ConfigErrorCollector::new();
         self.data.validate(&mut errors);

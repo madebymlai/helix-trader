@@ -224,8 +224,9 @@ pub(crate) fn ensure_on(id: InstrumentId, venue: Venue) -> anyhow::Result<()> {
 ///
 /// # Errors
 ///
-/// Returns an error naming the first series that is not the quotes of an
-/// instrument on `venue`: the adapter serves nothing else (`SERVED_DATA`).
+/// Returns an error if a series is not the quotes of an instrument on
+/// `venue`, naming the first: the adapter serves nothing else
+/// (`SERVED_DATA`).
 pub fn quoted(
     venue: Venue,
     series: &[(NautilusDataType, String)],

@@ -87,7 +87,7 @@ impl ModelBlueprint {
     ///
     /// # Errors
     ///
-    /// Returns an error as `dataset::fingerprint` does.
+    /// Returns an error if `dataset::fingerprint` fails.
     pub fn fingerprint(&self) -> anyhow::Result<Fingerprint> {
         dataset::fingerprint(
             &self.features,
@@ -102,7 +102,7 @@ impl ModelBlueprint {
     ///
     /// # Errors
     ///
-    /// Returns an error as `fingerprint` does.
+    /// Returns an error if `fingerprint` fails.
     pub fn dataset(&self, catalog: &Path) -> anyhow::Result<Dataset> {
         Ok(Dataset::new(catalog, self, self.fingerprint()?))
     }
@@ -111,7 +111,7 @@ impl ModelBlueprint {
     ///
     /// # Errors
     ///
-    /// Returns an error as `fingerprint` does, or if a learner cannot be
+    /// Returns an error if `fingerprint` fails, or if a learner cannot be
     /// written as JSON (`ModelSet::new`).
     pub fn model_set(&self, models: &Path) -> anyhow::Result<ModelSet> {
         ModelSet::new(models, self, self.fingerprint()?)
@@ -122,7 +122,7 @@ impl ModelBlueprint {
     ///
     /// # Errors
     ///
-    /// Returns an error as `model_set` does.
+    /// Returns an error if `model_set` would.
     pub fn training(&self, catalog: &Path, models: &Path) -> anyhow::Result<Training> {
         Ok(Training::new(self.stored(catalog, models)?))
     }
@@ -133,7 +133,7 @@ impl ModelBlueprint {
     ///
     /// # Errors
     ///
-    /// Returns an error as `model_set` does.
+    /// Returns an error if `model_set` would.
     pub fn walk_forward(&self, catalog: &Path, models: &Path) -> anyhow::Result<WalkForward> {
         Ok(WalkForward::new(self.stored(catalog, models)?))
     }
@@ -144,7 +144,7 @@ impl ModelBlueprint {
     ///
     /// # Errors
     ///
-    /// Returns an error as `model_set` does.
+    /// Returns an error if `model_set` would.
     pub(super) fn stored(&self, catalog: &Path, models: &Path) -> anyhow::Result<Stored<'_>> {
         let fingerprint = self.fingerprint()?;
         Ok(Stored {

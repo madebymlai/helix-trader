@@ -154,12 +154,16 @@ impl RowSource {
     ///
     /// # Errors
     ///
-    /// Returns an error, before LSE is asked: for LSE's options chain
-    /// (`options_chain`), which LSE serves as it stands alone, with no
-    /// history; for a macro series of observations, each keyed by the day
-    /// of its period, not when it came out; for a reference collection the client has not classified,
-    /// whose rows may be known at any time; for factors of a symbol naming
-    /// no market.
+    /// Returns an error if:
+    /// - `source` is LSE's options chain (`options_chain`), which LSE serves
+    ///   as it stands alone, with no history.
+    /// - It is a macro series of observations, each keyed by the day of its
+    ///   period, not when it came out.
+    /// - It is a reference collection the client has not classified, whose
+    ///   rows may be known at any time.
+    /// - It is factors of a symbol naming no market.
+    ///
+    /// Each fails before LSE is asked.
     pub fn of(source: &str, symbol: &str) -> anyhow::Result<Self> {
         let call = match source {
             OPTIONS_CHAIN => bail!(
@@ -242,11 +246,15 @@ impl fmt::Display for RowSource {
 ///
 /// # Errors
 ///
-/// Returns an error naming the call that failed: LSE refused it, answered
-/// as its docs do not say, or could not be reached; a reference collection
-/// LSE's catalogue does not list; a file not read (see `parse_rows`); or a
-/// window from before the oldest of an instrument's dividends LSE cut to
-/// their newest.
+/// Returns an error if:
+/// - A call fails, naming it: LSE refused it, answered as its docs do not
+///   say, or could not be reached.
+/// - LSE's catalogue does not list the reference collection.
+/// - Its `last` is neither a date nor a time (see
+///   `ReferenceCollection::last_key`).
+/// - A file is not read (see `parse_rows`).
+/// - The window is from before the oldest of an instrument's dividends LSE
+///   cut to their newest.
 pub async fn fetch(
     http: &LseHttpClient,
     source: &RowSource,
@@ -348,8 +356,8 @@ pub async fn fetch(
 ///
 /// # Errors
 ///
-/// Returns an error naming `query` if LSE refused the export or its file is
-/// not read.
+/// Returns an error if LSE refused the export or its file is not read,
+/// naming `query`.
 fn read(
     file: Result<Option<Bytes>, LseHttpError>,
     query: &impl fmt::Display,

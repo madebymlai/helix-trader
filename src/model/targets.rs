@@ -514,16 +514,17 @@ enum Leg {
 }
 
 impl TargetConfig {
+    // panics-doc-ok (transitive via AverageTrueRange::new)
     /// # Errors
     ///
-    /// Returns every violation, each Nautilus' `ConfigError` under its
-    /// field of `[model]` (`model.target…`), as one
-    /// `ConfigError::Multiple` if there are several: a distance or the
-    /// limit not positive, an `atr` table no distance uses,
-    /// a time-only target without an `atr` table or a bracket beside one, or
-    /// an ATR without bars at the cadence of `rule` built from what a strategy
-    /// of `requirements` reads (see `atr_bars`), each ATR's under its own
-    /// table's field (`Target::atr_field`).
+    /// Returns an error if the target violates a rule, with every
+    /// violation, each Nautilus' `ConfigError` under its field of `[model]`
+    /// (`model.target…`), as one `ConfigError::Multiple` if there are
+    /// several: a distance or the limit not positive, an `atr` table no
+    /// distance uses, a time-only target without an `atr` table or a
+    /// bracket beside one, or an ATR without bars at the cadence of `rule`
+    /// built from what a strategy of `requirements` reads (see `atr_bars`),
+    /// each ATR's under its own table's field (`Target::atr_field`).
     ///
     /// # Panics
     ///
@@ -874,6 +875,7 @@ impl Display for Distance {
     }
 }
 
+// panics-doc-ok (transitive via Distance::length)
 /// The take profit and stop of each side of `bracket`, from `reference` and,
 /// if a distance is in ATRs, the ATR's value `atr`, each on the nearest tick
 /// of `instrument`; none at all if an exit rounds onto `reference`, no
@@ -1099,9 +1101,10 @@ impl TargetSetter {
     ///
     /// # Errors
     ///
-    /// As `new`, or if `width`'s ATR is not the one the target runs: of
-    /// other arguments or bars, or none where the target has one or the
-    /// reverse.
+    /// Returns an error if the target's ATR has no bars (see
+    /// `TargetConfig::atr_bars`), or if `width`'s ATR is not the one the
+    /// target runs: of other arguments or bars, or none where the target
+    /// has one or the reverse.
     pub fn sharing(
         config: &TargetConfig,
         rule: DecisionRule,
@@ -1467,7 +1470,7 @@ impl Targets {
     ///
     /// # Errors
     ///
-    /// Returns an error as `TargetSetter::new` does.
+    /// Returns an error if `TargetSetter::new` would.
     pub fn new(
         config: TargetConfig,
         rule: DecisionRule,
@@ -1482,7 +1485,8 @@ impl Targets {
     ///
     /// # Errors
     ///
-    /// As `new`, or if the setter refuses `width`.
+    /// Returns an error if `new` would, or if the setter refuses `width`
+    /// (`TargetSetter::sharing`).
     pub fn sharing(
         config: TargetConfig,
         rule: DecisionRule,
@@ -1564,9 +1568,10 @@ impl Targets {
     ///
     /// # Errors
     ///
-    /// Returns an error as the setter does, before any order; or if the
-    /// instrument is not in the cache or Nautilus refuses an order or an
-    /// alert, as the orders are sent, which unsettles the decision.
+    /// Returns an error if:
+    /// - The setter fails (`TargetSetter::at`), before any order.
+    /// - The instrument is not in the cache, or Nautilus refuses an order
+    ///   or an alert, as the orders are sent, which unsettles the decision.
     pub fn open<S>(&self, strategy: &mut S, row: FeatureRow) -> anyhow::Result<()>
     where
         S: Strategy + StrategyNative + DataActor + DataActorNative,

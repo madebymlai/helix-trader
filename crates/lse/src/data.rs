@@ -138,6 +138,7 @@ pub(crate) struct LseDataClient {
 }
 
 impl LseDataClient {
+    // panics-doc-ok (transitive via get_data_event_sender)
     /// The client `client_id` on the keys, API and sockets of `config`,
     /// each key given or, if none is, read by `var` from its variable,
     /// `LSE_API_KEY`, `LSE_CME_API_KEY` and `LSE_NASDAQ_API_KEY`, streaming
@@ -146,10 +147,11 @@ impl LseDataClient {
     ///
     /// # Errors
     ///
-    /// Returns an error naming the variables if no key is given or in
-    /// them, if an HTTP client cannot be built, or if an instrument
-    /// streamed is not an `LSEDGE` series streamed on a socket, or is
-    /// streamed with no LSE key (see `LseStreams::new`).
+    /// Returns an error if:
+    /// - No key is given or in the variables, naming them.
+    /// - An HTTP client cannot be built.
+    /// - An instrument streamed is not an `LSEDGE` series streamed on a
+    ///   socket, or is streamed with no LSE key (see `LseStreams::new`).
     ///
     /// # Panics
     ///
@@ -452,8 +454,10 @@ impl DataClient for LseDataClient {
     ///
     /// # Errors
     ///
-    /// As `LseStreams::open`: a connection failing, LSE refusing the key,
-    /// a symbol a socket does not list or more of them than it allows.
+    /// Returns an error if the request tasks a stop closed cannot be
+    /// reopened, or if `LseStreams::open` fails: a connection failing, LSE
+    /// refusing the key, a symbol a socket does not list or more of them
+    /// than it allows.
     async fn connect(&mut self) -> anyhow::Result<()> {
         if self.is_connected() {
             return Ok(());
@@ -488,8 +492,8 @@ impl DataClient for LseDataClient {
     ///
     /// # Errors
     ///
-    /// Returns an error naming an instrument it does not stream or the
-    /// cache does not define.
+    /// Returns an error if an instrument, which it names, is one it does
+    /// not stream or the cache does not define.
     fn subscribe_quotes(&mut self, cmd: SubscribeQuotes) -> anyhow::Result<()> {
         execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
             self.streams.subscribe_quotes(id, &self.cache)
@@ -500,7 +504,8 @@ impl DataClient for LseDataClient {
     ///
     /// # Errors
     ///
-    /// Returns an error naming an instrument it does not stream.
+    /// Returns an error if an instrument, which it names, is one it does
+    /// not stream.
     fn unsubscribe_quotes(&mut self, cmd: &UnsubscribeQuotes) -> anyhow::Result<()> {
         execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
             self.streams.unsubscribe_quotes(id)
@@ -516,9 +521,9 @@ impl DataClient for LseDataClient {
     ///
     /// # Errors
     ///
-    /// Returns an error naming an instrument that is none of them, LSE's
-    /// sockets streaming a series' ticks as quotes, that it does not stream,
-    /// or that the cache does not define.
+    /// Returns an error if an instrument, which it names, is none of them,
+    /// LSE's sockets streaming a series' ticks as quotes, or is one it does
+    /// not stream or the cache does not define.
     fn subscribe_trades(&mut self, cmd: SubscribeTrades) -> anyhow::Result<()> {
         execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
             self.streams.subscribe_trades(id, &self.cache)
@@ -530,8 +535,9 @@ impl DataClient for LseDataClient {
     ///
     /// # Errors
     ///
-    /// Returns an error naming an instrument that is neither a `GLBX` nor an
-    /// `OPRA` contract nor an `XNAS` stock, or that it does not stream.
+    /// Returns an error if an instrument, which it names, is neither a
+    /// `GLBX` nor an `OPRA` contract nor an `XNAS` stock, or is one it does
+    /// not stream.
     fn unsubscribe_trades(&mut self, cmd: &UnsubscribeTrades) -> anyhow::Result<()> {
         execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
             self.streams.unsubscribe_trades(id)
@@ -547,10 +553,11 @@ impl DataClient for LseDataClient {
     ///
     /// # Errors
     ///
-    /// Returns an error naming it if the depth asked is not ten, the levels
-    /// LSE streams, as Nautilus' Databento client serves MBP-10's alone, or
-    /// naming an instrument that is neither, that the client does not
-    /// stream, or that the cache does not define.
+    /// Returns an error if:
+    /// - The depth asked is not ten, the levels LSE streams, as Nautilus'
+    ///   Databento client serves MBP-10's alone, naming the instruments.
+    /// - An instrument, which it names, is neither, or is one the client
+    ///   does not stream or the cache does not define.
     fn subscribe_book_depth(&mut self, cmd: SubscribeBookDepth) -> anyhow::Result<()> {
         if let Some(depth) = cmd.depth.filter(|depth| depth.get() != DEPTH10_LEN) {
             bail!(
@@ -572,8 +579,8 @@ impl DataClient for LseDataClient {
     ///
     /// # Errors
     ///
-    /// Returns an error naming an instrument that is neither a `GLBX`
-    /// contract nor an `XNAS` stock, or that is not subscribed.
+    /// Returns an error if an instrument, which it names, is neither a
+    /// `GLBX` contract nor an `XNAS` stock, or is not subscribed.
     fn unsubscribe_book_depth(&mut self, cmd: &UnsubscribeBookDepth) -> anyhow::Result<()> {
         execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
             self.streams.unsubscribe_book_depth(id)
@@ -593,9 +600,9 @@ impl DataClient for LseDataClient {
     ///
     /// # Errors
     ///
-    /// Returns an error naming an instrument that is neither a `GLBX`
-    /// contract nor an `XNAS` stock, that the client does not stream, or that
-    /// the cache does not define.
+    /// Returns an error if an instrument, which it names, is neither a
+    /// `GLBX` contract nor an `XNAS` stock, or is one the client does not
+    /// stream or the cache does not define.
     fn subscribe_book_deltas(&mut self, cmd: SubscribeBookDeltas) -> anyhow::Result<()> {
         execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
             self.streams.subscribe_book_deltas(id, &self.cache)
@@ -606,8 +613,8 @@ impl DataClient for LseDataClient {
     ///
     /// # Errors
     ///
-    /// Returns an error naming an instrument that is neither a `GLBX`
-    /// contract nor an `XNAS` stock, or that is not subscribed.
+    /// Returns an error if an instrument, which it names, is neither a
+    /// `GLBX` contract nor an `XNAS` stock, or is not subscribed.
     fn unsubscribe_book_deltas(&mut self, cmd: &UnsubscribeBookDeltas) -> anyhow::Result<()> {
         execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
             self.streams.unsubscribe_book_deltas(id)
@@ -977,7 +984,7 @@ impl DataClient for LseDataClient {
 ///
 /// # Errors
 ///
-/// Returns an error naming it if `cache` has no definition of it: LSE
+/// Returns an error if `cache` has no definition of `id`, naming it: LSE
 /// publishes none, and its prices are read at the definition's precision.
 fn precisions(cache: &CacheView, id: InstrumentId) -> anyhow::Result<(u8, u8)> {
     let cache = cache.borrow();

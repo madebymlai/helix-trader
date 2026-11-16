@@ -733,7 +733,8 @@ impl FeatureSetBuilder {
     ///
     /// # Panics
     ///
-    /// As `quotes`.
+    /// Panics if its table is missing, does not parse or is refused (see
+    /// `quotes`).
     #[must_use]
     pub fn trades<A>(
         self,
@@ -755,7 +756,8 @@ impl FeatureSetBuilder {
     ///
     /// # Panics
     ///
-    /// As `quotes`.
+    /// Panics if its table is missing, does not parse or is refused (see
+    /// `quotes`).
     #[must_use]
     pub fn bars<A>(
         self,
@@ -777,7 +779,8 @@ impl FeatureSetBuilder {
     ///
     /// # Panics
     ///
-    /// As `quotes`.
+    /// Panics if its table is missing, does not parse or is refused (see
+    /// `quotes`).
     #[must_use]
     pub fn depth<A>(
         self,
@@ -799,7 +802,8 @@ impl FeatureSetBuilder {
     ///
     /// # Panics
     ///
-    /// As `quotes`.
+    /// Panics if its table is missing, does not parse or is refused (see
+    /// `quotes`).
     #[must_use]
     pub fn deltas<A>(
         self,
@@ -823,8 +827,9 @@ impl FeatureSetBuilder {
     ///
     /// # Panics
     ///
-    /// As `quotes`, or if a feature declared before reads another width:
-    /// the setter runs on one.
+    /// Panics if its table is missing, does not parse or is refused (see
+    /// `quotes`), or if a feature declared before reads another width: the
+    /// setter runs on one.
     #[must_use]
     pub fn over_bracket<A>(
         mut self,

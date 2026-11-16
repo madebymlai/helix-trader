@@ -192,8 +192,8 @@ impl ExchangeInstrument {
     ///
     /// # Errors
     ///
-    /// Returns an error naming `id` if it is neither a `GLBX` contract nor
-    /// an `XNAS` stock (see `LseInstrument::from_instrument_id`).
+    /// Returns an error if `id`, which it names, is neither a `GLBX`
+    /// contract nor an `XNAS` stock (see `LseInstrument::from_instrument_id`).
     fn of(id: InstrumentId, reference_year: i16) -> anyhow::Result<Self> {
         match LseInstrument::from_instrument_id(id, reference_year)? {
             LseInstrument::Cme(contract) => Ok(Self::Cme(contract)),
@@ -227,11 +227,12 @@ impl ExchangeInstrument {
     ///
     /// # Errors
     ///
-    /// Returns an error naming a CME contract whose listing LSE delisted:
-    /// its symbol names a contract every ten years, so the stream would
-    /// carry the later one's records under its id (`ESZ16.GLBX`, delisted
-    /// in 2016, is `ESZ6`, which names 2026's contract). Or as
-    /// `CmeListings::listing`.
+    /// Returns an error if:
+    /// - LSE delisted a CME contract's listing, naming the contract: its
+    ///   symbol names a contract every ten years, so the stream would carry
+    ///   the later one's records under its id (`ESZ16.GLBX`, delisted in
+    ///   2016, is `ESZ6`, which names 2026's contract).
+    /// - `CmeListings::listing` fails.
     async fn name(&self, listings: &CmeListings, http: &LseHttpClient) -> anyhow::Result<String> {
         match self {
             Self::Cme(contract) => {
@@ -294,8 +295,8 @@ impl ExchangeStreams {
     ///
     /// # Errors
     ///
-    /// Returns an error naming the variable of the plan's key and the
-    /// contracts if any is streamed with no such key.
+    /// Returns an error if any contract is streamed with no key of the
+    /// plan, naming the variable of the key and the contracts.
     pub(super) fn new(
         exchange: LseExchange,
         streamed: Vec<ExchangeInstrument>,
@@ -429,7 +430,7 @@ impl ExchangeStreams {
     ///
     /// # Errors
     ///
-    /// Returns an error naming the exchange if the client has no such key.
+    /// Returns an error if the client has no such key, naming the exchange.
     fn access(&self) -> anyhow::Result<&ExchangeAccess> {
         self.access.as_ref().with_context(|| {
             format!(
@@ -554,10 +555,13 @@ impl ExchangeStreams {
     ///
     /// # Errors
     ///
-    /// Returns an error naming it if the stream is not open, if it is no
-    /// contract of an exchange stream, or if `cache` has no definition of
-    /// it: LSE publishes none, and its prices are read at the definition's
-    /// precision.
+    /// Returns an error if:
+    /// - The stream is not open.
+    /// - `id` is no contract of an exchange stream.
+    /// - `cache` has no definition of `id`: LSE publishes none, and its
+    ///   prices are read at the definition's precision.
+    ///
+    /// Each names `id`.
     pub(super) fn subscribe(
         &mut self,
         id: InstrumentId,
@@ -617,7 +621,7 @@ impl ExchangeStreams {
     ///
     /// # Errors
     ///
-    /// Returns an error naming it if it is not subscribed.
+    /// Returns an error if `id`, which it names, is not subscribed.
     pub(super) fn unsubscribe(&self, id: InstrumentId, kind: StreamKind) -> anyhow::Result<()> {
         let symbol = self
             .names

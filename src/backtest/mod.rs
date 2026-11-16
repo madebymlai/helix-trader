@@ -140,7 +140,8 @@ impl Backtest {
     ///
     /// # Errors
     ///
-    /// Returns an error as `run` does, but for the costs of the fills.
+    /// Returns an error if the inputs are inconsistent or the node fails to
+    /// build or run, as `run` does but for the costs of the fills.
     pub fn run_dataset<S>(&self, strategy: S) -> anyhow::Result<()>
     where
         S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
@@ -164,8 +165,8 @@ impl Backtest {
     ///
     /// # Errors
     ///
-    /// Returns an error as `catalog::instruments`,
-    /// `refuse_unheld_pnl_currency` and `refuse_balance` do.
+    /// Returns an error if `catalog::instruments`,
+    /// `refuse_unheld_pnl_currency` or `refuse_balance` fails.
     pub fn refuse_balance(&self, trade: &TradeConfig) -> anyhow::Result<()> {
         let traded = crate::catalog::instruments(&self.catalog, &trade.instrument_ids())
             .context("reading the instruments traded")?;
@@ -182,7 +183,7 @@ impl Backtest {
     ///
     /// # Errors
     ///
-    /// Returns an error as `ContinuousBars::read` does: a root without a
+    /// Returns an error if `ContinuousBars::read` fails: a root without a
     /// roll over `[start, end]`, a roll without a trade to price it. A bar
     /// type on a root not built from trades is refused by the config's
     /// load (see `strategy::DataConfig`).
@@ -334,10 +335,10 @@ impl Backtest {
 ///
 /// # Errors
 ///
-/// Returns an error naming a pair of `pairs` defined without a base
-/// currency, which gives no rate (`conversions::reaches`), or naming both
-/// currencies if the pairs do not reach the P&L currency of an instrument
-/// of `traded` from the balance's.
+/// Returns an error if a pair of `pairs`, which it names, is defined
+/// without a base currency, which gives no rate (`conversions::reaches`),
+/// or if the pairs do not reach the P&L currency of an instrument of
+/// `traded` from the balance's, naming both currencies.
 pub fn refuse_balance(
     balance: Money,
     traded: &[InstrumentAny],
@@ -381,7 +382,8 @@ pub fn refuse_balance(
 ///
 /// # Errors
 ///
-/// Returns an error naming the instrument, its venue, the balance's
+/// Returns an error if the balance's currency is not the P&L currency of
+/// such an instrument, naming the instrument, its venue, the balance's
 /// currency, the P&L currency and the Nautilus limitation.
 fn refuse_unheld_pnl_currency(balance: Money, traded: &[InstrumentAny]) -> anyhow::Result<()> {
     for instrument in traded {

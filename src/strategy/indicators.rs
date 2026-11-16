@@ -32,7 +32,7 @@ pub trait IndicatorArgs: DeserializeOwned + Serialize {
 
     /// # Errors
     ///
-    /// Returns the error of an argument the indicator refuses.
+    /// Returns an error if the indicator refuses an argument.
     fn build(self) -> anyhow::Result<Self::Indicator>;
 }
 
@@ -70,8 +70,8 @@ pub trait Declaration {
 
     /// # Errors
     ///
-    /// Returns the error parsing `table` into the arguments, or building
-    /// the indicator of them.
+    /// Returns an error if `table` does not parse into the arguments, or
+    /// the indicator of them does not build.
     fn check(&self, table: &toml::Table) -> anyhow::Result<()>;
 }
 
@@ -179,7 +179,8 @@ impl IndicatorsConfig {
     ///
     /// # Panics
     ///
-    /// As `canonical_args`.
+    /// Panics if its table is missing or does not parse (see
+    /// `canonical_args`).
     fn parsed<A: IndicatorArgs>(&self, declared: Declared<A>) -> A {
         parse(&self.0[declared.name])
             .unwrap_or_else(|e| panic!("indicator {} validated: {e}", declared.name))

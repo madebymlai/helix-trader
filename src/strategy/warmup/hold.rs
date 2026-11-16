@@ -123,7 +123,8 @@ impl Hold {
     ///
     /// # Errors
     ///
-    /// Returns the first error of an indicator reading it.
+    /// Returns an error if an indicator reading it fails: the first such
+    /// error.
     pub(super) fn history(&self, tick: &Tick) -> anyhow::Result<()> {
         self.seams
             .borrow_mut()
@@ -138,7 +139,8 @@ impl Hold {
     ///
     /// # Errors
     ///
-    /// Returns the first error of an indicator reading it.
+    /// Returns an error if an indicator reading it fails: the first such
+    /// error.
     pub(super) fn live(&self, tick: Tick) -> anyhow::Result<()> {
         if let Some(held) = self.held.borrow_mut().as_mut() {
             held.push(tick);
@@ -153,8 +155,8 @@ impl Hold {
     ///
     /// # Errors
     ///
-    /// Returns the first error of an indicator reading a tick, which ends
-    /// the hand-over: the ticks after it are lost.
+    /// Returns an error if an indicator reading a tick fails, the first of
+    /// which ends the hand-over: the ticks after it are lost.
     pub(super) fn release(&self) -> anyhow::Result<()> {
         let Some(held) = self.held.take() else {
             return Ok(());

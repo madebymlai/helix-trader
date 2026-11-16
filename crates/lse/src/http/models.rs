@@ -115,8 +115,8 @@ impl ReferenceCollection {
     ///
     /// # Errors
     ///
-    /// Returns an error naming the collection if `last` is neither a date
-    /// nor a time.
+    /// Returns an error if `last` is neither a date nor a time, naming the
+    /// collection.
     pub fn last_key(&self) -> anyhow::Result<Option<Timestamp>> {
         self.last
             .as_deref()

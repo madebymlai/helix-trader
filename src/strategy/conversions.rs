@@ -239,10 +239,11 @@ impl fmt::Display for Rates {
 ///
 /// # Errors
 ///
-/// Returns an error naming a pair of `pairs` whose definition has no base
-/// currency, whatever `from` and `to`: Nautilus' cache leaves such an
-/// instrument out of its rates, so it would give none. Otherwise as
-/// `get_exchange_rate` does, which it does not on rates of 1.
+/// Returns an error if:
+/// - A pair of `pairs`, which it names, has no base currency in its
+///   definition, whatever `from` and `to`: Nautilus' cache leaves such an
+///   instrument out of its rates, so it would give none.
+/// - `get_exchange_rate` fails, which it does not on rates of 1.
 pub fn reaches(pairs: &[InstrumentAny], from: Currency, to: Currency) -> anyhow::Result<bool> {
     let keys = pairs
         .iter()

@@ -315,9 +315,9 @@ impl CTraderWebSocketClient {
     ///
     /// # Errors
     ///
-    /// Returns cTrader's error response, or an error if the session cannot
-    /// serve requests, the connection is lost first, or no response comes
-    /// within `REQUEST_TIMEOUT`.
+    /// Returns an error if cTrader answers with an error response, which it
+    /// passes on, or if the session cannot serve requests, the connection
+    /// is lost first, or no response comes within `REQUEST_TIMEOUT`.
     pub(super) async fn request<Req: Payload, Res: Payload>(
         &self,
         request: &Req,

@@ -262,18 +262,18 @@ impl ModelConfig {
     ///
     /// # Errors
     ///
-    /// Returns every violation, each Nautilus' `ConfigError` under its
-    /// field of `[model]` (`model.…`), as one `ConfigError::Multiple` if
-    /// there are several: the decision rule, the target or the learner
-    /// invalid (see `DecisionRule::validate`, `TargetConfig::validate`,
+    /// Returns an error if `[model]` violates a rule, with every violation,
+    /// each Nautilus' `ConfigError` under its field of `[model]`
+    /// (`model.…`), as one `ConfigError::Multiple` if there are several:
+    /// the decision rule, the target or the learner invalid (see
+    /// `DecisionRule::validate`, `TargetConfig::validate`,
     /// `LearnerConfig::validate`), the retrain interval not positive, the
-    /// target's ATR without bars built from what the strategy reads of
-    /// the instrument traded (see
-    /// `TargetConfig::atr_bars`) or warming over longer than its warmup,
-    /// the target's limit not shorter than the window, the holdout not
-    /// positive or leaving no fitted row (see `validate_window`), the
-    /// margins naming no side, the minimums invalid (see
-    /// `validate_minimums`), the meta model invalid (see
+    /// target's ATR without bars built from what the strategy reads of the
+    /// instrument traded (see `TargetConfig::atr_bars`) or warming over
+    /// longer than its warmup, the target's limit not shorter than the
+    /// window, the holdout not positive or leaving no fitted row (see
+    /// `validate_window`), the margins naming no side, the minimums invalid
+    /// (see `validate_minimums`), the meta model invalid (see
     /// `MetaConfig::validate`), the target's limit not shorter than the
     /// decision cadence (see `validate_cadence`), or shorter than the
     /// longest its dataset runs take to process a command (see

@@ -69,7 +69,7 @@ impl Account {
     ///
     /// # Errors
     ///
-    /// As `environment_of` and `connect`.
+    /// Returns an error if `environment_of` or `connect` fails.
     pub(super) fn of_environment() -> anyhow::Result<Self> {
         let environment = environment_of(std::env::var(ENVIRONMENT_VAR).ok().as_deref())?;
         Self::connect(&OKXExecutionClientConfig {

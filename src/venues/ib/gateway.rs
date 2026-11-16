@@ -66,7 +66,7 @@ impl IbGateway {
     ///
     /// # Errors
     ///
-    /// See `start`.
+    /// Returns an error if `start` fails.
     pub(super) async fn of_account(account: &IbAccount, client_id: i32) -> anyhow::Result<Self> {
         Self::start(account.trading_mode(), client_id).await
     }
@@ -75,7 +75,7 @@ impl IbGateway {
     ///
     /// # Errors
     ///
-    /// See `start`.
+    /// Returns an error if `start` fails.
     pub(super) async fn paper(client_id: i32) -> anyhow::Result<Self> {
         Self::start(TradingMode::Paper, client_id).await
     }

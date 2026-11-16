@@ -25,9 +25,9 @@ impl CmeListings {
     ///
     /// # Errors
     ///
-    /// Returns an error naming the contract if LSE lists it under neither
-    /// name, with the listings LSE has of them, if LSE lists it twice, or
-    /// if a lookup fails (LSE's refusal in the error).
+    /// Returns an error if LSE lists the contract under neither name,
+    /// naming it with the listings LSE has of them, if LSE lists it twice,
+    /// or if a lookup fails (LSE's refusal in the error).
     pub async fn listing(
         &self,
         http: &LseHttpClient,

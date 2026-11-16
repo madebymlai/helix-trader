@@ -300,8 +300,8 @@ impl CTraderSession {
     ///
     /// # Errors
     ///
-    /// Returns cTrader's error for an order it does not hold
-    /// (`ORDER_NOT_FOUND`), or an error if the request fails.
+    /// Returns an error if cTrader does not hold the order, cTrader's
+    /// `ORDER_NOT_FOUND`, or if the request fails.
     pub(crate) async fn order_details(
         &self,
         order_id: i64,
@@ -620,7 +620,8 @@ impl CTraderSession {
     ///
     /// # Errors
     ///
-    /// As `connect`, and as `instruments` for `instrument_ids`.
+    /// Returns an error if `connect` fails, or if `instruments` fails for
+    /// `instrument_ids`.
     #[cfg(feature = "test-support")]
     pub async fn connect_with_spots(
         connection: &CTraderConnection,

@@ -35,8 +35,8 @@ use crate::{
 ///
 /// # Errors
 ///
-/// Returns an error naming the series and saying why if the client does
-/// not serve it.
+/// Returns an error if the client does not serve the series, naming it and
+/// saying why.
 pub fn serves(series: &(NautilusDataType, String)) -> anyhow::Result<()> {
     let (data, identifier) = series;
     if *data == NautilusDataType::Bar {
@@ -84,8 +84,8 @@ pub fn serves(series: &(NautilusDataType, String)) -> anyhow::Result<()> {
 ///
 /// # Errors
 ///
-/// Returns an error naming the data type and saying why if the client does
-/// not serve it (see `row_source`).
+/// Returns an error if the client does not serve the data type, naming it
+/// and saying why (see `row_source`).
 pub fn serves_custom(data_type: &DataType) -> anyhow::Result<()> {
     row_source(data_type).map(drop)
 }
@@ -98,9 +98,9 @@ pub fn serves_custom(data_type: &DataType) -> anyhow::Result<()> {
 ///
 /// # Errors
 ///
-/// Returns an error naming the data type if it is not `LseRow`'s, if its
-/// metadata names no source or symbol, a key not a string, or another
-/// key, or as `RowSource::of`.
+/// Returns an error if the data type, which it names, is not `LseRow`'s,
+/// if its metadata names no source or symbol, a key not a string, or
+/// another key, or if `RowSource::of` fails.
 pub(super) fn row_source(data_type: &DataType) -> anyhow::Result<RowSource> {
     let rows = LseRow::type_name_static();
     ensure!(

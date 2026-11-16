@@ -131,12 +131,13 @@ impl CustomSeries {
     ///
     /// # Errors
     ///
-    /// Returns Nautilus' error if `metadata` holds the key it reserves for
-    /// the identifier (`DataType::try_new`), or an error naming
-    /// `identifier` if it holds a backslash, or if its catalog folder
-    /// (`catalog_folder`) is empty or blank, which Nautilus' correctness
-    /// check refuses (`check_valid_string_utf8`): an empty folder is its
-    /// type's own, which no series keys.
+    /// Returns an error if:
+    /// - `metadata` holds the key Nautilus reserves for the identifier,
+    ///   Nautilus' error (`DataType::try_new`).
+    /// - `identifier`, which it names, holds a backslash, or its catalog
+    ///   folder (`catalog_folder`) is empty or blank, which Nautilus'
+    ///   correctness check refuses (`check_valid_string_utf8`): an empty
+    ///   folder is its type's own, which no series keys.
     pub fn new(
         type_name: &str,
         identifier: String,

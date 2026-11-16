@@ -705,7 +705,7 @@ impl DatasetRow {
 ///
 /// # Errors
 ///
-/// Returns an error as `targets::fingerprint` does.
+/// Returns an error if `targets::fingerprint` fails.
 pub(super) fn fingerprint(
     features: &FeatureSet,
     rule: DecisionRule,

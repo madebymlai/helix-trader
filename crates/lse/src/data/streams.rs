@@ -115,11 +115,12 @@ impl LseStreams {
     ///
     /// # Errors
     ///
-    /// Returns an error naming it if an instrument is neither an `LSEDGE`
-    /// series, an `OPRA` contract, a `GLBX` contract nor an `XNAS` stock, or
-    /// is a series of a market streamed on no socket here, and naming the
-    /// variable of the key if an instrument is streamed with no key of its
-    /// product.
+    /// Returns an error if:
+    /// - An instrument, which it names, is neither an `LSEDGE` series, an
+    ///   `OPRA` contract, a `GLBX` contract nor an `XNAS` stock, or is a
+    ///   series of a market streamed on no socket here.
+    /// - An instrument is streamed with no key of its product, naming the
+    ///   variable of the key.
     pub(super) fn new(
         config: &LseDataClientConfig,
         credential: Option<LseCredential>,
@@ -380,9 +381,9 @@ impl LseStreams {
     ///
     /// # Errors
     ///
-    /// Returns an error naming it if the client does not stream it, if its
-    /// socket is not open, or if `cache` has no definition of it: LSE
-    /// publishes none, and its prices are read at the definition's
+    /// Returns an error if `id`, which it names, is one the client does not
+    /// stream, if its socket is not open, or if `cache` has no definition of
+    /// it: LSE publishes none, and its prices are read at the definition's
     /// precision.
     pub(super) fn subscribe_quotes(
         &mut self,
@@ -407,8 +408,8 @@ impl LseStreams {
     ///
     /// # Errors
     ///
-    /// Returns an error naming it if the client does not stream it, or if
-    /// its socket is not open.
+    /// Returns an error if `id`, which it names, is one the client does not
+    /// stream, or if its socket is not open.
     pub(super) fn unsubscribe_quotes(&self, id: InstrumentId) -> anyhow::Result<()> {
         if let Some(exchange) = LseExchange::of_venue(id.venue) {
             return self.exchange(exchange).unsubscribe(id, StreamKind::Quotes);
@@ -427,10 +428,10 @@ impl LseStreams {
     ///
     /// # Errors
     ///
-    /// Returns an error naming it if it is none of those, LSE's sockets
-    /// streaming a series' ticks as quotes, if it is a contract of an
-    /// underlying whose chain the client does not stream, if its socket is
-    /// not open, or if `cache` has no definition of it.
+    /// Returns an error if `id`, which it names, is none of those, LSE's
+    /// sockets streaming a series' ticks as quotes, if it is a contract of
+    /// an underlying whose chain the client does not stream, if its socket
+    /// is not open, or if `cache` has no definition of it.
     pub(super) fn subscribe_trades(
         &mut self,
         id: InstrumentId,
@@ -465,9 +466,9 @@ impl LseStreams {
     ///
     /// # Errors
     ///
-    /// Returns an error naming it if it is none of those, if it is a
-    /// contract of an underlying whose chain the client does not stream, or
-    /// if its socket is not open.
+    /// Returns an error if `id`, which it names, is none of those, if it is
+    /// a contract of an underlying whose chain the client does not stream,
+    /// or if its socket is not open.
     pub(super) fn unsubscribe_trades(&mut self, id: InstrumentId) -> anyhow::Result<()> {
         if let Some(exchange) = LseExchange::of_venue(id.venue) {
             return self.exchange(exchange).unsubscribe(id, StreamKind::Trades);
@@ -499,8 +500,8 @@ impl LseStreams {
     ///
     /// # Errors
     ///
-    /// Returns an error naming it if it is neither, or as
-    /// `ExchangeStreams::subscribe`.
+    /// Returns an error if `id`, which it names, is neither, or if
+    /// `ExchangeStreams::subscribe` fails.
     pub(super) fn subscribe_book_depth(
         &mut self,
         id: InstrumentId,
@@ -515,8 +516,8 @@ impl LseStreams {
     ///
     /// # Errors
     ///
-    /// Returns an error naming it if it is neither a `GLBX` contract nor an
-    /// `XNAS` stock, or is not subscribed.
+    /// Returns an error if `id`, which it names, is neither a `GLBX`
+    /// contract nor an `XNAS` stock, or is not subscribed.
     pub(super) fn unsubscribe_book_depth(&self, id: InstrumentId) -> anyhow::Result<()> {
         self.exchange(booked(id, &NautilusDataType::OrderBookDepth)?)
             .unsubscribe(id, StreamKind::Depth)
@@ -529,8 +530,8 @@ impl LseStreams {
     ///
     /// # Errors
     ///
-    /// Returns an error naming it if it is neither, or as
-    /// `ExchangeStreams::subscribe`.
+    /// Returns an error if `id`, which it names, is neither, or if
+    /// `ExchangeStreams::subscribe` fails.
     pub(super) fn subscribe_book_deltas(
         &mut self,
         id: InstrumentId,
@@ -546,8 +547,8 @@ impl LseStreams {
     ///
     /// # Errors
     ///
-    /// Returns an error naming it if it is neither a `GLBX` contract nor an
-    /// `XNAS` stock, or is not subscribed.
+    /// Returns an error if `id`, which it names, is neither a `GLBX`
+    /// contract nor an `XNAS` stock, or is not subscribed.
     pub(super) fn unsubscribe_book_deltas(&self, id: InstrumentId) -> anyhow::Result<()> {
         self.exchange(booked(id, &NautilusDataType::OrderBookDelta)?)
             .unsubscribe(id, StreamKind::Deltas)
@@ -647,8 +648,8 @@ impl LseStreams {
 ///
 /// # Errors
 ///
-/// Returns an error naming the series if the client does not stream it,
-/// saying what LSE streams instead: bars, LSE streaming no candles, to be
+/// Returns an error if the client does not stream the series, naming it
+/// and saying what LSE streams instead: bars, LSE streaming no candles, to be
 /// built from the instrument's quotes or trades (`INTERNAL`); an `LSEDGE`
 /// series' trades, its sockets' ticks being quotes; an `OPRA` contract's
 /// quotes, LSE's US options feed carrying trades alone; the book of either;
@@ -674,7 +675,7 @@ pub fn streams(series: &(NautilusDataType, String)) -> anyhow::Result<()> {
 ///
 /// # Errors
 ///
-/// Returns an error naming the data type, whatever it is.
+/// Returns an error if called, naming `data_type`, whatever it is.
 pub fn streams_custom(data_type: &DataType) -> anyhow::Result<()> {
     bail!(
         "LSE streams no custom data, {data_type}: its rows are history alone, asked of its HTTP \
@@ -687,7 +688,8 @@ pub fn streams_custom(data_type: &DataType) -> anyhow::Result<()> {
 ///
 /// # Errors
 ///
-/// Returns an error naming it and saying what LSE streams instead if not.
+/// Returns an error if the client does not stream `data` of `id`, naming
+/// it and saying what LSE streams instead.
 fn check_stream(data: &NautilusDataType, id: InstrumentId) -> anyhow::Result<()> {
     use NautilusDataType as D;
     let venue = id.venue;
@@ -738,7 +740,8 @@ fn check_stream(data: &NautilusDataType, id: InstrumentId) -> anyhow::Result<()>
 ///
 /// # Errors
 ///
-/// Returns an error naming it if it is neither (see `check_stream`).
+/// Returns an error if `id`, which it names, is neither (see
+/// `check_stream`).
 fn booked(id: InstrumentId, data: &NautilusDataType) -> anyhow::Result<LseExchange> {
     check_stream(data, id)?;
     Ok(LseExchange::of_venue(id.venue).expect("LSE streams a book of an exchange's alone"))
@@ -748,7 +751,7 @@ fn booked(id: InstrumentId, data: &NautilusDataType) -> anyhow::Result<LseExchan
 ///
 /// # Errors
 ///
-/// As `precisions`.
+/// Returns an error if `precisions` fails.
 fn defined(id: InstrumentId, cache: &CacheView) -> anyhow::Result<Subscribed> {
     let (price_precision, size_precision) = precisions(cache, id)?;
     Ok(Subscribed {

@@ -79,8 +79,8 @@ pub(in crate::venues) const BOOK: BookFormat = BookFormat {
 ///
 /// # Errors
 ///
-/// Returns an error naming `source` and saying why if the client does not
-/// stream it.
+/// Returns an error if the client does not stream `source`, naming it and
+/// saying why.
 pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
     use NautilusDataType as D;
     match source {

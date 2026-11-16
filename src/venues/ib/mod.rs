@@ -335,10 +335,10 @@ impl IbHistory {
     ///
     /// # Errors
     ///
-    /// Returns an error naming the instrument and the window, and IB's
-    /// error, if the definition cannot be had, if a page is refused, is not
-    /// answered whole within the request timeout or ends with an error, or
-    /// if a second holds a full page (see `page_back`).
+    /// Returns an error if the definition cannot be had, if a page is
+    /// refused, is not answered whole within the request timeout or ends
+    /// with an error, or if a second holds a full page (see `page_back`),
+    /// naming the instrument and the window, and IB's error.
     async fn ticks(
         &self,
         tick_type: IbHistoricalTickType,
@@ -599,7 +599,8 @@ enum Served {
 ///
 /// # Errors
 ///
-/// Returns an error naming `source` and saying why if not.
+/// Returns an error if IB's history does not serve `source`, naming it and
+/// saying why.
 pub(crate) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
     let (data_type, identifier) = source.key();
     served(&data_type, &identifier).map(drop)
@@ -618,8 +619,8 @@ pub(crate) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
 ///
 /// # Errors
 ///
-/// Returns an error naming the series and saying why if IB's history does
-/// not serve it.
+/// Returns an error if IB's history does not serve the series, naming it
+/// and saying why.
 fn served(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<Served> {
     let instrument = || {
         InstrumentId::from_str(identifier)
@@ -816,9 +817,11 @@ impl SmallBarPacing {
 ///
 /// # Errors
 ///
-/// Returns an error naming the bars and the oldest start IB holds if a
-/// slice of them would be asked from earlier, naming a slice of bars keyed
-/// by no bar type, or as `catalog::resumed`.
+/// Returns an error if:
+/// - A slice of bars would be asked from earlier than the oldest start IB
+///   holds, naming the bars and that start.
+/// - A slice of bars is keyed by no bar type, naming it.
+/// - `catalog::resumed` fails.
 pub(crate) fn check_held(
     catalog: &ParquetDataCatalog,
     slices: &[SeriesSlice],
@@ -878,10 +881,12 @@ fn ensure_bars_closed(end: Timestamp, now: Timestamp) -> anyhow::Result<()> {
 ///
 /// # Errors
 ///
-/// Returns the error of a request (`fetch`'s) or of a page (an item's), the
-/// ticks paged so far dropped, or one naming the second if a page holds no
-/// tick at or before its cursor: that second alone holds a full page, which
-/// IB cannot page past, so the ticks before it cannot be asked.
+/// Returns an error if:
+/// - A request fails (`fetch`'s error) or a page does (an item's), the
+///   ticks paged so far dropped.
+/// - A page holds no tick at or before its cursor, naming the second: that
+///   second alone holds a full page, which IB cannot page past, so the
+///   ticks before it cannot be asked.
 async fn page_back<T>(
     start: Timestamp,
     end: Timestamp,

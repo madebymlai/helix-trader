@@ -84,8 +84,8 @@ impl LseSymbol {
     ///
     /// # Errors
     ///
-    /// Returns an error naming `id` if it is not on `LSEDGE`, or if its
-    /// symbol is not an LSE symbol, a hyphen and its market in capitals.
+    /// Returns an error if `id`, which it names, is not on `LSEDGE`, or if
+    /// its symbol is not an LSE symbol, a hyphen and its market in capitals.
     pub fn from_instrument_id(id: InstrumentId) -> anyhow::Result<Self> {
         if id.venue != *LSEDGE_VENUE {
             bail!("{id} is not an LSEDGE instrument");
@@ -131,9 +131,9 @@ impl LseSymbol {
     ///
     /// # Errors
     ///
-    /// Returns an error naming the market if its series stream on no
-    /// socket, or naming a crypto symbol not quoted in Tether, as LSE's
-    /// crypto symbols are.
+    /// Returns an error if the series of the market, which it names, stream
+    /// on no socket, or if a crypto symbol, which it names, is not quoted in
+    /// Tether, as LSE's crypto symbols are.
     pub fn stream(&self) -> anyhow::Result<(LseSocket, String)> {
         let symbol = &self.symbol;
         Ok(match self.market.as_str() {
@@ -189,8 +189,8 @@ impl LseInstrument {
     ///
     /// # Errors
     ///
-    /// Returns an error naming `id` if it is on none of the venues, or not
-    /// an instrument of its venue (see `LseSymbol::from_instrument_id`,
+    /// Returns an error if `id`, which it names, is on none of the venues,
+    /// or not an instrument of its venue (see `LseSymbol::from_instrument_id`,
     /// `CmeContract::from_instrument_id`, `NasdaqStock::from_instrument_id`
     /// and `OpraContract::from_instrument_id`).
     pub fn from_instrument_id(id: InstrumentId, reference_year: i16) -> anyhow::Result<Self> {
@@ -248,7 +248,7 @@ impl CmeContract {
     ///
     /// # Errors
     ///
-    /// Returns an error naming `id` if it is not on `GLBX`, or not a
+    /// Returns an error if `id`, which it names, is not on `GLBX`, or not a
     /// futures contract's symbol with a two-digit year, a one-digit year
     /// standing for contracts ten years apart.
     pub fn from_instrument_id(id: InstrumentId, reference_year: i16) -> anyhow::Result<Self> {
@@ -320,8 +320,8 @@ impl CmeContract {
     ///
     /// # Errors
     ///
-    /// Returns an error naming them if more than one listing is the
-    /// contract's.
+    /// Returns an error if more than one listing is the contract's, naming
+    /// them.
     pub fn listing<'a>(&self, pairs: &'a [LsePair]) -> anyhow::Result<Option<&'a LsePair>> {
         let listings: Vec<&LsePair> = pairs
             .iter()
@@ -386,7 +386,7 @@ impl NasdaqStock {
     ///
     /// # Errors
     ///
-    /// Returns an error naming `id` if it is not on `XNAS`, or if its
+    /// Returns an error if `id`, which it names, is not on `XNAS`, or if its
     /// symbol is no ticker in capitals, its class after one space, as
     /// Nautilus' Databento client writes one: a ticker in lower case, which
     /// LSE would match, or a class after a dot, Nasdaq's spelling, would
@@ -455,7 +455,7 @@ impl OpraContract {
     ///
     /// # Errors
     ///
-    /// Returns an error naming `id` if it is not on `OPRA`, or if its
+    /// Returns an error if `id`, which it names, is not on `OPRA`, or if its
     /// symbol is not an OSI symbol as Databento and LSE write it: padded,
     /// its root in capitals, as Nautilus' OSI function writes one
     /// (`osi_option_symbol`), not as LSE's sockets do, unpadded.
