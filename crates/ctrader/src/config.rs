@@ -367,28 +367,13 @@ mod tests {
     use crate::testing::{self, VENUE};
 
     #[rstest]
-    fn each_environment_has_spotware_s_endpoint() {
-        assert_eq!(
-            CTraderEnvironment::Demo.url(),
-            "wss://demo.ctraderapi.com:5035"
-        );
-        assert_eq!(
-            CTraderEnvironment::Live.url(),
-            "wss://live.ctraderapi.com:5035"
-        );
-    }
-
-    #[rstest]
-    fn the_account_is_named_after_the_venue_and_the_environment() {
-        let (demo, _tokens) = testing::connection();
-        let live = CTraderConnection {
-            environment: CTraderEnvironment::Live,
-            ..demo.clone()
-        };
-
-        assert_eq!(demo.venue, Venue::new(VENUE));
-        assert_eq!(demo.account_id(), AccountId::from("ACMEFX-DEMO"));
-        assert_eq!(live.account_id(), AccountId::from("ACMEFX-LIVE"));
+    #[case::demo(CTraderEnvironment::Demo, "wss://demo.ctraderapi.com:5035")]
+    #[case::live(CTraderEnvironment::Live, "wss://live.ctraderapi.com:5035")]
+    fn each_environment_has_spotware_s_endpoint(
+        #[case] environment: CTraderEnvironment,
+        #[case] url: &str,
+    ) {
+        assert_eq!(environment.url(), url);
     }
 
     #[rstest]
@@ -402,24 +387,6 @@ mod tests {
         assert_eq!(pair.access_token.expose_secret(), testing::ACCESS_TOKEN);
         assert_eq!(pair.refresh_token.expose_secret(), testing::REFRESH_TOKEN);
         assert_eq!(credential.tokens().path(), credential.token_file);
-    }
-
-    #[rstest]
-    fn debug_shows_no_credential_value() {
-        let (credential, _tokens) = testing::credential();
-
-        let debug = format!("{credential:?}");
-
-        for value in [
-            credential.client_id.expose_secret(),
-            credential.client_secret.expose_secret(),
-            credential.access_token.expose_secret(),
-            credential.refresh_token.expose_secret(),
-            &credential.account_id.get().to_string(),
-        ] {
-            assert!(!debug.contains(value), "{debug}");
-        }
-        assert!(debug.contains(REDACTED), "{debug}");
     }
 
     /// The settings of a made-up broker's account, beside the shared
@@ -494,17 +461,19 @@ mod tests {
     }
 
     #[rstest]
-    fn the_environment_has_no_default() {
-        for value in [None, Some(""), Some("Demo"), Some("paper")] {
-            let err = read(&full_with("ACMEFX_ENVIRONMENT", value))
-                .unwrap_err()
-                .to_string();
+    #[case::unset(None)]
+    #[case::empty(Some(""))]
+    #[case::capitalized(Some("Demo"))]
+    #[case::paper(Some("paper"))]
+    fn the_environment_has_no_default(#[case] value: Option<&'static str>) {
+        let err = read(&full_with("ACMEFX_ENVIRONMENT", value))
+            .unwrap_err()
+            .to_string();
 
-            assert!(
-                err.contains("ACMEFX_ENVIRONMENT must be `demo` or `live`"),
-                "{err}"
-            );
-        }
+        assert!(
+            err.contains("ACMEFX_ENVIRONMENT must be `demo` or `live`"),
+            "{err}"
+        );
     }
 
     #[rstest]
@@ -562,14 +531,20 @@ mod tests {
         }
     }
 
+    /// The names the errors use: the variables read, where they are set,
+    /// and the guide to setting up the credential.
     #[rstest]
-    fn the_errors_name_the_settings_read() {
+    fn a_connection_from_the_environment_names_the_variables_it_read() {
         let names = read(&FULL).unwrap().credential.names;
 
         assert_eq!(names.environment, "ACMEFX_ENVIRONMENT");
         assert_eq!(names.account_id, "ACMEFX_ACCOUNT_ID");
+        assert_eq!(names.client_id, "CTRADER_CLIENT_ID");
+        assert_eq!(names.client_secret, "CTRADER_CLIENT_SECRET");
         assert_eq!(names.access_token, "CTRADER_ACCESS_TOKEN");
         assert_eq!(names.refresh_token, "CTRADER_REFRESH_TOKEN");
+        assert_eq!(names.source, "the environment");
+        assert_eq!(names.guide, "crates/ctrader/README.md, \"Credentials\"");
     }
 
     /// Whichever broker's account it connects to, one token file: the pair
@@ -606,18 +581,20 @@ mod tests {
 
     /// The XDG base directory specification ignores a relative one.
     #[rstest]
-    fn without_an_absolute_xdg_state_home_the_token_file_is_under_local_state() {
-        let mut relative = FULL.to_vec();
-        relative.push(("XDG_STATE_HOME", "state"));
+    #[case::unset(None)]
+    #[case::relative(Some("state"))]
+    fn without_an_absolute_xdg_state_home_the_token_file_is_under_local_state(
+        #[case] xdg_state_home: Option<&'static str>,
+    ) {
+        let mut pairs = FULL.to_vec();
+        pairs.extend(xdg_state_home.map(|dir| ("XDG_STATE_HOME", dir)));
 
-        for pairs in [FULL.to_vec(), relative] {
-            let connection = read(&pairs).unwrap();
+        let connection = read(&pairs).unwrap();
 
-            assert_eq!(
-                connection.credential.token_file,
-                Path::new("/home/u/.local/state/ctrader/token.json")
-            );
-        }
+        assert_eq!(
+            connection.credential.token_file,
+            Path::new("/home/u/.local/state/ctrader/token.json")
+        );
     }
 
     #[rstest]

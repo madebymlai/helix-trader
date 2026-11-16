@@ -60,7 +60,10 @@ use nautilus_network::{
 use prost::Message as _;
 use zeroize::Zeroize;
 
-use super::{AUTH_TIMEOUT, TradeEvent, TradeMessage, spot_subscribed, spot_symbol, spot_topic};
+use super::{
+    AUTH_TIMEOUT, HEARTBEAT_INTERVAL, TradeEvent, TradeMessage, spot_subscribed, spot_symbol,
+    spot_topic,
+};
 use crate::{
     common::{
         messages::{
@@ -234,7 +237,6 @@ pub(super) struct CTraderWsHandler {
     spot_tx: tokio::sync::mpsc::UnboundedSender<ProtoOaSpotEvent>,
     /// The listener of the trade events, once one asked.
     trade_tx: Option<tokio::sync::mpsc::UnboundedSender<TradeEvent>>,
-    heartbeat: Duration,
     session: Session,
     next_id: u64,
     pending: HashMap<String, Pending>,
@@ -255,10 +257,6 @@ pub(super) struct CTraderWsHandler {
 }
 
 impl CTraderWsHandler {
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the handler owns the session's channels, credential and shared state"
-    )]
     pub(super) fn new(
         credential: CTraderCredential,
         tokens: TokenPair,
@@ -267,7 +265,6 @@ impl CTraderWsHandler {
         cmd_rx: tokio::sync::mpsc::UnboundedReceiver<HandlerCommand>,
         raw_rx: tokio::sync::mpsc::UnboundedReceiver<(u64, Message)>,
         spot_tx: tokio::sync::mpsc::UnboundedSender<ProtoOaSpotEvent>,
-        heartbeat: Duration,
     ) -> Self {
         Self {
             client: None,
@@ -283,7 +280,6 @@ impl CTraderWsHandler {
             raw_rx,
             spot_tx,
             trade_tx: None,
-            heartbeat,
             session: Session::Unconnected,
             next_id: 0,
             pending: HashMap::new(),
@@ -297,8 +293,8 @@ impl CTraderWsHandler {
     /// Runs until disconnected, the outer client dropped, or the
     /// transport closed for good.
     pub(super) async fn run(mut self) {
-        let start = Instant::now() + self.heartbeat;
-        let mut heartbeat = time::interval_at(start, self.heartbeat);
+        let start = Instant::now() + HEARTBEAT_INTERVAL;
+        let mut heartbeat = time::interval_at(start, HEARTBEAT_INTERVAL);
         heartbeat.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             tokio::select! {
@@ -1203,29 +1199,27 @@ mod tests {
     /// have reached cTrader, as one that timed out may: Nautilus' adapter
     /// guide leaves such an outcome unknown, never a rejection.
     #[rstest]
-    fn a_frame_whose_write_failed_after_it_began_counts_as_sent() {
-        assert!(failed_send(SendError::BrokenPipe("connection reset".to_owned())).is_ok());
-        assert!(failed_send(SendError::WriteTimeout).is_ok());
+    #[case::broken_pipe(SendError::BrokenPipe("connection reset".to_owned()))]
+    #[case::write_timeout(SendError::WriteTimeout)]
+    fn a_frame_whose_write_failed_after_it_began_counts_as_sent(#[case] failed: SendError) {
+        assert!(failed_send(failed).is_ok());
     }
 
     /// Refused before its write began, or its connection changed: never
     /// sent, for the transport's reason.
     #[rstest]
-    fn a_frame_refused_before_its_write_is_unsent() {
-        for refused in [
-            SendError::InvalidInput("empty".to_owned()),
-            SendError::BufferFull,
-            SendError::Closed,
-            SendError::Timeout,
-            SendError::ConnectionChanged,
-        ] {
-            let unsent = failed_send(refused.clone());
-            assert!(
-                unsent
-                    .as_ref()
-                    .is_err_and(|e| std::mem::discriminant(e) == std::mem::discriminant(&refused)),
-                "{refused:?}: {unsent:?}"
-            );
-        }
+    #[case::invalid_input(SendError::InvalidInput("empty".to_owned()))]
+    #[case::buffer_full(SendError::BufferFull)]
+    #[case::closed(SendError::Closed)]
+    #[case::timeout(SendError::Timeout)]
+    #[case::connection_changed(SendError::ConnectionChanged)]
+    fn a_frame_refused_before_its_write_is_unsent(#[case] refused: SendError) {
+        let unsent = failed_send(refused.clone());
+        assert!(
+            unsent
+                .as_ref()
+                .is_err_and(|e| std::mem::discriminant(e) == std::mem::discriminant(&refused)),
+            "{refused:?}: {unsent:?}"
+        );
     }
 }

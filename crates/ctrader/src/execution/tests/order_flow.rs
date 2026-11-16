@@ -454,61 +454,67 @@ async fn a_limit_order_is_accepted_amended_and_cancelled() {
 /// The captured MARKET_RANGE orders based 3.00 on the better side of the
 /// market, as a limit IOC at that price: each filled at the market,
 /// better than its limit, as Nautilus' limit order.
+#[rstest]
+#[case::buy(
+    "PROBE-IOC-1",
+    OrderSide::Buy,
+    "3869.20",
+    EXECUTION_MARKET_RANGE_BUY_BETTER_ACCEPTED,
+    EXECUTION_MARKET_RANGE_BUY_BETTER_FILLED,
+    "3866.20",
+    "961302364"
+)]
+#[case::sell(
+    "PROBE-IOC-2",
+    OrderSide::Sell,
+    "3863.09",
+    EXECUTION_MARKET_RANGE_SELL_BETTER_ACCEPTED,
+    EXECUTION_MARKET_RANGE_SELL_BETTER_FILLED,
+    "3866.09",
+    "961302463"
+)]
 #[tokio::test]
-async fn a_limit_ioc_order_is_a_market_range_filled_at_its_price_or_better() {
-    for (id, side, limit, accepted, filled, price, deal) in [
-        (
-            "PROBE-IOC-1",
-            OrderSide::Buy,
-            "3869.20",
-            EXECUTION_MARKET_RANGE_BUY_BETTER_ACCEPTED,
-            EXECUTION_MARKET_RANGE_BUY_BETTER_FILLED,
-            "3866.20",
-            "961302364",
-        ),
-        (
-            "PROBE-IOC-2",
-            OrderSide::Sell,
-            "3863.09",
-            EXECUTION_MARKET_RANGE_SELL_BETTER_ACCEPTED,
-            EXECUTION_MARKET_RANGE_SELL_BETTER_FILLED,
-            "3866.09",
-            "961302463",
-        ),
-    ] {
-        let mut node = Node::start(move |request| {
-            vec![
-                answer(request, &execution(accepted)),
-                answer(request, &execution(filled)),
-            ]
-        })
-        .await;
-        let order = order(OrderType::Limit, id, side, 1)
-            .price(Price::from(limit))
-            .time_in_force(TimeInForce::Ioc)
-            .build();
+async fn a_limit_ioc_order_is_a_market_range_filled_at_its_price_or_better(
+    #[case] id: &str,
+    #[case] side: OrderSide,
+    #[case] limit: &str,
+    #[case] accepted: &'static [u8],
+    #[case] filled: &'static [u8],
+    #[case] price: &str,
+    #[case] deal: &str,
+) {
+    let mut node = Node::start(move |request| {
+        vec![
+            answer(request, &execution(accepted)),
+            answer(request, &execution(filled)),
+        ]
+    })
+    .await;
+    let order = order(OrderType::Limit, id, side, 1)
+        .price(Price::from(limit))
+        .time_in_force(TimeInForce::Ioc)
+        .build();
 
-        node.submit(&order, None);
+    node.submit(&order, None);
 
-        let events = node.order_events(3).await;
-        assert_eq!(
-            kinds(&events),
-            [row(id, "submitted"), row(id, "accepted"), row(id, "filled")]
-        );
-        let fill = fill_of(&events, id);
-        assert_eq!(fill.order_type, OrderType::Limit, "{id}");
-        assert_eq!(fill.last_px, Price::from(price));
-        assert_eq!(fill.trade_id.to_string(), deal);
-        assert_eq!(fill.commission, Some(eur(0.11)));
-        let sent = node.requests::<ProtoOaNewOrderReq>();
-        assert_eq!(sent[0].order_type(), ProtoOaOrderType::MarketRange);
-        assert_eq!(
-            sent[0].base_slippage_price,
-            Some(Price::from(limit).as_f64())
-        );
-        assert_eq!(sent[0].slippage_in_points, Some(0));
-        node.client.disconnect().await.unwrap();
-    }
+    let events = node.order_events(3).await;
+    assert_eq!(
+        kinds(&events),
+        [row(id, "submitted"), row(id, "accepted"), row(id, "filled")]
+    );
+    let fill = fill_of(&events, id);
+    assert_eq!(fill.order_type, OrderType::Limit, "{id}");
+    assert_eq!(fill.last_px, Price::from(price));
+    assert_eq!(fill.trade_id.to_string(), deal);
+    assert_eq!(fill.commission, Some(eur(0.11)));
+    let sent = node.requests::<ProtoOaNewOrderReq>();
+    assert_eq!(sent[0].order_type(), ProtoOaOrderType::MarketRange);
+    assert_eq!(
+        sent[0].base_slippage_price,
+        Some(Price::from(limit).as_f64())
+    );
+    assert_eq!(sent[0].slippage_in_points, Some(0));
+    node.client.disconnect().await.unwrap();
 }
 
 /// The captured MARKET_RANGE buy based 5.00 under the ask, as a limit IOC
@@ -586,6 +592,10 @@ async fn an_order_the_broker_refuses_is_rejected_with_its_reason() {
     node.submit(&market("PROBE-3", OrderSide::Buy, 1), None);
 
     let events = node.order_events(2).await;
+    assert_eq!(
+        kinds(&events),
+        [row("PROBE-3", "submitted"), row("PROBE-3", "rejected")]
+    );
     let OrderEventAny::Rejected(rejected) = events[1] else {
         panic!("not a rejection: {events:?}");
     };
@@ -796,7 +806,9 @@ async fn a_lookup_of_an_order_on_a_symbol_the_run_did_not_load_fails() {
         ))
         .await;
 
-    assert!(lookup.is_err(), "{lookup:?}");
+    let error = format!("{:#}", lookup.unwrap_err());
+    assert!(error.contains(VENUE), "{error}");
+    assert!(error.contains("PROBE-1"), "{error}");
     let details: Vec<ProtoOaOrderDetailsReq> = node.requests();
     assert_eq!(details[0].order_id, 1_031_776_265);
     node.client.disconnect().await.unwrap();
@@ -874,7 +886,8 @@ async fn a_lookup_of_an_order_without_its_client_order_id_fails() {
         ))
         .await;
 
-    assert!(lookup.is_err(), "{lookup:?}");
+    let error = format!("{:#}", lookup.unwrap_err());
+    assert!(error.contains("no client order id"), "{error}");
     node.client.disconnect().await.unwrap();
 }
 
@@ -1038,40 +1051,43 @@ async fn a_limit_ioc_bracket_entry_carries_its_protections_which_the_position_th
 /// A bracket's legs are the protections of its position, which cTrader
 /// holds as long as the position (GOOD_TILL_CANCEL): a leg of any other
 /// time in force is denied with the list.
+#[rstest]
+#[case::ioc(TimeInForce::Ioc)]
+#[case::gtd(TimeInForce::Gtd)]
+#[case::day(TimeInForce::Day)]
 #[tokio::test]
-async fn a_bracket_whose_legs_are_not_gtc_is_denied_and_nothing_is_sent() {
-    for lasting in [TimeInForce::Ioc, TimeInForce::Gtd, TimeInForce::Day] {
-        let mut node = Node::start(|_| vec![]).await;
-        let [entry, stop_loss, take_profit] = bracket_lasting(
-            order(OrderType::Market, "PROBE-1", OrderSide::Buy, 1),
-            "PROBE-1",
-            "3992.78",
-            "4052.78",
-            lasting,
-        );
+async fn a_bracket_whose_legs_are_not_gtc_is_denied_and_nothing_is_sent(
+    #[case] lasting: TimeInForce,
+) {
+    let mut node = Node::start(|_| vec![]).await;
+    let [entry, stop_loss, take_profit] = bracket_lasting(
+        order(OrderType::Market, "PROBE-1", OrderSide::Buy, 1),
+        "PROBE-1",
+        "3992.78",
+        "4052.78",
+        lasting,
+    );
 
-        node.submit_list(&[&entry, &stop_loss, &take_profit]);
+    node.submit_list(&[&entry, &stop_loss, &take_profit]);
 
-        let events = node.order_events(3).await;
-        assert_eq!(
-            kinds(&events),
-            [
-                row("PROBE-1", "denied"),
-                row("PROBE-1-SL", "denied"),
-                row("PROBE-1-TP", "denied"),
-            ],
-            "{lasting}"
-        );
-        let OrderEventAny::Denied(denied) = events[0] else {
-            panic!("not a denial: {events:?}");
-        };
-        assert_eq!(
-            denied.reason.as_str(),
-            OrderDeniedReason::UnsupportedTimeInForce(lasting).to_string()
-        );
-        assert!(node.requests::<ProtoOaNewOrderReq>().is_empty());
-        node.client.disconnect().await.unwrap();
-    }
+    let events = node.order_events(3).await;
+    assert_eq!(
+        kinds(&events),
+        [
+            row("PROBE-1", "denied"),
+            row("PROBE-1-SL", "denied"),
+            row("PROBE-1-TP", "denied"),
+        ]
+    );
+    let OrderEventAny::Denied(denied) = events[0] else {
+        panic!("not a denial: {events:?}");
+    };
+    assert_eq!(
+        denied.reason.as_str(),
+        OrderDeniedReason::UnsupportedTimeInForce(lasting).to_string()
+    );
+    assert!(node.requests::<ProtoOaNewOrderReq>().is_empty());
+    node.client.disconnect().await.unwrap();
 }
 
 /// Moving the stop loss sends both prices: cTrader drops one left out.
@@ -1337,6 +1353,17 @@ async fn a_close_larger_than_its_position_is_denied_and_nothing_is_sent() {
 
     let events = node.order_events(1).await;
     assert_eq!(kinds(&events), [row("CLOSE-1", "denied")]);
+    let OrderEventAny::Denied(denied) = &events[0] else {
+        panic!("not a denial: {events:?}");
+    };
+    // The position, then the close's 2 oz and the position's 1.
+    let numbers: Vec<&str> = denied
+        .reason
+        .as_str()
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|n| !n.is_empty())
+        .collect();
+    assert_eq!(numbers, ["690004734", "2", "1"], "{}", denied.reason);
     assert!(node.requests::<ProtoOaClosePositionReq>().is_empty());
     assert!(node.requests::<ProtoOaNewOrderReq>().is_empty());
     node.client.disconnect().await.unwrap();
@@ -1409,38 +1436,39 @@ fn refusing(request: &ProtoMessage) -> Vec<Action> {
     )]
 }
 
+/// A move or a cancel of the stop loss goes out as an amendment of its
+/// position's protection, tagged as either; the broker's refusal rejects
+/// the command with its reason.
+#[rstest]
+#[case::move_(
+    |node: &Node| node.modify("O-RECON-SL", None, Some(Price::from("3982.78"))),
+    "modify rejected",
+    "P:O-RECON-SL"
+)]
+#[case::cancel(|node: &Node| node.cancel("O-RECON-SL"), "cancel rejected", "U:O-RECON-SL")]
 #[tokio::test]
-async fn a_refused_move_of_a_protection_from_before_a_restart_is_rejected() {
+async fn a_refused_change_of_a_protection_from_before_a_restart_is_rejected(
+    #[case] change: fn(&Node),
+    #[case] kind: &'static str,
+    #[case] tag: &str,
+) {
     let mut node = Node::start(refusing).await;
     reconciled_stop_loss(&node, "O-RECON-SL", "690004734-SL");
 
-    node.modify("O-RECON-SL", None, Some(Price::from("3982.78")));
+    change(&node);
 
     let events = node.order_events(1).await;
-    let OrderEventAny::ModifyRejected(rejected) = &events[0] else {
-        panic!("not a modify rejection: {events:?}");
+    assert_eq!(kinds(&events), [row("O-RECON-SL", kind)]);
+    let reason = match &events[0] {
+        OrderEventAny::ModifyRejected(rejected) => rejected.reason,
+        OrderEventAny::CancelRejected(rejected) => rejected.reason,
+        other => panic!("not a rejection: {other:?}"),
     };
-    assert_eq!(rejected.client_order_id, ClientOrderId::from("O-RECON-SL"));
     assert_eq!(
-        rejected.reason.as_str(),
+        reason.as_str(),
         "POSITION_NOT_FOUND: Position not found with id 690004734"
     );
-    node.client.disconnect().await.unwrap();
-}
-
-#[tokio::test]
-async fn a_refused_cancel_of_a_protection_from_before_a_restart_is_rejected() {
-    let mut node = Node::start(refusing).await;
-    reconciled_stop_loss(&node, "O-RECON-SL", "690004734-SL");
-
-    node.cancel("O-RECON-SL");
-
-    let events = node.order_events(1).await;
-    let OrderEventAny::CancelRejected(rejected) = &events[0] else {
-        panic!("not a cancel rejection: {events:?}");
-    };
-    assert_eq!(rejected.client_order_id, ClientOrderId::from("O-RECON-SL"));
-    assert_eq!(node.tags::<ProtoOaAmendPositionSltpReq>(), ["U:O-RECON-SL"]);
+    assert_eq!(node.tags::<ProtoOaAmendPositionSltpReq>(), [tag]);
     node.client.disconnect().await.unwrap();
 }
 
@@ -1475,29 +1503,36 @@ async fn protection_amendments(node: &Node, n: usize) -> Vec<ProtoOaAmendPositio
     node.requests()
 }
 
+/// The second amendment of the position's protections carries the first
+/// change, still unanswered: the take profit cancelled stays gone, the
+/// stop loss moved stays moved.
+#[rstest]
+#[case::after_an_unanswered_cancel(
+    |node: &Node| {
+        node.cancel("PROBE-1-TP");
+        node.modify("PROBE-1-SL", None, Some(Price::from("3982.78")));
+    },
+    None
+)]
+#[case::after_an_unanswered_move(
+    |node: &Node| {
+        node.modify("PROBE-1-SL", None, Some(Price::from("3982.78")));
+        node.modify("PROBE-1-TP", Some(Price::from("4062.78")), None);
+    },
+    Some(4062.78)
+)]
 #[tokio::test]
-async fn a_move_after_an_unanswered_cancel_keeps_the_cancelled_protection_gone() {
+async fn a_move_keeps_the_unanswered_change_before_it(
+    #[case] changes: fn(&Node),
+    #[case] take_profit: Option<f64>,
+) {
     let mut node = protected_position().await;
 
-    node.cancel("PROBE-1-TP");
-    node.modify("PROBE-1-SL", None, Some(Price::from("3982.78")));
+    changes(&node);
 
     let amended = protection_amendments(&node, 2).await;
     assert_eq!(amended[1].stop_loss, Some(3982.78));
-    assert_eq!(amended[1].take_profit, None);
-    node.client.disconnect().await.unwrap();
-}
-
-#[tokio::test]
-async fn a_move_after_an_unanswered_move_keeps_the_first_move() {
-    let mut node = protected_position().await;
-
-    node.modify("PROBE-1-SL", None, Some(Price::from("3982.78")));
-    node.modify("PROBE-1-TP", Some(Price::from("4062.78")), None);
-
-    let amended = protection_amendments(&node, 2).await;
-    assert_eq!(amended[1].stop_loss, Some(3982.78));
-    assert_eq!(amended[1].take_profit, Some(4062.78));
+    assert_eq!(amended[1].take_profit, take_profit);
     node.client.disconnect().await.unwrap();
 }
 
@@ -1577,6 +1612,16 @@ async fn a_refused_cancel_of_both_protections_rejects_the_cancel_of_each() {
             row("PROBE-1-TP", "cancel rejected")
         ]
     );
+
+    for event in &events {
+        let OrderEventAny::CancelRejected(rejected) = event else {
+            panic!("not a cancel rejection: {event:?}");
+        };
+        assert_eq!(
+            rejected.reason.as_str(),
+            "POSITION_NOT_FOUND: Position not found with id 690004734"
+        );
+    }
     assert_eq!(node.requests::<ProtoOaAmendPositionSltpReq>().len(), 1);
     node.client.disconnect().await.unwrap();
 }

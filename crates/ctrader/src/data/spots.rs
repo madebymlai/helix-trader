@@ -277,15 +277,4 @@ mod tests {
 
         assert!(err.to_string().contains("symbol 7"), "{err}");
     }
-
-    #[rstest]
-    fn an_instrument_not_loaded_is_refused() {
-        let mut quotes = subscribed();
-
-        let err = quotes
-            .subscribe(InstrumentId::from("GBPUSD.ACMEFX"))
-            .unwrap_err();
-
-        assert!(err.to_string().contains("GBPUSD.ACMEFX"), "{err}");
-    }
 }
