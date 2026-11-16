@@ -637,7 +637,7 @@ impl Reading {
 
 impl Debug for FeatureSet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FeatureSet")
+        f.debug_struct(stringify!(FeatureSet))
             .field("names", &self.names)
             .field("fingerprint", &self.fingerprint)
             .finish_non_exhaustive()

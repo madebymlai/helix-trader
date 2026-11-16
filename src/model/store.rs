@@ -924,7 +924,7 @@ impl<M> Swap<M> {
 /// A swap reads as the model in use and the valid-from last read.
 impl<M: Debug> Debug for Swap<M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Swap")
+        f.debug_struct(stringify!(Swap))
             .field("current", &self.current)
             .field("read", &self.read)
             .finish_non_exhaustive()

@@ -244,7 +244,7 @@ impl Model {
 
 impl Debug for Model {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Model")
+        f.debug_struct(stringify!(Model))
             .field("kind", &self.kind)
             .field("width", &self.width())
             .finish()

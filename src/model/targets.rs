@@ -1046,7 +1046,7 @@ impl BracketWidth {
 
 impl Debug for BracketWidth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BracketWidth")
+        f.debug_struct(stringify!(BracketWidth))
             .field("distance", &self.distance)
             .field("atr", &self.atr.as_ref().map(|atr| atr.bars))
             .field("limit", &self.limit)
@@ -1362,7 +1362,7 @@ impl TargetSetter {
 
 impl Debug for TargetSetter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TargetSetter")
+        f.debug_struct(stringify!(TargetSetter))
             .field("spec", &self.spec)
             .finish_non_exhaustive()
     }
@@ -1822,7 +1822,7 @@ impl Targets {
 impl Debug for Targets {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let state = self.state.borrow();
-        f.debug_struct("Targets")
+        f.debug_struct(stringify!(Targets))
             .field("config", &self.config)
             .field("next", &state.next)
             .field("open", &state.open.len())
