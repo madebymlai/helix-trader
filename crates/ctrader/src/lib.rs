@@ -30,8 +30,8 @@ pub use self::{
     factories::{CTraderDataClientFactory, CTraderExecutionClientFactory},
     session::CTraderSession,
 };
-// The types of the hooks of a caller's test on a real server.
-#[cfg(feature = "test-support")]
+// The types the hooks of a caller's test on a real server return; the
+// hooks themselves come with the `test-support` feature.
 pub use self::{common::token::TokenPair, websocket::SpotEvents};
 
 mod common;
