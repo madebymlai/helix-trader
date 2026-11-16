@@ -496,7 +496,11 @@ fn validate_minimums(minimums: Minimums, section: &str, errors: &mut ConfigError
 
 #[cfg(test)]
 mod tests {
-    use nautilus_model::{data::BarType, identifiers::InstrumentId, types::Money};
+    use nautilus_model::{
+        data::{BarType, NautilusDataType},
+        identifiers::InstrumentId,
+        types::Money,
+    };
     use rstest::rstest;
     use rust_decimal::Decimal;
 
@@ -541,13 +545,10 @@ mod tests {
     fn reading(instrument: &str) -> DataRequirements {
         DataRequirements {
             bar_types: vec![],
-            ticks: vec![
-                toml::from_str::<TickSeries>(&format!(
-                    r#"data = "quotes"
-                       instrument_id = "{instrument}""#
-                ))
-                .unwrap(),
-            ],
+            ticks: vec![TickSeries {
+                data: NautilusDataType::QuoteTick,
+                instrument_id: InstrumentId::from(instrument),
+            }],
             custom: vec![],
             warmup: SignedDuration::ZERO,
         }
@@ -1258,12 +1259,9 @@ mod tests {
                 .collect(),
             ticks: ticks
                 .iter()
-                .map(|data| {
-                    toml::from_str::<TickSeries>(&format!(
-                        r#"data = "{data}"
-                           instrument_id = "{GOLD}""#
-                    ))
-                    .unwrap()
+                .map(|data| TickSeries {
+                    data: data.parse().unwrap(),
+                    instrument_id: InstrumentId::from(GOLD),
                 })
                 .collect(),
             custom: vec![],
