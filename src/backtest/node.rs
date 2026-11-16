@@ -671,25 +671,35 @@ mod tests {
         assert_eq!(latencies(&dataset_run_config(&backtest).unwrap()), [None]);
     }
 
-    /// Pins the matching defaults of Nautilus' `BacktestVenueConfig`
-    /// builder, bar execution and the rejection of a stop in the market on,
-    /// adaptive bar ordering and liquidity consumption off
-    /// (`crates/backtest/src/config.rs:489-491`, `:468-470`, `:498-499`,
-    /// `:506-508`): `venue_config` sets none of them, and the backtest and
-    /// model guides rely on them.
+    /// Pins two matching defaults of Nautilus' `BacktestVenueConfig`
+    /// builder, which its guides do not state: bar execution and the
+    /// rejection of a stop in the market on
+    /// (`crates/backtest/src/config.rs:489-491`, `:468-470`):
+    /// `venue_config` sets neither, and the backtest and model guides rely
+    /// on both.
     ///
-    /// The venue matches as Nautilus does by default: resting orders match
-    /// on external bars, replayed open, high, low, close, without consuming
-    /// liquidity, and a stop whose trigger is in the market is rejected.
+    /// The venue matches resting orders on external bars, and rejects a
+    /// stop whose trigger is in the market.
     #[rstest]
-    fn drift_the_venue_keeps_nautilus_default_matching() {
+    fn drift_the_venue_matches_on_bars_and_rejects_a_stop_in_the_market_by_default() {
         let dir = tempfile::tempdir().unwrap();
         let config = run_config(&backtest(dir.path())).unwrap();
         let venue = &config.venues()[0];
         assert!(venue.bar_execution());
+        assert!(venue.reject_stop_orders());
+    }
+
+    /// The venue replays a bar's open, high, low and close in that order
+    /// and consumes no liquidity, as the backtest guide says: Nautilus'
+    /// documented defaults (`docs/concepts/backtesting/bar-execution.md`,
+    /// `docs/concepts/options.md`), which `venue_config` keeps.
+    #[rstest]
+    fn the_venue_replays_bars_in_a_fixed_order_and_consumes_no_liquidity() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = run_config(&backtest(dir.path())).unwrap();
+        let venue = &config.venues()[0];
         assert!(!venue.bar_adaptive_high_low_ordering());
         assert!(!venue.liquidity_consumption());
-        assert!(venue.reject_stop_orders());
     }
 
     /// The instrument of each data config, all quotes from `catalog`.

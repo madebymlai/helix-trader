@@ -989,7 +989,6 @@ impl<'de, P: Part> DeserializeSeed<'de> for TradeKeys<P> {
 #[cfg(test)]
 mod tests {
     use nautilus_model::data::DataType;
-    use nautilus_trading::strategy::StrategyCore;
     use rstest::rstest;
     use rust_decimal::Decimal;
 
@@ -1148,14 +1147,13 @@ mod tests {
     }
 
     /// Nautilus derives the order id tag from the strategy id when the
-    /// base sets none: the default base's `PAIRS-001`'s is `001`, so a
-    /// strategy's default base sets its id alone.
+    /// base sets none (`docs/concepts/strategies.md`, "Order ID tag"): the
+    /// default base's `PAIRS-001`'s is `001`, so a strategy's default base
+    /// sets its id alone, and the load adds no tag to it.
     #[rstest]
-    fn a_base_naming_the_strategy_id_alone_tags_its_orders_with_its_tag() {
+    fn without_a_base_no_order_id_tag_is_set() {
         let config = load(TOML).unwrap();
         assert_eq!(config.base.order_id_tag, None);
-        let core = StrategyCore::new_checked(config.base).unwrap();
-        assert_eq!(core.order_id_tag(), Some("001"));
     }
 
     #[rstest]

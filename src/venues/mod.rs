@@ -2622,76 +2622,32 @@ mod tests {
         answer.is_err_and(|e| e.to_string().contains("does not support"))
     }
 
-    /// Pins the kinds of history request Nautilus' OKX and IB data clients
-    /// implement, OKX's trades and bars
-    /// (`crates/adapters/okx/src/data.rs:3005`, `:3055`) and IB's quotes,
-    /// trades and bars (`crates/adapters/interactive_brokers/src/data/
-    /// core.rs:1693`, `:1876`, `:2077`), every other kind refused by the
-    /// `DataClient` default (`crates/common/src/clients/data.rs:622-699`):
-    /// `serves` copies them (`okx::serves`, `ib::serves`), which a fill
-    /// checks before anything connects and a live warmup before it
-    /// requests a series.
-    ///
-    /// `serves` against the data clients its answers copy: each history
-    /// source's client, built as its fill builds it and unconnected, on
-    /// unreachable addresses, refuses as a kind it does not take exactly
-    /// the kinds of request of which `serves` refuses the source of every
-    /// instrument of its venues tried; a kind it takes the source of one
-    /// of them, it does not. Each kind is tried on the 1-minute LAST bars
-    /// of each instrument, its quotes, its trades and its book; a bar type
-    /// a client takes but `serves` refuses (a price, a width) is not
-    /// checked here.
-    #[tokio::test]
-    async fn drift_each_history_source_s_client_takes_the_kinds_of_request_its_history_serves() {
+    /// The instrument ids `ids` name.
+    fn instrument_ids(ids: &[&str]) -> Vec<InstrumentId> {
+        ids.iter().map(|&id| InstrumentId::from(id)).collect()
+    }
+
+    /// An address nothing listens on, for the clients' HTTP.
+    const UNREACHABLE: &str = "http://127.0.0.1:1";
+
+    /// `serves` against the data clients its answers copy: each of
+    /// `clients`, a history source's client with instruments of its venues,
+    /// built as its fill builds it and unconnected, refuses as a kind it
+    /// does not take exactly the kinds of request of which `serves` refuses
+    /// the source of every instrument of its venues tried; a kind it takes
+    /// the source of one of them, it does not. Each kind is tried on the
+    /// 1-minute LAST bars of each instrument, its quotes, its trades and its
+    /// book; a bar type a client takes but `serves` refuses (a price, a
+    /// width) is not checked here. The kinds where the two disagree, each
+    /// named with its client and whether `serves` serves it.
+    fn request_kinds_against_serves(clients: Vec<(NodeClient, Vec<InstrumentId>)>) -> Vec<String> {
         let (data_tx, _data_events) = tokio::sync::mpsc::unbounded_channel();
         replace_data_event_sender(data_tx);
         let cache = Rc::new(RefCell::new(Cache::default()));
         let clock = Rc::new(RefCell::new(VirtualClock::new()));
-        let unreachable = "http://127.0.0.1:1".to_string();
-        let ids = |ids: &[&str]| {
-            ids.iter()
-                .map(|&id| InstrumentId::from(id))
-                .collect::<Vec<_>>()
-        };
-        let okx = NodeClient {
-            factory: Box::new(OKXDataClientFactory::new()),
-            config: Box::new(OKXDataClientConfig {
-                base_url_http: Some(unreachable.clone()),
-                ..Default::default()
-            }),
-        };
-        let lse = NodeClient {
-            factory: Box::new(LseDataClientFactory::new()),
-            config: Box::new(
-                LseDataClientConfig::builder()
-                    .api_key(SecretString::from(::lse::testing::API_KEY))
-                    .cme_api_key(SecretString::from(::lse::testing::CME_API_KEY))
-                    .nasdaq_api_key(SecretString::from(::lse::testing::NASDAQ_API_KEY))
-                    .base_url_http(unreachable)
-                    .build(),
-            ),
-        };
-        let ib = ib::offline_clients(&ids(&["SXR8.IBIS"])).into_node_clients(&[]);
-        let ib = NodeClient {
-            factory: ib.data_factory,
-            config: ib.data_config,
-        };
-        let ctrader = ctrader_node_client(demo_connection(ic::BROKER), ids(&["XAUUSD.ICMARKETS"]));
-        let mut drift = Vec::new();
-        for (client, venues) in [
-            (ctrader, ids(&["XAUUSD.ICMARKETS"])),
-            (okx, ids(&[SWAP])),
-            (
-                lse,
-                ids(&[
-                    "GOLD-FUTURES.LSEDGE",
-                    "GCZ26.GLBX",
-                    "NVDA.XNAS",
-                    "AAPL  261120C00355000.OPRA",
-                ]),
-            ),
-            (ib, ids(&["SXR8.IBIS"])),
-        ] {
+        let mut disagreeing = Vec::new();
+
+        for (client, venues) in clients {
             let name = client.factory.name().to_string();
             let created = client
                 .factory
@@ -2703,17 +2659,87 @@ mod tests {
                 )
                 .unwrap();
             assert!(created.is_disconnected(), "{name}");
+
             for (i, (kind, _, request)) in requests_of(venues[0]).into_iter().enumerate() {
                 let served = venues
                     .iter()
                     .any(|&id| serves(&requests_of(id).swap_remove(i).1).is_ok());
                 if unsupported(created.as_ref(), request) == served {
-                    drift.push(format!("{name}'s {kind}: served {served}"));
+                    disagreeing.push(format!("{name}'s {kind}: served {served}"));
                 }
             }
         }
+        disagreeing
+    }
 
-        assert_eq!(drift, Vec::<String>::new());
+    /// Pins the kinds of history request Nautilus' OKX data client
+    /// implements, trades and bars (`crates/adapters/okx/src/data.rs:3005`,
+    /// `:3055`), every other kind refused by the `DataClient` default
+    /// (`crates/common/src/clients/data.rs:622-699`): `serves` copies them
+    /// (`okx::serves`), which a fill checks before anything connects and a
+    /// live warmup before it requests a series.
+    ///
+    /// OKX's client, on an unreachable address, refuses as a kind it does
+    /// not take exactly the kinds of request of which `serves` refuses the
+    /// swap's source (see `request_kinds_against_serves`).
+    #[tokio::test]
+    async fn drift_okx_s_client_takes_the_kinds_of_request_its_history_serves() {
+        let okx = NodeClient {
+            factory: Box::new(OKXDataClientFactory::new()),
+            config: Box::new(OKXDataClientConfig {
+                base_url_http: Some(UNREACHABLE.to_string()),
+                ..Default::default()
+            }),
+        };
+
+        let disagreeing = request_kinds_against_serves(vec![(okx, instrument_ids(&[SWAP]))]);
+
+        assert_eq!(disagreeing, Vec::<String>::new());
+    }
+
+    /// `serves` against the cTrader, LSE and IB data clients its answers
+    /// copy, LSE's on an unreachable address, IB's on a gateway that is not
+    /// started: each refuses as a kind it does not take exactly the kinds of
+    /// request of which `serves` refuses the source of every instrument of
+    /// its venues tried (see `request_kinds_against_serves`).
+    #[tokio::test]
+    async fn the_ctrader_lse_and_ib_clients_take_the_kinds_of_request_their_history_serves() {
+        let ctrader = ctrader_node_client(
+            demo_connection(ic::BROKER),
+            instrument_ids(&["XAUUSD.ICMARKETS"]),
+        );
+        let lse = NodeClient {
+            factory: Box::new(LseDataClientFactory::new()),
+            config: Box::new(
+                LseDataClientConfig::builder()
+                    .api_key(SecretString::from(::lse::testing::API_KEY))
+                    .cme_api_key(SecretString::from(::lse::testing::CME_API_KEY))
+                    .nasdaq_api_key(SecretString::from(::lse::testing::NASDAQ_API_KEY))
+                    .base_url_http(UNREACHABLE.to_string())
+                    .build(),
+            ),
+        };
+        let ib = ib::offline_clients(&instrument_ids(&["SXR8.IBIS"])).into_node_clients(&[]);
+        let ib = NodeClient {
+            factory: ib.data_factory,
+            config: ib.data_config,
+        };
+
+        let disagreeing = request_kinds_against_serves(vec![
+            (ctrader, instrument_ids(&["XAUUSD.ICMARKETS"])),
+            (
+                lse,
+                instrument_ids(&[
+                    "GOLD-FUTURES.LSEDGE",
+                    "GCZ26.GLBX",
+                    "NVDA.XNAS",
+                    "AAPL  261120C00355000.OPRA",
+                ]),
+            ),
+            (ib, instrument_ids(&["SXR8.IBIS"])),
+        ]);
+
+        assert_eq!(disagreeing, Vec::<String>::new());
     }
 
     /// A strategy registered without a node at `FILL_START`, to subscribe

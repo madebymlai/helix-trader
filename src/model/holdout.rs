@@ -391,11 +391,19 @@ mod tests {
     /// A trade at nought is neither a win nor a loss in Nautilus'
     /// expectancy, a win of 2 and a loss of 1 making 0.5, not a third.
     #[rstest]
-    fn drift_a_trade_at_nought_is_counted_and_weighs_in_no_expectancy() {
+    fn drift_a_trade_at_nought_weighs_in_no_expectancy() {
+        let trades = Trades::of(&[2.0, -1.0, 0.0]);
+
+        close(trades.expectancy, 0.5);
+    }
+
+    /// A trade at nought, neither a win nor a loss, is a trade all the
+    /// same: a win, a loss and one at nought are three.
+    #[rstest]
+    fn a_trade_at_nought_is_counted() {
         let trades = Trades::of(&[2.0, -1.0, 0.0]);
 
         assert_eq!(trades.count, 3);
-        close(trades.expectancy, 0.5);
     }
 
     #[rstest]
