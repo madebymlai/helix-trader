@@ -682,6 +682,10 @@ async fn run_until(node: &mut LiveNode, done: impl Fn() -> bool) {
     node.dispose();
 }
 
+/// A depth's sequence on the stream and its best bid and ask, each a price
+/// and a size.
+type Best = (u64, (&'static str, u64), (&'static str, u64));
+
 /// A contract's book depth at Level 2 as LSE's documentation records the
 /// stream's messages, GCZ6's on the CME stream and NVDA's on the Nasdaq
 /// stream, its definition in the node's catalog: the tester's depth opens
@@ -712,7 +716,7 @@ async fn run_until(node: &mut LiveNode, done: impl Fn() -> bool) {
 #[tokio::test]
 async fn the_data_tester_receives_a_contract_s_book_depth_from_lse(
     #[case] streamed: Streamed,
-    #[case] best: [(u64, (&str, u64), (&str, u64)); 4],
+    #[case] best: [Best; 4],
 ) {
     let lse = streamed.lse(vec![]);
     let stream = streamed.stream();
