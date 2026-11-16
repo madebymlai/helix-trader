@@ -349,6 +349,17 @@ mod tests {
         }
     }
 
+    /// A bare number could be a fraction or a percentage: it is refused
+    /// saying a risk is a percentage of equity.
+    #[rstest]
+    fn a_bare_number_is_refused_saying_a_risk_is_a_percentage() {
+        let float: F64Deserializer<Error> = 0.005.into_deserializer();
+
+        let err = Risk::deserialize(float).unwrap_err().to_string();
+
+        assert!(err.contains("percentage of equity"), "{err}");
+    }
+
     #[rstest]
     fn a_risk_is_proper_above_none_and_below_all_of_equity() {
         assert!(risk("0.01%").is_proper());
