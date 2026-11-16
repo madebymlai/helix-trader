@@ -401,7 +401,9 @@ mod tests {
 
     /// A connection carries one level: a record of another is no record of
     /// it, refused naming its one record and the level's length of one,
-    /// Databento's `Mbp1Msg` 80 bytes, `Mbp10Msg` 368 and `MboMsg` 56.
+    /// Databento's `Mbp1Msg` 80 bytes, `Mbp10Msg` 368 and `MboMsg` 56. The
+    /// one record is looked for beside the level's name, which holds a 1 at
+    /// Level 1.
     #[rstest]
     #[case::level_1_at_level_2(CME_GCZ6_GCG7, 2, ExchangeLevel::Mbp10, "368")]
     #[case::level_2_at_level_1(CME_GCZ6_L2_DOCUMENTED, 2, ExchangeLevel::Mbp1, "80")]
@@ -422,8 +424,9 @@ mod tests {
             .unwrap_err()
             .to_string();
 
+        let beside = err.replace(&level.to_string(), "");
         for fact in ["1", level_len] {
-            assert!(words(&err).contains(&fact), "{fact}: {err}");
+            assert!(words(&beside).contains(&fact), "{fact}: {err}");
         }
     }
 }

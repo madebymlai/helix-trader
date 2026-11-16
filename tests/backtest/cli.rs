@@ -222,6 +222,10 @@ fn argv<'a>(parts: &[&[&'a str]]) -> Vec<&'a str> {
     argv(&[&FILL_CATALOG[..5], &["2024-03-02"], &FILL_CATALOG[6..]]),
     &["2024-03-02T00:00:00Z", "2024-03-01T12:30:00Z"]
 )]
+#[case::a_fill_starting_at_its_end(
+    argv(&[&FILL_CATALOG[..5], &["2024-03-01T12:30:00Z"], &FILL_CATALOG[6..]]),
+    &["2024-03-01T12:30:00Z"]
+)]
 #[case::a_backtest_starting_after_its_end(
     argv(&[&BACKTEST[..5], &["2024-03-02"], &BACKTEST[6..], &COSTS]),
     &["2024-03-02T00:00:00Z", "2024-03-01T12:30:00Z"]

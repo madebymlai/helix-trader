@@ -378,14 +378,15 @@ mod tests {
     }
 
     /// A bare number could be a fraction or a percentage: it is refused
-    /// saying a risk is a percentage of equity.
+    /// naming it and showing a risk written as a percentage.
     #[rstest]
     fn a_bare_number_is_refused_saying_a_risk_is_a_percentage() {
         let float: F64Deserializer<Error> = 0.005.into_deserializer();
 
         let err = Risk::deserialize(float).unwrap_err().to_string();
 
-        assert!(err.contains("percentage of equity"), "{err}");
+        assert!(err.contains("0.005"), "{err}");
+        assert!(err.contains("\"0.5%\""), "{err}");
     }
 
     #[rstest]

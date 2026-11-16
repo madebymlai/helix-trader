@@ -905,8 +905,8 @@ mod tests {
             .on_time_event(&fired("2026-10-22T00:00:00Z"))
             .unwrap();
         // Each train logs its outcome before it hands it over.
-        let _ = succeeding.running.take().unwrap().wait();
-        let _ = refused.running.take().unwrap().wait();
+        waited_to_its_end(&succeeding);
+        waited_to_its_end(&refused);
         let lines = log_capture::lines();
 
         let logged = |level: &str, facts: &[&str]| {

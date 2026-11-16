@@ -903,9 +903,9 @@ mod tests {
     }
 
     /// Never retrained, a meta's model of the 6th with no pair of the sides
-    /// beside it: the sides fit at the train, and the meta, learned from
-    /// sides no longer stored, is not kept to filter new ones but waits, no
-    /// pair of the sides being valid before the 7th.
+    /// beside it: the sides fit at the train, and no pair of them is valid
+    /// before the 7th, so the meta waits though a model of its own is
+    /// current.
     #[rstest]
     fn never_retrained_a_meta_with_no_pair_waits_while_the_sides_fit_at_the_train() {
         let plan = never().plan(at(SEVENTH), &stores(&[], &[], &[SIXTH]));

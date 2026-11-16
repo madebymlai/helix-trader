@@ -779,9 +779,11 @@ fn through_eurusd() -> Rates {
 /// Pepperstone's account holds 100,000 EUR, converted into USD through
 /// EUR/USD, whose first quote has not come yet, as at a live start: there
 /// is no rate, and the trade sends nothing, no order and no time alert,
-/// and says why, naming the instrument and, beside its id, which holds USD
-/// and Pepperstone itself, the currencies, EUR held and USD its P&L's, and
-/// the venue whose rates it lacks, Pepperstone.
+/// and says why, naming the instrument and, beside its id and the
+/// account's name, both of which hold Pepperstone, the currencies, EUR
+/// held and USD its P&L's, and the venue whose rates it lacks, Pepperstone:
+/// no client is routed to Pepperstone, so the account is named as the one
+/// of its venue.
 #[rstest]
 fn a_trade_sent_before_its_pairs_first_quote_sends_nothing_and_logs_why() {
     let name = "a_trade_sent_before_its_pairs_first_quote_sends_nothing_and_logs_why";
@@ -802,7 +804,7 @@ fn a_trade_sent_before_its_pairs_first_quote_sends_nothing_and_logs_why() {
         .iter()
         .find(|line| line.starts_with("ERROR") && line.contains(AUD))
         .unwrap_or_else(|| panic!("{lines:#?}"));
-    let beside = line.replace(AUD, "");
+    let beside = line.replace(AUD, "").replace("of PEPPERSTONE", "");
     for named in ["EUR", "USD", "PEPPERSTONE"] {
         assert!(beside.contains(named), "{named}: {line}");
     }
