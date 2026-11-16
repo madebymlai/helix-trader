@@ -93,7 +93,7 @@ pub struct ModelConfig<T = TargetConfig> {
     pub dataset: DatasetVenue,
 }
 
-/// A meta model: on each decision that picks a side, the realised net R of
+/// A meta model: on each decision that picks a side, the realized net R of
 /// that side's trade, the target on it, learned from the sides' features,
 /// the side picked and the decision's calibrated level and side call. It is
 /// retrained on the sides' schedule, right after them, or, the sides never
@@ -1204,7 +1204,7 @@ mod tests {
         config.validate(&reading("EURUSD.ICMARKETS")).unwrap();
     }
 
-    /// A bracket 2 ATRs away in the side's favour, 1.5 against it, its ATR
+    /// A bracket 2 ATRs away in the side's favor, 1.5 against it, its ATR
     /// `atr`, a table or none.
     fn atr_section(atr: Option<&str>) -> String {
         let atr = atr.map(|atr| format!(", atr = {atr}")).unwrap_or_default();

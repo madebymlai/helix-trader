@@ -389,8 +389,9 @@ mod tests {
         clock::{Clock, VirtualClock},
         messages::data::{DataCommand, SubscribeCommand, UnsubscribeCommand},
         msgbus::{
-            self, MessagingSwitchboard, stubs::TypedIntoMessageSavingHandler,
-            stubs::get_typed_into_message_saving_handler, switchboard::get_custom_topic,
+            self, MessagingSwitchboard,
+            stubs::{TypedIntoMessageSavingHandler, get_typed_into_message_saving_handler},
+            switchboard::get_custom_topic,
         },
         timer::{TimeEvent, TimeEventCallback},
     };

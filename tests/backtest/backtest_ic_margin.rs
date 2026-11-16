@@ -7,12 +7,13 @@
 //! (1,000 less its margin and its commission of 0.60), and Nautilus' risk
 //! engine denies it. One node per thread, so one run per test.
 
-use crate::common::{ic, recorder::Recorder};
 use nautilus_model::{
     data::BarType,
     enums::OrderSide,
     types::{Money, Quantity},
 };
+
+use crate::common::{ic, recorder::Recorder};
 
 #[test]
 fn an_ic_position_locks_ic_s_margin_and_an_order_beyond_it_is_denied() {

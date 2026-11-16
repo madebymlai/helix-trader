@@ -160,7 +160,7 @@ fn each_rows_reference_stake_is_of_the_balance_converted_at_its_decisions_rate()
     );
 }
 
-/// Each row's decision time and the realised P&L of each side, net of its
+/// Each row's decision time and the realized P&L of each side, net of its
 /// commissions, in USD.
 fn pnls(rows: &[TargetRow]) -> Vec<(Timestamp, Money, Money)> {
     rows.iter()

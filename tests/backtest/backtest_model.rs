@@ -5,26 +5,17 @@
 //! predicting its own R whatever the row, its calibration leaving it as it
 //! is, each decision's level names the model it used: the latest valid at
 //! or before it. A LightGBM model fitted on the dataset's long rows'
-//! realised R and published as a train would, reloaded in the node,
+//! realized R and published as a train would, reloaded in the node,
 //! predicts on the decisions of its probe rows exactly as when fitted; and
 //! one splitting on the payoff features alone predicts on every decision
 //! as on the long's row the dataset holds for it, the row a decision reads
 //! being the dataset's. The probe sends its
 //! trades: on the hand-worked targets' quotes (`backtest_targets`), each
-//! trade of a model of either side realises the P&L the dataset row of
+//! trade of a model of either side realizes the P&L the dataset row of
 //! its decision recorded of that side.
 
 use std::path::Path;
 
-use crate::{
-    backtest_targets::hand_worked_quotes,
-    common::{
-        dataset::{
-            baseline_of, blueprint, config, features, r, replay, replay_of, target, trade, walk,
-        },
-        ic,
-    },
-};
 use helix_trader::{
     model::{
         config::{Margins, ModelConfig},
@@ -39,6 +30,16 @@ use jiff::SignedDuration;
 use nautilus_core::UnixNanos;
 use nautilus_model::types::Money;
 use rust_decimal::Decimal;
+
+use crate::{
+    backtest_targets::hand_worked_quotes,
+    common::{
+        dataset::{
+            baseline_of, blueprint, config, features, r, replay, replay_of, target, trade, walk,
+        },
+        ic,
+    },
+};
 
 fn store(models: &Path, config: &ModelConfig, side: Side) -> ModelStore {
     blueprint(features(), config.clone())
@@ -121,7 +122,7 @@ fn each_decision_uses_the_latest_model_valid_at_or_before_it() {
 
 /// A LightGBM model fitted on the long's rows of the 72 hours before t
 /// (16:00 of the 25th) but its last 12, enough for its leaves of 20 rows to
-/// split, on each long's realised R, published as a train would, valid from
+/// split, on each long's realized R, published as a train would, valid from
 /// the last 12 hours, whose decisions' long rows are its probe rows and its
 /// predictions on them; it then trades over them, each decision's level, the
 /// strategy's one side calibrated as it is, its prediction to the bit. The
@@ -352,14 +353,14 @@ pub(crate) fn hand_worked(side: Side) -> ModelConfig {
 /// Worked by hand on the quotes of the hand-worked targets: a dip at
 /// 09:20, a spike at 10:45:00.010 and a rise from 11:20. Over 08:30 to
 /// 12:30 a model of one side, trading every decision on its bracket,
-/// realises at the decisions of 09:00, 10:00 and 11:00 the P&L the
+/// realizes at the decisions of 09:00, 10:00 and 11:00 the P&L the
 /// dataset row of that decision recorded of that side: the long stopped
 /// (-3.64 USD), taking profit (2.66) and closed by time (0.56), the short
 /// taking profit (2.66), stopped (-3.64) and closed by time (-1.44). The
 /// 12:00 decision's trade is still open at the end, as its row is
 /// unsettled.
 #[test]
-fn a_model_strategy_realises_per_trade_the_pnl_its_dataset_row_recorded() {
+fn a_model_strategy_realizes_per_trade_the_pnl_its_dataset_row_recorded() {
     let catalog = ic::catalog_of(hand_worked_quotes(), ic::at("08:00:00"), ic::at("13:00:00"));
     let (from, to) = (ic::at("08:30:00"), ic::at("12:30:00"));
     let decision = |hour: &str| UnixNanos::from(ic::at(&format!("{hour}:00:00.010")));

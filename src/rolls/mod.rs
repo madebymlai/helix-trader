@@ -22,10 +22,9 @@ mod continuous;
 mod roller;
 
 pub use continuous::ContinuousBars;
-pub use roller::{Roller, front};
-
 use jiff::{SignedDuration, Timestamp};
 use nautilus_model::identifiers::InstrumentId;
+pub use roller::{Roller, front};
 
 /// The transitions of an instrument over a span, in Nautilus' continuous
 /// futures shape: a transition hands the root from its pre to its post

@@ -10,3 +10,6 @@ target/
 /docs/data/
 /AGENTS.md
 /CLAUDE.md
+.nautilus-engineering.syncing
+.nautilus-engineering.sync-lock
+.nautilus-engineering.tmp.*

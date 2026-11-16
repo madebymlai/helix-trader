@@ -38,7 +38,6 @@ pub(crate) use proto::{
     ProtoOaTimeInForce, ProtoOaTradeSide, ProtoOaTrader, ProtoOaTraderReq, ProtoOaTraderRes,
     ProtoOaUnsubscribeSpotsReq, ProtoOaUnsubscribeSpotsRes, ProtoPayloadType,
 };
-
 // The tests build synthetic positions, deals and leverage tiers from these,
 // and read the broker's margin estimate.
 #[cfg(test)]

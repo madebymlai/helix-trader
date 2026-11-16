@@ -4,13 +4,14 @@
 //! on the 11:00 bar, at 4012.15, and closes neither: two positions, each
 //! at its own price. One node per thread, so one run per test.
 
-use crate::common::{ic, recorder::Recorder};
 use nautilus_model::{
     data::BarType,
     enums::{OrderSide, PositionSide},
     types::Quantity,
 };
 use rust_decimal::Decimal;
+
+use crate::common::{ic, recorder::Recorder};
 
 #[test]
 fn two_overlapping_ic_trades_are_two_positions_at_their_own_prices() {

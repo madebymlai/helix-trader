@@ -8,7 +8,7 @@
 //! What the trades earned (`Earnings`) is Nautilus' `Expectancy` and `WinRate`
 //! of their net P&Ls in R (`calculate_from_realized_pnls`), each trade's net
 //! P&L over its unit, the money one R of it is, as its model learns it
-//! (`Example::realised`), so that the same figures judge a model whatever
+//! (`Example::realized`), so that the same figures judge a model whatever
 //! its trades' size or instrument; beside the same of every trade of the
 //! rows, which taking them all would earn; and both again at 1.5 times the
 //! commission (`STRESS`), reported only. Nautilus' `Expectancy` is the
@@ -17,7 +17,7 @@
 //! counted among the trades, weighs in neither.
 //!
 //! How well the model predicted the holdout is its calibrated expected R,
-//! `E'`, a side's or a meta's, against its trades' realised R
+//! `E'`, a side's or a meta's, against its trades' realized R
 //! (`score::ExpectedScore`): its skill, one less its squared error over that
 //! of the training mean of R, the mean of `R - E'`, the slope of `R` on `E'`
 //! and the gap of the tenth of the rows expected the most. Nautilus scores
@@ -58,7 +58,7 @@ pub struct Trade {
 }
 
 /// A row as a model is fitted and judged on it: its features, the trade it
-/// is of, whose realised R the model learns (`realised`), the decision's
+/// is of, whose realized R the model learns (`realized`), the decision's
 /// time and when its target settled.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Example {
@@ -102,7 +102,7 @@ pub struct Holdout {
     /// pair, the same for each side.
     pub earnings: Earnings,
     /// How well the model predicted the holdout's rows: its calibrated
-    /// expected R against its trades' realised R, beside its baseline, the
+    /// expected R against its trades' realized R, beside its baseline, the
     /// training mean of R.
     pub score: ExpectedScore,
 }
@@ -236,8 +236,8 @@ impl Example {
         }
     }
 
-    /// The realised value of its trade: its net P&L over its unit, in R.
-    pub(super) fn realised(&self) -> f64 {
+    /// The realized value of its trade: its net P&L over its unit, in R.
+    pub(super) fn realized(&self) -> f64 {
         self.trade.r_at(1.0)
     }
 }

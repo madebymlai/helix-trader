@@ -9,10 +9,6 @@
 
 use std::{cell::RefCell, path::Path, rc::Rc};
 
-use crate::common::{
-    features::{SmaArgs, tables},
-    ic,
-};
 use helix_trader::{
     backtest::{Backtest, Commission},
     model::{
@@ -59,6 +55,11 @@ use nautilus_trading::{
 };
 use rust_decimal::Decimal;
 
+use crate::common::{
+    features::{SmaArgs, tables},
+    ic,
+};
+
 pub const STRATEGY: &str = "DATASET-001";
 
 /// Decides every hour on the last mid of IC's gold through its model
@@ -81,7 +82,7 @@ pub struct Record {
     pub rows: Vec<FeatureRow>,
     /// Each decision to trade, and its time.
     pub trades: Vec<(UnixNanos, Decision)>,
-    /// Each position closed, when it opened and its realised P&L.
+    /// Each position closed, when it opened and its realized P&L.
     pub closed: Vec<(UnixNanos, Money)>,
     /// Each entry filled, when, of how much, and what its tags say it
     /// risks (`orders::entry_risk`).

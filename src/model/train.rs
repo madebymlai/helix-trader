@@ -4,8 +4,8 @@
 //!
 //! A strategy has a model for each side it trades (the sides of its
 //! margins, `ModelConfig::margins`): each a regression of its side's
-//! realised net R, the trade's net P&L over its unit
-//! (`holdout::Example::realised`), the long's of the long of the target,
+//! realized net R, the trade's net P&L over its unit
+//! (`holdout::Example::realized`), the long's of the long of the target,
 //! the short's of its short, both on the same rows, window and holdout,
 //! each reading a row's features then its own side's payoff features
 //! (`dataset::DatasetRow::side`), under the names its store checks it
@@ -83,7 +83,7 @@
 //! that of a train at two times, valid from the window's start, used
 //! throughout it; and should the sides of such a train publish none, the
 //! meta waits for the sides' decisions (`Plan::meta_after_sides`). The meta
-//! is a regression of the realised net R of the trade of the side picked,
+//! is a regression of the realized net R of the trade of the side picked,
 //! calibrated by its level line alone (`calibration::Ksplit` of one side) on
 //! its own calibration's rows, and is judged alone, on its own holdout, by
 //! its skill, as a side is, and by the trades of the side picked its margin
@@ -382,7 +382,7 @@ impl Training {
 
     /// The outcome of each side of the pair fitted as of `at` on `rows`, in
     /// time order, split into the rows fitted on, calibrated on and held out
-    /// (`split`): each side's model fitted on its realised R (`fit_side`),
+    /// (`split`): each side's model fitted on its realized R (`fit_side`),
     /// the pair calibrated together on the calibration's rows
     /// (`Ksplit::fit`), and judged on the holdout, each side on its own
     /// calibrated expected R against its trades' R (`ExpectedScore`), the
@@ -423,7 +423,7 @@ impl Training {
                     fits.iter()
                         .map(|fit| {
                             let example = Example::of_side(row, fit.side);
-                            Ok((fit.model.predict(&example.features)?, example.realised()))
+                            Ok((fit.model.predict(&example.features)?, example.realized()))
                         })
                         .collect()
                 })
@@ -451,8 +451,8 @@ impl Training {
         for row in &held_out {
             let calibrated = pair.expect(&row.sides())?;
             for (&(side, _, _, baseline), rows) in trained.iter().zip(&mut expected) {
-                let realised = Example::of_side(row, side).realised();
-                rows.push((calibrated.of(side), realised, baseline));
+                let realized = Example::of_side(row, side).realized();
+                rows.push((calibrated.of(side), realized, baseline));
             }
         }
         let sides: Vec<Side> = trained.iter().map(|&(side, ..)| side).collect();
@@ -615,7 +615,7 @@ impl Training {
 }
 
 impl Level {
-    /// The level of `meta`: it learns the realised R of the target on the
+    /// The level of `meta`: it learns the realized R of the target on the
     /// side picked.
     fn of_meta(meta: &MetaLevel) -> Self {
         let config = meta.config();
@@ -629,7 +629,7 @@ impl Level {
     }
 
     /// The meta model fitted as of `at` on `examples`, in time order, a
-    /// regression of each trade's realised R (`split`), calibrated by its
+    /// regression of each trade's realized R (`split`), calibrated by its
     /// level line alone (`Ksplit` of one side), and scored on its holdout,
     /// its calibrated expected R against the trades' R beside its baseline,
     /// the training mean of R on the rows it was fitted and calibrated on.
@@ -648,7 +648,7 @@ impl Level {
             TrainingSet::new(
                 self.feature_names.len(),
                 rows.iter().flat_map(|row| row.features.clone()).collect(),
-                rows.iter().map(|row| row.realised()).collect(),
+                rows.iter().map(|row| row.realized()).collect(),
             )
         };
         let model = self.learner.fit(
@@ -658,7 +658,7 @@ impl Level {
         let line = Ksplit::fit(
             &calibrating
                 .iter()
-                .map(|row| Ok(vec![(model.predict(&row.features)?, row.realised())]))
+                .map(|row| Ok(vec![(model.predict(&row.features)?, row.realized())]))
                 .collect::<anyhow::Result<Vec<_>>>()?,
         )
         .context("calibrating on the window before the holdout")?
@@ -679,7 +679,7 @@ impl Level {
             &expected
                 .iter()
                 .zip(&held_out)
-                .map(|(&expected, row)| (expected, row.realised(), baseline))
+                .map(|(&expected, row)| (expected, row.realized(), baseline))
                 .collect::<Vec<_>>(),
         );
         let probes = spread(held_out.len())
@@ -733,7 +733,7 @@ fn kept(e: &anyhow::Error) -> Outcome {
     })
 }
 
-/// The model of `side` of `level`, fitted on the realised R of the side's
+/// The model of `side` of `level`, fitted on the realized R of the side's
 /// trades of the rows `fitted`, its baseline the training mean of R on
 /// those and the rows `calibrating`, not calibrated yet.
 ///
@@ -752,7 +752,7 @@ fn fit_side<'a>(
         TrainingSet::new(
             width,
             rows.iter().flat_map(|row| row.features.clone()).collect(),
-            rows.iter().map(Example::realised).collect(),
+            rows.iter().map(Example::realized).collect(),
         )
     };
     let fitting: Vec<Example> = fitted
@@ -1183,7 +1183,7 @@ mod tests {
     };
 
     /// Worked by hand on `rows`: each side fitted on the rows before the
-    /// calibration settled at its start, a regression of their realised R,
+    /// calibration settled at its start, a regression of their realized R,
     /// 1.5 and -1, of a mean of 0.25, which the fake predicts where its
     /// feature is missing; the pair calibrated together on those before the
     /// holdout settled at its start (`LINES`), each manifest holding the one

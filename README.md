@@ -1,3 +1,4 @@
+<!-- markdownlint-disable-next-line MD041 -->
 <p align="center">
   <img src="docs/assets/banner.svg" alt="helix trader" width="100%">
 </p>

@@ -43,7 +43,10 @@ nautilus-network.workspace = true
 nautilus-serialization = { workspace = true, features = ["arrow"] }
 # The version Nautilus' persistence reads with, and the codec LSE's exports
 # are compressed with.
-parquet = { version = "59.3", default-features = false, features = ["arrow", "zstd"] }
+parquet = { version = "59.3", default-features = false, features = [
+  "arrow",
+  "zstd",
+] }
 rust_decimal.workspace = true
 serde.workspace = true
 serde_json.workspace = true

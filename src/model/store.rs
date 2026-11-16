@@ -316,7 +316,7 @@ impl StoredModel {
 }
 
 /// A meta model as a strategy and a score use it: loaded, predicting the
-/// realised R of the trade of the side picked, every prediction calibrated
+/// realized R of the trade of the side picked, every prediction calibrated
 /// by its level line, with its baseline.
 #[derive(Debug)]
 pub struct LoadedModel {
@@ -348,7 +348,7 @@ impl LoadedModel {
 }
 
 /// A side's model as a strategy and a score use it: loaded, predicting the
-/// realised R of its side's trade, which its pair calibrates
+/// realized R of its side's trade, which its pair calibrates
 /// (`Pair::expect`), with its baseline, the training mean of R.
 #[derive(Debug)]
 pub struct SideModel {

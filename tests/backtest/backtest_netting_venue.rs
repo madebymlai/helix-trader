@@ -3,9 +3,10 @@
 //! its `oms_type` unset (`common::overlap`), add into one position at
 //! their average price. One node per thread, so one run per test.
 
-use crate::common::overlap;
 use nautilus_model::enums::PositionSide;
 use rust_decimal::Decimal;
+
+use crate::common::overlap;
 
 #[test]
 fn two_overlapping_trades_add_into_one_position_at_their_average_price() {

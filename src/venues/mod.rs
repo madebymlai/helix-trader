@@ -452,7 +452,8 @@ impl CustomRow {
     /// LSE's rows (`lse::LseRow`) take their history and their live data
     /// from LSE.
     fn table() -> [(&'static str, Self); 1] {
-        use {HistorySource as H, LiveDataSource as L};
+        use HistorySource as H;
+        use LiveDataSource as L;
         [(
             LseRow::type_name_static(),
             Self {
@@ -1177,7 +1178,6 @@ pub(crate) async fn live_clients(
 
 #[cfg(test)]
 mod tests {
-    use rust_decimal::Decimal;
     use std::{
         cell::RefCell,
         collections::{HashMap, HashSet},
@@ -1220,6 +1220,7 @@ mod tests {
         nautilus_strategy,
         strategy::{StrategyConfig, StrategyCore},
     };
+    use rust_decimal::Decimal;
 
     use super::*;
     use crate::{

@@ -24,8 +24,6 @@
 //! NAUTILUS_CTRADER_RUN=ic cargo test --test live ctrader_conversions_demo:: -- --nocapture
 //! ```
 
-use crate::common;
-
 use std::{cell::RefCell, process::Command, rc::Rc, time::Duration};
 
 use helix_trader::{
@@ -50,7 +48,7 @@ use nautilus_trading::{
     strategy::{StrategyConfig, StrategyCore},
 };
 
-use crate::demo_broker::opted_in;
+use crate::{common, demo_broker::opted_in};
 
 const TRADER: &str = "HELIXTEST-108";
 

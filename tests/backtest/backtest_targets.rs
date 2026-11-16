@@ -30,10 +30,6 @@
 
 use std::{cell::RefCell, collections::BTreeSet, path::PathBuf, rc::Rc, thread};
 
-use crate::common::{
-    features::{SmaArgs, tables},
-    ic,
-};
 use helix_trader::{
     backtest::{Backtest, Commission},
     model::{
@@ -75,6 +71,11 @@ use nautilus_trading::{
     strategy::{StrategyConfig, StrategyCore},
 };
 use rust_decimal::Decimal;
+
+use crate::common::{
+    features::{SmaArgs, tables},
+    ic,
+};
 
 const STRATEGY: &str = "TARGETS-001";
 
@@ -512,7 +513,7 @@ pub(crate) fn hand_worked_quotes() -> Vec<QuoteTick> {
 /// prices. At each decision, on 4000.00/4000.20, the long's take profit would
 /// net 2.90 − 0.24 and its stop lose 3.10 + 0.24, the short's the same, and
 /// either's entry costs the spread and a fee, 0.20 + 0.12: in R, over 3 USD,
-/// its payoff features. A take profit realises its R.
+/// its payoff features. A take profit realizes its R.
 #[test]
 fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
     let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
@@ -1032,7 +1033,7 @@ fn btc_backtest(catalog: &tempfile::TempDir) -> Backtest {
 /// would net 1 − 0.5 − 0.5005 and its stop lose 1 + 0.5 + 0.4995, the
 /// short's take profit net 1 − 0.5 − 0.4995 and its stop lose 1 + 0.5 +
 /// 0.5005, each entry costing its fee alone, 0.5, all over 1 USDT: the
-/// payoffs the bars realise.
+/// payoffs the bars realize.
 #[test]
 fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
     let catalog = btc_catalog(btc_bar);

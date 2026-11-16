@@ -1,9 +1,9 @@
 //! How well a model's predictions do on its rows: how its expected values
-//! meet the values realised (`ExpectedScore`).
+//! meet the values realized (`ExpectedScore`).
 
 use serde::{Deserialize, Serialize};
 
-/// How a model's expected values meet the values realised on rows, beside
+/// How a model's expected values meet the values realized on rows, beside
 /// a baseline's: all none, of no row.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct ExpectedScore {
@@ -11,19 +11,19 @@ pub struct ExpectedScore {
     /// One less the squared error of the expected values over that of the
     /// baseline's; none where the baseline's is nought.
     pub skill: Option<f64>,
-    /// The mean of the values realised less those expected.
+    /// The mean of the values realized less those expected.
     pub mean_error: Option<f64>,
-    /// The least squares slope of the values realised on those expected, 1
+    /// The least squares slope of the values realized on those expected, 1
     /// of a calibrated model; none where the expected values never vary.
     pub slope: Option<f64>,
-    /// The mean of the values realised less those expected over the tenth
+    /// The mean of the values realized less those expected over the tenth
     /// of the rows expected the most, rounded up, the earlier of a tie
     /// first.
     pub top_decile_gap: Option<f64>,
 }
 
 impl ExpectedScore {
-    /// The score of `rows`, each a value expected, the value realised and
+    /// The score of `rows`, each a value expected, the value realized and
     /// the baseline's expected value.
     #[must_use]
     pub fn of(rows: &[(f64, f64, f64)]) -> Self {
@@ -36,10 +36,10 @@ impl ExpectedScore {
             rows.iter().map(|row| value(row).powi(2)).sum::<f64>()
         };
         let (error, baseline_error) = (squares(|r| r.1 - r.0), squares(|r| r.1 - r.2));
-        let (expected, realised) = (mean(|r| r.0), mean(|r| r.1));
+        let (expected, realized) = (mean(|r| r.0), mean(|r| r.1));
         let (covariance, variance) = rows.iter().fold((0.0, 0.0), |(cov, var), row| {
             let x = row.0 - expected;
-            (x.mul_add(row.1 - realised, cov), x.mul_add(x, var))
+            (x.mul_add(row.1 - realized, cov), x.mul_add(x, var))
         });
         let mut ranked = rows.to_vec();
         ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
@@ -68,14 +68,14 @@ mod tests {
         assert!((actual - expected).abs() < 1e-12, "{actual} != {expected}");
     }
 
-    /// Expected 0.1, 0.4, 0.2 and 0.3, realised 0, 1, -0.5 and 0.9, the
+    /// Expected 0.1, 0.4, 0.2 and 0.3, realized 0, 1, -0.5 and 0.9, the
     /// baseline 0.25 throughout. Squared errors 0.01 + 0.36 + 0.49 + 0.36 =
     /// 1.22, the baseline's 0.0625 + 0.5625 + 0.5625 + 0.4225 = 1.61: a
     /// skill of 1 - 1.22 / 1.61. Errors -0.1, 0.6, -0.7 and 0.6, a mean of
     /// 0.1. The slope: means 0.25 and 0.35, a covariance of 0.0525, 0.0975,
     /// 0.0425 and 0.0275, 0.22, over a variance of 0.05, 4.4. The top
     /// decile, a tenth of four rows rounded up, is the row expected 0.4,
-    /// which realised 1: a gap of 0.6.
+    /// which realized 1: a gap of 0.6.
     #[test]
     fn expectations_score_their_skill_mean_error_slope_and_top_decile_gap() {
         let rows = [
@@ -95,24 +95,24 @@ mod tests {
     }
 
     /// Eleven rows expected 0 to 10: the top decile, a tenth rounded up, is
-    /// the two expected 10 and 9, which realised 12 and 10, a gap of 1.5.
+    /// the two expected 10 and 9, which realized 12 and 10, a gap of 1.5.
     #[test]
     fn the_top_decile_is_the_tenth_of_the_rows_expected_the_most_rounded_up() {
         let rows: Vec<(f64, f64, f64)> = (0..11)
             .map(|i| {
-                let realised = match i {
+                let realized = match i {
                     10 => 12.0,
                     9 => 10.0,
                     _ => 0.0,
                 };
-                (f64::from(i), realised, 0.0)
+                (f64::from(i), realized, 0.0)
             })
             .collect();
 
         close(ExpectedScore::of(&rows).top_decile_gap, 1.5);
     }
 
-    /// Realised values all at the baseline leave it no error to beat: no
+    /// Realized values all at the baseline leave it no error to beat: no
     /// skill. One expectation for every row has no slope.
     #[test]
     fn no_baseline_error_has_no_skill_and_no_spread_has_no_slope() {

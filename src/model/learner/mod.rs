@@ -7,7 +7,7 @@
 //! adapter module and one variant. The adapters:
 //!
 //! - `lightgbm`: LightGBM's gradient-boosted trees under L2 regression, its
-//!   settings defaulting to ones regularised for a weak signal.
+//!   settings defaulting to ones regularized for a weak signal.
 //! - `perpetual`: PerpetualBooster's gradient-boosted trees on squared loss,
 //!   stopped by a budget instead of tuned settings; its settings need a
 //!   memory limit. It fits far slower than LightGBM and saves models many
@@ -42,10 +42,9 @@ mod perpetual;
 use std::fmt;
 
 use anyhow::{bail, ensure};
-use serde::{Deserialize, Serialize};
-
 pub use lightgbm::LightGbmConfig;
 pub use perpetual::PerpetualConfig;
+use serde::{Deserialize, Serialize};
 
 /// The learner of a strategy's model, loaded from TOML, such as
 /// `learner = { kind = "lightgbm", num_iterations = 200 }`.
@@ -70,7 +69,7 @@ impl LearnerConfig {
     /// # Errors
     ///
     /// Returns an error if the settings are ones the library would not
-    /// honour (see `LightGbmConfig::validate`).
+    /// honor (see `LightGbmConfig::validate`).
     pub fn validate(&self) -> anyhow::Result<()> {
         match self {
             Self::LightGbm(config) => config.validate(),
@@ -302,7 +301,7 @@ mod tests {
     }
 
     /// A fixed synthetic set: `ROWS` rows of `WIDTH` features drawn from a
-    /// seeded generator, labelled by a noisy line on the first two
+    /// seeded generator, labeled by a noisy line on the first two
     /// features, from about -3 to 2.5. The third feature is missing in about
     /// a tenth of the rows, and a missing third feature raises the label by
     /// 1.5.

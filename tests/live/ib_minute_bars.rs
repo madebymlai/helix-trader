@@ -25,8 +25,6 @@
 //! whose records the test deletes once the node has stopped. Client id 46
 //! for the node, 47 for filling the catalog.
 
-use crate::common;
-
 use std::{cell::RefCell, process::Command, rc::Rc, time::Duration};
 
 use helix_trader::{
@@ -54,6 +52,8 @@ use nautilus_trading::{
     nautilus_strategy,
     strategy::{StrategyConfig, StrategyCore},
 };
+
+use crate::common;
 
 /// The hour bars of the instrument, built from IB's minute bars.
 fn composite() -> BarType {

@@ -13,7 +13,6 @@ use nautilus_trading::{
     nautilus_strategy,
     strategy::{StrategyConfig, StrategyCore},
 };
-
 use rust_decimal::Decimal;
 
 use super::{testing::BOOK, *};

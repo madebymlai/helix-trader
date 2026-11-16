@@ -18,7 +18,6 @@
 
 use std::{cell::RefCell, path::Path, rc::Rc};
 
-use crate::common::ic;
 use helix_trader::{
     backtest::Backtest,
     catalog::{NodeClient, NodeFill, missing_custom},
@@ -46,6 +45,8 @@ use nautilus_trading::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+
+use crate::common::ic;
 
 fn november(time: &str) -> Timestamp {
     format!("2026-11-{time}Z").parse().unwrap()

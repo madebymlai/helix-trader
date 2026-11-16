@@ -7,10 +7,6 @@
 //! and the report shows the spread paid. One node per thread, so one run
 //! per test.
 
-use crate::common::{
-    ic::{self, at},
-    recorder::Recorder,
-};
 use helix_trader::backtest::report;
 use jiff::Timestamp;
 use nautilus_model::{
@@ -18,6 +14,11 @@ use nautilus_model::{
     enums::{OmsType, OrderSide},
     identifiers::Venue,
     types::{Price, Quantity},
+};
+
+use crate::common::{
+    ic::{self, at},
+    recorder::Recorder,
 };
 
 #[test]

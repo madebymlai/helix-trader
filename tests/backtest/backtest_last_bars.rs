@@ -5,7 +5,6 @@
 //! are those of `common::trades`' quotes, one a minute at the quote's mid,
 //! so each bar closes where its MID bar did.
 
-use crate::common::{self, INSTRUMENT_ID, trades};
 use helix_trader::{
     backtest::Backtest,
     strategy::{
@@ -23,6 +22,8 @@ use nautilus_model::{
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use tempfile::TempDir;
+
+use crate::common::{self, INSTRUMENT_ID, trades};
 
 /// A trade at the mid of each of `trades::quotes(levels)`, at its time,
 /// of 100 shares and no aggressor.

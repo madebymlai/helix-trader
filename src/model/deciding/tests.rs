@@ -760,7 +760,7 @@ fn lightgbm_meta() -> MetaConfig {
 /// A meta model of `config` valid from midnight of the 22nd, which learned on
 /// rows of its features in their order, the mid, 0.7, then the side picked, 1
 /// a buy and -1 a sell, then the decision's level, nought, and its side call,
-/// that buys realise 1R from a side call of 0.5 and -1R below it, and sells
+/// that buys realize 1R from a side call of 0.5 and -1R below it, and sells
 /// -1R: fitted by the learner of `config`'s meta on ten buys and ten sells at
 /// each side call from 0.20 to 0.79 by 0.01, at least 300 rows on each side
 /// of a split where LightGBM's leaves need 200, so that it predicts near 1R on

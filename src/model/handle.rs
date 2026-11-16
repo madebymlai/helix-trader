@@ -758,29 +758,33 @@ mod tests {
         nautilus_strategy,
         strategy::{StrategyConfig, StrategyCore},
     };
+    use rust_decimal::Decimal;
 
     use super::*;
-    use crate::log_capture;
-    use crate::model::{
-        config::{Margins, ModelConfig},
-        decide::FeatureRow,
-        deciding::testing::{
-            AUD, GOLD, STRATEGY, at, baseline, baseline_for, blueprint_of, both_sides, config,
-            features, gold, meta, meta_baseline, model_set, r, requirements, side_store, store,
-            with_meta,
+    use crate::{
+        log_capture,
+        model::{
+            config::{Margins, ModelConfig},
+            decide::FeatureRow,
+            deciding::testing::{
+                AUD, GOLD, STRATEGY, at, baseline, baseline_for, blueprint_of, both_sides, config,
+                features, gold, meta, meta_baseline, model_set, r, requirements, side_store, store,
+                with_meta,
+            },
+            features::testing::{last_mid, mid_over},
+            schedule::Retrain,
+            targets::{
+                BracketSpec, BracketWidth, DEFAULT_ATR, Distance, Side, Target, TargetConfig,
+            },
         },
-        features::testing::{last_mid, mid_over},
-        schedule::Retrain,
-        targets::{BracketSpec, BracketWidth, DEFAULT_ATR, Distance, Side, Target, TargetConfig},
+        strategy::{
+            AtrArgs, Declared, EmaArgs, IndicatorsConfig,
+            conversions::Conversions,
+            orders::{Bracket, Exits},
+            requirements::{CustomSeries, DataRequirements, TickSeries},
+            risk::R,
+        },
     };
-    use crate::strategy::{
-        AtrArgs, Declared, EmaArgs, IndicatorsConfig,
-        conversions::Conversions,
-        orders::{Bracket, Exits},
-        requirements::{CustomSeries, DataRequirements, TickSeries},
-        risk::R,
-    };
-    use rust_decimal::Decimal;
 
     /// The quotes of the AUD/USD traded, which the data requirements hold
     /// when no series reads it.

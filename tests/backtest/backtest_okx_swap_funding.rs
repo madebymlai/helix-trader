@@ -11,7 +11,6 @@
 
 use std::path::Path;
 
-use crate::common::{recorder::Recorder, ts};
 use helix_trader::{
     backtest::{Backtest, Commission},
     venues,
@@ -28,6 +27,8 @@ use nautilus_model::{
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use rust_decimal::Decimal;
+
+use crate::common::{recorder::Recorder, ts};
 
 const INSTRUMENT_ID: &str = "BTC-USDT-SWAP.OKX";
 const MINUTE_BARS: &str = "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL";

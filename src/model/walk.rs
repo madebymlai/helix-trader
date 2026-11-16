@@ -28,7 +28,7 @@
 //!
 //! After the run (`WalkForward::scores`), each side is scored on each
 //! decision's row of the dataset in the span, its calibrated expected R,
-//! `E'`, against its trade's realised R, with the pair the strategy used at
+//! `E'`, against its trade's realized R, with the pair the strategy used at
 //! it: the latest valid then, a pair with a model failing its checks refused
 //! and the current one kept, as the handle does. Every model is out of
 //! sample on its rows: trained at its valid-from on rows settled by then.
@@ -277,7 +277,7 @@ struct Judged {
 /// The scores over `[start, end)`, retrained at `times`, of the models
 /// `models` swaps in on `examples`, in time order, among those valid from
 /// `valid_froms`, each beside its own baseline on the rows it decided:
-/// their expected R against the R each example's trade realised. `judge`
+/// their expected R against the R each example's trade realized. `judge`
 /// gives what the model in use on an example, at its position in
 /// `examples`, says of it.
 fn score<M>(
@@ -308,7 +308,7 @@ fn score<M>(
                     baseline,
                     taken,
                 } = judge(model, row, example)?;
-                judged.push((expected, example.realised(), baseline));
+                judged.push((expected, example.realized(), baseline));
                 trades.push((taken, example.trade));
             }
         }

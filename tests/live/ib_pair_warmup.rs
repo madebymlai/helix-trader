@@ -17,8 +17,6 @@
 //!
 //! Client id 50.
 
-use crate::common;
-
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use helix_trader::{
@@ -40,6 +38,8 @@ use nautilus_trading::{
     strategy::{StrategyConfig, StrategyCore},
 };
 use rust_decimal::Decimal;
+
+use crate::common;
 
 const TRADER: &str = "HELIXTEST-050";
 

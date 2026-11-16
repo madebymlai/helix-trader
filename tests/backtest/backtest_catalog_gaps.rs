@@ -5,14 +5,15 @@
 //! found for config"), each run on what exists. One node per thread, so one
 //! run per test.
 
-use crate::common::{
-    self, INSTRUMENT_ID, dataset, hour_bars, ic, noise, ohlc, recorder::Recorder, trades,
-};
 use helix_trader::backtest::Backtest;
 use jiff::{SignedDuration, civil::Date};
 use nautilus_core::UnixNanos;
 use nautilus_model::data::{BarType, NautilusDataType, QuoteTick};
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
+
+use crate::common::{
+    self, INSTRUMENT_ID, dataset, hour_bars, ic, noise, ohlc, recorder::Recorder, trades,
+};
 
 /// The time exit's quotes written as a live node promotes them, in two
 /// files each named by its rows' first and last stamps, the one closing

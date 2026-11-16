@@ -1,6 +1,6 @@
 //! Training at a time (`model::train`) on a fixture catalog with an edge:
 //! the dataset probe (`common::dataset`) replays the days the window lacks
-//! through `Backtest::run_dataset`, and LightGBM fits each side's realised
+//! through `Backtest::run_dataset`, and LightGBM fits each side's realized
 //! R on the rows. IC's gold rises 4.00 over each even hour and falls back
 //! over each odd one (`edge_quotes`), and the probe's one feature, `cheap`,
 //! marks where the hour starts: 1 at the bottom, 0 at the top. Each side
@@ -13,11 +13,6 @@
 
 use std::{path::Path, rc::Rc};
 
-use crate::common::{
-    dataset::{blueprint, replay_on, rule, target, venue},
-    features::tables,
-    ic,
-};
 use helix_trader::{
     model::{
         config::{Margins, ModelConfig},
@@ -34,6 +29,12 @@ use jiff::{SignedDuration, Timestamp};
 use nautilus_indicators::indicator::Indicator;
 use nautilus_model::{data::QuoteTick, identifiers::InstrumentId};
 use tempfile::TempDir;
+
+use crate::common::{
+    dataset::{blueprint, replay_on, rule, target, venue},
+    features::tables,
+    ic,
+};
 
 /// The price of gold at the bottom of each even hour, and the rise over
 /// it.

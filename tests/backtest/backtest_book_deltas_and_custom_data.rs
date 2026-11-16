@@ -11,7 +11,6 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use crate::common::{glbx, ic};
 use helix_trader::{
     backtest::Backtest,
     model::features::FeatureSet,
@@ -28,6 +27,8 @@ use nautilus_trading::{
     nautilus_strategy,
     strategy::{StrategyConfig, StrategyCore},
 };
+
+use crate::common::{glbx, ic};
 
 /// What the probe got, at its time.
 #[derive(Debug, Clone, PartialEq)]

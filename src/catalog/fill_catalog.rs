@@ -241,11 +241,6 @@ fn just_after(last: UnixNanos) -> Timestamp {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{
-        rolls::Slice,
-        strategy::requirements::{DataRequirements, SeriesSlice, TickSeries},
-    };
     use nautilus_model::{
         data::{Bar, BarType, OrderBookDepth, QuoteTick, TradeTick, stubs::stub_depth10},
         enums::AggressorSide,
@@ -257,6 +252,12 @@ mod tests {
         types::{Price, Quantity},
     };
     use nautilus_persistence::catalog::types::{CatalogDataType, HasCatalogDataType};
+
+    use super::*;
+    use crate::{
+        rolls::Slice,
+        strategy::requirements::{DataRequirements, SeriesSlice, TickSeries},
+    };
 
     fn instrument() -> InstrumentAny {
         InstrumentAny::FuturesContract(futures_contract_es(None, None))

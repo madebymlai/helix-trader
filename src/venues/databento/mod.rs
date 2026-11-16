@@ -218,6 +218,7 @@ fn within(request: FillRequest, available_end: Timestamp) -> FillRequest {
 
 #[cfg(test)]
 mod tests {
+    use jiff::SignedDuration;
     use nautilus_model::{
         data::{NautilusDataType, TradeTick},
         enums::AggressorSide,
@@ -225,8 +226,6 @@ mod tests {
         types::{Price, Quantity},
     };
     use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
-
-    use jiff::SignedDuration;
 
     use super::*;
     use crate::{

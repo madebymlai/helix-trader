@@ -75,10 +75,12 @@ use nautilus_network::{
 use super::messages::{
     ExchangeLevel, ExchangeRecord, ExchangeRecordFrame, ExchangeSubscription, ExchangeText,
 };
-use crate::common::{consts::LseExchange, credential::LseCredential};
-use crate::websocket::{
-    RECONNECT_BACKOFF_FACTOR, RECONNECT_DELAY_INITIAL_MS, RECONNECT_DELAY_MAX_MS,
-    RECONNECT_JITTER_MS, finish_handler,
+use crate::{
+    common::{consts::LseExchange, credential::LseCredential},
+    websocket::{
+        RECONNECT_BACKOFF_FACTOR, RECONNECT_DELAY_INITIAL_MS, RECONNECT_DELAY_MAX_MS,
+        RECONNECT_JITTER_MS, finish_handler,
+    },
 };
 
 /// How long LSE may take to answer the subscription.

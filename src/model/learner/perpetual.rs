@@ -3,9 +3,7 @@
 //! settings, which it has no equivalent of.
 
 use anyhow::{Context, anyhow, ensure};
-use perpetual::booster::config::BoosterIO;
-use perpetual::objective::Objective;
-use perpetual::{Matrix, PerpetualBooster};
+use perpetual::{Matrix, PerpetualBooster, booster::config::BoosterIO, objective::Objective};
 use serde::{Deserialize, Serialize};
 
 use super::{Learner, Predictor, SavedModel, TrainingSet};
@@ -174,7 +172,7 @@ mod tests {
         }
     }
 
-    /// 600 rows of one feature, 0.0 to 0.9 by 0.1, labelled 2 below 0.5
+    /// 600 rows of one feature, 0.0 to 0.9 by 0.1, labeled 2 below 0.5
     /// and -1 from it.
     fn step() -> TrainingSet {
         let features: Vec<f64> = (0..600_u32).map(|i| f64::from(i % 10) / 10.0).collect();

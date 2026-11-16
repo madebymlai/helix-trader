@@ -7,16 +7,17 @@
 //! and :37.750 each minute, so a command sent on the hour fills on the
 //! quote at :37.750.
 
-use crate::common::{
-    ic::{self, at},
-    recorder::Recorder,
-};
 use helix_trader::backtest::{Backtest, Latency};
 use jiff::{SignedDuration, Timestamp};
 use nautilus_model::{
     data::BarType,
     enums::OrderSide,
     types::{Price, Quantity},
+};
+
+use crate::common::{
+    ic::{self, at},
+    recorder::Recorder,
 };
 
 #[test]

@@ -9,7 +9,7 @@
 //! when a side is picked, on the decision's features, the strategy's
 //! without either side's payoff features, with the side picked and the
 //! decision's calibrated level and side call after them (`PICKED_FEATURES`),
-//! and learns, as a regression, the realised net R of the trade of the side
+//! and learns, as a regression, the realized net R of the trade of the side
 //! picked, the target on that side, with exits or time only, its net P&L
 //! over its unit, read from its row as the side models read their trades
 //! (`dataset::DatasetRow`): a dataset row opens a long and a short at every
@@ -47,7 +47,7 @@ use super::{
 /// The meta's examples of the dataset `rows` of the sides, in time order:
 /// each row a side is picked on, its features with that side and the
 /// decision's level and side call, with the trade on that side and its unit,
-/// whose realised R the meta learns. The side picked on a row is the one
+/// whose realized R the meta learns. The side picked on a row is the one
 /// `DecidingModels` picks, on each side's row (`DatasetRow::sides`), among the
 /// sides of the pair of `models` in use then, as its stores list them now,
 /// none before the first.
