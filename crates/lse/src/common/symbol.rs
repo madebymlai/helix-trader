@@ -571,77 +571,47 @@ mod tests {
     }
 
     #[rstest]
-    fn an_lsedge_id_is_its_symbol_in_the_market_after_its_last_hyphen() {
-        for (id, market, symbol) in [
-            ("GOLD-FUTURES.LSEDGE", "futures", "GOLD"),
-            ("US10Y-FUTURES.LSEDGE", "futures", "US10Y"),
-            ("BRK-B-US_STOCKS.LSEDGE", "us_stocks", "BRK-B"),
-            ("EUR_USD-FOREX.LSEDGE", "forex", "EUR_USD"),
-            ("XAU/USD-COMMODITIES.LSEDGE", "commodities", "XAU/USD"),
-        ] {
-            let series = of(id).unwrap();
+    #[case::futures("GOLD-FUTURES.LSEDGE", "futures", "GOLD")]
+    #[case::futures_of_digits("US10Y-FUTURES.LSEDGE", "futures", "US10Y")]
+    #[case::hyphenated_symbol("BRK-B-US_STOCKS.LSEDGE", "us_stocks", "BRK-B")]
+    #[case::underscored_symbol("EUR_USD-FOREX.LSEDGE", "forex", "EUR_USD")]
+    #[case::slashed_symbol("XAU/USD-COMMODITIES.LSEDGE", "commodities", "XAU/USD")]
+    #[case::underscored_market("RY-CA_STOCKS.LSEDGE", "ca_stocks", "RY")]
+    fn an_lsedge_id_is_its_symbol_in_the_market_after_its_last_hyphen(
+        #[case] id: &str,
+        #[case] market: &str,
+        #[case] symbol: &str,
+    ) {
+        let series = of(id).unwrap();
 
-            assert_eq!((series.market(), series.symbol()), (market, symbol), "{id}");
-        }
-    }
-
-    #[rstest]
-    fn an_instrument_id_is_the_series_of_its_symbol_and_market() {
-        for (market, symbol, id) in [
-            ("futures", "GOLD", "GOLD-FUTURES.LSEDGE"),
-            ("us_stocks", "BRK-B", "BRK-B-US_STOCKS.LSEDGE"),
-            ("ca_stocks", "RY", "RY-CA_STOCKS.LSEDGE"),
-        ] {
-            let series = LseSymbol::new(market, symbol).unwrap();
-
-            assert_eq!(of(id).unwrap(), series, "{id}");
-        }
+        assert_eq!((series.market(), series.symbol()), (market, symbol));
     }
 
     /// No hyphen, an empty symbol or market, or a market in lower case,
-    /// which would make a second id of one series.
+    /// which would make a second id of one series; and another venue's id.
     #[rstest]
-    fn an_id_without_its_market_in_capitals_is_refused_naming_it() {
-        for id in [
-            "GOLD.LSEDGE",
-            "-FUTURES.LSEDGE",
-            "GOLD-.LSEDGE",
-            "GOLD-futures.LSEDGE",
-            "GOLD-FU+TURES.LSEDGE",
-        ] {
-            let err = of(id).unwrap_err().to_string();
+    #[case::no_hyphen("GOLD.LSEDGE")]
+    #[case::empty_symbol("-FUTURES.LSEDGE")]
+    #[case::empty_market("GOLD-.LSEDGE")]
+    #[case::lower_case_market("GOLD-futures.LSEDGE")]
+    #[case::no_market_s_name("GOLD-FU+TURES.LSEDGE")]
+    #[case::another_venue("GOLD-FUTURES.GLBX")]
+    fn an_id_without_its_market_in_capitals_is_refused_naming_it(#[case] id: &str) {
+        let err = of(id).unwrap_err().to_string();
 
-            assert!(err.contains(id), "{id}: {err}");
-        }
-    }
-
-    #[rstest]
-    fn an_id_of_another_venue_is_refused_naming_it() {
-        let err = of("GOLD-FUTURES.GLBX").unwrap_err().to_string();
-
-        assert!(err.contains("GOLD-FUTURES.GLBX"), "{err}");
-    }
-
-    /// As LSE's socket documentation spells them, and as data-ws lists
-    /// them once authenticated (`test_data/ws_authenticated_futures.json`).
-    #[rstest]
-    #[case("GOLD-FUTURES.LSEDGE", "GOLD.F")]
-    #[case("US10Y-FUTURES.LSEDGE", "US10Y.F")]
-    fn a_futures_series_streams_on_data_ws_under_its_symbol_suffixed_f(
-        #[case] id: &str,
-        #[case] name: &str,
-    ) {
-        let (socket, streamed) = of(id).unwrap().stream().unwrap();
-
-        assert_eq!((socket.name(), streamed.as_str()), ("data-ws", name));
+        assert!(err.contains(id), "{err}");
     }
 
     /// As LSE's socket documentation spells them ("Symbols on each
     /// socket"), and as each socket acknowledged and ticked them on 13
-    /// November 2026: a UK or Canadian stock's dots as hyphens, a UK
+    /// November 2026, data-ws listing its futures so once authenticated
+    /// (`test_data/ws_authenticated_futures.json`): a futures series
+    /// suffixed `.F`, a UK or Canadian stock's dots as hyphens, a UK
     /// stock's trailing dot dropped, crypto quoted in dollars where LSE's
     /// REST API quotes it in Tether.
     #[rstest]
+    #[case("GOLD-FUTURES.LSEDGE", "data-ws", "GOLD.F")]
+    #[case("US10Y-FUTURES.LSEDGE", "data-ws", "US10Y.F")]
     #[case("AAPL-US_STOCKS.LSEDGE", "data-ws", "AAPL")]
     #[case("BRK.B-US_STOCKS.LSEDGE", "data-ws", "BRK.B")]
     #[case("EUR_USD-FOREX.LSEDGE", "data-ws", "EUR/USD")]
@@ -689,19 +659,17 @@ mod tests {
         assert!(err.contains("london_stock_exchange"), "{err}");
     }
 
-    /// Their listings take Databento's ids.
+    /// Their listings take Databento's ids: the refusal names the id and
+    /// the exchange market by LSE's folder name, in lower case.
     #[rstest]
-    fn an_exchange_market_is_no_lsedge_series() {
-        for id in [
-            "ESZ6-CME.LSEDGE",
-            "NVDA-NASDAQ.LSEDGE",
-            "AAPL261120C00100000-US_OPTIONS.LSEDGE",
-            "AAPL-OPRA.LSEDGE",
-        ] {
-            let err = of(id).unwrap_err().to_string();
+    #[case::cme("ESZ6-CME.LSEDGE", "cme")]
+    #[case::nasdaq("NVDA-NASDAQ.LSEDGE", "nasdaq")]
+    #[case::us_options("AAPL261120C00100000-US_OPTIONS.LSEDGE", "us_options")]
+    #[case::opra("AAPL-OPRA.LSEDGE", "opra")]
+    fn an_exchange_market_is_no_lsedge_series(#[case] id: &str, #[case] market: &str) {
+        let err = of(id).unwrap_err().to_string();
 
-            assert!(err.contains("exchange market"), "{id}: {err}");
-        }
+        assert!(err.contains(id) && err.contains(market), "{err}");
     }
 
     /// A CME contract of `id` as of 2026.
@@ -754,29 +722,26 @@ mod tests {
     #[case::continuous("GC.v.0.GLBX")]
     #[case::spread("ESU26-ESM27.GLBX")]
     #[case::no_month("ES26.GLBX")]
+    #[case::another_venue("ESZ26.CME")]
     fn a_glbx_id_that_is_no_contract_with_a_two_digit_year_is_refused_naming_it(#[case] id: &str) {
         let err = cme(id).unwrap_err().to_string();
 
-        assert!(err.contains(id), "{id}: {err}");
-    }
-
-    #[rstest]
-    fn an_id_of_another_venue_is_no_cme_contract() {
-        let err = cme("ESZ26.CME").unwrap_err().to_string();
-
-        assert!(err.contains("ESZ26.CME"), "{err}");
+        assert!(err.contains(id), "{err}");
     }
 
     /// LSE's ESZ6 names the contracts of 2016 and of 2026, numbered
-    /// 4000658762 and 4000000001.
+    /// 4000658762 and 4000000001; its NGZ26 names natural gas of 2026,
+    /// numbered 4000000128.
     #[rstest]
-    #[case::of_2026("ESZ26.GLBX", 4_000_000_001)]
-    #[case::of_2016("ESZ16.GLBX", 4_000_658_762)]
-    fn esz6_of_2016_and_of_2026_resolve_to_their_own_listings(
+    #[case::esz6_of_2026("ESZ26.GLBX", PAIRS_ESZ6, 4_000_000_001)]
+    #[case::esz6_of_2016("ESZ16.GLBX", PAIRS_ESZ6, 4_000_658_762)]
+    #[case::ngz26("NGZ26.GLBX", PAIRS_NGZ26, 4_000_000_128)]
+    fn a_contract_resolves_to_its_own_year_s_listing(
         #[case] id: &str,
+        #[case] answer: &str,
         #[case] pair_id: u64,
     ) {
-        assert_eq!(listed(id, PAIRS_ESZ6), Some(pair_id));
+        assert_eq!(listed(id, answer), Some(pair_id));
     }
 
     /// GCZ4 of 2014 is named `GC futures 2014-12`; GCZ4 of 2024 by its
@@ -803,13 +768,17 @@ mod tests {
         assert_eq!(listing.map(|pair| pair.pair_id), Some(4_000_402_563));
     }
 
-    /// LSE's NGZ6 is the contract of 2016 alone; 2026's is NGZ26.
+    /// LSE's NGZ6 is the contract of 2016 alone, 2026's being NGZ26; GCZ4
+    /// those of 2014 and of 2024, not of 2034; LSE lists no ESZ26.
     #[rstest]
-    fn a_contract_none_of_a_name_s_listings_is_has_no_listing_there() {
-        assert_eq!(listed("NGZ26.GLBX", PAIRS_NGZ6), None);
-        assert_eq!(listed("NGZ26.GLBX", PAIRS_NGZ26), Some(4_000_000_128));
-        assert_eq!(listed("GCZ34.GLBX", PAIRS_GCZ4), None);
-        assert_eq!(listed("ESZ26.GLBX", PAIRS_ESZ26), None);
+    #[case::ngz6_of_2016_alone("NGZ26.GLBX", PAIRS_NGZ6)]
+    #[case::gcz4_of_past_decades("GCZ34.GLBX", PAIRS_GCZ4)]
+    #[case::no_listing_at_all("ESZ26.GLBX", PAIRS_ESZ26)]
+    fn a_contract_none_of_a_name_s_listings_is_has_no_listing_there(
+        #[case] id: &str,
+        #[case] answer: &str,
+    ) {
+        assert_eq!(listed(id, answer), None);
     }
 
     #[rstest]
@@ -886,38 +855,28 @@ mod tests {
 
     /// Databento's raw symbols of `XNAS.ITCH` are Nasdaq's tickers, a class
     /// after a dot ("CMS vs. Nasdaq symbology": `BRK.B`), and so is LSE's
-    /// symbol of each in its `nasdaq`; Nautilus' id spells the class after
-    /// a space.
+    /// symbol of each in its `nasdaq`, as its catalogue, captured
+    /// (`answer`), lists it; Nautilus' id spells the class after a space.
     #[rstest]
-    #[case::common_stock("NVDA.XNAS", "NVDA")]
-    #[case::class_b("BRK B.XNAS", "BRK.B")]
-    fn an_xnas_stock_is_its_ticker_at_lse_and_back(#[case] id: &str, #[case] ticker: &str) {
-        let stock = NasdaqStock::from_instrument_id(InstrumentId::from(id)).unwrap();
-
-        assert_eq!(stock.ticker(), ticker);
-        assert_eq!(stock.instrument_id(), InstrumentId::from(id));
-    }
-
-    /// LSE's catalogue of `nasdaq`, captured: each ticker names a listing
-    /// there under that symbol.
-    #[rstest]
-    #[case::common_stock("NVDA.XNAS", PAIRS_NASDAQ_NVDA)]
-    #[case::class_b("BRK B.XNAS", PAIRS_NASDAQ_BRK)]
-    fn an_xnas_stock_s_ticker_is_the_symbol_lse_lists_it_under(
+    #[case::common_stock("NVDA.XNAS", "NVDA", PAIRS_NASDAQ_NVDA)]
+    #[case::class_b("BRK B.XNAS", "BRK.B", PAIRS_NASDAQ_BRK)]
+    fn an_xnas_stock_is_its_ticker_at_lse_and_back(
         #[case] id: &str,
+        #[case] ticker: &str,
         #[case] answer: &str,
     ) {
         let stock = NasdaqStock::from_instrument_id(InstrumentId::from(id)).unwrap();
         let listed: serde_json::Value = serde_json::from_str(answer).unwrap();
 
+        assert_eq!(stock.ticker(), ticker);
         assert!(
             listed["pairs"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|pair| pair["symbol"] == stock.ticker()),
-            "{id}"
+                .any(|pair| pair["symbol"] == stock.ticker())
         );
+        assert_eq!(stock.instrument_id(), InstrumentId::from(id));
     }
 
     /// A ticker in lower case, which LSE would match, or a class after a

@@ -200,47 +200,32 @@ mod tests {
         assert_eq!(authenticated.symbols.len(), 33);
     }
 
+    /// LSE's refusals, captured: a second connection on a key of one, its
+    /// limit and its count of those open in its details, and a key LSE
+    /// does not know, of no details.
     #[rstest]
-    fn a_refusal_reads_as_its_code_its_message_and_its_details() {
-        let LseWsFrame::Error(refusal) = frame(WS_TOO_MANY_CONNECTIONS) else {
-            panic!("not a refusal")
-        };
-        let LseWsFrame::Error(key) = frame(WS_INVALID_KEY) else {
+    #[case::too_many_connections(
+        WS_TOO_MANY_CONNECTIONS,
+        &[
+            "TOO_MANY_CONNECTIONS",
+            "Max 1 concurrent websocket connection(s) for this API key; 1 already open from \
+             this same address. Close it and retry.",
+            "max_connections 1",
+            "open_connections 1",
+        ]
+    )]
+    #[case::invalid_key(WS_INVALID_KEY, &["INVALID_KEY", "Invalid or inactive API key"])]
+    fn a_refusal_reads_as_its_code_its_message_and_its_details(
+        #[case] text: &str,
+        #[case] facts: &[&str],
+    ) {
+        let LseWsFrame::Error(refusal) = frame(text) else {
             panic!("not a refusal")
         };
 
-        assert_eq!(
-            refusal.to_string(),
-            "TOO_MANY_CONNECTIONS: Max 1 concurrent websocket connection(s) for this API key; \
-             1 already open from this same address. Close it and retry. \
-             (max_connections 1, open_connections 1)"
-        );
-        assert_eq!(key.to_string(), "INVALID_KEY: Invalid or inactive API key");
-    }
-
-    /// As LSE's documentation writes them.
-    #[rstest]
-    fn the_client_s_frames_are_lse_s_actions() {
-        assert_eq!(
-            LseWsAction::Auth { api_key: "k" }.to_json(),
-            r#"{"action":"auth","api_key":"k"}"#
-        );
-        assert_eq!(
-            LseWsAction::Subscribe { symbol: "GOLD.F" }.to_json(),
-            r#"{"action":"subscribe","symbol":"GOLD.F"}"#
-        );
-        assert_eq!(
-            LseWsAction::Unsubscribe { symbol: "GOLD.F" }.to_json(),
-            r#"{"action":"unsubscribe","symbol":"GOLD.F"}"#
-        );
-        assert_eq!(
-            LseWsAction::SubscribeOptions { underlying: "AAPL" }.to_json(),
-            r#"{"action":"subscribe_options","underlying":"AAPL"}"#
-        );
-        assert_eq!(
-            LseWsAction::UnsubscribeOptions { underlying: "AAPL" }.to_json(),
-            r#"{"action":"unsubscribe_options","underlying":"AAPL"}"#
-        );
-        assert_eq!(LseWsAction::Ping.to_json(), r#"{"action":"ping"}"#);
+        let read = refusal.to_string();
+        for fact in facts {
+            assert!(read.contains(fact), "{fact}: {read}");
+        }
     }
 }

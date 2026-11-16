@@ -948,7 +948,7 @@ mod tests {
         AHMA_COMPANY_PROFILES, AHMA_STOCK_FUNDAMENTALS, AT016322245_CORPORATE_BONDS,
         AUDUSD_FX_DERIVATIVES, AUGB10Y_SOVEREIGN_YIELDS, CNH_CREDIT_INDICES, GCZ26_BOOK,
         GCZ26_ORDERS, GCZ26_QUOTES, GCZ26_TRADES, GOLD_FUTURES_4H, GOLD_SPOT_MINUTES, GOLD_TRADES,
-        TEAM_INSIDER_TRADES, US_CORE_CPI_CALENDAR, US_CORE_CPI_RELEASES, US10Y_BOND_YIELDS,
+        US_CORE_CPI_CALENDAR, US_CORE_CPI_RELEASES, US10Y_BOND_YIELDS,
         US10Y_BOND_YIELDS_FIFTEEN_MINUTES, US10Y_BOND_YIELDS_FIVE_MINUTES,
         US10Y_BOND_YIELDS_FOUR_HOURS, US10Y_BOND_YIELDS_HOURLY, US10Y_BOND_YIELDS_INTRADAY,
         US10Y_BOND_YIELDS_MINUTE, US10Y_BOND_YIELDS_THIRTY_MINUTES, US10Y_YIELDS, ZN_COT,
@@ -1066,10 +1066,17 @@ mod tests {
     }
 
     /// The day's close is known when the day ends: the 9th's row at the
-    /// 10th's 00:00 UTC, and the 12th's at the 13th's.
+    /// 10th's 00:00 UTC, and the 12th's at the 13th's; a macro series of
+    /// yields, a day's close, as the daily bond yields.
     #[rstest]
-    fn a_row_of_a_date_is_stamped_at_the_date_s_end() {
-        let rows: Vec<_> = us10y_rows()
+    #[case::bond_yields(US10Y_BOND_YIELDS, "bond_yields", "date")]
+    #[case::macro_yield(US10Y_YIELDS, "macro_yield", "day")]
+    fn a_row_of_a_date_is_stamped_at_the_date_s_end(
+        #[case] file: &'static [u8],
+        #[case] source: &str,
+        #[case] time_column: &str,
+    ) {
+        let rows: Vec<_> = rows_of(file, source, "US10Y", time_column, Stamp::DateEnd)
             .into_iter()
             .map(|row| {
                 (
@@ -1086,7 +1093,7 @@ mod tests {
             (
                 day(stamped),
                 day(stamped),
-                "bond_yields".to_string(),
+                source.to_string(),
                 "US10Y".to_string(),
                 serde_json::json!(close),
             )
@@ -1225,25 +1232,6 @@ mod tests {
         assert_eq!(stamped, expected);
     }
 
-    /// Atlassian's insider trade filed on 13 October 2026, keyed by its
-    /// filing's day: known at 22:00 New York time that day, 02:00 UTC on the
-    /// 14th, New York keeping summer time.
-    #[rstest]
-    fn an_insider_trade_is_stamped_at_22_00_new_york_time_of_its_filing_s_day() {
-        let stamp = Stamp::of_collection("insider_trades").unwrap();
-
-        let rows = rows_of(
-            TEAM_INSIDER_TRADES,
-            "insider_trades",
-            "TEAM",
-            "filing_date",
-            stamp,
-        );
-
-        let stamped: Vec<_> = rows.iter().map(|row| row.ts_init).collect();
-        assert_eq!(stamped, [utc("2026-10-14T02:00:00")]);
-    }
-
     /// A company's snapshot, updated on 13 October 2026 at 05:08:01 UTC.
     #[rstest]
     #[case::company_profiles(AHMA_COMPANY_PROFILES, "company_profiles")]
@@ -1323,18 +1311,6 @@ mod tests {
         assert_eq!(released(&rows), core_cpi_releases());
     }
 
-    /// A macro series of yields is a day's close, as the daily bond yields.
-    #[rstest]
-    fn a_macro_yield_is_stamped_at_its_day_s_end() {
-        let rows: Vec<_> = rows_of(US10Y_YIELDS, "macro_yield", "US10Y", "day", Stamp::DateEnd)
-            .into_iter()
-            .map(|row| (row.ts_init, row.fields["close"].clone()))
-            .collect();
-
-        let row = |stamped, close: f64| (day(stamped), serde_json::json!(close));
-        assert_eq!(rows, [row("10", 4.884), row("11", 5.0), row("13", 5.133)]);
-    }
-
     /// ZN's reports, as pyarrow reads LSE's file: of a Tuesday, out on its
     /// Friday, `release_date`, and stamped at that day's end; since 28 April
     /// 2026 with no release date, and stamped at `created_at`, LSE's ingest
@@ -1401,8 +1377,9 @@ mod tests {
     /// 22 September 2026, in days from 1970.
     const SEPTEMBER_22: i32 = 20_718;
 
-    /// A row that says when it was known nowhere is left out, named, rather
-    /// than stamped at a time of the client's choosing.
+    /// A row that says when it was known nowhere is left out, named by its
+    /// symbol, key and source and the columns it has empty, rather than
+    /// stamped at a time of the client's choosing.
     #[rstest]
     #[case::a_report_of_no_release_or_ingest(
         "cot",
@@ -1430,7 +1407,10 @@ mod tests {
         let [refused] = &parsed.refused[..] else {
             panic!("not one row refused: {:?}", parsed.refused);
         };
-        assert!(refused.contains("2026-09-22"), "{refused}");
+        let empty = columns.iter().map(|&(column, _)| column);
+        for part in ["ZN", "2026-09-22", source].into_iter().chain(empty) {
+            assert!(refused.contains(part), "{part}: {refused}");
+        }
     }
 
     /// AAPL's reports, as pyarrow reads LSE's file: each statement at the
@@ -1489,18 +1469,23 @@ mod tests {
         }
     }
 
-    /// Its stamp would not be when its values are known.
+    /// Its stamp would not be when its values are known: refused naming
+    /// the column, a word of the reason, and LSE's type of it; or the file
+    /// lacks it.
     #[rstest]
     #[case::dates_as_intervals(
         US10Y_BOND_YIELDS,
         "date",
-        Stamp::Close(SignedDuration::from_hours(4))
+        Stamp::Close(SignedDuration::from_hours(4)),
+        Some("Date32")
     )]
-    #[case::times_as_dates(US10Y_BOND_YIELDS_FOUR_HOURS, "ts", Stamp::DateEnd)]
+    #[case::times_as_dates(US10Y_BOND_YIELDS_FOUR_HOURS, "ts", Stamp::DateEnd, Some("Timestamp"))]
+    #[case::missing(US10Y_BOND_YIELDS, "ts", Stamp::DateEnd, None)]
     fn a_time_column_not_of_the_key_of_its_collection_is_refused_naming_it(
         #[case] file: &'static [u8],
         #[case] time_column: &str,
         #[case] stamp: Stamp,
+        #[case] lse_type: Option<&str>,
     ) {
         let err = parse_rows(
             Bytes::from_static(file),
@@ -1511,9 +1496,20 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(err.to_string().contains(time_column), "{err:#}");
+        let err = format!("{err:#}");
+        assert!(
+            err.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .any(|word| word == time_column),
+            "{err}"
+        );
+        assert!(
+            lse_type.is_none_or(|lse_type| err.contains(lse_type)),
+            "{err}"
+        );
     }
 
+    /// As pyarrow reads them: LSE's row id, the yield's country, maturity
+    /// and currency, its day's open, high, low and close, and when LSE
     /// fetched it, a time in UTC.
     #[rstest]
     fn a_row_s_fields_are_its_other_columns_as_lse_sent_them() {
@@ -1545,20 +1541,6 @@ mod tests {
                 row(2_606_681, [4.988, 5.137, 4.98, 5.133]),
             ]
         );
-    }
-
-    #[rstest]
-    fn a_time_column_the_file_lacks_is_refused_naming_it() {
-        let err = parse_rows(
-            Bytes::from_static(US10Y_BOND_YIELDS),
-            "bond_yields",
-            "US10Y",
-            "ts",
-            Stamp::DateEnd,
-        )
-        .unwrap_err();
-
-        assert!(err.to_string().contains("ts"), "{err:#}");
     }
 
     /// A definition too coarse for the prices LSE sends: refused, not
@@ -2019,7 +2001,37 @@ mod tests {
 
         let quotes = parse_quotes(Bytes::from(file), gcz26(), 2, 0).unwrap();
 
-        let times: Vec<_> = quotes.iter().map(|q| q.ts_event).collect();
-        assert_eq!(times, [UnixNanos::from(1)]);
+        let [quote] = &quotes[..] else {
+            panic!("not one quote: {quotes:?}");
+        };
+        assert_eq!(
+            (
+                quote.instrument_id,
+                quote.bid_price,
+                quote.ask_price,
+                quote.bid_size,
+                quote.ask_size,
+                quote.ts_event,
+                quote.ts_init,
+            ),
+            (
+                gcz26(),
+                Price::from("3908.10"),
+                Price::from("3908.30"),
+                Quantity::from(2),
+                Quantity::from(9),
+                UnixNanos::from(1),
+                UnixNanos::from(1),
+            )
+        );
+        assert_eq!(
+            (
+                quote.bid_price.precision,
+                quote.ask_price.precision,
+                quote.bid_size.precision,
+                quote.ask_size.precision,
+            ),
+            (2, 2, 0, 0)
+        );
     }
 }

@@ -119,26 +119,22 @@ mod tests {
         );
     }
 
-    /// An exchange plan's key opens its market alone: the CME key is no
-    /// LSE key, nor a Nasdaq key.
+    /// A product reads its own variable alone, an empty key being none: an
+    /// exchange plan's key opens its market alone, so the CME key is no LSE
+    /// key, nor a Nasdaq key.
     #[rstest]
-    #[case::lse(LseProduct::Global)]
-    #[case::nasdaq(LseProduct::Nasdaq)]
-    fn another_product_s_key_is_none(#[case] product: LseProduct) {
-        let credential =
-            LseCredential::resolve(product, None, environment(LSE_CME_API_KEY, Some(KEY)));
+    #[case::cme_key_for_lse(LseProduct::Global, LSE_CME_API_KEY, Some(KEY))]
+    #[case::cme_key_for_nasdaq(LseProduct::Nasdaq, LSE_CME_API_KEY, Some(KEY))]
+    #[case::unset(LseProduct::Global, LSE_API_KEY, None)]
+    #[case::empty(LseProduct::Global, LSE_API_KEY, Some(""))]
+    fn no_key_of_the_product_is_none(
+        #[case] product: LseProduct,
+        #[case] variable: &'static str,
+        #[case] value: Option<&str>,
+    ) {
+        let credential = LseCredential::resolve(product, None, environment(variable, value));
 
         assert!(credential.is_none());
-    }
-
-    #[rstest]
-    #[case::unset(None)]
-    #[case::empty(Some(""))]
-    fn no_key_anywhere_is_none(#[case] set: Option<&str>) {
-        assert!(
-            LseCredential::resolve(LseProduct::Global, None, environment(LSE_API_KEY, set))
-                .is_none()
-        );
     }
 
     #[rstest]

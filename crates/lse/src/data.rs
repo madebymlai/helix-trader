@@ -1017,6 +1017,7 @@ mod tests {
     use nautilus_common::{cache::Cache, live::runner::replace_data_event_sender};
     use nautilus_core::string::secret::SecretString;
     use nautilus_model::instruments::InstrumentAny;
+    use rstest::rstest;
 
     use super::*;
     use crate::testing::{
@@ -1093,80 +1094,113 @@ mod tests {
         )
     }
 
-    fn gcz26_second<R>(request: WindowRequest<R>) -> R {
-        second_of(crate::testing::GCZ26, request)
+    /// The config of a client on `lse` with every key but `product`'s.
+    fn config_without(lse: &MockLse, product: LseProduct) -> LseDataClientConfig {
+        let mut config = config(lse);
+        match product {
+            LseProduct::Global => config.api_key = None,
+            LseProduct::Cme => config.cme_api_key = None,
+            LseProduct::Nasdaq => config.nasdaq_api_key = None,
+        }
+        config
     }
 
-    /// The client holds the LSE key alone, and the environment none.
+    /// The client holds every key but the instrument's product's, and the
+    /// environment none; LSE would answer the request, the contract's
+    /// listings or the stock's trades, were it asked.
+    #[rstest]
+    #[case::a_cme_contract(
+        LseProduct::Cme,
+        gcz26(),
+        crate::testing::GCZ26,
+        Reply::json(PAIRS_GCZ6),
+        "LSE_CME_API_KEY"
+    )]
+    #[case::an_xnas_stock(
+        LseProduct::Nasdaq,
+        nvda(),
+        NVDA,
+        Reply::file(NVDA_TRADES),
+        "LSE_NASDAQ_API_KEY"
+    )]
     #[tokio::test]
-    async fn a_cme_contract_asked_with_no_cme_key_fails_naming_its_variable_unasked() {
-        let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6)]);
+    async fn an_instrument_asked_with_no_key_of_its_product_fails_naming_its_variable_unasked(
+        #[case] product: LseProduct,
+        #[case] instrument: InstrumentAny,
+        #[case] id: &str,
+        #[case] answer: Reply,
+        #[case] variable: &str,
+    ) {
+        let lse = MockLse::start(vec![answer]);
         let mut events = events();
-        let config = LseDataClientConfig {
-            cme_api_key: None,
-            ..config(&lse)
-        };
         let client = LseDataClient::new(
             ClientId::from("LSE"),
-            &config,
-            cache_of(vec![gcz26()]),
+            &config_without(&lse, product),
+            cache_of(vec![instrument]),
             |_| None,
         )
         .unwrap();
 
         client
-            .request_trades(gcz26_second(RequestTrades::new))
+            .request_trades(second_of(id, RequestTrades::new))
             .unwrap();
 
         let envelope = next_envelope(&mut events).await;
         let reason = envelope.failure_reason().expect("a failure");
-        assert!(reason.contains("LSE_CME_API_KEY"), "{reason}");
+        assert!(reason.contains(variable), "{reason}");
         assert!(lse.calls().is_empty(), "{:?}", lse.calls());
     }
 
-    #[tokio::test]
-    async fn a_client_with_no_key_at_all_is_not_created_naming_every_variable() {
-        let lse = MockLse::start(vec![]);
-        let config = LseDataClientConfig {
-            api_key: None,
-            cme_api_key: None,
-            nasdaq_api_key: None,
-            ..config(&lse)
-        };
-
-        let err = LseDataClient::new(ClientId::from("LSE"), &config, cache_of(vec![]), |_| None)
-            .unwrap_err()
-            .to_string();
+    #[rstest]
+    fn a_client_with_no_key_at_all_is_not_created_naming_every_variable() {
+        let err = LseDataClient::new(
+            ClientId::from("LSE"),
+            &LseDataClientConfig::default(),
+            cache_of(vec![]),
+            |_| None,
+        )
+        .unwrap_err()
+        .to_string();
 
         for variable in ["LSE_API_KEY", "LSE_CME_API_KEY", "LSE_NASDAQ_API_KEY"] {
             assert!(err.contains(variable), "{variable}: {err}");
         }
     }
 
-    /// The client holds the LSE and CME keys, and the environment none.
-    #[tokio::test]
-    async fn an_xnas_stock_asked_with_no_nasdaq_key_fails_naming_its_variable_unasked() {
-        let lse = MockLse::start(vec![Reply::file(NVDA_TRADES)]);
-        let mut events = events();
-        let config = LseDataClientConfig {
-            nasdaq_api_key: None,
-            ..config(&lse)
+    /// The client streams the instrument holding every key but its
+    /// product's, the config's alone, the environment holding none.
+    #[rstest]
+    #[case::a_glbx_contract(
+        crate::testing::GCZ26,
+        LseDataClientConfig::builder()
+            .api_key(SecretString::from(API_KEY))
+            .nasdaq_api_key(SecretString::from(NASDAQ_API_KEY))
+            .stream_ids(vec![InstrumentId::from(crate::testing::GCZ26)])
+            .build(),
+        "LSE_CME_API_KEY"
+    )]
+    #[case::an_xnas_stock(
+        NVDA,
+        LseDataClientConfig::builder()
+            .api_key(SecretString::from(API_KEY))
+            .cme_api_key(SecretString::from(CME_API_KEY))
+            .stream_ids(vec![InstrumentId::from(NVDA)])
+            .build(),
+        "LSE_NASDAQ_API_KEY"
+    )]
+    fn an_instrument_streamed_with_no_key_of_its_product_is_refused_naming_its_variable(
+        #[case] id: &str,
+        #[case] config: LseDataClientConfig,
+        #[case] variable: &str,
+    ) {
+        let _events = events();
+
+        let Err(e) = LseDataClient::new(ClientId::from("LSE"), &config, cache_of(vec![]), |_| None)
+        else {
+            panic!("created a client streaming {id} with no key of its product")
         };
-        let client = LseDataClient::new(
-            ClientId::from("LSE"),
-            &config,
-            cache_of(vec![nvda()]),
-            |_| None,
-        )
-        .unwrap();
 
-        client
-            .request_trades(second_of(NVDA, RequestTrades::new))
-            .unwrap();
-
-        let envelope = next_envelope(&mut events).await;
-        let reason = envelope.failure_reason().expect("a failure");
-        assert!(reason.contains("LSE_NASDAQ_API_KEY"), "{reason}");
-        assert!(lse.calls().is_empty(), "{:?}", lse.calls());
+        let err = format!("{e:#}");
+        assert!(err.contains(id) && err.contains(variable), "{err}");
     }
 }
