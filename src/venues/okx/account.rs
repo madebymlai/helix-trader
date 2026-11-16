@@ -101,6 +101,8 @@ impl Account {
             None,
         )
         .context("building the OKX HTTP client")?;
+        // Temporary: the leverage, which the adapter does not read, through
+        // OKX's bare API, until Nautilus' OKX client reads it: helix-trader#21.
         let mut headers = HashMap::new();
         if exec.environment == OKXEnvironment::Demo {
             headers.insert("x-simulated-trading".to_string(), "1".to_string());
