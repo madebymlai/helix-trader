@@ -385,49 +385,57 @@ mod tests {
     }
 
     /// The account's margin of a position, a tenth of its notional at
-    /// leverage 10, as IC's definitions hold the account's.
+    /// leverage 10, as IC's definitions hold the account's; at leverage 25,
+    /// 4% of the notional.
     #[rstest]
-    fn an_okx_swap_is_a_crypto_perpetual_with_the_account_s_margins() {
-        let InstrumentAny::CryptoPerpetual(btc) = btc_instrument() else {
-            panic!("not a CryptoPerpetual");
+    #[case::a_swap_a_crypto_perpetual(btc_instrument(), "CryptoPerpetual", (1, 2), Decimal::new(1, 1))]
+    #[case::an_x_perp_a_crypto_future(xperp_instrument(), "CryptoFuture", (1, 0), Decimal::new(4, 2))]
+    fn an_okx_swap_or_x_perp_is_a_crypto_instrument_with_the_account_s_margins(
+        #[case] instrument: InstrumentAny,
+        #[case] kind: &str,
+        #[case] precisions: (u8, u8),
+        #[case] margin: Decimal,
+    ) {
+        let of_kind = match &instrument {
+            InstrumentAny::CryptoPerpetual(_) => "CryptoPerpetual",
+            InstrumentAny::CryptoFuture(_) => "CryptoFuture",
+            _ => "another kind",
         };
-        assert_eq!((btc.price_precision, btc.size_precision), (1, 2));
-        let tenth = Decimal::new(1, 1);
-        assert_eq!((btc.margin_init, btc.margin_maint), (tenth, tenth));
-    }
-
-    /// At leverage 25, 4% of the notional.
-    #[rstest]
-    fn an_okx_x_perp_is_a_crypto_future_with_the_account_s_margins() {
-        let InstrumentAny::CryptoFuture(btc) = xperp_instrument() else {
-            panic!("not a CryptoFuture");
-        };
-        assert_eq!((btc.price_precision, btc.size_precision), (1, 0));
-        let four_percent = Decimal::new(4, 2);
+        assert_eq!(of_kind, kind);
         assert_eq!(
-            (btc.margin_init, btc.margin_maint),
-            (four_percent, four_percent)
+            (instrument.price_precision(), instrument.size_precision()),
+            precisions
+        );
+        assert_eq!(
+            (instrument.margin_init(), instrument.margin_maint()),
+            (margin, margin)
         );
     }
 
     #[rstest]
-    fn a_leverage_not_positive_is_refused() {
-        for leverage in [Decimal::ZERO, Decimal::NEGATIVE_ONE] {
-            let err = instrument_from(&raw_instrument(), leverage, UnixNanos::default())
-                .unwrap_err()
-                .to_string();
-            assert!(err.contains("leverage"), "{leverage}: {err}");
-        }
+    #[case::nought(Decimal::ZERO, "0")]
+    #[case::negative(Decimal::NEGATIVE_ONE, "-1")]
+    fn a_leverage_not_positive_is_refused_naming_it(
+        #[case] leverage: Decimal,
+        #[case] named: &str,
+    ) {
+        let err = instrument_from(&raw_instrument(), leverage, UnixNanos::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(&format!("was {named}")), "{err}");
     }
 
     #[rstest]
-    fn a_dated_future_is_refused() {
+    fn a_dated_future_is_refused_naming_it_and_its_rule_type() {
         let mut dated = raw_xperp();
         dated.rule_type = "normal".to_string();
         let err = instrument_from(&dated, Decimal::TEN, UnixNanos::default())
             .unwrap_err()
             .to_string();
-        assert!(err.contains("X-Perp"), "{err}");
+        assert!(
+            err.contains("BTC-USD_UM_XPERP-310404") && err.contains("\"normal\""),
+            "{err}"
+        );
     }
 
     #[rstest]
@@ -442,13 +450,17 @@ mod tests {
             (future.inst_type, future.family),
             (OKXInstrumentType::Futures, "BTC-USD_UM_XPERP")
         );
-        for id in [
-            "BTC-USDT.OKX",
-            "BTC-USD-261225-100000-C.OKX",
-            "BTC-USDT-SWAP.BINANCE",
-        ] {
-            assert!(Contract::of(InstrumentId::from(id)).is_err(), "{id}");
-        }
+    }
+
+    #[rstest]
+    #[case::a_spot_pair("BTC-USDT.OKX")]
+    #[case::an_option("BTC-USD-261225-100000-C.OKX")]
+    #[case::a_swap_of_another_venue("BTC-USDT-SWAP.BINANCE")]
+    fn an_id_not_of_an_okx_swap_or_future_has_no_contract_naming_it(#[case] id: &str) {
+        let err = Contract::of(InstrumentId::from(id))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(id), "{err}");
     }
 
     fn btc() -> InstrumentId {
