@@ -18,7 +18,6 @@ use nautilus_model::{
 use nautilus_persistence::common::{
     coverage::merge_closed_intervals, paths::urisafe_instrument_id,
 };
-use serde::{Deserialize, Deserializer, de};
 
 use crate::rolls::{self, Slice, Transition, TransitionTable, front};
 
@@ -73,24 +72,17 @@ pub struct DataRequirements {
 
 /// A series a strategy reads as it is: the data of one Nautilus data type
 /// (`NautilusDataType`) of one instrument,
-/// `{ data = "quotes", instrument_id = "XAUUSD.ICMARKETS" }` in a TOML
-/// config. `data` is a name Nautilus parses (`NautilusDataType::from_str`)
-/// of quotes (`"quotes"`), trades (`"trades"`), book depth snapshots
-/// (`"order_book_depths"`) or book deltas (`"order_book_deltas"`). Custom
-/// data is no tick series, an instrument's included: it is a custom
-/// series (`CustomSeries`), keyed by its identifier.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// `{ data = "quotes", instrument_id = "XAUUSD.ICMARKETS" }` in `[data]
+/// series`, read as a `Series` (`tick_data`). `data` is a name Nautilus
+/// parses (`NautilusDataType::from_str`) of quotes (`"quotes"`), trades
+/// (`"trades"`), book depth snapshots (`"order_book_depths"`) or book
+/// deltas (`"order_book_deltas"`). Custom data is no tick series, an
+/// instrument's included: it is a custom series (`CustomSeries`), keyed by
+/// its identifier.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TickSeries {
-    #[serde(deserialize_with = "series_data")]
     pub data: NautilusDataType,
     pub instrument_id: InstrumentId,
-}
-
-/// The data of a tick series: a Nautilus data type by any name Nautilus
-/// parses, one of those a strategy reads as they are (see `TickSeries`).
-fn series_data<'de, D: Deserializer<'de>>(deserializer: D) -> Result<NautilusDataType, D::Error> {
-    tick_data(&String::deserialize(deserializer)?).map_err(de::Error::custom)
 }
 
 /// The Nautilus data type `name` parses to, if a strategy reads it as it
