@@ -15,7 +15,7 @@
 //! - `baseline`: the training mean, the benchmark every score is read
 //!   against.
 //! - `fake`: the row's first feature, for tests that need to steer the
-//!   prediction.
+//!   prediction; test support, behind the crate's `test-support` feature.
 //!
 //! A training set's labels are real values, fitted on their squared error:
 //! the model predicts a row's expected label. A model predicts from a row of
@@ -35,9 +35,11 @@
 //! booster is neither), so a model stays on the thread that loaded it.
 
 mod baseline;
-mod fake;
 mod lightgbm;
 mod perpetual;
+
+#[cfg(feature = "test-support")]
+mod fake;
 
 use std::fmt::Debug;
 
@@ -58,7 +60,8 @@ pub enum LearnerConfig {
     /// The mean of the training labels, whatever the row.
     Baseline {},
     /// The row's first feature; the mean of the training labels where it is
-    /// missing. For tests.
+    /// missing. Test support, behind the crate's `test-support` feature.
+    #[cfg(feature = "test-support")]
     Fake {},
 }
 
@@ -72,7 +75,9 @@ impl LearnerConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
         match self {
             Self::LightGbm(config) => config.validate(),
-            Self::Perpetual(_) | Self::Baseline {} | Self::Fake {} => Ok(()),
+            Self::Perpetual(_) | Self::Baseline {} => Ok(()),
+            #[cfg(feature = "test-support")]
+            Self::Fake {} => Ok(()),
         }
     }
 
@@ -100,6 +105,7 @@ impl LearnerConfig {
             Self::LightGbm(_) => "lightgbm",
             Self::Perpetual(_) => "perpetual",
             Self::Baseline {} => "baseline",
+            #[cfg(feature = "test-support")]
             Self::Fake {} => "fake",
         }
     }
@@ -109,6 +115,7 @@ impl LearnerConfig {
             Self::LightGbm(config) => config,
             Self::Perpetual(config) => config,
             Self::Baseline {} => &baseline::Baseline,
+            #[cfg(feature = "test-support")]
             Self::Fake {} => &fake::Fake,
         }
     }
