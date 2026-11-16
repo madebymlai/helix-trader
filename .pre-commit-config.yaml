@@ -1,5 +1,5 @@
 exclude: ^crates/(ctrader/proto|lse/docs-snapshot)/
-default_install_hook_types: [pre-commit]
+default_install_hook_types: [pre-commit, commit-msg]
 default_stages: [pre-commit]
 
 repos:
@@ -134,6 +134,14 @@ repos:
         files: ^\.pre-commit-hooks/(test_)?check_workarounds\.py$
         pass_filenames: false
 
+      - id: check-commit-message
+        name: check commit message
+        description: A capitalized subject of 60 characters at most, a body wrapped at 79, no AI attribution
+        entry: python3 -B .pre-commit-hooks/check_commit_message.py
+        language: system
+        stages: [commit-msg]
+        always_run: true
+
   ##############################################################################
   #  Rust formatting and linting
   ##############################################################################
@@ -169,4 +177,46 @@ repos:
             \.cargo/config\.toml
           )$
         types: [file]
+        pass_filenames: false
+
+      - id: cargo-doc
+        name: cargo doc
+        description: Build every crate's docs with warnings denied, intra-doc links resolved
+        entry: env RUSTDOCFLAGS=-Dwarnings cargo doc
+        language: system
+        args: ["--workspace", "--no-deps"]
+        files: >-
+          (?x)^(
+            .*\.rs|
+            (?:.*/)?Cargo\.toml|
+            Cargo\.lock
+          )$
+        types: [file]
+        pass_filenames: false
+
+      - id: cargo-machete
+        name: cargo machete
+        description: Detect declared-but-unused dependencies
+        entry: cargo machete
+        language: system
+        files: >-
+          (?x)^(
+            .*\.rs|
+            (?:.*/)?Cargo\.toml
+          )$
+        pass_filenames: false
+
+      - id: cargo-cooldown
+        name: cargo cooldown
+        description: Blocks crate versions published inside the cooldown window
+        entry: >-
+          bash -c 'bash scripts/check-cargo-cooldown.sh --all
+          --cache "${CARGO_TARGET_DIR:-target}/.cargo-cooldown.json"'
+        language: system
+        files: >-
+          (?x)^(
+            (?:.*/)?Cargo\.(lock|toml)|
+            \.supply-chain/crate-dates\.json|
+            scripts/check-cargo-cooldown\.sh
+          )$
         pass_filenames: false

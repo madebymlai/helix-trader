@@ -5,6 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
+# cargo-machete reads source for a dependency's name: the arrow schema of the
+# custom data macros is in their expansion alone.
+[package.metadata.cargo-machete]
+ignored = ["arrow"]
+
 [lints]
 workspace = true
 
@@ -240,6 +245,12 @@ similar_names = "allow" # Domain terms like trade/trader and side/size are inten
 
 [workspace.lints.rust]
 unreachable_pub = "deny"
+
+# The crate release cooldown (scripts/check-cargo-cooldown.sh, as Nautilus
+# sets it): a crates.io version enters Cargo.lock 3 days after publication.
+[workspace.metadata.cooldown]
+days = 3
+trusted-base = "origin/develop"
 
 # The typos spell checker's config (typos reads it here).
 [workspace.metadata.typos.default]
