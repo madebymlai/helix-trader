@@ -54,6 +54,7 @@ use nautilus_common::{
     logging::logger::LoggerConfig,
     messages::DataEvent,
     nautilus_actor,
+    testing::wait_until,
 };
 use nautilus_core::{UnixNanos, time::get_atomic_clock_realtime};
 use nautilus_live::config::{LiveDataEngineConfig, RoutingConfig};
@@ -141,7 +142,7 @@ fn a_reader_sees_a_clean_prefix_of_the_streamed_data_while_the_node_runs() {
 fn the_bars_the_node_builds_are_stored_under_the_external_source() {
     let dir = tempfile::tempdir().unwrap();
     let mut node = spawn_node(dir.path(), Duration::from_secs(1), Some(4_000), 0);
-    assert!(node.wait().unwrap().success());
+    assert!(stopped(&mut node).success());
     let mut catalog = catalog(dir.path());
     let built: Vec<Bar> = catalog
         .query(
@@ -163,7 +164,7 @@ fn a_clean_stop_promotes_everything_and_leaves_no_staging_file() {
     let dir = tempfile::tempdir().unwrap();
     // No promotion before the stop: the stop promotes all.
     let mut node = spawn_node(dir.path(), Duration::from_secs(3_600), Some(3_000), 0);
-    assert!(node.wait().unwrap().success());
+    assert!(stopped(&mut node).success());
     let read = Read::of(dir.path());
     assert!(read.quotes > 0 && read.trades > 0 && read.depths > 0 && read.bars > 0);
     assert_eq!(staged_files(dir.path()), Vec::<PathBuf>::new());
@@ -173,7 +174,7 @@ fn a_clean_stop_promotes_everything_and_leaves_no_staging_file() {
 fn the_instruments_the_clients_load_are_in_the_catalog() {
     let dir = tempfile::tempdir().unwrap();
     let mut node = spawn_node(dir.path(), Duration::from_secs(1), Some(2_000), 0);
-    assert!(node.wait().unwrap().success());
+    assert!(stopped(&mut node).success());
     // As a backtest node looks its instruments up.
     let instruments = catalog(dir.path())
         .instruments(Some(&[INSTRUMENT_ID.to_string()]), None, None)
@@ -196,7 +197,7 @@ fn a_restart_after_a_crash_promotes_what_the_crashed_run_staged() {
         Some(2_000),
         1_000_000,
     );
-    assert!(restarted.wait().unwrap().success());
+    assert!(stopped(&mut restarted).success());
     let seqs = quote_seqs(dir.path());
     let (first_run, second_run): (Vec<u64>, Vec<u64>) =
         seqs.into_iter().partition(|&seq| seq < 1_000_000);
@@ -229,7 +230,7 @@ fn a_restart_promotes_what_the_crashed_run_staged_before_its_warmup_writes_back(
         .unwrap(),
     );
 
-    assert!(restarted.wait().unwrap().success());
+    assert!(stopped(&mut restarted).success());
 
     let seqs = quote_seqs(dir.path());
     let crashed_run: Vec<u64> = seqs.iter().copied().filter(|&s| s < 1_000_000).collect();
@@ -255,7 +256,7 @@ fn a_backtest_across_a_crash_runs_through_the_gap_it_left() {
     crashed.kill().unwrap();
     crashed.wait().unwrap();
     let mut restarted = spawn_node(dir.path(), Duration::from_secs(1), Some(3_000), 1_000_000);
-    assert!(restarted.wait().unwrap().success());
+    assert!(stopped(&mut restarted).success());
     let quotes: Vec<QuoteTick> = catalog(dir.path())
         .query(None, None, None, None, None, true)
         .unwrap();
@@ -711,6 +712,13 @@ fn wait_for_staged_quotes(root: &Path, node: &mut Child) {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// How `node`, which stops itself (`STOP_MS`), exited, once it has, within
+/// `PATIENCE`.
+fn stopped(node: &mut Child) -> ExitStatus {
+    wait_until(|| node.try_wait().unwrap().is_some(), PATIENCE);
+    node.wait().unwrap()
 }
 
 /// Stops `node` as Ctrl-C would, its signal handler stopping it cleanly:
