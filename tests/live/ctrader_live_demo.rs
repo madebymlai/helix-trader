@@ -27,6 +27,7 @@ use helix_trader::{
 use jiff::SignedDuration;
 use nautilus_common::{
     actor::{DataActor, indicators::SharedActorIndicator},
+    live::get_runtime,
     logging::logger::LoggerConfig,
     messages::data::DataResponseEnvelope,
 };
@@ -140,7 +141,7 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
     // The catalog: gold and its quotes over [now - warmup, now -
     // CATALOG_BEHIND], as fill-catalog stores them.
     let catalog = tempfile::tempdir().unwrap();
-    let now = jiff::Timestamp::now();
+    let now = crate::now();
     let catalog_end = now - CATALOG_BEHIND;
     crate::ctrader_demo::fill_quotes_through_node(
         catalog.path(),
@@ -150,7 +151,7 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
     )
     .await
     .unwrap();
-    let started = jiff::Timestamp::now();
+    let started = crate::now();
     // Outside the catalog, as `Live` requires.
     let staging = tempfile::tempdir().unwrap();
     let live = Live {
@@ -161,7 +162,7 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
         recording: crate::recording(staging.path()),
     };
     // As Ctrl-C would, once the node runs: its signal handler stops it.
-    let interrupt = tokio::spawn(async {
+    let interrupt = get_runtime().spawn(async {
         tokio::time::sleep(LIVE_RUN).await;
         let status = Command::new("kill")
             .args(["-INT", &std::process::id().to_string()])

@@ -50,7 +50,7 @@ use nautilus_common::{
     clients::DataClient,
     clock::Clock,
     factories::{ClientConfig, DataClientFactory},
-    live::{runner::get_data_event_sender, sender::EventSender},
+    live::{get_runtime, runner::get_data_event_sender, sender::EventSender},
     logging::logger::LoggerConfig,
     messages::DataEvent,
     nautilus_actor,
@@ -423,7 +423,7 @@ async fn run_node(
     })?;
     if let Some(stop_after) = stop_after {
         let handle = node.handle();
-        tokio::spawn(async move {
+        get_runtime().spawn(async move {
             tokio::time::sleep(stop_after).await;
             handle.stop();
         });
@@ -938,7 +938,7 @@ impl DataClient for Stub {
         ))?;
         let sender = self.sender.clone();
         let first_seq = self.first_seq;
-        self.feed = Some(tokio::spawn(async move {
+        self.feed = Some(get_runtime().spawn(async move {
             let instrument_id = InstrumentId::from(INSTRUMENT_ID);
             let clock = get_atomic_clock_realtime();
             let mut ticks = tokio::time::interval(TICK);

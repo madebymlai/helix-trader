@@ -33,7 +33,7 @@ use nautilus_common::{
     clients::DataClient,
     clock::Clock,
     factories::{ClientConfig, DataClientFactory},
-    live::{runner::get_data_event_sender, sender::EventSender},
+    live::{get_runtime, runner::get_data_event_sender, sender::EventSender},
     messages::{
         DataEvent, DataResponse,
         data::{
@@ -267,7 +267,7 @@ impl FakeClient {
             Answer::Later => {
                 let sender = self.sender.clone();
                 let event = DataEvent::ResponseEnvelope(envelope(response));
-                tokio::spawn(async move {
+                get_runtime().spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     done.fetch_sub(1, Ordering::SeqCst);
                     sender.send(event).unwrap();

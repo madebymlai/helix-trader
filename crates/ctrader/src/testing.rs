@@ -10,7 +10,7 @@ use std::{
 
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::testing::wait_until_async;
-use nautilus_core::{UnixNanos, string::secret::SecretString};
+use nautilus_core::{UnixNanos, string::secret::SecretString, time::get_atomic_clock_realtime};
 use nautilus_model::{identifiers::Venue, instruments::Cfd};
 use prost::Message as _;
 use rust_decimal::Decimal;
@@ -322,11 +322,16 @@ pub(crate) async fn wait_until(
 pub(crate) const ACCESS_TOKEN: &str = "accessTokenValue";
 pub(crate) const REFRESH_TOKEN: &str = "refreshTokenValue";
 
+/// Now on the wall clock the adapter reads, Nautilus' realtime clock.
+pub(crate) fn now() -> Timestamp {
+    Timestamp::from(get_atomic_clock_realtime().get_time_ns())
+}
+
 /// A credential of made-up values, for account `ACCOUNT_ID`, its token
 /// file in the directory returned, holding the pair of `ACCESS_TOKEN`
 /// and `REFRESH_TOKEN`, valid for 30 days.
 pub(crate) fn credential() -> (CTraderCredential, TempDir) {
-    credential_expiring(Some(Timestamp::now() + SignedDuration::from_hours(30 * 24)))
+    credential_expiring(Some(now() + SignedDuration::from_hours(30 * 24)))
 }
 
 /// A demo connection of the made-up broker, on `VENUE`, with `credential`.

@@ -54,7 +54,7 @@ use ibapi::{
     contracts::Contract,
 };
 use jiff::{SignedDuration, Timestamp};
-use nautilus_common::logging::logger::LoggerConfig;
+use nautilus_common::{live::get_runtime, logging::logger::LoggerConfig};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::{BarType, NautilusDataType},
@@ -102,7 +102,7 @@ async fn history_starts_or_reuses_the_paper_gateway_and_a_second_connection_reus
     }
     let _gateway = GATEWAY.lock().await;
     load_env();
-    let now = Timestamp::now();
+    let now = crate::now();
     let end = IbHistory::latest_end(now).unwrap();
 
     let first = IbHistory::connect(40, end, now).await.unwrap();
@@ -274,7 +274,7 @@ async fn live_runs_on_the_paper_gateway_and_stops_cleanly_on_sigint() {
     // As Ctrl-C would, once the node runs: its signal handler stops it.
     // The node is not `Send`, so it runs here and the signal is sent from
     // another task.
-    let interrupt = tokio::spawn(async {
+    let interrupt = get_runtime().spawn(async {
         tokio::time::sleep(LIVE_RUN).await;
         let status = Command::new("kill")
             .args(["-INT", &std::process::id().to_string()])
@@ -320,7 +320,7 @@ fn paper_account() -> IbAccount {
 
 /// A client of the paper gateway, started or reused.
 async fn paper_client() -> Client {
-    let now = Timestamp::now();
+    let now = crate::now();
     let end = IbHistory::latest_end(now).unwrap();
     drop(IbHistory::connect(ACCOUNT_GATEWAY, end, now).await.unwrap());
     Client::connect("127.0.0.1:4002", ACCOUNT_CLIENT)

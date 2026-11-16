@@ -34,6 +34,7 @@ use helix_trader::{
 };
 use nautilus_common::{
     actor::{DataActor, DataActorNative},
+    live::get_runtime,
     logging::logger::LoggerConfig,
     messages::data::DataResponseEnvelope,
 };
@@ -201,7 +202,7 @@ async fn a_live_run_caches_its_conversion_pairs_quotes_after_its_start() {
         recording: crate::recording(staging.path()),
     };
     // As Ctrl-C would, once the node runs: its signal handler stops it.
-    let interrupt = tokio::spawn(async {
+    let interrupt = get_runtime().spawn(async {
         tokio::time::sleep(LIVE_RUN).await;
         let status = Command::new("kill")
             .args(["-INT", &std::process::id().to_string()])

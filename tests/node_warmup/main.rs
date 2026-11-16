@@ -42,7 +42,7 @@ use nautilus_common::{
     clock::Clock,
     enums::Environment,
     factories::{ClientConfig, DataClientFactory},
-    live::{runner::get_data_event_sender, sender::EventSender},
+    live::{get_runtime, runner::get_data_event_sender, sender::EventSender},
     messages::{
         DataEvent, DataResponse,
         data::{
@@ -53,7 +53,9 @@ use nautilus_common::{
     },
     nautilus_actor,
 };
-use nautilus_core::{UUID4, UnixNanos, datetime::datetime_to_unix_nanos};
+use nautilus_core::{
+    UUID4, UnixNanos, datetime::datetime_to_unix_nanos, time::get_atomic_clock_realtime,
+};
 use nautilus_live::{
     builder::LiveNodeBuilder,
     config::{LiveNodeConfig, RoutingConfig},
@@ -248,7 +250,7 @@ impl FakeClient {
             None => self.sender.send(event)?,
             Some(latency) => {
                 let sender = self.sender.clone();
-                tokio::spawn(async move {
+                get_runtime().spawn(async move {
                     tokio::time::sleep(latency).await;
                     sender.send(event).unwrap();
                 });
@@ -272,7 +274,7 @@ impl FakeClient {
         instrument_id: InstrumentId,
         tick: impl Fn(InstrumentId, u64, u64) -> Data,
     ) -> anyhow::Result<()> {
-        let now = UnixNanos::from(Timestamp::now()).as_u64();
+        let now = get_atomic_clock_realtime().get_time_ns().as_u64();
         let mut venue = self.venue.borrow_mut();
         let mut made = vec![];
         if let Some(length) = venue.resends {
@@ -867,7 +869,7 @@ fn bars_built_from_quotes_are_handed_over_once_each_across_windows() {
 fn a_run_of_empty_windows_does_not_end_the_warmup() {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::Envelope);
-    let now = UnixNanos::from(Timestamp::now()).as_u64();
+    let now = get_atomic_clock_realtime().get_time_ns().as_u64();
     venue.borrow_mut().closed = Some((now - 66 * HOUR_NS, now - 6 * HOUR_NS));
 
     let warmed = warm(dir.path(), &venue, COMPOSITE, WARMUP);
@@ -1228,7 +1230,7 @@ fn the_venues_resend_of_the_warmups_last_quote_is_read_once() {
 #[test]
 fn features_read_a_catalogs_windows_then_the_venues_before_a_live_quote() {
     let dir = tempfile::tempdir().unwrap();
-    let now = UnixNanos::from(Timestamp::now()).as_u64();
+    let now = get_atomic_clock_realtime().get_time_ns().as_u64();
     let (from, to) = (now - 73 * HOUR_NS, now - 30 * HOUR_NS);
     let id = InstrumentId::from(GCZ26);
     let quotes: Vec<QuoteTick> = minutes(from, to, None)
@@ -1302,7 +1304,7 @@ fn assert_the_days_book(books: &Books) {
     let book = books.book.borrow();
     let best = book.best_bid_price().expect("a bid");
     let minute = best.as_f64() as u64;
-    let now = UnixNanos::from(Timestamp::now()).as_u64();
+    let now = get_atomic_clock_realtime().get_time_ns().as_u64();
     assert!(
         now / MINUTE_NS - minute <= 2,
         "the best bid is of minute {minute}"

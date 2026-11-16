@@ -41,8 +41,12 @@ use helix_trader::{
 };
 use jiff::SignedDuration;
 use nautilus_common::{
-    actor::DataActor, cache::Cache, clock::VirtualClock, factories::ExecutionClientFactory,
-    live::runner::replace_exec_event_sender, logging::logger::LoggerConfig,
+    actor::DataActor,
+    cache::Cache,
+    clock::VirtualClock,
+    factories::ExecutionClientFactory,
+    live::{get_runtime, runner::replace_exec_event_sender},
+    logging::logger::LoggerConfig,
     messages::ExecutionEvent,
 };
 use nautilus_model::{
@@ -259,7 +263,7 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
     };
     // As Ctrl-C would, once the position closed or the deadline passed.
     let finished = Arc::clone(&done);
-    let interrupt = tokio::spawn(async move {
+    let interrupt = get_runtime().spawn(async move {
         let deadline = tokio::time::Instant::now() + DEADLINE;
         while !finished.load(Ordering::SeqCst) && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(200)).await;

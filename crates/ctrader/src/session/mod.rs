@@ -1036,10 +1036,10 @@ mod tests {
         .unwrap();
         let before = credential.stored_tokens().unwrap();
 
-        let asked_at = Timestamp::now();
+        let asked_at = testing::now();
         session.renew_token();
         session.disconnect().await;
-        let answered_by = Timestamp::now();
+        let answered_by = testing::now();
 
         let renewed = credential.stored_tokens().unwrap();
         assert_eq!(before.access_token.expose_secret(), testing::ACCESS_TOKEN);

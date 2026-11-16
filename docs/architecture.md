@@ -1,6 +1,6 @@
 # Architecture
 
-Helix Trader is a Rust workspace built on NautilusTrader: the main crate, `helix-trader` at the root, and two adapters, `ctrader` in `crates/ctrader`, a Nautilus adapter for Spotware's cTrader Open API, and `lse` in `crates/lse`, a Nautilus data client for London Strategic Edge's market data. Nautilus owns data, simulation, execution and the portfolio; this repository adds what Nautilus lacks.
+Helix Trader is a Rust workspace built on NautilusTrader: the main crate, `helix-trader` at the root, and two adapters, `ctrader` in `crates/ctrader`, a Nautilus adapter for Spotware's cTrader Open API, and `lse` in `crates/lse`, a Nautilus data client for London Strategic Edge's market data. Helix builds its trading system on Nautilus, which owns data, simulation, execution and the portfolio, and takes from Nautilus everything Nautilus provides.
 
 ## Design rules
 

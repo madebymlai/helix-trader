@@ -1591,7 +1591,7 @@ mod tests {
 
     /// A token file whose access token is due for renewal `after` from now.
     fn due_after(after: Duration) -> Timestamp {
-        Timestamp::now() + RENEW_BEFORE + jiff::SignedDuration::try_from(after).unwrap()
+        testing::now() + RENEW_BEFORE + jiff::SignedDuration::try_from(after).unwrap()
     }
 
     #[tokio::test]
@@ -1600,7 +1600,7 @@ mod tests {
         let (url, received) = testing::start(venue_peer(&venue));
         let (credential, _dir) = credential_expiring(None);
         let tokens = credential.tokens();
-        let before = Timestamp::now();
+        let before = testing::now();
 
         let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
 
@@ -1614,7 +1614,7 @@ mod tests {
         );
         let lifetime = jiff::SignedDuration::from_secs(EXPIRES_IN);
         let expires_at = expires_at.unwrap();
-        assert!(before + lifetime <= expires_at && expires_at <= Timestamp::now() + lifetime);
+        assert!(before + lifetime <= expires_at && expires_at <= testing::now() + lifetime);
         client.disconnect().await;
     }
 
@@ -1622,9 +1622,8 @@ mod tests {
     async fn a_token_expiring_within_a_day_is_renewed_at_start() {
         let venue = TokenVenue::new();
         let (url, received) = testing::start(venue_peer(&venue));
-        let (credential, _dir) = credential_expiring(Some(
-            Timestamp::now() + jiff::SignedDuration::from_hours(23),
-        ));
+        let (credential, _dir) =
+            credential_expiring(Some(testing::now() + jiff::SignedDuration::from_hours(23)));
 
         let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
 
@@ -1637,9 +1636,8 @@ mod tests {
     async fn a_token_expiring_later_than_a_day_is_not_renewed_at_start() {
         let venue = TokenVenue::new();
         let (url, received) = testing::start(venue_peer(&venue));
-        let (credential, _dir) = credential_expiring(Some(
-            Timestamp::now() + jiff::SignedDuration::from_hours(25),
-        ));
+        let (credential, _dir) =
+            credential_expiring(Some(testing::now() + jiff::SignedDuration::from_hours(25)));
 
         let client = connect(&url, credential, SLOW_HEARTBEAT).await.unwrap();
 

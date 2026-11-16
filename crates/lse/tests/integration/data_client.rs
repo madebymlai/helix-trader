@@ -45,7 +45,9 @@ use nautilus_common::{
         },
     },
 };
-use nautilus_core::{Params, UUID4, UnixNanos, string::secret::SecretString};
+use nautilus_core::{
+    Params, UUID4, UnixNanos, string::secret::SecretString, time::get_atomic_clock_realtime,
+};
 use nautilus_model::{
     data::{BarType, CustomData, CustomDataTrait, Data, DataType, HasTsInit, QuoteTick, TradeTick},
     enums::{AggressorSide, BookAction, RecordFlag},
@@ -175,6 +177,11 @@ const LISTED_FUTURES: [&str; 17] = [
 
 /// The first tick captured, GOLD.F's at 16:44:55.499567 on 13 November
 /// 2026: bid 3888.0, ask 3888.2.
+/// Now on the wall clock the data client reads, Nautilus' realtime clock.
+fn now() -> Timestamp {
+    Timestamp::from(get_atomic_clock_realtime().get_time_ns())
+}
+
 #[tokio::test]
 async fn a_subscribed_lsedge_instrument_receives_lse_s_quotes_of_bid_and_ask_with_no_sizes() {
     let socket = MockLseSocket::start(|_, frame| data_ws_answer(frame));
@@ -1007,7 +1014,7 @@ async fn a_trades_request_reaching_into_the_day_lse_has_not_loaded_is_answered_u
         Reply::refusal(404, DATA_UNAVAILABLE_TODAY),
     ]);
     let (client, mut events) = connected(&lse, true).await;
-    let today = Timestamp::from_second(Timestamp::now().as_second() / 86_400 * 86_400).unwrap();
+    let today = Timestamp::from_second(now().as_second() / 86_400 * 86_400).unwrap();
     let day_before = today - SignedDuration::from_hours(24);
     let request = RequestTrades::new(
         InstrumentId::from(GOLD_FUTURES),
@@ -1267,7 +1274,7 @@ async fn a_request_reaching_into_a_day_lse_has_not_loaded_is_answered_unwritten(
         Reply::refusal(404, REFERENCE_DATA_UNAVAILABLE),
     ]);
     let (client, mut events) = connected(&lse, false).await;
-    let today = Timestamp::from_second(Timestamp::now().as_second() / 86_400 * 86_400).unwrap();
+    let today = Timestamp::from_second(now().as_second() / 86_400 * 86_400).unwrap();
     let mut request = bond_yields("2026-11-10T00:00:00Z", "2026-11-13T00:00:00Z");
     request.start = Some(today - SignedDuration::from_hours(24));
     request.end = None;
@@ -2260,7 +2267,7 @@ async fn a_bars_request_reaching_into_the_day_lse_has_not_loaded_is_answered_unw
         Reply::refusal(404, DATA_UNAVAILABLE_TODAY),
     ]);
     let (client, mut events) = connected(&lse, true).await;
-    let today = Timestamp::from_second(Timestamp::now().as_second() / 86_400 * 86_400).unwrap();
+    let today = Timestamp::from_second(now().as_second() / 86_400 * 86_400).unwrap();
     let day_before = today - SignedDuration::from_hours(24);
     let request = RequestBars::new(
         BarType::from(GOLD_SPOT_MINUTE_BARS),

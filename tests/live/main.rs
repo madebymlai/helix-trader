@@ -26,6 +26,11 @@ use helix_trader::{live::Recording, venues::LiveVenueArgs};
 use nautilus_common::actor::indicators::ActorIndicator;
 use nautilus_model::data::{Bar, QuoteTick, TradeTick};
 
+/// Now on the wall clock the live node reads, Nautilus' realtime clock.
+pub(crate) fn now() -> jiff::Timestamp {
+    jiff::Timestamp::from(nautilus_core::time::get_atomic_clock_realtime().get_time_ns())
+}
+
 #[path = "../common/mod.rs"]
 mod common;
 

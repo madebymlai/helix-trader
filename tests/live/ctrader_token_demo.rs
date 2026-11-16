@@ -91,7 +91,7 @@ async fn the_demo_session_renews_its_token_and_keeps_receiving_quotes() {
         assert!(tokio::time::Instant::now() < deadline, "no renewal in 30 s");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let renewed_at = Timestamp::now();
+    let renewed_at = crate::now();
     let after = loop {
         let at = next_spot_at(&mut spots, Duration::from_secs(60)).await;
         if at > renewed_at {
@@ -107,7 +107,7 @@ async fn the_demo_session_renews_its_token_and_keeps_receiving_quotes() {
         .permissions()
         .mode()
         & 0o777;
-    let left = renewed.expires_at.unwrap().duration_since(Timestamp::now());
+    let left = renewed.expires_at.unwrap().duration_since(crate::now());
     println!(
         "renewed at {renewed_at}, a spot at {after}; token file {} mode {mode:o}, the \
          access token valid until {:?} ({:.1} days)",
