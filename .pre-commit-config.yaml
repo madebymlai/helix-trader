@@ -115,6 +115,20 @@ repos:
         pass_filenames: false
   # nautilus-engineering: hooks end
 
+  - repo: https://github.com/google/yamlfmt
+    rev: v0.21.0
+    hooks:
+      - id: yamlfmt
+        # The vendored files stay as nautilus_engineering writes them
+        exclude: ^(\.nautilus-engineering/|\.yamllint\.yaml$)
+
+  - repo: https://github.com/Mateusz-Grzelinski/actionlint-py
+    rev: v1.7.12.24
+    hooks:
+      - id: actionlint
+        name: actionlint (syntax/structure)
+        description: Checks GitHub Actions workflow syntax and structural correctness
+
   ##############################################################################
   #  Custom hooks
   ##############################################################################
