@@ -261,10 +261,11 @@ pub enum EquitySource {
 impl Broker {
     /// How the broker's accounts keep positions. Nautilus answers this only
     /// on an execution client it has built, so this is a copy of its answer,
-    /// each broker's pinned by a test creating that client through its
-    /// factory from the config the node gets: the cTrader brokers' accounts
-    /// hedge, each trade a position of its own; OKX's derivatives net, in
-    /// the net position mode live requires; IB's account nets.
+    /// the cTrader brokers' and IB's pinned by a test creating that client
+    /// through its factory from the config the node gets, OKX's not: the
+    /// cTrader brokers' accounts hedge, each trade a position of its own;
+    /// OKX's derivatives net, in the net position mode live requires; IB's
+    /// account nets.
     #[must_use]
     pub(crate) fn oms_type(self) -> OmsType {
         match self {
