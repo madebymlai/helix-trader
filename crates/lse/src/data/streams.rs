@@ -814,7 +814,7 @@ mod tests {
     }
 
     /// LSE's rows are history alone: the client subscribes to none.
-    #[test]
+    #[rstest]
     fn lse_s_rows_are_refused_naming_them() {
         let metadata = nautilus_core::Params::new(
             [

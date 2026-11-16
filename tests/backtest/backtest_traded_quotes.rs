@@ -28,6 +28,7 @@ use nautilus_trading::{
     nautilus_strategy,
     strategy::{Strategy, StrategyConfig, StrategyCore},
 };
+use rstest::rstest;
 use serde::Deserialize;
 
 use crate::common::{glbx, ic};
@@ -233,7 +234,7 @@ fn positions(catalog: &tempfile::TempDir, config: &StandardConfig<Reader>, reads
     outcome.result.total_positions
 }
 
-#[test]
+#[rstest]
 fn a_traded_instrument_read_only_through_its_custom_data_fills_its_orders() {
     let catalog = ic::catalog();
     store_imbalances(&catalog);
@@ -247,7 +248,7 @@ fn a_traded_instrument_read_only_through_its_custom_data_fills_its_orders() {
     assert_eq!(opened, 1);
 }
 
-#[test]
+#[rstest]
 fn a_traded_instrument_read_only_through_its_book_deltas_fills_its_orders() {
     let catalog = ic::catalog();
     store_deltas(&catalog);
@@ -261,7 +262,7 @@ fn a_traded_instrument_read_only_through_its_book_deltas_fills_its_orders() {
     assert_eq!(opened, 1);
 }
 
-#[test]
+#[rstest]
 fn a_traded_instrument_read_only_through_its_depth_fills_its_orders() {
     let catalog = ic::catalog();
     store_depth(&catalog);

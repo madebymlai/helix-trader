@@ -422,6 +422,7 @@ mod tests {
         identifiers::{InstrumentId, StrategyId},
         types::{Currency, Money},
     };
+    use rstest::rstest;
     use rust_decimal::Decimal;
 
     use super::*;
@@ -719,7 +720,7 @@ mod tests {
         (built.take(), trained.take())
     }
 
-    #[test]
+    #[rstest]
     fn a_backtest_builds_from_its_first_window_then_trains_at_each_retrain_time() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -735,7 +736,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_second_backtest_of_the_span_builds_and_trains_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk(dir.path());
@@ -744,7 +745,7 @@ mod tests {
         assert_eq!(prepare(dir.path(), &walk), (vec![], vec![]));
     }
 
-    #[test]
+    #[rstest]
     fn a_model_in_the_store_is_reused() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk(dir.path());
@@ -776,7 +777,7 @@ mod tests {
     /// deviations from 0.56 and 0.2, a slope of 0.44 / 0.372. The short wins
     /// where the long loses: on the 7th its errors 1.8, 0.7 and 0.4 against
     /// the baseline -1/3's 4, a skill of 1 - 3.89 / 4, its slope -70/19.
-    #[test]
+    #[rstest]
     fn each_period_scores_its_model_beside_that_models_own_baseline_on_the_same_rows() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk(dir.path());
@@ -846,7 +847,7 @@ mod tests {
     /// win at 0.9, every trade (with the win at 0.2) 1; the span, two wins and
     /// a loss taken, 1/3, of five trades, 1/5. At 1.5 times the commission of
     /// 0.1 each trade makes 0.05 less.
-    #[test]
+    #[rstest]
     fn each_period_reports_what_the_models_decisions_earned_beside_every_trade() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -869,7 +870,7 @@ mod tests {
 
     /// The short alone, the reverse trades of the same decisions, takes on the
     /// 7th a loss at 0.8 and a win at 0.6, nought, every trade 1/3.
-    #[test]
+    #[rstest]
     fn a_short_only_strategy_reports_what_its_decisions_earned_beside_every_trade() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -939,7 +940,7 @@ mod tests {
     /// though each side clears on one more; the 8th, the long the win at 0.9,
     /// the short the loss at 0.2. The span, the long's two wins and a loss, 1/3,
     /// the short's win and loss, nought: five trades of five rows.
-    #[test]
+    #[rstest]
     fn each_trade_counts_for_the_side_picked_alone_where_both_sides_clear() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -959,7 +960,7 @@ mod tests {
     /// At 1.5 times the commission of 0.1, each trade picked on the rows of
     /// `opposed_scores` makes 0.05 less: the long's on the 7th, a win and a
     /// loss, -0.05, the short's, a win, 0.95.
-    #[test]
+    #[rstest]
     fn a_sides_stressed_earnings_count_only_the_trades_picked_for_it() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -976,7 +977,7 @@ mod tests {
     /// win and two losses, -1/3; on the 8th two wins, 1; the span, 1/5. The
     /// short's, the reverse: 1/3, -1 and -1/5. At 1.5 times the commission
     /// each makes 0.05 less.
-    #[test]
+    #[rstest]
     fn each_sides_every_trade_stays_its_own_beside_the_trades_picked() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -1001,7 +1002,7 @@ mod tests {
     /// 4, 1 - 2.75 / 4, its expectation never varying and so of no slope: each
     /// on all three rows, though two are picked for the long and one for the
     /// short.
-    #[test]
+    #[rstest]
     fn each_sides_score_stays_on_all_its_rows_with_a_model() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -1018,7 +1019,7 @@ mod tests {
 
     /// The models of both sides alike: on every row they expect the same, so
     /// tie, whether or not they clear their margins.
-    #[test]
+    #[rstest]
     fn a_row_where_the_sides_tie_counts_no_trade_for_either() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk(dir.path());
@@ -1039,7 +1040,7 @@ mod tests {
     /// The short's first model is the 8th's, the long's of the 7th having none
     /// beside it: on the 7th no pair decides, and neither side has a row
     /// scored or a trade. On the 8th the pair picks as in `opposed_scores`.
-    #[test]
+    #[rstest]
     fn a_side_with_no_model_beside_it_decides_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk(dir.path());
@@ -1101,7 +1102,7 @@ mod tests {
     /// row whatever their stops are worth: at 04:00 the short's is worth
     /// twice the long's, at 08:00 the long's twice the short's, and neither
     /// side is picked on either row.
-    #[test]
+    #[rstest]
     fn sides_expecting_the_same_r_tie_whatever_their_units() {
         let dir = tempfile::tempdir().unwrap();
         let config = with_exits();
@@ -1174,7 +1175,7 @@ mod tests {
     /// USD, not those at 0.3 and 0.2, though they expect 0.5 and 0.4 USD. The
     /// trades taken earn 1/3 USD a trade, as on units of 1 USD, beside every
     /// trade's 0.2: over units of 2, 1/6R and 0.1R.
-    #[test]
+    #[rstest]
     fn the_metas_margin_is_in_r_whatever_the_unit_of_the_side_picked() {
         let dir = tempfile::tempdir().unwrap();
         let config = with_meta();
@@ -1203,7 +1204,7 @@ mod tests {
     /// of which it takes the first and the last, nought. The 8th: a win and
     /// the short's loss, nought, of which it takes the win, 1. The span, 1/3
     /// of three beside 1/5 of five.
-    #[test]
+    #[rstest]
     fn a_metas_earnings_read_the_trades_of_the_side_picked_from_its_margin() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -1224,7 +1225,7 @@ mod tests {
     /// the means 0.38 and 0.2 of 0.12, -0.13, 0.02, 0.17 and -0.18 against 0.8,
     /// 0.8, -1.2, 0.8 and -1.2, a slope of 0.32 / 0.093; the top decile, the
     /// row expected 0.55, a gap of 0.45.
-    #[test]
+    #[rstest]
     fn the_metas_expected_r_is_scored_on_the_trades_of_the_side_picked() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -1241,7 +1242,7 @@ mod tests {
     /// With a meta filtering the side picked, each side still counts every
     /// trade picked for it, as in `opposed_scores`: the meta's section says
     /// which of them it took.
-    #[test]
+    #[rstest]
     fn a_sides_trades_picked_are_counted_before_any_meta() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -1254,7 +1255,7 @@ mod tests {
     /// The pair of the 8th has a long of another fingerprint, refused as it
     /// loads: the pair is, and on the 8th the pair of the 7th is scored, its
     /// short too, never the 8th's short beside the 7th's long.
-    #[test]
+    #[rstest]
     fn a_model_failing_its_checks_is_not_scored_and_the_current_one_is() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk(dir.path());
@@ -1283,7 +1284,7 @@ mod tests {
     /// A baseline is a model's: the 7th's three rows, decided with none,
     /// have no baseline either, and over the span the baseline has the
     /// model's two rows of the 8th.
-    #[test]
+    #[rstest]
     fn rows_before_any_model_have_no_score_of_a_model_nor_of_a_baseline() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk(dir.path());
@@ -1308,7 +1309,7 @@ mod tests {
     /// that decided it: the long's squared errors 4.29 against 4/9 + 16/9 +
     /// 25/16, a skill of 1 - 4.29 / (20/9 + 25/16), where the 7th's baseline
     /// throughout would make 1 - 4.29 / 4.
-    #[test]
+    #[rstest]
     fn a_period_scores_each_row_beside_the_baseline_of_the_model_that_decided_it() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk(dir.path());
@@ -1341,7 +1342,7 @@ mod tests {
         close(first.skill, 1.0 - 4.29 / (20.0 / 9.0 + 25.0 / 16.0));
     }
 
-    #[test]
+    #[rstest]
     fn scores_of_a_span_the_dataset_lacks_are_refused() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -1352,7 +1353,7 @@ mod tests {
         assert!(err.to_string().contains("lacks"), "{err}");
     }
 
-    #[test]
+    #[rstest]
     fn the_scores_read_as_report_sections() {
         let score = ExpectedScore {
             rows: 3,
@@ -1470,7 +1471,7 @@ Meta model scores, out of sample, over the span
     /// days before, their meta model's at none: the backtest builds from the
     /// meta's longer window and trains at both times, where the meta lacks
     /// a model.
-    #[test]
+    #[rstest]
     fn a_backtest_with_a_meta_model_builds_its_window_and_trains_where_either_lacks() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("catalog")).unwrap();
@@ -1531,7 +1532,7 @@ Meta model scores, out of sample, over the span
     /// On an empty store the meta waits at the first retrain, the 7th, with
     /// no side's model before it, so reads no row there: the backtest
     /// builds from the sides' window, the 6th, not the meta's.
-    #[test]
+    #[rstest]
     fn a_backtest_from_an_empty_store_builds_from_the_sides_window_its_meta_waiting() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -1545,7 +1546,7 @@ Meta model scores, out of sample, over the span
 
     /// The sides' first model is the 6th's: the meta's rows, its
     /// decisions, start there, though its window starts on the 5th.
-    #[test]
+    #[rstest]
     fn a_backtest_builds_no_day_before_the_sides_first_model() {
         let dir = tempfile::tempdir().unwrap();
         for at in [
@@ -1599,7 +1600,7 @@ Meta model scores, out of sample, over the span
     /// A meta model has no row before its sides' first model, so none
     /// is trained at the sides' first retrain time: a second backtest
     /// of the span finds nothing to train.
-    #[test]
+    #[rstest]
     fn a_second_backtest_with_a_meta_model_trains_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let walk = meta_walk(dir.path());
@@ -1630,7 +1631,7 @@ Meta model scores, out of sample, over the span
     /// A backtest from the 8th trains no meta there, the sides' first
     /// model; a backtest from the 7th then trains the sides at the 7th
     /// first, which gives the meta at the 8th rows: it trains there too.
-    #[test]
+    #[rstest]
     fn a_backtest_from_earlier_trains_the_meta_where_the_sides_now_precede_it() {
         let dir = tempfile::tempdir().unwrap();
         let walk = meta_walk(dir.path());
@@ -1659,7 +1660,7 @@ Meta model scores, out of sample, over the span
         );
     }
 
-    #[test]
+    #[rstest]
     fn the_long_the_short_then_the_meta_models_scores_follow_in_the_report() {
         let score = ExpectedScore::default();
         let scores = ModelScores {
@@ -1734,7 +1735,7 @@ Meta model scores, out of sample, over the span
     /// Never retrained, the backtest from 12:00 of the 7th trains at its
     /// start alone, off the daily grid, and builds from its window back
     /// from there.
-    #[test]
+    #[rstest]
     fn a_backtest_never_retrained_builds_its_window_and_trains_at_its_start_alone() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk_of(dir.path(), &never());
@@ -1756,7 +1757,7 @@ Meta model scores, out of sample, over the span
 
     /// The models trained at the first backtest's start, 12:00 of the 7th,
     /// are in use at a second's of the same span, and at one from the 8th.
-    #[test]
+    #[rstest]
     fn a_second_backtest_never_retrained_of_the_span_or_from_later_trains_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk_of(dir.path(), &never());
@@ -1778,7 +1779,7 @@ Meta model scores, out of sample, over the span
 
     /// Never retrained, the train at the start published no side: the
     /// backtest would trade nothing, and is refused, naming the sides.
-    #[test]
+    #[rstest]
     fn a_backtest_never_retrained_with_no_sides_model_at_its_start_is_refused_naming_the_sides() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk_of(dir.path(), &never());
@@ -1840,7 +1841,7 @@ Meta model scores, out of sample, over the span
     /// from there: the backtest builds from the 4th, trains at the start
     /// alone, and runs, the sides of the 5th and the meta of the 7th in
     /// use.
-    #[test]
+    #[rstest]
     fn a_backtest_never_retrained_on_an_empty_store_builds_back_to_the_sides_window_and_has_both_in_use_at_its_start()
      {
         let dir = tempfile::tempdir().unwrap();
@@ -1858,7 +1859,7 @@ Meta model scores, out of sample, over the span
     /// publishes the sides as of the meta's window before it, and its
     /// meta's holdout falls short: the backtest is refused, naming the
     /// meta.
-    #[test]
+    #[rstest]
     fn a_backtest_never_retrained_whose_meta_was_refused_at_its_start_is_refused_naming_it() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -1873,7 +1874,7 @@ Meta model scores, out of sample, over the span
     /// Never retrained, on an empty store, the train at the start
     /// publishes no side, and so leaves the meta waiting: the backtest is
     /// refused, naming the sides and the meta.
-    #[test]
+    #[rstest]
     fn a_backtest_never_retrained_whose_sides_were_refused_at_its_start_is_refused_naming_both() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -1889,7 +1890,7 @@ Meta model scores, out of sample, over the span
 
     /// Retrained, a backtest whose every train published nothing runs: a
     /// later retrain may publish, and its sides' scores stay.
-    #[test]
+    #[rstest]
     fn a_retrained_backtest_whose_trains_were_all_refused_still_runs() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -1910,7 +1911,7 @@ Meta model scores, out of sample, over the span
     /// Never retrained, the models trained at the start, the 7th, are used
     /// over the whole span: one period, the 7th to the 9th, of the five
     /// rows decided in it.
-    #[test]
+    #[rstest]
     fn a_backtest_never_retrained_scores_the_span_as_one_period() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk_of(dir.path(), &never());
@@ -1937,7 +1938,7 @@ Meta model scores, out of sample, over the span
     /// Never retrained, each side's model of the 7th is in use at a
     /// backtest from the 8th: its plan fits nothing, so it trains nothing
     /// and builds only the span's day, the scores reading no row before it.
-    #[test]
+    #[rstest]
     fn a_backtest_never_retrained_with_its_models_in_use_builds_only_its_span() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk_of(dir.path(), &never());
@@ -1964,7 +1965,7 @@ Meta model scores, out of sample, over the span
     /// holdout from 18:00, 1/3 (`trained_baseline`): on the 8th's two wins at
     /// 0.9 and 0.2, squared errors 0.65 against 8/9, a skill of 1 - 0.65 x
     /// 9/8, where the 8th's baseline, -1/3, would make 1 - 0.65 x 9/32.
-    #[test]
+    #[rstest]
     fn a_backtest_never_retrained_scores_a_model_beside_its_own_baseline() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk_of(dir.path(), &never());
@@ -1987,7 +1988,7 @@ Meta model scores, out of sample, over the span
     /// so no pair is in use at a backtest from the 8th: its train there is
     /// refused, and the backtest, which would trade nothing, is refused too,
     /// naming the sides.
-    #[test]
+    #[rstest]
     fn a_backtest_never_retrained_with_a_side_alone_at_its_start_is_refused_naming_the_sides() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk_of(dir.path(), &never());
@@ -2018,7 +2019,7 @@ Meta model scores, out of sample, over the span
     /// scored beside its own baseline, 1/3 (`trained_baseline`), not the
     /// training mean a train of the 8th would have fitted, -1/3: on the 8th's
     /// two wins, a skill of 1 - 0.65 x 9/8.
-    #[test]
+    #[rstest]
     fn a_retrained_backtest_scores_an_earlier_model_in_use_beside_its_own_baseline() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk(dir.path());

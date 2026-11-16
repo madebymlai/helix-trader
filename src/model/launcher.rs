@@ -416,6 +416,7 @@ mod tests {
         identifiers::{InstrumentId, TraderId},
         types::{Price, Quantity},
     };
+    use rstest::rstest;
     use ustr::Ustr;
 
     use super::*;
@@ -462,7 +463,7 @@ mod tests {
         )
     }
 
-    #[test]
+    #[rstest]
     fn a_panicking_in_process_train_is_kept() {
         let launcher = Launcher::in_process(|_| panic!("the train panicked"));
 
@@ -474,7 +475,7 @@ mod tests {
 
     /// A train finding its model published at its time keeps it in use:
     /// it kept no model, and succeeded.
-    #[test]
+    #[rstest]
     fn an_in_process_train_whose_model_is_in_use_succeeds() {
         let launcher = Launcher::in_process(|at| {
             Outcome::InUse {
@@ -490,7 +491,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_child_is_told_the_time_and_its_success_is_the_retrains() {
         let launcher = shell(r#"[ "$1" = --at ] && [ "$2" = 2026-10-22T00:00:00Z ]"#);
 
@@ -500,7 +501,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_failing_child_is_kept_with_the_error_it_printed_last() {
         let launcher = shell(
             "echo 'ERROR a log line of the replay' >&2; \
@@ -516,7 +517,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_failing_child_printing_no_error_is_kept_with_its_status() {
         let launcher = shell("exit 3");
 
@@ -526,7 +527,7 @@ mod tests {
         assert!(why.contains('3'), "{why}");
     }
 
-    #[test]
+    #[rstest]
     fn a_child_that_cannot_start_is_kept() {
         let launcher = Launcher::process(PathBuf::from("/nonexistent/helix-trader"), vec![]);
 
@@ -633,7 +634,7 @@ mod tests {
         })
     }
 
-    #[test]
+    #[rstest]
     fn a_strategy_never_retrained_has_no_retrain_actor_and_a_retrained_one_has_one() {
         let dir = tempfile::tempdir().unwrap();
         let launcher = || Launcher::in_process(|_| unreachable!());
@@ -651,7 +652,7 @@ mod tests {
 
     /// Nautilus refuses two actors of one id: a node retraining two
     /// strategies holds the actor of each, named after it.
-    #[test]
+    #[rstest]
     fn a_strategys_retrain_actor_is_named_after_it() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -684,7 +685,7 @@ mod tests {
     /// Started at 11:30 on 2026-10-22, a daily retrain's timer, on the
     /// actor's own clock, first fires at the next midnight, 2026-10-23, a
     /// whole number of days since the epoch.
-    #[test]
+    #[rstest]
     fn the_retrain_timer_is_the_actors_on_the_grid() {
         let dir = tempfile::tempdir().unwrap();
         let mut actor = daily_on(dir.path(), Launcher::in_process(|_| unreachable!()));
@@ -726,7 +727,7 @@ mod tests {
     /// it with, launches a train at 2026-10-23T00:00. The actor is released
     /// then, as the trader releases it at dispose, its launcher with it, so
     /// that a train never launched ends the wait.
-    #[test]
+    #[rstest]
     fn an_added_retrain_actor_trains_at_the_grid_time_its_clock_fires() {
         let dir = tempfile::tempdir().unwrap();
         let (finish, finished) = mpsc::channel();
@@ -745,7 +746,7 @@ mod tests {
         assert_eq!(finished.recv(), Ok(at("2026-10-23T00:00:00Z")));
     }
 
-    #[test]
+    #[rstest]
     fn a_retrain_due_while_one_runs_is_skipped() {
         let dir = tempfile::tempdir().unwrap();
         let (release, released) = mpsc::channel::<()>();
@@ -809,7 +810,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn a_finished_retrain_makes_way_for_the_next() {
         let dir = tempfile::tempdir().unwrap();
         let (finish, finished) = mpsc::channel();
@@ -825,7 +826,7 @@ mod tests {
     /// A retrain that kept the current model, which the strategy trades
     /// on still, leaves the next retrain free to launch, as one that
     /// published does.
-    #[test]
+    #[rstest]
     fn a_retrain_keeping_the_model_makes_way_for_the_next() {
         let dir = tempfile::tempdir().unwrap();
         let (finish, finished) = mpsc::channel();
@@ -838,7 +839,7 @@ mod tests {
         assert_eq!(second, at("2026-10-23T00:00:00Z"));
     }
 
-    #[test]
+    #[rstest]
     fn a_retrain_trains_at_its_time_when_the_catalog_holds_past_it() {
         let dir = tempfile::tempdir().unwrap();
         let (finish, finished) = mpsc::channel();
@@ -849,7 +850,7 @@ mod tests {
         assert_eq!(finished.recv().unwrap(), at("2026-10-22T00:00:00Z"));
     }
 
-    #[test]
+    #[rstest]
     fn a_retrain_trains_at_the_catalogs_end_when_it_ends_before_its_time() {
         let dir = tempfile::tempdir().unwrap();
         stored(
@@ -864,7 +865,7 @@ mod tests {
         assert_eq!(finished.recv().unwrap(), at("2026-10-21T13:00:00Z"));
     }
 
-    #[test]
+    #[rstest]
     fn the_catalogs_end_is_the_earliest_last_time_of_the_series_read() {
         let dir = tempfile::tempdir().unwrap();
         stored(
@@ -879,7 +880,7 @@ mod tests {
         assert_eq!(finished.recv().unwrap(), at("2026-10-21T09:30:00Z"));
     }
 
-    #[test]
+    #[rstest]
     fn a_retrain_is_skipped_when_the_catalog_holds_nothing_of_a_series_read() {
         let dir = tempfile::tempdir().unwrap();
         stored(dir.path(), &[(AUD, "2026-10-21T13:00:00Z")]);
@@ -892,7 +893,7 @@ mod tests {
         assert_eq!(finished.recv(), Err(mpsc::RecvError));
     }
 
-    #[test]
+    #[rstest]
     fn a_retrain_is_skipped_when_the_catalog_gained_nothing_since_the_previous() {
         let dir = tempfile::tempdir().unwrap();
         stored(
@@ -911,7 +912,7 @@ mod tests {
         assert_eq!(finished.recv(), Err(mpsc::RecvError));
     }
 
-    #[test]
+    #[rstest]
     fn a_retrain_trains_at_what_the_catalog_gained_since_the_previous() {
         let dir = tempfile::tempdir().unwrap();
         stored(
@@ -937,7 +938,7 @@ mod tests {
     /// its success as info, and the child that kept the current model,
     /// printing why last (`Error: ` and the reason), logs that reason as an
     /// error, each as its train ends.
-    #[test]
+    #[rstest]
     fn a_finished_retrain_logs_its_outcome_as_it_ends() {
         if !log_capture::alone(
             module_path!(),

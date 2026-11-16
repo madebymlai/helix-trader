@@ -70,6 +70,7 @@ use nautilus_model::{
 use nautilus_persistence::{
     backend::parquet::catalog::ParquetDataCatalog, config::DataCatalogConfig,
 };
+use rstest::rstest;
 
 const INSTRUMENT_ID: &str = "AUD/USD.SIM";
 /// The bars the actor subscribes to, which Nautilus builds from the trades.
@@ -102,7 +103,7 @@ const PATIENCE: Duration = Duration::from_secs(60);
 
 /// The reader reads until the catalog has grown under it and holds a few
 /// bars, then the node is interrupted.
-#[test]
+#[rstest]
 fn a_reader_sees_a_clean_prefix_of_the_streamed_data_while_the_node_runs() {
     let dir = tempfile::tempdir().unwrap();
     let mut node = spawn_node(dir.path(), Duration::from_secs(1), None, 0);
@@ -136,7 +137,7 @@ fn a_reader_sees_a_clean_prefix_of_the_streamed_data_while_the_node_runs() {
     }
 }
 
-#[test]
+#[rstest]
 fn the_bars_the_node_builds_are_stored_under_the_external_source() {
     let dir = tempfile::tempdir().unwrap();
     let mut node = spawn_node(dir.path(), Duration::from_secs(1), Some(4_000), 0);
@@ -157,7 +158,7 @@ fn the_bars_the_node_builds_are_stored_under_the_external_source() {
     assert!(!stored.is_empty());
 }
 
-#[test]
+#[rstest]
 fn a_clean_stop_promotes_everything_and_leaves_no_staging_file() {
     let dir = tempfile::tempdir().unwrap();
     // No promotion before the stop: the stop promotes all.
@@ -168,7 +169,7 @@ fn a_clean_stop_promotes_everything_and_leaves_no_staging_file() {
     assert_eq!(staged_files(dir.path()), Vec::<PathBuf>::new());
 }
 
-#[test]
+#[rstest]
 fn the_instruments_the_clients_load_are_in_the_catalog() {
     let dir = tempfile::tempdir().unwrap();
     let mut node = spawn_node(dir.path(), Duration::from_secs(1), Some(2_000), 0);
@@ -181,7 +182,7 @@ fn the_instruments_the_clients_load_are_in_the_catalog() {
     assert_eq!(ids, vec![InstrumentId::from(INSTRUMENT_ID)]);
 }
 
-#[test]
+#[rstest]
 fn a_restart_after_a_crash_promotes_what_the_crashed_run_staged() {
     let dir = tempfile::tempdir().unwrap();
     let mut crashed = spawn_node(dir.path(), Duration::from_secs(3_600), None, 0);
@@ -209,7 +210,7 @@ fn a_restart_after_a_crash_promotes_what_the_crashed_run_staged() {
 /// The restart's warmup writes the venue's answer back over what the
 /// catalog lacks up to now: the crashed run's staged rows are in the
 /// catalog by then, so the answer lands after them, not over them.
-#[test]
+#[rstest]
 fn a_restart_promotes_what_the_crashed_run_staged_before_its_warmup_writes_back() {
     let dir = tempfile::tempdir().unwrap();
     let mut crashed = spawn_node(dir.path(), Duration::from_secs(3_600), None, 0);
@@ -246,7 +247,7 @@ fn a_restart_promotes_what_the_crashed_run_staged_before_its_warmup_writes_back(
 /// No check of ours stands before a backtest: one across a crash runs on
 /// what the catalog stores, the gap the crash left replayed as a quiet
 /// period.
-#[test]
+#[rstest]
 fn a_backtest_across_a_crash_runs_through_the_gap_it_left() {
     let dir = tempfile::tempdir().unwrap();
     let mut crashed = spawn_node(dir.path(), Duration::from_secs(3_600), None, 0);
@@ -271,7 +272,7 @@ fn a_backtest_across_a_crash_runs_through_the_gap_it_left() {
 /// A backtest over the streamed data runs through the gaps between the
 /// files Nautilus promoted, which stay in the catalog: it reads the rows,
 /// not the catalog's intervals.
-#[test]
+#[rstest]
 fn a_backtest_over_the_streamed_data_runs_through_the_gaps_between_promotions() {
     let dir = tempfile::tempdir().unwrap();
     let mut node = spawn_node(dir.path(), Duration::from_secs(1), None, 0);
@@ -295,7 +296,7 @@ fn a_backtest_over_the_streamed_data_runs_through_the_gaps_between_promotions() 
 /// A dataset build, a model backtest's before its run or a retrain's
 /// replay, over the streamed data runs through the gaps between the files
 /// Nautilus promoted, as a backtest does.
-#[test]
+#[rstest]
 fn a_dataset_build_over_the_streamed_data_runs_through_the_gaps_between_promotions() {
     let dir = tempfile::tempdir().unwrap();
     let mut node = spawn_node(dir.path(), Duration::from_secs(1), None, 0);
@@ -314,7 +315,7 @@ fn a_dataset_build_over_the_streamed_data_runs_through_the_gaps_between_promotio
 /// backtest builds before its run and a retrain replays: a dataset run of
 /// the strategy, a Nautilus node, here the one of its process. Passes at
 /// once outside one.
-#[test]
+#[rstest]
 fn streamed_dataset() {
     let (Ok(root), Ok(span)) = (std::env::var(ROOT), std::env::var(DATASET_SPAN)) else {
         return;
@@ -357,7 +358,7 @@ fn streamed_dataset() {
 
 /// Not a test: the node the tests above run in a child process. Passes at
 /// once outside one.
-#[test]
+#[rstest]
 fn streamed_node() {
     let Ok(root) = std::env::var(ROOT) else {
         return;

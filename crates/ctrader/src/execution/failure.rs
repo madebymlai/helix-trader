@@ -119,6 +119,8 @@ fn joined(code: &str, description: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
     const VENUE: &str = "ACMEFX";
@@ -168,7 +170,7 @@ mod tests {
 
     /// The refusals the demo answered (`testdata/order_error_*`), and the
     /// deal timeout Spotware documents as "rejected".
-    #[test]
+    #[rstest]
     fn a_refusal_ctrader_explains_is_a_venue_rejection() {
         for code in [
             "TRADING_BAD_VOLUME",
@@ -190,7 +192,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_rate_limit_or_an_unavailable_server_leaves_the_outcome_unknown() {
         for code in [
             "UNKNOWN_ERROR",

@@ -56,6 +56,7 @@ use nautilus_model::{
     types::{Price, Quantity},
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
+use rstest::rstest;
 
 const GCZ26: &str = "GCZ26.GLBX";
 
@@ -574,7 +575,7 @@ fn stored_book(dir: &Path) -> Vec<u64> {
         .collect()
 }
 
-#[test]
+#[rstest]
 fn each_day_is_asked_and_written_back_and_a_wider_fill_asks_only_the_new_day() {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::Data);
@@ -628,7 +629,7 @@ fn each_day_is_asked_and_written_back_and_a_wider_fill_asks_only_the_new_day() {
 /// The book stored over Friday to Monday but for 0.2 s before Friday's
 /// midnight, as a live node's daily promotions leave a sliver between
 /// their files. The venue holds nothing in the sliver.
-#[test]
+#[rstest]
 fn a_sliver_between_stored_files_is_asked_once_and_closed_by_its_write_back() {
     let dir = tempfile::tempdir().unwrap();
     let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -678,7 +679,7 @@ fn a_sliver_between_stored_files_is_asked_once_and_closed_by_its_write_back() {
 
 /// Friday from midnight to noon in windows of three hours: the book's
 /// snapshot at 10:00 is in the last.
-#[test]
+#[rstest]
 fn a_slow_client_is_asked_one_window_at_a_time_in_order() {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::Later);
@@ -720,7 +721,7 @@ fn a_slow_client_is_asked_one_window_at_a_time_in_order() {
 /// empty, the most a request can hold, and none of them ends the fill. With
 /// no stored data beside them they record nothing, so the next fill asks for
 /// them again.
-#[test]
+#[rstest]
 fn a_run_of_empty_windows_does_not_end_the_fill() {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::Data);
@@ -758,7 +759,7 @@ fn a_run_of_empty_windows_does_not_end_the_fill() {
 
 /// The venue cuts the history at Sunday's window. What came before stays
 /// written, window by window, and the next fill asks only from there.
-#[test]
+#[rstest]
 fn a_window_failing_keeps_those_before_it_and_the_next_fill_asks_only_from_it() {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::FailedFrom(ns(SUN)));
@@ -799,7 +800,7 @@ fn a_window_failing_keeps_those_before_it_and_the_next_fill_asks_only_from_it() 
     );
 }
 
-#[test]
+#[rstest]
 fn a_failed_request_fails_the_fill_naming_it_and_writes_nothing() {
     let friday_on = "the book depths of GCZ26.GLBX over \
                      [2025-10-17T00:00:00Z, 2025-10-18T23:59:59.999999999Z]";
@@ -836,7 +837,7 @@ fn a_failed_request_fails_the_fill_naming_it_and_writes_nothing() {
 /// GCZ26's definition asked of one client and its book of another, both on
 /// no venue and with no route, as two sources of one venue share a fill's
 /// node: each request names its client, and that client answers it.
-#[test]
+#[rstest]
 fn each_request_is_answered_by_the_client_it_names() {
     let dir = tempfile::tempdir().unwrap();
     let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -876,7 +877,7 @@ fn each_request_is_answered_by_the_client_it_names() {
     assert_eq!(stored_book(dir.path()), [ns("2025-10-17T10:00:00Z")]);
 }
 
-#[test]
+#[rstest]
 fn rows_the_engine_does_not_write_back_fail_the_fill_naming_the_request() {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::OtherContract);
@@ -898,7 +899,7 @@ fn rows_the_engine_does_not_write_back_fail_the_fill_naming_the_request() {
     assert!(err.contains("write-back failed"), "{err}");
 }
 
-#[test]
+#[rstest]
 fn book_deltas_are_asked_a_day_a_request_and_written_back() {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::Data);
@@ -969,7 +970,7 @@ fn series_slice(series: (NautilusDataType, &str), from: Timestamp, to: Timestamp
     }
 }
 
-#[test]
+#[rstest]
 fn bars_and_funding_are_asked_a_day_a_request_and_written_back_under_their_series() {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::Data);

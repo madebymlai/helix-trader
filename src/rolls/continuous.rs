@@ -173,6 +173,7 @@ fn roll_price(
 #[cfg(test)]
 mod tests {
     use nautilus_model::{enums::AggressorSide, identifiers::TradeId, types::Quantity};
+    use rstest::rstest;
 
     use super::*;
 
@@ -194,7 +195,7 @@ mod tests {
         )
     }
 
-    #[test]
+    #[rstest]
     fn a_roll_is_priced_from_the_trades_nearest_it_days_away() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -239,13 +240,13 @@ mod tests {
         )
     }
 
-    #[test]
+    #[rstest]
     fn bars_on_a_plain_instrument_read_nothing() {
         let continuous = read("GCZ26.GLBX-1-MINUTE-LAST-INTERNAL").unwrap();
         assert_eq!(continuous, ContinuousBars::default());
     }
 
-    #[test]
+    #[rstest]
     fn a_root_without_a_roll_over_the_span_is_refused_naming_its_contract() {
         let dir = tempfile::tempdir().unwrap();
         let err = ContinuousBars::read(

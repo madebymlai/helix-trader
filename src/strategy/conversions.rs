@@ -276,6 +276,7 @@ mod tests {
         instruments::stubs::default_fx_ccy,
         types::{Price, Quantity},
     };
+    use rstest::rstest;
 
     use super::*;
 
@@ -337,7 +338,7 @@ mod tests {
     /// EUR are 125,000 USD, a loss of 2,000 USD is itself, 150,000 JPY are
     /// 1,000 USD. Their sum, 124,000 USD, is the equity in USD; any one
     /// left out, or taken alone, gives another.
-    #[test]
+    #[rstest]
     fn an_equity_in_several_currencies_is_the_sum_of_each_converted() {
         let equity = money(&["100000 EUR", "-2000 USD", "150000 JPY"]);
 
@@ -350,7 +351,7 @@ mod tests {
 
     /// No pair reaches GBP, but none of it is held: the equity is the EUR's
     /// alone, converted.
-    #[test]
+    #[rstest]
     fn an_amount_of_zero_needs_no_rate() {
         let equity = money(&["100000 EUR", "0 GBP"]);
 
@@ -363,7 +364,7 @@ mod tests {
 
     /// No pair reaches GBP, and 5 GBP are held: the equity is not
     /// converted, rather than converted without them.
-    #[test]
+    #[rstest]
     fn an_amount_no_pair_reaches_converts_nothing() {
         let equity = money(&["100000 EUR", "5 GBP"]);
 
@@ -376,7 +377,7 @@ mod tests {
 
     /// An amount of a currency with a pair but no rate cached yet converts
     /// nothing either.
-    #[test]
+    #[rstest]
     fn an_amount_of_a_pair_not_quoted_yet_converts_nothing() {
         let equity = money(&["100000 EUR"]);
 
@@ -410,7 +411,7 @@ mod tests {
     /// IB serves an FX pair's history as BID and ASK bars, not quotes:
     /// Nautilus reads a pair no quote of which is cached at the closes of
     /// its BID and ASK bars, 1.24990 and 1.25010, the mid 1.25 USD per EUR.
-    #[test]
+    #[rstest]
     fn a_pair_without_quotes_is_read_at_its_bid_and_ask_bars() {
         let mut cache = defining(&[EURUSD]);
         cache

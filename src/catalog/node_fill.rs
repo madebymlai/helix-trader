@@ -626,6 +626,7 @@ mod tests {
         types::{Price, Quantity},
     };
     use nautilus_persistence::backend::parquet::paths::timestamps_to_filename;
+    use rstest::rstest;
 
     use super::*;
     use crate::{rolls::Slice, strategy::requirements::CustomSeries};
@@ -654,7 +655,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn an_empty_catalog_lacks_each_series_over_its_slice_after_the_definition() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -730,7 +731,7 @@ mod tests {
         )
     }
 
-    #[test]
+    #[rstest]
     fn a_stored_series_lacks_only_what_is_outside_its_stored_intervals() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -776,7 +777,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_covered_window_asks_for_nothing_not_even_the_definition() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -815,7 +816,7 @@ mod tests {
     /// The slivers a live node's daily promotions leave between their files
     /// are what the catalog lacks, each asked with the definition over it.
     /// A run-start directory an older node left is ignored.
-    #[test]
+    #[rstest]
     fn a_sliver_between_promoted_files_is_asked_with_its_definition() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("live-runs/1792540800000000000")).unwrap();
@@ -868,7 +869,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn bars_are_asked_as_their_bar_type_over_their_slice_after_the_definition() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -886,7 +887,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn stored_bars_lack_only_what_is_outside_their_bar_type_s_stored_interval() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -939,7 +940,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn bars_on_a_slice_of_another_contract_are_refused_naming_both() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -956,7 +957,7 @@ mod tests {
         assert!(err.contains("GCQ26.GLBX"), "{err}");
     }
 
-    #[test]
+    #[rstest]
     fn funding_is_asked_over_its_slice_after_the_definition() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -979,7 +980,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn book_deltas_are_asked_as_deltas_over_their_slice() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -1009,7 +1010,7 @@ mod tests {
 
     /// No definition: a custom series brings no instrument. Asked by its
     /// data type as Nautilus builds it.
-    #[test]
+    #[rstest]
     fn a_custom_series_is_lacking_over_its_window_alone() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -1040,7 +1041,7 @@ mod tests {
     /// at 00:00 UTC on 29 July 2026 (`rolls/README.md`): each contract's
     /// series lacks over its slice, asked by its data type, the
     /// contract's id its identifier, the type and metadata kept.
-    #[test]
+    #[rstest]
     fn a_roots_custom_series_is_lacking_contract_by_contract_over_its_slices() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);

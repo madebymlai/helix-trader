@@ -241,6 +241,7 @@ impl fmt::Display for Stake {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
     use serde::de::{
         IntoDeserializer,
         value::{Error, F64Deserializer, I64Deserializer},
@@ -248,7 +249,7 @@ mod tests {
 
     use super::*;
 
-    #[test]
+    #[rstest]
     fn a_value_in_r_reads_from_its_text_with_an_r_suffix() {
         for (text, value) in [("0.5R", 0.5), ("0R", 0.0), ("-1e9R", -1e9), ("2R", 2.0)] {
             assert_eq!(text.parse::<R>().unwrap(), R::new(value), "{text}");
@@ -257,7 +258,7 @@ mod tests {
 
     /// A number without its suffix is not taken for R, nor a suffix
     /// without its number, nor an R that is not finite.
-    #[test]
+    #[rstest]
     fn a_value_without_an_r_suffix_or_not_a_finite_number_is_refused() {
         for text in [
             "0.5", "0.5r", "0.5 R", "R", "halfR", "nanR", "infR", "-infR",
@@ -268,7 +269,7 @@ mod tests {
 
     /// Its text reads back to it, so a store keyed by its text is keyed
     /// by its value.
-    #[test]
+    #[rstest]
     fn a_value_in_r_is_written_with_its_suffix() {
         assert_eq!(R::new(0.5).to_string(), "0.5R");
         assert_eq!(R::new(-1e9).to_string(), "-1000000000R");
@@ -277,14 +278,14 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     #[should_panic(expected = "finite")]
     fn a_value_in_r_not_finite_cannot_be_made() {
         let _ = R::new(f64::NAN);
     }
 
     /// A prediction not finite is no value in R, rather than a panic.
-    #[test]
+    #[rstest]
     fn a_finite_value_is_an_r_and_nan_or_an_infinity_none() {
         assert_eq!(R::finite(0.25), Some(R::new(0.25)));
         assert_eq!(R::finite(0.25).map(R::as_f64), Some(0.25));
@@ -293,7 +294,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn a_value_reaches_an_r_at_or_above_it_and_nan_does_not() {
         let r = R::new(0.25);
 
@@ -307,7 +308,7 @@ mod tests {
         R::deserialize(deserializer).unwrap_err().to_string()
     }
 
-    #[test]
+    #[rstest]
     fn a_value_in_r_deserializes_from_its_text() {
         let text: serde::de::value::StrDeserializer<'_, Error> = "0.5R".into_deserializer();
 
@@ -316,7 +317,7 @@ mod tests {
 
     /// A bare number, an old margin in money say, is refused saying that
     /// the value is in R, an integer as a float.
-    #[test]
+    #[rstest]
     fn a_bare_number_is_refused_saying_the_value_is_in_r() {
         let float: F64Deserializer<Error> = 0.5.into_deserializer();
         let integer: I64Deserializer<Error> = 1_i64.into_deserializer();
@@ -334,13 +335,13 @@ mod tests {
         s.parse().unwrap()
     }
 
-    #[test]
+    #[rstest]
     fn a_risk_is_its_percentage_of_equity() {
         assert_eq!(Stake::new(risk("0.5%")).fraction(), decimal("0.005"));
         assert_eq!(Stake::new(risk("2%")).fraction(), decimal("0.02"));
     }
 
-    #[test]
+    #[rstest]
     fn a_risk_not_written_as_a_percentage_is_refused() {
         for written in ["0.005", "0.5", "%", "0.5 %", "half%", ""] {
             let err = written.parse::<Risk>().unwrap_err();
@@ -348,7 +349,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn a_risk_is_proper_above_none_and_below_all_of_equity() {
         assert!(risk("0.01%").is_proper());
         assert!(risk("99.9%").is_proper());
@@ -357,7 +358,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn a_stake_times_a_multiple_risks_that_many_times_its_risk() {
         let stake = Stake::new(risk("0.5%")).times(decimal("2")).unwrap();
         assert_eq!(stake.fraction(), decimal("0.01"));
@@ -367,7 +368,7 @@ mod tests {
         assert_eq!(again.multiple(), decimal("3"));
     }
 
-    #[test]
+    #[rstest]
     fn a_stake_times_a_multiple_not_positive_is_refused() {
         for multiple in ["0", "-1"] {
             let err = Stake::new(risk("0.5%"))
@@ -378,14 +379,14 @@ mod tests {
     }
 
     /// A target's manifest holds its risk as the config writes it.
-    #[test]
+    #[rstest]
     fn a_risk_serializes_as_written_and_reads_back() {
         let json = serde_json::to_string(&risk("0.25%")).unwrap();
         assert_eq!(json, "\"0.25%\"");
         assert_eq!(serde_json::from_str::<Risk>(&json).unwrap(), risk("0.25%"));
     }
 
-    #[test]
+    #[rstest]
     fn a_risk_reads_and_prints_as_written() {
         assert_eq!(risk("0.5%").to_string(), "0.5%");
         let stake = Stake::new(risk("0.25%")).times(decimal("2")).unwrap();

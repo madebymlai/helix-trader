@@ -360,10 +360,12 @@ impl ClientConfig for CTraderExecutionClientConfig {
 mod tests {
     use std::{collections::HashMap, path::Path};
 
+    use rstest::rstest;
+
     use super::*;
     use crate::testing::{self, VENUE};
 
-    #[test]
+    #[rstest]
     fn each_environment_has_spotware_s_endpoint() {
         assert_eq!(
             CTraderEnvironment::Demo.url(),
@@ -375,7 +377,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn the_account_is_named_after_the_venue_and_the_environment() {
         let (demo, _tokens) = testing::connection();
         let live = CTraderConnection {
@@ -388,7 +390,7 @@ mod tests {
         assert_eq!(live.account_id(), AccountId::from("ACMEFX-LIVE"));
     }
 
-    #[test]
+    #[rstest]
     fn the_credential_s_pair_seeds_its_token_file() {
         let dir = tempfile::tempdir().unwrap();
         let (mut credential, _tokens) = testing::credential();
@@ -401,7 +403,7 @@ mod tests {
         assert_eq!(credential.tokens().path(), credential.token_file);
     }
 
-    #[test]
+    #[rstest]
     fn debug_shows_no_credential_value() {
         let (credential, _tokens) = testing::credential();
 
@@ -461,7 +463,7 @@ mod tests {
             .collect()
     }
 
-    #[test]
+    #[rstest]
     fn a_connection_is_the_venue_s_on_its_account_s_environment_and_the_shared_credential() {
         let connection = read(&FULL).unwrap();
 
@@ -482,7 +484,7 @@ mod tests {
         assert_eq!(credential.account_id.get(), 1_000_001);
     }
 
-    #[test]
+    #[rstest]
     fn the_environment_is_demo_or_live() {
         let live = read(&full_with("ACMEFX_ENVIRONMENT", Some("live"))).unwrap();
 
@@ -490,7 +492,7 @@ mod tests {
         assert_eq!(live.account_id(), AccountId::from("ACMEFX-LIVE"));
     }
 
-    #[test]
+    #[rstest]
     fn the_environment_has_no_default() {
         for value in [None, Some(""), Some("Demo"), Some("paper")] {
             let err = read(&full_with("ACMEFX_ENVIRONMENT", value))
@@ -504,7 +506,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn a_missing_or_empty_variable_is_named_without_any_value() {
         let pairs = [
             ("CTRADER_CLIENT_ID", "12345_clientIdValue"),
@@ -526,7 +528,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_missing_account_id_is_named_by_the_broker_s_variable() {
         let err = read(&full_with("ACMEFX_ACCOUNT_ID", None))
             .unwrap_err()
@@ -535,7 +537,7 @@ mod tests {
         assert!(err.contains("ACMEFX_ACCOUNT_ID"), "{err}");
     }
 
-    #[test]
+    #[rstest]
     fn an_account_id_not_an_integer_is_refused_without_its_value() {
         let err = read(&full_with("ACMEFX_ACCOUNT_ID", Some("acct-77")))
             .unwrap_err()
@@ -548,7 +550,7 @@ mod tests {
         assert!(!err.contains("acct-77"), "{err}");
     }
 
-    #[test]
+    #[rstest]
     fn a_connection_s_debug_shows_no_credential_value() {
         let debug = format!("{:?}", read(&FULL).unwrap());
 
@@ -559,7 +561,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn the_errors_name_the_settings_read() {
         let names = read(&FULL).unwrap().credential.names;
 
@@ -571,7 +573,7 @@ mod tests {
 
     /// Whichever broker's account it connects to, one token file: the pair
     /// is the login's, and a renewal invalidates the old one.
-    #[test]
+    #[rstest]
     fn two_brokers_share_the_token_file() {
         let other = CTraderAccountVars {
             environment: "OTHERFX_ENVIRONMENT",
@@ -588,7 +590,7 @@ mod tests {
         assert_eq!(second.credential.account_id.get(), 2);
     }
 
-    #[test]
+    #[rstest]
     fn the_token_file_is_under_the_xdg_state_home() {
         let mut pairs = FULL.to_vec();
         pairs.push(("XDG_STATE_HOME", "/home/u/state"));
@@ -602,7 +604,7 @@ mod tests {
     }
 
     /// The XDG base directory specification ignores a relative one.
-    #[test]
+    #[rstest]
     fn without_an_absolute_xdg_state_home_the_token_file_is_under_local_state() {
         let mut relative = FULL.to_vec();
         relative.push(("XDG_STATE_HOME", "state"));
@@ -617,14 +619,14 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn without_a_home_there_is_no_token_file() {
         let err = read(&full_with("HOME", None)).unwrap_err().to_string();
 
         assert!(err.contains("set HOME"), "{err}");
     }
 
-    #[test]
+    #[rstest]
     fn each_client_is_named_after_the_venue_on_its_connection() {
         let ids = vec![InstrumentId::from("XAUUSD.ACMEFX")];
 

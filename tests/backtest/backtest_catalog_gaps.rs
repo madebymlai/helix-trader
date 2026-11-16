@@ -10,6 +10,7 @@ use jiff::{SignedDuration, civil::Date};
 use nautilus_core::UnixNanos;
 use nautilus_model::data::{BarType, NautilusDataType, QuoteTick};
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
+use rstest::rstest;
 
 use crate::common::{
     self, INSTRUMENT_ID, dataset, hour_bars, ic, noise, ohlc, recorder::Recorder, trades,
@@ -20,7 +21,7 @@ use crate::common::{
 /// 11:59:59.999999999 and the next opening a minute later: the catalog's
 /// intervals miss the sliver between them, and the run from 10:00 trades
 /// as on one file (`backtest_warmup.rs`).
-#[test]
+#[rstest]
 fn a_sliver_between_promoted_files_is_replayed_through() {
     let levels = trades::TIME_EXIT;
     let quotes = trades::quotes(&levels);
@@ -54,7 +55,7 @@ fn a_sliver_between_promoted_files_is_replayed_through() {
 /// The noise is stored from 06:00 to 15:00; a run from 05:00 to 16:00
 /// gets the bars of what is stored: from the one closing 07:00, the first
 /// whose hour is quoted, to the one closing 15:00.
-#[test]
+#[rstest]
 fn a_window_reaching_past_the_stored_quotes_runs_on_what_is_stored() {
     let catalog = noise::catalog();
     let (recorder, record) = Recorder::new(BarType::from(common::MID_BAR_TYPE));
@@ -75,7 +76,7 @@ fn a_window_reaching_past_the_stored_quotes_runs_on_what_is_stored() {
 
 /// A catalog storing the instrument and no quotes: Nautilus warns the
 /// series has no data, and the run completes.
-#[test]
+#[rstest]
 fn a_catalog_without_quotes_runs_to_completion() {
     let catalog = common::catalog_without_quotes();
     let (recorder, _) = Recorder::new(BarType::from(common::MID_BAR_TYPE));
@@ -88,7 +89,7 @@ fn a_catalog_without_quotes_runs_to_completion() {
 /// A dataset build over quotes written as a live node promotes them, in
 /// two files with a sliver between them at noon of the 21st: it replays
 /// the day through the sliver and stores a row for each hour's decision.
-#[test]
+#[rstest]
 fn a_dataset_build_replays_through_a_sliver_between_promoted_files() {
     let (from, to) = (
         ic::at("00:00:00") - SignedDuration::from_hours(1),

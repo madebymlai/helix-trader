@@ -239,6 +239,7 @@ mod tests {
         OKXInstrumentType,
         common::enums::{OKXMarginMode, OKXRegion},
     };
+    use rstest::rstest;
 
     use super::*;
     use crate::venues::{Broker, tests::created_oms_type};
@@ -256,7 +257,7 @@ mod tests {
     /// are the configs of a node. The factory builds no client without
     /// credentials: made up here, so that the environment's are never read;
     /// the client connects to nothing.
-    #[test]
+    #[rstest]
     fn the_execution_client_keeps_positions_as_the_broker_answers() {
         for ids in [vec![swap()], vec![xperp()], vec![xperp(), swap()]] {
             let mut clients = configs(&ids, OKXEnvironment::Demo).unwrap();
@@ -333,7 +334,7 @@ mod tests {
         assert!(depth(BOOK.depth.map(|levels| levels.saturating_add(1))).is_err());
     }
 
-    #[test]
+    #[rstest]
     fn both_clients_trade_in_the_eea_on_the_given_environment() {
         let clients = configs(&[xperp()], OKXEnvironment::Demo).unwrap();
         assert_eq!(
@@ -360,13 +361,13 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn orders_are_in_cross_margin() {
         let exec = configs(&[xperp()], OKXEnvironment::Demo).unwrap().exec;
         assert_eq!(exec.margin_mode, Some(OKXMarginMode::Cross));
     }
 
-    #[test]
+    #[rstest]
     fn the_credentials_are_left_to_the_adapter_from_the_environment() {
         let clients = configs(&[xperp()], OKXEnvironment::Demo).unwrap();
         let data = &clients.data;
@@ -377,7 +378,7 @@ mod tests {
         assert!(exec.api_passphrase.is_none());
     }
 
-    #[test]
+    #[rstest]
     fn the_clients_load_the_types_and_families_of_the_instruments_each_once() {
         let other_xperp = InstrumentId::from("BTC-USD_UM_XPERP-310404.OKX");
         let clients = configs(&[xperp(), swap(), other_xperp], OKXEnvironment::Demo).unwrap();
@@ -395,7 +396,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn an_instrument_not_an_okx_swap_or_future_is_refused() {
         for id in ["SXR8.IBIS", "BTC-USDT.OKX"] {
             assert!(
@@ -405,7 +406,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn a_long_short_account_is_refused_naming_net_mode() {
         ensure_net_mode(OKXPositionMode::NetMode).unwrap();
         let err = ensure_net_mode(OKXPositionMode::LongShortMode)
@@ -416,7 +417,7 @@ mod tests {
 
     /// The catalog's definition holds a margin of 0.2, leverage 5, which
     /// backtests ran at: an account at leverage 10 is refused, naming both.
-    #[test]
+    #[rstest]
     fn a_leverage_other_than_the_catalogs_is_refused_naming_both() {
         ensure_leverage(xperp(), Decimal::TEN, Decimal::new(1, 1)).unwrap();
         let err = ensure_leverage(xperp(), Decimal::TEN, Decimal::new(2, 1))

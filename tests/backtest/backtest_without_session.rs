@@ -3,6 +3,7 @@
 //! per test.
 
 use jiff::Timestamp;
+use rstest::rstest;
 
 use crate::common::{self, stepped_quotes, ts};
 
@@ -24,7 +25,7 @@ fn level(close: Timestamp) -> f64 {
     }
 }
 
-#[test]
+#[rstest]
 fn without_a_session_every_bar_counts_across_midnight() {
     let (from, start, end) = (
         ts("2026-01-07T19:00:00Z"),

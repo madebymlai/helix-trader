@@ -28,6 +28,7 @@ use nautilus_model::{
     data::{NautilusDataType, QuoteTick},
     identifiers::InstrumentId,
 };
+use rstest::rstest;
 use rust_decimal::Decimal;
 
 use crate::common::{
@@ -43,7 +44,7 @@ use crate::common::{
 /// before to 03:00 of the 23rd:
 /// the replay runs to 02:00, the end of the 22nd plus the bracket's two
 /// hours, and every decision of the two days settles by then.
-#[test]
+#[rstest]
 fn a_second_build_of_the_same_span_replays_no_day_and_rows_read_back_as_written() {
     let (first, last) = (Date::constant(2026, 10, 21), Date::constant(2026, 10, 22));
     let catalog = walk(
@@ -194,7 +195,7 @@ fn thursday_stored_by_a_build_from(first: Date) -> Vec<DatasetRow> {
 /// build of Thursday alone replays from 21:00 on Wednesday, the warmup
 /// before it, as a build from Wednesday replays it, and stores none of
 /// Wednesday's rows.
-#[test]
+#[rstest]
 fn a_day_built_alone_is_stored_as_inside_a_longer_build() {
     let alone = thursday_stored_by_a_build_from(Date::constant(2026, 10, 22));
     let inside = thursday_stored_by_a_build_from(Date::constant(2026, 10, 21));
@@ -268,7 +269,7 @@ fn friday_stored_by_a_build_to(last: Date) -> Vec<DatasetRow> {
 /// any market order between quotes, so neither build waits for Sunday's
 /// open, and both store the same Friday. The decisions at 22:00 and 23:00,
 /// with no quote since the one before, store no row.
-#[test]
+#[rstest]
 fn a_day_is_stored_the_same_by_a_build_cut_before_a_weekend_and_one_cut_after() {
     let cut_before = friday_stored_by_a_build_to(Date::constant(2026, 10, 23));
     let cut_after = friday_stored_by_a_build_to(Date::constant(2026, 10, 26));
@@ -281,7 +282,7 @@ fn a_day_is_stored_the_same_by_a_build_cut_before_a_weekend_and_one_cut_after() 
 /// the decision at 21:00 reads the quotes of the hour before it, the next
 /// stale one is skipped, and so is every decision to Sunday's open, the
 /// first since a quote.
-#[test]
+#[rstest]
 fn a_closed_market_stores_no_row() {
     let (friday, sunday) = (Date::constant(2026, 10, 23), Date::constant(2026, 10, 25));
 
@@ -396,7 +397,7 @@ fn reading_quotes(warmup: SignedDuration) -> DataRequirements {
 /// first, would close a 15th bar, the hour before, and hide a warmup a
 /// bar short. An hour shorter, validation refuses the warmup, and that
 /// decision opens nothing, the ATR a bar short.
-#[test]
+#[rstest]
 fn a_target_atr_warming_over_exactly_the_warmup_opens_the_day_s_first_decision() {
     let (thursday, margin) = (
         Date::constant(2026, 10, 22),

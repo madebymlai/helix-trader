@@ -247,6 +247,7 @@ fn config(
 mod tests {
     use ahash::AHashSet;
     use nautilus_model::identifiers::InstrumentId;
+    use rstest::rstest;
 
     use super::*;
     use crate::{
@@ -326,7 +327,7 @@ mod tests {
         )
     }
 
-    #[test]
+    #[rstest]
     fn closed_orders_positions_and_account_events_are_purged_hourly_after_a_week() {
         let exec = node_config().exec_engine;
         let week = Some(7 * 24 * 60);
@@ -339,14 +340,14 @@ mod tests {
         assert!(!exec.purge_from_database);
     }
 
-    #[test]
+    #[rstest]
     fn the_catalog_is_registered_writable() {
         let [catalog] = node_config().catalogs.try_into().unwrap();
         assert_eq!(catalog.path(), "/data/catalog");
         assert!(!catalog.read_only());
     }
 
-    #[test]
+    #[rstest]
     fn the_node_streams_into_its_catalog_under_its_kept_instance_id() {
         let config = node_config();
         assert_eq!(config.instance_id, Some(UUID4::from(INSTANCE_ID)));

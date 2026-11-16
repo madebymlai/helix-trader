@@ -15,13 +15,14 @@ use nautilus_model::{
     identifiers::Venue,
     types::{Price, Quantity},
 };
+use rstest::rstest;
 
 use crate::common::{
     ic::{self, at},
     recorder::Recorder,
 };
 
-#[test]
+#[rstest]
 fn ic_gold_quotes_fill_orders_at_the_ask_and_the_bid_and_report_the_spread() {
     let catalog = ic::catalog();
     let backtest = ic::backtest(&catalog);

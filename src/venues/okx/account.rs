@@ -232,19 +232,21 @@ fn leverage_of(id: InstrumentId, body: &[u8]) -> anyhow::Result<Decimal> {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
     fn xperp() -> InstrumentId {
         InstrumentId::from("BTC-USD_UM_XPERP-310328.OKX")
     }
 
-    #[test]
+    #[rstest]
     fn the_environment_is_demo_or_live_by_its_lowercase_name() {
         assert_eq!(environment_of(Some("demo")).unwrap(), OKXEnvironment::Demo);
         assert_eq!(environment_of(Some("live")).unwrap(), OKXEnvironment::Live);
     }
 
-    #[test]
+    #[rstest]
     fn a_missing_empty_or_other_environment_is_refused_naming_the_variable_and_values() {
         for value in [None, Some(""), Some("Demo"), Some("real"), Some(" demo")] {
             let err = environment_of(value).unwrap_err().to_string();
@@ -253,13 +255,13 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn the_leverage_is_read_from_okxs_answer() {
         let body = br#"{"code":"0","msg":"","data":[{"ccy":"","instId":"BTC-USD_UM_XPERP-310328","lever":"3","mgnMode":"cross","posSide":"net"}]}"#;
         assert_eq!(leverage_of(xperp(), body).unwrap(), Decimal::from(3));
     }
 
-    #[test]
+    #[rstest]
     fn a_refused_empty_or_foreign_leverage_answer_is_an_error() {
         let error = |body: &[u8]| leverage_of(xperp(), body).unwrap_err().to_string();
         let refused = br#"{"code":"51001","msg":"Instrument ID doesn't exist","data":[]}"#;

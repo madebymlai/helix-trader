@@ -30,6 +30,7 @@ use nautilus_trading::{
     nautilus_strategy,
     strategy::{StrategyConfig, StrategyCore},
 };
+use rstest::rstest;
 use serde::Deserialize;
 use tempfile::TempDir;
 
@@ -170,7 +171,7 @@ fn got_through_subscriptions(backtest: Backtest) -> Vec<Got> {
 
 /// The imbalances of the run's window reach the strategy, each at its
 /// time, not the one of 08:50, before the run.
-#[test]
+#[rstest]
 fn a_strategy_gets_a_custom_series_of_the_catalog_s_through_its_subscriptions() {
     let catalog = catalog();
 
@@ -187,7 +188,7 @@ fn a_strategy_gets_a_custom_series_of_the_catalog_s_through_its_subscriptions() 
 
 /// The catalog holds none of the series: the run warns of it and goes
 /// on, the strategy getting none of it.
-#[test]
+#[rstest]
 fn a_run_of_a_custom_series_the_catalog_holds_nothing_of_goes_on() {
     let catalog = ic::catalog();
 
@@ -224,7 +225,7 @@ impl DataActor for Featured {
 /// A model's raw feature over the series reads each imbalance replayed
 /// from the cache, where the data engine put it before the strategy's
 /// handler, with no strategy code.
-#[test]
+#[rstest]
 fn a_raw_feature_over_a_custom_series_of_the_catalog_s_reads_each_replayed_point() {
     let catalog = catalog();
     let backtest = backtest(&catalog);

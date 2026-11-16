@@ -736,6 +736,7 @@ mod tests {
         strategy::{ema::EmaParams, risk::R},
     };
     use jiff::SignedDuration;
+    use rstest::rstest;
 
     use super::*;
 
@@ -788,7 +789,7 @@ mod tests {
     }
 
     /// Its IB client id is the venues' (`HistoryVenueArgs`).
-    #[test]
+    #[rstest]
     fn parses_fill_catalog_over_a_window_of_the_catalog() {
         let args = parse(&REQUIRED).unwrap();
         assert_eq!(args.run.strategy, StrategyName::Ema);
@@ -805,7 +806,7 @@ mod tests {
     }
 
     /// Fill-catalog takes IB's client id, not live's account or leverage.
-    #[test]
+    #[rstest]
     fn fill_catalog_takes_the_ib_client_id_but_not_lives_account_or_leverage() {
         let mut argv = REQUIRED.to_vec();
         argv.extend(["--client-id", "12"]);
@@ -822,7 +823,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn parses_a_backtest_with_its_costs() {
         let args = parse_backtest(&backtest_required()).unwrap();
         assert_eq!(args.run.strategy, StrategyName::Ema);
@@ -847,7 +848,7 @@ mod tests {
         argv
     }
 
-    #[test]
+    #[rstest]
     fn a_backtest_requires_the_commission_and_the_balance() {
         assert!(parse_backtest(&REQUIRED).is_err());
         for flag in ["--commission", "--balance"] {
@@ -859,7 +860,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn a_backtest_takes_one_commission_of_the_three_kinds() {
         let flags = [
             ["--commission", "3 EUR"],
@@ -887,7 +888,7 @@ mod tests {
 
     /// Pepperstone's gold: 3.5 USD per 100 oz, so 0.035 USD an ounce, not
     /// rounded to 0.04 USD.
-    #[test]
+    #[rstest]
     fn a_commission_per_quantity_is_its_exact_amount_per_unit() {
         let args =
             parse_backtest(&backtest_with(&["--commission-per-quantity", "0.035 USD"])).unwrap();
@@ -898,7 +899,7 @@ mod tests {
 
     /// Each value joined to its flag, so that clap reads `-0.035 USD` as the
     /// value, not as a flag of its own.
-    #[test]
+    #[rstest]
     fn rejects_a_commission_per_quantity_it_cannot_charge() {
         for amount in ["-0.035 USD", "0.035", "USD", "0.035 XYZ"] {
             let flag = format!("--commission-per-quantity={amount}");
@@ -911,7 +912,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn rejects_malformed_money() {
         for flag in ["--commission", "--balance"] {
             for money in ["3", "EUR", "3 XYZ", "three EUR"] {
@@ -926,7 +927,7 @@ mod tests {
 
     /// 150 ms, as jiff reads a duration: each command reaches the
     /// simulated account's venues 150 ms after it is sent.
-    #[test]
+    #[rstest]
     fn a_backtest_takes_the_latency_of_its_venues_as_a_duration() {
         let mut argv = backtest_required();
         argv.extend(["--latency", "150ms"]);
@@ -939,14 +940,14 @@ mod tests {
     }
 
     /// Nautilus' default: each command reaches the venue as it is sent.
-    #[test]
+    #[rstest]
     fn a_backtest_without_a_latency_has_none() {
         assert_eq!(parse_backtest(&backtest_required()).unwrap().latency, None);
     }
 
     /// Each value joined to its flag, so that clap reads `-1s` as the
     /// value; none is left out, not a latency of nothing.
-    #[test]
+    #[rstest]
     fn rejects_a_latency_that_is_no_positive_duration() {
         for latency in ["-1s", "0s", "150", "fast"] {
             let mut argv = backtest_required();
@@ -964,7 +965,7 @@ mod tests {
     /// A backtest's margins are its instruments', each holding its
     /// account's (an OKX definition the account's leverage), so it takes no
     /// leverage.
-    #[test]
+    #[rstest]
     fn a_backtest_takes_no_leverage() {
         let mut argv = backtest_required();
         argv.extend(["--leverage", "10"]);
@@ -984,7 +985,7 @@ mod tests {
         parse_command("live", args).map(live_args)
     }
 
-    #[test]
+    #[rstest]
     fn live_runs_as_trader_helix_001_unless_given_another() {
         let args = parse_live(&["ema", "--config", "ema.toml"]).unwrap();
         assert_eq!(args.trader_id, TraderId::from("HELIX-001"));
@@ -993,14 +994,14 @@ mod tests {
         assert_eq!(args.trader_id, TraderId::from("HELIX-002"));
     }
 
-    #[test]
+    #[rstest]
     fn rejects_a_trader_id_nautilus_refuses() {
         // Nautilus' trader id is a name and a tag joined by a hyphen.
         assert!(parse_live(&["ema", "--config", "ema.toml", "--trader-id", "HELIX"]).is_err());
     }
 
     /// Its IB account and client id are the venues' (`LiveVenueArgs`).
-    #[test]
+    #[rstest]
     fn parses_live_with_its_strategy_config_and_catalog() {
         let args = parse_live(&["ema", "--config", "ema.toml"]).unwrap();
         assert_eq!(args.strategy, StrategyName::Ema);
@@ -1010,13 +1011,13 @@ mod tests {
 
     /// Live checks each OKX account's leverage against its instruments'
     /// definitions in the catalog, so it takes no leverage.
-    #[test]
+    #[rstest]
     fn live_takes_no_leverage() {
         let err = parse_live(&["ema", "--config", "ema.toml", "--leverage", "10"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument, "{err}");
     }
 
-    #[test]
+    #[rstest]
     fn live_stages_in_staging_unless_told_otherwise() {
         let args = parse_live(&["ema", "--config", "ema.toml"]).unwrap();
         assert_eq!(args.staging, PathBuf::from("staging"));
@@ -1025,7 +1026,7 @@ mod tests {
         assert_eq!(args.staging, PathBuf::from("/data/staging"));
     }
 
-    #[test]
+    #[rstest]
     fn rejects_a_start_not_before_the_end() {
         let mut argv = REQUIRED.to_vec();
         argv[4] = "2024-03-01T12:30:00Z";
@@ -1038,7 +1039,7 @@ mod tests {
         assert!(err.to_string().contains("before"), "{err}");
     }
 
-    #[test]
+    #[rstest]
     fn a_config_error_names_the_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ema.toml");
@@ -1065,7 +1066,7 @@ mod tests {
         assert!(err.contains("missing.toml"), "{err}");
     }
 
-    #[test]
+    #[rstest]
     fn logger_config_defaults_when_unset_and_rejects_a_malformed_spec() {
         assert!(logger_config(Err(std::env::VarError::NotPresent)).is_ok());
         let not_unicode = std::ffi::OsString::from("x");
@@ -1095,7 +1096,7 @@ mod tests {
         "2026-10-23",
     ];
 
-    #[test]
+    #[rstest]
     fn parses_a_train_at_a_time_into_the_models_store() {
         let args = parse_train(&TRAIN).unwrap();
         assert_eq!(args.strategy, StrategyName::ModelEma);
@@ -1109,7 +1110,7 @@ mod tests {
     }
 
     /// A train's dataset runs margin nothing, so it takes no leverage.
-    #[test]
+    #[rstest]
     fn a_train_takes_no_leverage() {
         let mut argv = TRAIN.to_vec();
         argv.extend(["--leverage", "2"]);
@@ -1119,7 +1120,7 @@ mod tests {
 
     /// The commission and balance of a train's dataset runs are its
     /// config's (`[model] dataset`), so it takes none.
-    #[test]
+    #[rstest]
     fn a_train_takes_no_commission_or_balance() {
         for flags in [
             ["--commission", "3 EUR"],
@@ -1138,7 +1139,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn a_train_requires_its_time() {
         let at = TRAIN.iter().position(|&arg| arg == "--at").unwrap();
         let argv = [&TRAIN[..at], &TRAIN[at + 2..]].concat();
@@ -1146,7 +1147,7 @@ mod tests {
         assert!(err.contains("--at"), "{err}");
     }
 
-    #[test]
+    #[rstest]
     fn backtest_and_live_read_models_from_models_unless_told_otherwise() {
         assert_eq!(
             parse_backtest(&backtest_required()).unwrap().models,
@@ -1162,7 +1163,7 @@ mod tests {
         assert_eq!(args.models, PathBuf::from("models"));
     }
 
-    #[test]
+    #[rstest]
     fn a_train_keeping_the_model_fails_with_the_reason() {
         let holdout = Box::new(Holdout {
             earnings: Earnings::default(),
@@ -1199,7 +1200,7 @@ mod tests {
 
     /// A rerun of a train finds the long's model published: kept in use, it
     /// is no failure, and the train exits 0.
-    #[test]
+    #[rstest]
     fn a_train_keeping_no_model_succeeds_its_models_in_use_or_published() {
         let t: Timestamp = "2026-10-23T00:00:00Z".parse().unwrap();
         let trained = Trained {
@@ -1226,7 +1227,7 @@ mod tests {
 
     /// A meta with no side's model before the train waits: the
     /// train fails, saying why.
-    #[test]
+    #[rstest]
     fn a_train_whose_meta_waits_fails_saying_so() {
         let t: Timestamp = "2026-10-23T00:00:00Z".parse().unwrap();
         let trained = Trained {
@@ -1264,7 +1265,7 @@ mod tests {
     /// A live node's retrain is a `train` on the node's strategy, config,
     /// catalog and store, which reads its dataset runs' commission and
     /// balance from the config.
-    #[test]
+    #[rstest]
     fn a_live_nodes_retrain_parses_as_train_on_its_files_and_store() {
         let mut argv = LIVE.to_vec();
         argv.extend(["--catalog", "/data/catalog", "--models", "/data/models"]);
@@ -1280,7 +1281,7 @@ mod tests {
     /// The commission and balance of a live node's dataset runs, which key
     /// the store it reads and its retrains train at, are its config's
     /// (`[model] dataset`), so it takes none.
-    #[test]
+    #[rstest]
     fn live_takes_no_retrain_commission_or_balance() {
         for flags in [
             ["--retrain-commission", "3 USD"],
@@ -1299,7 +1300,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn the_ema_strategy_has_no_model_to_train() {
         let mut argv = TRAIN.to_vec();
         argv[0] = "ema";
@@ -1308,7 +1309,7 @@ mod tests {
     }
 
     /// Two spellings of one commission are one commission.
-    #[test]
+    #[rstest]
     fn two_spellings_of_a_commission_are_one() {
         for (one, other) in [
             (["--commission", "3 EUR"], ["--commission", "3.00 EUR"]),
@@ -1333,7 +1334,7 @@ mod tests {
 
     /// A model backtest's dataset runs are at its config's commission and
     /// balance: it takes no balance of theirs.
-    #[test]
+    #[rstest]
     fn a_backtest_takes_no_dataset_balance() {
         let mut argv = backtest_required();
         argv.extend(["--dataset-balance", "10000000 EUR"]);
@@ -1343,7 +1344,7 @@ mod tests {
 
     /// Every subcommand takes the strategy first, by its command-line
     /// name: without one, or with a name no strategy has, it is refused.
-    #[test]
+    #[rstest]
     fn every_subcommand_takes_the_strategy_by_name() {
         let backtest = backtest_required();
         let live = ["ema", "--config", "ema.toml"];

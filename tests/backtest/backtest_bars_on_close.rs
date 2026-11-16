@@ -3,9 +3,11 @@
 //! quotes all before it, and each bar of the run holds its whole hour. One
 //! node per thread, so one run per test.
 
+use rstest::rstest;
+
 use crate::common::{noise, ohlc};
 
-#[test]
+#[rstest]
 fn a_run_starting_on_a_close_gets_whole_bars_from_the_next() {
     let start = noise::at("13:00");
     let catalog = noise::catalog();

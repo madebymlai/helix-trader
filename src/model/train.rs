@@ -908,6 +908,7 @@ mod tests {
 
     use jiff::SignedDuration;
     use nautilus_model::{identifiers::InstrumentId, types::Money};
+    use rstest::rstest;
     use rust_decimal::Decimal;
 
     use super::*;
@@ -1191,7 +1192,7 @@ mod tests {
     /// holdout. Each side's probes are its rows of the holdout and its
     /// predictions on them, before the calibration: the fake's, their
     /// feature.
-    #[test]
+    #[rstest]
     fn a_train_fits_calibrates_and_judges_each_side_on_its_part_of_the_window() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), config());
@@ -1261,7 +1262,7 @@ mod tests {
     /// the top decile, the row expected 0.95, a gap of 0.55. The short's,
     /// 0.75 and -1: errors -0.2 and -1.2, 1.48 against 0.140625 + 1.890625 =
     /// 2.03125; a mean of -0.7; a slope of 1.75 / 0.75; a gap of -0.2.
-    #[test]
+    #[rstest]
     fn the_sides_are_judged_on_the_trades_picked_on_the_holdout() {
         let dir = tempfile::tempdir().unwrap();
         let trained =
@@ -1314,7 +1315,7 @@ mod tests {
     /// win; the long's losses are taken by no decision. Each stop worth 2 USD,
     /// two trades of 1.5R; every trade the four of the two rows, 0.25R per
     /// trade.
-    #[test]
+    #[rstest]
     fn a_row_where_both_sides_clear_counts_one_trade() {
         let pair = Pair::new(
             vec![(Side::Long, in_hand(0.2)), (Side::Short, in_hand(0.3))],
@@ -1354,7 +1355,7 @@ mod tests {
     /// -0.625. A slope fitted on the calibration's means alone, 3.125 /
     /// 3.125, would expect 1.5R of the long and 0.25R of the short, and pick
     /// the long on every row.
-    #[test]
+    #[rstest]
     fn two_sides_whose_predictions_never_vary_pick_no_trade() {
         let dir = tempfile::tempdir().unwrap();
         let baselines = ModelConfig {
@@ -1408,7 +1409,7 @@ mod tests {
     /// every trade's four, where the long beside the 5th's short would have
     /// taken its win alone, 1.5R. Neither side publishes, refused for the
     /// short's skill, and the pair of the 5th stays the current one.
-    #[test]
+    #[rstest]
     fn a_side_refused_on_its_skill_refuses_the_pair_judged_on_the_trains_own_picks() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), config());
@@ -1461,7 +1462,7 @@ mod tests {
     /// and a loss of 1, 0.325R. Each side's skill is above nought: the
     /// short's R, 0.75 and 0.05, errs by -0.2 and -0.15 against the
     /// baseline's 0.375 and -0.325.
-    #[test]
+    #[rstest]
     fn the_sides_publish_together_on_what_their_picks_earned() {
         let dir = tempfile::tempdir().unwrap();
         let t = at("2026-01-07T00:00:00Z");
@@ -1498,7 +1499,7 @@ mod tests {
     /// skill is above nought (the long's R, 1.5 twice, errs by 0.55 and 1.3
     /// against the baseline's 1.125 twice), and the profitable side is
     /// refused with the losing one.
-    #[test]
+    #[rstest]
     fn a_profitable_side_paired_with_a_losing_one_is_refused_with_it() {
         let dir = tempfile::tempdir().unwrap();
         let mut rows = rows();
@@ -1535,7 +1536,7 @@ mod tests {
     /// its side's own score, worked as in
     /// `the_sides_are_judged_on_the_trades_picked_on_the_holdout`, and the
     /// holdout's mean R - E', which its publish reports.
-    #[test]
+    #[rstest]
     fn both_manifests_hold_the_earnings_judged_beside_each_sides_own_score() {
         let dir = tempfile::tempdir().unwrap();
         let t = at("2026-01-07T00:00:00Z");
@@ -1573,7 +1574,7 @@ mod tests {
     /// 19:00, expecting 0.95R, its loss of 2 on its stop worth 4, -0.5R,
     /// beside every trade, two wins of 1.5R and the long's loss of 1R and the
     /// short's, 0.375R per trade.
-    #[test]
+    #[rstest]
     fn with_both_sides_failing_their_skill_each_reports_its_own_and_the_pairs_earnings() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), config());
@@ -1608,7 +1609,7 @@ mod tests {
     /// no finite number and its fit fails. The long, fitted, publishes
     /// neither: both are kept, the long for the short's failure, which it
     /// names, and the pair of the 6th stays the current one.
-    #[test]
+    #[rstest]
     fn a_side_whose_fit_fails_publishes_neither_side() {
         let dir = tempfile::tempdir().unwrap();
         let sixth = "2026-01-06T00:00:00Z";
@@ -1639,7 +1640,7 @@ mod tests {
     /// The short's publish fails after the long's: the long's model is in
     /// its store, valid from the train's time, but has no short beside it,
     /// so the sides list no pair from then and both are kept, failed.
-    #[test]
+    #[rstest]
     fn a_publish_failing_after_the_others_leaves_no_pair_published() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), config());
@@ -1668,7 +1669,7 @@ mod tests {
 
     /// The long's publish fails, and the short, judged with it, publishes
     /// nothing.
-    #[test]
+    #[rstest]
     fn a_publish_failing_publishes_no_other_side() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), config());
@@ -1694,7 +1695,7 @@ mod tests {
     /// always had: taking every trade of the holdout, the long's win of 3 USD
     /// and loss of 2 on stops worth 2, 1.5R and -1R, 0.25R a trade, earns no
     /// more than every trade, so a margin no trade falls short of is refused.
-    #[test]
+    #[rstest]
     fn a_one_sided_strategy_taking_every_trade_of_the_holdout_is_refused() {
         let takes_all = ModelConfig {
             margins: Margins {
@@ -1724,7 +1725,7 @@ mod tests {
     /// which the long's line never reads. The long's R on the calibration's
     /// rows, -0.5 and 1.5, makes the line of `LINES`, and no side call;
     /// the sides' mean R, -0.5 and 0.25, would make `alpha_C` -0.875.
-    #[test]
+    #[rstest]
     fn a_one_sided_strategy_calibrates_its_level_line_alone_on_its_sides_r() {
         let long_only = ModelConfig {
             margins: Margins {
@@ -1766,7 +1767,7 @@ mod tests {
     /// picked on the holdout, fewer than two, refuses both sides, though
     /// each side's own count is never compared, and neither store holds a
     /// model.
-    #[test]
+    #[rstest]
     fn fewer_trades_picked_than_the_minimum_refuse_both_sides_and_publish_nothing() {
         let two = ModelConfig {
             min_trades: 2,
@@ -1803,7 +1804,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn a_train_replays_from_the_first_day_of_the_window_to_its_end() {
         let dir = tempfile::tempdir().unwrap();
         let mut replays = vec![];
@@ -1824,7 +1825,7 @@ mod tests {
     /// pair is valid from then, so both sides are fitted again, judged
     /// together, and published, the long's fitted model in place of the
     /// baseline.
-    #[test]
+    #[rstest]
     fn a_side_published_at_the_trains_time_without_the_other_is_fitted_again_with_it() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), config());
@@ -1850,7 +1851,7 @@ mod tests {
 
     /// Both sides have a model valid from the train's time: a rerun of the
     /// train fits nothing, and so replays nothing.
-    #[test]
+    #[rstest]
     fn a_train_with_every_model_in_use_replays_nothing_and_reports_each() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), config());
@@ -1896,7 +1897,7 @@ mod tests {
     /// Never retrained, the pair of the 6th, its long expecting nought and
     /// so never picked, is current at the train of the 7th: kept in use, not
     /// fitted again, and nothing replayed.
-    #[test]
+    #[rstest]
     fn never_retrained_a_pair_valid_before_the_train_is_kept_in_use() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), never());
@@ -1932,7 +1933,7 @@ mod tests {
     /// so no pair is current at the train of the 7th: both sides are fitted
     /// and published as of the 7th, and the long of the 6th stays in its
     /// store, in no pair.
-    #[test]
+    #[rstest]
     fn never_retrained_a_side_valid_before_the_train_without_the_other_is_fitted_again_with_it() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), never());
@@ -1966,7 +1967,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_published_model_carries_its_schema_target_and_learner() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), config());
@@ -1998,7 +1999,7 @@ mod tests {
     /// rows outside those (the win at 23:00 of the 5th, before the window, the
     /// wins at 11:30 and 17:00, settled after their part's end), nor on the
     /// holdout's, with which the long's would be 1/3.
-    #[test]
+    #[rstest]
     fn a_published_sides_baseline_is_the_training_mean_of_the_rows_it_was_fitted_and_calibrated_on()
     {
         let dir = tempfile::tempdir().unwrap();
@@ -2017,7 +2018,7 @@ mod tests {
     }
 
     /// Margins of the long alone: no short model is trained nor stored.
-    #[test]
+    #[rstest]
     fn a_long_only_model_trains_no_short() {
         let dir = tempfile::tempdir().unwrap();
         let long_only = ModelConfig {
@@ -2046,7 +2047,7 @@ mod tests {
     /// pair's picks, the short's loss of 2 USD at 19:00 on its stop worth 4,
     /// -0.5R, beside every trade of both sides, the long's 1.5R and -1R and
     /// the short's -0.5R and 1.5R, 0.375R per trade. Neither publishes.
-    #[test]
+    #[rstest]
     fn a_side_refused_on_its_skill_refuses_the_other_reporting_it_beside_its_own_holdout() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), config());
@@ -2082,7 +2083,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn a_failed_replay_keeps_the_current_models() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), config());
@@ -2109,7 +2110,7 @@ mod tests {
     /// is a win at 0.8, 3 USD on its stop worth 2, 1.5R, taken: no
     /// calibration slope on one row, and no more earned than taking every
     /// trade.
-    #[test]
+    #[rstest]
     fn a_holdout_of_one_row_has_no_slope_and_is_judged_on_its_trades() {
         let dir = tempfile::tempdir().unwrap();
         let long_only = ModelConfig {
@@ -2141,7 +2142,7 @@ mod tests {
     }
 
     /// No row between 12:00 and 18:00: nothing to calibrate the model on.
-    #[test]
+    #[rstest]
     fn a_calibration_without_a_row_fails() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), config());
@@ -2159,7 +2160,7 @@ mod tests {
         assert!(why.contains("calibrat"), "{why}");
     }
 
-    #[test]
+    #[rstest]
     fn rows_of_other_features_are_a_schema_mismatch() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), config());
@@ -2214,7 +2215,7 @@ mod tests {
     /// trades, expectancy of the trades taken and of every trade, in R, at the
     /// commission and at 1.5 times it, its skill, its mean R - E', its
     /// calibration slope and its top-decile gap.
-    #[test]
+    #[rstest]
     fn an_outcome_reads_as_published_or_kept_with_its_reason_and_its_holdout() {
         let published = Outcome::Published {
             valid_from: at("2026-01-07T00:00:00Z"),
@@ -2376,7 +2377,7 @@ mod tests {
     /// the decision before the sides' first model no row; calibrated by its
     /// level line on the calibration's rows (`META_LINE`); its probes the
     /// holdout's shorts and its predictions on them, before the calibration.
-    #[test]
+    #[rstest]
     fn a_meta_model_learns_the_r_of_the_side_picked_from_its_out_of_sample_decisions() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), with_meta(24));
@@ -2428,7 +2429,7 @@ mod tests {
     /// leaves the one at 19:00, expected -0.05R, a loss of 1R: one trade of
     /// 1.5R beside every trade's 0.25R, and at 1.5 times the commission of
     /// 0.2 each makes 0.1 USD less, 0.05R.
-    #[test]
+    #[rstest]
     fn a_meta_model_is_judged_by_its_skill_and_the_trades_its_margin_takes() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), with_meta(24));
@@ -2459,7 +2460,7 @@ mod tests {
     /// The meta's margin is in R: one of 0.9R leaves the trade at 20:00 of
     /// `meta_rows`'s holdout, expected 0.85R, though on its stop worth 2 USD
     /// it expects 1.7 USD, and the one at 19:00, so no trade is taken.
-    #[test]
+    #[rstest]
     fn a_meta_models_margin_in_r_leaves_a_trade_expected_less_whatever_its_unit() {
         let dir = tempfile::tempdir().unwrap();
         let config = ModelConfig {
@@ -2482,7 +2483,7 @@ mod tests {
     /// 20:00, which gains 1.5R, errors of -1.85 and 1.55, squared 5.825
     /// against the baseline's 3.125: a skill of 1 - 5.825 / 3.125, refused
     /// whatever its trades earned, and no meta model published.
-    #[test]
+    #[rstest]
     fn a_meta_model_whose_skill_is_not_above_nought_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), with_meta(24));
@@ -2513,7 +2514,7 @@ mod tests {
     /// A meta of a skill above nought whose margin takes one trade of
     /// `meta_rows`'s holdout (`a_meta_model_is_judged_by_its_skill_and_the_trades_its_margin_takes`)
     /// is refused under a minimum of two trades.
-    #[test]
+    #[rstest]
     fn a_meta_model_whose_trades_taken_miss_the_minimums_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let two = ModelConfig {
@@ -2549,7 +2550,7 @@ mod tests {
     /// and the win at 15:00, -1 and 1.5, a mean of 0.875; not on the decision
     /// at 05:00, before the sides' first model, a win, nor on the holdout's
     /// shorts, a loss and a win.
-    #[test]
+    #[rstest]
     fn a_published_metas_baseline_is_the_training_mean_of_the_rows_it_was_fitted_and_calibrated_on()
     {
         let dir = tempfile::tempdir().unwrap();
@@ -2603,7 +2604,7 @@ mod tests {
     /// `alpha` 0.5 - 0.75, expects 1.1R of the short at 20:00, which its
     /// margin of 0.5R takes, a win of 3, and 0.2R of the one at 19:00, which
     /// it leaves.
-    #[test]
+    #[rstest]
     fn a_meta_model_on_a_time_only_target_learns_from_its_trades() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = with_meta(24);
@@ -2635,7 +2636,7 @@ mod tests {
     /// four buys of the models valid from 06:00 carry 2 and the two sells
     /// of those valid from 17:00 carry 4, the short still expecting less
     /// than its margin in the morning and more in the evening.
-    #[test]
+    #[rstest]
     fn the_metas_examples_carry_the_unit_of_their_sides_trade() {
         let dir = tempfile::tempdir().unwrap();
         let config = with_meta(24);
@@ -2674,7 +2675,7 @@ mod tests {
     /// The examples list the stores as they are when made: one that cannot be
     /// listed fails them, rows or none, so a train never learns silently from
     /// rows skipped.
-    #[test]
+    #[rstest]
     fn a_store_that_cannot_be_listed_fails_the_metas_examples() {
         let dir = tempfile::tempdir().unwrap();
         let config = with_meta(24);
@@ -2690,7 +2691,7 @@ mod tests {
     /// the meta's rows are the long's trades, the holdout's a loss at 0.3 and
     /// a win at 0.7, which the meta, taking the win, expected 0.55R, publishes
     /// on, each of the level of the long of 17:00, 0.2R, and no side call.
-    #[test]
+    #[rstest]
     fn a_long_only_strategy_gives_its_meta_model_buys_alone() {
         let dir = tempfile::tempdir().unwrap();
         let long_only = ModelConfig {
@@ -2731,7 +2732,7 @@ mod tests {
 
     /// The meta's window of 36 hours is longer than the sides' 24, and
     /// starts after the sides' first models, of the 5th.
-    #[test]
+    #[rstest]
     fn a_train_with_a_meta_model_replays_once_from_the_longer_windows_first_day() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), with_meta(36));
@@ -2761,7 +2762,7 @@ mod tests {
     /// The meta's window of 36 hours starts on the 5th, before the
     /// sides' first models, of 06:00 of the 6th, where its rows start:
     /// the one replay starts with the sides' window, on the 6th.
-    #[test]
+    #[rstest]
     fn a_train_replays_no_day_before_the_sides_first_model() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), with_meta(36));
@@ -2782,7 +2783,7 @@ mod tests {
     /// No side's model is valid before the train, so no row of the meta
     /// has a decision of the sides: the meta waits, and none is fitted, the
     /// sides fitted and published as ever.
-    #[test]
+    #[rstest]
     fn a_meta_model_without_a_sides_model_before_it_waits() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), with_meta(24));
@@ -2802,7 +2803,7 @@ mod tests {
     /// from 21:00, are in use at the train of the 7th: kept, their
     /// decisions give the meta its rows, and the meta is fitted alone,
     /// learning from the very models in use.
-    #[test]
+    #[rstest]
     fn never_retrained_a_meta_whose_sides_are_in_use_is_fitted_alone() {
         let dir = tempfile::tempdir().unwrap();
         let config = ModelConfig {
@@ -2892,7 +2893,7 @@ mod tests {
     /// Never retrained, on an empty store, the train of the 8th fits the
     /// sides as of the 7th, the meta's window of 24 hours before it, and
     /// publishes them valid from then, and the meta at the 8th.
-    #[test]
+    #[rstest]
     fn never_retrained_on_an_empty_store_a_train_fits_the_sides_as_of_the_metas_window_before_it_and_the_meta_at_it()
      {
         let dir = tempfile::tempdir().unwrap();
@@ -2931,7 +2932,7 @@ mod tests {
     /// of the 6th, settled after the 7th, not among them, nor the decisions of
     /// the 7th: their calibration `LINES`, one trade picked, of every trade's
     /// four.
-    #[test]
+    #[rstest]
     fn a_two_time_trains_sides_are_judged_on_rows_settled_by_their_time() {
         let dir = tempfile::tempdir().unwrap();
         let (models, _, _) = two_time(dir.path(), never_with_meta());
@@ -2960,7 +2961,7 @@ mod tests {
     /// published over its window, the 7th: held out, the shorts at 0.55 and
     /// 0.8, each decision's level `-0.25 + 1.5p`, 0.575 and 0.95, and no side
     /// call.
-    #[test]
+    #[rstest]
     fn a_two_time_trains_meta_learns_from_the_sides_decisions_over_its_window() {
         let dir = tempfile::tempdir().unwrap();
         let (models, _, _) = two_time(dir.path(), never_with_meta());
@@ -2984,7 +2985,7 @@ mod tests {
 
     /// One replay serves both: from the sides' window back from the 7th,
     /// the 6th, to the train, the 8th.
-    #[test]
+    #[rstest]
     fn a_two_time_train_replays_once_from_the_sides_window_to_its_time() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -3000,7 +3001,7 @@ mod tests {
     /// neither publishes as of the 7th: the meta has no decision of the
     /// sides to learn from, and waits, with no fit attempted, as the train
     /// says.
-    #[test]
+    #[rstest]
     fn the_sides_refused_in_a_two_time_train_leave_the_meta_waiting() {
         let dir = tempfile::tempdir().unwrap();
         let two = ModelConfig {
@@ -3034,7 +3035,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_train_succeeds_unless_it_kept_a_model() {
         let t = at("2026-01-07T00:00:00Z");
         let published = Outcome::Published {
@@ -3067,7 +3068,7 @@ mod tests {
 
     /// A model kept in use reads with its valid-from; a waiting meta as
     /// waiting for the sides' decisions.
-    #[test]
+    #[rstest]
     fn a_model_in_use_reads_with_its_valid_from_and_a_waiting_meta_as_waiting() {
         let in_use = Outcome::InUse {
             valid_from: at("2026-01-07T00:00:00Z"),
@@ -3088,7 +3089,7 @@ mod tests {
 
     /// Never retrained, a model in use reads as in use since its
     /// valid-from, and never retrained.
-    #[test]
+    #[rstest]
     fn a_model_in_use_never_retrained_reads_as_in_use_since_its_valid_from() {
         let in_use = Outcome::InUse {
             valid_from: at("2026-01-06T00:00:00Z"),
@@ -3103,7 +3104,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_train_of_several_models_reads_as_each_outcome() {
         let trained = Trained {
             long: Some(Outcome::Published {

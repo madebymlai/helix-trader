@@ -126,9 +126,11 @@ fn cache_database() -> RedisCacheConfig {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
-    #[test]
+    #[rstest]
     fn redis_keeps_its_data_in_an_append_only_file_on_the_volume() {
         let container = container();
         assert_eq!(
@@ -140,7 +142,7 @@ mod tests {
         assert_eq!(host.binds.unwrap(), ["helix-redis-data:/data"]);
     }
 
-    #[test]
+    #[rstest]
     fn the_container_restarts_always() {
         let host = container().host_config.unwrap();
         assert_eq!(
@@ -149,7 +151,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn the_port_is_bound_to_the_loopback_only() {
         let bindings = container().host_config.unwrap().port_bindings.unwrap();
         let [binding] = bindings["6379/tcp"].as_deref().unwrap() else {
@@ -159,7 +161,7 @@ mod tests {
         assert_eq!(binding.host_port.as_deref(), Some("6379"));
     }
 
-    #[test]
+    #[rstest]
     fn the_cache_database_is_the_containers_redis_without_credentials() {
         let config = cache_database();
         assert_eq!(config.host.as_deref(), Some("127.0.0.1"));

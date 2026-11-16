@@ -354,6 +354,7 @@ impl Contract {
 mod tests {
     use jiff::Timestamp;
     use nautilus_model::data::BarType;
+    use rstest::rstest;
 
     use super::*;
     use crate::strategy::requirements::DataRequirements;
@@ -384,7 +385,7 @@ mod tests {
 
     /// The account's margin of a position, a tenth of its notional at
     /// leverage 10, as IC's definitions hold the account's.
-    #[test]
+    #[rstest]
     fn an_okx_swap_is_a_crypto_perpetual_with_the_account_s_margins() {
         let InstrumentAny::CryptoPerpetual(btc) = btc_instrument() else {
             panic!("not a CryptoPerpetual");
@@ -395,7 +396,7 @@ mod tests {
     }
 
     /// At leverage 25, 4% of the notional.
-    #[test]
+    #[rstest]
     fn an_okx_x_perp_is_a_crypto_future_with_the_account_s_margins() {
         let InstrumentAny::CryptoFuture(btc) = xperp_instrument() else {
             panic!("not a CryptoFuture");
@@ -408,7 +409,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_leverage_not_positive_is_refused() {
         for leverage in [Decimal::ZERO, Decimal::NEGATIVE_ONE] {
             let err = instrument_from(&raw_instrument(), leverage, UnixNanos::default())
@@ -418,7 +419,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn a_dated_future_is_refused() {
         let mut dated = raw_xperp();
         dated.rule_type = "normal".to_string();
@@ -428,7 +429,7 @@ mod tests {
         assert!(err.contains("X-Perp"), "{err}");
     }
 
-    #[test]
+    #[rstest]
     fn the_type_and_family_of_an_okx_swap_or_future_key_its_clients() {
         let swap = Contract::of(btc()).unwrap();
         assert_eq!(
@@ -491,7 +492,7 @@ mod tests {
         .slices(at(from), at(to))
     }
 
-    #[test]
+    #[rstest]
     fn an_instrument_s_funding_is_asked_once_before_its_bars_and_its_definition_not_at_all() {
         let dir = tempfile::tempdir().unwrap();
         let (from, to) = ("2026-10-01T00:00:00Z", "2026-10-08T00:00:00Z");
@@ -513,7 +514,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn funding_is_asked_in_two_weeks_and_bars_in_days() {
         assert_eq!(period(FillData::Funding), SignedDuration::from_hours(336));
         assert_eq!(

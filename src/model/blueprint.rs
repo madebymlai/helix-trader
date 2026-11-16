@@ -177,6 +177,7 @@ impl ModelBlueprint {
 mod tests {
     use jiff::SignedDuration;
     use nautilus_model::identifiers::InstrumentId;
+    use rstest::rstest;
 
     use super::*;
     use crate::model::{
@@ -197,7 +198,7 @@ mod tests {
     /// A cadence not positive is refused as the blueprint is built, with
     /// the decision rule's error, before the target's ATR, which has no
     /// bars of that cadence.
-    #[test]
+    #[rstest]
     fn a_decision_cadence_not_positive_is_refused() {
         let config = ModelConfig {
             decision: DecisionRule::Every(SignedDuration::ZERO),
@@ -215,7 +216,7 @@ mod tests {
     /// The target is checked against what the strategy reads: an ATR of an
     /// instrument whose prices it does not read is refused as the
     /// blueprint is built, under the ATR's field.
-    #[test]
+    #[rstest]
     fn a_target_whose_atr_has_no_bars_to_be_built_from_is_refused() {
         let mut config = config();
         config.target.instrument_id = InstrumentId::from("EUR/USD.SIM");
@@ -232,7 +233,7 @@ mod tests {
     /// The dataset and the model set of a model stored carry one
     /// fingerprint: a model published under the dataset's, as a train
     /// publishes it, is the one the model set swaps in.
-    #[test]
+    #[rstest]
     fn the_dataset_and_the_model_set_of_a_model_stored_carry_one_fingerprint() {
         let dir = tempfile::tempdir().unwrap();
         let blueprint = blueprint(config()).unwrap();

@@ -280,6 +280,8 @@ pub(in crate::venues) fn offline_clients(instrument_ids: &[InstrumentId]) -> IbC
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
     use crate::venues::{Broker, tests::created_oms_type};
 
@@ -301,7 +303,7 @@ mod tests {
 
     /// Against the adapter's client: the broker's answer is our copy of it.
     /// The client needs no credential and connects to nothing.
-    #[test]
+    #[rstest]
     fn the_execution_client_keeps_positions_as_the_broker_answers() {
         let clients = configs(&gateway(), &paper(), &[sxr8()]);
 
@@ -312,7 +314,7 @@ mod tests {
 
     /// Not made the default of data: Nautilus makes the first data client
     /// on no venue the default itself, and refuses another made it after.
-    #[test]
+    #[rstest]
     fn the_data_client_is_routed_its_venues_and_the_execution_client_takes_every_order() {
         let ibis = || configs(&gateway(), &paper(), &[sxr8()]);
 
@@ -335,7 +337,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn the_data_client_takes_the_full_session_and_tick_by_tick_quotes() {
         let data = configs(&gateway(), &paper(), &[sxr8()]).data;
         assert!(!data.batch_quotes);
@@ -347,7 +349,7 @@ mod tests {
         assert_eq!(data.instrument_provider.load_ids, [sxr8()].into());
     }
 
-    #[test]
+    #[rstest]
     fn the_exec_client_trades_the_account_on_the_same_connection() {
         let exec = configs(&gateway(), &paper(), &[sxr8()]).exec;
         assert_eq!(exec.account_id.as_deref(), Some("DU1234567"));

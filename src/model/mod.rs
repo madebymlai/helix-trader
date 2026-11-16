@@ -251,6 +251,7 @@ mod tests {
     use nautilus_indicators::indicator::Indicator;
     use nautilus_model::{data::NautilusDataType, identifiers::StrategyId};
     use nautilus_trading::strategy::StrategyConfig;
+    use rstest::rstest;
     use serde::{Deserialize, Serialize};
 
     use super::*;
@@ -466,12 +467,12 @@ mod tests {
             .collect()
     }
 
-    #[test]
+    #[rstest]
     fn features_reading_every_series_of_data_and_no_other_load() {
         load(&[GOLD_BARS, GC_TRADES], &[GC_TRADES, GOLD_BARS], TIME_ONLY).unwrap();
     }
 
-    #[test]
+    #[rstest]
     fn a_series_of_data_no_feature_reads_is_refused_under_its_field_naming_it() {
         let [(field, message)] = &refusals(&[GOLD_BARS], &[GOLD_BARS, GC_TRADES], TIME_ONLY)[..]
         else {
@@ -482,7 +483,7 @@ mod tests {
         assert!(message.contains("TradeTick of GC.GLBX"), "{message}");
     }
 
-    #[test]
+    #[rstest]
     fn a_series_the_features_read_that_data_does_not_list_is_refused_naming_it() {
         let [(field, message)] = &refusals(&[GOLD_BARS, GC_TRADES], &[GOLD_BARS], TIME_ONLY)[..]
         else {
@@ -496,7 +497,7 @@ mod tests {
     /// Hourly bars of silver the features read and `[data]` does not list,
     /// the trades of GC `[data]` lists and no feature reads: each refused
     /// under its field, naming it.
-    #[test]
+    #[rstest]
     fn both_mismatches_are_refused_at_once() {
         let silver_bars = GOLD_BARS
             .replace("XAUUSD", "XAGUSD")
@@ -526,7 +527,7 @@ mod tests {
     /// Features on the MID bars of the GC root, listed: Nautilus builds a
     /// root's bars from its contracts' trades, so these would never come,
     /// refused under their series, naming them.
-    #[test]
+    #[rstest]
     fn bars_on_a_root_not_built_from_its_trades_are_refused_under_their_series() {
         let root_bars = r#"{ data = "bars", instrument_id = "GC.GLBX", bar_spec = { step = 1, aggregation = "HOUR", price_type = "MID" } }"#;
 
@@ -543,7 +544,7 @@ mod tests {
     /// or a time-only target's, is built of the quotes of the gold traded,
     /// which `[data]` lists for it; a bracket in basis points has no ATR to
     /// read them.
-    #[test]
+    #[rstest]
     fn ticks_the_target_atr_reads_alone_are_read() {
         let gold_quotes = r#"{ data = "quotes", instrument_id = "XAUUSD.ICMARKETS" }"#;
 
@@ -563,7 +564,7 @@ mod tests {
     /// Deciding hourly, the target's ATR, a bracket's or a time-only
     /// target's, runs on gold's hourly bars of mids, which `[data]` lists and
     /// no feature reads; a bracket in basis points has no ATR to read them.
-    #[test]
+    #[rstest]
     fn bars_the_target_atr_runs_on_alone_are_read() {
         let gold_hours = GOLD_BARS.replace("MINUTE", "HOUR");
 
@@ -582,7 +583,7 @@ mod tests {
 
     /// The target's ATR reads what it is built from, and nothing more:
     /// its bars of gold's quotes leave the trades of GC unread.
-    #[test]
+    #[rstest]
     fn a_series_neither_the_features_nor_the_target_atr_read_is_refused() {
         let refusals = refusals(&[GOLD_BARS], &[GOLD_BARS, GC_TRADES], BRACKET);
         let [(field, message)] = &refusals[..] else {
@@ -594,7 +595,7 @@ mod tests {
 
     /// An unread series and a limit of an hour decided every hour are
     /// both reported, each under its field.
-    #[test]
+    #[rstest]
     fn the_series_refusals_are_reported_with_the_other_violations() {
         let mut fields: Vec<String> = refusals(
             &[GOLD_BARS],
@@ -611,7 +612,7 @@ mod tests {
 
     /// The features read GC's trades once, and `[data]` lists them again:
     /// refused under their second listing, naming them.
-    #[test]
+    #[rstest]
     fn a_tick_series_listed_twice_is_refused_under_its_second_listing() {
         let err = load(
             &[GOLD_BARS, GC_TRADES],
@@ -633,7 +634,7 @@ mod tests {
 
     /// A series listed twice and a limit of an hour decided every hour
     /// are both reported, each under its field.
-    #[test]
+    #[rstest]
     fn a_series_listed_twice_is_reported_with_the_other_violations() {
         let mut fields: Vec<String> = refusals(
             &[GOLD_BARS],
@@ -650,7 +651,7 @@ mod tests {
 
     /// The part's own error building the features is the answer: no
     /// series is then refused for it.
-    #[test]
+    #[rstest]
     fn the_parts_error_building_the_features_is_reported_under_its_field() {
         let refusals = refusals(&[], &[GOLD_BARS], TIME_ONLY);
         let fields: Vec<&str> = refusals.iter().map(|(field, _)| field.as_str()).collect();
@@ -664,14 +665,14 @@ mod tests {
 
     /// Features on gold's bars and the 10-year yields, which `[data]`
     /// lists beside the bars.
-    #[test]
+    #[rstest]
     fn features_reading_a_custom_series_data_lists_load() {
         load(&[GOLD_BARS, US10Y], &[GOLD_BARS, US10Y], TIME_ONLY).unwrap();
     }
 
     /// The features read the 2-year yields, which `[data]` does not list
     /// beside the 10-year: refused, naming them by their identifier.
-    #[test]
+    #[rstest]
     fn a_custom_series_the_features_read_that_data_does_not_list_is_refused_naming_it() {
         let [(field, message)] =
             &refusals(&[GOLD_BARS, US10Y, US2Y], &[GOLD_BARS, US10Y], TIME_ONLY)[..]
@@ -687,7 +688,7 @@ mod tests {
     /// The 2-year yields `[data]` lists beside the 10-year the features
     /// read: refused as any series read by none, a strategy reading custom
     /// data in its `on_data` declaring it in what it reads.
-    #[test]
+    #[rstest]
     fn a_custom_series_data_lists_that_no_feature_reads_is_refused_naming_it() {
         let [(field, message)] =
             &refusals(&[GOLD_BARS, US10Y], &[GOLD_BARS, US2Y, US10Y], TIME_ONLY)[..]
@@ -703,7 +704,7 @@ mod tests {
     /// data type than the 10-year's the features read there: the cache keys
     /// a point by its whole data type, so each is refused, the one listed
     /// as read by no feature, the one read as not listed.
-    #[test]
+    #[rstest]
     fn a_custom_series_listed_under_its_identifier_with_other_metadata_is_refused_both_ways() {
         let under_10y = US2Y.replace("TREASURY-2Y", "TREASURY-10Y");
 
@@ -724,14 +725,14 @@ mod tests {
     }
 
     /// The span of 15 minutes, 900 s, is its feature's value.
-    #[test]
+    #[rstest]
     fn a_feature_is_built_of_its_table() {
         assert_eq!(features_of(TABLES).values(), Some(vec![900.0]));
     }
 
     /// Rows and models of a span of 15 minutes are not those of one of
     /// 30, with no code of the part's own.
-    #[test]
+    #[rstest]
     fn a_features_changed_argument_changes_the_fingerprint() {
         let changed = TABLES.replace(r#""15m""#, r#""30m""#);
 
@@ -742,7 +743,7 @@ mod tests {
     }
 
     /// 15 minutes written as 900 seconds is the same span.
-    #[test]
+    #[rstest]
     fn a_features_argument_written_otherwise_keeps_the_fingerprint() {
         let otherwise = TABLES.replace(r#""15m""#, r#""900s""#);
 
@@ -754,7 +755,7 @@ mod tests {
 
     /// The rows do not depend on the filter, which the part declares for
     /// its own logic and never hands to its features.
-    #[test]
+    #[rstest]
     fn an_indicator_of_the_parts_own_logic_is_not_in_the_fingerprint() {
         let changed = TABLES.replace("period = 5", "period = 6");
 
@@ -767,7 +768,7 @@ mod tests {
     /// A span its arguments refuse and the filter's table missing are
     /// reported, each under its table, with the model's violation; the
     /// features, which need the span, are not built.
-    #[test]
+    #[rstest]
     fn the_tables_refusals_are_reported_with_the_other_violations() {
         let tables = TABLES
             .replace(r#""15m""#, r#""0s""#)

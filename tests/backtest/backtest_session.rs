@@ -3,6 +3,7 @@
 //! per thread, so one run per test.
 
 use jiff::Timestamp;
+use rstest::rstest;
 
 use crate::common::{self, stepped_quotes, ts};
 
@@ -31,7 +32,7 @@ fn level(close: Timestamp) -> Option<f64> {
     }
 }
 
-#[test]
+#[rstest]
 fn bars_outside_the_session_neither_move_the_emas_nor_trade() {
     let (from, start, end) = (
         ts("2026-01-07T08:00:00Z"),

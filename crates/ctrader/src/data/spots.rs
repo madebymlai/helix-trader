@@ -139,6 +139,7 @@ impl SpotQuotes {
 mod tests {
     use nautilus_model::types::Quantity;
     use prost::Message as _;
+    use rstest::rstest;
 
     use super::*;
     use crate::testing::{
@@ -181,7 +182,7 @@ mod tests {
         (ms, bid.to_owned(), ask.to_owned())
     }
 
-    #[test]
+    #[rstest]
     fn the_first_spot_makes_a_quote_at_its_time_received_now_sized_as_history() {
         let mut quotes = subscribed();
 
@@ -201,7 +202,7 @@ mod tests {
         assert_eq!(made.ask_size, Quantity::from(100_000));
     }
 
-    #[test]
+    #[rstest]
     fn a_spot_of_one_side_carries_the_other() {
         let mut quotes = subscribed();
         quotes
@@ -220,7 +221,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn no_quote_before_both_sides_are_known() {
         let mut quotes = subscribed();
 
@@ -230,7 +231,7 @@ mod tests {
     }
 
     /// The captured first spot, then an ask captured later, below its bid.
-    #[test]
+    #[rstest]
     fn a_crossed_quote_is_dropped() {
         let mut quotes = subscribed();
         quotes
@@ -242,7 +243,7 @@ mod tests {
         assert_eq!(made, None);
     }
 
-    #[test]
+    #[rstest]
     fn an_instrument_not_subscribed_gets_no_quote_but_its_sides_are_kept() {
         let mut quotes = SpotQuotes::new(&[eurusd()]).unwrap();
         quotes
@@ -266,7 +267,7 @@ mod tests {
     }
 
     /// Synthetic: a spot of a symbol the session did not load.
-    #[test]
+    #[rstest]
     fn a_spot_of_a_symbol_not_loaded_is_an_error() {
         let mut quotes = subscribed();
         let mut other = spot(SPOT_EVENT_EURUSD_FIRST);
@@ -277,7 +278,7 @@ mod tests {
         assert!(err.to_string().contains("symbol 7"), "{err}");
     }
 
-    #[test]
+    #[rstest]
     fn an_instrument_not_loaded_is_refused() {
         let mut quotes = subscribed();
 

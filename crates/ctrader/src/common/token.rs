@@ -284,6 +284,7 @@ mod tests {
     };
 
     use nautilus_core::string::secret::REDACTED;
+    use rstest::rstest;
 
     use super::*;
     use crate::testing::NAMES;
@@ -317,7 +318,7 @@ mod tests {
         fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
-    #[test]
+    #[rstest]
     fn the_first_load_seeds_the_file_from_the_env_pair_expiry_unknown() {
         let dir = tempfile::tempdir().unwrap();
         let store = store_in(dir.path(), seed());
@@ -331,7 +332,7 @@ mod tests {
         assert_eq!(exposed(&store.read().unwrap()), exposed(&loaded));
     }
 
-    #[test]
+    #[rstest]
     fn the_file_is_the_user_s_only() {
         let dir = tempfile::tempdir().unwrap();
         let store = store_in(dir.path(), seed());
@@ -342,7 +343,7 @@ mod tests {
         assert_eq!(mode(store.path().parent().unwrap()), 0o700);
     }
 
-    #[test]
+    #[rstest]
     fn a_renewed_pair_is_what_the_next_load_finds() {
         let dir = tempfile::tempdir().unwrap();
         let store = store_in(dir.path(), seed());
@@ -359,7 +360,7 @@ mod tests {
         assert_eq!(mode(store.path()), 0o600);
     }
 
-    #[test]
+    #[rstest]
     fn another_env_pair_seeds_the_file_again() {
         let dir = tempfile::tempdir().unwrap();
         let store = store_in(dir.path(), seed());
@@ -376,7 +377,7 @@ mod tests {
         assert_eq!(exposed(&loaded), exposed(&from_playground));
     }
 
-    #[test]
+    #[rstest]
     fn no_pair_is_loaded_while_another_session_renews() {
         let dir = tempfile::tempdir().unwrap();
         let (one, other) = (store_in(dir.path(), seed()), store_in(dir.path(), seed()));
@@ -389,7 +390,7 @@ mod tests {
         assert!(other.try_load().unwrap().is_some());
     }
 
-    #[test]
+    #[rstest]
     fn the_lock_is_taken_by_one_session_at_a_time() {
         let dir = tempfile::tempdir().unwrap();
         let (one, other) = (store_in(dir.path(), seed()), store_in(dir.path(), seed()));
@@ -405,7 +406,7 @@ mod tests {
     /// Two writers replace the pair over and over while a reader, which
     /// read the seed before they started, reads on: every read is one
     /// whole pair, and the file ends with the last one written.
-    #[test]
+    #[rstest]
     fn concurrent_writers_never_leave_a_partial_pair_and_the_later_wins() {
         let dir = tempfile::tempdir().unwrap();
         let store = store_in(dir.path(), pair("seedaccess", "seedrefresh", None));
@@ -458,7 +459,7 @@ mod tests {
         assert!(["a99access", "b99access"].contains(&access.as_str()));
     }
 
-    #[test]
+    #[rstest]
     fn a_file_not_a_token_file_is_an_error_naming_it_not_its_content() {
         let dir = tempfile::tempdir().unwrap();
         let store = store_in(dir.path(), seed());
@@ -476,7 +477,7 @@ mod tests {
         assert!(!err.contains("leakedValue"), "{err}");
     }
 
-    #[test]
+    #[rstest]
     fn a_renewed_pair_expires_after_its_lifetime_and_renews_a_day_before() {
         let now: Timestamp = "2026-10-26T12:00:00Z".parse().unwrap();
 
@@ -493,7 +494,7 @@ mod tests {
         assert_eq!(seed().renew_at(), None);
     }
 
-    #[test]
+    #[rstest]
     fn debug_shows_no_token() {
         let dir = tempfile::tempdir().unwrap();
         let store = store_in(dir.path(), seed());

@@ -1210,6 +1210,7 @@ mod tests {
         nautilus_strategy,
         strategy::{StrategyConfig, StrategyCore},
     };
+    use rstest::rstest;
     use rust_decimal::Decimal;
 
     use super::*;
@@ -1238,7 +1239,7 @@ mod tests {
 
     /// Each broker's account by its own variables, on the login's one
     /// credential and token file.
-    #[test]
+    #[rstest]
     fn each_ctrader_venue_reads_its_own_account_beside_the_login_s_credential() {
         let ic = demo_connection(ic::BROKER);
         let pepperstone = demo_connection(pepperstone::BROKER);
@@ -1265,7 +1266,7 @@ mod tests {
 
     /// A broker without instruments is not among those present, the only
     /// ones whose connection either dispatch reads.
-    #[test]
+    #[rstest]
     fn a_ctrader_broker_without_instruments_is_not_present() {
         let gold = InstrumentId::from("XAUUSD.PEPPERSTONE");
 
@@ -1276,7 +1277,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn the_ctrader_brokers_present_come_in_their_table_s_order_each_with_its_instruments_in_theirs()
     {
         let eurusd = InstrumentId::from("EURUSD.PEPPERSTONE");
@@ -1302,7 +1303,7 @@ mod tests {
     /// quotes alone, a pair of `[trade] conversions`, no bars built from
     /// them, go to its clients, which load them, so that the strategy's
     /// subscriptions to them are served.
-    #[test]
+    #[rstest]
     fn a_ctrader_broker_s_clients_take_the_instruments_of_its_bars_and_of_its_quotes_read_alone() {
         let (gold, eurusd) = (
             InstrumentId::from("XAUUSD.PEPPERSTONE"),
@@ -1329,7 +1330,7 @@ mod tests {
 
     /// As the node does: each client created by its factory, under the
     /// factory's name, from its config.
-    #[test]
+    #[rstest]
     fn the_node_gets_factories_that_create_the_broker_s_clients_on_its_venue() {
         let (data_tx, _data_events) = tokio::sync::mpsc::unbounded_channel();
         replace_data_event_sender(data_tx);
@@ -1381,7 +1382,7 @@ mod tests {
         A::from_arg_matches(&matches)
     }
 
-    #[test]
+    #[rstest]
     fn live_takes_the_ib_account_and_client_id() {
         let venues: LiveVenueArgs =
             parsed(&["--account", "DU1234567", "--client-id", "7"]).unwrap();
@@ -1391,7 +1392,7 @@ mod tests {
 
     /// The account given, since the developer's environment may set
     /// `NAUTILUS_IB_ACCOUNT_ID`, which the flag falls back on.
-    #[test]
+    #[rstest]
     fn live_is_the_adapters_default_ib_client_unless_told_otherwise() {
         let venues: LiveVenueArgs = parsed(&["--account", "DU1234567"]).unwrap();
         assert_eq!(venues.ib.client_id, 1);
@@ -1400,7 +1401,7 @@ mod tests {
     /// Read from the arguments' definition: setting the variable would race
     /// the other tests, and the developer's environment may have it. Not
     /// required: a run on OKX alone has no IB account.
-    #[test]
+    #[rstest]
     fn the_live_account_falls_back_on_nautilus_ib_account_id() {
         let live = LiveVenueArgs::augment_args(Command::new("live"));
         let account = live
@@ -1414,7 +1415,7 @@ mod tests {
         assert!(!account.is_required_set());
     }
 
-    #[test]
+    #[rstest]
     fn fill_catalog_is_ib_client_10_unless_told_otherwise() {
         let venues: HistoryVenueArgs = parsed(&[]).unwrap();
         assert_eq!(venues.ib.client_id, 10);
@@ -1479,7 +1480,7 @@ mod tests {
     }
 
     /// Against the adapter's client: the broker's answer is our copy of it.
-    #[test]
+    #[rstest]
     fn each_ctrader_broker_s_execution_client_keeps_positions_as_the_broker_answers() {
         for &broker in CTRADER_BROKERS {
             let id = InstrumentId::from(format!("XAUUSD.{}", broker.venue).as_str());
@@ -1490,7 +1491,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn each_ctrader_broker_is_on_the_venue_its_module_offers_its_callers() {
         assert_eq!((ic::BROKER.venue, ic::VENUE), ("ICMARKETS", "ICMARKETS"));
         assert_eq!(
@@ -1760,7 +1761,7 @@ mod tests {
 
     /// LSE's rows are LSE's: its history serves them, and their data
     /// client on a live node is LSE's.
-    #[test]
+    #[rstest]
     fn lse_s_rows_are_served_by_lse_and_their_live_data_client_is_lse_s() {
         let us10y = lse_rows("bond_yields", "US10Y");
 
@@ -1770,7 +1771,7 @@ mod tests {
 
     /// A type with no row is the catalog's: no source serves it, and it
     /// has no data client on a live node.
-    #[test]
+    #[rstest]
     fn a_custom_series_of_a_type_with_no_row_is_served_by_no_source_and_has_no_client() {
         assert_eq!(serves_custom(&signal()).unwrap(), None);
         assert_eq!(custom_data_client(&signal()), None);
@@ -1856,7 +1857,7 @@ mod tests {
         )
     }
 
-    #[test]
+    #[rstest]
     fn a_ctrader_fill_asks_what_the_catalog_lacks_in_tick_requests_and_a_definition_whole() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -1887,7 +1888,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_ctrader_fill_on_a_complete_catalog_asks_nothing_and_reads_no_connection() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -1909,7 +1910,7 @@ mod tests {
 
     /// GC.GLBX rolls from GCQ26 to GCZ26 at 00:00 UTC on 29 July 2026: its
     /// slices are LSE's, contract by contract, as LSEDGE's are.
-    #[test]
+    #[rstest]
     fn each_history_source_takes_the_slices_of_its_own_contracts() {
         let requirements = ticks(&[
             (NautilusDataType::TradeTick, "GC.GLBX"),
@@ -1944,7 +1945,7 @@ mod tests {
     }
 
     /// Only a venue no broker trades, LSEDGE, has none.
-    #[test]
+    #[rstest]
     fn every_venue_has_a_broker_but_lsedge() {
         for (venue, has) in [
             ("ICMARKETS", true),
@@ -2030,7 +2031,7 @@ mod tests {
     /// The cTrader brokers' accounts hedge; IB's and OKX's net, whether the
     /// venue has a row of its own, as GLBX has, or none; LSEDGE, which no
     /// broker trades, keeps positions as Nautilus' venue default.
-    #[test]
+    #[rstest]
     fn each_venue_keeps_positions_as_the_account_of_its_live_broker_does() {
         for (venue, kept) in [
             ("ICMARKETS", OmsType::Hedging),
@@ -2054,7 +2055,7 @@ mod tests {
     /// row of its own; a cTrader broker's balance and OKX's cash leave
     /// them out; LSEDGE, which no broker trades, has no account of a
     /// broker.
-    #[test]
+    #[rstest]
     fn each_venue_reads_its_equity_as_its_live_broker_reports_it() {
         for (venue, source) in [
             ("ICMARKETS", EquitySource::Portfolio),
@@ -2074,7 +2075,7 @@ mod tests {
     /// IB's execution client as helix configures it, GLBX's and every
     /// venue's without a row of its own; LSEDGE, which no broker trades,
     /// has no account of a broker.
-    #[test]
+    #[rstest]
     fn each_venue_has_a_base_currency_as_the_account_of_its_live_broker_has() {
         for (venue, based) in [
             ("ICMARKETS", true),
@@ -2094,7 +2095,7 @@ mod tests {
     /// broker's as its quotes, serving no bars; IB's, an IDEALPRO pair's,
     /// IDEALPRO having no row of its own, as its bars, which IB serves
     /// beside its quotes.
-    #[test]
+    #[rstest]
     fn each_venue_s_pairs_are_read_in_the_first_form_its_history_serves() {
         let quotes = |pair: &str| {
             vec![Series::Ticks(TickSeries {
@@ -2123,7 +2124,7 @@ mod tests {
     /// OKX's history serves no BID or ASK bars, its candles being of trades,
     /// and no quotes: no rate of an OKX pair can be read, which names the
     /// pair and its venue.
-    #[test]
+    #[rstest]
     fn a_pair_whose_venue_serves_neither_form_has_no_rate_series() {
         let err = rate_series(InstrumentId::from("USDC-USDT.OKX"))
             .unwrap_err()
@@ -2167,7 +2168,7 @@ mod tests {
 
     /// A cTrader broker's history is its tick history, of quotes alone, as
     /// its adapter serves (`ctrader::quoted`).
-    #[test]
+    #[rstest]
     fn a_ctrader_broker_s_history_serves_its_quotes_alone() {
         use NautilusDataType as D;
         assert_serves(
@@ -2188,7 +2189,7 @@ mod tests {
     /// (`request_trades`, `request_bars`), no quotes and no book: its
     /// candles are of trade prices, at a width OKX has a candle of
     /// (`bar_spec_as_okx_channel`), whatever price a bar type names.
-    #[test]
+    #[rstest]
     fn okx_s_history_serves_its_trades_and_its_candles() {
         use NautilusDataType as D;
         assert_serves(
@@ -2217,7 +2218,7 @@ mod tests {
     /// of, and for its candles of an LSEDGE series and an OPRA contract
     /// alone, EXTERNAL bars of the LAST price below a day wide
     /// (`lse::serves`).
-    #[test]
+    #[rstest]
     fn lse_s_history_serves_what_its_client_asks_lse_for() {
         use NautilusDataType as D;
         assert_serves(
@@ -2249,7 +2250,7 @@ mod tests {
     /// and IB's historical ticks, BID_ASK as quotes and TRADES as trades,
     /// every venue without a row of its own; no book, no other price and
     /// no size IB has not.
-    #[test]
+    #[rstest]
     fn ib_s_history_serves_its_time_bars_quotes_and_trades() {
         use NautilusDataType as D;
         assert_serves(
@@ -2301,7 +2302,7 @@ mod tests {
 
     /// A cTrader broker's data client streams its spots, its quotes, alone
     /// (`ctrader::quoted`): no trades, no book, no bars.
-    #[test]
+    #[rstest]
     fn a_ctrader_broker_streams_its_quotes_alone() {
         use NautilusDataType as D;
         assert_streams(
@@ -2324,7 +2325,7 @@ mod tests {
     /// Levels 1 to 3, a rolled root's on its contracts
     /// (`lse::streams`); no candles, of which its history serves
     /// some.
-    #[test]
+    #[rstest]
     fn lse_s_client_streams_what_its_streams_carry() {
         use NautilusDataType as D;
         assert_streams(
@@ -2357,7 +2358,7 @@ mod tests {
     /// own. No trades of a currency pair, which its `subscribe_trades`
     /// logs as unsupported, no TRADES bars of a forex pair, which IB has
     /// none of, and no book depth, which it does not subscribe to.
-    #[test]
+    #[rstest]
     fn ib_s_client_streams_its_quotes_trades_bars_and_book_deltas() {
         use NautilusDataType as D;
         assert_streams(
@@ -2397,7 +2398,7 @@ mod tests {
     /// 15, 20 and 30 minutes, 1, 2, 3, 4 and 8 hours, a day, a week, a
     /// month) but 1 second, which IB does not keep up to date. No 10-second
     /// bars, of which the client has no size.
-    #[test]
+    #[rstest]
     fn ib_s_refusal_of_bars_offers_exactly_the_sizes_it_streams() {
         let units = ["SECOND", "MINUTE", "HOUR", "DAY", "WEEK", "MONTH"];
         let err = format!(
@@ -2446,7 +2447,7 @@ mod tests {
     /// candles of `bar_spec_as_okx_channel`, trade-priced), and its book,
     /// deltas of an L2_MBP book and depth of five levels a side
     /// (`subscribe_book_deltas`, `subscribe_book_depth`).
-    #[test]
+    #[rstest]
     fn okx_s_client_streams_its_quotes_trades_candles_and_book() {
         use NautilusDataType as D;
         assert_streams(
@@ -2475,7 +2476,7 @@ mod tests {
     /// it does not subscribe to; OKX's price levels (L2_MBP), the one book type its
     /// client takes, and five levels a side of depth, the most it takes; a
     /// cTrader broker's none, its client streaming quotes alone.
-    #[test]
+    #[rstest]
     fn each_venue_s_book_is_in_the_format_its_live_data_client_streams() {
         let lse = Some(BookFormat {
             deltas: BookType::L3_MBO,
@@ -2893,7 +2894,7 @@ mod tests {
 
     /// IB's execution client denies reduce-only and post-only orders, GLBX's
     /// and every venue's without a row of its own.
-    #[test]
+    #[rstest]
     fn each_venue_takes_reduce_only_and_post_only_orders_as_its_live_broker_does() {
         for (venue, takes) in [
             ("ICMARKETS", true),
@@ -2917,7 +2918,7 @@ mod tests {
     /// each cTrader broker take all four from themselves; LSEDGE its
     /// definitions from the catalog and its history and live data from LSE,
     /// with no broker; and every other venue all four from IB.
-    #[test]
+    #[rstest]
     fn each_instrument_routes_to_the_row_of_its_venue() {
         let okx = Row {
             definitions: DefinitionsSource::Okx,
@@ -2981,7 +2982,7 @@ mod tests {
     /// through IB's, which loads their instruments; LSEDGE's data from LSE's
     /// alone; every other venue's from its broker's, IB's routed its venues
     /// alone.
-    #[test]
+    #[rstest]
     fn each_instrument_goes_to_the_clients_of_its_live_data_and_of_its_broker() {
         let routes = LiveRoutes::of(
             &[
@@ -3023,7 +3024,7 @@ mod tests {
     /// instruments' routes, each once, whether or not an instrument of the
     /// run routes to them: LSE's for LSE's yields, here of no LSE
     /// instrument; none for the tests' signal, of a type with no row.
-    #[test]
+    #[rstest]
     fn a_custom_series_routes_its_type_s_live_data_source_to_the_node_with_no_instrument_of_it() {
         let routes = LiveRoutes::of(
             &[InstrumentId::from("SXR8.IBIS")],
@@ -3111,7 +3112,7 @@ mod tests {
     }
 
     /// LSE's data client, routed GLBX, streams the contract.
-    #[test]
+    #[rstest]
     fn lse_s_client_streams_glbx_contracts_routed_glbx_with_no_execution_client() {
         let clients = lse::live_clients(&[
             InstrumentId::from("GCZ26.GLBX"),
@@ -3160,7 +3161,7 @@ mod tests {
 
     /// LSE's data client, routed OPRA, streams the contracts, the trades of
     /// each through its underlying's chain.
-    #[test]
+    #[rstest]
     fn lse_s_client_streams_option_contracts_routed_opra_with_no_execution_client() {
         let clients = lse::live_clients(&[
             InstrumentId::from("AAPL  261120C00355000.OPRA"),
@@ -3320,7 +3321,7 @@ mod tests {
     }
 
     /// The table names its venues as their adapters do.
-    #[test]
+    #[rstest]
     fn the_table_s_venues_are_their_adapters() {
         assert_eq!(Row::of(*OKX_VENUE).history, HistorySource::Okx);
         assert_eq!(
@@ -3374,7 +3375,7 @@ mod tests {
     /// The broker's data client where a broker trades the venue, GLBX's and
     /// XNAS's IB among them; LSEDGE's LSE, which streams it. Each by the
     /// name its factory gives the client, which the node registers it under.
-    #[test]
+    #[rstest]
     fn a_definition_is_asked_of_the_venue_s_broker_or_else_of_its_live_data_client() {
         for (id, client) in [
             ("BTC-USDT-SWAP.OKX", "OKX"),

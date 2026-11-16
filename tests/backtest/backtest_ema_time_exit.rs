@@ -4,9 +4,11 @@
 //! (`common::trades`, `TIME_EXIT`). One node per thread, so one run per
 //! test.
 
+use rstest::rstest;
+
 use crate::common::{self, trades};
 
-#[test]
+#[rstest]
 fn a_trade_is_closed_its_hold_after_its_send() {
     let levels = trades::TIME_EXIT;
     let catalog = trades::catalog(&levels);

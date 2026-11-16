@@ -26,6 +26,7 @@ use nautilus_model::{
     data::{NautilusDataType, TradeTick},
     identifiers::InstrumentId,
 };
+use rstest::rstest;
 
 use crate::common::{
     dataset::{self, probe_reading},
@@ -172,7 +173,7 @@ fn assert_rows(got: &[(Timestamp, Vec<f64>)], expected: &[(Timestamp, Vec<f64>)]
 /// 00:30 and 00:45 read December's alone: the mean of 4041 and 4042, then
 /// of 4042 and 4043. No feature reads IC's gold, which the run trades:
 /// its quotes, the harness's, make each decision fresh.
-#[test]
+#[rstest]
 fn features_on_a_root_read_each_contract_in_turn_reset_at_the_roll() {
     let rows = rows(root_trades());
 
@@ -192,7 +193,7 @@ fn features_on_a_root_read_each_contract_in_turn_reset_at_the_roll() {
 /// alone: the gold's, reset too, would stay cold until 00:59:30, after the
 /// run's last decision; untouched, it gives the rows of 00:30 and 00:45,
 /// a mid of 4000.10.
-#[test]
+#[rstest]
 fn a_roll_leaves_the_features_of_other_instruments_untouched() {
     let tables = root_tables();
     let features = FeatureSet::builder()

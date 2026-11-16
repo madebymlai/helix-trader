@@ -59,6 +59,7 @@ pub(super) fn features(config: &ModelEmaConfig) -> anyhow::Result<Rc<FeatureSet>
 #[cfg(all(test, feature = "strategy-tests"))]
 mod tests {
     use jiff::SignedDuration;
+    use rstest::rstest;
     use nautilus_common::actor::indicators::ActorIndicator;
     use nautilus_model::data::{Bar, BarType};
 
@@ -129,19 +130,19 @@ mod tests {
     }
 
     /// A dataset build replays the strategy's warmup before its first day.
-    #[test]
+    #[rstest]
     fn the_features_declare_the_strategys_warmup() {
         assert_eq!(features_of(CONFIG).warmup(), SignedDuration::from_hours(3));
     }
 
     /// Each table feeds one feature of one bar type.
-    #[test]
+    #[rstest]
     fn the_averages_of_one_bar_type_are_named_after_their_tables() {
         assert_eq!(features_of(CONFIG).names(), ["fast", "slow"]);
     }
 
     /// Each table feeds a feature of each bar type.
-    #[test]
+    #[rstest]
     fn the_averages_of_several_bar_types_are_named_after_each_and_their_tables_in_order() {
         assert_eq!(
             features_of(&with_silver()).names(),
@@ -158,7 +159,7 @@ mod tests {
     /// their first period, then weigh each close 2 / (period + 1). The
     /// fast one is 1.5 after two bars, then 1.5 + 2/3 (3 - 1.5) = 2.5; the
     /// slow one is warm after three, at 2.
-    #[test]
+    #[rstest]
     fn the_averages_are_of_the_periods_their_tables_set() {
         let features = features_of(CONFIG);
 
@@ -174,7 +175,7 @@ mod tests {
 
     /// Rows and models of a fast average of 2 bars are not those of one of
     /// 4, with no version bump.
-    #[test]
+    #[rstest]
     fn a_changed_period_changes_the_fingerprint() {
         let changed = CONFIG.replace("period = 2", "period = 4");
 
@@ -187,7 +188,7 @@ mod tests {
     /// Rows and models of gold's minute bars are not those of its
     /// 5-minute bars, though one series names the features after their
     /// tables alone.
-    #[test]
+    #[rstest]
     fn another_bar_spec_changes_the_fingerprint() {
         let five_minutes = CONFIG.replace("step = 1,", "step = 5,");
 
@@ -199,7 +200,7 @@ mod tests {
 
     /// Rows and models of gold's bars are not those of silver's, though
     /// one series names the features after their tables alone.
-    #[test]
+    #[rstest]
     fn another_instrument_changes_the_fingerprint() {
         let silver = CONFIG.replace("XAUUSD", "XAGUSD");
 
@@ -211,7 +212,7 @@ mod tests {
 
     /// Nautilus parses a `PriceType` in any case: `"mid"` is the price
     /// `"MID"` is, and keys the same rows and models.
-    #[test]
+    #[rstest]
     fn a_price_type_written_in_another_case_keeps_the_fingerprint() {
         let price_type = |name: &str| {
             CONFIG.replace(

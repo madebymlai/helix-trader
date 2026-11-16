@@ -194,6 +194,8 @@ const STREAMED: [NautilusDataType; 9] = [
 mod tests {
     use std::{collections::HashSet, path::Path};
 
+    use rstest::rstest;
+
     use super::*;
 
     fn recording(staging: PathBuf) -> Recording {
@@ -204,7 +206,7 @@ mod tests {
         DataCatalogConfig::new(dir.to_str().unwrap().to_string(), None, None)
     }
 
-    #[test]
+    #[rstest]
     fn the_staged_data_is_promoted_into_the_catalog_daily_and_on_stop() {
         let dir = tempfile::tempdir().unwrap();
         let streaming = recording(dir.path().join("staging"))
@@ -224,7 +226,7 @@ mod tests {
         assert!(streaming.delete_feather_after_promotion);
     }
 
-    #[test]
+    #[rstest]
     fn a_restart_appends_to_what_the_last_run_staged() {
         let dir = tempfile::tempdir().unwrap();
         let streaming = recording(dir.path().join("staging"))
@@ -233,7 +235,7 @@ mod tests {
         assert!(!streaming.replace_existing);
     }
 
-    #[test]
+    #[rstest]
     fn market_data_and_instruments_are_streamed_and_nothing_else() {
         let dir = tempfile::tempdir().unwrap();
         let streaming = recording(dir.path().join("staging"))
@@ -259,7 +261,7 @@ mod tests {
         assert_eq!(streaming.record_filters, None);
     }
 
-    #[test]
+    #[rstest]
     fn a_staging_directory_inside_the_catalog_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let catalog_dir = dir.path().join("catalog");
@@ -284,7 +286,7 @@ mod tests {
     /// Either directory by a path relative to the working directory, as
     /// `--catalog` and `--staging` take them, the other absolute or
     /// relative too.
-    #[test]
+    #[rstest]
     fn a_staging_directory_inside_the_catalog_is_refused_however_either_is_given() {
         let dir = tempfile::tempdir().unwrap();
         let catalog_dir = dir.path().join("catalog");
@@ -303,7 +305,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn a_staging_directory_beside_the_catalog_named_after_it_is_outside_it() {
         let dir = tempfile::tempdir().unwrap();
         let catalog_dir = dir.path().join("catalog");
@@ -313,7 +315,7 @@ mod tests {
             .unwrap();
     }
 
-    #[test]
+    #[rstest]
     fn a_trader_keeps_its_instance_id_across_runs() {
         let dir = tempfile::tempdir().unwrap();
         let trader_id = TraderId::from("HELIX-001");
@@ -326,7 +328,7 @@ mod tests {
         assert_eq!(first, second);
     }
 
-    #[test]
+    #[rstest]
     fn each_trader_has_its_own_instance_id() {
         let dir = tempfile::tempdir().unwrap();
         let recording = recording(dir.path().join("staging"));
@@ -335,7 +337,7 @@ mod tests {
         assert_ne!(first, second);
     }
 
-    #[test]
+    #[rstest]
     fn an_instance_id_file_without_an_instance_id_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let recording = recording(dir.path().join("staging"));

@@ -7,6 +7,7 @@
 
 use helix_trader::backtest::Backtest;
 use nautilus_model::enums::OmsType;
+use rstest::rstest;
 
 use crate::common::{self, trades};
 
@@ -29,7 +30,7 @@ use crate::common::{self, trades};
 /// On a netting venue the sell at 14:00 would have closed the long there.
 const LEVELS: [f64; 7] = [610.0, 608.0, 608.0, 608.0, 609.0, 607.0, 607.0];
 
-#[test]
+#[rstest]
 fn on_a_hedging_venue_overlapping_trades_are_two_positions_each_closed_by_its_hold() {
     let catalog = trades::catalog(&LEVELS);
     let backtest = Backtest {

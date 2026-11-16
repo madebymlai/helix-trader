@@ -759,6 +759,7 @@ mod tests {
         nautilus_strategy,
         strategy::{StrategyConfig, StrategyCore},
     };
+    use rstest::rstest;
     use rust_decimal::Decimal;
 
     use super::*;
@@ -942,7 +943,7 @@ mod tests {
         decision.map(|decision| decision.level)
     }
 
-    #[test]
+    #[rstest]
     fn cold_features_give_no_trade() {
         let models = tempfile::tempdir().unwrap();
         store(models.path())
@@ -961,7 +962,7 @@ mod tests {
     }
 
     /// No quote since the decision an hour before: the market is closed.
-    #[test]
+    #[rstest]
     fn a_stale_decision_gives_no_trade() {
         let models = tempfile::tempdir().unwrap();
         store(models.path())
@@ -979,7 +980,7 @@ mod tests {
     /// No feature reads AUD/USD, which it trades: its quote in the cache,
     /// made at the decision, the harness's, makes the decision fresh, and
     /// the long model of these features trades, expecting 0.3R.
-    #[test]
+    #[rstest]
     fn a_cadence_on_features_reading_no_data_of_the_traded_instrument_decides_on_its_quotes() {
         let models = tempfile::tempdir().unwrap();
         let features = last_mid(InstrumentId::from("GBP/USD.SIM")).build().unwrap();
@@ -1019,7 +1020,7 @@ mod tests {
     /// A strategy reading AUD/USD, which it trades, as trades alone, its
     /// features GBP/USD's quotes: the handle subscribes AUD/USD's trades,
     /// and no quotes of it, beside the features' GBP/USD quotes.
-    #[test]
+    #[rstest]
     fn the_handle_subscribes_the_series_the_strategy_reads_of_the_traded_instrument() {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
@@ -1107,7 +1108,7 @@ mod tests {
     /// A long expecting 0.1R, clearing its margin of nought; the short is
     /// not traded. The decision carries its expected R, its level and, of
     /// one side, no side call.
-    #[test]
+    #[rstest]
     fn a_side_expected_to_clear_its_margin_is_a_decision_of_its_expected_r() {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
@@ -1177,7 +1178,7 @@ mod tests {
     /// The dataset balance in EUR, EUR/USD quoted: the payoff features are
     /// priced at the reference stake of the balance converted into USD, and
     /// the long of 0.1R decides.
-    #[test]
+    #[rstest]
     fn a_dataset_balance_in_another_currency_decides_at_the_live_rate() {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
@@ -1193,7 +1194,7 @@ mod tests {
     /// The dataset balance in EUR, no quote of EUR/USD yet: no rate into
     /// USD, so no decision, the reason logged, naming the balance and the
     /// currency it has no rate into.
-    #[test]
+    #[rstest]
     fn a_decision_with_no_rate_of_the_dataset_balance_is_not_made_and_logs_why() {
         let name = "a_decision_with_no_rate_of_the_dataset_balance_is_not_made_and_logs_why";
         if !log_capture::alone(module_path!(), name) {
@@ -1242,7 +1243,7 @@ mod tests {
     /// bps above, 0.00140, and its stop 10 bps below, 0.00070, its one R:
     /// the prices a dataset run's long sets there, closed 2 hours later,
     /// with no quantity. The long expects 0.5R.
-    #[test]
+    #[rstest]
     fn a_bracket_trade_is_on_the_exits_and_the_limit_its_decision_sets() {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
@@ -1276,7 +1277,7 @@ mod tests {
 
     /// Worked by hand: the long of 0.5R clears a margin of 0.4R, whatever
     /// its stop is worth in money: the margin is in R.
-    #[test]
+    #[rstest]
     fn a_side_clears_its_margin_in_r_whatever_its_stop_is_worth() {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
@@ -1299,7 +1300,7 @@ mod tests {
     /// short of it, and the short of 0.5R clears it. From the mid of
     /// 0.70000, the short's take profit is 0.00140 below and its stop
     /// 0.00070 above.
-    #[test]
+    #[rstest]
     fn a_short_trade_is_on_the_exits_its_decision_sets_on_the_short() {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
@@ -1379,7 +1380,7 @@ mod tests {
 
     /// The long of -0.3R expects a loss whatever its stop is worth, half a
     /// cent here: it does not clear a margin of nought.
-    #[test]
+    #[rstest]
     fn a_side_expected_to_lose_on_a_half_tick_stop_does_not_clear_a_margin_of_nought() {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = on_a_half_tick(at("2026-10-22T12:00:00Z"));
@@ -1390,7 +1391,7 @@ mod tests {
 
     /// Worked by hand. The short expects 0.3R and the long -0.3R, a loss, so
     /// the short trades from a margin of nought, its stop on the ask.
-    #[test]
+    #[rstest]
     fn a_side_expected_to_gain_on_a_half_tick_stop_trades_its_stop_in_the_market() {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = on_a_half_tick(at("2026-10-22T12:00:00Z"));
@@ -1431,7 +1432,7 @@ mod tests {
     /// 0.25000, whole in binary, and the long expects 0.1R. Its trade is a
     /// market entry closed an hour later, no exit set from the mid of
     /// 0.70000, its one R the ATR, what `Trade::send_at` sends without them.
-    #[test]
+    #[rstest]
     fn a_time_only_trade_has_no_exits_its_one_r_its_atr_and_closes_at_its_limit() {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
@@ -1536,7 +1537,7 @@ mod tests {
     /// than the strategy's hourly bars: the live cache holds the day's
     /// 1,440 of them, and one spanning the start, on top of Nautilus'
     /// default 10,000, not the 25 hourly bars alone.
-    #[test]
+    #[rstest]
     fn a_live_cache_holds_the_warmup_of_the_targets_atr_on_finer_bars() {
         let models = tempfile::tempdir().unwrap();
         let mut config = atr_config();
@@ -1551,7 +1552,7 @@ mod tests {
     /// A bracket in basis points has no ATR: the live cache holds the
     /// warmup of the strategy's bars alone, 24 hourly bars and one
     /// spanning the start.
-    #[test]
+    #[rstest]
     fn a_live_cache_without_an_atr_holds_the_warmup_of_the_strategys_bars() {
         let models = tempfile::tempdir().unwrap();
         let handle = hourly_live_handle(&bracket_config(10), models.path());
@@ -1565,7 +1566,7 @@ mod tests {
     /// does: deciding every minute, the live cache holds the day's 1,440
     /// minute bars of its ATR, and one spanning the start, on top of
     /// Nautilus' default 10,000, not the 25 hourly bars alone.
-    #[test]
+    #[rstest]
     fn a_live_cache_holds_the_warmup_of_a_time_only_targets_atr() {
         let models = tempfile::tempdir().unwrap();
         let mut config = config();
@@ -1587,7 +1588,7 @@ mod tests {
     /// profit 0.00200 above, 0.70200, and its stop 0.00100 below, 0.69900,
     /// its one R, the long's 0.4R expected above the margin. Without the
     /// warmup the ATR is cold and the decision no trade.
-    #[test]
+    #[rstest]
     fn a_live_warmup_sets_the_first_decisions_stop_from_the_targets_atr() {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
@@ -1638,7 +1639,7 @@ mod tests {
     /// it reads itself, not from Nautilus' registered indicators: at 12:00,
     /// the features warm from a quote and the ATR of 2 hourly bars without
     /// a bar, the decision publishes no row and makes no trade.
-    #[test]
+    #[rstest]
     fn no_row_is_published_while_the_targets_atr_is_cold() {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
@@ -1667,7 +1668,7 @@ mod tests {
     /// 12:00 the last hourly close is cold, a quote of AUD/USD handed over
     /// leaves it cold, and the bar closing at 12:00, which Nautilus hands
     /// it, warms it: the long model expecting 0.3R trades.
-    #[test]
+    #[rstest]
     fn features_reading_no_ticks_warm_on_their_bars_through_nautilus_as_before() {
         let models = tempfile::tempdir().unwrap();
         let hours = BarType::from("AUD/USD.SIM-1-HOUR-MID-INTERNAL");
@@ -1732,7 +1733,7 @@ mod tests {
     /// on AUD/USD's quotes and GCZ26's trades, an average of two: a
     /// response of a quote and one of two trades warm them; once the group
     /// ends, a live quote at 14:30:01 and a live trade at 14:30:02 reach them.
-    #[test]
+    #[rstest]
     fn the_hooks_of_model_data_hooks_hand_the_warmup_a_strategys_ticks() {
         let models = tempfile::tempdir().unwrap();
         let gcz26 = InstrumentId::from("GCZ26.GLBX");
@@ -1824,7 +1825,7 @@ mod tests {
     /// series of the requirements the warmup requests, each's history and
     /// a live one held while the warmup is pending, and stays cold,
     /// recording no update of them; GCZ26's two quotes then warm it.
-    #[test]
+    #[rstest]
     fn the_features_read_of_a_warmup_the_quotes_of_the_series_they_read_alone() {
         const GC_2_MIDS: Declared<EmaArgs> = Declared::new("gc_2_mids");
         let models = tempfile::tempdir().unwrap();
@@ -1911,7 +1912,7 @@ mod tests {
     /// only the strategy's handlers. In a backtest, which holds nothing, a
     /// feature counting GCZ26's snapshots and one counting its batches of
     /// deltas read the one of each the strategy gets.
-    #[test]
+    #[rstest]
     fn the_hooks_of_model_data_hooks_hand_the_features_a_strategys_live_book() {
         let models = tempfile::tempdir().unwrap();
         let gcz26 = InstrumentId::from("GCZ26.GLBX");
@@ -1998,7 +1999,7 @@ mod tests {
         Timestamp::from(next)
     }
 
-    #[test]
+    #[rstest]
     fn a_backtests_cadence_waits_for_composite_bars_as_a_live_ones_does() {
         let models = tempfile::tempdir().unwrap();
         let models = models.path().to_path_buf();
@@ -2063,7 +2064,7 @@ mod tests {
     /// long's stop is 0.00200 below the mid, 0.69800. At 13:00, after a bar
     /// from 0.69800 to 0.70200, it is 0.00400: the row reads 175, the stop
     /// 0.69600. Each decision's row reads the width its trade is set at.
-    #[test]
+    #[rstest]
     fn a_decisions_row_reads_the_width_its_trade_is_set_at() {
         let models = tempfile::tempdir().unwrap();
         let (config, width) = width_config();
@@ -2124,7 +2125,7 @@ mod tests {
     /// read: started, the handle has the target's bars, AUD/USD's hourly
     /// mids, reach it, and nothing else does. One bar from 0.699 to 0.701
     /// warms an ATR of one bar.
-    #[test]
+    #[rstest]
     fn a_dataset_runs_targets_run_on_the_atr_of_the_features_width() {
         let (config, width) = width_config();
         let features = mid_over(InstrumentId::from(AUD), &width).build().unwrap();
@@ -2144,7 +2145,7 @@ mod tests {
         assert!(width.initialized());
     }
 
-    #[test]
+    #[rstest]
     fn a_dataset_runs_cadence_waits_for_composite_bars() {
         let dataset = Mode::Dataset {
             rows: SettledRows::default(),
@@ -2158,7 +2159,7 @@ mod tests {
 
     /// The minute bars the composite bars are built from, read as they
     /// are, are not composite.
-    #[test]
+    #[rstest]
     fn no_cadence_waits_for_bars_not_composite() {
         let models = tempfile::tempdir().unwrap();
         let models = models.path().to_path_buf();
@@ -2214,7 +2215,7 @@ mod tests {
     /// The bar-build delay is the bar types', not retraining's: a live
     /// handle never retrained decides on composite bars as late as a
     /// retrained one.
-    #[test]
+    #[rstest]
     fn a_live_handle_never_retrained_waits_for_composite_bars() {
         let models = tempfile::tempdir().unwrap();
         let requirements = DataRequirements {
@@ -2282,7 +2283,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn a_live_node_trades_from_its_first_decision_on_the_newest_model() {
         let models = tempfile::tempdir().unwrap();
         let store = store(models.path());
@@ -2297,7 +2298,7 @@ mod tests {
     /// A warmup reaches the features window by window with the node running
     /// between them: features warm and fresh on what they got so far give no
     /// decision until it ends, then the decision they give.
-    #[test]
+    #[rstest]
     fn a_live_node_does_not_decide_until_its_warmup_ends() {
         let models = tempfile::tempdir().unwrap();
         store(models.path())
@@ -2318,7 +2319,7 @@ mod tests {
     /// ending there: the handle decides at 23:30 on the model valid from
     /// 10:00, and from its next decision, at 01:00, on the new one, the
     /// store listed again at each.
-    #[test]
+    #[rstest]
     fn a_model_published_while_live_is_used_from_the_next_decision() {
         let models = tempfile::tempdir().unwrap();
         let store = store(models.path());
@@ -2367,7 +2368,7 @@ mod tests {
     /// The meta predicting an R of 0.3 expects 0.25R, `0.1 + 0.5 E`, at or
     /// above its margin of 0.15R: the decision carries the meta's expected R
     /// beside the side's.
-    #[test]
+    #[rstest]
     fn a_meta_model_from_its_margin_takes_the_trade_of_the_side_picked() {
         let models = tempfile::tempdir().unwrap();
         let handle = meta_handle(models.path(), &with_meta(meta()), 8);
@@ -2396,7 +2397,7 @@ mod tests {
     }
 
     /// A file where the store's root should be has no store to list.
-    #[test]
+    #[rstest]
     fn an_unreadable_store_fails_when_the_handle_is_built() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("a file");
@@ -2412,7 +2413,7 @@ mod tests {
 
     /// A dataset run's handle hands on the targets' refusal, which fails the
     /// strategy's `on_start`, and so the run.
-    #[test]
+    #[rstest]
     fn a_dataset_runs_start_fails_on_a_bracket_on_an_inverse_instrument() {
         let inverse = InstrumentAny::CryptoPerpetual(btcusd_bybit());
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
@@ -2440,7 +2441,7 @@ mod tests {
     /// price, which an inverse instrument's is not: a deciding handle
     /// trading one refuses to start, which fails the strategy's
     /// `on_start`.
-    #[test]
+    #[rstest]
     fn a_deciding_handles_start_fails_on_an_inverse_instrument() {
         let inverse = InstrumentAny::CryptoPerpetual(btcusd_bybit());
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
@@ -2511,7 +2512,7 @@ mod tests {
 
     /// The target is set before the models are asked: its exits need the
     /// instrument, whether or not a model is valid.
-    #[test]
+    #[rstest]
     fn no_model_valid_with_the_instrument_missing_from_the_cache_is_an_error() {
         let models = tempfile::tempdir().unwrap();
         let eur = InstrumentId::from("EUR/USD.SIM");
@@ -2529,7 +2530,7 @@ mod tests {
     /// the worth of its ATR on it and its entry cost costing its fills:
     /// missing from the cache, it is an error, though the long of 0.8 is
     /// valid, the instrument quoted and the ATR warm.
-    #[test]
+    #[rstest]
     fn a_time_only_target_with_the_instrument_missing_from_the_cache_is_an_error() {
         let models = tempfile::tempdir().unwrap();
         let eur = InstrumentId::from("EUR/USD.SIM");
@@ -2571,7 +2572,7 @@ mod tests {
 
     /// The model valid from 12:00, listed by the decision at 11:00, swaps
     /// in at 12:00 though the store then fails to list.
-    #[test]
+    #[rstest]
     fn a_failed_listing_keeps_the_previous_list() {
         let models = tempfile::tempdir().unwrap();
         let store = store(models.path());
@@ -2734,7 +2735,7 @@ mod tests {
     /// The response's two trades, which Nautilus hands to the strategy's
     /// `on_historical_trades` and that to the warmup, make the features
     /// initialized: the first decision after the warmup is warm.
-    #[test]
+    #[rstest]
     fn a_live_start_warms_a_roots_tick_features_on_its_front_contract() {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = registered(at("2026-08-10T14:30:00Z"));
@@ -2851,7 +2852,7 @@ mod tests {
 
     /// The target's ATR's bars, which no strategy declares, are subscribed
     /// from the start in a backtest, as the strategy's own are.
-    #[test]
+    #[rstest]
     fn a_backtests_start_subscribes_the_targets_atr_bars_from_its_start() {
         let models = tempfile::tempdir().unwrap();
 
@@ -2869,7 +2870,7 @@ mod tests {
     }
 
     /// A dataset run's targets' ATR's bars are subscribed from the start.
-    #[test]
+    #[rstest]
     fn a_dataset_runs_start_subscribes_the_targets_atr_bars_from_its_start() {
         let subscribed = bars_subscribed_at_start(
             &Mode::Dataset {
@@ -2886,7 +2887,7 @@ mod tests {
 
     /// Live, the target's ATR's bars, which the warmup builds, are
     /// subscribed from where the warmup ends, now.
-    #[test]
+    #[rstest]
     fn a_live_start_subscribes_the_targets_atr_bars_from_where_the_warmup_ends() {
         let models = tempfile::tempdir().unwrap();
 
@@ -2933,7 +2934,7 @@ mod tests {
     /// Live, a custom series' subscription names its data client on the
     /// node, LSE's for LSE's rows, so that Nautilus sends it the
     /// subscription, from where the warmup ends.
-    #[test]
+    #[rstest]
     fn a_live_start_subscribes_a_custom_series_naming_its_data_client() {
         let models = tempfile::tempdir().unwrap();
 
@@ -2951,7 +2952,7 @@ mod tests {
     /// A backtest's custom series' subscription names no client, its
     /// engine having none of LSE's: Nautilus subscribes the message bus
     /// alone, where the replay's rows arrive, and sends no command.
-    #[test]
+    #[rstest]
     fn a_backtests_start_subscribes_a_custom_series_naming_no_client() {
         let models = tempfile::tempdir().unwrap();
 
@@ -2964,7 +2965,7 @@ mod tests {
 
     /// A dataset run's custom series' subscription names no client, as a
     /// backtest's.
-    #[test]
+    #[rstest]
     fn a_dataset_runs_start_subscribes_a_custom_series_naming_no_client() {
         let subscribed = custom_subscribed_at_start(&Mode::Dataset {
             rows: SettledRows::default(),
@@ -2975,7 +2976,7 @@ mod tests {
 
     /// The target's ATR's bars the strategy reads too are subscribed once,
     /// beside the strategy's other bars of their venue.
-    #[test]
+    #[rstest]
     fn the_targets_atr_bars_the_strategy_reads_too_are_subscribed_once() {
         let models = tempfile::tempdir().unwrap();
 
@@ -3013,7 +3014,7 @@ mod tests {
     /// trade is sized at the start, a start while the market is closed
     /// among them if the warmup reaches back to its close, then subscribes
     /// to them from now.
-    #[test]
+    #[rstest]
     fn a_live_start_warms_up_a_conversion_pairs_quotes_then_subscribes_to_them_from_now() {
         let sent = started_live(&features(), vec![], vec![aud_quotes(), eurusd_quotes()]);
 
@@ -3031,7 +3032,7 @@ mod tests {
     /// which no feature reads, is a series of the requirements: the start
     /// requests the hour of warmup of it from the catalog alone, as it
     /// does a feature's.
-    #[test]
+    #[rstest]
     fn a_live_start_requests_custom_data_of_the_traded_instrument_from_the_catalog() {
         let (_probe, _handle, sent, _models) =
             started_live_reading(&features(), vec![aud_quotes()], vec![imbalance_series(AUD)]);
@@ -3049,7 +3050,7 @@ mod tests {
     /// tick: the start requests the minute bars, and the traded AUD/USD's
     /// quotes, a series of the requirements IB serves, no feature reading
     /// them, and no trades.
-    #[test]
+    #[rstest]
     fn a_live_start_of_bar_features_requests_the_minute_bars_and_the_traded_quotes() {
         let hours = BarType::from("AUD/USD.SIM-1-HOUR-MID-INTERNAL@1-MINUTE-EXTERNAL");
         let features = FeatureSet::builder()
@@ -3180,7 +3181,7 @@ mod tests {
     /// Nautilus hands the answer's imbalances to the strategy's
     /// `on_historical_data`, which hands them to the warmup: the feature
     /// holds the last one, warm before the first decision.
-    #[test]
+    #[rstest]
     fn a_live_start_warms_a_custom_feature_from_the_catalog() {
         let features = last_imbalance(AUD);
         let (mut probe, _handle, sent, _models) =
@@ -3213,7 +3214,7 @@ mod tests {
     /// the cache behind it, not over it: the feature reads the live one, and
     /// the cache holds no point the history and the live stream both carry
     /// twice.
-    #[test]
+    #[rstest]
     fn a_warmup_answer_older_than_a_live_point_leaves_it_the_latest() {
         let features = last_imbalance(AUD);
         let (mut probe, _handle, _sent, _models) =
@@ -3247,7 +3248,7 @@ mod tests {
     /// them, not to the root's, and loads no contract of GC, a custom
     /// series bringing no instrument. The answer's imbalance of GCZ26
     /// makes the feature hold it.
-    #[test]
+    #[rstest]
     fn a_live_start_warms_a_custom_feature_on_a_root_on_its_front_contract() {
         let features = last_imbalance("GC.GLBX");
         let (mut probe, _handle, sent, _models) = started_live_reading(
@@ -3292,7 +3293,7 @@ mod tests {
     /// rolls the series' root, and the roll's alert moves the subscription
     /// to GCG27's and the feature onto GCG27's latest imbalance the cache
     /// holds, the one of 23:20, then later ones, not GCZ26's.
-    #[test]
+    #[rstest]
     fn a_feature_on_a_roots_custom_series_reads_each_contract_in_turn_from_the_cache() {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, clock) = registered(at("2026-11-25T23:00:00Z"));
@@ -3362,7 +3363,7 @@ mod tests {
     /// US yields, are subscribed at a backtest's start through the
     /// handle's subscriptions, on the message bus alone, so the strategy's
     /// `on_data` gets them without subscribing itself.
-    #[test]
+    #[rstest]
     fn a_backtests_start_subscribes_the_custom_series_of_its_requirements() {
         let models = tempfile::tempdir().unwrap();
         let series = |symbol: &str| CustomSeries::new("Yield", symbol.to_string(), None).unwrap();

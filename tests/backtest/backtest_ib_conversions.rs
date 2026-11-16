@@ -27,6 +27,7 @@ use nautilus_model::{
     enums::OmsType,
     types::{Currency, Money},
 };
+use rstest::rstest;
 
 use crate::common::{glbx, ic, idealpro};
 
@@ -104,7 +105,7 @@ fn backtest_command(catalog: &Path, balance: &str) -> std::process::Output {
 /// EUR alone, would book none of the gold's USD losses: the backtest is
 /// refused before the run, naming the gold, its venue, both currencies
 /// and the Nautilus code booking such an account.
-#[test]
+#[rstest]
 fn a_backtest_through_ib_on_a_balance_off_the_pnl_currency_is_refused_naming_why() {
     let catalog = catalog(ic::at("08:00:00"));
 
@@ -129,7 +130,7 @@ fn a_backtest_through_ib_on_a_balance_off_the_pnl_currency_is_refused_naming_why
 
 /// On a balance in USD, the gold's P&L currency, the same backtest runs,
 /// IB's account keeping USD.
-#[test]
+#[rstest]
 fn a_backtest_through_ib_on_a_balance_in_the_pnl_currency_runs() {
     let catalog = catalog(ic::at("08:00:00"));
 
@@ -151,7 +152,7 @@ fn a_backtest_through_ib_on_a_balance_in_the_pnl_currency_runs() {
 /// nothing in the balance's currency, as a venue no broker trades does, so
 /// that the run's money is GLBX's 100,000 USD alone, and the report lists
 /// IDEALPRO's account empty.
-#[test]
+#[rstest]
 fn a_venue_the_run_reads_for_its_pairs_alone_starts_with_nothing() {
     let catalog = catalog(ic::at("08:00:00"));
 
@@ -248,7 +249,7 @@ fn rows() -> Vec<TargetRow> {
 /// on a contract, 7.5 bps of 4000.10 on the nearest cent, 3.2 contracts,
 /// whole contracts 3, one R worth 9 USD. Unconverted, 20M taken as USD
 /// would be 2 contracts, as would the rate swapped.
-#[test]
+#[rstest]
 fn a_dataset_runs_reference_is_converted_at_its_ib_pairs_bid_and_ask_bars() {
     let rows = std::thread::spawn(rows).join().unwrap();
 

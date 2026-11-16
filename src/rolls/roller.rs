@@ -275,6 +275,7 @@ mod tests {
         nautilus_strategy,
         strategy::{StrategyConfig, StrategyCore},
     };
+    use rstest::rstest;
 
     use super::*;
 
@@ -402,7 +403,7 @@ mod tests {
     /// Each post contract is asked of GLBX's broker's client, IB's, which
     /// resolves GLBX contracts, not of LSE's, which streams GLBX's data and
     /// publishes no definitions.
-    #[test]
+    #[rstest]
     fn a_live_roller_rolls_twice_requesting_each_post_contract_before_its_roll() {
         let (sent, rolls) = run(
             &Roller::live(vec![id("GC.GLBX")]),
@@ -429,7 +430,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_replayed_roller_rolls_twice_requesting_nothing() {
         let (sent, rolls) = run(
             &Roller::replayed(vec![id("GC.GLBX")]),
@@ -447,7 +448,7 @@ mod tests {
     /// clock's time (`validate_and_prepare_time_alert`). The roll the
     /// roller returns is the one it armed, out of GCZ26, the contract
     /// subscribed, not the next one after the alert's time.
-    #[test]
+    #[rstest]
     fn a_roll_armed_after_its_time_is_the_one_out_of_the_contract_standing_at_the_start() {
         let roller = Roller::live(vec![id("GC.GLBX")]);
         let (mut probe, clock, _) = registered("2026-11-25T23:59:00Z");
@@ -473,7 +474,7 @@ mod tests {
     /// GC as the root of a custom series alone rolls as a root read for its
     /// ticks does, live too, but its contracts are asked of no client: a
     /// custom series brings no instrument.
-    #[test]
+    #[rstest]
     fn a_live_roller_rolls_a_custom_series_root_requesting_no_contract() {
         let (sent, rolls) = run(
             &Roller::live(vec![]).custom_roots([id("GC.GLBX")]),
@@ -495,7 +496,7 @@ mod tests {
 
     /// GC read for its ticks and as a custom series' root rolls once a
     /// roll, its contracts loaded as its ticks need.
-    #[test]
+    #[rstest]
     fn a_root_read_for_its_ticks_and_its_custom_series_rolls_once_loading_its_contracts() {
         let (sent, rolls) = run(
             &Roller::live(vec![id("GC.GLBX")]).custom_roots([id("GC.GLBX")]),
@@ -506,7 +507,7 @@ mod tests {
         assert_eq!(sent.len(), 3, "{sent:?}");
     }
 
-    #[test]
+    #[rstest]
     fn a_live_roller_requests_nothing_for_a_plain_instrument() {
         let (sent, rolls) = run(
             &Roller::live(vec![id("GCZ26.GLBX")]),

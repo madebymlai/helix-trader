@@ -497,6 +497,7 @@ fn validate_minimums(minimums: Minimums, section: &str, errors: &mut ConfigError
 #[cfg(test)]
 mod tests {
     use nautilus_model::{data::BarType, identifiers::InstrumentId, types::Money};
+    use rstest::rstest;
     use rust_decimal::Decimal;
 
     use super::*;
@@ -614,7 +615,7 @@ mod tests {
             .collect()
     }
 
-    #[test]
+    #[rstest]
     fn a_section_reads_from_toml() {
         let config = load(SECTION).unwrap();
 
@@ -650,14 +651,14 @@ mod tests {
         assert_eq!(config.learner, LearnerConfig::Fake {});
     }
 
-    #[test]
+    #[rstest]
     fn a_section_refuses_an_unknown_field() {
         assert!(refused(&section("retrain_every = \"24h\"")).contains("retrain_every"));
     }
 
     /// One load shows every mistake: a retrain interval not positive is
     /// reported under `model.retrain`, beside a minimum of no trade.
-    #[test]
+    #[rstest]
     fn a_retrain_interval_not_positive_is_refused_with_the_sections_other_violations() {
         for retrain in ["0h", "-24h"] {
             let toml = section(&format!(r#"retrain = "{retrain}""#))
@@ -678,7 +679,7 @@ mod tests {
     /// the cadence holds these limits and the window alone refuses them, the
     /// time-only target's ATR of one bar of 72 hours warm over a warmup as
     /// long.
-    #[test]
+    #[rstest]
     fn a_limit_not_shorter_than_the_window_is_refused_under_the_limit() {
         let warmup = SignedDuration::from_hours(72);
         for target in [
@@ -700,7 +701,7 @@ mod tests {
     /// Deciding every hour, a bracket closed after an hour, or a time-only
     /// trade of an hour and a half, its ATR of one hourly bar warm over a
     /// warmup of an hour, would still be open at the next decision.
-    #[test]
+    #[rstest]
     fn a_limit_not_shorter_than_the_decision_cadence_is_refused_naming_both() {
         let warmup = SignedDuration::from_hours(1);
         for (target, named) in [
@@ -729,7 +730,7 @@ mod tests {
     /// A trade closed at its time alone: no exit, and the ATR its unit is
     /// measured in, of its `atr` table on the decision cadence's bars, as a
     /// bracket's: 3 hourly bars of gold's mids.
-    #[test]
+    #[rstest]
     fn a_time_only_target_loads_with_its_atr_and_no_exits() {
         let toml = section(r#"target = { limit = "30m", atr = { period = 3 } }"#);
 
@@ -753,7 +754,7 @@ mod tests {
 
     /// A bracket has both exits: one alone is refused as the section is
     /// parsed, on its own, a minimum of no trade beside it not reported.
-    #[test]
+    #[rstest]
     fn a_take_profit_or_a_stop_alone_is_refused_at_parsing_on_its_own() {
         for (bracket, missing) in [
             ("take_profit = { bps = 7.5 }", "stop"),
@@ -773,7 +774,7 @@ mod tests {
 
     /// A target's exits are in its bracket or nowhere: beside the limit,
     /// together or one alone, they are unknown fields of the target.
-    #[test]
+    #[rstest]
     fn exits_beside_the_limit_are_refused_as_unknown() {
         for target in [
             r#"target = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "45m" }"#,
@@ -788,7 +789,7 @@ mod tests {
 
     /// The two targets and the label chosen among them are gone: each is
     /// an unknown field, of the section and of the target.
-    #[test]
+    #[rstest]
     fn the_fields_of_two_targets_and_a_label_are_refused_as_unknown() {
         for (toml, name) in [
             (section(r#"barrier = { limit = "45m" }"#), "barrier"),
@@ -810,7 +811,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn a_target_without_a_limit_is_refused() {
         let toml =
             section("target = { bracket = { take_profit = { bps = 7.5 }, stop = { bps = 5 } } }");
@@ -823,7 +824,7 @@ mod tests {
     /// The window of 48 hours holds the holdout, the calibration as long
     /// before it, and before them a fitted row settled 45 minutes later: 23
     /// hours of holdout leave one, 24 none.
-    #[test]
+    #[rstest]
     fn a_holdout_leaving_no_fitted_row_before_it_and_its_calibration_is_refused() {
         for holdout in ["24h", "0h"] {
             let toml = section(&format!(r#"holdout = "{holdout}""#));
@@ -834,7 +835,7 @@ mod tests {
 
     /// A margin is in R: a bare number, a margin in money say, is refused as
     /// the section is parsed, at its field, saying so.
-    #[test]
+    #[rstest]
     fn a_bare_number_margin_is_refused_at_parsing_saying_it_is_in_r() {
         for (margins, field) in [
             (r#"{ long = 0.5, short = "0.5R" }"#, "long = 0.5"),
@@ -846,7 +847,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn a_bare_number_meta_margin_is_refused_at_parsing_saying_it_is_in_r() {
         let meta = META.replace(r#"margin = "0.25R""#, "margin = 0.25");
 
@@ -858,7 +859,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn margins_naming_no_side_are_refused() {
         assert_eq!(refused_fields(&section("margins = {}")), ["model.margins"]);
         assert!(refused(&section(r#"margins = { both = "0.5R" }"#)).contains("both"));
@@ -866,7 +867,7 @@ mod tests {
 
     /// An R is a finite number: a margin of NaN or infinity is refused as the
     /// section is parsed.
-    #[test]
+    #[rstest]
     fn a_margin_not_a_finite_number_of_r_is_refused_at_parsing() {
         for margins in [
             r#"{ long = "nanR" }"#,
@@ -879,7 +880,7 @@ mod tests {
     }
 
     /// `{ long = "0.5R" }` is a long-only model: the short is not traded.
-    #[test]
+    #[rstest]
     fn margins_of_one_side_trade_that_side_alone() {
         let config = load(&section(r#"margins = { long = "0.5R" }"#)).unwrap();
 
@@ -896,7 +897,7 @@ mod tests {
         Ok(load(&section(line))?.dataset)
     }
 
-    #[test]
+    #[rstest]
     fn a_section_declares_the_commission_and_balance_of_its_dataset_runs() {
         let exact = Money::from_str_exact("0.035 USD").unwrap();
         assert_ne!(exact, Money::from("0.04 USD"));
@@ -910,7 +911,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_dataset_commission_is_per_order_a_rate_or_per_quantity() {
         let at = |commission: &str| {
             dataset_of(&format!(
@@ -933,7 +934,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_section_without_a_dataset_venue_is_refused_at_parsing_naming_it() {
         let without: String = SECTION
             .lines()
@@ -944,7 +945,7 @@ mod tests {
         assert!(err.contains("dataset"), "{err}");
     }
 
-    #[test]
+    #[rstest]
     fn a_dataset_commission_of_no_kind_or_two_is_refused_at_parsing() {
         for commission in ["", r#"rate = "0.0005", per_order = "3 USD""#] {
             let line =
@@ -953,7 +954,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn a_negative_dataset_commission_is_refused_at_parsing() {
         for commission in [
             r#"per_order = "-3 USD""#,
@@ -966,7 +967,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn a_dataset_commission_or_balance_that_is_no_amount_is_refused_at_parsing() {
         for dataset in [
             r#"{ commission = { rate = 0.0005 }, balance = "1000 USD" }"#,
@@ -982,7 +983,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn a_dataset_balance_not_positive_is_refused_at_parsing() {
         for balance in ["0 USD", "-1000 USD"] {
             let line = format!(
@@ -995,7 +996,7 @@ mod tests {
 
     /// 150 ms, as jiff reads a config's durations: each command of its
     /// dataset runs reaches their venues 150 ms after it is sent.
-    #[test]
+    #[rstest]
     fn a_dataset_venue_may_declare_the_latency_of_its_runs() {
         let at_150ms = Latency::try_from(SignedDuration::from_millis(150)).unwrap();
         for latency in ["150ms", "0.15s", "PT0.15S"] {
@@ -1011,7 +1012,7 @@ mod tests {
     }
 
     /// Nautilus' default: each command reaches the venue as it is sent.
-    #[test]
+    #[rstest]
     fn a_dataset_venue_without_a_latency_has_none() {
         assert_eq!(load(SECTION).unwrap().dataset.latency, None);
     }
@@ -1039,7 +1040,7 @@ mod tests {
     /// yet at the venue, neither open nor filled, and leave the entry to
     /// fill with no time limit. 30 s against 1 m and a minute; 1 m against
     /// 150 ms and a minute.
-    #[test]
+    #[rstest]
     fn a_limit_shorter_than_its_dataset_runs_latency_and_a_minute_is_refused_naming_both() {
         for (limit, latency) in [("30s", "1m"), ("1m", "150ms")] {
             let toml = at_latency(limit, latency);
@@ -1056,7 +1057,7 @@ mod tests {
 
     /// 61 s against 1 s and a minute, the shortest limit taken at that
     /// latency; 45 m against 150 ms.
-    #[test]
+    #[rstest]
     fn a_limit_as_long_as_its_dataset_runs_latency_and_a_minute_loads() {
         for (limit, latency) in [("61s", "1s"), ("45m", "150ms")] {
             assert!(
@@ -1067,7 +1068,7 @@ mod tests {
     }
 
     /// None is left out, not a latency of nothing.
-    #[test]
+    #[rstest]
     fn a_dataset_latency_that_is_no_positive_duration_is_refused_at_parsing() {
         for latency in [r#""-1s""#, r#""0s""#, r#""150""#, "150"] {
             let line = format!(
@@ -1077,7 +1078,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn a_dataset_venue_refuses_an_unknown_field() {
         let line =
             r#"dataset = { commission = { rate = "0.0005" }, balance = "1000 USD", leverage = 1 }"#;
@@ -1091,7 +1092,7 @@ mod tests {
 
     /// The least expectancy is `min_expectancy`: a section of its old name
     /// is refused, naming the new one.
-    #[test]
+    #[rstest]
     fn the_old_name_of_the_least_expectancy_is_refused_naming_the_new() {
         let old = SECTION.replace("min_expectancy", OLD_MINIMUM);
 
@@ -1104,7 +1105,7 @@ mod tests {
     }
 
     /// The meta's too.
-    #[test]
+    #[rstest]
     fn the_old_name_of_the_metas_least_expectancy_is_refused_naming_the_new() {
         let meta = META.replace("min_expectancy", OLD_MINIMUM);
 
@@ -1119,7 +1120,7 @@ mod tests {
     /// The least expectancy is in R: a bare number, a minimum in
     /// money say, is refused as the section is parsed, at its field, saying
     /// so.
-    #[test]
+    #[rstest]
     fn a_bare_number_least_expectancy_is_refused_at_parsing_saying_it_is_in_r() {
         for line in ["min_expectancy = 1.0", "min_expectancy = 1"] {
             let err = refused_parsing(&section(line));
@@ -1128,7 +1129,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn a_least_expectancy_not_a_finite_number_of_r_is_refused_at_parsing() {
         for line in [r#"min_expectancy = "nanR""#, r#"min_expectancy = "-infR""#] {
             let err = refused_parsing(&section(line));
@@ -1138,7 +1139,7 @@ mod tests {
     }
 
     /// A minimum below nought publishes a model expected to lose a little.
-    #[test]
+    #[rstest]
     fn a_least_expectancy_below_nought_loads_and_no_minimum_trade_is_refused() {
         assert_eq!(
             load(&section(r#"min_expectancy = "-0.5R""#))
@@ -1152,7 +1153,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_strategy_sets_each_of_lightgbms_settings() {
         let config = load(&section(
             r#"learner = { kind = "lightgbm", num_iterations = 300, learning_rate = 0.02, num_leaves = 15, min_data_in_leaf = 50 }"#,
@@ -1174,7 +1175,7 @@ mod tests {
 
     /// The floor is the adapter's dataset's, 20 rows, not the default of
     /// 200 rows a leaf: 20 and 50 load.
-    #[test]
+    #[rstest]
     fn lightgbm_leaves_of_fewer_than_20_rows_are_refused() {
         let lightgbm = |rows: u32| {
             section(&format!(
@@ -1196,7 +1197,7 @@ mod tests {
 
     /// Its harness reads the quotes of what it trades when no series reads
     /// it.
-    #[test]
+    #[rstest]
     fn a_traded_instrument_the_strategy_does_not_read_is_no_error() {
         let config = parse(SECTION).unwrap();
 
@@ -1225,7 +1226,7 @@ mod tests {
     /// in 14 hours, 3 in 3. A dataset run, which replays the warmup before
     /// its first day, would open no target at that day's first decisions
     /// after a shorter one.
-    #[test]
+    #[rstest]
     fn a_target_atr_warming_longer_than_the_warmup_is_refused() {
         for (atr, hours) in [(None, 14), (Some("{ period = 3 }"), 3)] {
             let config = parse(&atr_section(atr)).unwrap();
@@ -1273,7 +1274,7 @@ mod tests {
     /// A time-only target's unit is the worth of its ATR: one without an
     /// `atr` table is refused under it, beside the section's others, saying
     /// so.
-    #[test]
+    #[rstest]
     fn a_time_only_target_without_an_atr_is_refused_under_its_atr() {
         let toml =
             section(r#"target = { limit = "30m" }"#).replace("min_trades = 30", "min_trades = 0");
@@ -1288,7 +1289,7 @@ mod tests {
 
     /// A time-only target's ATR warms as a bracket's does, its 3 hourly bars
     /// in 3 hours: over a shorter warmup it is refused under its own table.
-    #[test]
+    #[rstest]
     fn a_time_only_targets_atr_warming_longer_than_the_warmup_is_refused_under_it() {
         let toml = section(r#"target = { limit = "30m", atr = { period = 3 } }"#);
 
@@ -1301,7 +1302,7 @@ mod tests {
 
     /// A bracket in basis points may be written with an `atr` table, so the
     /// load refuses it, beside the section's others.
-    #[test]
+    #[rstest]
     fn an_atr_table_no_distance_uses_is_refused_under_the_bracket() {
         let toml = section(
             r#"target = { bracket = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, atr = { period = 3 } }, limit = "45m" }"#,
@@ -1315,7 +1316,7 @@ mod tests {
     }
 
     /// One distance in ATRs, of its table, the other in basis points.
-    #[test]
+    #[rstest]
     fn a_bracket_mixing_atrs_and_basis_points_loads() {
         let config = parse(&section(
             r#"target = { bracket = { take_profit = { atr = 1.5 }, stop = { bps = 7.5 }, atr = { period = 3 } }, limit = "45m" }"#,
@@ -1338,7 +1339,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_distance_not_positive_is_refused_under_the_bracket() {
         for bracket in [
             "take_profit = { bps = 0 }, stop = { bps = 5 }",
@@ -1354,7 +1355,7 @@ mod tests {
 
     /// Without quotes, the ATR's bars are built from the trades, or from
     /// the source bars the strategy reads.
-    #[test]
+    #[rstest]
     fn a_target_atr_is_built_from_the_trades_or_the_bars_of_a_strategy_without_quotes() {
         let config = parse(&atr_section(None)).unwrap();
 
@@ -1371,7 +1372,7 @@ mod tests {
 
     /// Neither quotes, trades nor bars of the target's instrument: the
     /// ATR's bars have nothing to be built from.
-    #[test]
+    #[rstest]
     fn a_target_atr_on_an_instrument_whose_prices_the_strategy_does_not_read_is_refused() {
         let config = parse(&atr_section(None)).unwrap();
 
@@ -1397,7 +1398,7 @@ mod tests {
         learner = { kind = "baseline" }
     "#;
 
-    #[test]
+    #[rstest]
     fn a_meta_section_reads_from_toml() {
         let config = load(&format!("{SECTION}\n{META}")).unwrap();
 
@@ -1416,7 +1417,7 @@ mod tests {
     }
 
     /// Two levels at most: a meta section has no meta section of its own.
-    #[test]
+    #[rstest]
     fn a_nested_meta_section_is_refused() {
         let nested = format!(
             "{SECTION}\n{META}\n{}",
@@ -1430,7 +1431,7 @@ mod tests {
 
     /// Sides on a time-only target: their meta model learns those trades,
     /// no exit being needed.
-    #[test]
+    #[rstest]
     fn a_meta_model_on_a_time_only_target_is_loaded() {
         let toml = section(r#"target = { limit = "30m", atr = { period = 1 } }"#);
 
@@ -1445,7 +1446,7 @@ mod tests {
     /// a threshold, alone as a section of probabilities has it or beside a
     /// margin, is refused as the section is parsed, saying that the margin
     /// takes its place, not as any unknown field.
-    #[test]
+    #[rstest]
     fn a_meta_threshold_is_refused_at_parsing_naming_the_margin() {
         for meta in [
             META.replace(r#"margin = "0.25R""#, "threshold = 0.55"),
@@ -1461,7 +1462,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn a_meta_without_a_margin_is_refused_at_parsing() {
         let meta = META.replace(r#"margin = "0.25R""#, "");
 
@@ -1473,7 +1474,7 @@ mod tests {
     /// A meta takes or leaves a decision's trade, which the strategy sizes
     /// by its stake: a size is refused as the section is parsed, pointing
     /// to the stake, `[trade] risk` and the strategy's multiple of it.
-    #[test]
+    #[rstest]
     fn a_meta_size_is_refused_at_parsing_pointing_to_the_stake() {
         let toml = format!("{SECTION}\n{META}\nsize = {{ min = 0.5, max = 2 }}");
 
@@ -1500,7 +1501,7 @@ mod tests {
 
     /// The target's limit, 45 minutes, does not fit the meta's window: that
     /// window is the meta's own to widen, the limit the sides' too.
-    #[test]
+    #[rstest]
     fn a_meta_window_not_longer_than_the_targets_limit_is_refused() {
         let err = meta_refused(r#"window = "45m""#);
 
@@ -1509,14 +1510,14 @@ mod tests {
 
     /// The meta's window of 36 hours cannot hold 35 of holdout and as many
     /// of calibration.
-    #[test]
+    #[rstest]
     fn a_meta_holdout_leaving_no_fitted_row_is_refused() {
         let err = meta_refused(r#"holdout = "35h""#);
 
         assert!(err.contains("model.meta.holdout"), "{err}");
     }
 
-    #[test]
+    #[rstest]
     fn a_meta_margin_not_a_finite_number_of_r_is_refused_at_parsing() {
         let meta = META.replace(r#"margin = "0.25R""#, r#"margin = "nanR""#);
 
@@ -1525,7 +1526,7 @@ mod tests {
         assert!(err.contains("not a finite number of R"), "{err}");
     }
 
-    #[test]
+    #[rstest]
     fn a_bare_number_meta_least_expectancy_is_refused_at_parsing_saying_it_is_in_r() {
         let meta = META.replace(r#"min_expectancy = "0.5R""#, "min_expectancy = 0.5");
 
@@ -1537,7 +1538,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_meta_minimum_of_no_trade_is_refused() {
         let err = meta_refused("min_trades = 0");
 

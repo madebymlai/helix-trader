@@ -74,6 +74,7 @@ use nautilus_model::{
 use nautilus_persistence::{
     backend::parquet::catalog::ParquetDataCatalog, config::DataCatalogConfig,
 };
+use rstest::rstest;
 
 const GCZ26: &str = "GCZ26.GLBX";
 /// CME's E-mini S&P 500 of December 2026, of a venue whose history, IB's,
@@ -777,7 +778,7 @@ fn one_every(bars: &[Bar], step: u64) -> bool {
 /// A warmup of 72 hours is asked of the venue one window at a time, each
 /// starting 1 ns after the one before, from the start of the warmup to its
 /// end: no time is asked twice or left out.
-#[test]
+#[rstest]
 fn a_long_warmup_is_asked_in_windows_covering_it_all() {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::Envelope);
@@ -799,7 +800,7 @@ fn a_long_warmup_is_asked_in_windows_covering_it_all() {
 /// ibapi asks such a span in seconds, up to 86,400, and a longer one in
 /// sessions, one more than the days it spans, so that a window of a day
 /// and a minute fetches three sessions to keep one day's bars.
-#[test]
+#[rstest]
 fn each_window_with_the_bar_before_it_spans_at_most_a_day() {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::Envelope);
@@ -822,7 +823,7 @@ fn each_window_with_the_bar_before_it_spans_at_most_a_day() {
 /// hours, dropping the first, partial, bar: 71 closes on the hour, or 72 or
 /// 70 if the run lands on an hour's edge; each closes at its last minute's
 /// price and opens at its first, the venue's 60 minutes up to its close.
-#[test]
+#[rstest]
 fn a_composite_bar_types_warmup_hands_every_bar_once_oldest_first() {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::Envelope);
@@ -843,7 +844,7 @@ fn a_composite_bar_types_warmup_hands_every_bar_once_oldest_first() {
 
 /// So are the bars Nautilus builds from a window's quotes: a warmup of 30
 /// hours spans two windows.
-#[test]
+#[rstest]
 fn bars_built_from_quotes_are_handed_over_once_each_across_windows() {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::Envelope);
@@ -865,7 +866,7 @@ fn bars_built_from_quotes_are_handed_over_once_each_across_windows() {
 /// the next duration after an empty window and ends a request, reporting
 /// success, when they run out. The windows after the empty ones are asked
 /// all the same, and the warmup reaches now.
-#[test]
+#[rstest]
 fn a_run_of_empty_windows_does_not_end_the_warmup() {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::Envelope);
@@ -883,7 +884,7 @@ fn a_run_of_empty_windows_does_not_end_the_warmup() {
 /// IB's client answers without an envelope: Nautilus takes the answer as
 /// complete, so the next window is asked. Without that, a warmup on IB would
 /// wait for ever.
-#[test]
+#[rstest]
 fn an_answer_without_an_envelope_moves_to_the_next_window() {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::Plain);
@@ -899,7 +900,7 @@ fn an_answer_without_an_envelope_moves_to_the_next_window() {
 /// The venue cuts the history at the third window: no later window is
 /// asked, the warmup ends naming the reason, and the indicator holds what
 /// was built up to there, each bar once.
-#[test]
+#[rstest]
 fn a_window_failing_ends_the_warmup_with_what_was_built_handed_over() {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::FailedAt(2));
@@ -921,7 +922,7 @@ fn a_window_failing_ends_the_warmup_with_what_was_built_handed_over() {
 /// are written back window by window, and the second reads them from the
 /// catalog, asking the venue only for the time since, and hands over the
 /// same bars once each.
-#[test]
+#[rstest]
 fn a_warmup_the_catalog_holds_asks_the_venue_only_for_the_rest() {
     let dir = tempfile::tempdir().unwrap();
     let first = FakeVenue::new(Answer::Envelope);
@@ -962,7 +963,7 @@ fn relative(dir: &Path) -> PathBuf {
 
 /// So it does with the catalog given by a path relative to the working
 /// directory, as `live --catalog` takes one and `Live` hands it to the node.
-#[test]
+#[rstest]
 fn a_warmup_reads_what_a_catalog_given_relative_to_the_working_directory_holds() {
     let dir = tempfile::tempdir().unwrap();
     let first = FakeVenue::new(Answer::Envelope);
@@ -1054,7 +1055,7 @@ fn assert_three_atrs_wide(exits: &SideTarget) {
 
 /// A strategy reading quotes: the ATR's bars are built from them, by the one
 /// request of the quotes, across its windows.
-#[test]
+#[rstest]
 fn a_warmup_of_quotes_warms_the_atr_of_a_bracket() {
     let exits = bracket_of(
         vec![],
@@ -1069,7 +1070,7 @@ fn a_warmup_of_quotes_warms_the_atr_of_a_bracket() {
 
 /// A strategy reading composite bars: the ATR is on the same hour bars, which
 /// a node caches under their standard type.
-#[test]
+#[rstest]
 fn a_warmup_of_composite_bars_warms_the_atr_of_a_bracket() {
     let exits = bracket_of(vec![BarType::from(COMPOSITE)], vec![]);
 
@@ -1125,7 +1126,7 @@ fn assert_live_before_the_last_window(venue: &FakeVenue) {
 /// a quote at once on the subscription, while the warmup is not answered yet:
 /// the features read every quote of the warmup, two windows of 23 hours over
 /// 30, then the live one, in time order.
-#[test]
+#[rstest]
 fn features_read_every_warmup_quote_before_a_live_one() {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::Envelope);
@@ -1153,7 +1154,7 @@ fn features_read_every_warmup_quote_before_a_live_one() {
 
 /// So with trades: the features read every trade of the warmup, then the
 /// live one the venue sends on the subscription.
-#[test]
+#[rstest]
 fn features_read_every_warmup_trade_before_a_live_one() {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::Envelope);
@@ -1183,7 +1184,7 @@ fn features_read_every_warmup_trade_before_a_live_one() {
 /// at the warmup's last minute, which the history holds, stamped on receipt;
 /// then sends a new one. The features read that minute once, from the
 /// warmup, then the new quote.
-#[test]
+#[rstest]
 fn the_venues_resend_of_the_warmups_last_quote_is_read_once() {
     let dir = tempfile::tempdir().unwrap();
     let length = SignedDuration::from_hours(30);
@@ -1227,7 +1228,7 @@ fn the_venues_resend_of_the_warmups_last_quote_is_read_once() {
 /// coming while they are pending. The features read every minute of the
 /// warmup once, oldest first, the catalog's and the venue's alike, then the
 /// live quote.
-#[test]
+#[rstest]
 fn features_read_a_catalogs_windows_then_the_venues_before_a_live_quote() {
     let dir = tempfile::tempdir().unwrap();
     let now = get_atomic_clock_realtime().get_time_ns().as_u64();
@@ -1323,7 +1324,7 @@ fn assert_the_days_book(books: &Books) {
 /// The venue answers the first window of an empty catalog, and each after it
 /// from its day's start as the windows before wrote it back, with the rest
 /// asked of the venue.
-#[test]
+#[rstest]
 fn deltas_a_venue_answers_in_windows_build_the_days_book() {
     let dir = tempfile::tempdir().unwrap();
 
@@ -1335,7 +1336,7 @@ fn deltas_a_venue_answers_in_windows_build_the_days_book() {
 
 /// The catalog holds them: each window is read from its day's start and opens
 /// with a snapshot of the book at its own start.
-#[test]
+#[rstest]
 fn deltas_a_catalog_answers_in_windows_build_the_days_book_across_their_snapshots() {
     let dir = tempfile::tempdir().unwrap();
     warm_deltas(dir.path());
@@ -1416,7 +1417,7 @@ impl DataActor for Streaming {
 /// stays. LSE serves no quotes of the gold series' past: LSE's mock peer
 /// refuses them as LSE does (`400 data-unavailable`), and the warmup ends
 /// with what the venue served and LSE's refusal.
-#[test]
+#[rstest]
 fn an_lsedge_definition_the_cache_lacks_comes_from_the_catalog_before_lse_streams_it() {
     let dir = tempfile::tempdir().unwrap();
     let older = {
@@ -1618,7 +1619,7 @@ impl DataActor for GlbxStreaming {
 /// IB's data client is routed the venues of its live data: Nautilus' node
 /// builder makes the first client on no venue it registers the default, in
 /// no set order, and refuses another made the default after it.
-#[test]
+#[rstest]
 fn glbx_data_comes_from_lse_s_cme_stream_routed_glbx_beside_another_client() {
     let dir = tempfile::tempdir().unwrap();
     let stream = Rc::new(lse::testing::MockExchangeStream::cme(|_, _| {

@@ -21,6 +21,7 @@ use nautilus_model::{
     types::{Price, Quantity},
 };
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
+use rstest::rstest;
 use tempfile::TempDir;
 
 use crate::common::{self, INSTRUMENT_ID, trades};
@@ -96,7 +97,7 @@ fn ema_on_last_bars() -> EmaCross {
 ///   trade, 624.90 (on quotes, the bid 624.85).
 ///
 /// The 10 shares gain 4.30 each: 10043.00 EUR, after 4 orders.
-#[test]
+#[rstest]
 fn the_ema_trades_on_last_bars_built_from_trades_alone() {
     let levels = trades::TIME_EXIT;
     let catalog = trades_catalog(&levels);

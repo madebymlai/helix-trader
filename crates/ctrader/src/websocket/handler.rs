@@ -1195,12 +1195,14 @@ fn auth_failure(stage: &str, error: &CTraderError, names: &CTraderSettingNames) 
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
     /// A write that began and failed, the transport broken under it, may
     /// have reached cTrader, as one that timed out may: Nautilus' adapter
     /// guide leaves such an outcome unknown, never a rejection.
-    #[test]
+    #[rstest]
     fn a_frame_whose_write_failed_after_it_began_counts_as_sent() {
         assert!(failed_send(SendError::BrokenPipe("connection reset".to_owned())).is_ok());
         assert!(failed_send(SendError::WriteTimeout).is_ok());
@@ -1208,7 +1210,7 @@ mod tests {
 
     /// Refused before its write began, or its connection changed: never
     /// sent, for the transport's reason.
-    #[test]
+    #[rstest]
     fn a_frame_refused_before_its_write_is_unsent() {
         for refused in [
             SendError::InvalidInput("empty".to_owned()),

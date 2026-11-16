@@ -70,6 +70,7 @@ use nautilus_trading::{
     nautilus_strategy,
     strategy::{StrategyConfig, StrategyCore},
 };
+use rstest::rstest;
 use rust_decimal::Decimal;
 
 use crate::common::{
@@ -514,7 +515,7 @@ pub(crate) fn hand_worked_quotes() -> Vec<QuoteTick> {
 /// net 2.90 − 0.24 and its stop lose 3.10 + 0.24, the short's the same, and
 /// either's entry costs the spread and a fee, 0.20 + 0.12: in R, over 3 USD,
 /// its payoff features. A take profit realizes its R.
-#[test]
+#[rstest]
 fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
     let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
     let catalog = ic::catalog_of(hand_worked_quotes(), from, to);
@@ -621,7 +622,7 @@ fn hand_worked_run(commission: Commission, dataset: bool) -> Record {
 /// Each side's payoff features are of that cost: a take profit netting 2.90 −
 /// 0.08, a stop losing 3.10 + 0.08 and an entry costing 0.20 + 0.04, over the
 /// stop's 3 USD.
-#[test]
+#[rstest]
 fn a_backtest_and_a_dataset_run_charge_a_commission_per_quantity_alike() {
     let cost = per_ounce()
         .cost(Quantity::from(1), Price::from("4000.20"), &ic::instrument())
@@ -688,7 +689,7 @@ fn half_tick_run() -> (tempfile::TempDir, Backtest) {
 /// reverse, each stop 3.005 away and worth 3.005 USD, not the cents around it.
 /// No exit is reached: each side crosses the cent of the spread and closes by
 /// time, -0.01, less two fees of 0.12 USD.
-#[test]
+#[rstest]
 fn a_stop_from_a_mid_on_a_half_tick_settles_at_its_exact_worth() {
     let (_catalog, backtest) = half_tick_run();
     let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
@@ -715,7 +716,7 @@ fn a_stop_from_a_mid_on_a_half_tick_settles_at_its_exact_worth() {
 /// One ounce, exits a hundredth of a basis point of the mid of 4000.005, on the
 /// cents either side: each stop is half a cent from the mid and on the touch,
 /// in the market, so the venue rejects it, and the decision stores no row.
-#[test]
+#[rstest]
 fn a_stop_half_a_tick_from_a_mid_on_a_half_tick_is_rejected_and_stores_no_row() {
     let (_catalog, backtest) = half_tick_run();
     let source = Source::Quotes(InstrumentId::from(ic::INSTRUMENT_ID));
@@ -744,7 +745,7 @@ fn a_stop_half_a_tick_from_a_mid_on_a_half_tick_is_rejected_and_stores_no_row() 
 /// ATR has one bar at 09:00: that decision opens no target and takes no
 /// number. Each side's entry costs the spread and a fee, 0.20 + 0.12 USD,
 /// over its unit.
-#[test]
+#[rstest]
 fn time_only_targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
     let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
     let catalog = ic::catalog_of(hand_worked_quotes(), from, to);
@@ -796,7 +797,7 @@ fn time_only_targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
 /// outcome of a position reads from its orders alone: over the first
 /// decision to 09:25, the entries, and on the dip at 09:20 the long's stop
 /// and the short's take profit.
-#[test]
+#[rstest]
 fn a_targets_orders_are_named_by_their_decision_side_and_leg() {
     let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
     let catalog = ic::catalog_of(hand_worked_quotes(), from, to);
@@ -824,7 +825,7 @@ fn a_targets_orders_are_named_by_their_decision_side_and_leg() {
 /// account of 100,000 USD could not carry. A dataset run's account locks no
 /// margin, so nothing is denied: each decision settles as the hand-worked
 /// targets do, each side's unit its stop's worth on 10,000 oz, 30,000 USD.
-#[test]
+#[rstest]
 fn a_dataset_run_locks_no_margin_so_a_size_beyond_its_balance_settles() {
     let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
     let catalog = ic::catalog_of(hand_worked_quotes(), from, to);
@@ -876,7 +877,7 @@ fn a_dataset_run_locks_no_margin_so_a_size_beyond_its_balance_settles() {
 /// below any margin. A dataset run's account is frozen, its balance whole
 /// whatever its trades lose, so every later decision opens and settles as
 /// the hand-worked targets do.
-#[test]
+#[rstest]
 fn a_dataset_runs_account_keeps_its_balance_whatever_its_trades_lose() {
     let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
     let catalog = ic::catalog_of(hand_worked_quotes(), from, to);
@@ -907,7 +908,7 @@ fn a_dataset_runs_account_keeps_its_balance_whatever_its_trades_lose() {
 /// dataset run, denies the first entry, which fails the run with its reason
 /// and stops it there, at the 09:00 decision, rather than leave the
 /// decision without its row: no row, and no later decision.
-#[test]
+#[rstest]
 fn a_size_below_the_instruments_minimum_fails_the_dataset_run_and_stops_it() {
     let InstrumentAny::Cfd(mut gold) = ic::instrument() else {
         unreachable!("IC's gold is a CFD")
@@ -1034,7 +1035,7 @@ fn btc_backtest(catalog: &tempfile::TempDir) -> Backtest {
 /// short's take profit net 1 − 0.5 − 0.4995 and its stop lose 1 + 0.5 +
 /// 0.5005, each entry costing its fee alone, 0.5, all over 1 USDT: the
 /// payoffs the bars realize.
-#[test]
+#[rstest]
 fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
     let catalog = btc_catalog(btc_bar);
     let source = Source::Bars(BarType::from(BTC_MINUTE));
@@ -1111,7 +1112,7 @@ fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
 /// 150, an ATR of (150 + 150) / 2 = 150; on 0.01 BTC, the contract's
 /// multiplier, 1.5 USDT. The ATR has one bar at 09:00: that decision opens
 /// no target and takes no number.
-#[test]
+#[rstest]
 fn time_only_targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
     let catalog = btc_catalog(btc_bar);
     let source = Source::Bars(BarType::from(BTC_MINUTE));
@@ -1199,7 +1200,7 @@ fn inverse_run() -> (tempfile::TempDir, Backtest) {
 /// leave an empty dataset. A time-only target is refused as a bracket is: its
 /// unit, its ATR's worth, is no multiple of a distance in price on an inverse
 /// instrument, as a stop's is not.
-#[test]
+#[rstest]
 fn a_target_on_an_inverse_instrument_fails_the_dataset_run() {
     for target in [
         bracket(INVERSE, risking("1"), Decimal::from(10)),
@@ -1251,7 +1252,7 @@ fn ranging_quotes() -> Vec<QuoteTick> {
 /// USD on one ounce. The ATR has one bar at 09:00: that decision opens no
 /// target and takes no number. Each fill pays 30 USD per million of its value,
 /// 0.12 USD at these prices.
-#[test]
+#[rstest]
 fn targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand() {
     let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
     let catalog = ic::catalog_of(ranging_quotes(), from, to);
@@ -1310,7 +1311,7 @@ fn targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand() {
 /// on gold's cent ticks the stop rounds onto the decision's price, no
 /// distance, so the decision opens no target, as one on a cold ATR: no
 /// row and no order.
-#[test]
+#[rstest]
 fn a_stop_rounding_onto_the_decisions_price_opens_no_target() {
     let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
     let catalog = ic::catalog_of(ranging_quotes(), from, to);
@@ -1413,7 +1414,7 @@ fn btc_trades_catalog() -> tempfile::TempDir {
 /// 100,000, each stop worth 0.825 USDT on 0.01 BTC. The ATR has one bar at
 /// 09:00: that decision opens no target. Each fill pays OKX's 0.05% of its
 /// value, 0.5 USDT at 100,000.
-#[test]
+#[rstest]
 fn targets_an_atr_of_cadence_bars_of_trades_away_are_the_outcomes_worked_out_by_hand() {
     let catalog = btc_trades_catalog();
     let backtest = Backtest {
@@ -1454,7 +1455,7 @@ fn targets_an_atr_of_cadence_bars_of_trades_away_are_the_outcomes_worked_out_by_
 /// bar closes on the hour's last trade, 100,000 at 09:59:55, so the
 /// decisions, their ATR and their targets are those of the probe deciding
 /// on the trades themselves.
-#[test]
+#[rstest]
 fn targets_on_last_bars_of_trades_are_those_on_the_trades() {
     let catalog = btc_trades_catalog();
     let hour_last = BarType::from("BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL");
@@ -1522,7 +1523,7 @@ fn ranging_btc_bar(open: Timestamp) -> Bar {
 /// and 82.5 from the last close, 100,000, each stop worth 0.825 USDT on 0.01
 /// BTC. The ATR has one bar at 09:00: that decision opens no target. Each fill
 /// pays OKX's 0.05% of its value, 0.5 USDT at 100,000.
-#[test]
+#[rstest]
 fn targets_an_atr_of_cadence_bars_of_source_bars_away_are_the_outcomes_worked_out_by_hand() {
     let catalog = btc_catalog(ranging_btc_bar);
     let backtest = Backtest {
@@ -1614,7 +1615,7 @@ fn walk_run(
 
 /// Two days of IC's gold, a quote every 5 s, the bid a random walk of up
 /// to 0.30 a step, the ask 0.20 above.
-#[test]
+#[rstest]
 fn targets_are_the_same_with_the_cache_purged_and_without() {
     let (from, to) = (
         ic::at("00:00:00"),

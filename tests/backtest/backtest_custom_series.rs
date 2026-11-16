@@ -43,6 +43,7 @@ use nautilus_trading::{
     nautilus_strategy,
     strategy::{StrategyConfig, StrategyCore},
 };
+use rstest::rstest;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -234,7 +235,7 @@ impl DataActor for Subscribed {
 
 /// The fill stores the rows under the identifier the config chose, each
 /// of the config's data type, unchanged.
-#[test]
+#[rstest]
 fn a_fill_stores_the_rows_under_the_identifier_the_config_names() {
     let dir = tempfile::tempdir().unwrap();
     let filled = dir.path().to_path_buf();
@@ -293,7 +294,7 @@ fn bond_yields_backtest() -> (tempfile::TempDir, Backtest) {
 /// 10-year's data type, which its strategy is not subscribed to, so that it
 /// would get nothing, and fill-catalog would find nothing missing: the run
 /// fails before it starts, naming both.
-#[test]
+#[rstest]
 fn a_backtest_of_rows_stored_under_other_metadata_fails_naming_both() {
     let (_catalog, backtest) = bond_yields_backtest();
     let us02y = declared("US02Y");
@@ -322,7 +323,7 @@ fn a_backtest_of_rows_stored_under_other_metadata_fails_naming_both() {
 /// the strategy at the 13th's 00:00, when the day it closes has ended, and
 /// at no time of the 12th; the 10th's, known at the 11th's 00:00, before
 /// the run, does not.
-#[test]
+#[rstest]
 fn a_bond_yield_of_a_date_reaches_the_strategy_at_the_date_s_end() {
     let (_catalog, backtest) = bond_yields_backtest();
 
@@ -347,7 +348,7 @@ fn a_bond_yield_of_a_date_reaches_the_strategy_at_the_date_s_end() {
 /// (`DataRequirements::custom`), subscribe it to the series: its `on_data`
 /// gets the 12th's close at the 13th's 00:00, though it subscribes to
 /// nothing itself.
-#[test]
+#[rstest]
 fn a_strategy_gets_a_custom_series_through_its_subscriptions() {
     let (_catalog, backtest) = bond_yields_backtest();
 
@@ -396,7 +397,7 @@ impl DataActor for Featured {
 /// A model's raw feature over the custom series reads the 12th's close,
 /// replayed at the 13th's 00:00, from the cache, where the data engine
 /// put it before the strategy's handler, with no strategy code.
-#[test]
+#[rstest]
 fn a_raw_feature_over_a_custom_series_reads_each_replayed_row_from_the_cache() {
     let (_catalog, backtest) = bond_yields_backtest();
 

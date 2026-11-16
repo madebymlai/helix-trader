@@ -5,6 +5,7 @@
 use std::path::Path;
 
 use nautilus_model::{enums::OrderSide, types::Money};
+use rstest::rstest;
 
 use super::{
     testing::{
@@ -90,7 +91,7 @@ fn side_picked(models: &mut DecidingModels) -> Option<Side> {
         .map(|picked| picked.side)
 }
 
-#[test]
+#[rstest]
 fn no_model_in_the_store_gives_no_trade() {
     let models = tempfile::tempdir().unwrap();
 
@@ -99,7 +100,7 @@ fn no_model_in_the_store_gives_no_trade() {
 
 /// A model learned targets net of its dataset runs' commission: a config
 /// declaring another does not trade on it.
-#[test]
+#[rstest]
 fn a_model_of_another_commission_gives_no_trade() {
     let models = tempfile::tempdir().unwrap();
     store(models.path())
@@ -126,7 +127,7 @@ fn a_model_of_another_commission_gives_no_trade() {
     );
 }
 
-#[test]
+#[rstest]
 fn no_model_valid_yet_gives_no_trade() {
     let models = tempfile::tempdir().unwrap();
     store(models.path())
@@ -136,7 +137,7 @@ fn no_model_valid_yet_gives_no_trade() {
     assert_eq!(decided(&mut listed(models.path(), &config()), NOON), None);
 }
 
-#[test]
+#[rstest]
 fn a_decision_uses_the_latest_model_valid_at_or_before_it() {
     let models = tempfile::tempdir().unwrap();
     let store = store(models.path());
@@ -159,7 +160,7 @@ fn a_decision_uses_the_latest_model_valid_at_or_before_it() {
     assert_eq!(expectations, [Some(r(7)), Some(r(8)), Some(r(8))]);
 }
 
-#[test]
+#[rstest]
 fn a_model_published_after_a_decision_is_used_from_the_next() {
     let root = tempfile::tempdir().unwrap();
     let store = store(root.path());
@@ -177,7 +178,7 @@ fn a_model_published_after_a_decision_is_used_from_the_next() {
 
 /// When to list is the caller's: the meta's examples decide on the stores as
 /// they are when made.
-#[test]
+#[rstest]
 fn a_model_published_after_the_listing_is_not_used_until_listed_again() {
     let root = tempfile::tempdir().unwrap();
     let store = store(root.path());
@@ -189,7 +190,7 @@ fn a_model_published_after_the_listing_is_not_used_until_listed_again() {
     assert_eq!(expected(&mut models, "2026-10-22T13:00:00Z"), Some(r(7)));
 }
 
-#[test]
+#[rstest]
 fn an_unreadable_store_fails_the_models_when_built() {
     let root = tempfile::tempdir().unwrap();
     store(root.path()).break_listing();
@@ -228,7 +229,7 @@ fn publish_pair(models: &Path, valid_from: &str, long: usize) {
 /// The pair valid from 10:30 is in stores of which the long's lists, but
 /// the short's fails: the failed listing keeps the long's list too, and a
 /// decision uses no fresh list beside a stale one.
-#[test]
+#[rstest]
 fn a_failed_listing_keeps_every_sides_previous_list() {
     let root = tempfile::tempdir().unwrap();
     publish_pair(root.path(), "2026-10-22T10:00:00Z", 7);
@@ -248,7 +249,7 @@ fn a_failed_listing_keeps_every_sides_previous_list() {
 /// valid from one time. The long of 9 valid from 11:00 has no short beside
 /// it: at noon the pair of 10:00 decides, its long of 7; once the short of
 /// 11:00 is published too, the pair of 11:00 decides.
-#[test]
+#[rstest]
 fn a_side_published_without_the_other_is_never_used() {
     let root = tempfile::tempdir().unwrap();
     publish_pair(root.path(), "2026-10-22T10:00:00Z", 7);
@@ -270,7 +271,7 @@ fn a_side_published_without_the_other_is_never_used() {
 
 /// A long published alone, with no pair before it, is no trade: the
 /// strategy has no pair to decide on.
-#[test]
+#[rstest]
 fn a_two_sided_strategy_with_no_pair_takes_no_trade() {
     let root = tempfile::tempdir().unwrap();
     publish_side(
@@ -302,7 +303,7 @@ fn pair_kept_over(refused: &StoredModel) {
     }
 }
 
-#[test]
+#[rstest]
 fn a_pair_with_a_side_failing_its_checks_is_refused_and_the_current_pair_kept() {
     let mut refused = side_model(Side::Short, NOON, 3);
     refused.manifest.fingerprint = "f".repeat(64);
@@ -312,7 +313,7 @@ fn a_pair_with_a_side_failing_its_checks_is_refused_and_the_current_pair_kept() 
 
 /// The pair's calibration is written once into each side's manifest: a pair
 /// whose sides' copies differ is refused.
-#[test]
+#[rstest]
 fn a_pair_whose_sides_hold_different_calibrations_is_refused_and_the_current_pair_kept() {
     let mut refused = side_model(Side::Short, NOON, 3);
     let ModelCalibration::Pair(calibration) = &mut refused.manifest.calibration else {
@@ -326,7 +327,7 @@ fn a_pair_whose_sides_hold_different_calibrations_is_refused_and_the_current_pai
 /// The pair's calibration names the pair it was fitted on: a short whose copy
 /// names the pair of 10:00, published beside the noon's long, is refused with
 /// it, and one naming the long alone too.
-#[test]
+#[rstest]
 fn a_pair_whose_calibration_names_another_pair_is_refused_and_the_current_pair_kept() {
     let names = |valid_from: &str, sides: Vec<Side>| {
         let mut refused = side_model(Side::Short, NOON, 3);
@@ -358,7 +359,7 @@ fn a_pair_whose_calibration_names_another_pair_is_refused_and_the_current_pair_k
 
 /// The meta's store is the last listed: its failure keeps the sides' lists,
 /// already read afresh, as they were.
-#[test]
+#[rstest]
 fn a_failed_listing_of_the_meta_keeps_the_sides_previous_lists() {
     let root = tempfile::tempdir().unwrap();
     let config = with_meta(meta());
@@ -390,7 +391,7 @@ fn a_failed_listing_of_the_meta_keeps_the_sides_previous_lists() {
     assert_eq!(picked.expected_r, R::new(r(7)));
 }
 
-#[test]
+#[rstest]
 fn a_store_listing_again_is_listed_again() {
     let root = tempfile::tempdir().unwrap();
     let store = store(root.path());
@@ -425,7 +426,7 @@ fn kept_over(refused: &StoredModel) {
     assert_eq!(expectations, [Some(r(7)), Some(r(7)), Some(r(7))]);
 }
 
-#[test]
+#[rstest]
 fn a_model_of_other_feature_names_is_refused_and_the_current_kept() {
     let mut refused = baseline(NOON, 9);
     refused.manifest.feature_names = vec!["spread".to_string()];
@@ -433,7 +434,7 @@ fn a_model_of_other_feature_names_is_refused_and_the_current_kept() {
     kept_over(&refused);
 }
 
-#[test]
+#[rstest]
 fn a_model_of_another_fingerprint_is_refused_and_the_current_kept() {
     let mut refused = baseline(NOON, 9);
     refused.manifest.fingerprint = "f".repeat(64);
@@ -443,7 +444,7 @@ fn a_model_of_another_fingerprint_is_refused_and_the_current_kept() {
 
 /// A side's rows are two wide, the mid and the entry cost: a model of three
 /// is refused.
-#[test]
+#[rstest]
 fn a_model_of_another_width_is_refused_and_the_current_kept() {
     let mut refused = baseline(NOON, 9);
     let set = TrainingSet::new(3, vec![0.5; 6], vec![r(9); 2]).unwrap();
@@ -457,7 +458,7 @@ fn a_model_of_another_width_is_refused_and_the_current_kept() {
     kept_over(&refused);
 }
 
-#[test]
+#[rstest]
 fn a_model_not_predicting_its_probes_is_refused_and_the_current_kept() {
     let mut refused = baseline(NOON, 9);
     refused.manifest.probes[0].prediction = r(9) + f64::EPSILON;
@@ -467,7 +468,7 @@ fn a_model_not_predicting_its_probes_is_refused_and_the_current_kept() {
 
 /// A side model trades by its pair's calibration: one whose manifest has a
 /// meta's instead is refused as it loads.
-#[test]
+#[rstest]
 fn a_side_model_without_its_pairs_calibration_is_refused_and_the_current_kept() {
     let mut refused = baseline(NOON, 9);
     refused.manifest.calibration = ModelCalibration::Meta(super::testing::CALIBRATION);
@@ -477,7 +478,7 @@ fn a_side_model_without_its_pairs_calibration_is_refused_and_the_current_kept() 
 
 /// A long expecting 0.1R, clearing its margin of nought; the short is not
 /// traded. One side has no side call.
-#[test]
+#[rstest]
 fn a_side_expected_to_clear_its_margin_is_picked_with_its_expected_r_level_and_side_call() {
     let root = tempfile::tempdir().unwrap();
     let mut models = listed_with(root.path(), &config(), (Some(6), None));
@@ -497,7 +498,7 @@ fn a_side_expected_to_clear_its_margin_is_picked_with_its_expected_r_level_and_s
 
 /// The long expects 0.2R, the short 0.3R: both clear nought, the short
 /// the more.
-#[test]
+#[rstest]
 fn of_two_sides_clearing_their_margins_the_one_expected_the_more_trades() {
     let root = tempfile::tempdir().unwrap();
     let mut models = listed_with(root.path(), &both_sides(), (Some(7), Some(8)));
@@ -508,7 +509,7 @@ fn of_two_sides_clearing_their_margins_the_one_expected_the_more_trades() {
     near(Some(taken.expected_r.as_f64()), Some(r(8)));
 }
 
-#[test]
+#[rstest]
 fn two_sides_expected_alike_trade_neither() {
     let root = tempfile::tempdir().unwrap();
     let mut models = listed_with(root.path(), &both_sides(), (Some(7), Some(7)));
@@ -518,7 +519,7 @@ fn two_sides_expected_alike_trade_neither() {
 
 /// The long expects 0.2R, short of its margin of 0.5R; the short expects
 /// to lose.
-#[test]
+#[rstest]
 fn no_side_clearing_its_margin_gives_no_trade() {
     let root = tempfile::tempdir().unwrap();
     let config = ModelConfig {
@@ -535,7 +536,7 @@ fn no_side_clearing_its_margin_gives_no_trade() {
 
 /// A short model in the store expecting 0.4R, which a model of both sides
 /// would sell on: a long-only model never reads it.
-#[test]
+#[rstest]
 fn a_long_only_model_never_sells() {
     let root = tempfile::tempdir().unwrap();
     let mut both = listed_with(root.path(), &both_sides(), (Some(3), Some(9)));
@@ -548,7 +549,7 @@ fn a_long_only_model_never_sells() {
 /// Worked by hand. The long expects 0.4R, above its margin of 0.3R: the
 /// margin is in R, a side's row holding no money, its payoff features in R
 /// at the reference stake.
-#[test]
+#[rstest]
 fn a_side_clears_its_margin_in_r() {
     let root = tempfile::tempdir().unwrap();
     let config = ModelConfig {
@@ -571,7 +572,7 @@ fn a_side_clears_its_margin_in_r() {
 
 /// Worked by hand. The long expects 0.2R and the short 0.1R: the long is
 /// picked, on R, whatever either is worth in money.
-#[test]
+#[rstest]
 fn the_side_expected_the_more_r_is_picked() {
     let root = tempfile::tempdir().unwrap();
     let mut models = listed_with(root.path(), &both_sides(), (Some(7), Some(6)));
@@ -606,7 +607,7 @@ fn pair_in_hand() -> Pair {
 /// Worked by hand on `pair_in_hand`: of a pair in no store, the short,
 /// expecting 0.3R, the more, its pick carrying the decision's level and side
 /// call.
-#[test]
+#[rstest]
 fn a_pair_in_hand_is_picked_among_on_its_calibrated_expectation() {
     let picked = DecidingModels::pick_among(
         &pair_in_hand(),
@@ -628,7 +629,7 @@ fn a_pair_in_hand_is_picked_among_on_its_calibrated_expectation() {
 
 /// The short expects 0.3R, the more, short of its own margin of 0.35R: the
 /// long, expecting 0.15R and clearing its margin of nought, is picked.
-#[test]
+#[rstest]
 fn a_side_of_a_pair_in_hand_is_held_to_its_own_margin() {
     let picked = DecidingModels::pick_among(
         &pair_in_hand(),
@@ -642,7 +643,7 @@ fn a_side_of_a_pair_in_hand_is_held_to_its_own_margin() {
 
 /// A pair's calibration is of as many sides as its models: one of two sides
 /// for one model is no pair, nor one of one side for two.
-#[test]
+#[rstest]
 fn a_calibration_of_other_sides_than_its_models_is_no_pair() {
     let line = Line {
         alpha: 0.0,
@@ -700,7 +701,7 @@ fn published_with(
 /// Worked by hand: the meta predicting an R of 0.3, its level line `0.1 +
 /// 0.5 E` expecting 0.25R, at or above its margin of 0.15R, takes the long
 /// picked, at its calibrated expected R.
-#[test]
+#[rstest]
 fn a_meta_model_from_its_margin_takes_the_side_picked_at_its_expected_r() {
     let root = tempfile::tempdir().unwrap();
     let mut models = with_meta_of(root.path(), &with_meta(meta()), Some(8));
@@ -722,7 +723,7 @@ fn a_meta_model_from_its_margin_takes_the_side_picked_at_its_expected_r() {
 
 /// The meta predicting nought expects 0.1R, below its margin of 0.15R:
 /// the margin is in R, as the meta's expectation is.
-#[test]
+#[rstest]
 fn a_meta_model_below_its_margin_takes_no_trade() {
     let root = tempfile::tempdir().unwrap();
     let mut models = with_meta_of(root.path(), &with_meta(meta()), Some(5));
@@ -730,7 +731,7 @@ fn a_meta_model_below_its_margin_takes_no_trade() {
     assert_eq!(decided(&mut models, NOON), None);
 }
 
-#[test]
+#[rstest]
 fn no_meta_model_valid_yet_takes_no_trade() {
     let root = tempfile::tempdir().unwrap();
     let mut models = with_meta_of(root.path(), &with_meta(meta()), None);
@@ -740,7 +741,7 @@ fn no_meta_model_valid_yet_takes_no_trade() {
 
 /// A pick is the side before any meta: the meta's examples learn from the
 /// sides picked whether or not a meta takes them.
-#[test]
+#[rstest]
 fn a_pick_is_the_side_before_any_meta() {
     let root = tempfile::tempdir().unwrap();
     let mut models = with_meta_of(root.path(), &with_meta(meta()), Some(5));
@@ -814,7 +815,7 @@ fn learned_meta_decision(side: Side, tenths: usize) -> Option<Taken> {
 /// after its side and level: it takes a buy on a side call of 0.6, a long of
 /// 0.3R beside a short of -0.3R, which it learned gains, and refuses one on
 /// 0.4, a long of 0.1R, which it learned loses.
-#[test]
+#[rstest]
 fn a_meta_model_decides_on_the_side_call_of_the_decision() {
     let above = learned_meta_decision(Side::Long, 8);
     let below = learned_meta_decision(Side::Long, 6);
@@ -826,7 +827,7 @@ fn a_meta_model_decides_on_the_side_call_of_the_decision() {
 /// The meta model is given the side picked after its features: on a side
 /// call of 0.6 it takes a buy, which it learned gains, and refuses a sell,
 /// its side call -0.6, which it learned never does.
-#[test]
+#[rstest]
 fn a_meta_model_decides_on_the_side_picked() {
     let buy = learned_meta_decision(Side::Long, 8);
     let sell = learned_meta_decision(Side::Short, 8);
@@ -871,7 +872,7 @@ fn predicting_nan(mut meta: StoredModel) -> StoredModel {
     meta
 }
 
-#[test]
+#[rstest]
 fn a_nan_meta_expectation_takes_no_trade() {
     let root = tempfile::tempdir().unwrap();
     let config = with_meta(lightgbm_meta());

@@ -299,6 +299,7 @@ mod tests {
         },
         types::{Currency, Money, Price, Quantity},
     };
+    use rstest::rstest;
 
     use super::*;
 
@@ -457,7 +458,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn each_fill_costs_on_the_last_quote_at_or_before_it_a_later_stream_winning_a_tie() {
         let sxr8 = sxr8();
         let mut cache = Cache::default();
@@ -487,7 +488,7 @@ mod tests {
         assert_eq!(outcome.costs["EUR"].unquoted, 0);
     }
 
-    #[test]
+    #[rstest]
     fn refuses_a_stream_out_of_time_order() {
         let sxr8 = sxr8();
         let mut cache = Cache::default();
@@ -502,7 +503,7 @@ mod tests {
         assert!(err.to_string().contains("out of time order"), "{err}");
     }
 
-    #[test]
+    #[rstest]
     fn refuses_a_fill_of_a_quoted_instrument_with_no_quote_before_it() {
         let sxr8 = sxr8();
         let mut cache = Cache::default();
@@ -518,7 +519,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn prints_the_counts_the_costs_and_every_statistic_sorted_by_section() {
         let expected = "\
 Orders: 5

@@ -1009,6 +1009,7 @@ mod values {
 mod tests {
     use jiff::SignedDuration;
     use nautilus_model::{identifiers::InstrumentId, types::Money};
+    use rstest::rstest;
     use rust_decimal::Decimal;
 
     use super::*;
@@ -1160,7 +1161,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn a_published_model_reads_back_whole() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path(), &config());
@@ -1171,7 +1172,7 @@ mod tests {
         assert_eq!(store.read(at("2026-10-22T00:00:00Z")).unwrap(), published);
     }
 
-    #[test]
+    #[rstest]
     fn missing_and_infinite_probe_values_read_back() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path(), &config());
@@ -1196,7 +1197,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_store_lists_the_times_its_models_are_valid_from_in_order() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path(), &config());
@@ -1212,7 +1213,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_model_valid_from_a_fraction_of_a_second_lists_and_reads_back() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path(), &config());
@@ -1233,7 +1234,7 @@ mod tests {
     /// Two publishers of a model at the same time, say a backtest and a
     /// live node's retrain, each write their own file before the rename:
     /// neither fails, and the model reads back whole.
-    #[test]
+    #[rstest]
     fn publishers_at_the_same_time_at_once_each_publish_a_whole_model() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path(), &config());
@@ -1252,7 +1253,7 @@ mod tests {
         assert_eq!(store.read(at("2026-10-22T00:00:00Z")).unwrap(), published);
     }
 
-    #[test]
+    #[rstest]
     fn publishing_at_the_same_time_replaces_the_model() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path(), &config());
@@ -1267,7 +1268,7 @@ mod tests {
         assert_eq!(store.read(at("2026-10-22T00:00:00Z")).unwrap(), second);
     }
 
-    #[test]
+    #[rstest]
     fn other_training_settings_target_minimums_or_margin_list_none_of_the_models() {
         let dir = tempfile::tempdir().unwrap();
         store(dir.path(), &config())
@@ -1326,7 +1327,7 @@ mod tests {
     /// every store of the strategy sits under, its sides' and its meta's:
     /// no model of another manifest is read, and every model is trained
     /// again.
-    #[test]
+    #[rstest]
     fn bumping_the_store_version_keys_another_store() {
         let config = config();
         let fingerprint = blueprint(&config).fingerprint().unwrap();
@@ -1355,7 +1356,7 @@ mod tests {
     /// fingerprint or to the training settings, updates the literal here; a
     /// rekey of the dataset updates the pinned dataset identifier too
     /// (`dataset::tests::a_fixed_strategys_dataset_keeps_its_identifier`).
-    #[test]
+    #[rstest]
     fn a_fixed_strategys_side_store_keeps_its_directory() {
         let store = side_store(Path::new("models"), &config(), Side::Long);
 
@@ -1374,7 +1375,7 @@ mod tests {
     /// a literal: under its sides' training settings, the meta's own, its
     /// margin and its least expectancy in R, `0.55R` and `1R`, among them,
     /// and the sides' margins in R.
-    #[test]
+    #[rstest]
     fn a_fixed_strategys_meta_store_keeps_its_directory() {
         let store = meta_store(Path::new("models"), &config(), &meta_config());
 
@@ -1393,7 +1394,7 @@ mod tests {
     /// reference stake, the config's risk of the dataset balance: a model
     /// published at one is not listed at another risk or balance, so the
     /// strategy retrains rather than reuse it.
-    #[test]
+    #[rstest]
     fn a_model_is_listed_only_at_the_risk_and_dataset_balance_it_was_trained_at() {
         let dir = tempfile::tempdir().unwrap();
         side_store(dir.path(), &config(), Side::Long)
@@ -1424,7 +1425,7 @@ mod tests {
     /// One side's margin changes which side is picked on a row, so what the
     /// other publishes: a side's models list only beside the same margins of
     /// both sides, a side not traded being another margin.
-    #[test]
+    #[rstest]
     fn either_sides_margin_keys_both_sides_stores() {
         let dir = tempfile::tempdir().unwrap();
         for side in Side::BOTH {
@@ -1466,7 +1467,7 @@ mod tests {
     /// A meta model published under one margin and minimums may fall
     /// short of others, and the sides' margins make its rows: a meta of
     /// another margin, minimums or sides' margins lists none of them.
-    #[test]
+    #[rstest]
     fn a_meta_model_of_another_margin_minimums_or_sides_margins_is_not_listed() {
         let dir = tempfile::tempdir().unwrap();
         let meta = |margin, min_expectancy| {
@@ -1530,7 +1531,7 @@ mod tests {
     /// retrains, never on one a daily-retrained strategy published between
     /// them: a store of either retrain lists its own models alone, a
     /// side's and a meta's alike.
-    #[test]
+    #[rstest]
     fn a_store_lists_only_the_models_of_its_retrain_interval() {
         let daily = Retrain::Every(SignedDuration::from_hours(24));
         let weekly = Retrain::Every(SignedDuration::from_hours(168));
@@ -1574,7 +1575,7 @@ mod tests {
     /// A strategy never retrained trades on the models trained for it
     /// alone: its store lists none a retrained one published, nor does a
     /// retrained one's list its, of each kind of store.
-    #[test]
+    #[rstest]
     fn a_store_never_retrained_and_a_retrained_one_list_none_of_each_others_models() {
         let daily = Retrain::Every(SignedDuration::from_hours(24));
 
@@ -1604,7 +1605,7 @@ mod tests {
     /// with a meta section on a meta model valid by then too: a store
     /// holding one side's model alone, a pair valid later, or no meta model
     /// beside the pair has none to trade on yet.
-    #[test]
+    #[rstest]
     fn a_model_set_has_models_to_trade_on_from_its_pair_and_its_meta() {
         let dir = tempfile::tempdir().unwrap();
         let at = |time: &str| time.parse::<Timestamp>().unwrap();
@@ -1639,7 +1640,7 @@ mod tests {
     /// Where a model set's stores are, which a live start names: the
     /// directory of its training settings, its sides' and its meta's
     /// stores under it (`a_fixed_strategys_side_store_keeps_its_directory`).
-    #[test]
+    #[rstest]
     fn a_fixed_strategys_model_set_is_in_the_directory_of_its_training_settings() {
         assert_eq!(
             models(Path::new("models"), &config()).directory(),
@@ -1651,7 +1652,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn the_long_and_the_short_models_are_listed_apart() {
         let dir = tempfile::tempdir().unwrap();
         side_store(dir.path(), &config(), Side::Long)
@@ -1667,7 +1668,7 @@ mod tests {
     /// and its probes are its predictions before it: the fake predicts the
     /// first feature, 0.25, calibrated by the line `0.1 + 0.5 E` to an
     /// expected R of 0.225.
-    #[test]
+    #[rstest]
     fn a_loaded_meta_model_predicts_through_its_calibration() {
         let mut stored = model("2026-10-22T00:00:00Z", &[vec![0.75]]);
         stored.manifest.side = None;
@@ -1687,7 +1688,7 @@ mod tests {
 
     /// A side's model has its pair's calibration and a meta's its own level
     /// line: each loaded as the other's level is refused.
-    #[test]
+    #[rstest]
     fn a_model_is_refused_at_the_other_levels_load() {
         let side = model("2026-10-22T00:00:00Z", &[]);
         let mut meta = side.clone();
@@ -1706,7 +1707,7 @@ mod tests {
     /// its row's mid: the long's 0.4 and the short's 0.1 are C = 0.25 and D =
     /// 0.3, calibrated by the pair's line `0.1 + 0.5 C` and slope 1.5 to C' =
     /// 0.225 and D' = 0.45, the long expecting 0.45R and the short nought.
-    #[test]
+    #[rstest]
     fn a_pair_expects_each_sides_r_through_its_calibration() {
         let dir = tempfile::tempdir().unwrap();
         let models = models(dir.path(), &config());
@@ -1746,7 +1747,7 @@ mod tests {
     /// side's of Platt's calibration and a payoff record, and a meta's of
     /// Platt's calibration and its probabilities' log loss and AUC. Read,
     /// each is refused, naming its file.
-    #[test]
+    #[rstest]
     fn a_model_of_an_earlier_manifest_is_refused_naming_its_file() {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path(), &config());
@@ -1791,7 +1792,7 @@ mod tests {
 
     /// A model learned targets net of its dataset run's commission: one of
     /// other costs is another model.
-    #[test]
+    #[rstest]
     fn another_commission_lists_none_of_the_models() {
         let dir = tempfile::tempdir().unwrap();
         store(dir.path(), &config())

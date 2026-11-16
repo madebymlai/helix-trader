@@ -262,6 +262,7 @@ mod tests {
     use nautilus_common::config::ConfigResult;
     use nautilus_model::data::Bar;
     use nautilus_trading::strategy::StrategyConfig;
+    use rstest::rstest;
 
     use super::*;
     use crate::strategy::{Part, Series, StandardConfig};
@@ -397,7 +398,7 @@ mod tests {
             .collect()
     }
 
-    #[test]
+    #[rstest]
     fn the_strategy_receives_nautilus_indicators_built_from_their_tables() {
         let config = load(TOML).unwrap();
         let fast = config.indicators.build(FAST);
@@ -414,14 +415,14 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_custom_indicator_is_received_built_from_its_table() {
         let config = load(TOML).unwrap();
         let breakout = config.indicators.build(BREAKOUT);
         assert_eq!(breakout.level, 100.5);
     }
 
-    #[test]
+    #[rstest]
     fn arguments_left_out_take_nautilus_defaults() {
         let toml = TOML
             .replace("price_type = \"BID\"\n", "")
@@ -436,7 +437,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn the_strategy_reads_an_indicator_s_arguments() {
         let config = load(TOML).unwrap();
         assert_eq!(
@@ -445,18 +446,18 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn a_missing_indicator_is_refused_naming_it() {
         assert_eq!(error_fields(&without("breakout")), ["indicators.breakout"]);
     }
 
-    #[test]
+    #[rstest]
     fn an_indicator_the_strategy_does_not_declare_is_refused_naming_it() {
         let toml = TOML.replace("[trade]", "[indicators.slow]\nperiod = 30\n\n[trade]");
         assert_eq!(error_fields(&toml), ["indicators.slow"]);
     }
 
-    #[test]
+    #[rstest]
     fn an_argument_nautilus_refuses_is_refused_naming_the_indicator() {
         let toml = TOML.replace("period = 5", "period = 0");
         let err = load(&toml).unwrap_err();
@@ -464,7 +465,7 @@ mod tests {
         assert_eq!(error_fields(&toml), ["indicators.fast"]);
     }
 
-    #[test]
+    #[rstest]
     fn an_argument_a_custom_builder_refuses_is_refused_naming_the_indicator() {
         let toml = TOML.replace("level = 100.5", "level = -1.0");
         let err = load(&toml).unwrap_err();
@@ -473,13 +474,13 @@ mod tests {
     }
 
     /// `AverageTrueRange::new_checked` is not public: its `new` panics.
-    #[test]
+    #[rstest]
     #[should_panic(expected = "period must be in")]
     fn an_average_true_range_argument_nautilus_refuses_panics_at_load() {
         let _ = load(&TOML.replace("period = 14", "period = 0"));
     }
 
-    #[test]
+    #[rstest]
     fn an_unknown_argument_is_refused_naming_the_indicator_and_the_argument() {
         let toml = TOML.replace("period = 5", "period = 5\nperiods = 6");
         let err = load(&toml).unwrap_err();
@@ -487,7 +488,7 @@ mod tests {
         assert_eq!(error_fields(&toml), ["indicators.fast"]);
     }
 
-    #[test]
+    #[rstest]
     fn a_kind_is_an_unknown_argument() {
         let toml = TOML.replace(
             "period = 5",
@@ -496,13 +497,13 @@ mod tests {
         assert_eq!(error_fields(&toml), ["indicators.fast"]);
     }
 
-    #[test]
+    #[rstest]
     fn an_argument_of_the_wrong_type_is_refused_naming_the_indicator() {
         let toml = TOML.replace("level = 100.5", "level = \"high\"");
         assert_eq!(error_fields(&toml), ["indicators.breakout"]);
     }
 
-    #[test]
+    #[rstest]
     fn an_unknown_moving_average_type_is_refused_naming_it() {
         let toml = TOML.replace("\"SIMPLE\"", "\"TRIANGULAR\"");
         let err = load(&toml).unwrap_err();
@@ -510,7 +511,7 @@ mod tests {
         assert_eq!(error_fields(&toml), ["indicators.range"]);
     }
 
-    #[test]
+    #[rstest]
     fn indicator_violations_are_reported_with_the_others_at_once() {
         let toml = without("breakout")
             .replace("period = 5", "period = 0")

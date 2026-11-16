@@ -21,6 +21,7 @@ use nautilus_model::{
     enums::OmsType,
     types::{Currency, Money},
 };
+use rstest::rstest;
 
 use crate::common::ic;
 
@@ -145,7 +146,7 @@ fn units(rows: &[TargetRow]) -> Vec<(Timestamp, Money, Money)> {
 /// 9 USD. At 11:00 and 12:00 it is 1.60000: 32M USD, 12.80 USD, 4.27 oz,
 /// 4, one R worth 12 USD. Unconverted, 20M taken as USD would be 2 oz at
 /// each; at the rate swapped, 2 oz at 10:00 and 1 at 11:00.
-#[test]
+#[rstest]
 fn each_rows_reference_stake_is_of_the_balance_converted_at_its_decisions_rate() {
     let rows = std::thread::spawn(rows).join().unwrap();
 
@@ -179,7 +180,7 @@ fn pnls(rows: &[TargetRow]) -> Vec<(Timestamp, Money, Money)> {
 /// limit across the spread, losing 0.20 USD an ounce and its two fills'
 /// commission, 30 USD per million: of 3 oz, 0.60 and 0.36 a fill, -1.32
 /// USD; of 4 oz, 0.80 and 0.48 a fill, -1.76 USD.
-#[test]
+#[rstest]
 fn the_dataset_run_sends_each_side_at_the_size_its_row_is_priced_at() {
     let rows = std::thread::spawn(rows).join().unwrap();
 

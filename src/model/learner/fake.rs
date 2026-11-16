@@ -51,6 +51,8 @@ impl Predictor for Saved {
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use crate::model::learner::{LearnerConfig, TrainingSet};
 
     /// Fitted on labels whose mean is (2.5 - 1.0 + 3.5 + 2.0) / 4 = 1.75.
@@ -59,19 +61,19 @@ mod tests {
         LearnerConfig::Fake {}.fit(&set).unwrap()
     }
 
-    #[test]
+    #[rstest]
     fn predicts_the_first_feature() {
         for first in [0.3, -2.0, 1.5] {
             assert_eq!(model().predict(&[first, 0.8]).unwrap(), first);
         }
     }
 
-    #[test]
+    #[rstest]
     fn predicts_the_training_mean_where_the_first_feature_is_missing() {
         assert_eq!(model().predict(&[f64::NAN, 0.5]).unwrap(), 1.75);
     }
 
-    #[test]
+    #[rstest]
     fn does_not_load_a_saved_baseline() {
         let set = TrainingSet::new(1, vec![0.0], vec![1.0]).unwrap();
         let baseline = LearnerConfig::Baseline {}.fit(&set).unwrap();

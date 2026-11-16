@@ -491,6 +491,7 @@ mod tests {
         identifiers::{StrategyId, TraderId},
         types::{Currency, Money},
     };
+    use rstest::rstest;
     use rust_decimal::Decimal;
 
     use super::*;
@@ -520,7 +521,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn one_margin_venue_named_after_the_instruments() {
         let dir = tempfile::tempdir().unwrap();
         let config = run_config(&backtest(dir.path())).unwrap();
@@ -532,7 +533,7 @@ mod tests {
         assert_eq!(venue.book_type(), BookType::L1_MBP);
     }
 
-    #[test]
+    #[rstest]
     fn each_series_is_streamed_from_its_files_as_one_query() {
         let dir = tempfile::tempdir().unwrap();
         let config = run_config(&backtest(dir.path())).unwrap();
@@ -545,7 +546,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn the_venue_keeps_positions_as_the_backtest_says() {
         let dir = tempfile::tempdir().unwrap();
         let netting = run_config(&backtest(dir.path())).unwrap();
@@ -560,7 +561,7 @@ mod tests {
 
     /// A backtest's margins are its instruments', each holding its
     /// account's, under Nautilus' default margin model, unleveraged.
-    #[test]
+    #[rstest]
     fn a_backtests_venues_are_unleveraged_under_nautilus_default_margin_model() {
         let dir = tempfile::tempdir().unwrap();
         let config = run_config(&backtest(dir.path())).unwrap();
@@ -573,7 +574,7 @@ mod tests {
     /// (`venues::has_base_currency`): a backtest's simulated account of
     /// IC Markets takes the balance's currency as its base, IBIS's none; a
     /// dataset run's takes none on any venue.
-    #[test]
+    #[rstest]
     fn a_backtests_venue_has_the_balances_currency_as_its_base_if_its_broker_has_one() {
         let dir = tempfile::tempdir().unwrap();
         let backtest = Backtest {
@@ -640,7 +641,7 @@ mod tests {
     /// 150 ms, Nautilus' static model of that base latency and no extra:
     /// a submit, a modify and a cancel each reach the venue 150 ms after
     /// they are sent, in a trading run as in a dataset run, on every venue.
-    #[test]
+    #[rstest]
     fn a_backtest_at_a_latency_delays_every_command_by_it_on_every_venue() {
         let dir = tempfile::tempdir().unwrap();
         let backtest = Backtest {
@@ -661,7 +662,7 @@ mod tests {
     }
 
     /// Nautilus' default: each command reaches the venue as it is sent.
-    #[test]
+    #[rstest]
     fn a_backtest_without_a_latency_has_no_latency_model() {
         let dir = tempfile::tempdir().unwrap();
         let backtest = backtest(dir.path());
@@ -674,7 +675,7 @@ mod tests {
     /// and model guides rely on: resting orders match on external bars,
     /// replayed open, high, low, close, without consuming liquidity, and a
     /// stop whose trigger is in the market is rejected.
-    #[test]
+    #[rstest]
     fn the_venue_keeps_nautilus_default_matching() {
         let dir = tempfile::tempdir().unwrap();
         let config = run_config(&backtest(dir.path())).unwrap();
@@ -698,14 +699,14 @@ mod tests {
             .collect()
     }
 
-    #[test]
+    #[rstest]
     fn only_the_quotes_of_every_instrument_come_from_the_catalog() {
         let dir = tempfile::tempdir().unwrap();
         let config = run_config(&backtest(dir.path())).unwrap();
         assert_eq!(quoted(&config, dir.path()), ["EUNL.IBIS", "SXR8.IBIS"]);
     }
 
-    #[test]
+    #[rstest]
     fn an_instrument_of_two_bar_types_has_its_quotes_loaded_once() {
         let dir = tempfile::tempdir().unwrap();
         let mut backtest = backtest(dir.path());
@@ -716,7 +717,7 @@ mod tests {
         assert_eq!(quoted(&config, dir.path()), ["EUNL.IBIS", "SXR8.IBIS"]);
     }
 
-    #[test]
+    #[rstest]
     fn a_composite_bar_type_has_its_source_bars_loaded_by_bar_type() {
         let dir = tempfile::tempdir().unwrap();
         let backtest = Backtest {
@@ -739,7 +740,7 @@ mod tests {
 
     /// 5 s after their close, as a live node builds them, in a trading run
     /// as in a dataset run.
-    #[test]
+    #[rstest]
     fn a_run_on_a_composite_bar_type_builds_its_bars_as_late_as_a_live_node() {
         let dir = tempfile::tempdir().unwrap();
         let backtest = Backtest {
@@ -762,7 +763,7 @@ mod tests {
 
     /// Its data comes from the data configs alone: no catalog serves a
     /// request, and the cache keeps Nautilus' default.
-    #[test]
+    #[rstest]
     fn no_catalog_is_registered_to_serve_requests() {
         let dir = tempfile::tempdir().unwrap();
         let config = run_config(&backtest(dir.path())).unwrap();
@@ -770,14 +771,14 @@ mod tests {
         assert_eq!(config.engine().cache, None);
     }
 
-    #[test]
+    #[rstest]
     fn the_node_installs_the_logger_as_configured() {
         let dir = tempfile::tempdir().unwrap();
         let config = run_config(&backtest(dir.path())).unwrap();
         assert!(config.engine().logging.print_config);
     }
 
-    #[test]
+    #[rstest]
     fn a_trading_run_keeps_its_closed_orders_and_positions() {
         let dir = tempfile::tempdir().unwrap();
         let config = run_config(&backtest(dir.path())).unwrap();
@@ -785,7 +786,7 @@ mod tests {
     }
 
     /// Every minute, those closed a minute or more before.
-    #[test]
+    #[rstest]
     fn a_dataset_run_purges_its_closed_orders_and_positions_every_minute() {
         let dir = tempfile::tempdir().unwrap();
         let config = dataset_run_config(&backtest(dir.path())).unwrap();
@@ -803,7 +804,7 @@ mod tests {
         assert_eq!(config.data().len(), trading.data().len());
     }
 
-    #[test]
+    #[rstest]
     fn the_data_is_streamed_in_chunks() {
         let dir = tempfile::tempdir().unwrap();
         let config = run_config(&backtest(dir.path())).unwrap();
@@ -813,7 +814,7 @@ mod tests {
     /// SXR8's imbalances, a custom series under its id: the run reads them
     /// apart (`custom_data`) and loads the series of its data configs, the
     /// quotes of its bars, at once.
-    #[test]
+    #[rstest]
     fn a_run_of_a_custom_series_loads_the_other_series_at_once() {
         let dir = tempfile::tempdir().unwrap();
         let backtest = Backtest {
@@ -828,7 +829,7 @@ mod tests {
     /// Nautilus' `BacktestNode` warns of a series it reads nothing of and
     /// runs on (`run_oneshot`): the read of a custom series the catalog
     /// holds nothing of warns so, naming its data type, and reads on.
-    #[test]
+    #[rstest]
     fn an_empty_read_of_a_custom_series_logs_nautilus_no_data_warning_and_reads_on() {
         let name = "an_empty_read_of_a_custom_series_logs_nautilus_no_data_warning_and_reads_on";
         if !crate::log_capture::alone(module_path!(), name) {
@@ -853,7 +854,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[rstest]
     fn runs_and_reads_each_series_from_the_start_to_the_end() {
         let dir = tempfile::tempdir().unwrap();
         let config = run_config(&backtest(dir.path())).unwrap();
@@ -870,7 +871,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[rstest]
     fn raises_errors_and_keeps_the_engine_after_the_run() {
         let dir = tempfile::tempdir().unwrap();
         let config = run_config(&backtest(dir.path())).unwrap();
@@ -878,7 +879,7 @@ mod tests {
         assert!(!config.dispose_on_completion());
     }
 
-    #[test]
+    #[rstest]
     fn rejects_no_instruments() {
         let dir = tempfile::tempdir().unwrap();
         let backtest = Backtest {
@@ -889,7 +890,7 @@ mod tests {
         assert!(err.to_string().contains("no instruments"), "{err}");
     }
 
-    #[test]
+    #[rstest]
     fn instruments_on_two_venues_get_a_venue_each_as_it_keeps_positions() {
         let dir = tempfile::tempdir().unwrap();
         let backtest = Backtest {
@@ -927,7 +928,7 @@ mod tests {
     /// with nothing in the run's currency, keeping positions as Nautilus'
     /// venue default in a normal run, and hedging in a dataset run, as
     /// every venue there.
-    #[test]
+    #[rstest]
     fn a_venue_no_broker_trades_starts_with_nothing_in_the_run_s_currency() {
         let dir = tempfile::tempdir().unwrap();
         let backtest = Backtest {

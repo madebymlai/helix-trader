@@ -27,6 +27,7 @@ use helix_trader::{
     strategy::model_ema::{ModelEma, ModelEmaConfig},
 };
 use jiff::{SignedDuration, Timestamp};
+use rstest::rstest;
 
 use crate::common::{
     dataset::{backtest, walk},
@@ -78,7 +79,7 @@ const SNAPSHOT: &str = concat!(
 const WRITE: &str = "GOLDEN_ROWS";
 
 /// The rows of the 21st to the 23rd of October 2026 are the snapshot's.
-#[test]
+#[rstest]
 fn the_rows_of_the_example_model_strategy_are_the_snapshots() {
     let config = ModelEmaConfig::load(CONFIG).unwrap();
     let (from, to) = (
