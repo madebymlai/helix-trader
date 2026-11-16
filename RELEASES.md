@@ -1,6 +1,6 @@
 # Helix Trader 0.1.0
 
-Released on TBD (UTC).
+Released on 2026-11-16 (UTC).
 
 ### Breaking Changes
 
