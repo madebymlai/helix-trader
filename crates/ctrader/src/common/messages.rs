@@ -216,7 +216,7 @@ pub(crate) fn open<M: Payload>(envelope: &ProtoMessage) -> Result<M, CTraderErro
             })
         }
         other => Err(CTraderError::Protocol(format!(
-            "expected {}, got {}",
+            "expected {}, received {}",
             payload_name(M::TYPE),
             payload_name(other)
         ))),
@@ -352,7 +352,7 @@ mod tests {
         assert_eq!(
             opened,
             Err(CTraderError::Protocol(
-                "expected PROTO_OA_ASSET_LIST_RES, got PROTO_OA_SYMBOLS_LIST_RES".to_owned()
+                "expected PROTO_OA_ASSET_LIST_RES, received PROTO_OA_SYMBOLS_LIST_RES".to_owned()
             ))
         );
     }

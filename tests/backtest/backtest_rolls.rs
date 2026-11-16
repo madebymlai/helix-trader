@@ -82,8 +82,8 @@ struct RollProbe {
 nautilus_strategy!(RollProbe);
 
 impl RollProbe {
-    fn record(&self, got: Got) {
-        self.got.borrow_mut().push(got);
+    fn record(&self, observed: Got) {
+        self.got.borrow_mut().push(observed);
     }
 }
 
