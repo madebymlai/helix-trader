@@ -46,46 +46,37 @@ mod tests {
     use super::*;
     use crate::model::targets::Side;
 
+    /// Of the sides at or above their margins, the one expected the most
+    /// trades; none if no side clears its margin, or two tie.
     #[rstest]
-    fn a_side_trades_from_its_margin() {
-        assert_eq!(
-            pick([(Side::Short, R::new(1.0), R::new(1.0))]),
-            Some(Side::Short)
-        );
-        assert_eq!(pick([(Side::Short, R::new(0.99), R::new(1.0))]), None);
-    }
-
-    #[rstest]
-    fn of_two_sides_clearing_their_margins_the_larger_trades() {
-        assert_eq!(
-            pick([
-                (Side::Long, R::new(1.5), R::new(1.0)),
-                (Side::Short, R::new(2.0), R::new(1.0))
-            ]),
-            Some(Side::Short)
-        );
-        assert_eq!(
-            pick([
-                (Side::Long, R::new(1.5), R::new(1.0)),
-                (Side::Short, R::new(2.0), R::new(2.5))
-            ]),
-            Some(Side::Long)
-        );
-    }
-
-    #[rstest]
-    fn two_sides_tied_trade_neither() {
-        assert_eq!(
-            pick([
-                (Side::Long, R::new(2.0), R::new(1.0)),
-                (Side::Short, R::new(2.0), R::new(1.0))
-            ]),
-            None
-        );
-    }
-
-    #[rstest]
-    fn no_side_trades_nothing() {
-        assert_eq!(pick::<Side>([]), None);
+    #[case::a_side_at_its_margin(vec![(Side::Short, R::new(1.0), R::new(1.0))], Some(Side::Short))]
+    #[case::a_side_below_its_margin(vec![(Side::Short, R::new(0.99), R::new(1.0))], None)]
+    #[case::of_two_clearing_the_larger(
+        vec![
+            (Side::Long, R::new(1.5), R::new(1.0)),
+            (Side::Short, R::new(2.0), R::new(1.0)),
+        ],
+        Some(Side::Short)
+    )]
+    #[case::of_two_the_larger_below_its_margin(
+        vec![
+            (Side::Long, R::new(1.5), R::new(1.0)),
+            (Side::Short, R::new(2.0), R::new(2.5)),
+        ],
+        Some(Side::Long)
+    )]
+    #[case::two_tied(
+        vec![
+            (Side::Long, R::new(2.0), R::new(1.0)),
+            (Side::Short, R::new(2.0), R::new(1.0)),
+        ],
+        None
+    )]
+    #[case::no_side(vec![], None)]
+    fn of_the_sides_clearing_their_margins_the_larger_trades(
+        #[case] sides: Vec<(Side, R, R)>,
+        #[case] traded: Option<Side>,
+    ) {
+        assert_eq!(pick(sides), traded);
     }
 }

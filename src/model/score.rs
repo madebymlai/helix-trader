@@ -115,13 +115,23 @@ mod tests {
     }
 
     /// Realized values all at the baseline leave it no error to beat: no
-    /// skill. One expectation for every row has no slope.
+    /// skill. One expectation for every row has no slope. Each row realized
+    /// 1 on an expectation of 0.5, the mean error and the top decile's gap,
+    /// a tenth of two rows rounded up, one row, are 0.5.
     #[rstest]
     fn no_baseline_error_has_no_skill_and_no_spread_has_no_slope() {
         let score = ExpectedScore::of(&[(0.5, 1.0, 1.0), (0.5, 1.0, 1.0)]);
 
-        assert_eq!((score.skill, score.slope), (None, None));
-        close(score.mean_error, 0.5);
+        assert_eq!(
+            score,
+            ExpectedScore {
+                rows: 2,
+                skill: None,
+                mean_error: Some(0.5),
+                slope: None,
+                top_decile_gap: Some(0.5),
+            }
+        );
     }
 
     /// Many rows of one expectation, -0.2, whose mean in floating point is not
