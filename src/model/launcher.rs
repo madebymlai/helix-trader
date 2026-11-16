@@ -421,36 +421,16 @@ mod tests {
     use super::*;
     use crate::{
         log_capture,
-        model::{
-            holdout::{Earnings, Holdout, Refusal},
-            score::ExpectedScore,
-            train::{Kept, Outcome},
-        },
-        strategy::{requirements::TickSeries, risk::R},
+        model::train::{Kept, Outcome},
+        strategy::requirements::TickSeries,
     };
 
     fn at(time: &str) -> Timestamp {
         time.parse().unwrap()
     }
 
-    /// A holdout of no trade.
-    fn holdout() -> Holdout {
-        Holdout {
-            earnings: Earnings::default(),
-            score: ExpectedScore {
-                rows: 2,
-                skill: Some(0.1),
-                ..ExpectedScore::default()
-            },
-        }
-    }
-
     fn published(at: Timestamp) -> Trained {
-        Outcome::Published {
-            valid_from: at,
-            holdout: Box::new(holdout()),
-        }
-        .into()
+        Outcome::Published { valid_from: at }.into()
     }
 
     /// A child of `sh` running `script`, `--at` and the time its `$1` and
@@ -486,14 +466,15 @@ mod tests {
     fn a_failing_child_is_kept_with_the_error_it_printed_last() {
         let launcher = shell(
             "echo 'ERROR a log line of the replay' >&2; \
-             echo 'Error: kept the current model: holdout expectancy of the trades taken 0.480000R below the minimum 0.55R' >&2; \
+             echo 'Error: kept the current model: failed: 34 rows in the fit slice, fewer than min_rows 35' >&2; \
              exit 1",
         );
 
         assert_eq!(
             launcher.launch(at("2026-10-22T00:00:00Z")).wait(),
             Retrained::Kept(
-                "kept the current model: holdout expectancy of the trades taken 0.480000R below the minimum 0.55R".to_string()
+                "kept the current model: failed: 34 rows in the fit slice, fewer than min_rows 35"
+                    .to_string()
             )
         );
     }
@@ -607,18 +588,14 @@ mod tests {
     }
 
     /// A launcher handing each time it trains at to `finish`, each train
-    /// keeping the current model: the model fitted is refused, its holdout
-    /// expectancy below the minimum.
+    /// keeping the current model: the train fails, a slice of fewer rows
+    /// than the minimum.
     fn keeping(finish: mpsc::Sender<Timestamp>) -> Launcher {
         Launcher::in_process(move |at| {
             finish.send(at).unwrap();
-            Outcome::Kept(Kept::Refused {
-                why: Refusal::MinExpectancy {
-                    expectancy: 0.25,
-                    min_expectancy: R::new(0.5),
-                },
-                holdout: Box::new(holdout()),
-            })
+            Outcome::Kept(Kept::Failed(
+                "34 rows in the fit slice, fewer than min_rows 35".to_string(),
+            ))
             .into()
         })
     }
@@ -893,7 +870,7 @@ mod tests {
         let mut refused = daily_on(
             dir.path(),
             shell(
-                "echo 'Error: kept the current model: holdout expectancy of the trades taken 0.480000R below the minimum 0.55R' >&2; \
+                "echo 'Error: kept the current model: failed: 34 rows in the fit slice, fewer than min_rows 35' >&2; \
                  exit 1",
             ),
         );
@@ -925,8 +902,8 @@ mod tests {
                 "ERROR",
                 &[
                     "2026-10-22T00:00:00Z",
-                    "kept the current model: holdout expectancy of the trades taken 0.480000R \
-                     below the minimum 0.55R",
+                    "kept the current model: failed: 34 rows in the fit slice, fewer than \
+                     min_rows 35",
                 ]
             ),
             "{lines:#?}"

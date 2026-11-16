@@ -1,19 +1,16 @@
 //! Meta-labeling on a fixture catalog (`model::meta`), the features a
 //! missing one (`common::dataset::Missing`).
 //! Over a span of three days retrained every midnight, the dataset is
-//! built and the models trained; the fixture's walk has no edge, so a
-//! train refuses each model, and the models traded on are published
-//! straight, baselines whose predictions name them
-//! (`common::dataset::baseline_of`). In the run, a decision trades only if
-//! the meta model in use takes the trade of the side picked, on the
-//! decision's level and side call.
+//! built and the models trained, each train publishing what it fits; the
+//! models traded on are then published straight in their place, baselines
+//! whose predictions name them (`common::dataset::baseline_of`). In the
+//! run, a decision trades only if the meta model in use takes the trade of
+//! the side picked, on the decision's level and side call.
 //!
 //! A strategy of the long alone trades long at every decision. Its
 //! meta model's first retrain has no side's model before it, so it waits
-//! for the sides' decisions; the next ones hold out the longs, every one
-//! of which the meta's margin takes, and refuse it, on its skill or for
-//! its trades, every trade, earning no more than every trade. With no meta
-//! model the first day, no trade.
+//! for the sides' decisions; the next ones learn from the longs and
+//! publish. With no meta model the first day, no trade.
 //!
 //! One node per thread: each build, train and run on a thread of its own.
 
@@ -25,7 +22,6 @@ use helix_trader::{
         dataset,
         features::FeatureSet,
         handle::Decision,
-        holdout::Earnings,
         learner::LearnerConfig,
         schedule::Retrain,
         store::{ModelSet, ModelStore},
@@ -52,16 +48,15 @@ fn features() -> Rc<FeatureSet> {
     missing().build().unwrap()
 }
 
-/// A meta model on 46 hours, the last 6 held out and the 6 before them
-/// calibrated on, the fake learner, published from nought per trade over
-/// a trade, taking every trade, to record its expected R.
+/// A meta model on 46 hours, the last 6 calibrated on, the fake learner,
+/// each slice of at least one row, taking every trade, to record its
+/// expected R.
 fn meta() -> MetaConfig {
     MetaConfig::builder()
         .window(SignedDuration::from_hours(46))
-        .holdout(SignedDuration::from_hours(6))
+        .calibration(SignedDuration::from_hours(6))
         .margin(R::new(f64::MIN))
-        .min_expectancy(R::new(0.0))
-        .min_trades(1)
+        .min_rows(1)
         .learner(LearnerConfig::Fake {})
         .build()
 }
@@ -107,10 +102,9 @@ fn on_thread<T: Send>(run: impl FnOnce() -> T + Send) -> T {
 
 /// Prepares the backtest of the span of `long_only`: the dataset built,
 /// then at each retrain time the long and its meta model trained, and
-/// the long model published straight after, a baseline predicting an R of
-/// `r(tenths)` (`tenths` 3 at the span's start and one more each day),
-/// which the train would keep in use had it been published before; what
-/// each train did.
+/// the long model published straight after in the place of the one the
+/// train published, a baseline predicting an R of `r(tenths)` (`tenths` 3
+/// at the span's start and one more each day); what each train did.
 fn prepare_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> {
     let (start, end) = span();
     let mut trained = vec![];
@@ -169,13 +163,11 @@ fn meta_store(models: &Path) -> ModelStore {
     model_set(models).meta().unwrap().store().clone()
 }
 
-/// The fixture has no edge: a train refuses each model it fits, the
-/// long's and, from the second retrain, when the long has a model
-/// before it, the meta's, whose margin takes every trade of its
-/// holdout, the longs, refused on its skill or for earning no more than
-/// every trade.
-/// With meta models published straight, a day's decisions trade only as
-/// the meta model in use takes the trade of the side picked: each of the
+/// Each train publishes the long it fits and, from the second retrain,
+/// when the long has a model before it, the meta's; the first meta waits.
+/// With meta models published straight in their place, a day's decisions
+/// trade only as the meta model in use takes the trade of the side picked:
+/// each of the
 /// second and third days a long at every decision, at the level of the
 /// long's baseline published at its start, r(4) = -0.1 then r(5) = 0, and
 /// at the expected R of the meta published then, a baseline of r(6) = 0.1
@@ -191,12 +183,13 @@ fn a_meta_model_trains_on_the_sides_trades_and_takes_them_in_the_run() {
 
     let times: Vec<Timestamp> = trained.iter().map(|(at, _)| *at).collect();
     assert_eq!(times, retrains);
-    assert!(
-        trained
-            .iter()
-            .all(|(_, trained)| matches!(trained.long, Some(Outcome::Kept(Kept::Refused { .. })))),
-        "{trained:?}"
-    );
+    for (at, trained) in &trained {
+        assert_eq!(
+            trained.long,
+            Some(Outcome::Published { valid_from: *at }),
+            "{trained:?}"
+        );
+    }
     assert_eq!(
         trained[0].1.meta,
         Some(Outcome::Kept(Kept::Waiting)),
@@ -204,15 +197,14 @@ fn a_meta_model_trains_on_the_sides_trades_and_takes_them_in_the_run() {
         trained[0].1
     );
     for (at, trained) in &trained[1..] {
-        let Some(Outcome::Kept(Kept::Refused { holdout, .. })) = &trained.meta else {
-            panic!("{at}: {trained:?}");
-        };
-        let Earnings { taken, every, .. } = holdout.earnings;
-        assert!(every.count > 0, "{at}: {holdout:?}");
-        assert_eq!(taken, every, "{at}: every trade taken");
+        assert_eq!(
+            trained.meta,
+            Some(Outcome::Published { valid_from: *at }),
+            "{trained:?}"
+        );
     }
     let meta = meta_store(models.path());
-    assert!(meta.valid_froms().unwrap().is_empty());
+    assert_eq!(meta.valid_froms().unwrap(), retrains[1..]);
     for (&at, tenths) in retrains[1..].iter().zip([6, 8]) {
         meta.publish(&meta_baseline_of(&features(), &long_only(), at, tenths))
             .unwrap();

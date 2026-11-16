@@ -642,10 +642,9 @@ const MODEL_EMA_CONFIG: &str = r#"
     target = { limit = "1s", atr = { period = 1 } }
     retrain = "24h"
     window = "46h"
-    holdout = "12h"
+    calibration = "12h"
     margins = { long = "0R", short = "0R" }
-    min_expectancy = "0R"
-    min_trades = 1
+    min_rows = 1
     learner = { kind = "fake" }
 "#;
 

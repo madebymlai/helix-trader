@@ -273,10 +273,9 @@ mod tests {
         target = { limit = "30m", atr = { period = 14 } }
         retrain = "24h"
         window = "48h"
-        holdout = "12h"
+        calibration = "12h"
         margins = { long = "0.5R", short = "0.5R" }
-        min_expectancy = "0.5R"
-        min_trades = 30
+        min_rows = 30
         learner = { kind = "baseline" }
     "#;
 
@@ -285,8 +284,8 @@ mod tests {
         ModelEmaConfig::load(include_str!("../../../config/model_ema.toml")).unwrap();
     }
 
-    /// Its side models are fitted on its window less its holdout and the
-    /// calibration before it, as long: 480 hours, 20 days, of which 14 at
+    /// Its side models are fitted on its window less its calibration
+    /// slice: 480 hours, 20 days, of which 14 at
     /// the fewest are weekdays, gold trading 23 hours of each, so 322
     /// hourly decisions. A split leaves `min_data_in_leaf` rows each side
     /// at least: its leaves split on those rows.
@@ -299,7 +298,7 @@ mod tests {
             panic!("not LightGBM: {:?}", model.learner);
         };
         let DecisionRule::Every(every) = model.decision;
-        let days = (model.window - model.holdout * 2).as_hours() / 24;
+        let days = (model.window - model.calibration).as_hours() / 24;
         let weekdays = days / 7 * 5 + (days % 7 - 2).max(0);
         let rows = weekdays * 23 * 60 / every.as_mins();
 

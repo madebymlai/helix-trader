@@ -5,17 +5,16 @@
 //! dataset: the features, the decision rule, the target and the
 //! venue settings of its dataset runs, see `dataset::fingerprint`) and training
 //! settings (the learner and its settings, the retrain interval,
-//! the window, the holdout and the minimums its holdout must meet to be
-//! published, `holdout::Minimums`) with the store `VERSION`, and side, the
-//! long or the short, keyed by the margins of both sides, which decide the
-//! side picked on each row of the holdout and so what either publishes, so a
-//! model is only ever listed beside models of the same features, costs,
-//! training, side and margins, and of the same manifest. Backtest and live
+//! the window, the calibration and the fewest rows of a slice) with the
+//! store `VERSION`, and side, the long or the short, keyed by the margins of
+//! both sides, which decide the side picked on each row and so the meta's
+//! rows, so a model is only ever listed beside models of the same features,
+//! costs, training, side and margins, and of the same manifest. Backtest and live
 //! read the same list.
 //!
 //! A meta model's store sits in a `meta/` directory beside its sides,
 //! under their training settings, keyed by its own (its learner and
-//! settings, window, holdout, margin and minimums) and the sides'
+//! settings, window, calibration, margin and fewest rows) and the sides'
 //! margins, which make its rows. A meta model is only ever listed beside
 //! meta models of the same sides.
 //!
@@ -52,7 +51,7 @@
 //! target spec and side, the learner, the calibration of its predictions (a
 //! side's its pair's, a meta's its own level line, `ModelCalibration`), its
 //! baseline (the training mean of the R it learned on the rows it was fitted
-//! and calibrated on), its holdout (`holdout::Holdout`) and probe rows with
+//! and calibrated on) and probe rows, of its calibration slice, with
 //! the predictions the model made on them when fitted, before any
 //! calibration, and the model as its adapter saved it. A side's model
 //! predicts R (`SideModel`), its pair calibrating both sides' predictions at
@@ -83,7 +82,6 @@ use super::{
     config::{Margins, MetaConfig, ModelConfig},
     deciding::SideRow,
     features::{Fingerprint, meta_names, side_names},
-    holdout::Holdout,
     learner::{LearnerConfig, Model, SavedModel},
     schedule::{Models, Retrain},
     targets::{PerSide, Side, TargetConfig},
@@ -107,7 +105,7 @@ const META: &str = "meta";
 /// too (`training_directory`): bumped by hand whenever that changes,
 /// which keys every store anew, so that no model of another manifest is
 /// read and every model is trained again, on the datasets as they are.
-const VERSION: u32 = 7;
+const VERSION: u32 = 8;
 
 /// The models of one strategy, fingerprint and training settings, as its
 /// model set builds them (`ModelSet`).
@@ -196,10 +194,8 @@ pub struct ModelManifest {
     /// beside: the training mean of the R it learned on the rows it was
     /// fitted and calibrated on.
     pub baseline: f64,
-    /// The model's holdout, as its publication read it.
-    pub holdout: Holdout,
-    /// Rows of the holdout and the model's predictions on them, before any
-    /// calibration.
+    /// Rows of its calibration slice and the model's predictions on them,
+    /// before any calibration.
     pub probes: Vec<Probe>,
 }
 
@@ -284,7 +280,11 @@ impl StoredModel {
     /// # Errors
     ///
     /// Returns an error if the model cannot be loaded or fails a check.
-    fn checked(&self, feature_names: &[String], fingerprint: &str) -> anyhow::Result<Model> {
+    pub(super) fn checked(
+        &self,
+        feature_names: &[String],
+        fingerprint: &str,
+    ) -> anyhow::Result<Model> {
         let manifest = &self.manifest;
         anyhow::ensure!(
             manifest.feature_names == feature_names,
@@ -672,8 +672,7 @@ impl CheckedStore {
 impl ModelStore {
     /// The store of the `side` models in `training`, the directory of
     /// their training settings: `long/` or `short/`, keyed by the `margins` of
-    /// the sides, which decide the side picked on each row of the holdout and
-    /// so what either side publishes.
+    /// the sides, which decide the side picked on each row.
     fn new(training: &Path, side: Side, margins: Margins) -> Self {
         Self {
             directory: training.join(side.name()).join(
@@ -808,8 +807,8 @@ fn dataset_directory(root: &Path, strategy_id: StrategyId, fingerprint: Fingerpr
 /// dataset has `fingerprint`, its side models trained as `config` says,
 /// of the store `version` (`VERSION`): its dataset's, then the side
 /// models' training settings, the learner and its settings, the retrain
-/// interval, the window, the holdout and the minimums of its
-/// holdout, the least expectancy in its R text, and the version.
+/// interval, the window, the calibration and the fewest rows of a slice,
+/// and the version.
 fn training_directory(
     root: &Path,
     strategy_id: StrategyId,
@@ -821,9 +820,8 @@ fn training_directory(
         .with(serde_json::to_string(&config.learner)?.as_bytes())
         .with(retrain_setting(config.retrain).as_bytes())
         .with(&config.window.as_nanos().to_le_bytes())
-        .with(&config.holdout.as_nanos().to_le_bytes())
-        .with(config.min_expectancy.to_string().as_bytes())
-        .with(&config.min_trades.to_le_bytes())
+        .with(&config.calibration.as_nanos().to_le_bytes())
+        .with(&config.min_rows.to_le_bytes())
         .with(format!("store version {version}").as_bytes());
     Ok(dataset_directory(root, strategy_id, fingerprint).join(settings.to_string()))
 }
@@ -853,17 +851,15 @@ fn margins_text(margins: Margins) -> String {
     )
 }
 
-/// The training settings of `meta`: its learner, window, holdout, and
-/// the margin deciding the trades its holdout is judged on, and the
-/// minimums of its holdout, both in R.
+/// The training settings of `meta`: its learner, window, calibration,
+/// margin in R and fewest rows of a slice.
 fn meta_settings(meta: &MetaConfig) -> anyhow::Result<Fingerprint> {
     Ok(Fingerprint::default()
         .with(serde_json::to_string(&meta.learner)?.as_bytes())
         .with(&meta.window.as_nanos().to_le_bytes())
-        .with(&meta.holdout.as_nanos().to_le_bytes())
+        .with(&meta.calibration.as_nanos().to_le_bytes())
         .with(meta.margin.to_string().as_bytes())
-        .with(meta.min_expectancy.to_string().as_bytes())
-        .with(&meta.min_trades.to_le_bytes()))
+        .with(&meta.min_rows.to_le_bytes()))
 }
 
 /// How a level's model is loaded from its file and checked against a
@@ -1020,7 +1016,6 @@ mod tests {
             calibration::Line,
             dataset::DatasetVenue,
             decide::DecisionRule,
-            deciding::testing::HOLDOUT,
             features::{FeatureSet, testing::last_mid},
             learner::{LearnerConfig, TrainingSet},
             targets::Target,
@@ -1053,13 +1048,12 @@ mod tests {
             .retrain(SignedDuration::from_hours(24))
             .dataset(venue())
             .window(SignedDuration::from_hours(48))
-            .holdout(SignedDuration::from_hours(12))
+            .calibration(SignedDuration::from_hours(12))
             .margins(Margins {
                 long: Some(R::new(0.5)),
                 short: Some(R::new(0.5)),
             })
-            .min_expectancy(R::new(1.0))
-            .min_trades(30)
+            .min_rows(30)
             .learner(LearnerConfig::Fake {})
             .build()
     }
@@ -1149,7 +1143,6 @@ mod tests {
                 learner: LearnerConfig::Fake {},
                 calibration: pair_calibration(valid_from),
                 baseline: 0.5,
-                holdout: HOLDOUT,
                 probes: rows
                     .iter()
                     .map(|row| Probe {
@@ -1284,27 +1277,25 @@ mod tests {
     }
 
     /// A model published under `config()` is listed there alone: another
-    /// learner, window, holdout or target is other training, and a model
-    /// held to a higher least expectancy, more trades or another margin,
-    /// as one priced at another reference stake, the config's risk of the
-    /// dataset balance, which a dataset's rows and a model's payoff
-    /// features are priced at, would fall short of them: the strategy
-    /// retrains rather than reuse it.
+    /// learner, window, calibration, minimum of rows or target is other
+    /// training, and a model of another margin, as one priced at another
+    /// reference stake, the config's risk of the dataset balance, which a
+    /// dataset's rows and a model's payoff features are priced at, would
+    /// decide otherwise: the strategy retrains rather than reuse it.
     #[rstest]
     #[case::another_learner(changed(|config| config.learner = LearnerConfig::Baseline {}))]
     #[case::another_window(changed(|config| config.window = SignedDuration::from_hours(72)))]
-    #[case::another_holdout(changed(|config| config.holdout = SignedDuration::from_hours(6)))]
+    #[case::another_calibration(changed(|config| config.calibration = SignedDuration::from_hours(6)))]
     #[case::another_target(changed(|config| {
         config.target.spec.limit = SignedDuration::from_mins(30);
     }))]
-    #[case::a_higher_least_expectancy(changed(|config| config.min_expectancy = R::new(2.0)))]
-    #[case::more_trades(changed(|config| config.min_trades = 50))]
+    #[case::more_rows(changed(|config| config.min_rows = 50))]
     #[case::another_margin(changed(|config| config.margins.long = Some(R::new(0.75))))]
     #[case::another_risk(changed(|config| config.target.risk = "1%".parse().unwrap()))]
     #[case::another_dataset_balance(changed(|config| {
         config.dataset.balance = Money::from("20000000 USD");
     }))]
-    fn other_training_settings_target_minimums_or_margin_list_none_of_the_models(
+    fn other_training_settings_target_or_margin_list_none_of_the_models(
         #[case] other: ModelConfig,
     ) {
         let dir = tempfile::tempdir().unwrap();
@@ -1342,10 +1333,9 @@ mod tests {
 
     /// The directory of a fixed strategy's long store under a models root,
     /// as a literal: its id, its dataset's fingerprint, its training
-    /// settings, its least expectancy in R, `1R`, among them, with the store
-    /// `VERSION`, its side, and the margins of both sides in R, `long 0.5R
-    /// short 0.5R`, so that no model published under a margin or a minimum
-    /// of another unit is listed. A change that rekeyed every store, leaving the models
+    /// settings with the store `VERSION`, its side, and the margins of both
+    /// sides in R, `long 0.5R short 0.5R`, so that no model published under
+    /// a margin of another unit is listed. A change that rekeyed every store, leaving the models
     /// published to it behind, fails here. A deliberate rekey, a bump of
     /// `VERSION` or of `dataset::VERSION`, or a new input to the dataset's
     /// fingerprint or to the training settings, updates the literal here; a
@@ -1360,7 +1350,7 @@ mod tests {
             Path::new(
                 "models/STORE-001/\
                  0614a0ef7ecea9c6cf17bdf7a38ab2ab47a955646cf2257595b30158aa9e35c9/\
-                 4fde0b9e20b35edde95fe4d35678d1548497a87b9da66b8387ad828b2da940f1/\
+                 1ee6eb642ec5348e5f7c459100de6084f300badf9b7ca42f191697b5da6e7623/\
                  long/7172a4d37d514662d105b99d75e9f7b1fc21aac68322ca53912d5254d40403c5"
             )
         );
@@ -1368,8 +1358,7 @@ mod tests {
 
     /// The directory of the fixed strategy's meta store (`meta_config`), as
     /// a literal: under its sides' training settings, the meta's own, its
-    /// margin and its least expectancy in R, `0.55R` and `1R`, among them,
-    /// and the sides' margins in R.
+    /// margin in R, `0.55R`, among them, and the sides' margins in R.
     #[rstest]
     fn a_fixed_strategys_meta_store_keeps_its_directory() {
         let store = meta_store(Path::new("models"), &config(), &meta_config());
@@ -1379,8 +1368,8 @@ mod tests {
             Path::new(
                 "models/STORE-001/\
                  0614a0ef7ecea9c6cf17bdf7a38ab2ab47a955646cf2257595b30158aa9e35c9/\
-                 4fde0b9e20b35edde95fe4d35678d1548497a87b9da66b8387ad828b2da940f1/\
-                 meta/d88b50a1d9ca9158b6a0506a4ed81d6e0e83914b2edcecf8a216f544d09b557f"
+                 1ee6eb642ec5348e5f7c459100de6084f300badf9b7ca42f191697b5da6e7623/\
+                 meta/9731a53745291e027c9caa13a18de1518d9d563e72815d1b4c4603ba5df72952"
             )
         );
     }
@@ -1426,34 +1415,34 @@ mod tests {
         models(root, &config).meta().unwrap().store().clone()
     }
 
-    /// A meta model published under one margin and minimums may fall
-    /// short of others, and the sides' margins make its rows: a meta of
-    /// another margin, minimums or sides' margins lists none of them.
+    /// A meta model published under one margin and minimum of rows is
+    /// other training than under others, and the sides' margins make its
+    /// rows: a meta of another margin, minimum of rows or sides' margins
+    /// lists none of them.
     #[rstest]
-    #[case::of_a_higher_least_expectancy(config(), 0.55, 2.0)]
-    #[case::of_another_margin(config(), 0.6, 1.0)]
-    #[case::of_other_sides_margins(changed(|config| config.margins.short = None), 0.55, 1.0)]
-    fn a_meta_model_of_another_margin_minimums_or_sides_margins_is_not_listed(
+    #[case::of_more_rows(config(), 0.55, 30)]
+    #[case::of_another_margin(config(), 0.6, 20)]
+    #[case::of_other_sides_margins(changed(|config| config.margins.short = None), 0.55, 20)]
+    fn a_meta_model_of_another_margin_minimum_of_rows_or_sides_margins_is_not_listed(
         #[case] config: ModelConfig,
         #[case] margin: f64,
-        #[case] min_expectancy: f64,
+        #[case] min_rows: usize,
     ) {
         let dir = tempfile::tempdir().unwrap();
-        let meta = |margin, min_expectancy| {
+        let meta = |margin, min_rows| {
             MetaConfig::builder()
                 .window(SignedDuration::from_hours(48))
-                .holdout(SignedDuration::from_hours(12))
+                .calibration(SignedDuration::from_hours(12))
                 .margin(R::new(margin))
-                .min_expectancy(R::new(min_expectancy))
-                .min_trades(20)
+                .min_rows(min_rows)
                 .learner(LearnerConfig::Fake {})
                 .build()
         };
-        meta_store(dir.path(), &self::config(), &meta(0.55, 1.0))
+        meta_store(dir.path(), &self::config(), &meta(0.55, 20))
             .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
             .unwrap();
 
-        let listed = meta_store(dir.path(), &config, &meta(margin, min_expectancy))
+        let listed = meta_store(dir.path(), &config, &meta(margin, min_rows))
             .valid_froms()
             .unwrap();
 
@@ -1465,10 +1454,9 @@ mod tests {
     fn meta_config() -> MetaConfig {
         MetaConfig::builder()
             .window(SignedDuration::from_hours(48))
-            .holdout(SignedDuration::from_hours(12))
+            .calibration(SignedDuration::from_hours(12))
             .margin(R::new(0.55))
-            .min_expectancy(R::new(1.0))
-            .min_trades(20)
+            .min_rows(20)
             .learner(LearnerConfig::Fake {})
             .build()
     }
@@ -1571,7 +1559,7 @@ mod tests {
             Path::new(
                 "models/STORE-001/\
                  0614a0ef7ecea9c6cf17bdf7a38ab2ab47a955646cf2257595b30158aa9e35c9/\
-                 4fde0b9e20b35edde95fe4d35678d1548497a87b9da66b8387ad828b2da940f1"
+                 1ee6eb642ec5348e5f7c459100de6084f300badf9b7ca42f191697b5da6e7623"
             )
         );
     }
@@ -1702,11 +1690,14 @@ mod tests {
             "calibration".to_string(),
             serde_json::json!({"platt": {"a": -0.9, "b": 0.0}}),
         );
-        manifest["holdout"]["score"] = serde_json::json!({"probability": {
-            "log_loss": 0.6,
-            "baseline_log_loss": 0.69,
-            "auc": 0.6
-        }});
+        manifest.insert(
+            "holdout".to_string(),
+            serde_json::json!({"score": {"probability": {
+                "log_loss": 0.6,
+                "baseline_log_loss": 0.69,
+                "auc": 0.6
+            }}}),
+        );
         current
     }
 

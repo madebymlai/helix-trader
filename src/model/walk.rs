@@ -35,7 +35,7 @@
 //! Beside each, on the very rows it decided, its own baseline, as its
 //! manifest has it (`store::ModelManifest::baseline`): the training mean of
 //! R on the rows that model was fitted and calibrated on, at its
-//! valid-from. A period whose train was refused so scores the earlier model
+//! valid-from. A period whose train failed so scores the earlier model
 //! in use beside that model's baseline, a period of models published off
 //! the schedule each row beside the baseline of the model that decided it,
 //! and a row decided with no pair, as before the sides' first, has no score.
@@ -47,12 +47,10 @@
 //! calibrated expected R against the R of the trade of the side picked, on
 //! the rows a side is picked on with a meta model. A side's trades taken are
 //! those picked for it on each row by the decision itself
-//! (`deciding::DecidingModels::pick`), the picks a train's gate reads (`train`),
-//! before any meta: a row where both sides clear counts one trade, for the side
+//! (`deciding::DecidingModels::pick`), before any meta: a row where both sides clear counts one trade, for the side
 //! expected the most, a tie none, so with no meta the sides' trades add up to
 //! the decisions returned. A meta's are the trades of the side picked its
-//! margin takes (`holdout::MetaMargin`), the figures its holdout is judged on,
-//! out of sample. All this judges the decision the handle returns, on the target's
+//! margin takes (`holdout::MetaMargin`), out of sample. All this judges the decision the handle returns, on the target's
 //! trade: no section adds the sides up, as the backtest's report gives what the
 //! strategy actually traded, which can differ whenever it filters its decisions.
 
@@ -439,7 +437,7 @@ mod tests {
             config::{Margins, MetaConfig, ModelConfig},
             dataset::DatasetVenue,
             decide::{DecisionRule, FeatureRow},
-            deciding::testing::{HOLDOUT, unchanged},
+            deciding::testing::unchanged,
             features::{FeatureSet, meta_names, side_names, testing::last_mid},
             holdout::Trades,
             learner::{LearnerConfig, TrainingSet},
@@ -482,13 +480,12 @@ mod tests {
             .retrain(SignedDuration::from_hours(24))
             .dataset(venue())
             .window(SignedDuration::from_hours(24))
-            .holdout(SignedDuration::from_hours(6))
+            .calibration(SignedDuration::from_hours(6))
             .margins(Margins {
                 long: Some(R::new(0.0)),
                 short: Some(R::new(0.0)),
             })
-            .min_expectancy(R::new(0.0))
-            .min_trades(1)
+            .min_rows(1)
             .learner(LearnerConfig::Fake {})
             .build()
     }
@@ -653,7 +650,6 @@ mod tests {
                 learner: LearnerConfig::Fake {},
                 calibration: unchanged(config, valid_from),
                 baseline,
-                holdout: HOLDOUT,
                 probes: vec![],
             },
             model: model.save().unwrap(),
@@ -1474,10 +1470,9 @@ Meta model scores, out of sample, over the span
         config.meta = Some(
             MetaConfig::builder()
                 .window(SignedDuration::from_hours(48))
-                .holdout(SignedDuration::from_hours(6))
+                .calibration(SignedDuration::from_hours(6))
                 .margin(R::new(0.3))
-                .min_expectancy(R::new(0.0))
-                .min_trades(1)
+                .min_rows(1)
                 .learner(LearnerConfig::Fake {})
                 .build(),
         );

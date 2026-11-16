@@ -1835,13 +1835,12 @@ mod model_handle {
                 latency: None,
             })
             .window(SignedDuration::from_hours(48))
-            .holdout(SignedDuration::from_hours(12))
+            .calibration(SignedDuration::from_hours(12))
             .margins(Margins {
                 long: Some(R::new(0.0)),
                 short: None,
             })
-            .min_expectancy(R::new(0.0))
-            .min_trades(1)
+            .min_rows(1)
             .learner(LearnerConfig::Baseline {})
             .build()
     }

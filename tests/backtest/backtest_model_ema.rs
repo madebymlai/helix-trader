@@ -3,20 +3,20 @@
 //! at a time, replaying the strategy's dataset run, and a backtest of the
 //! strategy then trades on the store. Its features are averages of 1-minute
 //! bars, warm from the bars replayed; the fake learner predicts the first,
-//! taking every trade, with no skill on the walk: `train` refuses it,
-//! failing with the reason
-//! and the holdout's figures, as does a live node's launcher
-//! (`model::launcher`) starting that `train` as its child. A model
-//! published straight to the store, a baseline (`common::dataset`), trades
-//! from its valid-from: every decision a long on its time-only target,
-//! closed 30 minutes later. The binary's `backtest` builds its dataset and retrains
-//! on the schedule first, in its own process, a retrain keeping the model
-//! no failure.
+//! taking every trade, with no edge on the walk, which no gate judges:
+//! `train` publishes it, and fails, publishing nothing, only on a slice of
+//! fewer rows than `min_rows`, naming the slice, its count and the minimum,
+//! as does a live node's launcher (`model::launcher`) starting that `train`
+//! as its child. A model published straight to the store, a baseline
+//! (`common::dataset`), trades from its valid-from: every decision a long on
+//! its time-only target, closed 30 minutes later. The binary's `backtest`
+//! builds its dataset and retrains on the schedule first, in its own
+//! process, a failed retrain no failure of the backtest.
 
 use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output},
 };
 
 use helix_trader::{
@@ -44,10 +44,9 @@ use crate::common::{
 /// Hourly decisions on IC's gold's 1-minute bars, its averages of 10 and
 /// 30 of them, warmed up an hour, learning the net P&L of the long of a
 /// 30-minute time-only target, its unit the worth of the ATR of one hourly
-/// bar, warm over the hour, its trades, on
-/// a window of 46 hours, the last 12 held out and the 12 before them
-/// calibrated on; trading the long alone, at every decision, its margin
-/// below any expected P&L.
+/// bar, warm over the hour, its trades, on a window of 46 hours, the last
+/// 12 calibrated on, each slice of at least one row; trading the long
+/// alone, at every decision, its margin below any expected P&L.
 const CONFIG: &str = r#"
     [data]
     series = [
@@ -70,12 +69,38 @@ const CONFIG: &str = r#"
     target = { limit = "30m", atr = { period = 1 } }
     retrain = "24h"
     window = "46h"
-    holdout = "12h"
+    calibration = "12h"
     margins = { long = "-1e9R" }
-    min_expectancy = "0R"
-    min_trades = 1
+    min_rows = 1
     learner = { kind = "fake" }
     dataset = { commission = { rate = "0.00003" }, balance = "10000000 USD" }
+"#;
+
+/// `CONFIG`'s `[model]` line `line` replaced by `with`.
+fn replaced(line: &str, with: &str) -> String {
+    assert!(CONFIG.contains(line), "{line}");
+    CONFIG.replace(line, with)
+}
+
+/// `CONFIG` of a `[model] min_rows` of `min_rows`.
+fn of_min_rows(min_rows: usize) -> String {
+    replaced("min_rows = 1", &format!("min_rows = {min_rows}"))
+}
+
+/// `CONFIG` with a `[model.meta]` section of `lines`.
+fn with_meta_section(lines: &str) -> String {
+    format!("{CONFIG}\n    [model.meta]\n{lines}")
+}
+
+/// A meta section's lines on the fake learner, on a window of 24 hours, the
+/// last 6 calibrated on, each slice of at least one row, taking every
+/// trade.
+const META: &str = r#"
+    window = "24h"
+    calibration = "6h"
+    margin = "-1e9R"
+    min_rows = 1
+    learner = { kind = "fake" }
 "#;
 
 /// Midnight of the 23rd: the window starts at 02:00 of the 21st, its
@@ -85,10 +110,9 @@ fn t() -> Timestamp {
     ic::at("00:00:00") + SignedDuration::from_hours(48)
 }
 
-/// The binary's `train` of the strategy of `config` at `at`, which fails;
-/// its stderr.
-fn train_refused(config: &Path, catalog: &Path, models: &Path, at: Timestamp) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_helix-trader"))
+/// The binary's `train` of the strategy of `config` at `at`.
+fn train(config: &Path, catalog: &Path, models: &Path, at: Timestamp) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_helix-trader"))
         .arg("train")
         .arg("model_ema")
         .arg("--config")
@@ -99,7 +123,24 @@ fn train_refused(config: &Path, catalog: &Path, models: &Path, at: Timestamp) ->
         .arg(models)
         .args(["--at", &at.to_string()])
         .output()
-        .unwrap();
+        .unwrap()
+}
+
+/// The stdout of `train`, which succeeds.
+fn trained(config: &Path, catalog: &Path, models: &Path, at: Timestamp) -> String {
+    let output = train(config, catalog, models, at);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    stdout
+}
+
+/// The stderr of `train`, which fails.
+fn train_failed(config: &Path, catalog: &Path, models: &Path, at: Timestamp) -> String {
+    let output = train(config, catalog, models, at);
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
         !output.status.success(),
@@ -109,34 +150,42 @@ fn train_refused(config: &Path, catalog: &Path, models: &Path, at: Timestamp) ->
     stderr
 }
 
-/// Asserts that `text` reports the fake long model kept on its holdout's
-/// figures, as `Kept::Refused` prints them: refused for its skill, the
-/// holdout's, not above nought; the holdout's 12 hours (`CONFIG`) 12 rows,
-/// each decision of which the fake takes, its margin below any expected
-/// P&L, so that the trades taken are every trade, 12 of them, alike at the
-/// commission and at 1.5 times it.
-fn assert_kept_with_its_figures(text: &str) {
-    let between = |after: &str, before: &str| -> &str {
-        let (_, rest) = text
-            .split_once(after)
-            .unwrap_or_else(|| panic!("no {after:?}: {text}"));
-        rest.split_once(before)
-            .unwrap_or_else(|| panic!("no {before:?} after {after:?}: {text}"))
-            .0
-    };
-    let skill = between(
-        "kept the current model: holdout skill ",
-        " not above nought",
-    );
-    assert!(skill.parse::<f64>().unwrap() <= 0.0, "{text}");
-    assert_eq!(between("; skill ", ", mean R - E' "), skill, "{text}");
-    let taken = between("(holdout taken ", "; every trade ");
-    assert!(taken.starts_with("12 trades, "), "{text}");
-    assert_eq!(between("; every trade ", "; at 1.5x"), taken, "{text}");
-    let stressed = between("at 1.5x the commission, taken ", "; skill ");
-    let (taken, every) = stressed.split_once(", every trade ").expect(text);
-    assert_eq!(taken, every, "{text}");
-    assert_eq!(between(" over ", " rows)"), "12", "{text}");
+/// The times the long models of `config` under `models` are valid from.
+fn long_valid_froms(config: &str, models: &Path) -> Vec<Timestamp> {
+    ModelEma::blueprint(&ModelEmaConfig::load(config).unwrap())
+        .unwrap()
+        .model_set(models)
+        .unwrap()
+        .side(Side::Long)
+        .unwrap()
+        .store()
+        .valid_froms()
+        .unwrap()
+}
+
+/// The times the meta models of `config` under `models` are valid from.
+fn meta_valid_froms(config: &str, models: &Path) -> Vec<Timestamp> {
+    ModelEma::blueprint(&ModelEmaConfig::load(config).unwrap())
+        .unwrap()
+        .model_set(models)
+        .unwrap()
+        .meta()
+        .unwrap()
+        .store()
+        .valid_froms()
+        .unwrap()
+}
+
+/// Asserts that `text` names a slice `slice` of `rows` rows, fewer than
+/// `min_rows`.
+fn assert_too_few_rows(text: &str, slice: &str, rows: usize, min_rows: usize) {
+    for fact in [
+        slice.to_string(),
+        format!("{rows} rows"),
+        format!("min_rows {min_rows}"),
+    ] {
+        assert!(text.contains(&fact), "{fact}: {text}");
+    }
 }
 
 /// Publishes straight to the store under `models` a long model valid from
@@ -171,27 +220,108 @@ fn publish(catalog: &TempDir, models: &Path, at: Timestamp) {
         .unwrap();
 }
 
-/// `train` at t refuses the fake, and its store stays empty: no trade.
-/// With a model published straight, valid from t, the decisions at 22:00
+/// The catalog of the train at `t` and around it: from 21:00 of the 20th to
+/// 04:00 of the 23rd.
+fn catalog() -> TempDir {
+    walk(
+        ic::at("00:00:00") - SignedDuration::from_hours(3),
+        t() + SignedDuration::from_hours(4),
+    )
+}
+
+/// `train` at t publishes the fake, which has no edge, no gate judging
+/// it: its store holds a model valid from t, and the decisions at 22:00
 /// and 23:00 have no model; those of 00:00, 01:00 and 02:00 each a long
 /// and its close.
 #[rstest]
-fn the_train_subcommand_refuses_a_model_without_an_edge_and_one_published_trades_from_its_valid_from()
- {
-    let catalog = walk(
-        ic::at("00:00:00") - SignedDuration::from_hours(3),
-        t() + SignedDuration::from_hours(4),
-    );
+fn the_train_subcommand_publishes_a_model_without_an_edge_which_trades_from_its_valid_from() {
+    let catalog = catalog();
     let dir = tempfile::tempdir().unwrap();
     let (config_path, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
     std::fs::write(&config_path, CONFIG).unwrap();
 
-    let stderr = train_refused(&config_path, catalog.path(), &models, t());
+    let stdout = trained(&config_path, catalog.path(), &models, t());
 
-    assert_kept_with_its_figures(&stderr);
-    assert_eq!(traded(&catalog, models.clone()), (0, 0));
-    publish(&catalog, &models, t());
+    assert!(
+        stdout.contains(&format!("published a model valid from {}", t())),
+        "{stdout}"
+    );
+    assert_eq!(long_valid_froms(CONFIG, &models), [t()]);
     assert_eq!(traded(&catalog, models), (6, 3));
+}
+
+/// Worked by hand: decisions every hour, each closed 30 minutes later, so
+/// settled before the next. At t, of the window from 02:00 of the 21st,
+/// the fit slice is the decisions before noon of the 22nd, the calibration
+/// slice's start, settled by then: 22 of the 21st from 02:00 and 12 of the
+/// 22nd, 34; the calibration slice those from noon to t, settled by t, 12.
+/// At 00:15 of the 23rd, of the window from 02:15 of the 21st, the fit
+/// slice is those from 03:00 of the 21st to 11:00 of the 22nd, 21 and 12,
+/// 33, the decision of 12:00 settling after the calibration's start, 12:15;
+/// the calibration slice those of 13:00 to 23:00, 11, the decision of 00:00
+/// settling after the train. A `min_rows` above a slice's count fails the
+/// train, which names the slice, its count and the minimum, the fit slice
+/// checked first, and publishes nothing.
+#[rstest]
+#[case::fit_at_t(SignedDuration::ZERO, 35, "fit slice", 34)]
+#[case::calibration_at_t(SignedDuration::ZERO, 13, "calibration slice", 12)]
+#[case::fit_off_the_hour(SignedDuration::from_mins(15), 34, "fit slice", 33)]
+#[case::calibration_off_the_hour(SignedDuration::from_mins(15), 12, "calibration slice", 11)]
+fn a_train_with_a_slice_of_fewer_rows_than_the_minimum_fails_naming_it_and_publishes_nothing(
+    #[case] after: SignedDuration,
+    #[case] min_rows: usize,
+    #[case] slice: &str,
+    #[case] rows: usize,
+) {
+    let catalog = catalog();
+    let dir = tempfile::tempdir().unwrap();
+    let (config_path, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
+    let config = of_min_rows(min_rows);
+    std::fs::write(&config_path, &config).unwrap();
+
+    let stderr = train_failed(&config_path, catalog.path(), &models, t() + after);
+
+    assert_too_few_rows(&stderr, slice, rows, min_rows);
+    assert_eq!(long_valid_froms(&config, &models), []);
+}
+
+/// Worked by hand: a train at midnight of the 22nd publishes the long,
+/// valid from then, its meta waiting with no long before it. The train at
+/// t then gives the meta the long's decisions of the 22nd, each a long of
+/// the model of the 22nd, 24 rows: its fit slice those of 00:00 to 17:00,
+/// settled by 18:00, the calibration slice's start, 18; its calibration
+/// slice those of 18:00 to 23:00, 6. A meta `min_rows` above a slice's
+/// count fails it, naming the meta, the slice, its count and the minimum,
+/// and publishes no meta model.
+#[rstest]
+#[case::fit(19, "fit slice", 18)]
+#[case::calibration(7, "calibration slice", 6)]
+fn a_meta_with_a_slice_of_fewer_rows_than_its_minimum_fails_naming_it_and_publishes_none(
+    #[case] min_rows: usize,
+    #[case] slice: &str,
+    #[case] rows: usize,
+) {
+    let catalog = walk(
+        ic::at("00:00:00") - SignedDuration::from_hours(27),
+        t() + SignedDuration::from_hours(4),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let (config_path, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
+    let config =
+        with_meta_section(&META.replace("min_rows = 1", &format!("min_rows = {min_rows}")));
+    std::fs::write(&config_path, &config).unwrap();
+    let day_before = t() - SignedDuration::from_hours(24);
+    train(&config_path, catalog.path(), &models, day_before);
+    assert_eq!(long_valid_froms(&config, &models), [day_before]);
+
+    let stderr = train_failed(&config_path, catalog.path(), &models, t());
+
+    let meta = stderr
+        .split_once("the meta model: ")
+        .unwrap_or_else(|| panic!("{stderr}"))
+        .1;
+    assert_too_few_rows(meta, slice, rows, min_rows);
+    assert_eq!(meta_valid_froms(&config, &models), []);
 }
 
 /// A backtest from midnight of the 23rd, the model's valid-from, warms its
@@ -200,15 +330,11 @@ fn the_train_subcommand_refuses_a_model_without_an_edge_and_one_published_trades
 /// 00:30. The decisions of 01:00 and 02:00 each a long and its close.
 #[rstest]
 fn a_backtest_from_the_valid_from_first_decides_once_its_features_are_initialized() {
-    let catalog = walk(
-        ic::at("00:00:00") - SignedDuration::from_hours(3),
-        t() + SignedDuration::from_hours(4),
-    );
+    let catalog = catalog();
     let dir = tempfile::tempdir().unwrap();
     let (config_path, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
     std::fs::write(&config_path, CONFIG).unwrap();
-    train_refused(&config_path, catalog.path(), &models, t());
-    publish(&catalog, &models, t());
+    trained(&config_path, catalog.path(), &models, t());
 
     assert_eq!(traded_from(&catalog, models, t()), (4, 2));
 }
@@ -238,15 +364,17 @@ fn traded_from(catalog: &TempDir, models: PathBuf, start: Timestamp) -> (usize, 
     (outcome.result.total_orders, outcome.result.total_positions)
 }
 
+/// A live node's retrain, the binary's `train` started by its launcher,
+/// fails as `train` does, the fit slice at t of 34 rows short of a
+/// `min_rows` of 35 (`a_train_with_a_slice_of_fewer_rows_than_the_minimum_fails_naming_it_and_publishes_nothing`):
+/// the launcher keeps the current model, its reason naming the slice, its
+/// count and the minimum, and nothing trades.
 #[rstest]
-fn a_live_retrain_through_the_train_subcommand_keeping_the_model_is_kept_with_its_figures() {
-    let catalog = walk(
-        ic::at("00:00:00") - SignedDuration::from_hours(3),
-        t() + SignedDuration::from_hours(4),
-    );
+fn a_live_retrain_through_the_train_subcommand_failing_is_kept_with_its_reason() {
+    let catalog = catalog();
     let dir = tempfile::tempdir().unwrap();
     let (config_path, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
-    std::fs::write(&config_path, CONFIG).unwrap();
+    std::fs::write(&config_path, of_min_rows(35)).unwrap();
     // As a live node starts it (`LiveArgs::train_args`).
     let args = [
         "train".as_ref(),
@@ -266,7 +394,7 @@ fn a_live_retrain_through_the_train_subcommand_keeping_the_model_is_kept_with_it
     let Retrained::Kept(why) = retrained else {
         panic!("{retrained:?}");
     };
-    assert_kept_with_its_figures(&why);
+    assert_too_few_rows(&why, "fit slice", 34, 35);
     assert_eq!(traded(&catalog, models), (0, 0));
 }
 
@@ -316,10 +444,12 @@ fn backtest_at(
 /// A backtest from midnight of the 23rd to noon of the 24th builds its
 /// dataset, in its own process, from the first window, 02:00 of the 21st,
 /// to the end of the 24th plus the target's limit, then retrains at
-/// midnight of each, there too, a node after another: without an edge, each
-/// keeps the current model, there being none, and the backtest goes on,
-/// each reason printed with its figures, to a run with no model: no
-/// period is scored, by a model or by a baseline, which is a model's.
+/// midnight of each, there too, a node after another: each fit slice of
+/// 34 rows (`a_train_with_a_slice_of_fewer_rows_than_the_minimum_fails_naming_it_and_publishes_nothing`)
+/// short of a `min_rows` of 35, each keeps the current model, there being
+/// none, and the backtest goes on, each reason printed, to a run with no
+/// model: no period is scored, by a model or by a baseline, which is a
+/// model's.
 #[rstest]
 fn a_retrain_keeping_the_model_does_not_fail_the_binarys_backtest() {
     let catalog = walk(
@@ -328,7 +458,7 @@ fn a_retrain_keeping_the_model_does_not_fail_the_binarys_backtest() {
     );
     let dir = tempfile::tempdir().unwrap();
     let (config_path, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
-    std::fs::write(&config_path, CONFIG).unwrap();
+    std::fs::write(&config_path, of_min_rows(35)).unwrap();
     let (start, end) = (t(), t() + SignedDuration::from_hours(36));
 
     let (stdout, stderr) = backtest(&config_path, catalog.path(), &models, start, end);
@@ -340,7 +470,7 @@ fn a_retrain_keeping_the_model_does_not_fail_the_binarys_backtest() {
             .lines()
             .find(|line| line.contains(&reason))
             .unwrap_or_else(|| panic!("{stderr}"));
-        assert_kept_with_its_figures(line);
+        assert_too_few_rows(line, "fit slice", 34, 35);
     }
     assert!(stdout.contains("Orders: 0"), "{stdout}");
     assert!(stdout.contains("Model valid from: none"), "{stdout}");
@@ -449,6 +579,71 @@ fn refused(
     (stdout, stderr)
 }
 
+/// The holdout and its minimums are gone, for the sides and the meta: a
+/// config still declaring one is refused at load, naming the key, as is one
+/// without `min_rows`, or of fewer than one row, or whose calibration and
+/// the target's limit of 30 minutes leave no fit slice in the window, 46
+/// hours for the sides and 24 for the meta. `train` refuses it before any
+/// replay: no store is made.
+#[rstest]
+#[case::a_holdout(
+    replaced("min_rows = 1", "min_rows = 1\n    holdout = \"12h\""),
+    "unknown field `holdout`"
+)]
+#[case::a_minimum_of_trades(
+    replaced("min_rows = 1", "min_rows = 1\n    min_trades = 30"),
+    "unknown field `min_trades`"
+)]
+#[case::a_minimum_expectancy(
+    replaced("min_rows = 1", "min_rows = 1\n    min_expectancy = \"0.1R\""),
+    "unknown field `min_expectancy`"
+)]
+#[case::no_minimum_of_rows(replaced("min_rows = 1\n", ""), "missing field `min_rows`")]
+#[case::a_minimum_of_no_row(of_min_rows(0), "model.min_rows")]
+#[case::a_calibration_leaving_no_fit_slice(
+    replaced("calibration = \"12h\"", "calibration = \"45h30m\""),
+    "model.calibration"
+)]
+#[case::a_meta_holdout(with_meta_section(&format!("{META}    holdout = \"6h\"\n")), "unknown field `holdout`")]
+#[case::a_meta_minimum_of_trades(
+    with_meta_section(&format!("{META}    min_trades = 30\n")),
+    "unknown field `min_trades`"
+)]
+#[case::a_meta_minimum_expectancy(
+    with_meta_section(&format!("{META}    min_expectancy = \"0R\"\n")),
+    "unknown field `min_expectancy`"
+)]
+#[case::no_meta_minimum_of_rows(with_meta_section(&META.replace("    min_rows = 1\n", "")), "missing field `min_rows`")]
+#[case::a_meta_minimum_of_no_row(
+    with_meta_section(&META.replace("min_rows = 1", "min_rows = 0")),
+    "model.meta.min_rows"
+)]
+#[case::a_meta_calibration_leaving_no_fit_slice(
+    with_meta_section(&META.replace("calibration = \"6h\"", "calibration = \"23h30m\"")),
+    "model.meta.calibration"
+)]
+fn a_config_of_the_old_acceptance_or_without_room_to_fit_is_refused_at_load_naming_the_key(
+    #[case] config: String,
+    #[case] key: &str,
+) {
+    let catalog = walk(ic::at("00:00:00"), ic::at("06:00:00"));
+    let dir = tempfile::tempdir().unwrap();
+    let (config_path, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
+    std::fs::write(&config_path, config).unwrap();
+
+    let (stdout, stderr) = refused(
+        "train",
+        &config_path,
+        catalog.path(),
+        &models,
+        &usd_args("train", dir.path()),
+    );
+
+    assert!(stderr.contains(key), "{key}: {stderr}");
+    assert!(!stdout.contains("BacktestEngine"), "{stdout}");
+    assert!(!models.exists());
+}
+
 /// The fixture's config, its dataset balance (`[model] dataset`) in EUR,
 /// where IC's gold's P&L is in USD.
 fn eur_config() -> String {
@@ -552,8 +747,7 @@ fn a_dataset_balance_its_conversions_do_not_reach_the_pnl_from_is_refused_before
 /// A dataset balance in EUR, which EURUSD, the pair the config converts
 /// through, reaches USD, IC's gold's P&L currency, from: `train` accepts
 /// it, builds the dataset at the balance converted at each row's rate and
-/// refuses the fake learner on its holdout's figures, as it does a dataset
-/// balance in USD.
+/// publishes the fake learner, as it does of a dataset balance in USD.
 #[rstest]
 fn the_train_subcommand_accepts_a_dataset_balance_its_conversions_reach_the_pnl_from() {
     let catalog = walk_with_eurusd(
@@ -564,10 +758,12 @@ fn the_train_subcommand_accepts_a_dataset_balance_its_conversions_reach_the_pnl_
     let (config, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
     std::fs::write(&config, converting_config("10000000 EUR")).unwrap();
 
-    let stderr = train_refused(&config, catalog.path(), &models, t());
+    let stdout = trained(&config, catalog.path(), &models, t());
 
-    assert!(!stderr.contains("dataset balance"), "{stderr}");
-    assert_kept_with_its_figures(&stderr);
+    assert!(
+        stdout.contains(&format!("published a model valid from {}", t())),
+        "{stdout}"
+    );
 }
 
 /// The arguments of `subcommand` of `refused` beyond its config, catalog

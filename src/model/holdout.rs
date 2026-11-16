@@ -1,36 +1,22 @@
-//! A retrained model's holdout as its publication reads it: what the decision
-//! would have earned there, and how well the model predicted it.
+//! What a model's decisions took and earned on rows, as a backtest's
+//! out-of-sample scores read it (`walk`), and the examples a model is fitted
+//! on (`Example`).
 //!
 //! The decision takes some of the trades of its rows: the sides', the side
-//! picked on each row (`deciding::DecidingModels`), which a train's gate and
-//! the walk-forward's scores both read (`train`, `walk`); a meta model's
+//! picked on each row (`deciding::DecidingModels`); a meta model's
 //! (`MetaMargin`), the trades of the side picked its margin takes.
 //! What the trades earned (`Earnings`) is Nautilus' `Expectancy` and `WinRate`
 //! of their net P&Ls in R (`calculate_from_realized_pnls`), each trade's net
 //! P&L over its unit, the money one R of it is, as its model learns it
-//! (`Example::realized`), so that the same figures judge a model whatever
+//! (`Example::realized`), so that the same figures describe a model whatever
 //! its trades' size or instrument; beside the same of every trade of the
 //! rows, which taking them all would earn; and both again at 1.5 times the
-//! commission (`STRESS`), reported only. Nautilus' `Expectancy` is the
-//! mean win times the win rate plus the mean loss times the loss rate,
-//! the rates among the trades that gained or lost: a trade at nought,
-//! counted among the trades, weighs in neither.
-//!
-//! How well the model predicted the holdout is its calibrated expected R,
-//! `E'`, a side's or a meta's, against its trades' realized R
-//! (`score::ExpectedScore`): its skill, one less its squared error over that
-//! of the training mean of R, the mean of `R - E'`, the slope of `R` on `E'`
-//! and the gap of the tenth of the rows expected the most. Nautilus scores
-//! trades, not predictions.
-//!
-//! A model is published (`Holdout::refusal` none) when, on its holdout, its
-//! skill is above nought (`Holdout::score_refusal`), and the trades taken, at
-//! least the minimum count (`Minimums`), earned per trade at least the
-//! least expectancy, in R, and more than every trade of the rows did. A side's model
-//! is published only with the other sides of its pair, each of a skill above
-//! nought, on the earnings of the pair's picks (`train`); a meta's alone, on
-//! the trades its margin takes. The slope and the gap are reported, never
-//! required.
+//! commission (`STRESS`). Nautilus' `Expectancy` is the mean win times the
+//! win rate plus the mean loss times the loss rate, the rates among the
+//! trades that gained or lost: a trade at nought, counted among the trades,
+//! weighs in neither. Nautilus scores trades, not predictions: how well a
+//! model predicted the rows is `score::ExpectedScore`. No figure here
+//! decides whether a model is published (`train`).
 
 use std::fmt::Display;
 
@@ -41,7 +27,7 @@ use nautilus_analysis::{
 use nautilus_core::UnixNanos;
 use serde::{Deserialize, Serialize};
 
-use super::{dataset::DatasetRow, score::ExpectedScore, targets::Side};
+use super::{dataset::DatasetRow, targets::Side};
 use crate::strategy::risk::R;
 
 /// The multiple of the commission the stressed earnings are at.
@@ -95,44 +81,10 @@ pub struct Earnings {
     pub every_stressed: Trades,
 }
 
-/// A model's holdout as its publication reads it.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct Holdout {
-    /// What was judged: a meta's own, or the picks between the sides of a
-    /// pair, the same for each side.
-    pub earnings: Earnings,
-    /// How well the model predicted the holdout's rows: its calibrated
-    /// expected R against its trades' realized R, beside its baseline, the
-    /// training mean of R.
-    pub score: ExpectedScore,
-}
-
-/// The least a model's holdout is published with: the expectancy of the
-/// trades taken, their average net R, over at least a count of trades.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Minimums {
-    pub min_expectancy: R,
-    pub min_trades: usize,
-}
-
-/// Why a model was not published.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Refusal {
-    /// The model's skill is not above nought, or it has none.
-    Skill { skill: Option<f64> },
-    /// Fewer trades were taken than the minimum.
-    Trades { trades: usize, min_trades: usize },
-    /// The expectancy of the trades taken, in R, is below the minimum.
-    MinExpectancy { expectancy: f64, min_expectancy: R },
-    /// The expectancy of the trades taken, in R, is not above every
-    /// trade's.
-    Every { expectancy: f64, every: f64 },
-}
-
 /// A meta model's decision rule: the trade of the side picked taken when the
 /// net R the meta expects of it, its calibrated expected R, is at least the
 /// margin, in R (`takes`, `MetaConfig::margin`), in a decision as in a
-/// holdout.
+/// backtest's scores.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MetaMargin(pub R);
 
@@ -187,43 +139,6 @@ impl Earnings {
     }
 }
 
-impl Holdout {
-    /// Why a model of this holdout is not published under `minimums`, the
-    /// first reason of its score, its count of trades, the least
-    /// expectancy and every trade's; none if it is.
-    #[must_use]
-    pub fn refusal(&self, minimums: Minimums) -> Option<Refusal> {
-        if let Some(refusal) = self.score_refusal() {
-            return Some(refusal);
-        }
-        let Earnings { taken, every, .. } = self.earnings;
-        if taken.count < minimums.min_trades {
-            return Some(Refusal::Trades {
-                trades: taken.count,
-                min_trades: minimums.min_trades,
-            });
-        }
-        let expectancy = taken.expectancy.unwrap_or(f64::NAN);
-        if !minimums.min_expectancy.reached_by(expectancy) {
-            return Some(Refusal::MinExpectancy {
-                expectancy,
-                min_expectancy: minimums.min_expectancy,
-            });
-        }
-        // Every trade includes those taken: it has an expectancy too.
-        let every = every.expectancy.unwrap_or(f64::NAN);
-        (expectancy <= every).then_some(Refusal::Every { expectancy, every })
-    }
-
-    /// Why a model of this holdout is not published whatever it earned: its
-    /// skill not above nought, or none.
-    #[must_use]
-    pub fn score_refusal(&self) -> Option<Refusal> {
-        let skill = self.score.skill;
-        (!skill.is_some_and(|skill| skill > 0.0)).then_some(Refusal::Skill { skill })
-    }
-}
-
 impl Example {
     /// The example of `row` on `side`'s trade: the side's row
     /// (`DatasetRow::side`), the trade and its payoff's unit.
@@ -261,58 +176,6 @@ impl Display for Trades {
             in_r(self.expectancy),
             value(self.win_rate)
         )
-    }
-}
-
-impl Display for Holdout {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Earnings {
-            taken,
-            every,
-            taken_stressed,
-            every_stressed,
-        } = self.earnings;
-        let score = &self.score;
-        write!(
-            f,
-            "taken {taken}; every trade {every}; at {STRESS}x the commission, taken {}, \
-             every trade {}; skill {}, mean R - E' {}, calibration slope {}, top-decile gap {} \
-             over {} rows",
-            in_r(taken_stressed.expectancy),
-            in_r(every_stressed.expectancy),
-            value(score.skill),
-            value(score.mean_error),
-            value(score.slope),
-            value(score.top_decile_gap),
-            score.rows
-        )
-    }
-}
-
-impl Display for Refusal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Skill { skill } => {
-                write!(f, "holdout skill {} not above nought", value(*skill))
-            }
-            Self::Trades { trades, min_trades } => write!(
-                f,
-                "{trades} holdout trades taken, fewer than the minimum {min_trades}"
-            ),
-            Self::MinExpectancy {
-                expectancy,
-                min_expectancy,
-            } => write!(
-                f,
-                "holdout expectancy of the trades taken {expectancy:.6}R below the minimum \
-                 {min_expectancy}"
-            ),
-            Self::Every { expectancy, every } => write!(
-                f,
-                "holdout expectancy of the trades taken {expectancy:.6}R not above every \
-                 trade's {every:.6}R"
-            ),
-        }
     }
 }
 
@@ -392,9 +255,8 @@ mod tests {
     /// rates among the trades that gained or lost, a trade at nought in
     /// neither, `avg_winner * win_rate + avg_loser * loss_rate`
     /// (`crates/analysis/src/statistics/expectancy.rs:75-95`):
-    /// `Trades::of` takes its expectancy, which a model's publication holds
-    /// against the least expectancy (`Holdout::refusal`), and the module
-    /// states that rule.
+    /// `Trades::of` takes its expectancy, which a backtest's scores report
+    /// (`walk::WalkForward::scores`), and the module states that rule.
     ///
     /// A trade at nought is neither a win nor a loss in Nautilus'
     /// expectancy, a win of 2 and a loss of 1 making 0.5, not a third.
@@ -423,197 +285,6 @@ mod tests {
                 expectancy: None,
                 win_rate: None
             }
-        );
-    }
-
-    /// A holdout whose decision took 3 trades of 1.2R each, every trade's
-    /// 0.4R, its skill 0.1.
-    fn holdout() -> Holdout {
-        let trades = |count, expectancy| Trades {
-            count,
-            expectancy: Some(expectancy),
-            win_rate: Some(0.5),
-        };
-        Holdout {
-            earnings: Earnings {
-                taken: trades(3, 1.2),
-                every: trades(8, 0.4),
-                ..Earnings::default()
-            },
-            score: of_skill(Some(0.1)),
-        }
-    }
-
-    /// A score of `skill`.
-    fn of_skill(skill: Option<f64>) -> ExpectedScore {
-        ExpectedScore {
-            rows: 8,
-            skill,
-            ..ExpectedScore::default()
-        }
-    }
-
-    const MINIMUMS: Minimums = Minimums {
-        min_expectancy: R::new(1.0),
-        min_trades: 3,
-    };
-
-    #[rstest]
-    fn a_holdout_beating_the_baseline_over_enough_trades_earning_the_minimum_and_more_than_every_trade_is_published()
-     {
-        assert_eq!(holdout().refusal(MINIMUMS), None);
-        let at_the_minimum = Minimums {
-            min_expectancy: R::new(1.2),
-            ..MINIMUMS
-        };
-        assert_eq!(holdout().refusal(at_the_minimum), None);
-    }
-
-    /// A model whose expected R errs no less than the training mean, or has
-    /// no skill to read, is refused whatever its trades earned.
-    #[rstest]
-    #[case::of_nought(Some(0.0))]
-    #[case::below_nought(Some(-0.2))]
-    #[case::none(None)]
-    fn a_skill_not_above_nought_is_refused(#[case] skill: Option<f64>) {
-        let worse = Holdout {
-            score: of_skill(skill),
-            ..holdout()
-        };
-
-        assert_eq!(worse.refusal(MINIMUMS), Some(Refusal::Skill { skill }));
-    }
-
-    #[rstest]
-    fn fewer_trades_than_the_minimum_are_refused() {
-        let minimums = Minimums {
-            min_trades: 4,
-            ..MINIMUMS
-        };
-
-        assert_eq!(
-            holdout().refusal(minimums),
-            Some(Refusal::Trades {
-                trades: 3,
-                min_trades: 4
-            })
-        );
-    }
-
-    /// A holdout of skill 0.1 whose trades are `rows`.
-    fn earning(rows: &[(bool, Trade)]) -> Holdout {
-        Holdout {
-            earnings: Earnings::of(rows),
-            ..holdout()
-        }
-    }
-
-    /// The trades taken win 3 each, over units of 4: 0.75R a trade, below a
-    /// minimum of 1R, however far above 1 their money is.
-    #[rstest]
-    fn a_net_r_per_trade_below_the_minimum_is_refused_whatever_its_money() {
-        let wins = earning(&[(true, trade(3.0, 4.0)), (true, trade(3.0, 4.0))]);
-        let minimums = Minimums {
-            min_expectancy: R::new(1.0),
-            min_trades: 2,
-        };
-
-        assert_eq!(
-            wins.refusal(minimums),
-            Some(Refusal::MinExpectancy {
-                expectancy: 0.75,
-                min_expectancy: R::new(1.0)
-            })
-        );
-    }
-
-    /// The trade taken wins 3 over a unit of 4, 0.75R; the trade left, 1
-    /// over a unit of 1, 1R: every trade's 0.875R is above the trade taken,
-    /// whose money, 3 a trade, is above every trade's, 2.
-    #[rstest]
-    fn a_net_r_per_trade_not_above_every_trades_is_refused_whatever_its_money() {
-        let taken_less = earning(&[(true, trade(3.0, 4.0)), (false, trade(1.0, 1.0))]);
-        let minimums = Minimums {
-            min_expectancy: R::new(0.5),
-            min_trades: 1,
-        };
-
-        assert_eq!(
-            taken_less.refusal(minimums),
-            Some(Refusal::Every {
-                expectancy: 0.75,
-                every: 0.875
-            })
-        );
-    }
-
-    /// A refusal gives its figures in R, as the holdout it reports does: of
-    /// the trades of `a_net_r_per_trade_not_above_every_trades_is_refused…`,
-    /// 0.75R taken and 0.875R every trade, and at 1.5 times the commission,
-    /// 2.85 over 4, 0.7125R, beside 0.85 over 1, 0.78125R a trade.
-    #[rstest]
-    fn a_refusal_and_a_holdout_say_their_figures_in_r() {
-        let below = Refusal::MinExpectancy {
-            expectancy: 0.75,
-            min_expectancy: R::new(1.0),
-        };
-        let not_above = Refusal::Every {
-            expectancy: 0.75,
-            every: 0.875,
-        };
-        let reported = earning(&[(true, trade(3.0, 4.0)), (false, trade(1.0, 1.0))]);
-
-        let (below, not_above, reported) = (
-            below.to_string(),
-            not_above.to_string(),
-            reported.to_string(),
-        );
-
-        assert!(
-            below.contains("0.750000R") && below.contains("minimum 1R"),
-            "{below}"
-        );
-        assert!(
-            not_above.contains("0.750000R") && not_above.contains("0.875000R"),
-            "{not_above}"
-        );
-        for r in ["0.750000R", "0.875000R", "0.712500R", "0.781250R"] {
-            assert!(reported.contains(r), "{r}: {reported}");
-        }
-    }
-
-    /// No trade taken has no expectancy: below any minimum.
-    #[rstest]
-    fn no_trade_taken_is_refused() {
-        let mut none = holdout();
-        none.earnings.taken = Trades::of(&[]);
-        let minimums = Minimums {
-            min_trades: 0,
-            ..MINIMUMS
-        };
-
-        let Some(Refusal::MinExpectancy {
-            expectancy,
-            min_expectancy,
-        }) = none.refusal(minimums)
-        else {
-            panic!("{:?}", none.refusal(minimums));
-        };
-        assert!(expectancy.is_nan(), "{expectancy}");
-        assert_eq!(min_expectancy, R::new(1.0));
-    }
-
-    #[rstest]
-    fn a_net_pnl_per_trade_not_above_every_trades_is_refused() {
-        let mut no_better = holdout();
-        no_better.earnings.every.expectancy = Some(1.2);
-
-        assert_eq!(
-            no_better.refusal(MINIMUMS),
-            Some(Refusal::Every {
-                expectancy: 1.2,
-                every: 1.2
-            })
         );
     }
 }

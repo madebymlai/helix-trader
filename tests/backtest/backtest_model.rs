@@ -156,7 +156,7 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
         },
         ..config()
     };
-    let holdout = t - config.holdout;
+    let holdout = t - config.calibration;
     let rows = std::thread::scope(|scope| {
         scope
             .spawn(|| replay(&catalog, t - config.window, t).unwrap())
@@ -254,7 +254,7 @@ fn a_decision_reads_each_sides_row_as_its_dataset_row_holds_it() {
         },
         ..config()
     };
-    let holdout = t - config.holdout;
+    let holdout = t - config.calibration;
     let rows: Vec<DatasetRow> = std::thread::scope(|scope| {
         scope
             .spawn(|| replay(&catalog, t - config.window, t).unwrap())

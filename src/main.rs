@@ -726,14 +726,9 @@ fn train<S: ModelStrategy>(args: &TrainArgs, run: &DatasetRun) -> anyhow::Result
 #[cfg(test)]
 mod tests {
 
-    use helix_trader::{
-        model::{
-            holdout::{Earnings, Holdout, Refusal},
-            schedule::Retrain,
-            score::ExpectedScore,
-            train::{Kept, Outcome},
-        },
-        strategy::risk::R,
+    use helix_trader::model::{
+        schedule::Retrain,
+        train::{Kept, Outcome},
     };
     use jiff::SignedDuration;
     use rstest::rstest;
@@ -973,24 +968,11 @@ mod tests {
 
     #[rstest]
     fn a_train_keeping_the_model_fails_with_the_reason() {
-        let holdout = Box::new(Holdout {
-            earnings: Earnings::default(),
-            score: ExpectedScore {
-                rows: 2,
-                skill: Some(0.1),
-                ..ExpectedScore::default()
-            },
-        });
-        let kept = Outcome::Kept(Kept::Refused {
-            why: Refusal::MinExpectancy {
-                expectancy: 0.48,
-                min_expectancy: R::new(0.55),
-            },
-            holdout: holdout.clone(),
-        });
+        let kept = Outcome::Kept(Kept::Failed(
+            "34 rows in the fit slice, fewer than min_rows 35".to_string(),
+        ));
         let published = Outcome::Published {
             valid_from: "2026-10-23T00:00:00Z".parse().unwrap(),
-            holdout,
         };
 
         let err = reported(&kept.clone().into()).unwrap_err().to_string();
@@ -1000,10 +982,10 @@ mod tests {
             meta: Some(kept),
         };
 
-        assert!(err.contains("0.48") && err.contains("0.55"), "{err}");
+        assert!(err.contains("34") && err.contains("35"), "{err}");
         assert!(reported(&published.into()).is_ok());
         let err = reported(&meta_kept).unwrap_err().to_string();
-        assert!(err.contains("meta") && err.contains("0.48"), "{err}");
+        assert!(err.contains("meta") && err.contains("34"), "{err}");
     }
 
     /// A rerun of a train finds the long's model published: kept in use, it
@@ -1016,17 +998,7 @@ mod tests {
                 valid_from: t,
                 retrain: Retrain::Every(SignedDuration::from_hours(24)),
             }),
-            short: Some(Outcome::Published {
-                valid_from: t,
-                holdout: Box::new(Holdout {
-                    earnings: Earnings::default(),
-                    score: ExpectedScore {
-                        rows: 2,
-                        skill: Some(0.1),
-                        ..ExpectedScore::default()
-                    },
-                }),
-            }),
+            short: Some(Outcome::Published { valid_from: t }),
             meta: None,
         };
 
