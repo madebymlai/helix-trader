@@ -50,7 +50,7 @@ A fill's commission is the charge its deal states. A deal that states none is no
 
 ## Tests
 
-The tests run against a mock cTrader peer replaying payloads captured from a broker's demo (`testdata/`, scrubbed), under a made-up venue, client id and setting names, so a broker's name left in the adapter fails a test. They run with the workspace's, or alone:
+The tests run against a mock cTrader peer replaying payloads captured from a broker's demo (`test_data/`, scrubbed), under a made-up venue, client id and setting names, so a broker's name left in the adapter fails a test. They run with the workspace's, or alone:
 
 ```sh
 cargo test -p ctrader
