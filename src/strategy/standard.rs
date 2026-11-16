@@ -2601,12 +2601,20 @@ mod tests {
         }
 
         /// The target trades what `[trade]` names: its one instrument, at
-        /// its risk, the reference stake.
+        /// its risk, the reference stake, through its conversions.
         #[rstest]
         fn the_target_trades_the_instrument_and_risk_of_the_trade_table() {
-            let target = load(TOML).unwrap().model().target;
+            let toml = TOML.replace(
+                r#"risk = "0.5%""#,
+                "risk = \"0.5%\"\nconversions = [\"EURUSD.ICMARKETS\"]",
+            );
+            let target = load(&toml).unwrap().model().target;
             assert_eq!(target.instrument_id, InstrumentId::from("XAUUSD.ICMARKETS"));
             assert_eq!(target.risk, "0.5%".parse().unwrap());
+            assert_eq!(
+                target.conversions,
+                Conversions::new(vec![InstrumentId::from("EURUSD.ICMARKETS")])
+            );
         }
 
         #[rstest]
