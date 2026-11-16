@@ -14,6 +14,7 @@ Released on TBD (UTC).
 - Added the `check-workarounds` hook: each workaround cites the `nautilus_trader` or `helix-trader` issue that retires it
 - Added CI: the hooks, clippy and the tests on every push and pull request, and a weekly run against Nautilus' `develop`, the workarounds' issues and `nautilus_engineering`
 - Added `RELEASES.md` and the release workflow that tags and publishes it
+- Added a pull request template: summary, type of change, migration and the Nautilus-native, tests and release-notes checklist
 
 ### Documentation Updates
 
