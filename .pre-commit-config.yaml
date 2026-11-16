@@ -122,6 +122,25 @@ repos:
   # nautilus-engineering: hooks end
 
   ##############################################################################
+  #  Custom hooks
+  ##############################################################################
+  - repo: local
+    hooks:
+      - id: check-workarounds
+        name: check workarounds cite their issue
+        description: A workaround cites the nautilus_trader or helix-trader issue that retires it
+        entry: python3 -B .pre-commit-hooks/check_workarounds.py
+        language: system
+        types_or: [rust, markdown]
+
+      - id: test-check-workarounds
+        name: test check-workarounds
+        entry: python3 -B .pre-commit-hooks/test_check_workarounds.py
+        language: system
+        files: ^\.pre-commit-hooks/(test_)?check_workarounds\.py$
+        pass_filenames: false
+
+  ##############################################################################
   #  Rust formatting and linting
   ##############################################################################
   - repo: local

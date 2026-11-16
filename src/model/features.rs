@@ -23,15 +23,15 @@
 //! comes, while a live warmup's older windows are still being answered, so
 //! the warmup hands the set the quotes and trades of its responses and the
 //! live ones the strategy hands it, these held until it ends
-//! (`strategy::warmup`'s `hold`, which goes once Nautilus holds them, the
-//! set then registered for quotes and trades again); in a replay, as they
-//! come. Nautilus routes no depth or book deltas to indicators at all, only
-//! to the actor's handlers: the strategy hands the warmup those of its
-//! responses and its live and replayed ones from them (`model_data_hooks!`),
-//! which hands them to the set (`BookIndicator`), the live ones held while a
-//! live warmup is pending, as quotes and trades are. Bars built from a warmup's
-//! quotes, trades or source bars reach only the cache, not the indicators:
-//! the strategy's warmup hands them to `handle_bar`
+//! (`strategy::warmup`'s `hold`, which goes once Nautilus holds them,
+//! helix-trader#16; the set then registered for quotes and trades again);
+//! in a replay, as they come. Nautilus routes no depth or book deltas to
+//! indicators at all, only to the actor's handlers: the strategy hands the
+//! warmup those of its responses and its live and replayed ones from them
+//! (`model_data_hooks!`), which hands them to the set (`BookIndicator`), the
+//! live ones held while a live warmup is pending, as quotes and trades are.
+//! Bars built from a warmup's quotes, trades or source bars reach only the
+//! cache, not the indicators: the strategy's warmup hands them to `handle_bar`
 //! (`Warmup::on_data_response`).
 //!
 //! A raw feature reads custom data, which Nautilus' `Indicator` does not
