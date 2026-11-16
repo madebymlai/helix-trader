@@ -201,24 +201,33 @@ mod tests {
     }
 
     /// Below 200 rows a side, the split is not made: the model predicts
-    /// the mean label, one half, on either side of it.
+    /// the mean label, one half, on either side of it. With leaves of 150
+    /// rows allowed it is made, and, worked as the step below is, L2
+    /// starts every row at one half, a half short of either label, and
+    /// each of the 100 rounds takes 0.05 of what is left on each side: 0.5
+    /// * 0.95^100 is left, the model predicting 1 less that below the split
+    /// and that from it.
     #[rstest]
-    fn a_leaf_holds_200_rows_at_least_by_default() {
-        let model = LearnerConfig::LightGbm(LightGbmConfig::builder().build())
-            .fit(&halves())
-            .unwrap();
-        for value in [0.2, 0.7] {
-            assert_eq!(model.predict(&[value]).unwrap(), 0.5, "{value}");
-        }
-    }
-
-    /// The same split is made with leaves of 150 rows allowed.
-    #[rstest]
-    fn a_leaf_of_fewer_rows_is_set() {
-        let config = LightGbmConfig::builder().min_data_in_leaf(150).build();
+    #[case::by_default(None, 0.5, 0.5)]
+    #[case::set_to_fewer_rows(
+        Some(150),
+        1.0 - 0.5 * 0.95_f64.powi(100),
+        0.5 * 0.95_f64.powi(100)
+    )]
+    fn a_leaf_holds_200_rows_at_least_by_default(
+        #[case] min_data_in_leaf: Option<u32>,
+        #[case] below: f64,
+        #[case] above: f64,
+    ) {
+        let config = LightGbmConfig::builder()
+            .maybe_min_data_in_leaf(min_data_in_leaf)
+            .build();
         let model = LearnerConfig::LightGbm(config).fit(&halves()).unwrap();
-        assert!(model.predict(&[0.2]).unwrap() > 0.9);
-        assert!(model.predict(&[0.7]).unwrap() < 0.1);
+
+        for (value, expected) in [(0.2, below), (0.7, above)] {
+            let predicted = model.predict(&[value]).unwrap();
+            assert!((predicted - expected).abs() < 1e-6, "{value}: {predicted}");
+        }
     }
 
     /// 600 rows of one feature, 0.0 to 0.9 by 0.1, labeled 2 below 0.5

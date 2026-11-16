@@ -339,15 +339,17 @@ mod tests {
     /// A margin of 0.25R, and one below nought, which a trade expected to
     /// lose a little clears.
     #[rstest]
-    fn a_meta_margin_takes_an_expected_r_at_or_above_it() {
-        let margin = MetaMargin(R::new(0.25));
-        let below_nought = MetaMargin(R::new(-0.5));
-
-        assert!(margin.takes(R::new(0.25)));
-        assert!(margin.takes(R::new(0.26)));
-        assert!(!margin.takes(R::new(0.24)));
-        assert!(below_nought.takes(R::new(-0.5)));
-        assert!(!below_nought.takes(R::new(-0.75)));
+    #[case::at_the_margin(0.25, 0.25, true)]
+    #[case::above_the_margin(0.25, 0.26, true)]
+    #[case::below_the_margin(0.25, 0.24, false)]
+    #[case::at_a_margin_below_nought(-0.5, -0.5, true)]
+    #[case::below_a_margin_below_nought(-0.5, -0.75, false)]
+    fn a_meta_margin_takes_an_expected_r_at_or_above_it(
+        #[case] margin: f64,
+        #[case] expected_r: f64,
+        #[case] taken: bool,
+    ) {
+        assert_eq!(MetaMargin(R::new(margin)).takes(R::new(expected_r)), taken);
     }
 
     /// Taken, wins of 3 over units of 2, 1.5R twice, and a loss of 2 over a
@@ -357,7 +359,8 @@ mod tests {
     /// win rate of 3/5. At 1.5 times the commission of 0.3 each loses 0.15
     /// more, 0.15 of its unit's R: the trades taken 0.075R, 0.0375R and
     /// 0.075R, 0.0625R a trade; every trade 0.15R and 0.075R besides,
-    /// 0.0825R a trade.
+    /// 0.0825R a trade. None changes sign, so the win rates stay 2/3 and
+    /// 3/5 over the same 3 and 5 trades.
     #[rstest]
     fn the_earnings_are_nautilus_expectancy_and_win_rate_of_the_r_of_the_trades_taken_and_of_every_trade()
      {
@@ -377,13 +380,18 @@ mod tests {
         assert_eq!(earnings.every.count, 5);
         close(earnings.every.expectancy, 0.4);
         close(earnings.every.win_rate, 0.6);
+        assert_eq!(earnings.taken_stressed.count, 3);
         close(earnings.taken_stressed.expectancy, 5.0 / 6.0 - 0.0625);
+        close(earnings.taken_stressed.win_rate, 2.0 / 3.0);
+        assert_eq!(earnings.every_stressed.count, 5);
         close(earnings.every_stressed.expectancy, 0.4 - 0.0825);
+        close(earnings.every_stressed.win_rate, 0.6);
     }
 
     /// Pins that Nautilus' `Expectancy` weighs its wins and losses by their
     /// rates among the trades that gained or lost, a trade at nought in
-    /// neither (`crates/analysis/src/statistics/expectancy.rs:75-92`):
+    /// neither, `avg_winner * win_rate + avg_loser * loss_rate`
+    /// (`crates/analysis/src/statistics/expectancy.rs:75-95`):
     /// `Trades::of` takes its expectancy, which a model's publication holds
     /// against the least expectancy (`Holdout::refusal`), and the module
     /// states that rule.
@@ -464,19 +472,16 @@ mod tests {
     /// A model whose expected R errs no less than the training mean, or has
     /// no skill to read, is refused whatever its trades earned.
     #[rstest]
-    fn a_skill_not_above_nought_is_refused() {
-        for skill in [Some(0.0), Some(-0.2), None] {
-            let worse = Holdout {
-                score: of_skill(skill),
-                ..holdout()
-            };
+    #[case::of_nought(Some(0.0))]
+    #[case::below_nought(Some(-0.2))]
+    #[case::none(None)]
+    fn a_skill_not_above_nought_is_refused(#[case] skill: Option<f64>) {
+        let worse = Holdout {
+            score: of_skill(skill),
+            ..holdout()
+        };
 
-            assert_eq!(
-                worse.refusal(MINIMUMS),
-                Some(Refusal::Skill { skill }),
-                "{skill:?}"
-            );
-        }
+        assert_eq!(worse.refusal(MINIMUMS), Some(Refusal::Skill { skill }));
     }
 
     #[rstest]
@@ -491,22 +496,6 @@ mod tests {
             Some(Refusal::Trades {
                 trades: 3,
                 min_trades: 4
-            })
-        );
-    }
-
-    #[rstest]
-    fn a_net_pnl_per_trade_below_the_minimum_is_refused() {
-        let minimums = Minimums {
-            min_expectancy: R::new(1.5),
-            ..MINIMUMS
-        };
-
-        assert_eq!(
-            holdout().refusal(minimums),
-            Some(Refusal::MinExpectancy {
-                expectancy: 1.2,
-                min_expectancy: R::new(1.5)
             })
         );
     }
@@ -603,11 +592,15 @@ mod tests {
             ..MINIMUMS
         };
 
-        assert!(
-            matches!(none.refusal(minimums), Some(Refusal::MinExpectancy { .. })),
-            "{:?}",
-            none.refusal(minimums)
-        );
+        let Some(Refusal::MinExpectancy {
+            expectancy,
+            min_expectancy,
+        }) = none.refusal(minimums)
+        else {
+            panic!("{:?}", none.refusal(minimums));
+        };
+        assert!(expectancy.is_nan(), "{expectancy}");
+        assert_eq!(min_expectancy, R::new(1.0));
     }
 
     #[rstest]

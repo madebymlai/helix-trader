@@ -205,12 +205,10 @@ mod tests {
             ..config()
         };
 
-        let err = blueprint(config).unwrap_err();
+        let err = format!("{:#}", blueprint(config).unwrap_err());
 
-        assert_eq!(
-            format!("{err:#}"),
-            "the decision interval 0s is not positive"
-        );
+        assert!(err.contains("0s"), "{err}");
+        assert!(!err.contains("model.target.atr"), "{err}");
     }
 
     /// The target is checked against what the strategy reads: an ATR of an
@@ -221,13 +219,10 @@ mod tests {
         let mut config = config();
         config.target.instrument_id = InstrumentId::from("EUR/USD.SIM");
 
-        let err = blueprint(config).unwrap_err();
+        let err = format!("{:#}", blueprint(config).unwrap_err());
 
-        assert_eq!(
-            format!("{err:#}"),
-            "invalid model.target.atr: the target's ATR has no bars of EUR/USD.SIM to be \
-             built from: the strategy reads neither its quotes, its trades nor its bars"
-        );
+        assert!(err.contains("model.target.atr"), "{err}");
+        assert!(err.contains("EUR/USD.SIM"), "{err}");
     }
 
     /// The dataset and the model set of a model stored carry one

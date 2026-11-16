@@ -1189,12 +1189,19 @@ mod tests {
 
         let read = store.read(at("2026-10-22T00:00:00Z")).unwrap();
 
-        let bits = |rows: Vec<Vec<f64>>| -> Vec<u64> {
-            rows.into_iter().flatten().map(f64::to_bits).collect()
-        };
+        let bits = |values: &[f64]| -> Vec<u64> { values.iter().map(|v| v.to_bits()).collect() };
+        let (rows_read, predictions): (Vec<f64>, Vec<f64>) = read
+            .manifest
+            .probes
+            .iter()
+            .map(|probe| (probe.row[0], probe.prediction))
+            .unzip();
+        assert_eq!(bits(&rows_read), bits(&rows.concat()));
+        // The fake predicts the first feature, the training mean, 1/2,
+        // where it is missing.
         assert_eq!(
-            bits(read.manifest.probes.into_iter().map(|p| p.row).collect()),
-            bits(rows.to_vec())
+            bits(&predictions),
+            bits(&[0.5, f64::INFINITY, f64::NEG_INFINITY, -0.0])
         );
     }
 
@@ -1265,63 +1272,50 @@ mod tests {
 
         store.publish(&second).unwrap();
 
-        assert_eq!(store.valid_froms().unwrap().len(), 1);
+        assert_eq!(store.valid_froms().unwrap(), [at("2026-10-22T00:00:00Z")]);
         assert_eq!(store.read(at("2026-10-22T00:00:00Z")).unwrap(), second);
     }
 
+    /// `config()` changed by `change`.
+    fn changed(change: fn(&mut ModelConfig)) -> ModelConfig {
+        let mut config = config();
+        change(&mut config);
+        config
+    }
+
+    /// A model published under `config()` is listed there alone: another
+    /// learner, window, holdout or target is other training, and a model
+    /// held to a higher least expectancy, more trades or another margin,
+    /// as one priced at another reference stake, the config's risk of the
+    /// dataset balance, which a dataset's rows and a model's payoff
+    /// features are priced at, would fall short of them: the strategy
+    /// retrains rather than reuse it.
     #[rstest]
-    fn other_training_settings_target_minimums_or_margin_list_none_of_the_models() {
+    #[case::another_learner(changed(|config| config.learner = LearnerConfig::Baseline {}))]
+    #[case::another_window(changed(|config| config.window = SignedDuration::from_hours(72)))]
+    #[case::another_holdout(changed(|config| config.holdout = SignedDuration::from_hours(6)))]
+    #[case::another_target(changed(|config| {
+        config.target.spec.limit = SignedDuration::from_mins(30);
+    }))]
+    #[case::a_higher_least_expectancy(changed(|config| config.min_expectancy = R::new(2.0)))]
+    #[case::more_trades(changed(|config| config.min_trades = 50))]
+    #[case::another_margin(changed(|config| config.margins.long = Some(R::new(0.75))))]
+    #[case::another_risk(changed(|config| config.target.risk = "1%".parse().unwrap()))]
+    #[case::another_dataset_balance(changed(|config| {
+        config.dataset.balance = Money::from("20000000 USD");
+    }))]
+    fn other_training_settings_target_minimums_or_margin_list_none_of_the_models(
+        #[case] other: ModelConfig,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         store(dir.path(), &config())
             .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
             .unwrap();
-        let mut target = config().target;
-        target.spec.limit = SignedDuration::from_mins(30);
-        let others = [
-            ModelConfig {
-                learner: LearnerConfig::Baseline {},
-                ..config()
-            },
-            ModelConfig {
-                window: SignedDuration::from_hours(72),
-                ..config()
-            },
-            ModelConfig {
-                holdout: SignedDuration::from_hours(6),
-                ..config()
-            },
-            ModelConfig { target, ..config() },
-        ];
 
-        for other in others {
-            assert!(
-                store(dir.path(), &other).valid_froms().unwrap().is_empty(),
-                "{other:?}"
-            );
-        }
-        let held_to_more = [
-            ModelConfig {
-                min_expectancy: R::new(2.0),
-                ..config()
-            },
-            ModelConfig {
-                min_trades: 50,
-                ..config()
-            },
-            ModelConfig {
-                margins: Margins {
-                    long: Some(R::new(0.75)),
-                    short: Some(R::new(0.5)),
-                },
-                ..config()
-            },
-        ];
-        for other in held_to_more {
-            assert!(
-                store(dir.path(), &other).valid_froms().unwrap().is_empty(),
-                "{other:?}"
-            );
-        }
+        let listed = |config: &ModelConfig| store(dir.path(), config).valid_froms().unwrap();
+
+        assert_eq!(listed(&config()), [at("2026-10-22T00:00:00Z")]);
+        assert!(listed(&other).is_empty());
     }
 
     /// Bumping the store version is another training directory, which
@@ -1391,69 +1385,36 @@ mod tests {
         );
     }
 
-    /// A dataset's rows and a model's payoff features are priced at the
-    /// reference stake, the config's risk of the dataset balance: a model
-    /// published at one is not listed at another risk or balance, so the
-    /// strategy retrains rather than reuse it.
-    #[rstest]
-    fn a_model_is_listed_only_at_the_risk_and_dataset_balance_it_was_trained_at() {
-        let dir = tempfile::tempdir().unwrap();
-        side_store(dir.path(), &config(), Side::Long)
-            .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
-            .unwrap();
-        let mut riskier = config();
-        riskier.target.risk = "1%".parse().unwrap();
-        let richer = ModelConfig {
-            dataset: DatasetVenue {
-                balance: Money::from("20000000 USD"),
-                ..venue()
-            },
-            ..config()
-        };
-
-        let listed = |config: &ModelConfig| {
-            side_store(dir.path(), config, Side::Long)
-                .valid_froms()
-                .unwrap()
-                .len()
-        };
-
-        assert_eq!(listed(&config()), 1);
-        assert_eq!(listed(&riskier), 0);
-        assert_eq!(listed(&richer), 0);
-    }
-
     /// One side's margin changes which side is picked on a row, so what the
     /// other publishes: a side's models list only beside the same margins of
     /// both sides, a side not traded being another margin.
     #[rstest]
-    fn either_sides_margin_keys_both_sides_stores() {
+    #[case::the_long_beside_another_short_margin(Side::Long, Some(0.5), Some(0.75))]
+    #[case::the_long_beside_no_short(Side::Long, Some(0.5), None)]
+    #[case::the_short_beside_another_long_margin(Side::Short, Some(0.75), Some(0.5))]
+    #[case::the_short_beside_no_long(Side::Short, None, Some(0.5))]
+    fn either_sides_margin_keys_both_sides_stores(
+        #[case] side: Side,
+        #[case] long: Option<f64>,
+        #[case] short: Option<f64>,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         for side in Side::BOTH {
             side_store(dir.path(), &config(), side)
                 .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
                 .unwrap();
         }
-        let margins = |long, short| ModelConfig {
-            margins: Margins { long, short },
+        let other = ModelConfig {
+            margins: Margins {
+                long: long.map(R::new),
+                short: short.map(R::new),
+            },
             ..config()
         };
 
-        for (side, other) in [
-            (Side::Long, margins(Some(R::new(0.5)), Some(R::new(0.75)))),
-            (Side::Long, margins(Some(R::new(0.5)), None)),
-            (Side::Short, margins(Some(R::new(0.75)), Some(R::new(0.5)))),
-            (Side::Short, margins(None, Some(R::new(0.5)))),
-        ] {
-            assert!(
-                side_store(dir.path(), &other, side)
-                    .valid_froms()
-                    .unwrap()
-                    .is_empty(),
-                "{side:?}: {:?}",
-                other.margins
-            );
-        }
+        let listed = side_store(dir.path(), &other, side).valid_froms().unwrap();
+
+        assert!(listed.is_empty());
     }
 
     /// The store of the meta model `meta` of `config`.
@@ -1469,42 +1430,34 @@ mod tests {
     /// short of others, and the sides' margins make its rows: a meta of
     /// another margin, minimums or sides' margins lists none of them.
     #[rstest]
-    fn a_meta_model_of_another_margin_minimums_or_sides_margins_is_not_listed() {
+    #[case::of_a_higher_least_expectancy(config(), 0.55, 2.0)]
+    #[case::of_another_margin(config(), 0.6, 1.0)]
+    #[case::of_other_sides_margins(changed(|config| config.margins.short = None), 0.55, 1.0)]
+    fn a_meta_model_of_another_margin_minimums_or_sides_margins_is_not_listed(
+        #[case] config: ModelConfig,
+        #[case] margin: f64,
+        #[case] min_expectancy: f64,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let meta = |margin, min_expectancy| {
             MetaConfig::builder()
                 .window(SignedDuration::from_hours(48))
                 .holdout(SignedDuration::from_hours(12))
-                .margin(margin)
-                .min_expectancy(min_expectancy)
+                .margin(R::new(margin))
+                .min_expectancy(R::new(min_expectancy))
                 .min_trades(20)
                 .learner(LearnerConfig::Fake {})
                 .build()
         };
-        meta_store(dir.path(), &config(), &meta(R::new(0.55), R::new(1.0)))
+        meta_store(dir.path(), &self::config(), &meta(0.55, 1.0))
             .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
             .unwrap();
-        let long_only = ModelConfig {
-            margins: Margins {
-                long: Some(R::new(0.5)),
-                short: None,
-            },
-            ..config()
-        };
 
-        for (config, meta) in [
-            (config(), meta(R::new(0.55), R::new(2.0))),
-            (config(), meta(R::new(0.6), R::new(1.0))),
-            (long_only, meta(R::new(0.55), R::new(1.0))),
-        ] {
-            assert!(
-                meta_store(dir.path(), &config, &meta)
-                    .valid_froms()
-                    .unwrap()
-                    .is_empty(),
-                "{config:?}"
-            );
-        }
+        let listed = meta_store(dir.path(), &config, &meta(margin, min_expectancy))
+            .valid_froms()
+            .unwrap();
+
+        assert!(listed.is_empty());
     }
 
     /// A meta model taking the trades of the side picked from an expected
@@ -1528,78 +1481,48 @@ mod tests {
         }
     }
 
-    /// A weekly-retrained strategy trades on the models of its own
-    /// retrains, never on one a daily-retrained strategy published between
-    /// them: a store of either retrain lists its own models alone, a
-    /// side's and a meta's alike.
-    #[rstest]
-    fn a_store_lists_only_the_models_of_its_retrain_interval() {
-        let daily = Retrain::Every(SignedDuration::from_hours(24));
-        let weekly = Retrain::Every(SignedDuration::from_hours(168));
-
-        for (kind, store) in stores() {
-            let dir = tempfile::tempdir().unwrap();
-            store(dir.path(), daily)
-                .publish(&model("2026-10-23T00:00:00Z", &[vec![0.5]]))
-                .unwrap();
-            store(dir.path(), weekly)
-                .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
-                .unwrap();
-
-            assert_eq!(
-                store(dir.path(), daily).valid_froms().unwrap(),
-                [at("2026-10-23T00:00:00Z")],
-                "{kind} daily store"
-            );
-            assert_eq!(
-                store(dir.path(), weekly).valid_froms().unwrap(),
-                [at("2026-10-22T00:00:00Z")],
-                "{kind} weekly store"
-            );
-        }
-    }
-
     /// The store under a root of a strategy retrained as a `Retrain` says.
     type StoreOf = fn(&Path, Retrain) -> ModelStore;
 
-    /// Each kind of store, of a strategy retrained as a `Retrain` says: a
-    /// side's and a meta's.
-    fn stores() -> [(&'static str, StoreOf); 2] {
-        [
-            ("a side's", |root, retrain| store(root, &retrained(retrain))),
-            ("a meta's", |root, retrain| {
-                meta_store(root, &retrained(retrain), &meta_config())
-            }),
-        ]
+    /// A side's store under `root` of `config()` retrained as `retrain`
+    /// says.
+    fn a_sides(root: &Path, retrain: Retrain) -> ModelStore {
+        store(root, &retrained(retrain))
     }
 
-    /// A strategy never retrained trades on the models trained for it
-    /// alone: its store lists none a retrained one published, nor does a
-    /// retrained one's list its, of each kind of store.
+    /// The meta's store under `root` of `config()` retrained as `retrain`
+    /// says.
+    fn a_metas(root: &Path, retrain: Retrain) -> ModelStore {
+        meta_store(root, &retrained(retrain), &meta_config())
+    }
+
+    /// A strategy trades on the models of its own retrains alone: a
+    /// weekly-retrained one never on one a daily-retrained strategy
+    /// published between them, nor one never retrained on one a retrained
+    /// one published, and the other way round. A store of either retrain
+    /// lists its own models alone, a side's and a meta's alike.
     #[rstest]
-    fn a_store_never_retrained_and_a_retrained_one_list_none_of_each_others_models() {
+    #[case::a_sides_daily_and_weekly(a_sides, Retrain::Every(SignedDuration::from_hours(168)))]
+    #[case::a_metas_daily_and_weekly(a_metas, Retrain::Every(SignedDuration::from_hours(168)))]
+    #[case::a_sides_daily_and_never_retrained(a_sides, Retrain::Never)]
+    #[case::a_metas_daily_and_never_retrained(a_metas, Retrain::Never)]
+    fn a_store_lists_only_the_models_of_its_retrain_interval(
+        #[case] store: StoreOf,
+        #[case] other: Retrain,
+    ) {
         let daily = Retrain::Every(SignedDuration::from_hours(24));
+        let dir = tempfile::tempdir().unwrap();
+        store(dir.path(), daily)
+            .publish(&model("2026-10-23T00:00:00Z", &[vec![0.5]]))
+            .unwrap();
+        store(dir.path(), other)
+            .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
+            .unwrap();
 
-        for (kind, store) in stores() {
-            let dir = tempfile::tempdir().unwrap();
-            store(dir.path(), daily)
-                .publish(&model("2026-10-23T00:00:00Z", &[vec![0.5]]))
-                .unwrap();
-            store(dir.path(), Retrain::Never)
-                .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
-                .unwrap();
+        let listed = |retrain| store(dir.path(), retrain).valid_froms().unwrap();
 
-            assert_eq!(
-                store(dir.path(), Retrain::Never).valid_froms().unwrap(),
-                [at("2026-10-22T00:00:00Z")],
-                "{kind} store never retrained"
-            );
-            assert_eq!(
-                store(dir.path(), daily).valid_froms().unwrap(),
-                [at("2026-10-23T00:00:00Z")],
-                "{kind} daily store"
-            );
-        }
+        assert_eq!(listed(daily), [at("2026-10-23T00:00:00Z")]);
+        assert_eq!(listed(other), [at("2026-10-22T00:00:00Z")]);
     }
 
     /// A strategy trades on a pair of its sides' models valid by then, and
@@ -1699,8 +1622,19 @@ mod tests {
         });
         let (names, fingerprint) = (&side.manifest.feature_names, &side.manifest.fingerprint);
 
-        assert!(side.load(names, fingerprint).is_err());
-        assert!(meta.load_side(names, fingerprint).is_err());
+        let side_as_meta = side.load(names, fingerprint).unwrap_err().to_string();
+        let meta_as_side = meta.load_side(names, fingerprint).unwrap_err().to_string();
+
+        assert!(
+            side_as_meta.contains("has a pair's calibration"),
+            "{side_as_meta}"
+        );
+        assert!(side_as_meta.contains("meta"), "{side_as_meta}");
+        assert!(
+            meta_as_side.contains("no pair's calibration"),
+            "{meta_as_side}"
+        );
+        assert!(meta_as_side.contains("side"), "{meta_as_side}");
     }
 
     /// The fake long and short of a pair valid from midnight, on a feature
@@ -1744,17 +1678,10 @@ mod tests {
         }
     }
 
-    /// The manifests of earlier store versions are no models of this one: a
-    /// side's of Platt's calibration and a payoff record, and a meta's of
-    /// Platt's calibration and its probabilities' log loss and AUC. Read,
-    /// each is refused, naming its file.
-    #[rstest]
-    fn a_model_of_an_earlier_manifest_is_refused_naming_its_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path(), &config());
-        let current = serde_json::to_value(model("2026-10-22T00:00:00Z", &[])).unwrap();
-        let mut side = current.clone();
-        let manifest = side["manifest"].as_object_mut().unwrap();
+    /// A side's manifest of an earlier store version: Platt's calibration
+    /// and a payoff record, beside `current`'s fields.
+    fn platt_side(mut current: serde_json::Value) -> serde_json::Value {
+        let manifest = current["manifest"].as_object_mut().unwrap();
         manifest.insert(
             "calibration".to_string(),
             serde_json::json!({"a": -0.9, "b": 0.0}),
@@ -1763,8 +1690,13 @@ mod tests {
             "payoff".to_string(),
             serde_json::json!({"win": 1.5, "loss": 1.25}),
         );
-        let mut meta = current;
-        let manifest = meta["manifest"].as_object_mut().unwrap();
+        current
+    }
+
+    /// A meta's manifest of an earlier store version: Platt's calibration
+    /// and its probabilities' log loss and AUC, beside `current`'s fields.
+    fn platt_meta(mut current: serde_json::Value) -> serde_json::Value {
+        let manifest = current["manifest"].as_object_mut().unwrap();
         manifest.insert("side".to_string(), serde_json::Value::Null);
         manifest.insert(
             "calibration".to_string(),
@@ -1775,52 +1707,27 @@ mod tests {
             "baseline_log_loss": 0.69,
             "auc": 0.6
         }});
-        std::fs::create_dir_all(&store.directory).unwrap();
-
-        for (earlier, valid_from) in [
-            (side, "2026-10-22T00:00:00Z"),
-            (meta, "2026-10-23T00:00:00Z"),
-        ] {
-            let path = store.path(at(valid_from));
-            std::fs::write(&path, earlier.to_string()).unwrap();
-
-            let refused = store.read(at(valid_from)).unwrap_err();
-
-            let message = format!("{refused:#}");
-            assert!(message.contains(&path.display().to_string()), "{message}");
-        }
+        current
     }
 
-    /// A model learned targets net of its dataset run's commission: one of
-    /// other costs is another model.
+    /// The manifests of earlier store versions are no models of this one:
+    /// read, each is refused, naming its file.
     #[rstest]
-    fn another_commission_lists_none_of_the_models() {
+    #[case::a_sides(platt_side)]
+    #[case::a_metas(platt_meta)]
+    fn a_model_of_an_earlier_manifest_is_refused_naming_its_file(
+        #[case] earlier: fn(serde_json::Value) -> serde_json::Value,
+    ) {
         let dir = tempfile::tempdir().unwrap();
-        store(dir.path(), &config())
-            .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
-            .unwrap();
+        let store = store(dir.path(), &config());
+        let current = serde_json::to_value(model("2026-10-22T00:00:00Z", &[])).unwrap();
+        std::fs::create_dir_all(&store.directory).unwrap();
+        let path = store.path(at("2026-10-22T00:00:00Z"));
+        std::fs::write(&path, earlier(current).to_string()).unwrap();
 
-        for other in [
-            Commission::Rate(Decimal::new(4, 5)),
-            Commission::PerOrder(Money::from("3 USD")),
-            Commission::PerQuantity(Money::from_str_exact("0.00003 USD").unwrap()),
-        ] {
-            assert!(
-                store(
-                    dir.path(),
-                    &ModelConfig {
-                        dataset: DatasetVenue {
-                            commission: other,
-                            ..venue()
-                        },
-                        ..config()
-                    }
-                )
-                .valid_froms()
-                .unwrap()
-                .is_empty(),
-                "{other:?}"
-            );
-        }
+        let refused = store.read(at("2026-10-22T00:00:00Z")).unwrap_err();
+
+        let message = format!("{refused:#}");
+        assert!(message.contains(&path.display().to_string()), "{message}");
     }
 }

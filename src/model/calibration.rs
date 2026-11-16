@@ -226,86 +226,86 @@ mod tests {
         near(expected.of(Side::Short), 0.25);
     }
 
-    /// The level's slope, 2 on C of 0, 1 and 2 against a mean R of 0, 2 and
-    /// 4, is clipped to 1.5, and alpha_C refitted after the clip: 2 - 1.5 x 1
-    /// = 0.5, not the unclipped 0. The side call's, -0.5 on D of 1, -1 and 2
-    /// against R long less R short of -0.5, 0.5 and -1, is clipped to
-    /// nought. At predictions of 1 and 0, C' = 0.5 + 1.5 x 0.5 = 1.25 and D'
-    /// = 0: each side's E' is the level.
+    /// A slope above 1.5 is clipped to it and one below nought to nought,
+    /// alpha_C refitted after the clip, on C of 0, 1 and 2 and D of 1, -1
+    /// and 2. At predictions of 1 and 0, C = 0.5 and D = 1, each side's E'
+    /// `C' + D'/2` and `C' - D'/2`:
+    ///
+    /// - The level's slope, 2 against a mean R of 0, 2 and 4, is clipped to
+    ///   1.5, alpha_C 2 - 1.5 x 1 = 0.5, not the unclipped 0. The side
+    ///   call's, -0.5 against R long less R short of -0.5, 0.5 and -1, is
+    ///   clipped to nought. C' = 0.5 + 1.5 x 0.5 = 1.25 and D' = 0: each
+    ///   side's E' is the level.
+    /// - The level's slope, -0.5 against a mean R of 1, 0.5 and 0, is
+    ///   clipped to nought, alpha_C then the mean R, 0.5. The side call's,
+    ///   (2 + 2 + 8) / (1 + 1 + 4) = 2 against 2, -2 and 4, is clipped to
+    ///   1.5. C' = 0.5 and D' = 1.5: the long's E' 0.5 + 0.75 = 1.25, the
+    ///   short's 0.5 - 0.75 = -0.25.
     #[rstest]
-    fn a_slope_above_one_and_a_half_is_clipped_to_it_and_one_below_nought_to_nought() {
-        let rows = pair_rows(
-            [0.0, 1.0, 2.0],
-            [1.0, -1.0, 2.0],
-            [0.0, 2.0, 4.0],
-            [-0.5, 0.5, -1.0],
-        );
+    #[case::a_level_above_and_a_side_call_below(
+        [0.0, 2.0, 4.0],
+        [-0.5, 0.5, -1.0],
+        (0.5, 1.5),
+        0.0,
+        (1.25, 1.25)
+    )]
+    #[case::a_level_below_and_a_side_call_above(
+        [1.0, 0.5, 0.0],
+        [2.0, -2.0, 4.0],
+        (0.5, 0.0),
+        1.5,
+        (1.25, -0.25)
+    )]
+    fn a_slope_above_one_and_a_half_is_clipped_to_it_and_one_below_nought_to_nought(
+        #[case] ys: [f64; 3],
+        #[case] ts: [f64; 3],
+        #[case] level: (f64, f64),
+        #[case] side_call: f64,
+        #[case] long_and_short: (f64, f64),
+    ) {
+        let rows = pair_rows([0.0, 1.0, 2.0], [1.0, -1.0, 2.0], ys, ts);
 
         let fit = Ksplit::fit(&rows).unwrap();
 
-        near(fit.level.beta, 1.5);
-        near(fit.level.alpha, 0.5);
-        near(fit.side_call.unwrap(), 0.0);
+        near(fit.level.alpha, level.0);
+        near(fit.level.beta, level.1);
+        near(fit.side_call.unwrap(), side_call);
         let expected = fit.apply(&[1.0, 0.0]);
-        near(expected.of(Side::Long), 1.25);
-        near(expected.of(Side::Short), 1.25);
+        near(expected.of(Side::Long), long_and_short.0);
+        near(expected.of(Side::Short), long_and_short.1);
     }
 
-    /// The level's slope, -0.5 on C of 0, 1 and 2 against a mean R of 1,
-    /// 0.5 and 0, is clipped to nought, alpha_C then the mean R, 0.5; the
-    /// side call's, 2 on D of 1, -1 and 2 against 2, -2 and 4, to 1.5.
+    /// One side: the level line alone, on its own prediction and R, no side
+    /// call, and at a prediction of 0.5 its E' is the level, whichever the
+    /// side:
+    ///
+    /// - 0, 1 and 2 against 0.3, 0.6 and 1.5: alpha 0.2 and beta 0.6, E'
+    ///   0.2 + 0.3 = 0.5.
+    /// - Its slope clipped too: 2 on 0, 1 and 2 against 0, 2 and 4 becomes
+    ///   1.5, its alpha 2 - 1.5 = 0.5, E' 0.5 + 0.75 = 1.25.
     #[rstest]
-    fn a_level_slope_below_nought_leaves_the_mean_and_a_side_call_above_one_and_a_half_is_clipped()
-    {
-        let rows = pair_rows(
-            [0.0, 1.0, 2.0],
-            [1.0, -1.0, 2.0],
-            [1.0, 0.5, 0.0],
-            [2.0, -2.0, 4.0],
-        );
-
-        let fit = Ksplit::fit(&rows).unwrap();
-
-        near(fit.level.beta, 0.0);
-        near(fit.level.alpha, 0.5);
-        near(fit.side_call.unwrap(), 1.5);
-    }
-
-    /// One side: the level line alone, on its own prediction and R, 0, 1
-    /// and 2 against 0.3, 0.6 and 1.5: alpha 0.2 and beta 0.6, no side
-    /// call. At a prediction of 0.5 its E' is the level, 0.5, whichever the
-    /// side.
-    #[rstest]
-    fn one_side_fits_the_level_line_alone_on_its_own_r() {
-        let rows: Vec<Vec<(f64, f64)>> = [(0.0, 0.3), (1.0, 0.6), (2.0, 1.5)]
+    #[case::fitted([0.3, 0.6, 1.5], (0.2, 0.6), 0.5)]
+    #[case::clipped_and_its_alpha_refitted([0.0, 2.0, 4.0], (0.5, 1.5), 1.25)]
+    fn one_side_fits_the_level_line_alone_on_its_own_r(
+        #[case] rs: [f64; 3],
+        #[case] level: (f64, f64),
+        #[case] expected_r: f64,
+    ) {
+        let rows: Vec<Vec<(f64, f64)>> = [0.0, 1.0, 2.0]
             .into_iter()
+            .zip(rs)
             .map(|row| vec![row])
             .collect();
 
         let fit = Ksplit::fit(&rows).unwrap();
 
-        near(fit.level.alpha, 0.2);
-        near(fit.level.beta, 0.6);
+        near(fit.level.alpha, level.0);
+        near(fit.level.beta, level.1);
         assert_eq!(fit.side_call, None);
         let expected = fit.apply(&[0.5]);
         assert_eq!(expected.side_call, 0.0);
-        near(expected.of(Side::Long), 0.5);
-        near(expected.of(Side::Short), 0.5);
-    }
-
-    /// One side's slope is clipped too: 2 on 0, 1 and 2 against 0, 2 and 4
-    /// becomes 1.5, its alpha 2 - 1.5 = 0.5.
-    #[rstest]
-    fn one_sides_slope_is_clipped_and_its_alpha_refitted() {
-        let rows: Vec<Vec<(f64, f64)>> = [(0.0, 0.0), (1.0, 2.0), (2.0, 4.0)]
-            .into_iter()
-            .map(|row| vec![row])
-            .collect();
-
-        let fit = Ksplit::fit(&rows).unwrap();
-
-        near(fit.level.beta, 1.5);
-        near(fit.level.alpha, 0.5);
+        near(expected.of(Side::Long), expected_r);
+        near(expected.of(Side::Short), expected_r);
     }
 
     /// Predictions that never vary show no signal, though the long's R
@@ -330,22 +330,36 @@ mod tests {
     }
 
     /// Many rows of one level, 0.1 a side, whose mean in floating point is
-    /// not 0.1 to the bit: still no slope, the level the mean R.
+    /// not 0.1 to the bit: still no slope, the level the mean R, and a side
+    /// call of nought, the sides' predictions never apart. Row `i`'s mean R
+    /// is (`i % 3` + 0.1 + 0.3) / 2, so the mean R is (m + 0.4) / 2, m the
+    /// mean of `i % 3`: 1 over 24 or 30 rows, a third each of 0, 1 and 2;
+    /// (12 + 2 x 12) / 37 over 37, thirteen 0s; (17 + 2 x 16) / 50 = 0.98
+    /// over 50, sixteen 2s.
     #[rstest]
-    fn a_level_that_never_varies_over_many_rows_has_no_slope() {
-        for count in [24, 30, 37, 50] {
-            let rows: Vec<Vec<(f64, f64)>> = (0..count)
-                .map(|i| vec![(0.1, f64::from(i % 3) + 0.1), (0.1, 0.3)])
-                .collect();
+    #[case::of_24_rows(24, 0.7)]
+    #[case::of_30_rows(30, 0.7)]
+    #[case::of_37_rows(37, (36.0 / 37.0 + 0.4) / 2.0)]
+    #[case::of_50_rows(50, 0.69)]
+    fn a_level_that_never_varies_over_many_rows_has_no_slope(
+        #[case] count: u8,
+        #[case] mean_r: f64,
+    ) {
+        let rows: Vec<Vec<(f64, f64)>> = (0..count)
+            .map(|i| vec![(0.1, f64::from(i % 3) + 0.1), (0.1, 0.3)])
+            .collect();
 
-            let fit = Ksplit::fit(&rows).unwrap();
+        let fit = Ksplit::fit(&rows).unwrap();
 
-            assert_eq!(fit.level.beta, 0.0, "{count} rows");
-        }
+        assert_eq!(fit.level.beta, 0.0);
+        near(fit.level.alpha, mean_r);
+        assert_eq!(fit.side_call, Some(0.0));
     }
 
     #[rstest]
     fn no_row_has_no_ksplit() {
-        assert!(Ksplit::fit(&[]).is_err());
+        let err = Ksplit::fit(&[]).unwrap_err().to_string();
+
+        assert!(err.contains("no row"), "{err}");
     }
 }
