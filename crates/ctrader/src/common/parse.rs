@@ -292,9 +292,11 @@ mod tests {
     #[rstest]
     fn a_series_not_of_quotes_is_refused_naming_it() {
         let bars = format!("XAUUSD.{VENUE}-1-MINUTE-BID-EXTERNAL");
+
         for data_type in [
             NautilusDataType::Bar,
             NautilusDataType::OrderBookDelta,
+            NautilusDataType::OrderBookDepth,
             NautilusDataType::TradeTick,
         ] {
             let named = data_type.to_string();
