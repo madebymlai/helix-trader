@@ -195,18 +195,19 @@ mod tests {
     }
 
     #[rstest]
-    fn a_memory_limit_of_nothing_is_refused_at_fit() {
-        for memory_limit in [0.0, -1.0] {
-            let config = PerpetualConfig::builder()
-                .memory_limit(memory_limit)
-                .build();
-            assert!(
-                LearnerConfig::Perpetual(config)
-                    .fit(&missing_is_one())
-                    .is_err(),
-                "{memory_limit}"
-            );
-        }
+    #[case::of_nought(0.0, "0 GB")]
+    #[case::below_nought(-1.0, "-1 GB")]
+    fn a_memory_limit_of_nothing_is_refused_at_fit(#[case] memory_limit: f32, #[case] limit: &str) {
+        let config = PerpetualConfig::builder()
+            .memory_limit(memory_limit)
+            .build();
+
+        let err = LearnerConfig::Perpetual(config)
+            .fit(&missing_is_one())
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains(limit), "{err}");
     }
 
     // PerpetualBooster draws only on a large set, where it fits each tree
