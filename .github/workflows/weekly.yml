@@ -50,6 +50,27 @@ jobs:
       - name: Test
         run: cargo test
 
+  advisories:
+    name: advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        # https://github.com/actions/checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install cargo-deny
+        # https://github.com/taiki-e/install-action
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-deny@0.20.2
+
+      # Advisories published since Cargo.lock last changed
+      - name: Check advisories
+        run: cargo deny check advisories
+
   workarounds:
     name: workarounds
     runs-on: ubuntu-latest

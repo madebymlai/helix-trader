@@ -21,6 +21,9 @@ Released on TBD (UTC).
 - Added a pull request template: summary, type of change, migration and the Nautilus-native, tests and release-notes checklist
 - Added `cargo doc` with warnings denied, `cargo-machete` and a 3-day crate release cooldown to the hooks and CI
 - Added Nautilus' commit message check: a capitalized subject of 60 characters at most, a body wrapped at 79
+- Added `cargo-deny` with Nautilus' policy (advisories, licenses, duplicate crates, sources) to the hooks, CI and the weekly run
+- Added the offline check that internal markdown links resolve (lychee)
+- Changed CI to run the tests with `cargo-nextest`, a hung test failing after 10 minutes
 
 ### Documentation Updates
 
