@@ -180,11 +180,11 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
 
     let interrupted = interrupt.is_finished();
     interrupt.abort();
+    // The node's records in Redis, under the test's trader.
+    common::cache::delete_trader("HELIXTEST-101").await;
     ran.expect("the node stops within a minute of SIGINT")
         .unwrap();
     assert!(interrupted, "the node stopped before SIGINT");
-    // The node's records in Redis, under the test's trader.
-    common::cache::delete_trader("HELIXTEST-101").await;
     let record = record.borrow();
     let fed_bars = fed.bars.borrow();
     let (warmup_quotes, warmup_bars, bars, quotes) = (
