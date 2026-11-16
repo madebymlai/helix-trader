@@ -884,7 +884,8 @@ impl Display for Distance {
 ///
 /// # Errors
 ///
-/// Returns an error if an exit is outside the instrument's prices.
+/// Returns an error if `atr` is not finite, or an exit is outside the
+/// instrument's prices.
 ///
 /// # Panics
 ///

@@ -40,6 +40,7 @@ Released on TBD (UTC).
 - Changed spelling to American English
 - Changed the `# Errors` and `# Panics` sections to Nautilus' wording
 - Added each crate's feature flags to its README
+- Documented the LSE book stream's panic on a non-book series and the target exits' error on a non-finite ATR
 
 ---
 
