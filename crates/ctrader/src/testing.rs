@@ -122,6 +122,20 @@ pub(crate) const EXECUTION_MARKET_RANGE_ACCEPTED: &[u8] =
     include_bytes!("../testdata/execution_market_range_accepted.bin");
 pub(crate) const EXECUTION_MARKET_RANGE_DEAL_REJECTED: &[u8] =
     include_bytes!("../testdata/execution_market_range_deal_rejected.bin");
+pub(crate) const EXECUTION_MARKET_RANGE_BUY_BETTER_ACCEPTED: &[u8] =
+    include_bytes!("../testdata/execution_market_range_buy_better_accepted.bin");
+pub(crate) const EXECUTION_MARKET_RANGE_BUY_BETTER_FILLED: &[u8] =
+    include_bytes!("../testdata/execution_market_range_buy_better_filled.bin");
+pub(crate) const EXECUTION_MARKET_RANGE_SELL_BETTER_ACCEPTED: &[u8] =
+    include_bytes!("../testdata/execution_market_range_sell_better_accepted.bin");
+pub(crate) const EXECUTION_MARKET_RANGE_SELL_BETTER_FILLED: &[u8] =
+    include_bytes!("../testdata/execution_market_range_sell_better_filled.bin");
+pub(crate) const EXECUTION_MARKET_RANGE_BRACKET_ACCEPTED: &[u8] =
+    include_bytes!("../testdata/execution_market_range_bracket_accepted.bin");
+pub(crate) const EXECUTION_MARKET_RANGE_BRACKET_FILLED: &[u8] =
+    include_bytes!("../testdata/execution_market_range_bracket_filled.bin");
+pub(crate) const EXECUTION_MARKET_RANGE_BRACKET_PROTECTION_ACCEPTED: &[u8] =
+    include_bytes!("../testdata/execution_market_range_bracket_protection_accepted.bin");
 pub(crate) const EXECUTION_STOP_LOSS_ENTRY_FILLED: &[u8] =
     include_bytes!("../testdata/execution_stop_loss_entry_filled.bin");
 pub(crate) const EXECUTION_STOP_LOSS_ACCEPTED: &[u8] =

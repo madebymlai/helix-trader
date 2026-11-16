@@ -1,17 +1,27 @@
 //! Nautilus orders as cTrader trade requests, on a hedging account.
 //!
 //! - **A new order** (`ProtoOANewOrderReq`) carries the Nautilus client
-//!   order id as its `clientOrderId`: market, limit and stop market orders,
-//!   GTC, GTD (its expiry in ms), IOC and FOK; a stop's trigger `DEFAULT`
-//!   or `BID_ASK` as cTrader's `TRADE`, `DOUBLE_BID_ASK` as `DOUBLE_TRADE`.
-//!   A market order's time in force is cTrader's own (IOC), whatever the
-//!   order's. Post-only, quote-quantity and display quantities are denied:
-//!   cTrader has none.
+//!   order id as its `clientOrderId`: a market order GTC, IOC or DAY as a
+//!   `MARKET`, whose time in force is cTrader's own (IOC); a limit order
+//!   GTC or GTD (its expiry in ms) as a `LIMIT`, IOC as a `MARKET_RANGE`
+//!   whose base is its price, with no slippage; a stop market order GTC
+//!   or GTD as a `STOP`, its trigger `DEFAULT` or `BID_ASK` as cTrader's
+//!   `TRADE`, `DOUBLE_BID_ASK` as `DOUBLE_TRADE`. cTrader bounds a
+//!   `MARKET_RANGE`'s slippage on the worse side alone: the demo filled
+//!   one based 3.00 on the better side of the market at the market, a buy
+//!   and a sell, and refused one whose fill would be worse, whole, with
+//!   its deal rejected (2026-11-16). cTrader holds a `LIMIT` or `STOP`
+//!   sent IOC or FOK as GTC, and refuses FOK on its immediate orders, so
+//!   FOK, a stop's IOC, DAY on a pending order and a session's open or
+//!   close are denied. Post-only, quote-quantity and display quantities
+//!   are denied: cTrader has none.
 //! - **A bracket's protections** go on its entry, absolute (`stopLoss`,
 //!   `takeProfit`): cTrader moves them to the position the entry opens,
-//!   as one `STOP_LOSS_TAKE_PROFIT` order. Spotware's proto says absolute
+//!   as one `STOP_LOSS_TAKE_PROFIT` order, held as long as the position,
+//!   so a leg other than GTC is denied. Spotware's proto says absolute
 //!   protections are not supported for market orders; the demo took them
-//!   on a market order and set them on its position (2026-10-26).
+//!   on a market order (2026-10-26) and a `MARKET_RANGE` (2026-11-16) and
+//!   set them on its position.
 //! - **An order naming a position** (`SubmitOrder.position_id`, the cTrader
 //!   `positionId`): a market order on the closing side closes that much of
 //!   the position (`ProtoOAClosePositionReq`), never more than it holds; any
@@ -174,8 +184,9 @@ pub(super) enum Placement {
 /// # Errors
 ///
 /// Returns an error if:
-/// - The order has a type, time in force, trigger or flag cTrader lacks, or
-///   is good till a date it does not name.
+/// - The order has a type, trigger or flag cTrader lacks, a time in force
+///   it does not honor for the type, or is good till a date it does not
+///   name.
 /// - It is reduce-only without a position.
 /// - It closes `position` and is larger than it, or carries protection.
 /// - `position` is not a cTrader position.
@@ -233,23 +244,31 @@ pub(super) fn placement(
         take_profit: protection.take_profit.map(|p| p.as_f64()),
         ..Default::default()
     };
+
     match order.order_type() {
-        OrderType::Market => request.set_order_type(ProtoOaOrderType::Market),
+        OrderType::Market => {
+            immediate(order)?;
+            request.set_order_type(ProtoOaOrderType::Market);
+        }
+        // cTrader fills a MARKET_RANGE within its slippage of its base or
+        // better, or refuses it: at no slippage, a limit IOC.
+        OrderType::Limit if order.time_in_force() == TimeInForce::Ioc => {
+            request.set_order_type(ProtoOaOrderType::MarketRange);
+            request.base_slippage_price = order.price().map(|p| p.as_f64());
+            request.slippage_in_points = Some(0);
+        }
         OrderType::Limit => {
             request.set_order_type(ProtoOaOrderType::Limit);
             request.limit_price = order.price().map(|p| p.as_f64());
+            pending(&mut request, order)?;
         }
         OrderType::StopMarket => {
             request.set_order_type(ProtoOaOrderType::Stop);
             request.stop_price = order.trigger_price().map(|p| p.as_f64());
             request.set_stop_trigger_method(trigger_method(order.trigger_type())?);
+            pending(&mut request, order)?;
         }
         order_type => return Err(OrderDeniedReason::UnsupportedOrderType { order_type }),
-    }
-    if order.order_type() != OrderType::Market {
-        let (time_in_force, expiry) = time_in_force(order)?;
-        request.set_time_in_force(time_in_force);
-        request.expiration_timestamp = expiry;
     }
     Ok(Placement::New(request))
 }
@@ -326,12 +345,25 @@ pub(super) fn trigger_method(
     }
 }
 
-/// cTrader's time in force of a pending `order`, and its expiry in ms.
-fn time_in_force(order: &OrderAny) -> Result<(ProtoOaTimeInForce, Option<i64>), OrderDeniedReason> {
-    Ok(match order.time_in_force() {
+/// Checks the time in force of the market `order`: cTrader executes a
+/// MARKET at once and cancels what it cannot fill (IOC), which honors
+/// GTC, IOC and DAY. It refuses a MARKET of FOK ("Such TIF is not
+/// supported by this Order type") and of MARKET_ON_OPEN ("Incorrect time
+/// of execution", demo, 2026-11-16), and has no market on close.
+fn immediate(order: &OrderAny) -> Result<(), OrderDeniedReason> {
+    match order.time_in_force() {
+        TimeInForce::Gtc | TimeInForce::Ioc | TimeInForce::Day => Ok(()),
+        other => Err(OrderDeniedReason::UnsupportedTimeInForce(other)),
+    }
+}
+
+/// Sets on `request` the time in force of the pending `order`, a limit or
+/// a stop, and its expiry in ms: GTC, or GTD. cTrader takes a LIMIT or
+/// STOP sent IOC or FOK and holds it GTC (demo, 2026-11-16), and has no
+/// DAY nor the session's open or close.
+fn pending(request: &mut ProtoOaNewOrderReq, order: &OrderAny) -> Result<(), OrderDeniedReason> {
+    let (time_in_force, expiry) = match order.time_in_force() {
         TimeInForce::Gtc => (ProtoOaTimeInForce::GoodTillCancel, None),
-        TimeInForce::Ioc => (ProtoOaTimeInForce::ImmediateOrCancel, None),
-        TimeInForce::Fok => (ProtoOaTimeInForce::FillOrKill, None),
         TimeInForce::Gtd => {
             let expiry = order
                 .expire_time()
@@ -339,7 +371,10 @@ fn time_in_force(order: &OrderAny) -> Result<(ProtoOaTimeInForce, Option<i64>), 
             (ProtoOaTimeInForce::GoodTillDate, Some(millis(expiry)))
         }
         other => return Err(OrderDeniedReason::UnsupportedTimeInForce(other)),
-    })
+    };
+    request.set_time_in_force(time_in_force);
+    request.expiration_timestamp = expiry;
+    Ok(())
 }
 
 /// `time` in whole milliseconds, cTrader's signed Unix time.
@@ -443,6 +478,35 @@ mod tests {
         assert_eq!(request.time_in_force(), ProtoOaTimeInForce::GoodTillCancel);
     }
 
+    /// cTrader holds a LIMIT sent IOC as GTC (demo, 2026-11-16); its IOC
+    /// execution at a price or better is MARKET_RANGE, whose base the
+    /// demo filled better than on either side.
+    #[rstest]
+    #[case::buy(OrderSide::Buy, ProtoOaTradeSide::Buy)]
+    #[case::sell(OrderSide::Sell, ProtoOaTradeSide::Sell)]
+    fn a_limit_ioc_order_is_a_market_range_based_at_its_price_with_no_slippage(
+        #[case] side: OrderSide,
+        #[case] trade_side: ProtoOaTradeSide,
+    ) {
+        let order = OrderTestBuilder::new(OrderType::Limit)
+            .instrument_id(gold())
+            .side(side)
+            .quantity(Quantity::from(1))
+            .price(Price::from("3869.20"))
+            .time_in_force(TimeInForce::Ioc)
+            .build();
+
+        let request = new_order(placement(&order, 41, None, Protection::default()).unwrap());
+
+        assert_eq!(request.order_type(), ProtoOaOrderType::MarketRange);
+        assert_eq!(request.trade_side(), trade_side);
+        assert_eq!(request.base_slippage_price, Some(3869.2));
+        assert_eq!(request.slippage_in_points, Some(0));
+        assert_eq!(request.limit_price, None);
+        assert_eq!(request.time_in_force, None, "cTrader's own IOC");
+        assert_eq!(request.volume, 100);
+    }
+
     #[rstest]
     fn a_stop_market_order_is_a_stop_triggered_as_its_trigger_type() {
         let order = OrderTestBuilder::new(OrderType::StopMarket)
@@ -461,6 +525,103 @@ mod tests {
         assert_eq!(
             request.stop_trigger_method(),
             ProtoOaOrderTriggerMethod::DoubleTrade
+        );
+    }
+
+    /// The order of `order_type` and `time_in_force`, at 4000.00 if it
+    /// has a price, a GTD's expiring at `EXPIRY`.
+    fn lasting(order_type: OrderType, time_in_force: TimeInForce) -> OrderAny {
+        let mut builder = OrderTestBuilder::new(order_type);
+        builder
+            .instrument_id(gold())
+            .quantity(Quantity::from(1))
+            .time_in_force(time_in_force);
+
+        match order_type {
+            OrderType::Limit => builder.price(Price::from("4000.00")),
+            OrderType::StopMarket => builder.trigger_price(Price::from("4000.00")),
+            _ => &mut builder,
+        };
+
+        if time_in_force == TimeInForce::Gtd {
+            builder.expire_time(EXPIRY);
+        }
+        builder.build()
+    }
+
+    /// 2026-11-16 18:00 UTC.
+    const EXPIRY: UnixNanos = UnixNanos::new(1_794_852_000_000_000_000);
+
+    /// A market order goes without a time in force, cTrader's own IOC; a
+    /// pending one GTC or GTD, its expiry in ms.
+    #[rstest]
+    #[case::market_gtc(OrderType::Market, TimeInForce::Gtc, None, None)]
+    #[case::market_ioc(OrderType::Market, TimeInForce::Ioc, None, None)]
+    #[case::market_day(OrderType::Market, TimeInForce::Day, None, None)]
+    #[case::limit_gtc(
+        OrderType::Limit,
+        TimeInForce::Gtc,
+        Some(ProtoOaTimeInForce::GoodTillCancel),
+        None
+    )]
+    #[case::limit_gtd(
+        OrderType::Limit,
+        TimeInForce::Gtd,
+        Some(ProtoOaTimeInForce::GoodTillDate),
+        Some(1_794_852_000_000)
+    )]
+    #[case::stop_gtc(
+        OrderType::StopMarket,
+        TimeInForce::Gtc,
+        Some(ProtoOaTimeInForce::GoodTillCancel),
+        None
+    )]
+    #[case::stop_gtd(
+        OrderType::StopMarket,
+        TimeInForce::Gtd,
+        Some(ProtoOaTimeInForce::GoodTillDate),
+        Some(1_794_852_000_000)
+    )]
+    fn a_time_in_force_ctrader_honors_is_its_own(
+        #[case] order_type: OrderType,
+        #[case] time_in_force: TimeInForce,
+        #[case] sent: Option<ProtoOaTimeInForce>,
+        #[case] expiration: Option<i64>,
+    ) {
+        let order = lasting(order_type, time_in_force);
+
+        let request = new_order(placement(&order, 41, None, Protection::default()).unwrap());
+
+        assert_eq!(request.time_in_force, sent.map(|t| t as i32));
+        assert_eq!(request.expiration_timestamp, expiration);
+    }
+
+    /// The demo refused FOK on MARKET and MARKET_RANGE ("Such TIF is not
+    /// supported by this Order type") and MARKET_ON_OPEN on MARKET
+    /// ("Incorrect time of execution"), and held a LIMIT or STOP sent IOC
+    /// or FOK as GTC (2026-11-16).
+    #[rstest]
+    #[case::market_fok(OrderType::Market, TimeInForce::Fok)]
+    #[case::market_at_the_open(OrderType::Market, TimeInForce::AtTheOpen)]
+    #[case::market_at_the_close(OrderType::Market, TimeInForce::AtTheClose)]
+    #[case::limit_fok(OrderType::Limit, TimeInForce::Fok)]
+    #[case::limit_day(OrderType::Limit, TimeInForce::Day)]
+    #[case::limit_at_the_open(OrderType::Limit, TimeInForce::AtTheOpen)]
+    #[case::limit_at_the_close(OrderType::Limit, TimeInForce::AtTheClose)]
+    #[case::stop_ioc(OrderType::StopMarket, TimeInForce::Ioc)]
+    #[case::stop_fok(OrderType::StopMarket, TimeInForce::Fok)]
+    #[case::stop_day(OrderType::StopMarket, TimeInForce::Day)]
+    #[case::stop_at_the_open(OrderType::StopMarket, TimeInForce::AtTheOpen)]
+    #[case::stop_at_the_close(OrderType::StopMarket, TimeInForce::AtTheClose)]
+    fn a_time_in_force_ctrader_cannot_honor_is_denied(
+        #[case] order_type: OrderType,
+        #[case] time_in_force: TimeInForce,
+    ) {
+        let order = lasting(order_type, time_in_force);
+
+        assert_eq!(
+            placement(&order, 41, None, Protection::default()),
+            Err(OrderDeniedReason::UnsupportedTimeInForce(time_in_force))
         );
     }
 

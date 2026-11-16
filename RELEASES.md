@@ -6,11 +6,13 @@ Released on TBD (UTC).
 
 - Changed `ModelHandle::new` to take `&ModelBlueprint` and `&Mode`; pass references
 - Removed `venues::bracket_exits_tag`: IB links a bracket's exits in its own OCA group, so they carry Nautilus' tags alone; drop its calls
+- Changed `ctrader` to deny a time in force cTrader does not honor: FOK, a stop market's IOC, a market order's `AT_THE_OPEN` or `AT_THE_CLOSE`, and bracket legs other than GTC; send market orders GTC, IOC or DAY, limits GTC, GTD or IOC, stop markets GTC or GTD, and legs GTC
 
 ### Fixes
 
 - Fixed `ctrader` failing to build without its `test-support` feature; `TokenPair` and `SpotEvents` are public whatever the features
 - Fixed `ctrader` reporting an order refused at execution as cancelled: an order cancelled unfilled with its deal rejected is rejected, with the deal's status and `rejectReason`
+- Fixed `ctrader` leaving a limit IOC working as a GTC order: it goes as a `MARKET_RANGE` based at its price with no slippage, filled at the price or better or rejected
 
 ### Internal Improvements
 

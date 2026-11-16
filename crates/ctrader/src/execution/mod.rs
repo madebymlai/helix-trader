@@ -61,7 +61,7 @@ use nautilus_live::{
 };
 use nautilus_model::{
     accounts::AccountAny,
-    enums::{AccountType, ContingencyType, OmsType, OrderType},
+    enums::{AccountType, ContingencyType, OmsType, OrderType, TimeInForce},
     events::{AccountState, OrderDeniedReason},
     identifiers::{
         AccountId, ClientId, ClientOrderId, InstrumentId, PositionId, Venue, VenueOrderId,
@@ -620,8 +620,8 @@ impl CTraderExecutionClient {
 
     /// Submits the bracket of `orders`: an entry (market, limit or stop
     /// market) whose protections are its children, a stop market stop
-    /// loss and a limit take profit, each for the entry's quantity on the
-    /// other side.
+    /// loss and a limit take profit, each GTC, for the entry's quantity on
+    /// the other side.
     fn submit_bracket(
         &self,
         session: &Session,
@@ -640,10 +640,17 @@ impl CTraderExecutionClient {
         };
         let mut protection = Protection::default();
         let (mut stop_loss, mut take_profit) = (None, None);
+
         for leg in orders
             .iter()
             .filter(|o| o.client_order_id() != entry.client_order_id())
         {
+            // A protection lasts as long as its position (GOOD_TILL_CANCEL).
+            if leg.time_in_force() != TimeInForce::Gtc {
+                return Err(OrderDeniedReason::UnsupportedTimeInForce(
+                    leg.time_in_force(),
+                ));
+            }
             let protects = leg.parent_order_id() == Some(entry.client_order_id())
                 && leg.order_side() != entry.order_side()
                 && leg.quantity() == entry.quantity();

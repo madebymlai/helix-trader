@@ -1,0 +1,61 @@
+# Captured from a cTrader broker's demo (2026-11-16), protobuf port 5035:
+# that MARKET_RANGE buy's protections set on the position it opened, as
+# one STOP_LOSS_TAKE_PROFIT order under the entry's clientOrderId: stop
+# loss 3851.58, take profit 3891.58, GOOD_TILL_CANCEL. Sent after the
+# entry's fill, under no clientMsgId of a request, as a market entry's.
+# Scrubbed: ctidTraderAccountId replaced by the fake 1000001; re-encoded
+# from the decoded event, fields as served.
+# The .bin is the payload; this is its text form, from:
+#   protoc -I ../proto --decode=ProtoOAExecutionEvent OpenApiMessages.proto < execution_market_range_bracket_protection_accepted.bin
+# Message: ProtoOAExecutionEvent
+ctidTraderAccountId: 1000001
+executionType: ORDER_ACCEPTED
+position {
+  positionId: 697002710
+  tradeData {
+    symbolId: 41
+    volume: 100
+    tradeSide: BUY
+    openTimestamp: 1794849521888
+    guaranteedStopLoss: false
+    measurementUnits: "Oz"
+  }
+  positionStatus: POSITION_STATUS_OPEN
+  swap: 0
+  price: 3868.57
+  stopLoss: 3851.58
+  takeProfit: 3891.58
+  utcLastUpdateTimestamp: 1794849521897
+  commission: -11
+  marginRate: 3513.06
+  mirroringCommission: 0
+  guaranteedStopLoss: false
+  usedMargin: 11710
+  stopLossTriggerMethod: TRADE
+  moneyDigits: 2
+  trailingStopLoss: false
+}
+order {
+  orderId: 1040675913
+  tradeData {
+    symbolId: 41
+    volume: 100
+    tradeSide: SELL
+    openTimestamp: 1794849521897
+    guaranteedStopLoss: false
+    measurementUnits: "Oz"
+  }
+  orderType: STOP_LOSS_TAKE_PROFIT
+  orderStatus: ORDER_STATUS_ACCEPTED
+  executedVolume: 0
+  utcLastUpdateTimestamp: 1794849521897
+  closingOrder: true
+  limitPrice: 3891.58
+  stopPrice: 3851.58
+  clientOrderId: "PROBE-IOC-5"
+  timeInForce: GOOD_TILL_CANCEL
+  positionId: 697002710
+  trailingStopLoss: false
+  stopTriggerMethod: TRADE
+}
+isServerEvent: true
