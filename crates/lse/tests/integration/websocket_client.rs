@@ -133,10 +133,13 @@ async fn a_subscription_brings_the_ticks_of_its_symbol() {
     assert_eq!(peer.received(), [(0, auth()), (0, subscribe("GOLD.F"))]);
 }
 
-/// LSE's documented keepalive, which it answers with a pong, sent every
-/// 25 s as LSE's Python client sends it. The test's clock is paused once
-/// the key is authenticated, so that no wait races the authentication,
-/// and moved on the 25 s, then let run for the ping to reach the peer.
+/// LSE's documented keepalive, which it answers with a pong, is sent
+/// while the connection is open. The test's clock is paused once the key
+/// is authenticated, so that no wait races the authentication, and moved
+/// on 25 s, the interval LSE's Python client keeps, then let run for the
+/// 10 s the peer waits for the ping: a ping reaches the peer within about
+/// 35 s of the connection, which bounds the interval without pinning it at
+/// 25 s.
 #[tokio::test]
 async fn the_keepalive_is_lse_s_ping() {
     let peer = MockLseSocket::start(|_, frame| data_ws_answer(frame));
