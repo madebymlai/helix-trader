@@ -128,8 +128,8 @@ impl ModelBlueprint {
     }
 
     /// The backtests of its models, on its dataset in the catalog at
-    /// `catalog`, and its models in the store under `models`: their
-    /// retrains and their scores.
+    /// `catalog`, and its models in the store under `models`: the check
+    /// of their start and their scores.
     ///
     /// # Errors
     ///

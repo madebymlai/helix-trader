@@ -1,8 +1,9 @@
 # Model EMA (`src/strategy/model_ema/`), read into `ModelEmaConfig`: an
 # example strategy trading on a learned model, whose features are a fast
 # and a slow EMA of each bars series it reads, set in [indicators]:
-#   cargo run --release -- train model_ema --config config/model_ema.toml --at ...
+#   cargo run --release -- train model_ema --config config/model_ema.toml --from ... --to ...
 #   cargo run --release -- backtest model_ema --config config/model_ema.toml ...
+# A backtest trains nothing: train the retrain times of its span first.
 # Its models are trained at the commission and balance of [model] dataset,
 # whatever a backtest's own --commission and --balance.
 # Every field is described in `src/strategy/README.md`.
@@ -93,7 +94,7 @@ learner = { kind = "lightgbm", num_iterations = 100, learning_rate = 0.1, num_le
 # net of the commission, in the traded instrument's P&L currency, and sized
 # at [trade] risk of the balance, in that currency or one [trade]
 # conversions reaches it from, converted at each decision's rate. They key the model store, so train, a
-# backtest's retrains and live all read the one store of this config,
+# backtest and live all read the one store of this config,
 # whatever a backtest's own --commission and --balance: changing either
 # retrains the model. IC's Raw account charges 30 USD per million a side.
 dataset = { commission = { rate = "0.00003" }, balance = "10000 USD" }

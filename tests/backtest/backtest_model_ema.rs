@@ -10,8 +10,8 @@
 //! as its child. A model published straight to the store, a baseline
 //! (`common::dataset`), trades from its valid-from: every decision a long on
 //! its time-only target, closed 30 minutes later. The binary's `backtest`
-//! builds its dataset and retrains on the schedule first, in its own
-//! process, a failed retrain no failure of the backtest.
+//! trades on the store as it is (`backtest_model_ema_trained` backtests a
+//! store `train` filled).
 
 use std::{
     ffi::OsStr,
@@ -398,23 +398,9 @@ fn a_live_retrain_through_the_train_subcommand_failing_is_kept_with_its_reason()
     assert_eq!(traded(&catalog, models), (0, 0));
 }
 
-/// The binary's `backtest` of the strategy of `config` over `[start,
-/// end]`, retraining into the store under `models`, its simulated account
-/// at the commission and balance of the config's dataset runs; its stdout
-/// and its stderr.
-fn backtest(
-    config: &Path,
-    catalog: &Path,
-    models: &Path,
-    start: Timestamp,
-    end: Timestamp,
-) -> (String, String) {
-    let costs = ["--commission-rate", "0.00003", "--balance", "10000000 USD"];
-    backtest_at(config, catalog, models, (start, end), &costs)
-}
-
-/// `backtest` over `span`, its simulated account at `costs`, its commission
-/// and balance flags.
+/// The binary's `backtest` of the strategy of `config` over `span`, on the
+/// store under `models`, its simulated account at `costs`, its commission
+/// and balance flags; its stdout and its stderr.
 fn backtest_at(
     config: &Path,
     catalog: &Path,
@@ -441,57 +427,13 @@ fn backtest_at(
     (stdout, stderr)
 }
 
-/// A backtest from midnight of the 23rd to noon of the 24th builds its
-/// dataset, in its own process, from the first window, 02:00 of the 21st,
-/// to the end of the 24th plus the target's limit, then retrains at
-/// midnight of each, there too, a node after another: each fit slice of
-/// 34 rows (`a_train_with_a_slice_of_fewer_rows_than_the_minimum_fails_naming_it_and_publishes_nothing`)
-/// short of a `min_rows` of 35, each keeps the current model, there being
-/// none, and the backtest goes on, each reason printed, to a run with no
-/// model: no period is scored, by a model or by a baseline, which is a
-/// model's.
-#[rstest]
-fn a_retrain_keeping_the_model_does_not_fail_the_binarys_backtest() {
-    let catalog = walk(
-        ic::at("00:00:00") - SignedDuration::from_hours(3),
-        t() + SignedDuration::from_hours(51),
-    );
-    let dir = tempfile::tempdir().unwrap();
-    let (config_path, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
-    std::fs::write(&config_path, of_min_rows(35)).unwrap();
-    let (start, end) = (t(), t() + SignedDuration::from_hours(36));
-
-    let (stdout, stderr) = backtest(&config_path, catalog.path(), &models, start, end);
-
-    assert!(stdout.contains("built 4 days of the dataset"), "{stdout}");
-    for at in [t(), t() + SignedDuration::from_hours(24)] {
-        let reason = format!("the retrain at {at}: kept the current model: ");
-        let line = stderr
-            .lines()
-            .find(|line| line.contains(&reason))
-            .unwrap_or_else(|| panic!("{stderr}"));
-        assert_too_few_rows(line, "fit slice", 34, 35);
-    }
-    assert!(stdout.contains("Orders: 0"), "{stdout}");
-    assert!(stdout.contains("Model valid from: none"), "{stdout}");
-    assert!(
-        stdout
-            .lines()
-            .filter(|line| line.starts_with("  Baseline rows: "))
-            .all(|line| line == "  Baseline rows: 0"),
-        "{stdout}"
-    );
-    assert!(!stdout.contains("published a model"), "{stdout}");
-}
-
 /// With a model in the store at each retrain time of the span, published
-/// straight once the dataset is built, a backtest builds and retrains
-/// nothing, whatever its own commission, balance and latency, which are its
-/// simulated account's alone: its models are the config's
-/// (`[model] dataset`), whose costs it reports, followed by the scores of
-/// both periods, each of its model.
+/// straight once `train` built the dataset it reads, a backtest runs at its
+/// own commission, balance and latency, which are its simulated account's
+/// alone: its models are the config's (`[model] dataset`), whose costs it
+/// reports, followed by the scores of both periods, each of its model.
 #[rstest]
-fn the_binarys_backtest_on_a_store_holding_each_retrains_model_builds_and_trains_nothing() {
+fn the_binarys_backtest_reports_its_own_costs_and_its_models_then_each_periods_scores() {
     let catalog = walk(
         ic::at("00:00:00") - SignedDuration::from_hours(3),
         t() + SignedDuration::from_hours(51),
@@ -501,7 +443,7 @@ fn the_binarys_backtest_on_a_store_holding_each_retrains_model_builds_and_trains
     std::fs::write(&config_path, CONFIG).unwrap();
     let (start, end) = (t(), t() + SignedDuration::from_hours(36));
     let next = t() + SignedDuration::from_hours(24);
-    backtest(&config_path, catalog.path(), &models, start, end);
+    trained(&config_path, catalog.path(), &models, t());
     for at in [t(), next] {
         publish(&catalog, &models, at);
     }
@@ -514,7 +456,7 @@ fn the_binarys_backtest_on_a_store_holding_each_retrains_model_builds_and_trains
         "150ms",
     ];
 
-    let (stdout, stderr) = backtest_at(
+    let (stdout, _) = backtest_at(
         &config_path,
         catalog.path(),
         &models,
@@ -522,9 +464,6 @@ fn the_binarys_backtest_on_a_store_holding_each_retrains_model_builds_and_trains
         &other_costs,
     );
 
-    assert!(!stdout.contains("days of the dataset"), "{stdout}");
-    assert!(!stdout.contains("the dataset holds every day"), "{stdout}");
-    assert!(!stderr.contains("the retrain at"), "{stderr}");
     assert!(
         stdout.contains(
             "Run at: commission rate 0.0001, balance 100000.00 USD, latency 150ms \

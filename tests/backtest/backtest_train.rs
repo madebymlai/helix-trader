@@ -2,7 +2,7 @@
 //! the dataset probe (`common::dataset`) replays the days the window lacks
 //! through `Backtest::run_dataset`, and LightGBM fits each side's realized
 //! R on the rows. IC's gold rises 4.00 over each even hour and falls back
-//! over each odd one (`edge_quotes`), and the probe's one feature, `cheap`,
+//! over each odd one (`ic::edge_quotes`), and the probe's one feature, `cheap`,
 //! marks where the hour starts: 1 at the bottom, 0 at the top. Each side
 //! learns its R from the feature, the long's high at the bottom, where it
 //! wins, and the short's at the top, and their pair is calibrated together
@@ -34,35 +34,10 @@ use crate::common::{
     ic,
 };
 
-/// The price of gold at the bottom of each even hour, and the rise over
-/// it.
-const BOTTOM: f64 = 4000.0;
-const RISE: f64 = 4.0;
-
-/// IC's gold's quotes over `[from, to)`, one every 45 s, the ask 0.20
-/// above the bid: over each even hour of the day the bid rises from
-/// 4000.00 by 0.05 a quote, to 4003.95, and over each odd hour falls from
-/// 4004.00 by as much, to 4000.05.
-fn edge_quotes(from: Timestamp, to: Timestamp) -> Vec<QuoteTick> {
-    let mut quotes = vec![];
-    let mut time = from;
-    while time < to {
-        let seconds = time.as_second();
-        let step = (seconds % 3600 / 45) as f64 * 0.05;
-        let bid = if seconds / 3600 % 2 == 0 {
-            BOTTOM + step
-        } else {
-            BOTTOM + RISE - step
-        };
-        quotes.push(ic::quote(
-            time,
-            &format!("{bid:.2}"),
-            &format!("{:.2}", bid + 0.2),
-        ));
-        time += SignedDuration::from_secs(45);
-    }
-    quotes
-}
+/// The price of gold at the bottom of each even hour of `ic::edge_quotes`,
+/// and the rise over it.
+const BOTTOM: f64 = ic::EDGE_BOTTOM;
+const RISE: f64 = ic::EDGE_RISE;
 
 /// Where the last mid is between the top of the hours, 4004.10, at 0, and
 /// their bottom, 4000.10, at 1, clamped.
@@ -175,7 +150,7 @@ fn catalog() -> TempDir {
         ic::at("00:00:00") - SignedDuration::from_hours(25),
         ic::at("00:00:00") + SignedDuration::from_hours(51),
     );
-    ic::catalog_of(edge_quotes(from, to), from, to)
+    ic::catalog_of(ic::edge_quotes(from, to), from, to)
 }
 
 /// Midnight of the 23rd: the window starts at 02:00 of the 20th.
