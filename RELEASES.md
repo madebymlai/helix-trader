@@ -43,6 +43,10 @@ Released on TBD (UTC).
 - Changed a live retrain due while another waits for its data to take its place, the waiting one skipped with a warning; train a skipped time with `train --from --to` if a backtest needs it
 - Changed `RetrainActor::new` to take the strategy's `ModelStore`, whose generations it lists at its start; pass the store the strategy reads
 
+### Security
+
+- Fixed a crash or power loss during a publish leaving a generation listed whose model files are cut short: a publish syncs its models' files to disk before it writes the manifest
+
 ### Fixes
 
 - Fixed a meta model deciding beside the sides of another train, as when a later train's meta waited or failed
