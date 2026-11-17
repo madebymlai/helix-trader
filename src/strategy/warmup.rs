@@ -262,20 +262,14 @@
 //! then, on bars on a root, `continuous_bars`; in a backtest or a dataset run
 //! nothing, the strategy subscribing alone.
 
-use std::{
-    any::Any,
-    cell::{Cell, RefCell},
-    collections::HashMap,
-    fmt::Debug,
-    rc::Rc,
-};
+use std::{any::Any, cell::Cell, fmt::Debug, rc::Rc};
 
 use anyhow::Context;
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::{DataActor, DataActorNative, indicators::SharedActorIndicator},
     cache::CacheConfig,
-    messages::data::{DataResponse, DataResponseEnvelope},
+    messages::data::DataResponseEnvelope,
 };
 use nautilus_core::{Params, UUID4, UnixNanos};
 use nautilus_data::engine::config::DataEngineConfig;
@@ -303,7 +297,7 @@ mod merge;
 mod tick;
 
 use hold::Hold;
-use merge::{Cut, Merge};
+use merge::Merge;
 use tick::{Series, Tick};
 
 /// The window a warmup is asked in (see `time_range`): under a day by more
@@ -402,7 +396,9 @@ pub struct Warmup {
     fed_ticks: Vec<TickSeries>,
     fed_custom: Vec<CustomSeries>,
     /// What hands the history of a live start's series on in time order
-    /// across them, to the hold (see `merge`).
+    /// across them, to the hold (see `merge`). Temporary until Nautilus
+    /// hands a warmup's history in time order across data types:
+    /// helix-trader#46.
     merge: Merge,
     /// What hands the quotes, trades, depth, deltas and custom data, of the
     /// warmup and live, to the indicators reading them, holding the live
@@ -414,11 +410,6 @@ pub struct Warmup {
     group: Cell<UUID4>,
     /// Whether that group has not ended yet.
     warming: Cell<bool>,
-    /// The bar types each request of that start not yet complete builds.
-    building: RefCell<HashMap<UUID4, Vec<BarType>>>,
-    /// The close of the latest bar of each bar type built that the warmup
-    /// read from the cache.
-    read: RefCell<HashMap<BarType, UnixNanos>>,
 }
 
 /// What a warmup's `start` does.
@@ -461,8 +452,6 @@ impl Warmup {
             end: Cell::new(UnixNanos::default()),
             group: Cell::new(UUID4::new()),
             warming: Cell::new(false),
-            building: RefCell::default(),
-            read: RefCell::default(),
         }
     }
 
@@ -572,42 +561,26 @@ impl Warmup {
                 &ContinuousBars::default(),
                 self.group.get(),
             )?;
-            let fed = self.fed(now);
-            let mut merged: Vec<(UUID4, Series)> = requested
-                .iter()
-                .flat_map(|request| {
-                    let bars = request
-                        .built
-                        .iter()
-                        .map(|bar_type| Series::Bars(bar_type.standard()));
-                    request
-                        .series
-                        .clone()
-                        .into_iter()
-                        .chain(bars)
-                        .map(|series| (request.id, series))
-                })
-                .filter(|(_, series)| fed.contains(series))
-                .collect();
-            // The strategy's own series, as a replay reads them
+            // Temporary: the merge of the history across series, until
+            // Nautilus hands it in time order, helix-trader#46. Its ties
+            // rank by the strategy's own series, as a replay reads them
             // (`Backtest::series`): not the harness's bars.
-            let catalog = DataRequirements {
+            let own = DataRequirements {
                 bar_types: self.bar_types.clone(),
                 ..requirements.clone()
-            }
-            .catalog_series();
-            merged.sort_by_cached_key(|(_, series)| tie_rank(series, &catalog, now));
-            self.merge.start(merged);
-            self.read.borrow_mut().clear();
+            };
+            let fed = DataRequirements {
+                bar_types: self.fed_bars.clone(),
+                ticks: self.fed_ticks.clone(),
+                custom: self.fed_custom.clone(),
+                warmup: self.length,
+            };
+            self.merge.start(&requested, &own, &fed, now);
 
             if requested.is_empty() {
                 self.warming.set(false);
                 self.end()?;
             }
-            *self.building.borrow_mut() = requested
-                .into_iter()
-                .map(|request| (request.id, request.built))
-                .collect();
         }
         Ok(now)
     }
@@ -636,40 +609,14 @@ impl Warmup {
         A: DataActor + DataActorNative,
     {
         let ends = *response.correlation_id() == self.group.get();
-        let cut = ends && self.merge.is_cut();
         if ends {
             self.warming.set(false);
         }
-
-        let request = response.correlation_id();
-        let built = self.building.borrow().get(request).cloned();
-        if let Some(built) = built {
-            // Those closing after the warmup's end Nautilus built from the
-            // live data it held for the request, at its completion: live.
-            let end = self.end.get();
-            let (live, bars): (Vec<Bar>, Vec<Bar>) = self
-                .built_bars(actor, &built)
-                .into_iter()
-                .partition(|bar| bar.ts_init > end);
-            for bar in live {
-                self.hold.built_live(Tick::Bar(bar))?;
-            }
-            let through = response.response().and_then(latest_initialized);
-            self.cut(
-                self.merge
-                    .built(request, bars, through, |tick| self.hold.history(tick))?,
-            )?;
-        }
-
-        if response.completed() {
-            self.merge
-                .complete(request, |tick| self.hold.history(tick))?;
-            self.building.borrow_mut().remove(request);
-        }
-
-        if ends {
-            self.end()?;
-        }
+        // Temporary: the merge reads the bars the request built and its
+        // end, helix-trader#46.
+        self.merge
+            .response(actor, response, self.end.get(), &self.hold)?;
+        let cut = if ends { self.end()? } else { false };
 
         if finished(self.group.get(), response)? && !cut {
             log::info!("Warmup complete");
@@ -678,10 +625,13 @@ impl Warmup {
     }
 
     /// Ends the merge and the hold of a live start: hands on all the
-    /// history held, in time order, then the live ticks held.
-    fn end(&self) -> anyhow::Result<()> {
-        self.merge.end(|tick| self.hold.history(tick))?;
-        self.hold.release()
+    /// history held, in time order, then the live ticks held. Returns
+    /// whether the merge was cut, the warmup ended incomplete.
+    fn end(&self) -> anyhow::Result<bool> {
+        // Temporary: the merge's end, helix-trader#46.
+        let cut = self.merge.end(&self.hold)?;
+        self.hold.release()?;
+        Ok(cut)
     }
 
     /// Hands `ticks`, a response's, to the merge, which hands them on in
@@ -694,55 +644,8 @@ impl Warmup {
     /// the series held back if the merge goes past its bound, or the series
     /// out of time order.
     fn history(&self, ticks: impl IntoIterator<Item = Tick>) -> anyhow::Result<()> {
-        self.cut(self.merge.history(ticks, |tick| self.hold.history(tick))?)
-    }
-
-    /// Ends the warmup incomplete if the merge was cut, by `cut`, handing
-    /// over the live ticks held.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if an indicator reading a live tick fails, or saying
-    /// why the merge was cut: the series held back past its bound, or the
-    /// series out of time order.
-    fn cut(&self, cut: Option<Cut>) -> anyhow::Result<()> {
-        let Some(cut) = cut else {
-            return Ok(());
-        };
-        self.warming.set(false);
-        self.hold.release()?;
-        anyhow::bail!("the warmup is incomplete: {cut}")
-    }
-
-    /// The bars of `bar_types` in `actor`'s cache the warmup has not read
-    /// yet, oldest first, read now. A node caches a bar type's bars under
-    /// its standard type, a composite's without its source
-    /// (`BarType::standard`, `TimeBarAggregator::new`).
-    fn built_bars<A>(&self, actor: &A, bar_types: &[BarType]) -> Vec<Bar>
-    where
-        A: DataActor + DataActorNative,
-    {
-        let cache = actor.cache();
-        let mut read = self.read.borrow_mut();
-        let mut bars = Vec::new();
-
-        for bar_type in bar_types {
-            let standard = bar_type.standard();
-            let after = read.get(&standard).copied();
-            // The cache holds the newest first.
-            let mut new: Vec<Bar> = cache
-                .bars(&standard)
-                .unwrap_or_default()
-                .into_iter()
-                .take_while(|bar| after.is_none_or(|after| bar.ts_event > after))
-                .collect();
-            new.reverse();
-            if let Some(latest) = new.last() {
-                read.insert(standard, latest.ts_event);
-            }
-            bars.extend(new);
-        }
-        bars
+        // Temporary: the merge of the history across series, helix-trader#46.
+        self.merge.history(ticks, &self.hold)
     }
 
     /// Reads the completion of every request of the last start, then of its
@@ -752,7 +655,7 @@ impl Warmup {
     where
         A: DataActor + DataActorNative,
     {
-        let requests: Vec<UUID4> = self.building.borrow().keys().copied().collect();
+        let requests = self.merge.pending();
         for id in requests.into_iter().chain([self.group.get()]) {
             self.on_data_response(actor, &DataResponseEnvelope::terminal(id, None))?;
         }
@@ -776,7 +679,9 @@ impl Warmup {
     /// them, so what they hold until then is no state to decide on.
     #[must_use]
     pub fn is_warming(&self) -> bool {
-        self.warming.get()
+        // Temporary: the merge cut ends the warmup incomplete,
+        // helix-trader#46.
+        self.warming.get() && !self.merge.is_cut()
     }
 
     /// Hands the book depth of `response`, a response to the warmup's
@@ -946,28 +851,6 @@ impl Warmup {
         self
     }
 
-    /// The series the indicators it feeds read, as a start at `now`
-    /// requests them: the bars by their standard type, a root's ticks and
-    /// custom series on the contract standing for it (`rolls::front`,
-    /// `CustomSeries::at`).
-    fn fed(&self, now: Timestamp) -> Vec<Series> {
-        let bars = self
-            .fed_bars
-            .iter()
-            .map(|bar_type| Series::Bars(bar_type.standard()));
-        let ticks = self.fed_ticks.iter().map(|tick| {
-            Series::of(&TickSeries {
-                data: tick.data.clone(),
-                instrument_id: front(tick.instrument_id, now),
-            })
-        });
-        let custom = self
-            .fed_custom
-            .iter()
-            .map(|series| Series::Custom(series.at(now).data_type().clone()));
-        bars.chain(ticks).chain(custom).collect()
-    }
-
     /// The cache config of a live node running the warmup: sized for the
     /// warmup of every bar type it builds (see `cache_config`).
     ///
@@ -1002,8 +885,6 @@ impl Debug for Warmup {
             .field("end", &self.end)
             .field("group", &self.group)
             .field("warming", &self.warming)
-            .field("building", &self.building)
-            .field("read", &self.read)
             .finish()
     }
 }
@@ -1202,36 +1083,6 @@ where
     Ok(requested)
 }
 
-/// Where `series`, a series a warmup merges, goes among the others on a tie
-/// (see `merge`), as a replay hands ties: custom data first, a backtest
-/// adding its stream before the catalog's (`backtest::node`); then the
-/// ticks in the order of `catalog`, the catalog series of the strategy's
-/// own bar types and ticks (`DataRequirements::catalog_series`), as a
-/// backtest reads them, the harness's bars left out, a root's standing for its
-/// contract at `now`; built bars last, the aggregator firing after the data
-/// of its instant. Within one of these, the order requested.
-fn tie_rank(series: &Series, catalog: &[CatalogSeries], now: Timestamp) -> (u8, usize) {
-    match series {
-        Series::Custom(_) => (0, 0),
-        Series::Bars(_) => (2, 0),
-        ticks => {
-            let at = catalog
-                .iter()
-                .position(|source| match source {
-                    CatalogSeries::Ticks(tick) => {
-                        Series::of(&TickSeries {
-                            data: tick.data.clone(),
-                            instrument_id: front(tick.instrument_id, now),
-                        }) == *ticks
-                    }
-                    CatalogSeries::Bars(_) => false,
-                })
-                .expect("a tick series requested is among the catalog series");
-            (1, at)
-        }
-    }
-}
-
 /// A request of a warmup's start: its id, the bar types it builds, and the
 /// series of the history it hands on in time order across series (see
 /// `merge`), none for bars or a definition.
@@ -1391,18 +1242,6 @@ pub fn finished(group: UUID4, response: &DataResponseEnvelope) -> anyhow::Result
     match response.failure_reason() {
         Some(reason) => anyhow::bail!("the warmup is incomplete: {reason}"),
         None => Ok(true),
-    }
-}
-
-/// The latest `ts_init` of `response`'s quotes, trades or bars, if it
-/// holds any: where the bars a request builds from them stand (see
-/// `merge`). Nautilus builds no bars from the other kinds.
-fn latest_initialized(response: &DataResponse) -> Option<UnixNanos> {
-    match response {
-        DataResponse::Quotes(quotes) => quotes.data.iter().map(|quote| quote.ts_init).max(),
-        DataResponse::Trades(trades) => trades.data.iter().map(|trade| trade.ts_init).max(),
-        DataResponse::Bars(bars) => bars.data.iter().map(|bar| bar.ts_init).max(),
-        _ => None,
     }
 }
 
