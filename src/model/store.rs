@@ -786,6 +786,12 @@ impl Pair {
         Ok(self.calibration.apply(&predictions))
     }
 
+    /// The calibration of its sides' predictions.
+    #[must_use]
+    pub const fn calibration(&self) -> Ksplit {
+        self.calibration
+    }
+
     /// The model of `side`.
     ///
     /// # Panics

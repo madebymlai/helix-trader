@@ -166,11 +166,10 @@ struct SideFit<'a> {
 
 /// The sides' pair a train fitted, in hand to decide on, the ancestor's,
 /// and what of it a generation publishes: each side's level and model as
-/// fitted, and the pair's calibration.
+/// fitted, and the pair's calibration (`Pair::calibration`).
 struct PairFit<'a> {
     pair: Pair,
     sides: Vec<(&'a Level, Fitted)>,
-    calibration: Ksplit,
 }
 
 /// What a train did, and the figures it reached doing it.
@@ -333,6 +332,7 @@ impl Training {
             .map(|(ancestor, level)| self.meta(level, ancestor, at, &rows, reached))
             .transpose()?;
         let pair = self.pair(fits.sides, &rows, &mut reached.sides)?;
+        let calibration = pair.pair.calibration();
         let sides = pair
             .sides
             .into_iter()
@@ -341,7 +341,7 @@ impl Training {
         self.models.publish(&StoredGeneration {
             valid_from: at,
             sides,
-            calibration: pair.calibration,
+            calibration,
             meta,
         })
     }
@@ -481,7 +481,6 @@ impl Training {
         Ok(PairFit {
             pair: Pair::new(models, calibration)?,
             sides,
-            calibration,
         })
     }
 
