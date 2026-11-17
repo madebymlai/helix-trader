@@ -255,8 +255,8 @@ fn a_backtest_across_a_crash_runs_through_the_gap_it_left() {
     wait_for_staged_quotes(dir.path(), &mut crashed);
     crashed.kill().unwrap();
     crashed.wait().unwrap();
-    let mut restarted = spawn_node(dir.path(), Duration::from_secs(1), Some(3_000), 1_000_000);
-    assert!(stopped(&mut restarted).success());
+    let mut restarted = spawn_node(dir.path(), Duration::from_secs(1), None, 1_000_000);
+    assert!(interrupt_once_promoted_from(dir.path(), &mut restarted, 1_000_000).success());
     let quotes: Vec<QuoteTick> = catalog(dir.path())
         .query(None, None, None, None, None, true)
         .unwrap();
@@ -750,6 +750,22 @@ fn interrupt_once_promoted(root: &Path, node: &mut Child, files: usize) -> ExitS
             return interrupt(node);
         }
         assert!(Instant::now() < deadline, "promoted {promoted:?}");
+        assert!(node.try_wait().unwrap().is_none(), "the node stopped");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Interrupts `node` (`interrupt`) once the catalog of `root` holds a
+/// quote of its run, one numbered `first_seq` or more (`quote_seqs`): how
+/// it exited.
+fn interrupt_once_promoted_from(root: &Path, node: &mut Child, first_seq: u64) -> ExitStatus {
+    let deadline = Instant::now() + PATIENCE;
+
+    loop {
+        if quote_seqs(root).iter().any(|&seq| seq >= first_seq) {
+            return interrupt(node);
+        }
+        assert!(Instant::now() < deadline, "no quote of the run promoted");
         assert!(node.try_wait().unwrap().is_none(), "the node stopped");
         std::thread::sleep(Duration::from_millis(100));
     }
