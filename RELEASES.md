@@ -8,6 +8,7 @@ Released on TBD (UTC).
 - Added a live retrain at a node's start of the latest retrain time whose model set the store lacks
 - Added a live retrain's `train` output to the node's Nautilus log, a log record per line
 - Added run figures to `train`'s report per retrain time: wall and CPU time, peak memory, dataset days and each fit and calibration slice's rows
+- Added features on any list of series, any kinds, instruments and futures roots, each update reaching a feature once, in the order it comes
 
 ### Breaking Changes
 
@@ -38,6 +39,7 @@ Released on TBD (UTC).
 - Removed `keepalive_secs` from `LseWebSocketClient::connect`; drop it, the client pings every 25 s
 - Removed `Deserialize` from `TickSeries`; read tick series through a strategy config's `[data]` series
 - Removed `Launcher::in_process` outside the crate's own tests
+- Removed `FeatureSetBuilder`'s `quotes`, `trades`, `bars`, `depth`, `deltas`, `over_bracket`; use `feature` on a list of series, `Bracketed` over the bracket
 
 ### Security
 
