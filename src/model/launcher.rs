@@ -168,7 +168,7 @@ impl Launcher {
                 if trained.succeeded() {
                     Retrained::Succeeded
                 } else {
-                    Retrained::Kept(trained.to_string())
+                    Retrained::Kept(trained.outcome.to_string())
                 }
             }),
         }
@@ -545,7 +545,10 @@ mod tests {
     }
 
     fn published(at: Timestamp) -> Trained {
-        Outcome::Published { valid_from: at }.into()
+        Outcome::Published {
+            generation: PathBuf::from("models").join(at.to_string()),
+        }
+        .into()
     }
 
     /// A child of `sh` running `script`, `--at` and the time its `$1` and

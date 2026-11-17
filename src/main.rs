@@ -25,6 +25,7 @@ use helix_trader::{
         ModelStrategy, dataset,
         handle::{Mode, SettledRows},
         launcher::{Launcher, RetrainActor},
+        report::{Meter, Report},
         schedule::Retrain,
         targets::TargetRow,
         train::Trained,
@@ -66,8 +67,9 @@ enum Command {
     Live(Box<LiveArgs>),
     /// Trains the strategy's models at a time, or at each retrain time of
     /// a span, those without one valid from it, replaying the days its
-    /// dataset lacks, and prints each model published or already
-    /// published, or fails with why a current one was kept.
+    /// dataset lacks, and prints a report of each train's run figures: its
+    /// generation published or already published, or why it failed, its
+    /// times, memory, dataset days and rows per slice; fails if any failed.
     Train(Box<TrainArgs>),
 }
 
@@ -698,40 +700,50 @@ impl DatasetRun {
     }
 }
 
-/// Prints the outcome of a train that kept no model, each model published
-/// or already published; one that kept a current model, failed, is an
-/// error, its reason: the command fails, so that
-/// the live node that started it knows why (`model::launcher`).
+/// Prints the report of the train at `at`, which did `trained`, as it ends
+/// (`report::Report`), its process figures read by `meter` then.
+fn print_report(meter: &mut Meter, at: Timestamp, trained: &Trained) {
+    let usage = meter.lap();
+    print!("{}", Report { at, trained, usage });
+}
+
+/// Prints the report of the train at `at`, which did `trained`
+/// (`print_report`); one that kept the current generation, failed, is an
+/// error, its reason: the command fails, so that the live node that started
+/// it knows why (`model::launcher`).
 ///
 /// # Errors
 ///
-/// Returns an error if the train kept a current model.
-fn reported(trained: &Trained) -> anyhow::Result<()> {
-    anyhow::ensure!(trained.succeeded(), "{trained}");
-    println!("{trained}");
+/// Returns an error if the train kept the current generation.
+fn reported(mut meter: Meter, at: Timestamp, trained: &Trained) -> anyhow::Result<()> {
+    print_report(&mut meter, at, trained);
+    anyhow::ensure!(trained.succeeded(), "{}", trained.outcome);
     Ok(())
 }
 
-/// Prints the outcome of each of `trains`, a train over a span, at its
-/// retrain time, as it comes: a train that kept a current model does not
-/// stop the next. Fails once all are done if any kept one, listing each
-/// such retrain time with its train's reason (`reported`).
+/// Prints the report of each of `trains`, a train over a span, at its
+/// retrain time, as it comes (`print_report`): a train that kept the
+/// current generation does not stop the next. Fails once all are done if
+/// any kept one, listing each such retrain time with its train's reason.
 ///
 /// # Errors
 ///
-/// Returns an error if a train kept a current model.
-fn reported_over(trains: impl Iterator<Item = (Timestamp, Trained)>) -> anyhow::Result<()> {
+/// Returns an error if a train kept the current generation.
+fn reported_over(
+    mut meter: Meter,
+    trains: impl Iterator<Item = (Timestamp, Trained)>,
+) -> anyhow::Result<()> {
     let (mut count, mut failed) = (0, vec![]);
     for (at, trained) in trains {
         count += 1;
-        println!("the train at {at}: {trained}");
+        print_report(&mut meter, at, &trained);
         if !trained.succeeded() {
-            failed.push(format!("  {at}: {trained}"));
+            failed.push(format!("  {at}: {}", trained.outcome));
         }
     }
     anyhow::ensure!(
         failed.is_empty(),
-        "the trains at {} of the span's {count} retrain times kept a current model:\n{}",
+        "the trains at {} of the span's {count} retrain times kept the current generation:\n{}",
         failed.len(),
         failed.join("\n")
     );
@@ -739,9 +751,11 @@ fn reported_over(trains: impl Iterator<Item = (Timestamp, Trained)>) -> anyhow::
 }
 
 /// Trains the strategy's models at `--at`, or over `--from` to `--to`, and
-/// reports the outcome (see `reported` and `reported_over`): the days its
-/// dataset lacks are replayed by a dataset run (`DatasetRun`).
+/// reports each train (see `reported`), its process figures from the
+/// command's start: the days its dataset lacks are replayed by a dataset
+/// run (`DatasetRun`).
 fn run_train(args: &TrainArgs) -> anyhow::Result<()> {
+    let meter = Meter::start();
     let trains = args.trains()?;
     let run = DatasetRun {
         catalog: args.catalog.clone(),
@@ -751,6 +765,7 @@ fn run_train(args: &TrainArgs) -> anyhow::Result<()> {
         args,
         trains,
         run: &run,
+        meter,
     })
 }
 
@@ -760,6 +775,7 @@ struct Training<'a> {
     args: &'a TrainArgs,
     trains: Trains,
     run: &'a DatasetRun,
+    meter: Meter,
 }
 
 impl Visitor for Training<'_> {
@@ -771,32 +787,35 @@ impl Visitor for Training<'_> {
     }
 
     fn model<S: ModelStrategy>(self) -> Self::Output {
-        train::<S>(self.args, self.trains, self.run)
+        train::<S>(self.args, self.trains, self.run, self.meter)
     }
 }
 
 /// Trains the model of the model strategy `S` of `args` as `trains` says,
-/// at each retrain time of a span in time order (`Training::retrain_times`),
-/// and reports the outcome, the days its dataset lacks replayed by `run`,
-/// its dataset balance refused first if the pairs of `[trade] conversions`
-/// do not reach the traded instrument's P&L currency from it
+/// at its one time or at each retrain time of a span in time order
+/// (`Training::retrain_times`), and reports each train, its process figures
+/// read by `meter`, the days its dataset lacks replayed by `run`, its
+/// dataset balance refused first if the pairs of `[trade] conversions` do
+/// not reach the traded instrument's P&L currency from it
 /// (`DatasetRun::refuse_balance`).
 fn train<S: ModelStrategy>(
     args: &TrainArgs,
     trains: Trains,
     run: &DatasetRun,
+    meter: Meter,
 ) -> anyhow::Result<()> {
     let config = load_config::<S::Params>(&args.config)?;
     run.refuse_balance::<S>(&config)?;
     let training = S::training(&config, &args.catalog, &args.models)?;
     let replay = |start, end| run.replay::<S>(&config, start, end);
     match trains {
-        Trains::At(at) => reported(&training.train_at(at, replay)),
+        Trains::At(at) => reported(meter, at, &training.train_at(at, replay)),
         Trains::Over { from, to } => {
             let times = training
                 .retrain_times(from, to)
                 .context("training over --from to --to; train it --at its one time")?;
             reported_over(
+                meter,
                 times
                     .into_iter()
                     .map(|at| (at, training.train_at(at, replay))),
@@ -1094,43 +1113,29 @@ mod tests {
         assert_eq!(args.models, PathBuf::from("models"));
     }
 
+    /// A train that kept the current generation fails with its reason; one
+    /// that published, or found its generation in use, succeeds.
     #[rstest]
-    fn a_train_keeping_the_model_fails_with_the_reason() {
+    fn a_train_keeping_the_generation_fails_with_the_reason() {
+        let t: Timestamp = "2026-10-23T00:00:00Z".parse().unwrap();
         let kept = Outcome::Kept(Kept::Failed(
             "34 rows in the fit slice, fewer than min_rows 35".to_string(),
         ));
         let published = Outcome::Published {
-            valid_from: "2026-10-23T00:00:00Z".parse().unwrap(),
+            generation: PathBuf::from("models/2026-10-23T00:00:00Z"),
+        };
+        let in_use = Outcome::InUse {
+            valid_from: t,
+            retrain: Retrain::Every(SignedDuration::from_hours(24)),
         };
 
-        let err = reported(&kept.clone().into()).unwrap_err().to_string();
-        let meta_kept = Trained {
-            long: Some(published.clone()),
-            short: Some(published.clone()),
-            meta: Some(kept),
-        };
+        let err = reported(Meter::start(), t, &kept.into())
+            .unwrap_err()
+            .to_string();
 
         assert!(err.contains("34") && err.contains("35"), "{err}");
-        assert!(reported(&published.into()).is_ok());
-        let err = reported(&meta_kept).unwrap_err().to_string();
-        assert!(err.contains("meta") && err.contains("34"), "{err}");
-    }
-
-    /// A rerun of a train finds the long's model published: kept in use, it
-    /// is no failure, and the train exits 0.
-    #[rstest]
-    fn a_train_keeping_no_model_succeeds_its_models_in_use_or_published() {
-        let t: Timestamp = "2026-10-23T00:00:00Z".parse().unwrap();
-        let trained = Trained {
-            long: Some(Outcome::InUse {
-                valid_from: t,
-                retrain: Retrain::Every(SignedDuration::from_hours(24)),
-            }),
-            short: Some(Outcome::Published { valid_from: t }),
-            meta: None,
-        };
-
-        assert!(reported(&trained).is_ok());
+        assert!(reported(Meter::start(), t, &published.into()).is_ok());
+        assert!(reported(Meter::start(), t, &in_use.into()).is_ok());
     }
 
     /// The arguments of a `model_ema` live node.

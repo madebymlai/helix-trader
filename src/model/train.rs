@@ -75,10 +75,13 @@
 //! every generation of a strategy with a meta holds one.
 //!
 //! A train never errors: what goes wrong is an outcome, the current
-//! generation kept with the reason (`Kept`), for each model of the strategy.
-//! It succeeds when it kept no model (`Trained::succeeded`).
+//! generation kept with the reason (`Kept`). It succeeds when it kept none
+//! (`Trained::succeeded`). Beside its outcome, a train holds the figures it
+//! reached, failing or not (`Reached`): the days of the dataset it read,
+//! built or cached, and the rows of each slice it counted, of its sides, its
+//! ancestor and its meta, beside their minimum (`model::report`).
 
-use std::fmt::Display;
+use std::{fmt::Display, path::PathBuf};
 
 use anyhow::Context;
 use jiff::{SignedDuration, Timestamp};
@@ -87,7 +90,7 @@ use nautilus_core::UnixNanos;
 use super::{
     blueprint::Stored,
     calibration::{self, Ksplit},
-    dataset::{Dataset, DatasetRow, SchemaMismatch},
+    dataset::{Dataset, DatasetRow, DaysRead, SchemaMismatch},
     deciding::{self, DecidingModels},
     holdout::Example,
     learner::{LearnerConfig, SavedModel, TrainingSet},
@@ -170,16 +173,19 @@ struct PairFit<'a> {
     calibration: Ksplit,
 }
 
-/// What a train did: the outcome of each model of the strategy, none for
-/// a model it has not (a side it does not trade, or the meta of
-/// a strategy without one).
-pub type Trained = Models<Outcome>;
+/// What a train did, and the figures it reached doing it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Trained {
+    pub outcome: Outcome,
+    pub reached: Reached,
+}
 
-/// What a train did to one model.
+/// What a train did to the strategy's generations.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
-    /// A model was published, in the generation valid from `valid_from`.
-    Published { valid_from: Timestamp },
+    /// A generation was published, valid from the train's time, in the
+    /// directory `generation`.
+    Published { generation: PathBuf },
     /// None was fitted: the current generation, valid from `valid_from`, is
     /// in use (`schedule::Plan::Keep`), of a strategy retrained as `retrain`
     /// says, which says how it reads (`Retrain::in_use`).
@@ -187,8 +193,31 @@ pub enum Outcome {
         valid_from: Timestamp,
         retrain: Retrain,
     },
-    /// No model was published: the current generation, if any, stays.
+    /// No generation was published: the current one, if any, stays.
     Kept(Kept),
+}
+
+/// The figures a train reached, as far as it went: none of a train that
+/// kept a generation in use, which reads no dataset and fits nothing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Reached {
+    /// The days of the dataset it read, once read.
+    pub days: Option<DaysRead>,
+    /// The slices of the sides fitted as of its time, once counted.
+    pub sides: Option<Slices>,
+    /// The slices of the ancestor pair, with a meta, once counted.
+    pub ancestor: Option<Slices>,
+    /// The slices of the meta, once counted.
+    pub meta: Option<Slices>,
+}
+
+/// The rows of a fit's two slices, and the fewest each must hold, its
+/// level's `min_rows`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Slices {
+    pub fit: usize,
+    pub calibration: usize,
+    pub min_rows: usize,
 }
 
 /// Why a train kept the current generation.
@@ -251,33 +280,32 @@ impl Training {
     }
 
     /// Trains at `at` as the schedule plans it (`Schedule::plan`), from
-    /// the store's generations: each model of the generation current at
-    /// `at` in use, if any; else a generation trained and published
-    /// (`generation`), or, should anything of it fail, each model kept with
-    /// the error. `replay` runs the strategy over a span of the days the
-    /// dataset lacks and returns the rows it settled (see
-    /// `Dataset::settled`), once, from where the plan's fits start, and not
-    /// at all if the plan keeps a generation.
+    /// the store's generations: the generation current at `at` in use, if
+    /// any; else a generation trained and published (`generation`), or,
+    /// should anything of it fail, the current one kept with the error,
+    /// beside the figures the train reached. `replay` runs the strategy
+    /// over a span of the days the dataset lacks and returns the rows it
+    /// settled (see `Dataset::settled`), once, from where the plan's fits
+    /// start, and not at all if the plan keeps a generation.
     pub fn train_at(
         &self,
         at: Timestamp,
         replay: impl FnOnce(Timestamp, Timestamp) -> anyhow::Result<Vec<TargetRow>>,
     ) -> Trained {
-        let each = |outcome: Outcome| self.levels.as_ref().map(|_| outcome.clone());
-        let generations = match self.models.generations() {
-            Ok(generations) => generations,
-            Err(e) => return each(kept(&e)),
+        let mut reached = Reached::default();
+        let outcome = match self.models.generations() {
+            Err(e) => kept(&e),
+            Ok(generations) => match self.schedule.plan(at, &generations) {
+                Plan::Keep { valid_from } => Outcome::InUse {
+                    valid_from,
+                    retrain: self.schedule.retrain(),
+                },
+                Plan::Train(fits) => self
+                    .generation(&fits, replay, &mut reached)
+                    .map_or_else(|e| kept(&e), |generation| Outcome::Published { generation }),
+            },
         };
-
-        match self.schedule.plan(at, &generations) {
-            Plan::Keep { valid_from } => each(Outcome::InUse {
-                valid_from,
-                retrain: self.schedule.retrain(),
-            }),
-            Plan::Train(fits) => self
-                .generation(&fits, replay)
-                .unwrap_or_else(|e| each(kept(&e))),
-        }
+        Trained { outcome, reached }
     }
 
     /// Trains the generation of `fits` and publishes it, valid from the
@@ -285,7 +313,8 @@ impl Training {
     /// its meta, if the strategy has one, learned from the ancestor's picks
     /// (`meta`), then its sides' pair fitted as of the train's time
     /// (`pair`), each side checked as a reader checks it
-    /// (`Training::stored`). Each model is published.
+    /// (`Training::stored`). Each model is published; the generation's
+    /// directory is returned. What it reached goes in `reached` as it goes.
     ///
     /// # Errors
     ///
@@ -296,15 +325,17 @@ impl Training {
         &self,
         fits: &Fits,
         replay: impl FnOnce(Timestamp, Timestamp) -> anyhow::Result<Vec<TargetRow>>,
-    ) -> anyhow::Result<Trained> {
+        reached: &mut Reached,
+    ) -> anyhow::Result<PathBuf> {
         let at = fits.at;
-        let rows = self.dataset.settled(fits.replay_from(), at, replay)?;
+        let (rows, days) = self.dataset.settled(fits.replay_from(), at, replay)?;
+        reached.days = Some(days);
         let meta = fits
             .ancestor
             .zip(self.levels.meta.as_ref())
-            .map(|(ancestor, level)| self.meta(level, ancestor, at, &rows))
+            .map(|(ancestor, level)| self.meta(level, ancestor, at, &rows, reached))
             .transpose()?;
-        let pair = self.pair(fits.sides, &rows)?;
+        let pair = self.pair(fits.sides, &rows, &mut reached.sides)?;
         let sides = pair
             .sides
             .into_iter()
@@ -315,18 +346,15 @@ impl Training {
             sides,
             calibration: pair.calibration,
             meta,
-        })?;
-        Ok(self
-            .levels
-            .as_ref()
-            .map(|_| Outcome::Published { valid_from: at }))
+        })
     }
 
     /// The meta model of `level` of a train at `at`, learned from the
     /// ancestor pair fitted as `ancestor` says on `rows` (`pair`): its
     /// examples the ancestor's picks, before any meta, on the rows of
     /// `[its time, at)` settled by `at` (`meta::examples`), fitted as of `at`
-    /// (`Level::fit`) and checked as a reader checks it (`Training::stored`).
+    /// (`Level::fit`) and checked as a reader checks it (`Training::stored`),
+    /// the ancestor's slices and the meta's counted in `reached`.
     ///
     /// # Errors
     ///
@@ -338,9 +366,10 @@ impl Training {
         ancestor: Fit,
         at: Timestamp,
         rows: &[DatasetRow],
+        reached: &mut Reached,
     ) -> anyhow::Result<StoredModel> {
         let pair = self
-            .pair(ancestor, rows)
+            .pair(ancestor, rows, &mut reached.ancestor)
             .with_context(|| format!("fitting the ancestor pair as of {}", ancestor.at))?
             .pair;
         let window = in_fit(
@@ -355,7 +384,7 @@ impl Training {
         })
         .context("making the meta model's rows")?;
         let fitted = level
-            .fit(at, ancestor.at, examples)
+            .fit(at, ancestor.at, examples, &mut reached.meta)
             .context("fitting the meta model")?;
         self.stored(level, fitted)
             .context("checking the meta model")
@@ -363,8 +392,8 @@ impl Training {
 
     /// The pair of the sides fitted as `fit` says on `rows`, those of its
     /// span settled by its time (`in_fit`), split into the fit slice and the
-    /// calibration slice (`split`), each of at least the minimum of rows
-    /// (`Level::ensure_rows`): each side's model fitted on its realized R on
+    /// calibration slice (`split`), counted in `slices`, each of at least the
+    /// minimum of rows (`Level::ensure_rows`): each side's model fitted on its realized R on
     /// the fit slice (`fit_side`), the pair calibrated together on the
     /// calibration slice (`Ksplit::fit`), every prediction there and the
     /// calibration finite; each side's model as fitted, probed on rows of
@@ -375,7 +404,12 @@ impl Training {
     /// Returns an error if a slice has fewer rows than the minimum, a side's
     /// fit fails, naming the side, a model fails to predict or predicts no
     /// finite number, or the calibration is no finite line.
-    fn pair(&self, fit: Fit, rows: &[DatasetRow]) -> anyhow::Result<PairFit<'_>> {
+    fn pair(
+        &self,
+        fit: Fit,
+        rows: &[DatasetRow],
+        slices: &mut Option<Slices>,
+    ) -> anyhow::Result<PairFit<'_>> {
         let at = fit.at;
         let levels: Vec<(Side, &Level)> = self
             .models
@@ -390,7 +424,7 @@ impl Training {
             split(in_fit(rows, fit), cut, |row| (row.ts_event, row.settled_at));
         levels[0]
             .1
-            .ensure_rows((cut, at), fitted.len(), calibrating.len())?;
+            .ensure_rows((cut, at), fitted.len(), calibrating.len(), slices)?;
         let fits = levels
             .iter()
             .map(|&(side, level)| {
@@ -500,7 +534,8 @@ impl Level {
     /// Refuses a fit slice of `fitted` rows, before the calibration slice of
     /// `(cut, at)`, or a calibration slice of `calibrating` rows, fewer than
     /// the level's minimum: naming the slice, its count and the minimum,
-    /// the fit slice first.
+    /// the fit slice first. Both counts and the minimum go in `slices`
+    /// first, refused or not.
     ///
     /// # Errors
     ///
@@ -510,8 +545,14 @@ impl Level {
         (cut, at): (Timestamp, Timestamp),
         fitted: usize,
         calibrating: usize,
+        slices: &mut Option<Slices>,
     ) -> anyhow::Result<()> {
         let min_rows = self.min_rows;
+        *slices = Some(Slices {
+            fit: fitted,
+            calibration: calibrating,
+            min_rows,
+        });
         anyhow::ensure!(
             fitted >= min_rows,
             "{fitted} rows in the fit slice before {cut}, fewer than min_rows {min_rows}"
@@ -528,7 +569,7 @@ impl Level {
     /// picks of the ancestor pair fitted as of `ancestor`: a regression of
     /// each trade's realized R on its fit slice (`split`), of
     /// at least the minimum of rows as its calibration slice is
-    /// (`ensure_rows`), calibrated by its level line alone (`Ksplit` of one
+    /// (`ensure_rows`, counted in `slices`), calibrated by its level line alone (`Ksplit` of one
     /// side) on its calibration slice, every prediction there and the line
     /// finite, its baseline the training mean of R on both slices.
     ///
@@ -542,10 +583,11 @@ impl Level {
         at: Timestamp,
         ancestor: Timestamp,
         examples: Vec<Example>,
+        slices: &mut Option<Slices>,
     ) -> anyhow::Result<Fitted> {
         let cut = at - self.calibration;
         let (fitted, calibrating) = split(examples, cut, |row| (row.ts_event, row.settled_at));
-        self.ensure_rows((cut, at), fitted.len(), calibrating.len())?;
+        self.ensure_rows((cut, at), fitted.len(), calibrating.len(), slices)?;
         let set = |rows: &[&Example]| {
             TrainingSet::new(
                 self.feature_names.len(),
@@ -593,27 +635,25 @@ impl Level {
 }
 
 impl Trained {
-    /// Whether the train succeeded: it kept no model, each published or
-    /// its current one in use.
+    /// Whether the train succeeded: it kept no generation, its own
+    /// published or the current one in use.
     #[must_use]
-    pub fn succeeded(&self) -> bool {
-        self.iter()
-            .all(|outcome| !matches!(outcome, Outcome::Kept(_)))
+    pub const fn succeeded(&self) -> bool {
+        !matches!(self.outcome, Outcome::Kept(_))
     }
 }
 
-/// A train of a long model alone.
+/// A train that reached no figure.
 impl From<Outcome> for Trained {
-    fn from(long: Outcome) -> Self {
+    fn from(outcome: Outcome) -> Self {
         Self {
-            long: Some(long),
-            short: None,
-            meta: None,
+            outcome,
+            reached: Reached::default(),
         }
     }
 }
 
-/// The current model kept for the error `e`: a schema mismatch, or a
+/// The current generation kept for the error `e`: a schema mismatch, or a
 /// failure.
 fn kept(e: &anyhow::Error) -> Outcome {
     Outcome::Kept(match e.downcast_ref::<SchemaMismatch>() {
@@ -728,41 +768,17 @@ fn spread(len: usize) -> impl Iterator<Item = usize> {
     (0..count).map(move |i| i * len / count)
 }
 
-/// A train of one model reads as its outcome; of more, each model's.
-impl Display for Trained {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let outcomes: Vec<(&str, &Outcome)> = [
-            ("the long model", &self.long),
-            ("the short model", &self.short),
-            ("the meta model", &self.meta),
-        ]
-        .into_iter()
-        .filter_map(|(name, outcome)| outcome.as_ref().map(|outcome| (name, outcome)))
-        .collect();
-        match &outcomes[..] {
-            [(_, outcome)] => write!(f, "{outcome}"),
-            outcomes => {
-                let named: Vec<String> = outcomes
-                    .iter()
-                    .map(|(name, outcome)| format!("{name}: {outcome}"))
-                    .collect();
-                write!(f, "{}", named.join("; "))
-            }
-        }
-    }
-}
-
 impl Display for Outcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Published { valid_from } => {
-                write!(f, "published a model valid from {valid_from}")
+            Self::Published { generation } => {
+                write!(f, "published the generation {}", generation.display())
             }
             Self::InUse {
                 valid_from,
                 retrain,
             } => write!(f, "{}", retrain.in_use(*valid_from)),
-            Self::Kept(kept) => write!(f, "kept the current model: {kept}"),
+            Self::Kept(kept) => write!(f, "{kept}"),
         }
     }
 }
@@ -920,6 +936,30 @@ mod tests {
             .unwrap()
     }
 
+    /// The outcome of a train publishing the generation of a training in
+    /// `dir` as `config` says valid from `valid_from`, named by its time in
+    /// the store's directory.
+    fn published(dir: &Path, config: &ModelConfig, valid_from: Timestamp) -> Outcome {
+        Outcome::Published {
+            generation: models(dir, config).directory().join(valid_from.to_string()),
+        }
+    }
+
+    /// The slices of `fit` and `calibration` rows, of a minimum of
+    /// `min_rows`.
+    fn slices(fit: usize, calibration: usize, min_rows: usize) -> Slices {
+        Slices {
+            fit,
+            calibration,
+            min_rows,
+        }
+    }
+
+    /// The days read of `built` built and `cached` cached.
+    fn days(built: usize, cached: usize) -> DaysRead {
+        DaysRead { built, cached }
+    }
+
     /// The generations of a training in `dir` as `config` says.
     fn generations(dir: &Path, config: &ModelConfig) -> Vec<Timestamp> {
         models(dir, config).generations().unwrap()
@@ -1059,7 +1099,10 @@ mod tests {
     /// from 12:00 settled by the train (`LINES`), the generation holding it
     /// and no side's manifest a calibration of its own. Each side's
     /// probes are its rows of the calibration slice and its predictions on
-    /// them, before the calibration: the fake's, their feature.
+    /// them, before the calibration: the fake's, their feature. The train
+    /// read the 6th, its window, built, and counted its fit slice's 2 rows,
+    /// at 08:00 and 10:00, and its calibration slice's 2, at 13:00 and
+    /// 15:00.
     #[rstest]
     fn a_train_fits_on_rows_settled_by_the_calibrations_start_and_calibrates_on_the_rest_settled_by_its_time()
      {
@@ -1069,9 +1112,17 @@ mod tests {
 
         let trained = training.train_at(t, |_, _| Ok(rows()));
 
-        for outcome in [&trained.long, &trained.short] {
-            assert_eq!(outcome, &Some(Outcome::Published { valid_from: t }));
-        }
+        assert_eq!(
+            trained,
+            Trained {
+                outcome: published(dir.path(), &config(), t),
+                reached: Reached {
+                    days: Some(days(1, 0)),
+                    sides: Some(slices(2, 2, 1)),
+                    ..Reached::default()
+                },
+            }
+        );
         let generation = generation(dir.path(), &config(), t);
         assert_eq!(generation.calibration, LINES);
         for side in Side::BOTH {
@@ -1105,15 +1156,13 @@ mod tests {
         let trained =
             training(dir.path(), config()).train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(rows));
 
-        for outcome in [&trained.long, &trained.short] {
-            let Some(Outcome::Kept(Kept::Failed(why))) = outcome else {
-                panic!("{trained:?}");
-            };
-            assert!(
-                why.contains("long") && why.contains("inf") && why.contains("2026-01-06T15:00:00"),
-                "{why}"
-            );
-        }
+        let Outcome::Kept(Kept::Failed(why)) = &trained.outcome else {
+            panic!("{trained:?}");
+        };
+        assert!(
+            why.contains("long") && why.contains("inf") && why.contains("2026-01-06T15:00:00"),
+            "{why}"
+        );
         assert_eq!(generations(dir.path(), &config()), []);
     }
 
@@ -1132,15 +1181,13 @@ mod tests {
         let trained =
             training(dir.path(), config()).train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(rows));
 
-        for outcome in [&trained.long, &trained.short] {
-            let Some(Outcome::Kept(Kept::Failed(why))) = outcome else {
-                panic!("{trained:?}");
-            };
-            assert!(
-                why.contains("calibration") && why.contains("not finite"),
-                "{why}"
-            );
-        }
+        let Outcome::Kept(Kept::Failed(why)) = &trained.outcome else {
+            panic!("{trained:?}");
+        };
+        assert!(
+            why.contains("calibration") && why.contains("not finite"),
+            "{why}"
+        );
         assert_eq!(generations(dir.path(), &config()), []);
     }
 
@@ -1159,12 +1206,10 @@ mod tests {
         let trained =
             training(dir.path(), config()).train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(rows));
 
-        for outcome in [&trained.long, &trained.short] {
-            let Some(Outcome::Kept(Kept::Failed(why))) = outcome else {
-                panic!("{trained:?}");
-            };
-            assert!(why.contains("short") && why.contains("finite"), "{why}");
-        }
+        let Outcome::Kept(Kept::Failed(why)) = &trained.outcome else {
+            panic!("{trained:?}");
+        };
+        assert!(why.contains("short") && why.contains("finite"), "{why}");
         assert_eq!(generations(dir.path(), &config()), [at(sixth)]);
     }
 
@@ -1179,15 +1224,13 @@ mod tests {
 
         let trained = training.train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(rows()));
 
-        for outcome in [&trained.long, &trained.short] {
-            let Some(Outcome::Kept(Kept::Failed(why))) = outcome else {
-                panic!("{trained:?}");
-            };
-            assert!(
-                why.contains(&models.directory().display().to_string()),
-                "{why}"
-            );
-        }
+        let Outcome::Kept(Kept::Failed(why)) = &trained.outcome else {
+            panic!("{trained:?}");
+        };
+        assert!(
+            why.contains(&models.directory().display().to_string()),
+            "{why}"
+        );
         assert_eq!(models.generations().unwrap(), []);
     }
 
@@ -1213,7 +1256,7 @@ mod tests {
         let trained = training(dir.path(), long_only.clone()).train_at(t, |_, _| Ok(rows));
 
         assert!(
-            matches!(trained.long, Some(Outcome::Published { .. })),
+            matches!(trained.outcome, Outcome::Published { .. }),
             "{trained:?}"
         );
         assert_eq!(
@@ -1255,12 +1298,10 @@ mod tests {
 
         let trained = training.train_at(t, |_, _| Ok(rows()));
 
-        for outcome in [&trained.long, &trained.short] {
-            assert!(
-                matches!(outcome, Some(Outcome::Published { valid_from, .. }) if *valid_from == t),
-                "{trained:?}"
-            );
-        }
+        assert!(
+            trained.outcome == published(dir.path(), &config(), t),
+            "{trained:?}"
+        );
         let generation = generation(dir.path(), &config(), t);
         assert_eq!(
             side_of(&generation, Side::Long).manifest.learner,
@@ -1284,17 +1325,12 @@ mod tests {
         });
 
         assert_eq!(replays, []);
-        let in_use = Outcome::InUse {
-            valid_from: t,
-            retrain: config().retrain,
-        };
         assert_eq!(
             trained,
-            Trained {
-                long: Some(in_use.clone()),
-                short: Some(in_use),
-                meta: None,
-            }
+            Trained::from(Outcome::InUse {
+                valid_from: t,
+                retrain: config().retrain,
+            })
         );
     }
 
@@ -1326,10 +1362,7 @@ mod tests {
             valid_from: sixth,
             retrain: Retrain::Never,
         };
-        assert_eq!(
-            (trained.long.as_ref(), trained.short.as_ref()),
-            (Some(&in_use), Some(&in_use))
-        );
+        assert_eq!(trained.outcome, in_use);
         assert_eq!(replays, []);
     }
 
@@ -1372,7 +1405,7 @@ mod tests {
         let trained = training(dir.path(), config()).train_at(t, |_, _| Ok(rows()));
 
         assert!(
-            matches!(trained.long, Some(Outcome::Published { .. })),
+            matches!(trained.outcome, Outcome::Published { .. }),
             "{trained:?}"
         );
         let generation = generation(dir.path(), &config(), t);
@@ -1402,10 +1435,9 @@ mod tests {
         let trained = training.train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(rows()));
 
         assert!(
-            matches!(trained.long, Some(Outcome::Published { .. })),
+            matches!(trained.outcome, Outcome::Published { .. }),
             "{trained:?}"
         );
-        assert_eq!((trained.short, trained.meta), (None, None));
         assert!(models(dir.path(), &long_only).side(Side::Short).is_none());
     }
 
@@ -1418,19 +1450,18 @@ mod tests {
             anyhow::bail!("the catalog does not cover the window")
         });
 
-        for outcome in [trained.long.unwrap(), trained.short.unwrap()] {
-            let Outcome::Kept(Kept::Failed(why)) = outcome else {
-                panic!("{outcome:?}");
-            };
-            assert!(why.contains("does not cover"), "{why}");
-        }
+        let Outcome::Kept(Kept::Failed(why)) = &trained.outcome else {
+            panic!("{trained:?}");
+        };
+        assert!(why.contains("does not cover"), "{why}");
         assert_eq!(generations(dir.path(), &config()), []);
     }
 
     /// No row of the calibration slice settled by the train, the win at
     /// 23:30 settling after it: of a minimum of one row, the train fails,
     /// naming the calibration slice, its 0 rows and the minimum, and no
-    /// generation is published.
+    /// generation is published. It reached the 6th, built, and the counts of
+    /// both slices, the fit slice's 2 rows at 08:00 and 10:00.
     #[rstest]
     fn a_calibration_slice_of_fewer_rows_than_the_minimum_fails() {
         let dir = tempfile::tempdir().unwrap();
@@ -1440,14 +1471,21 @@ mod tests {
 
         let trained = training.train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(rows));
 
-        for outcome in [&trained.long, &trained.short] {
-            let Some(Outcome::Kept(Kept::Failed(why))) = outcome else {
-                panic!("{trained:?}");
-            };
-            for fact in ["calibration slice", "0 rows", "min_rows 1"] {
-                assert!(why.contains(fact), "{fact}: {why}");
-            }
+        let Outcome::Kept(Kept::Failed(why)) = &trained.outcome else {
+            panic!("{trained:?}");
+        };
+
+        for fact in ["calibration slice", "0 rows", "min_rows 1"] {
+            assert!(why.contains(fact), "{fact}: {why}");
         }
+        assert_eq!(
+            trained.reached,
+            Reached {
+                days: Some(days(1, 0)),
+                sides: Some(slices(2, 0, 1)),
+                ..Reached::default()
+            }
+        );
         assert_eq!(generations(dir.path(), &config()), []);
     }
 
@@ -1469,12 +1507,10 @@ mod tests {
         // stored, and read back.
         let trained = training.train_at(at("2026-01-07T02:00:00Z"), |_, _| Ok(wide));
 
-        for outcome in [&trained.long, &trained.short] {
-            assert!(
-                matches!(outcome, Some(Outcome::Kept(Kept::SchemaMismatch(_)))),
-                "{trained:?}"
-            );
-        }
+        assert!(
+            matches!(trained.outcome, Outcome::Kept(Kept::SchemaMismatch(_))),
+            "{trained:?}"
+        );
         assert_eq!(generations(dir.path(), &config()), []);
     }
 
@@ -1648,7 +1684,10 @@ mod tests {
     /// a mean of 0.25, which the fake predicts where its feature is missing,
     /// calibrated on the rest (`META_LINE`), its probes the calibration
     /// slice's shorts and its predictions on them, before the calibration. A
-    /// first train publishes a whole generation, its meta included.
+    /// first train publishes a whole generation, its meta included, having
+    /// built the 6th and the 7th and counted 2 rows in each slice of the
+    /// ancestor, the meta and the sides of the 8th, the 7th's before and
+    /// from noon.
     #[rstest]
     #[case::retrained(ancestral())]
     #[case::never_retrained(never_ancestral())]
@@ -1660,13 +1699,22 @@ mod tests {
 
         let (models, trained, _) = at_the_eighth(dir.path(), config, two_days());
 
-        for outcome in trained.iter() {
-            assert_eq!(
-                outcome,
-                &Outcome::Published { valid_from: eighth },
-                "{trained:?}"
-            );
-        }
+        assert_eq!(
+            trained.outcome,
+            Outcome::Published {
+                generation: models.directory().join(eighth.to_string())
+            },
+            "{trained:?}"
+        );
+        assert_eq!(
+            trained.reached,
+            Reached {
+                days: Some(days(2, 0)),
+                sides: Some(slices(2, 2, 1)),
+                ancestor: Some(slices(2, 2, 1)),
+                meta: Some(slices(2, 2, 1)),
+            }
+        );
         assert_eq!(models.generations().unwrap(), [eighth]);
         let meta = meta_of_the_eighth(&models);
         assert_eq!(
@@ -1790,7 +1838,9 @@ mod tests {
     /// rows, short of a minimum of three, while the sides of the 8th have
     /// three in each slice, the 7th's shorts at 09:00 and 14:00 added: the
     /// train fails, naming the ancestor, its slice, its count and the
-    /// minimum, and publishes no generation.
+    /// minimum, and publishes no generation. It reached the 6th and the
+    /// 7th, built, and the ancestor's slices, 2 rows each, no slice of the
+    /// meta's or the sides', which it never fitted.
     #[rstest]
     fn an_ancestor_slice_of_fewer_rows_than_the_sides_minimum_fails_the_train_naming_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -1807,21 +1857,27 @@ mod tests {
 
         let (models, trained, _) = at_the_eighth(dir.path(), three, rows);
 
-        for outcome in trained.iter() {
-            let Outcome::Kept(Kept::Failed(why)) = outcome else {
-                panic!("{trained:?}");
-            };
+        let Outcome::Kept(Kept::Failed(why)) = &trained.outcome else {
+            panic!("{trained:?}");
+        };
 
-            for fact in [
-                "ancestor",
-                "2026-01-07T00:00:00Z",
-                "fit slice",
-                "2 rows",
-                "min_rows 3",
-            ] {
-                assert!(why.contains(fact), "{fact}: {why}");
-            }
+        for fact in [
+            "ancestor",
+            "2026-01-07T00:00:00Z",
+            "fit slice",
+            "2 rows",
+            "min_rows 3",
+        ] {
+            assert!(why.contains(fact), "{fact}: {why}");
         }
+        assert_eq!(
+            trained.reached,
+            Reached {
+                days: Some(days(2, 0)),
+                ancestor: Some(slices(2, 2, 3)),
+                ..Reached::default()
+            }
+        );
         assert_eq!(models.generations().unwrap(), []);
     }
 
@@ -1867,11 +1923,9 @@ mod tests {
 
         let (models, trained, _) = at_the_eighth(dir.path(), config, at_their_time(two_days()));
 
-        assert_eq!(
-            trained.meta,
-            Some(Outcome::Published {
-                valid_from: at("2026-01-08T00:00:00Z")
-            })
+        assert!(
+            matches!(trained.outcome, Outcome::Published { .. }),
+            "{trained:?}"
         );
         let manifest = meta_of_the_eighth(&models).manifest;
         assert_eq!(manifest.baseline, 0.5);
@@ -1936,6 +1990,7 @@ mod tests {
                 at("2026-01-08T00:00:00Z"),
                 at("2026-01-07T00:00:00Z"),
                 examples,
+                &mut None,
             )
             .unwrap_err();
 
@@ -1947,35 +2002,33 @@ mod tests {
     }
 
     #[rstest]
-    fn a_train_succeeds_unless_it_kept_a_model() {
+    fn a_train_succeeds_unless_it_kept_the_current_generation() {
         let t = at("2026-01-07T00:00:00Z");
-        let published = Outcome::Published { valid_from: t };
+        let published = Outcome::Published {
+            generation: PathBuf::from("models").join(t.to_string()),
+        };
         let in_use = Outcome::InUse {
             valid_from: t,
             retrain: Retrain::Every(SignedDuration::from_hours(24)),
         };
-        let fitted_or_in_use = Trained {
-            long: Some(published),
-            short: Some(in_use.clone()),
-            meta: Some(in_use.clone()),
-        };
-        let short_kept = Trained {
-            short: Some(Outcome::Kept(Kept::Failed("no short row".to_string()))),
-            ..fitted_or_in_use.clone()
-        };
+        let kept = Outcome::Kept(Kept::Failed("no short row".to_string()));
 
-        assert!(fitted_or_in_use.succeeded());
+        assert!(Trained::from(published).succeeded());
         assert!(Trained::from(in_use).succeeded());
-        assert!(!short_kept.succeeded());
+        assert!(!Trained::from(kept).succeeded());
     }
 
-    /// A model published reads with its valid-from; one kept in use as
+    /// A generation published reads with its directory; one kept in use as
     /// already published, with its valid-from, and never retrained as in
-    /// use since it, and never retrained.
+    /// use since it, and never retrained; a failure as its reason.
     #[rstest]
     #[case::published(
-        Outcome::Published { valid_from: at("2026-01-07T00:00:00Z") },
-        &["published", "2026-01-07T00:00:00Z"]
+        Outcome::Published { generation: PathBuf::from("models/2026-01-07T00:00:00Z") },
+        &["published the generation models/2026-01-07T00:00:00Z"]
+    )]
+    #[case::kept(
+        Outcome::Kept(Kept::Failed("no short row".to_string())),
+        &["failed: no short row"]
     )]
     #[case::in_use(
         Outcome::InUse {
@@ -1991,7 +2044,7 @@ mod tests {
         },
         &["already published", "in use since 2026-01-06T00:00:00Z", "never retrained"]
     )]
-    fn a_model_published_or_in_use_reads_with_its_valid_from(
+    fn an_outcome_reads_as_the_generation_published_in_use_or_the_failure(
         #[case] outcome: Outcome,
         #[case] facts: &[&str],
     ) {
@@ -2000,27 +2053,5 @@ mod tests {
         for fact in facts {
             assert!(text.contains(fact), "{fact}: {text}");
         }
-    }
-
-    #[rstest]
-    fn a_train_of_several_models_reads_as_each_outcome() {
-        let trained = Trained {
-            long: Some(Outcome::Published {
-                valid_from: at("2026-01-07T00:00:00Z"),
-            }),
-            short: Some(Outcome::Kept(Kept::Failed("no short row".to_string()))),
-            meta: Some(Outcome::Kept(Kept::Failed("no row".to_string()))),
-        };
-
-        let text = trained.to_string();
-
-        assert!(
-            text.contains("long") && text.contains("short") && text.contains("meta"),
-            "{text}"
-        );
-        assert!(
-            text.contains("no short row") && text.contains("no row"),
-            "{text}"
-        );
     }
 }
