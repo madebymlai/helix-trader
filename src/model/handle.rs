@@ -106,17 +106,19 @@
 //! from its requirements and mode, feeding the features, and `start`
 //! starts it,
 //! the features registered first. The strategy's data hooks hand it the
-//! responses and the live quotes, trades, depth and deltas:
+//! responses and the live quotes, trades, depth, deltas and custom data:
 //! `model_data_hooks!` writes them, the one place they are written, so that
 //! no strategy misses one. The features are registered with Nautilus for
-//! their bars alone: the warmup hands them the quotes, trades, depth and
-//! deltas of its responses and the live ones, held until it ends, so that
+//! their bars alone: the warmup hands them the quotes, trades, depth,
+//! deltas and custom data of its responses and the live ones, held until it
+//! ends, so that
 //! no live tick reaches them before an older window of the history
 //! (`strategy::warmup`'s `hold`); in a replay they go straight through. Live, the warmup requests the history of
 //! every tick series of the requirements its venue's history serves, a
 //! root's on the contract standing for it, and of every custom series, of
 //! its type's live data client or the catalog alone, added to the cache
-//! the features read it from (`FeatureSetBuilder::custom`), and the
+//! the raw features read it from (`FeatureSetBuilder::custom`) and handed
+//! to the features reading it among their series, and the
 //! subscriptions continue from its end, so
 //! the first decision after a start is warm. A series no feature
 //! reads, the traded instrument's or a conversion pair's, is warmed up
@@ -172,7 +174,7 @@ use crate::{
         requirements::CustomSeries,
         risk::R,
         subscriptions::Subscriptions,
-        warmup::{self, BookIndicator, Warmup},
+        warmup::{self, BookIndicator, CustomIndicator, Warmup},
     },
 };
 
@@ -355,7 +357,8 @@ impl ModelHandle {
         }
         .feeding(Rc::clone(features) as SharedActorIndicator)
         .feeding_ticks(Rc::clone(features) as SharedActorIndicator)
-        .feeding_books(Rc::clone(features) as Rc<dyn BookIndicator>);
+        .feeding_books(Rc::clone(features) as Rc<dyn BookIndicator>)
+        .feeding_custom(Rc::clone(features) as Rc<dyn CustomIndicator>);
         let instrument_ids = ticks.iter().map(|tick| tick.instrument_id).collect();
         let roller = match mode {
             Mode::Live { .. } => Roller::live(instrument_ids),
@@ -600,9 +603,9 @@ impl ModelHandle {
 /// holding its `Rc<ModelHandle>`, they hand its warmup (`ModelHandle::warmup`)
 /// the end of each request (`on_data_response`), the quotes, trades, book
 /// depth, deltas and custom data of each response (`on_historical_*`), and
-/// the live quotes, trades, depth and deltas (`on_quote`, `on_trade`,
-/// `on_book_depth`, `on_book_deltas`), which it holds while it is pending
-/// and then hands to the features (`strategy::warmup`).
+/// the live quotes, trades, depth, deltas and custom data (`on_quote`,
+/// `on_trade`, `on_book_depth`, `on_book_deltas`, `on_data`), which it holds
+/// while it is pending and then hands to the features (`strategy::warmup`).
 #[macro_export]
 macro_rules! model_data_hooks {
     // The hooks expand in the strategy's module, which need not import the
@@ -665,8 +668,12 @@ macro_rules! model_data_hooks {
         }
 
         fn on_historical_data(&mut self, data: &dyn ::std::any::Any) -> ::anyhow::Result<()> {
-            self.$model.warmup().on_historical_data(self, data);
-            Ok(())
+            self.$model.warmup().on_historical_data(self, data)
+        }
+
+        // nautilus-import-ok
+        fn on_data(&mut self, data: &::nautilus_model::data::CustomData) -> ::anyhow::Result<()> {
+            self.$model.warmup().on_data(data)
         }
 
         // nautilus-import-ok
@@ -828,10 +835,9 @@ mod tests {
     /// (`model_data_hooks!`).
     impl DataActor for Decider {
         fn on_historical_data(&mut self, data: &dyn std::any::Any) -> anyhow::Result<()> {
-            if let Some(warmup) = self.warmup.clone() {
-                warmup.on_historical_data(self, data);
-            }
-            Ok(())
+            self.warmup
+                .clone()
+                .map_or(Ok(()), |warmup| warmup.on_historical_data(self, data))
         }
 
         fn on_historical_quotes(&mut self, quotes: &[QuoteTick]) -> anyhow::Result<()> {
@@ -1822,6 +1828,53 @@ mod tests {
 
         assert_eq!(cold, (false, [None, None]));
         assert!(features.initialized());
+    }
+
+    /// The hooks `model_data_hooks!` writes hand the warmup a strategy's
+    /// custom data too, of the history and live, which Nautilus hands no
+    /// indicator, only the strategy's handlers. Live on 2026-08-10 at
+    /// 14:30, a feature counting AUD/USD's imbalances: the catalog's answer
+    /// of two warms it; the history's last, sent again live, and a live one
+    /// of 14:30:01 come while the warmup is pending, held; once the group
+    /// ends, the new one reaches it, the other dropped.
+    #[rstest]
+    fn the_hooks_of_model_data_hooks_hand_the_features_a_strategys_custom_data() {
+        let models = tempfile::tempdir().unwrap();
+        let features = crate::model::features::testing::custom_count(&imbalance_series(AUD))
+            .build()
+            .unwrap();
+        let requirements = DataRequirements {
+            bar_types: vec![],
+            ticks: vec![],
+            custom: vec![imbalance_series(AUD)],
+            warmup: SignedDuration::from_hours(1),
+        };
+        let model = ModelHandle::new(
+            &blueprint_of(&features, &bracket_config(10), requirements),
+            &live(models.path().to_path_buf()),
+        )
+        .unwrap();
+        let mut hooked = Hooked {
+            core: strategy_core(),
+            model: Rc::clone(&model),
+        };
+        register(&mut hooked.core, at("2026-08-10T14:30:00Z"));
+        model.start(&mut hooked).unwrap();
+
+        hooked.handle_data_response(&catalog_answer(
+            AUD,
+            vec![
+                imbalance(AUD, "2026-08-10T14:00:00Z", 0.25),
+                imbalance(AUD, "2026-08-10T14:29:00Z", -0.5),
+            ],
+        ));
+        DataActor::on_data(&mut hooked, &imbalance(AUD, "2026-08-10T14:29:00Z", -0.5)).unwrap();
+        DataActor::on_data(&mut hooked, &imbalance(AUD, "2026-08-10T14:30:01Z", 0.75)).unwrap();
+        let pending = features.values();
+        model.warmup().complete(&hooked).unwrap();
+
+        assert_eq!(pending, Some(vec![2.0]));
+        assert_eq!(features.values(), Some(vec![3.0]));
     }
 
     /// The hooks `model_data_hooks!` writes hand the warmup a strategy's
