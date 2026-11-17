@@ -17,13 +17,13 @@ use helix_trader::{
         handle::{Mode, SettledRows},
     },
     strategy::{
-        Declared, IndicatorsConfig,
+        Declared, IndicatorsConfig, Series,
         requirements::{DataRequirements, TickSeries},
     },
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_model::{
-    data::{NautilusDataType, TradeTick},
+    data::{NautilusDataType, QuoteTick, TradeTick},
     identifiers::InstrumentId,
 };
 use rstest::rstest;
@@ -32,7 +32,7 @@ use crate::common::{
     dataset::{self, probe_reading},
     features::{SmaArgs, tables},
     ic,
-    rolls::{self, POST, PRE, ROOT, trade, tuesday, wednesday},
+    rolls::{self, POST, PRE, ROOT, quote, trade, tuesday, wednesday},
 };
 
 /// The contracts' trades: August's at 22:50 (before the run), 23:10, 23:20
@@ -55,7 +55,13 @@ fn trades() -> Vec<TradeTick> {
 /// Both contracts' trades and IC's gold quoted at 30 s past every minute
 /// from 22:00 Tuesday to 02:00 Wednesday, its mid 4000.10.
 fn catalog() -> tempfile::TempDir {
-    let catalog = rolls::catalog_of_trades(&trades());
+    catalog_of(&trades(), &[])
+}
+
+/// The contracts' `trades` and `quotes`, and IC's gold quoted at 30 s past
+/// every minute from 22:00 Tuesday to 02:00 Wednesday, its mid 4000.10.
+fn catalog_of(trades: &[TradeTick], quotes: &[QuoteTick]) -> tempfile::TempDir {
+    let catalog = rolls::catalog_of_ticks(trades, quotes);
     let (from, to) = (tuesday("22:00:00"), wednesday("02:00:00"));
     let mut quotes = vec![];
     let mut time = from + SignedDuration::from_secs(30);
@@ -91,19 +97,27 @@ fn root_trades() -> Rc<FeatureSet> {
         .unwrap()
 }
 
+/// The `data` ticks of `id`.
+fn tick(data: NautilusDataType, id: &str) -> TickSeries {
+    TickSeries {
+        data,
+        instrument_id: InstrumentId::from(id),
+    }
+}
+
 /// What the strategy reads: the root's trades, and the quotes of IC's gold,
 /// which the harness reads for the instrument it trades.
 fn requirements() -> DataRequirements {
-    let tick = |data, id: &str| TickSeries {
-        data,
-        instrument_id: InstrumentId::from(id),
-    };
+    requirements_of(vec![tick(NautilusDataType::TradeTick, ROOT)])
+}
+
+/// What the strategy reads: the root's `ticks`, and the quotes of IC's
+/// gold, which the harness reads for the instrument it trades.
+fn requirements_of(mut ticks: Vec<TickSeries>) -> DataRequirements {
+    ticks.push(tick(NautilusDataType::QuoteTick, ic::INSTRUMENT_ID));
     DataRequirements {
         bar_types: vec![],
-        ticks: vec![
-            tick(NautilusDataType::TradeTick, ROOT),
-            tick(NautilusDataType::QuoteTick, ic::INSTRUMENT_ID),
-        ],
+        ticks,
         custom: vec![],
         warmup: SignedDuration::ZERO,
     }
@@ -121,8 +135,16 @@ fn config() -> ModelConfig {
 /// The time of each row the dataset run of the probe deciding on
 /// `features` published over 23:00 to 01:00, and its values.
 fn rows(features: Rc<FeatureSet>) -> Vec<(Timestamp, Vec<f64>)> {
-    let catalog = catalog();
-    let requirements = requirements();
+    rows_of(features, &catalog(), &requirements())
+}
+
+/// The rows of `rows`, of the probe reading `requirements` of `catalog`.
+fn rows_of(
+    features: Rc<FeatureSet>,
+    catalog: &tempfile::TempDir,
+    requirements: &DataRequirements,
+) -> Vec<(Timestamp, Vec<f64>)> {
+    let requirements = requirements.clone();
     let (probe, record) = probe_reading(
         features,
         &config(),
@@ -209,6 +231,71 @@ fn a_roll_leaves_the_features_of_other_instruments_untouched() {
         &[
             (decided(wednesday("00:30:00")), vec![4041.5, 4000.1]),
             (decided(wednesday("00:45:00")), vec![4042.5, 4000.1]),
+        ],
+    );
+}
+
+/// The mean of the last two quote mids or trade prices,
+/// `[indicators.root_2_ticks]`.
+const ROOT_2_TICKS: Declared<SmaArgs> = Declared::new("root_2_ticks");
+
+/// August's quotes, mid 3990, 3992 and 3993 at 23:05, 23:20 and 23:40, and
+/// its trades, 3991 and 3994 at 23:10 and 23:50; then December's trades,
+/// 4041 and 4043 at 00:05 and 00:20, and its quotes, mid 4042 and 4044 at
+/// 00:10 and 00:35. August's quote of 00:25 and December's of 23:55 are
+/// outside their slices, not replayed. The decision of 23:15 reads the
+/// mean of the quote of 23:05 and the trade of 23:10, 3990.5; that of
+/// 23:30 of that trade and the quote of 23:20, 3991.5; that of 23:45 of
+/// the quotes of 23:20 and 23:40, 3992.5. The roll resets the feature: the
+/// decision of 00:00 has no tick. Then 00:15 reads the trade of 00:05 and
+/// the quote of 00:10, 4041.5; 00:30 that quote and the trade of 00:20,
+/// 4042.5; 00:45 that trade and the quote of 00:35, 4043.5. Quotes alone,
+/// trades alone, or one after the other would each read other means.
+#[rstest]
+fn a_feature_on_a_roots_quotes_and_trades_reads_them_in_time_order_across_the_roll() {
+    let trades = [
+        trade(PRE, tuesday("23:10:00"), "3991.00"),
+        trade(PRE, tuesday("23:50:00"), "3994.00"),
+        trade(POST, wednesday("00:05:00"), "4041.00"),
+        trade(POST, wednesday("00:20:00"), "4043.00"),
+    ];
+    let quotes = [
+        quote(PRE, tuesday("23:05:00"), "3990.00"),
+        quote(PRE, tuesday("23:20:00"), "3992.00"),
+        quote(PRE, tuesday("23:40:00"), "3993.00"),
+        quote(PRE, wednesday("00:25:00"), "3996.00"),
+        quote(POST, tuesday("23:55:00"), "4039.00"),
+        quote(POST, wednesday("00:10:00"), "4042.00"),
+        quote(POST, wednesday("00:35:00"), "4044.00"),
+    ];
+    let tables = tables(r#"root_2_ticks = { period = 2, price_type = "MID" }"#);
+    let features = FeatureSet::builder()
+        .feature(
+            &[
+                Series::Ticks(tick(NautilusDataType::QuoteTick, ROOT)),
+                Series::Ticks(tick(NautilusDataType::TradeTick, ROOT)),
+            ],
+            ROOT_2_TICKS,
+            &tables,
+        )
+        .build()
+        .unwrap();
+    let requirements = requirements_of(vec![
+        tick(NautilusDataType::QuoteTick, ROOT),
+        tick(NautilusDataType::TradeTick, ROOT),
+    ]);
+
+    let rows = rows_of(features, &catalog_of(&trades, &quotes), &requirements);
+
+    assert_rows(
+        &rows,
+        &[
+            (decided(tuesday("23:15:00")), vec![3990.5]),
+            (decided(tuesday("23:30:00")), vec![3991.5]),
+            (decided(tuesday("23:45:00")), vec![3992.5]),
+            (decided(wednesday("00:15:00")), vec![4041.5]),
+            (decided(wednesday("00:30:00")), vec![4042.5]),
+            (decided(wednesday("00:45:00")), vec![4043.5]),
         ],
     );
 }
