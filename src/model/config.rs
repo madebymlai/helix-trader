@@ -99,11 +99,9 @@ pub struct ModelConfig<T = TargetConfig> {
 #[derive(Debug, Clone, PartialEq, Deserialize, bon::Builder)]
 #[serde(try_from = "MetaFields")]
 pub struct MetaConfig {
-    /// How far back from a retrain its rows go; never before the
-    /// sides' first model, whose predictions the rows need. Never
-    /// retrained, sides trained with their meta, neither in use, are
-    /// trained as of this much before the meta, so their out-of-sample
-    /// decisions over the window are the meta's rows.
+    /// How far back from a retrain its rows go: its train fits an
+    /// ancestor pair of the sides as of this much before the retrain, whose
+    /// out-of-sample picks over the window are the meta's rows.
     pub window: SignedDuration,
     /// The last part of the window, ending at the retrain, the model is
     /// calibrated on and not fitted on.

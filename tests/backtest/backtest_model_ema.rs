@@ -279,15 +279,15 @@ fn a_train_with_a_slice_of_fewer_rows_than_the_minimum_fails_naming_it_and_publi
     assert_eq!(generations(&config, &models), []);
 }
 
-/// Worked by hand: a train at midnight of the 22nd publishes the
-/// generation of the long, valid from then, its meta waiting with no
-/// generation before it. The train at t then gives the meta the long's
-/// decisions of the 22nd, each a long of the generation of the 22nd, 24
-/// rows: its fit slice those of 00:00 to 17:00, settled by 18:00, the
-/// calibration slice's start, 18; its calibration slice those of 18:00 to
-/// 23:00, 6. A meta `min_rows` above a slice's count fails the train,
-/// naming the meta, the slice, its count and the minimum, and publishes no
-/// generation at t, the long fitted beside the meta neither.
+/// Worked by hand: the train at t fits the long's ancestor as of midnight
+/// of the 22nd, the meta's window of 24 hours before t, on its window back
+/// from there, from 02:00 of the 20th, and gives the meta the ancestor's
+/// decisions of the 22nd, each a long, 24 rows: its fit slice those of
+/// 00:00 to 17:00, settled by 18:00, the calibration slice's start, 18; its
+/// calibration slice those of 18:00 to 23:00, 6. A meta `min_rows` above a
+/// slice's count fails the train, naming the meta, the slice, its count and
+/// the minimum, and publishes no generation, the long fitted beside the
+/// meta neither.
 #[rstest]
 #[case::fit(19, "fit slice", 18)]
 #[case::calibration(7, "calibration slice", 6)]
@@ -305,9 +305,6 @@ fn a_meta_with_a_slice_of_fewer_rows_than_its_minimum_fails_naming_it_and_publis
     let config =
         with_meta_section(&META.replace("min_rows = 1", &format!("min_rows = {min_rows}")));
     std::fs::write(&config_path, &config).unwrap();
-    let day_before = t() - SignedDuration::from_hours(24);
-    train(&config_path, catalog.path(), &models, day_before);
-    assert_eq!(generations(&config, &models), [day_before]);
 
     let stderr = train_failed(&config_path, catalog.path(), &models, t());
 
@@ -316,7 +313,7 @@ fn a_meta_with_a_slice_of_fewer_rows_than_its_minimum_fails_naming_it_and_publis
         .unwrap_or_else(|| panic!("{stderr}"))
         .1;
     assert_too_few_rows(meta, slice, rows, min_rows);
-    assert_eq!(generations(&config, &models), [day_before]);
+    assert_eq!(generations(&config, &models), []);
 }
 
 /// A backtest from midnight of the 23rd, the model's valid-from, warms its

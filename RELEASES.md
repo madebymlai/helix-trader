@@ -26,6 +26,8 @@ Released on TBD (UTC).
 - Renamed `ModelSet` to `ModelStore` and `ModelBlueprint::model_set` to `model_store`, the store of a strategy's generations; publish, list, read and swap them with `ModelStore::publish`, `generations`, `read` and `swap` in place of the per-side `ModelStore`, `ModelSet::pairs`, `ModelSet::valid_froms` and `MetaLevel::swap`
 - Removed `PairCalibration`, `ModelCalibration` and `ModelManifest`'s `strategy_id` and `valid_from`: a side's manifest holds no calibration, its pair's being `StoredGeneration::calibration`, and a meta's holds its `Line`
 - Removed `Step` and `Plan::meta_after_sides` from the schedule; read a train's plan as `Plan::Keep` or `Plan::Train` of `Fits`
+- Changed a meta model to learn from the out-of-sample picks of an ancestor pair its train fits a meta window before the retrain time, shipping beside sides fitted at that time, instead of from the decisions of the generations in the store, so a periodic strategy with a meta publishes its meta from its first train and a never-retrained one ships sides fresh at its train time; train again, the store's version changed
+- Removed `Kept::Waiting` and `MetaStep`: every generation of a strategy with a meta holds one, and `ModelStore::publish` refuses one without; read the ancestor's fit as `Fits::ancestor` and its time as `ModelManifest::ancestor`
 
 ### Fixes
 

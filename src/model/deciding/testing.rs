@@ -298,6 +298,7 @@ pub(crate) fn baseline_for(
             side: Some(side),
             learner: config.learner,
             baseline: r(tenths),
+            ancestor: None,
             probes: vec![Probe {
                 prediction: model.predict(&probe).unwrap(),
                 row: probe,

@@ -384,3 +384,65 @@ fn a_backtest_over_a_missing_retrain_time_runs_the_previous_model_deciding_throu
     assert_day_decided_by(section(&stdout, day(22), day(23)), day(21));
     assert_day_decided_by(section(&stdout, day(23), day(24)), day(23));
 }
+
+/// The config with a meta model on the fake learner, on a window of 24
+/// hours, the last 12 calibrated on, each slice of at least one row,
+/// taking every trade its finite expectation clears, from -1000R.
+fn with_meta() -> String {
+    format!(
+        "{CONFIG}
+    [model.meta]
+    window = \"24h\"
+    calibration = \"12h\"
+    margin = \"-1000R\"
+    min_rows = 1
+    learner = {{ kind = \"fake\" }}
+"
+    )
+}
+
+/// With a meta, the first retrain time of a span, the 21st, publishes a
+/// meta beside the short: its ancestor short, fitted as of the 20th on its
+/// window back from there, as the train of the 20th fits it, picks the
+/// shorts of the 20th's odd hours, the meta's rows. A backtest of the span
+/// then trades from its first retrain time: the short at each odd hour of
+/// the 21st and of the 22nd, 12 a day, each an order to open and one to
+/// close, every one taken by the meta of its day's generation.
+#[rstest]
+fn a_periodic_strategy_with_a_meta_publishes_it_from_its_first_train_and_trades_from_that_retrain_time()
+ {
+    let catalog = catalog(23);
+    let files = files();
+    std::fs::write(&files.config, with_meta()).unwrap();
+    let span = (day(21), day(23));
+
+    let (succeeded, trained, stderr) = train_over(&files, catalog.path(), span);
+
+    assert!(succeeded, "{trained}\n{stderr}");
+
+    for at in [day(21), day(22)] {
+        let published = format!("the meta model: published a model valid from {at}");
+        assert!(train_line(&trained, at).contains(&published), "{trained}");
+    }
+
+    let (succeeded, stdout, stderr) = backtest(&files, catalog.path(), span);
+
+    assert!(succeeded, "{stdout}\n{stderr}");
+    assert!(stdout.contains("Orders: 48\nPositions: 24\n"), "{stdout}");
+    assert_day_decided_by(section(&stdout, day(21), day(22)), day(21));
+    assert_day_decided_by(section(&stdout, day(22), day(23)), day(22));
+    for (from, to) in [(day(21), day(22)), (day(22), day(23))] {
+        let heading = format!("Meta model scores, out of sample, from {from} to {to}\n");
+        let (_, rest) = stdout
+            .split_once(&heading)
+            .unwrap_or_else(|| panic!("no {heading:?}: {stdout}"));
+        let meta = rest.split("\n\n").next().unwrap();
+        for line in [
+            format!("  Model valid from: {from}"),
+            "  Rows: 12".to_string(),
+            "  Trades taken: 12".to_string(),
+        ] {
+            assert!(meta.lines().any(|l| l == line), "{line}: {meta}");
+        }
+    }
+}

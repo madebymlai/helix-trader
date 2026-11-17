@@ -604,40 +604,36 @@ fn a_meta_model_from_its_margin_takes_the_side_picked_at_its_expected_r() {
 }
 
 /// The meta predicting nought expects 0.1R, below its margin of 0.15R:
-/// the margin is in R, as the meta's expectation is. A generation holding
-/// no meta model, its meta having waited, takes no trade either.
+/// the margin is in R, as the meta's expectation is.
 #[rstest]
-#[case::below_its_margin(Some(5))]
-#[case::of_a_generation_without_one(None)]
-fn a_meta_model_below_its_margin_takes_no_trade(#[case] tenths: Option<usize>) {
+fn a_meta_model_below_its_margin_takes_no_trade() {
     let root = tempfile::tempdir().unwrap();
-    let mut models = with_meta_of(root.path(), &with_meta(meta()), tenths);
+    let mut models = with_meta_of(root.path(), &with_meta(meta()), Some(5));
 
     assert_eq!(decided(&mut models, NOON), None);
 }
 
 /// A generation's sides decide beside its own meta alone: the generation
 /// of 10:00 holds a meta model taking the long, expecting 0.25R; the one of
-/// 11:00, a long of 9, holds none, its meta having waited. At noon the
-/// latest decides, and takes no trade, never its long beside the meta of
-/// 10:00, which would take it; at 10:30 the generation of 10:00 takes its
-/// long of 6.
+/// 11:00, a long of 9, a meta predicting nought, expecting 0.1R, below its
+/// margin. At noon the latest decides, and takes no trade, never its long
+/// beside the meta of 10:00, which would take it; at 10:30 the generation
+/// of 10:00 takes its long of 6.
 #[rstest]
 fn a_meta_never_decides_beside_the_sides_of_another_generation() {
     let root = tempfile::tempdir().unwrap();
     let (features, config) = (features(), with_meta(meta()));
     let set = model_store(root.path(), &features, &config);
-    let meta = meta_baseline(&features, &config, 8);
     for (valid_from, tenths, meta) in [
-        ("2026-10-22T10:00:00Z", 6, Some(meta)),
-        ("2026-10-22T11:00:00Z", 9, None),
+        ("2026-10-22T10:00:00Z", 6, 8),
+        ("2026-10-22T11:00:00Z", 9, 5),
     ] {
         set.publish(&generation_of(
             &features,
             &config,
             valid_from,
             [(Side::Long, tenths)],
-            meta,
+            Some(meta_baseline(&features, &config, meta)),
         ))
         .unwrap();
     }

@@ -697,8 +697,8 @@ impl DatasetRun {
 }
 
 /// Prints the outcome of a train that kept no model, each model published
-/// or already published; one that kept a current model, failed or a meta
-/// waiting, is an error, its reason: the command fails, so that
+/// or already published; one that kept a current model, failed, is an
+/// error, its reason: the command fails, so that
 /// the live node that started it knows why (`model::launcher`).
 ///
 /// # Errors
@@ -1129,25 +1129,6 @@ mod tests {
         };
 
         assert!(reported(&trained).is_ok());
-    }
-
-    /// A meta with no side's model before the train waits: the
-    /// train fails, saying why.
-    #[rstest]
-    fn a_train_whose_meta_waits_fails_saying_so() {
-        let t: Timestamp = "2026-10-23T00:00:00Z".parse().unwrap();
-        let trained = Trained {
-            long: Some(Outcome::InUse {
-                valid_from: t,
-                retrain: Retrain::Every(SignedDuration::from_hours(24)),
-            }),
-            short: None,
-            meta: Some(Outcome::Kept(Kept::Waiting)),
-        };
-
-        let err = reported(&trained).unwrap_err().to_string();
-
-        assert!(err.contains("waiting for the sides' decisions"), "{err}");
     }
 
     /// The arguments of a `model_ema` live node.
