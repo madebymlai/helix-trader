@@ -254,30 +254,6 @@ impl<T> Models<T> {
             Side::Short => self.short = Some(value),
         }
     }
-
-    /// The value of each model, the long's, the short's, then the meta's.
-    pub fn iter(&self) -> impl Iterator<Item = &T> {
-        [&self.long, &self.short, &self.meta].into_iter().flatten()
-    }
-
-    /// The values by reference.
-    #[must_use]
-    pub const fn as_ref(&self) -> Models<&T> {
-        Models {
-            long: self.long.as_ref(),
-            short: self.short.as_ref(),
-            meta: self.meta.as_ref(),
-        }
-    }
-
-    /// The value of `f` of each model's.
-    pub fn map<U>(self, mut f: impl FnMut(T) -> U) -> Models<U> {
-        Models {
-            long: self.long.map(&mut f),
-            short: self.short.map(&mut f),
-            meta: self.meta.map(&mut f),
-        }
-    }
 }
 
 /// Starts the retrain timer `timer` on `actor`'s clock, firing every
