@@ -18,7 +18,7 @@ use helix_trader::{
         targets::{BracketSpec, Distance, Target, TargetConfig},
     },
     strategy::{
-        Declared, IndicatorArgs,
+        Declared, IndicatorArgs, Series,
         requirements::{DataRequirements, TickSeries},
     },
 };
@@ -156,8 +156,8 @@ const MEAN_2H: Declared<WindowMeanArgs> = Declared::new("mean_2h");
 /// with a warmup of 3 hours.
 fn two_hour_mean() -> Rc<FeatureSet> {
     FeatureSet::builder()
-        .quotes(
-            InstrumentId::from(ic::INSTRUMENT_ID),
+        .feature(
+            &[Series::quotes(InstrumentId::from(ic::INSTRUMENT_ID))],
             MEAN_2H,
             &tables("mean_2h = { period = 1440 }"),
         )
@@ -378,7 +378,11 @@ fn atr_config() -> ModelConfig {
 /// `warmup`.
 fn mid_warming_for(warmup: SignedDuration) -> Rc<FeatureSet> {
     FeatureSet::builder()
-        .quotes(InstrumentId::from(ic::INSTRUMENT_ID), MID, &mid_tables())
+        .feature(
+            &[Series::quotes(InstrumentId::from(ic::INSTRUMENT_ID))],
+            MID,
+            &mid_tables(),
+        )
         .warmup(warmup)
         .build()
         .unwrap()

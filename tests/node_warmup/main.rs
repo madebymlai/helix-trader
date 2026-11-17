@@ -1741,7 +1741,7 @@ mod model_handle {
             learner::{LearnerConfig, TrainingSet},
             targets::Side,
         },
-        strategy::{Declared, EmaArgs, IndicatorsConfig, risk::R},
+        strategy::{Declared, EmaArgs, IndicatorsConfig, Series, risk::R},
     };
     use nautilus_common::messages::data::DataResponseEnvelope;
     use nautilus_model::identifiers::StrategyId;
@@ -1850,7 +1850,7 @@ mod model_handle {
         let tables: IndicatorsConfig =
             toml::from_str(r#"mid_0 = { period = 1, price_type = "MID" }"#).unwrap();
         FeatureSet::builder()
-            .quotes(InstrumentId::from(GCZ26), MID, &tables)
+            .feature(&[Series::quotes(InstrumentId::from(GCZ26))], MID, &tables)
             .build()
             .unwrap()
     }

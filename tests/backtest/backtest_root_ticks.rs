@@ -92,7 +92,11 @@ fn root_tables() -> IndicatorsConfig {
 /// The mean of the root's last two trades.
 fn root_trades() -> Rc<FeatureSet> {
     FeatureSet::builder()
-        .trades(InstrumentId::from(ROOT), ROOT_2_TRADES, &root_tables())
+        .feature(
+            &[Series::trades(InstrumentId::from(ROOT))],
+            ROOT_2_TRADES,
+            &root_tables(),
+        )
         .build()
         .unwrap()
 }
@@ -219,8 +223,16 @@ fn features_on_a_root_read_each_contract_in_turn_reset_at_the_roll() {
 fn a_roll_leaves_the_features_of_other_instruments_untouched() {
     let tables = root_tables();
     let features = FeatureSet::builder()
-        .trades(InstrumentId::from(ROOT), ROOT_2_TRADES, &tables)
-        .quotes(InstrumentId::from(ic::INSTRUMENT_ID), GOLD_60_MIDS, &tables)
+        .feature(
+            &[Series::trades(InstrumentId::from(ROOT))],
+            ROOT_2_TRADES,
+            &tables,
+        )
+        .feature(
+            &[Series::quotes(InstrumentId::from(ic::INSTRUMENT_ID))],
+            GOLD_60_MIDS,
+            &tables,
+        )
         .build()
         .unwrap();
 
@@ -272,8 +284,8 @@ fn a_feature_on_a_roots_quotes_and_trades_reads_them_in_time_order_across_the_ro
     let features = FeatureSet::builder()
         .feature(
             &[
-                Series::Ticks(tick(NautilusDataType::QuoteTick, ROOT)),
-                Series::Ticks(tick(NautilusDataType::TradeTick, ROOT)),
+                Series::quotes(InstrumentId::from(ROOT)),
+                Series::trades(InstrumentId::from(ROOT)),
             ],
             ROOT_2_TICKS,
             &tables,

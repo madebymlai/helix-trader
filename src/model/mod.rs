@@ -250,6 +250,8 @@ pub trait ModelStrategy:
 
 #[cfg(test)]
 mod tests {
+    use std::slice;
+
     use jiff::SignedDuration;
     use nautilus_common::config::ConfigError;
     use nautilus_indicators::indicator::Indicator;
@@ -346,13 +348,10 @@ mod tests {
             let builder = config.own.features.iter().enumerate().try_fold(
                 FeatureSet::builder(),
                 |builder, (i, series)| match series {
-                    Series::Bars(bar_type) => Ok(builder.bars(*bar_type, SPAN, tables)),
+                    Series::Bars(_) => Ok(builder.feature(slice::from_ref(series), SPAN, tables)),
                     Series::Ticks(ticks) => match &ticks.data {
-                        NautilusDataType::QuoteTick => {
-                            Ok(builder.quotes(ticks.instrument_id, SPAN, tables))
-                        }
-                        NautilusDataType::TradeTick => {
-                            Ok(builder.trades(ticks.instrument_id, SPAN, tables))
+                        NautilusDataType::QuoteTick | NautilusDataType::TradeTick => {
+                            Ok(builder.feature(slice::from_ref(series), SPAN, tables))
                         }
                         data => Err(ConfigError::invalid_value(
                             "features",

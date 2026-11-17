@@ -14,7 +14,7 @@ use helix_trader::{
         decide::{self, DecisionRule, FeatureRow},
         features::FeatureSet,
     },
-    strategy::Declared,
+    strategy::{Declared, Series},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
@@ -80,8 +80,12 @@ impl FeatureProbe {
             "#,
         );
         let features = FeatureSet::builder()
-            .quotes(instrument_id, MID_3_QUOTES, &tables)
-            .bars(BarType::from(MID_BAR_TYPE), CLOSE_2_HOURS, &tables)
+            .feature(&[Series::quotes(instrument_id)], MID_3_QUOTES, &tables)
+            .feature(
+                &[Series::Bars(BarType::from(MID_BAR_TYPE))],
+                CLOSE_2_HOURS,
+                &tables,
+            )
             .build()
             .unwrap();
         let rows = Rc::new(RefCell::new(vec![]));
