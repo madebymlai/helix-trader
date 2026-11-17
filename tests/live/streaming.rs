@@ -54,7 +54,6 @@ use nautilus_common::{
     logging::logger::LoggerConfig,
     messages::DataEvent,
     nautilus_actor,
-    testing::wait_until,
 };
 use nautilus_core::{UnixNanos, time::get_atomic_clock_realtime};
 use nautilus_live::config::{LiveDataEngineConfig, RoutingConfig};
@@ -87,9 +86,6 @@ const ROOT: &str = "HELIX_STREAMING_ROOT";
 /// The child's promotion interval, in milliseconds, set on the streaming
 /// config `Recording` gives in place of its daily one.
 const PROMOTION_MS: &str = "HELIX_STREAMING_PROMOTION_MS";
-/// When the child's node stops itself, in milliseconds after it starts;
-/// unset, it runs until interrupted (`interrupt`) or killed.
-const STOP_MS: &str = "HELIX_STREAMING_STOP_MS";
 /// The number of the child's first tick.
 const FIRST_SEQ: &str = "HELIX_STREAMING_FIRST_SEQ";
 /// Set, the child writes a venue's answer back over what the catalog lacks
@@ -107,7 +103,7 @@ const PATIENCE: Duration = Duration::from_secs(60);
 #[rstest]
 fn a_reader_sees_a_clean_prefix_of_the_streamed_data_while_the_node_runs() {
     let dir = tempfile::tempdir().unwrap();
-    let mut node = spawn_node(dir.path(), Duration::from_secs(1), None, 0);
+    let mut node = spawn_node(dir.path(), Duration::from_secs(1), 0);
     let mut prefixes_while_running: Vec<Read> = Vec::new();
     let deadline = Instant::now() + PATIENCE;
     loop {
@@ -141,8 +137,9 @@ fn a_reader_sees_a_clean_prefix_of_the_streamed_data_while_the_node_runs() {
 #[rstest]
 fn the_bars_the_node_builds_are_stored_under_the_external_source() {
     let dir = tempfile::tempdir().unwrap();
-    let mut node = spawn_node(dir.path(), Duration::from_secs(1), Some(4_000), 0);
-    assert!(stopped(&mut node).success());
+    let mut node = spawn_node(dir.path(), Duration::from_secs(1), 0);
+    // Two promotions, two seconds of trades: a bar closed.
+    assert!(interrupt_once_promoted(dir.path(), &mut node, 2).success());
     let mut catalog = catalog(dir.path());
     let built: Vec<Bar> = catalog
         .query(
@@ -163,8 +160,8 @@ fn the_bars_the_node_builds_are_stored_under_the_external_source() {
 fn a_clean_stop_promotes_everything_and_leaves_no_staging_file() {
     let dir = tempfile::tempdir().unwrap();
     // No promotion before the stop: the stop promotes all.
-    let mut node = spawn_node(dir.path(), Duration::from_secs(3_600), Some(3_000), 0);
-    assert!(stopped(&mut node).success());
+    let mut node = spawn_node(dir.path(), Duration::from_secs(3_600), 0);
+    assert!(interrupt_once_staged(dir.path(), &mut node, "bars").success());
     let read = Read::of(dir.path());
     assert!(read.quotes > 0 && read.trades > 0 && read.depths > 0 && read.bars > 0);
     assert_eq!(staged_files(dir.path()), Vec::<PathBuf>::new());
@@ -173,8 +170,8 @@ fn a_clean_stop_promotes_everything_and_leaves_no_staging_file() {
 #[rstest]
 fn the_instruments_the_clients_load_are_in_the_catalog() {
     let dir = tempfile::tempdir().unwrap();
-    let mut node = spawn_node(dir.path(), Duration::from_secs(1), Some(2_000), 0);
-    assert!(stopped(&mut node).success());
+    let mut node = spawn_node(dir.path(), Duration::from_secs(1), 0);
+    assert!(interrupt_once_promoted(dir.path(), &mut node, 1).success());
     // As a backtest node looks its instruments up.
     let instruments = catalog(dir.path())
         .instruments(Some(&[INSTRUMENT_ID.to_string()]), None, None)
@@ -186,18 +183,13 @@ fn the_instruments_the_clients_load_are_in_the_catalog() {
 #[rstest]
 fn a_restart_after_a_crash_promotes_what_the_crashed_run_staged() {
     let dir = tempfile::tempdir().unwrap();
-    let mut crashed = spawn_node(dir.path(), Duration::from_secs(3_600), None, 0);
+    let mut crashed = spawn_node(dir.path(), Duration::from_secs(3_600), 0);
     wait_for_staged_quotes(dir.path(), &mut crashed);
     crashed.kill().unwrap();
     crashed.wait().unwrap();
     assert_eq!(Read::of(dir.path()).quotes, 0, "promoted before the crash");
-    let mut restarted = spawn_node(
-        dir.path(),
-        Duration::from_secs(3_600),
-        Some(2_000),
-        1_000_000,
-    );
-    assert!(stopped(&mut restarted).success());
+    let mut restarted = spawn_node(dir.path(), Duration::from_secs(1), 1_000_000);
+    assert!(interrupt_once_promoted_from(dir.path(), &mut restarted, 1_000_000).success());
     let seqs = quote_seqs(dir.path());
     let (first_run, second_run): (Vec<u64>, Vec<u64>) =
         seqs.into_iter().partition(|&seq| seq < 1_000_000);
@@ -214,23 +206,18 @@ fn a_restart_after_a_crash_promotes_what_the_crashed_run_staged() {
 #[rstest]
 fn a_restart_promotes_what_the_crashed_run_staged_before_its_warmup_writes_back() {
     let dir = tempfile::tempdir().unwrap();
-    let mut crashed = spawn_node(dir.path(), Duration::from_secs(3_600), None, 0);
+    let mut crashed = spawn_node(dir.path(), Duration::from_secs(3_600), 0);
     wait_for_staged_quotes(dir.path(), &mut crashed);
     crashed.kill().unwrap();
     crashed.wait().unwrap();
     let mut restarted = NodeProcess(
-        node_command(
-            dir.path(),
-            Duration::from_secs(3_600),
-            Some(2_000),
-            1_000_000,
-        )
-        .env(WRITE_BACK, "1")
-        .spawn()
-        .unwrap(),
+        node_command(dir.path(), Duration::from_secs(1), 1_000_000)
+            .env(WRITE_BACK, "1")
+            .spawn()
+            .unwrap(),
     );
 
-    assert!(stopped(&mut restarted).success());
+    assert!(interrupt_once_promoted_from(dir.path(), &mut restarted, 1_000_000).success());
 
     let seqs = quote_seqs(dir.path());
     let crashed_run: Vec<u64> = seqs.iter().copied().filter(|&s| s < 1_000_000).collect();
@@ -251,11 +238,11 @@ fn a_restart_promotes_what_the_crashed_run_staged_before_its_warmup_writes_back(
 #[rstest]
 fn a_backtest_across_a_crash_runs_through_the_gap_it_left() {
     let dir = tempfile::tempdir().unwrap();
-    let mut crashed = spawn_node(dir.path(), Duration::from_secs(3_600), None, 0);
+    let mut crashed = spawn_node(dir.path(), Duration::from_secs(3_600), 0);
     wait_for_staged_quotes(dir.path(), &mut crashed);
     crashed.kill().unwrap();
     crashed.wait().unwrap();
-    let mut restarted = spawn_node(dir.path(), Duration::from_secs(1), None, 1_000_000);
+    let mut restarted = spawn_node(dir.path(), Duration::from_secs(1), 1_000_000);
     assert!(interrupt_once_promoted_from(dir.path(), &mut restarted, 1_000_000).success());
     let quotes: Vec<QuoteTick> = catalog(dir.path())
         .query(None, None, None, None, None, true)
@@ -276,7 +263,7 @@ fn a_backtest_across_a_crash_runs_through_the_gap_it_left() {
 #[rstest]
 fn a_backtest_over_the_streamed_data_runs_through_the_gaps_between_promotions() {
     let dir = tempfile::tempdir().unwrap();
-    let mut node = spawn_node(dir.path(), Duration::from_secs(1), None, 0);
+    let mut node = spawn_node(dir.path(), Duration::from_secs(1), 0);
     assert!(interrupt_once_promoted(dir.path(), &mut node, 2).success());
     let (first, last) = streamed_span(dir.path());
 
@@ -300,7 +287,7 @@ fn a_backtest_over_the_streamed_data_runs_through_the_gaps_between_promotions() 
 #[rstest]
 fn a_dataset_build_over_the_streamed_data_runs_through_the_gaps_between_promotions() {
     let dir = tempfile::tempdir().unwrap();
-    let mut node = spawn_node(dir.path(), Duration::from_secs(1), None, 0);
+    let mut node = spawn_node(dir.path(), Duration::from_secs(1), 0);
     assert!(interrupt_once_promoted(dir.path(), &mut node, 2).success());
     let (first, last) = streamed_span(dir.path());
 
@@ -367,26 +354,19 @@ fn streamed_node() {
     let number = |name: &str| std::env::var(name).ok().map(|v| v.parse::<u64>().unwrap());
     let root = PathBuf::from(root);
     let promotion_interval = Duration::from_millis(number(PROMOTION_MS).unwrap());
-    let stop_after = number(STOP_MS).map(Duration::from_millis);
     let first_seq = number(FIRST_SEQ).unwrap();
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap()
-        .block_on(run_node(&root, promotion_interval, stop_after, first_seq))
+        .block_on(run_node(&root, promotion_interval, first_seq))
         .unwrap();
 }
 
 /// Runs the node of `root`, built as `Live` builds it on the stub's data
 /// client and no cache database, streaming as `Recording` configures it,
-/// but promoting every `promotion_interval`, until `stop_after`, or until
-/// interrupted or killed.
-async fn run_node(
-    root: &Path,
-    promotion_interval: Duration,
-    stop_after: Option<Duration>,
-    first_seq: u64,
-) -> anyhow::Result<()> {
+/// but promoting every `promotion_interval`, until interrupted or killed.
+async fn run_node(root: &Path, promotion_interval: Duration, first_seq: u64) -> anyhow::Result<()> {
     let trader_id = TraderId::from(TRADER_ID);
     // Created first, as `Live` creates it.
     std::fs::create_dir_all(root.join("catalog"))?;
@@ -423,13 +403,6 @@ async fn run_node(
     node.add_actor(Subscriber {
         core: DataActorCore::new(DataActorConfig::default()),
     })?;
-    if let Some(stop_after) = stop_after {
-        let handle = node.handle();
-        get_runtime().spawn(async move {
-            tokio::time::sleep(stop_after).await;
-            handle.stop();
-        });
-    }
     let result = node.run().await;
     node.dispose();
     result
@@ -713,13 +686,6 @@ fn wait_for_staged_quotes(root: &Path, node: &mut Child) {
     }
 }
 
-/// How `node`, which stops itself (`STOP_MS`), exited, once it has, within
-/// `PATIENCE`.
-fn stopped(node: &mut Child) -> ExitStatus {
-    wait_until(|| node.try_wait().unwrap().is_some(), PATIENCE);
-    node.wait().unwrap()
-}
-
 /// Stops `node` as Ctrl-C would, its signal handler stopping it cleanly:
 /// how it exited.
 fn interrupt(node: &mut Child) -> ExitStatus {
@@ -756,13 +722,17 @@ fn interrupt_once_promoted(root: &Path, node: &mut Child, files: usize) -> ExitS
 }
 
 /// Interrupts `node` (`interrupt`) once the catalog of `root` holds a
-/// quote of its run, one numbered `first_seq` or more (`quote_seqs`): how
-/// it exited.
+/// quote of its run, one the stub numbered `first_seq` or more
+/// (`quote_seqs`), not the one written back (`WRITTEN_BACK`): how it
+/// exited.
 fn interrupt_once_promoted_from(root: &Path, node: &mut Child, first_seq: u64) -> ExitStatus {
     let deadline = Instant::now() + PATIENCE;
 
     loop {
-        if quote_seqs(root).iter().any(|&seq| seq >= first_seq) {
+        if quote_seqs(root)
+            .iter()
+            .any(|seq| (first_seq..WRITTEN_BACK).contains(seq))
+        {
             return interrupt(node);
         }
         assert!(Instant::now() < deadline, "no quote of the run promoted");
@@ -771,28 +741,41 @@ fn interrupt_once_promoted_from(root: &Path, node: &mut Child, first_seq: u64) -
     }
 }
 
+/// Interrupts `node` (`interrupt`) once it has staged a file of `series`,
+/// the files of the staging directory of `root` named for it (`bars_…`,
+/// `quotes_…`): it has received some of the series, which its writer
+/// promotes as it closes. How it exited.
+fn interrupt_once_staged(root: &Path, node: &mut Child, series: &str) -> ExitStatus {
+    let deadline = Instant::now() + PATIENCE;
+
+    loop {
+        let staged = root.join("staging").exists()
+            && staged_files(root).iter().any(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(series))
+            });
+
+        if staged {
+            return interrupt(node);
+        }
+        assert!(Instant::now() < deadline, "no {series} staged");
+        assert!(node.try_wait().unwrap().is_none(), "the node stopped");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// Spawns the node of `root` in a child process (`streamed_node`). Its
 /// catalog is created first, so that the test reads it from the start.
-fn spawn_node(
-    root: &Path,
-    promotion_interval: Duration,
-    stop_ms: Option<u64>,
-    first_seq: u64,
-) -> NodeProcess {
+fn spawn_node(root: &Path, promotion_interval: Duration, first_seq: u64) -> NodeProcess {
     NodeProcess(
-        node_command(root, promotion_interval, stop_ms, first_seq)
+        node_command(root, promotion_interval, first_seq)
             .spawn()
             .unwrap(),
     )
 }
 
 /// The command of the child process of `spawn_node`.
-fn node_command(
-    root: &Path,
-    promotion_interval: Duration,
-    stop_ms: Option<u64>,
-    first_seq: u64,
-) -> Command {
+fn node_command(root: &Path, promotion_interval: Duration, first_seq: u64) -> Command {
     std::fs::create_dir_all(root.join("catalog")).unwrap();
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
@@ -800,11 +783,7 @@ fn node_command(
         .env(ROOT, root)
         .env(PROMOTION_MS, promotion_interval.as_millis().to_string())
         .env(FIRST_SEQ, first_seq.to_string())
-        .env_remove(STOP_MS)
         .env_remove(WRITE_BACK);
-    if let Some(stop_ms) = stop_ms {
-        command.env(STOP_MS, stop_ms.to_string());
-    }
     command
 }
 
