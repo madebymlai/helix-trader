@@ -48,10 +48,13 @@
 //! a bar the request builds later closes no earlier than the latest
 //! `ts_init` its data has brought, a history's data initialized as made,
 //! where its bars stand. Ties across
-//! series go in a fixed order of kinds, quotes, trades, depth, deltas,
-//! custom data, then bars, then in the order the series were requested, so
-//! that a replay and a live warmup agree on a tie: a backtest fires the
-//! timer building a bar after the data of its instant
+//! series, at one `ts_init`, go in the order the warmup starts the merge
+//! with, the order a replay hands them in, so that a replay and a live
+//! warmup agree on a tie (`tie_rank` in `strategy::warmup`): custom data
+//! first, a backtest adding its stream before the catalog's; then the
+//! ticks in the order a backtest reads its catalog series
+//! (`DataRequirements::catalog_series`); then the bars, a backtest firing
+//! the timer building a bar after the data of its instant
 //! (`BacktestEngine::flush_accumulator_events` in
 //! `crates/backtest/src/engine.rs`). Within a series, the ticks go in the
 //! order they came. A series
@@ -154,8 +157,8 @@ impl Merge {
 
     /// Merges the history of `requests`, each a request's id and a series
     /// of it, its ticks' or the bars of a bar type it builds, in the order
-    /// requested, a live start's group pending; what it held of a warmup
-    /// before is forgotten.
+    /// their ticks go on a tie, a live start's group pending; what it held
+    /// of a warmup before is forgotten.
     pub(super) fn start(&self, requests: impl IntoIterator<Item = (UUID4, Series)>) {
         let queues = requests
             .into_iter()
@@ -349,22 +352,17 @@ fn hand_on(
         let next = queues
             .iter()
             .enumerate()
-            .filter_map(|(at, queue)| {
-                queue
-                    .held
-                    .front()
-                    .map(|(tick, _)| (tick.ts_init(), order(queues, at), at))
-            })
+            .filter_map(|(at, queue)| queue.held.front().map(|(tick, _)| (tick.ts_init(), at)))
             .min();
-        let Some((at_init, rank, at)) = next else {
+        let Some((at_init, at)) = next else {
             return Ok(());
         };
         let free = queues.iter().enumerate().all(|(other, queue)| {
             other == at
                 || !queue.pending
-                || queue.latest.is_some_and(|latest| {
-                    at_init < latest || (at_init == latest && rank < order(queues, other))
-                })
+                || queue
+                    .latest
+                    .is_some_and(|latest| at_init < latest || (at_init == latest && at < other))
         });
 
         if !free {
@@ -375,21 +373,6 @@ fn hand_on(
         queue.bytes -= size;
         hand(&tick)?;
     }
-}
-
-/// Where the series of `queues[at]` goes on a tie: by its kind, quotes,
-/// trades, depth, deltas, custom data, then bars, then in the order
-/// requested.
-fn order(queues: &[Queue], at: usize) -> (u8, usize) {
-    let kind = match queues[at].series {
-        Series::Quotes(_) => 0,
-        Series::Trades(_) => 1,
-        Series::Depth(_) => 2,
-        Series::Deltas(_) => 3,
-        Series::Custom(_) => 4,
-        Series::Bars(_) => 5,
-    };
-    (kind, at)
 }
 
 /// The pending series of `queues` the merge waits on: those that brought

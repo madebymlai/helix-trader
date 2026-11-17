@@ -195,8 +195,9 @@
 //! replay hands them, up to the earliest, over the series whose requests
 //! are still pending, of the latest `ts_init` each brought, a request's
 //! bars standing at the latest its data brought; a series whose request completes or fails holds the
-//! others back no longer, ties go quotes, trades, depth, deltas, custom
-//! data, then bars, and the group's end hands on all that is held. Past
+//! others back no longer, ties go as a replay hands them, custom data,
+//! then the ticks in the order of the catalog series, then bars
+//! (`tie_rank`), and the group's end hands on all that is held. Past
 //! `merge::HELD` bytes held, 2 GiB, each tick and bar counted with what it
 //! keeps on the heap, the warmup ends incomplete, naming the series held
 //! back, and the rest of its history is left out. The hold's
@@ -531,18 +532,24 @@ impl Warmup {
                 &ContinuousBars::default(),
                 self.group.get(),
             )?;
-            self.merge.start(requested.iter().flat_map(|request| {
-                let bars = request
-                    .built
-                    .iter()
-                    .map(|bar_type| Series::Bars(bar_type.standard()));
-                request
-                    .series
-                    .clone()
-                    .into_iter()
-                    .chain(bars)
-                    .map(|series| (request.id, series))
-            }));
+            let mut merged: Vec<(UUID4, Series)> = requested
+                .iter()
+                .flat_map(|request| {
+                    let bars = request
+                        .built
+                        .iter()
+                        .map(|bar_type| Series::Bars(bar_type.standard()));
+                    request
+                        .series
+                        .clone()
+                        .into_iter()
+                        .chain(bars)
+                        .map(|series| (request.id, series))
+                })
+                .collect();
+            let catalog = requirements.catalog_series();
+            merged.sort_by_cached_key(|(_, series)| tie_rank(series, &catalog, now));
+            self.merge.start(merged);
             self.read.borrow_mut().clear();
 
             if requested.is_empty() {
@@ -1108,6 +1115,35 @@ where
         actor.request_group(ids, Some(group))?;
     }
     Ok(requested)
+}
+
+/// Where `series`, a series a warmup merges, goes among the others on a tie
+/// (see `merge`), as a replay hands ties: custom data first, a backtest
+/// adding its stream before the catalog's (`backtest::node`); then the
+/// ticks in the order of `catalog`, the requirements' catalog series
+/// (`DataRequirements::catalog_series`), a root's standing for its
+/// contract at `now`; built bars last, the aggregator firing after the data
+/// of its instant. Within one of these, the order requested.
+fn tie_rank(series: &Series, catalog: &[CatalogSeries], now: Timestamp) -> (u8, usize) {
+    match series {
+        Series::Custom(_) => (0, 0),
+        Series::Bars(_) => (2, 0),
+        ticks => {
+            let at = catalog
+                .iter()
+                .position(|source| match source {
+                    CatalogSeries::Ticks(tick) => {
+                        Series::of(&TickSeries {
+                            data: tick.data.clone(),
+                            instrument_id: front(tick.instrument_id, now),
+                        }) == *ticks
+                    }
+                    CatalogSeries::Bars(_) => false,
+                })
+                .expect("a tick series requested is among the catalog series");
+            (1, at)
+        }
+    }
 }
 
 /// A request of a warmup's start: its id, the bar types it builds, and the
@@ -3151,17 +3187,32 @@ mod tests {
         }
     }
 
-    /// A feature reads ties across series in a fixed order of kinds, as a
-    /// replay does: quotes, trades, depth, deltas, custom data, then bars.
-    /// Every series answers one point made at midnight: the quotes first,
-    /// with the hourly bar closing then built, the others in the reverse
-    /// order.
+    /// A feature reads ties across series in the order a replay hands
+    /// them: custom data first, a backtest adding its stream before the
+    /// catalog's; then the catalog series in the order a backtest reads
+    /// them (`DataRequirements::catalog_series`), by instrument, a bar's
+    /// source before the ticks, the ticks in the order `[data]` lists
+    /// them; built bars last, a backtest building a bar after the data of
+    /// its instant. `[data]` lists GCZ26's deltas, trades, quotes and depth,
+    /// and its hourly MID bars, built from its quotes: the order is custom
+    /// data, quotes, deltas, trades, depth, then the bar. Every series
+    /// answers one point initialized at midnight: the quotes first, with
+    /// the hourly bar closing then built, the others in the reverse order.
     #[rstest]
-    fn ties_across_series_reach_a_feature_in_the_order_of_their_kinds() {
+    fn ties_across_series_reach_a_feature_in_the_order_a_replay_hands_them() {
         let log = Rc::new(Log::default());
         let requirements = DataRequirements {
             bar_types: vec![BarType::from(XAU_HOURS)],
-            ..every_kind()
+            ticks: [
+                NautilusDataType::OrderBookDelta,
+                NautilusDataType::TradeTick,
+                NautilusDataType::QuoteTick,
+                NautilusDataType::OrderBookDepth,
+            ]
+            .into_iter()
+            .map(|data| tick(data, XAU))
+            .collect(),
+            ..reading_us10y()
         };
         let (warmup, probe, commands) = logging(&requirements, &log);
         let quotes = request_of(&commands, NautilusDataType::QuoteTick);
@@ -3191,7 +3242,7 @@ mod tests {
         let kinds: Vec<&str> = log.read.borrow().iter().map(|(kind, _)| *kind).collect();
         assert_eq!(
             kinds,
-            ["quote", "trade", "depth", "deltas", "custom", "bar"]
+            ["custom", "quote", "deltas", "trade", "depth", "bar"]
         );
     }
 
