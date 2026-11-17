@@ -53,16 +53,16 @@ use super::{config::ModelConfig, targets::Side};
 /// The name of the timer `times` fires on its own clock.
 const GRID: &str = "RETRAIN";
 
-/// How a strategy's models are retrained: every interval, or never, one
-/// generation trained and kept. A `[model]` section gives the
+/// How a strategy's models are retrained: every interval, or never, a
+/// generation trained by `train --at` alone. A `[model]` section gives the
 /// interval, such as `retrain = "168h"`; without one, never.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(from = "SignedDuration")]
 pub enum Retrain {
     /// At every multiple of the interval since the Unix epoch.
     Every(SignedDuration),
-    /// Never: one generation is trained, when a train finds none in use,
-    /// and kept.
+    /// Never: no retrain, each `train --at` training a generation at its
+    /// time.
     #[default]
     Never,
 }

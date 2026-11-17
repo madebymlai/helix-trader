@@ -74,9 +74,9 @@
 //! the meta, so its sides are as fresh as a strategy's without a meta, and
 //! every generation of a strategy with a meta holds one.
 //!
-//! A train never errors: what goes wrong is an outcome, the current
-//! generation kept with the reason (`Kept`). It succeeds when it kept none
-//! (`Trained::succeeded`). Beside its outcome, a train holds the figures it
+//! A train never errors: what goes wrong is an outcome, its failure with
+//! the reason (`Failure`), nothing published and the current generation
+//! deciding on. It succeeds when it did not fail (`Trained::succeeded`). Beside its outcome, a train holds the figures it
 //! reached, failing or not (`Reached`): the days of the dataset it read,
 //! built or cached, and the rows of each slice it counted, of its sides, its
 //! ancestor and its meta, beside their minimum (`model::report`).
@@ -189,8 +189,9 @@ pub enum Outcome {
     /// None was fitted: the generation valid from the train's time is
     /// already published (`schedule::Plan::Keep`).
     AlreadyPublished,
-    /// No generation was published: the current one, if any, stays.
-    Kept(Kept),
+    /// The train failed, publishing no generation: the current one, if
+    /// any, stays.
+    Failed(Failure),
 }
 
 /// The figures a train reached, as far as it went: none of a train whose
@@ -217,13 +218,13 @@ pub struct Slices {
     pub min_rows: usize,
 }
 
-/// Why a train kept the current generation.
+/// Why a train failed.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Kept {
+pub enum Failure {
     /// The replay, the dataset, a fit, a check of the models or the store
     /// failed, or a slice had fewer rows than the minimum; the error, the
     /// same for every model of the generation, whichever it was of.
-    Failed(String),
+    Error(String),
     /// The dataset holds rows that do not match the strategy's features; the
     /// mismatch.
     SchemaMismatch(String),
@@ -280,7 +281,7 @@ impl Training {
     /// the store's generations: the generation valid from `at` already
     /// published, if any; else a generation trained and published
     /// (`generation`), or,
-    /// should anything of it fail, the current one kept with the error,
+    /// should anything of it fail, the train's failure with the error,
     /// beside the figures the train reached. `replay` runs the strategy
     /// over a span of the days the dataset lacks and returns the rows it
     /// settled (see `Dataset::settled`), once, from where the plan's fits
@@ -292,12 +293,13 @@ impl Training {
     ) -> Trained {
         let mut reached = Reached::default();
         let outcome = match self.models.generations() {
-            Err(e) => kept(&e),
+            Err(e) => failed(&e),
             Ok(generations) => match self.schedule.plan(at, &generations) {
                 Plan::Keep => Outcome::AlreadyPublished,
-                Plan::Train(fits) => self
-                    .generation(&fits, replay, &mut reached)
-                    .map_or_else(|e| kept(&e), |generation| Outcome::Published { generation }),
+                Plan::Train(fits) => self.generation(&fits, replay, &mut reached).map_or_else(
+                    |e| failed(&e),
+                    |generation| Outcome::Published { generation },
+                ),
             },
         };
         Trained { outcome, reached }
@@ -630,11 +632,11 @@ impl Level {
 }
 
 impl Trained {
-    /// Whether the train succeeded: it kept no generation, its own
+    /// Whether the train succeeded: it did not fail, its generation
     /// published or already published.
     #[must_use]
     pub const fn succeeded(&self) -> bool {
-        !matches!(self.outcome, Outcome::Kept(_))
+        !matches!(self.outcome, Outcome::Failed(_))
     }
 }
 
@@ -648,12 +650,11 @@ impl From<Outcome> for Trained {
     }
 }
 
-/// The current generation kept for the error `e`: a schema mismatch, or a
-/// failure.
-fn kept(e: &anyhow::Error) -> Outcome {
-    Outcome::Kept(match e.downcast_ref::<SchemaMismatch>() {
-        Some(mismatch) => Kept::SchemaMismatch(mismatch.to_string()),
-        None => Kept::Failed(format!("{e:#}")),
+/// The failure of the error `e`: a schema mismatch, or any other error.
+fn failed(e: &anyhow::Error) -> Outcome {
+    Outcome::Failed(match e.downcast_ref::<SchemaMismatch>() {
+        Some(mismatch) => Failure::SchemaMismatch(mismatch.to_string()),
+        None => Failure::Error(format!("{e:#}")),
     })
 }
 
@@ -770,15 +771,15 @@ impl Display for Outcome {
                 write!(f, "published the generation {}", generation.display())
             }
             Self::AlreadyPublished => write!(f, "already published"),
-            Self::Kept(kept) => write!(f, "{kept}"),
+            Self::Failed(failure) => write!(f, "{failure}"),
         }
     }
 }
 
-impl Display for Kept {
+impl Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Failed(why) => write!(f, "failed: {why}"),
+            Self::Error(why) => write!(f, "failed: {why}"),
             Self::SchemaMismatch(why) => write!(f, "schema mismatch: {why}"),
         }
     }
@@ -1149,7 +1150,7 @@ mod tests {
         let trained =
             training(dir.path(), config()).train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(rows));
 
-        let Outcome::Kept(Kept::Failed(why)) = &trained.outcome else {
+        let Outcome::Failed(Failure::Error(why)) = &trained.outcome else {
             panic!("{trained:?}");
         };
         assert!(
@@ -1174,7 +1175,7 @@ mod tests {
         let trained =
             training(dir.path(), config()).train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(rows));
 
-        let Outcome::Kept(Kept::Failed(why)) = &trained.outcome else {
+        let Outcome::Failed(Failure::Error(why)) = &trained.outcome else {
             panic!("{trained:?}");
         };
         assert!(
@@ -1186,8 +1187,8 @@ mod tests {
 
     /// The short's stop on a row fitted on is worth nought, so its R there is
     /// no finite number and its fit fails. The long, fitted, publishes
-    /// nothing: both are kept, the long for the short's failure, which it
-    /// names, and the generation of the 6th stays the current one.
+    /// nothing: the train fails for the short's failure, which it names,
+    /// and the generation of the 6th stays the current one.
     #[rstest]
     fn a_side_whose_fit_fails_publishes_no_generation() {
         let dir = tempfile::tempdir().unwrap();
@@ -1199,15 +1200,15 @@ mod tests {
         let trained =
             training(dir.path(), config()).train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(rows));
 
-        let Outcome::Kept(Kept::Failed(why)) = &trained.outcome else {
+        let Outcome::Failed(Failure::Error(why)) = &trained.outcome else {
             panic!("{trained:?}");
         };
         assert!(why.contains("short") && why.contains("finite"), "{why}");
         assert_eq!(generations(dir.path(), &config()), [at(sixth)]);
     }
 
-    /// The generation's publish fails: every model is kept, failed, for the
-    /// store, which each names, and no generation is listed.
+    /// The generation's publish fails: the train fails for the store,
+    /// which it names, and no generation is listed.
     #[rstest]
     fn a_publish_failing_publishes_no_generation() {
         let dir = tempfile::tempdir().unwrap();
@@ -1217,7 +1218,7 @@ mod tests {
 
         let trained = training.train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(rows()));
 
-        let Outcome::Kept(Kept::Failed(why)) = &trained.outcome else {
+        let Outcome::Failed(Failure::Error(why)) = &trained.outcome else {
             panic!("{trained:?}");
         };
         assert!(
@@ -1434,7 +1435,7 @@ mod tests {
             anyhow::bail!("the catalog does not cover the window")
         });
 
-        let Outcome::Kept(Kept::Failed(why)) = &trained.outcome else {
+        let Outcome::Failed(Failure::Error(why)) = &trained.outcome else {
             panic!("{trained:?}");
         };
         assert!(why.contains("does not cover"), "{why}");
@@ -1455,7 +1456,7 @@ mod tests {
 
         let trained = training.train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(rows));
 
-        let Outcome::Kept(Kept::Failed(why)) = &trained.outcome else {
+        let Outcome::Failed(Failure::Error(why)) = &trained.outcome else {
             panic!("{trained:?}");
         };
 
@@ -1492,7 +1493,7 @@ mod tests {
         let trained = training.train_at(at("2026-01-07T02:00:00Z"), |_, _| Ok(wide));
 
         assert!(
-            matches!(trained.outcome, Outcome::Kept(Kept::SchemaMismatch(_))),
+            matches!(trained.outcome, Outcome::Failed(Failure::SchemaMismatch(_))),
             "{trained:?}"
         );
         assert_eq!(generations(dir.path(), &config()), []);
@@ -1841,7 +1842,7 @@ mod tests {
 
         let (models, trained, _) = at_the_eighth(dir.path(), three, rows);
 
-        let Outcome::Kept(Kept::Failed(why)) = &trained.outcome else {
+        let Outcome::Failed(Failure::Error(why)) = &trained.outcome else {
             panic!("{trained:?}");
         };
 
@@ -1986,17 +1987,17 @@ mod tests {
     }
 
     #[rstest]
-    fn a_train_succeeds_unless_it_kept_the_current_generation() {
+    fn a_train_succeeds_unless_it_failed() {
         let t = at("2026-01-07T00:00:00Z");
         let published = Outcome::Published {
             generation: PathBuf::from("models").join(t.to_string()),
         };
         let already = Outcome::AlreadyPublished;
-        let kept = Outcome::Kept(Kept::Failed("no short row".to_string()));
+        let failed = Outcome::Failed(Failure::Error("no short row".to_string()));
 
         assert!(Trained::from(published).succeeded());
         assert!(Trained::from(already).succeeded());
-        assert!(!Trained::from(kept).succeeded());
+        assert!(!Trained::from(failed).succeeded());
     }
 
     /// A generation published reads with its directory; one already
@@ -2006,8 +2007,8 @@ mod tests {
         Outcome::Published { generation: PathBuf::from("models/2026-01-07T00:00:00Z") },
         &["published the generation models/2026-01-07T00:00:00Z"]
     )]
-    #[case::kept(
-        Outcome::Kept(Kept::Failed("no short row".to_string())),
+    #[case::failed(
+        Outcome::Failed(Failure::Error("no short row".to_string())),
         &["failed: no short row"]
     )]
     #[case::already_published(Outcome::AlreadyPublished, &["already published"])]

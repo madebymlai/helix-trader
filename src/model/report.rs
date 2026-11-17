@@ -204,7 +204,7 @@ mod tests {
     use super::*;
     use crate::model::{
         dataset::DaysRead,
-        train::{Kept, Outcome},
+        train::{Failure, Outcome},
     };
 
     fn at() -> Timestamp {
@@ -282,7 +282,7 @@ mod tests {
     #[rstest]
     fn a_failed_train_reports_its_reason_and_the_figures_it_reached() {
         let trained = Trained {
-            outcome: Outcome::Kept(Kept::Failed("0 rows in the fit slice".to_string())),
+            outcome: Outcome::Failed(Failure::Error("0 rows in the fit slice".to_string())),
             reached: Reached {
                 days: Some(DaysRead {
                     built: 3,

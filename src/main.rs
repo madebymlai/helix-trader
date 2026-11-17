@@ -836,7 +836,7 @@ fn strategy_name(strategy: StrategyName) -> String {
 #[cfg(test)]
 mod tests {
 
-    use helix_trader::model::train::{Kept, Outcome};
+    use helix_trader::model::train::{Failure, Outcome};
     use jiff::SignedDuration;
     use rstest::rstest;
 
@@ -1115,7 +1115,7 @@ mod tests {
     #[rstest]
     fn a_train_keeping_the_generation_fails_with_the_reason() {
         let t: Timestamp = "2026-10-23T00:00:00Z".parse().unwrap();
-        let kept = Outcome::Kept(Kept::Failed(
+        let kept = Outcome::Failed(Failure::Error(
             "34 rows in the fit slice, fewer than min_rows 35".to_string(),
         ));
         let published = Outcome::Published {
