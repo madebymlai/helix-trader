@@ -586,7 +586,13 @@ impl Warmup {
                 })
                 .filter(|(_, series)| fed.contains(series))
                 .collect();
-            let catalog = requirements.catalog_series();
+            // The strategy's own series, as a replay reads them
+            // (`Backtest::series`): not the harness's bars.
+            let catalog = DataRequirements {
+                bar_types: self.bar_types.clone(),
+                ..requirements.clone()
+            }
+            .catalog_series();
             merged.sort_by_cached_key(|(_, series)| tie_rank(series, &catalog, now));
             self.merge.start(merged);
             self.read.borrow_mut().clear();
@@ -1191,8 +1197,9 @@ where
 /// Where `series`, a series a warmup merges, goes among the others on a tie
 /// (see `merge`), as a replay hands ties: custom data first, a backtest
 /// adding its stream before the catalog's (`backtest::node`); then the
-/// ticks in the order of `catalog`, the requirements' catalog series
-/// (`DataRequirements::catalog_series`), a root's standing for its
+/// ticks in the order of `catalog`, the catalog series of the strategy's
+/// own bar types and ticks (`DataRequirements::catalog_series`), as a
+/// backtest reads them, the harness's bars left out, a root's standing for its
 /// contract at `now`; built bars last, the aggregator firing after the data
 /// of its instant. Within one of these, the order requested.
 fn tie_rank(series: &Series, catalog: &[CatalogSeries], now: Timestamp) -> (u8, usize) {
@@ -3347,6 +3354,43 @@ mod tests {
         assert_eq!(
             kinds,
             ["custom", "quote", "deltas", "trade", "depth", "bar"]
+        );
+    }
+
+    /// The ties go as a replay of the strategy's own series hands them,
+    /// which the harness's bars are not among: a backtest reads the
+    /// catalog series of the strategy's bar types and ticks
+    /// (`Backtest::series`), not of the target's ATR's bars. `[data]` lists
+    /// GCZ26's trades, then its quotes, and the warmup builds its hourly
+    /// MID bars for the target's ATR, from those quotes: a backtest hands a
+    /// trade and a quote initialized at midnight in that order, the trade
+    /// first, whichever the venue answers first.
+    #[rstest]
+    fn ties_go_as_a_replay_of_the_strategys_own_series_hands_them() {
+        let log = Rc::new(Log::default());
+        let requirements = reading_ticks(
+            &[],
+            vec![
+                tick(NautilusDataType::TradeTick, XAU),
+                tick(NautilusDataType::QuoteTick, XAU),
+            ],
+        );
+        let atr = Rc::new(Log::default());
+        let warmup = Warmup::live(&requirements).building(
+            BarType::from(XAU_HOURS),
+            Rc::clone(&atr) as SharedActorIndicator,
+        );
+        let (warmup, probe, _) = logging_with(warmup, &requirements, &log);
+
+        warmup.on_historical_quotes(&[quote("00:00:00")]).unwrap();
+        warmup
+            .on_historical_trades(&[trade("00:00:00", "00:00:00")])
+            .unwrap();
+        warmup.complete(&probe).unwrap();
+
+        assert_eq!(
+            *log.read.borrow(),
+            [entry("trade", "00:00:00"), entry("quote", "00:00:00")]
         );
     }
 
