@@ -63,7 +63,10 @@
 //! longer, and the rest of its queue goes on in order, its bars' too: held
 //! past their request's completion while others are pending, they reach
 //! the features before the live bars Nautilus builds from then on all the
-//! same, which the hold holds (see `hold`). When the group
+//! same, which the hold holds (see `hold`). A bar a request builds at its
+//! completion from the live data Nautilus held for it, closing after the
+//! warmup's end, never reaches the merge: the warmup hands it the hold as
+//! a live one (`Warmup::on_data_response`). When the group
 //! ends, everything held goes on in order. A response of a series no fed
 //! indicator reads, a conversion pair's quotes or the traded instrument's,
 //! goes on at once, holding nothing back and held by nothing (see

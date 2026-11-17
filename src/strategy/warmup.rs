@@ -63,9 +63,14 @@
 //! in `crates/data/src/engine/bar.rs`): so the warmup reads, at each
 //! response of a request, window or completion (`Warmup::on_data_response`),
 //! the bars it built since the last, each once, and hands them on with the
-//! ticks (see the merge, below). An external bar type's request hands its
-//! indicators nothing: its bars come in its responses, which the data
-//! engine caches (where `get_xrate` reads a conversion pair's), and no
+//! ticks (see the merge, below). A bar closing after the warmup's `now`
+//! (`ts_init`) is one of the live data the request held
+//! (`finish_historical_bar_aggregator`, which Nautilus builds into the
+//! cache alone, handing no handler): it is live, not history, and goes
+//! among the live ticks the hold holds, in time order (`Hold::built_live`),
+//! after the live ticks it was built from. An external bar type's request
+//! hands its indicators nothing: its bars come in its responses, which the
+//! data engine caches (where `get_xrate` reads a conversion pair's), and no
 //! indicator reads external bars, which the strategies' bar types are not.
 //! A response's data is that window's alone, and the request's completion
 //! carries none.
@@ -193,10 +198,11 @@
 //! trades, depth, deltas and custom data, and the bars each request builds,
 //! of each series an indicator it feeds reads (`feeding`, `feeding_ticks`,
 //! `feeding_books`, `feeding_custom`, `building` each naming what its
-//! indicator reads), the others going on as they come, and hands them to the hold in `ts_init` order, as a
-//! replay hands them, up to the earliest, over the series whose requests
-//! are still pending, of the latest `ts_init` each brought, a request's
-//! bars standing at the latest its data brought; a series whose request completes or fails holds the
+//! indicator reads), the others going on as they come, and hands them to
+//! the hold in `ts_init` order, as a replay hands them, up to the
+//! earliest, over the series whose requests are still pending, of the
+//! latest `ts_init` each brought, a request's bars standing at the latest
+//! its data brought; a series whose request completes or fails holds the
 //! others back no longer, ties go as a replay hands them, custom data,
 //! then the ticks in the order of the catalog series, then bars
 //! (`tie_rank`), and the group's end hands on all that is held. Past
@@ -399,6 +405,8 @@ pub struct Warmup {
     /// warmup and live, to the indicators reading them, holding the live
     /// ones while a live start's group is pending.
     hold: Hold,
+    /// The end of the last live start's warmup, its `now`.
+    end: Cell<UnixNanos>,
     /// The request group of the last live start.
     group: Cell<UUID4>,
     /// Whether that group has not ended yet.
@@ -447,6 +455,7 @@ impl Warmup {
             fed_custom: Vec::new(),
             merge: Merge::new(merge::HELD),
             hold: Hold::default(),
+            end: Cell::new(UnixNanos::default()),
             group: Cell::new(UUID4::new()),
             warming: Cell::new(false),
             building: RefCell::default(),
@@ -542,6 +551,7 @@ impl Warmup {
     {
         let now = actor.clock().utc_now();
         if self.start == Start::Request {
+            self.end.set(UnixNanos::from(now));
             self.group.set(UUID4::new());
             self.warming.set(true);
             self.hold.hold();
@@ -624,7 +634,16 @@ impl Warmup {
         let request = response.correlation_id();
         let built = self.building.borrow().get(request).cloned();
         if let Some(built) = built {
-            let bars = self.built_bars(actor, &built);
+            // Those closing after the warmup's end Nautilus built from the
+            // live data it held for the request, at its completion: live.
+            let end = self.end.get();
+            let (live, bars): (Vec<Bar>, Vec<Bar>) = self
+                .built_bars(actor, &built)
+                .into_iter()
+                .partition(|bar| bar.ts_init > end);
+            for bar in live {
+                self.hold.built_live(Tick::Bar(bar))?;
+            }
             let through = response.response().and_then(latest_initialized);
             self.overflowed(
                 self.merge
@@ -966,6 +985,7 @@ impl Debug for Warmup {
             .field("ticks", &self.ticks)
             .field("merge", &self.merge)
             .field("hold", &self.hold)
+            .field("end", &self.end)
             .field("group", &self.group)
             .field("warming", &self.warming)
             .field("building", &self.building)
@@ -3766,6 +3786,63 @@ mod tests {
                 entry("bar", "14:00:00"),
                 entry("trade", "14:00:30"),
                 entry("bar", "15:00:00"),
+            ]
+        );
+    }
+
+    /// A bar Nautilus builds at a request's completion from the live data
+    /// it held for the request (`WarmupBuffer`, replayed by
+    /// `finish_historical_bar_aggregator`) is live, not history: it closes
+    /// after the warmup's end, 14:30. GCZ26's quotes answer 14:00, building
+    /// that hour's bar; live, a quote made at 14:45, a trade at 14:50 and a
+    /// quote at 15:00:01 come while the quotes' request is pending, the
+    /// last closing the bar of 15:00, which the data engine builds into the
+    /// cache alone as the request completes. The trades answer 14:00:30.
+    /// The feature reads the history, then the live ticks and that bar in
+    /// time order (`ts_init`): the bar after the trade of 14:50, before the
+    /// quote received after its close.
+    #[rstest]
+    fn a_bar_built_from_the_live_data_a_request_held_is_read_among_the_live_ticks() {
+        let log = Rc::new(Log::default());
+        let (warmup, probe, commands) = logging_bars(&log);
+        let quotes = request_of(&commands, NautilusDataType::QuoteTick);
+
+        answer_quotes(
+            &warmup,
+            &probe,
+            quotes,
+            &[quote("14:00:00")],
+            &[hour_bar("14:00:00")],
+        );
+        warmup
+            .on_quote(&quote_of(XAU, "14:45:00", "14:45:00.050"))
+            .unwrap();
+        warmup.on_trade(&trade("14:50:00", "14:50:00.050")).unwrap();
+        warmup
+            .on_quote(&quote_of(XAU, "15:00:01", "15:00:01.050"))
+            .unwrap();
+        probe
+            .cache_rc()
+            .borrow_mut()
+            .add_bar(hour_bar("15:00:00"))
+            .unwrap();
+        let completed = DataResponseEnvelope::terminal(quotes, None);
+        warmup.on_data_response(&probe, &completed).unwrap();
+        warmup
+            .on_historical_trades(&[trade("14:00:30", "14:00:30")])
+            .unwrap();
+        warmup.complete(&probe).unwrap();
+
+        assert_eq!(
+            *log.read.borrow(),
+            [
+                entry("quote", "14:00:00"),
+                entry("bar", "14:00:00"),
+                entry("trade", "14:00:30"),
+                entry("quote", "14:45:00"),
+                entry("trade", "14:50:00"),
+                entry("bar", "15:00:00"),
+                entry("quote", "15:00:01"),
             ]
         );
     }

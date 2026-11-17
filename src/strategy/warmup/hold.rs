@@ -155,6 +155,28 @@ impl Hold {
         self.pass(&tick)
     }
 
+    /// Takes `tick`, a live one Nautilus built from the live data it held
+    /// for a request and hands no handler, a bar it built into the cache
+    /// alone at the request's completion: held among the live ticks held in
+    /// time order, before the first initialized after it (`ts_init`), the
+    /// ticks it was built from before it, as a replay hands a bar after the
+    /// data of its instant; with none held, handed as `live` hands one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an indicator reading it fails, as `live`.
+    pub(super) fn built_live(&self, tick: Tick) -> anyhow::Result<()> {
+        if let Some(held) = self.held.borrow_mut().as_mut() {
+            let at = held
+                .iter()
+                .position(|other| other.ts_init() > tick.ts_init())
+                .unwrap_or(held.len());
+            held.insert(at, tick);
+            return Ok(());
+        }
+        self.pass(&tick)
+    }
+
     /// Hands the ticks held over, in the order they came, but those the
     /// history holds, the group having ended; from now on live ticks go
     /// straight through. Nothing held, nothing to do.
