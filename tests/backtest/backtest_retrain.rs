@@ -54,12 +54,12 @@ fn config_daily() -> ModelConfig {
     }
 }
 
-/// Quotes from 23:00 of the 20th of October 2026 to 03:00 of the 26th:
-/// the span's days, after their warmup, to the span's end plus the
+/// Quotes from 23:00 of the 22nd of October 2026 to 03:00 of the 26th:
+/// the span's days, from an hour before them, to the span's end plus the
 /// target's limit.
 fn catalog() -> TempDir {
     walk(
-        ic::at("00:00:00") - SignedDuration::from_hours(1),
+        ic::at("00:00:00") + SignedDuration::from_hours(47),
         ic::at("00:00:00") + SignedDuration::from_hours(123),
     )
 }

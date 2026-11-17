@@ -8,7 +8,7 @@
 //! warmup opens the target of a day's first decision. One node per
 //! thread: the second build runs none.
 
-use std::{collections::VecDeque, rc::Rc};
+use std::{collections::VecDeque, path::PathBuf, rc::Rc};
 
 use helix_trader::{
     model::{
@@ -30,6 +30,7 @@ use nautilus_model::{
 };
 use rstest::rstest;
 use rust_decimal::Decimal;
+use tempfile::TempDir;
 
 use crate::common::{
     dataset::{
@@ -166,42 +167,70 @@ fn two_hour_mean() -> Rc<FeatureSet> {
 }
 
 /// The rows of Thursday 22 October 2026 stored by a build of the two-hour
-/// mean from `first` to the 22nd, on a catalog of its own from 20:00 on
-/// the 20th: on a thread of its own, one node per thread.
-fn thursday_stored_by_a_build_from(first: Date) -> Vec<DatasetRow> {
-    std::thread::spawn(move || {
+/// mean from `first` to the 22nd on `catalog`, IC's gold as `walk` from
+/// 20:00 on the 20th to 03:00 on the 23rd: on a thread of its own, one
+/// node per thread.
+fn thursday_stored_by_a_build_from(catalog: &TempDir, first: Date) -> Vec<DatasetRow> {
+    on_thread(|| {
         let thursday = Date::constant(2026, 10, 22);
-        let catalog = walk(
-            on(Date::constant(2026, 10, 20), "20:00:00"),
-            on(Date::constant(2026, 10, 23), "03:00:00"),
-        );
         let dataset = blueprint(two_hour_mean(), config())
             .dataset(catalog.path())
             .unwrap();
         dataset
             .build(first, thursday, |from, to| {
-                replay_on(&catalog, two_hour_mean(), from, to)
+                replay_on(catalog, two_hour_mean(), from, to)
             })
             .unwrap();
         dataset
             .read(on(thursday, "00:00:00"), on(thursday, "23:59:59"))
             .unwrap()
     })
-    .join()
-    .unwrap()
 }
 
 /// The mean at Thursday's first decisions reads Wednesday's quotes: a
 /// build of Thursday alone replays from 21:00 on Wednesday, the warmup
 /// before it, as a build from Wednesday replays it, and stores none of
-/// Wednesday's rows.
+/// Wednesday's rows. Each build stores its rows in a catalog of its own,
+/// the same quotes.
 #[rstest]
 fn a_day_built_alone_is_stored_as_inside_a_longer_build() {
-    let alone = thursday_stored_by_a_build_from(Date::constant(2026, 10, 22));
-    let inside = thursday_stored_by_a_build_from(Date::constant(2026, 10, 21));
+    let catalog = walk(
+        on(Date::constant(2026, 10, 20), "20:00:00"),
+        on(Date::constant(2026, 10, 23), "03:00:00"),
+    );
+    let copy = copy_of(&catalog);
+
+    let alone = thursday_stored_by_a_build_from(&catalog, Date::constant(2026, 10, 22));
+    let inside = thursday_stored_by_a_build_from(&copy, Date::constant(2026, 10, 21));
 
     assert_eq!(alone.len(), 24, "{alone:#?}");
     assert_eq!(alone, inside);
+}
+
+/// Runs `run` on a thread of its own, a node's.
+fn on_thread<T: Send>(run: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|scope| scope.spawn(run).join().unwrap())
+}
+
+/// A copy of the catalog `catalog`, its files copied into a temp dir of
+/// their own: a dataset build stores its rows in it apart from the
+/// original's.
+fn copy_of(catalog: &TempDir) -> TempDir {
+    let copy = tempfile::tempdir().unwrap();
+    let mut dirs = vec![PathBuf::new()];
+    while let Some(dir) = dirs.pop() {
+        std::fs::create_dir_all(copy.path().join(&dir)).unwrap();
+        for entry in std::fs::read_dir(catalog.path().join(&dir)).unwrap() {
+            let entry = entry.unwrap();
+            let path = dir.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                dirs.push(path);
+            } else {
+                std::fs::copy(catalog.path().join(&path), copy.path().join(&path)).unwrap();
+            }
+        }
+    }
+    copy
 }
 
 /// `hh:mm:ss` UTC on `date`.
@@ -212,7 +241,7 @@ fn on(date: Date, time: &str) -> Timestamp {
 /// IC's gold as `walk` from 23:00 on Wednesday 21 October 2026 to 06:00
 /// on Tuesday 27th, without quotes over the weekend, from 21:00 on Friday
 /// 23rd to 22:00 on Sunday 25th.
-fn weekend_walk() -> tempfile::TempDir {
+fn weekend_walk() -> TempDir {
     let (from, to) = (
         on(Date::constant(2026, 10, 21), "23:00:00"),
         on(Date::constant(2026, 10, 27), "06:00:00"),
@@ -237,29 +266,37 @@ fn weekend_walk() -> tempfile::TempDir {
 }
 
 /// The rows from `from` to `to` stored by a build from Thursday 22 October
-/// 2026 to `last` on `weekend_walk`, on a catalog of its own: on a thread
-/// of its own, one node per thread.
-fn stored_by_a_build_to(last: Date, from: Timestamp, to: Timestamp) -> Vec<DatasetRow> {
-    std::thread::spawn(move || {
-        let catalog = weekend_walk();
+/// 2026 to `last` on `catalog`, a `weekend_walk`: on a thread of its own,
+/// one node per thread.
+fn stored_by_a_build_to(
+    catalog: &TempDir,
+    last: Date,
+    from: Timestamp,
+    to: Timestamp,
+) -> Vec<DatasetRow> {
+    on_thread(|| {
         let dataset = blueprint(features(), config())
             .dataset(catalog.path())
             .unwrap();
         dataset
             .build(Date::constant(2026, 10, 22), last, |from, to| {
-                replay(&catalog, from, to)
+                replay(catalog, from, to)
             })
             .unwrap();
         dataset.read(from, to).unwrap()
     })
-    .join()
-    .unwrap()
 }
 
-/// The rows of Friday 23 October 2026 stored by a build to `last`.
-fn friday_stored_by_a_build_to(last: Date) -> Vec<DatasetRow> {
+/// The rows of Friday 23 October 2026 stored by a build to `last` on
+/// `catalog`.
+fn friday_stored_by_a_build_to(catalog: &TempDir, last: Date) -> Vec<DatasetRow> {
     let friday = Date::constant(2026, 10, 23);
-    stored_by_a_build_to(last, on(friday, "00:00:00"), on(friday, "23:59:59"))
+    stored_by_a_build_to(
+        catalog,
+        last,
+        on(friday, "00:00:00"),
+        on(friday, "23:59:59"),
+    )
 }
 
 /// A build cut on Friday replays to 02:00 on Saturday, one cut on Monday
@@ -268,11 +305,15 @@ fn friday_stored_by_a_build_to(last: Date) -> Vec<DatasetRow> {
 /// the time close, a market order, on the last quote it has, as it fills
 /// any market order between quotes, so neither build waits for Sunday's
 /// open, and both store the same Friday. The decisions at 22:00 and 23:00,
-/// with no quote since the one before, store no row.
+/// with no quote since the one before, store no row. Each build stores its
+/// rows in a catalog of its own, the same quotes.
 #[rstest]
 fn a_day_is_stored_the_same_by_a_build_cut_before_a_weekend_and_one_cut_after() {
-    let cut_before = friday_stored_by_a_build_to(Date::constant(2026, 10, 23));
-    let cut_after = friday_stored_by_a_build_to(Date::constant(2026, 10, 26));
+    let catalog = weekend_walk();
+    let copy = copy_of(&catalog);
+
+    let cut_before = friday_stored_by_a_build_to(&catalog, Date::constant(2026, 10, 23));
+    let cut_after = friday_stored_by_a_build_to(&copy, Date::constant(2026, 10, 26));
 
     assert_eq!(cut_before.len(), 22, "{cut_before:#?}");
     assert_eq!(cut_before, cut_after);
@@ -287,6 +328,7 @@ fn a_closed_market_stores_no_row() {
     let (friday, sunday) = (Date::constant(2026, 10, 23), Date::constant(2026, 10, 25));
 
     let rows = stored_by_a_build_to(
+        &weekend_walk(),
         Date::constant(2026, 10, 26),
         on(friday, "20:30:00"),
         on(sunday, "23:30:00"),
