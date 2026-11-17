@@ -2,15 +2,14 @@
 //! its `Retrain` says (`ModelConfig::retrain`), every interval, on the
 //! fixed UTC grid of the interval's multiples since the Unix epoch,
 //! whatever the run start, in a backtest as live; or never, a generation
-//! trained once, when a train finds none in use, and kept. At each train,
-//! what is done (`Plan`).
+//! trained at each time the operator trains it at alone. At each train,
+//! what is done (`Plan`), alike in both modes.
 //!
 //! Retrained and never retrained differ in the arms of `Retrain` in this
 //! module alone, so no caller tells them apart: the section's validation
-//! (`Retrain::validate`), a run's train times (`Schedule::times`), the
-//! current generation at a train's time (`Retrain::current`), how a model
-//! kept in use reads (`Retrain::in_use`), and the retrain times of a train
-//! over a span, none never retrained (`Schedule::retrain_times`). The model
+//! (`Retrain::validate`), a run's train times (`Schedule::times`), and the
+//! retrain times of a train over a span, none never retrained
+//! (`Schedule::retrain_times`). The model
 //! store reads it once more, as a key: generations of another retrain, or
 //! of none, are another store's (`store`); and a live node once, building the retrain
 //! actor of a strategy only if it is retrained
@@ -26,14 +25,14 @@
 //! a live node has no retrain actor, so no timer is set, and the strategy
 //! is trained at one time alone (`train --at`).
 //!
-//! A train at `t` is planned (`Schedule::plan`): a generation current at
-//! `t` in the store (retrained, the one valid exactly from `t`; never
-//! retrained, the latest valid at or before `t`) is kept, in use, whole;
-//! else the train trains a generation at `t`, the same in both modes and
-//! whatever else the store holds: its sides fitted as of `t`, on the rows
-//! of their window back from `t` settled by then, and, with a meta, an
-//! ancestor pair of the sides fitted alike as of `t` less the meta's
-//! window, whose picks over the meta's window are the meta's rows, out of
+//! A train at `t` is planned (`Schedule::plan`), the same in both modes: a
+//! generation the store holds valid exactly from `t` is kept, whole,
+//! already published, a train being deterministic; else the train trains a
+//! generation at `t`, whatever else the store holds, an older generation
+//! included, which a decision before `t` still uses: its sides fitted as of
+//! `t`, on the rows of their window back from `t` settled by then, and,
+//! with a meta, an ancestor pair of the sides fitted alike as of `t` less
+//! the meta's window, whose picks over the meta's window are the meta's rows, out of
 //! sample (`train`). The plan answers where the train's one replay starts
 //! (`Fits::replay_from`), at the first row a fit reads, the ancestor's with
 //! a meta: a kept generation reads none, its baselines its own, published
@@ -91,8 +90,8 @@ pub struct Models<T> {
 /// What a train at a time does (`Schedule::plan`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Plan {
-    /// Keeps the generation valid from `valid_from`, current at the train,
-    /// whole.
+    /// Keeps the generation valid from `valid_from`, the train's time,
+    /// whole: already published.
     Keep { valid_from: Timestamp },
     /// Trains a generation valid from the train's time.
     Train(Fits),
@@ -174,16 +173,17 @@ impl Schedule {
     }
 
     /// The plan of a train at `at`, the store holding generations valid
-    /// from `generations`: the generation current at `at` (`Retrain::current`)
-    /// kept, if any; else a generation trained at `at`, its sides fitted as
+    /// from `generations`: the generation valid exactly from `at` kept, if
+    /// any, retrained or never retrained alike, as a train is deterministic;
+    /// else a generation trained at `at`, its sides fitted as
     /// of `at` on the rows of their window back from it, and, with a meta,
     /// its ancestor pair fitted alike as of the meta's window before `at`.
     /// The store is read for the generation kept alone: what a train fits
     /// is the same whatever else the store holds.
     #[must_use]
     pub fn plan(&self, at: Timestamp, generations: &[Timestamp]) -> Plan {
-        if let Some(valid_from) = self.retrain.current(generations, at) {
-            return Plan::Keep { valid_from };
+        if generations.contains(&at) {
+            return Plan::Keep { valid_from: at };
         }
         let fit = |at: Timestamp| Fit {
             from: at - self.sides,
@@ -218,33 +218,6 @@ impl Retrain {
                     format!("the retrain interval {every:#} is not positive"),
                 ),
             );
-        }
-    }
-
-    /// How a model a train kept in use reads, of its current generation
-    /// valid from `valid_from`, already published, so not trained again:
-    /// retrained, valid from then; never retrained, in use since then.
-    #[must_use]
-    pub fn in_use(self, valid_from: Timestamp) -> String {
-        match self {
-            Self::Every(_) => format!("already published, valid from {valid_from}"),
-            Self::Never => {
-                format!("already published, in use since {valid_from}, never retrained")
-            }
-        }
-    }
-
-    /// The current generation at `at` of a store holding generations valid
-    /// from `valid_froms`: retrained, the one valid exactly from `at`; never
-    /// retrained, the latest valid at or before `at`.
-    fn current(self, valid_froms: &[Timestamp], at: Timestamp) -> Option<Timestamp> {
-        match self {
-            Self::Every(_) => valid_froms.contains(&at).then_some(at),
-            Self::Never => valid_froms
-                .iter()
-                .copied()
-                .filter(|&valid_from| valid_from <= at)
-                .max(),
         }
     }
 }
@@ -542,20 +515,23 @@ mod tests {
     const SEVENTH: &str = "2026-01-07T00:00:00Z";
     const EIGHTH: &str = "2026-01-08T00:00:00Z";
 
-    /// Retrained, the generation current at the train is the one valid
-    /// exactly from it, kept whole; one valid before it is not current, and
-    /// a generation is trained: its sides on their window of 24 hours back
-    /// from the train, and its ancestor pair as of the 5th, the meta's window
-    /// of 48 hours before the train, on its window of 24 hours back from
-    /// there.
+    /// Retrained or never retrained alike, the generation valid exactly
+    /// from the train is kept whole, already published; one valid before
+    /// it is not, and a generation is trained: its sides on their window of
+    /// 24 hours back from the train, and its ancestor pair as of the 5th,
+    /// the meta's window of 48 hours before the train, on its window of 24
+    /// hours back from there.
     #[rstest]
-    #[case::of_the_train(&[SIXTH, SEVENTH], keep(SEVENTH))]
-    #[case::of_the_day_before(&[SIXTH], train(SEVENTH, fit(SIXTH, SEVENTH), Some(fit(FOURTH, FIFTH))))]
-    fn retrained_the_generation_valid_from_the_train_is_kept_and_one_before_it_is_not(
+    #[case::retrained_of_the_train(daily(), &[SIXTH, SEVENTH], keep(SEVENTH))]
+    #[case::retrained_of_the_day_before(daily(), &[SIXTH], train(SEVENTH, fit(SIXTH, SEVENTH), Some(fit(FOURTH, FIFTH))))]
+    #[case::never_retrained_of_the_train(never(), &[SIXTH, SEVENTH], keep(SEVENTH))]
+    #[case::never_retrained_of_the_day_before(never(), &[FIFTH, SIXTH, EIGHTH], train(SEVENTH, fit(SIXTH, SEVENTH), Some(fit(FOURTH, FIFTH))))]
+    fn the_generation_valid_from_the_train_is_kept_and_one_before_it_is_not(
+        #[case] schedule: Schedule,
         #[case] valid_froms: &[&str],
         #[case] plan: Plan,
     ) {
-        assert_eq!(daily().plan(at(SEVENTH), &generations(valid_froms)), plan);
+        assert_eq!(schedule.plan(at(SEVENTH), &generations(valid_froms)), plan);
     }
 
     /// A train with a meta fits the same ancestor pair whatever the store
@@ -610,15 +586,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(times, [at("2026-10-21T15:20:00Z")]);
-    }
-
-    /// Never retrained, the generation current at the train is the latest
-    /// valid at or before it, the 6th's, not the later one of the 8th.
-    #[rstest]
-    fn never_retrained_the_latest_generation_valid_by_the_train_is_kept() {
-        let plan = never().plan(at(SEVENTH), &generations(&[FIFTH, SIXTH, EIGHTH]));
-
-        assert_eq!(plan, keep(SIXTH));
     }
 
     /// Retrained, a span's retrain times are a run's over it; never

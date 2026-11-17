@@ -284,6 +284,53 @@ fn a_train_over_a_span_of_a_strategy_never_retrained_is_refused_before_any_repla
     assert!(!stdout.contains("BacktestEngine"), "{stdout}");
 }
 
+/// `train --at` of `files` at `at`: its stdout, the train succeeding.
+fn trained_at(files: &Files, catalog: &Path, at: Timestamp) -> String {
+    let (succeeded, stdout, stderr) = run(
+        "train",
+        files,
+        catalog,
+        &["--at".to_string(), at.to_string()],
+    );
+    assert!(succeeded, "{stdout}\n{stderr}");
+    stdout
+}
+
+/// Never retrained, a train skips only a generation valid exactly from its
+/// time: with the generation of the 21st stored, `train --at` the 22nd
+/// publishes one valid from the 22nd, and again at the 22nd reports it
+/// already published. A backtest of the 21st, before the 22nd, trades on
+/// the generation of the 21st, its 12 shorts, as each decision uses the
+/// latest generation valid by then.
+#[rstest]
+fn never_retrained_a_train_publishes_at_its_time_beside_an_older_generation_which_decides_before_it()
+ {
+    let catalog = catalog(23);
+    let files = files();
+    std::fs::write(&files.config, never_retrained()).unwrap();
+    let older = trained_at(&files, catalog.path(), day(21));
+    assert!(
+        older.contains(&format!("published a model valid from {}", day(21))),
+        "{older}"
+    );
+
+    let newer = trained_at(&files, catalog.path(), day(22));
+    let again = trained_at(&files, catalog.path(), day(22));
+
+    assert!(
+        newer.contains(&format!("published a model valid from {}", day(22))),
+        "{newer}"
+    );
+    assert!(
+        again.contains(&format!("already published, valid from {}", day(22))),
+        "{again}"
+    );
+    let (succeeded, stdout, stderr) = backtest(&files, catalog.path(), (day(21), day(22)));
+    assert!(succeeded, "{stdout}\n{stderr}");
+    assert!(stdout.contains("Orders: 24\nPositions: 12\n"), "{stdout}");
+    assert_day_decided_by(section(&stdout, day(21), day(22)), day(21));
+}
+
 /// A backtest from 06:00 of the 22nd on an empty store refuses before
 /// any replay, naming the retrain time at its start, midnight of the 22nd,
 /// and the train commands filling it: there, or over its span.

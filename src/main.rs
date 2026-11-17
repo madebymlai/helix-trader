@@ -817,10 +817,7 @@ fn strategy_name(strategy: StrategyName) -> String {
 #[cfg(test)]
 mod tests {
 
-    use helix_trader::model::{
-        schedule::Retrain,
-        train::{Kept, Outcome},
-    };
+    use helix_trader::model::train::{Kept, Outcome};
     use jiff::SignedDuration;
     use rstest::rstest;
 
@@ -1122,10 +1119,7 @@ mod tests {
     fn a_train_keeping_no_model_succeeds_its_models_in_use_or_published() {
         let t: Timestamp = "2026-10-23T00:00:00Z".parse().unwrap();
         let trained = Trained {
-            long: Some(Outcome::InUse {
-                valid_from: t,
-                retrain: Retrain::Every(SignedDuration::from_hours(24)),
-            }),
+            long: Some(Outcome::InUse { valid_from: t }),
             short: Some(Outcome::Published { valid_from: t }),
             meta: None,
         };
