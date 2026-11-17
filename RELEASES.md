@@ -9,6 +9,7 @@ Released on TBD (UTC).
 - Added a live retrain's `train` output to the node's Nautilus log, a log record per line
 - Added run figures to `train`'s report per retrain time: wall and CPU time, peak memory, dataset days and each fit and calibration slice's rows
 - Added features on any list of series, any kinds, instruments and futures roots, each update reaching a feature once, in the order it comes
+- Added a live warmup handing features its series' history in time order across them, as a replay does, ending incomplete past 5,000,000 ticks held
 
 ### Breaking Changes
 

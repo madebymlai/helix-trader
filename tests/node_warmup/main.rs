@@ -143,6 +143,11 @@ struct FakeVenue {
     /// How long it takes to answer a request, as over a network; none
     /// answers at once.
     latency: Option<Duration>,
+    /// How long it takes to answer a request of quotes, if not `latency`.
+    quotes_latency: Option<Duration>,
+    /// How long before each minute's close its trade is made, in ns: none,
+    /// on the close, as its quote.
+    trades_early: u64,
     /// If a subscription resends the warmup's last tick first, made as it
     /// was and stamped on receipt, as IC does its latest: the warmup's
     /// length, from which and the start of the first window asked, an empty
@@ -150,6 +155,9 @@ struct FakeVenue {
     resends: Option<SignedDuration>,
     /// Each request's window, in ns.
     asked: Vec<(u64, u64)>,
+    /// What each request asked, in the order asked: `bar`, `deltas`,
+    /// `quote` or `trade`.
+    kinds: Vec<&'static str>,
     /// Each live tick it sent.
     live: Vec<Live>,
 }
@@ -170,8 +178,11 @@ impl FakeVenue {
             answer,
             closed: None,
             latency: None,
+            quotes_latency: None,
+            trades_early: 0,
             resends: None,
             asked: vec![],
+            kinds: vec![],
             live: vec![],
         }))
     }
@@ -235,6 +246,13 @@ impl FakeClient {
         let mut venue = self.venue.borrow_mut();
         let index = venue.asked.len();
         venue.asked.push(window);
+        let (kind, latency) = match &response {
+            DataResponse::Quotes(_) => ("quote", venue.quotes_latency.or(venue.latency)),
+            DataResponse::Trades(_) => ("trade", venue.latency),
+            DataResponse::BookDeltas(_) => ("deltas", venue.latency),
+            _ => ("bar", venue.latency),
+        };
+        venue.kinds.push(kind);
         let event = match venue.answer {
             Answer::FailedAt(failing) if index == failing => {
                 DataEvent::RequestFailed(DataRequestFailed {
@@ -248,7 +266,8 @@ impl FakeClient {
                 DataEvent::ResponseEnvelope(DataResponseEnvelope::new(response, true, None))
             }
         };
-        match venue.latency {
+
+        match latency {
             None => self.sender.send(event)?,
             Some(latency) => {
                 let sender = self.sender.clone();
@@ -445,13 +464,13 @@ impl DataClient for FakeClient {
         self.answer(request.request_id, (start, end), response)
     }
 
-    /// The venue's trades in the request's window, one on each minute.
+    /// The venue's trades in the request's window, one on each minute,
+    /// made `FakeVenue::trades_early` before it.
     fn request_trades(&self, request: RequestTrades) -> anyhow::Result<()> {
         let (start, end) = window(request.start, request.end);
         let id = request.single_instrument_id()?;
-        let closed = self.venue.borrow().closed;
-        let rows: Vec<TradeTick> = minutes(start, end, closed)
-            .map(|ns| trade_at(id, ns, ns))
+        let rows: Vec<TradeTick> = trades_made(&self.venue.borrow(), start, end)
+            .map(|made| trade_at(id, made, made))
             .collect();
         let response = DataResponse::Trades(TradesResponse::new(
             request.request_id,
@@ -486,6 +505,13 @@ impl DataClient for FakeClient {
         }
         Ok(())
     }
+}
+
+/// When the trades `venue` holds in `[start, end]` were made, in ns: one a
+/// minute, `FakeVenue::trades_early` before its close.
+fn trades_made(venue: &FakeVenue, start: u64, end: u64) -> impl Iterator<Item = u64> {
+    let early = venue.trades_early;
+    minutes(start + early, end, venue.closed).map(move |ns| ns - early)
 }
 
 /// The venue's deltas at the minute closing at `ns`, as a book feed carries
@@ -1210,6 +1236,107 @@ fn features_read_a_catalogs_windows_then_the_venues_before_a_live_quote() {
         "a minute repeated, lost or out of order"
     );
     assert_eq!(Some(*live), venue.live.first().map(|live| live.made));
+}
+
+/// A feature reading several series, recording each quote and trade it
+/// reads, in one log, so that the order across them shows.
+#[derive(Debug, Default)]
+struct Flow {
+    read: RefCell<Vec<(&'static str, u64)>>,
+}
+
+impl ActorIndicator for Flow {
+    fn key(&self) -> usize {
+        std::ptr::from_ref(self).addr()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn initialized(&self) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+
+    fn handle_quote(&self, quote: &QuoteTick) -> anyhow::Result<()> {
+        self.read
+            .borrow_mut()
+            .push(("quote", quote.ts_event.as_u64()));
+        Ok(())
+    }
+
+    fn handle_trade(&self, trade: &TradeTick) -> anyhow::Result<()> {
+        self.read
+            .borrow_mut()
+            .push(("trade", trade.ts_event.as_u64()));
+        Ok(())
+    }
+
+    fn handle_bar(&self, _bar: &Bar) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+/// A feature on GCZ26's quotes and trades, two series the warmup asks in
+/// windows of their own, two of 23 hours over 30: the venue answers the
+/// quotes' windows after a while and the trades' at once, so both of the
+/// trades' windows reach the strategy before the quotes' first does. The
+/// trades are made 30 seconds before each minute's quote. The feature
+/// reads the history as a replay of the same data hands it, every quote and
+/// trade once in time order, then the live ones.
+#[rstest]
+fn a_feature_on_two_series_reads_their_history_in_time_order_however_it_arrives() {
+    let dir = tempfile::tempdir().unwrap();
+    let venue = FakeVenue::new(Answer::Envelope);
+    venue.borrow_mut().quotes_latency = Some(Duration::from_millis(200));
+    venue.borrow_mut().trades_early = 30_000_000_000;
+    let series = vec![
+        of_gcz26(NautilusDataType::QuoteTick),
+        of_gcz26(NautilusDataType::TradeTick),
+    ];
+    let requirements = DataRequirements {
+        bar_types: vec![],
+        ticks: series.clone(),
+        custom: vec![],
+        warmup: SignedDuration::from_hours(30),
+    };
+    let flow = Rc::new(Flow::default());
+    let warmup =
+        Warmup::live(&requirements).feeding_ticks(Rc::clone(&flow) as SharedActorIndicator);
+
+    let (failure, _) = run(dir.path(), &venue, &requirements, warmup, series, None);
+
+    assert_eq!(failure, None);
+    let venue = venue.borrow();
+    assert_eq!(venue.kinds, ["quote", "trade", "trade", "quote"]);
+    let mut replayed: Vec<(&str, u64)> = venue
+        .kinds
+        .iter()
+        .zip(&venue.asked)
+        .flat_map(|(&kind, &(start, end))| -> Vec<(&str, u64)> {
+            match kind {
+                "quote" => minutes(start, end, None).map(|ns| ("quote", ns)).collect(),
+                _ => trades_made(&venue, start, end)
+                    .map(|ns| ("trade", ns))
+                    .collect(),
+            }
+        })
+        .collect();
+    replayed.sort_by_key(|&(_, made)| made);
+    let read = flow.read.borrow();
+    let (history, live) = read.split_at(read.len() - venue.live.len());
+    assert!(history.len() >= 2 * 29 * 60, "{} ticks", history.len());
+    assert!(
+        history == replayed.as_slice(),
+        "the first tick read out of time order: {:?}",
+        history
+            .iter()
+            .zip(&replayed)
+            .find(|(read, replayed)| read != replayed)
+    );
+    let live_made: Vec<u64> = live.iter().map(|&(_, made)| made).collect();
+    let sent: Vec<u64> = venue.live.iter().map(|live| live.made).collect();
+    assert_eq!(live_made, sent);
 }
 
 /// A warmup of 72 hours of deltas on `dir`'s catalog: the book they build, how
