@@ -8,11 +8,11 @@
 //! Everything of a strategy's model is built of its blueprint, which is
 //! the one caller of the dataset fingerprint (`dataset::fingerprint`), of
 //! the venue of the dataset runs its config declares (`ModelConfig::dataset`).
-//! Its dataset, its model set and its schedule are built together
+//! Its dataset, its model store and its schedule are built together
 //! (`Stored`), the fingerprint computed once and keying the dataset and
 //! every store, and
 //! the training and the walk-forward are each built of them; a dataset
-//! alone, for a dataset build, and a model set alone, for a handle, which
+//! alone, for a dataset build, and a model store alone, for a handle, which
 //! has no catalog, are built of the blueprint as well. The strategy's
 //! model handle (`handle::ModelHandle`) is built of it and a mode, and
 //! registers the very feature set the dataset and the stores are
@@ -28,7 +28,7 @@ use super::{
     dataset::{self, Dataset},
     features::{FeatureSet, Fingerprint},
     schedule::Schedule,
-    store::ModelSet,
+    store::ModelStore,
     train::Training,
     walk::WalkForward,
 };
@@ -45,7 +45,7 @@ pub struct ModelBlueprint {
     requirements: DataRequirements,
 }
 
-/// A strategy's model stored: its dataset in a catalog and its model set
+/// A strategy's model stored: its dataset in a catalog and its model store
 /// under a models root, both of the one fingerprint of its blueprint, and
 /// its schedule.
 #[derive(Debug)]
@@ -53,7 +53,7 @@ pub(super) struct Stored<'a> {
     /// The blueprint it is the model of.
     pub(super) blueprint: &'a ModelBlueprint,
     pub(super) dataset: Dataset,
-    pub(super) models: ModelSet,
+    pub(super) models: ModelStore,
     pub(super) schedule: Schedule,
 }
 
@@ -112,9 +112,9 @@ impl ModelBlueprint {
     /// # Errors
     ///
     /// Returns an error if `fingerprint` fails, or if a learner cannot be
-    /// written as JSON (`ModelSet::new`).
-    pub fn model_set(&self, models: &Path) -> anyhow::Result<ModelSet> {
-        ModelSet::new(models, self, self.fingerprint()?)
+    /// written as JSON (`ModelStore::new`).
+    pub fn model_store(&self, models: &Path) -> anyhow::Result<ModelStore> {
+        ModelStore::new(models, self, self.fingerprint()?)
     }
 
     /// The training of its models, on its dataset in the catalog at
@@ -122,7 +122,7 @@ impl ModelBlueprint {
     ///
     /// # Errors
     ///
-    /// Returns an error if `model_set` would.
+    /// Returns an error if `model_store` would.
     pub fn training(&self, catalog: &Path, models: &Path) -> anyhow::Result<Training> {
         Ok(Training::new(self.stored(catalog, models)?))
     }
@@ -133,7 +133,7 @@ impl ModelBlueprint {
     ///
     /// # Errors
     ///
-    /// Returns an error if `model_set` would.
+    /// Returns an error if `model_store` would.
     pub fn walk_forward(&self, catalog: &Path, models: &Path) -> anyhow::Result<WalkForward> {
         Ok(WalkForward::new(self.stored(catalog, models)?))
     }
@@ -144,12 +144,12 @@ impl ModelBlueprint {
     ///
     /// # Errors
     ///
-    /// Returns an error if `model_set` would.
+    /// Returns an error if `model_store` would.
     pub(super) fn stored(&self, catalog: &Path, models: &Path) -> anyhow::Result<Stored<'_>> {
         let fingerprint = self.fingerprint()?;
         Ok(Stored {
             blueprint: self,
-            models: ModelSet::new(models, self, fingerprint)?,
+            models: ModelStore::new(models, self, fingerprint)?,
             dataset: Dataset::new(catalog, self, fingerprint),
             schedule: Schedule::of_model(&self.config),
         })
@@ -183,7 +183,6 @@ mod tests {
     use crate::model::{
         decide::DecisionRule,
         deciding::testing::{STRATEGY, at, baseline, config, features, requirements},
-        targets::Side,
     };
 
     fn blueprint(config: ModelConfig) -> anyhow::Result<ModelBlueprint> {
@@ -225,23 +224,27 @@ mod tests {
         assert!(err.contains("EUR/USD.SIM"), "{err}");
     }
 
-    /// The dataset and the model set of a model stored carry one
+    /// The dataset and the model store of a model stored carry one
     /// fingerprint: a model published under the dataset's, as a train
-    /// publishes it, is the one the model set swaps in.
+    /// publishes it, is the one the model store swaps in.
     #[rstest]
-    fn the_dataset_and_the_model_set_of_a_model_stored_carry_one_fingerprint() {
+    fn the_dataset_and_the_model_store_of_a_model_stored_carry_one_fingerprint() {
         let dir = tempfile::tempdir().unwrap();
         let blueprint = blueprint(config()).unwrap();
         let model = blueprint
             .stored(&dir.path().join("catalog"), &dir.path().join("models"))
             .unwrap();
         let mut published = baseline("2026-10-22T00:00:00Z", 8);
-        published.manifest.fingerprint = model.dataset.fingerprint().to_string();
-        let store = model.models.side(Side::Long).unwrap().store();
-        store.publish(&published).unwrap();
-        let mut pairs = model.models.pairs();
+        published.sides[0].manifest.fingerprint = model.dataset.fingerprint().to_string();
+        model.models.publish(&published).unwrap();
+        let mut generations = model.models.swap();
 
-        let in_use = pairs.at(at("2026-10-22T12:00:00Z"), &store.valid_froms().unwrap());
+        let in_use = generations
+            .at(
+                at("2026-10-22T12:00:00Z"),
+                &model.models.generations().unwrap(),
+            )
+            .unwrap();
 
         assert_eq!(
             in_use.map(|(valid_from, _)| valid_from),

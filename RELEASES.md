@@ -21,6 +21,16 @@ Released on TBD (UTC).
 - Removed the `keepalive_secs` argument of `lse`'s `LseWebSocketClient::connect`; drop it, the client pings every 25 s
 - Removed `Deserialize` from `TickSeries`; read tick series through a strategy config's `[data]` series
 - Removed `Launcher::in_process` outside the crate's own tests
+- Changed the model store to one generation per train: a train publishes its sides, their pair's calibration and its meta together under its retrain time, a manifest written last making it visible, keyed by every training setting of the sides and the meta, and a decision uses the latest generation's sides and meta together; train again, the store's version changed
+- Changed a newest generation failing its load checks to stop new entries with an error naming it and the check, read again at the next decision, instead of keeping the previous models; publish it again whole or train it again
+- Renamed `ModelSet` to `ModelStore` and `ModelBlueprint::model_set` to `model_store`, the store of a strategy's generations; publish, list, read and swap them with `ModelStore::publish`, `generations`, `read` and `swap` in place of the per-side `ModelStore`, `ModelSet::pairs`, `ModelSet::valid_froms` and `MetaLevel::swap`
+- Removed `PairCalibration`, `ModelCalibration` and `ModelManifest`'s `strategy_id` and `valid_from`: a side's manifest holds no calibration, its pair's being `StoredGeneration::calibration`, and a meta's holds its `Line`
+- Removed `Step` and `Plan::meta_after_sides` from the schedule; read a train's plan as `Plan::Keep` or `Plan::Train` of `Fits`
+
+### Fixes
+
+- Fixed a meta model deciding beside the sides of another train, as when a later train's meta waited or failed
+- Fixed a train whose meta failed, or that stopped between its sides' publishes, leaving its sides published without the rest of its models
 
 ### Internal Improvements
 

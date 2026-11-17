@@ -2,9 +2,9 @@
 //! fixture catalog: the probe of `common::dataset` decides every hour on
 //! one feature, missing (NaN) from the first quote. Before the run, the
 //! dataset is built over the span and, at each daily retrain time of it, a
-//! long model published as a train would: a baseline of its own R, its
-//! calibration leaving it as it is (`common::dataset::baseline_of`), which
-//! names it. The walk has no edge for a train to earn on, so its trains
+//! generation published as a train would, its long a baseline of its own R,
+//! its calibration leaving it as it is (`common::dataset::baseline_of`),
+//! which names it. The walk has no edge for a train to earn on, so its trains
 //! would publish none (`backtest_train` trains on one). In the run, every
 //! decision of a period trades on the model published at its start, and
 //! the scores of each period are its model's, a constant, beside its own
@@ -33,7 +33,7 @@ use rstest::rstest;
 use tempfile::TempDir;
 
 use crate::common::{
-    dataset::{baseline_of, blueprint, config, missing, r, replay_on, trade_on, walk},
+    dataset::{baseline_of, blueprint, config, generation, missing, r, replay_on, trade_on, walk},
     ic,
 };
 
@@ -70,15 +70,11 @@ fn span() -> (Timestamp, Timestamp) {
     (start, start + SignedDuration::from_hours(72))
 }
 
-/// The store of the long models under `models`.
-fn long_store(models: &Path) -> ModelStore {
+/// The models of `config_daily` under `models`.
+fn model_store(models: &Path) -> ModelStore {
     blueprint(features(), config_daily())
-        .model_set(models)
+        .model_store(models)
         .unwrap()
-        .side(Side::Long)
-        .unwrap()
-        .store()
-        .clone()
 }
 
 fn walk_forward(catalog: &TempDir, models: &Path) -> WalkForward {
@@ -105,14 +101,14 @@ fn trained(catalog: &TempDir, models: &Path) {
 
     for day in 0..3 {
         let at = start + SignedDuration::from_hours(24 * day);
-        long_store(models)
-            .publish(&baseline_of(
-                &features(),
-                &config_daily(),
-                Side::Long,
-                at,
-                3 + usize::try_from(day).unwrap(),
-            ))
+        let long = baseline_of(
+            &features(),
+            &config_daily(),
+            Side::Long,
+            3 + usize::try_from(day).unwrap(),
+        );
+        model_store(models)
+            .publish(&generation(&config_daily(), at, vec![long], None))
             .unwrap();
     }
 }

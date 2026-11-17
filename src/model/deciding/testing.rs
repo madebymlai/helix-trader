@@ -26,10 +26,7 @@ use crate::{
         decide::DecisionRule,
         features::{FeatureSet, meta_names, side_names, testing::last_mid},
         learner::{LearnerConfig, TrainingSet},
-        store::{
-            ModelCalibration, ModelManifest, ModelSet, ModelStore, PairCalibration, Probe,
-            StoredModel,
-        },
+        store::{ModelManifest, ModelStore, Probe, StoredGeneration, StoredModel},
         targets::{DEFAULT_ATR, Side, Target, TargetConfig},
     },
     strategy::{
@@ -84,22 +81,17 @@ pub(crate) fn r(tenths: usize) -> f64 {
     (tenths as f64 - 5.0) / 10.0
 }
 
-/// The calibration of the pair of `config`'s sides valid from
-/// `valid_from` leaving each side's prediction as it is, up to rounding:
-/// the level line `C' = C`, and of two sides the side call `D' = D`.
-pub(crate) fn unchanged(config: &ModelConfig, valid_from: Timestamp) -> ModelCalibration {
-    let sides: Vec<Side> = config.margins.sides().map(|(side, _)| side).collect();
-    ModelCalibration::Pair(PairCalibration {
-        valid_from,
-        lines: Ksplit {
-            level: Line {
-                alpha: 0.0,
-                beta: 1.0,
-            },
-            side_call: (sides.len() == 2).then_some(1.0),
+/// The calibration of the pair of `config`'s sides leaving each side's
+/// prediction as it is, up to rounding: the level line `C' = C`, and of two
+/// sides the side call `D' = D`.
+pub(crate) fn unchanged(config: &ModelConfig) -> Ksplit {
+    Ksplit {
+        level: Line {
+            alpha: 0.0,
+            beta: 1.0,
         },
-        sides,
-    })
+        side_call: (config.margins.sides().count() == 2).then_some(1.0),
+    }
 }
 
 pub(crate) fn at(time: &str) -> Timestamp {
@@ -216,52 +208,64 @@ pub(crate) fn blueprint_of(
 }
 
 /// The models of `features` and `config` under `models`.
-pub(crate) fn model_set(
+pub(crate) fn model_store(
     models: &Path,
     features: &Rc<FeatureSet>,
     config: &ModelConfig,
-) -> ModelSet {
-    blueprint_of(features, config, requirements())
-        .model_set(models)
-        .unwrap()
-}
-
-/// The store of the `side` models of `features` and `config` under
-/// `models`.
-pub(crate) fn side_store(
-    models: &Path,
-    features: &Rc<FeatureSet>,
-    config: &ModelConfig,
-    side: Side,
 ) -> ModelStore {
-    model_set(models, features, config)
-        .side(side)
+    blueprint_of(features, config, requirements())
+        .model_store(models)
         .unwrap()
-        .store()
-        .clone()
 }
 
-/// The store of the long models under `models`.
+/// The models of `config` under `models`, its long alone traded.
 pub(crate) fn store(models: &Path) -> ModelStore {
-    side_store(models, &features(), &config(), Side::Long)
+    model_store(models, &features(), &config())
 }
 
-/// A baseline long model of `config` valid from `valid_from` predicting an
-/// R of `r(tenths)` whatever the row, as `baseline_for` says.
-pub(crate) fn baseline(valid_from: &str, tenths: usize) -> StoredModel {
-    baseline_for(&features(), &config(), Side::Long, valid_from, tenths)
+/// A generation of `config` valid from `valid_from`, its long a baseline
+/// predicting an R of `r(tenths)` whatever the row, as `baseline_for` says.
+pub(crate) fn baseline(valid_from: &str, tenths: usize) -> StoredGeneration {
+    generation_of(
+        &features(),
+        &config(),
+        valid_from,
+        [(Side::Long, tenths)],
+        None,
+    )
 }
 
-/// A baseline model of `config`'s `side` valid from `valid_from`, on the
-/// side's features of `features` and the target's payoff, predicting an R
-/// of `r(tenths)` whatever the row, its pair's calibration leaving it as it
-/// is (`unchanged`), its baseline that R, as the store keeps it, probed on
+/// A generation of `config` valid from `valid_from`: each side of `sides`,
+/// every side traded, the long first, a baseline predicting an R of
+/// `r(tenths)` of its tenths (`baseline_for`), their pair's calibration
+/// leaving them as they are (`unchanged`), and the meta model `meta`, if
+/// any.
+pub(crate) fn generation_of(
+    features: &Rc<FeatureSet>,
+    config: &ModelConfig,
+    valid_from: &str,
+    sides: impl IntoIterator<Item = (Side, usize)>,
+    meta: Option<StoredModel>,
+) -> StoredGeneration {
+    StoredGeneration {
+        valid_from: at(valid_from),
+        sides: sides
+            .into_iter()
+            .map(|(side, tenths)| baseline_for(features, config, side, tenths))
+            .collect(),
+        calibration: unchanged(config),
+        meta,
+    }
+}
+
+/// A baseline model of `config`'s `side`, on the side's features of
+/// `features` and the target's payoff, predicting an R of `r(tenths)`
+/// whatever the row, its baseline that R, as the store keeps it, probed on
 /// one row.
 pub(crate) fn baseline_for(
     features: &Rc<FeatureSet>,
     config: &ModelConfig,
     side: Side,
-    valid_from: &str,
     tenths: usize,
 ) -> StoredModel {
     let names = side_names(features.names(), &config.target.payoff_names());
@@ -272,8 +276,6 @@ pub(crate) fn baseline_for(
     let config = config.clone();
     StoredModel {
         manifest: ModelManifest {
-            strategy_id: StrategyId::from(STRATEGY),
-            valid_from: at(valid_from),
             // Its strategy reads the quotes of what it trades, which the
             // target's ATR, if any, is built from.
             fingerprint: blueprint_of(
@@ -291,7 +293,7 @@ pub(crate) fn baseline_for(
             .unwrap()
             .to_string(),
             feature_names: names,
-            calibration: unchanged(&config, at(valid_from)),
+            calibration: None,
             target: config.target,
             side: Some(side),
             learner: config.learner,
@@ -305,21 +307,20 @@ pub(crate) fn baseline_for(
     }
 }
 
-/// A baseline meta model of `config` valid from `valid_from` predicting an
-/// R of `r(tenths)` whatever the row, calibrated by `CALIBRATION`, on the
-/// meta's features of `features`, its baseline that R, with no probe.
+/// A baseline meta model of `config` predicting an R of `r(tenths)`
+/// whatever the row, calibrated by `CALIBRATION`, on the meta's features of
+/// `features`, its baseline that R, with no probe.
 pub(crate) fn meta_baseline(
     features: &Rc<FeatureSet>,
     config: &ModelConfig,
-    valid_from: &str,
     tenths: usize,
 ) -> StoredModel {
     let names = meta_names(features.names());
     let set = TrainingSet::new(names.len(), vec![0.5; names.len()], vec![r(tenths)]).unwrap();
-    let mut meta = baseline_for(features, config, Side::Long, valid_from, tenths);
+    let mut meta = baseline_for(features, config, Side::Long, tenths);
     meta.manifest.side = None;
     meta.manifest.feature_names = names;
-    meta.manifest.calibration = ModelCalibration::Meta(CALIBRATION);
+    meta.manifest.calibration = Some(CALIBRATION);
     meta.manifest.probes.clear();
     meta.model = LearnerConfig::Baseline {}
         .fit(&set)

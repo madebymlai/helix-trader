@@ -27,6 +27,7 @@ use helix_trader::{
         handle::Mode,
         launcher::{Launcher, Retrained},
         learner::TrainingSet,
+        store::{ModelStore, StoredModel},
         targets::Side,
     },
     strategy::model_ema::{ModelEma, ModelEmaConfig},
@@ -37,7 +38,7 @@ use rstest::rstest;
 use tempfile::TempDir;
 
 use crate::common::{
-    dataset::{baseline_stored, r, walk},
+    dataset::{baseline_stored, generation, r, walk},
     ic,
 };
 
@@ -150,30 +151,17 @@ fn train_failed(config: &Path, catalog: &Path, models: &Path, at: Timestamp) -> 
     stderr
 }
 
-/// The times the long models of `config` under `models` are valid from.
-fn long_valid_froms(config: &str, models: &Path) -> Vec<Timestamp> {
+/// The models of `config` under `models`.
+fn model_store(config: &str, models: &Path) -> ModelStore {
     ModelEma::blueprint(&ModelEmaConfig::load(config).unwrap())
         .unwrap()
-        .model_set(models)
-        .unwrap()
-        .side(Side::Long)
-        .unwrap()
-        .store()
-        .valid_froms()
+        .model_store(models)
         .unwrap()
 }
 
-/// The times the meta models of `config` under `models` are valid from.
-fn meta_valid_froms(config: &str, models: &Path) -> Vec<Timestamp> {
-    ModelEma::blueprint(&ModelEmaConfig::load(config).unwrap())
-        .unwrap()
-        .model_set(models)
-        .unwrap()
-        .meta()
-        .unwrap()
-        .store()
-        .valid_froms()
-        .unwrap()
+/// The times the generations of `config` under `models` are valid from.
+fn generations(config: &str, models: &Path) -> Vec<Timestamp> {
+    model_store(config, models).generations().unwrap()
 }
 
 /// Asserts that `text` names a slice `slice` of `rows` rows, fewer than
@@ -188,11 +176,21 @@ fn assert_too_few_rows(text: &str, slice: &str, rows: usize, min_rows: usize) {
     }
 }
 
-/// Publishes straight to the store under `models` a long model valid from
-/// `at`, a baseline of 0.1R on a side's features, the strategy's then the
-/// target's payoff features, as the dataset the `train` subcommand built in
-/// `catalog` names them.
+/// Publishes straight to the store under `models` a generation valid from
+/// `at`, its long a baseline of 0.1R on a side's features, the strategy's
+/// then the target's payoff features, as the dataset the `train` subcommand
+/// built in `catalog` names them.
 fn publish(catalog: &TempDir, models: &Path, at: Timestamp) {
+    publish_with(catalog, models, at, |_| {});
+}
+
+/// Publishes the generation of `publish`, its long changed by `change`.
+fn publish_with(
+    catalog: &TempDir,
+    models: &Path,
+    at: Timestamp,
+    change: impl FnOnce(&mut StoredModel),
+) {
     let config = ModelEmaConfig::load(CONFIG).unwrap();
     let dataset = ModelEma::dataset(&config, catalog.path())
         .unwrap()
@@ -200,23 +198,19 @@ fn publish(catalog: &TempDir, models: &Path, at: Timestamp) {
         .unwrap();
     let names = side_names(&dataset.feature_names, &dataset.payoff_names);
     let set = TrainingSet::new(names.len(), vec![0.5; names.len()], vec![r(6)]).unwrap();
-    let model = baseline_stored(
-        dataset.strategy_id,
+    let mut model = baseline_stored(
         dataset.fingerprint,
         names,
         &config.model(),
         Some(Side::Long),
-        at,
         &set,
     );
+    change(&mut model);
     ModelEma::blueprint(&config)
         .unwrap()
-        .model_set(models)
+        .model_store(models)
         .unwrap()
-        .side(Side::Long)
-        .unwrap()
-        .store()
-        .publish(&model)
+        .publish(&generation(&config.model(), at, vec![model], None))
         .unwrap();
 }
 
@@ -246,7 +240,7 @@ fn the_train_subcommand_publishes_a_model_without_an_edge_which_trades_from_its_
         stdout.contains(&format!("published a model valid from {}", t())),
         "{stdout}"
     );
-    assert_eq!(long_valid_froms(CONFIG, &models), [t()]);
+    assert_eq!(generations(CONFIG, &models), [t()]);
     assert_eq!(traded(&catalog, models), (6, 3));
 }
 
@@ -282,21 +276,22 @@ fn a_train_with_a_slice_of_fewer_rows_than_the_minimum_fails_naming_it_and_publi
     let stderr = train_failed(&config_path, catalog.path(), &models, t() + after);
 
     assert_too_few_rows(&stderr, slice, rows, min_rows);
-    assert_eq!(long_valid_froms(&config, &models), []);
+    assert_eq!(generations(&config, &models), []);
 }
 
-/// Worked by hand: a train at midnight of the 22nd publishes the long,
-/// valid from then, its meta waiting with no long before it. The train at
-/// t then gives the meta the long's decisions of the 22nd, each a long of
-/// the model of the 22nd, 24 rows: its fit slice those of 00:00 to 17:00,
-/// settled by 18:00, the calibration slice's start, 18; its calibration
-/// slice those of 18:00 to 23:00, 6. A meta `min_rows` above a slice's
-/// count fails it, naming the meta, the slice, its count and the minimum,
-/// and publishes no meta model.
+/// Worked by hand: a train at midnight of the 22nd publishes the
+/// generation of the long, valid from then, its meta waiting with no
+/// generation before it. The train at t then gives the meta the long's
+/// decisions of the 22nd, each a long of the generation of the 22nd, 24
+/// rows: its fit slice those of 00:00 to 17:00, settled by 18:00, the
+/// calibration slice's start, 18; its calibration slice those of 18:00 to
+/// 23:00, 6. A meta `min_rows` above a slice's count fails the train,
+/// naming the meta, the slice, its count and the minimum, and publishes no
+/// generation at t, the long fitted beside the meta neither.
 #[rstest]
 #[case::fit(19, "fit slice", 18)]
 #[case::calibration(7, "calibration slice", 6)]
-fn a_meta_with_a_slice_of_fewer_rows_than_its_minimum_fails_naming_it_and_publishes_none(
+fn a_meta_with_a_slice_of_fewer_rows_than_its_minimum_fails_naming_it_and_publishes_no_generation(
     #[case] min_rows: usize,
     #[case] slice: &str,
     #[case] rows: usize,
@@ -312,7 +307,7 @@ fn a_meta_with_a_slice_of_fewer_rows_than_its_minimum_fails_naming_it_and_publis
     std::fs::write(&config_path, &config).unwrap();
     let day_before = t() - SignedDuration::from_hours(24);
     train(&config_path, catalog.path(), &models, day_before);
-    assert_eq!(long_valid_froms(&config, &models), [day_before]);
+    assert_eq!(generations(&config, &models), [day_before]);
 
     let stderr = train_failed(&config_path, catalog.path(), &models, t());
 
@@ -321,7 +316,7 @@ fn a_meta_with_a_slice_of_fewer_rows_than_its_minimum_fails_naming_it_and_publis
         .unwrap_or_else(|| panic!("{stderr}"))
         .1;
     assert_too_few_rows(meta, slice, rows, min_rows);
-    assert_eq!(meta_valid_froms(&config, &models), []);
+    assert_eq!(generations(&config, &models), [day_before]);
 }
 
 /// A backtest from midnight of the 23rd, the model's valid-from, warms its
@@ -486,6 +481,55 @@ fn the_binarys_backtest_reports_its_own_costs_and_its_models_then_each_periods_s
         );
     }
     assert!(stdout.contains("over the span"), "{stdout}");
+}
+
+/// The store holds a generation at t and one at the next retrain time
+/// whose long is of another fingerprint, failing its load check: the
+/// binary's backtest over both periods logs, at the next period's
+/// decisions, the error naming that generation and the check, and decides
+/// no trade there, on it nor on the generation of t, so the next period's
+/// scores have no generation and no row.
+#[rstest]
+fn the_binarys_backtest_stops_new_entries_on_a_generation_failing_a_check_naming_it() {
+    let catalog = walk(
+        ic::at("00:00:00") - SignedDuration::from_hours(3),
+        t() + SignedDuration::from_hours(51),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let (config_path, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
+    std::fs::write(&config_path, CONFIG).unwrap();
+    let (start, end) = (t(), t() + SignedDuration::from_hours(36));
+    let next = t() + SignedDuration::from_hours(24);
+    trained(&config_path, catalog.path(), &models, t());
+    publish(&catalog, &models, t());
+    publish_with(&catalog, &models, next, |long| {
+        long.manifest.fingerprint = "f".repeat(64);
+    });
+
+    let costs = ["--commission-rate", "0.00003", "--balance", "10000000 USD"];
+    let (stdout, stderr) = backtest_at(&config_path, catalog.path(), &models, (start, end), &costs);
+
+    let output = format!("{stdout}\n{stderr}");
+    let refusal = format!("no new entry until the generation valid from {next} loads");
+    assert!(output.contains(&refusal), "{output}");
+    assert!(
+        output.contains("the long model: its fingerprint ffff"),
+        "{output}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "Long model scores, out of sample, from {next} to {end}\n  Model valid from: none"
+        )),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            "Long model scores, out of sample, from {} to {next}\n  Model valid from: {}",
+            t(),
+            t()
+        )),
+        "{stdout}"
+    );
 }
 
 /// The binary's `subcommand` of the strategy of `config` on `catalog`, its

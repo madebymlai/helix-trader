@@ -10,23 +10,20 @@
 //! (`holdout::Example::realized`), the long's of the long of the target,
 //! the short's of its short, both on the same rows, window and calibration,
 //! each reading a row's features then its own side's payoff features
-//! (`dataset::DatasetRow::side`), under the names its store checks it
-//! against (`store::SideLevel::feature_names`). The sides are calibrated
-//! and published as a pair, or not at all: a pair is the sides one train
-//! published, valid from one time (`Models::pairs`), and a one-sided
-//! strategy's is its one side. A train never publishes a side beside
-//! another side's older model.
+//! (`dataset::DatasetRow::side`), under the names its model store checks it
+//! against (`store::SideLevel::feature_names`); and its meta model, if it
+//! has one (`model::meta`). A train publishes them as one generation
+//! (`store::StoredGeneration`), valid from its time, or nothing: a decision
+//! uses the sides and the meta of one train together.
 //!
-//! What a train at `t` does to each model is the schedule's plan
-//! (`schedule::Schedule::plan`), from the stores' valid-froms alone: a
-//! model with a current model at `t`, the sides their pair, keeps it, in use
+//! What a train at `t` does is the schedule's plan (`schedule::Schedule::plan`),
+//! from the store's generations alone: a generation current at `t`
 //! (retrained, the one valid from `t`; never retrained, the latest valid by
-//! `t`, so each model is trained once); a meta with no pair of the sides
-//! before `t` waits for the sides' decisions; the others are fitted, the
-//! sides every one of them, as of `t`, or, never retrained, the sides with
-//! neither them nor the meta in use, as of `t` less the meta's window, the
-//! meta at `t` on their decisions. With nothing to fit the train replays
-//! nothing.
+//! `t`, so one generation is trained) is kept, in use; else a generation is
+//! trained at `t`, its sides fitted as of `t`, or, never retrained with a
+//! meta, as of `t` less the meta's window, and its meta, if any, at `t`,
+//! unless it waits for the sides' decisions, no generation being valid
+//! before `t`. A kept generation replays nothing.
 //!
 //! A model fitted as of `t'`, the train's time or before it, takes the
 //! rows of the window ending at `t'` (`ModelConfig::window`), the days
@@ -43,61 +40,57 @@
 //! which no model was fitted on.
 //!
 //! No figure of a slice judges the models: there is no holdout and no gate.
-//! A train fails, publishing none of the pair, when a slice has fewer rows
+//! A train fails, publishing nothing, when a slice of a level has fewer rows
 //! than the level's minimum (`ModelConfig::min_rows`), naming the slice, its
 //! count and the minimum; when a model's prediction on a calibration row,
-//! or the calibration, is no finite number; or when a model reloaded from
+//! or a calibration, is no finite number; or when a model reloaded from
 //! what it saved does not predict its probes as fitted, the check a reader
 //! makes before use (`store::StoredModel`). Out-of-sample evidence is a
-//! backtest's (`walk::WalkForward::scores`). Otherwise the sides publish
-//! together, in their sides' stores (`store`), valid from `t'`, each with
-//! the pair's calibration naming the pair, its baseline, the training mean
-//! of R on the rows it was fitted and calibrated on, which its out-of-sample
-//! scores are read beside, and its manifest probing it on rows of the
-//! calibration slice. A publish is a rename per side, the long first: one
-//! failing keeps every side, failed, and the sides published before it, as
-//! those a crash between the renames leaves, have no other side beside them
-//! at their valid-from, so are in no pair: no decision uses them, and the
-//! next train fits the pair again, its publishes replacing them.
+//! backtest's (`walk::WalkForward::scores`). Otherwise the generation
+//! publishes whole (`store::ModelStore::publish`), valid from `t`, its sides
+//! with the pair's calibration, each model with its baseline, the training
+//! mean of R on the rows it was fitted and calibrated on, which its
+//! out-of-sample scores are read beside, and its manifest probing it on rows
+//! of its calibration slice; its manifest, written last, makes it visible,
+//! so a train failing or stopped before it leaves nothing any decision uses.
 //!
-//! With a meta model (`model::meta`), the sides train first, then the
-//! meta, on the same rows, of the one replay: the meta's window is its
-//! own (`MetaConfig::window`), from the sides' first pair on, and its
-//! rows are made from the sides' out-of-sample decisions, those of the
-//! pair of the stores in use at each decision, read once the
-//! sides published: the one just published valid from `t` used by none,
-//! that of a train at two times, valid from the window's start, used
-//! throughout it; and should the sides of such a train publish none, the
-//! meta waits for the sides' decisions (`Plan::meta_after_sides`). The meta
-//! is a regression of the realized net R of the trade of the side picked,
-//! split as the sides are on its own calibration slice
-//! (`MetaConfig::calibration`), calibrated by its level line alone
-//! (`calibration::Ksplit` of one side), held to its own minimum of rows
-//! (`MetaConfig::min_rows`) and checked as a side is, and published in its
-//! own store.
+//! With a meta model, the sides train first, then the meta, on the same
+//! rows, of the one replay: the meta's window is its own
+//! (`MetaConfig::window`), and its rows are made from the sides'
+//! out-of-sample decisions (`meta::examples`): retrained, those of the
+//! generations the store holds before the train, read as the train starts,
+//! from the first on; never retrained, those of the sides the train fits as
+//! of the meta's window before it, over that window. The meta is a
+//! regression of the realized net R of the trade of the side picked, split
+//! as the sides are on its own calibration slice (`MetaConfig::calibration`),
+//! calibrated by its level line alone (`calibration::Ksplit` of one side),
+//! held to its own minimum of rows (`MetaConfig::min_rows`) and checked as a
+//! side is. A meta that waits publishes the generation without it, which
+//! trades nothing (`deciding`), and the next train's meta learns from its
+//! sides.
 //!
-//! A train never errors: what goes wrong is an outcome, the current model
-//! kept with the reason (`Kept`), for each model trained. It succeeds when
-//! it kept no model (`Trained::succeeded`).
+//! A train never errors: what goes wrong is an outcome, the current
+//! generation kept with the reason (`Kept`), for each model of the strategy.
+//! It succeeds when it kept no model (`Trained::succeeded`).
 
 use std::fmt::Display;
 
 use anyhow::Context;
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
-use nautilus_model::identifiers::StrategyId;
 
 use super::{
     blueprint::Stored,
-    calibration::Ksplit,
+    calibration::{self, Ksplit},
     dataset::{Dataset, DatasetRow, SchemaMismatch},
+    deciding::{self, DecidingModels},
     holdout::Example,
     learner::{LearnerConfig, SavedModel, TrainingSet},
     meta,
-    schedule::{Models, Retrain, Schedule, Step},
+    schedule::{Fit, Fits, MetaStep, Models, Plan, Retrain, Schedule},
     store::{
-        Baselined, MetaLevel, ModelCalibration, ModelManifest, ModelSet, ModelStore,
-        PairCalibration, Probe, SideLevel, SideModel, StoredModel,
+        Baselined, MetaLevel, ModelManifest, ModelStore, Pair, Probe, SideModel, StoredGeneration,
+        StoredModel,
     },
     targets::{Side, TargetConfig, TargetRow},
 };
@@ -109,21 +102,20 @@ const PROBES: usize = 16;
 /// both.
 #[derive(Debug)]
 pub struct Training {
-    strategy_id: StrategyId,
     target: TargetConfig,
     dataset: Dataset,
     /// What each train does to each model.
     schedule: Schedule,
-    /// The strategy's models: the stores the plan reads, and the side
-    /// models the meta's rows are made from.
-    models: ModelSet,
+    /// The strategy's models: the generations the plan reads, which a
+    /// retrained meta's rows are made from, and where the train publishes.
+    models: ModelStore,
     /// Each model: of each side the strategy trades, and the meta model, if
     /// any.
     levels: Models<Level>,
 }
 
-/// How the models of one level, a side or a meta, are fitted, calibrated and
-/// published.
+/// How the models of one level, a side or a meta, are fitted and
+/// calibrated.
 #[derive(Debug)]
 struct Level {
     /// The names of the features of its rows, in order.
@@ -133,7 +125,6 @@ struct Level {
     /// The fewest rows of its fit slice and of its calibration slice.
     min_rows: usize,
     learner: LearnerConfig,
-    store: ModelStore,
 }
 
 /// A model fitted and calibrated as of a time, not published: what its
@@ -143,7 +134,8 @@ struct Fitted {
     saved: SavedModel,
     /// The side of a side's model; none of a meta's.
     side: Option<Side>,
-    calibration: ModelCalibration,
+    /// A meta's level line; none of a side's, which its pair calibrates.
+    calibration: Option<calibration::Line>,
     baseline: f64,
     /// Rows of its calibration slice and its predictions on them, before
     /// calibration.
@@ -162,15 +154,13 @@ struct SideFit<'a> {
     saved: SavedModel,
 }
 
-/// What a step comes to on the replay's rows.
-enum Planned<'a> {
-    /// A model is fitted as of `at` on `rows`.
-    Fit {
-        at: Timestamp,
-        rows: Vec<&'a DatasetRow>,
-    },
-    /// None is: the model's outcome.
-    Done(Outcome),
+/// The sides' pair a train fitted, in hand to decide the meta's rows, and
+/// as the generation publishes it: each side's model, and the pair's
+/// calibration.
+struct PairFit {
+    pair: Pair,
+    sides: Vec<StoredModel>,
+    calibration: Ksplit,
 }
 
 /// What a train did: the outcome of each model of the strategy, none for
@@ -181,32 +171,33 @@ pub type Trained = Models<Outcome>;
 /// What a train did to one model.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
-    /// A model was published, valid from `valid_from`.
+    /// A model was published, in the generation valid from `valid_from`.
     Published { valid_from: Timestamp },
-    /// None was fitted: the current model, valid from `valid_from`, is in
-    /// use (`schedule::Step::Keep`), of a strategy retrained as `retrain`
+    /// None was fitted: the current generation, valid from `valid_from`, is
+    /// in use (`schedule::Plan::Keep`), of a strategy retrained as `retrain`
     /// says, which says how it reads (`Retrain::in_use`).
     InUse {
         valid_from: Timestamp,
         retrain: Retrain,
     },
-    /// No model was published: the current one, if any, stays.
+    /// No model was published: the current generation, if any, stays.
     Kept(Kept),
 }
 
-/// Why a train kept the current model.
+/// Why a train kept the current generation, or published one without a
+/// meta.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Kept {
-    /// The replay, the dataset, the fit, a check of the models or the store
-    /// failed, or a slice had fewer rows than the minimum; the error. A
-    /// side's is its pair's, its own or another side's.
+    /// The replay, the dataset, a fit, a check of the models or the store
+    /// failed, or a slice had fewer rows than the minimum; the error, the
+    /// same for every model of the generation, whichever it was of.
     Failed(String),
     /// The dataset holds rows that do not match the strategy's features; the
     /// mismatch.
     SchemaMismatch(String),
-    /// A meta waits for the sides' decisions to learn from: no pair of the
-    /// sides is valid before the train, so none was fitted
-    /// (`schedule::Step::Wait`).
+    /// A meta waits for the sides' decisions to learn from: no generation
+    /// is valid before the train, so none was fitted, and the generation
+    /// published holds none (`schedule::MetaStep::Wait`).
     Waiting,
 }
 
@@ -214,7 +205,7 @@ impl Training {
     /// The training of the models of `model`, a strategy's model on the
     /// venue of its dataset runs, one for each side of its margins, and of
     /// its meta model if its config has one, on its dataset and in its
-    /// model set, as its config says.
+    /// model store, as its config says.
     pub(super) fn new(model: Stored<'_>) -> Self {
         let Stored {
             blueprint,
@@ -229,7 +220,6 @@ impl Training {
                 calibration: config.calibration,
                 min_rows: config.min_rows,
                 learner: config.learner.clone(),
-                store: traded.store().clone(),
             })
         };
         let levels = Models {
@@ -238,7 +228,6 @@ impl Training {
             meta: models.meta().map(Level::of_meta),
         };
         Self {
-            strategy_id: blueprint.strategy_id(),
             dataset,
             schedule,
             models,
@@ -260,113 +249,125 @@ impl Training {
     }
 
     /// Trains at `at` as the schedule plans it (`Schedule::plan`), from
-    /// the stores' valid-froms: `replay` runs the strategy over a span of
-    /// the days the dataset lacks and returns the rows it settled (see
+    /// the store's generations: each model of the generation current at
+    /// `at` in use, if any; else a generation trained and published
+    /// (`generation`), or, should anything of it fail, each model kept with
+    /// the error. `replay` runs the strategy over a span of the days the
+    /// dataset lacks and returns the rows it settled (see
     /// `Dataset::settled`), once, from where the plan's fits start, and not
-    /// at all if it fits none. Fits the sides' pair if the plan fits it, as
-    /// of its time (`sides`), then the meta model as the plan has it once
-    /// the sides are published (`Plan::meta_after_sides`), its rows the
-    /// sides' decisions by the store as the sides left it: each fitted is
-    /// published, or its current model kept with the reason; a model the
-    /// plan keeps is in use, and a meta the plan makes wait is kept,
-    /// waiting.
+    /// at all if the plan keeps a generation.
     pub fn train_at(
         &self,
         at: Timestamp,
         replay: impl FnOnce(Timestamp, Timestamp) -> anyhow::Result<Vec<TargetRow>>,
     ) -> Trained {
-        let listed = match self.models.valid_froms() {
-            Ok(listed) => listed,
-            Err(e) => return self.levels.as_ref().map(|_| kept(&e)),
+        let each = |outcome: Outcome| self.levels.as_ref().map(|_| outcome.clone());
+        let generations = match self.models.generations() {
+            Ok(generations) => generations,
+            Err(e) => return each(kept(&e)),
         };
-        let plan = self.schedule.plan(at, &listed);
-        let rows = match plan.replay_from() {
-            Some(from) => self.dataset.settled(from, at, replay),
-            None => Ok(vec![]),
-        };
-        let sides = self.sides(plan.steps(), &rows);
-        let meta = || {
-            let level = self.levels.meta.as_ref()?;
-            let step = match self.models.valid_froms() {
-                Ok(valid_froms) => plan.meta_after_sides(&valid_froms)?,
-                Err(e) => return Some(kept(&e)),
-            };
-            Some(match self.planned(step, &rows) {
-                Planned::Done(outcome) => outcome,
-                Planned::Fit { at, rows } => {
-                    self.fit_meta(level, at, &rows).unwrap_or_else(|e| kept(&e))
-                }
-            })
-        };
-        Trained {
-            meta: meta(),
-            ..sides
+
+        match self.schedule.plan(at, &generations) {
+            Plan::Keep { valid_from } => each(Outcome::InUse {
+                valid_from,
+                retrain: self.schedule.retrain(),
+            }),
+            Plan::Train(fits) => self
+                .generation(&fits, replay)
+                .unwrap_or_else(|e| each(kept(&e))),
         }
     }
 
-    /// What `step` comes to on the replay's `rows`: its current model in use; a
-    /// meta waiting; the current model kept if the replay failed; or a fit as
-    /// of the step's time on the step's rows, those of `[from, at)` settled by
-    /// `at` (`Step::Fit`).
-    fn planned<'a>(&self, step: Step, rows: &'a anyhow::Result<Vec<DatasetRow>>) -> Planned<'a> {
-        let (from, at) = match step {
-            Step::Keep { valid_from } => {
-                return Planned::Done(Outcome::InUse {
-                    valid_from,
-                    retrain: self.schedule.retrain(),
-                });
+    /// Trains the generation of `fits` and publishes it, valid from the
+    /// train's time, its sides and its meta, if the meta did not wait: on
+    /// the rows `replay` settles from where the fits start, the sides'
+    /// pair fitted as of their time (`pair`), then the meta as of the
+    /// train's (`Level::fit`), on the decisions the plan says of
+    /// (`meta_examples`). Each model is published, and a waiting meta kept,
+    /// waiting.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the replay, a fit, a check or the store fails, or
+    /// a slice has fewer rows than its level's minimum, the meta's naming it.
+    fn generation(
+        &self,
+        fits: &Fits,
+        replay: impl FnOnce(Timestamp, Timestamp) -> anyhow::Result<Vec<TargetRow>>,
+    ) -> anyhow::Result<Trained> {
+        let at = fits.at;
+        let rows = self.dataset.settled(fits.replay_from(), at, replay)?;
+        let pair = self.pair(fits.sides, &rows)?;
+        let (meta, meta_outcome) = match (fits.meta, &self.levels.meta) {
+            (Some(MetaStep::Wait), _) => (None, Some(Outcome::Kept(Kept::Waiting))),
+            (Some(step), Some(level)) => {
+                let examples = self
+                    .meta_examples(step, fits, &pair.pair, &rows)
+                    .context("making the meta model's rows")?;
+                let fitted = level.fit(at, examples).context("fitting the meta model")?;
+                let stored = self
+                    .stored(level, fitted)
+                    .context("checking the meta model")?;
+                (Some(stored), Some(Outcome::Published { valid_from: at }))
             }
-            Step::Wait => return Planned::Done(Outcome::Kept(Kept::Waiting)),
-            Step::Fit { from, at } => (from, at),
+            (None, _) | (Some(_), None) => (None, None),
         };
-        let rows = match rows {
-            Ok(rows) => rows,
-            Err(e) => return Planned::Done(kept(e)),
+        self.models.publish(&StoredGeneration {
+            valid_from: at,
+            sides: pair.sides,
+            calibration: pair.calibration,
+            meta,
+        })?;
+        let mut trained = self
+            .levels
+            .as_ref()
+            .map(|_| Outcome::Published { valid_from: at });
+        trained.meta = meta_outcome;
+        Ok(trained)
+    }
+
+    /// The meta's examples of a train of `fits` (`meta::examples`), on the
+    /// replay's `rows` over its window, the step `step` of its meta: the
+    /// decisions over `[from, the train)` of the generations the store
+    /// holds, listed now; or those of `pair`, the sides the train fitted, over
+    /// `[their time, the train)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be listed, a generation fails its
+    /// checks, or a model fails to predict.
+    fn meta_examples(
+        &self,
+        step: MetaStep,
+        fits: &Fits,
+        pair: &Pair,
+        rows: &[DatasetRow],
+    ) -> anyhow::Result<Vec<Example>> {
+        let from = match step {
+            MetaStep::OnStored { from } => from,
+            MetaStep::OnSides | MetaStep::Wait => fits.sides.at,
         };
-        let (start, end) = (UnixNanos::from(from), UnixNanos::from(at));
-        Planned::Fit {
-            at,
-            rows: rows
-                .iter()
-                .filter(|row| start <= row.ts_event && row.ts_event < end && row.settled_at <= end)
-                .collect(),
+        let rows = in_fit(rows, Fit { from, at: fits.at });
+
+        match step {
+            MetaStep::OnStored { .. } => {
+                let mut generations = DecidingModels::new(&self.models)?;
+                meta::examples(&rows, |now, sides| generations.pick(now, sides))
+            }
+            MetaStep::OnSides | MetaStep::Wait => meta::examples(&rows, |_, sides| {
+                DecidingModels::pick_among(pair, deciding::margins(&self.models), sides)
+            }),
         }
     }
 
-    /// What a train does to the sides at `steps`, on the replay's `rows`: the
-    /// plan keeps the pair, each side its outcome, or fits it, the sides'
-    /// step being their pair's (`Schedule::plan`), the pair published or
-    /// failed together (`pair`).
-    fn sides(&self, steps: &Models<Step>, rows: &anyhow::Result<Vec<DatasetRow>>) -> Trained {
-        let mut trained = Trained {
-            long: None,
-            short: None,
-            meta: None,
-        };
-        let traded: Vec<Side> = self.models.sides().map(SideLevel::side).collect();
-        let Some(&step) = traded.first().and_then(|&side| steps.side(side)) else {
-            return trained;
-        };
-        let outcomes = match self.planned(step, rows) {
-            Planned::Done(outcome) => traded.iter().map(|&side| (side, outcome.clone())).collect(),
-            Planned::Fit { at, rows } => self
-                .pair(at, rows)
-                .unwrap_or_else(|e| traded.iter().map(|&side| (side, kept(&e))).collect()),
-        };
-        for (side, outcome) in outcomes {
-            trained.set_side(side, outcome);
-        }
-        trained
-    }
-
-    /// The outcome of each side of the pair fitted as of `at` on `rows`,
-    /// split into the fit slice and the calibration slice (`split`), each
-    /// of at least the minimum of rows (`Level::ensure_rows`): each side's
-    /// model fitted on its realized R on the fit slice (`fit_side`), the
-    /// pair calibrated together on the calibration slice (`Ksplit::fit`),
-    /// every prediction there and the calibration finite, and each side
-    /// checked as a reader checks it (`Training::stored`) before any
-    /// publishes (`publish_pair`).
+    /// The pair of the sides fitted as `fit` says on `rows`, those of its
+    /// span settled by its time (`in_fit`), split into the fit slice and the
+    /// calibration slice (`split`), each of at least the minimum of rows
+    /// (`Level::ensure_rows`): each side's model fitted on its realized R on
+    /// the fit slice (`fit_side`), the pair calibrated together on the
+    /// calibration slice (`Ksplit::fit`), every prediction there and the
+    /// calibration finite, and each side checked as a reader checks it
+    /// (`Training::stored`).
     ///
     /// # Errors
     ///
@@ -374,7 +375,8 @@ impl Training {
     /// fit fails, naming the side, a model fails to predict or predicts no
     /// finite number, the calibration is no finite line, or a side fails its
     /// check.
-    fn pair(&self, at: Timestamp, rows: Vec<&DatasetRow>) -> anyhow::Result<Vec<(Side, Outcome)>> {
+    fn pair(&self, fit: Fit, rows: &[DatasetRow]) -> anyhow::Result<PairFit> {
+        let at = fit.at;
         let levels: Vec<(Side, &Level)> = self
             .models
             .sides()
@@ -384,7 +386,8 @@ impl Training {
             })
             .collect();
         let cut = at - levels[0].1.calibration;
-        let (fitted, calibrating) = split(rows, cut, |row| (row.ts_event, row.settled_at));
+        let (fitted, calibrating) =
+            split(in_fit(rows, fit), cut, |row| (row.ts_event, row.settled_at));
         levels[0]
             .1
             .ensure_rows((cut, at), fitted.len(), calibrating.len())?;
@@ -411,100 +414,56 @@ impl Training {
                     .collect()
             })
             .collect::<anyhow::Result<Vec<Vec<(f64, f64)>>>>()?;
-        let lines =
+        let calibration =
             Ksplit::fit(&predicted).context("calibrating the pair on the calibration slice")?;
         anyhow::ensure!(
             [
-                lines.level.alpha,
-                lines.level.beta,
-                lines.side_call.unwrap_or(0.0)
+                calibration.level.alpha,
+                calibration.level.beta,
+                calibration.side_call.unwrap_or(0.0)
             ]
             .iter()
             .all(|value| value.is_finite()),
-            "the pair's calibration {lines:?} is not finite"
+            "the pair's calibration {calibration:?} is not finite"
         );
-        let calibration = ModelCalibration::Pair(PairCalibration {
-            valid_from: at,
-            sides: fits.iter().map(|fit| fit.side).collect(),
-            lines,
-        });
-        let stored = fits
-            .into_iter()
-            .enumerate()
-            .map(|(i, fit)| {
-                let probes = spread(calibrating.len())
-                    .map(|row| Probe {
-                        row: calibrating[row].side(fit.side).features,
-                        prediction: predicted[row][i].0,
-                    })
-                    .collect();
-                let fitted = Fitted {
-                    side: Some(fit.side),
-                    calibration: calibration.clone(),
-                    baseline: fit.model.baseline(),
-                    saved: fit.saved,
-                    probes,
-                };
-                Ok((fit.side, fit.level, self.stored(fit.level, at, fitted)?))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
-        Ok(self.publish_pair(at, &stored))
-    }
+        let mut models = vec![];
+        let mut sides = vec![];
 
-    /// Publishes each side of the pair `stored`, the long first, valid from
-    /// `at`: each published, or, should a publish fail, each kept with its
-    /// error, the sides published before it no pair without the others.
-    fn publish_pair(
-        &self,
-        at: Timestamp,
-        stored: &[(Side, &Level, StoredModel)],
-    ) -> Vec<(Side, Outcome)> {
-        let sides: Vec<Side> = stored.iter().map(|&(side, ..)| side).collect();
-        for (_, level, model) in stored {
-            if let Err(e) = level.store.publish(model) {
-                return sides.into_iter().map(|side| (side, kept(&e))).collect();
-            }
+        for (i, fit) in fits.into_iter().enumerate() {
+            let probes = spread(calibrating.len())
+                .map(|row| Probe {
+                    row: calibrating[row].side(fit.side).features,
+                    prediction: predicted[row][i].0,
+                })
+                .collect();
+            let fitted = Fitted {
+                side: Some(fit.side),
+                calibration: None,
+                baseline: fit.model.baseline(),
+                saved: fit.saved,
+                probes,
+            };
+            sides.push(self.stored(fit.level, fitted)?);
+            models.push((fit.side, fit.model));
         }
-        sides
-            .into_iter()
-            .map(|side| (side, Outcome::Published { valid_from: at }))
-            .collect()
+        Ok(PairFit {
+            pair: Pair::new(models, calibration)?,
+            sides,
+            calibration,
+        })
     }
 
-    /// Fits the meta model of `level` as of `at` on the examples of `rows`,
-    /// in time order (`Level::fit`), checks it as a reader checks it
-    /// (`Training::stored`), and publishes it.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the examples cannot be made, the fit or its check
-    /// fails, or the store fails.
-    fn fit_meta(
-        &self,
-        level: &Level,
-        at: Timestamp,
-        rows: &[&DatasetRow],
-    ) -> anyhow::Result<Outcome> {
-        let examples = meta::examples(&self.models, rows)?;
-        let stored = self.stored(level, at, level.fit(at, examples)?)?;
-        level.store.publish(&stored)?;
-        Ok(Outcome::Published { valid_from: at })
-    }
-
-    /// The model `fitted` of `level` as its store holds it, valid from `at`,
-    /// checked as a reader checks it before use (`StoredModel::checked`):
-    /// reloaded from what it saved, it predicts each probe to the bit as
-    /// fitted.
+    /// The model `fitted` of `level` as its generation holds it, checked as
+    /// a reader checks it before use (`StoredModel::checked`): reloaded from
+    /// what it saved, it predicts each probe to the bit as fitted.
     ///
     /// # Errors
     ///
     /// Returns an error if the model fails its check.
-    fn stored(&self, level: &Level, at: Timestamp, fitted: Fitted) -> anyhow::Result<StoredModel> {
+    fn stored(&self, level: &Level, fitted: Fitted) -> anyhow::Result<StoredModel> {
         let fingerprint = self.dataset.fingerprint().to_string();
         let stored = StoredModel {
             manifest: ModelManifest {
-                strategy_id: self.strategy_id,
-                valid_from: at,
                 fingerprint: fingerprint.clone(),
                 feature_names: level.feature_names.clone(),
                 target: self.target.clone(),
@@ -533,7 +492,6 @@ impl Level {
             calibration: config.calibration,
             min_rows: config.min_rows,
             learner: config.learner.clone(),
-            store: meta.store().clone(),
         }
     }
 
@@ -618,7 +576,7 @@ impl Level {
         Ok(Fitted {
             saved: model.save()?,
             side: None,
-            calibration: ModelCalibration::Meta(line),
+            calibration: Some(line),
             baseline,
             probes,
         })
@@ -711,6 +669,15 @@ fn fit_side<'a>(
     })
 }
 
+/// The rows of `rows` a fit `fit` reads: those of `[from, at)` settled by
+/// `at`.
+fn in_fit(rows: &[DatasetRow], Fit { from, at }: Fit) -> Vec<&DatasetRow> {
+    let (start, end) = (UnixNanos::from(from), UnixNanos::from(at));
+    rows.iter()
+        .filter(|row| start <= row.ts_event && row.ts_event < end && row.settled_at <= end)
+        .collect()
+}
+
 /// `items`, each settled by the train, split at the calibration slice's
 /// start `cut`, each item's decision time and settlement read by `of`:
 /// those before it settled by it, the fit slice; and those from it, the
@@ -798,7 +765,7 @@ impl Display for Kept {
             Self::SchemaMismatch(why) => write!(f, "schema mismatch: {why}"),
             Self::Waiting => write!(
                 f,
-                "waiting for the sides' decisions: no pair of the sides is valid before the train"
+                "waiting for the sides' decisions: no generation is valid before the train"
             ),
         }
     }
@@ -809,7 +776,11 @@ mod tests {
     use std::{path::Path, rc::Rc};
 
     use jiff::SignedDuration;
-    use nautilus_model::{data::NautilusDataType, identifiers::InstrumentId, types::Money};
+    use nautilus_model::{
+        data::NautilusDataType,
+        identifiers::{InstrumentId, StrategyId},
+        types::Money,
+    };
     use rstest::rstest;
     use rust_decimal::Decimal;
 
@@ -825,6 +796,7 @@ mod tests {
             deciding::testing::unchanged,
             features::{FeatureSet, side_names, side_row},
             learner::LearnerConfig,
+            store::ModelStore,
             targets::{
                 BracketSpec, Distance, Exit, Outcome as TargetOutcome, Outcomes, PerSide, Target,
                 TargetRow,
@@ -937,22 +909,36 @@ mod tests {
 
     /// The models of a training in `dir` as `config` says, as `training`
     /// keys them.
-    fn models(dir: &Path, config: &ModelConfig) -> ModelSet {
+    fn models(dir: &Path, config: &ModelConfig) -> ModelStore {
         blueprint(config.clone())
-            .model_set(&dir.join("models"))
+            .model_store(&dir.join("models"))
             .unwrap()
     }
 
-    /// The store of the `side` models of a training in `dir` as `config`
-    /// says.
-    fn store(dir: &Path, config: &ModelConfig, side: Side) -> ModelStore {
-        models(dir, config).side(side).unwrap().store().clone()
+    /// The generations of a training in `dir` as `config` says.
+    fn generations(dir: &Path, config: &ModelConfig) -> Vec<Timestamp> {
+        models(dir, config).generations().unwrap()
     }
 
-    /// The store of the meta models of a training in `dir` as `config`
-    /// says.
-    fn meta_store(dir: &Path, config: &ModelConfig) -> ModelStore {
-        models(dir, config).meta().unwrap().store().clone()
+    /// The generation valid from `valid_from` of a training in `dir` as
+    /// `config` says.
+    fn generation(dir: &Path, config: &ModelConfig, valid_from: Timestamp) -> StoredGeneration {
+        models(dir, config).read(valid_from).unwrap()
+    }
+
+    /// The model of `side` of `generation`.
+    fn side_of(generation: &StoredGeneration, side: Side) -> &StoredModel {
+        generation
+            .sides
+            .iter()
+            .find(|model| model.manifest.side == Some(side))
+            .unwrap()
+    }
+
+    /// The meta model of the generation valid from `valid_from` of a
+    /// training in `dir` as `config` says.
+    fn meta_of(dir: &Path, config: &ModelConfig, valid_from: Timestamp) -> StoredModel {
+        generation(dir, config, valid_from).meta.unwrap()
     }
 
     fn at(time: &str) -> Timestamp {
@@ -1077,8 +1063,8 @@ mod tests {
     /// and -1, of a mean of 0.25, which the fake predicts where its feature
     /// is missing; with the row of 11:30 settled after 12:00 it would be
     /// 2/3. The pair calibrated together on the calibration slice, the rows
-    /// from 12:00 settled by the train (`LINES`), each manifest holding the
-    /// one calibration and naming the pair it was fitted on. Each side's
+    /// from 12:00 settled by the train (`LINES`), the generation holding it
+    /// and no side's manifest a calibration of its own. Each side's
     /// probes are its rows of the calibration slice and its predictions on
     /// them, before the calibration: the fake's, their feature.
     #[rstest]
@@ -1093,15 +1079,11 @@ mod tests {
         for outcome in [&trained.long, &trained.short] {
             assert_eq!(outcome, &Some(Outcome::Published { valid_from: t }));
         }
-        let calibration = ModelCalibration::Pair(PairCalibration {
-            valid_from: t,
-            sides: vec![Side::Long, Side::Short],
-            lines: LINES,
-        });
+        let generation = generation(dir.path(), &config(), t);
+        assert_eq!(generation.calibration, LINES);
         for side in Side::BOTH {
-            let stored = store(dir.path(), &config(), side).read(t).unwrap();
-            assert_eq!(stored.manifest.side, Some(side));
-            assert_eq!(stored.manifest.calibration, calibration, "{side:?}");
+            let stored = side_of(&generation, side);
+            assert_eq!(stored.manifest.calibration, None, "{side:?}");
             let fake = LearnerConfig::Fake {}.load(&stored.model).unwrap();
             // The side's row: the decision's feature, then its payoff
             // features.
@@ -1120,7 +1102,7 @@ mod tests {
 
     /// A calibration row whose feature is infinite: the fake predicts it,
     /// infinite, and the train fails, naming the model and the row, and
-    /// publishes neither side.
+    /// publishes no generation.
     #[rstest]
     fn a_prediction_on_the_calibration_slice_that_is_no_finite_number_fails_the_train() {
         let dir = tempfile::tempdir().unwrap();
@@ -1139,19 +1121,14 @@ mod tests {
                 "{why}"
             );
         }
-        for side in Side::BOTH {
-            assert_eq!(
-                store(dir.path(), &config(), side).valid_froms().unwrap(),
-                [],
-                "{side:?}"
-            );
-        }
+        assert_eq!(generations(dir.path(), &config()), []);
     }
 
     /// The calibration slice's features the largest finite numbers, less
     /// at 13:00 and more at 15:00: the fake predicts them, finite, but the
     /// mean of each row's two sides' predictions, the level, overflows, so
-    /// the pair's calibration is no finite line. The train fails, and publishes neither side.
+    /// the pair's calibration is no finite line. The train fails, and
+    /// publishes no generation.
     #[rstest]
     fn a_calibration_that_is_no_finite_line_fails_the_train() {
         let dir = tempfile::tempdir().unwrap();
@@ -1171,25 +1148,18 @@ mod tests {
                 "{why}"
             );
         }
-        assert_eq!(
-            store(dir.path(), &config(), Side::Long)
-                .valid_froms()
-                .unwrap(),
-            []
-        );
+        assert_eq!(generations(dir.path(), &config()), []);
     }
 
     /// The short's stop on a row fitted on is worth nought, so its R there is
     /// no finite number and its fit fails. The long, fitted, publishes
-    /// neither: both are kept, the long for the short's failure, which it
-    /// names, and the pair of the 6th stays the current one.
+    /// nothing: both are kept, the long for the short's failure, which it
+    /// names, and the generation of the 6th stays the current one.
     #[rstest]
-    fn a_side_whose_fit_fails_publishes_neither_side() {
+    fn a_side_whose_fit_fails_publishes_no_generation() {
         let dir = tempfile::tempdir().unwrap();
         let sixth = "2026-01-06T00:00:00Z";
-        for side in Side::BOTH {
-            publish_baseline(&store(dir.path(), &config(), side), side, sixth, 0.0);
-        }
+        publish_generation(dir.path(), &config(), sixth, (0.0, 0.0));
         let mut rows = rows();
         rows[1].outcomes.short.unit = Money::from("0 USD");
 
@@ -1202,57 +1172,17 @@ mod tests {
             };
             assert!(why.contains("short") && why.contains("finite"), "{why}");
         }
-        for side in Side::BOTH {
-            assert_eq!(
-                store(dir.path(), &config(), side).valid_froms().unwrap(),
-                [at(sixth)],
-                "{side:?}"
-            );
-        }
+        assert_eq!(generations(dir.path(), &config()), [at(sixth)]);
     }
 
-    /// The short's publish fails after the long's: the long's model is in
-    /// its store, valid from the train's time, but has no short beside it,
-    /// so the sides list no pair from then and both are kept, failed, for
-    /// the short's store, which each names.
+    /// The generation's publish fails: every model is kept, failed, for the
+    /// store, which each names, and no generation is listed.
     #[rstest]
-    fn a_publish_failing_after_the_others_leaves_no_pair_published() {
+    fn a_publish_failing_publishes_no_generation() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), config());
-        let t = at("2026-01-07T00:00:00Z");
-        store(dir.path(), &config(), Side::Short).break_publishing();
-        let short = models(dir.path(), &config()).directory().join("short");
-
-        let trained = training.train_at(t, |_, _| Ok(rows()));
-
-        for outcome in [&trained.long, &trained.short] {
-            let Some(Outcome::Kept(Kept::Failed(why))) = outcome else {
-                panic!("{trained:?}");
-            };
-            assert!(why.contains(&short.display().to_string()), "{why}");
-        }
-        assert_eq!(
-            store(dir.path(), &config(), Side::Long)
-                .valid_froms()
-                .unwrap(),
-            [t]
-        );
-        assert_eq!(
-            models(dir.path(), &config()).valid_froms().unwrap().pairs(),
-            []
-        );
-    }
-
-    /// The long's publish fails, the first: both are kept, failed, for the
-    /// long's store, which each names, and neither the long nor the short,
-    /// fitted with it, publishes anything.
-    #[rstest]
-    fn a_publish_failing_publishes_no_other_side() {
-        let dir = tempfile::tempdir().unwrap();
-        let training = training(dir.path(), config());
-        let long = store(dir.path(), &config(), Side::Long);
-        long.break_publishing();
-        let long_directory = models(dir.path(), &config()).directory().join("long");
+        let models = models(dir.path(), &config());
+        models.break_publishing();
 
         let trained = training.train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(rows()));
 
@@ -1260,15 +1190,12 @@ mod tests {
             let Some(Outcome::Kept(Kept::Failed(why))) = outcome else {
                 panic!("{trained:?}");
             };
-            assert!(why.contains(&long_directory.display().to_string()), "{why}");
+            assert!(
+                why.contains(&models.directory().display().to_string()),
+                "{why}"
+            );
         }
-        assert_eq!(long.valid_froms().unwrap(), []);
-        assert_eq!(
-            store(dir.path(), &config(), Side::Short)
-                .valid_froms()
-                .unwrap(),
-            []
-        );
+        assert_eq!(models.generations().unwrap(), []);
     }
 
     /// A one-sided strategy's calibration is the level line alone, on its
@@ -1296,21 +1223,12 @@ mod tests {
             matches!(trained.long, Some(Outcome::Published { .. })),
             "{trained:?}"
         );
-        let calibration = store(dir.path(), &long_only, Side::Long)
-            .read(t)
-            .unwrap()
-            .manifest
-            .calibration;
         assert_eq!(
-            calibration,
-            ModelCalibration::Pair(PairCalibration {
-                valid_from: t,
-                sides: vec![Side::Long],
-                lines: Ksplit {
-                    side_call: None,
-                    ..LINES
-                },
-            })
+            generation(dir.path(), &long_only, t).calibration,
+            Ksplit {
+                side_call: None,
+                ..LINES
+            }
         );
     }
 
@@ -1330,22 +1248,17 @@ mod tests {
         );
     }
 
-    /// The long's model valid from the train's time, a baseline published by
-    /// a train stopped before its short's publish, has no short beside it: no
-    /// pair is valid from then, so both sides are fitted again, calibrated
-    /// together, and published, the long's fitted model in place of the
-    /// baseline.
+    /// The generation at the train's time, a baseline published by a train
+    /// stopped before its manifest, is not listed: the train fits and
+    /// publishes the generation again, the fitted models in place of the
+    /// baselines.
     #[rstest]
-    fn a_side_published_at_the_trains_time_without_the_other_is_fitted_again_with_it() {
+    fn a_generation_at_the_trains_time_without_its_manifest_is_trained_again() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), config());
         let t = at("2026-01-07T00:00:00Z");
-        publish_baseline(
-            &store(dir.path(), &config(), Side::Long),
-            Side::Long,
-            "2026-01-07T00:00:00Z",
-            0.8,
-        );
+        publish_generation(dir.path(), &config(), "2026-01-07T00:00:00Z", (0.8, 0.8));
+        models(dir.path(), &config()).drop_manifest(t);
 
         let trained = training.train_at(t, |_, _| Ok(rows()));
 
@@ -1355,25 +1268,21 @@ mod tests {
                 "{trained:?}"
             );
         }
-        let long = store(dir.path(), &config(), Side::Long).read(t).unwrap();
-        assert_eq!(long.manifest.learner, LearnerConfig::Fake {});
+        let generation = generation(dir.path(), &config(), t);
+        assert_eq!(
+            side_of(&generation, Side::Long).manifest.learner,
+            LearnerConfig::Fake {}
+        );
     }
 
-    /// Both sides have a model valid from the train's time: a rerun of the
-    /// train fits nothing, and so replays nothing.
+    /// A generation is valid from the train's time: a rerun of the train
+    /// fits nothing, and so replays nothing.
     #[rstest]
     fn a_train_with_every_model_in_use_replays_nothing_and_reports_each() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), config());
         let t = at("2026-01-07T00:00:00Z");
-        for side in Side::BOTH {
-            publish_baseline(
-                &store(dir.path(), &config(), side),
-                side,
-                "2026-01-07T00:00:00Z",
-                0.5,
-            );
-        }
+        publish_generation(dir.path(), &config(), "2026-01-07T00:00:00Z", (0.5, 0.5));
         let mut replays = vec![];
 
         let trained = training.train_at(t, |from, to| {
@@ -1404,23 +1313,15 @@ mod tests {
         }
     }
 
-    /// Never retrained, the pair of the 6th, its long expecting nought and
-    /// so never picked, is current at the train of the 7th: kept in use, not
-    /// fitted again, and nothing replayed.
+    /// Never retrained, the generation of the 6th, its long expecting
+    /// nought and so never picked, is current at the train of the 7th: kept
+    /// in use, not fitted again, and nothing replayed.
     #[rstest]
-    fn never_retrained_a_pair_valid_before_the_train_is_kept_in_use() {
+    fn never_retrained_a_generation_valid_before_the_train_is_kept_in_use() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), never());
         let sixth = at("2026-01-06T00:00:00Z");
-        for side in Side::BOTH {
-            publish_baseline_of(
-                never(),
-                &store(dir.path(), &never(), side),
-                side,
-                "2026-01-06T00:00:00Z",
-                0.5,
-            );
-        }
+        publish_generation(dir.path(), &never(), "2026-01-06T00:00:00Z", (0.5, 0.5));
         let mut replays = vec![];
 
         let trained = training.train_at(at("2026-01-07T00:00:00Z"), |from, to| {
@@ -1439,44 +1340,6 @@ mod tests {
         assert_eq!(replays, []);
     }
 
-    /// Never retrained, the long's model of the 6th has no short beside it,
-    /// so no pair is current at the train of the 7th: both sides are fitted
-    /// and published as of the 7th, and the long of the 6th stays in its
-    /// store, in no pair.
-    #[rstest]
-    fn never_retrained_a_side_valid_before_the_train_without_the_other_is_fitted_again_with_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let training = training(dir.path(), never());
-        let t = at("2026-01-07T00:00:00Z");
-        let sixth = at("2026-01-06T00:00:00Z");
-        publish_baseline_of(
-            never(),
-            &store(dir.path(), &never(), Side::Long),
-            Side::Long,
-            "2026-01-06T00:00:00Z",
-            0.5,
-        );
-
-        let trained = training.train_at(t, |_, _| Ok(rows()));
-
-        for outcome in [&trained.long, &trained.short] {
-            assert!(
-                matches!(outcome, Some(Outcome::Published { valid_from, .. }) if *valid_from == t),
-                "{trained:?}"
-            );
-        }
-        assert_eq!(
-            store(dir.path(), &never(), Side::Long)
-                .valid_froms()
-                .unwrap(),
-            [sixth, t]
-        );
-        assert_eq!(
-            models(dir.path(), &never()).valid_froms().unwrap().pairs(),
-            [t]
-        );
-    }
-
     #[rstest]
     fn a_published_model_carries_its_schema_target_and_learner() {
         let dir = tempfile::tempdir().unwrap();
@@ -1485,12 +1348,10 @@ mod tests {
 
         training.train_at(t, |_, _| Ok(rows()));
 
-        let manifest = store(dir.path(), &config(), Side::Long)
-            .read(t)
-            .unwrap()
-            .manifest;
-        assert_eq!(manifest.strategy_id, StrategyId::from(STRATEGY));
-        assert_eq!(manifest.valid_from, t);
+        assert_eq!(generations(dir.path(), &config()), [t]);
+        let manifest = side_of(&generation(dir.path(), &config(), t), Side::Long)
+            .manifest
+            .clone();
         // The strategy's feature, then the bracket's payoff features.
         assert_eq!(
             manifest.feature_names,
@@ -1521,9 +1382,14 @@ mod tests {
             matches!(trained.long, Some(Outcome::Published { .. })),
             "{trained:?}"
         );
+        let generation = generation(dir.path(), &config(), t);
+
         for side in Side::BOTH {
-            let stored = store(dir.path(), &config(), side).read(t).unwrap();
-            assert_eq!(stored.manifest.baseline, 0.375, "{side:?}");
+            assert_eq!(
+                side_of(&generation, side).manifest.baseline,
+                0.375,
+                "{side:?}"
+            );
         }
     }
 
@@ -1565,18 +1431,13 @@ mod tests {
             };
             assert!(why.contains("does not cover"), "{why}");
         }
-        assert!(
-            store(dir.path(), &config(), Side::Long)
-                .valid_froms()
-                .unwrap()
-                .is_empty()
-        );
+        assert_eq!(generations(dir.path(), &config()), []);
     }
 
     /// No row of the calibration slice settled by the train, the win at
     /// 23:30 settling after it: of a minimum of one row, the train fails,
-    /// naming the calibration slice, its 0 rows and the minimum, and
-    /// neither side publishes.
+    /// naming the calibration slice, its 0 rows and the minimum, and no
+    /// generation is published.
     #[rstest]
     fn a_calibration_slice_of_fewer_rows_than_the_minimum_fails() {
         let dir = tempfile::tempdir().unwrap();
@@ -1594,17 +1455,11 @@ mod tests {
                 assert!(why.contains(fact), "{fact}: {why}");
             }
         }
-        for side in Side::BOTH {
-            assert_eq!(
-                store(dir.path(), &config(), side).valid_froms().unwrap(),
-                [],
-                "{side:?}"
-            );
-        }
+        assert_eq!(generations(dir.path(), &config()), []);
     }
 
     /// Rows of a feature more than the strategy's: neither side's model is
-    /// fitted on them, and neither publishes.
+    /// fitted on them, and no generation is published.
     #[rstest]
     fn rows_of_other_features_are_a_schema_mismatch() {
         let dir = tempfile::tempdir().unwrap();
@@ -1627,14 +1482,7 @@ mod tests {
                 "{trained:?}"
             );
         }
-
-        for side in Side::BOTH {
-            assert_eq!(
-                store(dir.path(), &config(), side).valid_froms().unwrap(),
-                [],
-                "{side:?}"
-            );
-        }
+        assert_eq!(generations(dir.path(), &config()), []);
     }
 
     /// The section of `config` with a meta model on the fake learner, on a
@@ -1663,41 +1511,53 @@ mod tests {
             .build()
     }
 
-    /// Publishes in `store` a baseline of `side`, of `config()`, valid from
-    /// `valid_from`, predicting an R of `r` on every row, as
-    /// `publish_baseline_of`.
-    fn publish_baseline(store: &ModelStore, side: Side, valid_from: &str, r: f64) {
-        publish_baseline_of(config(), store, side, valid_from, r);
-    }
-
-    /// Publishes in `store` a baseline of `side`, of `config`, valid from
-    /// `valid_from`, predicting an R of `r` on every row, its pair's
-    /// calibration leaving it as it is (`unchanged`), its baseline that R.
-    fn publish_baseline_of(
-        config: ModelConfig,
-        store: &ModelStore,
-        side: Side,
+    /// Publishes under `dir` a generation of `config` valid from
+    /// `valid_from`: each side traded a baseline predicting an R of its own
+    /// of `(long, short)` on every row, its baseline that R, their pair's
+    /// calibration leaving them as they are (`unchanged`), and no meta.
+    fn publish_generation(
+        dir: &Path,
+        config: &ModelConfig,
         valid_from: &str,
-        r: f64,
+        (long, short): (f64, f64),
     ) {
         let names = side_names(features().names(), &config.target.payoff_names());
-        let set = TrainingSet::new(names.len(), vec![0.5; names.len()], vec![r]).unwrap();
-        let model = LearnerConfig::Baseline {}.fit(&set).unwrap();
-        store
-            .publish(&StoredModel {
+        let side = |side, r| {
+            let set = TrainingSet::new(names.len(), vec![0.5; names.len()], vec![r]).unwrap();
+            let model = LearnerConfig::Baseline {}.fit(&set).unwrap();
+            StoredModel {
                 manifest: ModelManifest {
-                    strategy_id: StrategyId::from(STRATEGY),
-                    valid_from: at(valid_from),
                     fingerprint: blueprint(config.clone()).fingerprint().unwrap().to_string(),
-                    feature_names: names,
-                    calibration: unchanged(&config, at(valid_from)),
-                    target: config.target,
+                    feature_names: names.clone(),
+                    calibration: None,
+                    target: config.target.clone(),
                     side: Some(side),
                     learner: LearnerConfig::Baseline {},
                     baseline: r,
                     probes: vec![],
                 },
                 model: model.save().unwrap(),
+            }
+        };
+        let sides = config
+            .margins
+            .sides()
+            .map(|(traded, _)| {
+                side(
+                    traded,
+                    match traded {
+                        Side::Long => long,
+                        Side::Short => short,
+                    },
+                )
+            })
+            .collect();
+        models(dir, config)
+            .publish(&StoredGeneration {
+                valid_from: at(valid_from),
+                sides,
+                calibration: unchanged(config),
+                meta: None,
             })
             .unwrap();
     }
@@ -1720,17 +1580,12 @@ mod tests {
         ]
     }
 
-    /// The sides' models of a training in `dir` as `config` says: from
-    /// 06:00 a long, and from 21:00, after every row, a long again, which no
-    /// row may use.
+    /// The generations of a training in `dir` as `config` says, their
+    /// meta waited: from 06:00 a long, and from 21:00, after every row, a
+    /// long again, which no row may use.
     fn publish_baselines(dir: &Path, config: &ModelConfig) {
-        let (long, short) = (
-            store(dir, config, Side::Long),
-            store(dir, config, Side::Short),
-        );
         for (valid_from, long_r) in [("2026-01-06T06:00:00Z", 0.6), ("2026-01-06T21:00:00Z", 0.8)] {
-            publish_baseline_of(config.clone(), &long, Side::Long, valid_from, long_r);
-            publish_baseline_of(config.clone(), &short, Side::Short, valid_from, -long_r);
+            publish_generation(dir, config, valid_from, (long_r, -long_r));
         }
     }
 
@@ -1761,16 +1616,13 @@ mod tests {
         let trained = training.train_at(t, |_, _| Ok(meta_rows()));
 
         assert_eq!(trained.meta, Some(Outcome::Published { valid_from: t }));
-        let stored = meta_store(dir.path(), &with_meta(24)).read(t).unwrap();
+        let stored = meta_of(dir.path(), &with_meta(24), t);
         assert_eq!(
             stored.manifest.feature_names,
             ["mid_0", "picked_side", "level", "side_call"]
         );
         assert_eq!(stored.manifest.side, None);
-        assert_eq!(
-            stored.manifest.calibration,
-            ModelCalibration::Meta(META_LINE)
-        );
+        assert_eq!(stored.manifest.calibration, Some(META_LINE));
         let probes: Vec<(&Vec<f64>, f64)> = stored
             .manifest
             .probes
@@ -1788,31 +1640,42 @@ mod tests {
         assert_eq!(model.predict(&[f64::NAN, 1.0, 0.0, 1.2]).unwrap(), 0.25);
     }
 
-    /// A row of the meta's calibration slice whose feature is infinite: the
-    /// meta's fake predicts it, infinite, and the meta fails, naming the row,
-    /// and publishes none.
+    /// A row of the meta's calibration slice whose feature is infinite, the
+    /// meta calibrated on 15 hours, from 09:00, and the sides on 12, from
+    /// 12:00: the decision at 10:00 is in the sides' fit slice, which the
+    /// fake fits on its R alone, and in the meta's calibration slice, where
+    /// the meta's fake predicts it, infinite. The meta fails, naming the row,
+    /// after the sides fitted: they publish nothing either, every model kept
+    /// for the meta's failure, and no generation is published at the train.
     #[rstest]
-    fn a_meta_prediction_on_its_calibration_slice_that_is_no_finite_number_fails_it() {
+    fn a_meta_prediction_on_its_calibration_slice_that_is_no_finite_number_fails_the_generation() {
         let dir = tempfile::tempdir().unwrap();
-        let training = training(dir.path(), with_meta(24));
-        publish_baselines(dir.path(), &with_meta(24));
+        let config = ModelConfig {
+            meta: Some(MetaConfig {
+                calibration: SignedDuration::from_hours(15),
+                ..meta(24)
+            }),
+            ..with_meta(24)
+        };
+        let training = training(dir.path(), config.clone());
+        publish_baselines(dir.path(), &config);
         let mut rows = meta_rows();
-        rows[3].decision.features = vec![f64::INFINITY];
+        rows[2].decision.features = vec![f64::INFINITY];
 
         let trained = training.train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(rows));
 
-        let Some(Outcome::Kept(Kept::Failed(why))) = trained.meta else {
-            panic!("{trained:?}");
-        };
-        assert!(
-            why.contains("meta") && why.contains("inf") && why.contains("2026-01-06T13:00:00"),
-            "{why}"
-        );
+        for outcome in trained.iter() {
+            let Outcome::Kept(Kept::Failed(why)) = outcome else {
+                panic!("{trained:?}");
+            };
+            assert!(
+                why.contains("meta") && why.contains("inf") && why.contains("2026-01-06T10:00:00"),
+                "{why}"
+            );
+        }
         assert_eq!(
-            meta_store(dir.path(), &with_meta(24))
-                .valid_froms()
-                .unwrap(),
-            []
+            generations(dir.path(), &config),
+            [at("2026-01-06T06:00:00Z"), at("2026-01-06T21:00:00Z")]
         );
     }
 
@@ -1837,8 +1700,10 @@ mod tests {
             matches!(trained.meta, Some(Outcome::Published { .. })),
             "{trained:?}"
         );
-        let stored = meta_store(dir.path(), &with_meta(24)).read(t).unwrap();
-        assert_eq!(stored.manifest.baseline, 0.875);
+        assert_eq!(
+            meta_of(dir.path(), &with_meta(24), t).manifest.baseline,
+            0.875
+        );
     }
 
     /// `rows` as a time-only target has them: closed at their time, each
@@ -1889,7 +1754,7 @@ mod tests {
         let trained = training.train_at(t, |_, _| Ok(at_their_time(rows)));
 
         assert_eq!(trained.meta, Some(Outcome::Published { valid_from: t }));
-        let manifest = meta_store(dir.path(), &config).read(t).unwrap().manifest;
+        let manifest = meta_of(dir.path(), &config, t).manifest;
         assert_eq!(manifest.baseline, 1.75);
         assert_eq!(manifest.target.spec.bracket, None);
     }
@@ -1909,19 +1774,13 @@ mod tests {
             ..with_meta(24)
         };
         let training = training(dir.path(), long_only.clone());
-        publish_baseline_of(
-            long_only.clone(),
-            &store(dir.path(), &long_only, Side::Long),
-            Side::Long,
-            "2026-01-06T06:00:00Z",
-            0.6,
-        );
+        publish_generation(dir.path(), &long_only, "2026-01-06T06:00:00Z", (0.6, 0.0));
         let t = at("2026-01-07T00:00:00Z");
 
         let trained = training.train_at(t, |_, _| Ok(meta_rows()));
 
         assert_eq!(trained.meta, Some(Outcome::Published { valid_from: t }));
-        let stored = meta_store(dir.path(), &long_only).read(t).unwrap();
+        let stored = meta_of(dir.path(), &long_only, t);
         let probes: Vec<&Vec<f64>> = stored.manifest.probes.iter().map(|p| &p.row).collect();
         assert_eq!(
             probes,
@@ -1930,21 +1789,18 @@ mod tests {
     }
 
     /// The meta's window of 36 hours is longer than the sides' 24, and
-    /// starts after the sides' first models, of the 5th.
+    /// starts after the first generation, of the 5th.
     #[rstest]
     fn a_train_with_a_meta_model_replays_once_from_the_longer_windows_first_day() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), with_meta(36));
         publish_baselines(dir.path(), &with_meta(36));
-        for side in Side::BOTH {
-            publish_baseline_of(
-                with_meta(36),
-                &store(dir.path(), &with_meta(36), side),
-                side,
-                "2026-01-05T00:00:00Z",
-                0.0,
-            );
-        }
+        publish_generation(
+            dir.path(),
+            &with_meta(36),
+            "2026-01-05T00:00:00Z",
+            (0.0, 0.0),
+        );
         let mut replays = vec![];
 
         training.train_at(at("2026-01-07T00:00:00Z"), |from, to| {
@@ -1958,11 +1814,11 @@ mod tests {
         );
     }
 
-    /// The meta's window of 36 hours starts on the 5th, before the
-    /// sides' first models, of 06:00 of the 6th, where its rows start:
-    /// the one replay starts with the sides' window, on the 6th.
+    /// The meta's window of 36 hours starts on the 5th, before the first
+    /// generation, of 06:00 of the 6th, where its rows start: the one replay
+    /// starts with the sides' window, on the 6th.
     #[rstest]
-    fn a_train_replays_no_day_before_the_sides_first_model() {
+    fn a_train_replays_no_day_before_the_first_generation() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), with_meta(36));
         publish_baselines(dir.path(), &with_meta(36));
@@ -1979,59 +1835,22 @@ mod tests {
         );
     }
 
-    /// No side's model is valid before the train, so no row of the meta
-    /// has a decision of the sides: the meta waits, and none is fitted, the
-    /// sides fitted and published as ever.
+    /// No generation is valid before the train, so no row of the meta has
+    /// a decision of the sides: the meta waits, and none is fitted, the
+    /// sides fitted and published as ever, in a generation holding no meta.
     #[rstest]
-    fn a_meta_model_without_a_sides_model_before_it_waits() {
+    fn a_meta_model_without_a_generation_before_it_waits() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), with_meta(24));
-
-        let trained = training.train_at(at("2026-01-07T00:00:00Z"), |_, _| Ok(meta_rows()));
-
-        assert_eq!(trained.meta, Some(Outcome::Kept(Kept::Waiting)));
-        assert!(
-            meta_store(dir.path(), &with_meta(24))
-                .valid_froms()
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    /// Never retrained, the sides' models of the 6th, the last valid
-    /// from 21:00, are in use at the train of the 7th: kept, their
-    /// decisions give the meta its rows, and the meta is fitted alone,
-    /// learning from the very models in use.
-    #[rstest]
-    fn never_retrained_a_meta_whose_sides_are_in_use_is_fitted_alone() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = ModelConfig {
-            retrain: Retrain::Never,
-            ..with_meta(24)
-        };
-        let training = training(dir.path(), config.clone());
-        publish_baselines(dir.path(), &config);
         let t = at("2026-01-07T00:00:00Z");
-        let last = at("2026-01-06T21:00:00Z");
 
         let trained = training.train_at(t, |_, _| Ok(meta_rows()));
 
-        let in_use = Outcome::InUse {
-            valid_from: last,
-            retrain: Retrain::Never,
-        };
-        assert_eq!(
-            (trained.long.as_ref(), trained.short.as_ref()),
-            (Some(&in_use), Some(&in_use))
-        );
-        assert!(
-            matches!(trained.meta, Some(Outcome::Published { valid_from, .. }) if valid_from == t),
-            "{trained:?}"
-        );
-        for side in Side::BOTH {
-            let valid_froms = store(dir.path(), &config, side).valid_froms().unwrap();
-            assert_eq!(valid_froms.last(), Some(&last), "{side:?}");
+        assert_eq!(trained.meta, Some(Outcome::Kept(Kept::Waiting)));
+        for outcome in [&trained.long, &trained.short] {
+            assert_eq!(outcome, &Some(Outcome::Published { valid_from: t }));
         }
+        assert_eq!(generation(dir.path(), &with_meta(24), t).meta, None);
     }
 
     /// `with_meta` on a meta window of 24 hours, never retrained, its sides
@@ -2068,7 +1887,7 @@ mod tests {
     fn two_time(
         dir: &Path,
         config: ModelConfig,
-    ) -> (ModelSet, Trained, Vec<(Timestamp, Timestamp)>) {
+    ) -> (ModelStore, Trained, Vec<(Timestamp, Timestamp)>) {
         let models = models(dir, &config);
         let training = training(dir, config);
         let mut replays = vec![];
@@ -2083,40 +1902,26 @@ mod tests {
     }
 
     /// Never retrained, on an empty store, the train of the 8th fits the
-    /// sides as of the 7th, the meta's window of 24 hours before it, and
-    /// publishes them valid from then, and the meta at the 8th.
+    /// sides as of the 7th, the meta's window of 24 hours before it, and the
+    /// meta at the 8th, and publishes them as one generation, valid from the
+    /// 8th.
     #[rstest]
     fn never_retrained_on_an_empty_store_a_train_fits_the_sides_as_of_the_metas_window_before_it_and_the_meta_at_it()
      {
         let dir = tempfile::tempdir().unwrap();
-        let (seventh, eighth) = (at("2026-01-07T00:00:00Z"), at("2026-01-08T00:00:00Z"));
+        let eighth = at("2026-01-08T00:00:00Z");
 
         let (models, trained, _) = two_time(dir.path(), never_with_meta());
 
-        for (outcome, valid_from) in [
-            (&trained.long, seventh),
-            (&trained.short, seventh),
-            (&trained.meta, eighth),
-        ] {
-            let Some(Outcome::Published {
-                valid_from: published,
-                ..
-            }) = outcome
-            else {
-                panic!("{trained:?}");
-            };
-            assert_eq!(*published, valid_from, "{trained:?}");
-        }
-        for side in Side::BOTH {
+        for outcome in trained.iter() {
             assert_eq!(
-                models.side(side).unwrap().store().valid_froms().unwrap(),
-                [seventh]
+                outcome,
+                &Outcome::Published { valid_from: eighth },
+                "{trained:?}"
             );
         }
-        assert_eq!(
-            models.meta().unwrap().store().valid_froms().unwrap(),
-            [eighth]
-        );
+        assert_eq!(models.generations().unwrap(), [eighth]);
+        assert!(models.read(eighth).unwrap().meta.is_some());
     }
 
     /// The sides fitted as of the 7th are fitted and calibrated as a train
@@ -2128,17 +1933,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (models, _, _) = two_time(dir.path(), never_with_meta());
 
-        let long = models
-            .side(Side::Long)
-            .unwrap()
-            .store()
-            .read(at("2026-01-07T00:00:00Z"))
-            .unwrap();
+        let generation = models.read(at("2026-01-08T00:00:00Z")).unwrap();
 
-        let ModelCalibration::Pair(calibration) = long.manifest.calibration else {
-            panic!("{:?}", long.manifest.calibration);
-        };
-        assert_eq!(calibration.lines, LINES);
+        assert_eq!(generation.calibration, LINES);
+        let long = side_of(&generation, Side::Long);
         let probes: Vec<&Vec<f64>> = long.manifest.probes.iter().map(|p| &p.row).collect();
         assert_eq!(
             probes,
@@ -2146,8 +1944,8 @@ mod tests {
         );
     }
 
-    /// The meta at the 8th learns from the decisions of the sides just
-    /// published over its window, the 7th: its calibration slice the shorts
+    /// The meta at the 8th learns from the decisions of the sides fitted
+    /// beside it over its window, the 7th: its calibration slice the shorts
     /// at 0.55 and 0.65, each decision's level `-0.25 + 1.5p`, 0.575 and
     /// 0.725, and no side call.
     #[rstest]
@@ -2156,10 +1954,9 @@ mod tests {
         let (models, _, _) = two_time(dir.path(), never_with_meta());
 
         let meta = models
-            .meta()
-            .unwrap()
-            .store()
             .read(at("2026-01-08T00:00:00Z"))
+            .unwrap()
+            .meta
             .unwrap();
 
         let probes: Vec<&Vec<f64>> = meta.manifest.probes.iter().map(|p| &p.row).collect();
@@ -2187,11 +1984,10 @@ mod tests {
     }
 
     /// The sides' fit slice as of the 7th, two rows, short of a minimum of
-    /// three: neither side publishes as of the 7th, the meta has no
-    /// decision of the sides to learn from, and waits, with no fit
-    /// attempted, as the train says.
+    /// three: the train fails, the meta with no decision of the sides to
+    /// learn from, and publishes no generation.
     #[rstest]
-    fn the_sides_failing_in_a_two_time_train_leave_the_meta_waiting() {
+    fn the_sides_failing_in_a_two_time_train_publish_no_generation() {
         let dir = tempfile::tempdir().unwrap();
         let three = ModelConfig {
             min_rows: 3,
@@ -2200,22 +1996,13 @@ mod tests {
 
         let (models, trained, _) = two_time(dir.path(), three);
 
-        for outcome in [&trained.long, &trained.short] {
-            let Some(Outcome::Kept(Kept::Failed(why))) = outcome else {
+        for outcome in trained.iter() {
+            let Outcome::Kept(Kept::Failed(why)) = outcome else {
                 panic!("{trained:?}");
             };
             assert!(why.contains("fit slice") && why.contains("2 rows"), "{why}");
         }
-        assert_eq!(trained.meta, Some(Outcome::Kept(Kept::Waiting)));
-        assert!(
-            models
-                .meta()
-                .unwrap()
-                .store()
-                .valid_froms()
-                .unwrap()
-                .is_empty()
-        );
+        assert_eq!(models.generations().unwrap(), []);
     }
 
     #[rstest]

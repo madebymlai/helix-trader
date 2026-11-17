@@ -17,17 +17,17 @@
 //! `train` trains
 //! at a time, fitting a model of each side traded on a window of the
 //! dataset less its calibration slice, calibrating them together on that
-//! slice and publishing them together in the `store`, no figure of theirs
-//! judged; `holdout` is what the decision took and earned on rows, and
+//! slice and publishing them, with the meta's, as one generation in the
+//! `store`, no figure of theirs judged; `holdout` is what the decision took and earned on rows, and
 //! `score` how its expected R met the R realized, which a backtest's
 //! scores read;
 //! `deciding` is the decision itself, the side picked among the models
 //! valid at a time and the meta's margin; `handle` is
-//! what the strategy holds and decides through, trading on the sides'
-//! latest pair and the meta's latest model valid at each decision, or
+//! what the strategy holds and decides through, trading on the latest
+//! generation valid at each decision, its sides and its meta together, or
 //! opening the decision's target in a dataset run; `schedule` is when a
 //! model is retrained, on a fixed UTC grid, or that it never is, and what
-//! each train does to each model; `launcher`
+//! each train does; `launcher`
 //! starts a live strategy's retrains, one
 //! at a time, in a child process; `walk` is a backtest on the models in the
 //! store, trained by `train`, refused before its run without one to trade
