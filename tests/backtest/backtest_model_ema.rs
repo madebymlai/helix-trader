@@ -253,7 +253,7 @@ fn the_train_subcommand_publishes_a_model_without_an_edge_which_trades_from_its_
     let stdout = trained(&config_path, catalog.path(), &models, t());
 
     assert!(
-        stdout.contains(&format!("published a model valid from {}", t())),
+        report(&stdout, t())[0].contains("published the generation"),
         "{stdout}"
     );
     assert_eq!(generations(CONFIG, &models), [t()]);
@@ -329,6 +329,217 @@ fn a_meta_with_a_slice_of_fewer_rows_than_its_minimum_fails_naming_it_and_publis
         .unwrap_or_else(|| panic!("{stderr}"))
         .1;
     assert_too_few_rows(meta, slice, rows, min_rows);
+    assert_eq!(generations(&config, &models), []);
+}
+
+/// The report of the train at `at` in `stdout`: the line naming it, then
+/// the indented lines of its figures.
+fn report(stdout: &str, at: Timestamp) -> Vec<&str> {
+    let named = format!("the train at {at}: ");
+    let mut lines = stdout.lines().skip_while(|line| !line.starts_with(&named));
+    let first = lines
+        .next()
+        .unwrap_or_else(|| panic!("no {named:?}: {stdout}"));
+    std::iter::once(first)
+        .chain(lines.take_while(|line| line.starts_with("  ")))
+        .collect()
+}
+
+/// Asserts that `report` holds the run figures that vary from run to run,
+/// present with a value, which is not asserted: the wall time, the CPU
+/// time, user and system, and the peak memory.
+fn assert_run_figures(report: &[&str]) {
+    let figure = |name: &str| {
+        let line = report
+            .iter()
+            .find(|line| line.starts_with(&format!("  {name}: ")))
+            .unwrap_or_else(|| panic!("no {name}: {report:#?}"));
+        line.split_once(": ").unwrap().1
+    };
+    assert!(!figure("Wall time").is_empty(), "{report:#?}");
+    let cpu = figure("CPU time");
+    assert!(cpu.contains("user") && cpu.contains("system"), "{cpu}");
+    assert!(!figure("Peak memory").is_empty(), "{report:#?}");
+}
+
+/// Asserts that `report` holds each of `lines`, and of the rows those of
+/// the models in `lines` alone.
+fn assert_figures(report: &[&str], lines: &[&str]) {
+    for line in lines {
+        assert!(report.contains(line), "{line}: {report:#?}");
+    }
+    let rows = report.iter().filter(|line| line.starts_with("  Rows of "));
+    assert_eq!(
+        rows.count(),
+        lines
+            .iter()
+            .filter(|line| line.starts_with("  Rows of "))
+            .count()
+    );
+}
+
+/// Asserts that `report` holds no figure of a model's performance. The
+/// dataset runs' own logs, Nautilus' statistics of each run among them,
+/// are not the report's.
+fn assert_no_performance(report: &[&str]) {
+    for figure in [
+        "skill",
+        "expectancy",
+        "win rate",
+        "earnings",
+        "stress",
+        "holdout",
+        "slope",
+    ] {
+        assert!(
+            report
+                .iter()
+                .all(|line| !line.to_lowercase().contains(figure)),
+            "{figure}: {report:#?}"
+        );
+    }
+}
+
+/// Worked by hand, the slices as in
+/// `a_train_with_a_slice_of_fewer_rows_than_the_minimum_fails_naming_it_and_publishes_nothing`:
+/// the train at t reads the days of its window, from 02:00 of the 21st,
+/// the 21st and the 22nd, both built, the dataset empty; its sides' fit
+/// slice holds 34 rows, its calibration slice 12. It writes the 21st alone,
+/// whose last decision settles by t, the 22nd's last not. The train at
+/// 00:15 of the 23rd reads the 21st to the 23rd: the 21st cached, the 22nd
+/// and the 23rd built; its slices hold 33 and 11 rows. Each report names
+/// the generation published, under its time in the store, and no figure of
+/// performance.
+#[rstest]
+fn a_train_reports_its_generation_run_figures_dataset_days_and_rows_of_each_slice() {
+    let catalog = catalog();
+    let dir = tempfile::tempdir().unwrap();
+    let (config_path, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
+    std::fs::write(&config_path, CONFIG).unwrap();
+    let later = t() + SignedDuration::from_mins(15);
+
+    let first = trained(&config_path, catalog.path(), &models, t());
+    let second = trained(&config_path, catalog.path(), &models, later);
+
+    let store = model_store(CONFIG, &models);
+
+    for (stdout, at, days, rows) in [
+        (&first, t(), "2 built, 0 cached", "34 fit, 12 calibration"),
+        (
+            &second,
+            later,
+            "2 built, 1 cached",
+            "33 fit, 11 calibration",
+        ),
+    ] {
+        let report = report(stdout, at);
+        let generation = store.directory().join(at.to_string());
+        assert_eq!(
+            report[0],
+            format!(
+                "the train at {at}: published the generation {}",
+                generation.display()
+            )
+        );
+        assert_run_figures(&report);
+        assert_figures(
+            &report,
+            &[
+                &format!("  Dataset days: {days}"),
+                &format!("  Rows of the sides: {rows}, min_rows 1"),
+            ],
+        );
+        assert_no_performance(&report);
+    }
+}
+
+/// Worked by hand, the slices as in
+/// `a_meta_with_a_slice_of_fewer_rows_than_its_minimum_fails_naming_it_and_publishes_no_generation`:
+/// the train at t reads from its ancestor's window, from 02:00 of the 20th,
+/// so builds the 20th to the 22nd. The ancestor, fitted as of midnight of
+/// the 22nd, holds 34 rows in its fit slice, 22 of the 20th from 02:00 and
+/// 12 of the 21st before noon, and 12 in its calibration slice, from noon;
+/// the sides at t 34 and 12 alike; the meta 18 and 6.
+#[rstest]
+fn a_train_with_a_meta_reports_the_rows_of_its_sides_ancestor_and_meta() {
+    let catalog = walk(
+        ic::at("00:00:00") - SignedDuration::from_hours(27),
+        t() + SignedDuration::from_hours(4),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let (config_path, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
+    std::fs::write(&config_path, with_meta_section(META)).unwrap();
+
+    let stdout = trained(&config_path, catalog.path(), &models, t());
+
+    let report = report(&stdout, t());
+    assert!(
+        report[0].contains("published the generation"),
+        "{report:#?}"
+    );
+    assert_run_figures(&report);
+    assert_figures(
+        &report,
+        &[
+            "  Dataset days: 3 built, 0 cached",
+            "  Rows of the sides: 34 fit, 12 calibration, min_rows 1",
+            "  Rows of the ancestor: 34 fit, 12 calibration, min_rows 1",
+            "  Rows of the meta: 18 fit, 6 calibration, min_rows 1",
+        ],
+    );
+    assert_no_performance(&report);
+}
+
+/// A failed train reports the figures it reached and its reason, on the
+/// catalog of the meta's train. Its sides' fit slice short of a `min_rows` of 35, it built its days and
+/// counted the sides' slices, 34 and 12. Its meta's fit slice short of a
+/// meta `min_rows` of 19, it counted the ancestor's slices and the meta's,
+/// 18 and 6, and fitted no sides at t, the meta trained first. The command
+/// fails with the reason.
+#[rstest]
+#[case::sides(
+    of_min_rows(35),
+    "34 rows in the fit slice",
+    &["  Dataset days: 2 built, 0 cached", "  Rows of the sides: 34 fit, 12 calibration, min_rows 35"],
+)]
+#[case::meta(
+    with_meta_section(&META.replace("min_rows = 1", "min_rows = 19")),
+    "18 rows in the fit slice",
+    &[
+        "  Dataset days: 3 built, 0 cached",
+        "  Rows of the ancestor: 34 fit, 12 calibration, min_rows 1",
+        "  Rows of the meta: 18 fit, 6 calibration, min_rows 19",
+    ],
+)]
+fn a_failed_train_reports_the_figures_it_reached_and_its_reason(
+    #[case] config: String,
+    #[case] reason: &str,
+    #[case] lines: &[&str],
+) {
+    let catalog = walk(
+        ic::at("00:00:00") - SignedDuration::from_hours(27),
+        t() + SignedDuration::from_hours(4),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let (config_path, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
+    std::fs::write(&config_path, &config).unwrap();
+
+    let output = train(&config_path, catalog.path(), &models, t());
+
+    let (stdout, stderr) = (
+        String::from_utf8(output.stdout).unwrap(),
+        String::from_utf8(output.stderr).unwrap(),
+    );
+    assert!(!output.status.success(), "{stdout}\n{stderr}");
+    let report = report(&stdout, t());
+    assert!(
+        report[0].contains("failed") && report[0].contains(reason),
+        "{report:#?}"
+    );
+    assert!(!report[0].contains("published"), "{report:#?}");
+    assert_run_figures(&report);
+    assert_figures(&report, lines);
+    assert!(stderr.contains(reason), "{stderr}");
     assert_eq!(generations(&config, &models), []);
 }
 
@@ -834,7 +1045,7 @@ fn the_train_subcommand_accepts_a_dataset_balance_its_conversions_reach_the_pnl_
     let stdout = trained(&config, catalog.path(), &models, t());
 
     assert!(
-        stdout.contains(&format!("published a model valid from {}", t())),
+        report(&stdout, t())[0].contains("published the generation"),
         "{stdout}"
     );
 }

@@ -513,14 +513,15 @@ impl ModelStore {
     /// written in a directory of this publish, named by the process and the
     /// publish, then its manifest, naming that directory, written beside its
     /// name and renamed onto it, replacing the generation valid from then, if
-    /// any.
+    /// any. Returns the generation's directory, named by its time in the
+    /// store's.
     ///
     /// # Errors
     ///
     /// Returns an error if a side's model names no side, the generation
     /// holds a meta model and the strategy has no meta or the reverse, or a
     /// file cannot be written.
-    pub fn publish(&self, generation: &StoredGeneration) -> anyhow::Result<()> {
+    pub fn publish(&self, generation: &StoredGeneration) -> anyhow::Result<PathBuf> {
         anyhow::ensure!(
             generation.meta.is_some() == self.meta.is_some(),
             "publishing a generation {} a meta model for a strategy {} a meta",
@@ -564,7 +565,8 @@ impl ModelStore {
         })?;
         fs::write(&written, text)
             .and_then(|()| fs::rename(&written, &manifest))
-            .with_context(|| format!("writing the generation {}", manifest.display()))
+            .with_context(|| format!("writing the generation {}", manifest.display()))?;
+        Ok(directory)
     }
 
     /// The generation valid from `valid_from`, as published: the model of

@@ -174,6 +174,27 @@ fn train_line(text: &str, at: Timestamp) -> &str {
         .unwrap_or_else(|| panic!("no {named:?}: {text}"))
 }
 
+/// The report of the train at `at` in `text`: the line naming it, then
+/// the indented lines of its figures.
+fn report(text: &str, at: Timestamp) -> Vec<&str> {
+    let first = train_line(text, at);
+    let rest = &text[train_line_at(text, at) + first.len()..];
+    std::iter::once(first)
+        .chain(
+            rest.lines()
+                .skip(1)
+                .take_while(|line| line.starts_with("  ")),
+        )
+        .collect()
+}
+
+/// Whether `text` reports the train at `at` publishing its generation, the
+/// store's directory of `at`.
+fn published(text: &str, at: Timestamp) -> bool {
+    let line = train_line(text, at);
+    line.contains("published the generation ") && line.ends_with(&format!("/{at}"))
+}
+
 /// Where in `text` the line reporting the train at `at` is.
 fn train_line_at(text: &str, at: Timestamp) -> usize {
     text.find(train_line(text, at)).unwrap()
@@ -195,8 +216,7 @@ fn a_train_over_a_span_publishes_each_retrain_time_in_order_then_only_those_the_
     assert!(succeeded, "{first}\n{stderr}");
 
     for at in [day(21), day(22)] {
-        let published = format!("published a model valid from {at}");
-        assert!(train_line(&first, at).contains(&published), "{first}");
+        assert!(published(&first, at), "{first}");
     }
     assert!(train_line_at(&first, day(21)) < train_line_at(&first, day(22)));
     assert!(
@@ -207,7 +227,7 @@ fn a_train_over_a_span_publishes_each_retrain_time_in_order_then_only_those_the_
     let (succeeded, again, stderr) = train_over(&files, catalog.path(), span);
 
     assert!(succeeded, "{again}\n{stderr}");
-    assert!(!again.contains("published a model"), "{again}");
+    assert!(!again.contains("published the generation"), "{again}");
     for at in [day(21), day(22)] {
         let already = format!("already published, valid from {at}");
         assert!(train_line(&again, at).contains(&already), "{again}");
@@ -216,12 +236,12 @@ fn a_train_over_a_span_publishes_each_retrain_time_in_order_then_only_those_the_
     let (succeeded, earlier, stderr) = train_over(&files, catalog.path(), (twentieth, span.1));
 
     assert!(succeeded, "{earlier}\n{stderr}");
-    let published = format!("published a model valid from {twentieth}");
-    assert!(
-        train_line(&earlier, twentieth).contains(&published),
+    assert!(published(&earlier, twentieth), "{earlier}");
+    assert_eq!(
+        earlier.matches("published the generation").count(),
+        1,
         "{earlier}"
     );
-    assert_eq!(earlier.matches("published a model").count(), 1, "{earlier}");
 
     for at in [day(21), day(22)] {
         assert!(
@@ -233,8 +253,12 @@ fn a_train_over_a_span_publishes_each_retrain_time_in_order_then_only_those_the_
 
 /// The train of the 19th has no row to fit on, the catalog starting at
 /// 21:00 of the 18th, within its calibration slice, from noon: it fails, and the
-/// trains of the 20th and the 21st after it publish. The command fails,
-/// listing the 19th alone, with its reason.
+/// trains of the 20th and the 21st after it publish. Its report holds the
+/// figures it reached: the days of its window from 02:00 of the 17th, the
+/// 17th and the 18th, built; no row in its fit slice; 2 in its calibration
+/// slice, the decisions of 22:00 and 23:00 of the 18th, the first once the
+/// slow average of 30 bars is warm, from 21:30. The command fails, listing
+/// the 19th alone, with its reason.
 #[rstest]
 fn a_train_over_a_span_goes_on_past_a_failed_retrain_time_and_fails_listing_it() {
     let catalog = catalog(22);
@@ -245,10 +269,29 @@ fn a_train_over_a_span_goes_on_past_a_failed_retrain_time_and_fails_listing_it()
     assert!(!succeeded, "{stdout}\n{stderr}");
 
     for at in [day(20), day(21)] {
-        let published = format!("published a model valid from {at}");
-        assert!(train_line(&stdout, at).contains(&published), "{stdout}");
+        assert!(published(&stdout, at), "{stdout}");
     }
     assert!(train_line_at(&stdout, day(19)) < train_line_at(&stdout, day(20)));
+    let report = report(&stdout, day(19));
+    assert!(
+        report[0].contains("failed: 0 rows in the fit slice"),
+        "{report:#?}"
+    );
+
+    for line in [
+        "  Dataset days: 2 built, 0 cached",
+        "  Rows of the sides: 0 fit, 2 calibration, min_rows 1",
+    ] {
+        assert!(report.contains(&line), "{line}: {report:#?}");
+    }
+
+    for figure in ["Wall time", "CPU time", "Peak memory"] {
+        let named = format!("  {figure}: ");
+        assert!(
+            report.iter().any(|line| line.starts_with(&named)),
+            "{report:#?}"
+        );
+    }
     let failed = stderr
         .lines()
         .find(|line| line.contains(&day(19).to_string()))
@@ -309,18 +352,12 @@ fn never_retrained_a_train_publishes_at_its_time_beside_an_older_generation_whic
     let files = files();
     std::fs::write(&files.config, never_retrained()).unwrap();
     let older = trained_at(&files, catalog.path(), day(21));
-    assert!(
-        older.contains(&format!("published a model valid from {}", day(21))),
-        "{older}"
-    );
+    assert!(published(&older, day(21)), "{older}");
 
     let newer = trained_at(&files, catalog.path(), day(22));
     let again = trained_at(&files, catalog.path(), day(22));
 
-    assert!(
-        newer.contains(&format!("published a model valid from {}", day(22))),
-        "{newer}"
-    );
+    assert!(published(&newer, day(22)), "{newer}");
     assert!(
         again.contains(&format!("already published, valid from {}", day(22))),
         "{again}"
@@ -468,8 +505,13 @@ fn a_periodic_strategy_with_a_meta_publishes_it_from_its_first_train_and_trades_
     assert!(succeeded, "{trained}\n{stderr}");
 
     for at in [day(21), day(22)] {
-        let published = format!("the meta model: published a model valid from {at}");
-        assert!(train_line(&trained, at).contains(&published), "{trained}");
+        assert!(published(&trained, at), "{trained}");
+        assert!(
+            report(&trained, at)
+                .iter()
+                .any(|line| line.starts_with("  Rows of the meta: ")),
+            "{trained}"
+        );
     }
 
     let (succeeded, stdout, stderr) = backtest(&files, catalog.path(), span);

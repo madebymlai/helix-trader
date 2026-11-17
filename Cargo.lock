@@ -2311,6 +2311,7 @@ dependencies = [
  "helix-trader",
  "ibapi",
  "jiff",
+ "libc",
  "lightgbm3",
  "log",
  "lse",

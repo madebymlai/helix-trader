@@ -168,16 +168,17 @@ fn a_meta_model_trains_on_its_ancestors_trades_and_takes_them_in_the_run_from_it
     let times: Vec<Timestamp> = trained.iter().map(|(at, _)| *at).collect();
     assert_eq!(times, retrains);
 
-    for (at, trained) in &trained {
-        for outcome in [&trained.long, &trained.meta] {
-            assert_eq!(
-                outcome,
-                &Some(Outcome::Published { valid_from: *at }),
-                "{trained:?}"
-            );
-        }
-    }
     let store = model_store(models.path());
+
+    for (at, trained) in &trained {
+        assert_eq!(
+            trained.outcome,
+            Outcome::Published {
+                generation: store.directory().join(at.to_string())
+            },
+            "{trained:?}"
+        );
+    }
     assert_eq!(store.generations().unwrap(), retrains);
     for (&at, tenths) in retrains.iter().zip([4, 6, 8]) {
         let published = store.read(at).unwrap();

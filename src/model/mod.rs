@@ -58,6 +58,7 @@ pub mod launcher;
 pub mod learner;
 pub mod meta;
 pub mod payoff;
+pub mod report;
 pub mod schedule;
 pub mod score;
 pub mod store;

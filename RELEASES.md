@@ -7,6 +7,7 @@ Released on TBD (UTC).
 - Added `train --from --to`, training a periodic strategy at each retrain time of a span in time order, past failures, which it lists at the end
 - Added a live retrain at the start of a node of the latest retrain time whose generation the store lacks, as after the node was down then
 - Added the output of a live retrain's `train` to the node's Nautilus log, each line a log record, its file holding the train's whole output
+- Added run figures to `train`'s report, a block per retrain time: the generation published, its directory, or the failure and its reason, the wall time, the CPU time and peak memory of the train process (Unix), the dataset days built and cached, and the rows of each fit and calibration slice of the sides, the ancestor and the meta beside `min_rows`
 
 ### Breaking Changes
 
@@ -17,6 +18,8 @@ Released on TBD (UTC).
 - Changed the model store's version, so every model is trained again; datasets keep their keys
 - Changed `backtest` of a model strategy to train nothing, refusing a store with no model to trade on at its start and naming the `train` that fills it; run `train` over the backtest's span first
 - Changed `train`'s report of a model it does not train again to "already published"; match that text instead of "in use"
+- Changed `train`'s report to one block per retrain time opening `the train at <t>:`, the generation published read as `published the generation <directory>` and a failure as `failed: <reason>`, in place of a line per model; match the block's first line
+- Changed `Trained` to one `Outcome` of the generation and the figures it `Reached`, `Outcome::Published` holding the generation's directory, `ModelStore::publish` returning it and `Dataset::settled` returning the days it read beside its rows; read `trained.outcome` in place of each model's
 - Removed `WalkForward::prepare`, `Schedule::ensure_trades` and `Plan::fits`; train at each of `Training::retrain_times` with `Training::train_at`, and check a backtest's start with `WalkForward::untrained`
 - Removed the `fake` learner from builds without the new `test-support` feature: a config with `learner = { kind = "fake" }` no longer loads; use `baseline`, `lightgbm` or `perpetual`
 - Removed the `heartbeat` argument of `ctrader`'s `CTraderWebSocketClient::connect` and `CTraderSession::connect_to`; drop it, the session heartbeats every 10 s

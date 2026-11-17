@@ -18,7 +18,7 @@ use helix_trader::{
         learner::{LearnerConfig, LightGbmConfig},
         store::StoredGeneration,
         targets::Side,
-        train::{Outcome, Trained, Training},
+        train::{Outcome, Training},
     },
     strategy::{Declared, IndicatorArgs, risk::R},
 };
@@ -167,13 +167,14 @@ fn train_at_t_publishes_each_side_whose_probes_reload_to_identical_predictions()
 
     let trained = training.train_at(t(), |from, to| replay_on(&catalog, features(), from, to));
 
-    let published = Some(Outcome::Published { valid_from: t() });
     assert_eq!(
-        trained,
-        Trained {
-            long: published.clone(),
-            short: published,
-            meta: None
+        trained.outcome,
+        Outcome::Published {
+            generation: blueprint(features(), config())
+                .model_store(models.path())
+                .unwrap()
+                .directory()
+                .join(t().to_string())
         }
     );
     let fingerprint = blueprint(features(), config())
