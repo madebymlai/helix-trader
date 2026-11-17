@@ -26,7 +26,7 @@ use std::{
 use helix_trader::{
     backtest::Backtest,
     model::{
-        ModelStrategy,
+        ModelPart, ModelStrategy,
         features::side_names,
         handle::Mode,
         launcher::{Launcher, RetrainActor, Retrained},
@@ -34,7 +34,7 @@ use helix_trader::{
         store::{ModelStore, StoredModel},
         targets::Side,
     },
-    strategy::model_ema::{ModelEma, ModelEmaConfig},
+    strategy::model_ema::{ModelEma, ModelEmaConfig, ModelEmaParams},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
@@ -194,36 +194,28 @@ fn assert_too_few_rows(text: &str, slice: &str, rows: usize, min_rows: usize) {
 
 /// Publishes straight to the store under `models` a model set valid from
 /// `at`, its long a baseline of 0.1R on a side's features, the strategy's
-/// then the target's payoff features, as the dataset the `train` subcommand
-/// built in `catalog` names them.
-fn publish(catalog: &TempDir, models: &Path, at: Timestamp) {
-    publish_with(catalog, models, at, |_| {});
+/// then the target's payoff features, under the fingerprint of its
+/// blueprint, as its dataset names them.
+fn publish(models: &Path, at: Timestamp) {
+    publish_with(models, at, |_| {});
 }
 
 /// Publishes the model set of `publish`, its long changed by `change`.
-fn publish_with(
-    catalog: &TempDir,
-    models: &Path,
-    at: Timestamp,
-    change: impl FnOnce(&mut StoredModel),
-) {
+fn publish_with(models: &Path, at: Timestamp, change: impl FnOnce(&mut StoredModel)) {
     let config = ModelEmaConfig::load(CONFIG).unwrap();
-    let dataset = ModelEma::dataset(&config, catalog.path())
-        .unwrap()
-        .manifest()
-        .unwrap();
-    let names = side_names(&dataset.feature_names, &dataset.payoff_names);
+    let blueprint = ModelEma::blueprint(&config).unwrap();
+    let features = ModelEmaParams::features(&config).unwrap();
+    let names = side_names(features.names(), &config.model().target.payoff_names());
     let set = TrainingSet::new(names.len(), vec![0.5; names.len()], vec![r(6)]).unwrap();
     let mut model = baseline_stored(
-        dataset.fingerprint,
+        blueprint.fingerprint().unwrap().to_string(),
         names,
         &config.model(),
         Some(Side::Long),
         &set,
     );
     change(&mut model);
-    ModelEma::blueprint(&config)
-        .unwrap()
+    blueprint
         .model_store(models)
         .unwrap()
         .publish(&model_set(&config.model(), at, vec![model], None))
@@ -720,25 +712,32 @@ fn backtest_at(
     (stdout, stderr)
 }
 
+/// The catalog of a backtest of the 23rd and the 24th: from 21:00 of the
+/// 22nd, two hours before the first day's replay from 23:00, the features'
+/// warmup before it, to 03:00 of the 25th, past the last day's replay to
+/// its end plus the target's limit.
+fn backtest_catalog() -> TempDir {
+    walk(
+        t() - SignedDuration::from_hours(3),
+        t() + SignedDuration::from_hours(51),
+    )
+}
+
 /// With a model in the store at each retrain time of the span, published
-/// straight once `train` built the dataset it reads, a backtest runs at its
-/// own commission, balance and latency, which are its simulated account's
-/// alone: its models are the config's (`[model] dataset`), whose costs it
-/// reports, followed by the scores of both periods, each of its model.
+/// straight, a backtest runs at its own commission, balance and latency,
+/// which are its simulated account's alone: its models are the config's
+/// (`[model] dataset`), whose costs it reports, followed by the scores of
+/// both periods, each of its model.
 #[rstest]
 fn the_binarys_backtest_reports_its_own_costs_and_its_models_then_each_periods_scores() {
-    let catalog = walk(
-        ic::at("00:00:00") - SignedDuration::from_hours(3),
-        t() + SignedDuration::from_hours(51),
-    );
+    let catalog = backtest_catalog();
     let dir = tempfile::tempdir().unwrap();
     let (config_path, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
     std::fs::write(&config_path, CONFIG).unwrap();
     let (start, end) = (t(), t() + SignedDuration::from_hours(36));
     let next = t() + SignedDuration::from_hours(24);
-    trained(&config_path, catalog.path(), &models, t());
     for at in [t(), next] {
-        publish(&catalog, &models, at);
+        publish(&models, at);
     }
     let other_costs = [
         "--commission-rate",
@@ -789,18 +788,14 @@ fn the_binarys_backtest_reports_its_own_costs_and_its_models_then_each_periods_s
 /// scores have no model set and no row.
 #[rstest]
 fn the_binarys_backtest_stops_new_entries_on_a_model_set_failing_a_check_naming_it() {
-    let catalog = walk(
-        ic::at("00:00:00") - SignedDuration::from_hours(3),
-        t() + SignedDuration::from_hours(51),
-    );
+    let catalog = backtest_catalog();
     let dir = tempfile::tempdir().unwrap();
     let (config_path, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
     std::fs::write(&config_path, CONFIG).unwrap();
     let (start, end) = (t(), t() + SignedDuration::from_hours(36));
     let next = t() + SignedDuration::from_hours(24);
-    trained(&config_path, catalog.path(), &models, t());
-    publish(&catalog, &models, t());
-    publish_with(&catalog, &models, next, |long| {
+    publish(&models, t());
+    publish_with(&models, next, |long| {
         long.manifest.fingerprint = "f".repeat(64);
     });
 
