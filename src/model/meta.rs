@@ -16,50 +16,47 @@
 //! decision, so the row has the trade of either side, and the meta's rows
 //! need no replay of their own. It takes the trade when the net R it
 //! expects of it, its calibrated expected R, clears its margin, in R
-//! (`holdout::MetaMargin`).
+//! (`earnings::MetaMargin`).
 //!
-//! The sides' rows are their dataset's, each decided by the pair of the
-//! sides in use at it through the code a strategy decides through
-//! (`deciding::DecidingModels`), of the strategy's model set
-//! (`store::ModelSet`) as its stores are when the rows are made, listed
-//! once, a read error failing them: the latest valid then, trained on
-//! rows settled by its valid-from, so every decision is out of sample; each
-//! side's row, its payoff features, is the row's own
-//! (`dataset::DatasetRow::sides`).
-//! A row before the sides' first pair has no decision: the meta's rows
-//! start there at the earliest, and with no pair of the sides before a
-//! train the meta waits (`schedule::Schedule::plan`). Never retrained, with
-//! neither in use, one train fits the sides as of the meta's window before
-//! it and the meta at it, on those sides' decisions over the window: the
-//! meta filters the very side models it learned from. A row no side is
-//! picked on is no row of the meta; a long-only strategy gives it buys
-//! alone.
+//! The meta's rows are those of its window back from its train, each
+//! decided through the code a strategy decides through
+//! (`deciding::DecidingModels::pick_among`) by the out-of-fold pair the train
+//! fits as of the window's start (`train`), out of sample for it, each row
+//! after its time; each side's row, its payoff features, is the row's own
+//! (`dataset::DatasetRow::sides`). The out-of-fold pair is in no store: the meta
+//! learns from nothing a store holds, and decides beside the sides its
+//! train fits as of its own time, in the one model set the train
+//! publishes. A row no side is picked on is no row of the meta; a
+//! long-only strategy gives it buys alone.
 //!
 //! Two levels at most: a meta section has no meta of its own (`config`).
 
-use jiff::Timestamp;
-
 use super::{
-    dataset::DatasetRow, deciding::DecidingModels, features::meta_row, holdout::Example,
-    store::ModelSet,
+    dataset::DatasetRow,
+    deciding::{Picked, SideRow},
+    earnings::Example,
+    features::meta_row,
+    targets::PerSide,
 };
 
 /// The meta's examples of the dataset `rows` of the sides, in time order:
 /// each row a side is picked on, its features with that side and the
 /// decision's level and side call, with the trade on that side and its unit,
 /// whose realized R the meta learns. The side picked on a row is the one
-/// `DecidingModels` picks, on each side's row (`DatasetRow::sides`), among the
-/// sides of the pair of `models` in use then, as its stores list them now,
-/// none before the first.
+/// `pick` picks on each side's row (`DatasetRow::sides`), of a pair in hand
+/// (`DecidingModels::pick_among`).
 ///
 /// # Errors
 ///
-/// Returns an error if a store cannot be read, or a model fails to predict.
-pub(super) fn examples(models: &ModelSet, rows: &[&DatasetRow]) -> anyhow::Result<Vec<Example>> {
-    let mut models = DecidingModels::new(models)?;
+/// Returns an error if `pick` fails.
+pub(super) fn examples(
+    rows: &[&DatasetRow],
+    mut pick: impl FnMut(&PerSide<SideRow>) -> anyhow::Result<Option<Picked>>,
+) -> anyhow::Result<Vec<Example>> {
     let mut examples = vec![];
+
     for row in rows {
-        let Some(picked) = models.pick(Timestamp::from(row.ts_event), &row.sides())? else {
+        let Some(picked) = pick(&row.sides())? else {
             continue;
         };
         examples.push(Example {
@@ -72,48 +69,19 @@ pub(super) fn examples(models: &ModelSet, rows: &[&DatasetRow]) -> anyhow::Resul
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use jiff::SignedDuration;
     use nautilus_core::UnixNanos;
     use rstest::rstest;
 
     use super::*;
-    use crate::model::{
-        config::ModelConfig,
-        deciding::testing::{at, baseline_for, both_sides, features, meta, model_set, side_store},
-        targets::{Exit, Side},
+    use crate::{
+        model::{
+            calibration::Expected,
+            deciding::testing::at,
+            targets::{Exit, Side},
+        },
+        strategy::risk::R,
     };
-
-    /// Both sides traded from an expected R of nought, their trades taken
-    /// by `meta`.
-    fn config() -> ModelConfig {
-        ModelConfig {
-            meta: Some(meta()),
-            ..both_sides()
-        }
-    }
-
-    /// Publishes under `models` the sides' pairs of `config`: from 06:00 a
-    /// long of 0.4R and a short of -0.4R, from 17:00 the reverse.
-    fn publish_pairs(models: &Path) {
-        for (valid_from, long, short) in [
-            ("2026-01-06T06:00:00Z", 9, 1),
-            ("2026-01-06T17:00:00Z", 1, 9),
-        ] {
-            for (side, tenths) in [(Side::Long, long), (Side::Short, short)] {
-                side_store(models, &features(), &config(), side)
-                    .publish(&baseline_for(
-                        &features(),
-                        &config(),
-                        side,
-                        valid_from,
-                        tenths,
-                    ))
-                    .unwrap();
-            }
-        }
-    }
 
     /// The row of the decision at `time` on a mid of 0.7, settled an hour
     /// later, each side stopped: the long's stop worth 2 USD, the short's 4.
@@ -137,25 +105,35 @@ mod tests {
         }
     }
 
+    /// The side `side` picked, expecting 0.4R of a level of 0.4 and no side
+    /// call.
+    fn picked(side: Side) -> Picked {
+        Picked {
+            side,
+            expected_r: R::new(0.4),
+            expected: Expected {
+                level: 0.4,
+                side_call: 0.0,
+            },
+        }
+    }
+
     /// A meta example carries the unit of its trade, the worth of the stop
-    /// of the side picked: the row at 05:00, before the sides' first pair,
-    /// is no example; at 08:00 the long of the pair of 06:00 is picked, a
-    /// buy carrying the long's 2 USD, and at 19:00 the short of the pair of
-    /// 17:00, a sell carrying the short's 4 USD.
+    /// of the side picked: the row at 05:00, no side picked, is no example;
+    /// at 08:00 the long is picked, a buy carrying the long's 2 USD, and at
+    /// 19:00 the short, a sell carrying the short's 4 USD.
     #[rstest]
     fn the_metas_examples_carry_the_unit_of_their_sides_trade() {
-        let dir = tempfile::tempdir().unwrap();
-        publish_pairs(dir.path());
         let rows = [
             row("2026-01-06T05:00:00Z"),
             row("2026-01-06T08:00:00Z"),
             row("2026-01-06T19:00:00Z"),
         ];
+        let mut picks = [None, Some(picked(Side::Long)), Some(picked(Side::Short))].into_iter();
 
-        let examples = examples(
-            &model_set(dir.path(), &features(), &config()),
-            &rows.iter().collect::<Vec<_>>(),
-        )
+        let examples = examples(&rows.iter().collect::<Vec<_>>(), |_| {
+            Ok(picks.next().unwrap())
+        })
         .unwrap();
 
         let sides_and_units: Vec<(f64, f64)> = examples
@@ -165,22 +143,17 @@ mod tests {
         assert_eq!(sides_and_units, [(1.0, 2.0), (-1.0, 4.0)]);
     }
 
-    /// The examples list the stores as they are when made: one that cannot
-    /// be listed fails them, rows or none, naming the short's store, so a
-    /// train never learns silently from rows skipped.
+    /// The examples fail on a pick failing, a model failing to predict say,
+    /// so a train never learns silently from rows skipped.
     #[rstest]
-    fn a_store_that_cannot_be_listed_fails_the_metas_examples() {
-        let dir = tempfile::tempdir().unwrap();
-        publish_pairs(dir.path());
-        side_store(dir.path(), &features(), &config(), Side::Short).break_listing();
-        let models = model_set(dir.path(), &features(), &config());
+    fn a_pick_failing_fails_the_metas_examples() {
+        let rows = [row("2026-01-06T08:00:00Z")];
 
-        let err = examples(&models, &[]).unwrap_err();
+        let err = examples(&rows.iter().collect::<Vec<_>>(), |_| {
+            anyhow::bail!("the model fails to predict")
+        })
+        .unwrap_err();
 
-        let short = models.directory().join("short");
-        assert!(
-            format!("{err:#}").contains(&short.display().to_string()),
-            "{err:#}"
-        );
+        assert!(format!("{err:#}").contains("fails to predict"), "{err:#}");
     }
 }

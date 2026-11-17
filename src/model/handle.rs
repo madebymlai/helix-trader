@@ -12,9 +12,10 @@
 //! target's instrument since the previous) and every feature is
 //! initialized, and publishes their row (`decide::decide`), then:
 //!
-//! - deciding (`Mode::Backtest`, `Mode::Live`): takes the latest pair of
-//!   the sides of the config's margins valid at the decision, the sides
-//!   one train published (`store::Pair`), each side's model predicting its
+//! - deciding (`Mode::Backtest`, `Mode::Live`): takes the latest model set
+//!   valid at the decision, the models one train published
+//!   (`store::ModelSet`), the pair of the sides of the config's margins
+//!   (`store::Pair`), each side's model predicting its
 //!   R on the side's row, the decision's features then the side's payoff
 //!   features as the target sets them, which a dataset row of the decision
 //!   holds alike (`deciding::SideRow`), the pair calibrating both
@@ -33,7 +34,7 @@
 //!   dataset run sends its targets), drops it or trades otherwise, and
 //!   closes its trades through the same module. The models see the target
 //!   at the reference stake alone, the config's risk of the dataset balance
-//!   (`targets::TargetSetter`), whatever the strategy stakes. With no pair
+//!   (`targets::TargetSetter`), whatever the strategy stakes. With no model set
 //!   valid yet no side trades; a stale decision, cold features, a target's
 //!   ATR not yet initialized, a target of no size at the reference stake,
 //!   no side clearing its margin or two tied are no decision, never an
@@ -47,27 +48,29 @@
 //!   the targets settle are collected for the caller of the run.
 //!
 //! With a meta model (`model::meta`), the trade of the side picked is
-//! taken only if the meta model in use, on the row with that side and the
-//! decision's level and side call, expects of it a net R, its calibrated
-//! expected R, of at least its margin (`MetaConfig::margin`), the trade as
-//! the target sets it; no meta model valid yet is no trade.
+//! taken only if the model set's meta model, on the row with that side and
+//! the decision's level and side call, expects of it a net R, its
+//! calibrated expected R, of at least its margin (`MetaConfig::margin`), the
+//! trade as the target sets it; every model set of a strategy with a meta
+//! holds one.
 //!
 //! The decision itself is `deciding::DecidingModels`'s; the handle is what
-//! talks to the strategy. A model is swapped in only inside `decide`, before
-//! it predicts, the sides' as a pair: no decision mixes two models, nor the
-//! sides of two trains. A backtest and a live node read
-//! the same store, which must be readable when the handle is built, and is
-//! listed again at each decision, a failure logged and the previous lists
-//! kept, so a model published meanwhile is used from the first decision at or
+//! talks to the strategy. A model set is swapped in only inside `decide`,
+//! before it predicts, whole: no decision mixes two model sets, nor a meta
+//! with the sides of another train. A backtest and a live node read the same
+//! store, which must be readable when the handle is built, and is listed
+//! again at each decision, a failure logged and the previous list kept, so
+//! a model set published meanwhile is used from the first decision at or
 //! after its valid-from. Every prediction is calibrated, the sides' by their
 //! pair (`store::Pair`), the meta's on its own (`store::LoadedModel`). Before
-//! use a model is checked against the strategy:
-//! its feature names and their
-//! order, its fingerprint (`dataset::fingerprint`), its width, and its
-//! probes, each of which the reloaded model must predict to the bit as it
-//! did when fitted. A model failing a check is refused, logged as an
-//! error, a side's with its pair, and the current one kept; it is not read
-//! again (`store::Swap`).
+//! use each model of a model set is checked against the strategy: its
+//! feature names and their order, its fingerprint (`dataset::fingerprint`),
+//! its width, and its probes, each of which the reloaded model must predict
+//! to the bit as it did when fitted. A model set failing a check stops new
+//! entries: `decide` errs, naming it and the check, which Nautilus logs, no
+//! decision is made on it nor on the model set before it, and it is read
+//! again at the next decision (`store::Swap`), so it is used once it loads;
+//! open trades finish on their exits, which the handle does not hold.
 //!
 //! The handle owns the strategy's subscriptions
 //! (`strategy::subscriptions::Subscriptions`) to the bars of its
@@ -135,7 +138,7 @@
 //!
 //! The handle does not retrain: live, the retrains of a strategy are a
 //! Nautilus actor of their own beside it (`launcher::RetrainActor`), and
-//! the model a retrain publishes, or `train --at`, is the handle's from its
+//! the model set a retrain publishes, or `train --at`, is the handle's from its
 //! next decision, which lists the store again. Never retrained, a strategy
 //! has no retrain actor: the handle trades on the store as it is.
 
@@ -239,8 +242,8 @@ impl SettledRows {
 /// dataset run sends there, without a quantity (`trade`). The handle sends
 /// nothing and reads no equity: a strategy sends the trade at a stake of its
 /// choosing, the config's or a multiple of it (`orders::Trade::send`), or
-/// drops it, or trades otherwise, and then the models' holdout figures
-/// describe the target's trade, not its own. Its expected R, in R, is the
+/// drops it, or trades otherwise, and then the models' scores describe the
+/// target's trade, not its own. Its expected R, in R, is the
 /// same at any stake.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Decision {
@@ -327,7 +330,7 @@ struct Deciding {
 
 impl ModelHandle {
     /// The handle of the model `blueprint` describes, in `mode`: deciding
-    /// on its models under the store's root (`ModelBlueprint::model_set`),
+    /// on its models under the store's root (`ModelBlueprint::model_store`),
     /// of the target of its dataset runs on the mode's venue, or opening
     /// its target. It decides on the blueprint's features, the very set its
     /// dataset and its stores are fingerprinted from.
@@ -362,7 +365,7 @@ impl ModelHandle {
         let delay = warmup::bar_build_delay(&requirements.bar_types);
         let serving = match mode {
             Mode::Backtest { models } | Mode::Live { models } => {
-                let models = blueprint.model_set(models)?;
+                let models = blueprint.model_store(models)?;
                 Serving::Deciding(Box::new(Deciding {
                     models: RefCell::new(DecidingModels::new(&models)?),
                     target: TargetSetter::sharing(
@@ -782,8 +785,8 @@ mod tests {
             config::{Margins, ModelConfig},
             decide::FeatureRow,
             deciding::testing::{
-                AUD, GOLD, STRATEGY, at, baseline, baseline_for, blueprint_of, both_sides, config,
-                features, gold, meta, meta_baseline, model_set, r, requirements, side_store, store,
+                AUD, GOLD, STRATEGY, at, baseline, blueprint_of, both_sides, config, features,
+                gold, meta, meta_baseline, model_set_of, model_store, r, requirements, store,
                 with_meta,
             },
             features::testing::{last_mid, mid_over},
@@ -1002,13 +1005,13 @@ mod tests {
     fn a_cadence_on_features_reading_no_data_of_the_traded_instrument_decides_on_its_quotes() {
         let models = tempfile::tempdir().unwrap();
         let features = last_mid(InstrumentId::from("GBP/USD.SIM")).build().unwrap();
-        side_store(models.path(), &features, &config(), Side::Long)
-            .publish(&baseline_for(
+        model_store(models.path(), &features, &config())
+            .publish(&model_set_of(
                 &features,
                 &config(),
-                Side::Long,
                 "2026-10-22T00:00:00Z",
-                8,
+                [(Side::Long, 8)],
+                None,
             ))
             .unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
@@ -1106,19 +1109,18 @@ mod tests {
         (long, short): (Option<usize>, Option<usize>),
     ) -> Rc<ModelHandle> {
         let features = features();
-        for (side, tenths) in [(Side::Long, long), (Side::Short, short)] {
-            if let Some(tenths) = tenths {
-                side_store(models, &features, config, side)
-                    .publish(&baseline_for(
-                        &features,
-                        config,
-                        side,
-                        "2026-10-22T00:00:00Z",
-                        tenths,
-                    ))
-                    .unwrap();
-            }
-        }
+        let sides = [(Side::Long, long), (Side::Short, short)]
+            .into_iter()
+            .filter_map(|(side, tenths)| tenths.map(|tenths| (side, tenths)));
+        model_store(models, &features, config)
+            .publish(&model_set_of(
+                &features,
+                config,
+                "2026-10-22T00:00:00Z",
+                sides,
+                None,
+            ))
+            .unwrap();
         warm(&features, probe.clock().timestamp_ns());
         ModelHandle::new(&blueprint_of(&features, config, requirements()), mode).unwrap()
     }
@@ -1586,9 +1588,14 @@ mod tests {
             .bars(hours, HOURLY_CLOSE, &tables())
             .build()
             .unwrap();
-        let long = baseline_for(&features, &config(), Side::Long, "2026-10-22T00:00:00Z", 8);
-        side_store(models.path(), &features, &config(), Side::Long)
-            .publish(&long)
+        model_store(models.path(), &features, &config())
+            .publish(&model_set_of(
+                &features,
+                &config(),
+                "2026-10-22T00:00:00Z",
+                [(Side::Long, 8)],
+                None,
+            ))
             .unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
         let handle = ModelHandle::new(
@@ -2011,9 +2018,14 @@ mod tests {
         let models = tempfile::tempdir().unwrap();
         let (config, width) = width_config();
         let features = mid_over(InstrumentId::from(AUD), &width).build().unwrap();
-        let long = baseline_for(&features, &config, Side::Long, "2026-10-22T00:00:00Z", 8);
-        side_store(models.path(), &features, &config, Side::Long)
-            .publish(&long)
+        model_store(models.path(), &features, &config)
+            .publish(&model_set_of(
+                &features,
+                &config,
+                "2026-10-22T00:00:00Z",
+                [(Side::Long, 8)],
+                None,
+            ))
             .unwrap();
         let (mut probe, clock) = registered(at("2026-10-22T12:00:00Z"));
         warm(&features, probe.clock().timestamp_ns());
@@ -2200,17 +2212,14 @@ mod tests {
     /// the 22nd.
     fn meta_handle(models: &Path, config: &ModelConfig, meta_tenths: usize) -> Rc<ModelHandle> {
         let features = features();
-        let set = model_set(models, &features, config);
-        let midnight = "2026-10-22T00:00:00Z";
-        set.side(Side::Long)
-            .unwrap()
-            .store()
-            .publish(&baseline_for(&features, config, Side::Long, midnight, 6))
-            .unwrap();
-        set.meta()
-            .unwrap()
-            .store()
-            .publish(&meta_baseline(&features, config, midnight, meta_tenths))
+        model_store(models, &features, config)
+            .publish(&model_set_of(
+                &features,
+                config,
+                "2026-10-22T00:00:00Z",
+                [(Side::Long, 6)],
+                Some(meta_baseline(&features, config, meta_tenths)),
+            ))
             .unwrap();
         warm(&features, UnixNanos::from(at("2026-10-22T12:00:00Z")));
         ModelHandle::new(
@@ -2374,17 +2383,14 @@ mod tests {
         let features = last_mid(eur).build().unwrap();
         // The target's ATR, on the quotes of EUR/USD, keys its store.
         blueprint_of(&features, &config, reading_eur(eur))
-            .model_set(models.path())
+            .model_store(models.path())
             .unwrap()
-            .side(Side::Long)
-            .unwrap()
-            .store()
-            .publish(&baseline_for(
+            .publish(&model_set_of(
                 &features,
                 &config,
-                Side::Long,
                 "2026-10-22T00:00:00Z",
-                8,
+                [(Side::Long, 8)],
+                None,
             ))
             .unwrap();
         let handle = handle_on_an_instrument_not_in_the_cache(models.path(), &config, eur);

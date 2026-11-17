@@ -1,60 +1,51 @@
-//! A backtest of a strategy trading on its models, retrained on its
-//! schedule as live would be: what the backtest does before its run, and
-//! the out-of-sample scores it reports after.
+//! A backtest of a strategy trading on its models, as they are in the
+//! store: what the backtest checks before its run, and the out-of-sample
+//! scores it reports after. A backtest trains nothing: its models are those
+//! the binary's `train` published (`train::Training::train_at`), at each
+//! retrain time of a span or at one time, so that no backtest trains over
+//! the range it judges.
 //!
-//! Before the run (`WalkForward::prepare`), the dataset is built over the
-//! span, from where the replay of the plan of the first train starts
-//! (`Plan::replay_from`: the first row a fit reads), or from that train's
-//! time if it fits no model, to the end of the span's last day
-//! (`Dataset::build`), so that the last retrain period has targets to
-//! score: a backtest whose models are all in the store builds from its
-//! first train time, its start, or, retrained, the last retrain time not
-//! after it. Then the models are trained at every train time of the span
-//! (`Schedule::times`: each retrain time, or, never retrained, the start
-//! alone) whose plan fits a model (`Schedule::plan`), each planned once
-//! the trains before it published. Never retrained, a backtest whose
-//! sides or meta then have no model in use at its start is refused: it
-//! would trade nothing (`Schedule::ensure_trades`). Each build and train
-//! is handed in by the caller, the binary's in its own process, one after
-//! another before the run, each dataset run a Nautilus node disposed
-//! before the next; a train finds the days it reads from there
-//! built, and a later train whose window reaches before them replays the
-//! days missing itself (`Dataset::settled`), as any train does. A model in
-//! the store is reused, so a second backtest of the same span builds and
-//! trains nothing. A train that kept a model's current one published none,
-//! so the next backtest trains at that time again.
-//! The run then trades on the stores as they are: at each decision, the
-//! latest pair of the sides valid then (`handle`).
+//! Before the run (`WalkForward::untrained`), a backtest whose store holds
+//! no model set to trade on at its start (`ModelStore::trades_by`: one
+//! valid by then, as a live start checks) is refused: it would trade nothing from its
+//! start, and names the retrain time there, the span's first train time
+//! (`Schedule::times`: the last retrain time not after the start, or, never
+//! retrained, the start). The run then trades on the store as it is: at
+//! each decision, the latest model set valid then (`handle`), as live
+//! does, so a retrain time the store lacks leaves the model set before it
+//! deciding through its period.
 //!
-//! After the run (`WalkForward::scores`), each side is scored on each
-//! decision's row of the dataset in the span, its calibrated expected R,
-//! `E'`, against its trade's realized R, with the pair the strategy used at
-//! it: the latest valid then, a pair with a model failing its checks refused
-//! and the current one kept, as the handle does. Every model is out of
-//! sample on its rows: trained at its valid-from on rows settled by then.
-//! Beside each, on the very rows it decided, its own baseline, as its
-//! manifest has it (`store::ModelManifest::baseline`): the training mean of
-//! R on the rows that model was fitted and calibrated on, at its
-//! valid-from. A period whose train was refused so scores the earlier model
-//! in use beside that model's baseline, a period of models published off
-//! the schedule each row beside the baseline of the model that decided it,
-//! and a row decided with no pair, as before the sides' first, has no score.
-//! Each side's skill against those baselines, mean `R - E'`, calibration
-//! slope and top-decile gap (`score::ExpectedScore`) are given per retrain
-//! period and over the span, on all the side's rows with a pair, and what was
-//! earned there, in R (`holdout::Earnings`), beside every trade of those rows,
-//! its own, at the commission and at 1.5 times it; and the same of the meta, its
-//! calibrated expected R against the R of the trade of the side picked, on
-//! the rows a side is picked on with a meta model. A side's trades taken are
-//! those picked for it on each row by the decision itself
-//! (`deciding::DecidingModels::pick`), the picks a train's gate reads (`train`),
-//! before any meta: a row where both sides clear counts one trade, for the side
-//! expected the most, a tie none, so with no meta the sides' trades add up to
-//! the decisions returned. A meta's are the trades of the side picked its
-//! margin takes (`holdout::MetaMargin`), the figures its holdout is judged on,
-//! out of sample. All this judges the decision the handle returns, on the target's
-//! trade: no section adds the sides up, as the backtest's report gives what the
-//! strategy actually traded, which can differ whenever it filters its decisions.
+//! After the run (`WalkForward::scores`), each model is scored on each
+//! decision's row of the dataset in the span with the model set the
+//! strategy used at it: the latest valid then, swapped in as the handle
+//! swaps it (`store::Swap`), a row whose model set fails its checks
+//! decided by none, as the handle decides no trade there. Each side, its
+//! calibrated expected R, `E'`, against its trade's realized R; the meta,
+//! on the rows a side is picked on, of a model set holding a meta model,
+//! its calibrated expected R against the R of the trade of the side picked.
+//! Every model is out of sample on its rows: trained by its model set's
+//! valid-from on rows settled by then. Beside each, on the very rows it
+//! decided, its own baseline, as its manifest has it
+//! (`store::ModelManifest::baseline`): the training mean of R on the rows
+//! that model was fitted and calibrated on. A period whose retrain time the
+//! store lacks, its train failed or never run, so scores the earlier
+//! model set in use beside its baselines, a period of model sets
+//! published off the schedule each row beside the baseline of the model
+//! that decided it, and a row decided with no model set, as before the
+//! first, has no score. Each model's skill against those baselines, its
+//! mean `R - E'`, calibration slope and top-decile gap (`score::ExpectedScore`) are
+//! given per retrain period and over the span, on all its rows with a
+//! model set, and what was earned there, in R (`earnings::Earnings`), beside
+//! every trade of those rows, its own, at the commission and at 1.5 times
+//! it. A side's trades taken are those picked for it on each row by the
+//! decision itself (`deciding::DecidingModels::pick_among`), before any
+//! meta: a row where both sides clear counts one trade, for the side
+//! expected the most, a tie none, so with no meta the sides' trades add up
+//! to the decisions returned. A meta's are the trades of the side picked its
+//! margin takes (`earnings::MetaMargin`), out of sample. All this judges the
+//! decision the handle returns, on the target's trade: no section adds the
+//! sides up, as the backtest's report gives what the strategy actually
+//! traded, which can differ whenever it filters its decisions.
 
 use std::{collections::BTreeSet, fmt::Display};
 
@@ -64,17 +55,17 @@ use nautilus_core::UnixNanos;
 use super::{
     blueprint::Stored,
     dataset::{self, Dataset, DatasetRow},
-    deciding::DecidingModels,
-    holdout::{Earnings, Example, MetaMargin, STRESS, in_r},
-    meta,
+    deciding::{self, DecidingModels},
+    earnings::{Earnings, Example, MetaMargin, STRESS, in_r},
+    features::meta_row,
     schedule::{Models, Schedule},
     score::ExpectedScore,
-    store::{Baselined, ModelSet, Swap},
-    targets::Side,
+    store::{Baselined, ModelStore},
 };
 use crate::strategy::risk::R;
 
-/// The retrains and scores of one strategy's backtests.
+/// The check before the run and the scores after it of one strategy's
+/// backtests.
 #[derive(Debug)]
 pub struct WalkForward {
     dataset: Dataset,
@@ -82,7 +73,7 @@ pub struct WalkForward {
     schedule: Schedule,
     /// The strategy's models: each side traded, with its margin and its
     /// store, and the meta level, if any.
-    models: ModelSet,
+    models: ModelStore,
 }
 
 /// The out-of-sample scores of a backtest: of each model, the meta's on
@@ -108,8 +99,8 @@ pub struct Period {
     pub from: Timestamp,
     /// The period's end: the next retrain time, or the span's end.
     pub to: Timestamp,
-    /// The valid-froms of the models used in the period: one, unless a
-    /// model valid from within it was published off the schedule.
+    /// The valid-froms of the model sets used in the period: one, unless
+    /// a model set valid from within it was published off the schedule.
     pub models: Vec<Timestamp>,
     /// The model's, on the rows decided with one, beside the baselines' on
     /// the same rows: each row's that of the model that decided it.
@@ -121,7 +112,7 @@ pub struct Period {
 
 impl WalkForward {
     /// The backtests of the models of `model`, a strategy's model on the
-    /// venue of its dataset runs, on its dataset and in its model set, on
+    /// venue of its dataset runs, on its dataset and in its model store, on
     /// its schedule.
     pub(super) fn new(model: Stored<'_>) -> Self {
         let Stored {
@@ -137,55 +128,28 @@ impl WalkForward {
         }
     }
 
-    /// Prepares a backtest over `[start, end)`: if the dataset lacks a day
-    /// from where the replay of the plan of the span's first train time
-    /// starts (`Plan::replay_from`), or that time if it fits no model, to
-    /// the span's end, `build` builds it over that span (`Dataset::build`
-    /// of its days); then `train` trains at each train time of the span
-    /// (`Schedule::times`) whose plan fits a model (`Schedule::plan`,
-    /// `Training::train_at`), in time order, each planned after the
-    /// trains before it: a pair of the sides they publish gives the meta its
-    /// rows from then on. A backtest that could then trade nothing is
-    /// refused (`Schedule::ensure_trades`).
+    /// The train time at the start of a backtest over `[start, end)` if
+    /// the store holds no model set to trade on there (`ModelStore::trades_by`):
+    /// the span's first train time (`Schedule::times`), whose train fills
+    /// it; none if they hold one.
     ///
     /// # Errors
     ///
-    /// Returns an error if the span is empty, the dataset or a store
-    /// cannot be read, as `build` and `train` do, or, never retrained, if
-    /// the sides or the meta have no model in use at `start`.
-    pub fn prepare(
-        &self,
-        start: Timestamp,
-        end: Timestamp,
-        build: impl FnOnce(Timestamp, Timestamp) -> anyhow::Result<()>,
-        mut train: impl FnMut(Timestamp) -> anyhow::Result<()>,
-    ) -> anyhow::Result<()> {
-        let times = self.schedule.times(start, end)?;
-        let from = self
-            .schedule
-            .plan(times[0], &self.models.valid_froms()?)
-            .replay_from()
-            .unwrap_or(times[0]);
-        let (first, last) = dataset::days(from, end);
-        if !self.dataset.missing(first, last)?.is_empty() {
-            build(from, end)?;
-        }
-        for at in times {
-            if self.schedule.plan(at, &self.models.valid_froms()?).fits() {
-                train(at)?;
-            }
-        }
-        self.schedule
-            .ensure_trades(start, &self.models.valid_froms()?)
+    /// Returns an error if the span is empty or a store cannot be read.
+    pub fn untrained(&self, start: Timestamp, end: Timestamp) -> anyhow::Result<Option<Timestamp>> {
+        let first = self.schedule.times(start, end)?[0];
+        Ok((!self.models.trades_by(start)?).then_some(first))
     }
 
-    /// The scores of a backtest over `[start, end)`, prepared (`prepare`):
-    /// each side's model's, and the meta model's, if any.
+    /// The scores of a backtest over `[start, end)`, its dataset built over
+    /// it: each side's model's, and the meta model's, if any, of the
+    /// model set in use at each row (`judged`).
     ///
     /// # Errors
     ///
     /// Returns an error if the span is empty, the dataset lacks a day of
-    /// it, a model fails to predict, or the dataset or a store cannot be read.
+    /// it, a model fails to predict, or the dataset or the store cannot be
+    /// read.
     pub fn scores(&self, start: Timestamp, end: Timestamp) -> anyhow::Result<Scores> {
         let times = self.schedule.times(start, end)?;
         let (first, last) = dataset::days(start, end);
@@ -196,75 +160,91 @@ impl WalkForward {
         );
         let mut rows = self.dataset.read(start, end)?;
         rows.retain(|row| row.ts_event < UnixNanos::from(end));
-        let listed = self.models.valid_froms()?;
-        let picked = self.picked(&rows)?;
-        let mut scores = Scores {
-            long: None,
-            short: None,
-            meta: None,
-        };
-        let pairs = listed.pairs();
-        for level in self.models.sides() {
-            let side = level.side();
-            let examples: Vec<Example> =
-                rows.iter().map(|row| Example::of_side(row, side)).collect();
-            let side_scores = score(
-                &times,
-                (start, end),
-                &examples,
-                &pairs,
-                self.models.pairs(),
-                |pair, row, _| {
-                    Ok(Judged {
-                        expected: pair.expect(&rows[row].sides())?.of(side),
-                        baseline: pair.side(side).baseline(),
-                        taken: picked[row] == Some(side),
-                    })
-                },
-            )?;
-            match side {
-                Side::Long => scores.long = Some(side_scores),
-                Side::Short => scores.short = Some(side_scores),
-            }
-        }
-        if let (Some(level), Some(valid_froms)) = (self.models.meta(), &listed.meta) {
-            let margin = MetaMargin(level.config().margin);
-            let examples = meta::examples(&self.models, &rows.iter().collect::<Vec<_>>())?;
-            scores.meta = Some(score(
-                &times,
-                (start, end),
-                &examples,
-                valid_froms,
-                level.swap(),
-                |model, _, example| {
-                    let expected = model.predict(&example.features)?;
-                    Ok(Judged {
-                        expected,
-                        baseline: model.baseline(),
-                        taken: R::finite(expected).is_some_and(|expected| margin.takes(expected)),
-                    })
-                },
-            )?);
-        }
-        Ok(scores)
+        let judged = self.judged(&rows)?;
+        let scores = |judged: &Vec<Judged>| score(&times, (start, end), judged);
+        Ok(Scores {
+            long: judged.long.as_ref().map(scores),
+            short: judged.short.as_ref().map(scores),
+            meta: judged.meta.as_ref().map(scores),
+        })
     }
 
-    /// The side picked on each of `rows`, in time order, by the decision
-    /// itself, before any meta: on each side's row, among the sides of the
-    /// pair in use then (`DecidingModels::pick`).
-    fn picked(&self, rows: &[DatasetRow]) -> anyhow::Result<Vec<Option<Side>>> {
-        let mut models = DecidingModels::new(&self.models)?;
-        rows.iter()
-            .map(|row| {
-                let picked = models.pick(Timestamp::from(row.ts_event), &row.sides())?;
-                Ok(picked.map(|picked| picked.side))
-            })
-            .collect()
+    /// What the model set in use at each of `rows`, in time order, says of
+    /// each model's example of it, swapped in as the handle swaps it, a row
+    /// whose model set fails its checks judged by none: each side's, on the
+    /// side's trade; and the meta's, if the model set holds one, on the
+    /// trade of the side picked, if any (`DecidingModels::pick_among`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be listed, or a model fails to
+    /// predict.
+    fn judged(&self, rows: &[DatasetRow]) -> anyhow::Result<Models<Vec<Judged>>> {
+        let listed = self.models.model_sets()?;
+        let mut model_sets = self.models.swap();
+        let margin = self
+            .models
+            .meta()
+            .map(|level| MetaMargin(level.config().margin));
+        let mut judged = Models {
+            long: None,
+            short: None,
+            meta: margin.map(|_| vec![]),
+        };
+
+        for level in self.models.sides() {
+            judged.set_side(level.side(), vec![]);
+        }
+
+        for row in rows {
+            let Ok(Some((valid_from, model_set))) =
+                model_sets.at(Timestamp::from(row.ts_event), &listed)
+            else {
+                continue;
+            };
+            let sides = row.sides();
+            let pair = model_set.pair();
+            let expected = pair.expect(&sides)?;
+            let picked = DecidingModels::pick_among(pair, deciding::margins(&self.models), &sides)?;
+            for level in self.models.sides() {
+                let side = level.side();
+                if let Some(judged) = judged.side_mut(side) {
+                    judged.push(Judged {
+                        valid_from,
+                        example: Example::of_side(row, side),
+                        expected: expected.of(side),
+                        baseline: pair.side(side).baseline(),
+                        taken: picked.is_some_and(|picked| picked.side == side),
+                    });
+                }
+            }
+
+            if let (Some(margin), Some(meta), Some(picked), Some(judged)) =
+                (margin, model_set.meta(), picked, judged.meta.as_mut())
+            {
+                let example = Example {
+                    features: meta_row(&row.features, picked.side.order_side(), picked.expected),
+                    ..Example::of_side(row, picked.side)
+                };
+                let expected = meta.predict(&example.features)?;
+                judged.push(Judged {
+                    valid_from,
+                    expected,
+                    baseline: meta.baseline(),
+                    taken: R::finite(expected).is_some_and(|expected| margin.takes(expected)),
+                    example,
+                });
+            }
+        }
+        Ok(judged)
     }
 }
 
-/// What the model in use on an example says of it.
+/// What the model set in use on a model's example says of it.
 struct Judged {
+    /// The model set's valid-from.
+    valid_from: Timestamp,
+    example: Example,
     /// Its calibrated expected R of the example's trade.
     expected: f64,
     /// Its baseline's (`Baselined`).
@@ -273,59 +253,44 @@ struct Judged {
     taken: bool,
 }
 
-/// The scores over `[start, end)`, retrained at `times`, of the models
-/// `models` swaps in on `examples`, in time order, among those valid from
-/// `valid_froms`, each beside its own baseline on the rows it decided:
-/// their expected R against the R each example's trade realized. `judge`
-/// gives what the model in use on an example, at its position in
-/// `examples`, says of it.
-fn score<M>(
+/// The scores over `[start, end)`, retrained at `times`, of a model's
+/// examples `judged`, in time order, each by the model set in use on it
+/// and beside its own baseline: their expected R against the R each
+/// example's trade realized.
+fn score(
     times: &[Timestamp],
     (start, end): (Timestamp, Timestamp),
-    examples: &[Example],
-    valid_froms: &[Timestamp],
-    mut models: Swap<M>,
-    judge: impl Fn(&M, usize, &Example) -> anyhow::Result<Judged>,
-) -> anyhow::Result<ModelScores> {
+    judged: &[Judged],
+) -> ModelScores {
     let (mut model_rows, mut model_trades) = (vec![], vec![]);
     let mut periods = vec![];
     for (i, &at) in times.iter().enumerate() {
         let (from, to) = (at.max(start), times.get(i + 1).copied().unwrap_or(end));
         let (from_ns, to_ns) = (UnixNanos::from(from), UnixNanos::from(to));
-        let (mut period_models, mut judged, mut trades) = (BTreeSet::new(), vec![], vec![]);
-        for (row, example) in examples
+        let (mut period_models, mut rows, mut trades) = (BTreeSet::new(), vec![], vec![]);
+        for judged in judged
             .iter()
-            .enumerate()
-            .filter(|(_, example)| from_ns <= example.ts_event && example.ts_event < to_ns)
+            .filter(|judged| from_ns <= judged.example.ts_event && judged.example.ts_event < to_ns)
         {
-            if let Some((valid_from, model)) =
-                models.at(Timestamp::from(example.ts_event), valid_froms)
-            {
-                period_models.insert(valid_from);
-                let Judged {
-                    expected,
-                    baseline,
-                    taken,
-                } = judge(model, row, example)?;
-                judged.push((expected, example.realized(), baseline));
-                trades.push((taken, example.trade));
-            }
+            period_models.insert(judged.valid_from);
+            rows.push((judged.expected, judged.example.realized(), judged.baseline));
+            trades.push((judged.taken, judged.example.trade));
         }
         periods.push(Period {
             from,
             to,
             models: period_models.into_iter().collect(),
-            score: ExpectedScore::of(&judged),
+            score: ExpectedScore::of(&rows),
             earnings: Earnings::of(&trades),
         });
-        model_rows.extend(judged);
+        model_rows.extend(rows);
         model_trades.extend(trades);
     }
-    Ok(ModelScores {
+    ModelScores {
         periods,
         score: ExpectedScore::of(&model_rows),
         earnings: Earnings::of(&model_trades),
-    })
+    }
 }
 
 /// The scores as text, in the sections of the backtest's report: of each
@@ -419,7 +384,7 @@ fn earned(f: &mut std::fmt::Formatter<'_>, earnings: &Earnings) -> std::fmt::Res
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, path::Path, rc::Rc};
+    use std::{path::Path, rc::Rc};
 
     use jiff::SignedDuration;
     use nautilus_model::{
@@ -439,15 +404,15 @@ mod tests {
             config::{Margins, MetaConfig, ModelConfig},
             dataset::DatasetVenue,
             decide::{DecisionRule, FeatureRow},
-            deciding::testing::{HOLDOUT, unchanged},
+            deciding::testing::unchanged,
+            earnings::Trades,
             features::{FeatureSet, meta_names, side_names, testing::last_mid},
-            holdout::Trades,
             learner::{LearnerConfig, TrainingSet},
             schedule::Retrain,
-            store::{ModelCalibration, ModelManifest, ModelStore, StoredModel},
+            store::{ModelManifest, StoredModel, StoredModelSet},
             targets::{
-                BracketSpec, Distance, Exit, Outcome, Outcomes, PerSide, Target, TargetConfig,
-                TargetRow,
+                BracketSpec, Distance, Exit, Outcome, Outcomes, PerSide, Side, Target,
+                TargetConfig, TargetRow,
             },
         },
         strategy::{requirements::DataRequirements, risk::R},
@@ -482,13 +447,12 @@ mod tests {
             .retrain(SignedDuration::from_hours(24))
             .dataset(venue())
             .window(SignedDuration::from_hours(24))
-            .holdout(SignedDuration::from_hours(6))
+            .calibration(SignedDuration::from_hours(6))
             .margins(Margins {
                 long: Some(R::new(0.0)),
                 short: Some(R::new(0.0)),
             })
-            .min_expectancy(R::new(0.0))
-            .min_trades(1)
+            .min_rows(1)
             .learner(LearnerConfig::Fake {})
             .build()
     }
@@ -581,11 +545,9 @@ mod tests {
     }
 
     /// The 6th to the 8th of January, each the long's R of 1 or -1 and the
-    /// short's the reverse. Fitted at the retrain of the 7th, before its
-    /// holdout from 18:00 of the 6th: two wins in three, the long's mean R
-    /// 1/3; held out, a loss. Fitted at the retrain of the 8th: one win in
-    /// three, -1/3, the decisions of the 7th, scored on the 7th as well.
-    /// Scored on the 8th: two wins.
+    /// short's the reverse. Of the 6th, before 18:00, two wins in three, the
+    /// long's mean R 1/3, then a loss. Of the 7th: one win in three, -1/3,
+    /// scored on the 7th as well. Scored on the 8th: two wins.
     fn rows() -> Vec<TargetRow> {
         vec![
             row("2026-01-06T10:00:00Z", 0.5, true),
@@ -623,19 +585,12 @@ mod tests {
         beta: 0.5,
     };
 
-    /// A fake side model of `config()` valid from `valid_from`, of
-    /// `fingerprint`, its baseline `baseline` (`model_of`).
-    fn model(valid_from: Timestamp, fingerprint: String, baseline: f64) -> StoredModel {
-        model_of(&config(), valid_from, fingerprint, baseline)
-    }
-
-    /// A fake side model of `config` valid from `valid_from`, of
-    /// `fingerprint`, on the features then the target's payoff names: its R
-    /// the row's first feature, its pair's calibration leaving it as it is
-    /// (`unchanged`), its baseline `baseline`.
+    /// A fake model of `side` of `config`, of `fingerprint`, on the
+    /// features then the target's payoff names: its R the row's first
+    /// feature, its baseline `baseline`.
     fn model_of(
         config: &ModelConfig,
-        valid_from: Timestamp,
+        side: Side,
         fingerprint: String,
         baseline: f64,
     ) -> StoredModel {
@@ -644,16 +599,14 @@ mod tests {
         let model = LearnerConfig::Fake {}.fit(&set).unwrap();
         StoredModel {
             manifest: ModelManifest {
-                strategy_id: StrategyId::from(STRATEGY),
-                valid_from,
                 fingerprint,
                 feature_names: names,
                 target: config.target.clone(),
-                side: Some(Side::Long),
+                side: Some(side),
                 learner: LearnerConfig::Fake {},
-                calibration: unchanged(config, valid_from),
+                calibration: None,
                 baseline,
-                holdout: HOLDOUT,
+                out_of_fold: None,
                 probes: vec![],
             },
             model: model.save().unwrap(),
@@ -661,33 +614,57 @@ mod tests {
     }
 
     /// The models of a walk in `dir` as `config` says.
-    fn models(dir: &Path, config: &ModelConfig) -> ModelSet {
-        blueprint(config).model_set(&dir.join("models")).unwrap()
+    fn models(dir: &Path, config: &ModelConfig) -> ModelStore {
+        blueprint(config).model_store(&dir.join("models")).unwrap()
     }
 
-    /// The store of the `side` models of a walk in `dir` as `config` says.
-    fn store(dir: &Path, config: &ModelConfig, side: Side) -> ModelStore {
-        models(dir, config).side(side).unwrap().store().clone()
+    /// Publishes for a walk in `dir` as `config` says the model set valid
+    /// from `valid_from` of `sides`, each side traded, their pair's
+    /// calibration leaving them as they are (`unchanged`), and `meta`, if
+    /// any.
+    fn publish_model_set(
+        dir: &Path,
+        config: &ModelConfig,
+        valid_from: Timestamp,
+        sides: Vec<StoredModel>,
+        meta: Option<StoredModel>,
+    ) {
+        models(dir, config)
+            .publish(&StoredModelSet {
+                valid_from,
+                sides,
+                calibration: unchanged(config),
+                meta,
+            })
+            .unwrap();
     }
 
-    /// Publishes a fake model valid from `valid_from` for each side of a
-    /// walk in `dir` as `config` says, with the baseline a train then fits
-    /// (`trained_baseline`).
+    /// Publishes for a walk in `dir` as `config` says a model set valid
+    /// from `valid_from`, a fake for each side, with the baseline of
+    /// `trained_baseline`, and no meta.
     fn publish(dir: &Path, config: &ModelConfig, valid_from: Timestamp) {
         let fingerprint = dataset(dir, config).fingerprint().to_string();
-        for (side, _) in config.margins.sides() {
-            let baseline = trained_baseline(side, valid_from);
-            store(dir, config, side)
-                .publish(&model_of(config, valid_from, fingerprint.clone(), baseline))
-                .unwrap();
-        }
+        let sides = config
+            .margins
+            .sides()
+            .map(|(side, _)| {
+                model_of(
+                    config,
+                    side,
+                    fingerprint.clone(),
+                    trained_baseline(side, valid_from),
+                )
+            })
+            .collect();
+        publish_model_set(dir, config, valid_from, sides, None);
     }
 
-    /// The baseline of the `side` model a train at `valid_from` fits on
-    /// `rows`, the training mean of the side's R before its holdout: at the
-    /// 7th the long's two wins and a loss, 1/3, at the 8th its win and two
-    /// losses, -1/3, the short's the reverse, winning where the long loses;
-    /// nought at any other time, whose models' baselines no test reads.
+    /// The baseline the `side` model published at `valid_from` carries, a
+    /// training mean of the side's R on `rows`: at the 7th the long's two
+    /// wins and a loss of the 6th before 18:00, 1/3, at the 8th its win and
+    /// two losses of the 7th, -1/3, the short's the reverse, winning where
+    /// the long loses; nought at any other time, whose models' baselines no
+    /// test reads.
     fn trained_baseline(side: Side, valid_from: Timestamp) -> f64 {
         let long = if valid_from == at("2026-01-07T00:00:00Z") {
             1.0 / 3.0
@@ -702,38 +679,13 @@ mod tests {
         }
     }
 
-    /// What `prepare` of `walk(dir)` over the 7th and the 8th asked for:
-    /// the spans built and the times trained at. The build writes the
-    /// dataset, a train publishes a model.
-    fn prepare(dir: &Path, walk: &WalkForward) -> (Vec<(Timestamp, Timestamp)>, Vec<Timestamp>) {
-        let (built, trained) = (RefCell::new(vec![]), RefCell::new(vec![]));
-        walk.prepare(
-            at("2026-01-07T00:00:00Z"),
-            at("2026-01-09T00:00:00Z"),
-            |from, to| {
-                built.borrow_mut().push((from, to));
-                build(dir);
-                Ok(())
-            },
-            |at| {
-                trained.borrow_mut().push(at);
-                publish(dir, &config(), at);
-                Ok(())
-            },
-        )
-        .unwrap();
-        (built.take(), trained.take())
-    }
-
-    #[rstest]
-    fn a_model_in_the_store_is_reused() {
-        let dir = tempfile::tempdir().unwrap();
-        let walk = walk(dir.path());
-        publish(dir.path(), &config(), at("2026-01-07T00:00:00Z"));
-
-        let (_, trained) = prepare(dir.path(), &walk);
-
-        assert_eq!(trained, [at("2026-01-08T00:00:00Z")]);
+    /// Builds the dataset of `walk(dir)` and publishes the models of
+    /// `config` a train at each retrain time of the 7th and the 8th would.
+    fn trained(dir: &Path, config: &ModelConfig) {
+        build(dir);
+        for valid_from in [at("2026-01-07T00:00:00Z"), at("2026-01-08T00:00:00Z")] {
+            publish(dir, config, valid_from);
+        }
     }
 
     fn close(actual: Option<f64>, expected: f64) {
@@ -761,7 +713,7 @@ mod tests {
     fn each_period_scores_its_model_beside_that_models_own_baseline_on_the_same_rows() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk(dir.path());
-        prepare(dir.path(), &walk);
+        trained(dir.path(), &config());
 
         let scores = walk
             .scores(at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"))
@@ -816,7 +768,7 @@ mod tests {
         };
         let walk = walk_of(dir, &config);
         let span = ("2026-01-07T00:00:00Z", "2026-01-09T00:00:00Z");
-        prepared(dir, &walk, span, Some(&config)).unwrap();
+        trained(dir, &config);
         walk.scores(at(span.0), at(span.1)).unwrap()
     }
 
@@ -892,30 +844,43 @@ mod tests {
         close(first.earnings.taken.win_rate, 0.5);
     }
 
-    /// Publishes for `side` of a walk in `dir` as `config` says a model valid
-    /// from `valid_from`, with the baseline a train then fits
-    /// (`trained_baseline`): the long's a fake, expecting its row's feature in
-    /// R, the short's a baseline expecting 0.5R whatever the row, their pair's
-    /// calibration leaving each as it is (`unchanged`), up to rounding.
-    fn publish_opposed(dir: &Path, config: &ModelConfig, side: Side, valid_from: Timestamp) {
+    /// Publishes for a walk in `dir` as `config` says the model set valid
+    /// from `valid_from` of opposed sides, each with the baseline a train
+    /// then fits (`trained_baseline`): the long's a fake, expecting its row's
+    /// feature in R, the short's a baseline expecting 0.5R whatever the row,
+    /// their pair's calibration leaving each as it is (`unchanged`), up to
+    /// rounding; and the meta model `meta`, if any.
+    fn publish_opposed(
+        dir: &Path,
+        config: &ModelConfig,
+        valid_from: Timestamp,
+        meta: Option<StoredModel>,
+    ) {
         let fingerprint = dataset(dir, config).fingerprint().to_string();
-        let mut opposed = model_of(
-            config,
-            valid_from,
-            fingerprint,
-            trained_baseline(side, valid_from),
-        );
-        if side == Side::Short {
-            let width = opposed.manifest.feature_names.len();
-            let set = TrainingSet::new(width, vec![0.0; width], vec![0.5]).unwrap();
-            opposed.manifest.learner = LearnerConfig::Baseline {};
-            opposed.model = LearnerConfig::Baseline {}
-                .fit(&set)
-                .unwrap()
-                .save()
-                .unwrap();
-        }
-        store(dir, config, side).publish(&opposed).unwrap();
+        let sides = Side::BOTH
+            .into_iter()
+            .map(|side| {
+                let mut opposed = model_of(
+                    config,
+                    side,
+                    fingerprint.clone(),
+                    trained_baseline(side, valid_from),
+                );
+
+                if side == Side::Short {
+                    let width = opposed.manifest.feature_names.len();
+                    let set = TrainingSet::new(width, vec![0.0; width], vec![0.5]).unwrap();
+                    opposed.manifest.learner = LearnerConfig::Baseline {};
+                    opposed.model = LearnerConfig::Baseline {}
+                        .fit(&set)
+                        .unwrap()
+                        .save()
+                        .unwrap();
+                }
+                opposed
+            })
+            .collect();
+        publish_model_set(dir, config, valid_from, sides, meta);
     }
 
     /// The scores over the 7th and the 8th of `walk(dir)`, with `rows` and each
@@ -932,9 +897,7 @@ mod tests {
         let walk = walk(dir);
         build(dir);
         for valid_from in [at("2026-01-07T00:00:00Z"), at("2026-01-08T00:00:00Z")] {
-            for side in Side::BOTH {
-                publish_opposed(dir, &config(), side, valid_from);
-            }
+            publish_opposed(dir, &config(), valid_from, None);
         }
         walk.scores(at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"))
             .unwrap()
@@ -1034,7 +997,7 @@ mod tests {
     fn a_row_where_the_sides_tie_counts_no_trade_for_either() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk(dir.path());
-        prepare(dir.path(), &walk);
+        trained(dir.path(), &config());
 
         let scores = walk
             .scores(at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"))
@@ -1046,33 +1009,6 @@ mod tests {
             assert_eq!(side.earnings.every.count, 5, "{side:?}");
             assert_eq!(side.score.rows, 5, "{side:?}");
         }
-    }
-
-    /// The short's first model is the 8th's, the long's of the 7th having none
-    /// beside it: on the 7th no pair decides, and neither side has a row
-    /// scored or a trade. On the 8th the pair picks as in `opposed_scores`.
-    #[rstest]
-    fn a_side_with_no_model_beside_it_decides_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let walk = walk(dir.path());
-        build(dir.path());
-        let (seventh, eighth) = (at("2026-01-07T00:00:00Z"), at("2026-01-08T00:00:00Z"));
-        publish_opposed(dir.path(), &config(), Side::Long, seventh);
-        publish_opposed(dir.path(), &config(), Side::Long, eighth);
-        publish_opposed(dir.path(), &config(), Side::Short, eighth);
-
-        let scores = walk.scores(seventh, at("2026-01-09T00:00:00Z")).unwrap();
-
-        let (long, short) = (scores.long.unwrap(), scores.short.unwrap());
-        for side in [&long, &short] {
-            let first = &side.periods[0];
-            assert!(first.models.is_empty(), "{first:?}");
-            assert_eq!(first.score.rows, 0, "{first:?}");
-            assert_eq!(first.earnings.taken.count, 0, "{first:?}");
-            assert_eq!(first.earnings.every.count, 0, "{first:?}");
-        }
-        trades_are(long.periods[1].earnings.taken, 1, 1.0);
-        trades_are(short.periods[1].earnings.taken, 1, -1.0);
     }
 
     /// `config`, on a target with exits on AUD/USD.
@@ -1137,23 +1073,23 @@ mod tests {
         assert_eq!(scores.short.unwrap().earnings.taken.count, 0);
     }
 
-    /// A fake meta model valid from `valid_from`, of `fingerprint`, on the
-    /// meta's features: its R that of the row's first feature calibrated by
-    /// `CALIBRATION`, its baseline 0.5.
-    fn meta_model(valid_from: Timestamp, fingerprint: String) -> StoredModel {
+    /// A fake meta model of `fingerprint`, on the meta's features: its R
+    /// that of the row's first feature calibrated by `CALIBRATION`, its
+    /// baseline 0.5.
+    fn meta_model(fingerprint: String) -> StoredModel {
         let names = meta_names(features().names());
         let set = TrainingSet::new(names.len(), vec![0.5; names.len()], vec![1.0]).unwrap();
-        let mut meta = model(valid_from, fingerprint, 0.5);
+        let mut meta = model_of(&config(), Side::Long, fingerprint, 0.5);
         meta.manifest.side = None;
-        meta.manifest.calibration = ModelCalibration::Meta(CALIBRATION);
+        meta.manifest.calibration = Some(CALIBRATION);
         meta.manifest.feature_names = names;
         meta.model = LearnerConfig::Fake {}.fit(&set).unwrap().save().unwrap();
         meta
     }
 
-    /// The scores over the 7th and the 8th of `meta_walk(dir)`, with `rows`,
-    /// each side's opposed models (`publish_opposed`) and a meta model
-    /// (`meta_model`) valid from the 7th and the 8th, the meta taking a trade
+    /// The scores over the 7th and the 8th of a walk as `with_meta` says,
+    /// with `rows`, model sets of opposed sides (`publish_opposed`) and a
+    /// meta model (`meta_model`) valid from the 7th and the 8th, the meta taking a trade
     /// from an expected 0.3 USD. The sides pick as in `opposed_scores`.
     fn opposed_meta_scores(dir: &Path) -> Scores {
         opposed_meta_scores_of(dir, &with_meta(), &rows())
@@ -1167,13 +1103,14 @@ mod tests {
             .write(rows, at("2026-01-06T00:00:00Z"), at("2026-01-09T01:00:00Z"))
             .unwrap();
         let fingerprint = dataset(dir, config).fingerprint().to_string();
+
         for valid_from in [at("2026-01-07T00:00:00Z"), at("2026-01-08T00:00:00Z")] {
-            for side in Side::BOTH {
-                publish_opposed(dir, config, side, valid_from);
-            }
-            meta_store_of(dir, config)
-                .publish(&meta_model(valid_from, fingerprint.clone()))
-                .unwrap();
+            publish_opposed(
+                dir,
+                config,
+                valid_from,
+                Some(meta_model(fingerprint.clone())),
+            );
         }
         walk.scores(at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"))
             .unwrap()
@@ -1263,33 +1200,91 @@ mod tests {
         trades_are(scores.short.unwrap().earnings.taken, 2, 0.0);
     }
 
-    /// The pair of the 8th has a long of another fingerprint, refused as it
-    /// loads: the pair is, and on the 8th the pair of the 7th is scored, its
-    /// short too, never the 8th's short beside the 7th's long.
+    /// The model set of the 8th has a long of another fingerprint, refused
+    /// as it loads: as the handle decides no trade on it, nor on the
+    /// model set of the 7th, no row of the 8th is scored, of either side;
+    /// the 7th's are.
     #[rstest]
-    fn a_model_failing_its_checks_is_not_scored_and_the_current_one_is() {
+    fn rows_of_a_model_set_failing_its_checks_are_not_scored() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk(dir.path());
         build(dir.path());
         let eighth = at("2026-01-08T00:00:00Z");
         publish(dir.path(), &config(), at("2026-01-07T00:00:00Z"));
-        store(dir.path(), &config(), Side::Long)
-            .publish(&model(eighth, "f".repeat(64), 0.5))
-            .unwrap();
         let fingerprint = dataset(dir.path(), &config()).fingerprint().to_string();
-        store(dir.path(), &config(), Side::Short)
-            .publish(&model(eighth, fingerprint, 0.5))
-            .unwrap();
+        publish_model_set(
+            dir.path(),
+            &config(),
+            eighth,
+            vec![
+                model_of(&config(), Side::Long, "f".repeat(64), 0.5),
+                model_of(&config(), Side::Short, fingerprint, 0.5),
+            ],
+            None,
+        );
 
         let scores = walk
             .scores(at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"))
             .unwrap();
 
         for side in [scores.long.unwrap(), scores.short.unwrap()] {
-            let second = &side.periods[1];
-            assert_eq!(second.models, [at("2026-01-07T00:00:00Z")], "{second:?}");
-            assert_eq!(second.score.rows, 2, "{second:?}");
+            let [first, second] = &side.periods[..] else {
+                panic!("{side:?}");
+            };
+            assert_eq!(first.score.rows, 3, "{first:?}");
+            assert!(second.models.is_empty(), "{second:?}");
+            assert_eq!(second.score.rows, 0, "{second:?}");
         }
+    }
+
+    /// A model set's meta is scored beside its own sides alone: the meta
+    /// scores the 7th's three rows with the 7th's model set, and the two
+    /// the 8th's sides pick with the 8th's, never the 7th's meta beside the
+    /// 8th's sides.
+    #[rstest]
+    fn a_meta_is_scored_beside_its_own_model_sets_sides_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = with_meta();
+        let walk = walk_of(dir.path(), &config);
+        dataset(dir.path(), &config)
+            .write(
+                &rows(),
+                at("2026-01-06T00:00:00Z"),
+                at("2026-01-09T01:00:00Z"),
+            )
+            .unwrap();
+        let fingerprint = dataset(dir.path(), &config).fingerprint().to_string();
+        publish_opposed(
+            dir.path(),
+            &config,
+            at("2026-01-07T00:00:00Z"),
+            Some(meta_model(fingerprint.clone())),
+        );
+        publish_opposed(
+            dir.path(),
+            &config,
+            at("2026-01-08T00:00:00Z"),
+            Some(meta_model(fingerprint)),
+        );
+
+        let scores = walk
+            .scores(at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"))
+            .unwrap();
+
+        let meta = scores.meta.unwrap();
+        assert_eq!(meta.periods[0].score.rows, 3, "{meta:?}");
+        assert_eq!(
+            meta.periods[0].models,
+            [at("2026-01-07T00:00:00Z")],
+            "{meta:?}"
+        );
+        assert_eq!(meta.periods[1].score.rows, 2, "{meta:?}");
+        assert_eq!(
+            meta.periods[1].models,
+            [at("2026-01-08T00:00:00Z")],
+            "{meta:?}"
+        );
+        trades_are(scores.long.unwrap().periods[1].earnings.taken, 1, 1.0);
     }
 
     /// A baseline is a model's: the 7th's three rows, decided with none,
@@ -1313,7 +1308,7 @@ mod tests {
         assert_eq!(long.score.rows, 2);
     }
 
-    /// A pair published off the schedule, valid from 12:00 of the 7th, its
+    /// A model set published off the schedule, valid from 12:00 of the 7th, its
     /// long's baseline 1/4: the period of the 7th uses the 7th's long, its
     /// baseline 1/3, at 04:00 and 08:00, a win and a loss, and the later one
     /// at 12:00, a loss, each row scored beside the baseline of the model
@@ -1329,15 +1324,15 @@ mod tests {
             publish(dir.path(), &config(), at);
         }
         let fingerprint = dataset(dir.path(), &config()).fingerprint().to_string();
-        for (side, baseline) in [(Side::Long, 0.25), (Side::Short, 0.75)] {
-            store(dir.path(), &config(), side)
-                .publish(&model(
-                    at("2026-01-07T12:00:00Z"),
-                    fingerprint.clone(),
-                    baseline,
-                ))
-                .unwrap();
-        }
+        let sides = [(Side::Long, 0.25), (Side::Short, 0.75)]
+            .map(|(side, baseline)| model_of(&config(), side, fingerprint.clone(), baseline));
+        publish_model_set(
+            dir.path(),
+            &config(),
+            at("2026-01-07T12:00:00Z"),
+            sides.into(),
+            None,
+        );
 
         let scores = walk
             .scores(at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"))
@@ -1474,207 +1469,13 @@ Meta model scores, out of sample, over the span
         config.meta = Some(
             MetaConfig::builder()
                 .window(SignedDuration::from_hours(48))
-                .holdout(SignedDuration::from_hours(6))
+                .calibration(SignedDuration::from_hours(6))
                 .margin(R::new(0.3))
-                .min_expectancy(R::new(0.0))
-                .min_trades(1)
+                .min_rows(1)
                 .learner(LearnerConfig::Fake {})
                 .build(),
         );
         config
-    }
-
-    /// The sides' models in the store at both retrain times and the two
-    /// days before, their meta model's at none: the backtest builds from the
-    /// meta's longer window and trains at both times, where the meta lacks
-    /// a model.
-    #[rstest]
-    fn a_backtest_with_a_meta_model_builds_its_window_and_trains_where_either_lacks() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("catalog")).unwrap();
-        let walk = blueprint(&with_meta())
-            .walk_forward(&dir.path().join("catalog"), &dir.path().join("models"))
-            .unwrap();
-        for at in [
-            at("2026-01-05T00:00:00Z"),
-            at("2026-01-06T00:00:00Z"),
-            at("2026-01-07T00:00:00Z"),
-            at("2026-01-08T00:00:00Z"),
-        ] {
-            publish(dir.path(), &with_meta(), at);
-        }
-        let (built, trained) = (RefCell::new(vec![]), RefCell::new(vec![]));
-
-        walk.prepare(
-            at("2026-01-07T00:00:00Z"),
-            at("2026-01-09T00:00:00Z"),
-            |from, to| {
-                built.borrow_mut().push((from, to));
-                Ok(())
-            },
-            |at| {
-                trained.borrow_mut().push(at);
-                Ok(())
-            },
-        )
-        .unwrap();
-
-        assert_eq!(
-            built.take(),
-            [(at("2026-01-05T00:00:00Z"), at("2026-01-09T00:00:00Z"))]
-        );
-        assert_eq!(
-            trained.take(),
-            [at("2026-01-07T00:00:00Z"), at("2026-01-08T00:00:00Z")]
-        );
-    }
-
-    /// What `prepare` of `walk` over the 7th and the 8th built, its trains
-    /// training nothing.
-    fn built(walk: &WalkForward) -> Vec<(Timestamp, Timestamp)> {
-        let built = RefCell::new(vec![]);
-        walk.prepare(
-            at("2026-01-07T00:00:00Z"),
-            at("2026-01-09T00:00:00Z"),
-            |from, to| {
-                built.borrow_mut().push((from, to));
-                Ok(())
-            },
-            |_| Ok(()),
-        )
-        .unwrap();
-        built.take()
-    }
-
-    /// On an empty store the meta waits at the first retrain, the 7th, with
-    /// no side's model before it, so reads no row there: the backtest
-    /// builds from the sides' window, the 6th, not the meta's.
-    #[rstest]
-    fn a_backtest_from_an_empty_store_builds_from_the_sides_window_its_meta_waiting() {
-        let dir = tempfile::tempdir().unwrap();
-
-        let built = built(&meta_walk(dir.path()));
-
-        assert_eq!(
-            built,
-            [(at("2026-01-06T00:00:00Z"), at("2026-01-09T00:00:00Z"))]
-        );
-    }
-
-    /// The sides' first model is the 6th's: the meta's rows, its
-    /// decisions, start there, though its window starts on the 5th.
-    #[rstest]
-    fn a_backtest_builds_no_day_before_the_sides_first_model() {
-        let dir = tempfile::tempdir().unwrap();
-        for at in [
-            at("2026-01-06T00:00:00Z"),
-            at("2026-01-07T00:00:00Z"),
-            at("2026-01-08T00:00:00Z"),
-        ] {
-            publish(dir.path(), &with_meta(), at);
-        }
-
-        let built = built(&meta_walk(dir.path()));
-
-        assert_eq!(
-            built,
-            [(at("2026-01-06T00:00:00Z"), at("2026-01-09T00:00:00Z"))]
-        );
-    }
-
-    /// The walk of `with_meta` in `dir`, its catalog and store side by side.
-    fn meta_walk(dir: &Path) -> WalkForward {
-        walk_of(dir, &with_meta())
-    }
-
-    /// The store of the meta models of `meta_walk(dir)`.
-    fn meta_store(dir: &Path) -> ModelStore {
-        meta_store_of(dir, &with_meta())
-    }
-
-    /// The store of the meta models of a walk in `dir` as `config` says.
-    fn meta_store_of(dir: &Path, config: &ModelConfig) -> ModelStore {
-        models(dir, config).meta().unwrap().store().clone()
-    }
-
-    /// A train of `meta_walk(dir)` at `at`, publishing as
-    /// `Training::train_at` may: the sides, and the meta if the sides
-    /// had a model before `at`.
-    fn train_both(dir: &Path, at: Timestamp) -> anyhow::Result<()> {
-        let config = with_meta();
-        let earlier = store(dir, &config, Side::Long)
-            .valid_froms()?
-            .first()
-            .is_some_and(|&t| t < at);
-        publish(dir, &config, at);
-        if earlier {
-            let fingerprint = dataset(dir, &config).fingerprint().to_string();
-            meta_store(dir).publish(&model(at, fingerprint, 0.5))?;
-        }
-        Ok(())
-    }
-
-    /// A meta model has no row before its sides' first model, so none
-    /// is trained at the sides' first retrain time: a second backtest
-    /// of the span finds nothing to train.
-    #[rstest]
-    fn a_second_backtest_with_a_meta_model_trains_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let walk = meta_walk(dir.path());
-        let span = (at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"));
-        walk.prepare(
-            span.0,
-            span.1,
-            |_, _| Ok(()),
-            |at| train_both(dir.path(), at),
-        )
-        .unwrap();
-        let trained = RefCell::new(vec![]);
-
-        walk.prepare(
-            span.0,
-            span.1,
-            |_, _| Ok(()),
-            |at| {
-                trained.borrow_mut().push(at);
-                Ok(())
-            },
-        )
-        .unwrap();
-
-        assert_eq!(trained.take(), []);
-    }
-
-    /// A backtest from the 8th trains no meta there, the sides' first
-    /// model; a backtest from the 7th then trains the sides at the 7th
-    /// first, which gives the meta at the 8th rows: it trains there too.
-    #[rstest]
-    fn a_backtest_from_earlier_trains_the_meta_where_the_sides_now_precede_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let walk = meta_walk(dir.path());
-        let end = at("2026-01-10T00:00:00Z");
-        walk.prepare(
-            at("2026-01-08T00:00:00Z"),
-            end,
-            |_, _| Ok(()),
-            |at| train_both(dir.path(), at),
-        )
-        .unwrap();
-        let meta = meta_store(dir.path());
-        assert_eq!(meta.valid_froms().unwrap(), [at("2026-01-09T00:00:00Z")]);
-
-        walk.prepare(
-            at("2026-01-07T00:00:00Z"),
-            end,
-            |_, _| Ok(()),
-            |at| train_both(dir.path(), at),
-        )
-        .unwrap();
-
-        assert_eq!(
-            meta.valid_froms().unwrap(),
-            [at("2026-01-08T00:00:00Z"), at("2026-01-09T00:00:00Z")]
-        );
     }
 
     #[rstest]
@@ -1715,107 +1516,6 @@ Meta model scores, out of sample, over the span
         }
     }
 
-    /// What a backtest's preparation asked for: the spans built and the
-    /// times trained at.
-    type Asked = (Vec<(Timestamp, Timestamp)>, Vec<Timestamp>);
-
-    /// What `prepare` of `walk`, in `dir`, over `[start, end)` asked for,
-    /// or its error. The build writes the dataset; a train publishes a
-    /// model of each side of `published`, if any, as a train of it would,
-    /// and none if its holdouts fell short.
-    fn prepared(
-        dir: &Path,
-        walk: &WalkForward,
-        (start, end): (&str, &str),
-        published: Option<&ModelConfig>,
-    ) -> anyhow::Result<Asked> {
-        let (built, trained) = (RefCell::new(vec![]), RefCell::new(vec![]));
-        walk.prepare(
-            at(start),
-            at(end),
-            |from, to| {
-                built.borrow_mut().push((from, to));
-                build(dir);
-                Ok(())
-            },
-            |at| {
-                trained.borrow_mut().push(at);
-                if let Some(config) = published {
-                    publish(dir, config, at);
-                }
-                Ok(())
-            },
-        )?;
-        Ok((built.take(), trained.take()))
-    }
-
-    /// Never retrained, the backtest from 12:00 of the 7th trains at its
-    /// start alone, off the daily grid, and builds from its window back
-    /// from there.
-    #[rstest]
-    fn a_backtest_never_retrained_builds_its_window_and_trains_at_its_start_alone() {
-        let dir = tempfile::tempdir().unwrap();
-        let walk = walk_of(dir.path(), &never());
-
-        let (built, trained) = prepared(
-            dir.path(),
-            &walk,
-            ("2026-01-07T12:00:00Z", "2026-01-09T00:00:00Z"),
-            Some(&never()),
-        )
-        .unwrap();
-
-        assert_eq!(
-            built,
-            [(at("2026-01-06T12:00:00Z"), at("2026-01-09T00:00:00Z"))]
-        );
-        assert_eq!(trained, [at("2026-01-07T12:00:00Z")]);
-    }
-
-    /// The models trained at the first backtest's start, 12:00 of the 7th,
-    /// are in use at a second's of the same span, and at one from the 8th.
-    #[rstest]
-    #[case::of_the_span("2026-01-07T12:00:00Z")]
-    #[case::from_later("2026-01-08T00:00:00Z")]
-    fn a_second_backtest_never_retrained_of_the_span_or_from_later_trains_nothing(
-        #[case] start: &str,
-    ) {
-        let dir = tempfile::tempdir().unwrap();
-        let walk = walk_of(dir.path(), &never());
-        let end = "2026-01-09T00:00:00Z";
-        prepared(
-            dir.path(),
-            &walk,
-            ("2026-01-07T12:00:00Z", end),
-            Some(&never()),
-        )
-        .unwrap();
-
-        let (_, trained) = prepared(dir.path(), &walk, (start, end), Some(&never())).unwrap();
-
-        assert_eq!(trained, []);
-    }
-
-    /// Never retrained, the train at the start published no side: the
-    /// backtest would trade nothing, and is refused, naming the sides.
-    #[rstest]
-    fn a_backtest_never_retrained_with_no_sides_model_at_its_start_is_refused_naming_the_sides() {
-        let dir = tempfile::tempdir().unwrap();
-        let walk = walk_of(dir.path(), &never());
-
-        let err = prepared(
-            dir.path(),
-            &walk,
-            ("2026-01-07T00:00:00Z", "2026-01-09T00:00:00Z"),
-            None,
-        )
-        .unwrap_err()
-        .to_string();
-
-        assert!(err.contains("no side has a model in use"), "{err}");
-        assert!(!err.contains("meta"), "{err}");
-    }
-
     /// `with_meta`, never retrained.
     fn never_with_meta() -> ModelConfig {
         ModelConfig {
@@ -1824,107 +1524,94 @@ Meta model scores, out of sample, over the span
         }
     }
 
-    /// What `prepare` of the walk of `never_with_meta` in `dir` over the
-    /// 7th and the 8th asked for, or its error, on an empty store. A train
-    /// publishes as a train of two times would: if `sides`, a model of
-    /// each side valid from the meta's window of 48 hours before it, and
-    /// if `meta`, a meta model valid from it.
-    fn prepared_two_time(dir: &Path, sides: bool, meta: bool) -> anyhow::Result<Asked> {
-        let config = never_with_meta();
-        let walk = walk_of(dir, &config);
-        let (built, trained) = (RefCell::new(vec![]), RefCell::new(vec![]));
-        walk.prepare(
-            at("2026-01-07T00:00:00Z"),
-            at("2026-01-09T00:00:00Z"),
-            |from, to| {
-                built.borrow_mut().push((from, to));
-                Ok(())
-            },
-            |at| {
-                trained.borrow_mut().push(at);
-                if sides {
-                    publish(dir, &config, at - SignedDuration::from_hours(48));
+    /// A model set published to the store of a walk in `dir` as `config`
+    /// says: of the sides alone, or with a meta model.
+    #[derive(Debug, Clone, Copy)]
+    enum Published {
+        Sides(&'static str),
+        WithMeta(&'static str),
+    }
+
+    /// Publishes `published` to the store of a walk in `dir` as `config`
+    /// says.
+    fn publish_each(dir: &Path, config: &ModelConfig, published: &[Published]) {
+        let fingerprint = dataset(dir, config).fingerprint().to_string();
+
+        for &model_set in published {
+            match model_set {
+                Published::Sides(valid_from) => publish(dir, config, at(valid_from)),
+                Published::WithMeta(valid_from) => {
+                    publish_opposed(
+                        dir,
+                        config,
+                        at(valid_from),
+                        Some(meta_model(fingerprint.clone())),
+                    );
                 }
-                if meta {
-                    let fingerprint = dataset(dir, &config).fingerprint().to_string();
-                    meta_store_of(dir, &config).publish(&model(at, fingerprint, 0.5))?;
-                }
-                Ok(())
-            },
-        )?;
-        Ok((built.take(), trained.take()))
+            }
+        }
     }
 
-    /// Never retrained, on an empty store, the plan of the train at the
-    /// start, the 7th, fits the sides as of the 5th, on their window back
-    /// from there: the backtest builds from the 4th, trains at the start
-    /// alone, and runs, the sides of the 5th and the meta of the 7th in
-    /// use.
+    /// A backtest from 12:00 of the 7th to the 9th whose store holds no
+    /// model set to trade on at its start is untrained there: at the span's
+    /// first train time, retrained daily the midnight of the 7th, never
+    /// retrained its start; nor one whose model sets come after the start,
+    /// with a meta level or without.
     #[rstest]
-    fn a_backtest_never_retrained_on_an_empty_store_builds_back_to_the_sides_window_and_has_both_in_use_at_its_start()
-     {
+    #[case::retrained_on_an_empty_store(config(), &[], "2026-01-07T00:00:00Z")]
+    #[case::never_retrained_on_an_empty_store(never(), &[], "2026-01-07T12:00:00Z")]
+    #[case::with_model_sets_after_its_start(
+        config(),
+        &[Published::Sides("2026-01-08T00:00:00Z")],
+        "2026-01-07T00:00:00Z"
+    )]
+    #[case::with_a_meta_and_model_sets_after_its_start(
+        with_meta(),
+        &[Published::WithMeta("2026-01-08T00:00:00Z")],
+        "2026-01-07T00:00:00Z"
+    )]
+    fn a_backtest_with_no_model_to_trade_on_at_its_start_is_untrained_at_its_first_train_time(
+        #[case] config: ModelConfig,
+        #[case] published: &[Published],
+        #[case] first: &str,
+    ) {
         let dir = tempfile::tempdir().unwrap();
+        let walk = walk_of(dir.path(), &config);
+        publish_each(dir.path(), &config, published);
 
-        let (built, trained) = prepared_two_time(dir.path(), true, true).unwrap();
+        let untrained = walk
+            .untrained(at("2026-01-07T12:00:00Z"), at("2026-01-09T00:00:00Z"))
+            .unwrap();
 
-        assert_eq!(
-            built,
-            [(at("2026-01-04T00:00:00Z"), at("2026-01-09T00:00:00Z"))]
-        );
-        assert_eq!(trained, [at("2026-01-07T00:00:00Z")]);
+        assert_eq!(untrained, Some(at(first)));
     }
 
-    /// Never retrained, on an empty store, the train at the start
-    /// publishes the sides as of the meta's window before it, and its
-    /// meta's holdout falls short: the backtest is refused, naming the
-    /// meta.
+    /// A backtest from 12:00 of the 7th whose store holds a model set to
+    /// trade on by then trains nothing: the model set of the 6th, published
+    /// at no retrain time of the span, decides until the next, retrained or
+    /// not; with a meta level, holding a meta model, as does a retrained
+    /// one's first model set, of the 7th, its first retrain time.
     #[rstest]
-    fn a_backtest_never_retrained_whose_meta_was_refused_at_its_start_is_refused_naming_it() {
+    #[case::retrained(config(), &[Published::Sides("2026-01-06T00:00:00Z")])]
+    #[case::never_retrained(never(), &[Published::Sides("2026-01-06T00:00:00Z")])]
+    #[case::with_a_meta_model(never_with_meta(), &[Published::WithMeta("2026-01-06T00:00:00Z")])]
+    #[case::retrained_with_a_meta_model_from_its_first_retrain_time(
+        with_meta(),
+        &[Published::WithMeta("2026-01-07T00:00:00Z")]
+    )]
+    fn a_backtest_with_models_to_trade_on_at_its_start_is_not_untrained(
+        #[case] config: ModelConfig,
+        #[case] published: &[Published],
+    ) {
         let dir = tempfile::tempdir().unwrap();
+        let walk = walk_of(dir.path(), &config);
+        publish_each(dir.path(), &config, published);
 
-        let err = prepared_two_time(dir.path(), true, false)
-            .unwrap_err()
-            .to_string();
+        let untrained = walk
+            .untrained(at("2026-01-07T12:00:00Z"), at("2026-01-09T00:00:00Z"))
+            .unwrap();
 
-        assert!(err.contains("meta"), "{err}");
-        assert!(!err.contains("no side"), "{err}");
-    }
-
-    /// Never retrained, on an empty store, the train at the start
-    /// publishes no side, and so leaves the meta waiting: the backtest is
-    /// refused, naming the sides and the meta.
-    #[rstest]
-    fn a_backtest_never_retrained_whose_sides_were_refused_at_its_start_is_refused_naming_both() {
-        let dir = tempfile::tempdir().unwrap();
-
-        let err = prepared_two_time(dir.path(), false, false)
-            .unwrap_err()
-            .to_string();
-
-        assert!(
-            err.contains("no side has a model in use") && err.contains("meta"),
-            "{err}"
-        );
-    }
-
-    /// Retrained, a backtest whose every train published nothing runs: a
-    /// later retrain may publish, and its sides' scores stay.
-    #[rstest]
-    fn a_retrained_backtest_whose_trains_were_all_refused_still_runs() {
-        let dir = tempfile::tempdir().unwrap();
-
-        let (_, trained) = prepared(
-            dir.path(),
-            &walk(dir.path()),
-            ("2026-01-07T00:00:00Z", "2026-01-09T00:00:00Z"),
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(
-            trained,
-            [at("2026-01-07T00:00:00Z"), at("2026-01-08T00:00:00Z")]
-        );
+        assert_eq!(untrained, None);
     }
 
     /// Never retrained, the models trained at the start, the 7th, are used
@@ -1934,8 +1621,9 @@ Meta model scores, out of sample, over the span
     fn a_backtest_never_retrained_scores_the_span_as_one_period() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk_of(dir.path(), &never());
+        build(dir.path());
+        publish(dir.path(), &never(), at("2026-01-07T00:00:00Z"));
         let span = ("2026-01-07T00:00:00Z", "2026-01-09T00:00:00Z");
-        prepared(dir.path(), &walk, span, Some(&never())).unwrap();
 
         let scores = walk.scores(at(span.0), at(span.1)).unwrap();
 
@@ -1954,43 +1642,18 @@ Meta model scores, out of sample, over the span
         assert_eq!(period.score.rows, 5);
     }
 
-    /// Never retrained, each side's model of the 7th is in use at a
-    /// backtest from the 8th: its plan fits nothing, so it trains nothing
-    /// and builds only the span's day, the scores reading no row before it.
-    #[rstest]
-    fn a_backtest_never_retrained_with_its_models_in_use_builds_only_its_span() {
-        let dir = tempfile::tempdir().unwrap();
-        let walk = walk_of(dir.path(), &never());
-        publish(dir.path(), &never(), at("2026-01-07T00:00:00Z"));
-
-        let (built, trained) = prepared(
-            dir.path(),
-            &walk,
-            ("2026-01-08T00:00:00Z", "2026-01-09T00:00:00Z"),
-            Some(&never()),
-        )
-        .unwrap();
-
-        assert_eq!(
-            built,
-            [(at("2026-01-08T00:00:00Z"), at("2026-01-09T00:00:00Z"))]
-        );
-        assert_eq!(trained, []);
-    }
-
     /// Never retrained, the long's model of the 7th in use over a backtest
-    /// from the 8th is scored beside its own baseline, the training mean of R
-    /// its train fitted at the 7th, on the rows of the 6th before the
-    /// holdout from 18:00, 1/3 (`trained_baseline`): on the 8th's two wins at
+    /// from the 8th is scored beside its own baseline, the one its manifest
+    /// carries, 1/3 (`trained_baseline`): on the 8th's two wins at
     /// 0.9 and 0.2, squared errors 0.65 against 8/9, a skill of 1 - 0.65 x
     /// 9/8, where the 8th's baseline, -1/3, would make 1 - 0.65 x 9/32.
     #[rstest]
     fn a_backtest_never_retrained_scores_a_model_beside_its_own_baseline() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk_of(dir.path(), &never());
+        build(dir.path());
         publish(dir.path(), &never(), at("2026-01-07T00:00:00Z"));
         let span = ("2026-01-08T00:00:00Z", "2026-01-09T00:00:00Z");
-        prepared(dir.path(), &walk, span, Some(&never())).unwrap();
 
         let scores = walk.scores(at(span.0), at(span.1)).unwrap();
 
@@ -2003,39 +1666,9 @@ Meta model scores, out of sample, over the span
         close(period.skill, 1.0 - 0.65 * 9.0 / 8.0);
     }
 
-    /// Never retrained, the long's model of the 7th has no short beside it,
-    /// so no pair is in use at a backtest from the 8th: its train there is
-    /// refused, and the backtest, which would trade nothing, is refused too,
-    /// naming the sides.
-    #[rstest]
-    fn a_backtest_never_retrained_with_a_side_alone_at_its_start_is_refused_naming_the_sides() {
-        let dir = tempfile::tempdir().unwrap();
-        let walk = walk_of(dir.path(), &never());
-        let fingerprint = dataset(dir.path(), &never()).fingerprint().to_string();
-        let seventh = at("2026-01-07T00:00:00Z");
-        store(dir.path(), &never(), Side::Long)
-            .publish(&model(
-                seventh,
-                fingerprint,
-                trained_baseline(Side::Long, seventh),
-            ))
-            .unwrap();
-
-        let err = prepared(
-            dir.path(),
-            &walk,
-            ("2026-01-08T00:00:00Z", "2026-01-09T00:00:00Z"),
-            None,
-        )
-        .unwrap_err()
-        .to_string();
-
-        assert!(err.contains("no side has a model in use"), "{err}");
-    }
-
     /// Retrained, the models of the 7th are in use over both periods, the
-    /// train of the 8th refused: on the 8th the long's model of the 7th is
-    /// scored beside its own baseline, 1/3 (`trained_baseline`), not the
+    /// store holding none of the 8th: on the 8th the long's model of the 7th
+    /// is scored beside its own baseline, 1/3 (`trained_baseline`), not the
     /// training mean a train of the 8th would have fitted, -1/3: on the 8th's
     /// two wins, a skill of 1 - 0.65 x 9/8.
     #[rstest]

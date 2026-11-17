@@ -107,8 +107,8 @@ use super::{
     blueprint::ModelBlueprint,
     decide::{self, DecisionRule},
     deciding::SideRow,
+    earnings::Trade,
     features::{FeatureSet, Fingerprint},
-    holdout::Trade,
     targets::{self, PerSide, Side, TargetConfig, TargetRow},
 };
 use crate::{
@@ -285,6 +285,15 @@ impl DatasetVenue {
     }
 }
 
+/// The days of the dataset a train read (`Dataset::settled`): those its
+/// replay built, from the first the dataset lacked to the last, and those
+/// before it, taken from the cache.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DaysRead {
+    pub built: usize,
+    pub cached: usize,
+}
+
 /// The dataset of one strategy in a catalog.
 #[derive(Debug, Clone)]
 pub struct Dataset {
@@ -366,6 +375,9 @@ impl Dataset {
     /// written (see `write`), the rows before the first not; the rows of
     /// the days still unsettled, the last before `at`, are taken from the
     /// replay alone. A row whose positions close after `at` is dropped.
+    /// With the rows, the days of `[from, at)` read (`DaysRead`): those
+    /// from the first missing to the last, replayed, built; those before,
+    /// cached.
     ///
     /// # Errors
     ///
@@ -376,10 +388,20 @@ impl Dataset {
         from: Timestamp,
         at: Timestamp,
         replay: impl FnOnce(Timestamp, Timestamp) -> anyhow::Result<Vec<TargetRow>>,
-    ) -> anyhow::Result<Vec<DatasetRow>> {
+    ) -> anyhow::Result<(Vec<DatasetRow>, DaysRead)> {
         let (first, last) = days(from, at);
         let mut rows = vec![];
-        if let Some(&day) = self.missing(first, last)?.first() {
+        let first_missing = self.missing(first, last)?.first().copied();
+        let built = match first_missing {
+            Some(day) => days_from(day, last)?,
+            None => 0,
+        };
+        let read = DaysRead {
+            built,
+            cached: days_from(first, last)? - built,
+        };
+
+        if let Some(day) = first_missing {
             let start = start_of(day)?;
             let replayed = replay(start - self.warmup, at)?;
             self.write(&replayed, start, at)?;
@@ -395,7 +417,7 @@ impl Dataset {
         let (from, at) = (UnixNanos::from(from), UnixNanos::from(at));
         rows.retain(|row| from <= row.ts_event && row.ts_event < at && row.settled_at <= at);
         rows.sort_by_key(|row| row.ts_init);
-        Ok(rows)
+        Ok((rows, read))
     }
 
     /// The fingerprint the rows are stored under.
@@ -755,6 +777,11 @@ pub fn days(from: Timestamp, to: Timestamp) -> (Date, Date) {
     )
 }
 
+/// How many days `first` to `last` are, both counted.
+fn days_from(first: Date, last: Date) -> anyhow::Result<usize> {
+    Ok(usize::try_from(first.until(last)?.get_days())? + 1)
+}
+
 /// The UTC day of `time`.
 fn day_of(time: UnixNanos) -> Date {
     Timestamp::from(time).to_zoned(TimeZone::UTC).date()
@@ -894,13 +921,12 @@ mod tests {
             .target(target)
             .dataset(venue)
             .window(SignedDuration::from_hours(24))
-            .holdout(SignedDuration::from_hours(6))
+            .calibration(SignedDuration::from_hours(6))
             .margins(Margins {
                 long: Some(R::new(0.0)),
                 short: Some(R::new(0.0)),
             })
-            .min_expectancy(R::new(0.0))
-            .min_trades(1)
+            .min_rows(1)
             .learner(LearnerConfig::Fake {})
             .build();
         ModelBlueprint::new(StrategyId::from(strategy), features, config, requirements).unwrap()
@@ -1504,7 +1530,7 @@ mod tests {
     /// bump of `VERSION` or a new input to the fingerprint, updates the
     /// literal here, and the pinned directory of a store, which the
     /// fingerprint keys too
-    /// (`store::tests::a_fixed_strategys_side_store_keeps_its_directory`).
+    /// (`store::tests::a_fixed_strategys_model_sets_keep_their_directory`).
     #[rstest]
     fn a_fixed_strategys_dataset_keeps_its_identifier() {
         let dataset = dataset(Path::new("catalog"), STRATEGY, 1);
@@ -1829,7 +1855,7 @@ mod tests {
         ];
         let mut replays = vec![];
 
-        let settled = dataset
+        let (settled, _) = dataset
             .settled(
                 at("2026-01-05T00:00:00Z"),
                 at("2026-01-05T12:00:00Z"),
@@ -1895,6 +1921,7 @@ mod tests {
         assert!(err.downcast_ref::<SchemaMismatch>().is_some(), "{err:#}");
     }
 
+    /// The dataset empty, the 5th to the 7th are each built by the replay.
     #[rstest]
     fn the_settled_rows_are_those_of_the_span_settled_at_its_end() {
         let dir = tempfile::tempdir().unwrap();
@@ -1908,7 +1935,7 @@ mod tests {
         ];
         let mut replays = vec![];
 
-        let settled = dataset
+        let (settled, days) = dataset
             .settled(
                 at("2026-01-05T09:00:00Z"),
                 at("2026-01-07T10:00:00Z"),
@@ -1923,6 +1950,13 @@ mod tests {
             replays,
             [(at("2026-01-05T00:00:00Z"), at("2026-01-07T10:00:00Z"))]
         );
+        assert_eq!(
+            days,
+            DaysRead {
+                built: 3,
+                cached: 0
+            }
+        );
         assert_bits_eq(
             &settled,
             &[
@@ -1932,6 +1966,8 @@ mod tests {
         );
     }
 
+    /// The 5th and the 6th, settled by the first train's end, are cached; the
+    /// 7th, unsettled, built again.
     #[rstest]
     fn the_days_settled_at_the_end_are_cached_and_the_others_replayed_again() {
         let dir = tempfile::tempdir().unwrap();
@@ -1951,7 +1987,7 @@ mod tests {
         let missing = dataset
             .missing(day("2026-01-05"), day("2026-01-07"))
             .unwrap();
-        let settled = dataset
+        let (settled, days) = dataset
             .settled(from, end, |from, to| {
                 replays.push((from, to));
                 Ok(rows[2..].to_vec())
@@ -1960,6 +1996,13 @@ mod tests {
 
         assert_eq!(missing, [day("2026-01-07")]);
         assert_eq!(replays, [(at("2026-01-07T00:00:00Z"), end)]);
+        assert_eq!(
+            days,
+            DaysRead {
+                built: 1,
+                cached: 2
+            }
+        );
         assert_bits_eq(
             &settled,
             &[
@@ -1970,6 +2013,7 @@ mod tests {
         );
     }
 
+    /// The 5th, written, is cached.
     #[rstest]
     fn settled_rows_of_cached_days_replay_nothing() {
         let dir = tempfile::tempdir().unwrap();
@@ -1982,7 +2026,7 @@ mod tests {
             )
             .unwrap();
 
-        let settled = dataset
+        let (settled, days) = dataset
             .settled(
                 at("2026-01-05T00:00:00Z"),
                 at("2026-01-06T00:00:00Z"),
@@ -1991,5 +2035,12 @@ mod tests {
             .unwrap();
 
         assert_bits_eq(&settled, &[stored("2026-01-05T09:00:00Z", vec![1.0], 1.0)]);
+        assert_eq!(
+            days,
+            DaysRead {
+                built: 0,
+                cached: 1
+            }
+        );
     }
 }

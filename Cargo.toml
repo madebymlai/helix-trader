@@ -365,6 +365,12 @@ tokio.workspace = true
 toml = "1"
 ustr.workspace = true
 
+# getrusage, for the CPU time and peak memory `train` reports
+# (`model::report`), which Nautilus does not read: Unix alone. Already in the
+# tree, Nautilus' and Tokio's.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # The `DataClient` trait of the test venues' data clients.
 async-trait.workspace = true

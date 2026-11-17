@@ -21,12 +21,12 @@ use helix_trader::{
         config::{Margins, ModelConfig},
         dataset::DatasetRow,
         learner::{LearnerConfig, LightGbmConfig, TrainingSet},
-        store::{ModelStore, Probe},
+        store::{Probe, StoredModel},
         targets::{BracketSpec, Distance, Side, Target, TargetConfig},
     },
     strategy::risk::R,
 };
-use jiff::SignedDuration;
+use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
 use nautilus_model::types::Money;
 use rstest::rstest;
@@ -36,20 +36,21 @@ use crate::{
     backtest_targets::hand_worked_quotes,
     common::{
         dataset::{
-            baseline_of, blueprint, config, features, r, replay, replay_of, target, trade, walk,
+            baseline_of, blueprint, config, features, model_set, r, replay, replay_of, target,
+            trade, walk,
         },
         ic,
     },
 };
 
-fn store(models: &Path, config: &ModelConfig, side: Side) -> ModelStore {
+/// Publishes under `models` the model set of `config`, trading one side,
+/// valid from `valid_from`, of that side's model `model`.
+fn publish(models: &Path, config: &ModelConfig, valid_from: Timestamp, model: StoredModel) {
     blueprint(features(), config.clone())
-        .model_set(models)
+        .model_store(models)
         .unwrap()
-        .side(side)
-        .unwrap()
-        .store()
-        .clone()
+        .publish(&model_set(config, valid_from, vec![model], None))
+        .unwrap();
 }
 
 /// Decisions from midnight of the 21st to 06:00, on the hour, 10 ms late,
@@ -72,22 +73,19 @@ fn each_decision_uses_the_latest_model_valid_at_or_before_it() {
         },
         ..config()
     };
-    let store = store(models.path(), &config, Side::Long);
+
     for (valid_from, tenths) in [
         ("02:00:00", 7),
         ("04:00:00", 8),
         ("04:30:00", 9),
         ("09:00:00", 9),
     ] {
-        store
-            .publish(&baseline_of(
-                &features(),
-                &config,
-                Side::Long,
-                ic::at(valid_from),
-                tenths,
-            ))
-            .unwrap();
+        publish(
+            models.path(),
+            &config,
+            ic::at(valid_from),
+            baseline_of(&features(), &config, Side::Long, tenths),
+        );
     }
 
     let record = trade(
@@ -156,7 +154,7 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
         },
         ..config()
     };
-    let holdout = t - config.holdout;
+    let holdout = t - config.calibration;
     let rows = std::thread::scope(|scope| {
         scope
             .spawn(|| replay(&catalog, t - config.window, t).unwrap())
@@ -179,7 +177,7 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
     )
     .unwrap();
     let fitted = learner.fit(&set).unwrap();
-    let mut model = baseline_of(&features(), &config, Side::Long, holdout, 5);
+    let mut model = baseline_of(&features(), &config, Side::Long, 5);
     model.manifest.learner = learner;
     model.manifest.probes = held_out
         .iter()
@@ -189,9 +187,7 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
         })
         .collect();
     model.model = fitted.save().unwrap();
-    store(models.path(), &config, Side::Long)
-        .publish(&model)
-        .unwrap();
+    publish(models.path(), &config, holdout, model.clone());
 
     let record = trade(&catalog, holdout, t, &config, models.path());
 
@@ -254,7 +250,7 @@ fn a_decision_reads_each_sides_row_as_its_dataset_row_holds_it() {
         },
         ..config()
     };
-    let holdout = t - config.holdout;
+    let holdout = t - config.calibration;
     let rows: Vec<DatasetRow> = std::thread::scope(|scope| {
         scope
             .spawn(|| replay(&catalog, t - config.window, t).unwrap())
@@ -286,13 +282,11 @@ fn a_decision_reads_each_sides_row_as_its_dataset_row_holds_it() {
     )
     .unwrap();
     let fitted = learner.fit(&set).unwrap();
-    let mut model = baseline_of(&features(), &config, Side::Long, holdout, 5);
+    let mut model = baseline_of(&features(), &config, Side::Long, 5);
     model.manifest.learner = learner;
     model.manifest.probes.clear();
     model.model = fitted.save().unwrap();
-    store(models.path(), &config, Side::Long)
-        .publish(&model)
-        .unwrap();
+    publish(models.path(), &config, holdout, model);
 
     let record = trade(&catalog, holdout, t, &config, models.path());
 
@@ -379,9 +373,12 @@ fn a_model_strategy_realizes_per_trade_the_pnl_its_dataset_row_recorded() {
     ] {
         let config = hand_worked(side);
         let models = tempfile::tempdir().unwrap();
-        store(models.path(), &config, side)
-            .publish(&baseline_of(&features(), &config, side, from, 8))
-            .unwrap();
+        publish(
+            models.path(),
+            &config,
+            from,
+            baseline_of(&features(), &config, side, 8),
+        );
         let record = std::thread::scope(|scope| {
             scope
                 .spawn(|| trade(&catalog, from, to, &config, models.path()))

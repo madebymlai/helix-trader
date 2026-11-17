@@ -1,8 +1,8 @@
 //! The binary's refusals of a command line before it runs anything: a flag
 //! its subcommand does not take, one it requires left out, two that
 //! conflict, a value it cannot read, a strategy it does not know, a window
-//! not ending after its start, a config it cannot load, and a train of a
-//! strategy with no model. Each exits non-zero, its stderr naming the flag
+//! or a train's span not ending after its start, a config it cannot load,
+//! and a train of a strategy with no model. Each exits non-zero, its stderr naming the flag
 //! or the facts ahead of the usage clap prints after a refusal, printing
 //! nothing and creating no catalog. The binary runs
 //! in a directory of its own with no environment, so that neither the
@@ -195,6 +195,22 @@ fn argv<'a>(parts: &[&[&'a str]]) -> Vec<&'a str> {
 )]
 #[case::a_train_given_a_balance(argv(&[&TRAIN, &["--balance", "10000 USD"]]), &["--balance"])]
 #[case::a_train_without_its_time(argv(&[&TRAIN[..4]]), &["--at"])]
+#[case::a_train_given_a_time_and_a_span(
+    argv(&[&TRAIN, &["--from", "2026-10-21", "--to", "2026-10-23"]]),
+    &["--at", "--from"]
+)]
+#[case::a_train_over_a_span_without_its_end(
+    argv(&[&TRAIN[..4], &["--from", "2026-10-21"]]),
+    &["--to"]
+)]
+#[case::a_train_over_a_span_without_its_start(
+    argv(&[&TRAIN[..4], &["--to", "2026-10-23"]]),
+    &["--from"]
+)]
+#[case::a_train_over_a_span_ending_before_it_starts(
+    argv(&[&TRAIN[..4], &["--from", "2026-10-23", "--to", "2026-10-21"]]),
+    &["2026-10-23T00:00:00Z", "2026-10-21T00:00:00Z"]
+)]
 #[case::fill_catalog_without_a_strategy(
     argv(&[&FILL_CATALOG[..1], &FILL_CATALOG[2..]]),
     &["<STRATEGY>"]

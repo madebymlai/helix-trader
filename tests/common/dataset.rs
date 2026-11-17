@@ -19,10 +19,8 @@ use helix_trader::{
         decide::{self, DecisionRule, FeatureRow},
         features::{Feature, FeatureSet, FeatureSetBuilder, PICKED_FEATURES, side_names},
         handle::{Decision, Mode, ModelHandle, SettledRows},
-        holdout::{Earnings, Holdout},
         learner::{LearnerConfig, TrainingSet},
-        score::ExpectedScore,
-        store::{ModelCalibration, ModelManifest, PairCalibration, Probe, StoredModel},
+        store::{ModelManifest, Probe, StoredModel, StoredModelSet},
         targets::{BracketSpec, Distance, Side, Target, TargetConfig, TargetRow},
     },
     strategy::{
@@ -204,10 +202,9 @@ pub(crate) fn target() -> TargetConfig {
 }
 
 /// The probe's decisions and target, learning whether each side of the
-/// bracket gains, on a window of 46 hours, the last 12 held out and the
-/// 12 before them calibrated on, by the fake learner, published from
-/// nought per trade over a trade; each side traded from an expected net
-/// P&L of nought.
+/// bracket gains, on a window of 46 hours, the last 12 calibrated on, by
+/// the fake learner, each slice of at least one row; each side traded from
+/// an expected net P&L of nought.
 pub(crate) fn config() -> ModelConfig {
     ModelConfig::builder()
         .decision(rule())
@@ -215,13 +212,12 @@ pub(crate) fn config() -> ModelConfig {
         .retrain(SignedDuration::from_hours(24))
         .dataset(venue())
         .window(SignedDuration::from_hours(46))
-        .holdout(SignedDuration::from_hours(12))
+        .calibration(SignedDuration::from_hours(12))
         .margins(Margins {
             long: Some(R::new(0.0)),
             short: Some(R::new(0.0)),
         })
-        .min_expectancy(R::new(0.0))
-        .min_trades(1)
+        .min_rows(1)
         .learner(LearnerConfig::Fake {})
         .build()
 }
@@ -540,53 +536,63 @@ pub(crate) fn r(tenths: usize) -> f64 {
     (tenths as f64 - 5.0) / 10.0
 }
 
-/// The calibration of the pair of `config`'s sides valid from
-/// `valid_from` leaving each side's prediction as it is, up to rounding,
-/// and to the bit on one side: the level line `C' = C`, and of two sides
-/// the side call `D' = D`.
-pub(crate) fn unchanged(config: &ModelConfig, valid_from: Timestamp) -> ModelCalibration {
-    let sides: Vec<Side> = config.margins.sides().map(|(side, _)| side).collect();
-    ModelCalibration::Pair(PairCalibration {
-        valid_from,
-        lines: Ksplit {
-            level: Line {
-                alpha: 0.0,
-                beta: 1.0,
-            },
-            side_call: (sides.len() == 2).then_some(1.0),
+/// The calibration of the pair of `config`'s sides leaving each side's
+/// prediction as it is, up to rounding, and to the bit on one side: the
+/// level line `C' = C`, and of two sides the side call `D' = D`.
+pub(crate) fn unchanged(config: &ModelConfig) -> Ksplit {
+    Ksplit {
+        level: Line {
+            alpha: 0.0,
+            beta: 1.0,
         },
+        side_call: (config.margins.sides().count() == 2).then_some(1.0),
+    }
+}
+
+/// The model set valid from `valid_from` of `sides`, the model of each
+/// side `config` trades, the long first, their pair's calibration leaving
+/// them as they are (`unchanged`), and the meta model `meta`, if any, as a
+/// train publishes one.
+pub(crate) fn model_set(
+    config: &ModelConfig,
+    valid_from: Timestamp,
+    sides: Vec<StoredModel>,
+    meta: Option<StoredModel>,
+) -> StoredModelSet {
+    StoredModelSet {
+        valid_from,
         sides,
-    })
+        calibration: unchanged(config),
+        meta,
+    }
 }
 
 /// A baseline long or short model of the probe deciding on `features` as
 /// `config` says, its rows the features then the target's payoff features
-/// (`features::side_names`), valid from `valid_from`, predicting an R of
-/// `r(tenths)` whatever the row, its pair's calibration leaving it as it is
-/// (`unchanged`), as a train publishes one: above 5 a trade expected to gain.
-/// For a test whose models come from no train: the fixture's walk has no
-/// edge for a train to publish on (`backtest_train` trains on one).
+/// (`features::side_names`), predicting an R of `r(tenths)` whatever the
+/// row, as a train publishes one, its pair calibrating it as the model set
+/// says: above 5 a trade expected to gain. For a test whose models'
+/// predictions a test sets, which no train's on the fixture's walk, with no
+/// edge, would be.
 pub(crate) fn baseline_of(
     features: &Rc<FeatureSet>,
     config: &ModelConfig,
     side: Side,
-    valid_from: Timestamp,
     tenths: usize,
 ) -> StoredModel {
     let names = side_names(features.names(), &config.target.payoff_names());
     let width = names.len();
     let set = TrainingSet::new(width, vec![0.5; width], vec![r(tenths)]).unwrap();
-    stored_baseline(features, config, names, Some(side), valid_from, &set)
+    stored_baseline(features, config, names, Some(side), &set)
 }
 
 /// A baseline meta model of the sides deciding on `features` as `config`
 /// says (the side picked, the decision's level and side call after their
-/// features), valid from `valid_from`, predicting an R of `r(tenths)`
-/// whatever the row, calibrated by `CALIBRATION`.
+/// features), predicting an R of `r(tenths)` whatever the row, calibrated
+/// by `CALIBRATION`.
 pub(crate) fn meta_baseline_of(
     features: &Rc<FeatureSet>,
     config: &ModelConfig,
-    valid_from: Timestamp,
     tenths: usize,
 ) -> StoredModel {
     let names: Vec<String> = features
@@ -597,7 +603,7 @@ pub(crate) fn meta_baseline_of(
         .collect();
     let width = names.len();
     let set = TrainingSet::new(width, vec![0.5; width], vec![r(tenths)]).unwrap();
-    stored_baseline(features, config, names, None, valid_from, &set)
+    stored_baseline(features, config, names, None, &set)
 }
 
 /// A baseline of `feature_names`, of `side` for a side's model and none
@@ -607,50 +613,33 @@ fn stored_baseline(
     config: &ModelConfig,
     feature_names: Vec<String>,
     side: Option<Side>,
-    valid_from: Timestamp,
     set: &TrainingSet,
 ) -> StoredModel {
     let fingerprint = blueprint(Rc::clone(features), config.clone())
         .fingerprint()
         .unwrap();
-    baseline_stored(
-        StrategyId::from(STRATEGY),
-        fingerprint.to_string(),
-        feature_names,
-        config,
-        side,
-        valid_from,
-        set,
-    )
+    baseline_stored(fingerprint.to_string(), feature_names, config, side, set)
 }
 
-/// A baseline of `strategy_id`, of its features `feature_names` under
-/// `fingerprint`, decided as `config` says, of `side` for a side's model
-/// and none for a meta, valid from `valid_from`, fitted on `set`, predicting
-/// the mean of its labels whatever the row, its manifest's baseline that
-/// mean, its holdout's skill 0.1: a meta's calibrated by `CALIBRATION`, a
-/// side's by its pair's calibration leaving it as it is (`unchanged`).
+/// A baseline of the features `feature_names` under `fingerprint`, decided
+/// as `config` says, of `side` for a side's model and none for a meta,
+/// fitted on `set`, predicting the mean of its labels whatever the row, its
+/// manifest's baseline that mean: a meta's calibrated by `CALIBRATION`, a
+/// side's by its pair's, the model set's.
 pub(crate) fn baseline_stored(
-    strategy_id: StrategyId,
     fingerprint: String,
     feature_names: Vec<String>,
     config: &ModelConfig,
     side: Option<Side>,
-    valid_from: Timestamp,
     set: &TrainingSet,
 ) -> StoredModel {
     let width = feature_names.len();
     let model = LearnerConfig::Baseline {}.fit(set).unwrap();
     let probe = vec![0.5; width];
     let prediction = model.predict(&probe).unwrap();
-    let calibration = match side {
-        Some(_) => unchanged(config, valid_from),
-        None => ModelCalibration::Meta(CALIBRATION),
-    };
+    let calibration = side.is_none().then_some(CALIBRATION);
     StoredModel {
         manifest: ModelManifest {
-            strategy_id,
-            valid_from,
             fingerprint,
             feature_names,
             target: config.target.clone(),
@@ -658,14 +647,7 @@ pub(crate) fn baseline_stored(
             learner: LearnerConfig::Baseline {},
             calibration,
             baseline: prediction,
-            holdout: Holdout {
-                earnings: Earnings::default(),
-                score: ExpectedScore {
-                    rows: 2,
-                    skill: Some(0.1),
-                    ..ExpectedScore::default()
-                },
-            },
+            out_of_fold: None,
             probes: vec![Probe {
                 prediction,
                 row: probe,

@@ -16,19 +16,22 @@
 //! the stores, the training, the walk-forward and the handle built of it;
 //! `train` trains
 //! at a time, fitting a model of each side traded on a window of the
-//! dataset and publishing them together in the `store` if their `holdout`,
-//! each side's `score` and what the decision would have earned there, meets
-//! the minimums;
+//! dataset less its calibration slice, calibrating them together on that
+//! slice and publishing them, with the meta's, as one model set in the
+//! `store`, no figure of theirs judged; `earnings` is what the decision took and earned on rows, and
+//! `score` how its expected R met the R realized, which a backtest's
+//! scores read;
 //! `deciding` is the decision itself, the side picked among the models
 //! valid at a time and the meta's margin; `handle` is
-//! what the strategy holds and decides through, trading on the sides'
-//! latest pair and the meta's latest model valid at each decision, or
+//! what the strategy holds and decides through, trading on the latest
+//! model set valid at each decision, its sides and its meta together, or
 //! opening the decision's target in a dataset run; `schedule` is when a
 //! model is retrained, on a fixed UTC grid, or that it never is, and what
-//! each train does to each model; `launcher`
+//! each train does; `launcher`
 //! starts a live strategy's retrains, one
-//! at a time, in a child process; `walk` is a backtest retraining on the
-//! schedule before its run and scoring its models out of sample after.
+//! at a time, in a child process; `walk` is a backtest on the models in the
+//! store, trained by `train`, refused before its run without one to trade
+//! on at its start and scoring its models out of sample after.
 //! `meta` is meta-labeling: a meta model deciding whether to take the
 //! trade of the side picked on the net R it expects of it, trained on the
 //! out-of-sample predictions of the strategy's side models.
@@ -48,13 +51,14 @@ pub mod config;
 pub mod dataset;
 pub mod decide;
 pub mod deciding;
+pub mod earnings;
 pub mod features;
 pub mod handle;
-pub mod holdout;
 pub mod launcher;
 pub mod learner;
 pub mod meta;
 pub mod payoff;
+pub mod report;
 pub mod schedule;
 pub mod score;
 pub mod store;
@@ -229,7 +233,7 @@ pub trait ModelStrategy:
 
     /// The backtests of the model of the strategy `config` describes, on
     /// its dataset in the catalog at `catalog`, and its models in the store
-    /// under `models`: their retrains and their scores.
+    /// under `models`: the check of their start and their scores.
     ///
     /// # Errors
     ///
@@ -429,10 +433,9 @@ mod tests {
             target = {target}
             retrain = "24h"
             window = "48h"
-            holdout = "12h"
+            calibration = "12h"
             margins = {{ long = "0.5R", short = "0.5R" }}
-            min_expectancy = "0.5R"
-            min_trades = 30
+            min_rows = 30
             learner = {{ kind = "baseline" }}
             "#,
             features.join(", "),

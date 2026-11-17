@@ -1,9 +1,9 @@
 //! The model section of a strategy's TOML: when the strategy decides, the
 //! target of its decisions, which its model learns, how often a model is
-//! retrained, if ever, and the window it is trained on, the least its
-//! holdout earns to be published, in R, the margins in R its expected R
-//! must clear to trade a side, and its learner; and, optionally, the meta
-//! model filtering its trades.
+//! retrained, if ever, the window it is trained on, the calibration slice
+//! ending it and the fewest rows of each slice, the margins in R its
+//! expected R must clear to trade a side, and its learner; and,
+//! optionally, the meta model filtering its trades.
 //!
 //! A strategy has at most two levels of models: the side models of a
 //! `ModelConfig`, and one meta model (`MetaConfig`) deciding whether to
@@ -18,7 +18,6 @@ use serde::{Deserialize, de::IgnoredAny};
 use super::{
     dataset::DatasetVenue,
     decide::DecisionRule,
-    holdout::Minimums,
     learner::LearnerConfig,
     schedule::Retrain,
     targets::{Side, Target, TargetConfig},
@@ -38,10 +37,9 @@ use crate::strategy::{
 /// target = { bracket = { take_profit = { atr = 2.0 }, stop = { atr = 1.0 } }, limit = "45m" }
 /// retrain = "168h"
 /// window = "720h"
-/// holdout = "120h"
+/// calibration = "120h"
 /// margins = { long = "0.5R", short = "0.5R" }
-/// min_expectancy = "0.1R"
-/// min_trades = 30
+/// min_rows = 300
 /// learner = { kind = "lightgbm" }
 /// dataset = { commission = { rate = "0.00003" }, balance = "10000 USD" }
 /// ```
@@ -59,25 +57,22 @@ pub struct ModelConfig<T = TargetConfig> {
     pub target: T,
     /// How often the model is retrained, such as `"168h"`: at every multiple
     /// of it since the Unix epoch, in a backtest as live
-    /// (`model::schedule`). Left out, never: each model is trained once and
-    /// kept (`Retrain::Never`).
+    /// (`model::schedule`). Left out, never: each `train --at` trains a
+    /// model set at its time (`Retrain::Never`).
     #[serde(default)]
     #[builder(default, into)]
     pub retrain: Retrain,
     /// How far back from a retrain its rows go, such as `"720h"`.
     pub window: SignedDuration,
-    /// The last part of the window the model is scored on and not fitted
-    /// on, such as `"120h"`.
-    pub holdout: SignedDuration,
+    /// The last part of the window, ending at the retrain, the sides'
+    /// models are calibrated on and not fitted on, such as `"120h"`
+    /// (`train`).
+    pub calibration: SignedDuration,
     /// The sides traded, each with the expected net R it trades from.
     pub margins: Margins,
-    /// The least expectancy, the average net R per trade, the trades picked between the
-    /// sides earn on the holdout for the sides' models to be published
-    /// (`holdout`, `train`).
-    pub min_expectancy: R,
-    /// The fewest trades picked between the sides on the holdout for the
-    /// sides' models to be published.
-    pub min_trades: usize,
+    /// The fewest rows of the fit slice and of the calibration slice of a
+    /// train of the sides, at least one: a train with fewer fails.
+    pub min_rows: usize,
     /// The learner and its settings.
     pub learner: LearnerConfig,
     /// The meta model deciding whether to take each trade of this one, a
@@ -88,8 +83,8 @@ pub struct ModelConfig<T = TargetConfig> {
     /// commission their targets are net of, the balance their reference
     /// stake is of and, optionally, their latency (`latency = "150ms"`). It
     /// keys the dataset and the stores (`dataset::fingerprint`), so `train`,
-    /// a backtest's retrains and a live node all read the one store of the
-    /// config, whatever a backtest's own commission, balance and latency.
+    /// a backtest and a live node all read the one store of the config,
+    /// whatever a backtest's own commission, balance and latency.
     pub dataset: DatasetVenue,
 }
 
@@ -97,32 +92,27 @@ pub struct ModelConfig<T = TargetConfig> {
 /// that side's trade, the target on it, learned from the sides' features,
 /// the side picked and the decision's calibrated level and side call. It is
 /// retrained on the sides' schedule, right after them, or, the sides never
-/// retrained, trained once and kept.
+/// retrained, at each `train --at`.
 ///
 /// In the TOML, a probability `threshold` or a `size` is refused as the
 /// section is parsed, saying what takes its place (`MetaFields`).
 #[derive(Debug, Clone, PartialEq, Deserialize, bon::Builder)]
 #[serde(try_from = "MetaFields")]
 pub struct MetaConfig {
-    /// How far back from a retrain its rows go; never before the
-    /// sides' first model, whose predictions the rows need. Never
-    /// retrained, sides trained with their meta, neither in use, are
-    /// trained as of this much before the meta, so their out-of-sample
-    /// decisions over the window are the meta's rows.
+    /// How far back from a retrain its rows go: its train fits an
+    /// out-of-fold pair of the sides as of this much before the retrain, whose
+    /// out-of-sample picks over the window are the meta's rows.
     pub window: SignedDuration,
-    /// The last part of the window the model is scored on and not fitted
-    /// on.
-    pub holdout: SignedDuration,
+    /// The last part of the window, ending at the retrain, the model is
+    /// calibrated on and not fitted on.
+    pub calibration: SignedDuration,
     /// The net R the meta expects of the trade of the side picked, its
     /// calibrated expected R, from which the trade is taken
-    /// (`holdout::MetaMargin`).
+    /// (`earnings::MetaMargin`).
     pub margin: R,
-    /// The least expectancy, the average net R per trade, the meta's decisions earn on the
-    /// holdout for its model to be published (`holdout`).
-    pub min_expectancy: R,
-    /// The fewest trades the meta's decisions take on the holdout for its
-    /// model to be published.
-    pub min_trades: usize,
+    /// The fewest rows of the meta's fit slice and of its calibration
+    /// slice, at least one: a train with fewer fails.
+    pub min_rows: usize,
     /// The learner and its settings.
     pub learner: LearnerConfig,
 }
@@ -134,10 +124,9 @@ pub struct MetaConfig {
 #[serde(deny_unknown_fields)]
 struct MetaFields {
     window: SignedDuration,
-    holdout: SignedDuration,
+    calibration: SignedDuration,
     margin: Option<R>,
-    min_expectancy: R,
-    min_trades: usize,
+    min_rows: usize,
     learner: LearnerConfig,
     threshold: Option<IgnoredAny>,
     size: Option<IgnoredAny>,
@@ -149,10 +138,9 @@ impl TryFrom<MetaFields> for MetaConfig {
     fn try_from(fields: MetaFields) -> Result<Self, String> {
         let MetaFields {
             window,
-            holdout,
+            calibration,
             margin,
-            min_expectancy,
-            min_trades,
+            min_rows,
             learner,
             threshold,
             size,
@@ -173,10 +161,9 @@ impl TryFrom<MetaFields> for MetaConfig {
         }
         Ok(Self {
             window,
-            holdout,
+            calibration,
             margin: margin.ok_or("missing field `margin`")?,
-            min_expectancy,
-            min_trades,
+            min_rows,
             learner,
         })
     }
@@ -232,10 +219,9 @@ impl ModelSection {
             target,
             retrain,
             window,
-            holdout,
+            calibration,
             margins,
-            min_expectancy,
-            min_trades,
+            min_rows,
             learner,
             meta,
             dataset,
@@ -245,10 +231,9 @@ impl ModelSection {
             target: target.trading(traded, risk, conversions),
             retrain,
             window,
-            holdout,
+            calibration,
             margins,
-            min_expectancy,
-            min_trades,
+            min_rows,
             learner,
             meta,
             dataset,
@@ -271,9 +256,9 @@ impl ModelConfig {
     /// target's ATR without bars built from what the strategy reads of the
     /// instrument traded (see `TargetConfig::atr_bars`) or warming over
     /// longer than its warmup, the target's limit not shorter than the
-    /// window, the holdout not positive or leaving no fitted row (see
-    /// `validate_window`), the margins naming no side, the minimums invalid
-    /// (see `validate_minimums`), the meta model invalid (see
+    /// window, the calibration not positive or leaving no fit slice (see
+    /// `validate_window`), the margins naming no side, the minimum of rows
+    /// below one (see `validate_min_rows`), the meta model invalid (see
     /// `MetaConfig::validate`), the target's limit not shorter than the
     /// decision cadence (see `validate_cadence`), or shorter than the
     /// longest its dataset runs take to process a command (see
@@ -290,7 +275,7 @@ impl ModelConfig {
         errors.collect(learner(&self.learner, "model.learner"));
         validate_window(
             self.window,
-            self.holdout,
+            self.calibration,
             &self.target,
             "model",
             "model.target.limit",
@@ -300,22 +285,13 @@ impl ModelConfig {
             self.margins.sides().next().is_some(),
             ConfigError::invalid_value("model.margins", "the margins name no side to trade"),
         );
-        validate_minimums(self.minimums(), "model", &mut errors);
+        validate_min_rows(self.min_rows, "model", &mut errors);
         if let Some(meta) = &self.meta {
             meta.validate(&self.target, &mut errors);
         }
         validate_cadence(self.decision, &self.target, &mut errors);
         validate_latency(&self.target, &self.dataset, &mut errors);
         errors.into_result()
-    }
-
-    /// The least a side's model is published with, on its holdout.
-    #[must_use]
-    pub const fn minimums(&self) -> Minimums {
-        Minimums {
-            min_expectancy: self.min_expectancy,
-            min_trades: self.min_trades,
-        }
     }
 }
 
@@ -374,28 +350,19 @@ impl MetaConfig {
     /// sides' `target`, each under its field of `[model.meta]`
     /// (`model.meta.…`): the learner invalid (see
     /// `LearnerConfig::validate`), the target's limit not shorter than the
-    /// window, the holdout not positive or leaving no fitted row, or the
-    /// minimums invalid (see `validate_minimums`).
+    /// window, the calibration not positive or leaving no fit slice, or the
+    /// minimum of rows below one (see `validate_min_rows`).
     pub fn validate(&self, target: &TargetConfig, errors: &mut ConfigErrorCollector) {
         errors.collect(learner(&self.learner, "model.meta.learner"));
         validate_window(
             self.window,
-            self.holdout,
+            self.calibration,
             target,
             "model.meta",
             "model.meta.window",
             errors,
         );
-        validate_minimums(self.minimums(), "model.meta", errors);
-    }
-
-    /// The least a meta model is published with, on its holdout.
-    #[must_use]
-    pub const fn minimums(&self) -> Minimums {
-        Minimums {
-            min_expectancy: self.min_expectancy,
-            min_trades: self.min_trades,
-        }
+        validate_min_rows(self.min_rows, "model.meta", errors);
     }
 }
 
@@ -445,14 +412,14 @@ fn learner(learner: &LearnerConfig, field: &str) -> ConfigResult<()> {
 
 /// Pushes onto `errors`, of `section` (`model` or `model.meta`), the
 /// violations of the limit of `target` not shorter than `window`, under
-/// `limit_field`, or `holdout` not positive or too long to leave a fitted
-/// row before it and the calibration, as long as it, before it (`train`):
-/// the window longer than twice the holdout and the limit. The sides'
+/// `limit_field`, or `calibration` not positive or too long to leave a fit
+/// slice before it (`train`), a fitted row settling by the calibration's
+/// start: the window longer than the calibration and the limit. The sides'
 /// window is their target's to fit, and a meta's the meta's own, set
 /// beside the target it shares.
 fn validate_window(
     window: SignedDuration,
-    holdout: SignedDuration,
+    calibration: SignedDuration,
     target: &TargetConfig,
     section: &str,
     limit_field: &str,
@@ -467,29 +434,25 @@ fn validate_window(
         ),
     );
     errors.check(
-        holdout.is_positive() && holdout * 2 + limit < window,
+        calibration.is_positive() && calibration + limit < window,
         ConfigError::invalid_value(
-            format!("{section}.holdout"),
+            format!("{section}.calibration"),
             format!(
-                "the holdout {holdout:#} and the calibration as long before it leave no fitted \
-                 row in the window {window:#} after the target's limit {limit:#}"
+                "the calibration {calibration:#} leaves no fit slice in the window {window:#} \
+                 after the target's limit {limit:#}"
             ),
         ),
     );
 }
 
 /// Pushes onto `errors`, under `section` (`model` or `model.meta`), the
-/// violation of the minimum count of trades of `minimums` below one; their
-/// least expectancy, an R, is a finite number as it is parsed.
-fn validate_minimums(minimums: Minimums, section: &str, errors: &mut ConfigErrorCollector) {
+/// violation of `min_rows` below one.
+fn validate_min_rows(min_rows: usize, section: &str, errors: &mut ConfigErrorCollector) {
     errors.check(
-        minimums.min_trades >= 1,
+        min_rows >= 1,
         ConfigError::invalid_value(
-            format!("{section}.min_trades"),
-            format!(
-                "the minimum count of trades is {}, not at least one",
-                minimums.min_trades
-            ),
+            format!("{section}.min_rows"),
+            format!("the minimum of rows is {min_rows}, not at least one"),
         ),
     );
 }
@@ -517,16 +480,16 @@ mod tests {
     const GOLD: &str = "XAUUSD.ICMARKETS";
 
     /// A model section deciding every hour, with a bracket closed after 45
-    /// minutes, on a window of 48 hours, 12 of them held out.
+    /// minutes, on a window of 48 hours, the last 12 calibrated on, each
+    /// slice of at least 30 rows.
     const SECTION: &str = r#"
         decision = { every = "1h" }
         target = { bracket = { take_profit = { bps = 7.5 }, stop = { bps = 5 } }, limit = "45m" }
         retrain = "24h"
         window = "48h"
-        holdout = "12h"
+        calibration = "12h"
         margins = { long = "0.5R", short = "0.5R" }
-        min_expectancy = "1R"
-        min_trades = 30
+        min_rows = 30
         learner = { kind = "fake" }
         dataset = { commission = { per_quantity = "0.035 USD" }, balance = "10000 USD" }
     "#;
@@ -633,7 +596,7 @@ mod tests {
             Retrain::Every(SignedDuration::from_hours(24))
         );
         assert_eq!(config.window, SignedDuration::from_hours(48));
-        assert_eq!(config.holdout, SignedDuration::from_hours(12));
+        assert_eq!(config.calibration, SignedDuration::from_hours(12));
         assert_eq!(
             config.margins,
             Margins {
@@ -641,13 +604,7 @@ mod tests {
                 short: Some(R::new(0.5))
             }
         );
-        assert_eq!(
-            config.minimums(),
-            Minimums {
-                min_expectancy: R::new(1.0),
-                min_trades: 30
-            }
-        );
+        assert_eq!(config.min_rows, 30);
         assert_eq!(config.learner, LearnerConfig::Fake {});
     }
 
@@ -657,17 +614,17 @@ mod tests {
     }
 
     /// One load shows every mistake: a retrain interval not positive is
-    /// reported under `model.retrain`, beside a minimum of no trade.
+    /// reported under `model.retrain`, beside a minimum of no row.
     #[rstest]
     #[case::nought("0h")]
     #[case::negative("-24h")]
     fn a_retrain_interval_not_positive_is_refused_with_the_sections_other_violations(
         #[case] retrain: &str,
     ) {
-        let toml = section(&format!(r#"retrain = "{retrain}""#))
-            .replace("min_trades = 30", "min_trades = 0");
+        let toml =
+            section(&format!(r#"retrain = "{retrain}""#)).replace("min_rows = 30", "min_rows = 0");
 
-        assert_eq!(refused_fields(&toml), ["model.retrain", "model.min_trades"]);
+        assert_eq!(refused_fields(&toml), ["model.retrain", "model.min_rows"]);
     }
 
     /// Time only, or a bracket: the target closes after its limit at the
@@ -686,7 +643,7 @@ mod tests {
 
         assert_eq!(
             refused_fields_warming(&toml, warmup),
-            ["model.target.limit", "model.holdout"]
+            ["model.target.limit", "model.calibration"]
         );
     }
 
@@ -755,12 +712,12 @@ mod tests {
         let toml = section(&format!(
             r#"target = {{ bracket = {{ {bracket} }}, limit = "45m" }}"#
         ))
-        .replace("min_trades = 30", "min_trades = 0");
+        .replace("min_rows = 30", "min_rows = 0");
 
         let err = refused_parsing(&toml);
 
         assert!(err.contains(&format!("missing field `{missing}`")), "{err}");
-        assert!(!err.contains("min_trades"), "{err}");
+        assert!(!err.contains("min_rows"), "{err}");
     }
 
     /// A target's exits are in its bracket or nowhere: beside the limit,
@@ -782,19 +739,17 @@ mod tests {
         assert!(err.contains(&format!("`{key}`")), "{err}");
     }
 
-    /// The window of 48 hours holds the holdout, the calibration as long
-    /// before it, and before them a fitted row settled 45 minutes later: 23
-    /// hours of holdout leave one, 24 none.
+    /// The window of 48 hours holds the calibration and, before it, a
+    /// fitted row settled 45 minutes later: 47 hours of calibration leave
+    /// one, 47 hours and 15 minutes none.
     #[rstest]
-    #[case::of_a_day("24h")]
+    #[case::to_the_limit("47h15m")]
     #[case::of_nought("0h")]
-    fn a_holdout_leaving_no_fitted_row_before_it_and_its_calibration_is_refused(
-        #[case] holdout: &str,
-    ) {
-        let toml = section(&format!(r#"holdout = "{holdout}""#));
+    fn a_calibration_leaving_no_fitted_row_before_it_is_refused(#[case] calibration: &str) {
+        let toml = section(&format!(r#"calibration = "{calibration}""#));
 
-        assert_eq!(refused_fields(&toml), ["model.holdout"]);
-        assert!(load(&section(r#"holdout = "23h""#)).is_ok());
+        assert_eq!(refused_fields(&toml), ["model.calibration"]);
+        assert!(load(&section(r#"calibration = "47h""#)).is_ok());
     }
 
     #[rstest]
@@ -1000,14 +955,6 @@ mod tests {
         assert!(err.contains("leverage"), "{err}");
     }
 
-    /// A minimum below nought publishes a model expected to lose a little.
-    #[rstest]
-    fn a_least_expectancy_below_nought_loads() {
-        let config = load(&section(r#"min_expectancy = "-0.5R""#)).unwrap();
-
-        assert_eq!(config.min_expectancy, R::new(-0.5));
-    }
-
     /// The floor is the adapter's dataset's, 20 rows, not the default of
     /// 200 rows a leaf: 20 and 50 load.
     #[rstest]
@@ -1109,11 +1056,11 @@ mod tests {
     #[rstest]
     fn a_time_only_target_without_an_atr_is_refused_under_its_atr() {
         let toml =
-            section(r#"target = { limit = "30m" }"#).replace("min_trades = 30", "min_trades = 0");
+            section(r#"target = { limit = "30m" }"#).replace("min_rows = 30", "min_rows = 0");
 
         assert_eq!(
             refused_fields(&toml),
-            ["model.target.atr", "model.min_trades"]
+            ["model.target.atr", "model.min_rows"]
         );
         let err = refused(&toml);
         assert!(err.contains("ATR") && err.contains("unit"), "{err}");
@@ -1139,11 +1086,11 @@ mod tests {
         let toml = section(
             r#"target = { bracket = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, atr = { period = 3 } }, limit = "45m" }"#,
         )
-        .replace("min_trades = 30", "min_trades = 0");
+        .replace("min_rows = 30", "min_rows = 0");
 
         assert_eq!(
             refused_fields(&toml),
-            ["model.target.bracket.atr", "model.min_trades"]
+            ["model.target.bracket.atr", "model.min_rows"]
         );
     }
 
@@ -1198,14 +1145,14 @@ mod tests {
         assert!(config.validate(&requirements).is_ok());
     }
 
-    /// A meta model on the section's target, held out its last 12 hours.
+    /// A meta model on the section's target, calibrated on its last 12
+    /// hours, each slice of at least 20 rows.
     const META: &str = r#"
         [meta]
         window = "36h"
-        holdout = "12h"
+        calibration = "12h"
         margin = "0.25R"
-        min_expectancy = "0.5R"
-        min_trades = 20
+        min_rows = 20
         learner = { kind = "baseline" }
     "#;
 
@@ -1215,15 +1162,9 @@ mod tests {
 
         let meta = config.meta.unwrap();
         assert_eq!(meta.window, SignedDuration::from_hours(36));
-        assert_eq!(meta.holdout, SignedDuration::from_hours(12));
+        assert_eq!(meta.calibration, SignedDuration::from_hours(12));
         assert_eq!(meta.margin, R::new(0.25));
-        assert_eq!(
-            meta.minimums(),
-            Minimums {
-                min_expectancy: R::new(0.5),
-                min_trades: 20
-            }
-        );
+        assert_eq!(meta.min_rows, 20);
         assert_eq!(meta.learner, LearnerConfig::Baseline {});
     }
 
@@ -1314,21 +1255,5 @@ mod tests {
         let err = meta_refused(r#"window = "45m""#);
 
         assert!(err.contains("model.meta.window"), "{err}");
-    }
-
-    /// The meta's window of 36 hours cannot hold 35 of holdout and as many
-    /// of calibration.
-    #[rstest]
-    fn a_meta_holdout_leaving_no_fitted_row_is_refused() {
-        let err = meta_refused(r#"holdout = "35h""#);
-
-        assert!(err.contains("model.meta.holdout"), "{err}");
-    }
-
-    #[rstest]
-    fn a_meta_minimum_of_no_trade_is_refused() {
-        let err = meta_refused("min_trades = 0");
-
-        assert!(err.contains("model.meta.min_trades"), "{err}");
     }
 }

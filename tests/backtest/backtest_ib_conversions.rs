@@ -199,10 +199,9 @@ fn model_config() -> String {
         target = {{ bracket = {{ take_profit = {{ bps = 7.5 }}, stop = {{ bps = 7.5 }} }}, limit = "45m" }}
         retrain = "24h"
         window = "46h"
-        holdout = "12h"
+        calibration = "12h"
         margins = {{ long = "0R", short = "0R" }}
-        min_expectancy = "0R"
-        min_trades = 1
+        min_rows = 1
         learner = {{ kind = "fake" }}
         "#,
         gold = glbx::INSTRUMENT_ID,

@@ -1,8 +1,9 @@
 # Model EMA (`src/strategy/model_ema/`), read into `ModelEmaConfig`: an
 # example strategy trading on a learned model, whose features are a fast
 # and a slow EMA of each bars series it reads, set in [indicators]:
-#   cargo run --release -- train model_ema --config config/model_ema.toml --at ...
+#   cargo run --release -- train model_ema --config config/model_ema.toml --from ... --to ...
 #   cargo run --release -- backtest model_ema --config config/model_ema.toml ...
+# A backtest trains nothing: train the retrain times of its span first.
 # Its models are trained at the commission and balance of [model] dataset,
 # whatever a backtest's own --commission and --balance.
 # Every field is described in `src/strategy/README.md`.
@@ -69,30 +70,31 @@ decision = { every = "1h" }
 # period = 14 } }` is a trade closed at its time alone, its P&L read over the
 # worth of its ATR, declared beside the limit, as a stop's distance.
 target = { bracket = { take_profit = { atr = 2.0 }, stop = { atr = 1.0 }, atr = { period = 14, ma_type = "WILDER" } }, limit = "45m" }
-# Retrained weekly on the last 30 days, the last 5 held out to score it.
+# Retrained weekly on the last 30 days, the last 10 the calibration slice,
+# which the models are calibrated on and not fitted on. Nothing judges a
+# retrain: a backtest of the models over a span is their evidence.
 retrain = "168h"
 window = "720h"
-holdout = "120h"
+calibration = "240h"
 # Both sides traded, each from an expected net 0.03R a trade, R the money
 # its stop risks: 3% of that, whatever the trade's size. A margin is in R,
 # written with its suffix.
 margins = { long = "0.03R", short = "0.03R" }
-# The sides' models are published together if the trades picked between them
-# earn at least a net 0.07R a trade, their expectancy, over at least 30
-# trades of the holdout. Like a margin, it is in R, written with its suffix.
-min_expectancy = "0.07R"
-min_trades = 30
+# A train fails, publishing nothing, if its fit slice or its calibration
+# slice holds fewer than 100 rows: the calibration's 10 days hold 6 weekdays
+# at the fewest, 138 hourly decisions of gold's 23 hours a day.
+min_rows = 100
 # LightGBM, its trees of up to 31 leaves of 20 rows at least, over 100
 # rounds at a rate of 0.1: each side's model is fitted on the window less
-# the holdout and the calibration before it, as long, 20 days of which 14
-# or 15 are weekdays, 320 to 345 hourly decisions, too few for the
-# learner's default leaves of 200 rows to split.
+# the calibration slice, 20 days of which 14 or 15 are weekdays, 320 to 345
+# hourly decisions, too few for the learner's default leaves of 200 rows to
+# split.
 learner = { kind = "lightgbm", num_iterations = 100, learning_rate = 0.1, num_leaves = 31, min_data_in_leaf = 20 }
 # The commission and balance its dataset runs are made at: their targets are
 # net of the commission, in the traded instrument's P&L currency, and sized
 # at [trade] risk of the balance, in that currency or one [trade]
 # conversions reaches it from, converted at each decision's rate. They key the model store, so train, a
-# backtest's retrains and live all read the one store of this config,
+# backtest and live all read the one store of this config,
 # whatever a backtest's own --commission and --balance: changing either
 # retrains the model. IC's Raw account charges 30 USD per million a side.
 dataset = { commission = { rate = "0.00003" }, balance = "10000 USD" }
