@@ -186,15 +186,16 @@ pub enum Outcome {
     /// A generation was published, valid from the train's time, in the
     /// directory `generation`.
     Published { generation: PathBuf },
-    /// None was fitted: the generation valid from `valid_from`, the
-    /// train's time, is already published (`schedule::Plan::Keep`).
-    InUse { valid_from: Timestamp },
+    /// None was fitted: the generation valid from the train's time is
+    /// already published (`schedule::Plan::Keep`).
+    AlreadyPublished,
     /// No generation was published: the current one, if any, stays.
     Kept(Kept),
 }
 
-/// The figures a train reached, as far as it went: none of a train that
-/// kept a generation in use, which reads no dataset and fits nothing.
+/// The figures a train reached, as far as it went: none of a train whose
+/// generation is already published, which reads no dataset and fits
+/// nothing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Reached {
     /// The days of the dataset it read, once read.
@@ -276,8 +277,9 @@ impl Training {
     }
 
     /// Trains at `at` as the schedule plans it (`Schedule::plan`), from
-    /// the store's generations: the generation current at `at` in use, if
-    /// any; else a generation trained and published (`generation`), or,
+    /// the store's generations: the generation valid from `at` already
+    /// published, if any; else a generation trained and published
+    /// (`generation`), or,
     /// should anything of it fail, the current one kept with the error,
     /// beside the figures the train reached. `replay` runs the strategy
     /// over a span of the days the dataset lacks and returns the rows it
@@ -292,7 +294,7 @@ impl Training {
         let outcome = match self.models.generations() {
             Err(e) => kept(&e),
             Ok(generations) => match self.schedule.plan(at, &generations) {
-                Plan::Keep { valid_from } => Outcome::InUse { valid_from },
+                Plan::Keep => Outcome::AlreadyPublished,
                 Plan::Train(fits) => self
                     .generation(&fits, replay, &mut reached)
                     .map_or_else(|e| kept(&e), |generation| Outcome::Published { generation }),
@@ -629,7 +631,7 @@ impl Level {
 
 impl Trained {
     /// Whether the train succeeded: it kept no generation, its own
-    /// published or the current one in use.
+    /// published or already published.
     #[must_use]
     pub const fn succeeded(&self) -> bool {
         !matches!(self.outcome, Outcome::Kept(_))
@@ -767,9 +769,7 @@ impl Display for Outcome {
             Self::Published { generation } => {
                 write!(f, "published the generation {}", generation.display())
             }
-            Self::InUse { valid_from } => {
-                write!(f, "already published, valid from {valid_from}")
-            }
+            Self::AlreadyPublished => write!(f, "already published"),
             Self::Kept(kept) => write!(f, "{kept}"),
         }
     }
@@ -1318,7 +1318,7 @@ mod tests {
         });
 
         assert_eq!(replays, []);
-        assert_eq!(trained, Trained::from(Outcome::InUse { valid_from: t }));
+        assert_eq!(trained, Trained::from(Outcome::AlreadyPublished));
     }
 
     /// `config`, never retrained.
@@ -1991,16 +1991,16 @@ mod tests {
         let published = Outcome::Published {
             generation: PathBuf::from("models").join(t.to_string()),
         };
-        let in_use = Outcome::InUse { valid_from: t };
+        let already = Outcome::AlreadyPublished;
         let kept = Outcome::Kept(Kept::Failed("no short row".to_string()));
 
         assert!(Trained::from(published).succeeded());
-        assert!(Trained::from(in_use).succeeded());
+        assert!(Trained::from(already).succeeded());
         assert!(!Trained::from(kept).succeeded());
     }
 
-    /// A generation published reads with its directory; one kept in use as
-    /// already published, with its valid-from; a failure as its reason.
+    /// A generation published reads with its directory; one already
+    /// published as such; a failure as its reason.
     #[rstest]
     #[case::published(
         Outcome::Published { generation: PathBuf::from("models/2026-01-07T00:00:00Z") },
@@ -2010,11 +2010,8 @@ mod tests {
         Outcome::Kept(Kept::Failed("no short row".to_string())),
         &["failed: no short row"]
     )]
-    #[case::in_use(
-        Outcome::InUse { valid_from: at("2026-01-07T00:00:00Z") },
-        &["already published, valid from 2026-01-07T00:00:00Z"]
-    )]
-    fn an_outcome_reads_as_the_generation_published_in_use_or_the_failure(
+    #[case::already_published(Outcome::AlreadyPublished, &["already published"])]
+    fn an_outcome_reads_as_the_generation_published_already_published_or_the_failure(
         #[case] outcome: Outcome,
         #[case] facts: &[&str],
     ) {

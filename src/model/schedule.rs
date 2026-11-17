@@ -90,9 +90,9 @@ pub struct Models<T> {
 /// What a train at a time does (`Schedule::plan`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Plan {
-    /// Keeps the generation valid from `valid_from`, the train's time,
-    /// whole: already published.
-    Keep { valid_from: Timestamp },
+    /// Keeps the generation valid from the train's time, whole: already
+    /// published.
+    Keep,
     /// Trains a generation valid from the train's time.
     Train(Fits),
 }
@@ -183,7 +183,7 @@ impl Schedule {
     #[must_use]
     pub fn plan(&self, at: Timestamp, generations: &[Timestamp]) -> Plan {
         if generations.contains(&at) {
-            return Plan::Keep { valid_from: at };
+            return Plan::Keep;
         }
         let fit = |at: Timestamp| Fit {
             from: at - self.sides,
@@ -503,12 +503,6 @@ mod tests {
         })
     }
 
-    fn keep(valid_from: &str) -> Plan {
-        Plan::Keep {
-            valid_from: at(valid_from),
-        }
-    }
-
     const FOURTH: &str = "2026-01-04T00:00:00Z";
     const FIFTH: &str = "2026-01-05T00:00:00Z";
     const SIXTH: &str = "2026-01-06T00:00:00Z";
@@ -522,9 +516,9 @@ mod tests {
     /// the meta's window of 48 hours before the train, on its window of 24
     /// hours back from there.
     #[rstest]
-    #[case::retrained_of_the_train(daily(), &[SIXTH, SEVENTH], keep(SEVENTH))]
+    #[case::retrained_of_the_train(daily(), &[SIXTH, SEVENTH], Plan::Keep)]
     #[case::retrained_of_the_day_before(daily(), &[SIXTH], train(SEVENTH, fit(SIXTH, SEVENTH), Some(fit(FOURTH, FIFTH))))]
-    #[case::never_retrained_of_the_train(never(), &[SIXTH, SEVENTH], keep(SEVENTH))]
+    #[case::never_retrained_of_the_train(never(), &[SIXTH, SEVENTH], Plan::Keep)]
     #[case::never_retrained_of_the_day_before(never(), &[FIFTH, SIXTH, EIGHTH], train(SEVENTH, fit(SIXTH, SEVENTH), Some(fit(FOURTH, FIFTH))))]
     fn the_generation_valid_from_the_train_is_kept_and_one_before_it_is_not(
         #[case] schedule: Schedule,

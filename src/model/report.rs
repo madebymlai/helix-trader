@@ -307,8 +307,8 @@ mod tests {
     /// A generation already published reads no day and counts no row; off
     /// Unix, no CPU time or peak memory is measured.
     #[rstest]
-    fn a_train_keeping_a_generation_in_use_reports_its_times_alone() {
-        let trained = Trained::from(Outcome::InUse { valid_from: at() });
+    fn a_train_of_a_generation_already_published_reports_its_times_alone() {
+        let trained = Trained::from(Outcome::AlreadyPublished);
         let unmeasured = Usage {
             process: None,
             ..usage()
@@ -316,8 +316,7 @@ mod tests {
 
         assert_eq!(
             report(&trained, unmeasured),
-            "the train at 2026-10-23T00:00:00Z: already published, valid from \
-             2026-10-23T00:00:00Z\n\
+            "the train at 2026-10-23T00:00:00Z: already published\n\
              \x20 Wall time: 2.500 s\n\
              \x20 CPU time: not measured off Unix\n\
              \x20 Peak memory: not measured off Unix\n"
