@@ -1,10 +1,24 @@
 //! The merge of a live warmup's history across its series: the warmup
 //! queues each requested series' responses, quotes, trades, book depth and
 //! deltas, and custom data alike, and the bars each request builds, and
-//! hands them on in time order (`ts_event`), to the hold of live ticks and
+//! hands them on in time order (`ts_init`), to the hold of live ticks and
 //! bars (`hold`) and through it to the features. A replay requests no
 //! warmup and merges nothing: Nautilus replays its data in time order
 //! already.
+//!
+//! Its time is `ts_init` throughout, its order, its watermark and its
+//! ties, because that is the order a replay hands data in (a backtest
+//! streams its data by `ts_init`) and the one a request's windows are cut
+//! by (`DataResponse::trim_to_bounds`, `range_for_bounds` in
+//! `crates/common/src/messages/data/response.rs`), so a pending series
+//! brings nothing initialized before its latest. Every history a warmup
+//! reads stamps `ts_init` so that it means this: a tick's as it was made
+//! (IB, OKX's trades, cTrader, LSE) or received at the venue, which is
+//! its `ts_event` too (Databento), a bar's at its close, whether its
+//! `ts_event` is its close (IB, Databento, the bars Nautilus builds) or
+//! its open (OKX's history bars). The hold drops a live tick the history holds by
+//! `ts_event` within its series, not by `ts_init`: a live tick's `ts_init`
+//! is when its client received it (see `hold`).
 //!
 //! Temporary until Nautilus hands a warmup's history in time order across
 //! data types: helix-trader#46
@@ -23,7 +37,7 @@
 //!
 //! The merge hands a tick on once no series still pending can bring an
 //! older one: its watermark is, over the series whose requests are still
-//! pending, the earliest of the latest `ts_event` each has brought, a
+//! pending, the earliest of the latest `ts_init` each has brought, a
 //! series that has brought nothing yet holding everything back. A request
 //! answers its windows in order, so a pending series brings nothing older
 //! than its latest. The bars a request builds are a series of their own,
@@ -32,7 +46,8 @@
 //! its close comes, stamping it with that close
 //! (`TimeBarAggregator::build_bar` in `crates/data/src/aggregation.rs`), so
 //! a bar the request builds later closes no earlier than the latest
-//! `ts_event` its data has brought, where its bars stand. Ties across
+//! `ts_init` its data has brought, a history's data initialized as made,
+//! where its bars stand. Ties across
 //! series go in a fixed order of kinds, quotes, trades, depth, deltas,
 //! custom data, then bars, then in the order the series were requested, so
 //! that a replay and a live warmup agree on a tie: a backtest fires the
@@ -103,7 +118,7 @@ struct Queue {
     held: VecDeque<(Tick, usize)>,
     /// What its ticks held take together.
     bytes: usize,
-    /// The latest `ts_event` it brought, none before its first tick.
+    /// The latest `ts_init` it brought, none before its first tick.
     latest: Option<UnixNanos>,
     /// Whether its request has not ended yet.
     pending: bool,
@@ -177,7 +192,7 @@ impl Merge {
     }
 
     /// Takes `bars`, those `request` built from a response of it, oldest
-    /// first, and `through`, the latest `ts_event` of that response's data,
+    /// first, and `through`, the latest `ts_init` of that response's data,
     /// if it held any: a bar it builds from then on closes no earlier (see
     /// the module). Hands on as `history` does.
     ///
@@ -199,7 +214,7 @@ impl Merge {
     }
 
     /// Takes `ticks`, and, `built` the request of bars among them and the
-    /// latest `ts_event` of its response, moves the latest of that
+    /// latest `ts_init` of its response, moves the latest of that
     /// request's bars there; hands on as `history` does.
     fn take(
         &self,
@@ -232,8 +247,8 @@ impl Merge {
             if !brought.iter().any(|&(of, _)| of == at) {
                 brought.push((at, !queue.held.is_empty()));
             }
-            let made = tick.ts_event();
-            queue.latest = Some(queue.latest.map_or(made, |latest| latest.max(made)));
+            let at_init = tick.ts_init();
+            queue.latest = Some(queue.latest.map_or(at_init, |latest| latest.max(at_init)));
             let size = tick.size()?;
             queue.bytes += size;
             queue.held.push_back((tick, size));
@@ -338,17 +353,17 @@ fn hand_on(
                 queue
                     .held
                     .front()
-                    .map(|(tick, _)| (tick.ts_event(), order(queues, at), at))
+                    .map(|(tick, _)| (tick.ts_init(), order(queues, at), at))
             })
             .min();
-        let Some((made, rank, at)) = next else {
+        let Some((at_init, rank, at)) = next else {
             return Ok(());
         };
         let free = queues.iter().enumerate().all(|(other, queue)| {
             other == at
                 || !queue.pending
                 || queue.latest.is_some_and(|latest| {
-                    made < latest || (made == latest && rank < order(queues, other))
+                    at_init < latest || (at_init == latest && rank < order(queues, other))
                 })
         });
 

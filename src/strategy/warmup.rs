@@ -191,10 +191,10 @@
 //! says the rule): Temporary until Nautilus hands a warmup's history in
 //! time order across data types, helix-trader#46. It queues each requested
 //! series' quotes, trades, depth, deltas and custom data, and the bars each
-//! request builds, and hands them to the hold in `ts_event` order up to
-//! the earliest, over the series whose requests are still pending, of the
-//! latest `ts_event` each brought, a request's bars standing at the latest
-//! its data brought; a series whose request completes or fails holds the
+//! request builds, and hands them to the hold in `ts_init` order, as a
+//! replay hands them, up to the earliest, over the series whose requests
+//! are still pending, of the latest `ts_init` each brought, a request's
+//! bars standing at the latest its data brought; a series whose request completes or fails holds the
 //! others back no longer, ties go quotes, trades, depth, deltas, custom
 //! data, then bars, and the group's end hands on all that is held. Past
 //! `merge::HELD` bytes held, 2 GiB, each tick and bar counted with what it
@@ -589,7 +589,7 @@ impl Warmup {
         let built = self.building.borrow().get(request).cloned();
         if let Some(built) = built {
             let bars = self.built_bars(actor, &built);
-            let through = response.response().and_then(latest_made);
+            let through = response.response().and_then(latest_initialized);
             self.overflowed(
                 self.merge
                     .built(request, bars, through, |tick| self.hold.history(tick))?,
@@ -1272,14 +1272,14 @@ pub fn finished(group: UUID4, response: &DataResponseEnvelope) -> anyhow::Result
     }
 }
 
-/// The latest `ts_event` of `response`'s quotes, trades or bars, if it
+/// The latest `ts_init` of `response`'s quotes, trades or bars, if it
 /// holds any: where the bars a request builds from them stand (see
 /// `merge`). Nautilus builds no bars from the other kinds.
-fn latest_made(response: &DataResponse) -> Option<UnixNanos> {
+fn latest_initialized(response: &DataResponse) -> Option<UnixNanos> {
     match response {
-        DataResponse::Quotes(quotes) => quotes.data.iter().map(|quote| quote.ts_event).max(),
-        DataResponse::Trades(trades) => trades.data.iter().map(|trade| trade.ts_event).max(),
-        DataResponse::Bars(bars) => bars.data.iter().map(|bar| bar.ts_event).max(),
+        DataResponse::Quotes(quotes) => quotes.data.iter().map(|quote| quote.ts_init).max(),
+        DataResponse::Trades(trades) => trades.data.iter().map(|trade| trade.ts_init).max(),
+        DataResponse::Bars(bars) => bars.data.iter().map(|bar| bar.ts_init).max(),
         _ => None,
     }
 }
@@ -3457,6 +3457,46 @@ mod tests {
                 entry("quote", "14:00:00"),
                 entry("bar", "14:00:00"),
                 entry("trade", "14:00:30"),
+            ]
+        );
+    }
+
+    /// The merge orders by `ts_init`, as a replay does: GCZ26's quotes
+    /// answer 12:00 and 13:00, building the hourly bar of 12:00 stamped at
+    /// its open (`ts_event` 12:00) and initialized at its close (`ts_init`
+    /// 13:00), as a node not timestamping on close builds it; the trades
+    /// answer 12:30. By `ts_event` the bar would come before the trade; by
+    /// `ts_init` the feature reads it after the trade and the quote of its
+    /// close, the data of an instant before the bar built then.
+    #[rstest]
+    fn the_merge_orders_series_by_ts_init_not_ts_event() {
+        let log = Rc::new(Log::default());
+        let (warmup, probe, commands) = logging(&bars_and_trades(), &log);
+        let quotes = request_of(&commands, NautilusDataType::QuoteTick);
+        let open_stamped = Bar {
+            ts_event: on_the_day("12:00:00"),
+            ..hour_bar("13:00:00")
+        };
+
+        answer_quotes(
+            &warmup,
+            &probe,
+            quotes,
+            &[quote("12:00:00"), quote("13:00:00")],
+            &[open_stamped],
+        );
+        warmup
+            .on_historical_trades(&[trade("12:30:00", "12:30:00")])
+            .unwrap();
+        warmup.complete(&probe).unwrap();
+
+        assert_eq!(
+            *log.read.borrow(),
+            [
+                entry("quote", "12:00:00"),
+                entry("trade", "12:30:00"),
+                entry("quote", "13:00:00"),
+                entry("bar", "12:00:00"),
             ]
         );
     }

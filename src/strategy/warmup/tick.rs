@@ -100,6 +100,19 @@ impl Tick {
         Ok(size_of::<Self>() + heap)
     }
 
+    /// When the tick was initialized, as a replay orders it: a history's
+    /// as its venue or the catalog stamps it, a bar's at its close.
+    pub(super) fn ts_init(&self) -> UnixNanos {
+        match self {
+            Self::Quote(quote) => quote.ts_init,
+            Self::Trade(trade) => trade.ts_init,
+            Self::Depth(depth) => depth.ts_init,
+            Self::Deltas(deltas) => deltas.ts_init,
+            Self::Custom(data) => data.data.ts_init(),
+            Self::Bar(bar) => bar.ts_init,
+        }
+    }
+
     /// When the tick was made, a batch of deltas when its last delta was, a
     /// bar when it closed.
     pub(super) fn ts_event(&self) -> UnixNanos {
