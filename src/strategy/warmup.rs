@@ -270,7 +270,9 @@ const CATALOG: &str = "CATALOG";
 
 /// What a warmup hands the book depth and deltas of its responses to,
 /// which Nautilus routes to no indicator (`ActorIndicator` reads quotes,
-/// trades and bars alone): a model strategy's features.
+/// trades and bars alone): a model strategy's features. Temporary until
+/// Nautilus routes book depth and deltas to registered indicators:
+/// helix-trader#47.
 pub trait BookIndicator {
     /// Reads `depth`, a snapshot of the warmup, oldest first.
     fn handle_depth(&self, depth: &OrderBookDepth);
