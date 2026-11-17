@@ -19,7 +19,7 @@ use std::{
 };
 
 use helix_trader::{
-    backtest::Commission,
+    backtest::{Backtest, Commission},
     model::{
         dataset::DatasetVenue,
         decide::DecisionRule,
@@ -30,6 +30,7 @@ use helix_trader::{
         subscriptions::Subscriptions,
         warmup::{self, BookIndicator, Warmup},
     },
+    venues,
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
@@ -43,6 +44,7 @@ use nautilus_common::{
     enums::Environment,
     factories::{ClientConfig, DataClientFactory},
     live::{get_runtime, runner::get_data_event_sender, sender::EventSender},
+    logging::logger::LoggerConfig,
     messages::{
         DataEvent, DataResponse,
         data::{
@@ -67,13 +69,17 @@ use nautilus_model::{
         OrderBookDepth, QuoteTick, TradeTick,
     },
     enums::{AggressorSide, BookAction, BookType, OrderSide, RecordFlag},
-    identifiers::{ClientId, InstrumentId, TradeId, TraderId, Venue},
+    identifiers::{ClientId, InstrumentId, StrategyId, TradeId, TraderId, Venue},
     instruments::{Instrument, InstrumentAny, stubs::futures_contract_es},
     orderbook::OrderBook,
     types::{Money, Price, Quantity},
 };
 use nautilus_persistence::{
     backend::parquet::catalog::ParquetDataCatalog, config::DataCatalogConfig,
+};
+use nautilus_trading::{
+    nautilus_strategy,
+    strategy::{StrategyConfig, StrategyCore},
 };
 use rstest::rstest;
 
@@ -86,6 +92,8 @@ const ESZ26: &str = "ESZ26.CME";
 const COMPOSITE: &str = "ESZ26.CME-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL";
 /// Minute bars built from the venue's quotes.
 const MID_MINUTES: &str = "GCZ26.GLBX-1-MINUTE-MID-INTERNAL";
+/// Minute bars of ESZ26 built from the venue's quotes.
+const ES_MID_MINUTES: &str = "ESZ26.CME-1-MINUTE-MID-INTERNAL";
 
 const HOUR_NS: u64 = 3_600_000_000_000;
 const MINUTE_NS: u64 = 60_000_000_000;
@@ -145,6 +153,10 @@ struct FakeVenue {
     latency: Option<Duration>,
     /// How long it takes to answer a request of quotes, if not `latency`.
     quotes_latency: Option<Duration>,
+    /// How long it takes to answer each window of a series, given its
+    /// kind (as `kinds`), its instrument and how many windows of it the
+    /// venue was asked before, if not as the latencies above say.
+    window_latency: Option<fn(&str, InstrumentId, usize) -> Duration>,
     /// How long before each minute's close its trade is made, in ns: none,
     /// on the close, as its quote.
     trades_early: u64,
@@ -158,6 +170,8 @@ struct FakeVenue {
     /// What each request asked, in the order asked: `bar`, `deltas`,
     /// `quote` or `trade`.
     kinds: Vec<&'static str>,
+    /// The instrument of each request, in the order asked.
+    instruments: Vec<InstrumentId>,
     /// Each live tick it sent.
     live: Vec<Live>,
 }
@@ -179,10 +193,12 @@ impl FakeVenue {
             closed: None,
             latency: None,
             quotes_latency: None,
+            window_latency: None,
             trades_early: 0,
             resends: None,
             asked: vec![],
             kinds: vec![],
+            instruments: vec![],
             live: vec![],
         }))
     }
@@ -252,7 +268,24 @@ impl FakeClient {
             DataResponse::BookDeltas(_) => ("deltas", venue.latency),
             _ => ("bar", venue.latency),
         };
+        let instrument_id = match &response {
+            DataResponse::Quotes(quotes) => quotes.instrument_ids[0],
+            DataResponse::Trades(trades) => trades.instrument_ids[0],
+            DataResponse::BookDeltas(deltas) => deltas.instrument_id,
+            DataResponse::Bars(bars) => bars.bar_type.instrument_id(),
+            other => unreachable!("the fake venue answers no {other:?}"),
+        };
+        let before = venue
+            .kinds
+            .iter()
+            .zip(&venue.instruments)
+            .filter(|&(&of, &id)| of == kind && id == instrument_id)
+            .count();
+        let latency = venue.window_latency.map_or(latency, |of_window| {
+            Some(of_window(kind, instrument_id, before))
+        });
         venue.kinds.push(kind);
+        venue.instruments.push(instrument_id);
         let event = match venue.answer {
             Answer::FailedAt(failing) if index == failing => {
                 DataEvent::RequestFailed(DataRequestFailed {
@@ -1465,6 +1498,287 @@ fn a_feature_on_built_bars_and_quotes_reads_them_in_time_order_however_they_arri
     assert!(bars.len() >= 29 * 60, "{} bars", bars.len());
     assert_eq!(bars[..bars.len() - 1], trades[1..]);
     assert_eq!(bars.last(), Some(&live_bar));
+}
+
+/// What a feature handled, whole, so that a replay and a live warmup are
+/// compared item for item.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Handled {
+    Quote(QuoteTick),
+    Trade(TradeTick),
+    Bar(Bar),
+}
+
+impl Handled {
+    fn ts_init(&self) -> u64 {
+        match self {
+            Self::Quote(quote) => quote.ts_init.as_u64(),
+            Self::Trade(trade) => trade.ts_init.as_u64(),
+            Self::Bar(bar) => bar.ts_init.as_u64(),
+        }
+    }
+}
+
+/// A feature recording everything it handles, in order: every quote and
+/// trade the warmup hands it, of the series it reads, and the bars of
+/// `bar_types`, as a feature set routes bars by their type, the warmup
+/// handing each indicator it feeds bars every bar.
+#[derive(Debug, Default)]
+struct Handling {
+    bar_types: Vec<BarType>,
+    handled: RefCell<Vec<Handled>>,
+}
+
+impl ActorIndicator for Handling {
+    fn key(&self) -> usize {
+        std::ptr::from_ref(self).addr()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn initialized(&self) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+
+    fn handle_quote(&self, quote: &QuoteTick) -> anyhow::Result<()> {
+        self.handled.borrow_mut().push(Handled::Quote(*quote));
+        Ok(())
+    }
+
+    fn handle_trade(&self, trade: &TradeTick) -> anyhow::Result<()> {
+        self.handled.borrow_mut().push(Handled::Trade(*trade));
+        Ok(())
+    }
+
+    fn handle_bar(&self, bar: &Bar) -> anyhow::Result<()> {
+        if self.bar_types.contains(&bar.bar_type) {
+            self.handled.borrow_mut().push(Handled::Bar(*bar));
+        }
+        Ok(())
+    }
+}
+
+/// The warmup of `requirements` handing everything to `handling`, which
+/// reads all its series, as a model handle builds a feature set's, and
+/// building GCZ26's minute MID bars for a target's ATR, as
+/// `TargetSetter::warmed` builds its bars, which no feature reads.
+fn handing(requirements: &DataRequirements, warmup: Warmup, handling: &Rc<Handling>) -> Warmup {
+    let atr = Rc::new(Handling::default());
+    warmup
+        .building(BarType::from(MID_MINUTES), atr as SharedActorIndicator)
+        .feeding(
+            &requirements.bar_types,
+            Rc::clone(handling) as SharedActorIndicator,
+        )
+        .feeding_ticks(
+            &requirements.ticks,
+            Rc::clone(handling) as SharedActorIndicator,
+        )
+}
+
+/// A strategy in a backtest, its warmup replayed, its subscriptions those of
+/// its requirements from its start, handing its warmup what it gets, as a
+/// model strategy does (`model_data_hooks!`).
+#[derive(Debug)]
+struct Replaying {
+    core: StrategyCore,
+    warmup: Rc<Warmup>,
+    subscriptions: Subscriptions,
+}
+
+nautilus_strategy!(Replaying);
+
+impl DataActor for Replaying {
+    fn on_start(&mut self) -> anyhow::Result<()> {
+        let now = Rc::clone(&self.warmup).start(self)?;
+        self.subscriptions.clone().start(self, now);
+        Ok(())
+    }
+
+    fn on_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
+        self.warmup.on_quote(quote)
+    }
+
+    fn on_trade(&mut self, trade: &TradeTick) -> anyhow::Result<()> {
+        self.warmup.on_trade(trade)
+    }
+
+    fn on_bar(&mut self, bar: &Bar) -> anyhow::Result<()> {
+        self.warmup.on_bar(bar)
+    }
+}
+
+/// What a feature reading every series of `requirements` handles in a
+/// backtest over `[start, end]`, in ns, of the catalog in `dir`, run on a
+/// thread of its own, as a node's message bus is thread-local.
+fn replayed(dir: &Path, requirements: &DataRequirements, start: u64, end: u64) -> Vec<Handled> {
+    let (dir, requirements) = (dir.to_path_buf(), requirements.clone());
+    let at = |ns: u64| Timestamp::from_nanosecond(i128::from(ns)).unwrap();
+
+    std::thread::spawn(move || {
+        let handling = Rc::new(Handling {
+            bar_types: requirements.bar_types.clone(),
+            ..Handling::default()
+        });
+        let warmup = handing(&requirements, Warmup::replayed(&requirements), &handling);
+        let strategy = Replaying {
+            core: StrategyCore::new(StrategyConfig {
+                strategy_id: Some(StrategyId::from("REPLAY-001")),
+                order_id_tag: Some("001".to_string()),
+                ..Default::default()
+            }),
+            warmup: Rc::new(warmup),
+            subscriptions: Subscriptions::new(
+                requirements.bar_types.clone(),
+                requirements.ticks.clone(),
+                vec![],
+            ),
+        };
+        let backtest = Backtest {
+            catalog: dir,
+            bar_types: requirements.bar_types.clone(),
+            ticks: requirements.ticks.clone(),
+            custom: vec![],
+            start: at(start),
+            end: at(end),
+            commission: Commission::PerOrder(Money::from("0 USD")),
+            latency: None,
+            pairs: vec![],
+            balance: Money::from("1000000 USD"),
+            venue_oms: venues::oms_type,
+            logging: LoggerConfig::default(),
+        };
+        backtest.run(strategy).unwrap();
+        handling.handled.take()
+    })
+    .join()
+    .unwrap()
+}
+
+/// How long the venue takes to answer each window of each series of
+/// `a_live_warmup_hands_a_feature_its_history_as_a_replay_of_the_same_data_does`,
+/// the window of the index given: GCZ26's quotes 300 ms then at once,
+/// ESZ26's quotes 100 ms then 400 ms, and GCZ26's trades at once then 700
+/// ms, so that the windows arrive in an order of their own, GCZ26's quotes,
+/// the ATR's bars built from them, completing while the others are pending
+/// and the trades completing last.
+fn shuffled(kind: &str, instrument_id: InstrumentId, window: usize) -> Duration {
+    let millis: &[u64] = match (kind, instrument_id.symbol.as_str()) {
+        ("quote", "GCZ26") => &[300, 0],
+        ("quote", _) => &[100, 400],
+        _ => &[0, 700],
+    };
+    Duration::from_millis(millis[window.min(millis.len() - 1)])
+}
+
+/// The acceptance check of the warmup's merge: a feature on GCZ26's trades
+/// and quotes, `[data]` listing them so, on ESZ26's quotes, and on ESZ26's
+/// minute MID bars, built from its quotes, reads a live warmup's history as
+/// a backtest replaying the same data hands it, item for item; the warmup
+/// builds GCZ26's minute MID bars for a target's ATR too, which no feature
+/// reads and a backtest reads no series for. The venue holds a quote of
+/// each instrument and a trade of GCZ26 on every minute, so every minute
+/// is a tie of the three ticks and the bars closing then; it answers each
+/// series' two windows of 23 hours over 30 after delays of their own
+/// (`shuffled`).
+/// The backtest replays the same quotes and trades, put in a catalog, over
+/// the span the live warmup asked. A live warmup drops the first bar, which
+/// misses the data before the warmup's start (`skip_first_non_full_bar`):
+/// the replay's first bar is left out of the comparison, and nothing else.
+#[rstest]
+fn a_live_warmup_hands_a_feature_its_history_as_a_replay_of_the_same_data_does() {
+    let live_dir = tempfile::tempdir().unwrap();
+    let venue = FakeVenue::new(Answer::Envelope);
+    venue.borrow_mut().window_latency = Some(shuffled);
+    let requirements = DataRequirements {
+        bar_types: vec![BarType::from(ES_MID_MINUTES)],
+        ticks: vec![
+            of_gcz26(NautilusDataType::TradeTick),
+            of_gcz26(NautilusDataType::QuoteTick),
+            TickSeries {
+                data: NautilusDataType::QuoteTick,
+                instrument_id: InstrumentId::from(ESZ26),
+            },
+        ],
+        custom: vec![],
+        warmup: SignedDuration::from_hours(30),
+    };
+    let handling = Rc::new(Handling {
+        bar_types: requirements.bar_types.clone(),
+        ..Handling::default()
+    });
+    let warmup = handing(&requirements, Warmup::live(&requirements), &handling);
+
+    let ran = run(
+        live_dir.path(),
+        &venue,
+        &requirements,
+        warmup,
+        requirements.ticks.clone(),
+        None,
+    );
+    assert_eq!(ran.failure, None);
+    let venue = venue.borrow();
+    assert_eq!(venue.kinds.len(), 6, "{:?}", venue.kinds);
+    let start = venue.asked.iter().map(|&(start, _)| start).min().unwrap();
+    let end = venue.asked.iter().map(|&(_, end)| end).max().unwrap();
+    let replay_dir = tempfile::tempdir().unwrap();
+    let catalog = ParquetDataCatalog::new(replay_dir.path(), None, None, None, None);
+    catalog.write_instruments(vec![gcz26(), esz26()]).unwrap();
+
+    for instrument_id in [GCZ26, ESZ26].map(InstrumentId::from) {
+        let quotes: Vec<QuoteTick> = minutes(start, end, None)
+            .map(|ns| quote_at(instrument_id, ns, ns))
+            .collect();
+        catalog
+            .write_to_parquet(&quotes, Some(start.into()), Some(end.into()), None)
+            .unwrap();
+    }
+    let trades: Vec<TradeTick> = trades_made(&venue, start, end)
+        .map(|ns| trade_at(InstrumentId::from(GCZ26), ns, ns))
+        .collect();
+    catalog
+        .write_to_parquet(&trades, Some(start.into()), Some(end.into()), None)
+        .unwrap();
+
+    let replay = replayed(replay_dir.path(), &requirements, start, end);
+
+    let live: Vec<Handled> = handling
+        .handled
+        .borrow()
+        .iter()
+        .copied()
+        .filter(|handled| handled.ts_init() <= end)
+        .collect();
+    let first_bar = replay
+        .iter()
+        .position(|handled| matches!(handled, Handled::Bar(_)))
+        .expect("a bar replayed");
+    let mut replay = replay;
+    let partial = replay.remove(first_bar);
+    assert_eq!(
+        partial.ts_init(),
+        start.div_ceil(MINUTE_NS) * MINUTE_NS,
+        "the replay's first bar closes on the warmup's first minute"
+    );
+    assert!(live.len() >= 4 * 29 * 60, "{} items", live.len());
+    let differs = live
+        .iter()
+        .zip(&replay)
+        .position(|(live, replayed)| live != replayed);
+    assert!(
+        live == replay,
+        "{} live, {} replayed; the first to differ: {:?}",
+        live.len(),
+        replay.len(),
+        differs.map(|at| (
+            at,
+            &live[at.saturating_sub(3)..(at + 4).min(live.len())],
+            &replay[at.saturating_sub(3)..(at + 4).min(replay.len())]
+        ))
+    );
 }
 
 /// A warmup of 72 hours of deltas on `dir`'s catalog: the book they build, how
