@@ -24,7 +24,7 @@ use nautilus_common::{
 };
 use nautilus_core::UnixNanos;
 use nautilus_model::{
-    data::{BarType, CustomData, QuoteTick},
+    data::{Bar, BarType, CustomData, QuoteTick},
     identifiers::{InstrumentId, StrategyId},
 };
 use nautilus_trading::{
@@ -120,10 +120,14 @@ impl DataActor for FeatureProbe {
         decide::start(self, EVERY, SignedDuration::ZERO)
     }
 
-    /// Hands the features its quotes: the set is registered with Nautilus
-    /// for its bars alone, a model strategy's warmup handing it its ticks.
+    /// Hands the features its quotes and bars: the set is registered with
+    /// Nautilus for nothing, a model strategy's warmup handing it its data.
     fn on_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
         self.features.handle_quote(quote)
+    }
+
+    fn on_bar(&mut self, bar: &Bar) -> anyhow::Result<()> {
+        self.features.handle_bar(bar)
     }
 
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {

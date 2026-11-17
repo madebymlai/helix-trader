@@ -3,8 +3,9 @@
 //!
 //! The strategy shares a `ModelHandle` (an `Rc`), built from its model
 //! blueprint (`blueprint::ModelBlueprint`), in a `Mode`. `start` from
-//! `on_start` registers the features (and starts the target's ATR, if it
-//! has one) and starts the decision cadence; `decide`, at a decision
+//! `on_start` registers the features, starts the warmup, which feeds them
+//! and the target's ATR, if it has one, and starts the decision cadence;
+//! `decide`, at a decision
 //! of the cadence (its timer, `decide::is_decision`), snapshots the
 //! features, if no live warmup is still answering (`Warmup::is_warming`),
 //! the target's ATR, if any, is initialized, as the handle reads it itself,
@@ -106,14 +107,15 @@
 //! from its requirements and mode, feeding the features, and `start`
 //! starts it,
 //! the features registered first. The strategy's data hooks hand it the
-//! responses and the live quotes, trades, depth, deltas and custom data:
-//! `model_data_hooks!` writes them, the one place they are written, so that
-//! no strategy misses one. The features are registered with Nautilus for
-//! their bars alone: the warmup hands them the quotes, trades, depth,
-//! deltas and custom data of its responses and the live ones, held until it
-//! ends, so that
-//! no live tick reaches them before an older window of the history
-//! (`strategy::warmup`'s `hold`); in a replay they go straight through. Live, the warmup requests the history of
+//! responses and the live bars, quotes, trades, depth, deltas and custom
+//! data: `model_data_hooks!` writes them, the one place they are written,
+//! so that no strategy misses one. The features and the target's ATR are
+//! registered with none of Nautilus' indicators: the warmup hands them the
+//! bars its requests build, the quotes, trades, depth, deltas and custom
+//! data of its responses, in time order across series, and the live ones,
+//! held until it ends, so that no live bar or tick reaches them before an
+//! older window of the history (`strategy::warmup`'s `merge` and `hold`);
+//! in a replay they go straight through. Live, the warmup requests the history of
 //! every tick series of the requirements its venue's history serves, a
 //! root's on the contract standing for it, and of every custom series, of
 //! its type's live data client or the catalog alone, added to the cache
@@ -128,13 +130,15 @@
 //! the warmup request, as it does the features: the request builds the
 //! ATR's bars too (`TargetSetter::warmed`), and the warmup hands the bars of the
 //! response to both, so the first decision after a start sets the stop and
-//! the unit a dataset run sets there. A live node sizes its cache from the same
+//! the unit a dataset run sets there; in a backtest and a dataset run the
+//! warmup hands the ATR the replayed bars as it does the features
+//! (`Targets::warmed`). A live node sizes its cache from the same
 //! warmup, the ATR's bars included.
 //!
 //! Features over the bracket's width (`features::OverBracket`) read the
 //! width the handle builds the setter on (`FeatureSet::bracket_width`,
-//! `TargetSetter::sharing`): its ATR is the target's, started and warmed
-//! with it, and `decide` reads the features and sets the target in the one
+//! `TargetSetter::sharing`): its ATR is the target's, warmed with it, and
+//! `decide` reads the features and sets the target in the one
 //! decision event, with no data between, so a row reads the width its
 //! target is set at.
 //!
@@ -392,10 +396,11 @@ impl ModelHandle {
                 rows: rows.clone(),
             },
         };
-        // A dataset run warms on its replay.
+        // Live, its ATR warms on the warmup's history; in a backtest and a
+        // dataset run on the replay, which the warmup hands it as it comes.
         let warmup = match &serving {
             Serving::Deciding(deciding) => deciding.target.warmed(warmup),
-            Serving::Dataset { .. } => warmup,
+            Serving::Dataset { targets, .. } => targets.warmed(warmup),
         };
         // The target's ATR's bars, which Nautilus subscribes once if the
         // strategy reads them too (`DataActorCore::subscribe_bars`).
@@ -456,26 +461,23 @@ impl ModelHandle {
         let now = self.warmup.start(strategy)?;
         self.subscriptions.start(strategy, now);
         self.roller.start(strategy, now)?;
-        match &self.serving {
-            Serving::Deciding(deciding) => deciding.target.start(strategy),
-            Serving::Dataset { targets, rows } => {
-                targets.start(strategy)?;
-                let rows = rows.clone();
-                let handler = ShareableMessageHandler::from_typed(move |data: &CustomData| {
-                    if let Some(row) = data.data.as_any().downcast_ref::<TargetRow>() {
-                        rows.push(row.clone());
-                    }
-                });
-                let topic = get_custom_topic(&TargetRow::data_type(self.strategy_id));
-                msgbus::subscribe_any(topic.into(), handler, None);
-            }
+        if let Serving::Dataset { targets, rows } = &self.serving {
+            targets.start(strategy)?;
+            let rows = rows.clone();
+            let handler = ShareableMessageHandler::from_typed(move |data: &CustomData| {
+                if let Some(row) = data.data.as_any().downcast_ref::<TargetRow>() {
+                    rows.push(row.clone());
+                }
+            });
+            let topic = get_custom_topic(&TargetRow::data_type(self.strategy_id));
+            msgbus::subscribe_any(topic.into(), handler, None);
         }
         decide::start(strategy, self.rule, self.delay)
     }
 
     /// The strategy's warmup, which the handle builds and starts: the
-    /// strategy's data hooks hand it the responses and the live quotes and
-    /// trades (`model_data_hooks!`), and a live node sizes its cache from
+    /// strategy's data hooks hand it the responses and the live bars and
+    /// ticks (`model_data_hooks!`), and a live node sizes its cache from
     /// it.
     #[must_use]
     pub fn warmup(&self) -> Rc<Warmup> {
@@ -518,10 +520,9 @@ impl ModelHandle {
     }
 
     /// Whether the target's ATR, if any, is initialized, read of it, not of
-    /// Nautilus' registered indicators, for which the features are
-    /// registered for their bars alone (`FeatureSet::register`). The
-    /// features are not read here: `decide::decide` publishes no row while
-    /// one is cold.
+    /// Nautilus' registered indicators, with which neither it nor the
+    /// features are registered (`FeatureSet::register`). The features are
+    /// not read here: `decide::decide` publishes no row while one is cold.
     fn target_initialized(&self) -> bool {
         match &self.serving {
             Serving::Deciding(deciding) => deciding.target.initialized(),
@@ -546,7 +547,7 @@ impl ModelHandle {
     {
         if let Some(roll) = self.roller.on_time_event(strategy, event)? {
             self.subscriptions.roll(strategy, &roll);
-            self.features.roll(strategy, &roll);
+            self.features.roll(&roll);
         }
         Ok(())
     }
@@ -601,11 +602,12 @@ impl ModelHandle {
 /// The data hooks of a model strategy, written once for every one: expanded
 /// in its `DataActor` impl as `model_data_hooks!(model);`, `model` the field
 /// holding its `Rc<ModelHandle>`, they hand its warmup (`ModelHandle::warmup`)
-/// the end of each request (`on_data_response`), the quotes, trades, book
+/// each response of a request (`on_data_response`), the quotes, trades, book
 /// depth, deltas and custom data of each response (`on_historical_*`), and
-/// the live quotes, trades, depth, deltas and custom data (`on_quote`,
-/// `on_trade`, `on_book_depth`, `on_book_deltas`, `on_data`), which it holds
-/// while it is pending and then hands to the features (`strategy::warmup`).
+/// the live bars, quotes, trades, depth, deltas and custom data (`on_bar`,
+/// `on_quote`, `on_trade`, `on_book_depth`, `on_book_deltas`, `on_data`),
+/// which it holds while it is pending and then hands to the features and
+/// the target's ATR (`strategy::warmup`).
 #[macro_export]
 macro_rules! model_data_hooks {
     // The hooks expand in the strategy's module, which need not import the
@@ -684,6 +686,11 @@ macro_rules! model_data_hooks {
         // nautilus-import-ok
         fn on_trade(&mut self, trade: &::nautilus_model::data::TradeTick) -> ::anyhow::Result<()> {
             self.$model.warmup().on_trade(trade)
+        }
+
+        // nautilus-import-ok
+        fn on_bar(&mut self, bar: &::nautilus_model::data::Bar) -> ::anyhow::Result<()> {
+            self.$model.warmup().on_bar(bar)
         }
     };
 }
@@ -831,8 +838,8 @@ mod tests {
     nautilus_strategy!(Decider);
 
     /// Hands the warmup, once given, the custom data, quotes and trades of a
-    /// response and the live quotes and trades, as a model strategy does
-    /// (`model_data_hooks!`).
+    /// response and the live quotes, trades and bars, as a model strategy
+    /// does (`model_data_hooks!`).
     impl DataActor for Decider {
         fn on_historical_data(&mut self, data: &dyn std::any::Any) -> anyhow::Result<()> {
             self.warmup
@@ -862,6 +869,12 @@ mod tests {
             self.warmup
                 .as_ref()
                 .map_or(Ok(()), |warmup| warmup.on_trade(trade))
+        }
+
+        fn on_bar(&mut self, bar: &Bar) -> anyhow::Result<()> {
+            self.warmup
+                .as_ref()
+                .map_or(Ok(()), |warmup| warmup.on_bar(bar))
         }
     }
 
@@ -1429,11 +1442,15 @@ mod tests {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = registered(at("2026-10-22T12:00:00Z"));
         let handle = sides_handle(&probe, models.path(), &config(), (Some(6), None));
+        probe.warmup = Some(handle.warmup());
         handle.start(&mut probe).unwrap();
-        probe.handle_bar(&hour_bar(
-            "2026-10-22T12:00:00Z",
-            ["0.70000", "0.75000", "0.50000", "0.70000"],
-        ));
+        hand_bar(
+            &mut probe,
+            &hour_bar(
+                "2026-10-22T12:00:00Z",
+                ["0.70000", "0.75000", "0.50000", "0.70000"],
+            ),
+        );
 
         let decision = handle.decide(&mut probe).unwrap().unwrap();
 
@@ -1503,11 +1520,18 @@ mod tests {
         )
     }
 
+    /// Hands `bar` to `probe`'s `on_bar`, as a running node does, which
+    /// hands it to its warmup, once given (`model_data_hooks!`).
+    fn hand_bar(probe: &mut Decider, bar: &Bar) {
+        DataActor::on_bar(probe, bar).unwrap();
+    }
+
     /// Starts `handle` on `probe` in a backtest and hands it `unit_bar`,
     /// which the ATR of `config`'s target reads: its unit is 1,000 USD.
     fn started(handle: &ModelHandle, probe: &mut Decider) {
+        probe.warmup = Some(handle.warmup());
         handle.start(probe).unwrap();
-        probe.handle_bar(&unit_bar());
+        hand_bar(probe, &unit_bar());
     }
 
     /// The handle trading live on `config` for a strategy reading the
@@ -1580,14 +1604,14 @@ mod tests {
         assert_eq!(rows.borrow().len(), 0);
     }
 
-    /// Features reading bars alone, as model_ema's: the set is registered
-    /// with Nautilus for its bars as before, and the quotes the strategy
-    /// hands its warmup reach none of its features. Worked by hand: at
-    /// 12:00 the last hourly close is cold, a quote of AUD/USD handed over
-    /// leaves it cold, and the bar closing at 12:00, which Nautilus hands
-    /// it, warms it: the long model expecting 0.3R trades.
+    /// Features reading bars alone, as model_ema's: the strategy hands its
+    /// warmup its bars, which reach the features, and its quotes, which
+    /// reach none of them. Worked by hand: at 12:00 the last hourly close
+    /// is cold, a quote of AUD/USD handed over leaves it cold, and the bar
+    /// closing at 12:00, handed over, warms it: the long model expecting
+    /// 0.3R trades.
     #[rstest]
-    fn features_reading_no_ticks_warm_on_their_bars_through_nautilus_as_before() {
+    fn features_reading_no_ticks_warm_on_the_bars_the_strategy_hands_its_warmup() {
         let models = tempfile::tempdir().unwrap();
         let hours = BarType::from("AUD/USD.SIM-1-HOUR-MID-INTERNAL");
         let features = FeatureSet::builder()
@@ -1626,10 +1650,13 @@ mod tests {
         let cold = handle.decide(&mut probe).unwrap();
         DataActor::on_quote(&mut probe, &quote).unwrap();
         let quoted = handle.decide(&mut probe).unwrap();
-        probe.handle_bar(&hour_bar(
-            "2026-10-22T12:00:00Z",
-            ["0.69950", "0.70020", "0.69940", "0.70000"],
-        ));
+        hand_bar(
+            &mut probe,
+            &hour_bar(
+                "2026-10-22T12:00:00Z",
+                ["0.69950", "0.70020", "0.69940", "0.70000"],
+            ),
+        );
         let barred = handle.decide(&mut probe).unwrap();
 
         assert_eq!(
@@ -1880,6 +1907,42 @@ mod tests {
     }
 
     /// The hooks `model_data_hooks!` writes hand the warmup a strategy's
+    /// bars too, with which neither the features nor the target's ATR are
+    /// registered with Nautilus. In a backtest, which holds nothing, the
+    /// hourly close of AUD/USD reads the bar closing at 12:00, at 0.70000,
+    /// as the strategy gets it, and through Nautilus nothing.
+    #[rstest]
+    fn the_hooks_of_model_data_hooks_hand_the_features_a_strategys_bars() {
+        let models = tempfile::tempdir().unwrap();
+        let hours = BarType::from("AUD/USD.SIM-1-HOUR-MID-INTERNAL");
+        let features = FeatureSet::builder()
+            .feature(&[Series::Bars(hours)], HOURLY_CLOSE, &tables())
+            .build()
+            .unwrap();
+        let model = ModelHandle::new(
+            &blueprint_of(&features, &config(), requirements()),
+            &Mode::Backtest {
+                models: models.path().to_path_buf(),
+            },
+        )
+        .unwrap();
+        let mut hooked = Hooked {
+            core: strategy_core(),
+            model: Rc::clone(&model),
+        };
+        register(&mut hooked.core, at("2026-10-22T12:00:00Z"));
+        model.start(&mut hooked).unwrap();
+        let bar = unit_bar();
+
+        hooked.handle_bar(&bar);
+        let through_nautilus = features.values();
+        DataActor::on_bar(&mut hooked, &bar).unwrap();
+
+        assert_eq!(through_nautilus, None);
+        assert_eq!(features.values(), Some(vec![0.7]));
+    }
+
+    /// The hooks `model_data_hooks!` writes hand the warmup a strategy's
     /// live book depth and deltas too, which Nautilus hands no indicator,
     /// only the strategy's handlers. In a backtest, which holds nothing, a
     /// feature counting GCZ26's snapshots and one counting its batches of
@@ -2091,6 +2154,7 @@ mod tests {
             },
         )
         .unwrap();
+        probe.warmup = Some(handle.warmup());
         handle.start(&mut probe).unwrap();
         let rows = published();
         let trade = |decision: Option<Decision>| decision.map(|decision| decision.trade());
@@ -2111,10 +2175,16 @@ mod tests {
             )
         };
 
-        probe.handle_bar(&mid_bar("2026-10-22T12:00:00Z", "0.69900", "0.70100"));
+        hand_bar(
+            &mut probe,
+            &mid_bar("2026-10-22T12:00:00Z", "0.69900", "0.70100"),
+        );
         let noon = trade(handle.decide(&mut probe).unwrap());
         advance(&features, &clock, "2026-10-22T13:00:00Z");
-        probe.handle_bar(&mid_bar("2026-10-22T13:00:00Z", "0.69800", "0.70200"));
+        hand_bar(
+            &mut probe,
+            &mid_bar("2026-10-22T13:00:00Z", "0.69800", "0.70200"),
+        );
         let one = trade(handle.decide(&mut probe).unwrap());
 
         let read: Vec<f64> = rows.borrow().iter().map(|row| row.features[0]).collect();
@@ -2146,10 +2216,14 @@ mod tests {
             },
         )
         .unwrap();
+        probe.warmup = Some(handle.warmup());
         handle.start(&mut probe).unwrap();
         assert!(!width.initialized());
 
-        probe.handle_bar(&mid_bar("2026-10-22T11:00:00Z", "0.69900", "0.70100"));
+        hand_bar(
+            &mut probe,
+            &mid_bar("2026-10-22T11:00:00Z", "0.69900", "0.70100"),
+        );
 
         assert!(width.initialized());
     }
@@ -2455,11 +2529,15 @@ mod tests {
             .borrow_mut()
             .add_quote(eur_quote(eur))
             .unwrap();
+        probe.warmup = Some(handle.warmup());
         handle.start(&mut probe).unwrap();
-        probe.handle_bar(&Bar {
-            bar_type: BarType::from("EUR/USD.SIM-1-HOUR-MID-INTERNAL"),
-            ..unit_bar()
-        });
+        hand_bar(
+            &mut probe,
+            &Bar {
+                bar_type: BarType::from("EUR/USD.SIM-1-HOUR-MID-INTERNAL"),
+                ..unit_bar()
+            },
+        );
 
         let err = handle.decide(&mut probe).unwrap_err();
 

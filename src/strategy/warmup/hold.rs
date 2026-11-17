@@ -1,5 +1,5 @@
-//! The hold of a live warmup's quotes, trades, book depth, deltas and custom
-//! data: the
+//! The hold of a live warmup's quotes, trades, book depth, deltas, custom
+//! data and bars: the
 //! warmup hands the indicators reading them, a model strategy's features,
 //! those of its responses as its merge hands them on, in time order across
 //! series (`merge`), holds the live ones the strategy
@@ -26,19 +26,32 @@
 //! while a request is pending either. So the strategy hands the warmup its
 //! live depth and deltas from its handlers too, held as ticks are, and its
 //! custom data, which Nautilus hands an actor's `on_data` and
-//! `on_historical_data` alone, likewise. Once
+//! `on_historical_data` alone, likewise. Nautilus holds live data for a
+//! request's bar aggregator only until that request completes
+//! (`cleanup_request_bar_aggregators` in `data/src/engine/bar.rs`), so the
+//! live bars it builds then would reach indicators registered for them
+//! while the other requests still answer older windows: the bar
+//! indicators are registered with Nautilus for nothing either, and the
+//! strategy hands the warmup its live and replayed bars (`on_bar`), held
+//! as ticks are. Once
 //! Nautilus holds live data for an actor's indicators and handlers while a
 //! request of it with `update_subscriptions` is pending, releasing them in
 //! time order after the response and deduplicated against it, this module
-//! goes: the features are registered for quotes and trades again, the
-//! strategy hands the warmup no ticks, and its handlers hand its depth,
-//! deltas and custom data to the features straight: helix-trader issue #16
-//! (<https://github.com/madebymlai/helix-trader/issues/16>).
+//! goes: helix-trader issue #16
+//! (<https://github.com/madebymlai/helix-trader/issues/16>), upstream
+//! nautilus_trader#5675. Until the merge goes too (`merge`,
+//! helix-trader#46), which hands a request's history on after its
+//! completion, the features stay fed through the warmup, live data then
+//! passed straight through; after it, they are registered for quotes,
+//! trades and bars again, the strategy hands the warmup no ticks and no
+//! bars, and its handlers hand its depth, deltas and custom data to the
+//! features straight.
 //!
 //! A live tick the history holds is dropped, held or not, judged within its
 //! series, the quotes, the trades, the depth or the deltas of one
-//! instrument, or the custom data of one data type, a batch of deltas by
-//! its last delta's time. The series' seam is
+//! instrument, the custom data of one data type, or the bars of one bar
+//! type, a batch of deltas by its last delta's time, a bar by its close.
+//! The series' seam is
 //! the latest `ts_event` of its ticks the warmup handed over; a live tick of
 //! the series made at or before it (`ts_event`) is dropped, one made after
 //! it handed over. Made at the seam itself, it is the venue's resend of the
@@ -62,13 +75,15 @@ use super::{
     tick::{Series, Tick},
 };
 
-/// What hands a warmup's quotes, trades, depth, deltas and custom data to
-/// the indicators reading them, holding the live ones while a live start's
-/// group is pending.
+/// What hands a warmup's quotes, trades, depth, deltas, custom data and
+/// bars to the indicators reading them, holding the live ones while a live
+/// start's group is pending.
 #[derive(Default)]
 pub(super) struct Hold {
     /// What the quotes and trades are handed to.
     indicators: Vec<SharedActorIndicator>,
+    /// What the bars are handed to.
+    bars: Vec<SharedActorIndicator>,
     /// What the depth and deltas are handed to.
     books: Vec<Rc<dyn BookIndicator>>,
     /// What the custom data is handed to.
@@ -85,6 +100,11 @@ impl Hold {
     /// Hands the quotes and trades to `indicator` too.
     pub(super) fn feeding(&mut self, indicator: SharedActorIndicator) {
         self.indicators.push(indicator);
+    }
+
+    /// Hands the bars to `indicator` too.
+    pub(super) fn feeding_bars(&mut self, indicator: SharedActorIndicator) {
+        self.bars.push(indicator);
     }
 
     /// Hands the depth and deltas to `books` too.
@@ -209,6 +229,11 @@ impl Hold {
                     custom.handle_custom(data);
                 }
             }
+            Tick::Bar(bar) => {
+                for indicator in &self.bars {
+                    indicator.handle_bar(bar)?;
+                }
+            }
         }
         Ok(())
     }
@@ -218,6 +243,7 @@ impl Debug for Hold {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct(stringify!(Hold))
             .field("indicators", &self.indicators.len())
+            .field("bars", &self.bars.len())
             .field("books", &self.books.len())
             .field("custom", &self.custom.len())
             .field("held", &self.held.borrow().as_ref().map(Vec::len))

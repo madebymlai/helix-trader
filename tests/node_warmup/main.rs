@@ -623,11 +623,14 @@ struct Warming {
     /// where the warmup ends, as a model handle starts them; none of the
     /// series rolls.
     subscriptions: Subscriptions,
-    /// The target, started as a model handle does, and read for the long
+    /// The target, warmed as a model handle does, and read for the long
     /// side when the warmup ends.
     traded: Option<Rc<TargetSetter>>,
     exits: Rc<RefCell<Option<SideTarget>>>,
     failure: Rc<RefCell<Option<String>>>,
+    /// The close of each live bar the strategy got, in ns, and whether the
+    /// warmup was pending then.
+    live_bars: Rc<RefCell<Vec<(u64, bool)>>>,
 }
 
 nautilus_actor!(Warming);
@@ -638,9 +641,6 @@ impl DataActor for Warming {
         self.cache_rc().borrow_mut().add_instrument(esz26())?;
         let now = Rc::clone(&self.warmup).start(self)?;
         self.subscriptions.clone().start(self, now);
-        if let Some(traded) = self.traded.clone() {
-            traded.start(self);
-        }
         Ok(())
     }
 
@@ -670,6 +670,17 @@ impl DataActor for Warming {
 
     fn on_trade(&mut self, trade: &TradeTick) -> anyhow::Result<()> {
         self.warmup.on_trade(trade)
+    }
+
+    /// The live bars go to the warmup, as a model strategy hands them
+    /// (`model_data_hooks!`); each recorded, with whether the warmup was
+    /// still pending.
+    fn on_bar(&mut self, bar: &Bar) -> anyhow::Result<()> {
+        let warming = self.warmup.is_warming();
+        self.live_bars
+            .borrow_mut()
+            .push((bar.ts_event.as_u64(), warming));
+        self.warmup.on_bar(bar)
     }
 
     fn on_data_response(&mut self, response: &DataResponseEnvelope) -> anyhow::Result<()> {
@@ -710,7 +721,7 @@ fn warm(
     };
     let fed = Rc::new(Fed::default());
     let warmup = Warmup::live(&requirements).feeding(Rc::clone(&fed) as SharedActorIndicator);
-    let (failure, _) = run(dir, venue, &requirements, warmup, vec![], None);
+    let Ran { failure, .. } = run(dir, venue, &requirements, warmup, vec![], None);
     Warmed {
         bars: fed.bars.borrow().clone(),
         failure,
@@ -720,8 +731,7 @@ fn warm(
 /// Runs `warmup`, the subscriptions to the bars of `requirements` and of
 /// `traded`'s ATR and to `ticks`, and `traded` of a strategy of
 /// `requirements` on a node with the catalog in `dir`, its history asked of
-/// `venue`: why it failed, if it did, and the long side's target when it
-/// ended.
+/// `venue`: what it did (`Ran`).
 fn run(
     dir: &Path,
     venue: &Rc<RefCell<FakeVenue>>,
@@ -729,7 +739,7 @@ fn run(
     warmup: Warmup,
     ticks: Vec<TickSeries>,
     traded: Option<Rc<TargetSetter>>,
-) -> (Option<String>, Option<SideTarget>) {
+) -> Ran {
     let atr_bars = traded.as_ref().and_then(|traded| traded.atr_bar_type());
     let bar_types = requirements.bar_types.iter().copied().chain(atr_bars);
     let subscriptions = Subscriptions::new(bar_types.collect(), ticks, vec![]);
@@ -750,6 +760,7 @@ fn run(
     };
     let failure = Rc::new(RefCell::new(None));
     let exits = Rc::new(RefCell::new(None));
+    let live_bars = Rc::new(RefCell::new(vec![]));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -778,6 +789,7 @@ fn run(
             traded,
             exits: Rc::clone(&exits),
             failure: Rc::clone(&failure),
+            live_bars: Rc::clone(&live_bars),
         })
         .unwrap();
         tokio::time::timeout(Duration::from_secs(60), node.run())
@@ -787,8 +799,23 @@ fn run(
         node.dispose();
     });
     let failure = failure.borrow().clone();
-    let exits = exits.take();
-    (failure, exits)
+    Ran {
+        failure,
+        exits: exits.take(),
+        live_bars: live_bars.take(),
+    }
+}
+
+/// What a run of a warmup did.
+#[derive(Debug)]
+struct Ran {
+    /// Why it failed, if it did.
+    failure: Option<String>,
+    /// The long side's target when it ended.
+    exits: Option<SideTarget>,
+    /// The close of each live bar the strategy got, in ns, and whether the
+    /// warmup was pending then.
+    live_bars: Vec<(u64, bool)>,
 }
 
 /// The time a bar closes, in ns.
@@ -1031,7 +1058,7 @@ fn bracket_of(bar_types: Vec<BarType>, ticks: Vec<TickSeries>) -> SideTarget {
     };
     let traded = Rc::new(TargetSetter::new(&target, hourly, &requirements, &dataset).unwrap());
     let warmup = traded.warmed(Warmup::live(&requirements));
-    let (failure, exits) = run(
+    let Ran { failure, exits, .. } = run(
         dir.path(),
         &venue,
         &requirements,
@@ -1098,7 +1125,7 @@ fn read_live(
     let features = Rc::new(Fed::default());
     let warmup =
         Warmup::live(&requirements).feeding_ticks(Rc::clone(&features) as SharedActorIndicator);
-    let (failure, _) = run(dir, venue, &requirements, warmup, vec![series], None);
+    let Ran { failure, .. } = run(dir, venue, &requirements, warmup, vec![series], None);
     assert_eq!(failure, None);
     features
 }
@@ -1238,8 +1265,8 @@ fn features_read_a_catalogs_windows_then_the_venues_before_a_live_quote() {
     assert_eq!(Some(*live), venue.live.first().map(|live| live.made));
 }
 
-/// A feature reading several series, recording each quote and trade it
-/// reads, in one log, so that the order across them shows.
+/// A feature reading several series, recording each quote, trade and bar
+/// it reads, in one log, so that the order across them shows.
 #[derive(Debug, Default)]
 struct Flow {
     read: RefCell<Vec<(&'static str, u64)>>,
@@ -1272,7 +1299,8 @@ impl ActorIndicator for Flow {
         Ok(())
     }
 
-    fn handle_bar(&self, _bar: &Bar) -> anyhow::Result<()> {
+    fn handle_bar(&self, bar: &Bar) -> anyhow::Result<()> {
+        self.read.borrow_mut().push(("bar", bar.ts_event.as_u64()));
         Ok(())
     }
 }
@@ -1304,7 +1332,7 @@ fn a_feature_on_two_series_reads_their_history_in_time_order_however_it_arrives(
     let warmup =
         Warmup::live(&requirements).feeding_ticks(Rc::clone(&flow) as SharedActorIndicator);
 
-    let (failure, _) = run(dir.path(), &venue, &requirements, warmup, series, None);
+    let Ran { failure, .. } = run(dir.path(), &venue, &requirements, warmup, series, None);
 
     assert_eq!(failure, None);
     let venue = venue.borrow();
@@ -1339,6 +1367,93 @@ fn a_feature_on_two_series_reads_their_history_in_time_order_however_it_arrives(
     assert_eq!(live_made, sent);
 }
 
+/// GCZ26's bars of a second, which a warmup builds from its trades.
+const LAST_SECONDS: &str = "GCZ26.GLBX-1-SECOND-LAST-INTERNAL";
+
+/// A feature on GCZ26's bars of a second, built from its trades, and on its
+/// quotes, the warmup asking the trades and the quotes in two windows each
+/// of 23 hours over 30: the venue answers the trades at once and the
+/// quotes' windows after 1.5 s each, so the trades' request completes, its
+/// bars built, while the quotes' is pending, and Nautilus' aggregator goes
+/// live on the venue's live trade, building a live bar a second on, which
+/// the strategy hands the warmup while the quotes are still pending. The
+/// trades are made 30 seconds before each minute's quote, so each bar
+/// closes then. The feature, handed the trades too, reads the history in
+/// time order, the bars among the ticks window by window, then the live
+/// ticks and bar.
+#[rstest]
+fn a_feature_on_built_bars_and_quotes_reads_them_in_time_order_however_they_arrive() {
+    let dir = tempfile::tempdir().unwrap();
+    let venue = FakeVenue::new(Answer::Envelope);
+    venue.borrow_mut().quotes_latency = Some(Duration::from_millis(1500));
+    venue.borrow_mut().trades_early = 30_000_000_000;
+    let quotes = of_gcz26(NautilusDataType::QuoteTick);
+    let requirements = DataRequirements {
+        bar_types: vec![BarType::from(LAST_SECONDS)],
+        ticks: vec![quotes.clone()],
+        custom: vec![],
+        warmup: SignedDuration::from_hours(30),
+    };
+    let flow = Rc::new(Flow::default());
+    let warmup = Warmup::live(&requirements)
+        .feeding(Rc::clone(&flow) as SharedActorIndicator)
+        .feeding_ticks(Rc::clone(&flow) as SharedActorIndicator);
+
+    let ran = run(
+        dir.path(),
+        &venue,
+        &requirements,
+        warmup,
+        vec![quotes],
+        None,
+    );
+
+    assert_eq!(ran.failure, None);
+    let venue = venue.borrow();
+    assert_eq!(venue.kinds.last(), Some(&"quote"), "{:?}", venue.kinds);
+    let (live_bar, _) = *ran
+        .live_bars
+        .iter()
+        .find(|&&(_, warming)| warming)
+        .expect("a live bar while the quotes were pending");
+    let read = flow.read.borrow();
+    let older = read.windows(2).find(|pair| pair[1].1 < pair[0].1);
+    assert_eq!(older, None, "read older than the one before it");
+    let made = |kind: &str| -> Vec<u64> {
+        read.iter()
+            .filter(|(of, _)| *of == kind)
+            .map(|&(_, made)| made)
+            .collect()
+    };
+    let asked = |kind: &str| -> Vec<u64> {
+        let mut made: Vec<u64> = venue
+            .kinds
+            .iter()
+            .zip(&venue.asked)
+            .filter(|(of, _)| **of == kind)
+            .flat_map(|(_, &(start, end))| -> Vec<u64> {
+                match kind {
+                    "quote" => minutes(start, end, None).collect(),
+                    _ => trades_made(&venue, start, end).collect(),
+                }
+            })
+            .collect();
+        made.sort_unstable();
+        made
+    };
+    // The history's, then the live one.
+    let quotes_read = made("quote");
+    assert_eq!(quotes_read[..quotes_read.len() - 1], asked("quote"));
+    let trades = asked("trade");
+    assert_eq!(made("trade"), trades);
+    // Each of the history's closes on the second of its one trade, the
+    // first, partial, dropped; then the live one.
+    let bars = made("bar");
+    assert!(bars.len() >= 29 * 60, "{} bars", bars.len());
+    assert_eq!(bars[..bars.len() - 1], trades[1..]);
+    assert_eq!(bars.last(), Some(&live_bar));
+}
+
 /// A warmup of 72 hours of deltas on `dir`'s catalog: the book they build, how
 /// many batches cleared it, and what the venue was asked.
 fn warm_deltas(dir: &Path) -> (Rc<Books>, Vec<(u64, u64)>) {
@@ -1360,7 +1475,7 @@ fn warm_deltas(dir: &Path) -> (Rc<Books>, Vec<(u64, u64)>) {
     });
     let warmup =
         Warmup::live(&requirements).feeding_books(Rc::clone(&books) as Rc<dyn BookIndicator>);
-    let (failure, _) = run(dir, &venue, &requirements, warmup, vec![], None);
+    let Ran { failure, .. } = run(dir, &venue, &requirements, warmup, vec![], None);
     assert_eq!(failure, None);
     let asked = venue.borrow().asked.clone();
     (books, asked)
