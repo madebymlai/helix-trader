@@ -16,7 +16,7 @@ use helix_trader::{
         config::{Margins, ModelConfig},
         features::{Feature, FeatureSet, side_names},
         learner::{LearnerConfig, LightGbmConfig},
-        store::{ModelCalibration, ModelStore},
+        store::StoredGeneration,
         targets::Side,
         train::{Outcome, Trained, Training},
     },
@@ -132,16 +132,14 @@ fn training(catalog: &TempDir, models: &Path) -> Training {
         .unwrap()
 }
 
-/// The store under `models` of the `side` models of a training, as
+/// The generation under `models` valid from `valid_from` of a training, as
 /// `training` keys it.
-fn store(models: &Path, side: Side) -> ModelStore {
+fn generation(models: &Path, valid_from: Timestamp) -> StoredGeneration {
     blueprint(features(), config())
-        .model_set(models)
+        .model_store(models)
         .unwrap()
-        .side(side)
+        .read(valid_from)
         .unwrap()
-        .store()
-        .clone()
 }
 
 /// Quotes from 23:00 of the 19th of October 2026 to 03:00 of the 23rd.
@@ -158,10 +156,9 @@ fn t() -> Timestamp {
     ic::at("00:00:00") + SignedDuration::from_hours(48)
 }
 
-/// Each side published at t, valid from then. Both manifests hold the
-/// pair's one calibration, naming it, and each side's model, reloaded by
-/// its learner, predicts its probes, rows of the calibration slice, to the
-/// bit.
+/// Each side published at t, in the generation valid from then, which
+/// holds their pair's calibration, and each side's model, reloaded by its
+/// learner, predicts its probes, rows of the calibration slice, to the bit.
 #[rstest]
 fn train_at_t_publishes_each_side_whose_probes_reload_to_identical_predictions() {
     let catalog = catalog();
@@ -186,16 +183,13 @@ fn train_at_t_publishes_each_side_whose_probes_reload_to_identical_predictions()
     // A side's model reads the strategy's features, then the bracket's payoff
     // features, the names the decision checks it against.
     let names = side_names(features().names(), &target().payoff_names());
-    let [long, short] = Side::BOTH.map(|side| store(models.path(), side).read(t()).unwrap());
-    assert_eq!(long.manifest.calibration, short.manifest.calibration);
-    let ModelCalibration::Pair(calibration) = &long.manifest.calibration else {
-        panic!("{:?}", long.manifest.calibration);
-    };
-    assert_eq!(
-        (calibration.valid_from, &calibration.sides[..]),
-        (t(), &Side::BOTH[..])
-    );
-    for (side, stored) in Side::BOTH.into_iter().zip([long, short]) {
+    let generation = generation(models.path(), t());
+    assert_eq!(generation.valid_from, t());
+    assert!(generation.calibration.side_call.is_some());
+    assert_eq!(generation.meta, None);
+    for (side, stored) in Side::BOTH.into_iter().zip(generation.sides) {
+        assert_eq!(stored.manifest.side, Some(side));
+        assert_eq!(stored.manifest.calibration, None, "{side:?}");
         assert_eq!(
             (&stored.manifest.feature_names, &stored.manifest.fingerprint),
             (&names, &fingerprint),

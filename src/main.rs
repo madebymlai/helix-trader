@@ -579,7 +579,7 @@ impl<'a> Visitor for Running<'a> {
 /// dataset`) whose currency those pairs do not reach a traded instrument's
 /// P&L currency from (`backtest::refuse_balance`), as `backtest` and
 /// `train` refuse it. Warns, naming the store, when it holds no model to
-/// trade on yet (`ModelSet::trades_by`): the strategy then makes no trade
+/// trade on yet (`ModelStore::trades_by`): the strategy then makes no trade
 /// until one is published there.
 async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyhow::Result<()> {
     let config = load_config::<S::Params>(&args.config)?;
@@ -594,7 +594,7 @@ async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyho
     )?;
     backtest::refuse_balance(config.model().dataset.balance, &traded, &pairs)
         .context(DATASET_BALANCE)?;
-    let models = S::blueprint(&config)?.model_set(&args.models)?;
+    let models = S::blueprint(&config)?.model_store(&args.models)?;
     if !models.trades_by(Timestamp::from(get_atomic_clock_realtime().get_time_ns()))? {
         eprintln!(
             "warning: no model to trade on yet in {}: the strategy makes no trade until one is \

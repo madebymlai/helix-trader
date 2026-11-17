@@ -6,43 +6,47 @@
 //! the range it judges.
 //!
 //! Before the run (`WalkForward::untrained`), a backtest whose store holds
-//! no model to trade on at its start (`ModelSet::trades_by`: a pair of the
-//! sides, and the meta's, if any, valid by then, as a live start checks) is
-//! refused: it would trade nothing from its start, and names the retrain
-//! time there, the span's first train time (`Schedule::times`: the last
-//! retrain time not after the start, or, never retrained, the start). The
-//! run then trades on the stores as they are: at each decision, the latest
-//! pair of the sides valid then (`handle`), as live does, so a retrain time
-//! the store lacks leaves the model before it deciding through its period.
+//! no generation to trade on at its start (`ModelStore::trades_by`: the
+//! latest valid by then, holding a meta model if the strategy has a meta,
+//! as a live start checks) is refused: it would trade nothing from its
+//! start, and names the retrain time there, the span's first train time
+//! (`Schedule::times`: the last retrain time not after the start, or, never
+//! retrained, the start). The run then trades on the store as it is: at
+//! each decision, the latest generation valid then (`handle`), as live
+//! does, so a retrain time the store lacks leaves the generation before it
+//! deciding through its period.
 //!
-//! After the run (`WalkForward::scores`), each side is scored on each
-//! decision's row of the dataset in the span, its calibrated expected R,
-//! `E'`, against its trade's realized R, with the pair the strategy used at
-//! it: the latest valid then, a pair with a model failing its checks refused
-//! and the current one kept, as the handle does. Every model is out of
-//! sample on its rows: trained at its valid-from on rows settled by then.
-//! Beside each, on the very rows it decided, its own baseline, as its
-//! manifest has it (`store::ModelManifest::baseline`): the training mean of
-//! R on the rows that model was fitted and calibrated on, at its
-//! valid-from. A period whose retrain time the store lacks, its train failed
-//! or never run, so scores the earlier model in use beside that model's
-//! baseline, a period of models published off
-//! the schedule each row beside the baseline of the model that decided it,
-//! and a row decided with no pair, as before the sides' first, has no score.
-//! Each side's skill against those baselines, mean `R - E'`, calibration
-//! slope and top-decile gap (`score::ExpectedScore`) are given per retrain
-//! period and over the span, on all the side's rows with a pair, and what was
-//! earned there, in R (`holdout::Earnings`), beside every trade of those rows,
-//! its own, at the commission and at 1.5 times it; and the same of the meta, its
-//! calibrated expected R against the R of the trade of the side picked, on
-//! the rows a side is picked on with a meta model. A side's trades taken are
-//! those picked for it on each row by the decision itself
-//! (`deciding::DecidingModels::pick`), before any meta: a row where both sides clear counts one trade, for the side
-//! expected the most, a tie none, so with no meta the sides' trades add up to
-//! the decisions returned. A meta's are the trades of the side picked its
-//! margin takes (`holdout::MetaMargin`), out of sample. All this judges the decision the handle returns, on the target's
-//! trade: no section adds the sides up, as the backtest's report gives what the
-//! strategy actually traded, which can differ whenever it filters its decisions.
+//! After the run (`WalkForward::scores`), each model is scored on each
+//! decision's row of the dataset in the span with the generation the
+//! strategy used at it: the latest valid then, swapped in as the handle
+//! swaps it (`store::Swap`), a row whose generation fails its checks
+//! decided by none, as the handle decides no trade there. Each side, its
+//! calibrated expected R, `E'`, against its trade's realized R; the meta,
+//! on the rows a side is picked on, of a generation holding a meta model,
+//! its calibrated expected R against the R of the trade of the side picked.
+//! Every model is out of sample on its rows: trained by its generation's
+//! valid-from on rows settled by then. Beside each, on the very rows it
+//! decided, its own baseline, as its manifest has it
+//! (`store::ModelManifest::baseline`): the training mean of R on the rows
+//! that model was fitted and calibrated on. A period whose retrain time the
+//! store lacks, its train failed or never run, so scores the earlier
+//! generation in use beside its baselines, a period of generations
+//! published off the schedule each row beside the baseline of the model
+//! that decided it, and a row decided with no generation, as before the
+//! first, has no score. Each model's skill against those baselines, its
+//! mean `R - E'`, calibration slope and top-decile gap (`score::ExpectedScore`) are
+//! given per retrain period and over the span, on all its rows with a
+//! generation, and what was earned there, in R (`holdout::Earnings`), beside
+//! every trade of those rows, its own, at the commission and at 1.5 times
+//! it. A side's trades taken are those picked for it on each row by the
+//! decision itself (`deciding::DecidingModels::pick_among`), before any
+//! meta: a row where both sides clear counts one trade, for the side
+//! expected the most, a tie none, so with no meta the sides' trades add up
+//! to the decisions returned. A meta's are the trades of the side picked its
+//! margin takes (`holdout::MetaMargin`), out of sample. All this judges the
+//! decision the handle returns, on the target's trade: no section adds the
+//! sides up, as the backtest's report gives what the strategy actually
+//! traded, which can differ whenever it filters its decisions.
 
 use std::{collections::BTreeSet, fmt::Display};
 
@@ -52,13 +56,12 @@ use nautilus_core::UnixNanos;
 use super::{
     blueprint::Stored,
     dataset::{self, Dataset, DatasetRow},
-    deciding::DecidingModels,
+    deciding::{self, DecidingModels},
+    features::meta_row,
     holdout::{Earnings, Example, MetaMargin, STRESS, in_r},
-    meta,
     schedule::{Models, Schedule},
     score::ExpectedScore,
-    store::{Baselined, ModelSet, Swap},
-    targets::Side,
+    store::{Baselined, ModelStore},
 };
 use crate::strategy::risk::R;
 
@@ -71,7 +74,7 @@ pub struct WalkForward {
     schedule: Schedule,
     /// The strategy's models: each side traded, with its margin and its
     /// store, and the meta level, if any.
-    models: ModelSet,
+    models: ModelStore,
 }
 
 /// The out-of-sample scores of a backtest: of each model, the meta's on
@@ -97,8 +100,8 @@ pub struct Period {
     pub from: Timestamp,
     /// The period's end: the next retrain time, or the span's end.
     pub to: Timestamp,
-    /// The valid-froms of the models used in the period: one, unless a
-    /// model valid from within it was published off the schedule.
+    /// The valid-froms of the generations used in the period: one, unless
+    /// a generation valid from within it was published off the schedule.
     pub models: Vec<Timestamp>,
     /// The model's, on the rows decided with one, beside the baselines' on
     /// the same rows: each row's that of the model that decided it.
@@ -110,7 +113,7 @@ pub struct Period {
 
 impl WalkForward {
     /// The backtests of the models of `model`, a strategy's model on the
-    /// venue of its dataset runs, on its dataset and in its model set, on
+    /// venue of its dataset runs, on its dataset and in its model store, on
     /// its schedule.
     pub(super) fn new(model: Stored<'_>) -> Self {
         let Stored {
@@ -127,7 +130,7 @@ impl WalkForward {
     }
 
     /// The train time at the start of a backtest over `[start, end)` if
-    /// the stores hold no model to trade on there (`ModelSet::trades_by`):
+    /// the store holds no generation to trade on there (`ModelStore::trades_by`):
     /// the span's first train time (`Schedule::times`), whose train fills
     /// it; none if they hold one.
     ///
@@ -140,12 +143,14 @@ impl WalkForward {
     }
 
     /// The scores of a backtest over `[start, end)`, its dataset built over
-    /// it: each side's model's, and the meta model's, if any.
+    /// it: each side's model's, and the meta model's, if any, of the
+    /// generation in use at each row (`judged`).
     ///
     /// # Errors
     ///
     /// Returns an error if the span is empty, the dataset lacks a day of
-    /// it, a model fails to predict, or the dataset or a store cannot be read.
+    /// it, a model fails to predict, or the dataset or the store cannot be
+    /// read.
     pub fn scores(&self, start: Timestamp, end: Timestamp) -> anyhow::Result<Scores> {
         let times = self.schedule.times(start, end)?;
         let (first, last) = dataset::days(start, end);
@@ -156,75 +161,91 @@ impl WalkForward {
         );
         let mut rows = self.dataset.read(start, end)?;
         rows.retain(|row| row.ts_event < UnixNanos::from(end));
-        let listed = self.models.valid_froms()?;
-        let picked = self.picked(&rows)?;
-        let mut scores = Scores {
-            long: None,
-            short: None,
-            meta: None,
-        };
-        let pairs = listed.pairs();
-        for level in self.models.sides() {
-            let side = level.side();
-            let examples: Vec<Example> =
-                rows.iter().map(|row| Example::of_side(row, side)).collect();
-            let side_scores = score(
-                &times,
-                (start, end),
-                &examples,
-                &pairs,
-                self.models.pairs(),
-                |pair, row, _| {
-                    Ok(Judged {
-                        expected: pair.expect(&rows[row].sides())?.of(side),
-                        baseline: pair.side(side).baseline(),
-                        taken: picked[row] == Some(side),
-                    })
-                },
-            )?;
-            match side {
-                Side::Long => scores.long = Some(side_scores),
-                Side::Short => scores.short = Some(side_scores),
-            }
-        }
-        if let (Some(level), Some(valid_froms)) = (self.models.meta(), &listed.meta) {
-            let margin = MetaMargin(level.config().margin);
-            let examples = meta::examples(&self.models, &rows.iter().collect::<Vec<_>>())?;
-            scores.meta = Some(score(
-                &times,
-                (start, end),
-                &examples,
-                valid_froms,
-                level.swap(),
-                |model, _, example| {
-                    let expected = model.predict(&example.features)?;
-                    Ok(Judged {
-                        expected,
-                        baseline: model.baseline(),
-                        taken: R::finite(expected).is_some_and(|expected| margin.takes(expected)),
-                    })
-                },
-            )?);
-        }
-        Ok(scores)
+        let judged = self.judged(&rows)?;
+        let scores = |judged: &Vec<Judged>| score(&times, (start, end), judged);
+        Ok(Scores {
+            long: judged.long.as_ref().map(scores),
+            short: judged.short.as_ref().map(scores),
+            meta: judged.meta.as_ref().map(scores),
+        })
     }
 
-    /// The side picked on each of `rows`, in time order, by the decision
-    /// itself, before any meta: on each side's row, among the sides of the
-    /// pair in use then (`DecidingModels::pick`).
-    fn picked(&self, rows: &[DatasetRow]) -> anyhow::Result<Vec<Option<Side>>> {
-        let mut models = DecidingModels::new(&self.models)?;
-        rows.iter()
-            .map(|row| {
-                let picked = models.pick(Timestamp::from(row.ts_event), &row.sides())?;
-                Ok(picked.map(|picked| picked.side))
-            })
-            .collect()
+    /// What the generation in use at each of `rows`, in time order, says of
+    /// each model's example of it, swapped in as the handle swaps it, a row
+    /// whose generation fails its checks judged by none: each side's, on the
+    /// side's trade; and the meta's, if the generation holds one, on the
+    /// trade of the side picked, if any (`DecidingModels::pick_among`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store cannot be listed, or a model fails to
+    /// predict.
+    fn judged(&self, rows: &[DatasetRow]) -> anyhow::Result<Models<Vec<Judged>>> {
+        let listed = self.models.generations()?;
+        let mut generations = self.models.swap();
+        let margin = self
+            .models
+            .meta()
+            .map(|level| MetaMargin(level.config().margin));
+        let mut judged = Models {
+            long: None,
+            short: None,
+            meta: margin.map(|_| vec![]),
+        };
+
+        for level in self.models.sides() {
+            judged.set_side(level.side(), vec![]);
+        }
+
+        for row in rows {
+            let Ok(Some((valid_from, generation))) =
+                generations.at(Timestamp::from(row.ts_event), &listed)
+            else {
+                continue;
+            };
+            let sides = row.sides();
+            let pair = generation.pair();
+            let expected = pair.expect(&sides)?;
+            let picked = DecidingModels::pick_among(pair, deciding::margins(&self.models), &sides)?;
+            for level in self.models.sides() {
+                let side = level.side();
+                if let Some(judged) = judged.side_mut(side) {
+                    judged.push(Judged {
+                        valid_from,
+                        example: Example::of_side(row, side),
+                        expected: expected.of(side),
+                        baseline: pair.side(side).baseline(),
+                        taken: picked.is_some_and(|picked| picked.side == side),
+                    });
+                }
+            }
+
+            if let (Some(margin), Some(meta), Some(picked), Some(judged)) =
+                (margin, generation.meta(), picked, judged.meta.as_mut())
+            {
+                let example = Example {
+                    features: meta_row(&row.features, picked.side.order_side(), picked.expected),
+                    ..Example::of_side(row, picked.side)
+                };
+                let expected = meta.predict(&example.features)?;
+                judged.push(Judged {
+                    valid_from,
+                    expected,
+                    baseline: meta.baseline(),
+                    taken: R::finite(expected).is_some_and(|expected| margin.takes(expected)),
+                    example,
+                });
+            }
+        }
+        Ok(judged)
     }
 }
 
-/// What the model in use on an example says of it.
+/// What the generation in use on a model's example says of it.
 struct Judged {
+    /// The generation's valid-from.
+    valid_from: Timestamp,
+    example: Example,
     /// Its calibrated expected R of the example's trade.
     expected: f64,
     /// Its baseline's (`Baselined`).
@@ -233,59 +254,44 @@ struct Judged {
     taken: bool,
 }
 
-/// The scores over `[start, end)`, retrained at `times`, of the models
-/// `models` swaps in on `examples`, in time order, among those valid from
-/// `valid_froms`, each beside its own baseline on the rows it decided:
-/// their expected R against the R each example's trade realized. `judge`
-/// gives what the model in use on an example, at its position in
-/// `examples`, says of it.
-fn score<M>(
+/// The scores over `[start, end)`, retrained at `times`, of a model's
+/// examples `judged`, in time order, each by the generation in use on it
+/// and beside its own baseline: their expected R against the R each
+/// example's trade realized.
+fn score(
     times: &[Timestamp],
     (start, end): (Timestamp, Timestamp),
-    examples: &[Example],
-    valid_froms: &[Timestamp],
-    mut models: Swap<M>,
-    judge: impl Fn(&M, usize, &Example) -> anyhow::Result<Judged>,
-) -> anyhow::Result<ModelScores> {
+    judged: &[Judged],
+) -> ModelScores {
     let (mut model_rows, mut model_trades) = (vec![], vec![]);
     let mut periods = vec![];
     for (i, &at) in times.iter().enumerate() {
         let (from, to) = (at.max(start), times.get(i + 1).copied().unwrap_or(end));
         let (from_ns, to_ns) = (UnixNanos::from(from), UnixNanos::from(to));
-        let (mut period_models, mut judged, mut trades) = (BTreeSet::new(), vec![], vec![]);
-        for (row, example) in examples
+        let (mut period_models, mut rows, mut trades) = (BTreeSet::new(), vec![], vec![]);
+        for judged in judged
             .iter()
-            .enumerate()
-            .filter(|(_, example)| from_ns <= example.ts_event && example.ts_event < to_ns)
+            .filter(|judged| from_ns <= judged.example.ts_event && judged.example.ts_event < to_ns)
         {
-            if let Some((valid_from, model)) =
-                models.at(Timestamp::from(example.ts_event), valid_froms)
-            {
-                period_models.insert(valid_from);
-                let Judged {
-                    expected,
-                    baseline,
-                    taken,
-                } = judge(model, row, example)?;
-                judged.push((expected, example.realized(), baseline));
-                trades.push((taken, example.trade));
-            }
+            period_models.insert(judged.valid_from);
+            rows.push((judged.expected, judged.example.realized(), judged.baseline));
+            trades.push((judged.taken, judged.example.trade));
         }
         periods.push(Period {
             from,
             to,
             models: period_models.into_iter().collect(),
-            score: ExpectedScore::of(&judged),
+            score: ExpectedScore::of(&rows),
             earnings: Earnings::of(&trades),
         });
-        model_rows.extend(judged);
+        model_rows.extend(rows);
         model_trades.extend(trades);
     }
-    Ok(ModelScores {
+    ModelScores {
         periods,
         score: ExpectedScore::of(&model_rows),
         earnings: Earnings::of(&model_trades),
-    })
+    }
 }
 
 /// The scores as text, in the sections of the backtest's report: of each
@@ -404,10 +410,10 @@ mod tests {
             holdout::Trades,
             learner::{LearnerConfig, TrainingSet},
             schedule::Retrain,
-            store::{ModelCalibration, ModelManifest, ModelStore, StoredModel},
+            store::{ModelManifest, StoredGeneration, StoredModel},
             targets::{
-                BracketSpec, Distance, Exit, Outcome, Outcomes, PerSide, Target, TargetConfig,
-                TargetRow,
+                BracketSpec, Distance, Exit, Outcome, Outcomes, PerSide, Side, Target,
+                TargetConfig, TargetRow,
             },
         },
         strategy::{requirements::DataRequirements, risk::R},
@@ -580,19 +586,12 @@ mod tests {
         beta: 0.5,
     };
 
-    /// A fake side model of `config()` valid from `valid_from`, of
-    /// `fingerprint`, its baseline `baseline` (`model_of`).
-    fn model(valid_from: Timestamp, fingerprint: String, baseline: f64) -> StoredModel {
-        model_of(&config(), valid_from, fingerprint, baseline)
-    }
-
-    /// A fake side model of `config` valid from `valid_from`, of
-    /// `fingerprint`, on the features then the target's payoff names: its R
-    /// the row's first feature, its pair's calibration leaving it as it is
-    /// (`unchanged`), its baseline `baseline`.
+    /// A fake model of `side` of `config`, of `fingerprint`, on the
+    /// features then the target's payoff names: its R the row's first
+    /// feature, its baseline `baseline`.
     fn model_of(
         config: &ModelConfig,
-        valid_from: Timestamp,
+        side: Side,
         fingerprint: String,
         baseline: f64,
     ) -> StoredModel {
@@ -601,14 +600,12 @@ mod tests {
         let model = LearnerConfig::Fake {}.fit(&set).unwrap();
         StoredModel {
             manifest: ModelManifest {
-                strategy_id: StrategyId::from(STRATEGY),
-                valid_from,
                 fingerprint,
                 feature_names: names,
                 target: config.target.clone(),
-                side: Some(Side::Long),
+                side: Some(side),
                 learner: LearnerConfig::Fake {},
-                calibration: unchanged(config, valid_from),
+                calibration: None,
                 baseline,
                 probes: vec![],
             },
@@ -617,26 +614,49 @@ mod tests {
     }
 
     /// The models of a walk in `dir` as `config` says.
-    fn models(dir: &Path, config: &ModelConfig) -> ModelSet {
-        blueprint(config).model_set(&dir.join("models")).unwrap()
+    fn models(dir: &Path, config: &ModelConfig) -> ModelStore {
+        blueprint(config).model_store(&dir.join("models")).unwrap()
     }
 
-    /// The store of the `side` models of a walk in `dir` as `config` says.
-    fn store(dir: &Path, config: &ModelConfig, side: Side) -> ModelStore {
-        models(dir, config).side(side).unwrap().store().clone()
+    /// Publishes for a walk in `dir` as `config` says the generation valid
+    /// from `valid_from` of `sides`, each side traded, their pair's
+    /// calibration leaving them as they are (`unchanged`), and `meta`, if
+    /// any.
+    fn publish_generation(
+        dir: &Path,
+        config: &ModelConfig,
+        valid_from: Timestamp,
+        sides: Vec<StoredModel>,
+        meta: Option<StoredModel>,
+    ) {
+        models(dir, config)
+            .publish(&StoredGeneration {
+                valid_from,
+                sides,
+                calibration: unchanged(config),
+                meta,
+            })
+            .unwrap();
     }
 
-    /// Publishes a fake model valid from `valid_from` for each side of a
-    /// walk in `dir` as `config` says, with the baseline of
-    /// `trained_baseline`.
+    /// Publishes for a walk in `dir` as `config` says a generation valid
+    /// from `valid_from`, a fake for each side, with the baseline of
+    /// `trained_baseline`, and no meta.
     fn publish(dir: &Path, config: &ModelConfig, valid_from: Timestamp) {
         let fingerprint = dataset(dir, config).fingerprint().to_string();
-        for (side, _) in config.margins.sides() {
-            let baseline = trained_baseline(side, valid_from);
-            store(dir, config, side)
-                .publish(&model_of(config, valid_from, fingerprint.clone(), baseline))
-                .unwrap();
-        }
+        let sides = config
+            .margins
+            .sides()
+            .map(|(side, _)| {
+                model_of(
+                    config,
+                    side,
+                    fingerprint.clone(),
+                    trained_baseline(side, valid_from),
+                )
+            })
+            .collect();
+        publish_generation(dir, config, valid_from, sides, None);
     }
 
     /// The baseline the `side` model published at `valid_from` carries, a
@@ -824,30 +844,43 @@ mod tests {
         close(first.earnings.taken.win_rate, 0.5);
     }
 
-    /// Publishes for `side` of a walk in `dir` as `config` says a model valid
-    /// from `valid_from`, with the baseline a train then fits
-    /// (`trained_baseline`): the long's a fake, expecting its row's feature in
-    /// R, the short's a baseline expecting 0.5R whatever the row, their pair's
-    /// calibration leaving each as it is (`unchanged`), up to rounding.
-    fn publish_opposed(dir: &Path, config: &ModelConfig, side: Side, valid_from: Timestamp) {
+    /// Publishes for a walk in `dir` as `config` says the generation valid
+    /// from `valid_from` of opposed sides, each with the baseline a train
+    /// then fits (`trained_baseline`): the long's a fake, expecting its row's
+    /// feature in R, the short's a baseline expecting 0.5R whatever the row,
+    /// their pair's calibration leaving each as it is (`unchanged`), up to
+    /// rounding; and the meta model `meta`, if any.
+    fn publish_opposed(
+        dir: &Path,
+        config: &ModelConfig,
+        valid_from: Timestamp,
+        meta: Option<StoredModel>,
+    ) {
         let fingerprint = dataset(dir, config).fingerprint().to_string();
-        let mut opposed = model_of(
-            config,
-            valid_from,
-            fingerprint,
-            trained_baseline(side, valid_from),
-        );
-        if side == Side::Short {
-            let width = opposed.manifest.feature_names.len();
-            let set = TrainingSet::new(width, vec![0.0; width], vec![0.5]).unwrap();
-            opposed.manifest.learner = LearnerConfig::Baseline {};
-            opposed.model = LearnerConfig::Baseline {}
-                .fit(&set)
-                .unwrap()
-                .save()
-                .unwrap();
-        }
-        store(dir, config, side).publish(&opposed).unwrap();
+        let sides = Side::BOTH
+            .into_iter()
+            .map(|side| {
+                let mut opposed = model_of(
+                    config,
+                    side,
+                    fingerprint.clone(),
+                    trained_baseline(side, valid_from),
+                );
+
+                if side == Side::Short {
+                    let width = opposed.manifest.feature_names.len();
+                    let set = TrainingSet::new(width, vec![0.0; width], vec![0.5]).unwrap();
+                    opposed.manifest.learner = LearnerConfig::Baseline {};
+                    opposed.model = LearnerConfig::Baseline {}
+                        .fit(&set)
+                        .unwrap()
+                        .save()
+                        .unwrap();
+                }
+                opposed
+            })
+            .collect();
+        publish_generation(dir, config, valid_from, sides, meta);
     }
 
     /// The scores over the 7th and the 8th of `walk(dir)`, with `rows` and each
@@ -864,9 +897,7 @@ mod tests {
         let walk = walk(dir);
         build(dir);
         for valid_from in [at("2026-01-07T00:00:00Z"), at("2026-01-08T00:00:00Z")] {
-            for side in Side::BOTH {
-                publish_opposed(dir, &config(), side, valid_from);
-            }
+            publish_opposed(dir, &config(), valid_from, None);
         }
         walk.scores(at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"))
             .unwrap()
@@ -980,33 +1011,6 @@ mod tests {
         }
     }
 
-    /// The short's first model is the 8th's, the long's of the 7th having none
-    /// beside it: on the 7th no pair decides, and neither side has a row
-    /// scored or a trade. On the 8th the pair picks as in `opposed_scores`.
-    #[rstest]
-    fn a_side_with_no_model_beside_it_decides_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let walk = walk(dir.path());
-        build(dir.path());
-        let (seventh, eighth) = (at("2026-01-07T00:00:00Z"), at("2026-01-08T00:00:00Z"));
-        publish_opposed(dir.path(), &config(), Side::Long, seventh);
-        publish_opposed(dir.path(), &config(), Side::Long, eighth);
-        publish_opposed(dir.path(), &config(), Side::Short, eighth);
-
-        let scores = walk.scores(seventh, at("2026-01-09T00:00:00Z")).unwrap();
-
-        let (long, short) = (scores.long.unwrap(), scores.short.unwrap());
-        for side in [&long, &short] {
-            let first = &side.periods[0];
-            assert!(first.models.is_empty(), "{first:?}");
-            assert_eq!(first.score.rows, 0, "{first:?}");
-            assert_eq!(first.earnings.taken.count, 0, "{first:?}");
-            assert_eq!(first.earnings.every.count, 0, "{first:?}");
-        }
-        trades_are(long.periods[1].earnings.taken, 1, 1.0);
-        trades_are(short.periods[1].earnings.taken, 1, -1.0);
-    }
-
     /// `config`, on a target with exits on AUD/USD.
     fn with_exits() -> ModelConfig {
         ModelConfig {
@@ -1069,23 +1073,23 @@ mod tests {
         assert_eq!(scores.short.unwrap().earnings.taken.count, 0);
     }
 
-    /// A fake meta model valid from `valid_from`, of `fingerprint`, on the
-    /// meta's features: its R that of the row's first feature calibrated by
-    /// `CALIBRATION`, its baseline 0.5.
-    fn meta_model(valid_from: Timestamp, fingerprint: String) -> StoredModel {
+    /// A fake meta model of `fingerprint`, on the meta's features: its R
+    /// that of the row's first feature calibrated by `CALIBRATION`, its
+    /// baseline 0.5.
+    fn meta_model(fingerprint: String) -> StoredModel {
         let names = meta_names(features().names());
         let set = TrainingSet::new(names.len(), vec![0.5; names.len()], vec![1.0]).unwrap();
-        let mut meta = model(valid_from, fingerprint, 0.5);
+        let mut meta = model_of(&config(), Side::Long, fingerprint, 0.5);
         meta.manifest.side = None;
-        meta.manifest.calibration = ModelCalibration::Meta(CALIBRATION);
+        meta.manifest.calibration = Some(CALIBRATION);
         meta.manifest.feature_names = names;
         meta.model = LearnerConfig::Fake {}.fit(&set).unwrap().save().unwrap();
         meta
     }
 
-    /// The scores over the 7th and the 8th of `meta_walk(dir)`, with `rows`,
-    /// each side's opposed models (`publish_opposed`) and a meta model
-    /// (`meta_model`) valid from the 7th and the 8th, the meta taking a trade
+    /// The scores over the 7th and the 8th of a walk as `with_meta` says,
+    /// with `rows`, generations of opposed sides (`publish_opposed`) and a
+    /// meta model (`meta_model`) valid from the 7th and the 8th, the meta taking a trade
     /// from an expected 0.3 USD. The sides pick as in `opposed_scores`.
     fn opposed_meta_scores(dir: &Path) -> Scores {
         opposed_meta_scores_of(dir, &with_meta(), &rows())
@@ -1099,13 +1103,14 @@ mod tests {
             .write(rows, at("2026-01-06T00:00:00Z"), at("2026-01-09T01:00:00Z"))
             .unwrap();
         let fingerprint = dataset(dir, config).fingerprint().to_string();
+
         for valid_from in [at("2026-01-07T00:00:00Z"), at("2026-01-08T00:00:00Z")] {
-            for side in Side::BOTH {
-                publish_opposed(dir, config, side, valid_from);
-            }
-            meta_store_of(dir, config)
-                .publish(&meta_model(valid_from, fingerprint.clone()))
-                .unwrap();
+            publish_opposed(
+                dir,
+                config,
+                valid_from,
+                Some(meta_model(fingerprint.clone())),
+            );
         }
         walk.scores(at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"))
             .unwrap()
@@ -1195,33 +1200,77 @@ mod tests {
         trades_are(scores.short.unwrap().earnings.taken, 2, 0.0);
     }
 
-    /// The pair of the 8th has a long of another fingerprint, refused as it
-    /// loads: the pair is, and on the 8th the pair of the 7th is scored, its
-    /// short too, never the 8th's short beside the 7th's long.
+    /// The generation of the 8th has a long of another fingerprint, refused
+    /// as it loads: as the handle decides no trade on it, nor on the
+    /// generation of the 7th, no row of the 8th is scored, of either side;
+    /// the 7th's are.
     #[rstest]
-    fn a_model_failing_its_checks_is_not_scored_and_the_current_one_is() {
+    fn rows_of_a_generation_failing_its_checks_are_not_scored() {
         let dir = tempfile::tempdir().unwrap();
         let walk = walk(dir.path());
         build(dir.path());
         let eighth = at("2026-01-08T00:00:00Z");
         publish(dir.path(), &config(), at("2026-01-07T00:00:00Z"));
-        store(dir.path(), &config(), Side::Long)
-            .publish(&model(eighth, "f".repeat(64), 0.5))
-            .unwrap();
         let fingerprint = dataset(dir.path(), &config()).fingerprint().to_string();
-        store(dir.path(), &config(), Side::Short)
-            .publish(&model(eighth, fingerprint, 0.5))
-            .unwrap();
+        publish_generation(
+            dir.path(),
+            &config(),
+            eighth,
+            vec![
+                model_of(&config(), Side::Long, "f".repeat(64), 0.5),
+                model_of(&config(), Side::Short, fingerprint, 0.5),
+            ],
+            None,
+        );
 
         let scores = walk
             .scores(at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"))
             .unwrap();
 
         for side in [scores.long.unwrap(), scores.short.unwrap()] {
-            let second = &side.periods[1];
-            assert_eq!(second.models, [at("2026-01-07T00:00:00Z")], "{second:?}");
-            assert_eq!(second.score.rows, 2, "{second:?}");
+            let [first, second] = &side.periods[..] else {
+                panic!("{side:?}");
+            };
+            assert_eq!(first.score.rows, 3, "{first:?}");
+            assert!(second.models.is_empty(), "{second:?}");
+            assert_eq!(second.score.rows, 0, "{second:?}");
         }
+    }
+
+    /// A generation's meta is scored beside its own sides alone: that of the
+    /// 7th holds a meta model, that of the 8th none, its meta having waited,
+    /// so the meta scores the 7th's three rows and none of the 8th, never
+    /// beside the 8th's sides, which still pick their two.
+    #[rstest]
+    fn a_meta_is_scored_beside_its_own_generations_sides_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = with_meta();
+        let walk = walk_of(dir.path(), &config);
+        dataset(dir.path(), &config)
+            .write(
+                &rows(),
+                at("2026-01-06T00:00:00Z"),
+                at("2026-01-09T01:00:00Z"),
+            )
+            .unwrap();
+        let fingerprint = dataset(dir.path(), &config).fingerprint().to_string();
+        publish_opposed(
+            dir.path(),
+            &config,
+            at("2026-01-07T00:00:00Z"),
+            Some(meta_model(fingerprint)),
+        );
+        publish_opposed(dir.path(), &config, at("2026-01-08T00:00:00Z"), None);
+
+        let scores = walk
+            .scores(at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"))
+            .unwrap();
+
+        let meta = scores.meta.unwrap();
+        assert_eq!(meta.periods[0].score.rows, 3, "{meta:?}");
+        assert_eq!(meta.periods[1].score.rows, 0, "{meta:?}");
+        assert!(meta.periods[1].models.is_empty(), "{meta:?}");
+        trades_are(scores.long.unwrap().periods[1].earnings.taken, 1, 1.0);
     }
 
     /// A baseline is a model's: the 7th's three rows, decided with none,
@@ -1245,7 +1294,7 @@ mod tests {
         assert_eq!(long.score.rows, 2);
     }
 
-    /// A pair published off the schedule, valid from 12:00 of the 7th, its
+    /// A generation published off the schedule, valid from 12:00 of the 7th, its
     /// long's baseline 1/4: the period of the 7th uses the 7th's long, its
     /// baseline 1/3, at 04:00 and 08:00, a win and a loss, and the later one
     /// at 12:00, a loss, each row scored beside the baseline of the model
@@ -1261,15 +1310,15 @@ mod tests {
             publish(dir.path(), &config(), at);
         }
         let fingerprint = dataset(dir.path(), &config()).fingerprint().to_string();
-        for (side, baseline) in [(Side::Long, 0.25), (Side::Short, 0.75)] {
-            store(dir.path(), &config(), side)
-                .publish(&model(
-                    at("2026-01-07T12:00:00Z"),
-                    fingerprint.clone(),
-                    baseline,
-                ))
-                .unwrap();
-        }
+        let sides = [(Side::Long, 0.25), (Side::Short, 0.75)]
+            .map(|(side, baseline)| model_of(&config(), side, fingerprint.clone(), baseline));
+        publish_generation(
+            dir.path(),
+            &config(),
+            at("2026-01-07T12:00:00Z"),
+            sides.into(),
+            None,
+        );
 
         let scores = walk
             .scores(at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"))
@@ -1415,11 +1464,6 @@ Meta model scores, out of sample, over the span
         config
     }
 
-    /// The store of the meta models of a walk in `dir` as `config` says.
-    fn meta_store_of(dir: &Path, config: &ModelConfig) -> ModelStore {
-        models(dir, config).meta().unwrap().store().clone()
-    }
-
     #[rstest]
     fn the_long_the_short_then_the_meta_models_scores_follow_in_the_report() {
         let score = ExpectedScore::default();
@@ -1466,56 +1510,57 @@ Meta model scores, out of sample, over the span
         }
     }
 
-    /// A model published to a store of a walk in `dir` as `config` says:
-    /// the pair of the sides, the long's alone, or the meta's.
+    /// A generation published to the store of a walk in `dir` as `config`
+    /// says: of the sides alone, or with a meta model.
     #[derive(Debug, Clone, Copy)]
     enum Published {
-        Pair(&'static str),
-        Long(&'static str),
-        Meta(&'static str),
+        Sides(&'static str),
+        WithMeta(&'static str),
     }
 
-    /// Publishes `published` to the stores of a walk in `dir` as `config`
+    /// Publishes `published` to the store of a walk in `dir` as `config`
     /// says.
     fn publish_each(dir: &Path, config: &ModelConfig, published: &[Published]) {
         let fingerprint = dataset(dir, config).fingerprint().to_string();
 
-        for &model_of in published {
-            match model_of {
-                Published::Pair(valid_from) => publish(dir, config, at(valid_from)),
-                Published::Long(valid_from) => store(dir, config, Side::Long)
-                    .publish(&model(at(valid_from), fingerprint.clone(), 0.0))
-                    .unwrap(),
-                Published::Meta(valid_from) => meta_store_of(dir, config)
-                    .publish(&model(at(valid_from), fingerprint.clone(), 0.5))
-                    .unwrap(),
+        for &generation in published {
+            match generation {
+                Published::Sides(valid_from) => publish(dir, config, at(valid_from)),
+                Published::WithMeta(valid_from) => {
+                    publish_opposed(
+                        dir,
+                        config,
+                        at(valid_from),
+                        Some(meta_model(fingerprint.clone())),
+                    );
+                }
             }
         }
     }
 
-    /// A backtest from 12:00 of the 7th to the 9th whose stores hold no
-    /// model to trade on at its start is untrained there: at the span's
+    /// A backtest from 12:00 of the 7th to the 9th whose store holds no
+    /// generation to trade on at its start is untrained there: at the span's
     /// first train time, retrained daily the midnight of the 7th, never
-    /// retrained its start. A store holding a side alone holds no pair; one
-    /// holding the sides' pair and no meta model, with a meta level,
-    /// nothing to trade on either; nor one whose models come after the
-    /// start.
+    /// retrained its start. A store holding a generation whose meta waited,
+    /// with a meta level, holds nothing to trade on either, even beside an
+    /// earlier generation holding one; nor one whose generations come after
+    /// the start.
     #[rstest]
     #[case::retrained_on_an_empty_store(config(), &[], "2026-01-07T00:00:00Z")]
     #[case::never_retrained_on_an_empty_store(never(), &[], "2026-01-07T12:00:00Z")]
-    #[case::with_models_after_its_start(
+    #[case::with_generations_after_its_start(
         config(),
-        &[Published::Pair("2026-01-08T00:00:00Z")],
+        &[Published::Sides("2026-01-08T00:00:00Z")],
         "2026-01-07T00:00:00Z"
     )]
-    #[case::with_a_side_alone(
-        never(),
-        &[Published::Long("2026-01-06T00:00:00Z")],
-        "2026-01-07T12:00:00Z"
-    )]
-    #[case::with_the_sides_and_no_meta_model(
+    #[case::with_a_generation_whose_meta_waited(
         with_meta(),
-        &[Published::Pair("2026-01-06T00:00:00Z")],
+        &[Published::Sides("2026-01-06T00:00:00Z")],
+        "2026-01-07T00:00:00Z"
+    )]
+    #[case::with_its_latest_generations_meta_waited(
+        with_meta(),
+        &[Published::WithMeta("2026-01-06T00:00:00Z"), Published::Sides("2026-01-07T06:00:00Z")],
         "2026-01-07T00:00:00Z"
     )]
     fn a_backtest_with_no_model_to_trade_on_at_its_start_is_untrained_at_its_first_train_time(
@@ -1534,17 +1579,14 @@ Meta model scores, out of sample, over the span
         assert_eq!(untrained, Some(at(first)));
     }
 
-    /// A backtest from 12:00 of the 7th whose stores hold models to trade on
-    /// by then trains nothing: the pair of the 6th, published at no retrain
-    /// time of the span, decides until the next, retrained or not; with a
-    /// meta level, beside a meta model of the 7th.
+    /// A backtest from 12:00 of the 7th whose store holds a generation to
+    /// trade on by then trains nothing: the generation of the 6th, published
+    /// at no retrain time of the span, decides until the next, retrained or
+    /// not; with a meta level, holding a meta model.
     #[rstest]
-    #[case::retrained(config(), &[Published::Pair("2026-01-06T00:00:00Z")])]
-    #[case::never_retrained(never(), &[Published::Pair("2026-01-06T00:00:00Z")])]
-    #[case::with_a_meta_model(
-        never_with_meta(),
-        &[Published::Pair("2026-01-06T00:00:00Z"), Published::Meta("2026-01-07T00:00:00Z")]
-    )]
+    #[case::retrained(config(), &[Published::Sides("2026-01-06T00:00:00Z")])]
+    #[case::never_retrained(never(), &[Published::Sides("2026-01-06T00:00:00Z")])]
+    #[case::with_a_meta_model(never_with_meta(), &[Published::WithMeta("2026-01-06T00:00:00Z")])]
     fn a_backtest_with_models_to_trade_on_at_its_start_is_not_untrained(
         #[case] config: ModelConfig,
         #[case] published: &[Published],

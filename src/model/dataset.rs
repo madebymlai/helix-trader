@@ -1503,7 +1503,7 @@ mod tests {
     /// bump of `VERSION` or a new input to the fingerprint, updates the
     /// literal here, and the pinned directory of a store, which the
     /// fingerprint keys too
-    /// (`store::tests::a_fixed_strategys_side_store_keeps_its_directory`).
+    /// (`store::tests::a_fixed_strategys_generations_keep_their_directory`).
     #[rstest]
     fn a_fixed_strategys_dataset_keeps_its_identifier() {
         let dataset = dataset(Path::new("catalog"), STRATEGY, 1);

@@ -1,68 +1,74 @@
-//! The model store: the models published for a strategy, each valid from
-//! the time it was trained at.
+//! The model store: the generations a strategy's trains published, each
+//! valid from the retrain time it was trained at.
 //!
-//! A store is a directory per strategy id, fingerprint (that of its
-//! dataset: the features, the decision rule, the target and the
-//! venue settings of its dataset runs, see `dataset::fingerprint`) and training
-//! settings (the learner and its settings, the retrain interval,
-//! the window, the calibration and the fewest rows of a slice) with the
-//! store `VERSION`, and side, the long or the short, keyed by the margins of
-//! both sides, which decide the side picked on each row and so the meta's
-//! rows, so a model is only ever listed beside models of the same features,
-//! costs, training, side and margins, and of the same manifest. Backtest and live
+//! A generation is one train's models (`StoredGeneration`): the model of
+//! each side the strategy trades, with the calibration of their pair, and
+//! the meta's, if the strategy has one and it did not wait for the sides'
+//! decisions (`train::Kept::Waiting`). It is self-contained: its models are
+//! fixed as of its retrain time, by that train alone, and none is derived
+//! from the generation before it, nor changed by a later train; a retrained
+//! meta learns from the decisions of the generations before it (`train`),
+//! but takes no model of theirs. A decision uses the latest generation
+//! valid at or before it, its sides and its meta together, so no meta ever
+//! decides beside the sides of another train, and no side beside another
+//! train's other side.
+//!
+//! A strategy's generations are in one directory, of its strategy id, its
+//! dataset's fingerprint (the features, the decision rule, the target and
+//! the venue settings of its dataset runs, see `dataset::fingerprint`) and
+//! its generation key: every training setting of its models, the sides'
+//! (the learner and its settings, the retrain interval, the window, the
+//! calibration and the fewest rows of a slice) and the margins of both
+//! sides, which decide the side picked on each row and so the meta's rows,
+//! then the meta's (its learner and settings, window, calibration, margin
+//! and fewest rows) or none, and the store `VERSION`. So a generation is
+//! only ever listed beside generations of the same features, costs,
+//! training, margins and meta, and of the same manifest. Backtest and live
 //! read the same list.
 //!
-//! A meta model's store sits in a `meta/` directory beside its sides,
-//! under their training settings, keyed by its own (its learner and
-//! settings, window, calibration, margin and fewest rows) and the sides'
-//! margins, which make its rows. A meta model is only ever listed beside
-//! meta models of the same sides.
+//! A strategy's model store (`ModelStore`) is built of its model's blueprint
+//! (`blueprint::ModelBlueprint`), and only there, which computes the
+//! fingerprint once and keys the directory with it. The model store holds
+//! each side the margins trade, with its margin and its feature names (the
+//! strategy's, then the target's payoff names, `features::side_names`),
+//! and the meta level, if any, with its config and its feature names; it
+//! publishes and lists the generations, and hands out their swap, each
+//! model checked against its level's feature names and the fingerprint. A
+//! train reads a level's feature names from it, so the names a model is
+//! published with are those it is checked against.
 //!
-//! A strategy's stores are built together, as its model set (`ModelSet`),
-//! and only there, of its model's blueprint (`blueprint::ModelBlueprint`),
-//! which computes the fingerprint once and keys them all with it. The
-//! model set holds each side the margins trade, with its margin, its feature
-//! names (the strategy's, then the target's payoff names,
-//! `features::side_names`) and its store, and the meta level, if any, with
-//! its config, its feature names and its store; it hands out the swap of the
-//! sides' pairs and of the meta's models, checked against the level's
-//! feature names and the fingerprint, and lists when each model was
-//! published. A train reads a level's feature names from it, so the names a
-//! model is published with are those it is checked against.
+//! `Swap` is how the generations are used: at each decision, in time
+//! order, the latest valid then, loaded and checked before use, all its
+//! models together. A generation failing a check is refused with an error
+//! naming it and the check, no decision is made on it nor on the one before
+//! it, and it is read again at the next decision, so that a generation that
+//! loads once mended is used from then.
 //!
-//! The sides' models are used as pairs (`Pair`), the sides one train
-//! published, valid from one time: a pair's valid-from is a time every side
-//! traded has a model valid from (`Models::pairs`), so a side's model with
-//! no other side's beside it, as a train stopped between its sides'
-//! publishes leaves, is in no pair and never used. A one-sided strategy's
-//! pairs are its one side's models. A pair is calibrated as one
-//! (`calibration::Ksplit`), its calibration fitted on that pair and written
-//! into each side's manifest, the same values naming the pair it was fitted
-//! on, its valid-from and its sides (`PairCalibration`): a pair whose sides'
-//! copies differ, or name another pair, is refused.
-//!
-//! `Swap` is how the models are used: at each decision, in time order,
-//! the latest valid then, the sides' pair or the meta's model, checked
-//! before use, one failing a check refused, a pair whole, and the current
-//! one kept.
-//!
-//! Each model is one file, `<valid from>.json` (an RFC 3339 time): its
-//! manifest, the schema (the feature names in order, the fingerprint), the
-//! target spec and side, the learner, the calibration of its predictions (a
-//! side's its pair's, a meta's its own level line, `ModelCalibration`), its
-//! baseline (the training mean of the R it learned on the rows it was fitted
-//! and calibrated on) and probe rows, of its calibration slice, with
-//! the predictions the model made on them when fitted, before any
-//! calibration, and the model as its adapter saved it. A side's model
-//! predicts R (`SideModel`), its pair calibrating both sides' predictions at
-//! once (`Pair::expect`); a meta's predicts the R of the trade of the side
-//! picked, every prediction calibrated (`LoadedModel`); each carries its
-//! baseline (`Baselined`). A model whose manifest has the other level's
-//! calibration is refused at load. A reloaded model is checked by
-//! predicting the probes, never by its bytes. The file is written beside
-//! its name, then renamed onto it, so a reader sees a whole model or none.
-//! A missing feature, NaN, has no JSON number: a probe row writes NaN and
-//! the infinities as strings, and so does a probe's prediction.
+//! A generation is a directory, `<valid from>/` (an RFC 3339 time), holding
+//! its manifest, `generation.json` (`GenerationManifest`), and the
+//! directory of the publish that wrote it, which holds a file per model,
+//! `long.json`, `short.json` and `meta.json`. A publish writes its models'
+//! files in a directory of its own, named by the process and the publish,
+//! then the manifest naming that directory, written beside its name and
+//! renamed onto it: the manifest is the generation's commit marker, a
+//! generation without one is not listed, and publishers at once, in a
+//! backtest and a live node say, never write each other's files, the last
+//! manifest renamed naming the models of one publish. A model's file is its
+//! manifest (`ModelManifest`), the schema (the feature names in order, the
+//! fingerprint), the target spec and side, the learner, the meta's
+//! calibration, its level line (a side's is its pair's, the generation's,
+//! `calibration::Ksplit`), its baseline (the training mean of the R it
+//! learned on the rows it was fitted and calibrated on) and probe rows, of
+//! its calibration slice, with the predictions the model made on them when
+//! fitted, before any calibration, and the model as its adapter saved it. A
+//! side's model predicts R (`SideModel`), its pair calibrating both sides'
+//! predictions at once (`Pair::expect`); a meta's predicts the R of the
+//! trade of the side picked, every prediction calibrated (`LoadedModel`);
+//! each carries its baseline (`Baselined`). A model whose manifest has the
+//! other level's calibration is refused at load. A reloaded model is checked
+//! by predicting the probes, never by its bytes. A missing feature, NaN, has
+//! no JSON number: a probe row writes NaN and the infinities as strings, and
+//! so does a probe's prediction.
 
 use std::{
     fmt::Debug,
@@ -74,7 +80,7 @@ use std::{
 use anyhow::Context;
 use jiff::Timestamp;
 use nautilus_model::identifiers::StrategyId;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::{
     blueprint::ModelBlueprint,
@@ -83,83 +89,110 @@ use super::{
     deciding::SideRow,
     features::{Fingerprint, meta_names, side_names},
     learner::{LearnerConfig, Model, SavedModel},
-    schedule::{Models, Retrain},
+    schedule::Retrain,
     targets::{PerSide, Side, TargetConfig},
 };
 use crate::strategy::risk::R;
 
+/// The name of a generation's manifest, in its directory.
+const MANIFEST: &str = "generation.json";
+
+/// The name of a meta model's file, in the directory of its generation's
+/// publish; a side's is its side's name.
+const META: &str = "meta";
+
 /// The extension of a model's file.
 const EXTENSION: &str = "json";
 
-/// The publishes of this process so far, which tell its temporary files
-/// apart.
+/// The publishes of this process so far, which tell its directories and
+/// temporary files apart.
 static PUBLISHES: AtomicU64 = AtomicU64::new(0);
 
-/// The directory of the meta models within the directory of their sides'
-/// models.
-const META: &str = "meta";
+/// The version of what a published generation holds, its manifests
+/// (`GenerationManifest`, `ModelManifest`), its layout and how it is read.
+/// Keyed with the generation key (`generation_directory`): bumped by hand
+/// whenever that changes, which keys every store anew, so that no
+/// generation of another layout is read and every model is trained again,
+/// on the datasets as they are.
+const VERSION: u32 = 9;
 
-/// The version of what a published model's file holds, its manifest
-/// (`ModelManifest`) and how a model is read from it. Keyed with the
-/// training settings every store of a strategy sits under, the meta's
-/// too (`training_directory`): bumped by hand whenever that changes,
-/// which keys every store anew, so that no model of another manifest is
-/// read and every model is trained again, on the datasets as they are.
-const VERSION: u32 = 8;
-
-/// The models of one strategy, fingerprint and training settings, as its
-/// model set builds them (`ModelSet`).
+/// A strategy's models: the generations its trains published, keyed by the
+/// one fingerprint of its dataset and its generation key, each side its
+/// margins trade and its meta model, if it has one.
 #[derive(Debug, Clone)]
 pub struct ModelStore {
+    /// The directory of its generation key, its generations in it.
     directory: PathBuf,
-}
-
-/// A strategy's models: the store of each side its margins trade and of
-/// its meta model, if it has one, all keyed by the one fingerprint of its
-/// dataset, and the swaps that use them.
-#[derive(Debug, Clone)]
-pub struct ModelSet {
-    /// The directory of its training settings, its stores under it.
-    directory: PathBuf,
+    strategy_id: StrategyId,
+    /// The fingerprint of its dataset, which each model is checked against.
+    fingerprint: String,
     /// Each side traded, the long first.
     sides: Vec<SideLevel>,
     meta: Option<MetaLevel>,
 }
 
-/// A side of a model set: the side, its margin and its models.
+/// A side of a model store: the side, its margin and the names of its
+/// model's features.
 #[derive(Debug, Clone)]
 pub struct SideLevel {
     side: Side,
     margin: R,
-    models: CheckedStore,
+    feature_names: Vec<String>,
 }
 
-/// The models of the sides a strategy trades valid from one time, one of
-/// each: the pair one train published, loaded and checked together
-/// (`ModelSet::pairs`), or a train holds before publishing it, with the
-/// calibration fitted on it.
+/// The meta level of a model store: the meta model's config and the names of
+/// its features.
+#[derive(Debug, Clone)]
+pub struct MetaLevel {
+    config: MetaConfig,
+    feature_names: Vec<String>,
+}
+
+/// One train's models as they are published and read back: valid from its
+/// retrain time, the model of each side the strategy trades, the long
+/// first, the calibration of their pair, fitted on both sides' predictions,
+/// and the meta's model, none if the strategy has no meta or its meta
+/// waited. Self-contained: the models of one train, fixed as of its retrain
+/// time, none derived from the previous generation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredGeneration {
+    pub valid_from: Timestamp,
+    /// Each side traded, the long first, its manifest naming its side.
+    pub sides: Vec<StoredModel>,
+    pub calibration: Ksplit,
+    pub meta: Option<StoredModel>,
+}
+
+/// What a generation's manifest holds, written last as its commit marker.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct GenerationManifest {
+    strategy_id: StrategyId,
+    /// The directory of the publish its models' files are in, within the
+    /// generation's.
+    publish: String,
+    /// The calibration of its sides' pair.
+    calibration: Ksplit,
+    /// Whether it holds a meta model.
+    meta: bool,
+}
+
+/// A generation loaded and checked, as a decision uses it: its sides'
+/// pair, and its meta's model, if it holds one, all of one train, fixed as
+/// of its retrain time and none derived from the previous generation.
+#[derive(Debug)]
+pub struct Generation {
+    pair: Pair,
+    meta: Option<LoadedModel>,
+}
+
+/// The models of the sides a strategy trades of one generation, one of
+/// each, loaded and checked together, or a train holds before publishing
+/// them, with the calibration fitted on them.
 #[derive(Debug)]
 pub struct Pair {
     /// Each side traded, the long first, and its model.
     models: Vec<(Side, SideModel)>,
     calibration: Ksplit,
-}
-
-/// The meta level of a model set: the meta model's config and its models.
-#[derive(Debug, Clone)]
-pub struct MetaLevel {
-    config: MetaConfig,
-    models: CheckedStore,
-}
-
-/// A level's store, and what a model of it is checked against when it is
-/// swapped in: the names of the level's features, in order, and the
-/// fingerprint of the strategy's dataset.
-#[derive(Debug, Clone)]
-struct CheckedStore {
-    store: ModelStore,
-    feature_names: Vec<String>,
-    fingerprint: String,
 }
 
 /// A published model and its manifest.
@@ -174,9 +207,6 @@ pub struct StoredModel {
 /// What a published model is, enough to check it before use.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelManifest {
-    pub strategy_id: StrategyId,
-    /// The time the model was trained at, from which it is valid.
-    pub valid_from: Timestamp,
     /// The fingerprint of the features, the decision rule, the target and
     /// the venue of its dataset runs.
     pub fingerprint: String,
@@ -188,8 +218,10 @@ pub struct ModelManifest {
     /// which learns the trade of the side picked.
     pub side: Option<Side>,
     pub learner: LearnerConfig,
-    /// The calibration of the model's predictions.
-    pub calibration: ModelCalibration,
+    /// A meta model's calibration, the level line of its predictions of R,
+    /// as a one-sided pair's (`Ksplit`); none of a side's, which its pair
+    /// calibrates (`StoredGeneration::calibration`).
+    pub calibration: Option<Line>,
     /// The model's baseline, the constant model its scores are read
     /// beside: the training mean of the R it learned on the rows it was
     /// fitted and calibrated on.
@@ -197,27 +229,6 @@ pub struct ModelManifest {
     /// Rows of its calibration slice and the model's predictions on them,
     /// before any calibration.
     pub probes: Vec<Probe>,
-}
-
-/// How a published model's predictions are calibrated.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelCalibration {
-    /// A side model's: its pair's, one copy in each side's manifest.
-    Pair(PairCalibration),
-    /// A meta model's: the level line of its predictions of R, as a
-    /// one-sided pair's (`Ksplit`).
-    Meta(Line),
-}
-
-/// A pair's calibration as each side's manifest holds it, naming the pair it
-/// was fitted on: its valid-from and its sides.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PairCalibration {
-    pub valid_from: Timestamp,
-    /// The sides of the pair, the long first.
-    pub sides: Vec<Side>,
-    pub lines: Ksplit,
 }
 
 /// A row and the prediction of a model on it when it was fitted, before
@@ -237,10 +248,10 @@ impl StoredModel {
     /// # Errors
     ///
     /// Returns an error if the model cannot be loaded, fails a check, or its
-    /// manifest has a side's calibration.
+    /// manifest has no level line, as a side's.
     pub fn load(&self, feature_names: &[String], fingerprint: &str) -> anyhow::Result<LoadedModel> {
-        let ModelCalibration::Meta(calibration) = self.manifest.calibration else {
-            anyhow::bail!("its manifest has a pair's calibration, which no meta model has");
+        let Some(calibration) = self.manifest.calibration else {
+            anyhow::bail!("its manifest has no level line, which every meta model has");
         };
         Ok(LoadedModel {
             model: self.checked(feature_names, fingerprint)?,
@@ -249,26 +260,24 @@ impl StoredModel {
         })
     }
 
-    /// The side model, loaded and checked as `checked` does, with the
-    /// calibration of its pair its manifest holds, which the pair checks.
+    /// The side model, loaded and checked as `checked` does, which its pair
+    /// calibrates.
     ///
     /// # Errors
     ///
     /// Returns an error if the model cannot be loaded or fails a check (see
-    /// `checked`), or if its manifest has no pair's calibration.
-    fn load_side(
-        &self,
-        feature_names: &[String],
-        fingerprint: &str,
-    ) -> anyhow::Result<(SideModel, PairCalibration)> {
-        let ModelCalibration::Pair(calibration) = &self.manifest.calibration else {
-            anyhow::bail!("its manifest has no pair's calibration, which a side model trades by");
-        };
-        let model = SideModel::new(
+    /// `checked`), or if its manifest has a calibration of its own, as a
+    /// meta's.
+    fn load_side(&self, feature_names: &[String], fingerprint: &str) -> anyhow::Result<SideModel> {
+        anyhow::ensure!(
+            self.manifest.calibration.is_none(),
+            "its manifest has a level line of its own, which no side model has: its pair \
+             calibrates it"
+        );
+        Ok(SideModel::new(
             self.checked(feature_names, fingerprint)?,
             self.manifest.baseline,
-        );
-        Ok((model, calibration.clone()))
+        ))
     }
 
     /// The model, loaded by its manifest's learner and checked against a
@@ -387,13 +396,13 @@ impl Baselined for SideModel {
     }
 }
 
-impl ModelSet {
+impl ModelStore {
     /// The models, under `root`, of the model of `blueprint`, its dataset's
     /// fingerprint `fingerprint`, its blueprint's on the venue of its
     /// dataset runs (`ModelBlueprint::fingerprint`), and trained as its
-    /// config says: the store of each side its margins trade, and of its
-    /// meta model if its config has a meta section, in the directory of
-    /// that fingerprint and its training settings.
+    /// config says: each side its margins trade, and its meta model if its
+    /// config has a meta section, in the directory of that fingerprint and
+    /// its generation key (`generation_directory`).
     ///
     /// # Errors
     ///
@@ -404,9 +413,8 @@ impl ModelSet {
         fingerprint: Fingerprint,
     ) -> anyhow::Result<Self> {
         let (features, config) = (blueprint.features(), blueprint.config());
-        let training =
-            training_directory(root, blueprint.strategy_id(), fingerprint, config, VERSION)?;
-        let fingerprint = fingerprint.to_string();
+        let directory =
+            generation_directory(root, blueprint.strategy_id(), fingerprint, config, VERSION)?;
         let side_names = side_names(features.names(), &config.target.payoff_names());
         let sides = config
             .margins
@@ -414,53 +422,42 @@ impl ModelSet {
             .map(|(side, margin)| SideLevel {
                 side,
                 margin,
-                models: CheckedStore {
-                    store: ModelStore::new(&training, side, config.margins),
-                    feature_names: side_names.clone(),
-                    fingerprint: fingerprint.clone(),
-                },
+                feature_names: side_names.clone(),
             })
             .collect();
-        let meta = config
-            .meta
-            .as_ref()
-            .map(|meta| {
-                Ok::<_, anyhow::Error>(MetaLevel {
-                    config: meta.clone(),
-                    models: CheckedStore {
-                        store: ModelStore::meta(&training, meta, config.margins)?,
-                        feature_names: meta_names(features.names()),
-                        fingerprint: fingerprint.clone(),
-                    },
-                })
-            })
-            .transpose()?;
+        let meta = config.meta.as_ref().map(|meta| MetaLevel {
+            config: meta.clone(),
+            feature_names: meta_names(features.names()),
+        });
         Ok(Self {
-            directory: training,
+            directory,
+            strategy_id: blueprint.strategy_id(),
+            fingerprint: fingerprint.to_string(),
             sides,
             meta,
         })
     }
 
-    /// The directory its stores are under: of its dataset's fingerprint and
-    /// its training settings.
+    /// The directory of its generation key, its generations in it.
     #[must_use]
     pub fn directory(&self) -> &Path {
         &self.directory
     }
 
-    /// Whether its stores hold models a strategy trades on by `now`: a pair
-    /// of its sides valid by then (`Models::pairs`), and, with a meta
-    /// section, a meta model valid by then too. A model valid by then may
-    /// still fail its checks as it is read.
+    /// Whether a strategy trades on its generations at `now`: the latest
+    /// valid by then (`Swap::at`) holds a meta model, if the strategy has a
+    /// meta section. Its models may still fail their checks as they load.
     ///
     /// # Errors
     ///
-    /// Returns an error if a store cannot be read.
+    /// Returns an error if the generations cannot be listed, or the latest's
+    /// manifest cannot be read.
     pub fn trades_by(&self, now: Timestamp) -> anyhow::Result<bool> {
-        let valid_froms = self.valid_froms()?;
-        let by_now = |times: &[Timestamp]| times.first().is_some_and(|&first| first <= now);
-        Ok(by_now(&valid_froms.pairs()) && valid_froms.meta.as_deref().is_none_or(by_now))
+        let generations = self.generations()?;
+        let Some(&latest) = generations.iter().rfind(|&&time| time <= now) else {
+            return Ok(false);
+        };
+        Ok(self.meta.is_none() || self.manifest(latest)?.meta)
     }
 
     /// Each side the margins trade, the long first.
@@ -480,65 +477,211 @@ impl ModelSet {
         self.meta.as_ref()
     }
 
-    /// The sides' pairs as a strategy swaps them in, valid from the
-    /// stores' pairs (`Models::pairs` of `valid_froms`): each side's model
-    /// of a pair loaded and checked against the side models' feature names
-    /// and the fingerprint (`StoredModel::load_side`), with the calibration
-    /// its manifest holds, which must be the same in every side's and name
-    /// this pair, its valid-from and its sides; a pair with a side failing
-    /// refused whole; none in use yet.
-    #[must_use]
-    pub fn pairs(&self) -> Swap<Pair> {
-        let sides = self.sides.clone();
-        Swap::new(move |valid_from| {
-            let mut models = vec![];
-            let mut calibrations: Vec<PairCalibration> = vec![];
-            for level in &sides {
-                let (model, calibration) = level
-                    .models
-                    .read(valid_from, StoredModel::load_side)
-                    .with_context(|| format!("the {} model", level.side.name()))?;
-                models.push((level.side, model));
-                calibrations.push(calibration);
-            }
-            let calibration = calibrations.swap_remove(0);
-            anyhow::ensure!(
-                calibrations.iter().all(|other| *other == calibration),
-                "its sides hold different calibrations: {calibration:?} beside {calibrations:?}"
-            );
-            let traded: Vec<Side> = sides.iter().map(|level| level.side).collect();
-            anyhow::ensure!(
-                calibration.valid_from == valid_from && calibration.sides == traded,
-                "its calibration was fitted on the pair of {:?} valid from {}, not on its {traded:?} valid from {valid_from}",
-                calibration.sides,
-                calibration.valid_from
-            );
-            Pair::new(models, calibration.lines)
-        })
-    }
-
-    /// The valid-froms of the store of each model: of each side traded,
-    /// whose pairs are the times every side has a model valid from
-    /// (`Models::pairs`), and of the meta model, if any.
+    /// The times its generations are valid from, in order: those whose
+    /// manifest is written; none if nothing was published.
     ///
     /// # Errors
     ///
-    /// Returns an error if a store cannot be read, the long's first.
-    pub fn valid_froms(&self) -> anyhow::Result<Models<Vec<Timestamp>>> {
-        let side = |side| {
-            self.side(side)
-                .map(|level| level.models.store.valid_froms())
-                .transpose()
+    /// Returns an error if its directory cannot be read, or a generation
+    /// with a manifest is named by no time.
+    pub fn generations(&self) -> anyhow::Result<Vec<Timestamp>> {
+        let entries = match fs::read_dir(&self.directory) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+            entries => entries
+                .with_context(|| format!("reading the model store {}", self.directory.display()))?,
         };
-        Ok(Models {
-            long: side(Side::Long)?,
-            short: side(Side::Short)?,
-            meta: self
-                .meta
-                .as_ref()
-                .map(|meta| meta.models.store.valid_froms())
-                .transpose()?,
+        let mut times = vec![];
+
+        for entry in entries {
+            let path = entry?.path();
+            let manifest = path.join(MANIFEST);
+            if !manifest
+                .try_exists()
+                .with_context(|| format!("reading the generation {}", path.display()))?
+            {
+                continue;
+            }
+            let time = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.parse().ok())
+                .with_context(|| format!("naming the generation {}", path.display()))?;
+            times.push(time);
+        }
+        times.sort();
+        Ok(times)
+    }
+
+    /// Publishes `generation`, valid from its time: its models' files
+    /// written in a directory of this publish, named by the process and the
+    /// publish, then its manifest, naming that directory, written beside its
+    /// name and renamed onto it, replacing the generation valid from then, if
+    /// any.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a side's model names no side, or a file cannot be
+    /// written.
+    pub fn publish(&self, generation: &StoredGeneration) -> anyhow::Result<()> {
+        let directory = self.generation(generation.valid_from);
+        let publish = format!(
+            "{}-{}",
+            std::process::id(),
+            PUBLISHES.fetch_add(1, Ordering::Relaxed)
+        );
+        let models = directory.join(&publish);
+        fs::create_dir_all(&models)
+            .with_context(|| format!("creating the generation {}", directory.display()))?;
+        for model in &generation.sides {
+            let side = model
+                .manifest
+                .side
+                .context("publishing a side's model that names no side")?;
+            write(&models.join(file(side.name())), model)?;
+        }
+
+        if let Some(meta) = &generation.meta {
+            write(&models.join(file(META)), meta)?;
+        }
+        let manifest = directory.join(MANIFEST);
+        let written = manifest.with_extension(format!("{EXTENSION}.{publish}.tmp"));
+        let text = serde_json::to_string_pretty(&GenerationManifest {
+            strategy_id: self.strategy_id,
+            publish,
+            calibration: generation.calibration,
+            meta: generation.meta.is_some(),
+        })?;
+        fs::write(&written, text)
+            .and_then(|()| fs::rename(&written, &manifest))
+            .with_context(|| format!("writing the generation {}", manifest.display()))
+    }
+
+    /// The generation valid from `valid_from`, as published: the model of
+    /// each side traded and its meta's, if its manifest says it holds one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there is none, or a file of it cannot be read.
+    pub fn read(&self, valid_from: Timestamp) -> anyhow::Result<StoredGeneration> {
+        let manifest = self.manifest(valid_from)?;
+        let models = self.generation(valid_from).join(&manifest.publish);
+        let sides = self
+            .sides
+            .iter()
+            .map(|level| read(&models.join(file(level.side.name()))))
+            .collect::<anyhow::Result<_>>()?;
+        let meta = manifest
+            .meta
+            .then(|| read(&models.join(file(META))))
+            .transpose()?;
+        Ok(StoredGeneration {
+            valid_from,
+            sides,
+            calibration: manifest.calibration,
+            meta,
         })
+    }
+
+    /// The generations as a strategy swaps them in (`Swap`), each loaded
+    /// and checked as `load` does; none in use yet.
+    #[must_use]
+    pub fn swap(&self) -> Swap<Generation> {
+        let models = self.clone();
+        Swap::new(move |valid_from| {
+            models.load(valid_from).with_context(|| {
+                format!("the generation {}", models.generation(valid_from).display())
+            })
+        })
+    }
+
+    /// The generation valid from `valid_from`, loaded and checked: each
+    /// side's model against the side models' feature names and the
+    /// fingerprint (`StoredModel::load_side`), calibrated as a pair by the
+    /// generation's calibration, and the meta's, if it holds one, against
+    /// the meta's.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if it cannot be read, a model fails its checks,
+    /// naming its level, the calibration is not of as many sides as the pair,
+    /// or it holds a meta model and the strategy has no meta.
+    fn load(&self, valid_from: Timestamp) -> anyhow::Result<Generation> {
+        let stored = self.read(valid_from)?;
+        let models = stored
+            .sides
+            .iter()
+            .zip(&self.sides)
+            .map(|(model, level)| {
+                let loaded = model
+                    .load_side(&level.feature_names, &self.fingerprint)
+                    .with_context(|| format!("the {} model", level.side.name()))?;
+                Ok((level.side, loaded))
+            })
+            .collect::<anyhow::Result<_>>()?;
+        let meta = match (&stored.meta, &self.meta) {
+            (None, _) => None,
+            (Some(model), Some(level)) => Some(
+                model
+                    .load(&level.feature_names, &self.fingerprint)
+                    .context("the meta model")?,
+            ),
+            (Some(_), None) => anyhow::bail!("it holds a meta model, and the strategy has none"),
+        };
+        Ok(Generation {
+            pair: Pair::new(models, stored.calibration)?,
+            meta,
+        })
+    }
+
+    /// The manifest of the generation valid from `valid_from`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there is none, or it cannot be read.
+    fn manifest(&self, valid_from: Timestamp) -> anyhow::Result<GenerationManifest> {
+        read(&self.generation(valid_from).join(MANIFEST))
+    }
+
+    /// The directory of the generation valid from `valid_from`.
+    fn generation(&self, valid_from: Timestamp) -> PathBuf {
+        self.directory.join(valid_from.to_string())
+    }
+
+    /// A generation of the store named by no time, so that listing it fails
+    /// while its generations can still be read.
+    #[cfg(test)]
+    fn unlistable(&self) -> PathBuf {
+        self.directory.join("no time")
+    }
+
+    /// Makes listing the generations fail (`generations`), until
+    /// `mend_listing`.
+    #[cfg(test)]
+    pub(super) fn break_listing(&self) {
+        fs::create_dir_all(self.unlistable()).unwrap();
+        fs::write(self.unlistable().join(MANIFEST), "").unwrap();
+    }
+
+    /// Undoes `break_listing`.
+    #[cfg(test)]
+    pub(super) fn mend_listing(&self) {
+        fs::remove_dir_all(self.unlistable()).unwrap();
+    }
+
+    /// Removes the manifest of the generation valid from `valid_from`, as a
+    /// publish stopped before it leaves the generation.
+    #[cfg(test)]
+    pub(super) fn drop_manifest(&self, valid_from: Timestamp) {
+        fs::remove_file(self.generation(valid_from).join(MANIFEST)).unwrap();
+    }
+
+    /// Makes publishing a generation fail (`publish`), listing them still
+    /// finding none: the directory of the generation key a link to nowhere.
+    #[cfg(test)]
+    pub(super) fn break_publishing(&self) {
+        fs::create_dir_all(self.directory.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(self.directory.with_extension("nowhere"), &self.directory)
+            .unwrap();
     }
 }
 
@@ -555,18 +698,40 @@ impl SideLevel {
         self.margin
     }
 
-    /// The store the side's models are published in.
-    #[must_use]
-    pub const fn store(&self) -> &ModelStore {
-        &self.models.store
-    }
-
     /// The names of the side model's features, in the order of its rows
     /// (`features::side_names`): the strategy's, then the target's payoff
     /// names.
     #[must_use]
     pub fn feature_names(&self) -> &[String] {
-        &self.models.feature_names
+        &self.feature_names
+    }
+}
+
+impl MetaLevel {
+    #[must_use]
+    pub const fn config(&self) -> &MetaConfig {
+        &self.config
+    }
+
+    /// The names of the meta's features, in the order of its rows
+    /// (`features::meta_names`).
+    #[must_use]
+    pub fn feature_names(&self) -> &[String] {
+        &self.feature_names
+    }
+}
+
+impl Generation {
+    /// Its sides' pair.
+    #[must_use]
+    pub const fn pair(&self) -> &Pair {
+        &self.pair
+    }
+
+    /// Its meta's model, none if it holds none.
+    #[must_use]
+    pub const fn meta(&self) -> Option<&LoadedModel> {
+        self.meta.as_ref()
     }
 }
 
@@ -614,7 +779,7 @@ impl Pair {
     ///
     /// # Panics
     ///
-    /// Panics if the pair's model set does not trade `side`.
+    /// Panics if the pair's model store does not trade `side`.
     #[must_use]
     pub fn side(&self, side: Side) -> &SideModel {
         self.models
@@ -627,172 +792,30 @@ impl Pair {
     }
 }
 
-impl MetaLevel {
-    #[must_use]
-    pub const fn config(&self) -> &MetaConfig {
-        &self.config
-    }
-
-    /// The names of the meta's features, in the order of its rows
-    /// (`features::meta_names`).
-    #[must_use]
-    pub fn feature_names(&self) -> &[String] {
-        &self.models.feature_names
-    }
-
-    /// The store the meta's models are published in.
-    #[must_use]
-    pub const fn store(&self) -> &ModelStore {
-        &self.models.store
-    }
-
-    /// The meta's models as a strategy swaps them in, checked against the
-    /// meta's feature names and the fingerprint; none in use yet.
-    #[must_use]
-    pub fn swap(&self) -> Swap<LoadedModel> {
-        let models = self.models.clone();
-        Swap::new(move |valid_from| models.read(valid_from, StoredModel::load))
-    }
+/// The name of the file of the model `name`, a side's or the meta's.
+fn file(name: &str) -> String {
+    format!("{name}.{EXTENSION}")
 }
 
-impl CheckedStore {
-    /// The store's model valid from `valid_from`, loaded and checked
-    /// against its feature names and fingerprint by `load`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if there is none, its file cannot be read, or as
-    /// `load` does.
-    fn read<M>(&self, valid_from: Timestamp, load: Load<M>) -> anyhow::Result<M> {
-        let stored = self.store.read(valid_from)?;
-        load(&stored, &self.feature_names, &self.fingerprint)
-    }
+/// Writes `value` as JSON to `path`.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be written.
+fn write(path: &Path, value: &impl Serialize) -> anyhow::Result<()> {
+    fs::write(path, serde_json::to_string_pretty(value)?)
+        .with_context(|| format!("writing the model {}", path.display()))
 }
 
-impl ModelStore {
-    /// The store of the `side` models in `training`, the directory of
-    /// their training settings: `long/` or `short/`, keyed by the `margins` of
-    /// the sides, which decide the side picked on each row.
-    fn new(training: &Path, side: Side, margins: Margins) -> Self {
-        Self {
-            directory: training.join(side.name()).join(
-                Fingerprint::default()
-                    .with(margins_text(margins).as_bytes())
-                    .to_string(),
-            ),
-        }
-    }
-
-    /// The store of the meta model `meta` in `training`, the directory of
-    /// the training settings of its sides, which trade `margins`: beside
-    /// the sides, under `meta/` and the meta's training settings, the
-    /// sides' margins among them (they make the meta's rows).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the meta's learner cannot be written as JSON.
-    fn meta(training: &Path, meta: &MetaConfig, margins: Margins) -> anyhow::Result<Self> {
-        let settings = meta_settings(meta)?.with(margins_text(margins).as_bytes());
-        Ok(Self {
-            directory: training.join(META).join(settings.to_string()),
-        })
-    }
-
-    /// Publishes `model`, valid from its manifest's time, replacing the
-    /// model valid from then, if any: written beside its file, then renamed
-    /// onto it. The file written is this publish's own, named by the
-    /// process and the publish, so publishers at once, in a backtest and a
-    /// live node say, never write or rename each other's.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the file cannot be written.
-    pub fn publish(&self, model: &StoredModel) -> anyhow::Result<()> {
-        fs::create_dir_all(&self.directory)
-            .with_context(|| format!("creating the model store {}", self.directory.display()))?;
-        let path = self.path(model.manifest.valid_from);
-        let publish = PUBLISHES.fetch_add(1, Ordering::Relaxed);
-        let written =
-            path.with_extension(format!("{EXTENSION}.{}-{publish}.tmp", std::process::id()));
-        fs::write(&written, serde_json::to_string_pretty(model)?)
-            .and_then(|()| fs::rename(&written, &path))
-            .with_context(|| format!("writing the model {}", path.display()))
-    }
-
-    /// The times the published models are valid from, in order; none if
-    /// nothing was published.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the store cannot be read.
-    pub fn valid_froms(&self) -> anyhow::Result<Vec<Timestamp>> {
-        let entries = match fs::read_dir(&self.directory) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-            entries => entries
-                .with_context(|| format!("reading the model store {}", self.directory.display()))?,
-        };
-        let mut times = vec![];
-        for entry in entries {
-            let path = entry?.path();
-            if path
-                .extension()
-                .is_some_and(|extension| extension == EXTENSION)
-                && let Some(time) = path.file_stem().and_then(|stem| stem.to_str())
-            {
-                times.push(
-                    time.parse()
-                        .with_context(|| format!("naming the model {}", path.display()))?,
-                );
-            }
-        }
-        times.sort();
-        Ok(times)
-    }
-
-    /// The model valid from `valid_from`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if there is none, or its file cannot be read.
-    pub fn read(&self, valid_from: Timestamp) -> anyhow::Result<StoredModel> {
-        let path = self.path(valid_from);
-        let json = fs::read_to_string(&path)
-            .with_context(|| format!("reading the model {}", path.display()))?;
-        serde_json::from_str(&json).with_context(|| format!("reading the model {}", path.display()))
-    }
-
-    fn path(&self, valid_from: Timestamp) -> PathBuf {
-        self.directory.join(format!("{valid_from}.{EXTENSION}"))
-    }
-
-    /// A file of the store named by no time, so that listing it fails while
-    /// its models can still be read.
-    #[cfg(test)]
-    fn unlistable(&self) -> PathBuf {
-        self.directory.join(format!("no time.{EXTENSION}"))
-    }
-
-    /// Makes listing the store fail (`valid_froms`), until `mend_listing`.
-    #[cfg(test)]
-    pub(super) fn break_listing(&self) {
-        fs::create_dir_all(&self.directory).unwrap();
-        fs::write(self.unlistable(), "").unwrap();
-    }
-
-    /// Undoes `break_listing`.
-    #[cfg(test)]
-    pub(super) fn mend_listing(&self) {
-        fs::remove_file(self.unlistable()).unwrap();
-    }
-
-    /// Makes publishing to the store fail (`publish`), listing it still finding
-    /// nothing: its directory a link to nowhere.
-    #[cfg(test)]
-    pub(super) fn break_publishing(&self) {
-        fs::create_dir_all(self.directory.parent().unwrap()).unwrap();
-        std::os::unix::fs::symlink(self.directory.with_extension("nowhere"), &self.directory)
-            .unwrap();
-    }
+/// The JSON of the file `path`.
+///
+/// # Errors
+///
+/// Returns an error if the file is missing, cannot be read, or holds no
+/// `T`, naming it.
+fn read<T: DeserializeOwned>(path: &Path) -> anyhow::Result<T> {
+    let json = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    serde_json::from_str(&json).with_context(|| format!("reading {}", path.display()))
 }
 
 /// The directory, under `root`, of the stores of `strategy_id` whose
@@ -803,35 +826,41 @@ fn dataset_directory(root: &Path, strategy_id: StrategyId, fingerprint: Fingerpr
         .join(fingerprint.to_string())
 }
 
-/// The directory, under `root`, of the models of `strategy_id` whose
-/// dataset has `fingerprint`, its side models trained as `config` says,
-/// of the store `version` (`VERSION`): its dataset's, then the side
-/// models' training settings, the learner and its settings, the retrain
-/// interval, the window, the calibration and the fewest rows of a slice,
-/// and the version.
-fn training_directory(
+/// The directory, under `root`, of the generations of `strategy_id` whose
+/// dataset has `fingerprint`, its models trained as `config` says, of the
+/// store `version` (`VERSION`): its dataset's, then its generation key, the
+/// side models' training settings (the learner and its settings, the
+/// retrain interval, the window, the calibration and the fewest rows of a
+/// slice), the margins of both sides, the meta's training settings or none
+/// (`meta_settings`), and the version.
+///
+/// # Errors
+///
+/// Returns an error if a learner cannot be written as JSON.
+fn generation_directory(
     root: &Path,
     strategy_id: StrategyId,
     fingerprint: Fingerprint,
     config: &ModelConfig,
     version: u32,
 ) -> anyhow::Result<PathBuf> {
-    let settings = Fingerprint::default()
+    let key = Fingerprint::default()
         .with(serde_json::to_string(&config.learner)?.as_bytes())
         .with(retrain_setting(config.retrain).as_bytes())
         .with(&config.window.as_nanos().to_le_bytes())
         .with(&config.calibration.as_nanos().to_le_bytes())
         .with(&config.min_rows.to_le_bytes())
+        .with(margins_text(config.margins).as_bytes())
+        .with(meta_settings(config.meta.as_ref())?.as_bytes())
         .with(format!("store version {version}").as_bytes());
-    Ok(dataset_directory(root, strategy_id, fingerprint).join(settings.to_string()))
+    Ok(dataset_directory(root, strategy_id, fingerprint).join(key.to_string()))
 }
 
-/// The retrain `retrain` as the training settings a store is keyed by
-/// hold it, its interval or never: a strategy retrained at another
-/// interval, or never, publishes to and reads from another store, so a
-/// weekly-retrained strategy never trades on a model a daily-retrained one
-/// published between its retrains, nor a strategy never retrained on a
-/// retrained one's.
+/// The retrain `retrain` as the generation key holds it, its interval or
+/// never: a strategy retrained at another interval, or never, publishes to
+/// and reads from another store, so a weekly-retrained strategy never
+/// trades on a generation a daily-retrained one published between its
+/// retrains, nor a strategy never retrained on a retrained one's.
 fn retrain_setting(retrain: Retrain) -> String {
     match retrain {
         Retrain::Every(every) => format!("retrain every {}", every.as_nanos()),
@@ -839,7 +868,7 @@ fn retrain_setting(retrain: Retrain) -> String {
     }
 }
 
-/// The margins `margins` as the keys of the stores hold them, each in R,
+/// The margins `margins` as the generation key holds them, each in R,
 /// `long 0.5R short none`, so that a store keyed by margins of another
 /// unit, money, is another store.
 fn margins_text(margins: Margins) -> String {
@@ -851,78 +880,95 @@ fn margins_text(margins: Margins) -> String {
     )
 }
 
-/// The training settings of `meta`: its learner, window, calibration,
-/// margin in R and fewest rows of a slice.
-fn meta_settings(meta: &MetaConfig) -> anyhow::Result<Fingerprint> {
-    Ok(Fingerprint::default()
-        .with(serde_json::to_string(&meta.learner)?.as_bytes())
-        .with(&meta.window.as_nanos().to_le_bytes())
-        .with(&meta.calibration.as_nanos().to_le_bytes())
-        .with(meta.margin.to_string().as_bytes())
-        .with(&meta.min_rows.to_le_bytes()))
+/// The training settings of the meta `meta` as the generation key holds
+/// them: its learner, window, calibration, margin in R and fewest rows of a
+/// slice; `no meta` of none.
+///
+/// # Errors
+///
+/// Returns an error if the meta's learner cannot be written as JSON.
+fn meta_settings(meta: Option<&MetaConfig>) -> anyhow::Result<String> {
+    let Some(meta) = meta else {
+        return Ok("no meta".to_string());
+    };
+    Ok(format!(
+        "meta {} window {} calibration {} margin {} min_rows {}",
+        serde_json::to_string(&meta.learner)?,
+        meta.window.as_nanos(),
+        meta.calibration.as_nanos(),
+        meta.margin,
+        meta.min_rows
+    ))
 }
 
-/// How a level's model is loaded from its file and checked against a
-/// strategy of feature names and a fingerprint, as a model `M`: a side's
-/// with its pair's calibration (`StoredModel::load_side`), a meta's with its
-/// own (`StoredModel::load`).
-type Load<M> = fn(&StoredModel, &[String], &str) -> anyhow::Result<M>;
-
-/// The models of a level as a strategy swaps them in, decision by decision
-/// in time order: at each, the latest valid then, read from its stores as an
-/// `M` and checked against the strategy before use, the meta's model or the
-/// sides' pair. One failing a check is refused, logged as an error, and the
-/// current one kept; it is not read again. A model set hands it out
-/// (`ModelSet::pairs`, `MetaLevel::swap`).
+/// The generations of a model store as a strategy swaps them in, decision by
+/// decision in time order: at each, the latest valid then, read as an `M`
+/// and checked against the strategy before use. One failing a check is
+/// refused, with an error naming it and the check, and no generation is in
+/// use until it loads: it is read again at the next decision. A model store
+/// hands it out (`ModelStore::swap`).
 pub struct Swap<M> {
-    /// The model valid from a time, read and checked.
+    /// The generation valid from a time, read and checked.
     read_at: Box<dyn Fn(Timestamp) -> anyhow::Result<M>>,
-    /// The model in use, and its valid-from.
+    /// The generation in use, and its valid-from.
     current: Option<(Timestamp, M)>,
-    /// The valid-from of the last model read, in use or refused.
-    read: Option<Timestamp>,
 }
 
 impl<M> Swap<M> {
-    /// Swaps in the models `read_at` reads and checks, by their valid-from;
-    /// none in use yet.
+    /// Swaps in the generations `read_at` reads and checks, by their
+    /// valid-from; none in use yet.
     fn new(read_at: impl Fn(Timestamp) -> anyhow::Result<M> + 'static) -> Self {
         Self {
             read_at: Box::new(read_at),
             current: None,
-            read: None,
         }
     }
 
-    /// The model in use at `now`, and its valid-from, among the models
-    /// valid from `valid_froms`, the stores' list in order: the latest
-    /// valid then, swapped in if not read yet, unless it fails its checks.
-    pub fn at(&mut self, now: Timestamp, valid_froms: &[Timestamp]) -> Option<(Timestamp, &M)> {
-        let latest = valid_froms.iter().rfind(|&&time| time <= now).copied();
-        if let Some(latest) = latest.filter(|&latest| self.read != Some(latest)) {
-            self.read = Some(latest);
-            match (self.read_at)(latest) {
-                Ok(model) => {
-                    log::info!("the model valid from {latest} in use from {now}");
-                    self.current = Some((latest, model));
-                }
-                Err(e) => log::error!(
-                    "refused the model valid from {latest}: {e:#}; the current model kept"
-                ),
-            }
-        }
-        self.current
+    /// The generation in use at `now`, and its valid-from, among those
+    /// valid from `valid_froms`, the store's list in order: the latest valid
+    /// then, swapped in if not in use yet; none if none is valid yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the latest fails its checks, naming it and the
+    /// check: it is read again at the next call.
+    pub fn at(
+        &mut self,
+        now: Timestamp,
+        valid_froms: &[Timestamp],
+    ) -> anyhow::Result<Option<(Timestamp, &M)>> {
+        let Some(latest) = valid_froms.iter().rfind(|&&time| time <= now).copied() else {
+            return Ok(None);
+        };
+
+        if self
+            .current
             .as_ref()
-            .map(|(valid_from, model)| (*valid_from, model))
+            .is_none_or(|(valid_from, _)| *valid_from != latest)
+        {
+            self.current = None;
+            // One message of the whole chain: Nautilus logs an error a
+            // strategy's handler returns by its message alone.
+            let generation = (self.read_at)(latest).map_err(|e| {
+                anyhow::anyhow!(
+                    "no new entry until the generation valid from {latest} loads: {e:#}"
+                )
+            })?;
+            log::info!("the generation valid from {latest} in use from {now}");
+            self.current = Some((latest, generation));
+        }
+        Ok(self
+            .current
+            .as_ref()
+            .map(|(valid_from, generation)| (*valid_from, generation)))
     }
 }
 
-/// A swap reads as the model in use and the valid-from last read.
+/// A swap reads as the generation in use.
 impl<M: Debug> Debug for Swap<M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct(stringify!(Swap))
             .field("current", &self.current)
-            .field("read", &self.read)
             .finish_non_exhaustive()
     }
 }
@@ -1013,7 +1059,6 @@ mod tests {
     use crate::{
         backtest::Commission,
         model::{
-            calibration::Line,
             dataset::DatasetVenue,
             decide::DecisionRule,
             features::{FeatureSet, testing::last_mid},
@@ -1025,6 +1070,7 @@ mod tests {
 
     const GOLD: &str = "XAUUSD.ICMARKETS";
     const STRATEGY: &str = "STORE-001";
+    const MIDNIGHT: &str = "2026-10-22T00:00:00Z";
 
     fn features() -> std::rc::Rc<FeatureSet> {
         last_mid(InstrumentId::from(GOLD)).build().unwrap()
@@ -1058,8 +1104,24 @@ mod tests {
             .build()
     }
 
-    fn store(root: &Path, config: &ModelConfig) -> ModelStore {
-        side_store(root, config, Side::Long)
+    /// A meta model taking the trades of the side picked from an expected
+    /// net R of 0.55.
+    fn meta_config() -> MetaConfig {
+        MetaConfig::builder()
+            .window(SignedDuration::from_hours(48))
+            .calibration(SignedDuration::from_hours(12))
+            .margin(R::new(0.55))
+            .min_rows(20)
+            .learner(LearnerConfig::Fake {})
+            .build()
+    }
+
+    /// `config()`, its trades taken by `meta_config()`.
+    fn with_meta() -> ModelConfig {
+        ModelConfig {
+            meta: Some(meta_config()),
+            ..config()
+        }
     }
 
     /// The model of `config`.
@@ -1074,13 +1136,8 @@ mod tests {
     }
 
     /// The models under `root` of `config`.
-    fn models(root: &Path, config: &ModelConfig) -> ModelSet {
-        blueprint(config).model_set(root).unwrap()
-    }
-
-    /// The store of the `side` models of `config`.
-    fn side_store(root: &Path, config: &ModelConfig, side: Side) -> ModelStore {
-        models(root, config).side(side).unwrap().store().clone()
+    fn models(root: &Path, config: &ModelConfig) -> ModelStore {
+        blueprint(config).model_store(root).unwrap()
     }
 
     /// What the strategy reads: the quotes of gold.
@@ -1110,38 +1167,33 @@ mod tests {
         time.parse().unwrap()
     }
 
-    /// The calibration of a pair of both sides valid from `valid_from`, its
-    /// level line `0.1 + 0.5 C` and its side call's slope 1.5.
-    fn pair_calibration(valid_from: &str) -> ModelCalibration {
-        ModelCalibration::Pair(PairCalibration {
-            valid_from: at(valid_from),
-            sides: vec![Side::Long, Side::Short],
-            lines: Ksplit {
-                level: Line {
-                    alpha: 0.1,
-                    beta: 0.5,
-                },
-                side_call: Some(1.5),
-            },
-        })
-    }
+    /// The calibration of a pair of both sides, its level line `0.1 + 0.5 C`
+    /// and its side call's slope 1.5.
+    const PAIR: Ksplit = Ksplit {
+        level: Line {
+            alpha: 0.1,
+            beta: 0.5,
+        },
+        side_call: Some(1.5),
+    };
 
-    /// A fake long model valid from `valid_from`, of the pair of both sides
-    /// valid then (`pair_calibration`), on a feature `mid`, probed on
-    /// `rows`, its baseline the mean of its training labels, 1/2.
-    fn model(valid_from: &str, rows: &[Vec<f64>]) -> StoredModel {
+    /// A fake model of `side`, a meta's of none, on a feature `mid`, probed
+    /// on `rows`, its baseline the mean of its training labels, 1/2; a
+    /// meta's calibrated by the line `0.1 + 0.5 E`.
+    fn model(side: Option<Side>, rows: &[Vec<f64>]) -> StoredModel {
         let set = TrainingSet::new(1, vec![0.2, 0.7], vec![0.0, 1.0]).unwrap();
         let fitted = LearnerConfig::Fake {}.fit(&set).unwrap();
         StoredModel {
             manifest: ModelManifest {
-                strategy_id: StrategyId::from(STRATEGY),
-                valid_from: at(valid_from),
                 fingerprint: "f".repeat(64),
                 feature_names: vec!["mid".to_string()],
                 target: config().target,
-                side: Some(Side::Long),
+                side,
                 learner: LearnerConfig::Fake {},
-                calibration: pair_calibration(valid_from),
+                calibration: side.is_none().then_some(Line {
+                    alpha: 0.1,
+                    beta: 0.5,
+                }),
                 baseline: 0.5,
                 probes: rows
                     .iter()
@@ -1155,35 +1207,59 @@ mod tests {
         }
     }
 
+    /// A generation of both sides valid from `valid_from`, each a fake
+    /// probed on `rows`, calibrated by `PAIR`, and a meta's if `meta`.
+    fn generation(valid_from: &str, rows: &[Vec<f64>], meta: bool) -> StoredGeneration {
+        StoredGeneration {
+            valid_from: at(valid_from),
+            sides: Side::BOTH
+                .into_iter()
+                .map(|side| model(Some(side), rows))
+                .collect(),
+            calibration: PAIR,
+            meta: meta.then(|| model(None, rows)),
+        }
+    }
+
     #[rstest]
-    fn a_published_model_reads_back_whole() {
+    fn a_published_generation_reads_back_whole() {
         let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path(), &config());
-        let published = model("2026-10-22T00:00:00Z", &[vec![0.3], vec![0.1 + 0.2]]);
+        let models = models(dir.path(), &with_meta());
+        let published = generation(MIDNIGHT, &[vec![0.3], vec![0.1 + 0.2]], true);
 
-        store.publish(&published).unwrap();
+        models.publish(&published).unwrap();
 
-        assert_eq!(store.read(at("2026-10-22T00:00:00Z")).unwrap(), published);
+        assert_eq!(models.read(at(MIDNIGHT)).unwrap(), published);
+    }
+
+    /// A generation whose meta waited holds none, and reads back so.
+    #[rstest]
+    fn a_generation_without_its_meta_reads_back_without_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let models = models(dir.path(), &with_meta());
+        let published = generation(MIDNIGHT, &[vec![0.3]], false);
+
+        models.publish(&published).unwrap();
+
+        assert_eq!(models.read(at(MIDNIGHT)).unwrap().meta, None);
     }
 
     #[rstest]
     fn missing_and_infinite_probe_values_read_back() {
         let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path(), &config());
+        let models = models(dir.path(), &config());
         let rows = [
             vec![f64::NAN],
             vec![f64::INFINITY],
             vec![f64::NEG_INFINITY],
             vec![-0.0],
         ];
-        store
-            .publish(&model("2026-10-22T00:00:00Z", &rows))
-            .unwrap();
+        models.publish(&generation(MIDNIGHT, &rows, false)).unwrap();
 
-        let read = store.read(at("2026-10-22T00:00:00Z")).unwrap();
+        let read = models.read(at(MIDNIGHT)).unwrap();
 
         let bits = |values: &[f64]| -> Vec<u64> { values.iter().map(|v| v.to_bits()).collect() };
-        let (rows_read, predictions): (Vec<f64>, Vec<f64>) = read
+        let (rows_read, predictions): (Vec<f64>, Vec<f64>) = read.sides[0]
             .manifest
             .probes
             .iter()
@@ -1199,126 +1275,177 @@ mod tests {
     }
 
     #[rstest]
-    fn a_store_lists_the_times_its_models_are_valid_from_in_order() {
+    fn a_store_lists_the_times_its_generations_are_valid_from_in_order() {
         let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path(), &config());
-        assert!(store.valid_froms().unwrap().is_empty());
+        let models = models(dir.path(), &config());
+        assert!(models.generations().unwrap().is_empty());
 
         for time in ["2026-10-23T00:00:00Z", "2026-10-21T12:00:00Z"] {
-            store.publish(&model(time, &[vec![0.5]])).unwrap();
+            models
+                .publish(&generation(time, &[vec![0.5]], false))
+                .unwrap();
         }
 
         assert_eq!(
-            store.valid_froms().unwrap(),
+            models.generations().unwrap(),
             [at("2026-10-21T12:00:00Z"), at("2026-10-23T00:00:00Z")]
         );
     }
 
+    /// A generation's manifest is written last: one whose models are
+    /// written and its manifest not, as a crash before it leaves, is not
+    /// listed, so no decision uses it, nor does a model store trade on it.
     #[rstest]
-    fn a_model_valid_from_a_fraction_of_a_second_lists_and_reads_back() {
+    fn a_generation_whose_manifest_is_missing_is_not_listed() {
         let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path(), &config());
-        let published = model("2026-10-22T04:00:00.01Z", &[vec![0.5]]);
+        let models = models(dir.path(), &config());
+        models
+            .publish(&generation(MIDNIGHT, &[vec![0.5]], false))
+            .unwrap();
+        let noon = "2026-10-22T12:00:00Z";
+        models
+            .publish(&generation(noon, &[vec![0.5]], false))
+            .unwrap();
 
-        store.publish(&published).unwrap();
+        models.drop_manifest(at(noon));
+
+        assert_eq!(models.generations().unwrap(), [at(MIDNIGHT)]);
+        assert!(!models.trades_by(at("2026-10-21T23:00:00Z")).unwrap());
+        assert!(models.trades_by(at(noon)).unwrap());
+    }
+
+    #[rstest]
+    fn a_generation_valid_from_a_fraction_of_a_second_lists_and_reads_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let models = models(dir.path(), &config());
+        let published = generation("2026-10-22T04:00:00.01Z", &[vec![0.5]], false);
+
+        models.publish(&published).unwrap();
 
         assert_eq!(
-            store.valid_froms().unwrap(),
+            models.generations().unwrap(),
             [at("2026-10-22T04:00:00.01Z")]
         );
         assert_eq!(
-            store.read(at("2026-10-22T04:00:00.01Z")).unwrap(),
+            models.read(at("2026-10-22T04:00:00.01Z")).unwrap(),
             published
         );
     }
 
-    /// Two publishers of a model at the same time, say a backtest and a
-    /// live node's retrain, each write their own file before the rename:
-    /// neither fails, and the model reads back whole.
+    /// Two publishers of a generation at the same time, say a backtest and
+    /// a live node's retrain, each write their own models and manifest
+    /// before the rename: neither fails, and the generation reads back
+    /// whole, its models those of one publish.
     #[rstest]
-    fn publishers_at_the_same_time_at_once_each_publish_a_whole_model() {
+    fn publishers_at_the_same_time_at_once_each_publish_a_whole_generation() {
         let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path(), &config());
-        let published = model("2026-10-22T00:00:00Z", &[vec![0.5]]);
+        let models = models(dir.path(), &with_meta());
+        let published = generation(MIDNIGHT, &[vec![0.5]], true);
 
         std::thread::scope(|scope| {
             for _ in 0..8 {
                 scope.spawn(|| {
-                    for _ in 0..50 {
-                        store.publish(&published).unwrap();
+                    for _ in 0..20 {
+                        models.publish(&published).unwrap();
                     }
                 });
             }
         });
 
-        assert_eq!(store.read(at("2026-10-22T00:00:00Z")).unwrap(), published);
+        assert_eq!(models.read(at(MIDNIGHT)).unwrap(), published);
     }
 
+    /// A generation published again at its time replaces the first whole:
+    /// its sides and its meta, and a meta the second holds none of is gone.
     #[rstest]
-    fn publishing_at_the_same_time_replaces_the_model() {
+    fn publishing_at_the_same_time_replaces_the_generation() {
         let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path(), &config());
-        store
-            .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
+        let models = models(dir.path(), &with_meta());
+        models
+            .publish(&generation(MIDNIGHT, &[vec![0.5]], true))
             .unwrap();
-        let second = model("2026-10-22T00:00:00Z", &[vec![0.9]]);
+        let second = generation(MIDNIGHT, &[vec![0.9]], false);
 
-        store.publish(&second).unwrap();
+        models.publish(&second).unwrap();
 
-        assert_eq!(store.valid_froms().unwrap(), [at("2026-10-22T00:00:00Z")]);
-        assert_eq!(store.read(at("2026-10-22T00:00:00Z")).unwrap(), second);
+        assert_eq!(models.generations().unwrap(), [at(MIDNIGHT)]);
+        assert_eq!(models.read(at(MIDNIGHT)).unwrap(), second);
     }
 
-    /// `config()` changed by `change`.
-    fn changed(change: fn(&mut ModelConfig)) -> ModelConfig {
-        let mut config = config();
+    /// `config` changed by `change`.
+    fn changed(config: ModelConfig, change: fn(&mut ModelConfig)) -> ModelConfig {
+        let mut config = config;
         change(&mut config);
         config
     }
 
-    /// A model published under `config()` is listed there alone: another
-    /// learner, window, calibration, minimum of rows or target is other
-    /// training, and a model of another margin, as one priced at another
-    /// reference stake, the config's risk of the dataset balance, which a
-    /// dataset's rows and a model's payoff features are priced at, would
-    /// decide otherwise: the strategy retrains rather than reuse it.
+    /// `with_meta()`, its meta changed by `change`.
+    fn meta_changed(change: fn(&mut MetaConfig)) -> ModelConfig {
+        let mut config = with_meta();
+        change(config.meta.as_mut().unwrap());
+        config
+    }
+
+    /// A generation published under `with_meta()` is listed there alone:
+    /// any other setting of the sides or of the meta selects another
+    /// generation key. Another learner, retrain interval, window,
+    /// calibration, minimum of rows or target is other training; a model of
+    /// another margin of either side, as one priced at another reference
+    /// stake, the config's risk of the dataset balance, which a dataset's
+    /// rows and a model's payoff features are priced at, would decide
+    /// otherwise; and a meta's other settings, or none, are another meta.
+    /// The strategy trains again rather than reuse them.
     #[rstest]
-    #[case::another_learner(changed(|config| config.learner = LearnerConfig::Baseline {}))]
-    #[case::another_window(changed(|config| config.window = SignedDuration::from_hours(72)))]
-    #[case::another_calibration(changed(|config| config.calibration = SignedDuration::from_hours(6)))]
-    #[case::another_target(changed(|config| {
+    #[case::another_learner(changed(with_meta(), |config| config.learner = LearnerConfig::Baseline {}))]
+    #[case::retrained_weekly(changed(with_meta(), |config| {
+        config.retrain = Retrain::Every(SignedDuration::from_hours(168));
+    }))]
+    #[case::never_retrained(changed(with_meta(), |config| config.retrain = Retrain::Never))]
+    #[case::another_window(changed(with_meta(), |config| config.window = SignedDuration::from_hours(72)))]
+    #[case::another_calibration(changed(with_meta(), |config| {
+        config.calibration = SignedDuration::from_hours(6);
+    }))]
+    #[case::another_target(changed(with_meta(), |config| {
         config.target.spec.limit = SignedDuration::from_mins(30);
     }))]
-    #[case::more_rows(changed(|config| config.min_rows = 50))]
-    #[case::another_margin(changed(|config| config.margins.long = Some(R::new(0.75))))]
-    #[case::another_risk(changed(|config| config.target.risk = "1%".parse().unwrap()))]
-    #[case::another_dataset_balance(changed(|config| {
+    #[case::more_rows(changed(with_meta(), |config| config.min_rows = 50))]
+    #[case::another_long_margin(changed(with_meta(), |config| config.margins.long = Some(R::new(0.75))))]
+    #[case::another_short_margin(changed(with_meta(), |config| config.margins.short = Some(R::new(0.75))))]
+    #[case::no_short(changed(with_meta(), |config| config.margins.short = None))]
+    #[case::another_risk(changed(with_meta(), |config| config.target.risk = "1%".parse().unwrap()))]
+    #[case::another_dataset_balance(changed(with_meta(), |config| {
         config.dataset.balance = Money::from("20000000 USD");
     }))]
-    fn other_training_settings_target_or_margin_list_none_of_the_models(
+    #[case::no_meta(config())]
+    #[case::another_meta_learner(meta_changed(|meta| meta.learner = LearnerConfig::Baseline {}))]
+    #[case::another_meta_window(meta_changed(|meta| meta.window = SignedDuration::from_hours(72)))]
+    #[case::another_meta_calibration(meta_changed(|meta| {
+        meta.calibration = SignedDuration::from_hours(6);
+    }))]
+    #[case::another_meta_margin(meta_changed(|meta| meta.margin = R::new(0.6)))]
+    #[case::more_meta_rows(meta_changed(|meta| meta.min_rows = 30))]
+    fn any_other_setting_of_the_sides_or_the_meta_lists_none_of_the_generations(
         #[case] other: ModelConfig,
     ) {
         let dir = tempfile::tempdir().unwrap();
-        store(dir.path(), &config())
-            .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
+        models(dir.path(), &with_meta())
+            .publish(&generation(MIDNIGHT, &[vec![0.5]], true))
             .unwrap();
 
-        let listed = |config: &ModelConfig| store(dir.path(), config).valid_froms().unwrap();
+        let listed = |config: &ModelConfig| models(dir.path(), config).generations().unwrap();
 
-        assert_eq!(listed(&config()), [at("2026-10-22T00:00:00Z")]);
+        assert_eq!(listed(&with_meta()), [at(MIDNIGHT)]);
         assert!(listed(&other).is_empty());
     }
 
-    /// Bumping the store version is another training directory, which
-    /// every store of the strategy sits under, its sides' and its meta's:
-    /// no model of another manifest is read, and every model is trained
-    /// again.
+    /// Bumping the store version is another generation key: no generation
+    /// of another layout is read, and every model is trained again.
     #[rstest]
     fn bumping_the_store_version_keys_another_store() {
-        let config = config();
+        let config = with_meta();
         let fingerprint = blueprint(&config).fingerprint().unwrap();
         let at = |version| {
-            training_directory(
+            generation_directory(
                 Path::new("models"),
                 StrategyId::from(STRATEGY),
                 fingerprint,
@@ -1331,249 +1458,68 @@ mod tests {
         assert_ne!(at(VERSION), at(VERSION + 1));
     }
 
-    /// The directory of a fixed strategy's long store under a models root,
-    /// as a literal: its id, its dataset's fingerprint, its training
-    /// settings with the store `VERSION`, its side, and the margins of both
-    /// sides in R, `long 0.5R short 0.5R`, so that no model published under
-    /// a margin of another unit is listed. A change that rekeyed every store, leaving the models
-    /// published to it behind, fails here. A deliberate rekey, a bump of
-    /// `VERSION` or of `dataset::VERSION`, or a new input to the dataset's
-    /// fingerprint or to the training settings, updates the literal here; a
-    /// rekey of the dataset updates the pinned dataset identifier too
+    /// The directory of a fixed strategy's generations under a models root,
+    /// as a literal: its id, its dataset's fingerprint, then its generation
+    /// key, of its sides' training settings, the margins of both sides in R,
+    /// `long 0.5R short 0.5R`, so that no generation published under a
+    /// margin of another unit is listed, its meta's settings, its margin in
+    /// R, `0.55R`, among them, or none, and the store `VERSION`. A change
+    /// that rekeyed every store, leaving the generations published to it
+    /// behind, fails here. A deliberate rekey, a bump of `VERSION` or of
+    /// `dataset::VERSION`, or a new input to the dataset's fingerprint or to
+    /// the generation key, updates the literals here; a rekey of the dataset
+    /// updates the pinned dataset identifier too
     /// (`dataset::tests::a_fixed_strategys_dataset_keeps_its_identifier`).
     #[rstest]
-    fn a_fixed_strategys_side_store_keeps_its_directory() {
-        let store = side_store(Path::new("models"), &config(), Side::Long);
-
-        assert_eq!(
-            store.directory,
-            Path::new(
-                "models/STORE-001/\
-                 0614a0ef7ecea9c6cf17bdf7a38ab2ab47a955646cf2257595b30158aa9e35c9/\
-                 1ee6eb642ec5348e5f7c459100de6084f300badf9b7ca42f191697b5da6e7623/\
-                 long/7172a4d37d514662d105b99d75e9f7b1fc21aac68322ca53912d5254d40403c5"
-            )
-        );
-    }
-
-    /// The directory of the fixed strategy's meta store (`meta_config`), as
-    /// a literal: under its sides' training settings, the meta's own, its
-    /// margin in R, `0.55R`, among them, and the sides' margins in R.
-    #[rstest]
-    fn a_fixed_strategys_meta_store_keeps_its_directory() {
-        let store = meta_store(Path::new("models"), &config(), &meta_config());
-
-        assert_eq!(
-            store.directory,
-            Path::new(
-                "models/STORE-001/\
-                 0614a0ef7ecea9c6cf17bdf7a38ab2ab47a955646cf2257595b30158aa9e35c9/\
-                 1ee6eb642ec5348e5f7c459100de6084f300badf9b7ca42f191697b5da6e7623/\
-                 meta/9731a53745291e027c9caa13a18de1518d9d563e72815d1b4c4603ba5df72952"
-            )
-        );
-    }
-
-    /// One side's margin changes which side is picked on a row, so what the
-    /// other publishes: a side's models list only beside the same margins of
-    /// both sides, a side not traded being another margin.
-    #[rstest]
-    #[case::the_long_beside_another_short_margin(Side::Long, Some(0.5), Some(0.75))]
-    #[case::the_long_beside_no_short(Side::Long, Some(0.5), None)]
-    #[case::the_short_beside_another_long_margin(Side::Short, Some(0.75), Some(0.5))]
-    #[case::the_short_beside_no_long(Side::Short, None, Some(0.5))]
-    fn either_sides_margin_keys_both_sides_stores(
-        #[case] side: Side,
-        #[case] long: Option<f64>,
-        #[case] short: Option<f64>,
-    ) {
-        let dir = tempfile::tempdir().unwrap();
-        for side in Side::BOTH {
-            side_store(dir.path(), &config(), side)
-                .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
-                .unwrap();
-        }
-        let other = ModelConfig {
-            margins: Margins {
-                long: long.map(R::new),
-                short: short.map(R::new),
-            },
-            ..config()
-        };
-
-        let listed = side_store(dir.path(), &other, side).valid_froms().unwrap();
-
-        assert!(listed.is_empty());
-    }
-
-    /// The store of the meta model `meta` of `config`.
-    fn meta_store(root: &Path, config: &ModelConfig, meta: &MetaConfig) -> ModelStore {
-        let config = ModelConfig {
-            meta: Some(meta.clone()),
-            ..config.clone()
-        };
-        models(root, &config).meta().unwrap().store().clone()
-    }
-
-    /// A meta model published under one margin and minimum of rows is
-    /// other training than under others, and the sides' margins make its
-    /// rows: a meta of another margin, minimum of rows or sides' margins
-    /// lists none of them.
-    #[rstest]
-    #[case::of_more_rows(config(), 0.55, 30)]
-    #[case::of_another_margin(config(), 0.6, 20)]
-    #[case::of_other_sides_margins(changed(|config| config.margins.short = None), 0.55, 20)]
-    fn a_meta_model_of_another_margin_minimum_of_rows_or_sides_margins_is_not_listed(
+    #[case::without_a_meta(
+        config(),
+        "19df384a00b8c0b4568a90df737a4647870371107c1d9e20f608702e8abb1a55"
+    )]
+    #[case::with_a_meta(
+        with_meta(),
+        "bb80863c1c51f2d8126de9eb645d46523ddff4088449ed706f35bd521522d6c0"
+    )]
+    fn a_fixed_strategys_generations_keep_their_directory(
         #[case] config: ModelConfig,
-        #[case] margin: f64,
-        #[case] min_rows: usize,
+        #[case] key: &str,
     ) {
-        let dir = tempfile::tempdir().unwrap();
-        let meta = |margin, min_rows| {
-            MetaConfig::builder()
-                .window(SignedDuration::from_hours(48))
-                .calibration(SignedDuration::from_hours(12))
-                .margin(R::new(margin))
-                .min_rows(min_rows)
-                .learner(LearnerConfig::Fake {})
-                .build()
-        };
-        meta_store(dir.path(), &self::config(), &meta(0.55, 20))
-            .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
-            .unwrap();
-
-        let listed = meta_store(dir.path(), &config, &meta(margin, min_rows))
-            .valid_froms()
-            .unwrap();
-
-        assert!(listed.is_empty());
+        assert_eq!(
+            models(Path::new("models"), &config).directory(),
+            Path::new(
+                "models/STORE-001/\
+                 0614a0ef7ecea9c6cf17bdf7a38ab2ab47a955646cf2257595b30158aa9e35c9"
+            )
+            .join(key)
+        );
     }
 
-    /// A meta model taking the trades of the side picked from an expected
-    /// net R of 0.55.
-    fn meta_config() -> MetaConfig {
-        MetaConfig::builder()
-            .window(SignedDuration::from_hours(48))
-            .calibration(SignedDuration::from_hours(12))
-            .margin(R::new(0.55))
-            .min_rows(20)
-            .learner(LearnerConfig::Fake {})
-            .build()
-    }
-
-    /// `config()`, retrained as `retrain` says.
-    fn retrained(retrain: Retrain) -> ModelConfig {
-        ModelConfig {
-            retrain,
-            ..config()
-        }
-    }
-
-    /// The store under a root of a strategy retrained as a `Retrain` says.
-    type StoreOf = fn(&Path, Retrain) -> ModelStore;
-
-    /// A side's store under `root` of `config()` retrained as `retrain`
-    /// says.
-    fn a_sides(root: &Path, retrain: Retrain) -> ModelStore {
-        store(root, &retrained(retrain))
-    }
-
-    /// The meta's store under `root` of `config()` retrained as `retrain`
-    /// says.
-    fn a_metas(root: &Path, retrain: Retrain) -> ModelStore {
-        meta_store(root, &retrained(retrain), &meta_config())
-    }
-
-    /// A strategy trades on the models of its own retrains alone: a
-    /// weekly-retrained one never on one a daily-retrained strategy
-    /// published between them, nor one never retrained on one a retrained
-    /// one published, and the other way round. A store of either retrain
-    /// lists its own models alone, a side's and a meta's alike.
+    /// A strategy trades on the latest generation valid by then, and with a
+    /// meta section only if it holds a meta model: a store holding no
+    /// generation, one valid later, or a latest one whose meta waited has
+    /// none to trade on yet.
     #[rstest]
-    #[case::a_sides_daily_and_weekly(a_sides, Retrain::Every(SignedDuration::from_hours(168)))]
-    #[case::a_metas_daily_and_weekly(a_metas, Retrain::Every(SignedDuration::from_hours(168)))]
-    #[case::a_sides_daily_and_never_retrained(a_sides, Retrain::Never)]
-    #[case::a_metas_daily_and_never_retrained(a_metas, Retrain::Never)]
-    fn a_store_lists_only_the_models_of_its_retrain_interval(
-        #[case] store: StoreOf,
-        #[case] other: Retrain,
-    ) {
-        let daily = Retrain::Every(SignedDuration::from_hours(24));
+    fn a_model_store_trades_on_its_latest_generation_holding_every_model() {
         let dir = tempfile::tempdir().unwrap();
-        store(dir.path(), daily)
-            .publish(&model("2026-10-23T00:00:00Z", &[vec![0.5]]))
-            .unwrap();
-        store(dir.path(), other)
-            .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
-            .unwrap();
-
-        let listed = |retrain| store(dir.path(), retrain).valid_froms().unwrap();
-
-        assert_eq!(listed(daily), [at("2026-10-23T00:00:00Z")]);
-        assert_eq!(listed(other), [at("2026-10-22T00:00:00Z")]);
-    }
-
-    /// A strategy trades on a pair of its sides' models valid by then, and
-    /// with a meta section on a meta model valid by then too: a store
-    /// holding one side's model alone, a pair valid later, or no meta model
-    /// beside the pair has none to trade on yet.
-    #[rstest]
-    fn a_model_set_has_models_to_trade_on_from_its_pair_and_its_meta() {
-        let dir = tempfile::tempdir().unwrap();
-        let at = |time: &str| time.parse::<Timestamp>().unwrap();
-        let (valid_from, before) = ("2026-10-22T00:00:00Z", "2026-10-21T23:59:59Z");
-        let with_meta = ModelConfig {
-            meta: Some(meta_config()),
-            ..config()
-        };
+        let (noon, before) = ("2026-10-22T12:00:00Z", "2026-10-21T23:59:59Z");
         let trades = |config: &ModelConfig, now: &str| {
             models(dir.path(), config).trades_by(at(now)).unwrap()
         };
 
-        assert!(!trades(&config(), valid_from));
-        side_store(dir.path(), &config(), Side::Long)
-            .publish(&model(valid_from, &[vec![0.5]]))
+        assert!(!trades(&config(), MIDNIGHT));
+        models(dir.path(), &config())
+            .publish(&generation(MIDNIGHT, &[vec![0.5]], false))
             .unwrap();
-        assert!(!trades(&config(), valid_from));
-        side_store(dir.path(), &config(), Side::Short)
-            .publish(&model(valid_from, &[vec![0.5]]))
-            .unwrap();
-        assert!(trades(&config(), valid_from));
+        assert!(trades(&config(), MIDNIGHT));
         assert!(!trades(&config(), before));
-        assert!(!trades(&with_meta, valid_from));
-        let mut meta = model(valid_from, &[vec![0.5]]);
-        meta.manifest.side = None;
-        meta_store(dir.path(), &config(), &meta_config())
-            .publish(&meta)
+        models(dir.path(), &with_meta())
+            .publish(&generation(MIDNIGHT, &[vec![0.5]], false))
             .unwrap();
-        assert!(trades(&with_meta, valid_from));
-    }
-
-    /// Where a model set's stores are, which a live start names: the
-    /// directory of its training settings, its sides' and its meta's
-    /// stores under it (`a_fixed_strategys_side_store_keeps_its_directory`).
-    #[rstest]
-    fn a_fixed_strategys_model_set_is_in_the_directory_of_its_training_settings() {
-        assert_eq!(
-            models(Path::new("models"), &config()).directory(),
-            Path::new(
-                "models/STORE-001/\
-                 0614a0ef7ecea9c6cf17bdf7a38ab2ab47a955646cf2257595b30158aa9e35c9/\
-                 1ee6eb642ec5348e5f7c459100de6084f300badf9b7ca42f191697b5da6e7623"
-            )
-        );
-    }
-
-    #[rstest]
-    fn the_long_and_the_short_models_are_listed_apart() {
-        let dir = tempfile::tempdir().unwrap();
-        side_store(dir.path(), &config(), Side::Long)
-            .publish(&model("2026-10-22T00:00:00Z", &[vec![0.5]]))
+        assert!(!trades(&with_meta(), noon));
+        models(dir.path(), &with_meta())
+            .publish(&generation(noon, &[vec![0.5]], true))
             .unwrap();
-
-        let short = side_store(dir.path(), &config(), Side::Short);
-
-        assert!(short.valid_froms().unwrap().is_empty());
+        assert!(!trades(&with_meta(), MIDNIGHT));
+        assert!(trades(&with_meta(), noon));
     }
 
     /// A meta model's every prediction of R is calibrated by its level line,
@@ -1582,12 +1528,7 @@ mod tests {
     /// expected R of 0.225.
     #[rstest]
     fn a_loaded_meta_model_predicts_through_its_calibration() {
-        let mut stored = model("2026-10-22T00:00:00Z", &[vec![0.75]]);
-        stored.manifest.side = None;
-        stored.manifest.calibration = ModelCalibration::Meta(Line {
-            alpha: 0.1,
-            beta: 0.5,
-        });
+        let stored = model(None, &[vec![0.75]]);
 
         let loaded = stored
             .load(&stored.manifest.feature_names, &stored.manifest.fingerprint)
@@ -1598,58 +1539,53 @@ mod tests {
         assert!((prediction - 0.225).abs() < 1e-12, "{prediction}");
     }
 
-    /// A side's model has its pair's calibration and a meta's its own level
-    /// line: each loaded as the other's level is refused.
+    /// A side's model has no calibration of its own, its pair's being the
+    /// generation's, and a meta's its own level line: each loaded as the
+    /// other's level is refused.
     #[rstest]
     fn a_model_is_refused_at_the_other_levels_load() {
-        let side = model("2026-10-22T00:00:00Z", &[]);
-        let mut meta = side.clone();
-        meta.manifest.calibration = ModelCalibration::Meta(Line {
-            alpha: 0.0,
-            beta: 1.0,
-        });
+        let side = model(Some(Side::Long), &[]);
+        let meta = model(None, &[]);
         let (names, fingerprint) = (&side.manifest.feature_names, &side.manifest.fingerprint);
 
         let side_as_meta = side.load(names, fingerprint).unwrap_err().to_string();
         let meta_as_side = meta.load_side(names, fingerprint).unwrap_err().to_string();
 
-        assert!(
-            side_as_meta.contains("has a pair's calibration"),
-            "{side_as_meta}"
-        );
+        assert!(side_as_meta.contains("no level line"), "{side_as_meta}");
         assert!(side_as_meta.contains("meta"), "{side_as_meta}");
         assert!(
-            meta_as_side.contains("no pair's calibration"),
+            meta_as_side.contains("a level line of its own"),
             "{meta_as_side}"
         );
         assert!(meta_as_side.contains("side"), "{meta_as_side}");
     }
 
-    /// The fake long and short of a pair valid from midnight, on a feature
-    /// `mid`, then the entry cost of the time-only target, each predicting
-    /// its row's mid: the long's 0.4 and the short's 0.1 are C = 0.25 and D =
-    /// 0.3, calibrated by the pair's line `0.1 + 0.5 C` and slope 1.5 to C' =
-    /// 0.225 and D' = 0.45, the long expecting 0.45R and the short nought.
+    /// The fake long and short of a generation valid from midnight, on a
+    /// feature `mid`, then the entry cost of the time-only target, each
+    /// predicting its row's mid: the long's 0.4 and the short's 0.1 are C =
+    /// 0.25 and D = 0.3, calibrated by the generation's line `0.1 + 0.5 C`
+    /// and slope 1.5 to C' = 0.225 and D' = 0.45, the long expecting 0.45R
+    /// and the short nought.
     #[rstest]
-    fn a_pair_expects_each_sides_r_through_its_calibration() {
+    fn a_generations_pair_expects_each_sides_r_through_its_calibration() {
         let dir = tempfile::tempdir().unwrap();
         let models = models(dir.path(), &config());
         let fingerprint = blueprint(&config()).fingerprint().unwrap().to_string();
         let names = models.side(Side::Long).unwrap().feature_names().to_vec();
-        for side in Side::BOTH {
-            let mut stored = model("2026-10-22T00:00:00Z", &[]);
-            stored.manifest.side = Some(side);
+        let mut published = generation(MIDNIGHT, &[], false);
+        for stored in &mut published.sides {
             stored.manifest.fingerprint.clone_from(&fingerprint);
             stored.manifest.feature_names.clone_from(&names);
             let set = TrainingSet::new(2, vec![0.2, 0.0], vec![0.0]).unwrap();
             stored.model = LearnerConfig::Fake {}.fit(&set).unwrap().save().unwrap();
-            models.side(side).unwrap().store().publish(&stored).unwrap();
         }
-        let mut pairs = models.pairs();
-        let midnight = at("2026-10-22T00:00:00Z");
+        models.publish(&published).unwrap();
+        let mut generations = models.swap();
+        let midnight = at(MIDNIGHT);
 
-        let (_, pair) = pairs.at(midnight, &[midnight]).unwrap();
-        let expected = pair
+        let (_, generation) = generations.at(midnight, &[midnight]).unwrap().unwrap();
+        let expected = generation
+            .pair()
             .expect(&PerSide {
                 long: SideRow::new(&[0.4], &[0.02]),
                 short: SideRow::new(&[0.1], &[0.02]),
@@ -1664,6 +1600,22 @@ mod tests {
         ] {
             assert!((actual - by_hand).abs() < 1e-12, "{expected:?}");
         }
+    }
+
+    /// A side's manifest of an earlier store version: its pair's
+    /// calibration in its manifest, naming the pair, beside `current`'s
+    /// fields.
+    fn pair_calibrated_side(mut current: serde_json::Value) -> serde_json::Value {
+        let manifest = current["manifest"].as_object_mut().unwrap();
+        manifest.insert(
+            "calibration".to_string(),
+            serde_json::json!({"pair": {
+                "valid_from": MIDNIGHT,
+                "sides": ["long", "short"],
+                "lines": {"level": {"alpha": 0.0, "beta": 1.0}, "side_call": 1.0}
+            }}),
+        );
+        current
     }
 
     /// A side's manifest of an earlier store version: Platt's calibration
@@ -1681,42 +1633,26 @@ mod tests {
         current
     }
 
-    /// A meta's manifest of an earlier store version: Platt's calibration
-    /// and its probabilities' log loss and AUC, beside `current`'s fields.
-    fn platt_meta(mut current: serde_json::Value) -> serde_json::Value {
-        let manifest = current["manifest"].as_object_mut().unwrap();
-        manifest.insert("side".to_string(), serde_json::Value::Null);
-        manifest.insert(
-            "calibration".to_string(),
-            serde_json::json!({"platt": {"a": -0.9, "b": 0.0}}),
-        );
-        manifest.insert(
-            "holdout".to_string(),
-            serde_json::json!({"score": {"probability": {
-                "log_loss": 0.6,
-                "baseline_log_loss": 0.69,
-                "auc": 0.6
-            }}}),
-        );
-        current
-    }
-
     /// The manifests of earlier store versions are no models of this one:
-    /// read, each is refused, naming its file.
+    /// a generation holding one is refused as it is read, naming its file.
     #[rstest]
-    #[case::a_sides(platt_side)]
-    #[case::a_metas(platt_meta)]
+    #[case::of_a_pair_calibrated_side(pair_calibrated_side)]
+    #[case::of_a_platt_side(platt_side)]
     fn a_model_of_an_earlier_manifest_is_refused_naming_its_file(
         #[case] earlier: fn(serde_json::Value) -> serde_json::Value,
     ) {
         let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path(), &config());
-        let current = serde_json::to_value(model("2026-10-22T00:00:00Z", &[])).unwrap();
-        std::fs::create_dir_all(&store.directory).unwrap();
-        let path = store.path(at("2026-10-22T00:00:00Z"));
-        std::fs::write(&path, earlier(current).to_string()).unwrap();
+        let models = models(dir.path(), &config());
+        models.publish(&generation(MIDNIGHT, &[], false)).unwrap();
+        let manifest = models.manifest(at(MIDNIGHT)).unwrap();
+        let path = models
+            .generation(at(MIDNIGHT))
+            .join(manifest.publish)
+            .join(file(Side::Long.name()));
+        let current = serde_json::to_value(model(Some(Side::Long), &[])).unwrap();
+        fs::write(&path, earlier(current).to_string()).unwrap();
 
-        let refused = store.read(at("2026-10-22T00:00:00Z")).unwrap_err();
+        let refused = models.read(at(MIDNIGHT)).unwrap_err();
 
         let message = format!("{refused:#}");
         assert!(message.contains(&path.display().to_string()), "{message}");

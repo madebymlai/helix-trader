@@ -1751,7 +1751,7 @@ mod model_handle {
     };
 
     use super::*;
-    use crate::common::dataset::baseline_stored;
+    use crate::common::dataset::{baseline_stored, generation};
 
     const STRATEGY: &str = "WARMUP-MODEL-001";
 
@@ -1887,21 +1887,21 @@ mod model_handle {
         let names = side_names(features().names(), &config.target.payoff_names());
         let set = TrainingSet::new(names.len(), vec![0.5; names.len()], vec![0.4]).unwrap();
         let long = baseline_stored(
-            StrategyId::from(STRATEGY),
             blueprint.fingerprint().unwrap().to_string(),
             names,
             &config,
             Some(Side::Long),
-            Timestamp::UNIX_EPOCH,
             &set,
         );
         blueprint
-            .model_set(models)
+            .model_store(models)
             .unwrap()
-            .side(Side::Long)
-            .unwrap()
-            .store()
-            .publish(&long)
+            .publish(&generation(
+                &config,
+                Timestamp::UNIX_EPOCH,
+                vec![long],
+                None,
+            ))
             .unwrap();
     }
 

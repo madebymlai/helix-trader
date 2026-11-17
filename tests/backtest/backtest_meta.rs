@@ -1,16 +1,19 @@
 //! Meta-labeling on a fixture catalog (`model::meta`), the features a
 //! missing one (`common::dataset::Missing`).
 //! Over a span of three days retrained every midnight, the models are
-//! trained at each retrain time, each train publishing what it fits; the
+//! trained at each retrain time, each train publishing its generation; the
 //! models traded on are then published straight in their place, baselines
 //! whose predictions name them (`common::dataset::baseline_of`). In the
-//! run, a decision trades only if the meta model in use takes the trade of
-//! the side picked, on the decision's level and side call.
+//! run, a decision trades only if the meta model of the generation in use
+//! takes the trade of the side picked, on the decision's level and side
+//! call.
 //!
-//! A strategy of the long alone trades long at every decision. Its
-//! meta model's first retrain has no side's model before it, so it waits
-//! for the sides' decisions; the next ones learn from the longs and
-//! publish. With no meta model the first day, no trade.
+//! A strategy of the long alone trades long at every decision. Its first
+//! retrain has no generation before it, so its meta waits for the sides'
+//! decisions, its generation holding none; the next ones learn from the
+//! longs and publish. With no meta model the first day, no trade. A
+//! generation's meta decides beside its own sides alone, and a generation
+//! failing its checks takes no trade until it loads.
 //!
 //! One node per thread: each build, train and run on a thread of its own.
 
@@ -23,7 +26,7 @@ use helix_trader::{
         handle::Decision,
         learner::LearnerConfig,
         schedule::Retrain,
-        store::{ModelSet, ModelStore},
+        store::{ModelStore, StoredGeneration},
         targets::Side,
         train::{Kept, Outcome, Trained},
     },
@@ -37,7 +40,8 @@ use tempfile::TempDir;
 
 use crate::common::{
     dataset::{
-        baseline_of, blueprint, config, meta_baseline_of, missing, r, replay_on, trade_on, walk,
+        baseline_of, blueprint, config, generation, meta_baseline_of, missing, r, replay_on,
+        trade_on, unchanged, walk,
     },
     ic,
 };
@@ -101,10 +105,11 @@ fn on_thread<T: Send>(run: impl FnOnce() -> T + Send) -> T {
 
 /// Trains at each retrain time of the span of `long_only` the long and its
 /// meta model, as `train` over the span would, each train replaying the
-/// days its window lacks, then publishes the long model straight in the
-/// place of the one the train published, a baseline predicting an R of
-/// `r(tenths)` (`tenths` 3 at the span's start and one more each day); what
-/// each train did.
+/// days its window lacks, then publishes its generation again with the
+/// long straight in the place of the one the train published, a baseline
+/// predicting an R of `r(tenths)` (`tenths` 3 at the span's start and one
+/// more each day), calibrated as it is, and the meta it trained, if any;
+/// what each train did.
 fn train_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> {
     let (start, end) = span();
     let training = || {
@@ -120,40 +125,30 @@ fn train_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> {
         });
         trained.push((at, outcome));
         let tenths = 3 + (at.duration_since(start).as_hours() / 24) as usize;
-        long_store(models)
-            .publish(&baseline_of(
-                &features(),
-                &long_only(),
-                Side::Long,
-                at,
-                tenths,
-            ))
+        let published = model_store(models).read(at).unwrap();
+        model_store(models)
+            .publish(&StoredGeneration {
+                sides: vec![baseline_of(&features(), &long_only(), Side::Long, tenths)],
+                calibration: unchanged(&long_only()),
+                ..published
+            })
             .unwrap();
     }
     trained
 }
 
 /// The models of `long_only` under `models`.
-fn model_set(models: &Path) -> ModelSet {
+fn model_store(models: &Path) -> ModelStore {
     blueprint(features(), long_only())
-        .model_set(models)
+        .model_store(models)
         .unwrap()
 }
 
-/// The store of the long models of `long_only` under `models`.
-fn long_store(models: &Path) -> ModelStore {
-    model_set(models).side(Side::Long).unwrap().store().clone()
-}
-
-/// The store of the meta models of `long_only` under `models`.
-fn meta_store(models: &Path) -> ModelStore {
-    model_set(models).meta().unwrap().store().clone()
-}
-
-/// Each train publishes the long it fits and, from the second retrain,
-/// when the long has a model before it, the meta's; the first meta waits.
-/// With meta models published straight in their place, a day's decisions
-/// trade only as the meta model in use takes the trade of the side picked:
+/// Each train publishes a generation of the long it fits and, from the
+/// second retrain, when a generation is before it, the meta's; the first
+/// meta waits, its generation holding none. With meta models published
+/// straight in their place, a day's decisions trade only as the meta model
+/// of the generation in use takes the trade of the side picked:
 /// each of the
 /// second and third days a long at every decision, at the level of the
 /// long's baseline published at its start, r(4) = -0.1 then r(5) = 0, and
@@ -190,10 +185,17 @@ fn a_meta_model_trains_on_the_sides_trades_and_takes_them_in_the_run() {
             "{trained:?}"
         );
     }
-    let meta = meta_store(models.path());
-    assert_eq!(meta.valid_froms().unwrap(), retrains[1..]);
+    let store = model_store(models.path());
+    assert_eq!(store.generations().unwrap(), retrains);
+    assert_eq!(store.read(retrains[0]).unwrap().meta, None);
     for (&at, tenths) in retrains[1..].iter().zip([6, 8]) {
-        meta.publish(&meta_baseline_of(&features(), &long_only(), at, tenths))
+        let published = store.read(at).unwrap();
+        assert!(published.meta.is_some(), "{at}");
+        store
+            .publish(&StoredGeneration {
+                meta: Some(meta_baseline_of(&features(), &long_only(), tenths)),
+                ..published
+            })
             .unwrap();
     }
 
@@ -234,4 +236,124 @@ fn a_meta_model_trains_on_the_sides_trades_and_takes_them_in_the_run() {
             "period {period}: {trades:?}, not longs at {level} taken at {taken}"
         );
     }
+}
+
+/// The trades of `record` in each day of the span from its start, as
+/// `(level, meta's expected R)`.
+fn by_day(record: &crate::common::dataset::Record) -> Vec<Vec<(f64, Option<R>)>> {
+    let (start, _) = span();
+    (0..3)
+        .map(|n| {
+            let from = start + day() * n;
+            let (from, to) = (UnixNanos::from(from), UnixNanos::from(from + day()));
+            record
+                .trades
+                .iter()
+                .filter(|(time, _)| from <= *time && *time < to)
+                .map(|(_, trade)| (trade.level, trade.meta_expected_r))
+                .collect()
+        })
+        .collect()
+}
+
+/// Publishes under `models` the generations of `long_only` at the span's
+/// first two retrain times: the first's long of `r(4)` beside a meta of
+/// `r(6)`, taking it at 0.1 + 0.5 r(6) = 0.15R; the second's long of `r(5)`
+/// beside `second_meta`, if any.
+fn publish_two(models: &Path, second_meta: Option<helix_trader::model::store::StoredModel>) {
+    let (start, _) = span();
+    let long = |tenths| baseline_of(&features(), &long_only(), Side::Long, tenths);
+    let first_meta = meta_baseline_of(&features(), &long_only(), 6);
+    for (at, tenths, meta) in [
+        (start, 4, Some(first_meta)),
+        (start + day(), 5, second_meta),
+    ] {
+        model_store(models)
+            .publish(&generation(&long_only(), at, vec![long(tenths)], meta))
+            .unwrap();
+    }
+}
+
+/// The original defect: a store holding a meta model from one train and
+/// sides from another never combines them. The first day's generation
+/// holds a long and its meta; the second's a long and no meta, its meta
+/// having waited. Each of the first day's decisions trades its long, at
+/// r(4) = -0.1, taken at 0.15R; no decision of the second or the third day
+/// trades, the second's long never beside the first's meta, which would
+/// take it.
+#[rstest]
+fn a_meta_from_one_train_never_decides_beside_the_sides_of_another() {
+    let catalog = catalog();
+    let models = tempfile::tempdir().unwrap();
+    let (start, end) = span();
+    publish_two(models.path(), None);
+
+    let record = on_thread(|| {
+        trade_on(
+            &catalog,
+            features(),
+            start,
+            end,
+            &long_only(),
+            models.path(),
+        )
+    });
+
+    let days = by_day(&record);
+    assert_eq!(days[0].len(), 24, "{days:?}");
+    assert!(
+        days[0]
+            .iter()
+            .all(|&trade| trade == (r(4), Some(R::new(0.1 + 0.5 * r(6))))),
+        "{days:?}"
+    );
+    assert!(days[1].is_empty() && days[2].is_empty(), "{days:?}");
+}
+
+/// The second day's generation holds a meta model of another fingerprint,
+/// which fails its load check: no decision of the second or the third day
+/// trades, not on it nor on the first day's generation, its error logged
+/// at each. Once published again whole, a run trades on it: each of its
+/// decisions its long at r(5) = nought, taken at 0.1 + 0.5 r(8) = 0.25R.
+#[rstest]
+fn a_generation_failing_a_check_stops_new_entries_and_is_used_once_it_loads() {
+    let catalog = catalog();
+    let models = tempfile::tempdir().unwrap();
+    let (start, end) = span();
+    let mut refused = meta_baseline_of(&features(), &long_only(), 8);
+    refused.manifest.fingerprint = "f".repeat(64);
+    publish_two(models.path(), Some(refused));
+    let run = || {
+        on_thread(|| {
+            trade_on(
+                &catalog,
+                features(),
+                start,
+                end,
+                &long_only(),
+                models.path(),
+            )
+        })
+    };
+
+    let stopped = by_day(&run());
+    publish_two(
+        models.path(),
+        Some(meta_baseline_of(&features(), &long_only(), 8)),
+    );
+    let loaded = by_day(&run());
+
+    assert_eq!(stopped[0].len(), 24, "{stopped:?}");
+    assert!(
+        stopped[1].is_empty() && stopped[2].is_empty(),
+        "{stopped:?}"
+    );
+    assert_eq!(loaded[1].len(), 24, "{loaded:?}");
+    assert!(
+        loaded[1]
+            .iter()
+            .chain(&loaded[2])
+            .all(|&trade| trade == (r(5), Some(R::new(0.1 + 0.5 * r(8))))),
+        "{loaded:?}"
+    );
 }
