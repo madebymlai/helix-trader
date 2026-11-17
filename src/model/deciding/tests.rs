@@ -82,12 +82,9 @@ fn near(actual: Option<f64>, expected: Option<f64>) {
     assert!(near, "{actual:?} != {expected:?}");
 }
 
-/// The side `models` pick at noon on `ROW`.
-fn side_picked(models: &mut DecidingModels) -> Option<Side> {
-    models
-        .pick(at(NOON), &rows_of_one())
-        .unwrap()
-        .map(|picked| picked.side)
+/// The side of the trade `models` decide at noon on `ROW`.
+fn side_taken(models: &mut DecidingModels) -> Option<Side> {
+    decided(models, NOON).map(|taken| taken.side)
 }
 
 #[rstest]
@@ -383,21 +380,23 @@ fn a_generation_failing_a_check_stops_new_entries_naming_it_and_is_used_once_it_
 }
 
 /// A long expecting 0.1R, clearing its margin of nought; the short is not
-/// traded. One side has no side call.
+/// traded. One side has no side call. With no meta, nothing more is
+/// expected of the trade.
 #[rstest]
-fn a_side_expected_to_clear_its_margin_is_picked_with_its_expected_r_level_and_side_call() {
+fn a_side_expected_to_clear_its_margin_is_taken_with_its_expected_r_level_and_side_call() {
     let root = tempfile::tempdir().unwrap();
     let mut models = listed_with(root.path(), &config(), (Some(6), None));
 
     assert_eq!(
-        models.pick(at(NOON), &rows_of_one()).unwrap(),
-        Some(Picked {
+        decided(&mut models, NOON),
+        Some(Taken {
             side: Side::Long,
             expected_r: R::new(0.1),
             expected: Expected {
                 level: 0.1,
                 side_call: 0.0
             },
+            meta_expected_r: None,
         })
     );
 }
@@ -450,8 +449,8 @@ fn a_long_only_model_never_sells() {
     let mut both = listed_with(root.path(), &both_sides(), (Some(3), Some(9)));
     let mut long = listed(root.path(), &config());
 
-    assert_eq!(side_picked(&mut both), Some(Side::Short));
-    assert_eq!(side_picked(&mut long), None);
+    assert_eq!(side_taken(&mut both), Some(Side::Short));
+    assert_eq!(side_taken(&mut long), None);
 }
 
 /// A side's model predicting an R of `r(tenths)`, in no store.
@@ -647,16 +646,6 @@ fn a_meta_never_decides_beside_the_sides_of_another_generation() {
         Some((R::new(0.1), Some(R::new(0.25))))
     );
     assert_eq!(at_noon, None);
-}
-
-/// A pick is the side before any meta: the meta's examples learn from the
-/// sides picked whether or not a meta takes them.
-#[rstest]
-fn a_pick_is_the_side_before_any_meta() {
-    let root = tempfile::tempdir().unwrap();
-    let mut models = with_meta_of(root.path(), &with_meta(meta()), Some(5));
-
-    assert_eq!(side_picked(&mut models), Some(Side::Long));
 }
 
 /// The meta model taking a trade from 0.15R, learned by LightGBM at its

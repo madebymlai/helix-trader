@@ -135,25 +135,6 @@ impl DecidingModels {
         Ok(())
     }
 
-    /// The side picked at `now` on each side's row `sides`, among the sides
-    /// of the latest generation valid then, swapped in (`pick_among`); none
-    /// without a generation valid, no side clearing its margin, or two tied.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the latest generation valid then fails its checks
-    /// (`Swap::at`), or a model fails to predict.
-    pub fn pick(
-        &mut self,
-        now: Timestamp,
-        sides: &PerSide<SideRow>,
-    ) -> anyhow::Result<Option<Picked>> {
-        let Some((_, generation)) = self.generations.at(now, &self.listed)? else {
-            return Ok(None);
-        };
-        Self::pick_among(generation.pair(), margins(&self.models), sides)
-    }
-
     /// The trade decided at `now` on the decision's `features` and each side's
     /// row `sides`, by the latest generation valid then, swapped in: the side
     /// picked (`pick_among`), if there is no meta; with one, taken if the
