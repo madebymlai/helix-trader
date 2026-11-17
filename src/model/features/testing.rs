@@ -11,7 +11,7 @@ use nautilus_model::{
     identifiers::InstrumentId,
 };
 
-use super::{CustomHandler, Feature, FeatureSet, FeatureSetBuilder, OverBracket};
+use super::{Bracketed, CustomHandler, Feature, FeatureSet, FeatureSetBuilder, OverBracket};
 use crate::{
     model::targets::BracketWidth,
     strategy::{
@@ -101,11 +101,10 @@ pub(crate) const OVER: Declared<MidOverWidthArgs> = Declared::new("over");
 /// bracket's `width` there.
 pub(crate) fn mid_over(instrument_id: InstrumentId, width: &Rc<BracketWidth>) -> FeatureSetBuilder {
     let tables: IndicatorsConfig = toml::from_str("over = {}").unwrap();
-    FeatureSet::builder().feature_over_bracket(
+    FeatureSet::builder().feature(
         &[Series::quotes(instrument_id)],
-        OVER,
+        Bracketed::new(OVER, width),
         &tables,
-        width,
     )
 }
 

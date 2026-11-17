@@ -1,16 +1,21 @@
 //! A strategy's features: Nautilus indicators, each declared once on the
 //! list of series it reads (`FeatureSetBuilder::feature`), fed by Nautilus
-//! whatever their kinds.
+//! whatever their kinds. The one declaration covers every case: any
+//! number of bar types, tick series (quotes, trades, depth or deltas of an
+//! instrument or futures root) and custom series (`Series`), a single
+//! series among them, in any combination and on any instruments, and a
+//! feature over the target's bracket (`Bracketed`, below).
 //!
 //! A feature is built of a declared indicator's table in `[indicators]`
 //! (`strategy::Declared`, `IndicatorsConfig`), never by hand: the builder
 //! takes the declaration and the tables, builds the indicator, names the
 //! feature and carries the table's arguments into the fingerprint. A
 //! feature is named after its table (`fast`) when the table feeds that
-//! feature alone, and after the series it reads and its table
+//! feature alone, and after its series and its table when the table feeds
+//! several: its whole list in the order declared, apart by `, `
 //! (`XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL:fast`, `QuoteTick of
-//! XAUUSD.ICMARKETS:fast`) when the table feeds several. A raw feature of
-//! custom data has no table, and is named by the strategy.
+//! XAUUSD.ICMARKETS, TradeTick of XAUUSD.ICMARKETS:fast`). A raw feature
+//! of custom data has no table, and is named by the strategy.
 //!
 //! The set is one Nautilus indicator (`ActorIndicator`), shared between
 //! Nautilus, the strategy's warmup and the strategy as an `Rc` (Nautilus'
@@ -64,9 +69,11 @@
 //! for it: `register` sets it from the clock (`rolls::front`), and that
 //! contract's quotes, trades, depth, deltas and custom data (keyed by the
 //! contract's id, `CustomSeries::on`) are matched to it.
-//! The set's tick series (`ticks`) are what the model handle's
-//! subscriptions subscribe to (`strategy::subscriptions`) and a live
-//! warmup requests; at the roller's
+//! The set's tick series (`ticks`), bar types (`bar_types`) and custom
+//! series (`custom`) gather the series of all its features, each once, in
+//! the order declared: they are what the model handle's subscriptions
+//! subscribe to (`strategy::subscriptions`), a live warmup requests and
+//! `[data] series` is checked against (`model::reads`); at the roller's
 //! transition, `roll` moves the root's features
 //! to the post contract and resets them (Nautilus' `Indicator::reset`):
 //! their windows never mix two contracts, which trade at different prices,
@@ -97,7 +104,7 @@
 //! value from the cache instead (see above).
 //!
 //! The set records, for each instrument, the time (`ts_init`) of the
-//! latest quote, trade, bar, depth or deltas a feature read
+//! latest quote, trade, bar, depth or deltas any series of a feature read
 //! (`last_update`), a root's under the root: a decision is fresh only if
 //! data of the traded instrument came since the previous one (`decide`).
 //! Custom data is no update of any instrument.
@@ -106,9 +113,10 @@
 //! its features read before a decision, such as the strategy's: a dataset
 //! build replays it before its first day (`dataset`).
 //!
-//! A feature over the target's bracket (`OverBracket`, declared with
-//! `FeatureSetBuilder::feature_over_bracket`) reads its list of series, and
-//! is handed the bracket's width (`targets::BracketWidth`) as it is built:
+//! A feature over the target's bracket (`OverBracket`) is declared as any
+//! other, on any list of series, its declaration over the bracket of a
+//! width (`Bracketed`), and is handed the width (`targets::BracketWidth`)
+//! as it is built:
 //! the width at the decision its value is for, the decision its series are
 //! read at, and the target's time limit. The set's features read one
 //! width, which the model handle has the target's setter run on
@@ -117,7 +125,8 @@
 //! dataset beside the set's (`targets::fingerprint`).
 //!
 //! The fingerprint covers what makes the features what they are: their
-//! names in order, the series each reads (which the name of a feature
+//! names in order, the series each reads, its whole list in the order
+//! declared (which the name of a feature
 //! named after its table alone, or of a raw feature, does not tell), the
 //! whole data type of each custom series, a feature's or a raw feature's,
 //! the arguments of each table they are built from by value
@@ -254,10 +263,86 @@ impl<T: MovingAverage> Feature for T {
 
 /// A feature formed over the target's bracket: its value at a decision is
 /// over the bracket's width there, which it reads from the width it is
-/// handed as it is built (`FeatureSetBuilder::over_bracket`).
+/// handed as it is built (`Bracketed`).
 pub trait OverBracket: Feature {
     /// Reads its values over `width` from now on.
     fn over(&mut self, width: Rc<BracketWidth>);
+}
+
+/// What an indicator feature is declared of (`FeatureSetBuilder::feature`):
+/// a declared indicator (`Declared`), or one over the target's bracket
+/// (`Bracketed`).
+pub trait FeatureDeclaration {
+    type Args: IndicatorArgs;
+
+    /// The declared indicator the feature is built of.
+    fn declared(&self) -> Declared<Self::Args>;
+
+    /// The width of the bracket the feature reads over, if it does.
+    fn width(&self) -> Option<&Rc<BracketWidth>>;
+
+    /// The feature of `indicator`, built of the declared table.
+    fn feature(self, indicator: <Self::Args as IndicatorArgs>::Indicator) -> Box<dyn Feature>;
+}
+
+impl<A> FeatureDeclaration for Declared<A>
+where
+    A: IndicatorArgs,
+    A::Indicator: Feature + 'static,
+{
+    type Args = A;
+
+    fn declared(&self) -> Self {
+        *self
+    }
+
+    fn width(&self) -> Option<&Rc<BracketWidth>> {
+        None
+    }
+
+    fn feature(self, indicator: A::Indicator) -> Box<dyn Feature> {
+        Box::new(indicator)
+    }
+}
+
+/// A declared indicator over the target's bracket of a width: its feature
+/// is handed the width as it is built (`OverBracket::over`), and the
+/// target's setter runs on it (`FeatureSet::bracket_width`), so all the
+/// features of a set over the bracket read one width.
+pub struct Bracketed<A> {
+    declared: Declared<A>,
+    width: Rc<BracketWidth>,
+}
+
+impl<A> Bracketed<A> {
+    #[must_use]
+    pub fn new(declared: Declared<A>, width: &Rc<BracketWidth>) -> Self {
+        Self {
+            declared,
+            width: Rc::clone(width),
+        }
+    }
+}
+
+impl<A> FeatureDeclaration for Bracketed<A>
+where
+    A: IndicatorArgs,
+    A::Indicator: OverBracket + 'static,
+{
+    type Args = A;
+
+    fn declared(&self) -> Declared<A> {
+        self.declared
+    }
+
+    fn width(&self) -> Option<&Rc<BracketWidth>> {
+        Some(&self.width)
+    }
+
+    fn feature(self, mut indicator: A::Indicator) -> Box<dyn Feature> {
+        indicator.over(self.width);
+        Box::new(indicator)
+    }
 }
 
 /// How a raw feature reads its value from a custom data point.
@@ -901,7 +986,7 @@ impl ActorIndicator for FeatureSet {
 }
 
 impl FeatureSetBuilder {
-    /// Declares the feature of `declared`, built of its table in
+    /// Declares the feature of `declaration`, built of its table in
     /// `indicators`, on `series`, any number of bar types, tick series
     /// (quotes, trades, depth or deltas of an instrument or futures root)
     /// and custom series in any combination: it is handed each update of
@@ -911,212 +996,35 @@ impl FeatureSetBuilder {
     /// the root's id among them, reads the contract standing for the root,
     /// from `register` and each roll. `build` refuses a custom series among
     /// them if the feature has no custom handler, as it does an empty
-    /// list.
+    /// list. A feature over the target's bracket (`Bracketed`) is handed
+    /// its width.
     ///
     /// # Panics
     ///
     /// Panics if its table is missing, does not parse or is refused,
     /// which the load refuses of an indicator the strategy declares
-    /// (`Part::INDICATORS`).
+    /// (`Part::INDICATORS`), or if it reads over a width of the bracket
+    /// and a feature declared before reads another: the target's setter
+    /// runs on one.
     #[must_use]
-    pub fn feature<A>(
+    pub fn feature<D: FeatureDeclaration>(
         mut self,
         series: &[Series],
-        declared: Declared<A>,
+        declaration: D,
         indicators: &IndicatorsConfig,
-    ) -> Self
-    where
-        A: IndicatorArgs,
-        A::Indicator: Feature + 'static,
-    {
-        let table = declared.name();
-        let feature = self.built(declared, indicators);
-        self.indicator(table, series, Box::new(feature))
-    }
-
-    /// Declares the feature of `declared`, built of its table in
-    /// `indicators`, on the quotes of `instrument_id` (see `feature`).
-    ///
-    /// # Panics
-    ///
-    /// Panics if its table is missing, does not parse or is refused (see
-    /// `feature`).
-    #[must_use]
-    pub fn quotes<A>(
-        self,
-        instrument_id: InstrumentId,
-        declared: Declared<A>,
-        indicators: &IndicatorsConfig,
-    ) -> Self
-    where
-        A: IndicatorArgs,
-        A::Indicator: Feature + 'static,
-    {
-        self.feature(
-            &[ticks(NautilusDataType::QuoteTick, instrument_id)],
-            declared,
-            indicators,
-        )
-    }
-
-    /// Declares the feature of `declared`, built of its table in
-    /// `indicators`, on the trades of `instrument_id` (see `feature`).
-    ///
-    /// # Panics
-    ///
-    /// Panics if its table is missing, does not parse or is refused (see
-    /// `feature`).
-    #[must_use]
-    pub fn trades<A>(
-        self,
-        instrument_id: InstrumentId,
-        declared: Declared<A>,
-        indicators: &IndicatorsConfig,
-    ) -> Self
-    where
-        A: IndicatorArgs,
-        A::Indicator: Feature + 'static,
-    {
-        self.feature(
-            &[ticks(NautilusDataType::TradeTick, instrument_id)],
-            declared,
-            indicators,
-        )
-    }
-
-    /// Declares the feature of `declared`, built of its table in
-    /// `indicators`, on the bars of `bar_type` (see `feature`).
-    ///
-    /// # Panics
-    ///
-    /// Panics if its table is missing, does not parse or is refused (see
-    /// `feature`).
-    #[must_use]
-    pub fn bars<A>(
-        self,
-        bar_type: BarType,
-        declared: Declared<A>,
-        indicators: &IndicatorsConfig,
-    ) -> Self
-    where
-        A: IndicatorArgs,
-        A::Indicator: Feature + 'static,
-    {
-        self.feature(&[Series::Bars(bar_type)], declared, indicators)
-    }
-
-    /// Declares the feature of `declared`, built of its table in
-    /// `indicators`, on the book depth of `instrument_id` (see `feature`).
-    ///
-    /// # Panics
-    ///
-    /// Panics if its table is missing, does not parse or is refused (see
-    /// `feature`).
-    #[must_use]
-    pub fn depth<A>(
-        self,
-        instrument_id: InstrumentId,
-        declared: Declared<A>,
-        indicators: &IndicatorsConfig,
-    ) -> Self
-    where
-        A: IndicatorArgs,
-        A::Indicator: Feature + 'static,
-    {
-        self.feature(
-            &[ticks(NautilusDataType::OrderBookDepth, instrument_id)],
-            declared,
-            indicators,
-        )
-    }
-
-    /// Declares the feature of `declared`, built of its table in
-    /// `indicators`, on the book deltas of `instrument_id` (see `feature`).
-    ///
-    /// # Panics
-    ///
-    /// Panics if its table is missing, does not parse or is refused (see
-    /// `feature`).
-    #[must_use]
-    pub fn deltas<A>(
-        self,
-        instrument_id: InstrumentId,
-        declared: Declared<A>,
-        indicators: &IndicatorsConfig,
-    ) -> Self
-    where
-        A: IndicatorArgs,
-        A::Indicator: Feature + 'static,
-    {
-        self.feature(
-            &[ticks(NautilusDataType::OrderBookDelta, instrument_id)],
-            declared,
-            indicators,
-        )
-    }
-
-    /// Declares the feature of `declared`, built of its table in
-    /// `indicators`, on `series` (see `feature`), over the bracket of
-    /// `width`, which it is handed (`OverBracket::over`) and the target's
-    /// setter runs on (`FeatureSet::bracket_width`).
-    ///
-    /// # Panics
-    ///
-    /// Panics if its table is missing, does not parse or is refused (see
-    /// `feature`), or if a feature declared before reads another width:
-    /// the setter runs on one.
-    #[must_use]
-    pub fn feature_over_bracket<A>(
-        mut self,
-        series: &[Series],
-        declared: Declared<A>,
-        indicators: &IndicatorsConfig,
-        width: &Rc<BracketWidth>,
-    ) -> Self
-    where
-        A: IndicatorArgs,
-        A::Indicator: OverBracket + 'static,
-    {
-        assert!(
-            self.width
-                .as_ref()
-                .is_none_or(|read| Rc::ptr_eq(read, width)),
-            "features over two widths of the target's bracket: its setter runs on one"
-        );
-        self.width = Some(Rc::clone(width));
-        let table = declared.name();
-        let mut feature = self.built(declared, indicators);
-        feature.over(Rc::clone(width));
-        self.indicator(table, series, Box::new(feature))
-    }
-
-    /// Declares the feature of `declared`, built of its table in
-    /// `indicators`, on the quotes of `instrument_id`, over the bracket of
-    /// `width` (see `feature_over_bracket`).
-    ///
-    /// # Panics
-    ///
-    /// Panics if its table is missing, does not parse or is refused, or if
-    /// a feature declared before reads another width (see
-    /// `feature_over_bracket`).
-    #[must_use]
-    pub fn over_bracket<A>(
-        self,
-        instrument_id: InstrumentId,
-        declared: Declared<A>,
-        indicators: &IndicatorsConfig,
-        width: &Rc<BracketWidth>,
-    ) -> Self
-    where
-        A: IndicatorArgs,
-        A::Indicator: OverBracket + 'static,
-    {
-        self.feature_over_bracket(
-            &[ticks(NautilusDataType::QuoteTick, instrument_id)],
-            declared,
-            indicators,
-            width,
-        )
+    ) -> Self {
+        if let Some(width) = declaration.width() {
+            assert!(
+                self.width
+                    .as_ref()
+                    .is_none_or(|read| Rc::ptr_eq(read, width)),
+                "features over two widths of the target's bracket: its setter runs on one"
+            );
+            self.width = Some(Rc::clone(width));
+        }
+        let declared = declaration.declared();
+        let feature = declaration.feature(self.built(declared, indicators));
+        self.indicator(declared.name(), series, feature)
     }
 
     /// Declares a raw feature, named `name`, on `series`, a custom series
@@ -1291,14 +1199,6 @@ impl FeatureSetBuilder {
         self.slots.push(slot);
         self
     }
-}
-
-/// The `data` ticks of `instrument_id`, as a series.
-fn ticks(data: NautilusDataType, instrument_id: InstrumentId) -> Series {
-    Series::Ticks(TickSeries {
-        data,
-        instrument_id,
-    })
 }
 
 impl Fingerprint {

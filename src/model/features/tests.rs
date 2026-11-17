@@ -944,7 +944,11 @@ fn features_over_one_width_hand_it_to_the_target() {
     let width = width_of(Distance::BasisPoints(Decimal::from(10)));
 
     let features = testing::mid_over(id(AUD), &width)
-        .feature_over_bracket(&[Series::quotes(id(AUD))], ALSO, &over_tables(), &width)
+        .feature(
+            &[Series::quotes(id(AUD))],
+            Bracketed::new(ALSO, &width),
+            &over_tables(),
+        )
         .build()
         .unwrap();
 
@@ -959,11 +963,10 @@ fn features_over_one_width_hand_it_to_the_target() {
 fn features_over_two_widths_panic() {
     let in_bps = || width_of(Distance::BasisPoints(Decimal::from(10)));
 
-    let _ = testing::mid_over(id(AUD), &in_bps()).feature_over_bracket(
+    let _ = testing::mid_over(id(AUD), &in_bps()).feature(
         &[Series::quotes(id(AUD))],
-        ALSO,
+        Bracketed::new(ALSO, &in_bps()),
         &over_tables(),
-        &in_bps(),
     );
 }
 
@@ -1269,40 +1272,18 @@ fn a_table_feeding_several_features_names_each_after_its_whole_list_of_series() 
 }
 
 /// The fingerprint, and names, of a set of a feature of each kind on one
-/// series, declared one way or the other, as the features of one series
-/// were fingerprinted before a feature read a list of them.
+/// series, as the features of one series were fingerprinted before a
+/// feature read a list of them.
 #[rstest]
-#[case::per_kind(true)]
-#[case::by_list(false)]
-fn a_single_series_features_names_and_fingerprint_are_unchanged(#[case] per_kind: bool) {
+fn a_single_series_features_names_and_fingerprint_are_unchanged() {
     let tables = tables();
     let width = width_of(Distance::BasisPoints(Decimal::from(10)));
-    let builder = if per_kind {
-        testing::mid_over(id(GBP), &width)
-            .feature(&[Series::Bars(BarType::from(AUD_BARS))], LAST, &tables)
-            .feature(&[Series::quotes(id(AUD))], LAST, &tables)
-            .feature(&[Series::trades(id(GBP))], TWO, &tables)
-            .feature(&[Series::depth(id(AUD))], BOOK, &tables)
-            .feature(&[Series::deltas(id(GBP))], BOOK, &tables)
-    } else {
-        FeatureSet::builder()
-            .feature_over_bracket(&[quotes(GBP)], testing::OVER, &over_tables(), &width)
-            .feature(&[bars(AUD_BARS)], LAST, &tables)
-            .feature(&[quotes(AUD)], LAST, &tables)
-            .feature(&[trades(GBP)], TWO, &tables)
-            .feature(
-                &[ticks(NautilusDataType::OrderBookDepth, AUD)],
-                BOOK,
-                &tables,
-            )
-            .feature(
-                &[ticks(NautilusDataType::OrderBookDelta, GBP)],
-                BOOK,
-                &tables,
-            )
-    };
-
-    let features = builder
+    let features = testing::mid_over(id(GBP), &width)
+        .feature(&[bars(AUD_BARS)], LAST, &tables)
+        .feature(&[quotes(AUD)], LAST, &tables)
+        .feature(&[trades(GBP)], TWO, &tables)
+        .feature(&[Series::depth(id(AUD))], BOOK, &tables)
+        .feature(&[Series::deltas(id(GBP))], BOOK, &tables)
         .custom(&levels("yields", "US10Y"), "yield", read_level)
         .version(3)
         .build()
@@ -1392,11 +1373,10 @@ fn a_feature_over_the_bracket_reads_its_list_of_series_over_its_width() {
     let width = width_of(Distance::BasisPoints(Decimal::from(10)));
 
     let features = FeatureSet::builder()
-        .feature_over_bracket(
+        .feature(
             &[quotes(GBP), quotes(AUD)],
-            testing::OVER,
+            Bracketed::new(testing::OVER, &width),
             &over_tables(),
-            &width,
         )
         .build()
         .unwrap();
