@@ -5,8 +5,8 @@
 //! (`StreamingConfig`): Feather files appended under a staging directory
 //! outside the catalog, in `live/<instance id>/`, promoted into the catalog
 //! the node registers daily and on a clean stop, each staging file deleted
-//! once promoted. A retrain the node starts then trains on the data up to
-//! the last promotion, at most a day old (`model::launcher`). Each
+//! once promoted. A retrain the node starts at a retrain time waits for
+//! the first promotion holding data at or after it (`model::launcher`). Each
 //! promotion names its files by their rows, so a run's files of a series
 //! leave a sliver between them, one a day, which the catalog counts as
 //! missing: a backtest replays the rows through it, and the live warmup

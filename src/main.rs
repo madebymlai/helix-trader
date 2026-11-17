@@ -571,8 +571,9 @@ impl<'a> Visitor for Running<'a> {
 
 /// Runs the model strategy `S` of `args` on `live` until Ctrl-C, on the
 /// models of the store its config keys, beside the actor of its
-/// retrains if it is retrained (`RetrainActor`), each retrain in a child
-/// process (`LiveArgs::train_args`) on the node's catalog. Refuses first,
+/// retrains if it is retrained (`RetrainActor`), which lists that store's
+/// generations as it starts, each retrain in a child process
+/// (`LiveArgs::train_args`) on the node's catalog. Refuses first,
 /// before any node is built, a catalog without the traded instruments or
 /// the pairs of `[trade] conversions`, which its models and retrains are
 /// built from (`catalog::instruments`), and a dataset balance (`[model]
@@ -608,6 +609,7 @@ async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyho
         config.model().retrain,
         args.catalog.clone(),
         requirements.clone(),
+        models,
         Launcher::process(program, args.train_args()),
     );
     let mode = Mode::Live {

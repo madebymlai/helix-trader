@@ -5,6 +5,8 @@ Released on TBD (UTC).
 ### Enhancements
 
 - Added `train --from --to`, training a periodic strategy at each retrain time of a span in time order, past failures, which it lists at the end
+- Added a live retrain at the start of a node of the latest retrain time whose generation the store lacks, as after the node was down then
+- Added the output of a live retrain's `train` to the node's Nautilus log, each line a log record, its file holding the train's whole output
 
 ### Breaking Changes
 
@@ -26,6 +28,9 @@ Released on TBD (UTC).
 - Renamed `ModelSet` to `ModelStore` and `ModelBlueprint::model_set` to `model_store`, the store of a strategy's generations; publish, list, read and swap them with `ModelStore::publish`, `generations`, `read` and `swap` in place of the per-side `ModelStore`, `ModelSet::pairs`, `ModelSet::valid_froms` and `MetaLevel::swap`
 - Removed `PairCalibration`, `ModelCalibration` and `ModelManifest`'s `strategy_id` and `valid_from`: a side's manifest holds no calibration, its pair's being `StoredGeneration::calibration`, and a meta's holds its `Line`
 - Removed `Step` and `Plan::meta_after_sides` from the schedule; read a train's plan as `Plan::Keep` or `Plan::Train` of `Fits`
+- Changed a live retrain to train at its retrain time, its generation stamped and its data cut there as `train --at` does, once every series the strategy reads has a stored point at or after that time, instead of at once at the catalog's last stored time; expect it after the first daily promotion past the retrain time, the previous generation deciding meanwhile
+- Changed a live retrain due while another waits for its data to take its place, the waiting one skipped with a warning; train a skipped time with `train --from --to` if a backtest needs it
+- Changed `RetrainActor::new` to take the strategy's `ModelStore`, whose generations it lists at its start; pass the store the strategy reads
 
 ### Fixes
 
