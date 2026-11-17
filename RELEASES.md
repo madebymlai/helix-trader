@@ -52,6 +52,7 @@ Released on TBD (UTC).
 
 ### Internal Improvements
 
+- Improved the run time of the LSE fill tests, which call their mock at the LSE crate tests' 6000 calls a minute instead of a plan's 60, each up to 3.6 s down to 0.5 s at most
 - Changed the dev and test builds to compile dependencies at `opt-level` 1, as Nautilus does: the backtest tests run 3 to 8 times faster, a cold build of the dependencies takes about twice as long, and rebuilds of helix are unchanged
 - Improved the run time of the slowest tests: the streaming tests stop their nodes once what they wait for is staged or promoted rather than after a fixed time, the model tests run no train and store no quotes that no assertion reads, and a test's two dataset builds copy one catalog, each change checked by a mutation
 - Improved the tests to `docs/testing.md`'s standard: same-shape tests parametrized with `#[case]`, duplicates and tests of library logic removed, messages asserted by the facts they carry, waits bounded, expected values worked by hand, and each change checked by a mutation

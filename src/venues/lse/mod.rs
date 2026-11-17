@@ -160,7 +160,7 @@ pub(super) fn live_clients(instrument_ids: &[InstrumentId]) -> Clients {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, path::Path};
+    use std::{collections::HashSet, num::NonZeroU32, path::Path};
 
     use ::lse::{
         LseRow,
@@ -292,6 +292,11 @@ mod tests {
             .cme_api_key(SecretString::from(CME_API_KEY))
             .nasdaq_api_key(SecretString::from(NASDAQ_API_KEY))
             .base_url_http(lse.url().to_string())
+            // The mock answers at once: no plan's minute to keep to, as the
+            // crate's own tests have it.
+            .calls_per_minute(NonZeroU32::new(6000).unwrap())
+            .cme_calls_per_minute(NonZeroU32::new(6000).unwrap())
+            .nasdaq_calls_per_minute(NonZeroU32::new(6000).unwrap())
             .build();
         let databento = || {
             let peer = databento.expect("Databento asked for a definition");
