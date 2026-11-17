@@ -708,13 +708,12 @@ fn print_report(meter: &mut Meter, at: Timestamp, trained: &Trained) {
 }
 
 /// Prints the report of the train at `at`, which did `trained`
-/// (`print_report`); one that kept the current generation, failed, is an
-/// error, its reason: the command fails, so that the live node that started
+/// (`print_report`); one that failed is an error, its reason: the command fails, so that the live node that started
 /// it knows why (`model::launcher`).
 ///
 /// # Errors
 ///
-/// Returns an error if the train kept the current generation.
+/// Returns an error if the train failed.
 fn reported(mut meter: Meter, at: Timestamp, trained: &Trained) -> anyhow::Result<()> {
     print_report(&mut meter, at, trained);
     anyhow::ensure!(trained.succeeded(), "{}", trained.outcome);
@@ -722,13 +721,13 @@ fn reported(mut meter: Meter, at: Timestamp, trained: &Trained) -> anyhow::Resul
 }
 
 /// Prints the report of each of `trains`, a train over a span, at its
-/// retrain time, as it comes (`print_report`): a train that kept the
-/// current generation does not stop the next. Fails once all are done if
-/// any kept one, listing each such retrain time with its train's reason.
+/// retrain time, as it comes (`print_report`): a train that failed does
+/// not stop the next. Fails once all are done if any failed, listing each
+/// such retrain time with its train's reason.
 ///
 /// # Errors
 ///
-/// Returns an error if a train kept the current generation.
+/// Returns an error if a train failed.
 fn reported_over(
     mut meter: Meter,
     trains: impl Iterator<Item = (Timestamp, Trained)>,
@@ -743,7 +742,7 @@ fn reported_over(
     }
     anyhow::ensure!(
         failed.is_empty(),
-        "the trains at {} of the span's {count} retrain times kept the current generation:\n{}",
+        "the trains at {} of the span's {count} retrain times failed:\n{}",
         failed.len(),
         failed.join("\n")
     );
@@ -1110,10 +1109,10 @@ mod tests {
         assert_eq!(args.models, PathBuf::from("models"));
     }
 
-    /// A train that kept the current generation fails with its reason; one
+    /// A train that failed fails the command with its reason; one
     /// that published, or found its generation already published, succeeds.
     #[rstest]
-    fn a_train_keeping_the_generation_fails_with_the_reason() {
+    fn a_failed_train_fails_with_the_reason() {
         let t: Timestamp = "2026-10-23T00:00:00Z".parse().unwrap();
         let kept = Outcome::Failed(Failure::Error(
             "34 rows in the fit slice, fewer than min_rows 35".to_string(),

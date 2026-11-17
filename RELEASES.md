@@ -11,7 +11,7 @@ Released on TBD (UTC).
 
 ### Breaking Changes
 
-- Removed the holdout gate: a train publishes its models unless a fit or calibration slice has fewer rows than `min_rows`, a prediction or calibration is not finite, or a model does not reproduce its probes; judge a config's models by a backtest's scores
+- Removed the holdout gate: a train publishes its models unless a fit or calibration slice has fewer rows than `min_rows`, a prediction or calibration is not finite, or a model does not reproduce its probes, so `model::holdout::Holdout`, `Refusal` and `Minimums`, `Kept::Refused` and `ModelManifest`'s `holdout` field are removed; judge a config's models by a backtest's scores
 - Renamed `[model] holdout` and `[model.meta] holdout` to `calibration`, the last part of the window the models are calibrated on and not fitted on; rename the key, and keep `calibration` plus the target's limit shorter than the window
 - Removed `min_trades` and `min_expectancy` from `[model]` and `[model.meta]`, each refused at load as unknown; drop them
 - Changed `[model]` and `[model.meta]` to require `min_rows`, the fewest rows of each fit and calibration slice; set it to at least 1

@@ -57,8 +57,8 @@ pub struct ModelConfig<T = TargetConfig> {
     pub target: T,
     /// How often the model is retrained, such as `"168h"`: at every multiple
     /// of it since the Unix epoch, in a backtest as live
-    /// (`model::schedule`). Left out, never: each model is trained once and
-    /// kept (`Retrain::Never`).
+    /// (`model::schedule`). Left out, never: each `train --at` trains a
+    /// generation at its time (`Retrain::Never`).
     #[serde(default)]
     #[builder(default, into)]
     pub retrain: Retrain,
@@ -92,7 +92,7 @@ pub struct ModelConfig<T = TargetConfig> {
 /// that side's trade, the target on it, learned from the sides' features,
 /// the side picked and the decision's calibrated level and side call. It is
 /// retrained on the sides' schedule, right after them, or, the sides never
-/// retrained, trained once and kept.
+/// retrained, at each `train --at`.
 ///
 /// In the TOML, a probability `threshold` or a `size` is refused as the
 /// section is parsed, saying what takes its place (`MetaFields`).
