@@ -1,4 +1,5 @@
-//! The hold of a live warmup's quotes, trades, book depth and deltas: the
+//! The hold of a live warmup's quotes, trades, book depth, deltas and custom
+//! data: the
 //! warmup hands the indicators reading them, a model strategy's features,
 //! those of its responses as they come, holds the live ones the strategy
 //! hands it until its group ends, the last window answered, and then hands
@@ -22,18 +23,21 @@
 //! as it gets a response's in `on_historical_book_depth` and
 //! `on_historical_book_deltas`, and Nautilus holds nothing for the handlers
 //! while a request is pending either. So the strategy hands the warmup its
-//! live depth and deltas from its handlers too, held as ticks are. Once
+//! live depth and deltas from its handlers too, held as ticks are, and its
+//! custom data, which Nautilus hands an actor's `on_data` and
+//! `on_historical_data` alone, likewise. Once
 //! Nautilus holds live data for an actor's indicators and handlers while a
 //! request of it with `update_subscriptions` is pending, releasing them in
 //! time order after the response and deduplicated against it, this module
 //! goes: the features are registered for quotes and trades again, the
-//! strategy hands the warmup no ticks, and its handlers hand its depth and
-//! deltas to the features straight: helix-trader issue #16
+//! strategy hands the warmup no ticks, and its handlers hand its depth,
+//! deltas and custom data to the features straight: helix-trader issue #16
 //! (<https://github.com/madebymlai/helix-trader/issues/16>).
 //!
 //! A live tick the history holds is dropped, held or not, judged within its
 //! series, the quotes, the trades, the depth or the deltas of one
-//! instrument, a batch of deltas by its last delta's time. The series' seam is
+//! instrument, or the custom data of one data type, a batch of deltas by
+//! its last delta's time. The series' seam is
 //! the latest `ts_event` of its ticks the warmup handed over; a live tick of
 //! the series made at or before it (`ts_event`) is dropped, one made after
 //! it handed over. Made at the seam itself, it is the venue's resend of the
@@ -52,13 +56,14 @@ use std::{cell::RefCell, collections::HashMap, fmt::Debug, rc::Rc};
 use nautilus_common::actor::indicators::SharedActorIndicator;
 use nautilus_core::UnixNanos;
 use nautilus_model::{
-    data::{OrderBookDeltas, OrderBookDepth, QuoteTick, TradeTick},
+    data::{CustomData, DataType, OrderBookDeltas, OrderBookDepth, QuoteTick, TradeTick},
     identifiers::InstrumentId,
 };
 
-use super::BookIndicator;
+use super::{BookIndicator, CustomIndicator};
 
-/// A quote, a trade, a snapshot of a book's depth or a batch of its deltas.
+/// A quote, a trade, a snapshot of a book's depth, a batch of its deltas or
+/// a point of custom data.
 #[derive(Debug, Clone)]
 pub(super) enum Tick {
     Quote(QuoteTick),
@@ -66,20 +71,22 @@ pub(super) enum Tick {
     /// Boxed: ten levels a side, against a quote's few fields.
     Depth(Box<OrderBookDepth>),
     Deltas(OrderBookDeltas),
+    Custom(CustomData),
 }
 
 /// The series of a tick, within which a live tick is judged against the
-/// history.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// history: custom data by its data type.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Series {
     Quotes(InstrumentId),
     Trades(InstrumentId),
     Depth(InstrumentId),
     Deltas(InstrumentId),
+    Custom(DataType),
 }
 
-/// What hands a warmup's quotes, trades, depth and deltas to the
-/// indicators reading them, holding the live ones while a live start's
+/// What hands a warmup's quotes, trades, depth, deltas and custom data to
+/// the indicators reading them, holding the live ones while a live start's
 /// group is pending.
 #[derive(Default)]
 pub(super) struct Hold {
@@ -87,6 +94,8 @@ pub(super) struct Hold {
     indicators: Vec<SharedActorIndicator>,
     /// What the depth and deltas are handed to.
     books: Vec<Rc<dyn BookIndicator>>,
+    /// What the custom data is handed to.
+    custom: Vec<Rc<dyn CustomIndicator>>,
     /// The live ticks held while a group is pending, in the order they
     /// came; none when live ticks go straight through.
     held: RefCell<Option<Vec<Tick>>>,
@@ -104,6 +113,11 @@ impl Hold {
     /// Hands the depth and deltas to `books` too.
     pub(super) fn feeding_books(&mut self, books: Rc<dyn BookIndicator>) {
         self.books.push(books);
+    }
+
+    /// Hands the custom data to `custom` too.
+    pub(super) fn feeding_custom(&mut self, custom: Rc<dyn CustomIndicator>) {
+        self.custom.push(custom);
     }
 
     /// Holds the live ticks from now, a live start's group pending, with
@@ -213,6 +227,11 @@ impl Hold {
                     books.handle_deltas(deltas);
                 }
             }
+            Tick::Custom(data) => {
+                for custom in &self.custom {
+                    custom.handle_custom(data);
+                }
+            }
         }
         Ok(())
     }
@@ -225,6 +244,7 @@ impl Tick {
             Self::Trade(trade) => Series::Trades(trade.instrument_id),
             Self::Depth(depth) => Series::Depth(depth.instrument_id),
             Self::Deltas(deltas) => Series::Deltas(deltas.instrument_id),
+            Self::Custom(data) => Series::Custom(data.data_type.clone()),
         }
     }
 
@@ -235,6 +255,7 @@ impl Tick {
             Self::Trade(trade) => trade.ts_event,
             Self::Depth(depth) => depth.ts_event,
             Self::Deltas(deltas) => deltas.ts_event,
+            Self::Custom(data) => data.data.ts_event(),
         }
     }
 }
@@ -244,6 +265,7 @@ impl Debug for Hold {
         f.debug_struct(stringify!(Hold))
             .field("indicators", &self.indicators.len())
             .field("books", &self.books.len())
+            .field("custom", &self.custom.len())
             .field("held", &self.held.borrow().as_ref().map(Vec::len))
             .field("seams", &self.seams.borrow())
             .finish()
