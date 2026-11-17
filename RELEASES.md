@@ -40,7 +40,8 @@ Released on TBD (UTC).
 - Removed `keepalive_secs` from `LseWebSocketClient::connect`; drop it, the client pings every 25 s
 - Removed `Deserialize` from `TickSeries`; read tick series through a strategy config's `[data]` series
 - Removed `Launcher::in_process` outside the crate's own tests
-- Removed `FeatureSetBuilder`'s `quotes`, `trades`, `bars`, `depth`, `deltas`, `over_bracket`; use `feature` on a list of series, `Bracketed` over the bracket
+- Removed `FeatureSetBuilder`'s `quotes`, `trades`, `bars`, `depth`, `deltas`, `over_bracket`; use `feature` on a list of series, and `bracket` for the width
+- Changed `OverBracket` to be a feature's `Feature::over_bracket`, handed the width `FeatureSetBuilder::bracket` takes; return `Some(self)` from it
 - Changed `Warmup`'s `feeding`, `feeding_ticks`, `feeding_books` and `feeding_custom` to take the series their indicator reads; pass them first
 
 ### Security

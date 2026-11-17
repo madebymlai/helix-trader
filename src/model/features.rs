@@ -3,8 +3,9 @@
 //! whatever their kinds. The one declaration covers every case: any
 //! number of bar types, tick series (quotes, trades, depth or deltas of an
 //! instrument or futures root) and custom series (`Series`), a single
-//! series among them, in any combination and on any instruments, and a
-//! feature over the target's bracket (`Bracketed`, below).
+//! series among them, in any combination and on any instruments, a
+//! feature over the target's bracket among them (`Feature::over_bracket`,
+//! below).
 //!
 //! A feature is built of a declared indicator's table in `[indicators]`
 //! (`strategy::Declared`, `IndicatorsConfig`), never by hand: the builder
@@ -114,15 +115,19 @@
 //! its features read before a decision, such as the strategy's: a dataset
 //! build replays it before its first day (`dataset`).
 //!
-//! A feature over the target's bracket (`OverBracket`) is declared as any
-//! other, on any list of series, its declaration over the bracket of a
-//! width (`Bracketed`), and is handed the width (`targets::BracketWidth`)
-//! as it is built:
-//! the width at the decision its value is for, the decision its series are
-//! read at, and the target's time limit. The set's features read one
-//! width, which the model handle has the target's setter run on
-//! (`bracket_width`), so the width's ATR is the target's, with no series of
-//! the strategy's. The width is the target's, in the fingerprint of a
+//! Being formed over the target's bracket is a property of the indicator,
+//! not of its declaration: a feature over it gives how it reads it
+//! (`Feature::over_bracket`, an `OverBracket`), is declared as any other,
+//! on any list of series, and is handed the width
+//! (`targets::BracketWidth`) the builder takes once
+//! (`FeatureSetBuilder::bracket`) as the set is built: the width at the
+//! decision its value is for, the decision its series are read at, and the
+//! target's time limit. The set refuses a feature over the bracket with no
+//! width given, a width no feature reads and a second width, and a feature
+//! over the bracket reading a width it was never handed panics, never
+//! reading NaN. The set's features read the one width, which the model
+//! handle has the target's setter run on (`bracket_width`), so the width's
+//! ATR is the target's, with no series of the strategy's. The width is the target's, in the fingerprint of a
 //! dataset beside the set's (`targets::fingerprint`).
 //!
 //! The fingerprint covers what makes the features what they are: their
@@ -238,6 +243,14 @@ pub trait Feature: Indicator {
     fn custom_handler(&mut self) -> Option<&mut dyn CustomHandler> {
         None
     }
+
+    /// How it reads the target's bracket, if it is formed over it: none
+    /// unless the feature gives one, and the set hands it the width its
+    /// builder takes (`FeatureSetBuilder::bracket`), a feature over the
+    /// bracket with no width given refused when the set is built.
+    fn over_bracket(&mut self) -> Option<&mut dyn OverBracket> {
+        None
+    }
 }
 
 /// How a feature reads custom data (`Feature::custom_handler`).
@@ -259,88 +272,15 @@ impl<T: MovingAverage> Feature for T {
     }
 }
 
-/// A feature formed over the target's bracket: its value at a decision is
-/// over the bracket's width there, which it reads from the width it is
-/// handed as it is built (`Bracketed`).
-pub trait OverBracket: Feature {
+/// How a feature formed over the target's bracket reads it
+/// (`Feature::over_bracket`): its value at a decision is over the bracket's
+/// width there, which the set hands it as it is built, the width the
+/// builder takes (`FeatureSetBuilder::bracket`). Reading a width it was
+/// never handed, it panics: a set refuses such a feature with no width, so
+/// only a feature outside a set can.
+pub trait OverBracket {
     /// Reads its values over `width` from now on.
     fn over(&mut self, width: Rc<BracketWidth>);
-}
-
-/// What an indicator feature is declared of (`FeatureSetBuilder::feature`):
-/// a declared indicator (`Declared`), or one over the target's bracket
-/// (`Bracketed`).
-pub trait FeatureDeclaration {
-    type Args: IndicatorArgs;
-
-    /// The declared indicator the feature is built of.
-    fn declared(&self) -> Declared<Self::Args>;
-
-    /// The width of the bracket the feature reads over, if it does.
-    fn width(&self) -> Option<&Rc<BracketWidth>>;
-
-    /// The feature of `indicator`, built of the declared table.
-    fn feature(self, indicator: <Self::Args as IndicatorArgs>::Indicator) -> Box<dyn Feature>;
-}
-
-impl<A> FeatureDeclaration for Declared<A>
-where
-    A: IndicatorArgs,
-    A::Indicator: Feature + 'static,
-{
-    type Args = A;
-
-    fn declared(&self) -> Self {
-        *self
-    }
-
-    fn width(&self) -> Option<&Rc<BracketWidth>> {
-        None
-    }
-
-    fn feature(self, indicator: A::Indicator) -> Box<dyn Feature> {
-        Box::new(indicator)
-    }
-}
-
-/// A declared indicator over the target's bracket of a width: its feature
-/// is handed the width as it is built (`OverBracket::over`), and the
-/// target's setter runs on it (`FeatureSet::bracket_width`), so all the
-/// features of a set over the bracket read one width.
-pub struct Bracketed<A> {
-    declared: Declared<A>,
-    width: Rc<BracketWidth>,
-}
-
-impl<A> Bracketed<A> {
-    #[must_use]
-    pub fn new(declared: Declared<A>, width: &Rc<BracketWidth>) -> Self {
-        Self {
-            declared,
-            width: Rc::clone(width),
-        }
-    }
-}
-
-impl<A> FeatureDeclaration for Bracketed<A>
-where
-    A: IndicatorArgs,
-    A::Indicator: OverBracket + 'static,
-{
-    type Args = A;
-
-    fn declared(&self) -> Declared<A> {
-        self.declared
-    }
-
-    fn width(&self) -> Option<&Rc<BracketWidth>> {
-        Some(&self.width)
-    }
-
-    fn feature(self, mut indicator: A::Indicator) -> Box<dyn Feature> {
-        indicator.over(self.width);
-        Box::new(indicator)
-    }
 }
 
 /// How a raw feature reads its value from a custom data point.
@@ -984,7 +924,7 @@ impl ActorIndicator for FeatureSet {
 }
 
 impl FeatureSetBuilder {
-    /// Declares the feature of `declaration`, built of its table in
+    /// Declares the feature of `declared`, built of its table in
     /// `indicators`, on `series`, any number of bar types, tick series
     /// (quotes, trades, depth or deltas of an instrument or futures root)
     /// and custom series in any combination: it is handed each update of
@@ -994,35 +934,45 @@ impl FeatureSetBuilder {
     /// the root's id among them, reads the contract standing for the root,
     /// from `register` and each roll. `build` refuses a custom series among
     /// them if the feature has no custom handler, as it does an empty
-    /// list. A feature over the target's bracket (`Bracketed`) is handed
-    /// its width.
+    /// list. A feature over the target's bracket (`Feature::over_bracket`)
+    /// is handed the width `bracket` takes as the set is built.
     ///
     /// # Panics
     ///
     /// Panics if its table is missing, does not parse or is refused,
     /// which the load refuses of an indicator the strategy declares
-    /// (`Part::INDICATORS`), or if it reads over a width of the bracket
-    /// and a feature declared before reads another: the target's setter
-    /// runs on one.
+    /// (`Part::INDICATORS`).
     #[must_use]
-    pub fn feature<D: FeatureDeclaration>(
+    pub fn feature<A>(
         mut self,
         series: &[Series],
-        declaration: D,
+        declared: Declared<A>,
         indicators: &IndicatorsConfig,
-    ) -> Self {
-        if let Some(width) = declaration.width() {
-            assert!(
-                self.width
-                    .as_ref()
-                    .is_none_or(|read| Rc::ptr_eq(read, width)),
-                "features over two widths of the target's bracket: its setter runs on one"
-            );
-            self.width = Some(Rc::clone(width));
-        }
-        let declared = declaration.declared();
-        let feature = declaration.feature(self.built(declared, indicators));
+    ) -> Self
+    where
+        A: IndicatorArgs,
+        A::Indicator: Feature + 'static,
+    {
+        let feature = Box::new(self.built(declared, indicators));
         self.indicator(declared.name(), series, feature)
+    }
+
+    /// Takes `width`, the width of the target's bracket the features over
+    /// it read (`Feature::over_bracket`), handed to each as the set is
+    /// built, and the one the target's setter runs on
+    /// (`FeatureSet::bracket_width`). `build` refuses a second width, a
+    /// width no feature reads, and a feature over the bracket with none.
+    #[must_use]
+    pub fn bracket(mut self, width: &Rc<BracketWidth>) -> Self {
+        if self.width.is_some() {
+            self.refused.push(
+                "the set is given the width of the target's bracket twice: the target's setter \
+                 runs on one"
+                    .to_string(),
+            );
+        }
+        self.width = Some(Rc::clone(width));
+        self
     }
 
     /// Declares a raw feature, named `name`, on `series`, a custom series
@@ -1085,7 +1035,9 @@ impl FeatureSetBuilder {
     ///
     /// Returns an error if no feature is declared, a feature is declared on
     /// no series or on a custom series it has no custom handler for (see
-    /// `feature`), two share a name, or the warmup is negative.
+    /// `feature`), two share a name, a feature over the target's bracket
+    /// is given no width, a width is given twice or read by no feature
+    /// (see `bracket`), or the warmup is negative.
     pub fn build(self) -> anyhow::Result<Rc<FeatureSet>> {
         anyhow::ensure!(!self.names.is_empty(), "a feature set needs a feature");
         if let Some(refused) = self.refused.first() {
@@ -1107,15 +1059,43 @@ impl FeatureSetBuilder {
         if let Some(name) = names.iter().find(|name| !seen.insert(*name)) {
             anyhow::bail!("two features are named {name}");
         }
+        let mut slots = self.slots;
+        let mut over = slots
+            .iter_mut()
+            .zip(&names)
+            .filter_map(|(slot, name)| match slot {
+                Slot::Indicator(_, feature) => feature.over_bracket().map(|over| (over, name)),
+                Slot::Custom(..) => None,
+            })
+            .peekable();
+
+        match &self.width {
+            Some(width) => {
+                anyhow::ensure!(
+                    over.peek().is_some(),
+                    "the set is given a width of the target's bracket, and no feature is formed \
+                     over the bracket (`Feature::over_bracket`)"
+                );
+
+                for (feature, _) in over {
+                    feature.over(Rc::clone(width));
+                }
+            }
+            None => {
+                if let Some((_, name)) = over.next() {
+                    anyhow::bail!(
+                        "the feature {name} is formed over the target's bracket, and the set is \
+                         given no width of it (`FeatureSetBuilder::bracket`)"
+                    );
+                }
+            }
+        }
         anyhow::ensure!(
             !self.warmup.is_negative(),
             "the features' warmup {:#} is negative",
             self.warmup
         );
-        let series = self
-            .slots
-            .iter()
-            .map(|slot| format!("series {}", slot.series()));
+        let series = slots.iter().map(|slot| format!("series {}", slot.series()));
         let arguments = self
             .arguments
             .iter()
@@ -1133,7 +1113,7 @@ impl FeatureSetBuilder {
             });
         Ok(Rc::new(FeatureSet {
             names,
-            slots: RefCell::new(self.slots),
+            slots: RefCell::new(slots),
             width: self.width,
             updates: RefCell::default(),
             cache: RefCell::default(),

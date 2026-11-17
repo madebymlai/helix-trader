@@ -927,11 +927,7 @@ fn features_over_one_width_hand_it_to_the_target() {
     let width = width_of(Distance::BasisPoints(Decimal::from(10)));
 
     let features = testing::mid_over(id(AUD), &width)
-        .feature(
-            &[Series::quotes(id(AUD))],
-            Bracketed::new(ALSO, &width),
-            &over_tables(),
-        )
+        .feature(&[Series::quotes(id(AUD))], ALSO, &over_tables())
         .build()
         .unwrap();
 
@@ -939,18 +935,50 @@ fn features_over_one_width_hand_it_to_the_target() {
     assert!(std::ptr::eq(handed, Rc::as_ptr(&width)));
 }
 
-/// The target's setter runs on the ATR of one width: features over two
-/// are refused as they are declared.
+/// The target's setter runs on the ATR of one width: a set given a second
+/// is refused when it is built.
 #[rstest]
-#[should_panic(expected = "two widths")]
-fn features_over_two_widths_panic() {
+fn a_second_width_of_the_bracket_is_refused_when_the_set_is_built() {
     let in_bps = || width_of(Distance::BasisPoints(Decimal::from(10)));
 
-    let _ = testing::mid_over(id(AUD), &in_bps()).feature(
-        &[Series::quotes(id(AUD))],
-        Bracketed::new(ALSO, &in_bps()),
-        &over_tables(),
-    );
+    let err = testing::mid_over(id(AUD), &in_bps())
+        .bracket(&in_bps())
+        .feature(&[Series::quotes(id(AUD))], ALSO, &over_tables())
+        .build()
+        .unwrap_err()
+        .to_string();
+
+    for part in ["bracket", "twice"] {
+        assert!(err.contains(part), "{err}");
+    }
+}
+
+/// A feature over the bracket reads a width: a set given none is refused
+/// when it is built, naming the feature.
+#[rstest]
+fn a_feature_over_the_bracket_with_no_width_is_refused_when_the_set_is_built() {
+    let err = FeatureSet::builder()
+        .feature(&[Series::quotes(id(AUD))], ALSO, &over_tables())
+        .build()
+        .unwrap_err()
+        .to_string();
+
+    for part in ["also", "bracket"] {
+        assert!(err.contains(part), "{err}");
+    }
+}
+
+/// A width no feature reads would run the target's setter on an ATR no
+/// feature asked for: a set given one is refused when it is built.
+#[rstest]
+fn a_width_of_the_bracket_no_feature_reads_is_refused_when_the_set_is_built() {
+    let err = testing::last_mid(id(AUD))
+        .bracket(&width_of(Distance::BasisPoints(Decimal::from(10))))
+        .build()
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("bracket"), "{err}");
 }
 
 /// The `data` ticks of `instrument`, as `[data] series` lists them.
@@ -1356,11 +1384,8 @@ fn a_feature_over_the_bracket_reads_its_list_of_series_over_its_width() {
     let width = width_of(Distance::BasisPoints(Decimal::from(10)));
 
     let features = FeatureSet::builder()
-        .feature(
-            &[quotes(GBP), quotes(AUD)],
-            Bracketed::new(testing::OVER, &width),
-            &over_tables(),
-        )
+        .bracket(&width)
+        .feature(&[quotes(GBP), quotes(AUD)], testing::OVER, &over_tables())
         .build()
         .unwrap();
     features.handle_quote(&quote(GBP, 1.3)).unwrap();
