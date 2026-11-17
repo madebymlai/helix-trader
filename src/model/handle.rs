@@ -1654,8 +1654,10 @@ mod tests {
     /// The hooks `model_data_hooks!` writes hand the warmup a strategy's
     /// ticks, of the history and live. Live on 2026-08-10 at 14:30, features
     /// on AUD/USD's quotes and GCZ26's trades, an average of two: a
-    /// response of a quote and one of two trades warm them; once the group
-    /// ends, a live quote at 14:30:01 and a live trade at 14:30:02 reach them.
+    /// response of a quote and one of two trades warm them once the group
+    /// ends, the warmup's merge holding each series' latest for the other's
+    /// pending request until then; then a live quote at 14:30:01 and a live
+    /// trade at 14:30:02 reach them.
     #[rstest]
     fn the_hooks_of_model_data_hooks_hand_the_warmup_a_strategys_ticks() {
         let models = tempfile::tempdir().unwrap();
@@ -1723,8 +1725,8 @@ mod tests {
             UnixNanos::from(at("2026-08-10T14:30:00Z")),
             None,
         ));
-        let warm = features.initialized();
         model.warmup().complete(&hooked).unwrap();
+        let warm = features.initialized();
         DataActor::on_quote(&mut hooked, &aud_quote("2026-08-10T14:30:01Z")).unwrap();
         DataActor::on_trade(&mut hooked, &gcz6_trade("2026-08-10T14:30:02Z", "4003.0")).unwrap();
 
@@ -2628,7 +2630,9 @@ mod tests {
     /// having no ATR to warm.
     /// The response's two trades, which Nautilus hands to the strategy's
     /// `on_historical_trades` and that to the warmup, make the features
-    /// initialized: the first decision after the warmup is warm.
+    /// initialized once the warmup's group ends, the merge holding them
+    /// until AUD/USD's pending quotes can bring nothing older: the first
+    /// decision after the warmup is warm.
     #[rstest]
     fn a_live_start_warms_a_roots_tick_features_on_its_front_contract() {
         let models = tempfile::tempdir().unwrap();
@@ -2676,6 +2680,7 @@ mod tests {
             UnixNanos::from(at("2026-08-10T14:30:00Z")),
             None,
         ));
+        handle.warmup().complete(&probe).unwrap();
 
         let sent = sent.take();
         assert_sent(

@@ -1,7 +1,8 @@
 //! The hold of a live warmup's quotes, trades, book depth, deltas and custom
 //! data: the
 //! warmup hands the indicators reading them, a model strategy's features,
-//! those of its responses as they come, holds the live ones the strategy
+//! those of its responses as its merge hands them on, in time order across
+//! series (`merge`), holds the live ones the strategy
 //! hands it until its group ends, the last window answered, and then hands
 //! those over in the order they came; from then on live ones go straight
 //! through. A replay requests no warmup and holds nothing.
@@ -55,35 +56,11 @@ use std::{cell::RefCell, collections::HashMap, fmt::Debug, rc::Rc};
 
 use nautilus_common::actor::indicators::SharedActorIndicator;
 use nautilus_core::UnixNanos;
-use nautilus_model::{
-    data::{CustomData, DataType, OrderBookDeltas, OrderBookDepth, QuoteTick, TradeTick},
-    identifiers::InstrumentId,
+
+use super::{
+    BookIndicator, CustomIndicator,
+    tick::{Series, Tick},
 };
-
-use super::{BookIndicator, CustomIndicator};
-
-/// A quote, a trade, a snapshot of a book's depth, a batch of its deltas or
-/// a point of custom data.
-#[derive(Debug, Clone)]
-pub(super) enum Tick {
-    Quote(QuoteTick),
-    Trade(TradeTick),
-    /// Boxed: ten levels a side, against a quote's few fields.
-    Depth(Box<OrderBookDepth>),
-    Deltas(OrderBookDeltas),
-    Custom(CustomData),
-}
-
-/// The series of a tick, within which a live tick is judged against the
-/// history: custom data by its data type.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum Series {
-    Quotes(InstrumentId),
-    Trades(InstrumentId),
-    Depth(InstrumentId),
-    Deltas(InstrumentId),
-    Custom(DataType),
-}
 
 /// What hands a warmup's quotes, trades, depth, deltas and custom data to
 /// the indicators reading them, holding the live ones while a live start's
@@ -127,8 +104,8 @@ impl Hold {
         self.seams.borrow_mut().clear();
     }
 
-    /// Hands `tick`, of a response, to the indicators, its series' seam
-    /// moved to it if it is the latest.
+    /// Hands `tick`, of a response, as the merge hands it on, to the
+    /// indicators, its series' seam moved to it if it is the latest.
     ///
     /// # Errors
     ///
@@ -234,29 +211,6 @@ impl Hold {
             }
         }
         Ok(())
-    }
-}
-
-impl Tick {
-    fn series(&self) -> Series {
-        match self {
-            Self::Quote(quote) => Series::Quotes(quote.instrument_id),
-            Self::Trade(trade) => Series::Trades(trade.instrument_id),
-            Self::Depth(depth) => Series::Depth(depth.instrument_id),
-            Self::Deltas(deltas) => Series::Deltas(deltas.instrument_id),
-            Self::Custom(data) => Series::Custom(data.data_type.clone()),
-        }
-    }
-
-    /// When the tick was made, a batch of deltas when its last delta was.
-    fn ts_event(&self) -> UnixNanos {
-        match self {
-            Self::Quote(quote) => quote.ts_event,
-            Self::Trade(trade) => trade.ts_event,
-            Self::Depth(depth) => depth.ts_event,
-            Self::Deltas(deltas) => deltas.ts_event,
-            Self::Custom(data) => data.data.ts_event(),
-        }
     }
 }
 
