@@ -180,13 +180,17 @@
 //! it is the catalog's, written into it from outside helix
 //! (`venues::serves_custom`), and a client would fail the request, ending
 //! the warmup incomplete. No definition is requested for it: it brings no
-//! instrument. The features read custom data from Nautilus' cache, where
+//! instrument. Raw features read custom data from Nautilus' cache, where
 //! the data engine puts each point it processes, live or replayed, but
 //! not a request's response (`docs/concepts/cache.md`, "Custom data"): the
 //! warmup adds the response's points to the cache itself, oldest first,
 //! as Nautilus' docs ask (`Cache::add_custom_data`), but a point no later
 //! than the latest the cache holds of its data type
-//! (`Warmup::on_historical_data`). No source's live client streams a
+//! (`Warmup::on_historical_data`). Nautilus routes custom data to no
+//! indicator, only to the actor's `on_data` and `on_historical_data`, so
+//! the warmup hands a response's points to its custom indicators too
+//! (`CustomIndicator`, `feeding_custom`), and the live ones the actor hands
+//! it from `on_data` the same way, held as live ticks are. No source's live client streams a
 //! custom series yet, LSE's streaming none and nothing the catalog's, so a
 //! live start refuses a run reading one (`venues::streams_custom`) and no
 //! run reaches this request today: it is the warmup half of such a run,
@@ -199,8 +203,8 @@
 //! its parts: `start` from `on_start`, `Warmup::on_historical_quotes`,
 //! `on_historical_trades`, `on_historical_book_depth`,
 //! `on_historical_book_deltas` and `on_historical_data` from the hooks of
-//! the same names, `Warmup::on_quote`, `on_trade`, `on_book_depth` and
-//! `on_book_deltas` from those, and
+//! the same names, `Warmup::on_quote`, `on_trade`, `on_book_depth`,
+//! `on_book_deltas` and `on_data` from those, and
 //! `Warmup::on_data_response`, or `finished` alone, from `on_data_response`,
 //! then, on bars on a root, `continuous_bars`; in a backtest or a dataset run
 //! nothing, the strategy subscribing alone.
@@ -282,6 +286,14 @@ pub trait BookIndicator {
     fn handle_deltas(&self, deltas: &OrderBookDeltas);
 }
 
+/// What a warmup hands custom data to, of its responses and live, which
+/// Nautilus hands an actor's `on_historical_data` and `on_data` alone, its
+/// `Indicator` reading none: a model strategy's features.
+pub trait CustomIndicator {
+    /// Reads `data`, a point of the warmup, oldest first, or a live one.
+    fn handle_custom(&self, data: &CustomData);
+}
+
 /// A strategy's warmup, built from its data requirements for a live node
 /// (`live`) or a replay (`replayed`, a backtest or a dataset run): the one
 /// owner of the protocol above, so that a strategy holds one and its hooks
@@ -290,8 +302,8 @@ pub trait BookIndicator {
 /// `on_data_response` from `on_data_response`, `on_historical_quotes`,
 /// `on_historical_trades`, `on_historical_book_depth`,
 /// `on_historical_book_deltas` and `on_historical_data` from theirs, and
-/// `on_quote`, `on_trade`, `on_book_depth` and `on_book_deltas` from its
-/// live hooks.
+/// `on_quote`, `on_trade`, `on_book_depth`, `on_book_deltas` and `on_data`
+/// from its live hooks.
 ///
 /// Live, `start` requests the warmup of the bar types the strategy reads,
 /// of those the strategy's harness needs warm (`building`, the target's
@@ -305,9 +317,11 @@ pub trait BookIndicator {
 /// indicators (`feeding_ticks`), holding the live ones until the group ends,
 /// its depth and deltas to its book indicators (`feeding_books`), holding
 /// the live ones as ticks, its custom data to the cache
-/// (`on_historical_data`).
+/// (`on_historical_data`) and to its custom indicators (`feeding_custom`),
+/// holding the live points as ticks.
 /// On a replay `start` requests nothing and returns the clock's time; the
-/// live ticks, depth and deltas go straight to their indicators.
+/// live ticks, depth, deltas and custom data go straight to their
+/// indicators.
 /// The strategies read no bars on a root, so a warmup has no continuous
 /// bars. A live node sizes its cache from `cache_config`, which holds the
 /// warmup of every bar type the warmup builds or, if external, requests.
@@ -326,9 +340,9 @@ pub struct Warmup {
     custom: Vec<CustomSeries>,
     /// What the warmup's bars are handed to.
     indicators: Vec<SharedActorIndicator>,
-    /// What hands the quotes and trades, of the warmup and live, to the
-    /// indicators reading them, holding the live ones while a live start's
-    /// group is pending.
+    /// What hands the quotes, trades, depth, deltas and custom data, of the
+    /// warmup and live, to the indicators reading them, holding the live
+    /// ones while a live start's group is pending.
     hold: Hold,
     /// The request group of the last live start.
     group: Cell<UUID4>,
@@ -406,6 +420,16 @@ impl Warmup {
     #[must_use]
     pub fn feeding_books(mut self, books: Rc<dyn BookIndicator>) -> Self {
         self.hold.feeding_books(books);
+        self
+    }
+
+    /// The warmup handing the custom data of its responses to `custom` too,
+    /// and the live and replayed points the strategy hands it (`on_data`):
+    /// live, those held until its group ends, and those the history holds
+    /// dropped (see `hold`).
+    #[must_use]
+    pub fn feeding_custom(mut self, custom: Rc<dyn CustomIndicator>) -> Self {
+        self.hold.feeding_custom(custom);
         self
     }
 
@@ -580,23 +604,44 @@ impl Warmup {
     /// point no later (`ts_event`) than the latest the cache holds of its
     /// data type is left out: a live point the node took while the request
     /// was pending stays the latest, and a point the history and the live
-    /// stream both carry is held once. Nautilus answers `request_data`
+    /// stream both carry is held once. Then hands each point to the custom
+    /// indicators it feeds (`feeding_custom`), oldest first, as
+    /// `on_historical_quotes` does quotes. Nautilus answers `request_data`
     /// with a batch (`Vec<CustomData>`); any other payload is no response
-    /// of the warmup's.
-    pub fn on_historical_data<A: DataActorNative>(&self, actor: &A, response: &dyn Any) {
+    /// of the warmup's. It returns no error: a custom indicator reads
+    /// custom data without failing, and the result is returned as the tick
+    /// hand-overs' are.
+    pub fn on_historical_data<A: DataActorNative>(
+        &self,
+        actor: &A,
+        response: &dyn Any,
+    ) -> anyhow::Result<()> {
         let Some(data) = response.downcast_ref::<Vec<CustomData>>() else {
-            return;
+            return Ok(());
         };
-        let cache = actor.cache_rc();
-        let mut cache = cache.borrow_mut();
-        for point in data {
-            let later = cache
-                .custom_data(&point.data_type)
-                .is_none_or(|latest| point.data.ts_event() > latest.data.ts_event());
-            if later {
-                cache.add_custom_data(point.clone());
+        {
+            let cache = actor.cache_rc();
+            let mut cache = cache.borrow_mut();
+            for point in data {
+                let later = cache
+                    .custom_data(&point.data_type)
+                    .is_none_or(|latest| point.data.ts_event() > latest.data.ts_event());
+                if later {
+                    cache.add_custom_data(point.clone());
+                }
             }
         }
+        data.iter()
+            .try_for_each(|point| self.hold.history(&Tick::Custom(point.clone())))
+    }
+
+    /// Takes `data`, a live or replayed point of custom data, from the
+    /// actor's `on_data`, as `on_quote` does a quote: the custom
+    /// indicators read it once a live start's group has ended, held until
+    /// then, and never if the history holds it (see `hold`). It returns no
+    /// error, as `on_historical_data`.
+    pub fn on_data(&self, data: &CustomData) -> anyhow::Result<()> {
+        self.hold.live(Tick::Custom(data.clone()))
     }
 
     /// Hands the quotes of `response`, a response to the warmup's request,
@@ -1849,7 +1894,9 @@ mod tests {
         let (mut probe, _commands) = registered();
         warmup.start(&mut probe).unwrap();
 
-        warmup.on_historical_data(&probe, &vec![us10y_row("09", 4.25), us10y_row("10", 4.5)]);
+        warmup
+            .on_historical_data(&probe, &vec![us10y_row("09", 4.25), us10y_row("10", 4.5)])
+            .unwrap();
 
         assert_eq!(cached_us10y_closes(&probe), [json!(4.5), json!(4.25)]);
     }
@@ -1869,16 +1916,72 @@ mod tests {
             .borrow_mut()
             .add_custom_data(us10y_row("10", 4.4));
 
-        warmup.on_historical_data(
-            &probe,
-            &vec![
-                us10y_row("08", 4.1),
-                us10y_row("09", 4.25),
-                us10y_row("10", 4.4),
-            ],
-        );
+        warmup
+            .on_historical_data(
+                &probe,
+                &vec![
+                    us10y_row("08", 4.1),
+                    us10y_row("09", 4.25),
+                    us10y_row("10", 4.4),
+                ],
+            )
+            .unwrap();
 
         assert_eq!(cached_us10y_closes(&probe), [json!(4.4)]);
+    }
+
+    /// What a warmup hands custom data to, recording the close of each row.
+    #[derive(Default)]
+    struct Rows {
+        closes: RefCell<Vec<Value>>,
+    }
+
+    impl CustomIndicator for Rows {
+        fn handle_custom(&self, data: &CustomData) {
+            let row = data.data.as_any().downcast_ref::<::lse::LseRow>().unwrap();
+            self.closes.borrow_mut().push(row.fields["close"].clone());
+        }
+    }
+
+    /// Custom data as quotes: started live, its group pending, the history
+    /// answers the rows of 2026-08-09 and 2026-08-10; live, the source
+    /// sends the row of 2026-08-10 again and that of 2026-08-11, both held
+    /// until the group ends. The custom indicator then reads the history's
+    /// rows, then the live row of 2026-08-11; the one the history holds is
+    /// dropped.
+    #[rstest]
+    fn live_custom_data_is_held_and_dropped_at_the_seam_as_ticks_are() {
+        let rows = Rc::new(Rows::default());
+        let warmup = Warmup::live(&reading_us10y()).feeding_custom(Rc::clone(&rows) as _);
+        let (mut probe, _) = registered();
+        warmup.start(&mut probe).unwrap();
+
+        warmup
+            .on_historical_data(&probe, &vec![us10y_row("09", 4.25), us10y_row("10", 4.5)])
+            .unwrap();
+        for live in [us10y_row("10", 4.5), us10y_row("11", 4.4)] {
+            warmup.on_data(&live).unwrap();
+        }
+        let pending = rows.closes.borrow().clone();
+        warmup.complete(&probe).unwrap();
+
+        assert_eq!(pending, [json!(4.25), json!(4.5)]);
+        assert_eq!(rows.closes.take(), [json!(4.25), json!(4.5), json!(4.4)]);
+    }
+
+    /// A replay holds nothing: each row the strategy gets reaches the
+    /// custom indicator as it comes.
+    #[rstest]
+    fn replayed_custom_data_goes_straight_to_the_custom_indicator() {
+        let rows = Rc::new(Rows::default());
+        let warmup = Warmup::replayed(&reading_us10y()).feeding_custom(Rc::clone(&rows) as _);
+        let (mut probe, _) = registered();
+        warmup.start(&mut probe).unwrap();
+
+        warmup.on_data(&us10y_row("09", 4.25)).unwrap();
+        warmup.on_data(&us10y_row("10", 4.5)).unwrap();
+
+        assert_eq!(rows.closes.take(), [json!(4.25), json!(4.5)]);
     }
 
     /// What a warmup hands books to, recording them.

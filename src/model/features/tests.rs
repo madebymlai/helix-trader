@@ -991,8 +991,8 @@ fn bars(bar_type: &str) -> Series {
 }
 
 /// A feature recording, digit by digit, each update it gets by its kind (a
-/// quote 1, a trade 2, a bar 3, depth 4, deltas 5) and each reset (9):
-/// initialized once an update came since the last reset.
+/// quote 1, a trade 2, a bar 3, depth 4, deltas 5, custom data 6) and each
+/// reset (9): initialized once an update came since the last reset.
 #[derive(Default)]
 struct Sequence {
     digits: u64,
@@ -1048,6 +1048,17 @@ impl Indicator for Sequence {
 impl Feature for Sequence {
     fn value(&self) -> f64 {
         self.digits as f64
+    }
+
+    fn custom_handler(&mut self) -> Option<&mut dyn CustomHandler> {
+        Some(self)
+    }
+}
+
+impl CustomHandler for Sequence {
+    fn handle_custom(&mut self, _data: &CustomData) -> anyhow::Result<()> {
+        self.record(6);
+        Ok(())
     }
 }
 
@@ -1323,8 +1334,9 @@ fn the_fingerprint_changes_with_a_features_list_of_series() {
     assert_ne!(base, listing(&[quotes(AUD)], &[trades(AUD), quotes(GBP)]));
 }
 
-/// No feature reads custom data yet, only a raw feature does: one declared
-/// on a custom series is refused, naming the series and its table.
+/// Nautilus' exponential average reads no custom data (no
+/// `Feature::custom_handler`): declared on a custom series, it is refused,
+/// naming the series and its table.
 #[rstest]
 fn a_feature_on_a_custom_series_is_refused_when_the_set_is_built() {
     let yields = levels("yields", "US10Y");
@@ -1376,4 +1388,110 @@ fn a_feature_over_the_bracket_reads_its_list_of_series_over_its_width() {
         features.bracket_width().unwrap(),
         Rc::as_ptr(&width)
     ));
+}
+
+/// `series`, a custom series, as a feature lists it.
+fn custom(series: &CustomSeries) -> Series {
+    Series::Custom(series.clone())
+}
+
+/// The feature on AUD's quotes and the yields under US10Y records each as
+/// it comes: 1 6 1 6. The yields of another identifier, and the bonds'
+/// under US10Y, of other metadata, reach it not.
+#[rstest]
+fn a_feature_on_a_custom_series_and_a_tick_series_gets_both_in_the_order_they_come() {
+    let yields = levels("yields", "US10Y");
+    let features = FeatureSet::builder()
+        .feature(&[quotes(AUD), custom(&yields)], SEQUENCE, &tables())
+        .build()
+        .unwrap();
+
+    features.handle_quote(&quote(AUD, 0.7)).unwrap();
+    features.handle_custom(&point(yields.data_type(), 4.25));
+    features.handle_custom(&point(levels("yields", "US02Y").data_type(), 3.9));
+    features.handle_custom(&point(levels("bonds", "US10Y").data_type(), 4.3));
+    features.handle_quote(&quote(AUD, 0.7)).unwrap();
+    features.handle_custom(&point(yields.data_type(), 4.5));
+
+    assert_eq!(features.values(), Some(vec![1616.0]));
+}
+
+/// The feature on the yields under the root GC reads GCZ26's, the
+/// contract standing for it, not GCG27's nor the root's own; the roll
+/// resets it (9) and moves it to GCG27's, GCZ26's no longer read.
+#[rstest]
+fn a_feature_on_a_roots_custom_series_reads_the_contract_in_front_and_moves_at_its_roll() {
+    let start = before_gcs_roll();
+    let mut probe = registered_at(start.into());
+    let features = FeatureSet::builder()
+        .feature(&[custom(&levels("yields", GC))], SEQUENCE, &tables())
+        .build()
+        .unwrap();
+    features.register(&mut probe);
+
+    features.handle_custom(&point(&yields_type(GCZ26), 4.25));
+    features.handle_custom(&point(&yields_type(GCG27), 4.3));
+    features.handle_custom(&point(&yields_type(GC), 4.2));
+    let before_the_roll = features.values();
+    features.roll(&mut probe, &Transition::after(id(GC), start).unwrap());
+    let rolled = features.values();
+    features.handle_custom(&point(&yields_type(GCZ26), 4.5));
+    features.handle_custom(&point(&yields_type(GCG27), 4.6));
+
+    assert_eq!(before_the_roll, Some(vec![6.0]));
+    assert_eq!(rolled, None);
+    assert_eq!(features.values(), Some(vec![696.0]));
+}
+
+/// A model strategy reads these (`model::reads`) and a live warmup
+/// requests them: each custom series a raw feature or a feature reads,
+/// once, in the order declared; none is a tick series.
+#[rstest]
+fn a_sets_custom_series_gather_over_its_raw_features_and_the_series_of_its_features() {
+    let tables = tables();
+    let yields = levels("yields", "US10Y");
+    let features = FeatureSet::builder()
+        .custom(&level_series(AUD), "level", read_level)
+        .feature(
+            &[quotes(AUD), custom(&yields), custom(&level_series(AUD))],
+            SEQUENCE,
+            &tables,
+        )
+        .feature(&[custom(&yields)], SEQUENCE, &tables)
+        .build()
+        .unwrap();
+
+    assert_eq!(features.custom(), [level_series(AUD), yields]);
+    assert_eq!(
+        features.ticks(),
+        [TickSeries {
+            data: NautilusDataType::QuoteTick,
+            instrument_id: id(AUD),
+        }]
+    );
+}
+
+/// The fingerprint of a feature reading custom data on `series` alone.
+fn reading_custom(series: &CustomSeries) -> Fingerprint {
+    FeatureSet::builder()
+        .feature(&[custom(series)], SEQUENCE, &tables())
+        .build()
+        .unwrap()
+        .fingerprint()
+}
+
+/// Pointed at another custom series, of another identifier, metadata or
+/// type name, a feature rebuilds the dataset and the models, as a raw
+/// feature does: the series' whole data type is in the fingerprint.
+#[rstest]
+fn the_fingerprint_changes_with_the_custom_series_a_feature_reads() {
+    let base = reading_custom(&levels("yields", "US10Y"));
+
+    assert_eq!(base, reading_custom(&levels("yields", "US10Y")));
+    assert_ne!(base, reading_custom(&levels("yields", "US02Y")));
+    assert_ne!(base, reading_custom(&levels("bonds", "US10Y")));
+    assert_ne!(
+        base,
+        reading_custom(&custom_series("Yield", "yields", "US10Y"))
+    );
 }
