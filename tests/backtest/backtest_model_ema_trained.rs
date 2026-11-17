@@ -188,11 +188,11 @@ fn report(text: &str, at: Timestamp) -> Vec<&str> {
         .collect()
 }
 
-/// Whether `text` reports the train at `at` publishing its generation, the
+/// Whether `text` reports the train at `at` publishing its model set, the
 /// store's directory of `at`.
 fn published(text: &str, at: Timestamp) -> bool {
     let line = train_line(text, at);
-    line.contains("published the generation ") && line.ends_with(&format!("/{at}"))
+    line.contains("published the model set ") && line.ends_with(&format!("/{at}"))
 }
 
 /// Where in `text` the line reporting the train at `at` is.
@@ -227,7 +227,7 @@ fn a_train_over_a_span_publishes_each_retrain_time_in_order_then_only_those_the_
     let (succeeded, again, stderr) = train_over(&files, catalog.path(), span);
 
     assert!(succeeded, "{again}\n{stderr}");
-    assert!(!again.contains("published the generation"), "{again}");
+    assert!(!again.contains("published the model set"), "{again}");
     for at in [day(21), day(22)] {
         assert!(
             train_line(&again, at).contains("already published"),
@@ -240,7 +240,7 @@ fn a_train_over_a_span_publishes_each_retrain_time_in_order_then_only_those_the_
     assert!(succeeded, "{earlier}\n{stderr}");
     assert!(published(&earlier, twentieth), "{earlier}");
     assert_eq!(
-        earlier.matches("published the generation").count(),
+        earlier.matches("published the model set").count(),
         1,
         "{earlier}"
     );
@@ -341,15 +341,15 @@ fn trained_at(files: &Files, catalog: &Path, at: Timestamp) -> String {
     stdout
 }
 
-/// Never retrained, a train skips only a generation valid exactly from its
-/// time: with the generation of the 21st stored, `train --at` the 22nd
+/// Never retrained, a train skips only a model set valid exactly from its
+/// time: with the model set of the 21st stored, `train --at` the 22nd
 /// publishes one valid from the 22nd, and again at the 22nd reports it
 /// already published. A backtest of the 21st, before the 22nd, trades on
-/// the generation of the 21st, its 12 shorts, as each decision uses the
-/// latest generation valid by then.
+/// the model set of the 21st, its 12 shorts, as each decision uses the
+/// latest model set valid by then.
 #[rstest]
-fn never_retrained_a_train_publishes_at_its_time_beside_an_older_generation_which_decides_before_it()
- {
+fn never_retrained_a_train_publishes_at_its_time_beside_an_older_model_set_which_decides_before_it()
+{
     let catalog = catalog(23);
     let files = files();
     std::fs::write(&files.config, never_retrained()).unwrap();
@@ -493,7 +493,7 @@ fn with_meta() -> String {
 /// shorts of the 20th's odd hours, the meta's rows. A backtest of the span
 /// then trades from its first retrain time: the short at each odd hour of
 /// the 21st and of the 22nd, 12 a day, each an order to open and one to
-/// close, every one taken by the meta of its day's generation.
+/// close, every one taken by the meta of its day's model set.
 #[rstest]
 fn a_periodic_strategy_with_a_meta_publishes_it_from_its_first_train_and_trades_from_that_retrain_time()
  {

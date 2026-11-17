@@ -1,6 +1,6 @@
 //! A decision on stores under a temp dir, with no strategy: the pick between
-//! the sides on their pair's calibrated expected R, swapping generations,
-//! refused generations, the meta's margin.
+//! the sides on their pair's calibrated expected R, swapping model sets,
+//! refused model sets, the meta's margin.
 
 use std::path::Path;
 
@@ -9,8 +9,8 @@ use rstest::rstest;
 
 use super::{
     testing::{
-        at, baseline, blueprint_of, both_sides, config, features, generation_of, meta,
-        meta_baseline, model_store, r, requirements, store, venue, with_meta,
+        at, baseline, blueprint_of, both_sides, config, features, meta, meta_baseline,
+        model_set_of, model_store, r, requirements, store, venue, with_meta,
     },
     *,
 };
@@ -21,7 +21,7 @@ use crate::{
         config::{Margins, MetaConfig, ModelConfig},
         dataset::DatasetVenue,
         learner::{LearnerConfig, LightGbmConfig, TrainingSet},
-        store::{SideModel, StoredGeneration, StoredModel},
+        store::{SideModel, StoredModel, StoredModelSet},
     },
 };
 
@@ -45,7 +45,7 @@ fn listed(models: &Path, config: &ModelConfig) -> DecidingModels {
     DecidingModels::new(&model_store(models, &features(), config)).unwrap()
 }
 
-/// Those of `listed`, the generation of the long's of `long` tenths and the
+/// Those of `listed`, the model set of the long's of `long` tenths and the
 /// short's of `short` tenths, if any, published from midnight first.
 fn listed_with(
     models: &Path,
@@ -57,7 +57,7 @@ fn listed_with(
         .into_iter()
         .filter_map(|(side, tenths)| tenths.map(|tenths| (side, tenths)));
     model_store(models, &features, config)
-        .publish(&generation_of(&features, config, MIDNIGHT, sides, None))
+        .publish(&model_set_of(&features, config, MIDNIGHT, sides, None))
         .unwrap();
     listed(models, config)
 }
@@ -134,7 +134,7 @@ fn no_model_valid_yet_gives_no_trade() {
 }
 
 #[rstest]
-fn a_decision_uses_the_latest_generation_valid_at_or_before_it() {
+fn a_decision_uses_the_latest_model_set_valid_at_or_before_it() {
     let models = tempfile::tempdir().unwrap();
     let store = store(models.path());
     for (valid_from, tenths) in [
@@ -157,7 +157,7 @@ fn a_decision_uses_the_latest_generation_valid_at_or_before_it() {
 }
 
 #[rstest]
-fn a_generation_published_after_a_decision_is_used_from_the_next() {
+fn a_model_set_published_after_a_decision_is_used_from_the_next() {
     let root = tempfile::tempdir().unwrap();
     let store = store(root.path());
     store.publish(&baseline("2026-10-22T10:00:00Z", 7)).unwrap();
@@ -175,7 +175,7 @@ fn a_generation_published_after_a_decision_is_used_from_the_next() {
 /// When to list is the caller's: the meta's examples decide on the stores as
 /// they are when made.
 #[rstest]
-fn a_generation_published_after_the_listing_is_not_used_until_listed_again() {
+fn a_model_set_published_after_the_listing_is_not_used_until_listed_again() {
     let root = tempfile::tempdir().unwrap();
     let store = store(root.path());
     store.publish(&baseline("2026-10-22T10:00:00Z", 7)).unwrap();
@@ -198,7 +198,7 @@ fn an_unreadable_store_fails_the_models_when_built() {
     assert!(err.contains(&root.path().display().to_string()), "{err}");
 }
 
-/// A failed listing keeps the previous list: the generation of 10:30,
+/// A failed listing keeps the previous list: the model set of 10:30,
 /// published before it, is not used.
 #[rstest]
 fn a_failed_listing_keeps_the_previous_list() {
@@ -239,14 +239,14 @@ fn with_both_and_meta() -> ModelConfig {
     }
 }
 
-/// A generation of `with_both_and_meta` valid from `valid_from`: its long
+/// A model set of `with_both_and_meta` valid from `valid_from`: its long
 /// predicting an R of `r(long)`, its short of 3, expecting a loss, never
 /// picked, and its meta model of 8, expecting 0.1 + 0.5 r(8) = 0.25R, which
 /// clears its margin of 0.15R.
-fn generation(valid_from: &str, long: usize) -> StoredGeneration {
+fn model_set(valid_from: &str, long: usize) -> StoredModelSet {
     let (features, config) = (features(), with_both_and_meta());
     let meta = meta_baseline(&features, &config, 8);
-    generation_of(
+    model_set_of(
         &features,
         &config,
         valid_from,
@@ -255,39 +255,37 @@ fn generation(valid_from: &str, long: usize) -> StoredGeneration {
     )
 }
 
-/// The generation's `side` model, a side's, or the meta's of none.
-fn model_of(generation: &mut StoredGeneration, side: Option<Side>) -> &mut StoredModel {
+/// The model set's `side` model, a side's, or the meta's of none.
+fn model_of(model_set: &mut StoredModelSet, side: Option<Side>) -> &mut StoredModel {
     match side {
-        Some(side) => generation
+        Some(side) => model_set
             .sides
             .iter_mut()
             .find(|model| model.manifest.side == Some(side))
             .unwrap(),
-        None => generation.meta.as_mut().unwrap(),
+        None => model_set.meta.as_mut().unwrap(),
     }
 }
 
-/// The model of a level of a generation, a side's or the meta's of none,
+/// The model of a level of a model set, a side's or the meta's of none,
 /// failing a check.
-type Refuse = fn(&mut StoredGeneration);
+type Refuse = fn(&mut StoredModelSet);
 
 /// Refuses the long's model: of other feature names.
-fn long_of_other_feature_names(generation: &mut StoredGeneration) {
-    model_of(generation, Some(Side::Long))
-        .manifest
-        .feature_names = vec!["spread".to_string()];
+fn long_of_other_feature_names(model_set: &mut StoredModelSet) {
+    model_of(model_set, Some(Side::Long)).manifest.feature_names = vec!["spread".to_string()];
 }
 
 /// Refuses the long's model: of another fingerprint.
-fn long_of_another_fingerprint(generation: &mut StoredGeneration) {
-    model_of(generation, Some(Side::Long)).manifest.fingerprint = "f".repeat(64);
+fn long_of_another_fingerprint(model_set: &mut StoredModelSet) {
+    model_of(model_set, Some(Side::Long)).manifest.fingerprint = "f".repeat(64);
 }
 
 /// Refuses the long's model: of another width, a side's rows being two
 /// wide, the mid and the entry cost, and the model three.
-fn long_of_another_width(generation: &mut StoredGeneration) {
+fn long_of_another_width(model_set: &mut StoredModelSet) {
     let set = TrainingSet::new(3, vec![0.5; 6], vec![r(9); 2]).unwrap();
-    let long = model_of(generation, Some(Side::Long));
+    let long = model_of(model_set, Some(Side::Long));
     long.model = LearnerConfig::Baseline {}
         .fit(&set)
         .unwrap()
@@ -297,39 +295,39 @@ fn long_of_another_width(generation: &mut StoredGeneration) {
 }
 
 /// Refuses the long's model: not predicting its probes.
-fn long_not_predicting_its_probes(generation: &mut StoredGeneration) {
-    model_of(generation, Some(Side::Long)).manifest.probes[0].prediction = r(9) + f64::EPSILON;
+fn long_not_predicting_its_probes(model_set: &mut StoredModelSet) {
+    model_of(model_set, Some(Side::Long)).manifest.probes[0].prediction = r(9) + f64::EPSILON;
 }
 
 /// Refuses the long's model: with a level line of its own, a meta's.
-fn long_with_a_level_line(generation: &mut StoredGeneration) {
-    model_of(generation, Some(Side::Long)).manifest.calibration = Some(super::testing::CALIBRATION);
+fn long_with_a_level_line(model_set: &mut StoredModelSet) {
+    model_of(model_set, Some(Side::Long)).manifest.calibration = Some(super::testing::CALIBRATION);
 }
 
 /// Refuses the short's model: of another fingerprint.
-fn short_of_another_fingerprint(generation: &mut StoredGeneration) {
-    model_of(generation, Some(Side::Short)).manifest.fingerprint = "f".repeat(64);
+fn short_of_another_fingerprint(model_set: &mut StoredModelSet) {
+    model_of(model_set, Some(Side::Short)).manifest.fingerprint = "f".repeat(64);
 }
 
 /// Refuses the meta's model: of another fingerprint.
-fn meta_of_another_fingerprint(generation: &mut StoredGeneration) {
-    model_of(generation, None).manifest.fingerprint = "f".repeat(64);
+fn meta_of_another_fingerprint(model_set: &mut StoredModelSet) {
+    model_of(model_set, None).manifest.fingerprint = "f".repeat(64);
 }
 
 /// Refuses the meta's model: without its level line, as a side's.
-fn meta_without_a_level_line(generation: &mut StoredGeneration) {
-    model_of(generation, None).manifest.calibration = None;
+fn meta_without_a_level_line(model_set: &mut StoredModelSet) {
+    model_of(model_set, None).manifest.calibration = None;
 }
 
 /// Refuses the pair: its calibration of one side for two.
-fn pair_calibrated_as_one_side(generation: &mut StoredGeneration) {
-    generation.calibration.side_call = None;
+fn pair_calibrated_as_one_side(model_set: &mut StoredModelSet) {
+    model_set.calibration.side_call = None;
 }
 
-/// The generation of 10:00, its long of 7, decides at 11:00; that of noon,
+/// The model set of 10:00, its long of 7, decides at 11:00; that of noon,
 /// its long of 9, `refuse`d, fails each decision from noon with an error
 /// naming it and the check, `check`, so no entry is made, neither on it nor
-/// on the generation of 10:00; once published again whole, it is read
+/// on the model set of 10:00; once published again whole, it is read
 /// again at the next decision and used.
 #[rstest]
 #[case::of_the_longs_feature_names(long_of_other_feature_names as Refuse, "the long model: its features")]
@@ -350,15 +348,15 @@ fn pair_calibrated_as_one_side(generation: &mut StoredGeneration) {
     pair_calibrated_as_one_side,
     "a calibration of 1 sides for a pair of 2"
 )]
-fn a_generation_failing_a_check_stops_new_entries_naming_it_and_is_used_once_it_loads(
+fn a_model_set_failing_a_check_stops_new_entries_naming_it_and_is_used_once_it_loads(
     #[case] refuse: Refuse,
     #[case] check: &str,
 ) {
     let root = tempfile::tempdir().unwrap();
     let config = with_both_and_meta();
     let set = model_store(root.path(), &features(), &config);
-    set.publish(&generation("2026-10-22T10:00:00Z", 7)).unwrap();
-    let mut refused = generation(NOON, 9);
+    set.publish(&model_set("2026-10-22T10:00:00Z", 7)).unwrap();
+    let mut refused = model_set(NOON, 9);
     refuse(&mut refused);
     set.publish(&refused).unwrap();
     let mut models = DecidingModels::new(&set).unwrap();
@@ -367,7 +365,7 @@ fn a_generation_failing_a_check_stops_new_entries_naming_it_and_is_used_once_it_
     let before = decide("2026-10-22T11:00:00Z").unwrap();
     let errors = ["2026-10-22T12:00:00Z", "2026-10-22T13:00:00Z"]
         .map(|time| format!("{:#}", decide(time).unwrap_err()));
-    set.publish(&generation(NOON, 9)).unwrap();
+    set.publish(&model_set(NOON, 9)).unwrap();
     let mended = decide("2026-10-22T14:00:00Z").unwrap();
 
     near(before.map(|taken| taken.expected_r.as_f64()), Some(r(7)));
@@ -548,7 +546,7 @@ fn a_calibration_of_other_sides_than_its_models_is_no_pair() {
     assert!(one_for_two.contains("pair of 2"), "{one_for_two}");
 }
 
-/// `listed`, as `config` says, its generation from midnight: its long a
+/// `listed`, as `config` says, its model set from midnight: its long a
 /// model of 6 tenths (expecting 0.1R, above its margin of nought) and its
 /// meta model predicting an R of `r(tenths)`, if any.
 fn with_meta_of(models: &Path, config: &ModelConfig, tenths: Option<usize>) -> DecidingModels {
@@ -557,7 +555,7 @@ fn with_meta_of(models: &Path, config: &ModelConfig, tenths: Option<usize>) -> D
     published_with(models, config, &[(Side::Long, 6)], meta)
 }
 
-/// `listed`, as `config` says, its generation from midnight: a model of
+/// `listed`, as `config` says, its model set from midnight: a model of
 /// each side of `sides` predicting an R of `r(tenths)` of its tenths, and
 /// its meta model `meta`, if any.
 fn published_with(
@@ -568,7 +566,7 @@ fn published_with(
 ) -> DecidingModels {
     let features = features();
     let set = model_store(models, &features, config);
-    set.publish(&generation_of(
+    set.publish(&model_set_of(
         &features,
         config,
         MIDNIGHT,
@@ -612,14 +610,14 @@ fn a_meta_model_below_its_margin_takes_no_trade() {
     assert_eq!(decided(&mut models, NOON), None);
 }
 
-/// A generation's sides decide beside its own meta alone: the generation
+/// A model set's sides decide beside its own meta alone: the model set
 /// of 10:00 holds a meta model taking the long, expecting 0.25R; the one of
 /// 11:00, a long of 9, a meta predicting nought, expecting 0.1R, below its
 /// margin. At noon the latest decides, and takes no trade, never its long
-/// beside the meta of 10:00, which would take it; at 10:30 the generation
+/// beside the meta of 10:00, which would take it; at 10:30 the model set
 /// of 10:00 takes its long of 6.
 #[rstest]
-fn a_meta_never_decides_beside_the_sides_of_another_generation() {
+fn a_meta_never_decides_beside_the_sides_of_another_model_set() {
     let root = tempfile::tempdir().unwrap();
     let (features, config) = (features(), with_meta(meta()));
     let set = model_store(root.path(), &features, &config);
@@ -627,7 +625,7 @@ fn a_meta_never_decides_beside_the_sides_of_another_generation() {
         ("2026-10-22T10:00:00Z", 6, 8),
         ("2026-10-22T11:00:00Z", 9, 5),
     ] {
-        set.publish(&generation_of(
+        set.publish(&model_set_of(
             &features,
             &config,
             valid_from,

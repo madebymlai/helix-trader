@@ -20,7 +20,7 @@ use helix_trader::{
         features::{Feature, FeatureSet, FeatureSetBuilder, PICKED_FEATURES, side_names},
         handle::{Decision, Mode, ModelHandle, SettledRows},
         learner::{LearnerConfig, TrainingSet},
-        store::{ModelManifest, Probe, StoredGeneration, StoredModel},
+        store::{ModelManifest, Probe, StoredModel, StoredModelSet},
         targets::{BracketSpec, Distance, Side, Target, TargetConfig, TargetRow},
     },
     strategy::{
@@ -549,17 +549,17 @@ pub(crate) fn unchanged(config: &ModelConfig) -> Ksplit {
     }
 }
 
-/// The generation valid from `valid_from` of `sides`, the model of each
+/// The model set valid from `valid_from` of `sides`, the model of each
 /// side `config` trades, the long first, their pair's calibration leaving
 /// them as they are (`unchanged`), and the meta model `meta`, if any, as a
 /// train publishes one.
-pub(crate) fn generation(
+pub(crate) fn model_set(
     config: &ModelConfig,
     valid_from: Timestamp,
     sides: Vec<StoredModel>,
     meta: Option<StoredModel>,
-) -> StoredGeneration {
-    StoredGeneration {
+) -> StoredModelSet {
+    StoredModelSet {
         valid_from,
         sides,
         calibration: unchanged(config),
@@ -570,7 +570,7 @@ pub(crate) fn generation(
 /// A baseline long or short model of the probe deciding on `features` as
 /// `config` says, its rows the features then the target's payoff features
 /// (`features::side_names`), predicting an R of `r(tenths)` whatever the
-/// row, as a train publishes one, its pair calibrating it as the generation
+/// row, as a train publishes one, its pair calibrating it as the model set
 /// says: above 5 a trade expected to gain. For a test whose models'
 /// predictions a test sets, which no train's on the fixture's walk, with no
 /// edge, would be.
@@ -625,7 +625,7 @@ fn stored_baseline(
 /// as `config` says, of `side` for a side's model and none for a meta,
 /// fitted on `set`, predicting the mean of its labels whatever the row, its
 /// manifest's baseline that mean: a meta's calibrated by `CALIBRATION`, a
-/// side's by its pair's, the generation's.
+/// side's by its pair's, the model set's.
 pub(crate) fn baseline_stored(
     fingerprint: String,
     feature_names: Vec<String>,

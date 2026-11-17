@@ -1751,7 +1751,7 @@ mod model_handle {
     };
 
     use super::*;
-    use crate::common::dataset::{baseline_stored, generation};
+    use crate::common::dataset::{baseline_stored, model_set};
 
     const STRATEGY: &str = "WARMUP-MODEL-001";
 
@@ -1896,12 +1896,7 @@ mod model_handle {
         blueprint
             .model_store(models)
             .unwrap()
-            .publish(&generation(
-                &config,
-                Timestamp::UNIX_EPOCH,
-                vec![long],
-                None,
-            ))
+            .publish(&model_set(&config, Timestamp::UNIX_EPOCH, vec![long], None))
             .unwrap();
     }
 

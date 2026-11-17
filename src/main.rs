@@ -68,7 +68,7 @@ enum Command {
     /// Trains the strategy's models at a time, or at each retrain time of
     /// a span, those without one valid from it, replaying the days its
     /// dataset lacks, and prints a report of each train's run figures: its
-    /// generation published or already published, or why it failed, its
+    /// model set published or already published, or why it failed, its
     /// times, memory, dataset days and rows per slice; fails if any failed.
     Train(Box<TrainArgs>),
 }
@@ -574,7 +574,7 @@ impl<'a> Visitor for Running<'a> {
 /// Runs the model strategy `S` of `args` on `live` until Ctrl-C, on the
 /// models of the store its config keys, beside the actor of its
 /// retrains if it is retrained (`RetrainActor`), which lists that store's
-/// generations as it starts, each retrain in a child process
+/// model sets as it starts, each retrain in a child process
 /// (`LiveArgs::train_args`) on the node's catalog. Refuses first,
 /// before any node is built, a catalog without the traded instruments or
 /// the pairs of `[trade] conversions`, which its models and retrains are
@@ -1110,7 +1110,7 @@ mod tests {
     }
 
     /// A train that failed fails the command with its reason; one
-    /// that published, or found its generation already published, succeeds.
+    /// that published, or found its model set already published, succeeds.
     #[rstest]
     fn a_failed_train_fails_with_the_reason() {
         let t: Timestamp = "2026-10-23T00:00:00Z".parse().unwrap();
@@ -1118,7 +1118,7 @@ mod tests {
             "34 rows in the fit slice, fewer than min_rows 35".to_string(),
         ));
         let published = Outcome::Published {
-            generation: PathBuf::from("models/2026-10-23T00:00:00Z"),
+            model_set: PathBuf::from("models/2026-10-23T00:00:00Z"),
         };
         let already = Outcome::AlreadyPublished;
 

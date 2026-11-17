@@ -3,7 +3,7 @@
 //! and an operator can size a train against its interval. A train's
 //! out-of-sample evidence is a backtest's (`walk`).
 //!
-//! A block names the train's time and its outcome, the generation published
+//! A block names the train's time and its outcome, the model set published
 //! (its directory) or the failure and its reason, then the figures the
 //! train reached, failing or not (`train::Reached`): its wall time, its CPU
 //! time, user and system, and the peak memory of the train process; the
@@ -248,13 +248,13 @@ mod tests {
     }
 
     /// A train with a meta that published reports every figure: its
-    /// generation, its times and memory, its days and the rows of its
+    /// model set, its times and memory, its days and the rows of its
     /// sides, its out-of-fold pair and its meta.
     #[rstest]
-    fn a_published_generation_reports_its_directory_and_every_figure() {
+    fn a_published_model_set_reports_its_directory_and_every_figure() {
         let trained = Trained {
             outcome: Outcome::Published {
-                generation: PathBuf::from("models/key/2026-10-23T00:00:00Z"),
+                model_set: PathBuf::from("models/key/2026-10-23T00:00:00Z"),
             },
             reached: Reached {
                 days: Some(DaysRead {
@@ -269,7 +269,7 @@ mod tests {
 
         assert_eq!(
             report(&trained, usage()),
-            "the train at 2026-10-23T00:00:00Z: published the generation \
+            "the train at 2026-10-23T00:00:00Z: published the model set \
              models/key/2026-10-23T00:00:00Z\n\
              \x20 Wall time: 2.500 s\n\
              \x20 CPU time: 1.250 s user, 0.125 s system\n\
@@ -308,10 +308,10 @@ mod tests {
         );
     }
 
-    /// A generation already published reads no day and counts no row; off
+    /// A model set already published reads no day and counts no row; off
     /// Unix, no CPU time or peak memory is measured.
     #[rstest]
-    fn a_train_of_a_generation_already_published_reports_its_times_alone() {
+    fn a_train_of_a_model_set_already_published_reports_its_times_alone() {
         let trained = Trained::from(Outcome::AlreadyPublished);
         let unmeasured = Usage {
             process: None,

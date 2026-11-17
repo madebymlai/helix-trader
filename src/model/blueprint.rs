@@ -237,12 +237,12 @@ mod tests {
         let mut published = baseline("2026-10-22T00:00:00Z", 8);
         published.sides[0].manifest.fingerprint = model.dataset.fingerprint().to_string();
         model.models.publish(&published).unwrap();
-        let mut generations = model.models.swap();
+        let mut model_sets = model.models.swap();
 
-        let in_use = generations
+        let in_use = model_sets
             .at(
                 at("2026-10-22T12:00:00Z"),
-                &model.models.generations().unwrap(),
+                &model.models.model_sets().unwrap(),
             )
             .unwrap();
 

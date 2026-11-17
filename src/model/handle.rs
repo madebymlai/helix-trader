@@ -12,9 +12,9 @@
 //! target's instrument since the previous) and every feature is
 //! initialized, and publishes their row (`decide::decide`), then:
 //!
-//! - deciding (`Mode::Backtest`, `Mode::Live`): takes the latest generation
+//! - deciding (`Mode::Backtest`, `Mode::Live`): takes the latest model set
 //!   valid at the decision, the models one train published
-//!   (`store::Generation`), the pair of the sides of the config's margins
+//!   (`store::ModelSet`), the pair of the sides of the config's margins
 //!   (`store::Pair`), each side's model predicting its
 //!   R on the side's row, the decision's features then the side's payoff
 //!   features as the target sets them, which a dataset row of the decision
@@ -34,7 +34,7 @@
 //!   dataset run sends its targets), drops it or trades otherwise, and
 //!   closes its trades through the same module. The models see the target
 //!   at the reference stake alone, the config's risk of the dataset balance
-//!   (`targets::TargetSetter`), whatever the strategy stakes. With no generation
+//!   (`targets::TargetSetter`), whatever the strategy stakes. With no model set
 //!   valid yet no side trades; a stale decision, cold features, a target's
 //!   ATR not yet initialized, a target of no size at the reference stake,
 //!   no side clearing its margin or two tied are no decision, never an
@@ -48,27 +48,27 @@
 //!   the targets settle are collected for the caller of the run.
 //!
 //! With a meta model (`model::meta`), the trade of the side picked is
-//! taken only if the generation's meta model, on the row with that side and
+//! taken only if the model set's meta model, on the row with that side and
 //! the decision's level and side call, expects of it a net R, its
 //! calibrated expected R, of at least its margin (`MetaConfig::margin`), the
-//! trade as the target sets it; every generation of a strategy with a meta
+//! trade as the target sets it; every model set of a strategy with a meta
 //! holds one.
 //!
 //! The decision itself is `deciding::DecidingModels`'s; the handle is what
-//! talks to the strategy. A generation is swapped in only inside `decide`,
-//! before it predicts, whole: no decision mixes two generations, nor a meta
+//! talks to the strategy. A model set is swapped in only inside `decide`,
+//! before it predicts, whole: no decision mixes two model sets, nor a meta
 //! with the sides of another train. A backtest and a live node read the same
 //! store, which must be readable when the handle is built, and is listed
 //! again at each decision, a failure logged and the previous list kept, so
-//! a generation published meanwhile is used from the first decision at or
+//! a model set published meanwhile is used from the first decision at or
 //! after its valid-from. Every prediction is calibrated, the sides' by their
 //! pair (`store::Pair`), the meta's on its own (`store::LoadedModel`). Before
-//! use each model of a generation is checked against the strategy: its
+//! use each model of a model set is checked against the strategy: its
 //! feature names and their order, its fingerprint (`dataset::fingerprint`),
 //! its width, and its probes, each of which the reloaded model must predict
-//! to the bit as it did when fitted. A generation failing a check stops new
+//! to the bit as it did when fitted. A model set failing a check stops new
 //! entries: `decide` errs, naming it and the check, which Nautilus logs, no
-//! decision is made on it nor on the generation before it, and it is read
+//! decision is made on it nor on the model set before it, and it is read
 //! again at the next decision (`store::Swap`), so it is used once it loads;
 //! open trades finish on their exits, which the handle does not hold.
 //!
@@ -138,7 +138,7 @@
 //!
 //! The handle does not retrain: live, the retrains of a strategy are a
 //! Nautilus actor of their own beside it (`launcher::RetrainActor`), and
-//! the generation a retrain publishes, or `train --at`, is the handle's from its
+//! the model set a retrain publishes, or `train --at`, is the handle's from its
 //! next decision, which lists the store again. Never retrained, a strategy
 //! has no retrain actor: the handle trades on the store as it is.
 
@@ -786,7 +786,7 @@ mod tests {
             decide::FeatureRow,
             deciding::testing::{
                 AUD, GOLD, STRATEGY, at, baseline, blueprint_of, both_sides, config, features,
-                generation_of, gold, meta, meta_baseline, model_store, r, requirements, store,
+                gold, meta, meta_baseline, model_set_of, model_store, r, requirements, store,
                 with_meta,
             },
             features::testing::{last_mid, mid_over},
@@ -1006,7 +1006,7 @@ mod tests {
         let models = tempfile::tempdir().unwrap();
         let features = last_mid(InstrumentId::from("GBP/USD.SIM")).build().unwrap();
         model_store(models.path(), &features, &config())
-            .publish(&generation_of(
+            .publish(&model_set_of(
                 &features,
                 &config(),
                 "2026-10-22T00:00:00Z",
@@ -1113,7 +1113,7 @@ mod tests {
             .into_iter()
             .filter_map(|(side, tenths)| tenths.map(|tenths| (side, tenths)));
         model_store(models, &features, config)
-            .publish(&generation_of(
+            .publish(&model_set_of(
                 &features,
                 config,
                 "2026-10-22T00:00:00Z",
@@ -1589,7 +1589,7 @@ mod tests {
             .build()
             .unwrap();
         model_store(models.path(), &features, &config())
-            .publish(&generation_of(
+            .publish(&model_set_of(
                 &features,
                 &config(),
                 "2026-10-22T00:00:00Z",
@@ -2019,7 +2019,7 @@ mod tests {
         let (config, width) = width_config();
         let features = mid_over(InstrumentId::from(AUD), &width).build().unwrap();
         model_store(models.path(), &features, &config)
-            .publish(&generation_of(
+            .publish(&model_set_of(
                 &features,
                 &config,
                 "2026-10-22T00:00:00Z",
@@ -2213,7 +2213,7 @@ mod tests {
     fn meta_handle(models: &Path, config: &ModelConfig, meta_tenths: usize) -> Rc<ModelHandle> {
         let features = features();
         model_store(models, &features, config)
-            .publish(&generation_of(
+            .publish(&model_set_of(
                 &features,
                 config,
                 "2026-10-22T00:00:00Z",
@@ -2385,7 +2385,7 @@ mod tests {
         blueprint_of(&features, &config, reading_eur(eur))
             .model_store(models.path())
             .unwrap()
-            .publish(&generation_of(
+            .publish(&model_set_of(
                 &features,
                 &config,
                 "2026-10-22T00:00:00Z",

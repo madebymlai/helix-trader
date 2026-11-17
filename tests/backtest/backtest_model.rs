@@ -36,20 +36,20 @@ use crate::{
     backtest_targets::hand_worked_quotes,
     common::{
         dataset::{
-            baseline_of, blueprint, config, features, generation, r, replay, replay_of, target,
+            baseline_of, blueprint, config, features, model_set, r, replay, replay_of, target,
             trade, walk,
         },
         ic,
     },
 };
 
-/// Publishes under `models` the generation of `config`, trading one side,
+/// Publishes under `models` the model set of `config`, trading one side,
 /// valid from `valid_from`, of that side's model `model`.
 fn publish(models: &Path, config: &ModelConfig, valid_from: Timestamp, model: StoredModel) {
     blueprint(features(), config.clone())
         .model_store(models)
         .unwrap()
-        .publish(&generation(config, valid_from, vec![model], None))
+        .publish(&model_set(config, valid_from, vec![model], None))
         .unwrap();
 }
 

@@ -2,7 +2,7 @@
 //! fixture catalog: the probe of `common::dataset` decides every hour on
 //! one feature, missing (NaN) from the first quote. Before the run, the
 //! dataset is built over the span and, at each daily retrain time of it, a
-//! generation published as a train would, its long a baseline of its own R,
+//! model set published as a train would, its long a baseline of its own R,
 //! its calibration leaving it as it is (`common::dataset::baseline_of`),
 //! which names it. The walk has no edge for a train to earn on, so its trains
 //! would publish none (`backtest_train` trains on one). In the run, every
@@ -33,7 +33,7 @@ use rstest::rstest;
 use tempfile::TempDir;
 
 use crate::common::{
-    dataset::{baseline_of, blueprint, config, generation, missing, r, replay_on, trade_on, walk},
+    dataset::{baseline_of, blueprint, config, missing, model_set, r, replay_on, trade_on, walk},
     ic,
 };
 
@@ -108,7 +108,7 @@ fn trained(catalog: &TempDir, models: &Path) {
             3 + usize::try_from(day).unwrap(),
         );
         model_store(models)
-            .publish(&generation(&config_daily(), at, vec![long], None))
+            .publish(&model_set(&config_daily(), at, vec![long], None))
             .unwrap();
     }
 }

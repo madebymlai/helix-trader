@@ -11,7 +11,7 @@
 //! backtest, holding no node while it trains, trains in its own process
 //! and starts no launcher (`backtest_on_models`, in `main.rs`). The
 //! child's exit status says what it did: success is a train that did not
-//! fail, its generation published or already published; a failure,
+//! fail, its model set published or already published; a failure,
 //! nothing published, the reason the error it printed last (`train` exits
 //! with an error when it fails). Each line the child prints is a
 //! log record of the node's process, so Nautilus' logger writes the
@@ -28,31 +28,31 @@
 //! (`schedule::Schedule::retrain_times`); a strategy never retrained has
 //! no actor (`RetrainActor::new`), so no timer is set and no train
 //! launched. At its start the actor also takes the latest retrain time, the
-//! last grid time not after now, if the store holds no generation of it,
+//! last grid time not after now, if the store holds no model set of it,
 //! as when the node was down then.
 //!
-//! A retrain at `t` trains as `train --at t` does, its generation stamped
+//! A retrain at `t` trains as `train --at t` does, its model set stamped
 //! `t` and its data cut there, so that live and a backtest of the same span
-//! share every generation. It launches once every series the strategy reads
+//! share every model set. It launches once every series the strategy reads
 //! at `t` has a stored point at or after `t` (each series' last stored
 //! timestamp, Nautilus' `ParquetDataCatalog::query_last_timestamp`), so
 //! that it never trains on data the catalog holds only part of: live, the
 //! data comes with the recording's daily promotion (`live::Recording`).
 //! Until then it waits, the catalog checked again every minute on a second
-//! timer of the actor's clock, and the previous generation decides
+//! timer of the actor's clock, and the previous model set decides
 //! meanwhile. A retrain falling due while another waits takes its place,
-//! the waiting one skipped with a warning, as the newer generation would
+//! the waiting one skipped with a warning, as the newer model set would
 //! supersede it at once; one falling due while the previous retrain still
 //! runs is skipped, with a warning. A retrain logs what it did as it ends,
 //! on its own thread, waiting for no decision nor firing: as info when it
 //! succeeded, as an error with its reason when it published nothing, the
-//! previous generation deciding on. The generation a retrain publishes is
+//! previous model set deciding on. The model set a retrain publishes is
 //! the strategy's from its next decision, at which its model handle lists
 //! the store again (`handle`). A retrain time skipped is trained later, if
 //! a backtest needs it, by `train` over its span.
 //!
 //! A child still running when the node stops runs on to its end: its
-//! generation is published, written whole, for the next start.
+//! model set is published, written whole, for the next start.
 
 use std::{
     collections::VecDeque,
@@ -123,10 +123,10 @@ pub struct Running {
 /// What a finished train did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Retrained {
-    /// Its generation was published, valid from its time, or already
+    /// Its model set was published, valid from its time, or already
     /// published.
     Succeeded,
-    /// It failed, publishing nothing, the current generation deciding on;
+    /// It failed, publishing nothing, the current model set deciding on;
     /// why.
     Failed(String),
 }
@@ -198,7 +198,7 @@ impl Launcher {
                 match &retrained {
                     Retrained::Succeeded => {
                         log::info!(
-                            "the retrain at {at} succeeded, its generation published or already published"
+                            "the retrain at {at} succeeded, its model set published or already published"
                         );
                     }
                     Retrained::Failed(why) => log::error!("the retrain at {at}: {why}"),
@@ -309,7 +309,7 @@ pub struct RetrainActor {
     every: SignedDuration,
     catalog: PathBuf,
     requirements: DataRequirements,
-    /// The strategy's generations, read at the actor's start.
+    /// The strategy's model sets, read at the actor's start.
     models: ModelStore,
     /// Launches trains that log what they did as they end
     /// (`Launcher::logged`).
@@ -324,7 +324,7 @@ pub struct RetrainActor {
 impl RetrainActor {
     /// The retrains of `strategy_id`, retrained as `retrain` says, of a
     /// strategy of `requirements` reading the catalog at `catalog`, its
-    /// generations in `models`, launched by `launcher`; none never
+    /// model sets in `models`, launched by `launcher`; none never
     /// retrained, so that no timer is set and no train launched.
     #[must_use]
     pub fn new(
@@ -450,7 +450,7 @@ impl DataActor for RetrainActor {
     /// Starts the retrain timer on the actor's clock (`schedule::start`),
     /// on the last grid time not after now, so it first fires on the next
     /// one; that grid time, the latest retrain time, falls due now if the
-    /// store holds no generation of it (`due`), as when the node was down
+    /// store holds no model set of it (`due`), as when the node was down
     /// then.
     fn on_start(&mut self) -> anyhow::Result<()> {
         schedule::start(&*self, TIMER, self.every)?;
@@ -458,11 +458,11 @@ impl DataActor for RetrainActor {
             self.clock().timestamp_ns(),
             self.every,
         )?);
-        let generations = self
+        let model_sets = self
             .models
-            .generations()
-            .context("listing the generations, of which the latest retrain time's is trained")?;
-        if generations.contains(&latest) {
+            .model_sets()
+            .context("listing the model sets, of which the latest retrain time's is trained")?;
+        if model_sets.contains(&latest) {
             return Ok(());
         }
         self.due(latest)
@@ -549,7 +549,7 @@ mod tests {
 
     fn published(at: Timestamp) -> Trained {
         Outcome::Published {
-            generation: PathBuf::from("models").join(at.to_string()),
+            model_set: PathBuf::from("models").join(at.to_string()),
         }
         .into()
     }
@@ -656,7 +656,7 @@ mod tests {
         }
     }
 
-    /// Publishes to the store in `dir` a generation valid from `valid_from`.
+    /// Publishes to the store in `dir` a model set valid from `valid_from`.
     fn published_at(dir: &Path, valid_from: &str) {
         store(&dir.join("models"))
             .publish(&baseline(valid_from, 6))
@@ -665,7 +665,7 @@ mod tests {
 
     /// The retrains of `LIVE-001`, retrained as `retrain` says, of a
     /// strategy reading the quotes of AUD/USD and EUR/USD from the catalog
-    /// in `dir`, its generations in the store in `dir`, launched by
+    /// in `dir`, its model sets in the store in `dir`, launched by
     /// `launcher`.
     fn retrains(dir: &Path, retrain: Retrain, launcher: Launcher) -> Option<RetrainActor> {
         let quotes = |instrument_id| TickSeries {
@@ -806,7 +806,7 @@ mod tests {
     }
 
     /// A daily retrain added and started at 11:30 on 2026-10-22 as a node
-    /// adds and starts an actor, the store holding the generation of
+    /// adds and starts an actor, the store holding the model set of
     /// midnight, the latest retrain time, on a catalog holding both series
     /// past every retrain: it trains nothing at its start, and its clock
     /// advanced past the next midnight, the event of the retrain timer
@@ -826,17 +826,17 @@ mod tests {
     }
 
     /// A daily retrain started at 11:30 on 2026-10-22, the store holding no
-    /// generation of midnight, the latest retrain time, whether it holds
+    /// model set of midnight, the latest retrain time, whether it holds
     /// none or that of the day before: the node was down then, and the
     /// actor trains that time as it starts, before its timer fires.
     #[rstest]
     #[case::of_an_empty_store(&[])]
     #[case::of_a_store_holding_the_day_before(&["2026-10-21T00:00:00Z"])]
-    fn a_retrain_actor_started_after_a_retrain_time_without_its_generation_trains_it_at_start(
-        #[case] generations: &[&str],
+    fn a_retrain_actor_started_after_a_retrain_time_without_its_model_set_trains_it_at_start(
+        #[case] model_sets: &[&str],
     ) {
         let dir = tempfile::tempdir().unwrap();
-        for valid_from in generations {
+        for valid_from in model_sets {
             published_at(dir.path(), valid_from);
         }
         let (finish, finished) = mpsc::channel();
@@ -849,7 +849,7 @@ mod tests {
         assert_eq!(finished.recv(), Err(mpsc::RecvError));
     }
 
-    /// A daily retrain started at 11:30 on 2026-10-22, the generation of
+    /// A daily retrain started at 11:30 on 2026-10-22, the model set of
     /// midnight published, on a catalog holding AUD/USD's quotes to 01:00
     /// on the 23rd and EUR/USD's `eur`: the retrain due at midnight on the
     /// 23rd finds no EUR/USD quote at or after it, and waits, trained
@@ -1009,7 +1009,7 @@ mod tests {
     }
 
     /// A finished retrain leaves the next retrain free to launch, whether
-    /// it published or failed, the current generation deciding on.
+    /// it published or failed, the current model set deciding on.
     #[rstest]
     #[case::published(sending)]
     #[case::failed(failing)]

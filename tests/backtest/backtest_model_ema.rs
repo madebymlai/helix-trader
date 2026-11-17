@@ -8,7 +8,7 @@
 //! fewer rows than `min_rows`, naming the slice, its count and the minimum,
 //! as does a live node's launcher (`model::launcher`) starting that `train`
 //! as its child; a live node's retrain actor publishes at a retrain time
-//! the generation `train` publishes there. A model published straight to the store, a baseline
+//! the model set `train` publishes there. A model published straight to the store, a baseline
 //! (`common::dataset`), trades from its valid-from: every decision a long on
 //! its time-only target, closed 30 minutes later. The binary's `backtest`
 //! trades on the store as it is (`backtest_model_ema_trained` backtests a
@@ -54,7 +54,7 @@ use tempfile::TempDir;
 use ustr::Ustr;
 
 use crate::common::{
-    dataset::{baseline_stored, generation, r, walk},
+    dataset::{baseline_stored, model_set, r, walk},
     ic,
 };
 
@@ -175,9 +175,9 @@ fn model_store(config: &str, models: &Path) -> ModelStore {
         .unwrap()
 }
 
-/// The times the generations of `config` under `models` are valid from.
-fn generations(config: &str, models: &Path) -> Vec<Timestamp> {
-    model_store(config, models).generations().unwrap()
+/// The times the model sets of `config` under `models` are valid from.
+fn model_sets(config: &str, models: &Path) -> Vec<Timestamp> {
+    model_store(config, models).model_sets().unwrap()
 }
 
 /// Asserts that `text` names a slice `slice` of `rows` rows, fewer than
@@ -192,7 +192,7 @@ fn assert_too_few_rows(text: &str, slice: &str, rows: usize, min_rows: usize) {
     }
 }
 
-/// Publishes straight to the store under `models` a generation valid from
+/// Publishes straight to the store under `models` a model set valid from
 /// `at`, its long a baseline of 0.1R on a side's features, the strategy's
 /// then the target's payoff features, as the dataset the `train` subcommand
 /// built in `catalog` names them.
@@ -200,7 +200,7 @@ fn publish(catalog: &TempDir, models: &Path, at: Timestamp) {
     publish_with(catalog, models, at, |_| {});
 }
 
-/// Publishes the generation of `publish`, its long changed by `change`.
+/// Publishes the model set of `publish`, its long changed by `change`.
 fn publish_with(
     catalog: &TempDir,
     models: &Path,
@@ -226,7 +226,7 @@ fn publish_with(
         .unwrap()
         .model_store(models)
         .unwrap()
-        .publish(&generation(&config.model(), at, vec![model], None))
+        .publish(&model_set(&config.model(), at, vec![model], None))
         .unwrap();
 }
 
@@ -253,10 +253,10 @@ fn the_train_subcommand_publishes_a_model_without_an_edge_which_trades_from_its_
     let stdout = trained(&config_path, catalog.path(), &models, t());
 
     assert!(
-        report(&stdout, t())[0].contains("published the generation"),
+        report(&stdout, t())[0].contains("published the model set"),
         "{stdout}"
     );
-    assert_eq!(generations(CONFIG, &models), [t()]);
+    assert_eq!(model_sets(CONFIG, &models), [t()]);
     assert_eq!(traded(&catalog, models), (6, 3));
 }
 
@@ -292,7 +292,7 @@ fn a_train_with_a_slice_of_fewer_rows_than_the_minimum_fails_naming_it_and_publi
     let stderr = train_failed(&config_path, catalog.path(), &models, t() + after);
 
     assert_too_few_rows(&stderr, slice, rows, min_rows);
-    assert_eq!(generations(&config, &models), []);
+    assert_eq!(model_sets(&config, &models), []);
 }
 
 /// Worked by hand: the train at t fits the long of its out-of-fold pair as
@@ -302,12 +302,12 @@ fn a_train_with_a_slice_of_fewer_rows_than_the_minimum_fails_naming_it_and_publi
 /// 00:00 to 17:00, settled by 18:00, the calibration slice's start, 18; its
 /// calibration slice those of 18:00 to 23:00, 6. A meta `min_rows` above a
 /// slice's count fails the train, naming the meta, the slice, its count and
-/// the minimum, and publishes no generation, the long fitted beside the
+/// the minimum, and publishes no model set, the long fitted beside the
 /// meta neither.
 #[rstest]
 #[case::fit(19, "fit slice", 18)]
 #[case::calibration(7, "calibration slice", 6)]
-fn a_meta_with_a_slice_of_fewer_rows_than_its_minimum_fails_naming_it_and_publishes_no_generation(
+fn a_meta_with_a_slice_of_fewer_rows_than_its_minimum_fails_naming_it_and_publishes_no_model_set(
     #[case] min_rows: usize,
     #[case] slice: &str,
     #[case] rows: usize,
@@ -329,7 +329,7 @@ fn a_meta_with_a_slice_of_fewer_rows_than_its_minimum_fails_naming_it_and_publis
         .unwrap_or_else(|| panic!("{stderr}"))
         .1;
     assert_too_few_rows(meta, slice, rows, min_rows);
-    assert_eq!(generations(&config, &models), []);
+    assert_eq!(model_sets(&config, &models), []);
 }
 
 /// The report of the train at `at` in `stdout`: the line naming it, then
@@ -408,10 +408,10 @@ fn assert_no_performance(report: &[&str]) {
 /// whose last decision settles by t, the 22nd's last not. The train at
 /// 00:15 of the 23rd reads the 21st to the 23rd: the 21st cached, the 22nd
 /// and the 23rd built; its slices hold 33 and 11 rows. Each report names
-/// the generation published, under its time in the store, and no figure of
+/// the model set published, under its time in the store, and no figure of
 /// performance.
 #[rstest]
-fn a_train_reports_its_generation_run_figures_dataset_days_and_rows_of_each_slice() {
+fn a_train_reports_its_model_set_run_figures_dataset_days_and_rows_of_each_slice() {
     let catalog = catalog();
     let dir = tempfile::tempdir().unwrap();
     let (config_path, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
@@ -433,12 +433,12 @@ fn a_train_reports_its_generation_run_figures_dataset_days_and_rows_of_each_slic
         ),
     ] {
         let report = report(stdout, at);
-        let generation = store.directory().join(at.to_string());
+        let model_set = store.directory().join(at.to_string());
         assert_eq!(
             report[0],
             format!(
-                "the train at {at}: published the generation {}",
-                generation.display()
+                "the train at {at}: published the model set {}",
+                model_set.display()
             )
         );
         assert_run_figures(&report);
@@ -454,7 +454,7 @@ fn a_train_reports_its_generation_run_figures_dataset_days_and_rows_of_each_slic
 }
 
 /// Worked by hand, the slices as in
-/// `a_meta_with_a_slice_of_fewer_rows_than_its_minimum_fails_naming_it_and_publishes_no_generation`:
+/// `a_meta_with_a_slice_of_fewer_rows_than_its_minimum_fails_naming_it_and_publishes_no_model_set`:
 /// the train at t reads from its out-of-fold pair's window, from 02:00 of the 20th,
 /// so builds the 20th to the 22nd. The out-of-fold pair, fitted as of midnight of
 /// the 22nd, holds 34 rows in its fit slice, 22 of the 20th from 02:00 and
@@ -473,10 +473,7 @@ fn a_train_with_a_meta_reports_the_rows_of_its_sides_out_of_fold_pair_and_meta()
     let stdout = trained(&config_path, catalog.path(), &models, t());
 
     let report = report(&stdout, t());
-    assert!(
-        report[0].contains("published the generation"),
-        "{report:#?}"
-    );
+    assert!(report[0].contains("published the model set"), "{report:#?}");
     assert_run_figures(&report);
     assert_figures(
         &report,
@@ -540,7 +537,7 @@ fn a_failed_train_reports_the_figures_it_reached_and_its_reason(
     assert_run_figures(&report);
     assert_figures(&report, lines);
     assert!(stderr.contains(reason), "{stderr}");
-    assert_eq!(generations(&config, &models), []);
+    assert_eq!(model_sets(&config, &models), []);
 }
 
 /// A backtest from midnight of the 23rd, the model's valid-from, warms its
@@ -646,10 +643,10 @@ fn added(mut actor: RetrainActor, now: Timestamp) -> Ustr {
 }
 
 /// A live node started at 00:30 on the 23rd, half an hour after the
-/// retrain time t, its store holding no generation: its retrain actor,
+/// retrain time t, its store holding no model set: its retrain actor,
 /// added as the node's trader adds it, trains t as it starts, through the
 /// binary's `train` its launcher starts, the catalog holding the quotes to
-/// 04:00, past t. Its generation is the one `train --at t` publishes into
+/// 04:00, past t. Its model set is the one `train --at t` publishes into
 /// another store on the same catalog: valid from t, and of the same
 /// models, calibration, baselines and probes, cut at t.
 #[rstest]
@@ -679,7 +676,7 @@ fn a_live_node_started_after_a_retrain_time_trains_it_at_start_as_train_at_it_do
         .unwrap()
         .block_on(wait_until_async(
             || {
-                let published = generations(CONFIG, &live) == [t()];
+                let published = model_sets(CONFIG, &live) == [t()];
                 async move { published }
             },
             Duration::from_secs(300),
@@ -784,14 +781,14 @@ fn the_binarys_backtest_reports_its_own_costs_and_its_models_then_each_periods_s
     assert!(stdout.contains("over the span"), "{stdout}");
 }
 
-/// The store holds a generation at t and one at the next retrain time
+/// The store holds a model set at t and one at the next retrain time
 /// whose long is of another fingerprint, failing its load check: the
 /// binary's backtest over both periods logs, at the next period's
-/// decisions, the error naming that generation and the check, and decides
-/// no trade there, on it nor on the generation of t, so the next period's
-/// scores have no generation and no row.
+/// decisions, the error naming that model set and the check, and decides
+/// no trade there, on it nor on the model set of t, so the next period's
+/// scores have no model set and no row.
 #[rstest]
-fn the_binarys_backtest_stops_new_entries_on_a_generation_failing_a_check_naming_it() {
+fn the_binarys_backtest_stops_new_entries_on_a_model_set_failing_a_check_naming_it() {
     let catalog = walk(
         ic::at("00:00:00") - SignedDuration::from_hours(3),
         t() + SignedDuration::from_hours(51),
@@ -811,7 +808,7 @@ fn the_binarys_backtest_stops_new_entries_on_a_generation_failing_a_check_naming
     let (stdout, stderr) = backtest_at(&config_path, catalog.path(), &models, (start, end), &costs);
 
     let output = format!("{stdout}\n{stderr}");
-    let refusal = format!("no new entry until the generation valid from {next} loads");
+    let refusal = format!("no new entry until the model set valid from {next} loads");
     assert!(output.contains(&refusal), "{output}");
     assert!(
         output.contains("the long model: its fingerprint ffff"),
@@ -1045,7 +1042,7 @@ fn the_train_subcommand_accepts_a_dataset_balance_its_conversions_reach_the_pnl_
     let stdout = trained(&config, catalog.path(), &models, t());
 
     assert!(
-        report(&stdout, t())[0].contains("published the generation"),
+        report(&stdout, t())[0].contains("published the model set"),
         "{stdout}"
     );
 }

@@ -12,17 +12,17 @@
 //! each reading a row's features then its own side's payoff features
 //! (`dataset::DatasetRow::side`), under the names its model store checks it
 //! against (`store::SideLevel::feature_names`); and its meta model, if it
-//! has one (`model::meta`). A train publishes them as one generation
-//! (`store::StoredGeneration`), valid from its time, or nothing: a decision
+//! has one (`model::meta`). A train publishes them as one model set
+//! (`store::StoredModelSet`), valid from its time, or nothing: a decision
 //! uses the sides and the meta of one train together.
 //!
 //! What a train at `t` does is the schedule's plan (`schedule::Schedule::plan`),
-//! retrained or never retrained alike: a generation the store holds valid
+//! retrained or never retrained alike: a model set the store holds valid
 //! exactly from `t` is kept, already published, and replays nothing; else a
-//! generation is
+//! model set is
 //! trained at `t`, its sides fitted as of `t` and, with a meta, its meta at
 //! `t` on the picks of an out-of-fold pair fitted as of `t` less the meta's
-//! window. Nothing else of the store is read: the generation a train
+//! window. Nothing else of the store is read: the model set a train
 //! publishes depends on the data, the config and `t` alone.
 //!
 //! A model fitted as of `t'`, the train's time or before it, takes the
@@ -46,7 +46,7 @@
 //! or a calibration, is no finite number; or when a model reloaded from
 //! what it saved does not predict its probes as fitted, the check a reader
 //! makes before use (`store::StoredModel`). Out-of-sample evidence is a
-//! backtest's (`walk::WalkForward::scores`). Otherwise the generation
+//! backtest's (`walk::WalkForward::scores`). Otherwise the model set
 //! publishes whole (`store::ModelStore::publish`), valid from `t`, its sides
 //! with the pair's calibration, each model with its baseline, the training
 //! mean of R on the rows it was fitted and calibrated on, which its
@@ -70,12 +70,12 @@
 //! (`calibration::Ksplit` of one side), held to its own minimum of rows
 //! (`MetaConfig::min_rows`) and checked as a side is, its manifest recording
 //! its out-of-fold pair's time (`store::ModelManifest::out_of_fold`). The
-//! out-of-fold pair is not published: the generation ships the sides fitted
+//! out-of-fold pair is not published: the model set ships the sides fitted
 //! as of `t` beside the meta, so its sides are as fresh as a strategy's without a meta, and
-//! every generation of a strategy with a meta holds one.
+//! every model set of a strategy with a meta holds one.
 //!
 //! A train never errors: what goes wrong is an outcome, its failure with
-//! the reason (`Failure`), nothing published and the current generation
+//! the reason (`Failure`), nothing published and the current model set
 //! deciding on. It succeeds when it did not fail (`Trained::succeeded`). Beside its outcome, a train holds the figures it
 //! reached, failing or not (`Reached`): the days of the dataset it read,
 //! built or cached, and the rows of each slice it counted, of its sides, its
@@ -97,8 +97,8 @@ use super::{
     meta,
     schedule::{Fit, Fits, Models, Plan, Schedule},
     store::{
-        Baselined, MetaLevel, ModelManifest, ModelStore, Pair, Probe, SideModel, StoredGeneration,
-        StoredModel,
+        Baselined, MetaLevel, ModelManifest, ModelStore, Pair, Probe, SideModel, StoredModel,
+        StoredModelSet,
     },
     targets::{Side, TargetConfig, TargetRow},
 };
@@ -114,7 +114,7 @@ pub struct Training {
     dataset: Dataset,
     /// What each train does to each model.
     schedule: Schedule,
-    /// The strategy's models: the generations the plan reads for the one it
+    /// The strategy's models: the model sets the plan reads for the one it
     /// keeps, and where the train publishes.
     models: ModelStore,
     /// Each model: of each side the strategy trades, and the meta model, if
@@ -165,7 +165,7 @@ struct SideFit<'a> {
 }
 
 /// The sides' pair a train fitted, in hand to decide on, the out-of-fold
-/// pair's, and what of it a generation publishes: each side's level and model as
+/// pair's, and what of it a model set publishes: each side's level and model as
 /// fitted, and the pair's calibration (`Pair::calibration`).
 struct PairFit<'a> {
     pair: Pair,
@@ -179,22 +179,22 @@ pub struct Trained {
     pub reached: Reached,
 }
 
-/// What a train did to the strategy's generations.
+/// What a train did to the strategy's model sets.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
-    /// A generation was published, valid from the train's time, in the
-    /// directory `generation`.
-    Published { generation: PathBuf },
-    /// None was fitted: the generation valid from the train's time is
+    /// A model set was published, valid from the train's time, in the
+    /// directory `model_set`.
+    Published { model_set: PathBuf },
+    /// None was fitted: the model set valid from the train's time is
     /// already published (`schedule::Plan::Keep`).
     AlreadyPublished,
-    /// The train failed, publishing no generation: the current one, if
+    /// The train failed, publishing no model set: the current one, if
     /// any, stays.
     Failed(Failure),
 }
 
 /// The figures a train reached, as far as it went: none of a train whose
-/// generation is already published, which reads no dataset and fits
+/// model set is already published, which reads no dataset and fits
 /// nothing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Reached {
@@ -222,7 +222,7 @@ pub struct Slices {
 pub enum Failure {
     /// The replay, the dataset, a fit, a check of the models or the store
     /// failed, or a slice had fewer rows than the minimum; the error, the
-    /// same for every model of the generation, whichever it was of.
+    /// same for every model of the model set, whichever it was of.
     Error(String),
     /// The dataset holds rows that do not match the strategy's features; the
     /// mismatch.
@@ -277,39 +277,38 @@ impl Training {
     }
 
     /// Trains at `at` as the schedule plans it (`Schedule::plan`), from
-    /// the store's generations: the generation valid from `at` already
-    /// published, if any; else a generation trained and published
-    /// (`generation`), or,
+    /// the store's model sets: the model set valid from `at` already
+    /// published, if any; else a model set trained and published
+    /// (`model_set`), or,
     /// should anything of it fail, the train's failure with the error,
     /// beside the figures the train reached. `replay` runs the strategy
     /// over a span of the days the dataset lacks and returns the rows it
     /// settled (see `Dataset::settled`), once, from where the plan's fits
-    /// start, and not at all if the plan keeps a generation.
+    /// start, and not at all if the plan keeps a model set.
     pub fn train_at(
         &self,
         at: Timestamp,
         replay: impl FnOnce(Timestamp, Timestamp) -> anyhow::Result<Vec<TargetRow>>,
     ) -> Trained {
         let mut reached = Reached::default();
-        let outcome = match self.models.generations() {
+        let outcome = match self.models.model_sets() {
             Err(e) => failed(&e),
-            Ok(generations) => match self.schedule.plan(at, &generations) {
+            Ok(model_sets) => match self.schedule.plan(at, &model_sets) {
                 Plan::Keep => Outcome::AlreadyPublished,
-                Plan::Train(fits) => self.generation(&fits, replay, &mut reached).map_or_else(
-                    |e| failed(&e),
-                    |generation| Outcome::Published { generation },
-                ),
+                Plan::Train(fits) => self
+                    .model_set(&fits, replay, &mut reached)
+                    .map_or_else(|e| failed(&e), |model_set| Outcome::Published { model_set }),
             },
         };
         Trained { outcome, reached }
     }
 
-    /// Trains the generation of `fits` and publishes it, valid from the
+    /// Trains the model set of `fits` and publishes it, valid from the
     /// train's time: on the rows `replay` settles from where the fits start,
     /// its meta, if the strategy has one, learned from the out-of-fold pair's
     /// picks (`meta`), then its sides' pair fitted as of the train's time
     /// (`pair`), each side checked as a reader checks it
-    /// (`Training::stored`). Each model is published; the generation's
+    /// (`Training::stored`). Each model is published; the model set's
     /// directory is returned. What it reached goes in `reached` as it goes.
     ///
     /// # Errors
@@ -317,7 +316,7 @@ impl Training {
     /// Returns an error if the replay, a fit, a check or the store fails, or
     /// a slice has fewer rows than its level's minimum, the out-of-fold
     /// pair's and the meta's naming it.
-    fn generation(
+    fn model_set(
         &self,
         fits: &Fits,
         replay: impl FnOnce(Timestamp, Timestamp) -> anyhow::Result<Vec<TargetRow>>,
@@ -338,7 +337,7 @@ impl Training {
             .into_iter()
             .map(|(level, fitted)| self.stored(level, fitted))
             .collect::<anyhow::Result<_>>()?;
-        self.models.publish(&StoredGeneration {
+        self.models.publish(&StoredModelSet {
             valid_from: at,
             sides,
             calibration,
@@ -484,7 +483,7 @@ impl Training {
         })
     }
 
-    /// The model `fitted` of `level` as its generation holds it, checked as
+    /// The model `fitted` of `level` as its model set holds it, checked as
     /// a reader checks it before use (`StoredModel::checked`): reloaded from
     /// what it saved, it predicts each probe to the bit as fitted.
     ///
@@ -631,7 +630,7 @@ impl Level {
 }
 
 impl Trained {
-    /// Whether the train succeeded: it did not fail, its generation
+    /// Whether the train succeeded: it did not fail, its model set
     /// published or already published.
     #[must_use]
     pub const fn succeeded(&self) -> bool {
@@ -767,8 +766,8 @@ fn spread(len: usize) -> impl Iterator<Item = usize> {
 impl Display for Outcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Published { generation } => {
-                write!(f, "published the generation {}", generation.display())
+            Self::Published { model_set } => {
+                write!(f, "published the model set {}", model_set.display())
             }
             Self::AlreadyPublished => write!(f, "already published"),
             Self::Failed(failure) => write!(f, "{failure}"),
@@ -930,12 +929,12 @@ mod tests {
             .unwrap()
     }
 
-    /// The outcome of a train publishing the generation of a training in
+    /// The outcome of a train publishing the model set of a training in
     /// `dir` as `config` says valid from `valid_from`, named by its time in
     /// the store's directory.
     fn published(dir: &Path, config: &ModelConfig, valid_from: Timestamp) -> Outcome {
         Outcome::Published {
-            generation: models(dir, config).directory().join(valid_from.to_string()),
+            model_set: models(dir, config).directory().join(valid_from.to_string()),
         }
     }
 
@@ -954,20 +953,20 @@ mod tests {
         DaysRead { built, cached }
     }
 
-    /// The generations of a training in `dir` as `config` says.
-    fn generations(dir: &Path, config: &ModelConfig) -> Vec<Timestamp> {
-        models(dir, config).generations().unwrap()
+    /// The model sets of a training in `dir` as `config` says.
+    fn model_sets(dir: &Path, config: &ModelConfig) -> Vec<Timestamp> {
+        models(dir, config).model_sets().unwrap()
     }
 
-    /// The generation valid from `valid_from` of a training in `dir` as
+    /// The model set valid from `valid_from` of a training in `dir` as
     /// `config` says.
-    fn generation(dir: &Path, config: &ModelConfig, valid_from: Timestamp) -> StoredGeneration {
+    fn model_set(dir: &Path, config: &ModelConfig, valid_from: Timestamp) -> StoredModelSet {
         models(dir, config).read(valid_from).unwrap()
     }
 
-    /// The model of `side` of `generation`.
-    fn side_of(generation: &StoredGeneration, side: Side) -> &StoredModel {
-        generation
+    /// The model of `side` of `model_set`.
+    fn side_of(model_set: &StoredModelSet, side: Side) -> &StoredModel {
+        model_set
             .sides
             .iter()
             .find(|model| model.manifest.side == Some(side))
@@ -1090,7 +1089,7 @@ mod tests {
     /// and -1, of a mean of 0.25, which the fake predicts where its feature
     /// is missing; with the row of 11:30 settled after 12:00 it would be
     /// 2/3. The pair calibrated together on the calibration slice, the rows
-    /// from 12:00 settled by the train (`LINES`), the generation holding it
+    /// from 12:00 settled by the train (`LINES`), the model set holding it
     /// and no side's manifest a calibration of its own. Each side's
     /// probes are its rows of the calibration slice and its predictions on
     /// them, before the calibration: the fake's, their feature. The train
@@ -1117,10 +1116,10 @@ mod tests {
                 },
             }
         );
-        let generation = generation(dir.path(), &config(), t);
-        assert_eq!(generation.calibration, LINES);
+        let model_set = model_set(dir.path(), &config(), t);
+        assert_eq!(model_set.calibration, LINES);
         for side in Side::BOTH {
-            let stored = side_of(&generation, side);
+            let stored = side_of(&model_set, side);
             assert_eq!(stored.manifest.calibration, None, "{side:?}");
             let fake = LearnerConfig::Fake {}.load(&stored.model).unwrap();
             // The side's row: the decision's feature, then its payoff
@@ -1140,7 +1139,7 @@ mod tests {
 
     /// A calibration row whose feature is infinite: the fake predicts it,
     /// infinite, and the train fails, naming the model and the row, and
-    /// publishes no generation.
+    /// publishes no model set.
     #[rstest]
     fn a_prediction_on_the_calibration_slice_that_is_no_finite_number_fails_the_train() {
         let dir = tempfile::tempdir().unwrap();
@@ -1157,14 +1156,14 @@ mod tests {
             why.contains("long") && why.contains("inf") && why.contains("2026-01-06T15:00:00"),
             "{why}"
         );
-        assert_eq!(generations(dir.path(), &config()), []);
+        assert_eq!(model_sets(dir.path(), &config()), []);
     }
 
     /// The calibration slice's features the largest finite numbers, less
     /// at 13:00 and more at 15:00: the fake predicts them, finite, but the
     /// mean of each row's two sides' predictions, the level, overflows, so
     /// the pair's calibration is no finite line. The train fails, and
-    /// publishes no generation.
+    /// publishes no model set.
     #[rstest]
     fn a_calibration_that_is_no_finite_line_fails_the_train() {
         let dir = tempfile::tempdir().unwrap();
@@ -1182,18 +1181,18 @@ mod tests {
             why.contains("calibration") && why.contains("not finite"),
             "{why}"
         );
-        assert_eq!(generations(dir.path(), &config()), []);
+        assert_eq!(model_sets(dir.path(), &config()), []);
     }
 
     /// The short's stop on a row fitted on is worth nought, so its R there is
     /// no finite number and its fit fails. The long, fitted, publishes
     /// nothing: the train fails for the short's failure, which it names,
-    /// and the generation of the 6th stays the current one.
+    /// and the model set of the 6th stays the current one.
     #[rstest]
-    fn a_side_whose_fit_fails_publishes_no_generation() {
+    fn a_side_whose_fit_fails_publishes_no_model_set() {
         let dir = tempfile::tempdir().unwrap();
         let sixth = "2026-01-06T00:00:00Z";
-        publish_generation(dir.path(), &config(), sixth, (0.0, 0.0));
+        publish_model_set(dir.path(), &config(), sixth, (0.0, 0.0));
         let mut rows = rows();
         rows[1].outcomes.short.unit = Money::from("0 USD");
 
@@ -1204,13 +1203,13 @@ mod tests {
             panic!("{trained:?}");
         };
         assert!(why.contains("short") && why.contains("finite"), "{why}");
-        assert_eq!(generations(dir.path(), &config()), [at(sixth)]);
+        assert_eq!(model_sets(dir.path(), &config()), [at(sixth)]);
     }
 
-    /// The generation's publish fails: the train fails for the store,
-    /// which it names, and no generation is listed.
+    /// The model set's publish fails: the train fails for the store,
+    /// which it names, and no model set is listed.
     #[rstest]
-    fn a_publish_failing_publishes_no_generation() {
+    fn a_publish_failing_publishes_no_model_set() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), config());
         let models = models(dir.path(), &config());
@@ -1225,7 +1224,7 @@ mod tests {
             why.contains(&models.directory().display().to_string()),
             "{why}"
         );
-        assert_eq!(models.generations().unwrap(), []);
+        assert_eq!(models.model_sets().unwrap(), []);
     }
 
     /// A one-sided strategy's calibration is the level line alone, on its
@@ -1254,7 +1253,7 @@ mod tests {
             "{trained:?}"
         );
         assert_eq!(
-            generation(dir.path(), &long_only, t).calibration,
+            model_set(dir.path(), &long_only, t).calibration,
             Ksplit {
                 side_call: None,
                 ..LINES
@@ -1278,16 +1277,16 @@ mod tests {
         );
     }
 
-    /// The generation at the train's time, a baseline published by a train
+    /// The model set at the train's time, a baseline published by a train
     /// stopped before its manifest, is not listed: the train fits and
-    /// publishes the generation again, the fitted models in place of the
+    /// publishes the model set again, the fitted models in place of the
     /// baselines.
     #[rstest]
-    fn a_generation_at_the_trains_time_without_its_manifest_is_trained_again() {
+    fn a_model_set_at_the_trains_time_without_its_manifest_is_trained_again() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), config());
         let t = at("2026-01-07T00:00:00Z");
-        publish_generation(dir.path(), &config(), "2026-01-07T00:00:00Z", (0.8, 0.8));
+        publish_model_set(dir.path(), &config(), "2026-01-07T00:00:00Z", (0.8, 0.8));
         models(dir.path(), &config()).drop_manifest(t);
 
         let trained = training.train_at(t, |_, _| Ok(rows()));
@@ -1296,21 +1295,21 @@ mod tests {
             trained.outcome == published(dir.path(), &config(), t),
             "{trained:?}"
         );
-        let generation = generation(dir.path(), &config(), t);
+        let model_set = model_set(dir.path(), &config(), t);
         assert_eq!(
-            side_of(&generation, Side::Long).manifest.learner,
+            side_of(&model_set, Side::Long).manifest.learner,
             LearnerConfig::Fake {}
         );
     }
 
-    /// A generation is valid from the train's time: a rerun of the train
+    /// A model set is valid from the train's time: a rerun of the train
     /// fits nothing, and so replays nothing.
     #[rstest]
     fn a_train_with_every_model_in_use_replays_nothing_and_reports_each() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), config());
         let t = at("2026-01-07T00:00:00Z");
-        publish_generation(dir.path(), &config(), "2026-01-07T00:00:00Z", (0.5, 0.5));
+        publish_model_set(dir.path(), &config(), "2026-01-07T00:00:00Z", (0.5, 0.5));
         let mut replays = vec![];
 
         let trained = training.train_at(t, |from, to| {
@@ -1330,15 +1329,15 @@ mod tests {
         }
     }
 
-    /// Never retrained as retrained, a generation valid before the train,
+    /// Never retrained as retrained, a model set valid before the train,
     /// of the 6th, is not the train's: the train of the 7th replays its
-    /// window and publishes a generation valid from the 7th beside it.
+    /// window and publishes a model set valid from the 7th beside it.
     #[rstest]
-    fn never_retrained_a_generation_valid_before_the_train_does_not_stop_it() {
+    fn never_retrained_a_model_set_valid_before_the_train_does_not_stop_it() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), never());
         let (sixth, seventh) = (at("2026-01-06T00:00:00Z"), at("2026-01-07T00:00:00Z"));
-        publish_generation(dir.path(), &never(), "2026-01-06T00:00:00Z", (0.5, 0.5));
+        publish_model_set(dir.path(), &never(), "2026-01-06T00:00:00Z", (0.5, 0.5));
         let mut replays = vec![];
 
         let trained = training.train_at(seventh, |from, to| {
@@ -1348,7 +1347,7 @@ mod tests {
 
         assert_eq!(trained.outcome, published(dir.path(), &never(), seventh));
         assert_eq!(replays, [(sixth, seventh)]);
-        assert_eq!(generations(dir.path(), &never()), [sixth, seventh]);
+        assert_eq!(model_sets(dir.path(), &never()), [sixth, seventh]);
     }
 
     #[rstest]
@@ -1359,8 +1358,8 @@ mod tests {
 
         training.train_at(t, |_, _| Ok(rows()));
 
-        assert_eq!(generations(dir.path(), &config()), [t]);
-        let manifest = side_of(&generation(dir.path(), &config(), t), Side::Long)
+        assert_eq!(model_sets(dir.path(), &config()), [t]);
+        let manifest = side_of(&model_set(dir.path(), &config(), t), Side::Long)
             .manifest
             .clone();
         // The strategy's feature, then the bracket's payoff features.
@@ -1393,11 +1392,11 @@ mod tests {
             matches!(trained.outcome, Outcome::Published { .. }),
             "{trained:?}"
         );
-        let generation = generation(dir.path(), &config(), t);
+        let model_set = model_set(dir.path(), &config(), t);
 
         for side in Side::BOTH {
             assert_eq!(
-                side_of(&generation, side).manifest.baseline,
+                side_of(&model_set, side).manifest.baseline,
                 0.375,
                 "{side:?}"
             );
@@ -1439,13 +1438,13 @@ mod tests {
             panic!("{trained:?}");
         };
         assert!(why.contains("does not cover"), "{why}");
-        assert_eq!(generations(dir.path(), &config()), []);
+        assert_eq!(model_sets(dir.path(), &config()), []);
     }
 
     /// No row of the calibration slice settled by the train, the win at
     /// 23:30 settling after it: of a minimum of one row, the train fails,
     /// naming the calibration slice, its 0 rows and the minimum, and no
-    /// generation is published. It reached the 6th, built, and the counts of
+    /// model set is published. It reached the 6th, built, and the counts of
     /// both slices, the fit slice's 2 rows at 08:00 and 10:00.
     #[rstest]
     fn a_calibration_slice_of_fewer_rows_than_the_minimum_fails() {
@@ -1471,11 +1470,11 @@ mod tests {
                 ..Reached::default()
             }
         );
-        assert_eq!(generations(dir.path(), &config()), []);
+        assert_eq!(model_sets(dir.path(), &config()), []);
     }
 
     /// Rows of a feature more than the strategy's: neither side's model is
-    /// fitted on them, and no generation is published.
+    /// fitted on them, and no model set is published.
     #[rstest]
     fn rows_of_other_features_are_a_schema_mismatch() {
         let dir = tempfile::tempdir().unwrap();
@@ -1496,7 +1495,7 @@ mod tests {
             matches!(trained.outcome, Outcome::Failed(Failure::SchemaMismatch(_))),
             "{trained:?}"
         );
-        assert_eq!(generations(dir.path(), &config()), []);
+        assert_eq!(model_sets(dir.path(), &config()), []);
     }
 
     /// The section of `config` with a meta model on the fake learner, on a
@@ -1519,12 +1518,12 @@ mod tests {
             .build()
     }
 
-    /// Publishes under `dir` a generation of `config` valid from
+    /// Publishes under `dir` a model set of `config` valid from
     /// `valid_from`: each side traded a baseline predicting an R of its own
     /// of `(long, short)` on every row, its baseline that R, their pair's
     /// calibration leaving them as they are (`unchanged`), and, with a meta,
     /// a meta baseline predicting nought, calibrated as it is.
-    fn publish_generation(
+    fn publish_model_set(
         dir: &Path,
         config: &ModelConfig,
         valid_from: &str,
@@ -1569,7 +1568,7 @@ mod tests {
             .as_ref()
             .map(|_| baseline(meta_names(features().names()), None, 0.0));
         models(dir, config)
-            .publish(&StoredGeneration {
+            .publish(&StoredModelSet {
                 valid_from: at(valid_from),
                 sides,
                 calibration: unchanged(config),
@@ -1638,7 +1637,7 @@ mod tests {
         (models, trained, replays)
     }
 
-    /// The meta model of the generation of the 8th of `models`.
+    /// The meta model of the model set of the 8th of `models`.
     fn meta_of_the_eighth(models: &ModelStore) -> StoredModel {
         models
             .read(at("2026-01-08T00:00:00Z"))
@@ -1669,7 +1668,7 @@ mod tests {
     /// a mean of 0.25, which the fake predicts where its feature is missing,
     /// calibrated on the rest (`META_LINE`), its probes the calibration
     /// slice's shorts and its predictions on them, before the calibration. A
-    /// first train publishes a whole generation, its meta included, having
+    /// first train publishes a whole model set, its meta included, having
     /// built the 6th and the 7th and counted 2 rows in each slice of the
     /// out-of-fold pair, the meta and the sides of the 8th, the 7th's before and
     /// from noon.
@@ -1687,7 +1686,7 @@ mod tests {
         assert_eq!(
             trained.outcome,
             Outcome::Published {
-                generation: models.directory().join(eighth.to_string())
+                model_set: models.directory().join(eighth.to_string())
             },
             "{trained:?}"
         );
@@ -1700,7 +1699,7 @@ mod tests {
                 meta: Some(slices(2, 2, 1)),
             }
         );
-        assert_eq!(models.generations().unwrap(), [eighth]);
+        assert_eq!(models.model_sets().unwrap(), [eighth]);
         let meta = meta_of_the_eighth(&models);
         assert_eq!(
             meta.manifest.feature_names,
@@ -1757,44 +1756,44 @@ mod tests {
     /// the 7th, and
     /// no side's has one.
     #[rstest]
-    fn a_generation_with_a_meta_ships_sides_fitted_at_its_time_and_its_meta_records_its_out_of_fold_pairs()
+    fn a_model_set_with_a_meta_ships_sides_fitted_at_its_time_and_its_meta_records_its_out_of_fold_pairs()
      {
         let dir = tempfile::tempdir().unwrap();
         let (models, _, _) = at_the_eighth(dir.path(), day_meta(), two_days());
 
-        let generation = models.read(at("2026-01-08T00:00:00Z")).unwrap();
+        let model_set = models.read(at("2026-01-08T00:00:00Z")).unwrap();
 
-        let calibration = generation.calibration;
+        let calibration = model_set.calibration;
         close(calibration.level.alpha, -0.65);
         close(calibration.level.beta, 1.5);
         assert_eq!(calibration.side_call, Some(0.0));
 
         for side in Side::BOTH {
-            let stored = side_of(&generation, side);
+            let stored = side_of(&model_set, side);
             let probes: Vec<f64> = stored.manifest.probes.iter().map(|p| p.row[0]).collect();
             assert_eq!(probes, [0.55, 0.65], "{side:?}");
             assert_eq!(stored.manifest.out_of_fold, None, "{side:?}");
         }
         assert_eq!(
-            generation.meta.unwrap().manifest.out_of_fold,
+            model_set.meta.unwrap().manifest.out_of_fold,
             Some(at("2026-01-07T00:00:00Z"))
         );
     }
 
-    /// A train reads nothing of the store but the generation it would keep:
-    /// on a store holding the generations of the 6th, picking the long of
+    /// A train reads nothing of the store but the model set it would keep:
+    /// on a store holding the model sets of the 6th, picking the long of
     /// 1.2R, and of the 7th, the short of 0.9R, each with its meta, the
-    /// train of the 8th publishes the very generation it publishes on an
+    /// train of the 8th publishes the very model set it publishes on an
     /// empty store, its meta learning from its out-of-fold pair's shorts
     /// alone.
     #[rstest]
-    fn a_trains_generation_does_not_depend_on_the_generations_stored_before_it() {
+    fn a_trains_model_set_does_not_depend_on_the_model_sets_stored_before_it() {
         let (empty, stored) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         for (valid_from, rs) in [
             ("2026-01-06T00:00:00Z", (1.2, 0.0)),
             ("2026-01-07T00:00:00Z", (0.0, 0.9)),
         ] {
-            publish_generation(stored.path(), &day_meta(), valid_from, rs);
+            publish_model_set(stored.path(), &day_meta(), valid_from, rs);
         }
         let eighth = at("2026-01-08T00:00:00Z");
 
@@ -1825,7 +1824,7 @@ mod tests {
     /// rows, short of a minimum of three, while the sides of the 8th have
     /// three in each slice, the 7th's shorts at 09:00 and 14:00 added: the
     /// train fails, naming the out-of-fold pair, its slice, its count and the
-    /// minimum, and publishes no generation. It reached the 6th and the
+    /// minimum, and publishes no model set. It reached the 6th and the
     /// 7th, built, and the out-of-fold pair's slices, 2 rows each, no slice of the
     /// meta's or the sides', which it never fitted.
     #[rstest]
@@ -1865,7 +1864,7 @@ mod tests {
                 ..Reached::default()
             }
         );
-        assert_eq!(models.generations().unwrap(), []);
+        assert_eq!(models.model_sets().unwrap(), []);
     }
 
     /// `rows` as a time-only target has them: closed at their time, each
@@ -1992,7 +1991,7 @@ mod tests {
     fn a_train_succeeds_unless_it_failed() {
         let t = at("2026-01-07T00:00:00Z");
         let published = Outcome::Published {
-            generation: PathBuf::from("models").join(t.to_string()),
+            model_set: PathBuf::from("models").join(t.to_string()),
         };
         let already = Outcome::AlreadyPublished;
         let failed = Outcome::Failed(Failure::Error("no short row".to_string()));
@@ -2002,19 +2001,19 @@ mod tests {
         assert!(!Trained::from(failed).succeeded());
     }
 
-    /// A generation published reads with its directory; one already
+    /// A model set published reads with its directory; one already
     /// published as such; a failure as its reason.
     #[rstest]
     #[case::published(
-        Outcome::Published { generation: PathBuf::from("models/2026-01-07T00:00:00Z") },
-        &["published the generation models/2026-01-07T00:00:00Z"]
+        Outcome::Published { model_set: PathBuf::from("models/2026-01-07T00:00:00Z") },
+        &["published the model set models/2026-01-07T00:00:00Z"]
     )]
     #[case::failed(
         Outcome::Failed(Failure::Error("no short row".to_string())),
         &["failed: no short row"]
     )]
     #[case::already_published(Outcome::AlreadyPublished, &["already published"])]
-    fn an_outcome_reads_as_the_generation_published_already_published_or_the_failure(
+    fn an_outcome_reads_as_the_model_set_published_already_published_or_the_failure(
         #[case] outcome: Outcome,
         #[case] facts: &[&str],
     ) {

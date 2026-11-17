@@ -1,7 +1,7 @@
 //! When a strategy's models are trained, and what each train does: as
 //! its `Retrain` says (`ModelConfig::retrain`), every interval, on the
 //! fixed UTC grid of the interval's multiples since the Unix epoch,
-//! whatever the run start, in a backtest as live; or never, a generation
+//! whatever the run start, in a backtest as live; or never, a model set
 //! trained at each time the operator trains it at alone. At each train,
 //! what is done (`Plan`), alike in both modes.
 //!
@@ -10,7 +10,7 @@
 //! (`Retrain::validate`), a run's train times (`Schedule::times`), and the
 //! retrain times of a train over a span, none never retrained
 //! (`Schedule::retrain_times`). The model
-//! store reads it once more, as a key: generations of another retrain, or
+//! store reads it once more, as a key: model sets of another retrain, or
 //! of none, are another store's (`store`); and a live node once, building the retrain
 //! actor of a strategy only if it is retrained
 //! (`launcher::RetrainActor::new`).
@@ -26,16 +26,16 @@
 //! is trained at one time alone (`train --at`).
 //!
 //! A train at `t` is planned (`Schedule::plan`), the same in both modes: a
-//! generation the store holds valid exactly from `t` is kept, whole,
+//! model set the store holds valid exactly from `t` is kept, whole,
 //! already published, a train being deterministic; else the train trains a
-//! generation at `t`, whatever else the store holds, an older generation
+//! model set at `t`, whatever else the store holds, an older model set
 //! included, which a decision before `t` still uses: its sides fitted as of
 //! `t`, on the rows of their window back from `t` settled by then, and,
 //! with a meta, an out-of-fold pair of the sides fitted alike as of `t` less
 //! the meta's window, whose picks over the meta's window are the meta's rows, out of
 //! sample (`train`). The plan answers where the train's one replay starts
 //! (`Fits::replay_from`), at the first row a fit reads, the out-of-fold
-//! pair's with a meta: a kept generation reads none, its baselines its own,
+//! pair's with a meta: a kept model set reads none, its baselines its own,
 //! published with it (`store::ModelManifest::baseline`).
 
 use jiff::{SignedDuration, Timestamp};
@@ -54,14 +54,14 @@ use super::{config::ModelConfig, targets::Side};
 const GRID: &str = "RETRAIN";
 
 /// How a strategy's models are retrained: every interval, or never, a
-/// generation trained by `train --at` alone. A `[model]` section gives the
+/// model set trained by `train --at` alone. A `[model]` section gives the
 /// interval, such as `retrain = "168h"`; without one, never.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(from = "SignedDuration")]
 pub enum Retrain {
     /// At every multiple of the interval since the Unix epoch.
     Every(SignedDuration),
-    /// Never: no retrain, each `train --at` training a generation at its
+    /// Never: no retrain, each `train --at` training a model set at its
     /// time.
     #[default]
     Never,
@@ -90,17 +90,17 @@ pub struct Models<T> {
 /// What a train at a time does (`Schedule::plan`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Plan {
-    /// Keeps the generation valid from the train's time, whole: already
+    /// Keeps the model set valid from the train's time, whole: already
     /// published.
     Keep,
-    /// Trains a generation valid from the train's time.
+    /// Trains a model set valid from the train's time.
     Train(Fits),
 }
 
-/// What a train fits of the generation it trains at its time `at`.
+/// What a train fits of the model set it trains at its time `at`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Fits {
-    /// The train's time, which the generation is valid from.
+    /// The train's time, which the model set is valid from.
     pub at: Timestamp,
     /// The sides' fit, as of `at`.
     pub sides: Fit,
@@ -172,17 +172,17 @@ impl Schedule {
         }
     }
 
-    /// The plan of a train at `at`, the store holding generations valid
-    /// from `generations`: the generation valid exactly from `at` kept, if
+    /// The plan of a train at `at`, the store holding model sets valid
+    /// from `model_sets`: the model set valid exactly from `at` kept, if
     /// any, retrained or never retrained alike, as a train is deterministic;
-    /// else a generation trained at `at`, its sides fitted as
+    /// else a model set trained at `at`, its sides fitted as
     /// of `at` on the rows of their window back from it, and, with a meta,
     /// its out-of-fold pair fitted alike as of the meta's window before `at`.
-    /// The store is read for the generation kept alone: what a train fits
+    /// The store is read for the model set kept alone: what a train fits
     /// is the same whatever else the store holds.
     #[must_use]
-    pub fn plan(&self, at: Timestamp, generations: &[Timestamp]) -> Plan {
-        if generations.contains(&at) {
+    pub fn plan(&self, at: Timestamp, model_sets: &[Timestamp]) -> Plan {
+        if model_sets.contains(&at) {
             return Plan::Keep;
         }
         let fit = |at: Timestamp| Fit {
@@ -457,8 +457,8 @@ mod tests {
         }
     }
 
-    /// The valid-froms of a store's generations.
-    fn generations(times: &[&str]) -> Vec<Timestamp> {
+    /// The valid-froms of a store's model sets.
+    fn model_sets(times: &[&str]) -> Vec<Timestamp> {
         times.iter().map(|time| at(time)).collect()
     }
 
@@ -485,9 +485,9 @@ mod tests {
     const SEVENTH: &str = "2026-01-07T00:00:00Z";
     const EIGHTH: &str = "2026-01-08T00:00:00Z";
 
-    /// Retrained or never retrained alike, the generation valid exactly
+    /// Retrained or never retrained alike, the model set valid exactly
     /// from the train is kept whole, already published; one valid before
-    /// it is not, and a generation is trained: its sides on their window of
+    /// it is not, and a model set is trained: its sides on their window of
     /// 24 hours back from the train, and its out-of-fold pair as of the 5th,
     /// the meta's window of 48 hours before the train, on its window of 24
     /// hours back from there.
@@ -496,31 +496,31 @@ mod tests {
     #[case::retrained_of_the_day_before(daily(), &[SIXTH], train(SEVENTH, fit(SIXTH, SEVENTH), Some(fit(FOURTH, FIFTH))))]
     #[case::never_retrained_of_the_train(never(), &[SIXTH, SEVENTH], Plan::Keep)]
     #[case::never_retrained_of_the_day_before(never(), &[FIFTH, SIXTH, EIGHTH], train(SEVENTH, fit(SIXTH, SEVENTH), Some(fit(FOURTH, FIFTH))))]
-    fn the_generation_valid_from_the_train_is_kept_and_one_before_it_is_not(
+    fn the_model_set_valid_from_the_train_is_kept_and_one_before_it_is_not(
         #[case] schedule: Schedule,
         #[case] valid_froms: &[&str],
         #[case] plan: Plan,
     ) {
-        assert_eq!(schedule.plan(at(SEVENTH), &generations(valid_froms)), plan);
+        assert_eq!(schedule.plan(at(SEVENTH), &model_sets(valid_froms)), plan);
     }
 
     /// A train with a meta fits the same out-of-fold pair whatever the store
-    /// holds but the generation it keeps: on an empty store, one of a
-    /// generation after the train, or one of the generations before it, the
+    /// holds but the model set it keeps: on an empty store, one of a
+    /// model set after the train, or one of the model sets before it, the
     /// out-of-fold pair as of the 5th on its window back from there, the sides as of
-    /// the 7th; and never retrained alike, with no generation by the train.
+    /// the 7th; and never retrained alike, with no model set by the train.
     #[rstest]
     #[case::retrained_on_an_empty_store(daily(), &[])]
-    #[case::retrained_on_a_store_of_a_generation_after_the_train(daily(), &[EIGHTH])]
-    #[case::retrained_on_a_store_of_generations_before_the_train(daily(), &[FOURTH, SIXTH])]
+    #[case::retrained_on_a_store_of_a_model_set_after_the_train(daily(), &[EIGHTH])]
+    #[case::retrained_on_a_store_of_model_sets_before_the_train(daily(), &[FOURTH, SIXTH])]
     #[case::never_retrained_on_an_empty_store(never(), &[])]
-    #[case::never_retrained_on_a_store_of_a_generation_after_the_train(never(), &[EIGHTH])]
+    #[case::never_retrained_on_a_store_of_a_model_set_after_the_train(never(), &[EIGHTH])]
     fn a_train_with_a_meta_fits_its_out_of_fold_pair_as_of_the_metas_window_before_it_whatever_the_store_holds(
         #[case] schedule: Schedule,
         #[case] valid_froms: &[&str],
     ) {
         assert_eq!(
-            schedule.plan(at(SEVENTH), &generations(valid_froms)),
+            schedule.plan(at(SEVENTH), &model_sets(valid_froms)),
             train(SEVENTH, fit(SIXTH, SEVENTH), Some(fit(FOURTH, FIFTH)))
         );
     }

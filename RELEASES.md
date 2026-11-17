@@ -5,9 +5,9 @@ Released on TBD (UTC).
 ### Enhancements
 
 - Added `train --from --to`, training a periodic strategy at each retrain time of a span in time order, past failures, which it lists at the end
-- Added a live retrain at the start of a node of the latest retrain time whose generation the store lacks, as after the node was down then
+- Added a live retrain at the start of a node of the latest retrain time whose model set the store lacks, as after the node was down then
 - Added the output of a live retrain's `train` to the node's Nautilus log, each line a log record, its file holding the train's whole output
-- Added run figures to `train`'s report, a block per retrain time: the generation published, its directory, or the failure and its reason, the wall time, the CPU time and peak memory of the train process (Unix), the dataset days built and cached, and the rows of each fit and calibration slice of the sides, the out-of-fold pair and the meta beside `min_rows`
+- Added run figures to `train`'s report, a block per retrain time: the model set published, its directory, or the failure and its reason, the wall time, the CPU time and peak memory of the train process (Unix), the dataset days built and cached, and the rows of each fit and calibration slice of the sides, the out-of-fold pair and the meta beside `min_rows`
 
 ### Breaking Changes
 
@@ -17,10 +17,10 @@ Released on TBD (UTC).
 - Changed `[model]` and `[model.meta]` to require `min_rows`, the fewest rows of each fit and calibration slice; set it to at least 1
 - Changed the model store's version, so every model is trained again; datasets keep their keys
 - Changed `backtest` of a model strategy to train nothing, refusing a store with no model to trade on at its start and naming the `train` that fills it; run `train` over the backtest's span first
-- Changed `train`'s report to one block per retrain time opening `the train at <t>:`, the generation published read as `published the generation <directory>`, one not trained again as `already published`, retrained or not, and a failure as `failed: <reason>`, in place of a line per model reading "in use"; match the block's first line
-- Changed `Trained` to one `Outcome` of the generation and the figures it `Reached`, `Outcome::Published` holding the generation's directory, `ModelStore::publish` returning it and `Dataset::settled` returning the days it read beside its rows; read `trained.outcome` in place of each model's
+- Changed `train`'s report to one block per retrain time opening `the train at <t>:`, the model set published read as `published the model set <directory>`, one not trained again as `already published`, retrained or not, and a failure as `failed: <reason>`, in place of a line per model reading "in use"; match the block's first line
+- Changed `Trained` to one `Outcome` of the model set and the figures it `Reached`, `Outcome::Published` holding the model set's directory, `ModelStore::publish` returning it and `Dataset::settled` returning the days it read beside its rows; read `trained.outcome` in place of each model's
 - Removed `WalkForward::prepare`, `Schedule::ensure_trades` and `Plan::fits`; train at each of `Training::retrain_times` with `Training::train_at`, and check a backtest's start with `WalkForward::untrained`
-- Removed `DecidingModels::pick`; decide with `DecidingModels::decide`, or pick among a generation's pair with `DecidingModels::pick_among`
+- Removed `DecidingModels::pick`; decide with `DecidingModels::decide`, or pick among a model set's pair with `DecidingModels::pick_among`
 - Removed `Models::iter`, `Models::as_ref` and `Models::map`, which nothing called; read the `long`, `short` and `meta` fields
 - Renamed the module `model::holdout` to `model::earnings`, what decisions took and earned on rows, there being no holdout; import `Earnings`, `Trades`, `Trade`, `MetaMargin` and `STRESS` from `model::earnings`
 - Removed the `fake` learner from builds without the new `test-support` feature: a config with `learner = { kind = "fake" }` no longer loads; use `baseline`, `lightgbm` or `perpetual`
@@ -28,22 +28,22 @@ Released on TBD (UTC).
 - Removed the `keepalive_secs` argument of `lse`'s `LseWebSocketClient::connect`; drop it, the client pings every 25 s
 - Removed `Deserialize` from `TickSeries`; read tick series through a strategy config's `[data]` series
 - Removed `Launcher::in_process` outside the crate's own tests
-- Changed the model store to one generation per train: a train publishes its sides, their pair's calibration and its meta together under its retrain time, a manifest written last making it visible, keyed by every training setting of the sides and the meta, and a decision uses the latest generation's sides and meta together; train again, the store's version changed
-- Changed a newest generation failing its load checks to stop new entries with an error naming it and the check, read again at the next decision, instead of keeping the previous models; remove its `<valid from>/` directory and train it again, a train skipping a generation already published at its time
-- Renamed `ModelSet` to `ModelStore` and `ModelBlueprint::model_set` to `model_store`, the store of a strategy's generations; publish, list, read and swap them with `ModelStore::publish`, `generations`, `read` and `swap` in place of the per-side `ModelStore`, `ModelSet::pairs`, `ModelSet::valid_froms` and `MetaLevel::swap`
-- Removed `PairCalibration`, `ModelCalibration` and `ModelManifest`'s `strategy_id` and `valid_from`: a side's manifest holds no calibration, its pair's being `StoredGeneration::calibration`, and a meta's holds its `Line`
+- Changed the model store to one model set per train: a train publishes its sides, their pair's calibration and its meta together under its retrain time, a manifest written last making it visible, keyed by every training setting of the sides and the meta, and a decision uses the latest model set's sides and meta together; train again, the store's version changed
+- Changed a newest model set failing its load checks to stop new entries with an error naming it and the check, read again at the next decision, instead of keeping the previous models; remove its `<valid from>/` directory and train it again, a train skipping a model set already published at its time
+- Renamed `ModelSet`, the store of a strategy's model sets, to `ModelStore` and `ModelBlueprint::model_set` to `model_store`, `ModelSet` now naming a model set, the models one train publishes: its sides, their pair's calibration and its meta, loaded and checked together; publish, list, read and swap model sets with `ModelStore::publish`, `model_sets`, `read` and `swap` in place of the per-side `ModelStore`, the former `ModelSet::pairs` and `ModelSet::valid_froms`, and `MetaLevel::swap`
+- Removed `PairCalibration`, `ModelCalibration` and `ModelManifest`'s `strategy_id` and `valid_from`: a side's manifest holds no calibration, its pair's being `StoredModelSet::calibration`, and a meta's holds its `Line`
 - Removed `Step` and `Plan::meta_after_sides` from the schedule; read a train's plan as `Plan::Keep` or `Plan::Train` of `Fits`
-- Changed a meta model to learn from the out-of-sample picks of an out-of-fold pair its train fits a meta window before the retrain time, shipping beside sides fitted at that time, instead of from the decisions of the generations in the store, so a periodic strategy with a meta publishes its meta from its first train and a never-retrained one ships sides fresh at its train time; train again, the store's version changed
-- Removed `Kept::Waiting`: every generation of a strategy with a meta holds one, and `ModelStore::publish` refuses one without; read the out-of-fold pair's fit as `Fits::out_of_fold` and its time as `ModelManifest::out_of_fold`
-- Changed a never-retrained `train --at t` to train a generation at `t` unless one is already published there, as a periodic train does, instead of keeping the latest generation at or before `t` and reporting it "in use since"; an older generation still decides before `t`, so train a never-retrained strategy only at the time it is to trade from
-- Renamed `Outcome::InUse` to `Outcome::AlreadyPublished`, holding no time, the generation's being the train's, and removed `Retrain::in_use`; match `Outcome::AlreadyPublished`
+- Changed a meta model to learn from the out-of-sample picks of an out-of-fold pair its train fits a meta window before the retrain time, shipping beside sides fitted at that time, instead of from the decisions of the model sets in the store, so a periodic strategy with a meta publishes its meta from its first train and a never-retrained one ships sides fresh at its train time; train again, the store's version changed
+- Removed `Kept::Waiting`: every model set of a strategy with a meta holds one, and `ModelStore::publish` refuses one without; read the out-of-fold pair's fit as `Fits::out_of_fold` and its time as `ModelManifest::out_of_fold`
+- Changed a never-retrained `train --at t` to train a model set at `t` unless one is already published there, as a periodic train does, instead of keeping the latest model set at or before `t` and reporting it "in use since"; an older model set still decides before `t`, so train a never-retrained strategy only at the time it is to trade from
+- Renamed `Outcome::InUse` to `Outcome::AlreadyPublished`, holding no time, the model set's being the train's, and removed `Retrain::in_use`; match `Outcome::AlreadyPublished`
 - Renamed `Kept`, of failures alone, to `Failure`, its `Failed` to `Error`, `Outcome::Kept` to `Outcome::Failed` and `Retrained::Kept` to `Retrained::Failed`; match the new names
-- Changed a live retrain to train at its retrain time, its generation stamped and its data cut there as `train --at` does, once every series the strategy reads has a stored point at or after that time, a retrain due while another waits taking its place, the waiting one skipped with a warning, instead of at once at the catalog's last stored time; expect it after the first daily promotion past the retrain time, the previous generation deciding meanwhile, and train a skipped time with `train --from --to` if a backtest needs it
-- Changed `RetrainActor::new` to take the strategy's `ModelStore`, whose generations it lists at its start; pass the store the strategy reads
+- Changed a live retrain to train at its retrain time, its model set stamped and its data cut there as `train --at` does, once every series the strategy reads has a stored point at or after that time, a retrain due while another waits taking its place, the waiting one skipped with a warning, instead of at once at the catalog's last stored time; expect it after the first daily promotion past the retrain time, the previous model set deciding meanwhile, and train a skipped time with `train --from --to` if a backtest needs it
+- Changed `RetrainActor::new` to take the strategy's `ModelStore`, whose model sets it lists at its start; pass the store the strategy reads
 
 ### Security
 
-- Fixed a crash or power loss during a publish leaving a generation listed whose model files are cut short: a publish syncs its models' files to disk before it writes the manifest
+- Fixed a crash or power loss during a publish leaving a model set listed whose model files are cut short: a publish syncs its models' files to disk before it writes the manifest
 
 ### Fixes
 

@@ -1,5 +1,5 @@
 //! A strategy's decision, made in one place: `DecidingModels` lists the
-//! generations of its model store, swaps them in, picks a side, and applies the
+//! model sets of its model store, swaps them in, picks a side, and applies the
 //! meta's margin. It sees no strategy, cache or clock, so the model
 //! handle and the meta's examples decide through the same code, and the meta
 //! learns from the decisions the handle would make.
@@ -13,31 +13,31 @@
 //! each dataset row (`dataset::DatasetRow::sides`), each through
 //! `SideRow::new`, so a side's row is the same whoever builds it.
 //!
-//! `new` lists the generations once and fails on a read error, so no
+//! `new` lists the model sets once and fails on a read error, so no
 //! decision runs unlisted. `list` lists them again, when the caller chooses,
 //! and what a failure means is the caller's: the handle lists at each
 //! decision and logs a failure; the meta's examples decide on the store as
 //! it is when made, and fail if it cannot be read. A failed listing keeps the
-//! previous list, so a generation already listed can still swap in once its
+//! previous list, so a model set already listed can still swap in once its
 //! valid-from passes.
 //!
-//! A generation is swapped in only inside a decision, before it predicts
+//! A model set is swapped in only inside a decision, before it predicts
 //! (`store::Swap`), so no decision mixes two, and its sides and its meta
 //! decide together: no decision uses a long and a short of different
-//! trains, nor a meta beside sides of another train. A generation failing
+//! trains, nor a meta beside sides of another train. A model set failing
 //! its checks fails the decision with an error naming it and the check: no
 //! side is picked until it loads, and it is read again at the next. `pick`
-//! picks among the sides of the generation valid at the time, by
+//! picks among the sides of the model set valid at the time, by
 //! `pick_among`, the rule for a pair already in hand, which a train's meta
 //! also learns from, its out-of-fold pair being in no store: the pair's calibrated
 //! expectation of the decision, its level `C'` and side call `D'`
 //! (`store::Pair::expect`), each side's `E'` held to its margin in R and
 //! picked on by `payoff::pick`. `decide` takes the side picked if the
-//! generation's meta model, on the features with that side and the
+//! model set's meta model, on the features with that side and the
 //! decision's `C'` and `D'` (`features::meta_row`), expects of its trade a
 //! net R, its calibrated expected R, of at least its margin in R
 //! (`earnings::MetaMargin`), the trade as the target sets it whatever the
-//! meta expects. A generation of a strategy with a meta holds a meta model
+//! meta expects. A model set of a strategy with a meta holds a meta model
 //! (`store::ModelStore::load`). An expected R that is not finite, of a model
 //! predicting NaN say, clears no margin.
 
@@ -49,21 +49,21 @@ use super::{
     earnings::MetaMargin,
     features::{meta_row, side_row},
     payoff,
-    store::{Generation, ModelStore, Pair, Swap},
+    store::{ModelSet, ModelStore, Pair, Swap},
     targets::{PerSide, Side},
 };
 use crate::strategy::risk::R;
 
-/// A strategy's models as they decide: its model store's generations as last
-/// listed, and the generation swapped in so far.
+/// A strategy's models as they decide: its model store's model sets as last
+/// listed, and the model set swapped in so far.
 #[derive(Debug)]
 pub struct DecidingModels {
     /// The model store: each side traded, the long first, with its margin.
     models: ModelStore,
-    /// When the generations are valid from, as last listed.
+    /// When the model sets are valid from, as last listed.
     listed: Vec<Timestamp>,
-    /// The generations, swapped in decision by decision.
-    generations: Swap<Generation>,
+    /// The model sets, swapped in decision by decision.
+    model_sets: Swap<ModelSet>,
     /// The meta's margin, if the strategy has a meta.
     meta: Option<MetaMargin>,
 }
@@ -109,44 +109,44 @@ pub struct Taken {
 }
 
 impl DecidingModels {
-    /// The models of `models`, its generations listed, none swapped in
+    /// The models of `models`, its model sets listed, none swapped in
     /// yet.
     ///
     /// # Errors
     ///
-    /// Returns an error if the generations cannot be listed.
+    /// Returns an error if the model sets cannot be listed.
     pub fn new(models: &ModelStore) -> anyhow::Result<Self> {
         Ok(Self {
-            listed: models.generations()?,
-            generations: models.swap(),
+            listed: models.model_sets()?,
+            model_sets: models.swap(),
             meta: models.meta().map(|level| MetaMargin(level.config().margin)),
             models: models.clone(),
         })
     }
 
-    /// Lists the generations again, for the decisions from now. A failure
+    /// Lists the model sets again, for the decisions from now. A failure
     /// keeps the previous list.
     ///
     /// # Errors
     ///
-    /// Returns an error if the generations cannot be listed.
+    /// Returns an error if the model sets cannot be listed.
     pub fn list(&mut self) -> anyhow::Result<()> {
-        self.listed = self.models.generations()?;
+        self.listed = self.models.model_sets()?;
         Ok(())
     }
 
     /// The trade decided at `now` on the decision's `features` and each side's
-    /// row `sides`, by the latest generation valid then, swapped in: the side
+    /// row `sides`, by the latest model set valid then, swapped in: the side
     /// picked (`pick_among`), if there is no meta; with one, taken if the
-    /// generation's meta model, on the features with that side and the
+    /// model set's meta model, on the features with that side and the
     /// decision's level and side call, expects of it a net R, its calibrated
     /// expected R, of at least its margin, at the meta model's expected R.
-    /// None if no generation is valid yet, no side is picked or the margin
+    /// None if no model set is valid yet, no side is picked or the margin
     /// is not met.
     ///
     /// # Errors
     ///
-    /// Returns an error if the latest generation valid then fails its checks
+    /// Returns an error if the latest model set valid then fails its checks
     /// (`Swap::at`), holds no meta model with a meta, or a model fails to
     /// predict.
     pub fn decide(
@@ -155,11 +155,10 @@ impl DecidingModels {
         features: &[f64],
         sides: &PerSide<SideRow>,
     ) -> anyhow::Result<Option<Taken>> {
-        let Some((_, generation)) = self.generations.at(now, &self.listed)? else {
+        let Some((_, model_set)) = self.model_sets.at(now, &self.listed)? else {
             return Ok(None);
         };
-        let Some(picked) = Self::pick_among(generation.pair(), margins(&self.models), sides)?
-        else {
+        let Some(picked) = Self::pick_among(model_set.pair(), margins(&self.models), sides)? else {
             return Ok(None);
         };
         let taken = |meta_expected_r| Taken {
@@ -171,9 +170,9 @@ impl DecidingModels {
         let Some(margin) = self.meta else {
             return Ok(Some(taken(None)));
         };
-        let model = generation
+        let model = model_set
             .meta()
-            .context("the generation holds no meta model, and the strategy has a meta")?;
+            .context("the model set holds no meta model, and the strategy has a meta")?;
         let expected_r = model.predict(&meta_row(
             features,
             picked.side.order_side(),

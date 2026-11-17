@@ -1,28 +1,28 @@
-//! The model store: the generations a strategy's trains published, each
+//! The model store: the model sets a strategy's trains published, each
 //! valid from the retrain time it was trained at.
 //!
-//! A generation is one train's models (`StoredGeneration`): the model of
+//! A model set is one train's models (`StoredModelSet`): the model of
 //! each side the strategy trades, with the calibration of their pair, and
-//! the meta's, if the strategy has one, every generation of a strategy with
+//! the meta's, if the strategy has one, every model set of a strategy with
 //! a meta holding one. It is self-contained: its models are fixed as of its
 //! retrain time, by that train alone, from the data and the config, none
-//! derived from another generation nor changed by a later train; its meta
+//! derived from another model set nor changed by a later train; its meta
 //! learned from an out-of-fold pair its train fitted and did not publish
-//! (`train`). A decision uses the latest generation
+//! (`train`). A decision uses the latest model set
 //! valid at or before it, its sides and its meta together, so no meta ever
 //! decides beside the sides of another train, and no side beside another
 //! train's other side.
 //!
-//! A strategy's generations are in one directory, of its strategy id, its
+//! A strategy's model sets are in one directory, of its strategy id, its
 //! dataset's fingerprint (the features, the decision rule, the target and
 //! the venue settings of its dataset runs, see `dataset::fingerprint`) and
-//! its generation key: every training setting of its models, the sides'
+//! its model set key: every training setting of its models, the sides'
 //! (the learner and its settings, the retrain interval, the window, the
 //! calibration and the fewest rows of a slice) and the margins of both
 //! sides, which decide the side picked on each row and so the meta's rows,
 //! then the meta's (its learner and settings, window, calibration, margin
-//! and fewest rows) or none, and the store `VERSION`. So a generation is
-//! only ever listed beside generations of the same features, costs,
+//! and fewest rows) or none, and the store `VERSION`. So a model set is
+//! only ever listed beside model sets of the same features, costs,
 //! training, margins and meta, and of the same manifest. Backtest and live
 //! read the same list.
 //!
@@ -32,33 +32,33 @@
 //! each side the margins trade, with its margin and its feature names (the
 //! strategy's, then the target's payoff names, `features::side_names`),
 //! and the meta level, if any, with its config and its feature names; it
-//! publishes and lists the generations, and hands out their swap, each
+//! publishes and lists the model sets, and hands out their swap, each
 //! model checked against its level's feature names and the fingerprint. A
 //! train reads a level's feature names from it, so the names a model is
 //! published with are those it is checked against.
 //!
-//! `Swap` is how the generations are used: at each decision, in time
+//! `Swap` is how the model sets are used: at each decision, in time
 //! order, the latest valid then, loaded and checked before use, all its
-//! models together. A generation failing a check is refused with an error
+//! models together. A model set failing a check is refused with an error
 //! naming it and the check, no decision is made on it nor on the one before
-//! it, and it is read again at the next decision, so that a generation that
+//! it, and it is read again at the next decision, so that a model set that
 //! loads once mended is used from then.
 //!
-//! A generation is a directory, `<valid from>/` (an RFC 3339 time), holding
-//! its manifest, `generation.json` (`GenerationManifest`), and the
+//! A model set is a directory, `<valid from>/` (an RFC 3339 time), holding
+//! its manifest, `model_set.json` (`ModelSetManifest`), and the
 //! directory of the publish that wrote it, which holds a file per model,
 //! `long.json`, `short.json` and `meta.json`. A publish writes its models'
 //! files in a directory of its own, named by the process and the publish,
 //! each synced to disk, and the directories naming them, then the manifest
 //! naming that directory, written beside its name, synced and renamed onto
-//! it: the manifest is the generation's commit marker, a generation without
+//! it: the manifest is the model set's commit marker, a model set without
 //! one is not listed, a crash or a power loss leaves none listed with its
 //! models' files cut short, and publishers at once, in a
 //! backtest and a live node say, never write each other's files, the last
 //! manifest renamed naming the models of one publish. A model's file is its
 //! manifest (`ModelManifest`), the schema (the feature names in order, the
 //! fingerprint), the target spec and side, the learner, the meta's
-//! calibration, its level line (a side's is its pair's, the generation's,
+//! calibration, its level line (a side's is its pair's, the model set's,
 //! `calibration::Ksplit`), the time of the meta's out-of-fold pair, its baseline (the training mean of the R it
 //! learned on the rows it was fitted and calibrated on) and probe rows, of
 //! its calibration slice, with the predictions the model made on them when
@@ -97,10 +97,10 @@ use super::{
 };
 use crate::strategy::risk::R;
 
-/// The name of a generation's manifest, in its directory.
-const MANIFEST: &str = "generation.json";
+/// The name of a model set's manifest, in its directory.
+const MANIFEST: &str = "model_set.json";
 
-/// The name of a meta model's file, in the directory of its generation's
+/// The name of a meta model's file, in the directory of its model set's
 /// publish; a side's is its side's name.
 const META: &str = "meta";
 
@@ -111,20 +111,20 @@ const EXTENSION: &str = "json";
 /// temporary files apart.
 static PUBLISHES: AtomicU64 = AtomicU64::new(0);
 
-/// The version of what a published generation holds, its manifests
-/// (`GenerationManifest`, `ModelManifest`), its layout and how it is read.
-/// Keyed with the generation key (`generation_directory`): bumped by hand
+/// The version of what a published model set holds, its manifests
+/// (`ModelSetManifest`, `ModelManifest`), its layout and how it is read.
+/// Keyed with the model set key (`model_set_directory`): bumped by hand
 /// whenever that changes, which keys every store anew, so that no
-/// generation of another layout is read and every model is trained again,
+/// model set of another layout is read and every model is trained again,
 /// on the datasets as they are.
-const VERSION: u32 = 11;
+const VERSION: u32 = 12;
 
-/// A strategy's models: the generations its trains published, keyed by the
-/// one fingerprint of its dataset and its generation key, each side its
+/// A strategy's models: the model sets its trains published, keyed by the
+/// one fingerprint of its dataset and its model set key, each side its
 /// margins trade and its meta model, if it has one.
 #[derive(Debug, Clone)]
 pub struct ModelStore {
-    /// The directory of its generation key, its generations in it.
+    /// The directory of its model set key, its model sets in it.
     directory: PathBuf,
     /// The fingerprint of its dataset, which each model is checked against.
     fingerprint: String,
@@ -155,9 +155,9 @@ pub struct MetaLevel {
 /// first, the calibration of their pair, fitted on both sides' predictions,
 /// and the meta's model, if and only if the strategy has a meta.
 /// Self-contained: the models of one train, fixed as of its retrain time,
-/// none derived from another generation.
+/// none derived from another model set.
 #[derive(Debug, Clone, PartialEq)]
-pub struct StoredGeneration {
+pub struct StoredModelSet {
     pub valid_from: Timestamp,
     /// Each side traded, the long first, its manifest naming its side.
     pub sides: Vec<StoredModel>,
@@ -165,26 +165,26 @@ pub struct StoredGeneration {
     pub meta: Option<StoredModel>,
 }
 
-/// What a generation's manifest holds, written last as its commit marker.
+/// What a model set's manifest holds, written last as its commit marker.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct GenerationManifest {
+struct ModelSetManifest {
     /// The directory of the publish its models' files are in, within the
-    /// generation's.
+    /// model set's.
     publish: String,
     /// The calibration of its sides' pair.
     calibration: Ksplit,
 }
 
-/// A generation loaded and checked, as a decision uses it: its sides'
+/// A model set loaded and checked, as a decision uses it: its sides'
 /// pair, and its meta's model if the strategy has a meta, all of one train,
-/// fixed as of its retrain time and none derived from another generation.
+/// fixed as of its retrain time and none derived from another model set.
 #[derive(Debug)]
-pub struct Generation {
+pub struct ModelSet {
     pair: Pair,
     meta: Option<LoadedModel>,
 }
 
-/// The models of the sides a strategy trades of one generation, one of
+/// The models of the sides a strategy trades of one model set, one of
 /// each, loaded and checked together, or a train holds before publishing
 /// them, with the calibration fitted on them.
 #[derive(Debug)]
@@ -219,11 +219,11 @@ pub struct ModelManifest {
     pub learner: LearnerConfig,
     /// A meta model's calibration, the level line of its predictions of R,
     /// as a one-sided pair's (`Ksplit`); none of a side's, which its pair
-    /// calibrates (`StoredGeneration::calibration`).
+    /// calibrates (`StoredModelSet::calibration`).
     pub calibration: Option<Line>,
     /// The time of a meta model's out-of-fold pair: the time the pair whose
     /// picks it learned from was fitted as of, a meta's window before its
-    /// generation's; none of a side's.
+    /// model set's; none of a side's.
     pub out_of_fold: Option<Timestamp>,
     /// The model's baseline, the constant model its scores are read
     /// beside: the training mean of the R it learned on the rows it was
@@ -405,7 +405,7 @@ impl ModelStore {
     /// dataset runs (`ModelBlueprint::fingerprint`), and trained as its
     /// config says: each side its margins trade, and its meta model if its
     /// config has a meta section, in the directory of that fingerprint and
-    /// its generation key (`generation_directory`).
+    /// its model set key (`model_set_directory`).
     ///
     /// # Errors
     ///
@@ -417,7 +417,7 @@ impl ModelStore {
     ) -> anyhow::Result<Self> {
         let (features, config) = (blueprint.features(), blueprint.config());
         let directory =
-            generation_directory(root, blueprint.strategy_id(), fingerprint, config, VERSION)?;
+            model_set_directory(root, blueprint.strategy_id(), fingerprint, config, VERSION)?;
         let side_names = side_names(features.names(), &config.target.payoff_names());
         let sides = config
             .margins
@@ -440,21 +440,21 @@ impl ModelStore {
         })
     }
 
-    /// The directory of its generation key, its generations in it.
+    /// The directory of its model set key, its model sets in it.
     #[must_use]
     pub fn directory(&self) -> &Path {
         &self.directory
     }
 
-    /// Whether a strategy trades on its generations at `now`: a generation
+    /// Whether a strategy trades on its model sets at `now`: a model set
     /// is valid by then (`Swap::at`). Its models may still fail their checks
     /// as they load.
     ///
     /// # Errors
     ///
-    /// Returns an error if the generations cannot be listed.
+    /// Returns an error if the model sets cannot be listed.
     pub fn trades_by(&self, now: Timestamp) -> anyhow::Result<bool> {
-        Ok(self.generations()?.iter().any(|&time| time <= now))
+        Ok(self.model_sets()?.iter().any(|&time| time <= now))
     }
 
     /// Each side the margins trade, the long first.
@@ -474,14 +474,14 @@ impl ModelStore {
         self.meta.as_ref()
     }
 
-    /// The times its generations are valid from, in order: those whose
+    /// The times its model sets are valid from, in order: those whose
     /// manifest is written; none if nothing was published.
     ///
     /// # Errors
     ///
-    /// Returns an error if its directory cannot be read, or a generation
+    /// Returns an error if its directory cannot be read, or a model set
     /// with a manifest is named by no time.
-    pub fn generations(&self) -> anyhow::Result<Vec<Timestamp>> {
+    pub fn model_sets(&self) -> anyhow::Result<Vec<Timestamp>> {
         let entries = match fs::read_dir(&self.directory) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
             entries => entries
@@ -494,7 +494,7 @@ impl ModelStore {
             let manifest = path.join(MANIFEST);
             if !manifest
                 .try_exists()
-                .with_context(|| format!("reading the generation {}", path.display()))?
+                .with_context(|| format!("reading the model set {}", path.display()))?
             {
                 continue;
             }
@@ -502,31 +502,31 @@ impl ModelStore {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .and_then(|name| name.parse().ok())
-                .with_context(|| format!("naming the generation {}", path.display()))?;
+                .with_context(|| format!("naming the model set {}", path.display()))?;
             times.push(time);
         }
         times.sort();
         Ok(times)
     }
 
-    /// Publishes `generation`, valid from its time: its models' files
+    /// Publishes `model_set`, valid from its time: its models' files
     /// written in a directory of this publish, named by the process and the
     /// publish, and synced to disk with the directories naming them, then
     /// its manifest, naming that directory, written beside its name, synced
-    /// and renamed onto it, replacing the generation valid from then, if
-    /// any. Returns the generation's directory, named by its time in the
+    /// and renamed onto it, replacing the model set valid from then, if
+    /// any. Returns the model set's directory, named by its time in the
     /// store's.
     ///
     /// # Errors
     ///
-    /// Returns an error if a side's model names no side, the generation
+    /// Returns an error if a side's model names no side, the model set
     /// holds a meta model and the strategy has no meta or the reverse, or a
     /// file or a directory cannot be written or synced.
-    pub fn publish(&self, generation: &StoredGeneration) -> anyhow::Result<PathBuf> {
+    pub fn publish(&self, model_set: &StoredModelSet) -> anyhow::Result<PathBuf> {
         anyhow::ensure!(
-            generation.meta.is_some() == self.meta.is_some(),
-            "publishing a generation {} a meta model for a strategy {} a meta",
-            if generation.meta.is_some() {
+            model_set.meta.is_some() == self.meta.is_some(),
+            "publishing a model set {} a meta model for a strategy {} a meta",
+            if model_set.meta.is_some() {
                 "holding"
             } else {
                 "without"
@@ -537,7 +537,7 @@ impl ModelStore {
                 "without"
             }
         );
-        let directory = self.generation(generation.valid_from);
+        let directory = self.model_set(model_set.valid_from);
         let publish = format!(
             "{}-{}",
             std::process::id(),
@@ -545,8 +545,8 @@ impl ModelStore {
         );
         let models = directory.join(&publish);
         fs::create_dir_all(&models)
-            .with_context(|| format!("creating the generation {}", directory.display()))?;
-        for model in &generation.sides {
+            .with_context(|| format!("creating the model set {}", directory.display()))?;
+        for model in &model_set.sides {
             let side = model
                 .manifest
                 .side
@@ -554,36 +554,36 @@ impl ModelStore {
             write(&models.join(file(side.name())), model)?;
         }
 
-        if let Some(meta) = &generation.meta {
+        if let Some(meta) = &model_set.meta {
             write(&models.join(file(META)), meta)?;
         }
         // The models' files, synced each as written, are named on disk
         // before the manifest listing them is written.
         sync_directory(&models)
             .and_then(|()| sync_directory(&directory))
-            .with_context(|| format!("syncing the generation {}", directory.display()))?;
+            .with_context(|| format!("syncing the model set {}", directory.display()))?;
         let manifest = directory.join(MANIFEST);
         let written = manifest.with_extension(format!("{EXTENSION}.{publish}.tmp"));
-        let text = serde_json::to_string_pretty(&GenerationManifest {
+        let text = serde_json::to_string_pretty(&ModelSetManifest {
             publish,
-            calibration: generation.calibration,
+            calibration: model_set.calibration,
         })?;
         synced(&written, text.as_bytes())
             .and_then(|()| fs::rename(&written, &manifest))
             .and_then(|()| sync_directory(&directory))
-            .with_context(|| format!("writing the generation {}", manifest.display()))?;
+            .with_context(|| format!("writing the model set {}", manifest.display()))?;
         Ok(directory)
     }
 
-    /// The generation valid from `valid_from`, as published: the model of
+    /// The model set valid from `valid_from`, as published: the model of
     /// each side traded and its meta's, if the strategy has a meta.
     ///
     /// # Errors
     ///
     /// Returns an error if there is none, or a file of it cannot be read.
-    pub fn read(&self, valid_from: Timestamp) -> anyhow::Result<StoredGeneration> {
+    pub fn read(&self, valid_from: Timestamp) -> anyhow::Result<StoredModelSet> {
         let manifest = self.manifest(valid_from)?;
-        let models = self.generation(valid_from).join(&manifest.publish);
+        let models = self.model_set(valid_from).join(&manifest.publish);
         let sides = self
             .sides
             .iter()
@@ -594,7 +594,7 @@ impl ModelStore {
             .as_ref()
             .map(|_| read(&models.join(file(META))))
             .transpose()?;
-        Ok(StoredGeneration {
+        Ok(StoredModelSet {
             valid_from,
             sides,
             calibration: manifest.calibration,
@@ -602,22 +602,22 @@ impl ModelStore {
         })
     }
 
-    /// The generations as a strategy swaps them in (`Swap`), each loaded
+    /// The model sets as a strategy swaps them in (`Swap`), each loaded
     /// and checked as `load` does; none in use yet.
     #[must_use]
-    pub fn swap(&self) -> Swap<Generation> {
+    pub fn swap(&self) -> Swap<ModelSet> {
         let models = self.clone();
         Swap::new(move |valid_from| {
             models.load(valid_from).with_context(|| {
-                format!("the generation {}", models.generation(valid_from).display())
+                format!("the model set {}", models.model_set(valid_from).display())
             })
         })
     }
 
-    /// The generation valid from `valid_from`, loaded and checked: each
+    /// The model set valid from `valid_from`, loaded and checked: each
     /// side's model against the side models' feature names and the
     /// fingerprint (`StoredModel::load_side`), calibrated as a pair by the
-    /// generation's calibration, and the meta's, if the strategy has a meta,
+    /// model set's calibration, and the meta's, if the strategy has a meta,
     /// against the meta's.
     ///
     /// # Errors
@@ -625,7 +625,7 @@ impl ModelStore {
     /// Returns an error if it cannot be read, its meta model included, a
     /// model fails its checks, naming its level, or the calibration is not
     /// of as many sides as the pair.
-    fn load(&self, valid_from: Timestamp) -> anyhow::Result<Generation> {
+    fn load(&self, valid_from: Timestamp) -> anyhow::Result<ModelSet> {
         let stored = self.read(valid_from)?;
         let models = stored
             .sides
@@ -648,34 +648,34 @@ impl ModelStore {
                     .context("the meta model")
             })
             .transpose()?;
-        Ok(Generation {
+        Ok(ModelSet {
             pair: Pair::new(models, stored.calibration)?,
             meta,
         })
     }
 
-    /// The manifest of the generation valid from `valid_from`.
+    /// The manifest of the model set valid from `valid_from`.
     ///
     /// # Errors
     ///
     /// Returns an error if there is none, or it cannot be read.
-    fn manifest(&self, valid_from: Timestamp) -> anyhow::Result<GenerationManifest> {
-        read(&self.generation(valid_from).join(MANIFEST))
+    fn manifest(&self, valid_from: Timestamp) -> anyhow::Result<ModelSetManifest> {
+        read(&self.model_set(valid_from).join(MANIFEST))
     }
 
-    /// The directory of the generation valid from `valid_from`.
-    fn generation(&self, valid_from: Timestamp) -> PathBuf {
+    /// The directory of the model set valid from `valid_from`.
+    fn model_set(&self, valid_from: Timestamp) -> PathBuf {
         self.directory.join(valid_from.to_string())
     }
 
-    /// A generation of the store named by no time, so that listing it fails
-    /// while its generations can still be read.
+    /// A model set of the store named by no time, so that listing it fails
+    /// while its model sets can still be read.
     #[cfg(test)]
     fn unlistable(&self) -> PathBuf {
         self.directory.join("no time")
     }
 
-    /// Makes listing the generations fail (`generations`), until
+    /// Makes listing the model sets fail (`model_sets`), until
     /// `mend_listing`.
     #[cfg(test)]
     pub(super) fn break_listing(&self) {
@@ -689,15 +689,15 @@ impl ModelStore {
         fs::remove_dir_all(self.unlistable()).unwrap();
     }
 
-    /// Removes the manifest of the generation valid from `valid_from`, as a
-    /// publish stopped before it leaves the generation.
+    /// Removes the manifest of the model set valid from `valid_from`, as a
+    /// publish stopped before it leaves the model set.
     #[cfg(test)]
     pub(super) fn drop_manifest(&self, valid_from: Timestamp) {
-        fs::remove_file(self.generation(valid_from).join(MANIFEST)).unwrap();
+        fs::remove_file(self.model_set(valid_from).join(MANIFEST)).unwrap();
     }
 
-    /// Makes publishing a generation fail (`publish`), listing them still
-    /// finding none: the directory of the generation key a link to nowhere.
+    /// Makes publishing a model set fail (`publish`), listing them still
+    /// finding none: the directory of the model set key a link to nowhere.
     #[cfg(test)]
     pub(super) fn break_publishing(&self) {
         fs::create_dir_all(self.directory.parent().unwrap()).unwrap();
@@ -742,7 +742,7 @@ impl MetaLevel {
     }
 }
 
-impl Generation {
+impl ModelSet {
     /// Its sides' pair.
     #[must_use]
     pub const fn pair(&self) -> &Pair {
@@ -883,9 +883,9 @@ fn dataset_directory(root: &Path, strategy_id: StrategyId, fingerprint: Fingerpr
         .join(fingerprint.to_string())
 }
 
-/// The directory, under `root`, of the generations of `strategy_id` whose
+/// The directory, under `root`, of the model sets of `strategy_id` whose
 /// dataset has `fingerprint`, its models trained as `config` says, of the
-/// store `version` (`VERSION`): its dataset's, then its generation key, the
+/// store `version` (`VERSION`): its dataset's, then its model set key, the
 /// side models' training settings (the learner and its settings, the
 /// retrain interval, the window, the calibration and the fewest rows of a
 /// slice), the margins of both sides, the meta's training settings or none
@@ -894,7 +894,7 @@ fn dataset_directory(root: &Path, strategy_id: StrategyId, fingerprint: Fingerpr
 /// # Errors
 ///
 /// Returns an error if a learner cannot be written as JSON.
-fn generation_directory(
+fn model_set_directory(
     root: &Path,
     strategy_id: StrategyId,
     fingerprint: Fingerprint,
@@ -913,10 +913,10 @@ fn generation_directory(
     Ok(dataset_directory(root, strategy_id, fingerprint).join(key.to_string()))
 }
 
-/// The retrain `retrain` as the generation key holds it, its interval or
+/// The retrain `retrain` as the model set key holds it, its interval or
 /// never: a strategy retrained at another interval, or never, publishes to
 /// and reads from another store, so a weekly-retrained strategy never
-/// trades on a generation a daily-retrained one published between its
+/// trades on a model set a daily-retrained one published between its
 /// retrains, nor a strategy never retrained on a retrained one's.
 fn retrain_setting(retrain: Retrain) -> String {
     match retrain {
@@ -925,7 +925,7 @@ fn retrain_setting(retrain: Retrain) -> String {
     }
 }
 
-/// The margins `margins` as the generation key holds them, each in R,
+/// The margins `margins` as the model set key holds them, each in R,
 /// `long 0.5R short none`, so that a store keyed by margins of another
 /// unit, money, is another store.
 fn margins_text(margins: Margins) -> String {
@@ -937,7 +937,7 @@ fn margins_text(margins: Margins) -> String {
     )
 }
 
-/// The training settings of the meta `meta` as the generation key holds
+/// The training settings of the meta `meta` as the model set key holds
 /// them: its learner, window, calibration, margin in R and fewest rows of a
 /// slice; `no meta` of none.
 ///
@@ -958,21 +958,21 @@ fn meta_settings(meta: Option<&MetaConfig>) -> anyhow::Result<String> {
     ))
 }
 
-/// The generations of a model store as a strategy swaps them in, decision by
+/// The model sets of a model store as a strategy swaps them in, decision by
 /// decision in time order: at each, the latest valid then, read as an `M`
 /// and checked against the strategy before use. One failing a check is
-/// refused, with an error naming it and the check, and no generation is in
+/// refused, with an error naming it and the check, and no model set is in
 /// use until it loads: it is read again at the next decision. A model store
 /// hands it out (`ModelStore::swap`).
 pub struct Swap<M> {
-    /// The generation valid from a time, read and checked.
+    /// The model set valid from a time, read and checked.
     read_at: Box<dyn Fn(Timestamp) -> anyhow::Result<M>>,
-    /// The generation in use, and its valid-from.
+    /// The model set in use, and its valid-from.
     current: Option<(Timestamp, M)>,
 }
 
 impl<M> Swap<M> {
-    /// Swaps in the generations `read_at` reads and checks, by their
+    /// Swaps in the model sets `read_at` reads and checks, by their
     /// valid-from; none in use yet.
     fn new(read_at: impl Fn(Timestamp) -> anyhow::Result<M> + 'static) -> Self {
         Self {
@@ -981,7 +981,7 @@ impl<M> Swap<M> {
         }
     }
 
-    /// The generation in use at `now`, and its valid-from, among those
+    /// The model set in use at `now`, and its valid-from, among those
     /// valid from `valid_froms`, the store's list in order: the latest valid
     /// then, swapped in if not in use yet; none if none is valid yet.
     ///
@@ -1006,22 +1006,20 @@ impl<M> Swap<M> {
             self.current = None;
             // One message of the whole chain: Nautilus logs an error a
             // strategy's handler returns by its message alone.
-            let generation = (self.read_at)(latest).map_err(|e| {
-                anyhow::anyhow!(
-                    "no new entry until the generation valid from {latest} loads: {e:#}"
-                )
+            let model_set = (self.read_at)(latest).map_err(|e| {
+                anyhow::anyhow!("no new entry until the model set valid from {latest} loads: {e:#}")
             })?;
-            log::info!("the generation valid from {latest} in use from {now}");
-            self.current = Some((latest, generation));
+            log::info!("the model set valid from {latest} in use from {now}");
+            self.current = Some((latest, model_set));
         }
         Ok(self
             .current
             .as_ref()
-            .map(|(valid_from, generation)| (*valid_from, generation)))
+            .map(|(valid_from, model_set)| (*valid_from, model_set)))
     }
 }
 
-/// A swap reads as the generation in use.
+/// A swap reads as the model set in use.
 impl<M: Debug> Debug for Swap<M> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct(stringify!(Swap))
@@ -1265,10 +1263,10 @@ mod tests {
         }
     }
 
-    /// A generation of both sides valid from `valid_from`, each a fake
+    /// A model set of both sides valid from `valid_from`, each a fake
     /// probed on `rows`, calibrated by `PAIR`, and a meta's if `meta`.
-    fn generation(valid_from: &str, rows: &[Vec<f64>], meta: bool) -> StoredGeneration {
-        StoredGeneration {
+    fn model_set(valid_from: &str, rows: &[Vec<f64>], meta: bool) -> StoredModelSet {
+        StoredModelSet {
             valid_from: at(valid_from),
             sides: Side::BOTH
                 .into_iter()
@@ -1280,23 +1278,23 @@ mod tests {
     }
 
     #[rstest]
-    fn a_published_generation_reads_back_whole() {
+    fn a_published_model_set_reads_back_whole() {
         let dir = tempfile::tempdir().unwrap();
         let models = models(dir.path(), &with_meta());
-        let published = generation(MIDNIGHT, &[vec![0.3], vec![0.1 + 0.2]], true);
+        let published = model_set(MIDNIGHT, &[vec![0.3], vec![0.1 + 0.2]], true);
 
         models.publish(&published).unwrap();
 
         assert_eq!(models.read(at(MIDNIGHT)).unwrap(), published);
     }
 
-    /// Every generation of a strategy with a meta holds a meta model, and
+    /// Every model set of a strategy with a meta holds a meta model, and
     /// none of one without holds one: a publish of either otherwise is
     /// refused, naming the meta, and publishes nothing.
     #[rstest]
     #[case::without_a_meta_for_a_strategy_with_one(with_meta(), false)]
     #[case::with_a_meta_for_a_strategy_without_one(config(), true)]
-    fn a_generation_whose_meta_is_not_the_strategys_is_refused(
+    fn a_model_set_whose_meta_is_not_the_strategys_is_refused(
         #[case] config: ModelConfig,
         #[case] meta: bool,
     ) {
@@ -1304,11 +1302,11 @@ mod tests {
         let models = models(dir.path(), &config);
 
         let err = models
-            .publish(&generation(MIDNIGHT, &[vec![0.3]], meta))
+            .publish(&model_set(MIDNIGHT, &[vec![0.3]], meta))
             .unwrap_err();
 
         assert!(err.to_string().contains("meta"), "{err}");
-        assert_eq!(models.generations().unwrap(), []);
+        assert_eq!(models.model_sets().unwrap(), []);
     }
 
     #[rstest]
@@ -1321,7 +1319,7 @@ mod tests {
             vec![f64::NEG_INFINITY],
             vec![-0.0],
         ];
-        models.publish(&generation(MIDNIGHT, &rows, false)).unwrap();
+        models.publish(&model_set(MIDNIGHT, &rows, false)).unwrap();
 
         let read = models.read(at(MIDNIGHT)).unwrap();
 
@@ -1342,74 +1340,74 @@ mod tests {
     }
 
     #[rstest]
-    fn a_store_lists_the_times_its_generations_are_valid_from_in_order() {
+    fn a_store_lists_the_times_its_model_sets_are_valid_from_in_order() {
         let dir = tempfile::tempdir().unwrap();
         let models = models(dir.path(), &config());
-        assert!(models.generations().unwrap().is_empty());
+        assert!(models.model_sets().unwrap().is_empty());
 
         for time in ["2026-10-23T00:00:00Z", "2026-10-21T12:00:00Z"] {
             models
-                .publish(&generation(time, &[vec![0.5]], false))
+                .publish(&model_set(time, &[vec![0.5]], false))
                 .unwrap();
         }
 
         assert_eq!(
-            models.generations().unwrap(),
+            models.model_sets().unwrap(),
             [at("2026-10-21T12:00:00Z"), at("2026-10-23T00:00:00Z")]
         );
     }
 
-    /// A generation's manifest is written last: one whose models are
+    /// A model set's manifest is written last: one whose models are
     /// written and its manifest not, as a crash before it leaves, is not
     /// listed, so no decision uses it, nor does a model store trade on it.
     #[rstest]
-    fn a_generation_whose_manifest_is_missing_is_not_listed() {
+    fn a_model_set_whose_manifest_is_missing_is_not_listed() {
         let dir = tempfile::tempdir().unwrap();
         let models = models(dir.path(), &config());
         models
-            .publish(&generation(MIDNIGHT, &[vec![0.5]], false))
+            .publish(&model_set(MIDNIGHT, &[vec![0.5]], false))
             .unwrap();
         let noon = "2026-10-22T12:00:00Z";
         models
-            .publish(&generation(noon, &[vec![0.5]], false))
+            .publish(&model_set(noon, &[vec![0.5]], false))
             .unwrap();
 
         models.drop_manifest(at(noon));
 
-        assert_eq!(models.generations().unwrap(), [at(MIDNIGHT)]);
+        assert_eq!(models.model_sets().unwrap(), [at(MIDNIGHT)]);
         assert!(!models.trades_by(at("2026-10-21T23:00:00Z")).unwrap());
         assert!(models.trades_by(at(noon)).unwrap());
     }
 
     /// A publish writes its manifest after its models: one stopped by a
     /// model it cannot publish, the short's naming no side, after the
-    /// long's is written, fails naming it and lists no generation.
+    /// long's is written, fails naming it and lists no model set.
     #[rstest]
-    fn a_publish_stopped_before_its_last_model_lists_no_generation() {
+    fn a_publish_stopped_before_its_last_model_lists_no_model_set() {
         let dir = tempfile::tempdir().unwrap();
         let models = models(dir.path(), &config());
         let rows = [vec![0.5]];
-        let stopped = StoredGeneration {
+        let stopped = StoredModelSet {
             sides: vec![model(Some(Side::Long), &rows), model(None, &rows)],
-            ..generation(MIDNIGHT, &rows, false)
+            ..model_set(MIDNIGHT, &rows, false)
         };
 
         let err = models.publish(&stopped).unwrap_err().to_string();
 
         assert!(err.contains("names no side"), "{err}");
-        assert_eq!(models.generations().unwrap(), []);
+        assert_eq!(models.model_sets().unwrap(), []);
     }
 
     #[rstest]
-    fn a_generation_valid_from_a_fraction_of_a_second_lists_and_reads_back() {
+    fn a_model_set_valid_from_a_fraction_of_a_second_lists_and_reads_back() {
         let dir = tempfile::tempdir().unwrap();
         let models = models(dir.path(), &config());
-        let published = generation("2026-10-22T04:00:00.01Z", &[vec![0.5]], false);
+        let published = model_set("2026-10-22T04:00:00.01Z", &[vec![0.5]], false);
 
         models.publish(&published).unwrap();
 
         assert_eq!(
-            models.generations().unwrap(),
+            models.model_sets().unwrap(),
             [at("2026-10-22T04:00:00.01Z")]
         );
         assert_eq!(
@@ -1418,15 +1416,15 @@ mod tests {
         );
     }
 
-    /// Two publishers of a generation at the same time, say a backtest and
+    /// Two publishers of a model set at the same time, say a backtest and
     /// a live node's retrain, each write their own models and manifest
-    /// before the rename: neither fails, and the generation reads back
+    /// before the rename: neither fails, and the model set reads back
     /// whole, its models those of one publish.
     #[rstest]
-    fn publishers_at_the_same_time_at_once_each_publish_a_whole_generation() {
+    fn publishers_at_the_same_time_at_once_each_publish_a_whole_model_set() {
         let dir = tempfile::tempdir().unwrap();
         let models = models(dir.path(), &with_meta());
-        let published = generation(MIDNIGHT, &[vec![0.5]], true);
+        let published = model_set(MIDNIGHT, &[vec![0.5]], true);
 
         std::thread::scope(|scope| {
             for _ in 0..8 {
@@ -1441,20 +1439,20 @@ mod tests {
         assert_eq!(models.read(at(MIDNIGHT)).unwrap(), published);
     }
 
-    /// A generation published again at its time replaces the first whole:
+    /// A model set published again at its time replaces the first whole:
     /// its sides and its meta, the second's probed on other rows.
     #[rstest]
-    fn publishing_at_the_same_time_replaces_the_generation() {
+    fn publishing_at_the_same_time_replaces_the_model_set() {
         let dir = tempfile::tempdir().unwrap();
         let models = models(dir.path(), &with_meta());
         models
-            .publish(&generation(MIDNIGHT, &[vec![0.5]], true))
+            .publish(&model_set(MIDNIGHT, &[vec![0.5]], true))
             .unwrap();
-        let second = generation(MIDNIGHT, &[vec![0.9]], true);
+        let second = model_set(MIDNIGHT, &[vec![0.9]], true);
 
         models.publish(&second).unwrap();
 
-        assert_eq!(models.generations().unwrap(), [at(MIDNIGHT)]);
+        assert_eq!(models.model_sets().unwrap(), [at(MIDNIGHT)]);
         assert_eq!(models.read(at(MIDNIGHT)).unwrap(), second);
     }
 
@@ -1472,9 +1470,9 @@ mod tests {
         config
     }
 
-    /// A generation published under `with_meta()` is listed there alone:
+    /// A model set published under `with_meta()` is listed there alone:
     /// any other setting of the sides or of the meta selects another
-    /// generation key. Another learner, retrain interval, window,
+    /// model set key. Another learner, retrain interval, window,
     /// calibration, minimum of rows or target is other training; a model of
     /// another margin of either side, as one priced at another reference
     /// stake, the config's risk of the dataset balance, which a dataset's
@@ -1510,28 +1508,28 @@ mod tests {
     }))]
     #[case::another_meta_margin(meta_changed(|meta| meta.margin = R::new(0.6)))]
     #[case::more_meta_rows(meta_changed(|meta| meta.min_rows = 30))]
-    fn any_other_setting_of_the_sides_or_the_meta_lists_none_of_the_generations(
+    fn any_other_setting_of_the_sides_or_the_meta_lists_none_of_the_model_sets(
         #[case] other: ModelConfig,
     ) {
         let dir = tempfile::tempdir().unwrap();
         models(dir.path(), &with_meta())
-            .publish(&generation(MIDNIGHT, &[vec![0.5]], true))
+            .publish(&model_set(MIDNIGHT, &[vec![0.5]], true))
             .unwrap();
 
-        let listed = |config: &ModelConfig| models(dir.path(), config).generations().unwrap();
+        let listed = |config: &ModelConfig| models(dir.path(), config).model_sets().unwrap();
 
         assert_eq!(listed(&with_meta()), [at(MIDNIGHT)]);
         assert!(listed(&other).is_empty());
     }
 
-    /// Bumping the store version is another generation key: no generation
+    /// Bumping the store version is another model set key: no model set
     /// of another layout is read, and every model is trained again.
     #[rstest]
     fn bumping_the_store_version_keys_another_store() {
         let config = with_meta();
         let fingerprint = blueprint(&config).fingerprint().unwrap();
         let at = |version| {
-            generation_directory(
+            model_set_directory(
                 Path::new("models"),
                 StrategyId::from(STRATEGY),
                 fingerprint,
@@ -1544,28 +1542,28 @@ mod tests {
         assert_ne!(at(VERSION), at(VERSION + 1));
     }
 
-    /// The directory of a fixed strategy's generations under a models root,
-    /// as a literal: its id, its dataset's fingerprint, then its generation
+    /// The directory of a fixed strategy's model sets under a models root,
+    /// as a literal: its id, its dataset's fingerprint, then its model set
     /// key, of its sides' training settings, the margins of both sides in R,
-    /// `long 0.5R short 0.5R`, so that no generation published under a
+    /// `long 0.5R short 0.5R`, so that no model set published under a
     /// margin of another unit is listed, its meta's settings, its margin in
     /// R, `0.55R`, among them, or none, and the store `VERSION`. A change
-    /// that rekeyed every store, leaving the generations published to it
+    /// that rekeyed every store, leaving the model sets published to it
     /// behind, fails here. A deliberate rekey, a bump of `VERSION` or of
     /// `dataset::VERSION`, or a new input to the dataset's fingerprint or to
-    /// the generation key, updates the literals here; a rekey of the dataset
+    /// the model set key, updates the literals here; a rekey of the dataset
     /// updates the pinned dataset identifier too
     /// (`dataset::tests::a_fixed_strategys_dataset_keeps_its_identifier`).
     #[rstest]
     #[case::without_a_meta(
         config(),
-        "f3ccb00e55c138b7bfec59ea9311d2d896b94a50199b789d7446779df3690e83"
+        "de9488a0af76c9eb1ca60369056a7ed348d14d366627cbb7fb43af5f9861fd6f"
     )]
     #[case::with_a_meta(
         with_meta(),
-        "14e745ebb978ee6d7738e658c9e574780e5e5f42fabdb3b6d965a47d95fce216"
+        "03bf2de6d834d3508b955378eb2f8187779466d2951e987b9ef69db7102a00d2"
     )]
-    fn a_fixed_strategys_generations_keep_their_directory(
+    fn a_fixed_strategys_model_sets_keep_their_directory(
         #[case] config: ModelConfig,
         #[case] key: &str,
     ) {
@@ -1579,13 +1577,13 @@ mod tests {
         );
     }
 
-    /// A strategy trades on a generation valid by then: a store holding no
-    /// generation, or one valid later alone, has none to trade on yet; with
-    /// a meta section alike, each generation holding a meta model.
+    /// A strategy trades on a model set valid by then: a store holding no
+    /// model set, or one valid later alone, has none to trade on yet; with
+    /// a meta section alike, each model set holding a meta model.
     #[rstest]
     #[case::without_a_meta(config(), false)]
     #[case::with_a_meta(with_meta(), true)]
-    fn a_model_store_trades_on_a_generation_valid_by_then(
+    fn a_model_store_trades_on_a_model_set_valid_by_then(
         #[case] config: ModelConfig,
         #[case] meta: bool,
     ) {
@@ -1595,7 +1593,7 @@ mod tests {
 
         assert!(!trades(MIDNIGHT));
         models(dir.path(), &config)
-            .publish(&generation(MIDNIGHT, &[vec![0.5]], meta))
+            .publish(&model_set(MIDNIGHT, &[vec![0.5]], meta))
             .unwrap();
         assert!(trades(MIDNIGHT));
         assert!(!trades(before));
@@ -1619,7 +1617,7 @@ mod tests {
     }
 
     /// A side's model has no calibration of its own, its pair's being the
-    /// generation's, and a meta's its own level line: each loaded as the
+    /// model set's, and a meta's its own level line: each loaded as the
     /// other's level is refused.
     #[rstest]
     fn a_model_is_refused_at_the_other_levels_load() {
@@ -1639,19 +1637,19 @@ mod tests {
         assert!(meta_as_side.contains("side"), "{meta_as_side}");
     }
 
-    /// The fake long and short of a generation valid from midnight, on a
+    /// The fake long and short of a model set valid from midnight, on a
     /// feature `mid`, then the entry cost of the time-only target, each
     /// predicting its row's mid: the long's 0.4 and the short's 0.1 are C =
-    /// 0.25 and D = 0.3, calibrated by the generation's line `0.1 + 0.5 C`
+    /// 0.25 and D = 0.3, calibrated by the model set's line `0.1 + 0.5 C`
     /// and slope 1.5 to C' = 0.225 and D' = 0.45, the long expecting 0.45R
     /// and the short nought.
     #[rstest]
-    fn a_generations_pair_expects_each_sides_r_through_its_calibration() {
+    fn a_model_sets_pair_expects_each_sides_r_through_its_calibration() {
         let dir = tempfile::tempdir().unwrap();
         let models = models(dir.path(), &config());
         let fingerprint = blueprint(&config()).fingerprint().unwrap().to_string();
         let names = models.side(Side::Long).unwrap().feature_names().to_vec();
-        let mut published = generation(MIDNIGHT, &[], false);
+        let mut published = model_set(MIDNIGHT, &[], false);
         for stored in &mut published.sides {
             stored.manifest.fingerprint.clone_from(&fingerprint);
             stored.manifest.feature_names.clone_from(&names);
@@ -1659,11 +1657,11 @@ mod tests {
             stored.model = LearnerConfig::Fake {}.fit(&set).unwrap().save().unwrap();
         }
         models.publish(&published).unwrap();
-        let mut generations = models.swap();
+        let mut model_sets = models.swap();
         let midnight = at(MIDNIGHT);
 
-        let (_, generation) = generations.at(midnight, &[midnight]).unwrap().unwrap();
-        let expected = generation
+        let (_, model_set) = model_sets.at(midnight, &[midnight]).unwrap().unwrap();
+        let expected = model_set
             .pair()
             .expect(&PerSide {
                 long: SideRow::new(&[0.4], &[0.02]),
@@ -1713,7 +1711,7 @@ mod tests {
     }
 
     /// The manifests of earlier store versions are no models of this one:
-    /// a generation holding one is refused as it is read, naming its file.
+    /// a model set holding one is refused as it is read, naming its file.
     #[rstest]
     #[case::of_a_pair_calibrated_side(pair_calibrated_side)]
     #[case::of_a_platt_side(platt_side)]
@@ -1722,10 +1720,10 @@ mod tests {
     ) {
         let dir = tempfile::tempdir().unwrap();
         let models = models(dir.path(), &config());
-        models.publish(&generation(MIDNIGHT, &[], false)).unwrap();
+        models.publish(&model_set(MIDNIGHT, &[], false)).unwrap();
         let manifest = models.manifest(at(MIDNIGHT)).unwrap();
         let path = models
-            .generation(at(MIDNIGHT))
+            .model_set(at(MIDNIGHT))
             .join(manifest.publish)
             .join(file(Side::Long.name()));
         let current = serde_json::to_value(model(Some(Side::Long), &[])).unwrap();

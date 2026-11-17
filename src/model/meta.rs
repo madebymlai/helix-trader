@@ -25,7 +25,7 @@
 //! after its time; each side's row, its payoff features, is the row's own
 //! (`dataset::DatasetRow::sides`). The out-of-fold pair is in no store: the meta
 //! learns from nothing a store holds, and decides beside the sides its
-//! train fits as of its own time, in the one generation the train
+//! train fits as of its own time, in the one model set the train
 //! publishes. A row no side is picked on is no row of the meta; a
 //! long-only strategy gives it buys alone.
 //!

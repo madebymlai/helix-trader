@@ -58,7 +58,7 @@ pub struct ModelConfig<T = TargetConfig> {
     /// How often the model is retrained, such as `"168h"`: at every multiple
     /// of it since the Unix epoch, in a backtest as live
     /// (`model::schedule`). Left out, never: each `train --at` trains a
-    /// generation at its time (`Retrain::Never`).
+    /// model set at its time (`Retrain::Never`).
     #[serde(default)]
     #[builder(default, into)]
     pub retrain: Retrain,

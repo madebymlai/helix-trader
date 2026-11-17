@@ -16,7 +16,7 @@ use helix_trader::{
         config::{Margins, ModelConfig},
         features::{Feature, FeatureSet, side_names},
         learner::{LearnerConfig, LightGbmConfig},
-        store::StoredGeneration,
+        store::StoredModelSet,
         targets::Side,
         train::{Outcome, Training},
     },
@@ -132,9 +132,9 @@ fn training(catalog: &TempDir, models: &Path) -> Training {
         .unwrap()
 }
 
-/// The generation under `models` valid from `valid_from` of a training, as
+/// The model set under `models` valid from `valid_from` of a training, as
 /// `training` keys it.
-fn generation(models: &Path, valid_from: Timestamp) -> StoredGeneration {
+fn model_set(models: &Path, valid_from: Timestamp) -> StoredModelSet {
     blueprint(features(), config())
         .model_store(models)
         .unwrap()
@@ -156,7 +156,7 @@ fn t() -> Timestamp {
     ic::at("00:00:00") + SignedDuration::from_hours(48)
 }
 
-/// Each side published at t, in the generation valid from then, which
+/// Each side published at t, in the model set valid from then, which
 /// holds their pair's calibration, and each side's model, reloaded by its
 /// learner, predicts its probes, rows of the calibration slice, to the bit.
 #[rstest]
@@ -170,7 +170,7 @@ fn train_at_t_publishes_each_side_whose_probes_reload_to_identical_predictions()
     assert_eq!(
         trained.outcome,
         Outcome::Published {
-            generation: blueprint(features(), config())
+            model_set: blueprint(features(), config())
                 .model_store(models.path())
                 .unwrap()
                 .directory()
@@ -184,11 +184,11 @@ fn train_at_t_publishes_each_side_whose_probes_reload_to_identical_predictions()
     // A side's model reads the strategy's features, then the bracket's payoff
     // features, the names the decision checks it against.
     let names = side_names(features().names(), &target().payoff_names());
-    let generation = generation(models.path(), t());
-    assert_eq!(generation.valid_from, t());
-    assert!(generation.calibration.side_call.is_some());
-    assert_eq!(generation.meta, None);
-    for (side, stored) in Side::BOTH.into_iter().zip(generation.sides) {
+    let model_set = model_set(models.path(), t());
+    assert_eq!(model_set.valid_from, t());
+    assert!(model_set.calibration.side_call.is_some());
+    assert_eq!(model_set.meta, None);
+    for (side, stored) in Side::BOTH.into_iter().zip(model_set.sides) {
         assert_eq!(stored.manifest.side, Some(side));
         assert_eq!(stored.manifest.calibration, None, "{side:?}");
         assert_eq!(

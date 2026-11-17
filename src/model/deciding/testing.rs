@@ -26,7 +26,7 @@ use crate::{
         decide::DecisionRule,
         features::{FeatureSet, meta_names, side_names, testing::last_mid},
         learner::{LearnerConfig, TrainingSet},
-        store::{ModelManifest, ModelStore, Probe, StoredGeneration, StoredModel},
+        store::{ModelManifest, ModelStore, Probe, StoredModel, StoredModelSet},
         targets::{DEFAULT_ATR, Side, Target, TargetConfig},
     },
     strategy::{
@@ -223,10 +223,10 @@ pub(crate) fn store(models: &Path) -> ModelStore {
     model_store(models, &features(), &config())
 }
 
-/// A generation of `config` valid from `valid_from`, its long a baseline
+/// A model set of `config` valid from `valid_from`, its long a baseline
 /// predicting an R of `r(tenths)` whatever the row, as `baseline_for` says.
-pub(crate) fn baseline(valid_from: &str, tenths: usize) -> StoredGeneration {
-    generation_of(
+pub(crate) fn baseline(valid_from: &str, tenths: usize) -> StoredModelSet {
+    model_set_of(
         &features(),
         &config(),
         valid_from,
@@ -235,19 +235,19 @@ pub(crate) fn baseline(valid_from: &str, tenths: usize) -> StoredGeneration {
     )
 }
 
-/// A generation of `config` valid from `valid_from`: each side of `sides`,
+/// A model set of `config` valid from `valid_from`: each side of `sides`,
 /// every side traded, the long first, a baseline predicting an R of
 /// `r(tenths)` of its tenths (`baseline_for`), their pair's calibration
 /// leaving them as they are (`unchanged`), and the meta model `meta`, if
 /// any.
-pub(crate) fn generation_of(
+pub(crate) fn model_set_of(
     features: &Rc<FeatureSet>,
     config: &ModelConfig,
     valid_from: &str,
     sides: impl IntoIterator<Item = (Side, usize)>,
     meta: Option<StoredModel>,
-) -> StoredGeneration {
-    StoredGeneration {
+) -> StoredModelSet {
+    StoredModelSet {
         valid_from: at(valid_from),
         sides: sides
             .into_iter()
