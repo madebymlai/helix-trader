@@ -114,7 +114,7 @@ static PUBLISHES: AtomicU64 = AtomicU64::new(0);
 /// whenever that changes, which keys every store anew, so that no
 /// generation of another layout is read and every model is trained again,
 /// on the datasets as they are.
-const VERSION: u32 = 10;
+const VERSION: u32 = 11;
 
 /// A strategy's models: the generations its trains published, keyed by the
 /// one fingerprint of its dataset and its generation key, each side its
@@ -123,7 +123,6 @@ const VERSION: u32 = 10;
 pub struct ModelStore {
     /// The directory of its generation key, its generations in it.
     directory: PathBuf,
-    strategy_id: StrategyId,
     /// The fingerprint of its dataset, which each model is checked against.
     fingerprint: String,
     /// Each side traded, the long first.
@@ -166,7 +165,6 @@ pub struct StoredGeneration {
 /// What a generation's manifest holds, written last as its commit marker.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct GenerationManifest {
-    strategy_id: StrategyId,
     /// The directory of the publish its models' files are in, within the
     /// generation's.
     publish: String,
@@ -433,7 +431,6 @@ impl ModelStore {
         });
         Ok(Self {
             directory,
-            strategy_id: blueprint.strategy_id(),
             fingerprint: fingerprint.to_string(),
             sides,
             meta,
@@ -559,7 +556,6 @@ impl ModelStore {
         let manifest = directory.join(MANIFEST);
         let written = manifest.with_extension(format!("{EXTENSION}.{publish}.tmp"));
         let text = serde_json::to_string_pretty(&GenerationManifest {
-            strategy_id: self.strategy_id,
             publish,
             calibration: generation.calibration,
         })?;
@@ -1498,11 +1494,11 @@ mod tests {
     #[rstest]
     #[case::without_a_meta(
         config(),
-        "af12e28a00a856fd66038709142f3df7572a2e66ddf865f06a24fa4bcc6fcb50"
+        "f3ccb00e55c138b7bfec59ea9311d2d896b94a50199b789d7446779df3690e83"
     )]
     #[case::with_a_meta(
         with_meta(),
-        "90e529b2258853f90af3500e9e9d5a9bac681f553a594fbde336dc34f038299c"
+        "14e745ebb978ee6d7738e658c9e574780e5e5f42fabdb3b6d965a47d95fce216"
     )]
     fn a_fixed_strategys_generations_keep_their_directory(
         #[case] config: ModelConfig,
