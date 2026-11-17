@@ -229,8 +229,10 @@ fn a_train_over_a_span_publishes_each_retrain_time_in_order_then_only_those_the_
     assert!(succeeded, "{again}\n{stderr}");
     assert!(!again.contains("published the generation"), "{again}");
     for at in [day(21), day(22)] {
-        let already = format!("already published, valid from {at}");
-        assert!(train_line(&again, at).contains(&already), "{again}");
+        assert!(
+            train_line(&again, at).contains("already published"),
+            "{again}"
+        );
     }
 
     let (succeeded, earlier, stderr) = train_over(&files, catalog.path(), (twentieth, span.1));
@@ -359,7 +361,7 @@ fn never_retrained_a_train_publishes_at_its_time_beside_an_older_generation_whic
 
     assert!(published(&newer, day(22)), "{newer}");
     assert!(
-        again.contains(&format!("already published, valid from {}", day(22))),
+        train_line(&again, day(22)).contains("already published"),
         "{again}"
     );
     let (succeeded, stdout, stderr) = backtest(&files, catalog.path(), (day(21), day(22)));

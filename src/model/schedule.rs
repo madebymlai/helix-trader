@@ -53,16 +53,16 @@ use super::{config::ModelConfig, targets::Side};
 /// The name of the timer `times` fires on its own clock.
 const GRID: &str = "RETRAIN";
 
-/// How a strategy's models are retrained: every interval, or never, one
-/// generation trained and kept. A `[model]` section gives the
+/// How a strategy's models are retrained: every interval, or never, a
+/// generation trained by `train --at` alone. A `[model]` section gives the
 /// interval, such as `retrain = "168h"`; without one, never.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(from = "SignedDuration")]
 pub enum Retrain {
     /// At every multiple of the interval since the Unix epoch.
     Every(SignedDuration),
-    /// Never: one generation is trained, when a train finds none in use,
-    /// and kept.
+    /// Never: no retrain, each `train --at` training a generation at its
+    /// time.
     #[default]
     Never,
 }
@@ -90,9 +90,9 @@ pub struct Models<T> {
 /// What a train at a time does (`Schedule::plan`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Plan {
-    /// Keeps the generation valid from `valid_from`, the train's time,
-    /// whole: already published.
-    Keep { valid_from: Timestamp },
+    /// Keeps the generation valid from the train's time, whole: already
+    /// published.
+    Keep,
     /// Trains a generation valid from the train's time.
     Train(Fits),
 }
@@ -183,7 +183,7 @@ impl Schedule {
     #[must_use]
     pub fn plan(&self, at: Timestamp, generations: &[Timestamp]) -> Plan {
         if generations.contains(&at) {
-            return Plan::Keep { valid_from: at };
+            return Plan::Keep;
         }
         let fit = |at: Timestamp| Fit {
             from: at - self.sides,
@@ -252,30 +252,6 @@ impl<T> Models<T> {
         match side {
             Side::Long => self.long = Some(value),
             Side::Short => self.short = Some(value),
-        }
-    }
-
-    /// The value of each model, the long's, the short's, then the meta's.
-    pub fn iter(&self) -> impl Iterator<Item = &T> {
-        [&self.long, &self.short, &self.meta].into_iter().flatten()
-    }
-
-    /// The values by reference.
-    #[must_use]
-    pub const fn as_ref(&self) -> Models<&T> {
-        Models {
-            long: self.long.as_ref(),
-            short: self.short.as_ref(),
-            meta: self.meta.as_ref(),
-        }
-    }
-
-    /// The value of `f` of each model's.
-    pub fn map<U>(self, mut f: impl FnMut(T) -> U) -> Models<U> {
-        Models {
-            long: self.long.map(&mut f),
-            short: self.short.map(&mut f),
-            meta: self.meta.map(&mut f),
         }
     }
 }
@@ -503,12 +479,6 @@ mod tests {
         })
     }
 
-    fn keep(valid_from: &str) -> Plan {
-        Plan::Keep {
-            valid_from: at(valid_from),
-        }
-    }
-
     const FOURTH: &str = "2026-01-04T00:00:00Z";
     const FIFTH: &str = "2026-01-05T00:00:00Z";
     const SIXTH: &str = "2026-01-06T00:00:00Z";
@@ -522,9 +492,9 @@ mod tests {
     /// the meta's window of 48 hours before the train, on its window of 24
     /// hours back from there.
     #[rstest]
-    #[case::retrained_of_the_train(daily(), &[SIXTH, SEVENTH], keep(SEVENTH))]
+    #[case::retrained_of_the_train(daily(), &[SIXTH, SEVENTH], Plan::Keep)]
     #[case::retrained_of_the_day_before(daily(), &[SIXTH], train(SEVENTH, fit(SIXTH, SEVENTH), Some(fit(FOURTH, FIFTH))))]
-    #[case::never_retrained_of_the_train(never(), &[SIXTH, SEVENTH], keep(SEVENTH))]
+    #[case::never_retrained_of_the_train(never(), &[SIXTH, SEVENTH], Plan::Keep)]
     #[case::never_retrained_of_the_day_before(never(), &[FIFTH, SIXTH, EIGHTH], train(SEVENTH, fit(SIXTH, SEVENTH), Some(fit(FOURTH, FIFTH))))]
     fn the_generation_valid_from_the_train_is_kept_and_one_before_it_is_not(
         #[case] schedule: Schedule,

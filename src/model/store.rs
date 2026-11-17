@@ -49,9 +49,11 @@
 //! directory of the publish that wrote it, which holds a file per model,
 //! `long.json`, `short.json` and `meta.json`. A publish writes its models'
 //! files in a directory of its own, named by the process and the publish,
-//! then the manifest naming that directory, written beside its name and
-//! renamed onto it: the manifest is the generation's commit marker, a
-//! generation without one is not listed, and publishers at once, in a
+//! each synced to disk, and the directories naming them, then the manifest
+//! naming that directory, written beside its name, synced and renamed onto
+//! it: the manifest is the generation's commit marker, a generation without
+//! one is not listed, a crash or a power loss leaves none listed with its
+//! models' files cut short, and publishers at once, in a
 //! backtest and a live node say, never write each other's files, the last
 //! manifest renamed naming the models of one publish. A model's file is its
 //! manifest (`ModelManifest`), the schema (the feature names in order, the
@@ -73,6 +75,7 @@
 use std::{
     fmt::Debug,
     fs,
+    io::Write,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -114,7 +117,7 @@ static PUBLISHES: AtomicU64 = AtomicU64::new(0);
 /// whenever that changes, which keys every store anew, so that no
 /// generation of another layout is read and every model is trained again,
 /// on the datasets as they are.
-const VERSION: u32 = 10;
+const VERSION: u32 = 11;
 
 /// A strategy's models: the generations its trains published, keyed by the
 /// one fingerprint of its dataset and its generation key, each side its
@@ -123,7 +126,6 @@ const VERSION: u32 = 10;
 pub struct ModelStore {
     /// The directory of its generation key, its generations in it.
     directory: PathBuf,
-    strategy_id: StrategyId,
     /// The fingerprint of its dataset, which each model is checked against.
     fingerprint: String,
     /// Each side traded, the long first.
@@ -166,7 +168,6 @@ pub struct StoredGeneration {
 /// What a generation's manifest holds, written last as its commit marker.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct GenerationManifest {
-    strategy_id: StrategyId,
     /// The directory of the publish its models' files are in, within the
     /// generation's.
     publish: String,
@@ -433,7 +434,6 @@ impl ModelStore {
         });
         Ok(Self {
             directory,
-            strategy_id: blueprint.strategy_id(),
             fingerprint: fingerprint.to_string(),
             sides,
             meta,
@@ -511,8 +511,9 @@ impl ModelStore {
 
     /// Publishes `generation`, valid from its time: its models' files
     /// written in a directory of this publish, named by the process and the
-    /// publish, then its manifest, naming that directory, written beside its
-    /// name and renamed onto it, replacing the generation valid from then, if
+    /// publish, and synced to disk with the directories naming them, then
+    /// its manifest, naming that directory, written beside its name, synced
+    /// and renamed onto it, replacing the generation valid from then, if
     /// any. Returns the generation's directory, named by its time in the
     /// store's.
     ///
@@ -520,7 +521,7 @@ impl ModelStore {
     ///
     /// Returns an error if a side's model names no side, the generation
     /// holds a meta model and the strategy has no meta or the reverse, or a
-    /// file cannot be written.
+    /// file or a directory cannot be written or synced.
     pub fn publish(&self, generation: &StoredGeneration) -> anyhow::Result<PathBuf> {
         anyhow::ensure!(
             generation.meta.is_some() == self.meta.is_some(),
@@ -556,15 +557,20 @@ impl ModelStore {
         if let Some(meta) = &generation.meta {
             write(&models.join(file(META)), meta)?;
         }
+        // The models' files, synced each as written, are named on disk
+        // before the manifest listing them is written.
+        sync_directory(&models)
+            .and_then(|()| sync_directory(&directory))
+            .with_context(|| format!("syncing the generation {}", directory.display()))?;
         let manifest = directory.join(MANIFEST);
         let written = manifest.with_extension(format!("{EXTENSION}.{publish}.tmp"));
         let text = serde_json::to_string_pretty(&GenerationManifest {
-            strategy_id: self.strategy_id,
             publish,
             calibration: generation.calibration,
         })?;
-        fs::write(&written, text)
+        synced(&written, text.as_bytes())
             .and_then(|()| fs::rename(&written, &manifest))
+            .and_then(|()| sync_directory(&directory))
             .with_context(|| format!("writing the generation {}", manifest.display()))?;
         Ok(directory)
     }
@@ -790,6 +796,12 @@ impl Pair {
         Ok(self.calibration.apply(&predictions))
     }
 
+    /// The calibration of its sides' predictions.
+    #[must_use]
+    pub const fn calibration(&self) -> Ksplit {
+        self.calibration
+    }
+
     /// The model of `side`.
     ///
     /// # Panics
@@ -812,14 +824,44 @@ fn file(name: &str) -> String {
     format!("{name}.{EXTENSION}")
 }
 
-/// Writes `value` as JSON to `path`.
+/// Writes `value` as JSON to `path`, synced to disk (`synced`).
 ///
 /// # Errors
 ///
 /// Returns an error if the file cannot be written.
 fn write(path: &Path, value: &impl Serialize) -> anyhow::Result<()> {
-    fs::write(path, serde_json::to_string_pretty(value)?)
+    synced(path, serde_json::to_string_pretty(value)?.as_bytes())
         .with_context(|| format!("writing the model {}", path.display()))
+}
+
+/// Writes `contents` to the file `path` and syncs it to disk, so that a
+/// crash or a power loss after leaves it whole.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be written or synced.
+fn synced(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    let mut file = fs::File::create(path)?;
+    file.write_all(contents)?;
+    file.sync_all()
+}
+
+/// Syncs the entries of the directory `path` to disk, so that a file
+/// created or renamed in it is found there after a crash or a power loss.
+///
+/// # Errors
+///
+/// Returns an error if the directory cannot be opened or synced.
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    fs::File::open(path)?.sync_all()
+}
+
+/// Off Unix a directory cannot be opened to sync it: its entries are the
+/// file system's to persist.
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 /// The JSON of the file `path`.
@@ -1339,6 +1381,25 @@ mod tests {
         assert!(models.trades_by(at(noon)).unwrap());
     }
 
+    /// A publish writes its manifest after its models: one stopped by a
+    /// model it cannot publish, the short's naming no side, after the
+    /// long's is written, fails naming it and lists no generation.
+    #[rstest]
+    fn a_publish_stopped_before_its_last_model_lists_no_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let models = models(dir.path(), &config());
+        let rows = [vec![0.5]];
+        let stopped = StoredGeneration {
+            sides: vec![model(Some(Side::Long), &rows), model(None, &rows)],
+            ..generation(MIDNIGHT, &rows, false)
+        };
+
+        let err = models.publish(&stopped).unwrap_err().to_string();
+
+        assert!(err.contains("names no side"), "{err}");
+        assert_eq!(models.generations().unwrap(), []);
+    }
+
     #[rstest]
     fn a_generation_valid_from_a_fraction_of_a_second_lists_and_reads_back() {
         let dir = tempfile::tempdir().unwrap();
@@ -1498,11 +1559,11 @@ mod tests {
     #[rstest]
     #[case::without_a_meta(
         config(),
-        "af12e28a00a856fd66038709142f3df7572a2e66ddf865f06a24fa4bcc6fcb50"
+        "f3ccb00e55c138b7bfec59ea9311d2d896b94a50199b789d7446779df3690e83"
     )]
     #[case::with_a_meta(
         with_meta(),
-        "90e529b2258853f90af3500e9e9d5a9bac681f553a594fbde336dc34f038299c"
+        "14e745ebb978ee6d7738e658c9e574780e5e5f42fabdb3b6d965a47d95fce216"
     )]
     fn a_fixed_strategys_generations_keep_their_directory(
         #[case] config: ModelConfig,

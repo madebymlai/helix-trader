@@ -108,7 +108,7 @@ pub struct MetaConfig {
     pub calibration: SignedDuration,
     /// The net R the meta expects of the trade of the side picked, its
     /// calibrated expected R, from which the trade is taken
-    /// (`holdout::MetaMargin`).
+    /// (`earnings::MetaMargin`).
     pub margin: R,
     /// The fewest rows of the meta's fit slice and of its calibration
     /// slice, at least one: a train with fewer fails.

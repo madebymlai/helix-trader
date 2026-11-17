@@ -35,14 +35,14 @@
 //! first, has no score. Each model's skill against those baselines, its
 //! mean `R - E'`, calibration slope and top-decile gap (`score::ExpectedScore`) are
 //! given per retrain period and over the span, on all its rows with a
-//! generation, and what was earned there, in R (`holdout::Earnings`), beside
+//! generation, and what was earned there, in R (`earnings::Earnings`), beside
 //! every trade of those rows, its own, at the commission and at 1.5 times
 //! it. A side's trades taken are those picked for it on each row by the
 //! decision itself (`deciding::DecidingModels::pick_among`), before any
 //! meta: a row where both sides clear counts one trade, for the side
 //! expected the most, a tie none, so with no meta the sides' trades add up
 //! to the decisions returned. A meta's are the trades of the side picked its
-//! margin takes (`holdout::MetaMargin`), out of sample. All this judges the
+//! margin takes (`earnings::MetaMargin`), out of sample. All this judges the
 //! decision the handle returns, on the target's trade: no section adds the
 //! sides up, as the backtest's report gives what the strategy actually
 //! traded, which can differ whenever it filters its decisions.
@@ -56,8 +56,8 @@ use super::{
     blueprint::Stored,
     dataset::{self, Dataset, DatasetRow},
     deciding::{self, DecidingModels},
+    earnings::{Earnings, Example, MetaMargin, STRESS, in_r},
     features::meta_row,
-    holdout::{Earnings, Example, MetaMargin, STRESS, in_r},
     schedule::{Models, Schedule},
     score::ExpectedScore,
     store::{Baselined, ModelStore},
@@ -405,8 +405,8 @@ mod tests {
             dataset::DatasetVenue,
             decide::{DecisionRule, FeatureRow},
             deciding::testing::unchanged,
+            earnings::Trades,
             features::{FeatureSet, meta_names, side_names, testing::last_mid},
-            holdout::Trades,
             learner::{LearnerConfig, TrainingSet},
             schedule::Retrain,
             store::{ModelManifest, StoredGeneration, StoredModel},

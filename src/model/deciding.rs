@@ -36,7 +36,7 @@
 //! generation's meta model, on the features with that side and the
 //! decision's `C'` and `D'` (`features::meta_row`), expects of its trade a
 //! net R, its calibrated expected R, of at least its margin in R
-//! (`holdout::MetaMargin`), the trade as the target sets it whatever the
+//! (`earnings::MetaMargin`), the trade as the target sets it whatever the
 //! meta expects. A generation of a strategy with a meta holds a meta model
 //! (`store::ModelStore::load`). An expected R that is not finite, of a model
 //! predicting NaN say, clears no margin.
@@ -46,8 +46,8 @@ use jiff::Timestamp;
 
 use super::{
     calibration::Expected,
+    earnings::MetaMargin,
     features::{meta_row, side_row},
-    holdout::MetaMargin,
     payoff,
     store::{Generation, ModelStore, Pair, Swap},
     targets::{PerSide, Side},
@@ -133,25 +133,6 @@ impl DecidingModels {
     pub fn list(&mut self) -> anyhow::Result<()> {
         self.listed = self.models.generations()?;
         Ok(())
-    }
-
-    /// The side picked at `now` on each side's row `sides`, among the sides
-    /// of the latest generation valid then, swapped in (`pick_among`); none
-    /// without a generation valid, no side clearing its margin, or two tied.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the latest generation valid then fails its checks
-    /// (`Swap::at`), or a model fails to predict.
-    pub fn pick(
-        &mut self,
-        now: Timestamp,
-        sides: &PerSide<SideRow>,
-    ) -> anyhow::Result<Option<Picked>> {
-        let Some((_, generation)) = self.generations.at(now, &self.listed)? else {
-            return Ok(None);
-        };
-        Self::pick_among(generation.pair(), margins(&self.models), sides)
     }
 
     /// The trade decided at `now` on the decision's `features` and each side's

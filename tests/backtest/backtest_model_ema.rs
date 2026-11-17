@@ -604,10 +604,10 @@ fn live_train_args(config: &Path, catalog: &Path, models: &Path) -> Vec<OsString
 /// A live node's retrain, the binary's `train` started by its launcher,
 /// fails as `train` does, the fit slice at t of 34 rows short of a
 /// `min_rows` of 35 (`a_train_with_a_slice_of_fewer_rows_than_the_minimum_fails_naming_it_and_publishes_nothing`):
-/// the launcher keeps the current model, its reason naming the slice, its
-/// count and the minimum, and nothing trades.
+/// the retrain fails, its reason naming the slice, its count and the
+/// minimum, and nothing trades.
 #[rstest]
-fn a_live_retrain_through_the_train_subcommand_failing_is_kept_with_its_reason() {
+fn a_live_retrain_through_the_train_subcommand_failing_fails_with_its_reason() {
     let catalog = catalog();
     let dir = tempfile::tempdir().unwrap();
     let (config_path, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
@@ -619,7 +619,7 @@ fn a_live_retrain_through_the_train_subcommand_failing_is_kept_with_its_reason()
 
     let retrained = launcher.launch(t()).wait();
 
-    let Retrained::Kept(why) = retrained else {
+    let Retrained::Failed(why) = retrained else {
         panic!("{retrained:?}");
     };
     assert_too_few_rows(&why, "fit slice", 34, 35);

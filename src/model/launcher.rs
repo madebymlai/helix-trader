@@ -10,10 +10,10 @@
 //! runs; in tests a thread of this process (`Launcher::in_process`). A
 //! backtest, holding no node while it trains, trains in its own process
 //! and starts no launcher (`backtest_on_models`, in `main.rs`). The
-//! child's exit status says what it did: success is a train that kept no
-//! model, its generation published or already published; a failure,
+//! child's exit status says what it did: success is a train that did not
+//! fail, its generation published or already published; a failure,
 //! nothing published, the reason the error it printed last (`train` exits
-//! with an error when it keeps a model). Each line the child prints is a
+//! with an error when it fails). Each line the child prints is a
 //! log record of the node's process, so Nautilus' logger writes the
 //! train's whole output where it writes the node's, its log file among
 //! them (`Launcher::process`).
@@ -123,11 +123,12 @@ pub struct Running {
 /// What a finished train did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Retrained {
-    /// It kept no model: each model it trained was published, valid from
-    /// its time, or its current one is in use.
+    /// Its generation was published, valid from its time, or already
+    /// published.
     Succeeded,
-    /// It kept the current model; why, or why it failed.
-    Kept(String),
+    /// It failed, publishing nothing, the current generation deciding on;
+    /// why.
+    Failed(String),
 }
 
 impl Launcher {
@@ -168,7 +169,7 @@ impl Launcher {
                 if trained.succeeded() {
                     Retrained::Succeeded
                 } else {
-                    Retrained::Kept(trained.outcome.to_string())
+                    Retrained::Failed(trained.outcome.to_string())
                 }
             }),
         }
@@ -188,7 +189,7 @@ impl Launcher {
 
     /// This launcher, each of its trains logging what it did as it ends,
     /// on its own thread: as info when it succeeded, as an error with its
-    /// reason when it kept a current model.
+    /// reason when it failed.
     fn logged(self) -> Self {
         let train = self.train;
         Self {
@@ -196,9 +197,11 @@ impl Launcher {
                 let retrained = train(at);
                 match &retrained {
                     Retrained::Succeeded => {
-                        log::info!("the retrain at {at} succeeded, its models published or in use");
+                        log::info!(
+                            "the retrain at {at} succeeded, its generation published or already published"
+                        );
                     }
-                    Retrained::Kept(why) => log::error!("the retrain at {at}: {why}"),
+                    Retrained::Failed(why) => log::error!("the retrain at {at}: {why}"),
                 }
                 retrained
             }),
@@ -215,7 +218,7 @@ impl Launcher {
 fn child(command: &mut Command) -> Retrained {
     let mut child = match command.spawn() {
         Ok(child) => child,
-        Err(e) => return Retrained::Kept(format!("the train could not start: {e}")),
+        Err(e) => return Retrained::Failed(format!("the train could not start: {e}")),
     };
     // Read beside its standard error, so that neither pipe fills while
     // the other is read.
@@ -244,8 +247,8 @@ fn child(command: &mut Command) -> Retrained {
 
     match child.wait() {
         Ok(status) if status.success() => Retrained::Succeeded,
-        Ok(status) => Retrained::Kept(failure(tail.make_contiguous(), &status.to_string())),
-        Err(e) => Retrained::Kept(format!("waiting for the train: {e}")),
+        Ok(status) => Retrained::Failed(failure(tail.make_contiguous(), &status.to_string())),
+        Err(e) => Retrained::Failed(format!("waiting for the train: {e}")),
     }
 }
 
@@ -274,7 +277,7 @@ impl Running {
     }
 
     /// What the train did, once it finished; `None` while it runs. Asked
-    /// again after it answered, a train is kept, having no outcome left.
+    /// again after it answered, a train failed, having no outcome left.
     #[must_use]
     pub fn finished(&self) -> Option<Retrained> {
         match self.finished.try_recv() {
@@ -293,7 +296,7 @@ impl Running {
 
 /// A train whose thread ended without an outcome: it panicked.
 fn ended() -> Retrained {
-    Retrained::Kept("the train ended without an outcome".to_string())
+    Retrained::Failed("the train ended without an outcome".to_string())
 }
 
 /// A live node's retrains of a strategy, a Nautilus actor: at most one
@@ -501,7 +504,7 @@ impl Display for Retrained {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Succeeded => write!(f, "succeeded"),
-            Self::Kept(why) => write!(f, "{why}"),
+            Self::Failed(why) => write!(f, "{why}"),
         }
     }
 }
@@ -535,7 +538,7 @@ mod tests {
         log_capture,
         model::{
             deciding::testing::{baseline, store},
-            train::{Kept, Outcome},
+            train::{Failure, Outcome},
         },
         strategy::requirements::TickSeries,
     };
@@ -561,10 +564,10 @@ mod tests {
     }
 
     #[rstest]
-    fn a_panicking_in_process_train_is_kept() {
+    fn a_panicking_in_process_train_fails() {
         let launcher = Launcher::in_process(|_| panic!("the train panicked"));
 
-        let Retrained::Kept(why) = launcher.launch(at("2026-10-22T00:00:00Z")).wait() else {
+        let Retrained::Failed(why) = launcher.launch(at("2026-10-22T00:00:00Z")).wait() else {
             panic!("a panicking train succeeded");
         };
         assert!(why.contains("without an outcome"), "{why}");
@@ -581,7 +584,7 @@ mod tests {
     }
 
     #[rstest]
-    fn a_failing_child_is_kept_with_the_error_it_printed_last() {
+    fn a_failing_child_fails_with_the_error_it_printed_last() {
         let launcher = shell(
             "echo 'ERROR a log line of the replay' >&2; \
              echo 'Error: kept the current model: failed: 34 rows in the fit slice, fewer than min_rows 35' >&2; \
@@ -590,7 +593,7 @@ mod tests {
 
         assert_eq!(
             launcher.launch(at("2026-10-22T00:00:00Z")).wait(),
-            Retrained::Kept(
+            Retrained::Failed(
                 "kept the current model: failed: 34 rows in the fit slice, fewer than min_rows 35"
                     .to_string()
             )
@@ -598,20 +601,20 @@ mod tests {
     }
 
     #[rstest]
-    fn a_failing_child_printing_no_error_is_kept_with_its_status() {
+    fn a_failing_child_printing_no_error_fails_with_its_status() {
         let launcher = shell("exit 3");
 
-        let Retrained::Kept(why) = launcher.launch(at("2026-10-22T00:00:00Z")).wait() else {
+        let Retrained::Failed(why) = launcher.launch(at("2026-10-22T00:00:00Z")).wait() else {
             panic!("published");
         };
         assert!(why.contains('3'), "{why}");
     }
 
     #[rstest]
-    fn a_child_that_cannot_start_is_kept() {
+    fn a_child_that_cannot_start_fails() {
         let launcher = Launcher::process(PathBuf::from("/nonexistent/helix-trader"), vec![]);
 
-        let Retrained::Kept(why) = launcher.launch(at("2026-10-22T00:00:00Z")).wait() else {
+        let Retrained::Failed(why) = launcher.launch(at("2026-10-22T00:00:00Z")).wait() else {
             panic!("published");
         };
         assert!(why.contains("could not start"), "{why}");
@@ -722,12 +725,11 @@ mod tests {
     }
 
     /// A launcher handing each time it trains at to `finish`, each train
-    /// keeping the current model: the train fails, a slice of fewer rows
-    /// than the minimum.
-    fn keeping(finish: mpsc::Sender<Timestamp>) -> Launcher {
+    /// failing, a slice of fewer rows than the minimum.
+    fn failing(finish: mpsc::Sender<Timestamp>) -> Launcher {
         Launcher::in_process(move |at| {
             finish.send(at).unwrap();
-            Outcome::Kept(Kept::Failed(
+            Outcome::Failed(Failure::Error(
                 "34 rows in the fit slice, fewer than min_rows 35".to_string(),
             ))
             .into()
@@ -1008,11 +1010,10 @@ mod tests {
     }
 
     /// A finished retrain leaves the next retrain free to launch, whether
-    /// it published or kept the current model, which the strategy trades
-    /// on still.
+    /// it published or failed, the current generation deciding on.
     #[rstest]
     #[case::published(sending)]
-    #[case::keeping_the_model(keeping)]
+    #[case::failed(failing)]
     fn a_finished_retrain_makes_way_for_the_next(
         #[case] launcher: fn(mpsc::Sender<Timestamp>) -> Launcher,
     ) {
@@ -1039,7 +1040,7 @@ mod tests {
 
     /// Two retrain actors, each fired once at midnight and then left
     /// alone, no decision nor firing after: the train that published logs
-    /// its success as info, and the child that kept the current model,
+    /// its success as info, and the child that failed,
     /// printing why last (`Error: ` and the reason), logs that reason as an
     /// error, each as its train ends.
     #[rstest]
