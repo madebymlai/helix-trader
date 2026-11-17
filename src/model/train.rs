@@ -734,6 +734,7 @@ fn split<T>(
 ) -> (Vec<T>, Vec<T>) {
     let cut = UnixNanos::from(cut);
     let (mut fitted, mut calibrating) = (vec![], vec![]);
+
     for item in items {
         let (ts_event, settled_at) = of(&item);
         if ts_event >= cut {
