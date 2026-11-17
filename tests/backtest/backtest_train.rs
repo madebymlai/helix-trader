@@ -20,7 +20,7 @@ use helix_trader::{
         targets::Side,
         train::{Outcome, Training},
     },
-    strategy::{Declared, IndicatorArgs, risk::R},
+    strategy::{Declared, IndicatorArgs, Series, risk::R},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_indicators::indicator::Indicator;
@@ -94,8 +94,8 @@ const CHEAP: Declared<CheapArgs> = Declared::new("cheap");
 
 fn features() -> Rc<FeatureSet> {
     FeatureSet::builder()
-        .quotes(
-            InstrumentId::from(ic::INSTRUMENT_ID),
+        .feature(
+            &[Series::quotes(InstrumentId::from(ic::INSTRUMENT_ID))],
             CHEAP,
             &tables("cheap = {}"),
         )

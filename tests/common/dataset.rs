@@ -24,7 +24,7 @@ use helix_trader::{
         targets::{BracketSpec, Distance, Side, Target, TargetConfig, TargetRow},
     },
     strategy::{
-        Declared, IndicatorArgs, IndicatorsConfig,
+        Declared, IndicatorArgs, IndicatorsConfig, Series,
         conversions::Conversions,
         orders::{self, EntryRisk},
         requirements::{DataRequirements, TickSeries},
@@ -173,7 +173,11 @@ pub(crate) fn mid_tables() -> IndicatorsConfig {
 /// The probe's one feature, the last mid of IC's gold.
 pub(crate) fn features() -> Rc<FeatureSet> {
     FeatureSet::builder()
-        .quotes(InstrumentId::from(ic::INSTRUMENT_ID), MID, &mid_tables())
+        .feature(
+            &[Series::quotes(InstrumentId::from(ic::INSTRUMENT_ID))],
+            MID,
+            &mid_tables(),
+        )
         .build()
         .unwrap()
 }
@@ -516,8 +520,8 @@ pub(crate) const MISSING: Declared<MissingArgs> = Declared::new("missing");
 
 /// The features of the missing one alone on the quotes of IC's gold.
 pub(crate) fn missing() -> FeatureSetBuilder {
-    FeatureSet::builder().quotes(
-        InstrumentId::from(ic::INSTRUMENT_ID),
+    FeatureSet::builder().feature(
+        &[Series::quotes(InstrumentId::from(ic::INSTRUMENT_ID))],
         MISSING,
         &tables("missing = {}"),
     )
