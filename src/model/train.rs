@@ -21,7 +21,7 @@
 //! exactly from `t` is kept, already published, and replays nothing; else a
 //! generation is
 //! trained at `t`, its sides fitted as of `t` and, with a meta, its meta at
-//! `t` on the picks of an ancestor pair fitted as of `t` less the meta's
+//! `t` on the picks of an out-of-fold pair fitted as of `t` less the meta's
 //! window. Nothing else of the store is read: the generation a train
 //! publishes depends on the data, the config and `t` alone.
 //!
@@ -54,13 +54,13 @@
 //! of its calibration slice; its manifest, written last, makes it visible,
 //! so a train failing or stopped before it leaves nothing any decision uses.
 //!
-//! With a meta model (`model::meta`), its rows come from an ancestor pair
+//! With a meta model (`model::meta`), its rows come from an out-of-fold pair
 //! the same train fits, on the same rows, of the one replay: the sides
 //! fitted as of `t - Wm`, the meta's window before `t`
 //! (`MetaConfig::window`), as a train at `t - Wm` fits them, on its window
 //! back from there and split alike, held to the sides' minimum, a slice
-//! short of it failing the train naming the ancestor. The ancestor decides
-//! every row of `[t - Wm, t)` settled by `t` through the decision path, its
+//! short of it failing the train naming the out-of-fold pair. The pair
+//! decides every row of `[t - Wm, t)` settled by `t` through the decision path, its
 //! picks before any meta (`deciding::DecidingModels::pick_among`): those
 //! rows are out of sample for it, each after its time, and the picks are
 //! the meta's rows (`meta::examples`), whatever the store holds. The meta is
@@ -69,9 +69,9 @@
 //! (`MetaConfig::calibration`), calibrated by its level line alone
 //! (`calibration::Ksplit` of one side), held to its own minimum of rows
 //! (`MetaConfig::min_rows`) and checked as a side is, its manifest recording
-//! its ancestor's time (`store::ModelManifest::ancestor`). The ancestor is
-//! not published: the generation ships the sides fitted as of `t` beside
-//! the meta, so its sides are as fresh as a strategy's without a meta, and
+//! its out-of-fold pair's time (`store::ModelManifest::out_of_fold`). The
+//! out-of-fold pair is not published: the generation ships the sides fitted
+//! as of `t` beside the meta, so its sides are as fresh as a strategy's without a meta, and
 //! every generation of a strategy with a meta holds one.
 //!
 //! A train never errors: what goes wrong is an outcome, its failure with
@@ -79,7 +79,7 @@
 //! deciding on. It succeeds when it did not fail (`Trained::succeeded`). Beside its outcome, a train holds the figures it
 //! reached, failing or not (`Reached`): the days of the dataset it read,
 //! built or cached, and the rows of each slice it counted, of its sides, its
-//! ancestor and its meta, beside their minimum (`model::report`).
+//! out-of-fold pair and its meta, beside their minimum (`model::report`).
 
 use std::{fmt::Display, path::PathBuf};
 
@@ -144,8 +144,8 @@ struct Fitted {
     side: Option<Side>,
     /// A meta's level line; none of a side's, which its pair calibrates.
     calibration: Option<calibration::Line>,
-    /// The time a meta's ancestor pair was fitted as of; none of a side's.
-    ancestor: Option<Timestamp>,
+    /// The time a meta's out-of-fold pair was fitted as of; none of a side's.
+    out_of_fold: Option<Timestamp>,
     baseline: f64,
     /// Rows of its calibration slice and its predictions on them, before
     /// calibration.
@@ -164,8 +164,8 @@ struct SideFit<'a> {
     saved: SavedModel,
 }
 
-/// The sides' pair a train fitted, in hand to decide on, the ancestor's,
-/// and what of it a generation publishes: each side's level and model as
+/// The sides' pair a train fitted, in hand to decide on, the out-of-fold
+/// pair's, and what of it a generation publishes: each side's level and model as
 /// fitted, and the pair's calibration (`Pair::calibration`).
 struct PairFit<'a> {
     pair: Pair,
@@ -202,8 +202,8 @@ pub struct Reached {
     pub days: Option<DaysRead>,
     /// The slices of the sides fitted as of its time, once counted.
     pub sides: Option<Slices>,
-    /// The slices of the ancestor pair, with a meta, once counted.
-    pub ancestor: Option<Slices>,
+    /// The slices of the out-of-fold pair, with a meta, once counted.
+    pub out_of_fold: Option<Slices>,
     /// The slices of the meta, once counted.
     pub meta: Option<Slices>,
 }
@@ -306,8 +306,8 @@ impl Training {
 
     /// Trains the generation of `fits` and publishes it, valid from the
     /// train's time: on the rows `replay` settles from where the fits start,
-    /// its meta, if the strategy has one, learned from the ancestor's picks
-    /// (`meta`), then its sides' pair fitted as of the train's time
+    /// its meta, if the strategy has one, learned from the out-of-fold pair's
+    /// picks (`meta`), then its sides' pair fitted as of the train's time
     /// (`pair`), each side checked as a reader checks it
     /// (`Training::stored`). Each model is published; the generation's
     /// directory is returned. What it reached goes in `reached` as it goes.
@@ -315,8 +315,8 @@ impl Training {
     /// # Errors
     ///
     /// Returns an error if the replay, a fit, a check or the store fails, or
-    /// a slice has fewer rows than its level's minimum, the ancestor's and
-    /// the meta's naming it.
+    /// a slice has fewer rows than its level's minimum, the out-of-fold
+    /// pair's and the meta's naming it.
     fn generation(
         &self,
         fits: &Fits,
@@ -327,9 +327,9 @@ impl Training {
         let (rows, days) = self.dataset.settled(fits.replay_from(), at, replay)?;
         reached.days = Some(days);
         let meta = fits
-            .ancestor
+            .out_of_fold
             .zip(self.levels.meta.as_ref())
-            .map(|(ancestor, level)| self.meta(level, ancestor, at, &rows, reached))
+            .map(|(out_of_fold, level)| self.meta(level, out_of_fold, at, &rows, reached))
             .transpose()?;
         let pair = self.pair(fits.sides, &rows, &mut reached.sides)?;
         let calibration = pair.pair.calibration();
@@ -347,32 +347,32 @@ impl Training {
     }
 
     /// The meta model of `level` of a train at `at`, learned from the
-    /// ancestor pair fitted as `ancestor` says on `rows` (`pair`): its
-    /// examples the ancestor's picks, before any meta, on the rows of
+    /// out-of-fold pair fitted as `out_of_fold` says on `rows` (`pair`): its
+    /// examples the out-of-fold pair's picks, before any meta, on the rows of
     /// `[its time, at)` settled by `at` (`meta::examples`), fitted as of `at`
     /// (`Level::fit`) and checked as a reader checks it (`Training::stored`),
-    /// the ancestor's slices and the meta's counted in `reached`.
+    /// the out-of-fold pair's slices and the meta's counted in `reached`.
     ///
     /// # Errors
     ///
-    /// Returns an error if the ancestor's fit fails, naming it, a model
+    /// Returns an error if the out-of-fold pair's fit fails, naming it, a model
     /// fails to predict, or the meta's fit or check fails, naming the meta.
     fn meta(
         &self,
         level: &Level,
-        ancestor: Fit,
+        out_of_fold: Fit,
         at: Timestamp,
         rows: &[DatasetRow],
         reached: &mut Reached,
     ) -> anyhow::Result<StoredModel> {
         let pair = self
-            .pair(ancestor, rows, &mut reached.ancestor)
-            .with_context(|| format!("fitting the ancestor pair as of {}", ancestor.at))?
+            .pair(out_of_fold, rows, &mut reached.out_of_fold)
+            .with_context(|| format!("fitting the out-of-fold pair as of {}", out_of_fold.at))?
             .pair;
         let window = in_fit(
             rows,
             Fit {
-                from: ancestor.at,
+                from: out_of_fold.at,
                 at,
             },
         );
@@ -381,7 +381,7 @@ impl Training {
         })
         .context("making the meta model's rows")?;
         let fitted = level
-            .fit(at, ancestor.at, examples, &mut reached.meta)
+            .fit(at, out_of_fold.at, examples, &mut reached.meta)
             .context("fitting the meta model")?;
         self.stored(level, fitted)
             .context("checking the meta model")
@@ -470,7 +470,7 @@ impl Training {
             let fitted = Fitted {
                 side: Some(fit.side),
                 calibration: None,
-                ancestor: None,
+                out_of_fold: None,
                 baseline: fit.model.baseline(),
                 saved: fit.saved,
                 probes,
@@ -502,7 +502,7 @@ impl Training {
                 learner: level.learner.clone(),
                 calibration: fitted.calibration,
                 baseline: fitted.baseline,
-                ancestor: fitted.ancestor,
+                out_of_fold: fitted.out_of_fold,
                 probes: fitted.probes,
             },
             model: fitted.saved,
@@ -562,7 +562,7 @@ impl Level {
     }
 
     /// The meta model fitted as of `at` on `examples`, in time order, the
-    /// picks of the ancestor pair fitted as of `ancestor`: a regression of
+    /// picks of the out-of-fold pair fitted as of `out_of_fold`: a regression of
     /// each trade's realized R on its fit slice (`split`), of
     /// at least the minimum of rows as its calibration slice is
     /// (`ensure_rows`, counted in `slices`), calibrated by its level line alone (`Ksplit` of one
@@ -577,7 +577,7 @@ impl Level {
     fn fit(
         &self,
         at: Timestamp,
-        ancestor: Timestamp,
+        out_of_fold: Timestamp,
         examples: Vec<Example>,
         slices: &mut Option<Slices>,
     ) -> anyhow::Result<Fitted> {
@@ -623,7 +623,7 @@ impl Level {
             saved: model.save()?,
             side: None,
             calibration: Some(line),
-            ancestor: Some(ancestor),
+            out_of_fold: Some(out_of_fold),
             baseline,
             probes,
         })
@@ -1546,7 +1546,7 @@ mod tests {
                     side,
                     learner: LearnerConfig::Baseline {},
                     baseline: r,
-                    ancestor: None,
+                    out_of_fold: None,
                     probes: vec![],
                 },
                 model: model.save().unwrap(),
@@ -1581,15 +1581,15 @@ mod tests {
     /// `with_meta` on a meta window of 24 hours, retrained every day, its
     /// sides traded from `config`'s margins, the long from 1R, the short
     /// from 0.5R.
-    fn ancestral() -> ModelConfig {
+    fn day_meta() -> ModelConfig {
         with_meta(24)
     }
 
-    /// `ancestral`, never retrained.
-    fn never_ancestral() -> ModelConfig {
+    /// `day_meta`, never retrained.
+    fn never_day_meta() -> ModelConfig {
         ModelConfig {
             retrain: Retrain::Never,
-            ..ancestral()
+            ..day_meta()
         }
     }
 
@@ -1657,12 +1657,12 @@ mod tests {
     };
 
     /// On an empty store, retrained or never retrained alike, the train of
-    /// the 8th with a meta of 24 hours fits the ancestor pair as of the 7th
+    /// the 8th with a meta of 24 hours fits the out-of-fold pair as of the 7th
     /// on its window back from there, the 6th, as a train at the 7th would
-    /// (`LINES`), and the meta on the ancestor's picks over the 7th: each a
+    /// (`LINES`), and the meta on the out-of-fold pair's picks over the 7th: each a
     /// short, its level `-0.25 + 1.5p`, 0.575 and 0.725 on the calibration
     /// slice, and no side call. Fitted on the win at 23:30 of the 6th,
-    /// settled after the 7th, the ancestor's `alpha_C` would be 0.2833, both
+    /// settled after the 7th, the out-of-fold pair's `alpha_C` would be 0.2833, both
     /// sides clearing their margins alike, a tie picking none; fitted on the
     /// 7th, it would be the sides of the 8th. The meta, a regression of the
     /// R of the side picked on its fit slice, the 7th to noon, 1.5 and -1, of
@@ -1671,12 +1671,12 @@ mod tests {
     /// slice's shorts and its predictions on them, before the calibration. A
     /// first train publishes a whole generation, its meta included, having
     /// built the 6th and the 7th and counted 2 rows in each slice of the
-    /// ancestor, the meta and the sides of the 8th, the 7th's before and
+    /// out-of-fold pair, the meta and the sides of the 8th, the 7th's before and
     /// from noon.
     #[rstest]
-    #[case::retrained(ancestral())]
-    #[case::never_retrained(never_ancestral())]
-    fn a_train_with_a_meta_fits_its_meta_on_the_picks_of_an_ancestor_fitted_a_meta_window_before_it(
+    #[case::retrained(day_meta())]
+    #[case::never_retrained(never_day_meta())]
+    fn a_train_with_a_meta_fits_its_meta_on_the_picks_of_an_out_of_fold_pair_fitted_a_meta_window_before_it(
         #[case] config: ModelConfig,
     ) {
         let dir = tempfile::tempdir().unwrap();
@@ -1696,7 +1696,7 @@ mod tests {
             Reached {
                 days: Some(days(2, 0)),
                 sides: Some(slices(2, 2, 1)),
-                ancestor: Some(slices(2, 2, 1)),
+                out_of_fold: Some(slices(2, 2, 1)),
                 meta: Some(slices(2, 2, 1)),
             }
         );
@@ -1733,33 +1733,34 @@ mod tests {
         assert_eq!(model.predict(&[f64::NAN, -1.0, 0.6, 0.0]).unwrap(), 0.25);
     }
 
-    /// The meta's rows are the ancestor's picks over the meta's window
+    /// The meta's rows are the out-of-fold pair's picks over the meta's window
     /// alone: its baseline, the training mean of R on the rows it was fitted
     /// and calibrated on, is that of the 7th's four shorts, 1.5, -1, -1 and
-    /// 1.5, 0.25; with the ancestor's pick at 15:00 of the 6th, a short of
-    /// 0.875R winning 1.5R, on which the ancestor was calibrated, it would
+    /// 1.5, 0.25; with the out-of-fold pair's pick at 15:00 of the 6th, a
+    /// short of 0.875R winning 1.5R, on which the pair was calibrated, it would
     /// be 0.5.
     #[rstest]
-    fn a_metas_rows_are_its_ancestors_picks_over_its_window_alone() {
+    fn a_metas_rows_are_its_out_of_fold_pairs_picks_over_its_window_alone() {
         let dir = tempfile::tempdir().unwrap();
 
-        let (models, _, _) = at_the_eighth(dir.path(), ancestral(), two_days());
+        let (models, _, _) = at_the_eighth(dir.path(), day_meta(), two_days());
 
         assert_eq!(meta_of_the_eighth(&models).manifest.baseline, 0.25);
     }
 
     /// The sides published are fitted as of the train, the 8th, on their
-    /// window back from it, the 7th, not as of the ancestor's time: their
+    /// window back from it, the 7th, not as of the out-of-fold pair's time: their
     /// probes the 7th's calibration slice, at 0.55 and 0.65, and their
     /// calibration, worked as `META_LINE` is on the same rows and R, `alpha_C`
-    /// -0.65 and a slope of 1.5, no side call, where the ancestor's is
-    /// `LINES`. The meta's manifest records its ancestor's time, the 7th, and
+    /// -0.65 and a slope of 1.5, no side call, where the out-of-fold pair's
+    /// is `LINES`. The meta's manifest records its out-of-fold pair's time,
+    /// the 7th, and
     /// no side's has one.
     #[rstest]
-    fn a_generation_with_a_meta_ships_sides_fitted_at_its_time_and_its_meta_records_its_ancestors()
-    {
+    fn a_generation_with_a_meta_ships_sides_fitted_at_its_time_and_its_meta_records_its_out_of_fold_pairs()
+     {
         let dir = tempfile::tempdir().unwrap();
-        let (models, _, _) = at_the_eighth(dir.path(), ancestral(), two_days());
+        let (models, _, _) = at_the_eighth(dir.path(), day_meta(), two_days());
 
         let generation = models.read(at("2026-01-08T00:00:00Z")).unwrap();
 
@@ -1772,10 +1773,10 @@ mod tests {
             let stored = side_of(&generation, side);
             let probes: Vec<f64> = stored.manifest.probes.iter().map(|p| p.row[0]).collect();
             assert_eq!(probes, [0.55, 0.65], "{side:?}");
-            assert_eq!(stored.manifest.ancestor, None, "{side:?}");
+            assert_eq!(stored.manifest.out_of_fold, None, "{side:?}");
         }
         assert_eq!(
-            generation.meta.unwrap().manifest.ancestor,
+            generation.meta.unwrap().manifest.out_of_fold,
             Some(at("2026-01-07T00:00:00Z"))
         );
     }
@@ -1784,7 +1785,8 @@ mod tests {
     /// on a store holding the generations of the 6th, picking the long of
     /// 1.2R, and of the 7th, the short of 0.9R, each with its meta, the
     /// train of the 8th publishes the very generation it publishes on an
-    /// empty store, its meta learning from its ancestor's shorts alone.
+    /// empty store, its meta learning from its out-of-fold pair's shorts
+    /// alone.
     #[rstest]
     fn a_trains_generation_does_not_depend_on_the_generations_stored_before_it() {
         let (empty, stored) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -1792,12 +1794,12 @@ mod tests {
             ("2026-01-06T00:00:00Z", (1.2, 0.0)),
             ("2026-01-07T00:00:00Z", (0.0, 0.9)),
         ] {
-            publish_generation(stored.path(), &ancestral(), valid_from, rs);
+            publish_generation(stored.path(), &day_meta(), valid_from, rs);
         }
         let eighth = at("2026-01-08T00:00:00Z");
 
-        let (on_empty, _, _) = at_the_eighth(empty.path(), ancestral(), two_days());
-        let (on_stored, _, _) = at_the_eighth(stored.path(), ancestral(), two_days());
+        let (on_empty, _, _) = at_the_eighth(empty.path(), day_meta(), two_days());
+        let (on_stored, _, _) = at_the_eighth(stored.path(), day_meta(), two_days());
 
         assert_eq!(
             on_stored.read(eighth).unwrap(),
@@ -1805,13 +1807,13 @@ mod tests {
         );
     }
 
-    /// One replay serves the ancestor, the meta and the sides: from the
-    /// ancestor's window back from the 7th, the 6th, to the train, the 8th.
+    /// One replay serves the out-of-fold pair, the meta and the sides: from
+    /// the out-of-fold pair's window back from the 7th, the 6th, to the train, the 8th.
     #[rstest]
-    fn a_train_with_a_meta_replays_once_from_its_ancestors_window_to_its_time() {
+    fn a_train_with_a_meta_replays_once_from_its_out_of_fold_pairs_window_to_its_time() {
         let dir = tempfile::tempdir().unwrap();
 
-        let (_, _, replays) = at_the_eighth(dir.path(), ancestral(), two_days());
+        let (_, _, replays) = at_the_eighth(dir.path(), day_meta(), two_days());
 
         assert_eq!(
             replays,
@@ -1819,19 +1821,19 @@ mod tests {
         );
     }
 
-    /// The ancestor's fit slice, the 6th's wins and losses before noon, two
+    /// The out-of-fold pair's fit slice, the 6th's wins and losses before noon, two
     /// rows, short of a minimum of three, while the sides of the 8th have
     /// three in each slice, the 7th's shorts at 09:00 and 14:00 added: the
-    /// train fails, naming the ancestor, its slice, its count and the
+    /// train fails, naming the out-of-fold pair, its slice, its count and the
     /// minimum, and publishes no generation. It reached the 6th and the
-    /// 7th, built, and the ancestor's slices, 2 rows each, no slice of the
+    /// 7th, built, and the out-of-fold pair's slices, 2 rows each, no slice of the
     /// meta's or the sides', which it never fitted.
     #[rstest]
-    fn an_ancestor_slice_of_fewer_rows_than_the_sides_minimum_fails_the_train_naming_it() {
+    fn an_out_of_fold_pairs_slice_of_fewer_rows_than_the_sides_minimum_fails_the_train_naming_it() {
         let dir = tempfile::tempdir().unwrap();
         let three = ModelConfig {
             min_rows: 3,
-            ..ancestral()
+            ..day_meta()
         };
         let short = |time, wins| row_of(time, vec![0.6], (wins, wins), hour());
         let mut rows = two_days();
@@ -1847,7 +1849,7 @@ mod tests {
         };
 
         for fact in [
-            "ancestor",
+            "out-of-fold pair",
             "2026-01-07T00:00:00Z",
             "fit slice",
             "2 rows",
@@ -1859,7 +1861,7 @@ mod tests {
             trained.reached,
             Reached {
                 days: Some(days(2, 0)),
-                ancestor: Some(slices(2, 2, 3)),
+                out_of_fold: Some(slices(2, 2, 3)),
                 ..Reached::default()
             }
         );
@@ -1892,15 +1894,15 @@ mod tests {
 
     /// A meta model learns the R of the trade of the side picked, on a target
     /// with no exits too: the rows of the 6th and the 7th, each closed at
-    /// its time, of a unit of 1 USD, a win 3R and a loss -2R. The ancestor's
-    /// calibration slice, a loss at 0.25 and a win at 0.75, means 0.5 and
+    /// its time, of a unit of 1 USD, a win 3R and a loss -2R. The out-of-fold
+    /// pair's calibration slice, a loss at 0.25 and a win at 0.75, means 0.5 and
     /// 0.5, a slope of 1.25 / 0.125 = 10, clipped to 1.5, and `alpha_C` 0.5 -
     /// 1.5 x 0.5 = -0.25, `LINES` again, so it picks the 7th's four shorts:
     /// the meta's baseline their mean R, 3, -2, -2 and 3, 0.5.
     #[rstest]
-    fn a_meta_model_on_a_time_only_target_learns_from_its_ancestors_trades() {
+    fn a_meta_model_on_a_time_only_target_learns_from_its_out_of_fold_pairs_trades() {
         let dir = tempfile::tempdir().unwrap();
-        let mut config = ancestral();
+        let mut config = day_meta();
         config.target.spec = Target::builder()
             .limit(SignedDuration::from_hours(1))
             .atr(crate::model::targets::DEFAULT_ATR)
@@ -1918,7 +1920,7 @@ mod tests {
     }
 
     /// Margins of the long alone, from nought: the short's models are never
-    /// asked, and the meta's rows are the ancestor's longs, each of the 7th
+    /// asked, and the meta's rows are the out-of-fold pair's longs, each of the 7th
     /// expecting `-0.25 + 1.5p` of its level line alone, above nought; its
     /// calibration slice a loss at 0.55 and a win at 0.65, buys, of levels
     /// 0.575 and 0.725 and no side call.
@@ -1930,7 +1932,7 @@ mod tests {
                 long: Some(R::new(0.0)),
                 short: None,
             },
-            ..ancestral()
+            ..day_meta()
         };
 
         let (models, _, _) = at_the_eighth(dir.path(), long_only, two_days());

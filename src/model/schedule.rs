@@ -31,12 +31,12 @@
 //! generation at `t`, whatever else the store holds, an older generation
 //! included, which a decision before `t` still uses: its sides fitted as of
 //! `t`, on the rows of their window back from `t` settled by then, and,
-//! with a meta, an ancestor pair of the sides fitted alike as of `t` less
+//! with a meta, an out-of-fold pair of the sides fitted alike as of `t` less
 //! the meta's window, whose picks over the meta's window are the meta's rows, out of
 //! sample (`train`). The plan answers where the train's one replay starts
-//! (`Fits::replay_from`), at the first row a fit reads, the ancestor's with
-//! a meta: a kept generation reads none, its baselines its own, published
-//! with it (`store::ModelManifest::baseline`).
+//! (`Fits::replay_from`), at the first row a fit reads, the out-of-fold
+//! pair's with a meta: a kept generation reads none, its baselines its own,
+//! published with it (`store::ModelManifest::baseline`).
 
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
@@ -104,10 +104,10 @@ pub struct Fits {
     pub at: Timestamp,
     /// The sides' fit, as of `at`.
     pub sides: Fit,
-    /// With a meta, the fit of the ancestor pair, the sides fitted as of
+    /// With a meta, the fit of the out-of-fold pair, the sides fitted as of
     /// the meta's window before `at`, whose picks over `[its time, at)` are
     /// the meta's rows; not published.
-    pub ancestor: Option<Fit>,
+    pub out_of_fold: Option<Fit>,
 }
 
 /// A fit as of `at`, on the rows of `[from, at)` settled by `at`.
@@ -177,7 +177,7 @@ impl Schedule {
     /// any, retrained or never retrained alike, as a train is deterministic;
     /// else a generation trained at `at`, its sides fitted as
     /// of `at` on the rows of their window back from it, and, with a meta,
-    /// its ancestor pair fitted alike as of the meta's window before `at`.
+    /// its out-of-fold pair fitted alike as of the meta's window before `at`.
     /// The store is read for the generation kept alone: what a train fits
     /// is the same whatever else the store holds.
     #[must_use]
@@ -192,17 +192,17 @@ impl Schedule {
         Plan::Train(Fits {
             at,
             sides: fit(at),
-            ancestor: self.meta.map(|window| fit(at - window)),
+            out_of_fold: self.meta.map(|window| fit(at - window)),
         })
     }
 }
 
 impl Fits {
     /// Where the train's one replay starts: at the first row a fit reads,
-    /// the ancestor's, a meta's window before the sides', if any.
+    /// the out-of-fold pair's, a meta's window before the sides', if any.
     #[must_use]
     pub fn replay_from(&self) -> Timestamp {
-        self.ancestor.unwrap_or(self.sides).from
+        self.out_of_fold.unwrap_or(self.sides).from
     }
 }
 
@@ -469,13 +469,13 @@ mod tests {
         }
     }
 
-    /// The train at `at` fitting the sides as `sides` and the ancestor pair
-    /// as `ancestor`.
-    fn train(at: &str, sides: Fit, ancestor: Option<Fit>) -> Plan {
+    /// The train at `at` fitting the sides as `sides` and the out-of-fold
+    /// pair as `out_of_fold`.
+    fn train(at: &str, sides: Fit, out_of_fold: Option<Fit>) -> Plan {
         Plan::Train(Fits {
             at: self::at(at),
             sides,
-            ancestor,
+            out_of_fold,
         })
     }
 
@@ -488,7 +488,7 @@ mod tests {
     /// Retrained or never retrained alike, the generation valid exactly
     /// from the train is kept whole, already published; one valid before
     /// it is not, and a generation is trained: its sides on their window of
-    /// 24 hours back from the train, and its ancestor pair as of the 5th,
+    /// 24 hours back from the train, and its out-of-fold pair as of the 5th,
     /// the meta's window of 48 hours before the train, on its window of 24
     /// hours back from there.
     #[rstest]
@@ -504,10 +504,10 @@ mod tests {
         assert_eq!(schedule.plan(at(SEVENTH), &generations(valid_froms)), plan);
     }
 
-    /// A train with a meta fits the same ancestor pair whatever the store
+    /// A train with a meta fits the same out-of-fold pair whatever the store
     /// holds but the generation it keeps: on an empty store, one of a
     /// generation after the train, or one of the generations before it, the
-    /// ancestor as of the 5th on its window back from there, the sides as of
+    /// out-of-fold pair as of the 5th on its window back from there, the sides as of
     /// the 7th; and never retrained alike, with no generation by the train.
     #[rstest]
     #[case::retrained_on_an_empty_store(daily(), &[])]
@@ -515,7 +515,7 @@ mod tests {
     #[case::retrained_on_a_store_of_generations_before_the_train(daily(), &[FOURTH, SIXTH])]
     #[case::never_retrained_on_an_empty_store(never(), &[])]
     #[case::never_retrained_on_a_store_of_a_generation_after_the_train(never(), &[EIGHTH])]
-    fn a_train_with_a_meta_fits_its_ancestor_as_of_the_metas_window_before_it_whatever_the_store_holds(
+    fn a_train_with_a_meta_fits_its_out_of_fold_pair_as_of_the_metas_window_before_it_whatever_the_store_holds(
         #[case] schedule: Schedule,
         #[case] valid_froms: &[&str],
     ) {
@@ -536,8 +536,8 @@ mod tests {
         );
     }
 
-    /// The replay starts at the first row a fit reads: the ancestor's
-    /// window from the 4th, or, without a meta, the sides' from the 6th.
+    /// The replay starts at the first row a fit reads: the out-of-fold
+    /// pair's window from the 4th, or, without a meta, the sides' from the 6th.
     #[rstest]
     #[case::with_a_meta(daily(), FOURTH)]
     #[case::without_a_meta(without_meta(daily()), SIXTH)]

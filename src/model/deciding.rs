@@ -29,7 +29,7 @@
 //! side is picked until it loads, and it is read again at the next. `pick`
 //! picks among the sides of the generation valid at the time, by
 //! `pick_among`, the rule for a pair already in hand, which a train's meta
-//! also learns from, its ancestor pair being in no store: the pair's calibrated
+//! also learns from, its out-of-fold pair being in no store: the pair's calibrated
 //! expectation of the decision, its level `C'` and side call `D'`
 //! (`store::Pair::expect`), each side's `E'` held to its margin in R and
 //! picked on by `payoff::pick`. `decide` takes the side picked if the

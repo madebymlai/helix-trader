@@ -7,7 +7,7 @@
 //! a meta holding one. It is self-contained: its models are fixed as of its
 //! retrain time, by that train alone, from the data and the config, none
 //! derived from another generation nor changed by a later train; its meta
-//! learned from an ancestor pair its train fitted and did not publish
+//! learned from an out-of-fold pair its train fitted and did not publish
 //! (`train`). A decision uses the latest generation
 //! valid at or before it, its sides and its meta together, so no meta ever
 //! decides beside the sides of another train, and no side beside another
@@ -59,7 +59,7 @@
 //! manifest (`ModelManifest`), the schema (the feature names in order, the
 //! fingerprint), the target spec and side, the learner, the meta's
 //! calibration, its level line (a side's is its pair's, the generation's,
-//! `calibration::Ksplit`), the meta's ancestor's time, its baseline (the training mean of the R it
+//! `calibration::Ksplit`), the time of the meta's out-of-fold pair, its baseline (the training mean of the R it
 //! learned on the rows it was fitted and calibrated on) and probe rows, of
 //! its calibration slice, with the predictions the model made on them when
 //! fitted, before any calibration, and the model as its adapter saved it. A
@@ -221,10 +221,10 @@ pub struct ModelManifest {
     /// as a one-sided pair's (`Ksplit`); none of a side's, which its pair
     /// calibrates (`StoredGeneration::calibration`).
     pub calibration: Option<Line>,
-    /// A meta model's ancestor's time: the time the ancestor pair whose
+    /// The time of a meta model's out-of-fold pair: the time the pair whose
     /// picks it learned from was fitted as of, a meta's window before its
     /// generation's; none of a side's.
-    pub ancestor: Option<Timestamp>,
+    pub out_of_fold: Option<Timestamp>,
     /// The model's baseline, the constant model its scores are read
     /// beside: the training mean of the R it learned on the rows it was
     /// fitted and calibrated on.
@@ -1252,7 +1252,7 @@ mod tests {
                     beta: 0.5,
                 }),
                 baseline: 0.5,
-                ancestor: None,
+                out_of_fold: None,
                 probes: rows
                     .iter()
                     .map(|row| Probe {

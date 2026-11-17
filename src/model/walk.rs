@@ -606,7 +606,7 @@ mod tests {
                 learner: LearnerConfig::Fake {},
                 calibration: None,
                 baseline,
-                ancestor: None,
+                out_of_fold: None,
                 probes: vec![],
             },
             model: model.save().unwrap(),

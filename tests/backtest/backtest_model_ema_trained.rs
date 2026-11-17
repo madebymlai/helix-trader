@@ -488,8 +488,8 @@ fn with_meta() -> String {
 }
 
 /// With a meta, the first retrain time of a span, the 21st, publishes a
-/// meta beside the short: its ancestor short, fitted as of the 20th on its
-/// window back from there, as the train of the 20th fits it, picks the
+/// meta beside the short: the short of its out-of-fold pair, fitted as of
+/// the 20th on its window back from there, as the train of the 20th fits it, picks the
 /// shorts of the 20th's odd hours, the meta's rows. A backtest of the span
 /// then trades from its first retrain time: the short at each odd hour of
 /// the 21st and of the 22nd, 12 a day, each an order to open and one to

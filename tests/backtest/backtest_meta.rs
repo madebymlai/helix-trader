@@ -9,10 +9,10 @@
 //! call.
 //!
 //! A strategy of the long alone trades long at every decision. Each
-//! retrain, its first included, fits an ancestor long a meta window before
-//! it, whose longs over that window its meta learns from, and publishes the
-//! long it fits at its time beside that meta, so the run trades from its
-//! first retrain time. A generation's meta decides beside its own sides
+//! retrain, its first included, fits an out-of-fold pair, its long alone, a
+//! meta window before it, whose longs over that window its meta learns
+//! from, and publishes the long it fits at its time beside that meta, so the
+//! run trades from its first retrain time. A generation's meta decides beside its own sides
 //! alone, and a generation failing its checks takes no trade until it
 //! loads.
 //!
@@ -81,7 +81,7 @@ fn long_only() -> ModelConfig {
 
 /// Quotes from 03:00 of the 19th of October 2026 to 03:00 of the 26th:
 /// the dataset's days, from an hour before the window of the first
-/// retrain's ancestor, fitted as of 02:00 of the 21st, the meta's 46 hours
+/// retrain's out-of-fold pair, fitted as of 02:00 of the 21st, the meta's 46 hours
 /// before midnight of the 23rd, on its 46 hours back from there, to the
 /// span's end plus the target's limit.
 fn catalog() -> TempDir {
@@ -148,7 +148,7 @@ fn model_store(models: &Path) -> ModelStore {
 }
 
 /// Each train publishes a generation of the long it fits and of the meta
-/// it learns from its ancestor's longs, the first train included. With
+/// it learns from the longs of its out-of-fold pair, the first train included. With
 /// meta models published straight in their place, a day's decisions trade
 /// only as the meta model of the generation in use takes the trade of the
 /// side picked: each day a long at every decision, at the level of the
@@ -157,7 +157,8 @@ fn model_store(models: &Path) -> ModelStore {
 /// of r(4) = -0.1, r(6) = 0.1 then r(8) = 0.3 through `CALIBRATION`, 0.1 +
 /// 0.5 r: 0.05, 0.15 then 0.25.
 #[rstest]
-fn a_meta_model_trains_on_its_ancestors_trades_and_takes_them_in_the_run_from_its_first_retrain() {
+fn a_meta_model_trains_on_its_out_of_fold_pairs_trades_and_takes_them_in_the_run_from_its_first_retrain()
+ {
     let catalog = catalog();
     let models = tempfile::tempdir().unwrap();
     let (start, end) = span();

@@ -20,10 +20,10 @@
 //!
 //! The meta's rows are those of its window back from its train, each
 //! decided through the code a strategy decides through
-//! (`deciding::DecidingModels::pick_among`) by the ancestor pair the train
+//! (`deciding::DecidingModels::pick_among`) by the out-of-fold pair the train
 //! fits as of the window's start (`train`), out of sample for it, each row
 //! after its time; each side's row, its payoff features, is the row's own
-//! (`dataset::DatasetRow::sides`). The ancestor is in no store: the meta
+//! (`dataset::DatasetRow::sides`). The out-of-fold pair is in no store: the meta
 //! learns from nothing a store holds, and decides beside the sides its
 //! train fits as of its own time, in the one generation the train
 //! publishes. A row no side is picked on is no row of the meta; a

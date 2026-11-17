@@ -7,7 +7,7 @@ Released on TBD (UTC).
 - Added `train --from --to`, training a periodic strategy at each retrain time of a span in time order, past failures, which it lists at the end
 - Added a live retrain at the start of a node of the latest retrain time whose generation the store lacks, as after the node was down then
 - Added the output of a live retrain's `train` to the node's Nautilus log, each line a log record, its file holding the train's whole output
-- Added run figures to `train`'s report, a block per retrain time: the generation published, its directory, or the failure and its reason, the wall time, the CPU time and peak memory of the train process (Unix), the dataset days built and cached, and the rows of each fit and calibration slice of the sides, the ancestor and the meta beside `min_rows`
+- Added run figures to `train`'s report, a block per retrain time: the generation published, its directory, or the failure and its reason, the wall time, the CPU time and peak memory of the train process (Unix), the dataset days built and cached, and the rows of each fit and calibration slice of the sides, the out-of-fold pair and the meta beside `min_rows`
 
 ### Breaking Changes
 
@@ -33,8 +33,8 @@ Released on TBD (UTC).
 - Renamed `ModelSet` to `ModelStore` and `ModelBlueprint::model_set` to `model_store`, the store of a strategy's generations; publish, list, read and swap them with `ModelStore::publish`, `generations`, `read` and `swap` in place of the per-side `ModelStore`, `ModelSet::pairs`, `ModelSet::valid_froms` and `MetaLevel::swap`
 - Removed `PairCalibration`, `ModelCalibration` and `ModelManifest`'s `strategy_id` and `valid_from`: a side's manifest holds no calibration, its pair's being `StoredGeneration::calibration`, and a meta's holds its `Line`
 - Removed `Step` and `Plan::meta_after_sides` from the schedule; read a train's plan as `Plan::Keep` or `Plan::Train` of `Fits`
-- Changed a meta model to learn from the out-of-sample picks of an ancestor pair its train fits a meta window before the retrain time, shipping beside sides fitted at that time, instead of from the decisions of the generations in the store, so a periodic strategy with a meta publishes its meta from its first train and a never-retrained one ships sides fresh at its train time; train again, the store's version changed
-- Removed `Kept::Waiting`: every generation of a strategy with a meta holds one, and `ModelStore::publish` refuses one without; read the ancestor's fit as `Fits::ancestor` and its time as `ModelManifest::ancestor`
+- Changed a meta model to learn from the out-of-sample picks of an out-of-fold pair its train fits a meta window before the retrain time, shipping beside sides fitted at that time, instead of from the decisions of the generations in the store, so a periodic strategy with a meta publishes its meta from its first train and a never-retrained one ships sides fresh at its train time; train again, the store's version changed
+- Removed `Kept::Waiting`: every generation of a strategy with a meta holds one, and `ModelStore::publish` refuses one without; read the out-of-fold pair's fit as `Fits::out_of_fold` and its time as `ModelManifest::out_of_fold`
 - Changed a never-retrained `train --at t` to train a generation at `t` unless one is already published there, as a periodic train does, instead of keeping the latest generation at or before `t` and reporting it "in use since"; an older generation still decides before `t`, so train a never-retrained strategy only at the time it is to trade from
 - Renamed `Outcome::InUse` to `Outcome::AlreadyPublished`, holding no time, the generation's being the train's, and removed `Retrain::in_use`; match `Outcome::AlreadyPublished`
 - Renamed `Kept`, of failures alone, to `Failure`, its `Failed` to `Error`, `Outcome::Kept` to `Outcome::Failed` and `Retrained::Kept` to `Retrained::Failed`; match the new names

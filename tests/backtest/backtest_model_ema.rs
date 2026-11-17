@@ -295,10 +295,10 @@ fn a_train_with_a_slice_of_fewer_rows_than_the_minimum_fails_naming_it_and_publi
     assert_eq!(generations(&config, &models), []);
 }
 
-/// Worked by hand: the train at t fits the long's ancestor as of midnight
-/// of the 22nd, the meta's window of 24 hours before t, on its window back
-/// from there, from 02:00 of the 20th, and gives the meta the ancestor's
-/// decisions of the 22nd, each a long, 24 rows: its fit slice those of
+/// Worked by hand: the train at t fits the long of its out-of-fold pair as
+/// of midnight of the 22nd, the meta's window of 24 hours before t, on its
+/// window back from there, from 02:00 of the 20th, and gives the meta that
+/// long's decisions of the 22nd, each a long, 24 rows: its fit slice those of
 /// 00:00 to 17:00, settled by 18:00, the calibration slice's start, 18; its
 /// calibration slice those of 18:00 to 23:00, 6. A meta `min_rows` above a
 /// slice's count fails the train, naming the meta, the slice, its count and
@@ -455,13 +455,13 @@ fn a_train_reports_its_generation_run_figures_dataset_days_and_rows_of_each_slic
 
 /// Worked by hand, the slices as in
 /// `a_meta_with_a_slice_of_fewer_rows_than_its_minimum_fails_naming_it_and_publishes_no_generation`:
-/// the train at t reads from its ancestor's window, from 02:00 of the 20th,
-/// so builds the 20th to the 22nd. The ancestor, fitted as of midnight of
+/// the train at t reads from its out-of-fold pair's window, from 02:00 of the 20th,
+/// so builds the 20th to the 22nd. The out-of-fold pair, fitted as of midnight of
 /// the 22nd, holds 34 rows in its fit slice, 22 of the 20th from 02:00 and
 /// 12 of the 21st before noon, and 12 in its calibration slice, from noon;
 /// the sides at t 34 and 12 alike; the meta 18 and 6.
 #[rstest]
-fn a_train_with_a_meta_reports_the_rows_of_its_sides_ancestor_and_meta() {
+fn a_train_with_a_meta_reports_the_rows_of_its_sides_out_of_fold_pair_and_meta() {
     let catalog = walk(
         ic::at("00:00:00") - SignedDuration::from_hours(27),
         t() + SignedDuration::from_hours(4),
@@ -483,7 +483,7 @@ fn a_train_with_a_meta_reports_the_rows_of_its_sides_ancestor_and_meta() {
         &[
             "  Dataset days: 3 built, 0 cached",
             "  Rows of the sides: 34 fit, 12 calibration, min_rows 1",
-            "  Rows of the ancestor: 34 fit, 12 calibration, min_rows 1",
+            "  Rows of the out-of-fold pair: 34 fit, 12 calibration, min_rows 1",
             "  Rows of the meta: 18 fit, 6 calibration, min_rows 1",
         ],
     );
@@ -493,7 +493,7 @@ fn a_train_with_a_meta_reports_the_rows_of_its_sides_ancestor_and_meta() {
 /// A failed train reports the figures it reached and its reason, on the
 /// catalog of the meta's train. Its sides' fit slice short of a `min_rows` of 35, it built its days and
 /// counted the sides' slices, 34 and 12. Its meta's fit slice short of a
-/// meta `min_rows` of 19, it counted the ancestor's slices and the meta's,
+/// meta `min_rows` of 19, it counted the out-of-fold pair's slices and the meta's,
 /// 18 and 6, and fitted no sides at t, the meta trained first. The command
 /// fails with the reason.
 #[rstest]
@@ -507,7 +507,7 @@ fn a_train_with_a_meta_reports_the_rows_of_its_sides_ancestor_and_meta() {
     "18 rows in the fit slice",
     &[
         "  Dataset days: 3 built, 0 cached",
-        "  Rows of the ancestor: 34 fit, 12 calibration, min_rows 1",
+        "  Rows of the out-of-fold pair: 34 fit, 12 calibration, min_rows 1",
         "  Rows of the meta: 18 fit, 6 calibration, min_rows 19",
     ],
 )]

@@ -9,8 +9,8 @@
 //! time, user and system, and the peak memory of the train process; the
 //! days of the dataset it read, built by its replay or taken from the
 //! cache; and the rows of the fit and calibration slices of its sides,
-//! fitted as of its time, the long's and the short's alike, of its ancestor
-//! pair and of its meta, beside each level's `min_rows`.
+//! fitted as of its time, the long's and the short's alike, of its
+//! out-of-fold pair and of its meta, beside each level's `min_rows`.
 //!
 //! The process figures are read once at a train's end (`Meter::lap`): the
 //! wall time from Nautilus' real-time clock, the CPU time and the peak
@@ -142,7 +142,7 @@ impl Display for Report<'_> {
         let Reached {
             days,
             sides,
-            ancestor,
+            out_of_fold,
             meta,
         } = self.trained.reached;
         writeln!(f, "the train at {}: {}", self.at, self.trained.outcome)?;
@@ -173,7 +173,11 @@ impl Display for Report<'_> {
             )?;
         }
 
-        for (name, slices) in [("sides", sides), ("ancestor", ancestor), ("meta", meta)] {
+        for (name, slices) in [
+            ("sides", sides),
+            ("out-of-fold pair", out_of_fold),
+            ("meta", meta),
+        ] {
             if let Some(Slices {
                 fit,
                 calibration,
@@ -245,7 +249,7 @@ mod tests {
 
     /// A train with a meta that published reports every figure: its
     /// generation, its times and memory, its days and the rows of its
-    /// sides, its ancestor and its meta.
+    /// sides, its out-of-fold pair and its meta.
     #[rstest]
     fn a_published_generation_reports_its_directory_and_every_figure() {
         let trained = Trained {
@@ -258,7 +262,7 @@ mod tests {
                     cached: 2,
                 }),
                 sides: Some(slices(34, 12, 1)),
-                ancestor: Some(slices(33, 11, 1)),
+                out_of_fold: Some(slices(33, 11, 1)),
                 meta: Some(slices(18, 6, 2)),
             },
         };
@@ -272,12 +276,12 @@ mod tests {
              \x20 Peak memory: 150.0 MiB\n\
              \x20 Dataset days: 1 built, 2 cached\n\
              \x20 Rows of the sides: 34 fit, 12 calibration, min_rows 1\n\
-             \x20 Rows of the ancestor: 33 fit, 11 calibration, min_rows 1\n\
+             \x20 Rows of the out-of-fold pair: 33 fit, 11 calibration, min_rows 1\n\
              \x20 Rows of the meta: 18 fit, 6 calibration, min_rows 2\n"
         );
     }
 
-    /// A train failing at its ancestor reports its reason and the figures
+    /// A train failing at its out-of-fold pair reports its reason and the figures
     /// it reached, no row of the sides or the meta, which it never counted.
     #[rstest]
     fn a_failed_train_reports_its_reason_and_the_figures_it_reached() {
@@ -288,7 +292,7 @@ mod tests {
                     built: 3,
                     cached: 0,
                 }),
-                ancestor: Some(slices(0, 12, 1)),
+                out_of_fold: Some(slices(0, 12, 1)),
                 ..Reached::default()
             },
         };
@@ -300,7 +304,7 @@ mod tests {
              \x20 CPU time: 1.250 s user, 0.125 s system\n\
              \x20 Peak memory: 150.0 MiB\n\
              \x20 Dataset days: 3 built, 0 cached\n\
-             \x20 Rows of the ancestor: 0 fit, 12 calibration, min_rows 1\n"
+             \x20 Rows of the out-of-fold pair: 0 fit, 12 calibration, min_rows 1\n"
         );
     }
 

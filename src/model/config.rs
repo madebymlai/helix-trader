@@ -100,7 +100,7 @@ pub struct ModelConfig<T = TargetConfig> {
 #[serde(try_from = "MetaFields")]
 pub struct MetaConfig {
     /// How far back from a retrain its rows go: its train fits an
-    /// ancestor pair of the sides as of this much before the retrain, whose
+    /// out-of-fold pair of the sides as of this much before the retrain, whose
     /// out-of-sample picks over the window are the meta's rows.
     pub window: SignedDuration,
     /// The last part of the window, ending at the retrain, the model is
