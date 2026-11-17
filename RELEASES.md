@@ -52,6 +52,7 @@ Released on TBD (UTC).
 
 ### Internal Improvements
 
+- Changed the dev and test builds to compile dependencies at `opt-level` 1, as Nautilus does: the backtest tests run 3 to 8 times faster, a cold build of the dependencies takes about twice as long, and rebuilds of helix are unchanged
 - Improved the run time of the slowest tests: the streaming tests stop their nodes once what they wait for is staged or promoted rather than after a fixed time, the model tests run no train and store no quotes that no assertion reads, and a test's two dataset builds copy one catalog, each change checked by a mutation
 - Improved the tests to `docs/testing.md`'s standard: same-shape tests parametrized with `#[case]`, duplicates and tests of library logic removed, messages asserted by the facts they carry, waits bounded, expected values worked by hand, and each change checked by a mutation
 - Added binary tests of the command line's refusals (`tests/backtest/cli.rs`) in place of in-process parses

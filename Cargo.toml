@@ -397,5 +397,9 @@ rstest.workspace = true
 [profile.dev]
 debug = "line-tables-only"
 
+# Dependencies at opt-level 1, helix's own crates at 0, as Nautilus builds
+# them: dependencies recompile rarely, and the backtests and trains of the
+# tests spend most of their time in them.
 [profile.dev.package."*"]
 debug = false
+opt-level = 1
