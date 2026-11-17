@@ -51,8 +51,8 @@
 //! taken only if the generation's meta model, on the row with that side and
 //! the decision's level and side call, expects of it a net R, its
 //! calibrated expected R, of at least its margin (`MetaConfig::margin`), the
-//! trade as the target sets it; a generation holding no meta model is no
-//! trade.
+//! trade as the target sets it; every generation of a strategy with a meta
+//! holds one.
 //!
 //! The decision itself is `deciding::DecidingModels`'s; the handle is what
 //! talks to the strategy. A generation is swapped in only inside `decide`,

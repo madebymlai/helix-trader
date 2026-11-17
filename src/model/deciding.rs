@@ -29,7 +29,7 @@
 //! side is picked until it loads, and it is read again at the next. `pick`
 //! picks among the sides of the generation valid at the time, by
 //! `pick_among`, the rule for a pair already in hand, which a train's meta
-//! also learns from, its pair being in no store yet: the pair's calibrated
+//! also learns from, its ancestor pair being in no store: the pair's calibrated
 //! expectation of the decision, its level `C'` and side call `D'`
 //! (`store::Pair::expect`), each side's `E'` held to its margin in R and
 //! picked on by `payoff::pick`. `decide` takes the side picked if the
@@ -37,10 +37,11 @@
 //! decision's `C'` and `D'` (`features::meta_row`), expects of its trade a
 //! net R, its calibrated expected R, of at least its margin in R
 //! (`holdout::MetaMargin`), the trade as the target sets it whatever the
-//! meta expects. A generation holding no meta model, its meta having waited
-//! (`train::Kept::Waiting`), is no trade. An expected R that is not finite,
-//! of a model predicting NaN say, clears no margin.
+//! meta expects. A generation of a strategy with a meta holds a meta model
+//! (`store::ModelStore::load`). An expected R that is not finite, of a model
+//! predicting NaN say, clears no margin.
 
+use anyhow::Context;
 use jiff::Timestamp;
 
 use super::{
@@ -159,13 +160,14 @@ impl DecidingModels {
     /// generation's meta model, on the features with that side and the
     /// decision's level and side call, expects of it a net R, its calibrated
     /// expected R, of at least its margin, at the meta model's expected R.
-    /// None if no generation is valid yet, no side is picked, the generation
-    /// holds no meta model or the margin is not met.
+    /// None if no generation is valid yet, no side is picked or the margin
+    /// is not met.
     ///
     /// # Errors
     ///
     /// Returns an error if the latest generation valid then fails its checks
-    /// (`Swap::at`), or a model fails to predict.
+    /// (`Swap::at`), holds no meta model with a meta, or a model fails to
+    /// predict.
     pub fn decide(
         &mut self,
         now: Timestamp,
@@ -188,9 +190,9 @@ impl DecidingModels {
         let Some(margin) = self.meta else {
             return Ok(Some(taken(None)));
         };
-        let Some(model) = generation.meta() else {
-            return Ok(None);
-        };
+        let model = generation
+            .meta()
+            .context("the generation holds no meta model, and the strategy has a meta")?;
         let expected_r = model.predict(&meta_row(
             features,
             picked.side.order_side(),

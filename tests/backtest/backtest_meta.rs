@@ -8,12 +8,13 @@
 //! takes the trade of the side picked, on the decision's level and side
 //! call.
 //!
-//! A strategy of the long alone trades long at every decision. Its first
-//! retrain has no generation before it, so its meta waits for the sides'
-//! decisions, its generation holding none; the next ones learn from the
-//! longs and publish. With no meta model the first day, no trade. A
-//! generation's meta decides beside its own sides alone, and a generation
-//! failing its checks takes no trade until it loads.
+//! A strategy of the long alone trades long at every decision. Each
+//! retrain, its first included, fits an ancestor long a meta window before
+//! it, whose longs over that window its meta learns from, and publishes the
+//! long it fits at its time beside that meta, so the run trades from its
+//! first retrain time. A generation's meta decides beside its own sides
+//! alone, and a generation failing its checks takes no trade until it
+//! loads.
 //!
 //! One node per thread: each build, train and run on a thread of its own.
 
@@ -28,7 +29,7 @@ use helix_trader::{
         schedule::Retrain,
         store::{ModelStore, StoredGeneration},
         targets::Side,
-        train::{Kept, Outcome, Trained},
+        train::{Outcome, Trained},
     },
     strategy::risk::R,
 };
@@ -78,12 +79,14 @@ fn long_only() -> ModelConfig {
     }
 }
 
-/// Quotes from 23:00 of the 20th of October 2026 to 03:00 of the 26th:
-/// the dataset's days, from the window of the first retrain, to the
+/// Quotes from 03:00 of the 19th of October 2026 to 03:00 of the 26th:
+/// the dataset's days, from an hour before the window of the first
+/// retrain's ancestor, fitted as of 02:00 of the 21st, the meta's 46 hours
+/// before midnight of the 23rd, on its 46 hours back from there, to the
 /// span's end plus the target's limit.
 fn catalog() -> TempDir {
     walk(
-        ic::at("00:00:00") - SignedDuration::from_hours(1),
+        ic::at("00:00:00") - SignedDuration::from_hours(45),
         ic::at("00:00:00") + SignedDuration::from_hours(123),
     )
 }
@@ -108,8 +111,8 @@ fn on_thread<T: Send>(run: impl FnOnce() -> T + Send) -> T {
 /// days its window lacks, then publishes its generation again with the
 /// long straight in the place of the one the train published, a baseline
 /// predicting an R of `r(tenths)` (`tenths` 3 at the span's start and one
-/// more each day), calibrated as it is, and the meta it trained, if any;
-/// what each train did.
+/// more each day), calibrated as it is, and the meta it trained; what each
+/// train did.
 fn train_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> {
     let (start, end) = span();
     let training = || {
@@ -144,18 +147,17 @@ fn model_store(models: &Path) -> ModelStore {
         .unwrap()
 }
 
-/// Each train publishes a generation of the long it fits and, from the
-/// second retrain, when a generation is before it, the meta's; the first
-/// meta waits, its generation holding none. With meta models published
-/// straight in their place, a day's decisions trade only as the meta model
-/// of the generation in use takes the trade of the side picked:
-/// each of the
-/// second and third days a long at every decision, at the level of the
-/// long's baseline published at its start, r(4) = -0.1 then r(5) = 0, and
-/// at the expected R of the meta published then, a baseline of r(6) = 0.1
-/// then r(8) = 0.3 through `CALIBRATION`, 0.1 + 0.5 r: 0.15 then 0.25.
+/// Each train publishes a generation of the long it fits and of the meta
+/// it learns from its ancestor's longs, the first train included. With
+/// meta models published straight in their place, a day's decisions trade
+/// only as the meta model of the generation in use takes the trade of the
+/// side picked: each day a long at every decision, at the level of the
+/// long's baseline published at its start, r(3) = -0.2, r(4) = -0.1 then
+/// r(5) = 0, and at the expected R of the meta published then, a baseline
+/// of r(4) = -0.1, r(6) = 0.1 then r(8) = 0.3 through `CALIBRATION`, 0.1 +
+/// 0.5 r: 0.05, 0.15 then 0.25.
 #[rstest]
-fn a_meta_model_trains_on_the_sides_trades_and_takes_them_in_the_run() {
+fn a_meta_model_trains_on_its_ancestors_trades_and_takes_them_in_the_run_from_its_first_retrain() {
     let catalog = catalog();
     let models = tempfile::tempdir().unwrap();
     let (start, end) = span();
@@ -165,30 +167,19 @@ fn a_meta_model_trains_on_the_sides_trades_and_takes_them_in_the_run() {
 
     let times: Vec<Timestamp> = trained.iter().map(|(at, _)| *at).collect();
     assert_eq!(times, retrains);
+
     for (at, trained) in &trained {
-        assert_eq!(
-            trained.long,
-            Some(Outcome::Published { valid_from: *at }),
-            "{trained:?}"
-        );
-    }
-    assert_eq!(
-        trained[0].1.meta,
-        Some(Outcome::Kept(Kept::Waiting)),
-        "no side's model before the first retrain: {:?}",
-        trained[0].1
-    );
-    for (at, trained) in &trained[1..] {
-        assert_eq!(
-            trained.meta,
-            Some(Outcome::Published { valid_from: *at }),
-            "{trained:?}"
-        );
+        for outcome in [&trained.long, &trained.meta] {
+            assert_eq!(
+                outcome,
+                &Some(Outcome::Published { valid_from: *at }),
+                "{trained:?}"
+            );
+        }
     }
     let store = model_store(models.path());
     assert_eq!(store.generations().unwrap(), retrains);
-    assert_eq!(store.read(retrains[0]).unwrap().meta, None);
-    for (&at, tenths) in retrains[1..].iter().zip([6, 8]) {
+    for (&at, tenths) in retrains.iter().zip([4, 6, 8]) {
         let published = store.read(at).unwrap();
         assert!(published.meta.is_some(), "{at}");
         store
@@ -210,7 +201,11 @@ fn a_meta_model_trains_on_the_sides_trades_and_takes_them_in_the_run() {
         )
     });
 
-    let expected = [(r(4), 0.1 + 0.5 * r(6)), (r(5), 0.1 + 0.5 * r(8))];
+    let expected = [
+        (r(3), 0.1 + 0.5 * r(4)),
+        (r(4), 0.1 + 0.5 * r(6)),
+        (r(5), 0.1 + 0.5 * r(8)),
+    ];
 
     for (period, &from) in retrains.iter().enumerate() {
         let (from_ns, to_ns) = (UnixNanos::from(from), UnixNanos::from(from + day()));
@@ -220,14 +215,7 @@ fn a_meta_model_trains_on_the_sides_trades_and_takes_them_in_the_run() {
             .filter(|(time, _)| from_ns <= *time && *time < to_ns)
             .map(|(_, trade)| *trade)
             .collect();
-        if period == 0 {
-            assert!(
-                trades.is_empty(),
-                "no meta model on the first day: {trades:?}"
-            );
-            continue;
-        }
-        let (level, taken) = expected[period - 1];
+        let (level, taken) = expected[period];
         assert_eq!(trades.len(), 24, "period {period}");
         assert!(
             trades.iter().all(|trade| trade.side == OrderSide::Buy
@@ -259,34 +247,39 @@ fn by_day(record: &crate::common::dataset::Record) -> Vec<Vec<(f64, Option<R>)>>
 /// Publishes under `models` the generations of `long_only` at the span's
 /// first two retrain times: the first's long of `r(4)` beside a meta of
 /// `r(6)`, taking it at 0.1 + 0.5 r(6) = 0.15R; the second's long of `r(5)`
-/// beside `second_meta`, if any.
-fn publish_two(models: &Path, second_meta: Option<helix_trader::model::store::StoredModel>) {
+/// beside `second_meta`.
+fn publish_two(models: &Path, second_meta: helix_trader::model::store::StoredModel) {
     let (start, _) = span();
     let long = |tenths| baseline_of(&features(), &long_only(), Side::Long, tenths);
     let first_meta = meta_baseline_of(&features(), &long_only(), 6);
-    for (at, tenths, meta) in [
-        (start, 4, Some(first_meta)),
-        (start + day(), 5, second_meta),
-    ] {
+    for (at, tenths, meta) in [(start, 4, first_meta), (start + day(), 5, second_meta)] {
         model_store(models)
-            .publish(&generation(&long_only(), at, vec![long(tenths)], meta))
+            .publish(&generation(
+                &long_only(),
+                at,
+                vec![long(tenths)],
+                Some(meta),
+            ))
             .unwrap();
     }
 }
 
 /// The original defect: a store holding a meta model from one train and
-/// sides from another never combines them. The first day's generation
-/// holds a long and its meta; the second's a long and no meta, its meta
-/// having waited. Each of the first day's decisions trades its long, at
-/// r(4) = -0.1, taken at 0.15R; no decision of the second or the third day
-/// trades, the second's long never beside the first's meta, which would
-/// take it.
+/// sides from another never combines them. Each generation holds a long
+/// and its meta: each of the first day's decisions trades its long, at
+/// r(4) = -0.1, taken at the first's meta's 0.15R; each of the second and
+/// the third day's its long at r(5) = nought, taken at the second's meta's
+/// 0.1 + 0.5 r(2) = -0.05R, never the first's meta beside the second's
+/// long.
 #[rstest]
 fn a_meta_from_one_train_never_decides_beside_the_sides_of_another() {
     let catalog = catalog();
     let models = tempfile::tempdir().unwrap();
     let (start, end) = span();
-    publish_two(models.path(), None);
+    publish_two(
+        models.path(),
+        meta_baseline_of(&features(), &long_only(), 2),
+    );
 
     let record = on_thread(|| {
         trade_on(
@@ -307,7 +300,14 @@ fn a_meta_from_one_train_never_decides_beside_the_sides_of_another() {
             .all(|&trade| trade == (r(4), Some(R::new(0.1 + 0.5 * r(6))))),
         "{days:?}"
     );
-    assert!(days[1].is_empty() && days[2].is_empty(), "{days:?}");
+    assert_eq!(days[1].len(), 24, "{days:?}");
+    assert!(
+        days[1]
+            .iter()
+            .chain(&days[2])
+            .all(|&trade| trade == (r(5), Some(R::new(0.1 + 0.5 * r(2))))),
+        "{days:?}"
+    );
 }
 
 /// The second day's generation holds a meta model of another fingerprint,
@@ -322,7 +322,7 @@ fn a_generation_failing_a_check_stops_new_entries_and_is_used_once_it_loads() {
     let (start, end) = span();
     let mut refused = meta_baseline_of(&features(), &long_only(), 8);
     refused.manifest.fingerprint = "f".repeat(64);
-    publish_two(models.path(), Some(refused));
+    publish_two(models.path(), refused);
     let run = || {
         on_thread(|| {
             trade_on(
@@ -339,7 +339,7 @@ fn a_generation_failing_a_check_stops_new_entries_and_is_used_once_it_loads() {
     let stopped = by_day(&run());
     publish_two(
         models.path(),
-        Some(meta_baseline_of(&features(), &long_only(), 8)),
+        meta_baseline_of(&features(), &long_only(), 8),
     );
     let loaded = by_day(&run());
 

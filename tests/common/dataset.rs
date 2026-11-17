@@ -647,6 +647,7 @@ pub(crate) fn baseline_stored(
             learner: LearnerConfig::Baseline {},
             calibration,
             baseline: prediction,
+            ancestor: None,
             probes: vec![Probe {
                 prediction,
                 row: probe,

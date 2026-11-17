@@ -26,26 +26,18 @@
 //! a live node has no retrain actor, so no timer is set, and the strategy
 //! is trained at one time alone (`train --at`).
 //!
-//! A train at `t` is planned (`Schedule::plan`) from the generations of
-//! the store alone (`store`), each one train's models. A generation current
-//! at `t` (retrained, the one valid exactly from `t`; never retrained, the
-//! latest valid at or before `t`) is kept, in use, whole; else the train
-//! trains a generation at `t`: its sides fitted as of `t`, on the rows of
-//! their window back from `t` settled by then, and its meta, if any, as of
-//! `t` on the sides' decisions over its window, the decisions of the
-//! generations before `t`; but a meta waits while the store holds no
-//! generation before `t`, and its rows start at the first at the earliest.
-//! Never retrained, with no generation current, one train trains at two
-//! times: the sides as of `t` less the meta's window, on their window back
-//! from there, and the meta at `t`, on their out-of-sample decisions over
-//! its window, so that it filters the very models it learned from; both
-//! are one generation, valid from `t`. The rule is the current
-//! generation's alone: it applies where a model fitted as of the earlier
-//! time would be current at `t`, never so retrained, whose generations
-//! stay on the grid. The plan answers where the train's one replay starts
-//! (`Fits::replay_from`), at the first row a fit reads: a kept generation
-//! reads none, its baselines its own, published with it
-//! (`store::ModelManifest::baseline`).
+//! A train at `t` is planned (`Schedule::plan`): a generation current at
+//! `t` in the store (retrained, the one valid exactly from `t`; never
+//! retrained, the latest valid at or before `t`) is kept, in use, whole;
+//! else the train trains a generation at `t`, the same in both modes and
+//! whatever else the store holds: its sides fitted as of `t`, on the rows
+//! of their window back from `t` settled by then, and, with a meta, an
+//! ancestor pair of the sides fitted alike as of `t` less the meta's
+//! window, whose picks over the meta's window are the meta's rows, out of
+//! sample (`train`). The plan answers where the train's one replay starts
+//! (`Fits::replay_from`), at the first row a fit reads, the ancestor's with
+//! a meta: a kept generation reads none, its baselines its own, published
+//! with it (`store::ModelManifest::baseline`).
 
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
@@ -111,11 +103,12 @@ pub enum Plan {
 pub struct Fits {
     /// The train's time, which the generation is valid from.
     pub at: Timestamp,
-    /// The sides' fit: as of `at`, or, of a train at two times, as of the
-    /// meta's window before it.
+    /// The sides' fit, as of `at`.
     pub sides: Fit,
-    /// The meta's step, if the strategy has a meta.
-    pub meta: Option<MetaStep>,
+    /// With a meta, the fit of the ancestor pair, the sides fitted as of
+    /// the meta's window before `at`, whose picks over `[its time, at)` are
+    /// the meta's rows; not published.
+    pub ancestor: Option<Fit>,
 }
 
 /// A fit as of `at`, on the rows of `[from, at)` settled by `at`.
@@ -123,20 +116,6 @@ pub struct Fits {
 pub struct Fit {
     pub from: Timestamp,
     pub at: Timestamp,
-}
-
-/// What a train does to the meta of the generation it trains.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MetaStep {
-    /// Fits it as of the train's time on the rows of `[from, the train)`,
-    /// the decisions of the generations the store holds before the train.
-    OnStored { from: Timestamp },
-    /// Fits it as of the train's time on the decisions of the sides the
-    /// train fits, from their time: a train at two times.
-    OnSides,
-    /// Fits none: the store holds no generation before the train to decide
-    /// the meta's rows.
-    Wait,
 }
 
 impl Schedule {
@@ -197,14 +176,10 @@ impl Schedule {
     /// The plan of a train at `at`, the store holding generations valid
     /// from `generations`: the generation current at `at` (`Retrain::current`)
     /// kept, if any; else a generation trained at `at`, its sides fitted as
-    /// of `at` on the rows of their window back from it, and its meta, if
-    /// any, on the decisions of the generations before `at` over its window,
-    /// from the first at the earliest, since a row before it has no decision;
-    /// waiting with none. With a meta and a model fitted as of the meta's
-    /// window before `at` current at `at` (never so retrained), the sides are
-    /// fitted as of then instead, on their window back from there, and the
-    /// meta on their decisions over its window, out of sample: the meta
-    /// filters the very models it learned from.
+    /// of `at` on the rows of their window back from it, and, with a meta,
+    /// its ancestor pair fitted alike as of the meta's window before `at`.
+    /// The store is read for the generation kept alone: what a train fits
+    /// is the same whatever else the store holds.
     #[must_use]
     pub fn plan(&self, at: Timestamp, generations: &[Timestamp]) -> Plan {
         if let Some(valid_from) = self.retrain.current(generations, at) {
@@ -214,40 +189,20 @@ impl Schedule {
             from: at - self.sides,
             at,
         };
-        let Some(window) = self.meta else {
-            return Plan::Train(Fits {
-                at,
-                sides: fit(at),
-                meta: None,
-            });
-        };
-        let early = at - window;
-        if self.retrain.current(&[early], at).is_some() {
-            return Plan::Train(Fits {
-                at,
-                sides: fit(early),
-                meta: Some(MetaStep::OnSides),
-            });
-        }
-        let first = generations.iter().copied().filter(|&time| time < at).min();
         Plan::Train(Fits {
             at,
             sides: fit(at),
-            meta: Some(first.map_or(MetaStep::Wait, |first| MetaStep::OnStored {
-                from: early.max(first),
-            })),
+            ancestor: self.meta.map(|window| fit(at - window)),
         })
     }
 }
 
 impl Fits {
-    /// Where the train's one replay starts: at the first row a fit reads.
+    /// Where the train's one replay starts: at the first row a fit reads,
+    /// the ancestor's, a meta's window before the sides', if any.
     #[must_use]
     pub fn replay_from(&self) -> Timestamp {
-        match self.meta {
-            Some(MetaStep::OnStored { from }) => from.min(self.sides.from),
-            Some(MetaStep::OnSides | MetaStep::Wait) | None => self.sides.from,
-        }
+        self.ancestor.unwrap_or(self.sides).from
     }
 }
 
@@ -565,18 +520,14 @@ mod tests {
         }
     }
 
-    /// The train at `at` fitting the sides as `sides` and the meta as `meta`.
-    fn train(at: &str, sides: Fit, meta: Option<MetaStep>) -> Plan {
+    /// The train at `at` fitting the sides as `sides` and the ancestor pair
+    /// as `ancestor`.
+    fn train(at: &str, sides: Fit, ancestor: Option<Fit>) -> Plan {
         Plan::Train(Fits {
             at: self::at(at),
             sides,
-            meta,
+            ancestor,
         })
-    }
-
-    /// The meta fitted on the stored generations' decisions from `from`.
-    fn on_stored(from: &str) -> MetaStep {
-        MetaStep::OnStored { from: at(from) }
     }
 
     fn keep(valid_from: &str) -> Plan {
@@ -593,11 +544,13 @@ mod tests {
 
     /// Retrained, the generation current at the train is the one valid
     /// exactly from it, kept whole; one valid before it is not current, and
-    /// a generation is trained, its sides on their window of 24 hours back
-    /// from the train and its meta on the decisions of the 6th's.
+    /// a generation is trained: its sides on their window of 24 hours back
+    /// from the train, and its ancestor pair as of the 5th, the meta's window
+    /// of 48 hours before the train, on its window of 24 hours back from
+    /// there.
     #[rstest]
     #[case::of_the_train(&[SIXTH, SEVENTH], keep(SEVENTH))]
-    #[case::of_the_day_before(&[SIXTH], train(SEVENTH, fit(SIXTH, SEVENTH), Some(on_stored(SIXTH))))]
+    #[case::of_the_day_before(&[SIXTH], train(SEVENTH, fit(SIXTH, SEVENTH), Some(fit(FOURTH, FIFTH))))]
     fn retrained_the_generation_valid_from_the_train_is_kept_and_one_before_it_is_not(
         #[case] valid_froms: &[&str],
         #[case] plan: Plan,
@@ -605,32 +558,24 @@ mod tests {
         assert_eq!(daily().plan(at(SEVENTH), &generations(valid_froms)), plan);
     }
 
-    /// On an empty store, or one of a generation after the train, or of
-    /// the train's alone, no generation before the train decides the meta's
-    /// rows: the meta waits, the sides fitting on their window.
+    /// A train with a meta fits the same ancestor pair whatever the store
+    /// holds but the generation it keeps: on an empty store, one of a
+    /// generation after the train, or one of the generations before it, the
+    /// ancestor as of the 5th on its window back from there, the sides as of
+    /// the 7th; and never retrained alike, with no generation by the train.
     #[rstest]
-    #[case::on_an_empty_store(&[])]
-    #[case::on_a_store_of_a_generation_after_the_train(&[EIGHTH])]
-    fn retrained_with_no_generation_before_the_train_the_meta_waits(#[case] valid_froms: &[&str]) {
-        assert_eq!(
-            daily().plan(at(SEVENTH), &generations(valid_froms)),
-            train(SEVENTH, fit(SIXTH, SEVENTH), Some(MetaStep::Wait))
-        );
-    }
-
-    /// The meta's window of 48 hours starts on the 5th: with the first
-    /// generation valid from 12:00 of the 6th, its rows start there; with
-    /// the first valid from the 4th, at the window's start.
-    #[rstest]
-    #[case::after_the_windows_start(&["2026-01-06T12:00:00Z"], "2026-01-06T12:00:00Z")]
-    #[case::before_the_windows_start(&[FOURTH, SIXTH], FIFTH)]
-    fn the_metas_rows_start_at_the_first_generation_at_the_earliest(
+    #[case::retrained_on_an_empty_store(daily(), &[])]
+    #[case::retrained_on_a_store_of_a_generation_after_the_train(daily(), &[EIGHTH])]
+    #[case::retrained_on_a_store_of_generations_before_the_train(daily(), &[FOURTH, SIXTH])]
+    #[case::never_retrained_on_an_empty_store(never(), &[])]
+    #[case::never_retrained_on_a_store_of_a_generation_after_the_train(never(), &[EIGHTH])]
+    fn a_train_with_a_meta_fits_its_ancestor_as_of_the_metas_window_before_it_whatever_the_store_holds(
+        #[case] schedule: Schedule,
         #[case] valid_froms: &[&str],
-        #[case] from: &str,
     ) {
         assert_eq!(
-            daily().plan(at(SEVENTH), &generations(valid_froms)),
-            train(SEVENTH, fit(SIXTH, SEVENTH), Some(on_stored(from)))
+            schedule.plan(at(SEVENTH), &generations(valid_froms)),
+            train(SEVENTH, fit(SIXTH, SEVENTH), Some(fit(FOURTH, FIFTH)))
         );
     }
 
@@ -645,14 +590,13 @@ mod tests {
         );
     }
 
-    /// The replay starts at the first row a fit reads: the sides' window
-    /// from the 6th, or the meta's from the 5th; a waiting meta reads none.
+    /// The replay starts at the first row a fit reads: the ancestor's
+    /// window from the 4th, or, without a meta, the sides' from the 6th.
     #[rstest]
-    #[case::the_metas_window_first(&[FOURTH], FIFTH)]
-    #[case::the_sides_window_first(&["2026-01-06T12:00:00Z"], SIXTH)]
-    #[case::the_meta_waiting(&[], SIXTH)]
-    fn the_replay_starts_at_the_first_row_fitted(#[case] valid_froms: &[&str], #[case] from: &str) {
-        let Plan::Train(fits) = daily().plan(at(SEVENTH), &generations(valid_froms)) else {
+    #[case::with_a_meta(daily(), FOURTH)]
+    #[case::without_a_meta(without_meta(daily()), SIXTH)]
+    fn the_replay_starts_at_the_first_row_fitted(#[case] schedule: Schedule, #[case] from: &str) {
+        let Plan::Train(fits) = schedule.plan(at(SEVENTH), &[]) else {
             panic!("no train");
         };
 
@@ -675,30 +619,6 @@ mod tests {
         let plan = never().plan(at(SEVENTH), &generations(&[FIFTH, SIXTH, EIGHTH]));
 
         assert_eq!(plan, keep(SIXTH));
-    }
-
-    /// Never retrained, with no generation by the train of the 7th, on an
-    /// empty store or one holding a generation of the 8th alone (published
-    /// by a train from later): the sides fit as of the 5th, the meta's
-    /// window of 48 hours before the train, on their window of 24 hours
-    /// back from there, and the meta at the 7th on their decisions, one
-    /// generation valid from the 7th; the one replay starts on the 4th.
-    #[rstest]
-    #[case::on_an_empty_store(&[])]
-    #[case::on_a_store_of_a_generation_after_the_train(&[EIGHTH])]
-    fn never_retrained_with_no_generation_in_use_the_sides_fit_as_of_the_metas_window_before_the_train(
-        #[case] valid_froms: &[&str],
-    ) {
-        let plan = never().plan(at(SEVENTH), &generations(valid_froms));
-
-        assert_eq!(
-            plan,
-            train(SEVENTH, fit(FOURTH, FIFTH), Some(MetaStep::OnSides))
-        );
-        let Plan::Train(fits) = plan else {
-            panic!("no train");
-        };
-        assert_eq!(fits.replay_from(), at(FOURTH));
     }
 
     /// Retrained, a span's retrain times are a run's over it; never

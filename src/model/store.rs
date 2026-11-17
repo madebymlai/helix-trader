@@ -3,12 +3,12 @@
 //!
 //! A generation is one train's models (`StoredGeneration`): the model of
 //! each side the strategy trades, with the calibration of their pair, and
-//! the meta's, if the strategy has one and it did not wait for the sides'
-//! decisions (`train::Kept::Waiting`). It is self-contained: its models are
-//! fixed as of its retrain time, by that train alone, and none is derived
-//! from the generation before it, nor changed by a later train; a retrained
-//! meta learns from the decisions of the generations before it (`train`),
-//! but takes no model of theirs. A decision uses the latest generation
+//! the meta's, if the strategy has one, every generation of a strategy with
+//! a meta holding one. It is self-contained: its models are fixed as of its
+//! retrain time, by that train alone, from the data and the config, none
+//! derived from another generation nor changed by a later train; its meta
+//! learned from an ancestor pair its train fitted and did not publish
+//! (`train`). A decision uses the latest generation
 //! valid at or before it, its sides and its meta together, so no meta ever
 //! decides beside the sides of another train, and no side beside another
 //! train's other side.
@@ -57,7 +57,7 @@
 //! manifest (`ModelManifest`), the schema (the feature names in order, the
 //! fingerprint), the target spec and side, the learner, the meta's
 //! calibration, its level line (a side's is its pair's, the generation's,
-//! `calibration::Ksplit`), its baseline (the training mean of the R it
+//! `calibration::Ksplit`), the meta's ancestor's time, its baseline (the training mean of the R it
 //! learned on the rows it was fitted and calibrated on) and probe rows, of
 //! its calibration slice, with the predictions the model made on them when
 //! fitted, before any calibration, and the model as its adapter saved it. A
@@ -114,7 +114,7 @@ static PUBLISHES: AtomicU64 = AtomicU64::new(0);
 /// whenever that changes, which keys every store anew, so that no
 /// generation of another layout is read and every model is trained again,
 /// on the datasets as they are.
-const VERSION: u32 = 9;
+const VERSION: u32 = 10;
 
 /// A strategy's models: the generations its trains published, keyed by the
 /// one fingerprint of its dataset and its generation key, each side its
@@ -151,9 +151,9 @@ pub struct MetaLevel {
 /// One train's models as they are published and read back: valid from its
 /// retrain time, the model of each side the strategy trades, the long
 /// first, the calibration of their pair, fitted on both sides' predictions,
-/// and the meta's model, none if the strategy has no meta or its meta
-/// waited. Self-contained: the models of one train, fixed as of its retrain
-/// time, none derived from the previous generation.
+/// and the meta's model, if and only if the strategy has a meta.
+/// Self-contained: the models of one train, fixed as of its retrain time,
+/// none derived from another generation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredGeneration {
     pub valid_from: Timestamp,
@@ -172,13 +172,11 @@ struct GenerationManifest {
     publish: String,
     /// The calibration of its sides' pair.
     calibration: Ksplit,
-    /// Whether it holds a meta model.
-    meta: bool,
 }
 
 /// A generation loaded and checked, as a decision uses it: its sides'
-/// pair, and its meta's model, if it holds one, all of one train, fixed as
-/// of its retrain time and none derived from the previous generation.
+/// pair, and its meta's model if the strategy has a meta, all of one train,
+/// fixed as of its retrain time and none derived from another generation.
 #[derive(Debug)]
 pub struct Generation {
     pair: Pair,
@@ -222,6 +220,10 @@ pub struct ModelManifest {
     /// as a one-sided pair's (`Ksplit`); none of a side's, which its pair
     /// calibrates (`StoredGeneration::calibration`).
     pub calibration: Option<Line>,
+    /// A meta model's ancestor's time: the time the ancestor pair whose
+    /// picks it learned from was fitted as of, a meta's window before its
+    /// generation's; none of a side's.
+    pub ancestor: Option<Timestamp>,
     /// The model's baseline, the constant model its scores are read
     /// beside: the training mean of the R it learned on the rows it was
     /// fitted and calibrated on.
@@ -444,20 +446,15 @@ impl ModelStore {
         &self.directory
     }
 
-    /// Whether a strategy trades on its generations at `now`: the latest
-    /// valid by then (`Swap::at`) holds a meta model, if the strategy has a
-    /// meta section. Its models may still fail their checks as they load.
+    /// Whether a strategy trades on its generations at `now`: a generation
+    /// is valid by then (`Swap::at`). Its models may still fail their checks
+    /// as they load.
     ///
     /// # Errors
     ///
-    /// Returns an error if the generations cannot be listed, or the latest's
-    /// manifest cannot be read.
+    /// Returns an error if the generations cannot be listed.
     pub fn trades_by(&self, now: Timestamp) -> anyhow::Result<bool> {
-        let generations = self.generations()?;
-        let Some(&latest) = generations.iter().rfind(|&&time| time <= now) else {
-            return Ok(false);
-        };
-        Ok(self.meta.is_none() || self.manifest(latest)?.meta)
+        Ok(self.generations()?.iter().any(|&time| time <= now))
     }
 
     /// Each side the margins trade, the long first.
@@ -520,9 +517,24 @@ impl ModelStore {
     ///
     /// # Errors
     ///
-    /// Returns an error if a side's model names no side, or a file cannot be
-    /// written.
+    /// Returns an error if a side's model names no side, the generation
+    /// holds a meta model and the strategy has no meta or the reverse, or a
+    /// file cannot be written.
     pub fn publish(&self, generation: &StoredGeneration) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            generation.meta.is_some() == self.meta.is_some(),
+            "publishing a generation {} a meta model for a strategy {} a meta",
+            if generation.meta.is_some() {
+                "holding"
+            } else {
+                "without"
+            },
+            if self.meta.is_some() {
+                "with"
+            } else {
+                "without"
+            }
+        );
         let directory = self.generation(generation.valid_from);
         let publish = format!(
             "{}-{}",
@@ -549,7 +561,6 @@ impl ModelStore {
             strategy_id: self.strategy_id,
             publish,
             calibration: generation.calibration,
-            meta: generation.meta.is_some(),
         })?;
         fs::write(&written, text)
             .and_then(|()| fs::rename(&written, &manifest))
@@ -557,7 +568,7 @@ impl ModelStore {
     }
 
     /// The generation valid from `valid_from`, as published: the model of
-    /// each side traded and its meta's, if its manifest says it holds one.
+    /// each side traded and its meta's, if the strategy has a meta.
     ///
     /// # Errors
     ///
@@ -570,9 +581,10 @@ impl ModelStore {
             .iter()
             .map(|level| read(&models.join(file(level.side.name()))))
             .collect::<anyhow::Result<_>>()?;
-        let meta = manifest
+        let meta = self
             .meta
-            .then(|| read(&models.join(file(META))))
+            .as_ref()
+            .map(|_| read(&models.join(file(META))))
             .transpose()?;
         Ok(StoredGeneration {
             valid_from,
@@ -597,14 +609,14 @@ impl ModelStore {
     /// The generation valid from `valid_from`, loaded and checked: each
     /// side's model against the side models' feature names and the
     /// fingerprint (`StoredModel::load_side`), calibrated as a pair by the
-    /// generation's calibration, and the meta's, if it holds one, against
-    /// the meta's.
+    /// generation's calibration, and the meta's, if the strategy has a meta,
+    /// against the meta's.
     ///
     /// # Errors
     ///
-    /// Returns an error if it cannot be read, a model fails its checks,
-    /// naming its level, the calibration is not of as many sides as the pair,
-    /// or it holds a meta model and the strategy has no meta.
+    /// Returns an error if it cannot be read, its meta model included, a
+    /// model fails its checks, naming its level, or the calibration is not
+    /// of as many sides as the pair.
     fn load(&self, valid_from: Timestamp) -> anyhow::Result<Generation> {
         let stored = self.read(valid_from)?;
         let models = stored
@@ -618,15 +630,16 @@ impl ModelStore {
                 Ok((level.side, loaded))
             })
             .collect::<anyhow::Result<_>>()?;
-        let meta = match (&stored.meta, &self.meta) {
-            (None, _) => None,
-            (Some(model), Some(level)) => Some(
+        let meta = stored
+            .meta
+            .as_ref()
+            .zip(self.meta.as_ref())
+            .map(|(model, level)| {
                 model
                     .load(&level.feature_names, &self.fingerprint)
-                    .context("the meta model")?,
-            ),
-            (Some(_), None) => anyhow::bail!("it holds a meta model, and the strategy has none"),
-        };
+                    .context("the meta model")
+            })
+            .transpose()?;
         Ok(Generation {
             pair: Pair::new(models, stored.calibration)?,
             meta,
@@ -728,7 +741,7 @@ impl Generation {
         &self.pair
     }
 
-    /// Its meta's model, none if it holds none.
+    /// Its meta's model, none if the strategy has no meta.
     #[must_use]
     pub const fn meta(&self) -> Option<&LoadedModel> {
         self.meta.as_ref()
@@ -1195,6 +1208,7 @@ mod tests {
                     beta: 0.5,
                 }),
                 baseline: 0.5,
+                ancestor: None,
                 probes: rows
                     .iter()
                     .map(|row| Probe {
@@ -1232,16 +1246,25 @@ mod tests {
         assert_eq!(models.read(at(MIDNIGHT)).unwrap(), published);
     }
 
-    /// A generation whose meta waited holds none, and reads back so.
+    /// Every generation of a strategy with a meta holds a meta model, and
+    /// none of one without holds one: a publish of either otherwise is
+    /// refused, naming the meta, and publishes nothing.
     #[rstest]
-    fn a_generation_without_its_meta_reads_back_without_one() {
+    #[case::without_a_meta_for_a_strategy_with_one(with_meta(), false)]
+    #[case::with_a_meta_for_a_strategy_without_one(config(), true)]
+    fn a_generation_whose_meta_is_not_the_strategys_is_refused(
+        #[case] config: ModelConfig,
+        #[case] meta: bool,
+    ) {
         let dir = tempfile::tempdir().unwrap();
-        let models = models(dir.path(), &with_meta());
-        let published = generation(MIDNIGHT, &[vec![0.3]], false);
+        let models = models(dir.path(), &config);
 
-        models.publish(&published).unwrap();
+        let err = models
+            .publish(&generation(MIDNIGHT, &[vec![0.3]], meta))
+            .unwrap_err();
 
-        assert_eq!(models.read(at(MIDNIGHT)).unwrap().meta, None);
+        assert!(err.to_string().contains("meta"), "{err}");
+        assert_eq!(models.generations().unwrap(), []);
     }
 
     #[rstest]
@@ -1356,7 +1379,7 @@ mod tests {
     }
 
     /// A generation published again at its time replaces the first whole:
-    /// its sides and its meta, and a meta the second holds none of is gone.
+    /// its sides and its meta, the second's probed on other rows.
     #[rstest]
     fn publishing_at_the_same_time_replaces_the_generation() {
         let dir = tempfile::tempdir().unwrap();
@@ -1364,7 +1387,7 @@ mod tests {
         models
             .publish(&generation(MIDNIGHT, &[vec![0.5]], true))
             .unwrap();
-        let second = generation(MIDNIGHT, &[vec![0.9]], false);
+        let second = generation(MIDNIGHT, &[vec![0.9]], true);
 
         models.publish(&second).unwrap();
 
@@ -1473,11 +1496,11 @@ mod tests {
     #[rstest]
     #[case::without_a_meta(
         config(),
-        "19df384a00b8c0b4568a90df737a4647870371107c1d9e20f608702e8abb1a55"
+        "af12e28a00a856fd66038709142f3df7572a2e66ddf865f06a24fa4bcc6fcb50"
     )]
     #[case::with_a_meta(
         with_meta(),
-        "bb80863c1c51f2d8126de9eb645d46523ddff4088449ed706f35bd521522d6c0"
+        "90e529b2258853f90af3500e9e9d5a9bac681f553a594fbde336dc34f038299c"
     )]
     fn a_fixed_strategys_generations_keep_their_directory(
         #[case] config: ModelConfig,
@@ -1493,33 +1516,26 @@ mod tests {
         );
     }
 
-    /// A strategy trades on the latest generation valid by then, and with a
-    /// meta section only if it holds a meta model: a store holding no
-    /// generation, one valid later, or a latest one whose meta waited has
-    /// none to trade on yet.
+    /// A strategy trades on a generation valid by then: a store holding no
+    /// generation, or one valid later alone, has none to trade on yet; with
+    /// a meta section alike, each generation holding a meta model.
     #[rstest]
-    fn a_model_store_trades_on_its_latest_generation_holding_every_model() {
+    #[case::without_a_meta(config(), false)]
+    #[case::with_a_meta(with_meta(), true)]
+    fn a_model_store_trades_on_a_generation_valid_by_then(
+        #[case] config: ModelConfig,
+        #[case] meta: bool,
+    ) {
         let dir = tempfile::tempdir().unwrap();
-        let (noon, before) = ("2026-10-22T12:00:00Z", "2026-10-21T23:59:59Z");
-        let trades = |config: &ModelConfig, now: &str| {
-            models(dir.path(), config).trades_by(at(now)).unwrap()
-        };
+        let before = "2026-10-21T23:59:59Z";
+        let trades = |now: &str| models(dir.path(), &config).trades_by(at(now)).unwrap();
 
-        assert!(!trades(&config(), MIDNIGHT));
-        models(dir.path(), &config())
-            .publish(&generation(MIDNIGHT, &[vec![0.5]], false))
+        assert!(!trades(MIDNIGHT));
+        models(dir.path(), &config)
+            .publish(&generation(MIDNIGHT, &[vec![0.5]], meta))
             .unwrap();
-        assert!(trades(&config(), MIDNIGHT));
-        assert!(!trades(&config(), before));
-        models(dir.path(), &with_meta())
-            .publish(&generation(MIDNIGHT, &[vec![0.5]], false))
-            .unwrap();
-        assert!(!trades(&with_meta(), noon));
-        models(dir.path(), &with_meta())
-            .publish(&generation(noon, &[vec![0.5]], true))
-            .unwrap();
-        assert!(!trades(&with_meta(), MIDNIGHT));
-        assert!(trades(&with_meta(), noon));
+        assert!(trades(MIDNIGHT));
+        assert!(!trades(before));
     }
 
     /// A meta model's every prediction of R is calibrated by its level line,

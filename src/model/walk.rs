@@ -6,9 +6,8 @@
 //! the range it judges.
 //!
 //! Before the run (`WalkForward::untrained`), a backtest whose store holds
-//! no generation to trade on at its start (`ModelStore::trades_by`: the
-//! latest valid by then, holding a meta model if the strategy has a meta,
-//! as a live start checks) is refused: it would trade nothing from its
+//! no generation to trade on at its start (`ModelStore::trades_by`: one
+//! valid by then, as a live start checks) is refused: it would trade nothing from its
 //! start, and names the retrain time there, the span's first train time
 //! (`Schedule::times`: the last retrain time not after the start, or, never
 //! retrained, the start). The run then trades on the store as it is: at
@@ -607,6 +606,7 @@ mod tests {
                 learner: LearnerConfig::Fake {},
                 calibration: None,
                 baseline,
+                ancestor: None,
                 probes: vec![],
             },
             model: model.save().unwrap(),
@@ -1237,10 +1237,10 @@ mod tests {
         }
     }
 
-    /// A generation's meta is scored beside its own sides alone: that of the
-    /// 7th holds a meta model, that of the 8th none, its meta having waited,
-    /// so the meta scores the 7th's three rows and none of the 8th, never
-    /// beside the 8th's sides, which still pick their two.
+    /// A generation's meta is scored beside its own sides alone: the meta
+    /// scores the 7th's three rows with the 7th's generation, and the two
+    /// the 8th's sides pick with the 8th's, never the 7th's meta beside the
+    /// 8th's sides.
     #[rstest]
     fn a_meta_is_scored_beside_its_own_generations_sides_alone() {
         let dir = tempfile::tempdir().unwrap();
@@ -1258,9 +1258,14 @@ mod tests {
             dir.path(),
             &config,
             at("2026-01-07T00:00:00Z"),
+            Some(meta_model(fingerprint.clone())),
+        );
+        publish_opposed(
+            dir.path(),
+            &config,
+            at("2026-01-08T00:00:00Z"),
             Some(meta_model(fingerprint)),
         );
-        publish_opposed(dir.path(), &config, at("2026-01-08T00:00:00Z"), None);
 
         let scores = walk
             .scores(at("2026-01-07T00:00:00Z"), at("2026-01-09T00:00:00Z"))
@@ -1268,8 +1273,17 @@ mod tests {
 
         let meta = scores.meta.unwrap();
         assert_eq!(meta.periods[0].score.rows, 3, "{meta:?}");
-        assert_eq!(meta.periods[1].score.rows, 0, "{meta:?}");
-        assert!(meta.periods[1].models.is_empty(), "{meta:?}");
+        assert_eq!(
+            meta.periods[0].models,
+            [at("2026-01-07T00:00:00Z")],
+            "{meta:?}"
+        );
+        assert_eq!(meta.periods[1].score.rows, 2, "{meta:?}");
+        assert_eq!(
+            meta.periods[1].models,
+            [at("2026-01-08T00:00:00Z")],
+            "{meta:?}"
+        );
         trades_are(scores.long.unwrap().periods[1].earnings.taken, 1, 1.0);
     }
 
@@ -1541,10 +1555,8 @@ Meta model scores, out of sample, over the span
     /// A backtest from 12:00 of the 7th to the 9th whose store holds no
     /// generation to trade on at its start is untrained there: at the span's
     /// first train time, retrained daily the midnight of the 7th, never
-    /// retrained its start. A store holding a generation whose meta waited,
-    /// with a meta level, holds nothing to trade on either, even beside an
-    /// earlier generation holding one; nor one whose generations come after
-    /// the start.
+    /// retrained its start; nor one whose generations come after the start,
+    /// with a meta level or without.
     #[rstest]
     #[case::retrained_on_an_empty_store(config(), &[], "2026-01-07T00:00:00Z")]
     #[case::never_retrained_on_an_empty_store(never(), &[], "2026-01-07T12:00:00Z")]
@@ -1553,14 +1565,9 @@ Meta model scores, out of sample, over the span
         &[Published::Sides("2026-01-08T00:00:00Z")],
         "2026-01-07T00:00:00Z"
     )]
-    #[case::with_a_generation_whose_meta_waited(
+    #[case::with_a_meta_and_generations_after_its_start(
         with_meta(),
-        &[Published::Sides("2026-01-06T00:00:00Z")],
-        "2026-01-07T00:00:00Z"
-    )]
-    #[case::with_its_latest_generations_meta_waited(
-        with_meta(),
-        &[Published::WithMeta("2026-01-06T00:00:00Z"), Published::Sides("2026-01-07T06:00:00Z")],
+        &[Published::WithMeta("2026-01-08T00:00:00Z")],
         "2026-01-07T00:00:00Z"
     )]
     fn a_backtest_with_no_model_to_trade_on_at_its_start_is_untrained_at_its_first_train_time(
@@ -1582,11 +1589,16 @@ Meta model scores, out of sample, over the span
     /// A backtest from 12:00 of the 7th whose store holds a generation to
     /// trade on by then trains nothing: the generation of the 6th, published
     /// at no retrain time of the span, decides until the next, retrained or
-    /// not; with a meta level, holding a meta model.
+    /// not; with a meta level, holding a meta model, as does a retrained
+    /// one's first generation, of the 7th, its first retrain time.
     #[rstest]
     #[case::retrained(config(), &[Published::Sides("2026-01-06T00:00:00Z")])]
     #[case::never_retrained(never(), &[Published::Sides("2026-01-06T00:00:00Z")])]
     #[case::with_a_meta_model(never_with_meta(), &[Published::WithMeta("2026-01-06T00:00:00Z")])]
+    #[case::retrained_with_a_meta_model_from_its_first_retrain_time(
+        with_meta(),
+        &[Published::WithMeta("2026-01-07T00:00:00Z")]
+    )]
     fn a_backtest_with_models_to_trade_on_at_its_start_is_not_untrained(
         #[case] config: ModelConfig,
         #[case] published: &[Published],
