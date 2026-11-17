@@ -816,7 +816,9 @@ mod tests {
                 TargetRow,
             },
         },
-        strategy::{Declared, EmaArgs, IndicatorsConfig, requirements::DataRequirements, risk::R},
+        strategy::{
+            Declared, EmaArgs, IndicatorsConfig, Series, requirements::DataRequirements, risk::R,
+        },
     };
 
     const AUD: &str = "AUD/USD.SIM";
@@ -834,7 +836,7 @@ mod tests {
     /// The one feature, `mid_0`.
     fn features() -> Rc<FeatureSet> {
         FeatureSet::builder()
-            .quotes(InstrumentId::from(AUD), MID, &tables())
+            .feature(&[Series::quotes(InstrumentId::from(AUD))], MID, &tables())
             .build()
             .unwrap()
     }

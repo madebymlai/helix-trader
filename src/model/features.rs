@@ -317,14 +317,14 @@ pub struct FeatureSet {
 /// raw feature of custom data. An indicator is never handed in built:
 ///
 /// ```
-/// # use helix_trader::{model::features::FeatureSet, strategy::{Declared, EmaArgs, IndicatorsConfig}};
+/// # use helix_trader::{model::features::FeatureSet, strategy::{Declared, EmaArgs, IndicatorsConfig, Series}};
 /// # use nautilus_model::identifiers::InstrumentId;
 /// const MID: Declared<EmaArgs> = Declared::new("mid");
 /// let indicators: IndicatorsConfig =
 ///     toml::from_str(r#"mid = { period = 1, price_type = "MID" }"#).unwrap();
 ///
 /// let features = FeatureSet::builder()
-///     .quotes(InstrumentId::from("AUD/USD.SIM"), MID, &indicators)
+///     .feature(&[Series::quotes(InstrumentId::from("AUD/USD.SIM"))], MID, &indicators)
 ///     .build()
 ///     .unwrap();
 ///
@@ -332,12 +332,12 @@ pub struct FeatureSet {
 /// ```
 ///
 /// ```compile_fail
-/// # use helix_trader::model::features::FeatureSet;
+/// # use helix_trader::{model::features::FeatureSet, strategy::Series};
 /// # use nautilus_indicators::average::ema::ExponentialMovingAverage;
 /// # use nautilus_model::identifiers::InstrumentId;
 /// let features = FeatureSet::builder()
-///     .quotes(
-///         InstrumentId::from("AUD/USD.SIM"),
+///     .feature(
+///         &[Series::quotes(InstrumentId::from("AUD/USD.SIM"))],
 ///         "mid",
 ///         ExponentialMovingAverage::new(1, None),
 ///     )

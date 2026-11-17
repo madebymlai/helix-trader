@@ -803,7 +803,7 @@ mod tests {
             },
         },
         strategy::{
-            AtrArgs, Declared, EmaArgs, IndicatorsConfig,
+            AtrArgs, Declared, EmaArgs, IndicatorsConfig, Series,
             conversions::Conversions,
             orders::{Bracket, Exits},
             requirements::{CustomSeries, DataRequirements, TickSeries},
@@ -1591,7 +1591,7 @@ mod tests {
         let models = tempfile::tempdir().unwrap();
         let hours = BarType::from("AUD/USD.SIM-1-HOUR-MID-INTERNAL");
         let features = FeatureSet::builder()
-            .bars(hours, HOURLY_CLOSE, &tables())
+            .feature(&[Series::Bars(hours)], HOURLY_CLOSE, &tables())
             .build()
             .unwrap();
         model_store(models.path(), &features, &config())
@@ -1661,7 +1661,7 @@ mod tests {
         let models = tempfile::tempdir().unwrap();
         let gcz26 = InstrumentId::from("GCZ26.GLBX");
         let features = last_mid(InstrumentId::from(AUD))
-            .trades(gcz26, GC_2_TRADES, &tables())
+            .feature(&[Series::trades(gcz26)], GC_2_TRADES, &tables())
             .build()
             .unwrap();
         let requirements = DataRequirements {
@@ -1756,7 +1756,7 @@ mod tests {
         let mids: IndicatorsConfig =
             toml::from_str(r#"gc_2_mids = { period = 2, price_type = "MID" }"#).unwrap();
         let features = FeatureSet::builder()
-            .quotes(gcz26, GC_2_MIDS, &mids)
+            .feature(&[Series::quotes(gcz26)], GC_2_MIDS, &mids)
             .build()
             .unwrap();
         let requirements = DataRequirements {
@@ -2634,7 +2634,11 @@ mod tests {
         let models = tempfile::tempdir().unwrap();
         let (mut probe, _clock) = registered(at("2026-08-10T14:30:00Z"));
         let features = FeatureSet::builder()
-            .trades(InstrumentId::from("GC.GLBX"), GC_2_TRADES, &tables())
+            .feature(
+                &[Series::trades(InstrumentId::from("GC.GLBX"))],
+                GC_2_TRADES,
+                &tables(),
+            )
             .build()
             .unwrap();
         let requirements = DataRequirements {
@@ -2900,7 +2904,7 @@ mod tests {
     fn a_live_start_of_bar_features_requests_the_minute_bars_and_the_traded_quotes() {
         let hours = BarType::from("AUD/USD.SIM-1-HOUR-MID-INTERNAL@1-MINUTE-EXTERNAL");
         let features = FeatureSet::builder()
-            .bars(hours, HOURLY_CLOSE, &tables())
+            .feature(&[Series::Bars(hours)], HOURLY_CLOSE, &tables())
             .build()
             .unwrap();
 

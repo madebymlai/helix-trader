@@ -18,7 +18,7 @@ use helix_trader::{
         targets::TargetConfig,
     },
     strategy::{
-        Declared,
+        Declared, Series,
         requirements::{DataRequirements, catalog_keys},
     },
 };
@@ -167,7 +167,11 @@ fn a_decision_on_hour_bars_reads_the_bar_closing_on_its_grid() {
     fill(dir.path());
     let hour_bars = BarType::from(COMPOSITE);
     let features = FeatureSet::builder()
-        .bars(hour_bars, CLOSE, &tables("close = { period = 1 }"))
+        .feature(
+            &[Series::Bars(hour_bars)],
+            CLOSE,
+            &tables("close = { period = 1 }"),
+        )
         .build()
         .unwrap();
     let requirements = DataRequirements {

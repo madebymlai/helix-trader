@@ -43,7 +43,7 @@ use helix_trader::{
         },
     },
     strategy::{
-        AtrArgs, Declared, orders,
+        AtrArgs, Declared, Series, orders,
         requirements::{DataRequirements, TickSeries},
         risk::Risk,
         subscriptions::Subscriptions,
@@ -194,9 +194,15 @@ impl TargetProbe {
             "#,
         );
         let features = match source {
-            Source::Quotes(id) => FeatureSet::builder().quotes(id, MID, &tables),
-            Source::Trades(id) => FeatureSet::builder().trades(id, LAST, &tables),
-            Source::Bars(bar_type) => FeatureSet::builder().bars(bar_type, CLOSE, &tables),
+            Source::Quotes(id) => {
+                FeatureSet::builder().feature(&[Series::quotes(id)], MID, &tables)
+            }
+            Source::Trades(id) => {
+                FeatureSet::builder().feature(&[Series::trades(id)], LAST, &tables)
+            }
+            Source::Bars(bar_type) => {
+                FeatureSet::builder().feature(&[Series::Bars(bar_type)], CLOSE, &tables)
+            }
         }
         .build()
         .unwrap();

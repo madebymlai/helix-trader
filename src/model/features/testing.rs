@@ -31,7 +31,7 @@ pub(crate) fn tables() -> IndicatorsConfig {
 /// The features of one, `mid`, the last mid of `instrument_id`, warm once
 /// a quote came.
 pub(crate) fn last_mid(instrument_id: InstrumentId) -> FeatureSetBuilder {
-    FeatureSet::builder().quotes(instrument_id, MID, &tables())
+    FeatureSet::builder().feature(&[Series::quotes(instrument_id)], MID, &tables())
 }
 
 /// The last mid of a quote over the bracket's width there: initialized once
@@ -101,7 +101,12 @@ pub(crate) const OVER: Declared<MidOverWidthArgs> = Declared::new("over");
 /// bracket's `width` there.
 pub(crate) fn mid_over(instrument_id: InstrumentId, width: &Rc<BracketWidth>) -> FeatureSetBuilder {
     let tables: IndicatorsConfig = toml::from_str("over = {}").unwrap();
-    FeatureSet::builder().over_bracket(instrument_id, OVER, &tables, width)
+    FeatureSet::builder().feature_over_bracket(
+        &[Series::quotes(instrument_id)],
+        OVER,
+        &tables,
+        width,
+    )
 }
 
 /// A count of the depth and deltas a feature gets, `[indicators.book]`.
@@ -112,8 +117,8 @@ pub(crate) const BOOK: Declared<BookCountArgs> = Declared::new("book");
 pub(crate) fn book_counts(instrument_id: InstrumentId) -> FeatureSetBuilder {
     let tables: IndicatorsConfig = toml::from_str("book = {}").unwrap();
     FeatureSet::builder()
-        .depth(instrument_id, BOOK, &tables)
-        .deltas(instrument_id, BOOK, &tables)
+        .feature(&[Series::depth(instrument_id)], BOOK, &tables)
+        .feature(&[Series::deltas(instrument_id)], BOOK, &tables)
 }
 
 /// A feature counting the depth and deltas it gets, initialized by the

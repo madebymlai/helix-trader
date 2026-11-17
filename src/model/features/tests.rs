@@ -196,7 +196,7 @@ fn a_table_feeding_one_feature_names_it_after_the_table() {
     let tables = tables();
 
     let features = FeatureSet::builder()
-        .quotes(id(AUD), LAST, &tables)
+        .feature(&[Series::quotes(id(AUD))], LAST, &tables)
         .build()
         .unwrap();
 
@@ -209,11 +209,11 @@ fn a_table_feeding_several_features_names_each_after_its_series_and_the_table() 
     let tables = tables();
 
     let features = FeatureSet::builder()
-        .bars(BarType::from(AUD_BARS), LAST, &tables)
-        .quotes(id(AUD), LAST, &tables)
-        .trades(id(GBP), LAST, &tables)
-        .depth(id(AUD), BOOK, &tables)
-        .deltas(id(GBP), BOOK, &tables)
+        .feature(&[Series::Bars(BarType::from(AUD_BARS))], LAST, &tables)
+        .feature(&[Series::quotes(id(AUD))], LAST, &tables)
+        .feature(&[Series::trades(id(GBP))], LAST, &tables)
+        .feature(&[Series::depth(id(AUD))], BOOK, &tables)
+        .feature(&[Series::deltas(id(GBP))], BOOK, &tables)
         .build()
         .unwrap();
 
@@ -235,9 +235,9 @@ fn each_table_is_named_by_the_features_it_feeds_itself() {
     let tables = tables();
 
     let features = FeatureSet::builder()
-        .quotes(id(AUD), LAST, &tables)
-        .quotes(id(AUD), TWO, &tables)
-        .quotes(id(GBP), LAST, &tables)
+        .feature(&[Series::quotes(id(AUD))], LAST, &tables)
+        .feature(&[Series::quotes(id(AUD))], TWO, &tables)
+        .feature(&[Series::quotes(id(GBP))], LAST, &tables)
         .build()
         .unwrap();
 
@@ -256,9 +256,9 @@ fn the_names_keep_the_order_of_their_declaration() {
     let tables = tables();
 
     let features = FeatureSet::builder()
-        .bars(BarType::from(AUD_BARS), TWO, &tables)
+        .feature(&[Series::Bars(BarType::from(AUD_BARS))], TWO, &tables)
         .custom(&level_series(AUD), "level", read_level)
-        .quotes(id(AUD), LAST, &tables)
+        .feature(&[Series::quotes(id(AUD))], LAST, &tables)
         .build()
         .unwrap();
 
@@ -271,8 +271,8 @@ fn two_features_of_one_name_are_an_error() {
     let tables = tables();
 
     let err = FeatureSet::builder()
-        .quotes(id(AUD), LAST, &tables)
-        .quotes(id(AUD), LAST, &tables)
+        .feature(&[Series::quotes(id(AUD))], LAST, &tables)
+        .feature(&[Series::quotes(id(AUD))], LAST, &tables)
         .build()
         .unwrap_err()
         .to_string();
@@ -291,9 +291,9 @@ fn a_set_without_features_is_an_error() {
 fn a_quote_reaches_only_the_features_on_the_quotes_of_its_instrument() {
     let tables = tables();
     let features = FeatureSet::builder()
-        .quotes(id(AUD), LAST, &tables)
-        .quotes(id(GBP), LAST, &tables)
-        .trades(id(AUD), LAST, &tables)
+        .feature(&[Series::quotes(id(AUD))], LAST, &tables)
+        .feature(&[Series::quotes(id(GBP))], LAST, &tables)
+        .feature(&[Series::trades(id(AUD))], LAST, &tables)
         .build()
         .unwrap();
 
@@ -313,8 +313,8 @@ fn a_quote_reaches_only_the_features_on_the_quotes_of_its_instrument() {
 fn a_bar_reaches_only_the_features_on_its_bar_type() {
     let tables = tables();
     let features = FeatureSet::builder()
-        .bars(BarType::from(AUD_BARS), LAST, &tables)
-        .bars(BarType::from(AUD_BID_BARS), LAST, &tables)
+        .feature(&[Series::Bars(BarType::from(AUD_BARS))], LAST, &tables)
+        .feature(&[Series::Bars(BarType::from(AUD_BID_BARS))], LAST, &tables)
         .build()
         .unwrap();
 
@@ -334,8 +334,8 @@ fn depth_and_deltas_reach_only_the_features_on_their_kind_and_instrument() {
     let tables = tables();
     let depth = stub_depth10();
     let features = FeatureSet::builder()
-        .depth(depth.instrument_id, BOOK, &tables)
-        .deltas(depth.instrument_id, BOOK, &tables)
+        .feature(&[Series::depth(depth.instrument_id)], BOOK, &tables)
+        .feature(&[Series::deltas(depth.instrument_id)], BOOK, &tables)
         .build()
         .unwrap();
 
@@ -352,7 +352,7 @@ fn depth_and_deltas_reach_only_the_features_on_their_kind_and_instrument() {
 #[rstest]
 fn an_update_of_a_kind_no_feature_reads_is_a_no_op() {
     let features = FeatureSet::builder()
-        .bars(BarType::from(AUD_BARS), LAST, &tables())
+        .feature(&[Series::Bars(BarType::from(AUD_BARS))], LAST, &tables())
         .build()
         .unwrap();
 
@@ -418,8 +418,8 @@ impl IndicatorArgs for FailingQuotesArgs {
 fn a_features_error_is_no_error_of_the_set_and_the_others_still_update() {
     let tables = tables();
     let features = FeatureSet::builder()
-        .quotes(id(AUD), FAILING, &tables)
-        .quotes(id(AUD), LAST, &tables)
+        .feature(&[Series::quotes(id(AUD))], FAILING, &tables)
+        .feature(&[Series::quotes(id(AUD))], LAST, &tables)
         .build()
         .unwrap();
 
@@ -434,8 +434,8 @@ fn a_features_error_is_no_error_of_the_set_and_the_others_still_update() {
 fn the_values_wait_for_every_feature() {
     let tables = tables();
     let features = FeatureSet::builder()
-        .quotes(id(AUD), TWO, &tables)
-        .quotes(id(AUD), LAST, &tables)
+        .feature(&[Series::quotes(id(AUD))], TWO, &tables)
+        .feature(&[Series::quotes(id(AUD))], LAST, &tables)
         .build()
         .unwrap();
 
@@ -574,10 +574,10 @@ fn an_instruments_last_update_is_the_latest_a_feature_read_of_any_kind() {
     let depth = stub_depth10();
     let tables = tables();
     let features = FeatureSet::builder()
-        .quotes(id(AUD), LAST, &tables)
-        .trades(id(AUD), LAST, &tables)
-        .bars(BarType::from(AUD_BARS), LAST, &tables)
-        .depth(depth.instrument_id, BOOK, &tables)
+        .feature(&[Series::quotes(id(AUD))], LAST, &tables)
+        .feature(&[Series::trades(id(AUD))], LAST, &tables)
+        .feature(&[Series::Bars(BarType::from(AUD_BARS))], LAST, &tables)
+        .feature(&[Series::depth(depth.instrument_id)], BOOK, &tables)
         .build()
         .unwrap();
 
@@ -600,7 +600,7 @@ fn an_instruments_last_update_is_the_latest_a_feature_read_of_any_kind() {
 #[rstest]
 fn an_update_no_feature_reads_and_custom_data_are_no_update_of_an_instrument() {
     let features = FeatureSet::builder()
-        .quotes(id(AUD), LAST, &tables())
+        .feature(&[Series::quotes(id(AUD))], LAST, &tables())
         .custom(&level_series(AUD), "level", read_level)
         .build()
         .unwrap();
@@ -622,13 +622,13 @@ fn an_update_no_feature_reads_and_custom_data_are_no_update_of_an_instrument() {
 fn a_sets_ticks_are_those_of_its_tick_features_each_once() {
     let tables = tables();
     let features = FeatureSet::builder()
-        .bars(BarType::from(AUD_BARS), LAST, &tables)
-        .trades(id(GBP), LAST, &tables)
-        .quotes(id(AUD), LAST, &tables)
+        .feature(&[Series::Bars(BarType::from(AUD_BARS))], LAST, &tables)
+        .feature(&[Series::trades(id(GBP))], LAST, &tables)
+        .feature(&[Series::quotes(id(AUD))], LAST, &tables)
         .custom(&level_series(AUD), "level", read_level)
-        .quotes(id(AUD), TWO, &tables)
-        .depth(id(AUD), BOOK, &tables)
-        .deltas(id(GBP), BOOK, &tables)
+        .feature(&[Series::quotes(id(AUD))], TWO, &tables)
+        .feature(&[Series::depth(id(AUD))], BOOK, &tables)
+        .feature(&[Series::deltas(id(GBP))], BOOK, &tables)
         .build()
         .unwrap();
     let tick = |data, instrument: &str| TickSeries {
@@ -675,10 +675,10 @@ fn a_sets_custom_series_are_those_of_its_raw_features_each_once() {
 fn a_sets_bar_types_are_those_of_its_bar_features_each_once() {
     let tables = tables();
     let features = FeatureSet::builder()
-        .bars(BarType::from(AUD_BARS), LAST, &tables)
-        .quotes(id(AUD), LAST, &tables)
-        .bars(BarType::from(AUD_BID_BARS), LAST, &tables)
-        .bars(BarType::from(AUD_BARS), TWO, &tables)
+        .feature(&[Series::Bars(BarType::from(AUD_BARS))], LAST, &tables)
+        .feature(&[Series::quotes(id(AUD))], LAST, &tables)
+        .feature(&[Series::Bars(BarType::from(AUD_BID_BARS))], LAST, &tables)
+        .feature(&[Series::Bars(BarType::from(AUD_BARS))], TWO, &tables)
         .build()
         .unwrap();
 
@@ -690,7 +690,7 @@ fn a_sets_bar_types_are_those_of_its_bar_features_each_once() {
 
 /// A set of one feature on AUD's mids, given `warmup` if any.
 fn warming(warmup: Option<SignedDuration>) -> Rc<FeatureSet> {
-    let builder = FeatureSet::builder().quotes(id(AUD), LAST, &tables());
+    let builder = FeatureSet::builder().feature(&[Series::quotes(id(AUD))], LAST, &tables());
     match warmup {
         Some(warmup) => builder.warmup(warmup),
         None => builder,
@@ -723,7 +723,7 @@ fn the_fingerprint_changes_with_the_warmup() {
 #[rstest]
 fn a_negative_warmup_is_an_error() {
     let err = FeatureSet::builder()
-        .quotes(id(AUD), LAST, &tables())
+        .feature(&[Series::quotes(id(AUD))], LAST, &tables())
         .warmup(SignedDuration::from_hours(-1))
         .build()
         .unwrap_err()
@@ -847,9 +847,9 @@ fn registered_features_get_their_bars_through_nautilus_and_not_their_quotes_or_t
     let mut probe = registered();
     let tables = tables();
     let features = FeatureSet::builder()
-        .quotes(id(GBP), LAST, &tables)
-        .trades(id(GBP), LAST, &tables)
-        .bars(BarType::from(AUD_BARS), LAST, &tables)
+        .feature(&[Series::quotes(id(GBP))], LAST, &tables)
+        .feature(&[Series::trades(id(GBP))], LAST, &tables)
+        .feature(&[Series::Bars(BarType::from(AUD_BARS))], LAST, &tables)
         .build()
         .unwrap();
     features.register(&mut probe);
@@ -868,7 +868,7 @@ fn registered_features_get_their_bars_through_nautilus_and_not_their_quotes_or_t
 fn a_set_registered_twice_gets_each_update_once() {
     let mut probe = registered();
     let features = FeatureSet::builder()
-        .bars(BarType::from(AUD_BARS), TWO, &tables())
+        .feature(&[Series::Bars(BarType::from(AUD_BARS))], TWO, &tables())
         .build()
         .unwrap();
     features.register(&mut probe);
@@ -944,7 +944,7 @@ fn features_over_one_width_hand_it_to_the_target() {
     let width = width_of(Distance::BasisPoints(Decimal::from(10)));
 
     let features = testing::mid_over(id(AUD), &width)
-        .over_bracket(id(AUD), ALSO, &over_tables(), &width)
+        .feature_over_bracket(&[Series::quotes(id(AUD))], ALSO, &over_tables(), &width)
         .build()
         .unwrap();
 
@@ -959,8 +959,8 @@ fn features_over_one_width_hand_it_to_the_target() {
 fn features_over_two_widths_panic() {
     let in_bps = || width_of(Distance::BasisPoints(Decimal::from(10)));
 
-    let _ = testing::mid_over(id(AUD), &in_bps()).over_bracket(
-        id(AUD),
+    let _ = testing::mid_over(id(AUD), &in_bps()).feature_over_bracket(
+        &[Series::quotes(id(AUD))],
         ALSO,
         &over_tables(),
         &in_bps(),
@@ -1279,11 +1279,11 @@ fn a_single_series_features_names_and_fingerprint_are_unchanged(#[case] per_kind
     let width = width_of(Distance::BasisPoints(Decimal::from(10)));
     let builder = if per_kind {
         testing::mid_over(id(GBP), &width)
-            .bars(BarType::from(AUD_BARS), LAST, &tables)
-            .quotes(id(AUD), LAST, &tables)
-            .trades(id(GBP), TWO, &tables)
-            .depth(id(AUD), BOOK, &tables)
-            .deltas(id(GBP), BOOK, &tables)
+            .feature(&[Series::Bars(BarType::from(AUD_BARS))], LAST, &tables)
+            .feature(&[Series::quotes(id(AUD))], LAST, &tables)
+            .feature(&[Series::trades(id(GBP))], TWO, &tables)
+            .feature(&[Series::depth(id(AUD))], BOOK, &tables)
+            .feature(&[Series::deltas(id(GBP))], BOOK, &tables)
     } else {
         FeatureSet::builder()
             .feature_over_bracket(&[quotes(GBP)], testing::OVER, &over_tables(), &width)
