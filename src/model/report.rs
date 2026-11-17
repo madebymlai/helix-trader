@@ -204,7 +204,6 @@ mod tests {
     use super::*;
     use crate::model::{
         dataset::DaysRead,
-        schedule::Retrain,
         train::{Kept, Outcome},
     };
 
@@ -309,10 +308,7 @@ mod tests {
     /// Unix, no CPU time or peak memory is measured.
     #[rstest]
     fn a_train_keeping_a_generation_in_use_reports_its_times_alone() {
-        let trained = Trained::from(Outcome::InUse {
-            valid_from: at(),
-            retrain: Retrain::Every(jiff::SignedDuration::from_hours(24)),
-        });
+        let trained = Trained::from(Outcome::InUse { valid_from: at() });
         let unmeasured = Usage {
             process: None,
             ..usage()

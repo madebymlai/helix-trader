@@ -16,10 +16,10 @@
 //! (`store::StoredGeneration`), valid from its time, or nothing: a decision
 //! uses the sides and the meta of one train together.
 //!
-//! What a train at `t` does is the schedule's plan (`schedule::Schedule::plan`):
-//! a generation current at `t` in the store (retrained, the one valid from
-//! `t`; never retrained, the latest valid by `t`, so one generation is
-//! trained) is kept, in use, and replays nothing; else a generation is
+//! What a train at `t` does is the schedule's plan (`schedule::Schedule::plan`),
+//! retrained or never retrained alike: a generation the store holds valid
+//! exactly from `t` is kept, already published, and replays nothing; else a
+//! generation is
 //! trained at `t`, its sides fitted as of `t` and, with a meta, its meta at
 //! `t` on the picks of an ancestor pair fitted as of `t` less the meta's
 //! window. Nothing else of the store is read: the generation a train
@@ -95,7 +95,7 @@ use super::{
     holdout::Example,
     learner::{LearnerConfig, SavedModel, TrainingSet},
     meta,
-    schedule::{Fit, Fits, Models, Plan, Retrain, Schedule},
+    schedule::{Fit, Fits, Models, Plan, Schedule},
     store::{
         Baselined, MetaLevel, ModelManifest, ModelStore, Pair, Probe, SideModel, StoredGeneration,
         StoredModel,
@@ -186,13 +186,9 @@ pub enum Outcome {
     /// A generation was published, valid from the train's time, in the
     /// directory `generation`.
     Published { generation: PathBuf },
-    /// None was fitted: the current generation, valid from `valid_from`, is
-    /// in use (`schedule::Plan::Keep`), of a strategy retrained as `retrain`
-    /// says, which says how it reads (`Retrain::in_use`).
-    InUse {
-        valid_from: Timestamp,
-        retrain: Retrain,
-    },
+    /// None was fitted: the generation valid from `valid_from`, the
+    /// train's time, is already published (`schedule::Plan::Keep`).
+    InUse { valid_from: Timestamp },
     /// No generation was published: the current one, if any, stays.
     Kept(Kept),
 }
@@ -296,10 +292,7 @@ impl Training {
         let outcome = match self.models.generations() {
             Err(e) => kept(&e),
             Ok(generations) => match self.schedule.plan(at, &generations) {
-                Plan::Keep { valid_from } => Outcome::InUse {
-                    valid_from,
-                    retrain: self.schedule.retrain(),
-                },
+                Plan::Keep { valid_from } => Outcome::InUse { valid_from },
                 Plan::Train(fits) => self
                     .generation(&fits, replay, &mut reached)
                     .map_or_else(|e| kept(&e), |generation| Outcome::Published { generation }),
@@ -774,10 +767,9 @@ impl Display for Outcome {
             Self::Published { generation } => {
                 write!(f, "published the generation {}", generation.display())
             }
-            Self::InUse {
-                valid_from,
-                retrain,
-            } => write!(f, "{}", retrain.in_use(*valid_from)),
+            Self::InUse { valid_from } => {
+                write!(f, "already published, valid from {valid_from}")
+            }
             Self::Kept(kept) => write!(f, "{kept}"),
         }
     }
@@ -817,6 +809,7 @@ mod tests {
             deciding::testing::unchanged,
             features::{FeatureSet, meta_names, side_names, side_row},
             learner::LearnerConfig,
+            schedule::Retrain,
             store::ModelStore,
             targets::{
                 BracketSpec, Distance, Exit, Outcome as TargetOutcome, Outcomes, PerSide, Target,
@@ -1325,13 +1318,7 @@ mod tests {
         });
 
         assert_eq!(replays, []);
-        assert_eq!(
-            trained,
-            Trained::from(Outcome::InUse {
-                valid_from: t,
-                retrain: config().retrain,
-            })
-        );
+        assert_eq!(trained, Trained::from(Outcome::InUse { valid_from: t }));
     }
 
     /// `config`, never retrained.
@@ -1342,28 +1329,25 @@ mod tests {
         }
     }
 
-    /// Never retrained, the generation of the 6th, its long expecting
-    /// nought and so never picked, is current at the train of the 7th: kept
-    /// in use, not fitted again, and nothing replayed.
+    /// Never retrained as retrained, a generation valid before the train,
+    /// of the 6th, is not the train's: the train of the 7th replays its
+    /// window and publishes a generation valid from the 7th beside it.
     #[rstest]
-    fn never_retrained_a_generation_valid_before_the_train_is_kept_in_use() {
+    fn never_retrained_a_generation_valid_before_the_train_does_not_stop_it() {
         let dir = tempfile::tempdir().unwrap();
         let training = training(dir.path(), never());
-        let sixth = at("2026-01-06T00:00:00Z");
+        let (sixth, seventh) = (at("2026-01-06T00:00:00Z"), at("2026-01-07T00:00:00Z"));
         publish_generation(dir.path(), &never(), "2026-01-06T00:00:00Z", (0.5, 0.5));
         let mut replays = vec![];
 
-        let trained = training.train_at(at("2026-01-07T00:00:00Z"), |from, to| {
+        let trained = training.train_at(seventh, |from, to| {
             replays.push((from, to));
             Ok(rows())
         });
 
-        let in_use = Outcome::InUse {
-            valid_from: sixth,
-            retrain: Retrain::Never,
-        };
-        assert_eq!(trained.outcome, in_use);
-        assert_eq!(replays, []);
+        assert_eq!(trained.outcome, published(dir.path(), &never(), seventh));
+        assert_eq!(replays, [(sixth, seventh)]);
+        assert_eq!(generations(dir.path(), &never()), [sixth, seventh]);
     }
 
     #[rstest]
@@ -2007,10 +1991,7 @@ mod tests {
         let published = Outcome::Published {
             generation: PathBuf::from("models").join(t.to_string()),
         };
-        let in_use = Outcome::InUse {
-            valid_from: t,
-            retrain: Retrain::Every(SignedDuration::from_hours(24)),
-        };
+        let in_use = Outcome::InUse { valid_from: t };
         let kept = Outcome::Kept(Kept::Failed("no short row".to_string()));
 
         assert!(Trained::from(published).succeeded());
@@ -2019,8 +2000,7 @@ mod tests {
     }
 
     /// A generation published reads with its directory; one kept in use as
-    /// already published, with its valid-from, and never retrained as in
-    /// use since it, and never retrained; a failure as its reason.
+    /// already published, with its valid-from; a failure as its reason.
     #[rstest]
     #[case::published(
         Outcome::Published { generation: PathBuf::from("models/2026-01-07T00:00:00Z") },
@@ -2031,18 +2011,8 @@ mod tests {
         &["failed: no short row"]
     )]
     #[case::in_use(
-        Outcome::InUse {
-            valid_from: at("2026-01-07T00:00:00Z"),
-            retrain: Retrain::Every(SignedDuration::from_hours(24)),
-        },
+        Outcome::InUse { valid_from: at("2026-01-07T00:00:00Z") },
         &["already published, valid from 2026-01-07T00:00:00Z"]
-    )]
-    #[case::in_use_never_retrained(
-        Outcome::InUse {
-            valid_from: at("2026-01-06T00:00:00Z"),
-            retrain: Retrain::Never,
-        },
-        &["already published", "in use since 2026-01-06T00:00:00Z", "never retrained"]
     )]
     fn an_outcome_reads_as_the_generation_published_in_use_or_the_failure(
         #[case] outcome: Outcome,

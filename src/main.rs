@@ -836,10 +836,7 @@ fn strategy_name(strategy: StrategyName) -> String {
 #[cfg(test)]
 mod tests {
 
-    use helix_trader::model::{
-        schedule::Retrain,
-        train::{Kept, Outcome},
-    };
+    use helix_trader::model::train::{Kept, Outcome};
     use jiff::SignedDuration;
     use rstest::rstest;
 
@@ -1124,10 +1121,7 @@ mod tests {
         let published = Outcome::Published {
             generation: PathBuf::from("models/2026-10-23T00:00:00Z"),
         };
-        let in_use = Outcome::InUse {
-            valid_from: t,
-            retrain: Retrain::Every(SignedDuration::from_hours(24)),
-        };
+        let in_use = Outcome::InUse { valid_from: t };
 
         let err = reported(Meter::start(), t, &kept.into())
             .unwrap_err()
