@@ -91,6 +91,16 @@ fn catalog() -> TempDir {
     )
 }
 
+/// Quotes from 23:00 of the 22nd of October 2026 to 03:00 of the 26th, as
+/// `catalog` ends: the span's days, from an hour before them, for a run
+/// that trains nothing.
+fn run_catalog() -> TempDir {
+    walk(
+        ic::at("00:00:00") + SignedDuration::from_hours(47),
+        ic::at("00:00:00") + SignedDuration::from_hours(123),
+    )
+}
+
 /// The span: the 23rd to the 25th, retrained at midnight of each.
 fn span() -> (Timestamp, Timestamp) {
     let start = ic::at("00:00:00") + SignedDuration::from_hours(48);
@@ -270,7 +280,7 @@ fn publish_two(models: &Path, second_meta: helix_trader::model::store::StoredMod
 /// long.
 #[rstest]
 fn a_meta_from_one_train_never_decides_beside_the_sides_of_another() {
-    let catalog = catalog();
+    let catalog = run_catalog();
     let models = tempfile::tempdir().unwrap();
     let (start, end) = span();
     publish_two(
@@ -314,7 +324,7 @@ fn a_meta_from_one_train_never_decides_beside_the_sides_of_another() {
 /// decisions its long at r(5) = nought, taken at 0.1 + 0.5 r(8) = 0.25R.
 #[rstest]
 fn a_model_set_failing_a_check_stops_new_entries_and_is_used_once_it_loads() {
-    let catalog = catalog();
+    let catalog = run_catalog();
     let models = tempfile::tempdir().unwrap();
     let (start, end) = span();
     let mut refused = meta_baseline_of(&features(), &long_only(), 8);
