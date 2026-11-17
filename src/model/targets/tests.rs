@@ -31,8 +31,8 @@ use crate::{
         config::ModelConfig,
         dataset::DatasetRow,
         deciding::testing::{self, GOLD, gold},
+        earnings::Example,
         features::testing::last_mid,
-        holdout::Example,
     },
     strategy::requirements::TickSeries,
 };

@@ -7,7 +7,7 @@
 //! A strategy has a model for each side it trades (the sides of its
 //! margins, `ModelConfig::margins`): each a regression of its side's
 //! realized net R, the trade's net P&L over its unit
-//! (`holdout::Example::realized`), the long's of the long of the target,
+//! (`earnings::Example::realized`), the long's of the long of the target,
 //! the short's of its short, both on the same rows, window and calibration,
 //! each reading a row's features then its own side's payoff features
 //! (`dataset::DatasetRow::side`), under the names its model store checks it
@@ -92,7 +92,7 @@ use super::{
     calibration::{self, Ksplit},
     dataset::{Dataset, DatasetRow, DaysRead, SchemaMismatch},
     deciding::{self, DecidingModels},
-    holdout::Example,
+    earnings::Example,
     learner::{LearnerConfig, SavedModel, TrainingSet},
     meta,
     schedule::{Fit, Fits, Models, Plan, Schedule},

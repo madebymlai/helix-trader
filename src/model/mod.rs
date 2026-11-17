@@ -18,7 +18,7 @@
 //! at a time, fitting a model of each side traded on a window of the
 //! dataset less its calibration slice, calibrating them together on that
 //! slice and publishing them, with the meta's, as one generation in the
-//! `store`, no figure of theirs judged; `holdout` is what the decision took and earned on rows, and
+//! `store`, no figure of theirs judged; `earnings` is what the decision took and earned on rows, and
 //! `score` how its expected R met the R realized, which a backtest's
 //! scores read;
 //! `deciding` is the decision itself, the side picked among the models
@@ -51,9 +51,9 @@ pub mod config;
 pub mod dataset;
 pub mod decide;
 pub mod deciding;
+pub mod earnings;
 pub mod features;
 pub mod handle;
-pub mod holdout;
 pub mod launcher;
 pub mod learner;
 pub mod meta;

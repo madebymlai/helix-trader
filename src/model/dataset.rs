@@ -107,8 +107,8 @@ use super::{
     blueprint::ModelBlueprint,
     decide::{self, DecisionRule},
     deciding::SideRow,
+    earnings::Trade,
     features::{FeatureSet, Fingerprint},
-    holdout::Trade,
     targets::{self, PerSide, Side, TargetConfig, TargetRow},
 };
 use crate::{

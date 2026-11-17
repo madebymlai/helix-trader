@@ -16,7 +16,7 @@
 //! decision, so the row has the trade of either side, and the meta's rows
 //! need no replay of their own. It takes the trade when the net R it
 //! expects of it, its calibrated expected R, clears its margin, in R
-//! (`holdout::MetaMargin`).
+//! (`earnings::MetaMargin`).
 //!
 //! The meta's rows are those of its window back from its train, each
 //! decided through the code a strategy decides through
@@ -34,8 +34,8 @@
 use super::{
     dataset::DatasetRow,
     deciding::{Picked, SideRow},
+    earnings::Example,
     features::meta_row,
-    holdout::Example,
     targets::PerSide,
 };
 

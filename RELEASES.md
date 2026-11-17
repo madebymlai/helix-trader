@@ -22,6 +22,7 @@ Released on TBD (UTC).
 - Changed `Trained` to one `Outcome` of the generation and the figures it `Reached`, `Outcome::Published` holding the generation's directory, `ModelStore::publish` returning it and `Dataset::settled` returning the days it read beside its rows; read `trained.outcome` in place of each model's
 - Removed `WalkForward::prepare`, `Schedule::ensure_trades` and `Plan::fits`; train at each of `Training::retrain_times` with `Training::train_at`, and check a backtest's start with `WalkForward::untrained`
 - Removed `DecidingModels::pick`; decide with `DecidingModels::decide`, or pick among a generation's pair with `DecidingModels::pick_among`
+- Renamed the module `model::holdout` to `model::earnings`, what decisions took and earned on rows, there being no holdout; import `Earnings`, `Trades`, `Trade`, `MetaMargin` and `STRESS` from `model::earnings`
 - Removed the `fake` learner from builds without the new `test-support` feature: a config with `learner = { kind = "fake" }` no longer loads; use `baseline`, `lightgbm` or `perpetual`
 - Removed the `heartbeat` argument of `ctrader`'s `CTraderWebSocketClient::connect` and `CTraderSession::connect_to`; drop it, the session heartbeats every 10 s
 - Removed the `keepalive_secs` argument of `lse`'s `LseWebSocketClient::connect`; drop it, the client pings every 25 s

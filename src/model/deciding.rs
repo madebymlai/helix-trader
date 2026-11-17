@@ -36,7 +36,7 @@
 //! generation's meta model, on the features with that side and the
 //! decision's `C'` and `D'` (`features::meta_row`), expects of its trade a
 //! net R, its calibrated expected R, of at least its margin in R
-//! (`holdout::MetaMargin`), the trade as the target sets it whatever the
+//! (`earnings::MetaMargin`), the trade as the target sets it whatever the
 //! meta expects. A generation of a strategy with a meta holds a meta model
 //! (`store::ModelStore::load`). An expected R that is not finite, of a model
 //! predicting NaN say, clears no margin.
@@ -46,8 +46,8 @@ use jiff::Timestamp;
 
 use super::{
     calibration::Expected,
+    earnings::MetaMargin,
     features::{meta_row, side_row},
-    holdout::MetaMargin,
     payoff,
     store::{Generation, ModelStore, Pair, Swap},
     targets::{PerSide, Side},
