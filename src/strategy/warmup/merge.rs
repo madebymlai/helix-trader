@@ -487,3 +487,384 @@ impl Display for Cut {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use nautilus_model::{
+        data::{
+            BarType, CustomData, DataType, OrderBookDelta, OrderBookDeltas, OrderBookDepth,
+            QuoteTick, TradeTick, stubs::stub_depth10,
+        },
+        enums::AggressorSide,
+        identifiers::{InstrumentId, TradeId},
+        types::{Price, Quantity},
+    };
+    use rstest::rstest;
+
+    use super::*;
+
+    /// How many warmups the property draws, each from its own seed, the
+    /// seeds `0..CASES`, so that a failure names the seed reproducing it.
+    const CASES: u64 = 10_000;
+
+    /// The times a warmup's history is initialized at are `0..SPAN` ns: few,
+    /// so that ties across series and within one are common.
+    const SPAN: u64 = 12;
+
+    /// What the property reads of a tick handed on: its series, its
+    /// `ts_init`, and its serial, the `ts_event` it was drawn with, unique
+    /// over a warmup.
+    type Key = (Series, UnixNanos, UnixNanos);
+
+    fn key(tick: &Tick) -> Key {
+        (tick.series(), tick.ts_init(), tick.ts_event())
+    }
+
+    /// A request of a drawn warmup: its id, the series it answers and, if
+    /// it builds bars, their bar type.
+    struct Request {
+        id: UUID4,
+        series: Series,
+        bars: Option<BarType>,
+    }
+
+    /// What a drawn warmup brings the merge, in the order the node brings
+    /// it: a response's history, the bars a request built at a response of
+    /// it and the latest `ts_init` of that response's data, or the end of a
+    /// request.
+    enum Event {
+        History(Vec<Tick>),
+        Built(UUID4, Vec<Bar>, Option<UnixNanos>),
+        Complete(UUID4),
+    }
+
+    /// The tick of `series` initialized at `at`, its serial `serial`.
+    fn tick_of(series: &Series, serial: u64, at: u64) -> Tick {
+        let (made, at) = (UnixNanos::from(serial), UnixNanos::from(at));
+        let price = Price::from("100.00");
+        let size = Quantity::from(1);
+
+        match series {
+            Series::Quotes(id) => {
+                Tick::Quote(QuoteTick::new(*id, price, price, size, size, made, at))
+            }
+            Series::Trades(id) => Tick::Trade(TradeTick::new(
+                *id,
+                price,
+                size,
+                AggressorSide::Buy,
+                TradeId::new(serial.to_string()),
+                made,
+                at,
+            )),
+            Series::Depth(id) => Tick::Depth(Box::new(OrderBookDepth {
+                instrument_id: *id,
+                ts_event: made,
+                ts_init: at,
+                ..stub_depth10()
+            })),
+            Series::Deltas(id) => Tick::Deltas(OrderBookDeltas::new(
+                *id,
+                vec![OrderBookDelta::clear(*id, serial, made, at)],
+            )),
+            Series::Custom(data_type) => {
+                let row = ::lse::LseRow::new(
+                    "bond_yields".into(),
+                    data_type.identifier().unwrap_or_default().into(),
+                    serde_json::Map::new(),
+                    made,
+                    at,
+                );
+                Tick::Custom(CustomData::new(Arc::new(row), data_type.clone()))
+            }
+            Series::Bars(bar_type) => Tick::Bar(Bar::new(
+                *bar_type, price, price, price, price, size, made, at,
+            )),
+        }
+    }
+
+    /// `count` times drawn from `0..SPAN`, oldest first.
+    fn times(rng: &mut fastrand::Rng, count: usize) -> Vec<u64> {
+        let mut times: Vec<u64> = (0..count).map(|_| rng.u64(0..SPAN)).collect();
+        times.sort_unstable();
+        times
+    }
+
+    /// The tick series a warmup draws its requests from, and the bar type
+    /// each of quotes and trades may build.
+    fn pool() -> Vec<(Series, Option<BarType>)> {
+        let (a, b) = (
+            InstrumentId::from("AAA.XNAS"),
+            InstrumentId::from("BBB.XNAS"),
+        );
+        let custom = |identifier: &str| {
+            Series::Custom(DataType::new("LseRow", None, Some(identifier.to_string())))
+        };
+        vec![
+            (
+                Series::Quotes(a),
+                Some(BarType::from("AAA.XNAS-1-MINUTE-MID-INTERNAL")),
+            ),
+            (
+                Series::Trades(a),
+                Some(BarType::from("AAA.XNAS-1-MINUTE-LAST-INTERNAL")),
+            ),
+            (
+                Series::Quotes(b),
+                Some(BarType::from("BBB.XNAS-1-MINUTE-MID-INTERNAL")),
+            ),
+            (Series::Depth(a), None),
+            (Series::Deltas(b), None),
+            (custom("US10Y"), None),
+            (custom("US2Y"), None),
+        ]
+    }
+
+    /// The events of `request` as a node brings them, its `serial` the
+    /// next serial free: its history in windows, each in time order and no
+    /// older than the window before, the bars it builds read at each of its
+    /// responses, each initialized no earlier than the latest data its
+    /// windows brought before, as Nautilus builds a bar once data past its
+    /// close comes; then, unless the group ends first, its end, answered
+    /// or failed, a failed request answering only its first windows.
+    fn events_of(rng: &mut fastrand::Rng, request: &Request, serial: &mut u64) -> Vec<Event> {
+        let mut next = |series: &Series, at: u64| {
+            *serial += 1;
+            tick_of(series, *serial, at)
+        };
+        let count = rng.usize(0..=10);
+        let ticks = times(rng, count);
+        let count = if request.bars.is_some() {
+            rng.usize(0..=6)
+        } else {
+            0
+        };
+        let mut bars = times(rng, count);
+        bars.reverse();
+        let count = rng.usize(0..=2);
+        let mut cuts = times(rng, count);
+        cuts.push(SPAN);
+        let failed_after = (rng.u8(0..4) == 0).then(|| rng.usize(0..=cuts.len()));
+        let mut events = Vec::new();
+        let mut from = 0;
+
+        for (window, &to) in cuts.iter().enumerate() {
+            if failed_after == Some(window) {
+                break;
+            }
+            let window: Vec<Tick> = ticks
+                .iter()
+                .filter(|&&at| (from..to).contains(&at))
+                .map(|&at| next(&request.series, at))
+                .collect();
+            from = to;
+            let through = window.iter().map(Tick::ts_init).max();
+            events.push(Event::History(window));
+
+            if let Some(bar_type) = request.bars {
+                let mut built = Vec::new();
+
+                while bars
+                    .last()
+                    .is_some_and(|&at| through.is_some_and(|through| at < through.as_u64()))
+                {
+                    let at = bars.pop().expect("a bar");
+                    let Tick::Bar(bar) = next(&Series::Bars(bar_type), at) else {
+                        unreachable!("a bar's tick")
+                    };
+                    built.push(bar);
+                }
+                events.push(Event::Built(request.id, built, through));
+            }
+        }
+
+        if let (Some(bar_type), None) = (request.bars, failed_after) {
+            let built = bars
+                .iter()
+                .rev()
+                .map(|&at| match next(&Series::Bars(bar_type), at) {
+                    Tick::Bar(bar) => bar,
+                    _ => unreachable!("a bar's tick"),
+                })
+                .collect();
+            events.push(Event::Built(request.id, built, None));
+        }
+
+        if rng.u8(0..8) != 0 {
+            events.push(Event::Complete(request.id));
+        }
+        events
+    }
+
+    /// What the merge was brought and handed on over a drawn warmup.
+    #[derive(Default)]
+    struct Tally {
+        /// Each tick it took and holds or handed, in the order brought,
+        /// none it left out past its bound, with what it takes.
+        taken: Vec<(Key, usize)>,
+        taken_bytes: usize,
+        /// Each tick it handed on, in order.
+        handed: Vec<Key>,
+        handed_bytes: usize,
+        /// How many ticks it had taken when it went past its bound.
+        cut: Option<usize>,
+    }
+
+    impl Tally {
+        fn held(&self) -> usize {
+            self.taken_bytes - self.handed_bytes
+        }
+    }
+
+    /// Draws the warmup of `seed`, brings it to a merge, and checks what it
+    /// handed on; returns whether it went past its bound and whether ties
+    /// across series were handed on, so that the draws are seen to reach
+    /// both.
+    fn check(seed: u64) -> (bool, bool) {
+        let mut rng = fastrand::Rng::with_seed(seed);
+        let mut pool = pool();
+        rng.shuffle(&mut pool);
+        let requests: Vec<Request> = pool
+            .into_iter()
+            .take(rng.usize(1..=4))
+            .map(|(series, bars)| Request {
+                id: UUID4::new(),
+                series,
+                bars: bars.filter(|_| rng.bool()),
+            })
+            .collect();
+        let mut merged: Vec<(UUID4, Series)> = requests
+            .iter()
+            .flat_map(|request| {
+                let bars = request
+                    .bars
+                    .map(|bar_type| (request.id, Series::Bars(bar_type)));
+                [(request.id, request.series.clone())]
+                    .into_iter()
+                    .chain(bars)
+            })
+            .collect();
+        rng.shuffle(&mut merged);
+        let rank = |series: &Series| {
+            merged
+                .iter()
+                .position(|(_, of)| of == series)
+                .expect("a series merged")
+        };
+        let limit = if rng.u8(0..4) == 0 {
+            rng.usize(1..=12) * size_of::<Tick>()
+        } else {
+            HELD
+        };
+        let mut serial = 0;
+        let mut pending: Vec<Vec<Event>> = requests
+            .iter()
+            .map(|request| {
+                let mut events = events_of(&mut rng, request, &mut serial);
+                events.reverse();
+                events
+            })
+            .collect();
+
+        let merge = Merge::new(limit);
+        merge.start(merged.clone());
+        let mut tally = Tally::default();
+
+        loop {
+            let open: Vec<usize> = (0..pending.len())
+                .filter(|&at| !pending[at].is_empty())
+                .collect();
+            let Some(&at) = rng.choice(&open) else {
+                break;
+            };
+            let event = pending[at].pop().expect("an event");
+            let brought: Vec<Tick> = match &event {
+                Event::History(ticks) => ticks.clone(),
+                Event::Built(_, bars, _) => bars.iter().copied().map(Tick::Bar).collect(),
+                Event::Complete(_) => Vec::new(),
+            };
+            let (held, handed) = (tally.held(), tally.handed.len());
+            let brought_bytes: usize = brought.iter().map(|tick| tick.size().unwrap()).sum();
+            if tally.cut.is_none() {
+                for tick in &brought {
+                    tally.taken.push((key(tick), tick.size().unwrap()));
+                }
+                tally.taken_bytes += brought_bytes;
+            }
+            let hand = |tick: &Tick| {
+                tally.handed.push(key(tick));
+                tally.handed_bytes += tick.size()?;
+                Ok(())
+            };
+            let cut = match event {
+                Event::History(ticks) => merge.history(ticks, hand),
+                Event::Built(request, bars, through) => merge.built(&request, bars, through, hand),
+                Event::Complete(request) => merge.complete(&request, hand).map(|()| None),
+            }
+            .unwrap_or_else(|e| panic!("seed {seed}: {e:#}"));
+            let overflow = match cut {
+                Some(Cut::Unordered { .. }) => panic!("seed {seed}: {}", cut.unwrap()),
+                overflow => overflow,
+            };
+
+            if tally.cut.is_some() {
+                assert_eq!(
+                    tally.handed.len(),
+                    handed,
+                    "seed {seed}: handed past its bound"
+                );
+            } else if overflow.is_some() {
+                assert!(
+                    held + brought_bytes > limit,
+                    "seed {seed}: past a bound of {limit} bytes holding {held} and brought \
+                     {brought_bytes}"
+                );
+                assert_eq!(tally.held(), 0, "seed {seed}: held past its bound");
+                tally.cut = Some(tally.taken.len());
+            } else {
+                assert!(
+                    tally.held() <= limit,
+                    "seed {seed}: holds {} bytes, bounded at {limit}",
+                    tally.held()
+                );
+            }
+        }
+        merge
+            .end(|tick| {
+                tally.handed.push(key(tick));
+                Ok(())
+            })
+            .unwrap_or_else(|e| panic!("seed {seed}: {e:#}"));
+
+        let mut expected: Vec<Key> = tally.taken.iter().map(|(key, _)| key.clone()).collect();
+        expected.sort_by_key(|(series, at, _)| (*at, rank(series)));
+        assert_eq!(tally.handed, expected, "seed {seed}");
+        let tied = expected
+            .windows(2)
+            .any(|pair| pair[0].1 == pair[1].1 && pair[0].0 != pair[1].0);
+        (tally.cut.is_some(), tied)
+    }
+
+    /// The merge hands on every tick it takes once, in `ts_init` order, ties
+    /// across series in the order it was started with, ticks of one series in
+    /// the order brought, whatever the series, kinds and bars among them, the
+    /// windows they come in, the order their responses arrive in, and which
+    /// of their requests fail or never end before the group does; and it
+    /// never holds more than its bound, past which it hands on all it holds
+    /// and takes no more. Each draw is a warmup of up to four requests, a
+    /// quarter of them bounded at a few ticks' worth.
+    #[rstest]
+    fn prop_the_merge_hands_on_every_tick_once_in_ts_init_and_tie_order_within_its_bound() {
+        let (mut cut, mut tied) = (0, 0);
+
+        for seed in 0..CASES {
+            let (was_cut, was_tied) = check(seed);
+            cut += usize::from(was_cut);
+            tied += usize::from(was_tied);
+        }
+
+        assert!(cut > 0 && tied > 0, "{cut} draws cut, {tied} tied");
+    }
+}
