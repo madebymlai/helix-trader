@@ -242,7 +242,15 @@ impl EmaCross {
         config.validate()?;
         let signal = Rc::new(Signal::new(&config));
         let requirements = config.data_requirements();
-        let warmup = warmup(&requirements).feeding(Rc::clone(&signal) as SharedActorIndicator);
+        // The signal reads every bar of the traded instrument.
+        let read: Vec<BarType> = requirements
+            .bar_types
+            .iter()
+            .filter(|bar_type| bar_type.instrument_id() == config.trade_instrument_id())
+            .copied()
+            .collect();
+        let warmup =
+            warmup(&requirements).feeding(&read, Rc::clone(&signal) as SharedActorIndicator);
         Ok(Self {
             core: StrategyCore::new_checked(config.base.clone())?,
             signal,

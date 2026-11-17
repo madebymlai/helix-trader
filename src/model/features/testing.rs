@@ -11,7 +11,7 @@ use nautilus_model::{
     identifiers::InstrumentId,
 };
 
-use super::{Bracketed, CustomHandler, Feature, FeatureSet, FeatureSetBuilder, OverBracket};
+use super::{CustomHandler, Feature, FeatureSet, FeatureSetBuilder, OverBracket};
 use crate::{
     model::targets::BracketWidth,
     strategy::{
@@ -35,7 +35,8 @@ pub(crate) fn last_mid(instrument_id: InstrumentId) -> FeatureSetBuilder {
 }
 
 /// The last mid of a quote over the bracket's width there: initialized once
-/// a quote came and the width has a length.
+/// a quote came and the width has a length; reading a width never handed,
+/// it panics.
 pub(crate) struct MidOverWidth {
     mid: Option<f64>,
     width: Option<Rc<BracketWidth>>,
@@ -51,7 +52,11 @@ impl Indicator for MidOverWidth {
     }
 
     fn initialized(&self) -> bool {
-        self.mid.is_some() && self.width.as_ref().is_some_and(|width| width.initialized())
+        let width = self
+            .width
+            .as_ref()
+            .expect("a width, handed as the set is built");
+        self.mid.is_some() && width.initialized()
     }
 
     fn handle_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
@@ -67,8 +72,15 @@ impl Indicator for MidOverWidth {
 impl Feature for MidOverWidth {
     fn value(&self) -> f64 {
         let mid = self.mid.expect("a mid");
-        let width = self.width.as_ref().expect("a width");
+        let width = self
+            .width
+            .as_ref()
+            .expect("a width, handed as the set is built");
         mid / width.length(mid).expect("a length")
+    }
+
+    fn over_bracket(&mut self) -> Option<&mut dyn OverBracket> {
+        Some(self)
     }
 }
 
@@ -101,11 +113,9 @@ pub(crate) const OVER: Declared<MidOverWidthArgs> = Declared::new("over");
 /// bracket's `width` there.
 pub(crate) fn mid_over(instrument_id: InstrumentId, width: &Rc<BracketWidth>) -> FeatureSetBuilder {
     let tables: IndicatorsConfig = toml::from_str("over = {}").unwrap();
-    FeatureSet::builder().feature(
-        &[Series::quotes(instrument_id)],
-        Bracketed::new(OVER, width),
-        &tables,
-    )
+    FeatureSet::builder()
+        .bracket(width)
+        .feature(&[Series::quotes(instrument_id)], OVER, &tables)
 }
 
 /// A count of the depth and deltas a feature gets, `[indicators.book]`.

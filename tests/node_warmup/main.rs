@@ -720,7 +720,10 @@ fn warm(
         warmup: length,
     };
     let fed = Rc::new(Fed::default());
-    let warmup = Warmup::live(&requirements).feeding(Rc::clone(&fed) as SharedActorIndicator);
+    let warmup = Warmup::live(&requirements).feeding(
+        &requirements.bar_types,
+        Rc::clone(&fed) as SharedActorIndicator,
+    );
     let Ran { failure, .. } = run(dir, venue, &requirements, warmup, vec![], None);
     Warmed {
         bars: fed.bars.borrow().clone(),
@@ -1123,8 +1126,10 @@ fn read_live(
         warmup: length,
     };
     let features = Rc::new(Fed::default());
-    let warmup =
-        Warmup::live(&requirements).feeding_ticks(Rc::clone(&features) as SharedActorIndicator);
+    let warmup = Warmup::live(&requirements).feeding_ticks(
+        &requirements.ticks,
+        Rc::clone(&features) as SharedActorIndicator,
+    );
     let Ran { failure, .. } = run(dir, venue, &requirements, warmup, vec![series], None);
     assert_eq!(failure, None);
     features
@@ -1329,8 +1334,10 @@ fn a_feature_on_two_series_reads_their_history_in_time_order_however_it_arrives(
         warmup: SignedDuration::from_hours(30),
     };
     let flow = Rc::new(Flow::default());
-    let warmup =
-        Warmup::live(&requirements).feeding_ticks(Rc::clone(&flow) as SharedActorIndicator);
+    let warmup = Warmup::live(&requirements).feeding_ticks(
+        &requirements.ticks,
+        Rc::clone(&flow) as SharedActorIndicator,
+    );
 
     let Ran { failure, .. } = run(dir.path(), &venue, &requirements, warmup, series, None);
 
@@ -1378,7 +1385,7 @@ const LAST_SECONDS: &str = "GCZ26.GLBX-1-SECOND-LAST-INTERNAL";
 /// live on the venue's live trade, building a live bar a second on, which
 /// the strategy hands the warmup while the quotes are still pending. The
 /// trades are made 30 seconds before each minute's quote, so each bar
-/// closes then. The feature, handed the trades too, reads the history in
+/// closes then. The feature, reading the trades too, reads the history in
 /// time order, the bars among the ticks window by window, then the live
 /// ticks and bar.
 #[rstest]
@@ -1396,8 +1403,14 @@ fn a_feature_on_built_bars_and_quotes_reads_them_in_time_order_however_they_arri
     };
     let flow = Rc::new(Flow::default());
     let warmup = Warmup::live(&requirements)
-        .feeding(Rc::clone(&flow) as SharedActorIndicator)
-        .feeding_ticks(Rc::clone(&flow) as SharedActorIndicator);
+        .feeding(
+            &requirements.bar_types,
+            Rc::clone(&flow) as SharedActorIndicator,
+        )
+        .feeding_ticks(
+            &[quotes.clone(), of_gcz26(NautilusDataType::TradeTick)],
+            Rc::clone(&flow) as SharedActorIndicator,
+        );
 
     let ran = run(
         dir.path(),
@@ -1473,8 +1486,10 @@ fn warm_deltas(dir: &Path) -> (Rc<Books>, Vec<(u64, u64)>) {
         book: RefCell::new(OrderBook::new(id, BookType::L3_MBO)),
         fed: RefCell::new(vec![]),
     });
-    let warmup =
-        Warmup::live(&requirements).feeding_books(Rc::clone(&books) as Rc<dyn BookIndicator>);
+    let warmup = Warmup::live(&requirements).feeding_books(
+        &requirements.ticks,
+        Rc::clone(&books) as Rc<dyn BookIndicator>,
+    );
     let Ran { failure, .. } = run(dir, &venue, &requirements, warmup, vec![], None);
     assert_eq!(failure, None);
     let asked = venue.borrow().asked.clone();

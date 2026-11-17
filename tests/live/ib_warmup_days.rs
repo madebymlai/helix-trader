@@ -115,8 +115,10 @@ async fn a_warmup_of_days_holds_every_minute_bar_of_ibs_history_and_builds_each_
         warmup: WARMUP,
     };
     let fed = Rc::new(crate::FedBars::default());
-    let warmup =
-        Rc::new(Warmup::live(&requirements).feeding(Rc::clone(&fed) as SharedActorIndicator));
+    let warmup = Rc::new(Warmup::live(&requirements).feeding(
+        &requirements.bar_types,
+        Rc::clone(&fed) as SharedActorIndicator,
+    ));
     let record = Rc::new(RefCell::new(Record::default()));
     let probe = Probe {
         core: StrategyCore::new(StrategyConfig {

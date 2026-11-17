@@ -4,11 +4,12 @@
 
 use std::fmt::Display;
 
+use anyhow::Context;
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::{
-        Bar, BarType, CustomData, DataType, NautilusDataType, OrderBookDeltas, OrderBookDepth,
-        QuoteTick, TradeTick,
+        Bar, BarType, CustomData, DataType, NautilusDataType, OrderBookDelta, OrderBookDeltas,
+        OrderBookDepth, QuoteTick, TradeTick,
     },
     identifiers::InstrumentId,
 };
@@ -65,6 +66,50 @@ impl Tick {
             Self::Deltas(deltas) => Series::Deltas(deltas.instrument_id),
             Self::Custom(data) => Series::Custom(data.data_type.clone()),
             Self::Bar(bar) => Series::Bars(bar.bar_type.standard()),
+        }
+    }
+
+    /// What the tick takes held: its own size and what it keeps on the
+    /// heap, a batch of deltas its deltas, a snapshot of depth its box, a
+    /// point of custom data its data, the data's own heap counted by the
+    /// length of its JSON (`CustomDataTrait::to_json`), and its data
+    /// type's names.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a point of custom data cannot be written as JSON,
+    /// naming its data type.
+    pub(super) fn size(&self) -> anyhow::Result<usize> {
+        let heap = match self {
+            Self::Quote(_) | Self::Trade(_) | Self::Bar(_) => 0,
+            Self::Depth(depth) => size_of_val(&**depth),
+            Self::Deltas(deltas) => deltas.deltas.capacity() * size_of::<OrderBookDelta>(),
+            Self::Custom(data) => {
+                let json = data.data.to_json().with_context(|| {
+                    format!("the warmup cannot size a point of {}", data.data_type)
+                })?;
+                let data_type = &data.data_type;
+                size_of_val(&*data.data)
+                    + json.len()
+                    + data_type.type_name().len()
+                    + data_type.topic().len()
+                    + data_type.identifier().map_or(0, str::len)
+                    + data_type.metadata_str().len()
+            }
+        };
+        Ok(size_of::<Self>() + heap)
+    }
+
+    /// When the tick was initialized, as a replay orders it: a history's
+    /// as its venue or the catalog stamps it, a bar's at its close.
+    pub(super) fn ts_init(&self) -> UnixNanos {
+        match self {
+            Self::Quote(quote) => quote.ts_init,
+            Self::Trade(trade) => trade.ts_init,
+            Self::Depth(depth) => depth.ts_init,
+            Self::Deltas(deltas) => deltas.ts_init,
+            Self::Custom(data) => data.data.ts_init(),
+            Self::Bar(bar) => bar.ts_init,
         }
     }
 

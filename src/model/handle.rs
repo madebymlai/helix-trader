@@ -126,7 +126,9 @@
 //! reads, the traded instrument's or a conversion pair's, is warmed up
 //! too, so that the cache holds its latest price at the start, and its
 //! ticks, of the history and live, reach no feature, each reading those of
-//! its own series alone. It warms the target's ATR from
+//! its own series alone; the warmup's merge holds none of its history, nor
+//! any back for it, the handle feeding the warmup the features' series
+//! alone (`FeatureSet::bar_types`, `ticks`, `handled_custom`). It warms the target's ATR from
 //! the warmup request, as it does the features: the request builds the
 //! ATR's bars too (`TargetSetter::warmed`), and the warmup hands the bars of the
 //! response to both, so the first decision after a start sets the stop and
@@ -359,10 +361,22 @@ impl ModelHandle {
             Mode::Live { .. } => Warmup::live(requirements),
             Mode::Backtest { .. } | Mode::Dataset { .. } => Warmup::replayed(requirements),
         }
-        .feeding(Rc::clone(features) as SharedActorIndicator)
-        .feeding_ticks(Rc::clone(features) as SharedActorIndicator)
-        .feeding_books(Rc::clone(features) as Rc<dyn BookIndicator>)
-        .feeding_custom(Rc::clone(features) as Rc<dyn CustomIndicator>);
+        .feeding(
+            &features.bar_types(),
+            Rc::clone(features) as SharedActorIndicator,
+        )
+        .feeding_ticks(
+            &features.ticks(),
+            Rc::clone(features) as SharedActorIndicator,
+        )
+        .feeding_books(
+            &features.ticks(),
+            Rc::clone(features) as Rc<dyn BookIndicator>,
+        )
+        .feeding_custom(
+            &features.handled_custom(),
+            Rc::clone(features) as Rc<dyn CustomIndicator>,
+        );
         let instrument_ids = ticks.iter().map(|tick| tick.instrument_id).collect();
         let roller = match mode {
             Mode::Live { .. } => Roller::live(instrument_ids),

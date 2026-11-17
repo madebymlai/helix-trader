@@ -63,9 +63,14 @@
 //! in `crates/data/src/engine/bar.rs`): so the warmup reads, at each
 //! response of a request, window or completion (`Warmup::on_data_response`),
 //! the bars it built since the last, each once, and hands them on with the
-//! ticks (see the merge, below). An external bar type's request hands its
-//! indicators nothing: its bars come in its responses, which the data
-//! engine caches (where `get_xrate` reads a conversion pair's), and no
+//! ticks (see the merge, below). A bar closing after the warmup's `now`
+//! (`ts_init`) is one of the live data the request held
+//! (`finish_historical_bar_aggregator`, which Nautilus builds into the
+//! cache alone, handing no handler): it is live, not history, and goes
+//! among the live ticks the hold holds, in time order (`Hold::built_live`),
+//! after the live ticks it was built from. An external bar type's request
+//! hands its indicators nothing: its bars come in its responses, which the
+//! data engine caches (where `get_xrate` reads a conversion pair's), and no
 //! indicator reads external bars, which the strategies' bar types are not.
 //! A response's data is that window's alone, and the request's completion
 //! carries none.
@@ -189,16 +194,21 @@
 //! feature reading several series would read their history out of order.
 //! The warmup therefore merges its history across series (`merge`, which
 //! says the rule): Temporary until Nautilus hands a warmup's history in
-//! time order across data types, helix-trader#46. It queues each requested
-//! series' quotes, trades, depth, deltas and custom data, and the bars each
-//! request builds, and hands them to the hold in `ts_event` order up to
-//! the earliest, over the series whose requests are still pending, of the
-//! latest `ts_event` each brought, a request's bars standing at the latest
+//! time order across data types, helix-trader#46. It queues the quotes,
+//! trades, depth, deltas and custom data, and the bars each request builds,
+//! of each series an indicator it feeds reads (`feeding`, `feeding_ticks`,
+//! `feeding_books`, `feeding_custom`, `building` each naming what its
+//! indicator reads), the others going on as they come, and hands them to
+//! the hold in `ts_init` order, as a replay hands them, up to the
+//! earliest, over the series whose requests are still pending, of the
+//! latest `ts_init` each brought, a request's bars standing at the latest
 //! its data brought; a series whose request completes or fails holds the
-//! others back no longer, ties go quotes, trades, depth, deltas, custom
-//! data, then bars, and the group's end hands on all that is held. Past
-//! `merge::HELD` ticks and bars held, the warmup ends incomplete, naming the
-//! series held back, and the rest of its history is left out. The hold's
+//! others back no longer, ties go as a replay hands them, custom data,
+//! then the ticks in the order of the catalog series, then bars
+//! (`tie_rank`), and the group's end hands on all that is held. Past
+//! `merge::HELD` bytes held, 2 GiB, each tick and bar counted with what it
+//! keeps on the heap, the warmup ends incomplete, naming the series held
+//! back, and the rest of its history is left out. The hold's
 //! seams move as the merge hands them on. It is separate from the hold,
 //! which goes with helix-trader#16 while the merge stays until its own
 //! issue closes. A replay merges nothing, Nautilus replaying in time order
@@ -383,6 +393,11 @@ pub struct Warmup {
     ticks: Vec<TickSeries>,
     /// The custom series of the requirements, warmed by their data type.
     custom: Vec<CustomSeries>,
+    /// The bar types, tick series and custom series the indicators it
+    /// feeds read: those whose history the merge orders.
+    fed_bars: Vec<BarType>,
+    fed_ticks: Vec<TickSeries>,
+    fed_custom: Vec<CustomSeries>,
     /// What hands the history of a live start's series on in time order
     /// across them, to the hold (see `merge`).
     merge: Merge,
@@ -390,6 +405,8 @@ pub struct Warmup {
     /// warmup and live, to the indicators reading them, holding the live
     /// ones while a live start's group is pending.
     hold: Hold,
+    /// The end of the last live start's warmup, its `now`.
+    end: Cell<UnixNanos>,
     /// The request group of the last live start.
     group: Cell<UUID4>,
     /// Whether that group has not ended yet.
@@ -433,8 +450,12 @@ impl Warmup {
             harness: Vec::new(),
             ticks: requirements.ticks.clone(),
             custom: requirements.custom.clone(),
+            fed_bars: Vec::new(),
+            fed_ticks: Vec::new(),
+            fed_custom: Vec::new(),
             merge: Merge::new(merge::HELD),
             hold: Hold::default(),
+            end: Cell::new(UnixNanos::default()),
             group: Cell::new(UUID4::new()),
             warming: Cell::new(false),
             building: RefCell::default(),
@@ -443,13 +464,16 @@ impl Warmup {
     }
 
     /// The warmup handing its bars to `indicator` too, which reads the
-    /// bars of its own bar types alone: those its requests build and the
-    /// live and replayed ones the strategy hands it (`on_bar`), live those
-    /// held until its group ends, and those the history holds dropped (see
-    /// `hold`). Nautilus is to hand `indicator` no bar of its own: it is
-    /// registered with none of the strategy's indicators.
+    /// bars of `bar_types` alone: those its requests build and the live and
+    /// replayed ones the strategy hands it (`on_bar`), live those held
+    /// until its group ends, and those the history holds dropped (see
+    /// `hold`). Live, the merge orders the bars of `bar_types` among the
+    /// other series fed indicators read (see `merge`). Nautilus is to hand
+    /// `indicator` no bar of its own: it is registered with none of the
+    /// strategy's indicators.
     #[must_use]
-    pub fn feeding(mut self, indicator: SharedActorIndicator) -> Self {
+    pub fn feeding(mut self, bar_types: &[BarType], indicator: SharedActorIndicator) -> Self {
+        self.fed_bars.extend(bar_types);
         self.hold.feeding_bars(indicator);
         self
     }
@@ -464,35 +488,49 @@ impl Warmup {
         if !self.bar_types.contains(&bar_type) && !self.harness.contains(&bar_type) {
             self.harness.push(bar_type);
         }
-        self.feeding(indicator)
+        self.feeding(&[bar_type], indicator)
     }
 
     /// The warmup handing the book depth and deltas of its responses to
-    /// `books` too, and the live ones the strategy hands it
-    /// (`on_book_depth`, `on_book_deltas`): live, those held until its group
-    /// ends, and those the history holds dropped (see `hold`).
+    /// `books` too, which reads those of `ticks`, and the live ones the
+    /// strategy hands it (`on_book_depth`, `on_book_deltas`): live, those
+    /// held until its group ends, and those the history holds dropped (see
+    /// `hold`), the merge ordering `ticks` as `feeding_ticks` does.
     #[must_use]
-    pub fn feeding_books(mut self, books: Rc<dyn BookIndicator>) -> Self {
+    pub fn feeding_books(mut self, ticks: &[TickSeries], books: Rc<dyn BookIndicator>) -> Self {
+        self.fed_ticks.extend_from_slice(ticks);
         self.hold.feeding_books(books);
         self
     }
 
     /// The warmup handing the custom data of its responses to `custom` too,
-    /// and the live and replayed points the strategy hands it (`on_data`):
-    /// live, those held until its group ends, and those the history holds
-    /// dropped (see `hold`).
+    /// which reads that of `series`, and the live and replayed points the
+    /// strategy hands it (`on_data`): live, those held until its group
+    /// ends, and those the history holds dropped (see `hold`), the merge
+    /// ordering `series`, each by its data type as read at the start
+    /// (`CustomSeries::at`), as `feeding_ticks` does ticks.
     #[must_use]
-    pub fn feeding_custom(mut self, custom: Rc<dyn CustomIndicator>) -> Self {
+    pub fn feeding_custom(
+        mut self,
+        series: &[CustomSeries],
+        custom: Rc<dyn CustomIndicator>,
+    ) -> Self {
+        self.fed_custom.extend_from_slice(series);
         self.hold.feeding_custom(custom);
         self
     }
 
     /// The warmup handing the quotes and trades of its responses to
-    /// `indicator` too, and the live ones the strategy hands it (`on_quote`,
-    /// `on_trade`): live, those held until its group ends, and those the
-    /// history holds dropped (see `hold`).
+    /// `indicator` too, which reads those of `ticks`, and the live ones the
+    /// strategy hands it (`on_quote`, `on_trade`): live, those held until
+    /// its group ends, and those the history holds dropped (see `hold`).
+    /// Live, the merge orders `ticks`, a root's on the contract standing
+    /// for it at the start, among the other series fed indicators read
+    /// (see `merge`); a series no fed indicator reads, a conversion pair's
+    /// quotes, say, goes on as it comes, holding none back.
     #[must_use]
-    pub fn feeding_ticks(mut self, indicator: SharedActorIndicator) -> Self {
+    pub fn feeding_ticks(mut self, ticks: &[TickSeries], indicator: SharedActorIndicator) -> Self {
+        self.fed_ticks.extend_from_slice(ticks);
         self.hold.feeding(indicator);
         self
     }
@@ -513,6 +551,7 @@ impl Warmup {
     {
         let now = actor.clock().utc_now();
         if self.start == Start::Request {
+            self.end.set(UnixNanos::from(now));
             self.group.set(UUID4::new());
             self.warming.set(true);
             self.hold.hold();
@@ -530,18 +569,26 @@ impl Warmup {
                 &ContinuousBars::default(),
                 self.group.get(),
             )?;
-            self.merge.start(requested.iter().flat_map(|request| {
-                let bars = request
-                    .built
-                    .iter()
-                    .map(|bar_type| Series::Bars(bar_type.standard()));
-                request
-                    .series
-                    .clone()
-                    .into_iter()
-                    .chain(bars)
-                    .map(|series| (request.id, series))
-            }));
+            let fed = self.fed(now);
+            let mut merged: Vec<(UUID4, Series)> = requested
+                .iter()
+                .flat_map(|request| {
+                    let bars = request
+                        .built
+                        .iter()
+                        .map(|bar_type| Series::Bars(bar_type.standard()));
+                    request
+                        .series
+                        .clone()
+                        .into_iter()
+                        .chain(bars)
+                        .map(|series| (request.id, series))
+                })
+                .filter(|(_, series)| fed.contains(series))
+                .collect();
+            let catalog = requirements.catalog_series();
+            merged.sort_by_cached_key(|(_, series)| tie_rank(series, &catalog, now));
+            self.merge.start(merged);
             self.read.borrow_mut().clear();
 
             if requested.is_empty() {
@@ -587,8 +634,17 @@ impl Warmup {
         let request = response.correlation_id();
         let built = self.building.borrow().get(request).cloned();
         if let Some(built) = built {
-            let bars = self.built_bars(actor, &built);
-            let through = response.response().and_then(latest_made);
+            // Those closing after the warmup's end Nautilus built from the
+            // live data it held for the request, at its completion: live.
+            let end = self.end.get();
+            let (live, bars): (Vec<Bar>, Vec<Bar>) = self
+                .built_bars(actor, &built)
+                .into_iter()
+                .partition(|bar| bar.ts_init > end);
+            for bar in live {
+                self.hold.built_live(Tick::Bar(bar))?;
+            }
+            let through = response.response().and_then(latest_initialized);
             self.overflowed(
                 self.merge
                     .built(request, bars, through, |tick| self.hold.history(tick))?,
@@ -869,11 +925,33 @@ impl Warmup {
         self.hold.live(Tick::Trade(*trade))
     }
 
-    /// The warmup's merge holding at most `limit` ticks, not `merge::HELD`.
+    /// The warmup's merge holding at most `limit` bytes, not `merge::HELD`.
     #[cfg(test)]
     pub(crate) fn holding(mut self, limit: usize) -> Self {
         self.merge = Merge::new(limit);
         self
+    }
+
+    /// The series the indicators it feeds read, as a start at `now`
+    /// requests them: the bars by their standard type, a root's ticks and
+    /// custom series on the contract standing for it (`rolls::front`,
+    /// `CustomSeries::at`).
+    fn fed(&self, now: Timestamp) -> Vec<Series> {
+        let bars = self
+            .fed_bars
+            .iter()
+            .map(|bar_type| Series::Bars(bar_type.standard()));
+        let ticks = self.fed_ticks.iter().map(|tick| {
+            Series::of(&TickSeries {
+                data: tick.data.clone(),
+                instrument_id: front(tick.instrument_id, now),
+            })
+        });
+        let custom = self
+            .fed_custom
+            .iter()
+            .map(|series| Series::Custom(series.at(now).data_type().clone()));
+        bars.chain(ticks).chain(custom).collect()
     }
 
     /// The cache config of a live node running the warmup: sized for the
@@ -907,6 +985,7 @@ impl Debug for Warmup {
             .field("ticks", &self.ticks)
             .field("merge", &self.merge)
             .field("hold", &self.hold)
+            .field("end", &self.end)
             .field("group", &self.group)
             .field("warming", &self.warming)
             .field("building", &self.building)
@@ -1109,6 +1188,35 @@ where
     Ok(requested)
 }
 
+/// Where `series`, a series a warmup merges, goes among the others on a tie
+/// (see `merge`), as a replay hands ties: custom data first, a backtest
+/// adding its stream before the catalog's (`backtest::node`); then the
+/// ticks in the order of `catalog`, the requirements' catalog series
+/// (`DataRequirements::catalog_series`), a root's standing for its
+/// contract at `now`; built bars last, the aggregator firing after the data
+/// of its instant. Within one of these, the order requested.
+fn tie_rank(series: &Series, catalog: &[CatalogSeries], now: Timestamp) -> (u8, usize) {
+    match series {
+        Series::Custom(_) => (0, 0),
+        Series::Bars(_) => (2, 0),
+        ticks => {
+            let at = catalog
+                .iter()
+                .position(|source| match source {
+                    CatalogSeries::Ticks(tick) => {
+                        Series::of(&TickSeries {
+                            data: tick.data.clone(),
+                            instrument_id: front(tick.instrument_id, now),
+                        }) == *ticks
+                    }
+                    CatalogSeries::Bars(_) => false,
+                })
+                .expect("a tick series requested is among the catalog series");
+            (1, at)
+        }
+    }
+}
+
 /// A request of a warmup's start: its id, the bar types it builds, and the
 /// series of the history it hands on in time order across series (see
 /// `merge`), none for bars or a definition.
@@ -1271,14 +1379,14 @@ pub fn finished(group: UUID4, response: &DataResponseEnvelope) -> anyhow::Result
     }
 }
 
-/// The latest `ts_event` of `response`'s quotes, trades or bars, if it
+/// The latest `ts_init` of `response`'s quotes, trades or bars, if it
 /// holds any: where the bars a request builds from them stand (see
 /// `merge`). Nautilus builds no bars from the other kinds.
-fn latest_made(response: &DataResponse) -> Option<UnixNanos> {
+fn latest_initialized(response: &DataResponse) -> Option<UnixNanos> {
     match response {
-        DataResponse::Quotes(quotes) => quotes.data.iter().map(|quote| quote.ts_event).max(),
-        DataResponse::Trades(trades) => trades.data.iter().map(|trade| trade.ts_event).max(),
-        DataResponse::Bars(bars) => bars.data.iter().map(|bar| bar.ts_event).max(),
+        DataResponse::Quotes(quotes) => quotes.data.iter().map(|quote| quote.ts_init).max(),
+        DataResponse::Trades(trades) => trades.data.iter().map(|trade| trade.ts_init).max(),
+        DataResponse::Bars(bars) => bars.data.iter().map(|bar| bar.ts_init).max(),
         _ => None,
     }
 }
@@ -2166,7 +2274,9 @@ mod tests {
     #[rstest]
     fn live_custom_data_is_held_and_dropped_at_the_seam_as_ticks_are() {
         let rows = Rc::new(Rows::default());
-        let warmup = Warmup::live(&reading_us10y()).feeding_custom(Rc::clone(&rows) as _);
+        let requirements = reading_us10y();
+        let warmup =
+            Warmup::live(&requirements).feeding_custom(&requirements.custom, Rc::clone(&rows) as _);
         let (mut probe, _) = registered();
         warmup.start(&mut probe).unwrap();
 
@@ -2188,7 +2298,9 @@ mod tests {
     #[rstest]
     fn replayed_custom_data_goes_straight_to_the_custom_indicator() {
         let rows = Rc::new(Rows::default());
-        let warmup = Warmup::replayed(&reading_us10y()).feeding_custom(Rc::clone(&rows) as _);
+        let requirements = reading_us10y();
+        let warmup = Warmup::replayed(&requirements)
+            .feeding_custom(&requirements.custom, Rc::clone(&rows) as _);
         let (mut probe, _) = registered();
         warmup.start(&mut probe).unwrap();
 
@@ -2240,7 +2352,7 @@ mod tests {
     #[rstest]
     fn the_warmup_hands_book_deltas_over_in_the_batches_the_live_stream_carries() {
         let books = Rc::new(Books::default());
-        let warmup = Warmup::live(&reading(&[])).feeding_books(Rc::clone(&books) as _);
+        let warmup = Warmup::live(&reading(&[])).feeding_books(&[], Rc::clone(&books) as _);
         let last = RecordFlag::F_LAST as u8;
 
         warmup
@@ -2282,11 +2394,9 @@ mod tests {
     #[rstest]
     fn live_book_depth_and_deltas_are_held_and_dropped_at_the_seam_as_ticks_are() {
         let books = Rc::new(Books::default());
-        let warmup = Warmup::live(&reading_ticks(
-            &[],
-            vec![tick(NautilusDataType::QuoteTick, XAU)],
-        ))
-        .feeding_books(Rc::clone(&books) as _);
+        let requirements = reading_ticks(&[], vec![tick(NautilusDataType::QuoteTick, XAU)]);
+        let warmup =
+            Warmup::live(&requirements).feeding_books(&requirements.ticks, Rc::clone(&books) as _);
         let (mut probe, _) = registered();
         warmup.start(&mut probe).unwrap();
 
@@ -2411,11 +2521,14 @@ mod tests {
         let hour_mid = BarType::from("ESM24.CME-1-HOUR-MID-INTERNAL");
         let composite = BarType::from("ESM24.CME-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL");
         let recorder = Rc::new(Recorder::default());
-        let warmup = Warmup::live(&reading(&[
+        let requirements = reading(&[
             "ESM24.CME-1-HOUR-MID-INTERNAL",
             "ESM24.CME-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL",
-        ]))
-        .feeding(Rc::clone(&recorder) as SharedActorIndicator);
+        ]);
+        let warmup = Warmup::live(&requirements).feeding(
+            &requirements.bar_types,
+            Rc::clone(&recorder) as SharedActorIndicator,
+        );
         let (mut probe, commands) = registered();
         warmup.start(&mut probe).unwrap();
         for bar_type in [hour_mid, composite.standard()] {
@@ -2628,14 +2741,10 @@ mod tests {
     /// ticks to `ticks`, started at 14:30 (`registered`), its group pending,
     /// and the strategy it started on.
     fn warming(ticks: &Rc<Ticks>) -> (Warmup, Probe) {
-        let warmup = Warmup::live(&reading_ticks(
-            &[],
-            vec![
-                tick(NautilusDataType::QuoteTick, XAU),
-                tick(NautilusDataType::TradeTick, XAU),
-            ],
-        ))
-        .feeding_ticks(Rc::clone(ticks) as SharedActorIndicator);
+        let warmup = Warmup::live(&quotes_and_trades()).feeding_ticks(
+            &quotes_and_trades().ticks,
+            Rc::clone(ticks) as SharedActorIndicator,
+        );
         let (mut probe, _) = registered();
         warmup.start(&mut probe).unwrap();
         (warmup, probe)
@@ -2690,14 +2799,10 @@ mod tests {
     #[rstest]
     fn live_ticks_are_held_until_the_group_ends_not_one_of_its_requests() {
         let ticks = Rc::new(Ticks::default());
-        let warmup = Warmup::live(&reading_ticks(
-            &[],
-            vec![
-                tick(NautilusDataType::QuoteTick, XAU),
-                tick(NautilusDataType::TradeTick, XAU),
-            ],
-        ))
-        .feeding_ticks(Rc::clone(&ticks) as SharedActorIndicator);
+        let warmup = Warmup::live(&quotes_and_trades()).feeding_ticks(
+            &quotes_and_trades().ticks,
+            Rc::clone(&ticks) as SharedActorIndicator,
+        );
         let (mut probe, commands) = registered();
         warmup.start(&mut probe).unwrap();
         let quotes = sent_requests(&commands)
@@ -2880,12 +2985,13 @@ mod tests {
     fn a_replays_ticks_and_books_reach_the_features_as_they_come() {
         let ticks = Rc::new(Ticks::default());
         let books = Rc::new(Books::default());
-        let replayed = Warmup::replayed(&reading_ticks(
-            &[],
-            vec![tick(NautilusDataType::QuoteTick, XAU)],
-        ))
-        .feeding_ticks(Rc::clone(&ticks) as SharedActorIndicator)
-        .feeding_books(Rc::clone(&books) as _);
+        let requirements = reading_ticks(&[], vec![tick(NautilusDataType::QuoteTick, XAU)]);
+        let replayed = Warmup::replayed(&requirements)
+            .feeding_ticks(
+                &requirements.ticks,
+                Rc::clone(&ticks) as SharedActorIndicator,
+            )
+            .feeding_books(&requirements.ticks, Rc::clone(&books) as _);
         let (mut probe, _) = registered();
         replayed.start(&mut probe).unwrap();
 
@@ -2964,18 +3070,21 @@ mod tests {
         requirements: &DataRequirements,
         log: &Rc<Log>,
     ) -> (Warmup, Probe, TypedIntoMessageSavingHandler<DataCommand>) {
-        logging_with(Warmup::live(requirements), log)
+        logging_with(Warmup::live(requirements), requirements, log)
     }
 
+    /// `warmup` handing everything to `log`, which reads the series of
+    /// `read`, started as `logging` starts it.
     fn logging_with(
         warmup: Warmup,
+        read: &DataRequirements,
         log: &Rc<Log>,
     ) -> (Warmup, Probe, TypedIntoMessageSavingHandler<DataCommand>) {
         let warmup = warmup
-            .feeding(Rc::clone(log) as SharedActorIndicator)
-            .feeding_ticks(Rc::clone(log) as SharedActorIndicator)
-            .feeding_books(Rc::clone(log) as _)
-            .feeding_custom(Rc::clone(log) as _);
+            .feeding(&read.bar_types, Rc::clone(log) as SharedActorIndicator)
+            .feeding_ticks(&read.ticks, Rc::clone(log) as SharedActorIndicator)
+            .feeding_books(&read.ticks, Rc::clone(log) as _)
+            .feeding_custom(&read.custom, Rc::clone(log) as _);
         let (mut probe, commands) = registered();
         warmup.start(&mut probe).unwrap();
         (warmup, probe, commands)
@@ -3081,6 +3190,38 @@ mod tests {
         );
     }
 
+    /// A series no fed indicator reads is no part of the merge: the warmup
+    /// requests EURUSD's quotes too, a conversion pair's, which the feature,
+    /// reading GCZ26's quotes alone, does not read. GCZ26's quotes answer
+    /// 12:00 and 13:00 while EURUSD's request is still pending, having
+    /// brought nothing: the feature reads them at once.
+    #[rstest]
+    fn a_series_no_fed_indicator_reads_holds_no_history_back() {
+        let log = Rc::new(Log::default());
+        let gold = tick(NautilusDataType::QuoteTick, XAU);
+        let requirements = reading_ticks(
+            &[],
+            vec![gold.clone(), tick(NautilusDataType::QuoteTick, EUR)],
+        );
+        let read = reading_ticks(&[], vec![gold]);
+        let (warmup, _probe, commands) = logging_with(Warmup::live(&requirements), &read, &log);
+
+        warmup
+            .on_historical_quotes(&[quote("12:00:00"), quote("13:00:00")])
+            .unwrap();
+
+        let pair = CatalogSeries::Ticks(tick(NautilusDataType::QuoteTick, EUR));
+        assert!(
+            sent_requests(&commands)
+                .iter()
+                .any(|(source, ..)| *source == pair)
+        );
+        assert_eq!(
+            *log.read.borrow(),
+            [entry("quote", "12:00:00"), entry("quote", "13:00:00")]
+        );
+    }
+
     /// GCZ26's quotes answered 12:00 and 14:00, its trades nothing yet: the
     /// trades could still bring older ones, so the quotes wait. The trades'
     /// request then ends, answered with nothing (a closed market) or failed,
@@ -3150,17 +3291,32 @@ mod tests {
         }
     }
 
-    /// A feature reads ties across series in a fixed order of kinds, as a
-    /// replay does: quotes, trades, depth, deltas, custom data, then bars.
-    /// Every series answers one point made at midnight: the quotes first,
-    /// with the hourly bar closing then built, the others in the reverse
-    /// order.
+    /// A feature reads ties across series in the order a replay hands
+    /// them: custom data first, a backtest adding its stream before the
+    /// catalog's; then the catalog series in the order a backtest reads
+    /// them (`DataRequirements::catalog_series`), by instrument, a bar's
+    /// source before the ticks, the ticks in the order `[data]` lists
+    /// them; built bars last, a backtest building a bar after the data of
+    /// its instant. `[data]` lists GCZ26's deltas, trades, quotes and depth,
+    /// and its hourly MID bars, built from its quotes: the order is custom
+    /// data, quotes, deltas, trades, depth, then the bar. Every series
+    /// answers one point initialized at midnight: the quotes first, with
+    /// the hourly bar closing then built, the others in the reverse order.
     #[rstest]
-    fn ties_across_series_reach_a_feature_in_the_order_of_their_kinds() {
+    fn ties_across_series_reach_a_feature_in_the_order_a_replay_hands_them() {
         let log = Rc::new(Log::default());
         let requirements = DataRequirements {
             bar_types: vec![BarType::from(XAU_HOURS)],
-            ..every_kind()
+            ticks: [
+                NautilusDataType::OrderBookDelta,
+                NautilusDataType::TradeTick,
+                NautilusDataType::QuoteTick,
+                NautilusDataType::OrderBookDepth,
+            ]
+            .into_iter()
+            .map(|data| tick(data, XAU))
+            .collect(),
+            ..reading_us10y()
         };
         let (warmup, probe, commands) = logging(&requirements, &log);
         let quotes = request_of(&commands, NautilusDataType::QuoteTick);
@@ -3190,7 +3346,7 @@ mod tests {
         let kinds: Vec<&str> = log.read.borrow().iter().map(|(kind, _)| *kind).collect();
         assert_eq!(
             kinds,
-            ["quote", "trade", "depth", "deltas", "custom", "bar"]
+            ["custom", "quote", "deltas", "trade", "depth", "bar"]
         );
     }
 
@@ -3233,7 +3389,8 @@ mod tests {
     }
 
     /// The history held is bounded: past it, the warmup ends incomplete,
-    /// naming the series held back. Bounded at two, GCZ26's quotes answer
+    /// naming the series held back. Bounded at what two quotes take, a
+    /// quote keeping nothing on the heap, GCZ26's quotes answer
     /// three while its trades answer nothing: the warmup is no longer
     /// warming, the feature has read the three quotes, in order, and the
     /// trades the venue answers after are left out, older than what it
@@ -3241,7 +3398,11 @@ mod tests {
     #[rstest]
     fn past_its_bound_the_warmup_ends_incomplete_naming_the_series_held_back() {
         let log = Rc::new(Log::default());
-        let (warmup, _probe, _) = logging_with(Warmup::live(&quotes_and_trades()).holding(2), &log);
+        let (warmup, _probe, _) = logging_with(
+            Warmup::live(&quotes_and_trades()).holding(2 * size_of::<Tick>()),
+            &quotes_and_trades(),
+            &log,
+        );
 
         let err = warmup
             .on_historical_quotes(&[quote("12:00:00"), quote("13:00:00"), quote("14:00:00")])
@@ -3262,6 +3423,52 @@ mod tests {
                 entry("quote", "14:00:00"),
             ]
         );
+    }
+
+    /// A tick held counts against the bound what it keeps on the heap
+    /// beside its own size: a batch of ten deltas its deltas, a snapshot of
+    /// depth its box, a point of custom data its data. Bounded a byte short
+    /// of the least that one of them takes, the warmup holding it alone,
+    /// the others pending, ends incomplete naming its series.
+    #[rstest]
+    #[case::deltas("deltas of GCZ26.GLBX")]
+    #[case::depth("depth of GCZ26.GLBX")]
+    #[case::custom("custom data")]
+    fn the_merge_counts_what_a_tick_keeps_on_the_heap_against_its_bound(#[case] series: &str) {
+        let log = Rc::new(Log::default());
+        let midnight = on_the_day("00:00:00");
+        let deltas: Vec<OrderBookDelta> = (0..10)
+            .map(|at| OrderBookDelta {
+                ts_event: midnight,
+                ts_init: midnight,
+                ..delta(at, if at == 9 { RecordFlag::F_LAST as u8 } else { 0 })
+            })
+            .collect();
+        let row = us10y_row("10", 4.5);
+        let heap = match series {
+            "deltas of GCZ26.GLBX" => 10 * size_of::<OrderBookDelta>(),
+            "depth of GCZ26.GLBX" => size_of::<OrderBookDepth>(),
+            _ => size_of_val(&*row.data),
+        };
+        let bound = size_of::<Tick>() + heap - 1;
+        let (warmup, probe, _) = logging_with(
+            Warmup::live(&every_kind()).holding(bound),
+            &every_kind(),
+            &log,
+        );
+
+        let err = match series {
+            "deltas of GCZ26.GLBX" => warmup.on_historical_book_deltas(&deltas),
+            "depth of GCZ26.GLBX" => warmup.on_historical_book_depth(&[depth_made(midnight)]),
+            _ => warmup.on_historical_data(&probe, &vec![row]),
+        }
+        .expect_err("past the bound");
+
+        let err = format!("{err:#}");
+        for part in ["incomplete", series] {
+            assert!(err.contains(part), "{err}");
+        }
+        assert!(!warmup.is_warming());
     }
 
     /// The live ticks held still follow the history, deduplicated against
@@ -3306,6 +3513,20 @@ mod tests {
     /// quotes, and of its trades.
     fn bars_and_trades() -> DataRequirements {
         reading_ticks(&[XAU_HOURS], vec![tick(NautilusDataType::TradeTick, XAU)])
+    }
+
+    /// The live warmup of `bars_and_trades` handing everything to `log`,
+    /// which reads the bars, the trades and the quotes the bars are built
+    /// from, started as `logging` starts it.
+    fn logging_bars(log: &Rc<Log>) -> (Warmup, Probe, TypedIntoMessageSavingHandler<DataCommand>) {
+        let read = reading_ticks(
+            &[XAU_HOURS],
+            vec![
+                tick(NautilusDataType::QuoteTick, XAU),
+                tick(NautilusDataType::TradeTick, XAU),
+            ],
+        );
+        logging_with(Warmup::live(&bars_and_trades()), &read, log)
     }
 
     /// An hourly MID bar of GCZ26 closing at `close` on the day, stamped
@@ -3370,7 +3591,7 @@ mod tests {
         #[case] order: &[usize],
     ) {
         let log = Rc::new(Log::default());
-        let (warmup, probe, commands) = logging(&bars_and_trades(), &log);
+        let (warmup, probe, commands) = logging_bars(&log);
         let quotes = request_of(&commands, NautilusDataType::QuoteTick);
         let windows = [
             (
@@ -3414,6 +3635,46 @@ mod tests {
         );
     }
 
+    /// The merge orders by `ts_init`, as a replay does: GCZ26's quotes
+    /// answer 12:00 and 13:00, building the hourly bar of 12:00 stamped at
+    /// its open (`ts_event` 12:00) and initialized at its close (`ts_init`
+    /// 13:00), as a node not timestamping on close builds it; the trades
+    /// answer 12:30. By `ts_event` the bar would come before the trade; by
+    /// `ts_init` the feature reads it after the trade and the quote of its
+    /// close, the data of an instant before the bar built then.
+    #[rstest]
+    fn the_merge_orders_series_by_ts_init_not_ts_event() {
+        let log = Rc::new(Log::default());
+        let (warmup, probe, commands) = logging_bars(&log);
+        let quotes = request_of(&commands, NautilusDataType::QuoteTick);
+        let open_stamped = Bar {
+            ts_event: on_the_day("12:00:00"),
+            ..hour_bar("13:00:00")
+        };
+
+        answer_quotes(
+            &warmup,
+            &probe,
+            quotes,
+            &[quote("12:00:00"), quote("13:00:00")],
+            &[open_stamped],
+        );
+        warmup
+            .on_historical_trades(&[trade("12:30:00", "12:30:00")])
+            .unwrap();
+        warmup.complete(&probe).unwrap();
+
+        assert_eq!(
+            *log.read.borrow(),
+            [
+                entry("quote", "12:00:00"),
+                entry("trade", "12:30:00"),
+                entry("quote", "13:00:00"),
+                entry("bar", "12:00:00"),
+            ]
+        );
+    }
+
     /// A pending request's bars stand at the latest its data brought, not
     /// at their own: the quotes' first window, 12:00 and 13:00, builds the
     /// bar of 12:00 alone, and no bar it builds later closes before 13:00.
@@ -3422,7 +3683,7 @@ mod tests {
     #[rstest]
     fn a_pending_requests_bars_stand_at_the_latest_its_data_brought() {
         let log = Rc::new(Log::default());
-        let (warmup, probe, commands) = logging(&bars_and_trades(), &log);
+        let (warmup, probe, commands) = logging_bars(&log);
         let quotes = request_of(&commands, NautilusDataType::QuoteTick);
 
         answer_quotes(
@@ -3456,7 +3717,7 @@ mod tests {
     #[rstest]
     fn a_request_completing_while_another_pends_hands_its_bars_on_as_far_as_the_other_reached() {
         let log = Rc::new(Log::default());
-        let (warmup, probe, commands) = logging(&bars_and_trades(), &log);
+        let (warmup, probe, commands) = logging_bars(&log);
         let quotes = request_of(&commands, NautilusDataType::QuoteTick);
         let trades = request_of(&commands, NautilusDataType::TradeTick);
 
@@ -3499,7 +3760,7 @@ mod tests {
     #[rstest]
     fn live_bars_are_held_behind_the_history_until_the_group_ends() {
         let log = Rc::new(Log::default());
-        let (warmup, probe, commands) = logging(&bars_and_trades(), &log);
+        let (warmup, probe, commands) = logging_bars(&log);
         let quotes = request_of(&commands, NautilusDataType::QuoteTick);
 
         answer_quotes(&warmup, &probe, quotes, &[quote("14:00:00")], &[]);
@@ -3529,6 +3790,63 @@ mod tests {
         );
     }
 
+    /// A bar Nautilus builds at a request's completion from the live data
+    /// it held for the request (`WarmupBuffer`, replayed by
+    /// `finish_historical_bar_aggregator`) is live, not history: it closes
+    /// after the warmup's end, 14:30. GCZ26's quotes answer 14:00, building
+    /// that hour's bar; live, a quote made at 14:45, a trade at 14:50 and a
+    /// quote at 15:00:01 come while the quotes' request is pending, the
+    /// last closing the bar of 15:00, which the data engine builds into the
+    /// cache alone as the request completes. The trades answer 14:00:30.
+    /// The feature reads the history, then the live ticks and that bar in
+    /// time order (`ts_init`): the bar after the trade of 14:50, before the
+    /// quote received after its close.
+    #[rstest]
+    fn a_bar_built_from_the_live_data_a_request_held_is_read_among_the_live_ticks() {
+        let log = Rc::new(Log::default());
+        let (warmup, probe, commands) = logging_bars(&log);
+        let quotes = request_of(&commands, NautilusDataType::QuoteTick);
+
+        answer_quotes(
+            &warmup,
+            &probe,
+            quotes,
+            &[quote("14:00:00")],
+            &[hour_bar("14:00:00")],
+        );
+        warmup
+            .on_quote(&quote_of(XAU, "14:45:00", "14:45:00.050"))
+            .unwrap();
+        warmup.on_trade(&trade("14:50:00", "14:50:00.050")).unwrap();
+        warmup
+            .on_quote(&quote_of(XAU, "15:00:01", "15:00:01.050"))
+            .unwrap();
+        probe
+            .cache_rc()
+            .borrow_mut()
+            .add_bar(hour_bar("15:00:00"))
+            .unwrap();
+        let completed = DataResponseEnvelope::terminal(quotes, None);
+        warmup.on_data_response(&probe, &completed).unwrap();
+        warmup
+            .on_historical_trades(&[trade("14:00:30", "14:00:30")])
+            .unwrap();
+        warmup.complete(&probe).unwrap();
+
+        assert_eq!(
+            *log.read.borrow(),
+            [
+                entry("quote", "14:00:00"),
+                entry("bar", "14:00:00"),
+                entry("trade", "14:00:30"),
+                entry("quote", "14:45:00"),
+                entry("trade", "14:50:00"),
+                entry("bar", "15:00:00"),
+                entry("quote", "15:00:01"),
+            ]
+        );
+    }
+
     /// A live bar the history holds is dropped, as a live tick is: the
     /// history's last bar closes at 14:00; a live bar closing then, held or
     /// after the warmup, is read once, from the history; one closing at
@@ -3538,7 +3856,7 @@ mod tests {
     #[case::after_the_warmup(false)]
     fn a_live_bar_at_or_before_the_historys_last_is_dropped(#[case] held: bool) {
         let log = Rc::new(Log::default());
-        let (warmup, probe, commands) = logging(&bars_and_trades(), &log);
+        let (warmup, probe, commands) = logging_bars(&log);
         let quotes = request_of(&commands, NautilusDataType::QuoteTick);
         answer_quotes(&warmup, &probe, quotes, &[quote("14:00:00")], &[]);
         probe
@@ -3574,7 +3892,11 @@ mod tests {
     #[rstest]
     fn a_replays_bars_reach_the_features_as_they_come() {
         let log = Rc::new(Log::default());
-        let (replayed, _probe, _) = logging_with(Warmup::replayed(&bars_and_trades()), &log);
+        let (replayed, _probe, _) = logging_with(
+            Warmup::replayed(&bars_and_trades()),
+            &bars_and_trades(),
+            &log,
+        );
 
         replayed.on_bar(&hour_bar("14:00:00")).unwrap();
 
