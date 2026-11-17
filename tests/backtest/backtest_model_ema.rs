@@ -7,16 +7,20 @@
 //! `train` publishes it, and fails, publishing nothing, only on a slice of
 //! fewer rows than `min_rows`, naming the slice, its count and the minimum,
 //! as does a live node's launcher (`model::launcher`) starting that `train`
-//! as its child. A model published straight to the store, a baseline
+//! as its child; a live node's retrain actor publishes at a retrain time
+//! the generation `train` publishes there. A model published straight to the store, a baseline
 //! (`common::dataset`), trades from its valid-from: every decision a long on
 //! its time-only target, closed 30 minutes later. The binary's `backtest`
 //! trades on the store as it is (`backtest_model_ema_trained` backtests a
 //! store `train` filled).
 
 use std::{
-    ffi::OsStr,
+    cell::RefCell,
+    ffi::{OsStr, OsString},
     path::{Path, PathBuf},
     process::{Command, Output},
+    rc::Rc,
+    time::Duration,
 };
 
 use helix_trader::{
@@ -25,7 +29,7 @@ use helix_trader::{
         ModelStrategy,
         features::side_names,
         handle::Mode,
-        launcher::{Launcher, Retrained},
+        launcher::{Launcher, RetrainActor, Retrained},
         learner::TrainingSet,
         store::{ModelStore, StoredModel},
         targets::Side,
@@ -33,9 +37,21 @@ use helix_trader::{
     strategy::model_ema::{ModelEma, ModelEmaConfig},
 };
 use jiff::{SignedDuration, Timestamp};
-use nautilus_model::types::{Currency, Money};
+use nautilus_common::{
+    actor::{DataActor, registry::deregister_actor},
+    cache::Cache,
+    clock::VirtualClock,
+    component::{Component, deregister_component, register_component_actor, start_component},
+    testing::wait_until_async,
+};
+use nautilus_core::UnixNanos;
+use nautilus_model::{
+    identifiers::TraderId,
+    types::{Currency, Money},
+};
 use rstest::rstest;
 use tempfile::TempDir;
+use ustr::Ustr;
 
 use crate::common::{
     dataset::{baseline_stored, generation, r, walk},
@@ -359,6 +375,24 @@ fn traded_from(catalog: &TempDir, models: PathBuf, start: Timestamp) -> (usize, 
     (outcome.result.total_orders, outcome.result.total_positions)
 }
 
+/// The arguments of the binary's `train` but its `--at` as a live node
+/// starts it (`LiveArgs::train_args`), on `config`, `catalog` and the store
+/// under `models`.
+fn live_train_args(config: &Path, catalog: &Path, models: &Path) -> Vec<OsString> {
+    [
+        "train".as_ref(),
+        "model_ema".as_ref(),
+        "--config".as_ref(),
+        config.as_os_str(),
+        "--catalog".as_ref(),
+        catalog.as_os_str(),
+        "--models".as_ref(),
+        models.as_os_str(),
+    ]
+    .map(OsStr::to_os_string)
+    .to_vec()
+}
+
 /// A live node's retrain, the binary's `train` started by its launcher,
 /// fails as `train` does, the fit slice at t of 34 rows short of a
 /// `min_rows` of 35 (`a_train_with_a_slice_of_fewer_rows_than_the_minimum_fails_naming_it_and_publishes_nothing`):
@@ -370,19 +404,10 @@ fn a_live_retrain_through_the_train_subcommand_failing_is_kept_with_its_reason()
     let dir = tempfile::tempdir().unwrap();
     let (config_path, models) = (dir.path().join("model_ema.toml"), dir.path().join("models"));
     std::fs::write(&config_path, of_min_rows(35)).unwrap();
-    // As a live node starts it (`LiveArgs::train_args`).
-    let args = [
-        "train".as_ref(),
-        "model_ema".as_ref(),
-        "--config".as_ref(),
-        config_path.as_os_str(),
-        "--catalog".as_ref(),
-        catalog.path().as_os_str(),
-        "--models".as_ref(),
-        models.as_os_str(),
-    ]
-    .map(OsStr::to_os_string);
-    let launcher = Launcher::process(env!("CARGO_BIN_EXE_helix-trader").into(), args.to_vec());
+    let launcher = Launcher::process(
+        env!("CARGO_BIN_EXE_helix-trader").into(),
+        live_train_args(&config_path, catalog.path(), &models),
+    );
 
     let retrained = launcher.launch(t()).wait();
 
@@ -391,6 +416,74 @@ fn a_live_retrain_through_the_train_subcommand_failing_is_kept_with_its_reason()
     };
     assert_too_few_rows(&why, "fit slice", 34, 35);
     assert_eq!(traded(&catalog, models), (0, 0));
+}
+
+/// Adds the retrain actor `actor` at `now` as a node's trader adds an
+/// actor: registered on a clock of its own and kept in Nautilus'
+/// registries, then started. Its id.
+fn added(mut actor: RetrainActor, now: Timestamp) -> Ustr {
+    let clock = Rc::new(RefCell::new(VirtualClock::new()));
+    clock.borrow_mut().advance_time(UnixNanos::from(now), true);
+    Component::register(
+        &mut actor,
+        TraderId::from("HELIX-001"),
+        clock,
+        Rc::new(RefCell::new(Cache::default())),
+    )
+    .unwrap();
+    let id = actor.actor_id().inner();
+    register_component_actor(actor);
+    start_component(&id).unwrap();
+    id
+}
+
+/// A live node started at 00:30 on the 23rd, half an hour after the
+/// retrain time t, its store holding no generation: its retrain actor,
+/// added as the node's trader adds it, trains t as it starts, through the
+/// binary's `train` its launcher starts, the catalog holding the quotes to
+/// 04:00, past t. Its generation is the one `train --at t` publishes into
+/// another store on the same catalog: valid from t, and of the same
+/// models, calibration, baselines and probes, cut at t.
+#[rstest]
+fn a_live_node_started_after_a_retrain_time_trains_it_at_start_as_train_at_it_does() {
+    let catalog = catalog();
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("model_ema.toml");
+    let (live, trained_at) = (dir.path().join("live"), dir.path().join("trained"));
+    std::fs::write(&config_path, CONFIG).unwrap();
+    let config = ModelEmaConfig::load(CONFIG).unwrap();
+    let actor = RetrainActor::new(
+        config.strategy_id(),
+        config.model().retrain,
+        catalog.path().to_path_buf(),
+        config.data_requirements(),
+        model_store(CONFIG, &live),
+        Launcher::process(
+            env!("CARGO_BIN_EXE_helix-trader").into(),
+            live_train_args(&config_path, catalog.path(), &live),
+        ),
+    )
+    .unwrap();
+
+    let id = added(actor, t() + SignedDuration::from_mins(30));
+    // On a runtime of its own: the fixtures start theirs.
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(wait_until_async(
+            || {
+                let published = generations(CONFIG, &live) == [t()];
+                async move { published }
+            },
+            Duration::from_secs(300),
+        ));
+    deregister_component(&id);
+    deregister_actor(&id);
+    trained(&config_path, catalog.path(), &trained_at, t());
+
+    assert_eq!(
+        model_store(CONFIG, &live).read(t()).unwrap(),
+        model_store(CONFIG, &trained_at).read(t()).unwrap()
+    );
 }
 
 /// The binary's `backtest` of the strategy of `config` over `span`, on the
