@@ -48,10 +48,15 @@
 //! ends, everything held goes on in order. A response of a series the
 //! warmup did not request goes on at once: it is no part of the warmup.
 //!
-//! The history held is bounded (`HELD`): past the bound the merge hands on
-//! everything it holds, in order, and leaves out the rest of the warmup's
-//! history, older than what the features then read, and the warmup ends
-//! incomplete, naming the series held back and those holding them. It logs
+//! The history held is bounded by a budget of bytes (`HELD`, 2 GiB), each
+//! tick and bar counted by what it takes, its own size and what it keeps
+//! on the heap, a batch of deltas its deltas, a snapshot of depth its box,
+//! a point of custom data its data (`Tick::size`): past the bound the
+//! merge hands on everything it holds, in order, and leaves out the rest
+//! of the warmup's history, older than what the features then read, and
+//! the warmup ends incomplete, naming the series held back and those
+//! holding them. The bound is the merge's own, set by no configuration: it
+//! goes with the merge. It logs
 //! a series of which it holds more than a window, once a warmup, naming
 //! those it waits on, so that a slow series shows.
 
@@ -62,19 +67,17 @@ use nautilus_model::data::Bar;
 
 use super::tick::{Series, Tick};
 
-/// The most ticks the merge holds, bars among them, of all its series
-/// together: under a gigabyte, a tick held taking 168 bytes, a bar's too,
-/// besides what a batch of deltas,
-/// a snapshot of depth or a point of custom data keeps on the heap. A
-/// series answered from the catalog at once while another waits on its
-/// venue is held whole, so the bound is that of a whole warmup of the
-/// series answered first.
-pub(super) const HELD: usize = 5_000_000;
+/// The most bytes the merge holds, of all its series together, each tick
+/// and bar held counted by what it takes (`Tick::size`): 2 GiB. A series
+/// answered from the catalog at once while another waits on its venue is
+/// held whole, so the bound is that of a whole warmup of the series
+/// answered first. It goes with the merge, so no configuration sets it.
+pub(super) const HELD: usize = 2 << 30;
 
 /// What merges a live warmup's history across its series (see the module).
 #[derive(Debug)]
 pub(super) struct Merge {
-    /// The most ticks it holds.
+    /// The most bytes it holds.
     limit: usize,
     state: RefCell<State>,
 }
@@ -95,8 +98,11 @@ enum State {
 struct Queue {
     series: Series,
     request: UUID4,
-    /// Its ticks held, in the order they came.
-    held: VecDeque<Tick>,
+    /// Its ticks held, in the order they came, each with what it takes
+    /// (`Tick::size`).
+    held: VecDeque<(Tick, usize)>,
+    /// What its ticks held take together.
+    bytes: usize,
     /// The latest `ts_event` it brought, none before its first tick.
     latest: Option<UnixNanos>,
     /// Whether its request has not ended yet.
@@ -105,12 +111,12 @@ struct Queue {
     logged: bool,
 }
 
-/// The merge past its bound: what it held, of which series, and the series
-/// it waited on.
+/// The merge past its bound: what it held, the ticks and bytes of each
+/// series, and the series it waited on.
 #[derive(Debug)]
 pub(super) struct Overflow {
     limit: usize,
-    held: Vec<(Series, usize)>,
+    held: Vec<(Series, usize, usize)>,
     waiting: Vec<Series>,
 }
 
@@ -122,7 +128,7 @@ impl Queue {
 }
 
 impl Merge {
-    /// A merge holding at most `limit` ticks, passing history on as it
+    /// A merge holding at most `limit` bytes, passing history on as it
     /// comes until a live warmup starts it.
     pub(super) fn new(limit: usize) -> Self {
         Self {
@@ -142,6 +148,7 @@ impl Merge {
                 series,
                 request,
                 held: VecDeque::new(),
+                bytes: 0,
                 latest: None,
                 pending: true,
                 logged: false,
@@ -157,9 +164,10 @@ impl Merge {
     /// # Errors
     ///
     /// Returns an error if `hand` fails, the first of which stops the
-    /// hand-over, the ticks after it kept held. Returns the overflow if the
-    /// merge holds more than its bound once it handed on what it could:
-    /// having handed on all it held, it is cut.
+    /// hand-over, the ticks after it kept held, or if a tick cannot be
+    /// sized (`Tick::size`). Returns the overflow if the merge holds more
+    /// bytes than its bound once it handed on what it could: having handed
+    /// on all it held, it is cut.
     pub(super) fn history(
         &self,
         ticks: impl IntoIterator<Item = Tick>,
@@ -226,7 +234,9 @@ impl Merge {
             }
             let made = tick.ts_event();
             queue.latest = Some(queue.latest.map_or(made, |latest| latest.max(made)));
-            queue.held.push_back(tick);
+            let size = tick.size()?;
+            queue.bytes += size;
+            queue.held.push_back((tick, size));
         }
 
         if let Some((request, Some(through))) = built {
@@ -241,7 +251,7 @@ impl Merge {
         for (at, _) in brought.into_iter().filter(|&(_, earlier)| earlier) {
             log_window(queues, at);
         }
-        let held: usize = queues.iter().map(|queue| queue.held.len()).sum();
+        let held: usize = queues.iter().map(|queue| queue.bytes).sum();
         if held <= self.limit {
             return Ok(None);
         }
@@ -250,7 +260,7 @@ impl Merge {
             held: queues
                 .iter()
                 .filter(|queue| !queue.held.is_empty())
-                .map(|queue| (queue.series.clone(), queue.held.len()))
+                .map(|queue| (queue.series.clone(), queue.held.len(), queue.bytes))
                 .collect(),
             waiting: waiting(queues),
         };
@@ -328,7 +338,7 @@ fn hand_on(
                 queue
                     .held
                     .front()
-                    .map(|tick| (tick.ts_event(), order(queues, at), at))
+                    .map(|(tick, _)| (tick.ts_event(), order(queues, at), at))
             })
             .min();
         let Some((made, rank, at)) = next else {
@@ -345,7 +355,9 @@ fn hand_on(
         if !free {
             return Ok(());
         }
-        let tick = queues[at].held.pop_front().expect("the queue's front");
+        let queue = &mut queues[at];
+        let (tick, size) = queue.held.pop_front().expect("the queue's front");
+        queue.bytes -= size;
         hand(&tick)?;
     }
 }
@@ -405,11 +417,11 @@ impl Display for Overflow {
         let held: Vec<String> = self
             .held
             .iter()
-            .map(|(series, count)| format!("{count} of {series}"))
+            .map(|(series, count, bytes)| format!("{count} ticks of {series}, {bytes} bytes"))
             .collect();
         write!(
             f,
-            "its merge of series held more than its bound of {} ticks of history, {}, \
+            "its merge of series held more than its bound of {} bytes of history, {}, \
              waiting on {}; the rest of the history is left out",
             self.limit,
             held.join(", "),

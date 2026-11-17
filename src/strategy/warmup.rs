@@ -197,8 +197,9 @@
 //! its data brought; a series whose request completes or fails holds the
 //! others back no longer, ties go quotes, trades, depth, deltas, custom
 //! data, then bars, and the group's end hands on all that is held. Past
-//! `merge::HELD` ticks and bars held, the warmup ends incomplete, naming the
-//! series held back, and the rest of its history is left out. The hold's
+//! `merge::HELD` bytes held, 2 GiB, each tick and bar counted with what it
+//! keeps on the heap, the warmup ends incomplete, naming the series held
+//! back, and the rest of its history is left out. The hold's
 //! seams move as the merge hands them on. It is separate from the hold,
 //! which goes with helix-trader#16 while the merge stays until its own
 //! issue closes. A replay merges nothing, Nautilus replaying in time order
@@ -869,7 +870,7 @@ impl Warmup {
         self.hold.live(Tick::Trade(*trade))
     }
 
-    /// The warmup's merge holding at most `limit` ticks, not `merge::HELD`.
+    /// The warmup's merge holding at most `limit` bytes, not `merge::HELD`.
     #[cfg(test)]
     pub(crate) fn holding(mut self, limit: usize) -> Self {
         self.merge = Merge::new(limit);
@@ -3233,7 +3234,8 @@ mod tests {
     }
 
     /// The history held is bounded: past it, the warmup ends incomplete,
-    /// naming the series held back. Bounded at two, GCZ26's quotes answer
+    /// naming the series held back. Bounded at what two quotes take, a
+    /// quote keeping nothing on the heap, GCZ26's quotes answer
     /// three while its trades answer nothing: the warmup is no longer
     /// warming, the feature has read the three quotes, in order, and the
     /// trades the venue answers after are left out, older than what it
@@ -3241,7 +3243,10 @@ mod tests {
     #[rstest]
     fn past_its_bound_the_warmup_ends_incomplete_naming_the_series_held_back() {
         let log = Rc::new(Log::default());
-        let (warmup, _probe, _) = logging_with(Warmup::live(&quotes_and_trades()).holding(2), &log);
+        let (warmup, _probe, _) = logging_with(
+            Warmup::live(&quotes_and_trades()).holding(2 * size_of::<Tick>()),
+            &log,
+        );
 
         let err = warmup
             .on_historical_quotes(&[quote("12:00:00"), quote("13:00:00"), quote("14:00:00")])
@@ -3262,6 +3267,48 @@ mod tests {
                 entry("quote", "14:00:00"),
             ]
         );
+    }
+
+    /// A tick held counts against the bound what it keeps on the heap
+    /// beside its own size: a batch of ten deltas its deltas, a snapshot of
+    /// depth its box, a point of custom data its data. Bounded a byte short
+    /// of the least that one of them takes, the warmup holding it alone,
+    /// the others pending, ends incomplete naming its series.
+    #[rstest]
+    #[case::deltas("deltas of GCZ26.GLBX")]
+    #[case::depth("depth of GCZ26.GLBX")]
+    #[case::custom("custom data")]
+    fn the_merge_counts_what_a_tick_keeps_on_the_heap_against_its_bound(#[case] series: &str) {
+        let log = Rc::new(Log::default());
+        let midnight = on_the_day("00:00:00");
+        let deltas: Vec<OrderBookDelta> = (0..10)
+            .map(|at| OrderBookDelta {
+                ts_event: midnight,
+                ts_init: midnight,
+                ..delta(at, if at == 9 { RecordFlag::F_LAST as u8 } else { 0 })
+            })
+            .collect();
+        let row = us10y_row("10", 4.5);
+        let heap = match series {
+            "deltas of GCZ26.GLBX" => 10 * size_of::<OrderBookDelta>(),
+            "depth of GCZ26.GLBX" => size_of::<OrderBookDepth>(),
+            _ => size_of_val(&*row.data),
+        };
+        let bound = size_of::<Tick>() + heap - 1;
+        let (warmup, probe, _) = logging_with(Warmup::live(&every_kind()).holding(bound), &log);
+
+        let err = match series {
+            "deltas of GCZ26.GLBX" => warmup.on_historical_book_deltas(&deltas),
+            "depth of GCZ26.GLBX" => warmup.on_historical_book_depth(&[depth_made(midnight)]),
+            _ => warmup.on_historical_data(&probe, &vec![row]),
+        }
+        .expect_err("past the bound");
+
+        let err = format!("{err:#}");
+        for part in ["incomplete", series] {
+            assert!(err.contains(part), "{err}");
+        }
+        assert!(!warmup.is_warming());
     }
 
     /// The live ticks held still follow the history, deduplicated against
