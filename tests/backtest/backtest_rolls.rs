@@ -151,7 +151,7 @@ impl DataActor for RollProbe {
             let now = self.clock().timestamp_ns();
             self.record(Got::Roll(roll, now));
             if let Some(features) = features {
-                features.roll(self, &roll);
+                features.roll(&roll);
                 self.record(Got::Read(features.values()));
             }
         }

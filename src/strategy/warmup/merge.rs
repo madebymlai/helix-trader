@@ -1,9 +1,10 @@
 //! The merge of a live warmup's history across its series: the warmup
 //! queues each requested series' responses, quotes, trades, book depth and
-//! deltas, and custom data alike, and hands them on in time order
-//! (`ts_event`), to the hold of live ticks (`hold`) and through it to the
-//! features. A replay requests no warmup and merges nothing: Nautilus
-//! replays its data in time order already.
+//! deltas, and custom data alike, and the bars each request builds, and
+//! hands them on in time order (`ts_event`), to the hold of live ticks and
+//! bars (`hold`) and through it to the features. A replay requests no
+//! warmup and merges nothing: Nautilus replays its data in time order
+//! already.
 //!
 //! Temporary until Nautilus hands a warmup's history in time order across
 //! data types: helix-trader#46
@@ -25,12 +26,25 @@
 //! pending, the earliest of the latest `ts_event` each has brought, a
 //! series that has brought nothing yet holding everything back. A request
 //! answers its windows in order, so a pending series brings nothing older
-//! than its latest. Ties across series go in a fixed order of kinds,
-//! quotes, trades, depth, deltas, then custom data, then in the order the
-//! series were requested, so that a replay and a live warmup agree on a
-//! tie; within a series, the ticks go in the order they came. A series
+//! than its latest. The bars a request builds are a series of their own,
+//! one per bar type, read from the cache at each response of the request
+//! (`Warmup::on_data_response`): Nautilus builds a time bar once data past
+//! its close comes, stamping it with that close
+//! (`TimeBarAggregator::build_bar` in `crates/data/src/aggregation.rs`), so
+//! a bar the request builds later closes no earlier than the latest
+//! `ts_event` its data has brought, where its bars stand. Ties across
+//! series go in a fixed order of kinds, quotes, trades, depth, deltas,
+//! custom data, then bars, then in the order the series were requested, so
+//! that a replay and a live warmup agree on a tie: a backtest fires the
+//! timer building a bar after the data of its instant
+//! (`BacktestEngine::flush_accumulator_events` in
+//! `crates/backtest/src/engine.rs`). Within a series, the ticks go in the
+//! order they came. A series
 //! whose request completes, answered or failed, holds the others back no
-//! longer, and the rest of its queue goes on in order. When the group
+//! longer, and the rest of its queue goes on in order, its bars' too: held
+//! past their request's completion while others are pending, they reach
+//! the features before the live bars Nautilus builds from then on all the
+//! same, which the hold holds (see `hold`). When the group
 //! ends, everything held goes on in order. A response of a series the
 //! warmup did not request goes on at once: it is no part of the warmup.
 //!
@@ -44,11 +58,13 @@
 use std::{cell::RefCell, collections::VecDeque, fmt::Display};
 
 use nautilus_core::{UUID4, UnixNanos};
+use nautilus_model::data::Bar;
 
 use super::tick::{Series, Tick};
 
-/// The most ticks the merge holds, of all its series together: under a
-/// gigabyte, a tick held taking 168 bytes besides what a batch of deltas,
+/// The most ticks the merge holds, bars among them, of all its series
+/// together: under a gigabyte, a tick held taking 168 bytes, a bar's too,
+/// besides what a batch of deltas,
 /// a snapshot of depth or a point of custom data keeps on the heap. A
 /// series answered from the catalog at once while another waits on its
 /// venue is held whole, so the bound is that of a whole warmup of the
@@ -98,6 +114,13 @@ pub(super) struct Overflow {
     waiting: Vec<Series>,
 }
 
+impl Queue {
+    /// Whether it holds the bars a request builds.
+    const fn is_bars(&self) -> bool {
+        matches!(self.series, Series::Bars(_))
+    }
+}
+
 impl Merge {
     /// A merge holding at most `limit` ticks, passing history on as it
     /// comes until a live warmup starts it.
@@ -108,9 +131,10 @@ impl Merge {
         }
     }
 
-    /// Merges the history of `requests`, each a request's id and its
-    /// series, in the order requested, a live start's group pending; what
-    /// it held of a warmup before is forgotten.
+    /// Merges the history of `requests`, each a request's id and a series
+    /// of it, its ticks' or the bars of a bar type it builds, in the order
+    /// requested, a live start's group pending; what it held of a warmup
+    /// before is forgotten.
     pub(super) fn start(&self, requests: impl IntoIterator<Item = (UUID4, Series)>) {
         let queues = requests
             .into_iter()
@@ -139,6 +163,40 @@ impl Merge {
     pub(super) fn history(
         &self,
         ticks: impl IntoIterator<Item = Tick>,
+        hand: impl FnMut(&Tick) -> anyhow::Result<()>,
+    ) -> anyhow::Result<Option<Overflow>> {
+        self.take(ticks, None, hand)
+    }
+
+    /// Takes `bars`, those `request` built from a response of it, oldest
+    /// first, and `through`, the latest `ts_event` of that response's data,
+    /// if it held any: a bar it builds from then on closes no earlier (see
+    /// the module). Hands on as `history` does.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `hand` fails, or the overflow, as `history`.
+    pub(super) fn built(
+        &self,
+        request: &UUID4,
+        bars: impl IntoIterator<Item = Bar>,
+        through: Option<UnixNanos>,
+        hand: impl FnMut(&Tick) -> anyhow::Result<()>,
+    ) -> anyhow::Result<Option<Overflow>> {
+        self.take(
+            bars.into_iter().map(Tick::Bar),
+            Some((request, through)),
+            hand,
+        )
+    }
+
+    /// Takes `ticks`, and, `built` the request of bars among them and the
+    /// latest `ts_event` of its response, moves the latest of that
+    /// request's bars there; hands on as `history` does.
+    fn take(
+        &self,
+        ticks: impl IntoIterator<Item = Tick>,
+        built: Option<(&UUID4, Option<UnixNanos>)>,
         mut hand: impl FnMut(&Tick) -> anyhow::Result<()>,
     ) -> anyhow::Result<Option<Overflow>> {
         let mut state = self.state.borrow_mut();
@@ -169,6 +227,15 @@ impl Merge {
             let made = tick.ts_event();
             queue.latest = Some(queue.latest.map_or(made, |latest| latest.max(made)));
             queue.held.push_back(tick);
+        }
+
+        if let Some((request, Some(through))) = built {
+            for queue in queues
+                .iter_mut()
+                .filter(|queue| queue.request == *request && queue.is_bars())
+            {
+                queue.latest = Some(queue.latest.map_or(through, |latest| latest.max(through)));
+            }
         }
         hand_on(queues, &mut hand)?;
         for (at, _) in brought.into_iter().filter(|&(_, earlier)| earlier) {
@@ -211,10 +278,10 @@ impl Merge {
         let State::Merging(queues) = &mut *state else {
             return Ok(());
         };
-        let Some(queue) = queues.iter_mut().find(|queue| queue.request == *request) else {
-            return Ok(());
-        };
-        queue.pending = false;
+
+        for queue in queues.iter_mut().filter(|queue| queue.request == *request) {
+            queue.pending = false;
+        }
         hand_on(queues, &mut hand)
     }
 
@@ -284,7 +351,8 @@ fn hand_on(
 }
 
 /// Where the series of `queues[at]` goes on a tie: by its kind, quotes,
-/// trades, depth, deltas, then custom data, then in the order requested.
+/// trades, depth, deltas, custom data, then bars, then in the order
+/// requested.
 fn order(queues: &[Queue], at: usize) -> (u8, usize) {
     let kind = match queues[at].series {
         Series::Quotes(_) => 0,
@@ -292,6 +360,7 @@ fn order(queues: &[Queue], at: usize) -> (u8, usize) {
         Series::Depth(_) => 2,
         Series::Deltas(_) => 3,
         Series::Custom(_) => 4,
+        Series::Bars(_) => 5,
     };
     (kind, at)
 }

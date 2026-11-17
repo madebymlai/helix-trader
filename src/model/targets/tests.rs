@@ -837,10 +837,10 @@ fn a_dataset_venue_in_another_currency_than_the_targets_pnl_is_refused_as_the_ta
     #[case] venue: DatasetVenue,
     #[case] named: &[&str],
 ) {
-    let mut probe = Probe::holding(Some(gold()));
+    let probe = Probe::holding(Some(gold()));
     let targets = Targets::new(lot(no_exits()), rule(), &quotes(), &venue).unwrap();
 
-    let err = format!("{:#}", targets.start(&mut probe).unwrap_err());
+    let err = format!("{:#}", targets.start(&probe).unwrap_err());
 
     for named in named {
         assert!(err.contains(named), "{named}: {err}");
@@ -935,12 +935,12 @@ fn a_dataset_balance_the_pairs_reach_the_pnl_from_starts_the_targets_and_another
         let requirements = reading_its_quotes(&config);
         Targets::new(config, rule(), &requirements, &holding(balance)).unwrap()
     };
-    let mut probe = holding_eurusd();
+    let probe = holding_eurusd();
 
-    targets_on("100000 EUR").start(&mut probe).unwrap();
+    targets_on("100000 EUR").start(&probe).unwrap();
     let err = format!(
         "{:#}",
-        targets_on("15000000 JPY").start(&mut probe).unwrap_err()
+        targets_on("15000000 JPY").start(&probe).unwrap_err()
     );
 
     assert!(err.contains("JPY") && err.contains(EURUSD), "{err}");
@@ -1104,11 +1104,16 @@ fn targets(config: TargetConfig) -> Rc<Targets> {
     Targets::new(config, rule(), &requirements, &venue_of(commission())).unwrap()
 }
 
-/// `setter` started on `probe` and handed `bar`, a bar of its ATR's, if it
-/// has one.
-fn warmed(setter: TargetSetter, probe: &mut Probe, bar: &Bar) -> TargetSetter {
-    setter.start(probe);
-    probe.handle_bar(bar);
+/// A replay's warmup feeding `setter`'s ATR, if it has one: it hands the
+/// ATR each bar the strategy hands it, as it comes (`Warmup::on_bar`).
+fn feeding(setter: &TargetSetter) -> Warmup {
+    setter.warmed(Warmup::replayed(&quotes()))
+}
+
+/// `setter` handed `bar`, a bar of its ATR's, if it has one, through its
+/// warmup.
+fn warmed(setter: TargetSetter, bar: &Bar) -> TargetSetter {
+    feeding(&setter).on_bar(bar).unwrap();
     setter
 }
 
@@ -1257,7 +1262,7 @@ fn swap() -> InstrumentAny {
 /// hour.
 #[rstest]
 fn a_time_only_target_is_set_with_the_worth_of_its_atr_through_the_multiplier() {
-    let mut probe = Probe::holding(Some(swap()));
+    let probe = Probe::holding(Some(swap()));
     probe.quoted_at(InstrumentId::from(SWAP), "99999.9", "100000.1");
     let config = trading(no_exits(), InstrumentId::from(SWAP));
     let bar = quarter(SWAP, ["100000.0", "100075.0", "99925.0", "100000.0"]);
@@ -1265,7 +1270,7 @@ fn a_time_only_target_is_set_with_the_worth_of_its_atr_through_the_multiplier() 
         balance: Money::from("100000 USDT"),
         ..venue_of(Commission::Rate(Decimal::ZERO))
     };
-    let setter = warmed(setter_on(&config, &venue), &mut probe, &bar);
+    let setter = warmed(setter_on(&config, &venue), &bar);
 
     let set = setter.at(&probe).unwrap().unwrap();
 
@@ -1290,13 +1295,11 @@ fn a_time_only_target_is_set_with_the_worth_of_its_atr_through_the_multiplier() 
     atr: Some(atr_of(1)),
 }))]
 fn a_target_on_an_atr_of_nought_says_so_and_names_its_bars(#[case] spec: Target) {
-    let mut probe = Probe::holding(Some(gold()));
+    let probe = Probe::holding(Some(gold()));
     probe.quoted_at(InstrumentId::from(GOLD), "3999.90", "4000.10");
     let flat = quarter(GOLD, ["4000.00"; 4]);
 
-    let set = warmed(setter(&of(spec)), &mut probe, &flat)
-        .at(&probe)
-        .unwrap();
+    let set = warmed(setter(&of(spec)), &flat).at(&probe).unwrap();
 
     assert_eq!(
         set,
@@ -1310,11 +1313,9 @@ fn a_target_on_an_atr_of_nought_says_so_and_names_its_bars(#[case] spec: Target)
 #[case::a_bracket(in_bps(20, 10))]
 #[case::time_only(no_exits())]
 fn a_target_with_no_price_to_set_it_from_says_so(#[case] spec: Target) {
-    let mut probe = Probe::holding(Some(gold()));
+    let probe = Probe::holding(Some(gold()));
 
-    let set = warmed(setter(&of(spec)), &mut probe, &gold_bar())
-        .at(&probe)
-        .unwrap();
+    let set = warmed(setter(&of(spec)), &gold_bar()).at(&probe).unwrap();
 
     assert_eq!(set, Err(NoTarget::NoPrice));
 }
@@ -1387,9 +1388,9 @@ fn a_setter_sharing_a_width_sets_its_exits_at_the_width_read_then() {
         Some(&width),
     )
     .unwrap();
-    let mut probe = Probe::holding(Some(gold()));
+    let probe = Probe::holding(Some(gold()));
     probe.quoted_at(InstrumentId::from(GOLD), "3999.99", "4000.01");
-    setter.start(&mut probe);
+    let warmup = feeding(&setter);
     let read = |probe: &Probe| {
         let set = setter.at(probe).unwrap().ok();
         let stop = set.map(|set| set.long.bracket.unwrap().stop_loss);
@@ -1397,12 +1398,12 @@ fn a_setter_sharing_a_width_sets_its_exits_at_the_width_read_then() {
     };
 
     for _ in 0..3 {
-        probe.handle_bar(&gold_bar());
+        warmup.on_bar(&gold_bar()).unwrap();
     }
     let cold = read(&probe);
-    probe.handle_bar(&gold_bar());
+    warmup.on_bar(&gold_bar()).unwrap();
     let warm = read(&probe);
-    probe.handle_bar(&wide_gold_bar());
+    warmup.on_bar(&wide_gold_bar()).unwrap();
     let wider = read(&probe);
 
     assert_eq!(cold, (None, None));
@@ -1515,9 +1516,9 @@ fn a_target_with_an_exit_on_the_price_says_so_and_names_the_price() {
 /// is the error of each decision, as `TargetSetter::at` has it.
 #[rstest]
 fn a_bracket_on_an_instrument_not_in_the_cache_starts() {
-    let mut probe = Probe::holding(None);
+    let probe = Probe::holding(None);
 
-    targets(on_aud(in_bps(20, 10))).start(&mut probe).unwrap();
+    targets(on_aud(in_bps(20, 10))).start(&probe).unwrap();
 }
 
 /// Past the start's refusal, a stop's worth failing is still an error before
@@ -1544,8 +1545,11 @@ fn a_time_only_target_missing_its_instrument_errs_before_any_order() {
     let mut probe = Probe::holding(None);
     probe.quoted(InstrumentId::from(AUD), "0.70000");
     let targets = targets(on_aud(no_exits()));
-    targets.start(&mut probe).unwrap();
-    probe.handle_bar(&quarter(AUD, ["0.70000", "0.70050", "0.69950", "0.70000"]));
+    targets.start(&probe).unwrap();
+    targets
+        .warmed(Warmup::replayed(&quotes()))
+        .on_bar(&quarter(AUD, ["0.70000", "0.70050", "0.69950", "0.70000"]))
+        .unwrap();
 
     let err = targets.open(&mut probe, decision()).unwrap_err();
 
@@ -1583,9 +1587,9 @@ fn per_ounce() -> Commission {
 
 /// The payoff features of each side of a lot of `spec` at `commission`, on
 /// `probe`, its ATR, if any, of the bar `gold_bar` alone: a true range of 2.
-fn payoff_on(probe: &mut Probe, spec: Target, commission: Commission) -> PerSide<Vec<f64>> {
+fn payoff_on(probe: &Probe, spec: Target, commission: Commission) -> PerSide<Vec<f64>> {
     let setter = TargetSetter::new(&lot(spec), rule(), &quotes(), &venue_of(commission)).unwrap();
-    warmed(setter, probe, &gold_bar())
+    warmed(setter, &gold_bar())
         .at(probe)
         .unwrap()
         .unwrap()
@@ -1595,9 +1599,9 @@ fn payoff_on(probe: &mut Probe, spec: Target, commission: Commission) -> PerSide
 /// The payoff features of each side of a lot of `spec` at `commission`,
 /// gold quoted at 4001.50/4001.70.
 fn payoff_quoted(spec: Target, commission: Commission) -> PerSide<Vec<f64>> {
-    let mut probe = Probe::holding(Some(gold()));
+    let probe = Probe::holding(Some(gold()));
     probe.quoted_at(InstrumentId::from(GOLD), "4001.50", "4001.70");
-    payoff_on(&mut probe, spec, commission)
+    payoff_on(&probe, spec, commission)
 }
 
 /// Each of `got` within 1e-12 of `want`'s, as many.
@@ -1692,7 +1696,7 @@ fn a_time_only_targets_entry_cost_is_over_the_worth_of_its_atr_on_each_side(
 /// alone, 12.00 at 4001.60.
 #[rstest]
 fn a_bracket_on_trades_alone_reads_its_payoff_from_the_last_trade_with_no_spread() {
-    let mut probe = Probe::holding(Some(gold()));
+    let probe = Probe::holding(Some(gold()));
     probe
         .cache_rc()
         .borrow_mut()
@@ -1707,7 +1711,7 @@ fn a_bracket_on_trades_alone_reads_its_payoff_from_the_last_trade_with_no_spread
         ))
         .unwrap();
 
-    let payoff = payoff_on(&mut probe, wide_take_profit(), commission());
+    let payoff = payoff_on(&probe, wide_take_profit(), commission());
 
     assert_near(
         &payoff,
@@ -1732,13 +1736,11 @@ fn in_euros() -> Commission {
 fn a_commission_in_another_currency_than_the_targets_pnl_is_an_error_at_a_decision(
     #[case] spec: Target,
 ) {
-    let mut probe = Probe::holding(Some(gold()));
+    let probe = Probe::holding(Some(gold()));
     probe.quoted_at(InstrumentId::from(GOLD), "4001.50", "4001.70");
     let setter = TargetSetter::new(&lot(spec), rule(), &quotes(), &venue_of(in_euros())).unwrap();
 
-    let err = warmed(setter, &mut probe, &gold_bar())
-        .at(&probe)
-        .unwrap_err();
+    let err = warmed(setter, &gold_bar()).at(&probe).unwrap_err();
 
     assert!(format!("{err:#}").contains("EUR"), "{err:#}");
 }

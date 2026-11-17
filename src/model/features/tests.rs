@@ -535,7 +535,7 @@ fn levels_across_the_roll(identifier: &str) -> [Option<Vec<f64>>; 3] {
     let before_the_roll = features.values();
 
     let roll = Transition::after(id("GC.GLBX"), start).unwrap();
-    features.roll(&mut probe, &roll);
+    features.roll(&roll);
     let rolled = features.values();
     cached(&probe, point(&yields_type("GCZ26.GLBX"), -0.25));
 
@@ -838,12 +838,12 @@ fn registered_at(now: UnixNanos) -> Probe {
 
 /// The data engine hands Nautilus' handler of the strategy each update,
 /// which feeds its registered indicators first: the set is registered for
-/// its bars, and not for its quotes or trades, which the strategy hands its
-/// warmup (`Warmup::feeding_ticks`). Through Nautilus, the features on
-/// GBP/USD's quotes and trades read neither, and the one on AUD/USD's bars
-/// reads its bar.
+/// none, its bars, quotes and trades coming through the strategy's warmup
+/// (`Warmup::feeding`, `Warmup::feeding_ticks`). Through Nautilus, the
+/// features on GBP/USD's quotes and trades and the one on AUD/USD's bars
+/// read nothing.
 #[rstest]
-fn registered_features_get_their_bars_through_nautilus_and_not_their_quotes_or_trades() {
+fn registered_features_get_nothing_through_nautilus() {
     let mut probe = registered();
     let tables = tables();
     let features = FeatureSet::builder()
@@ -859,24 +859,7 @@ fn registered_features_get_their_bars_through_nautilus_and_not_their_quotes_or_t
     probe.handle_bar(&bar(AUD_BARS, 0.75));
 
     assert_eq!(features.last_update(id(GBP)), None);
-    assert_eq!(features.last_update(id(AUD)), Some(UnixNanos::default()));
-}
-
-/// Registered twice, as on a restart: each bar still counts once, and the
-/// average of two is cold after one.
-#[rstest]
-fn a_set_registered_twice_gets_each_update_once() {
-    let mut probe = registered();
-    let features = FeatureSet::builder()
-        .feature(&[Series::Bars(BarType::from(AUD_BARS))], TWO, &tables())
-        .build()
-        .unwrap();
-    features.register(&mut probe);
-    features.register(&mut probe);
-
-    probe.handle_bar(&bar(AUD_BARS, 0.75));
-
-    assert_eq!(features.values(), None);
+    assert_eq!(features.last_update(id(AUD)), None);
 }
 
 /// The width of AUD/USD's bracket `distance` a side, of an ATR of one bar
@@ -1161,7 +1144,7 @@ fn a_roll_moves_every_series_of_a_feature_on_the_root_and_resets_it_once() {
     features.handle_trade(&trade(GCZ26, 4000.0)).unwrap();
     features.handle_quote(&quote(AUD, 0.7)).unwrap();
     let before_the_roll = features.values();
-    features.roll(&mut probe, &Transition::after(id(GC), start).unwrap());
+    features.roll(&Transition::after(id(GC), start).unwrap());
     let rolled = features.values();
     features.handle_quote(&quote(GCZ26, 4000.0)).unwrap();
     features.handle_trade(&trade(GCG27, 4040.0)).unwrap();
@@ -1433,7 +1416,7 @@ fn a_feature_on_a_roots_custom_series_reads_the_contract_in_front_and_moves_at_i
     features.handle_custom(&point(&yields_type(GCG27), 4.3));
     features.handle_custom(&point(&yields_type(GC), 4.2));
     let before_the_roll = features.values();
-    features.roll(&mut probe, &Transition::after(id(GC), start).unwrap());
+    features.roll(&Transition::after(id(GC), start).unwrap());
     let rolled = features.values();
     features.handle_custom(&point(&yields_type(GCZ26), 4.5));
     features.handle_custom(&point(&yields_type(GCG27), 4.6));

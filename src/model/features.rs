@@ -17,21 +17,22 @@
 //! XAUUSD.ICMARKETS, TradeTick of XAUUSD.ICMARKETS:fast`). A raw feature
 //! of custom data has no table, and is named by the strategy.
 //!
-//! The set is one Nautilus indicator (`ActorIndicator`), shared between
-//! Nautilus, the strategy's warmup and the strategy as an `Rc` (Nautilus'
-//! registration takes a shared indicator whose handlers borrow it
-//! immutably, so the features sit in a `RefCell`). `register` registers it
-//! with Nautilus once per bar type for bars: the data engine then hands it
-//! each bar before the strategy's own handler, live and replayed, with no
-//! strategy code. Its quotes and trades come through the warmup instead
-//! (`Warmup::feeding_ticks`, the warmup a model strategy's `ModelHandle`
-//! builds): Nautilus hands a registered indicator each live tick as it
-//! comes, while a live warmup's older windows are still being answered, so
-//! the warmup hands the set the quotes and trades of its responses and the
-//! live ones the strategy hands it, these held until it ends
-//! (`strategy::warmup`'s `hold`, which goes once Nautilus holds them,
-//! helix-trader#16; the set then registered for quotes and trades again);
-//! in a replay, as they come. Nautilus routes no depth or book deltas to
+//! The set is one Nautilus indicator (`ActorIndicator`), shared between the
+//! strategy's warmup and the strategy as an `Rc` (an `ActorIndicator`'s
+//! handlers borrow it immutably, so the features sit in a `RefCell`). It is
+//! registered with none of Nautilus' indicators of the strategy: its bars,
+//! quotes and trades come through the warmup (`Warmup::feeding`,
+//! `Warmup::feeding_ticks`, the warmup a model strategy's `ModelHandle`
+//! builds). Nautilus hands a registered indicator each live tick as it
+//! comes, and each live bar once the request building it completes, while a
+//! live warmup's older windows of other series are still being answered,
+//! so the warmup hands the set the quotes and trades of its responses and
+//! the bars its requests build, in time order across series, and the live
+//! ones the strategy hands it, these held until it ends
+//! (`strategy::warmup`'s `hold` and `merge`, Temporary until Nautilus holds
+//! them, helix-trader#16, and orders a warmup's history across data types,
+//! helix-trader#46; the set then registered for quotes, trades and bars
+//! again); in a replay, as they come. Nautilus routes no depth or book deltas to
 //! indicators at all, only to the actor's handlers: the strategy hands the
 //! warmup those of its responses and its live and replayed ones from them
 //! (`model_data_hooks!`), which hands them to the set (`BookIndicator`), the
@@ -43,8 +44,8 @@
 //! its live and replayed points (`model_data_hooks!`), which hands them to
 //! the set (`CustomIndicator`), held as quotes and trades are.
 //! Bars built from a warmup's quotes, trades or source bars reach only the
-//! cache, not the indicators: the strategy's warmup hands them to `handle_bar`
-//! (`Warmup::on_data_response`).
+//! cache, not the indicators: the strategy's warmup reads them there at
+//! each response and hands them to `handle_bar` (`Warmup::on_data_response`).
 //!
 //! A raw feature reads custom data with no indicator: a custom series, of a
 //! whole Nautilus data type, its type name, identifier and metadata
@@ -148,10 +149,7 @@ use std::{
 
 use jiff::SignedDuration;
 use nautilus_common::{
-    actor::{
-        DataActor, DataActorNative,
-        indicators::{ActorIndicator, SharedActorIndicator},
-    },
+    actor::{DataActor, DataActorNative, indicators::ActorIndicator},
     cache::Cache,
 };
 use nautilus_core::UnixNanos;
@@ -631,14 +629,13 @@ impl FeatureSet {
         read
     }
 
-    /// Registers the set with `actor`'s Nautilus indicators, from its
-    /// `on_start`: each tick feature, or raw feature of a custom series on
-    /// a root, reads the contract standing for its instrument or root now
-    /// (`rolls::front`), the
-    /// raw features from `actor`'s cache, and the set is registered for the
-    /// bars of each bar type a feature reads (`register_contracts`).
-    /// Nautilus registers an indicator once per source, so a set registered
-    /// again, on a restart, gets each bar once.
+    /// Registers the set on `actor`, from its `on_start`: each tick
+    /// feature, or raw feature of a custom series on a root, reads the
+    /// contract standing for its instrument or root now (`rolls::front`),
+    /// the raw features from `actor`'s cache. Nautilus' indicators of the
+    /// actor are not registered with: the warmup hands the set every update
+    /// (see the module), so a set registered again, on a restart, gets each
+    /// once.
     pub fn register<A: DataActor + DataActorNative>(self: &Rc<Self>, actor: &mut A) {
         *self.cache.borrow_mut() = Some(actor.cache_rc());
         let now = actor.clock().utc_now();
@@ -648,7 +645,6 @@ impl FeatureSet {
                 reading.contract = front(reading.instrument_id, now);
             }
         }
-        self.register_contracts(actor);
     }
 
     /// The width of the target's bracket its features read, if any: the
@@ -666,27 +662,9 @@ impl FeatureSet {
     /// decisions wait; a raw feature reads the post contract's latest point
     /// the cache holds. The other features are untouched. From the roller's transition
     /// (`rolls::Roller::on_time_event`).
-    pub fn roll<A: DataActorNative>(self: &Rc<Self>, actor: &mut A, roll: &Transition) {
+    pub fn roll(&self, roll: &Transition) {
         for slot in self.slots.borrow_mut().iter_mut() {
             slot.roll(roll);
-        }
-        self.register_contracts(actor);
-    }
-
-    /// Registers the set with `actor`'s Nautilus indicators for the bars of
-    /// each bar type a feature reads. Not for quotes and trades: the warmup
-    /// hands it those (`Warmup::feeding_ticks`), holding the live ones while
-    /// it is pending, which Nautilus does not do for an indicator.
-    fn register_contracts<A: DataActorNative>(self: &Rc<Self>, actor: &mut A) {
-        let core = actor.core_mut();
-
-        for slot in self.slots.borrow().iter() {
-            for source in slot.sources() {
-                if let Source::Bars(bar_type) = source {
-                    let shared = Rc::clone(self) as SharedActorIndicator;
-                    core.register_indicator_for_bars(*bar_type, shared);
-                }
-            }
         }
     }
 }
@@ -920,7 +898,7 @@ impl Debug for FeatureSet {
     }
 }
 
-/// Nautilus' side of the set, for its bars, and the warmup's, for its quotes
+/// The warmup's side of the set, for its bars (`Warmup::feeding`), quotes
 /// and trades (`Warmup::feeding_ticks`). Its handlers never fail: a
 /// feature's error is logged, and the other features are fed.
 impl ActorIndicator for FeatureSet {
@@ -970,7 +948,7 @@ impl ActorIndicator for FeatureSet {
         Ok(())
     }
 
-    /// Nautilus routes a bar by instrument and specification; a feature
+    /// The warmup hands the set every bar the strategy gets; a feature
     /// reads the bars of its bar types alone, of the same aggregation
     /// source.
     fn handle_bar(&self, bar: &Bar) -> anyhow::Result<()> {
