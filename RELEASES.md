@@ -4,46 +4,44 @@ Released on TBD (UTC).
 
 ### Enhancements
 
-- Added `train --from --to`, training a periodic strategy at each retrain time of a span in time order, past failures, which it lists at the end
-- Added a live retrain at the start of a node of the latest retrain time whose model set the store lacks, as after the node was down then
-- Added the output of a live retrain's `train` to the node's Nautilus log, each line a log record, its file holding the train's whole output
-- Added run figures to `train`'s report, a block per retrain time: the model set published, its directory, or the failure and its reason, the wall time, the CPU time and peak memory of the train process (Unix), the dataset days built and cached, and the rows of each fit and calibration slice of the sides, the out-of-fold pair and the meta beside `min_rows`
+- Added `train --from --to`, training a periodic strategy at each retrain time of a span and listing the times that failed
+- Added a live retrain at a node's start of the latest retrain time whose model set the store lacks
+- Added a live retrain's `train` output to the node's Nautilus log, a log record per line
+- Added run figures to `train`'s report per retrain time: wall and CPU time, peak memory, dataset days and each fit and calibration slice's rows
 
 ### Breaking Changes
 
-- Removed the holdout gate: a train publishes its models unless a fit or calibration slice has fewer rows than `min_rows`, a prediction or calibration is not finite, or a model does not reproduce its probes, so `model::holdout::Holdout`, `Refusal` and `Minimums`, `Kept::Refused` and `ModelManifest`'s `holdout` field are removed; judge a config's models by a backtest's scores
-- Renamed `[model] holdout` and `[model.meta] holdout` to `calibration`, the last part of the window the models are calibrated on and not fitted on; rename the key, and keep `calibration` plus the target's limit shorter than the window
-- Removed `min_trades` and `min_expectancy` from `[model]` and `[model.meta]`, each refused at load as unknown; drop them
+- Removed the holdout gate: a train fails only on `min_rows`, a non-finite output or a failed probe; judge a config's models by a backtest's scores
+- Renamed `[model] holdout` and `[model.meta] holdout` to `calibration`, the window's last part, calibrated on and not fitted on; rename the key
+- Removed `min_trades` and `min_expectancy` from `[model]` and `[model.meta]`; drop them
 - Changed `[model]` and `[model.meta]` to require `min_rows`, the fewest rows of each fit and calibration slice; set it to at least 1
-- Changed the model store's version, so every model is trained again; datasets keep their keys
-- Changed `backtest` of a model strategy to train nothing, refusing a store with no model to trade on at its start and naming the `train` that fills it; run `train` over the backtest's span first
-- Changed `train`'s report to one block per retrain time opening `the train at <t>:`, the model set published read as `published the model set <directory>`, one not trained again as `already published`, retrained or not, and a failure as `failed: <reason>`, in place of a line per model reading "in use"; match the block's first line
-- Changed `Trained` to one `Outcome` of the model set and the figures it `Reached`, `Outcome::Published` holding the model set's directory, `ModelStore::publish` returning it and `Dataset::settled` returning the days it read beside its rows; read `trained.outcome` in place of each model's
-- Removed `WalkForward::prepare`, `Schedule::ensure_trades` and `Plan::fits`; train at each of `Training::retrain_times` with `Training::train_at`, and check a backtest's start with `WalkForward::untrained`
-- Removed `DecidingModels::pick`; decide with `DecidingModels::decide`, or pick among a model set's pair with `DecidingModels::pick_among`
-- Removed `Models::iter`, `Models::as_ref` and `Models::map`, which nothing called; read the `long`, `short` and `meta` fields
-- Renamed the module `model::holdout` to `model::earnings`, what decisions took and earned on rows, there being no holdout; import `Earnings`, `Trades`, `Trade`, `MetaMargin` and `STRESS` from `model::earnings`
-- Removed the `fake` learner from builds without the new `test-support` feature: a config with `learner = { kind = "fake" }` no longer loads; use `baseline`, `lightgbm` or `perpetual`
-- Removed the `heartbeat` argument of `ctrader`'s `CTraderWebSocketClient::connect` and `CTraderSession::connect_to`; drop it, the session heartbeats every 10 s
-- Removed the `keepalive_secs` argument of `lse`'s `LseWebSocketClient::connect`; drop it, the client pings every 25 s
+- Changed the model store to one model set per train, its sides, their calibration and its meta published together at its retrain time; train again
+- Changed `backtest` of a model strategy to train nothing, refusing a store with no model set at its start; run `train` over the backtest's span first
+- Changed `train`'s report to a block per retrain time, opening `the train at <t>:`, the set published, already published or failed; match the first line
+- Changed a meta model to learn from an out-of-fold pair fitted a meta window before the retrain time, so a periodic strategy's meta ships from its first train
+- Changed a newest model set failing its load checks to stop new entries, naming it, until it loads; remove its directory and train it again
+- Changed a never-retrained `train --at t` to train a model set at `t` unless one is published there; train it only at the time it is to trade from
+- Changed a live retrain to wait until every series read has a stored point at or after its retrain time, skipping one due meanwhile
+- Changed `RetrainActor::new` to take the strategy's `ModelStore`; pass the store the strategy reads
+- Renamed the store of a strategy's model sets to `ModelStore` and `ModelBlueprint::model_set` to `model_store`, `ModelSet` now naming one train's models
+- Renamed `model::holdout` to `model::earnings`; import `Earnings`, `Trades`, `Trade`, `MetaMargin` and `STRESS` from it
+- Renamed `Kept` to `Failure`, its `Failed` to `Error`, and `Outcome`'s `Kept` to `Failed` and `InUse` to `AlreadyPublished`; match the new names
+- Removed `Holdout`, `Refusal`, `Minimums`, `PairCalibration`, `ModelCalibration`, `Step`, `Kept::Waiting` and `Retrain::in_use`, their concepts gone
+- Removed `ModelManifest`'s `holdout`, `strategy_id` and `valid_from`; read a side's pair calibration from `StoredModelSet::calibration`
+- Changed `Trained` to hold one `Outcome` of the model set, `Outcome::Published` its directory; read `trained.outcome` in place of each model's
+- Changed `ModelStore::publish` to return the model set's directory, and `Dataset::settled` the days it read beside its rows
+- Removed `WalkForward::prepare`, `Schedule::ensure_trades`, `Plan::fits` and `Plan::meta_after_sides`; train with `Training::train_at`
+- Removed `DecidingModels::pick`; decide with `DecidingModels::decide`, or pick within a model set with `DecidingModels::pick_among`
+- Removed `Models::iter`, `Models::as_ref` and `Models::map`; read the `long`, `short` and `meta` fields
+- Removed the `fake` learner from builds without the `test-support` feature; use `baseline`, `lightgbm` or `perpetual`
+- Removed `heartbeat` from `CTraderWebSocketClient::connect` and `CTraderSession::connect_to`; drop it, the session heartbeats every 10 s
+- Removed `keepalive_secs` from `LseWebSocketClient::connect`; drop it, the client pings every 25 s
 - Removed `Deserialize` from `TickSeries`; read tick series through a strategy config's `[data]` series
 - Removed `Launcher::in_process` outside the crate's own tests
-- Changed the model store to one model set per train: a train publishes its sides, their pair's calibration and its meta together under its retrain time, a manifest written last making it visible, keyed by every training setting of the sides and the meta, and a decision uses the latest model set's sides and meta together; train again, the store's version changed
-- Changed a newest model set failing its load checks to stop new entries with an error naming it and the check, read again at the next decision, instead of keeping the previous models; remove its `<valid from>/` directory and train it again, a train skipping a model set already published at its time
-- Renamed `ModelSet`, the store of a strategy's model sets, to `ModelStore` and `ModelBlueprint::model_set` to `model_store`, `ModelSet` now naming a model set, the models one train publishes: its sides, their pair's calibration and its meta, loaded and checked together; publish, list, read and swap model sets with `ModelStore::publish`, `model_sets`, `read` and `swap` in place of the per-side `ModelStore`, the former `ModelSet::pairs` and `ModelSet::valid_froms`, and `MetaLevel::swap`
-- Removed `PairCalibration`, `ModelCalibration` and `ModelManifest`'s `strategy_id` and `valid_from`: a side's manifest holds no calibration, its pair's being `StoredModelSet::calibration`, and a meta's holds its `Line`
-- Removed `Step` and `Plan::meta_after_sides` from the schedule; read a train's plan as `Plan::Keep` or `Plan::Train` of `Fits`
-- Changed a meta model to learn from the out-of-sample picks of an out-of-fold pair its train fits a meta window before the retrain time, shipping beside sides fitted at that time, instead of from the decisions of the model sets in the store, so a periodic strategy with a meta publishes its meta from its first train and a never-retrained one ships sides fresh at its train time; train again, the store's version changed
-- Removed `Kept::Waiting`: every model set of a strategy with a meta holds one, and `ModelStore::publish` refuses one without; read the out-of-fold pair's fit as `Fits::out_of_fold` and its time as `ModelManifest::out_of_fold`
-- Changed a never-retrained `train --at t` to train a model set at `t` unless one is already published there, as a periodic train does, instead of keeping the latest model set at or before `t` and reporting it "in use since"; an older model set still decides before `t`, so train a never-retrained strategy only at the time it is to trade from
-- Renamed `Outcome::InUse` to `Outcome::AlreadyPublished`, holding no time, the model set's being the train's, and removed `Retrain::in_use`; match `Outcome::AlreadyPublished`
-- Renamed `Kept`, of failures alone, to `Failure`, its `Failed` to `Error`, `Outcome::Kept` to `Outcome::Failed` and `Retrained::Kept` to `Retrained::Failed`; match the new names
-- Changed a live retrain to train at its retrain time, its model set stamped and its data cut there as `train --at` does, once every series the strategy reads has a stored point at or after that time, a retrain due while another waits taking its place, the waiting one skipped with a warning, instead of at once at the catalog's last stored time; expect it after the first daily promotion past the retrain time, the previous model set deciding meanwhile, and train a skipped time with `train --from --to` if a backtest needs it
-- Changed `RetrainActor::new` to take the strategy's `ModelStore`, whose model sets it lists at its start; pass the store the strategy reads
 
 ### Security
 
-- Fixed a crash or power loss during a publish leaving a model set listed whose model files are cut short: a publish syncs its models' files to disk before it writes the manifest
+- Fixed a crash during a publish leaving a model set listed with truncated model files: the files are synced to disk before the manifest is written
 
 ### Fixes
 
@@ -52,18 +50,20 @@ Released on TBD (UTC).
 
 ### Internal Improvements
 
-- Improved the run time of the LSE fill tests, which call their mock at the LSE crate tests' 6000 calls a minute instead of a plan's 60, each up to 3.6 s down to 0.5 s at most
-- Changed `cargo deny` to ignore the unmaintained advisories against `chrono`, `chrono-tz` and `humantime`, transitive through Arrow, DataFusion and `object_store`
-- Changed the dev and test builds to compile dependencies at `opt-level` 1, as Nautilus does: the backtest tests run 3 to 8 times faster, a cold build of the dependencies takes about twice as long, and rebuilds of helix are unchanged
-- Improved the run time of the slowest tests: the streaming tests stop their nodes once what they wait for is staged or promoted rather than after a fixed time, the model tests run no train and store no quotes that no assertion reads, and a test's two dataset builds copy one catalog, each change checked by a mutation
-- Improved the tests to `docs/testing.md`'s standard: same-shape tests parametrized with `#[case]`, duplicates and tests of library logic removed, messages asserted by the facts they carry, waits bounded, expected values worked by hand, and each change checked by a mutation
+- Added `check-release-entries`, a pre-commit hook capping each entry of the release in progress at one line of 160 characters
+- Improved the LSE fill tests' run time, their mock called at 6000 calls a minute instead of 60
+- Changed `cargo deny` to ignore the unmaintained `chrono`, `chrono-tz` and `humantime` advisories, transitive through Arrow, DataFusion and `object_store`
+- Changed the dev and test builds to compile dependencies at `opt-level` 1, as Nautilus does, running the backtest tests 3 to 8 times faster
+- Improved the slowest tests' run time: the streaming tests stop once data is staged or promoted, and the model tests skip unread trains and quotes
+- Improved the tests to `docs/testing.md`'s standard: `#[case]` parametrization, duplicates removed, bounded waits and expected values worked by hand
 - Added binary tests of the command line's refusals (`tests/backtest/cli.rs`) in place of in-process parses
-- Changed the backtest fee model and the live recording to set Nautilus' `charge_commission_once` and `promote_on_close` explicitly rather than rely on their defaults
+- Changed the backtest fee model and live recording to set Nautilus' `charge_commission_once` and `promote_on_close` rather than rely on their defaults
 - Removed `lse`'s `LseHttpClient::with_retry`, a test hook
 
 ### Documentation Updates
 
 - Changed the release steps to open the next release's version in `Cargo.toml` with its section, as Nautilus does
+- Changed `docs/releases.md` to cap an entry at 160 characters, its how and why going in the pull request
 
 ---
 

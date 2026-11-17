@@ -16,7 +16,7 @@ Each release's sections come in this order, an empty one left out:
 | Documentation Updates | Docs alone                                               | Added, Changed, Renamed, Removed  |
 | Deprecations          | What is due to go, and its replacement                   | Deprecated                        |
 
-An entry is one line: what changed, not how, code in backticks. A breaking change ends with its migration, after a semicolon.
+An entry is one line of 160 characters at most (`check-release-entries` in `.pre-commit-config.yaml`): what changed, not how or why, code in backticks; the how and why go in the pull request. A breaking change ends with its migration, after a semicolon. A pull request of several changes to one thing adds one entry for it.
 
 ## Shipping a release
 
