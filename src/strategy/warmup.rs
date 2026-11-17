@@ -208,7 +208,10 @@
 //! (`tie_rank`), and the group's end hands on all that is held. Past
 //! `merge::HELD` bytes held, 2 GiB, each tick and bar counted with what it
 //! keeps on the heap, the warmup ends incomplete, naming the series held
-//! back, and the rest of its history is left out. The hold's
+//! back, and the rest of its history is left out; so too if a series
+//! brings a tick initialized before the latest it brought, a response out
+//! of time order or a window older than one before, naming the series: the
+//! merge trusts no such history. The hold's
 //! seams move as the merge hands them on. It is separate from the hold,
 //! which goes with helix-trader#16 while the merge stays until its own
 //! issue closes. A replay merges nothing, Nautilus replaying in time order
@@ -300,7 +303,7 @@ mod merge;
 mod tick;
 
 use hold::Hold;
-use merge::{Merge, Overflow};
+use merge::{Cut, Merge};
 use tick::{Series, Tick};
 
 /// The window a warmup is asked in (see `time_range`): under a day by more
@@ -621,8 +624,9 @@ impl Warmup {
     ///
     /// Returns an error if an indicator fails to read a bar or tick the
     /// merge hands on, naming the series held back if the merge goes past
-    /// its bound, or naming the reason if the warmup ended incomplete (see
-    /// `finished`), which Nautilus logs.
+    /// its bound or the series whose bars came out of time order, or naming
+    /// the reason if the warmup ended incomplete (see `finished`), which
+    /// Nautilus logs.
     pub fn on_data_response<A>(
         &self,
         actor: &A,
@@ -651,7 +655,7 @@ impl Warmup {
                 self.hold.built_live(Tick::Bar(bar))?;
             }
             let through = response.response().and_then(latest_initialized);
-            self.overflowed(
+            self.cut(
                 self.merge
                     .built(request, bars, through, |tick| self.hold.history(tick))?,
             )?;
@@ -681,31 +685,33 @@ impl Warmup {
     }
 
     /// Hands `ticks`, a response's, to the merge, which hands them on in
-    /// time order across the series (see `merge`); past its bound, ends
-    /// the warmup incomplete.
+    /// time order across the series (see `merge`); past its bound, or on a
+    /// series' history out of time order, ends the warmup incomplete.
     ///
     /// # Errors
     ///
     /// Returns an error if an indicator reading a tick fails, or naming
-    /// the series held back if the merge goes past its bound.
+    /// the series held back if the merge goes past its bound, or the series
+    /// out of time order.
     fn history(&self, ticks: impl IntoIterator<Item = Tick>) -> anyhow::Result<()> {
-        self.overflowed(self.merge.history(ticks, |tick| self.hold.history(tick))?)
+        self.cut(self.merge.history(ticks, |tick| self.hold.history(tick))?)
     }
 
-    /// Ends the warmup incomplete if the merge went past its bound with
-    /// `overflow`, handing over the live ticks held.
+    /// Ends the warmup incomplete if the merge was cut, by `cut`, handing
+    /// over the live ticks held.
     ///
     /// # Errors
     ///
-    /// Returns an error if an indicator reading a live tick fails, or naming
-    /// the series held back if the merge went past its bound.
-    fn overflowed(&self, overflow: Option<Overflow>) -> anyhow::Result<()> {
-        let Some(overflow) = overflow else {
+    /// Returns an error if an indicator reading a live tick fails, or saying
+    /// why the merge was cut: the series held back past its bound, or the
+    /// series out of time order.
+    fn cut(&self, cut: Option<Cut>) -> anyhow::Result<()> {
+        let Some(cut) = cut else {
             return Ok(());
         };
         self.warming.set(false);
         self.hold.release()?;
-        anyhow::bail!("the warmup is incomplete: {overflow}")
+        anyhow::bail!("the warmup is incomplete: {cut}")
     }
 
     /// The bars of `bar_types` in `actor`'s cache the warmup has not read
@@ -782,7 +788,8 @@ impl Warmup {
     ///
     /// Returns an error if an indicator reading a tick the merge hands on
     /// fails, or naming the series held back if the merge goes past its
-    /// bound, which ends the warmup incomplete.
+    /// bound, or the series if its history comes out of time order, either
+    /// of which ends the warmup incomplete.
     pub fn on_historical_book_depth(&self, response: &[OrderBookDepth]) -> anyhow::Result<()> {
         self.history(
             response
@@ -880,7 +887,8 @@ impl Warmup {
     ///
     /// Returns an error if an indicator reading a tick the merge hands on
     /// fails, the first of which ends the hand-over, or naming the series
-    /// held back if the merge goes past its bound, which ends the warmup
+    /// held back if the merge goes past its bound, or the series if its
+    /// history comes out of time order, either of which ends the warmup
     /// incomplete.
     pub fn on_historical_quotes(&self, response: &[QuoteTick]) -> anyhow::Result<()> {
         self.history(response.iter().copied().map(Tick::Quote))
@@ -3467,6 +3475,41 @@ mod tests {
                 entry("quote", "14:00:00"),
             ]
         );
+    }
+
+    /// The merge trusts no history out of time order: GCZ26's trades pending,
+    /// its quotes answer 13:00, held for them, then 12:00, older than what
+    /// the series already brought, in the same response or a later one. The
+    /// warmup ends incomplete, naming the quotes, the feature having read
+    /// the quote of 13:00 alone, and the trades the venue answers after are
+    /// left out.
+    #[rstest]
+    #[case::within_a_response(vec![vec!["13:00:00", "12:00:00"]])]
+    #[case::across_windows(vec![vec!["13:00:00"], vec!["12:00:00"]])]
+    fn a_series_history_out_of_time_order_ends_the_warmup_incomplete_naming_it(
+        #[case] windows: Vec<Vec<&str>>,
+    ) {
+        let log = Rc::new(Log::default());
+        let (warmup, _probe, _) = logging(&quotes_and_trades(), &log);
+
+        let answered: Vec<anyhow::Result<()>> = windows
+            .iter()
+            .map(|made| {
+                let quotes: Vec<QuoteTick> = made.iter().map(|made| quote(made)).collect();
+                warmup.on_historical_quotes(&quotes)
+            })
+            .collect();
+        let after = warmup.on_historical_trades(&[trade("12:30:00", "12:30:00")]);
+
+        let (last, earlier) = answered.split_last().unwrap();
+        assert!(earlier.iter().all(Result::is_ok), "{earlier:?}");
+        let err = format!("{:#}", last.as_ref().expect_err("out of time order"));
+        for part in ["incomplete", "quotes of GCZ26.GLBX"] {
+            assert!(err.contains(part), "{err}");
+        }
+        assert!(!warmup.is_warming());
+        assert!(after.is_ok(), "{after:?}");
+        assert_eq!(*log.read.borrow(), [entry("quote", "13:00:00")]);
     }
 
     /// A tick held counts against the bound what it keeps on the heap

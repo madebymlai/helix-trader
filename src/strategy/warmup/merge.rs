@@ -72,6 +72,15 @@
 //! goes on at once, holding nothing back and held by nothing (see
 //! `Warmup::feeding`).
 //!
+//! The merge relies on each series answering in time order, and checks
+//! it: a tick of a series initialized before the latest the series
+//! brought, in a response out of time order or a window older than one
+//! before it, or a bar before the latest its request's data brought, ends
+//! the merge as its bound does
+//! (below), the ticks the response brought before it taken, and the
+//! warmup ends incomplete, naming the series, rather than hand on a
+//! history out of time order.
+//!
 //! The history held is bounded by a budget of bytes (`HELD`, 2 GiB), each
 //! tick and bar counted by what it takes, its own size and what it keeps
 //! on the heap, a batch of deltas its deltas, a snapshot of depth its box,
@@ -135,13 +144,24 @@ struct Queue {
     logged: bool,
 }
 
-/// The merge past its bound: what it held, the ticks and bytes of each
-/// series, and the series it waited on.
+/// Why the merge ended a warmup incomplete, handing on all it held and
+/// leaving out the rest of the history.
 #[derive(Debug)]
-pub(super) struct Overflow {
-    limit: usize,
-    held: Vec<(Series, usize, usize)>,
-    waiting: Vec<Series>,
+pub(super) enum Cut {
+    /// Past its bound: what it held, the ticks and bytes of each series,
+    /// and the series it waited on.
+    Overflow {
+        limit: usize,
+        held: Vec<(Series, usize, usize)>,
+        waiting: Vec<Series>,
+    },
+    /// A response of `series` brought a tick initialized at `at`, before
+    /// `latest`, the latest the series had brought: out of time order.
+    Unordered {
+        series: Series,
+        at: UnixNanos,
+        latest: UnixNanos,
+    },
 }
 
 impl Queue {
@@ -189,14 +209,16 @@ impl Merge {
     ///
     /// Returns an error if `hand` fails, the first of which stops the
     /// hand-over, the ticks after it kept held, or if a tick cannot be
-    /// sized (`Tick::size`). Returns the overflow if the merge holds more
-    /// bytes than its bound once it handed on what it could: having handed
-    /// on all it held, it is cut.
+    /// sized (`Tick::size`). Returns the cut if a tick of a series is
+    /// initialized before the latest the series brought, the ticks before
+    /// it taken and the rest left out, or if the merge holds more bytes
+    /// than its bound once it handed on what it could: having handed on all
+    /// it held, it is cut.
     pub(super) fn history(
         &self,
         ticks: impl IntoIterator<Item = Tick>,
         hand: impl FnMut(&Tick) -> anyhow::Result<()>,
-    ) -> anyhow::Result<Option<Overflow>> {
+    ) -> anyhow::Result<Option<Cut>> {
         self.take(ticks, None, hand)
     }
 
@@ -207,14 +229,14 @@ impl Merge {
     ///
     /// # Errors
     ///
-    /// Returns an error if `hand` fails, or the overflow, as `history`.
+    /// Returns an error if `hand` fails, or the cut, as `history`.
     pub(super) fn built(
         &self,
         request: &UUID4,
         bars: impl IntoIterator<Item = Bar>,
         through: Option<UnixNanos>,
         hand: impl FnMut(&Tick) -> anyhow::Result<()>,
-    ) -> anyhow::Result<Option<Overflow>> {
+    ) -> anyhow::Result<Option<Cut>> {
         self.take(
             bars.into_iter().map(Tick::Bar),
             Some((request, through)),
@@ -230,7 +252,7 @@ impl Merge {
         ticks: impl IntoIterator<Item = Tick>,
         built: Option<(&UUID4, Option<UnixNanos>)>,
         mut hand: impl FnMut(&Tick) -> anyhow::Result<()>,
-    ) -> anyhow::Result<Option<Overflow>> {
+    ) -> anyhow::Result<Option<Cut>> {
         let mut state = self.state.borrow_mut();
         let queues = match &mut *state {
             State::Passing => {
@@ -253,10 +275,21 @@ impl Merge {
                 continue;
             };
             let queue = &mut queues[at];
+            let at_init = tick.ts_init();
+            if let Some(latest) = queue.latest.filter(|&latest| at_init < latest) {
+                let unordered = Cut::Unordered {
+                    series,
+                    at: at_init,
+                    latest,
+                };
+                let handed = cut_off(queues, &mut hand);
+                *state = State::Cut;
+                return handed.map(|()| Some(unordered));
+            }
+
             if !brought.iter().any(|&(of, _)| of == at) {
                 brought.push((at, !queue.held.is_empty()));
             }
-            let at_init = tick.ts_init();
             queue.latest = Some(queue.latest.map_or(at_init, |latest| latest.max(at_init)));
             let size = tick.size()?;
             queue.bytes += size;
@@ -279,7 +312,7 @@ impl Merge {
         if held <= self.limit {
             return Ok(None);
         }
-        let overflow = Overflow {
+        let overflow = Cut::Overflow {
             limit: self.limit,
             held: queues
                 .iter()
@@ -288,11 +321,7 @@ impl Merge {
                 .collect(),
             waiting: waiting(queues),
         };
-
-        for queue in queues.iter_mut() {
-            queue.pending = false;
-        }
-        let handed = hand_on(queues, &mut hand);
+        let handed = cut_off(queues, &mut hand);
         *state = State::Cut;
         handed.map(|()| Some(overflow))
     }
@@ -346,6 +375,18 @@ impl Merge {
     pub(super) fn is_cut(&self) -> bool {
         matches!(*self.state.borrow(), State::Cut)
     }
+}
+
+/// Hands on through `hand`, in order, all `queues` hold, as no series is
+/// pending any longer.
+fn cut_off(
+    queues: &mut [Queue],
+    hand: &mut impl FnMut(&Tick) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    for queue in queues.iter_mut() {
+        queue.pending = false;
+    }
+    hand_on(queues, hand)
 }
 
 /// Hands on through `hand`, in order, the ticks of `queues` that no pending
@@ -416,20 +457,33 @@ fn listed(series: &[Series]) -> String {
     named.join(", ")
 }
 
-impl Display for Overflow {
+impl Display for Cut {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let held: Vec<String> = self
-            .held
-            .iter()
-            .map(|(series, count, bytes)| format!("{count} ticks of {series}, {bytes} bytes"))
-            .collect();
-        write!(
-            f,
-            "its merge of series held more than its bound of {} bytes of history, {}, \
-             waiting on {}; the rest of the history is left out",
-            self.limit,
-            held.join(", "),
-            listed(&self.waiting)
-        )
+        match self {
+            Self::Overflow {
+                limit,
+                held,
+                waiting,
+            } => {
+                let held: Vec<String> = held
+                    .iter()
+                    .map(|(series, count, bytes)| {
+                        format!("{count} ticks of {series}, {bytes} bytes")
+                    })
+                    .collect();
+                write!(
+                    f,
+                    "its merge of series held more than its bound of {limit} bytes of history, \
+                     {}, waiting on {}; the rest of the history is left out",
+                    held.join(", "),
+                    listed(waiting)
+                )
+            }
+            Self::Unordered { series, at, latest } => write!(
+                f,
+                "the history of {series} came out of time order, a tick initialized at {at} \
+                 after one at {latest}; the rest of the history is left out"
+            ),
+        }
     }
 }
