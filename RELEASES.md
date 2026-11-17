@@ -41,6 +41,7 @@ Released on TBD (UTC).
 - Removed `Deserialize` from `TickSeries`; read tick series through a strategy config's `[data]` series
 - Removed `Launcher::in_process` outside the crate's own tests
 - Removed `FeatureSetBuilder`'s `quotes`, `trades`, `bars`, `depth`, `deltas`, `over_bracket`; use `feature` on a list of series, `Bracketed` over the bracket
+- Changed `Warmup`'s `feeding`, `feeding_ticks`, `feeding_books` and `feeding_custom` to take the series their indicator reads; pass them first
 
 ### Security
 

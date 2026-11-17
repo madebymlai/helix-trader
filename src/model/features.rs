@@ -575,6 +575,26 @@ impl FeatureSet {
         custom
     }
 
+    /// The custom series among the features' series, each once, in order
+    /// as `custom`: those the set hands its features' custom handlers
+    /// (`CustomIndicator`), which a live warmup orders among their other
+    /// series. A raw feature's are not among them: it reads the cache.
+    #[must_use]
+    pub fn handled_custom(&self) -> Vec<CustomSeries> {
+        let mut custom: Vec<CustomSeries> = Vec::new();
+
+        for slot in self.slots.borrow().iter() {
+            for source in slot.sources() {
+                if let Source::Custom(series, _) = source
+                    && !custom.contains(series)
+                {
+                    custom.push(series.clone());
+                }
+            }
+        }
+        custom
+    }
+
     /// The time (`ts_init`) of the latest quote, trade, bar, depth or
     /// deltas of `instrument_id` a feature read, if any: an update no
     /// feature reads, or custom data, is none.

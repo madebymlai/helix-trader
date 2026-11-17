@@ -1,6 +1,7 @@
 //! The merge of a live warmup's history across its series: the warmup
-//! queues each requested series' responses, quotes, trades, book depth and
-//! deltas, and custom data alike, and the bars each request builds, and
+//! queues the responses of each requested series an indicator it feeds
+//! reads, quotes, trades, book depth and deltas, and custom data alike,
+//! and the bars each request builds that one reads, and
 //! hands them on in time order (`ts_init`), to the hold of live ticks and
 //! bars (`hold`) and through it to the features. A replay requests no
 //! warmup and merges nothing: Nautilus replays its data in time order
@@ -63,8 +64,10 @@
 //! past their request's completion while others are pending, they reach
 //! the features before the live bars Nautilus builds from then on all the
 //! same, which the hold holds (see `hold`). When the group
-//! ends, everything held goes on in order. A response of a series the
-//! warmup did not request goes on at once: it is no part of the warmup.
+//! ends, everything held goes on in order. A response of a series no fed
+//! indicator reads, a conversion pair's quotes or the traded instrument's,
+//! goes on at once, holding nothing back and held by nothing (see
+//! `Warmup::feeding`).
 //!
 //! The history held is bounded by a budget of bytes (`HELD`, 2 GiB), each
 //! tick and bar counted by what it takes, its own size and what it keeps

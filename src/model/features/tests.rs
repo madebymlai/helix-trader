@@ -1426,6 +1426,23 @@ fn a_feature_on_a_roots_custom_series_reads_the_contract_in_front_and_moves_at_i
     assert_eq!(features.values(), Some(vec![696.0]));
 }
 
+/// A live warmup orders these among the features' other series: the
+/// custom series among a feature's series, once, in the order declared,
+/// and none a raw feature alone reads, which reads the cache.
+#[rstest]
+fn a_sets_handled_custom_series_are_its_features_not_its_raw_features() {
+    let tables = tables();
+    let yields = levels("yields", "US10Y");
+    let features = FeatureSet::builder()
+        .custom(&level_series(AUD), "level", read_level)
+        .feature(&[quotes(AUD), custom(&yields)], SEQUENCE, &tables)
+        .feature(&[custom(&yields)], SEQUENCE, &tables)
+        .build()
+        .unwrap();
+
+    assert_eq!(features.handled_custom(), [yields]);
+}
+
 /// A model strategy reads these (`model::reads`) and a live warmup
 /// requests them: each custom series a raw feature or a feature reads,
 /// once, in the order declared; none is a tick series.

@@ -225,10 +225,10 @@ impl TargetProbe {
             },
         )
         .unwrap();
-        let warmup = targets.warmed(
-            Warmup::replayed(&source.requirements())
-                .feeding(Rc::clone(&features) as SharedActorIndicator),
-        );
+        let warmup = targets.warmed(Warmup::replayed(&source.requirements()).feeding(
+            &features.bar_types(),
+            Rc::clone(&features) as SharedActorIndicator,
+        ));
         let probe = Self {
             core: StrategyCore::new(StrategyConfig {
                 strategy_id: Some(StrategyId::from(STRATEGY)),
