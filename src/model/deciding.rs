@@ -26,9 +26,9 @@
 //! decide together: no decision uses a long and a short of different
 //! trains, nor a meta beside sides of another train. A model set failing
 //! its checks fails the decision with an error naming it and the check: no
-//! side is picked until it loads, and it is read again at the next. `pick`
+//! side is picked until it loads, and it is read again at the next. `decide`
 //! picks among the sides of the model set valid at the time, by
-//! `pick_among`, the rule for a pair already in hand, which a train's meta
+//! the same pair evaluation as `pick_among`, which a train's meta
 //! also learns from, its out-of-fold pair being in no store: the pair's calibrated
 //! expectation of the decision, its level `C'` and side call `D'`
 //! (`store::Pair::expect`), each side's `E'` held to its margin in R and
@@ -64,8 +64,6 @@ pub struct DecidingModels {
     listed: Vec<Timestamp>,
     /// The model sets, swapped in decision by decision.
     model_sets: Swap<ModelSet>,
-    /// The meta's margin, if the strategy has a meta.
-    meta: Option<MetaMargin>,
 }
 
 /// What a decision reads of a side: the row its model reads, the decision's
@@ -96,6 +94,49 @@ pub struct Picked {
     pub expected: Expected,
 }
 
+/// The pair's calibrated expectation and the pick made from it, before any meta.
+#[derive(Debug)]
+struct SideEvaluation {
+    expected: Expected,
+    picked: Option<Picked>,
+}
+
+/// One row evaluated by one model set, after model selection.
+#[derive(Debug)]
+pub(super) struct RowEvaluation {
+    pub expected: Expected,
+    pub pick: Option<EvaluatedPick>,
+}
+
+#[derive(Debug)]
+pub(super) struct EvaluatedPick {
+    pub picked: Picked,
+    pub meta: Option<MetaVerdict>,
+}
+
+/// Keep even a declined (possibly nonfinite) estimate for scoring.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum MetaVerdict {
+    Accepted(R),
+    Declined(f64),
+}
+
+impl EvaluatedPick {
+    fn taken(self) -> Option<Taken> {
+        let meta_expected_r = match self.meta {
+            Some(MetaVerdict::Declined(_)) => return None,
+            Some(MetaVerdict::Accepted(expected)) => Some(expected),
+            None => None,
+        };
+        Some(Taken {
+            side: self.picked.side,
+            expected_r: self.picked.expected_r,
+            expected: self.picked.expected,
+            meta_expected_r,
+        })
+    }
+}
+
 /// A decision to trade: the side picked, taken by the meta if there is one.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Taken {
@@ -119,7 +160,6 @@ impl DecidingModels {
         Ok(Self {
             listed: models.model_sets()?,
             model_sets: models.swap(),
-            meta: models.meta().map(|level| MetaMargin(level.config().margin)),
             models: models.clone(),
         })
     }
@@ -158,29 +198,43 @@ impl DecidingModels {
         let Some((_, model_set)) = self.model_sets.at(now, &self.listed)? else {
             return Ok(None);
         };
-        let Some(picked) = Self::pick_among(model_set.pair(), margins(&self.models), sides)? else {
-            return Ok(None);
+        let row = Self::evaluate(&self.models, model_set, features, sides)?;
+        Ok(row.pick.and_then(EvaluatedPick::taken))
+    }
+
+    /// Evaluate the sides and apply the same set's meta only to their pick.
+    pub(super) fn evaluate(
+        models: &ModelStore,
+        model_set: &ModelSet,
+        features: &[f64],
+        sides: &PerSide<SideRow>,
+    ) -> anyhow::Result<RowEvaluation> {
+        let SideEvaluation { expected, picked } =
+            Self::evaluate_sides(model_set.pair(), margins(models), sides)?;
+        let Some(picked) = picked else {
+            return Ok(RowEvaluation {
+                expected,
+                pick: None,
+            });
         };
-        let taken = |meta_expected_r| Taken {
-            side: picked.side,
-            expected_r: picked.expected_r,
-            expected: picked.expected,
-            meta_expected_r,
+        let meta = if let Some(level) = models.meta() {
+            let model = model_set
+                .meta()
+                .context("the model set holds no meta model, and the strategy has a meta")?;
+            let estimate =
+                model.predict(&meta_row(features, picked.side.order_side(), expected))?;
+            let margin = MetaMargin(level.config().margin);
+            Some(match R::finite(estimate).filter(|&r| margin.takes(r)) {
+                Some(r) => MetaVerdict::Accepted(r),
+                None => MetaVerdict::Declined(estimate),
+            })
+        } else {
+            None
         };
-        let Some(margin) = self.meta else {
-            return Ok(Some(taken(None)));
-        };
-        let model = model_set
-            .meta()
-            .context("the model set holds no meta model, and the strategy has a meta")?;
-        let expected_r = model.predict(&meta_row(
-            features,
-            picked.side.order_side(),
-            picked.expected,
-        ))?;
-        Ok(R::finite(expected_r)
-            .filter(|&expected_r| margin.takes(expected_r))
-            .map(|expected_r| taken(Some(expected_r))))
+        Ok(RowEvaluation {
+            expected,
+            pick: Some(EvaluatedPick { picked, meta }),
+        })
     }
 
     /// The side picked by `pair` on each side's row `sides`, each side
@@ -197,18 +251,26 @@ impl DecidingModels {
         margins: impl IntoIterator<Item = (Side, R)>,
         sides: &PerSide<SideRow>,
     ) -> anyhow::Result<Option<Picked>> {
+        Ok(Self::evaluate_sides(pair, margins, sides)?.picked)
+    }
+
+    /// Score each fitted side and pick from the same joint calibration.
+    fn evaluate_sides(
+        pair: &Pair,
+        margins: impl IntoIterator<Item = (Side, R)>,
+        sides: &PerSide<SideRow>,
+    ) -> anyhow::Result<SideEvaluation> {
         let expected = pair.expect(sides)?;
-        Ok(payoff::pick(margins.into_iter().filter_map(
-            |(side, margin)| {
-                let expected_r = R::finite(expected.of(side))?;
-                let picked = Picked {
-                    side,
-                    expected_r,
-                    expected,
-                };
-                Some((picked, expected_r, margin))
-            },
-        )))
+        let picked = payoff::pick(margins.into_iter().filter_map(|(side, margin)| {
+            let expected_r = R::finite(expected.of(side))?;
+            let picked = Picked {
+                side,
+                expected_r,
+                expected,
+            };
+            Some((picked, expected_r, margin))
+        }));
+        Ok(SideEvaluation { expected, picked })
     }
 }
 
