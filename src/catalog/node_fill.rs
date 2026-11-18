@@ -60,35 +60,50 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FillData {
     /// The instrument, its definition (`request_instrument`).
-    Instrument,
+    Instrument(InstrumentId),
     /// `QuoteTick`s (`request_quotes`).
-    Quotes,
+    Quotes(InstrumentId),
     /// `TradeTick`s (`request_trades`).
-    Trades,
+    Trades(InstrumentId),
     /// `OrderBookDepth` snapshots of the levels of its venue's book
     /// (`request_book_depth`, `venues::book_format`).
-    Depth,
+    Depth(InstrumentId),
     /// `OrderBookDelta`s (`request_book_deltas`).
-    Deltas,
+    Deltas(InstrumentId),
     /// The `Bar`s of a bar type (`request_bars`).
     Bars(BarType),
     /// `FundingRateUpdate`s (`request_funding_rates`).
-    Funding,
+    Funding(InstrumentId),
 }
 
 impl FillData {
-    /// The request kind for this resolved source, if served through the node.
+    /// The contract the request targets, from the bar type for bars.
+    #[must_use]
+    pub fn instrument_id(self) -> InstrumentId {
+        match self {
+            Self::Instrument(id)
+            | Self::Quotes(id)
+            | Self::Trades(id)
+            | Self::Depth(id)
+            | Self::Deltas(id)
+            | Self::Funding(id) => id,
+            Self::Bars(bar_type) => bar_type.instrument_id(),
+        }
+    }
+
+    /// The request for this resolved source, if served through the node.
     fn of(series: &CatalogSeries) -> anyhow::Result<Self> {
         let tick = match series {
             CatalogSeries::Bars(bar_type) => return Ok(Self::Bars(*bar_type)),
             CatalogSeries::Ticks(tick) => tick,
         };
+        let id = tick.instrument_id;
         Ok(match &tick.data {
-            NautilusDataType::QuoteTick => Self::Quotes,
-            NautilusDataType::TradeTick => Self::Trades,
-            NautilusDataType::OrderBookDepth => Self::Depth,
-            NautilusDataType::OrderBookDelta => Self::Deltas,
-            NautilusDataType::FundingRateUpdate => Self::Funding,
+            NautilusDataType::QuoteTick => Self::Quotes(id),
+            NautilusDataType::TradeTick => Self::Trades(id),
+            NautilusDataType::OrderBookDepth => Self::Depth(id),
+            NautilusDataType::OrderBookDelta => Self::Deltas(id),
+            NautilusDataType::FundingRateUpdate => Self::Funding(id),
             other => anyhow::bail!(
                 "no source filled through the node serves the {other} of an instrument"
             ),
@@ -99,28 +114,27 @@ impl FillData {
 impl Display for FillData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Instrument => f.write_str("definition"),
-            Self::Quotes => f.write_str("quotes"),
-            Self::Trades => f.write_str("trades"),
-            Self::Depth => f.write_str("book depths"),
-            Self::Deltas => f.write_str("book deltas"),
+            Self::Instrument(_) => f.write_str("definition"),
+            Self::Quotes(_) => f.write_str("quotes"),
+            Self::Trades(_) => f.write_str("trades"),
+            Self::Depth(_) => f.write_str("book depths"),
+            Self::Deltas(_) => f.write_str("book deltas"),
             Self::Bars(bar_type) => write!(
                 f,
                 "{}-{} bars",
                 bar_type.spec(),
                 bar_type.aggregation_source()
             ),
-            Self::Funding => f.write_str("funding rates"),
+            Self::Funding(_) => f.write_str("funding rates"),
         }
     }
 }
 
-/// A request of a fill: `data` of `instrument_id` over the closed window
+/// A request of a fill: the identified `data` over the closed window
 /// `[from, to]`, as the catalog stores intervals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FillRequest {
     pub data: FillData,
-    pub instrument_id: InstrumentId,
     pub from: Timestamp,
     pub to: Timestamp,
 }
@@ -130,7 +144,10 @@ impl Display for FillRequest {
         write!(
             f,
             "the {} of {} over [{}, {}]",
-            self.data, self.instrument_id, self.from, self.to
+            self.data,
+            self.data.instrument_id(),
+            self.from,
+            self.to
         )
     }
 }
@@ -169,7 +186,6 @@ pub fn missing(
             .with_context(|| format!("reading the stored {data} of {id}"))?;
         let requests = gaps.into_iter().map(|(from, to)| FillRequest {
             data,
-            instrument_id: id,
             from: at(from),
             to: at(to),
         });
@@ -185,8 +201,7 @@ pub fn missing(
             let from = requests.iter().map(|r| r.from).min().expect("a request");
             let to = requests.iter().map(|r| r.to).max().expect("a request");
             let definition = FillRequest {
-                data: FillData::Instrument,
-                instrument_id: id,
+                data: FillData::Instrument(id),
                 from,
                 to,
             };
@@ -347,7 +362,7 @@ impl NodeFill {
             request: Request::Series(request),
             client: id,
             period: match request.data {
-                FillData::Instrument => None,
+                FillData::Instrument(_) => None,
                 data => Some(period(data)),
             },
         }));
@@ -515,12 +530,8 @@ impl FillActor {
             params.extend(time_range::params(from, to, period));
         }
         let params = Some(Params::new(params.into_iter().collect()));
-        let FillRequest {
-            data,
-            instrument_id,
-            ..
-        } = match request {
-            Request::Series(request) => request,
+        let data = match request {
+            Request::Series(request) => request.data,
             Request::Custom(request) => {
                 return self.request_data(
                     request.data_type,
@@ -533,13 +544,18 @@ impl FillActor {
             }
         };
         let (from, to, client) = (Some(from), Some(to), Some(client));
+
         match data {
-            FillData::Instrument => {
+            FillData::Instrument(instrument_id) => {
                 self.request_instrument(instrument_id, from, to, client, params)
             }
-            FillData::Quotes => self.request_quotes(instrument_id, from, to, None, client, params),
-            FillData::Trades => self.request_trades(instrument_id, from, to, None, client, params),
-            FillData::Depth => {
+            FillData::Quotes(instrument_id) => {
+                self.request_quotes(instrument_id, from, to, None, client, params)
+            }
+            FillData::Trades(instrument_id) => {
+                self.request_trades(instrument_id, from, to, None, client, params)
+            }
+            FillData::Depth(instrument_id) => {
                 let levels = venues::book_format(instrument_id.venue)
                     .and_then(|book| book.depth)
                     .with_context(|| {
@@ -550,11 +566,11 @@ impl FillActor {
                     })?;
                 self.request_book_depth(instrument_id, from, to, None, Some(levels), client, params)
             }
-            FillData::Deltas => {
+            FillData::Deltas(instrument_id) => {
                 self.request_book_deltas(instrument_id, from, to, None, client, params)
             }
             FillData::Bars(bar_type) => self.request_bars(bar_type, from, to, None, client, params),
-            FillData::Funding => {
+            FillData::Funding(instrument_id) => {
                 self.request_funding_rates(instrument_id, from, to, None, client, params)
             }
         }
@@ -632,10 +648,9 @@ mod tests {
         s.parse().unwrap()
     }
 
-    fn request(data: FillData, id: &str, from: &str, to: &str) -> FillRequest {
+    fn request(data: FillData, from: &str, to: &str) -> FillRequest {
         FillRequest {
             data,
-            instrument_id: InstrumentId::from(id),
             from: ts(from),
             to: ts(to),
         }
@@ -683,32 +698,27 @@ mod tests {
             asked,
             [
                 request(
-                    FillData::Instrument,
-                    "GCQ26.GLBX",
+                    FillData::Instrument(InstrumentId::from("GCQ26.GLBX")),
                     "2026-07-01T00:00:00Z",
                     "2026-07-30T23:59:59.999999999Z"
                 ),
                 request(
-                    FillData::Depth,
-                    "GCQ26.GLBX",
+                    FillData::Depth(InstrumentId::from("GCQ26.GLBX")),
                     "2026-07-01T00:00:00Z",
                     "2026-07-30T23:59:59.999999999Z"
                 ),
                 request(
-                    FillData::Instrument,
-                    "GCZ26.GLBX",
+                    FillData::Instrument(InstrumentId::from("GCZ26.GLBX")),
                     "2026-07-31T00:00:00Z",
                     "2026-08-10T00:00:00Z"
                 ),
                 request(
-                    FillData::Depth,
-                    "GCZ26.GLBX",
+                    FillData::Depth(InstrumentId::from("GCZ26.GLBX")),
                     "2026-07-31T00:00:00Z",
                     "2026-08-10T00:00:00Z"
                 ),
                 request(
-                    FillData::Trades,
-                    "GCZ26.GLBX",
+                    FillData::Trades(InstrumentId::from("GCZ26.GLBX")),
                     "2026-08-01T00:00:00Z",
                     "2026-08-10T00:00:00Z"
                 ),
@@ -777,7 +787,7 @@ mod tests {
             "2026-10-20T00:00:00Z",
             "2026-10-23T00:00:00Z"
         ),
-        FillData::Trades,
+        FillData::Trades(InstrumentId::from("GCZ26.GLBX")),
         "2026-10-23T00:00:00Z"
     )]
     #[case::bars(
@@ -802,18 +812,16 @@ mod tests {
             asked,
             [
                 request(
-                    FillData::Instrument,
-                    "GCZ26.GLBX",
+                    FillData::Instrument(InstrumentId::from("GCZ26.GLBX")),
                     "2026-10-20T00:00:00Z",
                     to
                 ),
                 request(
                     data,
-                    "GCZ26.GLBX",
                     "2026-10-20T00:00:00Z",
                     "2026-10-20T23:59:59.999999999Z"
                 ),
-                request(data, "GCZ26.GLBX", "2026-10-22T00:00:00Z", to),
+                request(data, "2026-10-22T00:00:00Z", to),
             ]
         );
     }
@@ -880,8 +888,7 @@ mod tests {
         let asked = missing(&catalog, &slices).unwrap();
 
         let sliver = request(
-            FillData::Quotes,
-            "XAUUSD.ICMARKETS",
+            FillData::Quotes(InstrumentId::from("XAUUSD.ICMARKETS")),
             "2026-10-21T23:59:59.500000001Z",
             "2026-10-21T23:59:59.699999999Z",
         );
@@ -889,7 +896,7 @@ mod tests {
             asked,
             [
                 FillRequest {
-                    data: FillData::Instrument,
+                    data: FillData::Instrument(InstrumentId::from("XAUUSD.ICMARKETS")),
                     ..sliver
                 },
                 sliver
@@ -922,7 +929,7 @@ mod tests {
             "2026-10-20T00:00:00Z",
             "2026-10-21T00:00:00Z"
         ),
-        FillData::Funding
+        FillData::Funding(InstrumentId::from("BTC-USDT-SWAP.OKX"))
     )]
     #[case::book_deltas(
         slice(
@@ -931,7 +938,7 @@ mod tests {
             "2026-10-20T00:00:00Z",
             "2026-10-21T00:00:00Z"
         ),
-        FillData::Deltas
+        FillData::Deltas(InstrumentId::from("GCZ26.GLBX"))
     )]
     fn a_series_is_asked_as_its_kind_over_its_slice_after_the_definition(
         #[case] slice: SeriesSlice,
@@ -939,7 +946,7 @@ mod tests {
     ) {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        let id = slice.series.instrument_id().to_string();
+        let id = data.instrument_id();
         let (from, to) = ("2026-10-20T00:00:00Z", "2026-10-21T00:00:00Z");
 
         let asked = missing(&catalog, &[slice]).unwrap();
@@ -947,8 +954,8 @@ mod tests {
         assert_eq!(
             asked,
             [
-                request(FillData::Instrument, &id, from, to),
-                request(data, &id, from, to),
+                request(FillData::Instrument(id), from, to),
+                request(data, from, to),
             ]
         );
     }

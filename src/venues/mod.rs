@@ -1850,15 +1850,18 @@ mod tests {
 
         let asked = |data| FillRequest {
             data,
-            instrument_id: InstrumentId::from("XAUUSD.PEPPERSTONE"),
             from: at(FILL_START),
             to: at(FILL_END),
         };
+        let id = InstrumentId::from("XAUUSD.PEPPERSTONE");
         assert_eq!(
             node.asked(),
             [
-                (asked(FillData::Instrument), None),
-                (asked(FillData::Quotes), Some(ctrader::TICK_REQUEST_SPAN)),
+                (asked(FillData::Instrument(id)), None),
+                (
+                    asked(FillData::Quotes(id)),
+                    Some(ctrader::TICK_REQUEST_SPAN)
+                ),
             ]
         );
     }
