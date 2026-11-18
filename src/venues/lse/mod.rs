@@ -93,8 +93,7 @@ pub(super) async fn add_fill(
 ) -> anyhow::Result<()> {
     let (definitions, requests): (Vec<_>, Vec<_>) =
         missing(catalog, slices)?.into_iter().partition(|request| {
-            request.data == FillData::Instrument
-                && Row::of(request.instrument_id.venue).definitions == DefinitionsSource::Databento
+            matches!(request.data, FillData::Instrument(id) if Row::of(id.venue).definitions == DefinitionsSource::Databento)
         });
     let custom = missing_custom(catalog, custom)?;
     if !definitions.is_empty() {

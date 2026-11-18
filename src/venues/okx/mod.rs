@@ -218,7 +218,7 @@ pub fn requests(
     let slices = SeriesSlice::merged(funding.chain(slices.iter().cloned()));
     Ok(missing(catalog, &slices)?
         .into_iter()
-        .filter(|request| request.data != FillData::Instrument)
+        .filter(|request| !matches!(request.data, FillData::Instrument(_)))
         .collect())
 }
 
@@ -227,7 +227,7 @@ pub fn requests(
 #[must_use]
 pub fn period(data: FillData) -> SignedDuration {
     match data {
-        FillData::Funding => FUNDING_PERIOD,
+        FillData::Funding(_) => FUNDING_PERIOD,
         _ => DAY,
     }
 }
@@ -356,7 +356,7 @@ impl Contract {
 #[cfg(test)]
 mod tests {
     use jiff::Timestamp;
-    use nautilus_model::data::BarType;
+    use nautilus_model::data::{BarType, FundingRateUpdate};
     use rstest::rstest;
 
     use super::*;
@@ -484,10 +484,9 @@ mod tests {
         ParquetDataCatalog::new(dir.path(), None, None, None, None)
     }
 
-    fn fill(data: FillData, id: InstrumentId, from: &str, to: &str) -> FillRequest {
+    fn fill(data: FillData, from: &str, to: &str) -> FillRequest {
         FillRequest {
             data,
-            instrument_id: id,
             from: at(from),
             to: at(to),
         }
@@ -518,11 +517,50 @@ mod tests {
         assert_eq!(
             asked,
             [
-                fill(FillData::Funding, btc(), from, to),
-                fill(FillData::Bars(BarType::from(BTC_MINUTES)), btc(), from, to),
+                fill(FillData::Funding(btc()), from, to),
+                fill(FillData::Bars(BarType::from(BTC_MINUTES)), from, to),
                 fill(
                     FillData::Bars(BarType::from("BTC-USDT-SWAP.OKX-5-MINUTE-LAST-EXTERNAL")),
+                    from,
+                    to
+                ),
+            ]
+        );
+    }
+
+    /// Funding stored through October 4 covers neither bar series, but
+    /// the next funding request starts on October 5, not October 1.
+    #[rstest]
+    fn stored_funding_shortens_only_the_funding_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = new_catalog(&dir);
+        let (from, to) = ("2026-10-01T00:00:00Z", "2026-10-08T00:00:00Z");
+        let update = at("2026-10-03T08:00:00Z").into();
+        catalog
+            .write_to_parquet(
+                &[FundingRateUpdate::new(
                     btc(),
+                    Decimal::new(1, 4),
+                    Some(480),
+                    None,
+                    update,
+                    update,
+                )],
+                Some(at(from).into()),
+                Some(at("2026-10-04T23:59:59.999999999Z").into()),
+                None,
+            )
+            .unwrap();
+
+        let asked = requests(&catalog, &btc_slices(from, to)).unwrap();
+
+        assert_eq!(
+            asked,
+            [
+                fill(FillData::Funding(btc()), "2026-10-05T00:00:00Z", to),
+                fill(FillData::Bars(BarType::from(BTC_MINUTES)), from, to),
+                fill(
+                    FillData::Bars(BarType::from("BTC-USDT-SWAP.OKX-5-MINUTE-LAST-EXTERNAL")),
                     from,
                     to
                 ),
@@ -532,7 +570,10 @@ mod tests {
 
     #[rstest]
     fn funding_is_asked_in_two_weeks_and_bars_in_days() {
-        assert_eq!(period(FillData::Funding), SignedDuration::from_hours(336));
+        assert_eq!(
+            period(FillData::Funding(btc())),
+            SignedDuration::from_hours(336)
+        );
         assert_eq!(
             period(FillData::Bars(BarType::from(BTC_MINUTES))),
             SignedDuration::from_hours(24)
