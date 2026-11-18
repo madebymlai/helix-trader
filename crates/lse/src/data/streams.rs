@@ -94,9 +94,6 @@ pub(super) struct LseStreams {
     sockets: AHashMap<LseSocket, LseWebSocketClient>,
     quoted: QuotedBySymbol,
     traded: TradedByName,
-    /// How many contracts of each underlying's chain, by its root, have
-    /// their trades subscribed: the chain is subscribed while any has.
-    chains: AHashMap<String, usize>,
     /// The tasks turning each socket's ticks into quotes and trades.
     tasks: TaskGroup,
     /// The `GLBX` contracts, on LSE's CME stream.
@@ -190,7 +187,6 @@ impl LseStreams {
             sockets: AHashMap::new(),
             quoted: Arc::default(),
             traded: Arc::default(),
-            chains: AHashMap::new(),
             tasks: TaskGroup::new(),
             cme,
             nasdaq,
@@ -444,19 +440,17 @@ impl LseStreams {
         }
         let contract = self.contract(id)?;
         let (socket, name) = contract.stream();
-        let root = contract.root().to_owned();
-        self.socket(socket)?;
+        let client = self.socket(socket)?;
+
         if self.traded.contains_key(&name) {
             return Ok(());
         }
         let traded = defined(id, cache)?;
-        self.traded.insert(name, traded);
-        let subscribed = self.chains.entry(root.clone()).or_default();
-        *subscribed += 1;
-        if *subscribed == 1 {
-            self.socket(socket)?.subscribe_options(&root)?;
-        }
-        Ok(())
+        // Publish membership before the handler can elicit the first tick.
+        self.traded.insert(name.clone(), traded);
+        client.subscribe_options(contract.root()).inspect_err(|_| {
+            self.traded.remove(&name);
+        })
     }
 
     /// Ends the trades of `id`: a `GLBX` contract's or an `XNAS` stock's,
@@ -469,27 +463,19 @@ impl LseStreams {
     /// Returns an error if `id`, which it names, is none of those, if it is
     /// a contract of an underlying whose chain the client does not stream,
     /// or if its socket is not open.
-    pub(super) fn unsubscribe_trades(&mut self, id: InstrumentId) -> anyhow::Result<()> {
+    pub(super) fn unsubscribe_trades(&self, id: InstrumentId) -> anyhow::Result<()> {
         if let Some(exchange) = LseExchange::of_venue(id.venue) {
             return self.exchange(exchange).unsubscribe(id, StreamKind::Trades);
         }
         let contract = self.contract(id)?;
         let (socket, name) = contract.stream();
-        let root = contract.root().to_owned();
-        self.socket(socket)?;
+        let client = self.socket(socket)?;
+
         if !self.traded.contains_key(&name) {
             return Ok(());
         }
+        client.unsubscribe_options(contract.root())?;
         self.traded.remove(&name);
-        let subscribed = self
-            .chains
-            .get_mut(&root)
-            .expect("a contract subscribed counts in its chain");
-        *subscribed -= 1;
-        if *subscribed == 0 {
-            self.chains.remove(&root);
-            self.socket(socket)?.unsubscribe_options(&root)?;
-        }
         Ok(())
     }
 
@@ -631,7 +617,6 @@ impl LseStreams {
         }
         self.quoted.rcu(|quoted| quoted.clear());
         self.traded.rcu(|traded| traded.clear());
-        self.chains.clear();
         stopped.map_err(|e| anyhow::anyhow!("stopping the LSE tick tasks: {e}"))?;
         cme.and(nasdaq)
     }
