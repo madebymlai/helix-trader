@@ -744,7 +744,10 @@ mod tests {
             data.query_identifiers().unwrap(),
             ["SXR8.IBIS-1-MINUTE-LAST-EXTERNAL"]
         );
-        assert_eq!(data.instrument_id(), None);
+        assert_eq!(
+            data.get_instrument_ids().unwrap(),
+            [InstrumentId::from("SXR8.IBIS")]
+        );
     }
 
     /// 5 s after their close, as a live node builds them, in a trading run
