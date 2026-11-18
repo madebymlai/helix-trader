@@ -11,9 +11,8 @@
 //! account's equity. It hands the module its time
 //! events, which close the trades at their time, and the module sets the
 //! time of the trades still open again at start, as after a restart.
-//! The target closes before the next decision (`ModelConfig::validate`),
-//! so trades do not overlap, on a hedging venue as on a netting one. Its
-//! handle decides only once its features and the target's ATR are
+//! Its handle skips executable entries while a trade is outstanding and
+//! decides only once its features and the target's ATR are
 //! initialized: warm from the replay in a backtest or a dataset run, from
 //! its warmup request live. Its data hooks are the handle's
 //! (`model_data_hooks!`).

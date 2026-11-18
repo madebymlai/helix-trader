@@ -623,8 +623,8 @@ mod tests {
         assert!(message.contains(named), "{message}");
     }
 
-    /// An unread series, or one listed twice, and a limit of an hour
-    /// decided every hour are both reported, each under its field.
+    /// An unread series, or one listed twice, and a zero target limit
+    /// are both reported, each under its field.
     #[rstest]
     #[case::unread(&[GOLD_BARS, GC_TRADES])]
     #[case::listed_twice(&[GOLD_BARS, GOLD_BARS])]
@@ -632,7 +632,7 @@ mod tests {
         let mut fields: Vec<String> = refusals(
             &[GOLD_BARS],
             series,
-            r#"{ limit = "1h", atr = { period = 14 } }"#,
+            r#"{ limit = "0s", atr = { period = 14 } }"#,
         )
         .into_iter()
         .map(|(field, _)| field)
@@ -750,7 +750,7 @@ mod tests {
         let err = load_of(
             &[GOLD_BARS],
             &[GOLD_BARS],
-            r#"{ limit = "1h", atr = { period = 14 } }"#,
+            r#"{ limit = "0s", atr = { period = 14 } }"#,
             &tables,
         )
         .unwrap_err();

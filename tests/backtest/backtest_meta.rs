@@ -41,7 +41,7 @@ use tempfile::TempDir;
 
 use crate::common::{
     dataset::{
-        baseline_of, blueprint, config, meta_baseline_of, missing, model_set, r, replay_on,
+        baseline_of, blueprint, hourly_trades, meta_baseline_of, missing, model_set, r, replay_of,
         trade_on, unchanged, walk,
     },
     ic,
@@ -75,7 +75,7 @@ fn long_only() -> ModelConfig {
             short: None,
         },
         meta: Some(meta()),
-        ..config()
+        ..hourly_trades()
     }
 }
 
@@ -134,7 +134,9 @@ fn train_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> {
 
     for at in training().retrain_times(start, end).unwrap() {
         let outcome = on_thread(|| {
-            training().train_at(at, |from, to| replay_on(catalog, features(), from, to))
+            training().train_at(at, |from, to| {
+                replay_of(catalog, features(), &long_only(), from, to)
+            })
         });
         trained.push((at, outcome));
         let tenths = 3 + (at.duration_since(start).as_hours() / 24) as usize;

@@ -26,7 +26,8 @@
 //!   and the target's ATR, which the handle runs, and on a time-only target
 //!   that ATR alone. It returns the `Decision` of the side whose expected R
 //!   clears its margin, in R, the larger of two (`payoff::pick`), as plain
-//!   data: the side, the expected R and the level and side call behind it,
+//!   data only while the strategy has no working order or open position
+//!   on the traded instrument: the side, the expected R and the level and side call behind it,
 //!   and the trade the decision sets on that side, without a quantity: its
 //!   reference price, take profit, stop, time limit and one R. The handle
 //!   sends no order, reads no equity and handles no trade's time: the
@@ -486,7 +487,9 @@ impl ModelHandle {
     /// Decides now, for `strategy`: the decision to trade, if any; none
     /// while the warmup is not answered yet (`Warmup::is_warming`), the
     /// target's ATR is not initialized, or `decide::decide` publishes no
-    /// row (a stale decision, a feature not initialized).
+    /// row (a stale decision, a feature not initialized). In backtest and
+    /// live, a working order or open position of this strategy on the traded
+    /// instrument suppresses the entry, not the feature row.
     ///
     /// # Errors
     ///
@@ -509,7 +512,19 @@ impl ModelHandle {
         };
         match &self.serving {
             Serving::Deciding(deciding) => {
-                deciding.decide(strategy, Timestamp::from(row.ts_event), &row.features)
+                let decision =
+                    deciding.decide(strategy, Timestamp::from(row.ts_event), &row.features)?;
+                Ok(decision.filter(|_| {
+                    let cache = strategy.cache();
+                    let instrument = Some(&self.traded);
+                    let owner = Some(&row.strategy_id);
+                    // An order blocks from local initialization, through submission and
+                    // venue acceptance, until terminal. This includes outstanding exits.
+                    cache.positions_open_count(None, instrument, owner, None, None) == 0
+                        && cache.orders_active_local_count(None, instrument, owner, None, None) == 0
+                        && cache.orders_inflight_count(None, instrument, owner, None, None) == 0
+                        && cache.orders_open_count(None, instrument, owner, None, None) == 0
+                }))
             }
             Serving::Dataset { targets, .. } => {
                 targets.open(strategy, row)?;
@@ -1183,6 +1198,8 @@ mod tests {
             )
         );
     }
+
+    mod entry;
 
     /// EUR/USD on AUD/USD's venue, which `in_euros` converts through.
     const EURUSD: &str = "EUR/USD.SIM";
