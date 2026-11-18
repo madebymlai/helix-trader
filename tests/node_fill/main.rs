@@ -25,8 +25,7 @@ use std::{
 
 use helix_trader::{
     catalog::{FillData, FillRequest, NodeClient, NodeFill, missing},
-    rolls::Slice,
-    strategy::requirements::{DataRequirements, SeriesSlice, TickSeries},
+    strategy::requirements::{CatalogSeries, DataRequirements, SeriesSlice, TickSeries},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
@@ -72,6 +71,10 @@ const WED: &str = "2025-10-22T00:00:00Z";
 
 const DAY: SignedDuration = SignedDuration::from_hours(24);
 
+fn december() -> InstrumentId {
+    InstrumentId::from(GCZ26)
+}
+
 fn ts(s: &str) -> Timestamp {
     s.parse().unwrap()
 }
@@ -95,9 +98,9 @@ fn end_before(s: &str) -> Timestamp {
     ts(s) - SignedDuration::from_nanos(1)
 }
 
-fn gcz6() -> InstrumentAny {
+fn definition(id: InstrumentId) -> InstrumentAny {
     let mut contract = futures_contract_es(None, None);
-    contract.id = InstrumentId::from(GCZ26);
+    contract.id = id;
     InstrumentAny::FuturesContract(contract)
 }
 
@@ -123,15 +126,15 @@ fn delta(at: &str) -> OrderBookDelta {
     )
 }
 
-fn trade(id: &str, at: &str) -> TradeTick {
+fn trade(id: InstrumentId, at: Timestamp) -> TradeTick {
     TradeTick::new(
-        InstrumentId::from(id),
+        id,
         Price::from("4000.00"),
         Quantity::from(1),
         AggressorSide::Buy,
         TradeId::new("1"),
-        ts(at).into(),
-        ts(at).into(),
+        at.into(),
+        at.into(),
     )
 }
 
@@ -340,14 +343,18 @@ impl DataClient for FakeClient {
         let (start, end) = window(request.start, request.end);
         {
             let mut venue = self.venue.borrow_mut();
-            venue.asked.push((FillData::Instrument, start, end));
+            venue.asked.push((
+                FillData::Instrument(request.single_instrument_id()?),
+                start,
+                end,
+            ));
             venue.named.push(request.client_id);
         }
         let response = InstrumentResponse::new(
             request.request_id,
             self.id,
             request.single_instrument_id()?,
-            gcz6(),
+            definition(request.single_instrument_id()?),
             Some(UnixNanos::from(start)),
             Some(UnixNanos::from(end)),
             UnixNanos::from(end),
@@ -380,7 +387,7 @@ impl DataClient for FakeClient {
             request.params.clone(),
         ));
         self.answer(
-            FillData::Depth,
+            FillData::Depth(request.single_instrument_id()?),
             (request.request_id, request.client_id),
             (start, end),
             response,
@@ -405,7 +412,7 @@ impl DataClient for FakeClient {
             request.params.clone(),
         ));
         self.answer(
-            FillData::Deltas,
+            FillData::Deltas(request.single_instrument_id()?),
             (request.request_id, request.client_id),
             (start, end),
             response,
@@ -414,23 +421,24 @@ impl DataClient for FakeClient {
 
     fn request_trades(&self, request: RequestTrades) -> anyhow::Result<()> {
         let (start, end) = window(request.start, request.end);
+        let id = request.single_instrument_id()?;
         let of = if self.venue.borrow().answer == Answer::OtherContract {
-            "GCQ26.GLBX"
+            InstrumentId::from("GCQ26.GLBX")
         } else {
-            GCZ26
+            id
         };
         let response = DataResponse::Trades(TradesResponse::new(
             request.request_id,
             self.id,
             request.instrument_ids.clone(),
-            vec![trade(of, "2025-10-17T10:00:00Z")],
+            vec![trade(of, Timestamp::from(UnixNanos::from(start)))],
             Some(UnixNanos::from(start)),
             Some(UnixNanos::from(end)),
             UnixNanos::from(end),
             request.params.clone(),
         ));
         self.answer(
-            FillData::Trades,
+            FillData::Trades(id),
             (request.request_id, request.client_id),
             (start, end),
             response,
@@ -481,7 +489,7 @@ impl DataClient for FakeClient {
             request.params.clone(),
         ));
         self.answer(
-            FillData::Funding,
+            FillData::Funding(request.single_instrument_id()?),
             (request.request_id, request.client_id),
             (start, end),
             response,
@@ -582,6 +590,39 @@ fn stored_book(dir: &Path) -> Vec<u64> {
         .collect()
 }
 
+/// GC rolls from August to December at midnight. The explicit December
+/// trades start an hour earlier, so its history is needed once for both hours.
+#[rstest]
+fn a_root_and_explicit_contract_ask_each_contract_once_over_its_required_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let venue = FakeVenue::new(Answer::Data);
+    let mut requirements = reading(NautilusDataType::TradeTick);
+    requirements.ticks.insert(
+        0,
+        TickSeries {
+            data: NautilusDataType::TradeTick,
+            instrument_id: InstrumentId::from("GC.GLBX"),
+        },
+    );
+    let august = InstrumentId::from("GCQ26.GLBX");
+    let december = InstrumentId::from(GCZ26);
+    let from = "2026-07-28T23:00:00Z";
+    let roll = "2026-07-29T00:00:00Z";
+    let to = "2026-07-29T01:00:00Z";
+
+    fill(dir.path(), &venue, &requirements, (ts(from), ts(to)), DAY).unwrap();
+
+    assert_eq!(
+        venue.borrow().asked,
+        [
+            (FillData::Instrument(august), ns(from), before(roll)),
+            (FillData::Trades(august), ns(from), before(roll)),
+            (FillData::Instrument(december), ns(from), ns(to)),
+            (FillData::Trades(december), ns(from), ns(to)),
+        ]
+    );
+}
+
 #[rstest]
 fn each_day_is_asked_and_written_back_and_a_wider_fill_asks_only_the_new_day() {
     let dir = tempfile::tempdir().unwrap();
@@ -606,13 +647,13 @@ fn each_day_is_asked_and_written_back_and_a_wider_fill_asks_only_the_new_day() {
     assert_eq!(
         venue.borrow().asked,
         [
-            (FillData::Instrument, ns(FRI), before(TUE)),
-            (FillData::Depth, ns(FRI), ns(SAT)),
-            (FillData::Depth, after(SAT), ns(SUN)),
-            (FillData::Depth, after(SUN), ns(MON)),
-            (FillData::Depth, after(MON), before(TUE)),
+            (FillData::Instrument(december()), ns(FRI), before(TUE)),
+            (FillData::Depth(december()), ns(FRI), ns(SAT)),
+            (FillData::Depth(december()), after(SAT), ns(SUN)),
+            (FillData::Depth(december()), after(SUN), ns(MON)),
+            (FillData::Depth(december()), after(MON), before(TUE)),
             // The definition stored, the catalog answers it.
-            (FillData::Depth, ns(TUE), ns(WED)),
+            (FillData::Depth(december()), ns(TUE), ns(WED)),
         ]
     );
     assert_eq!(asked_twice, 6);
@@ -678,8 +719,8 @@ fn a_sliver_between_stored_files_is_asked_once_and_closed_by_its_write_back() {
     assert_eq!(
         venue.borrow().asked,
         [
-            (FillData::Instrument, sliver.0, sliver.1),
-            (FillData::Depth, sliver.0, sliver.1),
+            (FillData::Instrument(december()), sliver.0, sliver.1),
+            (FillData::Depth(december()), sliver.0, sliver.1),
         ]
     );
 }
@@ -793,8 +834,8 @@ fn a_window_failing_keeps_those_before_it_and_the_next_fill_asks_only_from_it() 
     assert_eq!(
         venue.borrow().asked,
         [
-            (FillData::Depth, after(SUN), ns(MON) + 1),
-            (FillData::Depth, ns(MON) + 2, before(TUE)),
+            (FillData::Depth(december()), after(SUN), ns(MON) + 1),
+            (FillData::Depth(december()), ns(MON) + 2, before(TUE)),
         ]
     );
     assert_eq!(
@@ -851,7 +892,7 @@ fn each_request_is_answered_by_the_client_it_names() {
     let (definition, book): (Vec<FillRequest>, Vec<FillRequest>) = missing(&catalog, &slices)
         .unwrap()
         .into_iter()
-        .partition(|request| request.data == FillData::Instrument);
+        .partition(|request| matches!(request.data, FillData::Instrument(_)));
     let mut node = NodeFill::new();
     node.add(
         fake_client(&definitions, "DEFINITIONS"),
@@ -864,7 +905,7 @@ fn each_request_is_answered_by_the_client_it_names() {
 
     assert_eq!(
         definitions.borrow().asked,
-        [(FillData::Instrument, ns(FRI), before(SUN))]
+        [(FillData::Instrument(december()), ns(FRI), before(SUN))]
     );
     assert_eq!(
         definitions.borrow().named,
@@ -873,8 +914,8 @@ fn each_request_is_answered_by_the_client_it_names() {
     assert_eq!(
         history.borrow().asked,
         [
-            (FillData::Depth, ns(FRI), ns(SAT)),
-            (FillData::Depth, after(SAT), before(SUN)),
+            (FillData::Depth(december()), ns(FRI), ns(SAT)),
+            (FillData::Depth(december()), after(SAT), before(SUN)),
         ]
     );
     assert_eq!(history.borrow().named, [Some(ClientId::from("HISTORY")); 2]);
@@ -920,9 +961,9 @@ fn book_deltas_are_asked_a_day_a_request_and_written_back() {
     assert_eq!(
         venue.borrow().asked,
         [
-            (FillData::Instrument, ns(MON), before(WED)),
-            (FillData::Deltas, ns(MON), ns(TUE)),
-            (FillData::Deltas, after(TUE), before(WED)),
+            (FillData::Instrument(december()), ns(MON), before(WED)),
+            (FillData::Deltas(december()), ns(MON), ns(TUE)),
+            (FillData::Deltas(december()), after(TUE), before(WED)),
         ]
     );
     let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -962,26 +1003,25 @@ fn funding(at: &str) -> FundingRateUpdate {
     )
 }
 
-/// The slice of GCZ26's `series` over `[from, to]`.
-fn series_slice(series: (NautilusDataType, &str), from: Timestamp, to: Timestamp) -> SeriesSlice {
-    SeriesSlice {
-        series: (series.0, series.1.to_string()),
-        slice: Slice {
-            instrument_id: InstrumentId::from(GCZ26),
-            from,
-            to,
-        },
-    }
-}
-
 #[rstest]
 fn bars_and_funding_are_asked_a_day_a_request_and_written_back_under_their_series() {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::Data);
     let (from, to) = (ts(FRI), end_before(SUN));
     let slices = [
-        series_slice((NautilusDataType::FundingRateUpdate, GCZ26), from, to),
-        series_slice((NautilusDataType::Bar, BARS), from, to),
+        SeriesSlice {
+            series: CatalogSeries::Ticks(TickSeries {
+                data: NautilusDataType::FundingRateUpdate,
+                instrument_id: InstrumentId::from(GCZ26),
+            }),
+            from,
+            to,
+        },
+        SeriesSlice {
+            series: CatalogSeries::Bars(BarType::from(BARS)),
+            from,
+            to,
+        },
     ];
 
     fill_slices(dir.path(), &venue, &slices, DAY).unwrap();
@@ -990,9 +1030,9 @@ fn bars_and_funding_are_asked_a_day_a_request_and_written_back_under_their_serie
     assert_eq!(
         venue.borrow().asked,
         [
-            (FillData::Instrument, ns(FRI), before(SUN)),
-            (FillData::Funding, ns(FRI), ns(SAT)),
-            (FillData::Funding, after(SAT), before(SUN)),
+            (FillData::Instrument(december()), ns(FRI), before(SUN)),
+            (FillData::Funding(december()), ns(FRI), ns(SAT)),
+            (FillData::Funding(december()), after(SAT), before(SUN)),
             (bars, ns(FRI), ns(SAT)),
             (bars, after(SAT), before(SUN)),
         ]

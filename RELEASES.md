@@ -13,6 +13,9 @@ Released on TBD (UTC).
 
 ### Breaking Changes
 
+- Changed `SeriesSlice` to hold `CatalogSeries`, `from` and `to`; use `series.instrument_id()` for the contract and `series.key()` for the catalog key
+- Removed `FillRequest::instrument_id`; pass the `InstrumentId` to non-bar `FillData` variants and use `request.data.instrument_id()` to read the target
+- Changed `fill_catalog`, its fetch callback and `IbHistory::data` to use `CatalogSeries`; pass a slice to the writer and a series reference to each fetch
 - Removed the holdout gate: a train fails only on `min_rows`, a non-finite output or a failed probe; judge a config's models by a backtest's scores
 - Renamed `[model] holdout` and `[model.meta] holdout` to `calibration`, the window's last part, calibrated on and not fitted on; rename the key
 - Removed `min_trades` and `min_expectancy` from `[model]` and `[model.meta]`; drop them

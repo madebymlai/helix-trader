@@ -107,10 +107,11 @@ impl DatabentoHistory {
         requests: &[FillRequest],
     ) -> anyhow::Result<Vec<FillRequest>> {
         let mut datasets = Vec::new();
+
         for request in requests {
-            let venue = request.instrument_id.venue;
+            let venue = request.data.instrument_id().venue;
             anyhow::ensure!(
-                request.data == FillData::Instrument
+                matches!(request.data, FillData::Instrument(_))
                     && Row::of(venue).definitions == DefinitionsSource::Databento,
                 "Databento gives the definitions of GLBX, XNAS and OPRA instruments here, not \
                  {request}"
@@ -229,8 +230,7 @@ mod tests {
 
     fn definition(from: &str, to: &str) -> FillRequest {
         FillRequest {
-            data: FillData::Instrument,
-            instrument_id: InstrumentId::from("GCZ26.GLBX"),
+            data: FillData::Instrument(InstrumentId::from("GCZ26.GLBX")),
             from: ts(from),
             to: ts(to),
         }
@@ -304,19 +304,26 @@ mod tests {
     /// GLBX's history is LSE's; IB defines XCEC's instruments, as it
     /// gives their history.
     #[rstest]
-    #[case::a_series_of_glbx(FillData::Trades, "GCZ26.GLBX", "the trades of GCZ26.GLBX")]
-    #[case::a_series_of_another_venue(FillData::Trades, "GCZ26.XCEC", "GCZ26.XCEC")]
-    #[case::a_definition_of_another_venue(FillData::Instrument, "GCZ26.XCEC", "GCZ26.XCEC")]
+    #[case::a_series_of_glbx(
+        FillData::Trades(InstrumentId::from("GCZ26.GLBX")),
+        "the trades of GCZ26.GLBX"
+    )]
+    #[case::a_series_of_another_venue(
+        FillData::Trades(InstrumentId::from("GCZ26.XCEC")),
+        "GCZ26.XCEC"
+    )]
+    #[case::a_definition_of_another_venue(
+        FillData::Instrument(InstrumentId::from("GCZ26.XCEC")),
+        "GCZ26.XCEC"
+    )]
     #[tokio::test]
     async fn a_request_databento_does_not_serve_is_refused_before_any_request(
         #[case] data: FillData,
-        #[case] instrument_id: &str,
         #[case] named: &str,
     ) {
         let history = DatabentoHistory::new(&format!("db-{}", "0".repeat(29))).unwrap();
         let request = FillRequest {
             data,
-            instrument_id: InstrumentId::from(instrument_id),
             from: ts("2026-10-26T00:00:00Z"),
             to: ts("2026-10-26T12:00:00Z"),
         };

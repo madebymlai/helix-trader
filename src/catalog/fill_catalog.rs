@@ -2,10 +2,9 @@
 //! instruments and the series their strategy's bars are built from.
 //!
 //! Source-agnostic, no node: the data comes from a fetch function the
-//! caller passes, backed by an adapter's historical client (`venues::ib`). A series is a Nautilus data type and its catalog
-//! identifier (see `strategy::requirements::catalog_keys`): the quotes of an
-//! instrument, keyed by its id, or the bars of a bar type, keyed by the bar
-//! type. Per series it resumes after its stored range
+//! caller passes, backed by an adapter's historical client (`venues::ib`).
+//! A series identifies bars by their full bar type and ticks by their kind
+//! and instrument. Per series it resumes after its stored range
 //! (`query_first_timestamp`, `query_last_timestamp`), checks the response,
 //! sorts it by `ts_init` and writes it with `write_instruments` and
 //! `write_data_enum` on a `ParquetDataCatalog` (`nautilus_persistence`),
@@ -32,10 +31,10 @@ use nautilus_persistence::{
     backend::parquet::catalog::ParquetDataCatalog, catalog::types::data_path_prefix,
 };
 
-use crate::strategy::requirements::SeriesSlice;
+use crate::strategy::requirements::{CatalogSeries, SeriesSlice};
 
 /// Fills `catalog` with `instruments`, then over `[start, end]` with each
-/// of `series`, a Nautilus data type and its catalog identifier, fetched one
+/// of `series`, fetched one
 /// series at a time through `fetch`.
 ///
 /// Instruments already in the catalog are not written again. A series is
@@ -61,15 +60,10 @@ use crate::strategy::requirements::SeriesSlice;
 pub async fn fill_catalog(
     catalog: &mut ParquetDataCatalog,
     instruments: Vec<InstrumentAny>,
-    series: &[(NautilusDataType, String)],
+    series: &[CatalogSeries],
     start: Timestamp,
     end: Timestamp,
-    mut fetch: impl AsyncFnMut(
-        &NautilusDataType,
-        &str,
-        Timestamp,
-        Timestamp,
-    ) -> anyhow::Result<Vec<Data>>,
+    mut fetch: impl AsyncFnMut(&CatalogSeries, Timestamp, Timestamp) -> anyhow::Result<Vec<Data>>,
 ) -> anyhow::Result<()> {
     let ids: Vec<String> = instruments.iter().map(|i| i.id().to_string()).collect();
     let stored: HashSet<InstrumentId> = catalog
@@ -86,23 +80,23 @@ pub async fn fill_catalog(
         .write_instruments(new)
         .context("writing instruments")?;
     let end_ns = UnixNanos::from(end);
-    for (data_type, identifier) in series {
-        let named = || format!("the {} of {identifier}", data_path_prefix(data_type));
-        let (Some(from), resume_point) = resumed(catalog, data_type, identifier, start, end)?
-        else {
+
+    for source in series {
+        let named = || {
+            let (kind, key) = source.key();
+            format!("the {} of {key}", data_path_prefix(&kind))
+        };
+        let (Some(from), resume_point) = resumed(catalog, source, start, end)? else {
             continue;
         };
-        let mut items = fetch(data_type, identifier, from, end)
+        let mut items = fetch(source, from, end)
             .await
             .with_context(|| format!("fetching {}", named()))?;
         if items.is_empty() && resume_point.is_none() {
             anyhow::bail!("empty response for {} over [{from}, {end}]", named());
         }
 
-        if let Some(foreign) = items
-            .iter()
-            .find(|item| !is_of(item, data_type, identifier))
-        {
+        if let Some(foreign) = items.iter().find(|item| !is_of(item, source)) {
             anyhow::bail!(
                 "response for {} holds {} of {}",
                 named(),
@@ -135,7 +129,7 @@ pub async fn fill_catalog(
     Ok(())
 }
 
-/// Where a fill of the series of `data_type` and `identifier` over the
+/// Where a fill of `series` over the
 /// window `[start, end]` resumes, by what `catalog` stores of it: from
 /// `start` if it stores nothing of it, else 1 ns after its stored end,
 /// whatever `start`, so that no hole opens between the stored range and
@@ -148,19 +142,19 @@ pub async fn fill_catalog(
 /// the stored range: extending history backwards is not supported.
 pub(crate) fn resumed(
     catalog: &ParquetDataCatalog,
-    data_type: &NautilusDataType,
-    identifier: &str,
+    series: &CatalogSeries,
     start: Timestamp,
     end: Timestamp,
 ) -> anyhow::Result<(Option<Timestamp>, Option<UnixNanos>)> {
-    let named = || format!("the {} of {identifier}", data_path_prefix(data_type));
+    let (data_type, identifier) = series.key();
+    let named = || format!("the {} of {identifier}", data_path_prefix(&data_type));
     let catalog_type = data_type.clone().into();
     let reading = || format!("reading the stored range of {}", named());
     let first = catalog
-        .query_first_timestamp(&catalog_type, Some(identifier))
+        .query_first_timestamp(&catalog_type, Some(&identifier))
         .with_context(reading)?;
     let last = catalog
-        .query_last_timestamp(&catalog_type, Some(identifier))
+        .query_last_timestamp(&catalog_type, Some(&identifier))
         .with_context(reading)?;
 
     if let (Some(first), Some(last)) = (first, last)
@@ -195,15 +189,10 @@ pub(crate) async fn fill_slices(
     catalog: &mut ParquetDataCatalog,
     instruments: &[InstrumentAny],
     slices: &[SeriesSlice],
-    mut fetch: impl AsyncFnMut(
-        &NautilusDataType,
-        &str,
-        Timestamp,
-        Timestamp,
-    ) -> anyhow::Result<Vec<Data>>,
+    mut fetch: impl AsyncFnMut(&CatalogSeries, Timestamp, Timestamp) -> anyhow::Result<Vec<Data>>,
 ) -> anyhow::Result<()> {
-    for SeriesSlice { series, slice } in slices {
-        let id = slice.instrument_id;
+    for slice in slices {
+        let id = slice.series.instrument_id();
         let instrument = instruments
             .iter()
             .find(|instrument| instrument.id() == id)
@@ -211,19 +200,26 @@ pub(crate) async fn fill_slices(
         fill_catalog(
             catalog,
             vec![instrument.clone()],
-            std::slice::from_ref(series),
+            std::slice::from_ref(&slice.series),
             slice.from,
             slice.to,
-            async |data_type, identifier, from, to| fetch(data_type, identifier, from, to).await,
+            &mut fetch,
         )
         .await?;
     }
     Ok(())
 }
 
-/// Whether `item` belongs to the series of `data_type` and `identifier`.
-fn is_of(item: &Data, data_type: &NautilusDataType, identifier: &str) -> bool {
-    NautilusDataType::from_data(item) == *data_type && catalog_identifier(item) == identifier
+/// Whether the venue returned an item of the requested series.
+fn is_of(item: &Data, series: &CatalogSeries) -> bool {
+    match (item, series) {
+        (Data::Bar(bar), CatalogSeries::Bars(expected)) => bar.bar_type == *expected,
+        (Data::Bar(_), _) | (_, CatalogSeries::Bars(_)) => false,
+        (_, CatalogSeries::Ticks(tick)) => {
+            NautilusDataType::from_data(item) == tick.data
+                && item.instrument_id() == tick.instrument_id
+        }
+    }
 }
 
 /// The identifier the catalog stores `item` under, as `write_data_enum`
@@ -257,10 +253,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::{
-        rolls::Slice,
-        strategy::requirements::{DataRequirements, SeriesSlice, TickSeries},
-    };
+    use crate::strategy::requirements::{CatalogSeries, DataRequirements, SeriesSlice, TickSeries};
 
     fn instrument() -> InstrumentAny {
         InstrumentAny::FuturesContract(futures_contract_es(None, None))
@@ -310,7 +303,12 @@ mod tests {
     ) -> anyhow::Result<()> {
         let series: Vec<_> = instruments
             .iter()
-            .map(|i| (NautilusDataType::QuoteTick, i.id().to_string()))
+            .map(|i| {
+                CatalogSeries::Ticks(TickSeries {
+                    data: NautilusDataType::QuoteTick,
+                    instrument_id: i.id(),
+                })
+            })
             .collect();
         fill_catalog(
             catalog,
@@ -318,9 +316,12 @@ mod tests {
             &series,
             start,
             end,
-            async |data_type, identifier, from, to| {
-                assert_eq!(*data_type, NautilusDataType::QuoteTick);
-                let quotes = fetch_quotes(InstrumentId::from(identifier), from, to).await?;
+            async |series, from, to| {
+                let CatalogSeries::Ticks(tick) = series else {
+                    panic!("{series}")
+                };
+                assert_eq!(tick.data, NautilusDataType::QuoteTick);
+                let quotes = fetch_quotes(tick.instrument_id, from, to).await?;
                 Ok(quotes.into_iter().map(Data::Quote).collect())
             },
         )
@@ -911,20 +912,17 @@ mod tests {
         start: u64,
         end: u64,
         source: impl Fn(u64, u64) -> Vec<Data>,
-    ) -> (
-        anyhow::Result<()>,
-        Vec<(NautilusDataType, String, u64, u64)>,
-    ) {
+    ) -> (anyhow::Result<()>, Vec<(CatalogSeries, u64, u64)>) {
         let mut asked = Vec::new();
         let result = fill_catalog(
             catalog,
             vec![instrument()],
-            &[(NautilusDataType::Bar, BARS.to_string())],
+            &[CatalogSeries::Bars(BarType::from(BARS))],
             ns(start),
             ns(end),
-            async |data_type, identifier, from, to| {
+            async |series, from, to| {
                 let (from, to) = (as_ns(from), as_ns(to));
-                asked.push((data_type.clone(), identifier.to_string(), from, to));
+                asked.push((series.clone(), from, to));
                 Ok(source(from, to))
             },
         )
@@ -958,7 +956,7 @@ mod tests {
         r.unwrap();
         assert_eq!(
             asked,
-            vec![(NautilusDataType::Bar, BARS.to_string(), 101, 200)]
+            vec![(CatalogSeries::Bars(BarType::from(BARS)), 101, 200)]
         );
         assert_eq!(stored_bars(&mut catalog), vec![10, 20, 30, 150]);
         let intervals = catalog
@@ -1062,12 +1060,16 @@ mod tests {
         let result = fill_catalog(
             catalog,
             vec![instrument()],
-            &requirements.catalog_keys(),
+            &requirements.catalog_series(),
             ns(start),
             ns(end),
-            async |data_type, identifier, from, to| {
+            async |series, from, to| {
+                let CatalogSeries::Ticks(tick) = series else {
+                    panic!("{series}")
+                };
+                let data_type = &tick.data;
                 let (from, to) = (as_ns(from), as_ns(to));
-                asked.push((data_type.clone(), identifier.to_string(), from, to));
+                asked.push((data_type.clone(), tick.instrument_id.to_string(), from, to));
                 let within = |ts: &u64| (from..=to).contains(ts);
                 Ok(match data_type {
                     NautilusDataType::TradeTick => [10, 60, 150]
@@ -1129,12 +1131,12 @@ mod tests {
 
     fn quotes_slice(id: &str, from: u64, to: u64) -> SeriesSlice {
         SeriesSlice {
-            series: (NautilusDataType::QuoteTick, id.to_string()),
-            slice: Slice {
+            series: CatalogSeries::Ticks(TickSeries {
+                data: NautilusDataType::QuoteTick,
                 instrument_id: InstrumentId::from(id),
-                from: ns(from),
-                to: ns(to),
-            },
+            }),
+            from: ns(from),
+            to: ns(to),
         }
     }
 
@@ -1152,10 +1154,13 @@ mod tests {
             &mut catalog,
             &contracts(),
             &slices,
-            async |data_type, identifier, from, to| {
-                assert_eq!(*data_type, NautilusDataType::QuoteTick);
-                asked.push((identifier.to_string(), as_ns(from), as_ns(to)));
-                let id = InstrumentId::from(identifier);
+            async |series, from, to| {
+                let CatalogSeries::Ticks(tick) = series else {
+                    panic!("{series}")
+                };
+                assert_eq!(tick.data, NautilusDataType::QuoteTick);
+                let id = tick.instrument_id;
+                asked.push((id.to_string(), as_ns(from), as_ns(to)));
                 Ok(vec![Data::Quote(quote_at(id, as_ns(from) + 10))])
             },
         )
@@ -1192,8 +1197,8 @@ mod tests {
             &mut catalog,
             &contracts(),
             &slices,
-            async |_, identifier, from, _| {
-                let id = InstrumentId::from(identifier);
+            async |series, from, _| {
+                let id = series.instrument_id();
                 Ok(vec![Data::Quote(quote_at(id, as_ns(from) + 10))])
             },
         )

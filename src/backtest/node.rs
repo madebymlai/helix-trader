@@ -16,7 +16,7 @@
 //! chunk, dropping what was added before, so a run with custom data loads
 //! all its data at once (no `chunk_size`).
 
-use std::{collections::BTreeSet, fmt::Debug, str::FromStr, sync::Arc};
+use std::{collections::BTreeSet, fmt::Debug, sync::Arc};
 
 use anyhow::Context;
 use nautilus_analysis::statistics::max_drawdown::MaxDrawdown;
@@ -31,7 +31,7 @@ use nautilus_execution::engine::config::ExecutionEngineConfig;
 use nautilus_model::{
     data::{Data, DataBatch, NautilusDataType, QuoteTick},
     enums::{AccountType, BookType},
-    identifiers::{InstrumentId, Venue},
+    identifiers::Venue,
     types::Money,
 };
 use nautilus_persistence::{
@@ -45,7 +45,7 @@ use super::{Backtest, Latency, report::Outcome};
 use crate::{
     catalog::catalog_config,
     strategy::{
-        requirements::{CustomSlice, SeriesSlice},
+        requirements::{CatalogSeries, CustomSlice, SeriesSlice},
         warmup,
     },
     venues,
@@ -249,26 +249,23 @@ fn data_config(
     catalog: &DataCatalogConfig,
     series: SeriesSlice,
 ) -> anyhow::Result<BacktestDataConfig> {
-    let SeriesSlice {
-        series: (data_type, identifier),
-        slice,
-    } = series;
+    let SeriesSlice { series, from, to } = series;
     let builder = BacktestDataConfig::builder()
         .catalog(catalog.clone())
-        .data_type(data_type.clone())
-        .start_time(UnixNanos::from(slice.from))
-        .end_time(UnixNanos::from(slice.to))
+        .instrument_id(series.instrument_id())
+        .start_time(UnixNanos::from(from))
+        .end_time(UnixNanos::from(to))
         // One stream over the series' files, as the catalog itself queries:
         // Nautilus' default for a backtest config opens a prefetching stream
         // per file, all before the first chunk, which over months of MBP-10
         // files takes tens of GB.
         .optimize_file_loading(true);
-    let config = if data_type == NautilusDataType::Bar {
-        builder.bar_types(vec![identifier]).build()
-    } else {
-        builder
-            .instrument_id(InstrumentId::from_str(&identifier)?)
-            .build()
+    let config = match series {
+        CatalogSeries::Bars(bar) => builder
+            .data_type(NautilusDataType::Bar)
+            .bar_spec(bar.spec())
+            .build(),
+        CatalogSeries::Ticks(tick) => builder.data_type(tick.data).build(),
     };
     Ok(config?)
 }
@@ -488,7 +485,7 @@ mod tests {
     use nautilus_model::{
         data::BarType,
         enums::OmsType,
-        identifiers::{StrategyId, TraderId},
+        identifiers::{InstrumentId, StrategyId, TraderId},
         types::{Currency, Money},
     };
     use rstest::rstest;
@@ -747,7 +744,10 @@ mod tests {
             data.query_identifiers().unwrap(),
             ["SXR8.IBIS-1-MINUTE-LAST-EXTERNAL"]
         );
-        assert_eq!(data.instrument_id(), None);
+        assert_eq!(
+            data.get_instrument_ids().unwrap(),
+            [InstrumentId::from("SXR8.IBIS")]
+        );
     }
 
     /// 5 s after their close, as a live node builds them, in a trading run

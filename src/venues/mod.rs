@@ -822,7 +822,7 @@ fn add_ctrader_fill(
 fn of_source(slices: &[SeriesSlice], source: HistorySource) -> Vec<SeriesSlice> {
     slices
         .iter()
-        .filter(|slice| Row::of(slice.slice.instrument_id.venue).history == source)
+        .filter(|slice| Row::of(slice.series.instrument_id().venue).history == source)
         .cloned()
         .collect()
 }
@@ -842,7 +842,7 @@ fn of_custom_source(custom: &[CustomSlice], source: HistorySource) -> Vec<Custom
 fn of_definitions_source(slices: &[SeriesSlice], source: DefinitionsSource) -> Vec<SeriesSlice> {
     slices
         .iter()
-        .filter(|slice| Row::of(slice.slice.instrument_id.venue).definitions == source)
+        .filter(|slice| Row::of(slice.series.instrument_id().venue).definitions == source)
         .cloned()
         .collect()
 }
@@ -1850,15 +1850,18 @@ mod tests {
 
         let asked = |data| FillRequest {
             data,
-            instrument_id: InstrumentId::from("XAUUSD.PEPPERSTONE"),
             from: at(FILL_START),
             to: at(FILL_END),
         };
+        let id = InstrumentId::from("XAUUSD.PEPPERSTONE");
         assert_eq!(
             node.asked(),
             [
-                (asked(FillData::Instrument), None),
-                (asked(FillData::Quotes), Some(ctrader::TICK_REQUEST_SPAN)),
+                (asked(FillData::Instrument(id)), None),
+                (
+                    asked(FillData::Quotes(id)),
+                    Some(ctrader::TICK_REQUEST_SPAN)
+                ),
             ]
         );
     }
@@ -1899,7 +1902,7 @@ mod tests {
         let contracts = |source| {
             of_source(&slices, source)
                 .iter()
-                .map(|slice| slice.slice.instrument_id.to_string())
+                .map(|slice| slice.series.instrument_id().to_string())
                 .collect::<Vec<_>>()
         };
 
