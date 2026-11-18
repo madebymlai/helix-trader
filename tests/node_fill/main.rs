@@ -34,7 +34,7 @@ use nautilus_common::{
     clients::DataClient,
     clock::Clock,
     factories::{ClientConfig, DataClientFactory},
-    live::{get_runtime, runner::get_data_event_sender, sender::EventSender},
+    live::{clock::LiveClock, get_runtime, runner::get_data_event_sender, sender::EventSender},
     messages::{
         DataEvent, DataResponse,
         data::{
@@ -539,7 +539,10 @@ fn run(node: NodeFill, dir: &Path) -> anyhow::Result<()> {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(async { tokio::time::timeout(Duration::from_secs(60), node.run(dir)).await })
+        .block_on(async {
+            let fill = node.run(dir, || Rc::new(RefCell::new(LiveClock::default())));
+            tokio::time::timeout(Duration::from_secs(60), fill).await
+        })
         .expect("the fill ends within a minute")
 }
 

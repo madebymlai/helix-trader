@@ -43,6 +43,7 @@ Released on TBD (UTC).
 - Removed `FeatureSetBuilder`'s `quotes`, `trades`, `bars`, `depth`, `deltas`, `over_bracket`; use `feature` on a list of series, and `bracket` for the width
 - Changed `OverBracket` to be a feature's `Feature::over_bracket`, handed the width `FeatureSetBuilder::bracket` takes; return `Some(self)` from it
 - Changed `Warmup`'s `feeding`, `feeding_ticks`, `feeding_books` and `feeding_custom` to take the series their indicator reads; pass them first
+- Changed `NodeFill::run` to take its node's clock factory, whose clock LSE's client reads the time from; pass `|| Rc::new(RefCell::new(LiveClock::default()))`
 
 ### Security
 

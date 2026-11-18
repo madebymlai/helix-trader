@@ -34,6 +34,7 @@ use anyhow::Context;
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
     actor::{DataActor, DataActorConfig, DataActorCore},
+    clock::Clock,
     enums::Environment,
     factories::{ClientConfig, DataClientFactory},
     messages::data::{DataResponse, DataResponseEnvelope},
@@ -389,6 +390,10 @@ impl NodeFill {
     /// clients and the catalog, one request at a time, each with
     /// `update_catalog`, so the data engine writes each answer back over
     /// its window, and what was written stays if a later window fails.
+    /// The node runs on the clocks `clock` makes, its kernel's and each
+    /// component's (`LiveNodeBuilder::with_clock_factory`), which the data
+    /// engine and the clients read the time from: a fill of history passes
+    /// Nautilus' `LiveClock`.
     /// Nothing asked builds no node; a node built is disposed whatever
     /// comes of it (`concepts/architecture.md`, "Processes and threads").
     ///
@@ -398,7 +403,11 @@ impl NodeFill {
     /// request, if one fails, its client answers with a failure or its
     /// answer is not written back; or if the node stops before every
     /// request is answered. What was written before stays.
-    pub async fn run(self, catalog_dir: &Path) -> anyhow::Result<()> {
+    pub async fn run(
+        self,
+        catalog_dir: &Path,
+        clock: impl Fn() -> Rc<RefCell<dyn Clock>> + 'static,
+    ) -> anyhow::Result<()> {
         let Self { clients, requests } = self;
         if requests.is_empty() {
             log::info!("The catalog holds every window asked for: no node");
@@ -418,7 +427,9 @@ impl NodeFill {
         };
         let mut builder = LiveNodeBuilder::from_config(config)?
             .with_name("FILL")
-            .with_delay_post_stop_secs(0);
+            .with_delay_post_stop_secs(0)
+            .with_clock_factory(clock);
+
         for client in clients {
             builder = builder.add_data_client(None, client.factory, client.config)?;
         }

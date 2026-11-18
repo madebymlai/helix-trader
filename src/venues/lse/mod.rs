@@ -160,7 +160,7 @@ pub(super) fn live_clients(instrument_ids: &[InstrumentId]) -> Clients {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, num::NonZeroU32, path::Path};
+    use std::{cell::RefCell, collections::HashSet, num::NonZeroU32, path::Path, rc::Rc};
 
     use ::lse::{
         LseRow,
@@ -177,7 +177,10 @@ mod tests {
         },
     };
     use jiff::Timestamp;
-    use nautilus_common::config::ConfigResult;
+    use nautilus_common::{
+        clock::{Clock, VirtualClock},
+        config::ConfigResult,
+    };
     use nautilus_core::{UnixNanos, string::secret::SecretString};
     use nautilus_model::{
         data::{Bar, BarType, Data, DataType, NautilusDataType, TradeTick},
@@ -228,20 +231,20 @@ mod tests {
             lse,
             id,
             definitions,
-            at("10:00:00"),
-            at("10:00:00.999999999"),
+            (at("10:00:00"), at("10:00:00.999999999")),
+            settled(),
         )
     }
 
-    /// fill-catalog's fill of the trades of `id` over `[from, to]`, as
-    /// `fill`'s.
+    /// fill-catalog's fill of the trades of `id` over `[from, to]` at
+    /// `now`, as `fill`'s.
     fn fill_over(
         dir: &Path,
         lse: &MockLse,
         id: &str,
         definitions: Vec<InstrumentAny>,
-        from: Timestamp,
-        to: Timestamp,
+        (from, to): (Timestamp, Timestamp),
+        now: Timestamp,
     ) -> anyhow::Result<()> {
         let requirements = DataRequirements {
             bar_types: vec![],
@@ -252,7 +255,7 @@ mod tests {
             custom: vec![],
             warmup: SignedDuration::ZERO,
         };
-        fill_requirements(dir, lse, &requirements, definitions, from, to)
+        fill_at(dir, lse, None, &requirements, definitions, (from, to), now)
     }
 
     /// fill-catalog's fill of `requirements` over `[from, to]` into the
@@ -268,18 +271,56 @@ mod tests {
         fill_from(dir, lse, None, requirements, definitions, (from, to))
     }
 
-    /// fill-catalog's fill of `requirements` over `[from, to]` into the
-    /// catalog in `dir`, from `lse` and `databento`, Databento's mock peer,
-    /// the catalog holding `definitions`, the custom data types helix
-    /// compiles registered first, as the process does at its start. With
-    /// no peer of Databento's, Databento is never asked.
+    /// When a fill runs unless a test says otherwise: days after every
+    /// window the tests fill, so that LSE has loaded each.
+    fn settled() -> Timestamp {
+        "2026-11-25T12:00:00Z".parse().unwrap()
+    }
+
+    /// The clocks of a node at `now`: Nautilus' virtual clock, set there.
+    fn clock_at(now: Timestamp) -> impl Fn() -> Rc<RefCell<dyn Clock>> + 'static {
+        move || {
+            let clock = VirtualClock::new();
+            clock.set_time(UnixNanos::from(now));
+            Rc::new(RefCell::new(clock))
+        }
+    }
+
+    /// fill-catalog's fill of `requirements` over `[from, to]`, as
+    /// `fill_at`'s, at `settled()`.
     fn fill_from(
         dir: &Path,
         lse: &MockLse,
         databento: Option<&MockDatabento>,
         requirements: &DataRequirements,
         definitions: Vec<InstrumentAny>,
+        window: (Timestamp, Timestamp),
+    ) -> anyhow::Result<()> {
+        fill_at(
+            dir,
+            lse,
+            databento,
+            requirements,
+            definitions,
+            window,
+            settled(),
+        )
+    }
+
+    /// fill-catalog's fill of `requirements` over `[from, to]` into the
+    /// catalog in `dir`, from `lse` and `databento`, Databento's mock peer,
+    /// the catalog holding `definitions`, the custom data types helix
+    /// compiles registered first, as the process does at its start, on a
+    /// node whose clock reads `now`. With no peer of Databento's,
+    /// Databento is never asked.
+    fn fill_at(
+        dir: &Path,
+        lse: &MockLse,
+        databento: Option<&MockDatabento>,
+        requirements: &DataRequirements,
+        definitions: Vec<InstrumentAny>,
         (from, to): (Timestamp, Timestamp),
+        now: Timestamp,
     ) -> anyhow::Result<()> {
         crate::venues::register_custom_data();
         let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
@@ -317,7 +358,7 @@ mod tests {
                     databento,
                 )
                 .await?;
-                node.run(dir).await
+                node.run(dir, clock_at(now)).await
             })
     }
 
@@ -765,16 +806,21 @@ mod tests {
     /// days, the 9th to the 12th of November, known from the 10th's 00:00
     /// to the 13th's, into the catalog in `dir`, from `lse`.
     fn fill_bond_yields(dir: &Path, lse: &MockLse) -> anyhow::Result<()> {
-        fill_bond_yields_over(dir, lse, november("10T00:00:00"), november("13T00:00:00"))
+        fill_bond_yields_over(
+            dir,
+            lse,
+            (november("10T00:00:00"), november("13T00:00:00")),
+            settled(),
+        )
     }
 
     /// fill-catalog's fill of `us10y()` over `[from, to]` into the catalog
-    /// in `dir`, from `lse`.
+    /// in `dir`, from `lse`, at `now`.
     fn fill_bond_yields_over(
         dir: &Path,
         lse: &MockLse,
-        from: Timestamp,
-        to: Timestamp,
+        (from, to): (Timestamp, Timestamp),
+        now: Timestamp,
     ) -> anyhow::Result<()> {
         let requirements = DataRequirements {
             bar_types: vec![],
@@ -782,7 +828,7 @@ mod tests {
             custom: vec![us10y()],
             warmup: SignedDuration::ZERO,
         };
-        fill_requirements(dir, lse, &requirements, vec![], from, to)
+        fill_at(dir, lse, None, &requirements, vec![], (from, to), now)
     }
 
     fn november(time: &str) -> Timestamp {
@@ -931,10 +977,10 @@ mod tests {
             ])
         };
         let first = not_loaded();
-        fill_bond_yields_over(dir.path(), &first, november("10T00:00:00"), now).unwrap();
+        fill_bond_yields_over(dir.path(), &first, (november("10T00:00:00"), now), now).unwrap();
 
         let again = not_loaded();
-        fill_bond_yields_over(dir.path(), &again, november("10T00:00:00"), now).unwrap();
+        fill_bond_yields_over(dir.path(), &again, (november("10T00:00:00"), now), now).unwrap();
 
         let froms = [&first, &again].map(|lse| {
             lse.calls()
@@ -1223,8 +1269,8 @@ mod tests {
             &refusing,
             GOLD_FUTURES,
             vec![gold_futures()],
-            from,
-            to,
+            (from, to),
+            settled(),
         )
         .unwrap_err()
         .to_string();
@@ -1243,7 +1289,15 @@ mod tests {
         );
 
         let resuming = MockLse::start(vec![Reply::refusal(404, DATE_NOT_TRADING)]);
-        fill_over(dir.path(), &resuming, GOLD_FUTURES, vec![], from, to).unwrap();
+        fill_over(
+            dir.path(),
+            &resuming,
+            GOLD_FUTURES,
+            vec![],
+            (from, to),
+            settled(),
+        )
+        .unwrap();
 
         assert_eq!(
             asked(&resuming),
@@ -1254,7 +1308,15 @@ mod tests {
         );
 
         let done = MockLse::start(vec![]);
-        fill_over(dir.path(), &done, GOLD_FUTURES, vec![], from, to).unwrap();
+        fill_over(
+            dir.path(),
+            &done,
+            GOLD_FUTURES,
+            vec![],
+            (from, to),
+            settled(),
+        )
+        .unwrap();
 
         assert!(done.calls().is_empty(), "{:?}", done.calls());
     }
@@ -1295,13 +1357,13 @@ mod tests {
             &first,
             GOLD_FUTURES,
             vec![gold_futures()],
-            from,
+            (from, now),
             now,
         )
         .unwrap();
 
         let again = MockLse::start(not_loaded());
-        fill_over(dir.path(), &again, GOLD_FUTURES, vec![], from, now).unwrap();
+        fill_over(dir.path(), &again, GOLD_FUTURES, vec![], (from, now), now).unwrap();
         let asked = asked(&again);
         assert_eq!(
             asked.first().map(|(from, _)| from.as_str()),
