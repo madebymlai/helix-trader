@@ -56,6 +56,7 @@ Released on TBD (UTC).
 
 ### Internal Improvements
 
+- Changed walk-forward scoring to evaluate each side once per row and use the same meta verdict as trading decisions
 - Added `check-release-entries`, a pre-commit hook capping each entry of the release in progress at one line of 160 characters
 - Improved the LSE fill tests' run time, their mock called at 6000 calls a minute instead of 60
 - Changed `cargo deny` to ignore the unmaintained `chrono`, `chrono-tz` and `humantime` advisories, transitive through Arrow, DataFusion and `object_store`
