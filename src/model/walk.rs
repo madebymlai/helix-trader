@@ -38,7 +38,7 @@
 //! model set, and what was earned there, in R (`earnings::Earnings`), beside
 //! every trade of those rows, its own, at the commission and at 1.5 times
 //! it. A side's trades taken are those picked for it on each row by the
-//! decision itself (`deciding::DecidingModels::evaluate_sides`), before any
+//! decision itself (`DecidingModels::evaluate`), before any
 //! meta: a row where both sides clear counts one trade, for the side
 //! expected the most, a tie none, so with no meta the sides' trades add up
 //! to the decisions returned. A meta's are the trades of the side picked its
@@ -55,14 +55,12 @@ use nautilus_core::UnixNanos;
 use super::{
     blueprint::Stored,
     dataset::{self, Dataset, DatasetRow},
-    deciding::{self, DecidingModels},
-    earnings::{Earnings, Example, MetaMargin, STRESS, in_r},
-    features::meta_row,
+    deciding::{DecidingModels, MetaVerdict},
+    earnings::{Earnings, Example, STRESS, in_r},
     schedule::{Models, Schedule},
     score::ExpectedScore,
     store::{Baselined, ModelStore},
 };
-use crate::strategy::risk::R;
 
 /// The check before the run and the scores after it of one strategy's
 /// backtests.
@@ -173,7 +171,7 @@ impl WalkForward {
     /// each model's example of it, swapped in as the handle swaps it, a row
     /// whose model set fails its checks judged by none: each side's, on the
     /// side's trade; and the meta's, if the model set holds one, on the
-    /// trade of the side picked, if any (`DecidingModels::evaluate_sides`).
+    /// trade of the side picked, if any (`DecidingModels::evaluate`).
     ///
     /// # Errors
     ///
@@ -182,14 +180,10 @@ impl WalkForward {
     fn judged(&self, rows: &[DatasetRow]) -> anyhow::Result<Models<Vec<Judged>>> {
         let listed = self.models.model_sets()?;
         let mut model_sets = self.models.swap();
-        let margin = self
-            .models
-            .meta()
-            .map(|level| MetaMargin(level.config().margin));
         let mut judged = Models {
             long: None,
             short: None,
-            meta: margin.map(|_| vec![]),
+            meta: self.models.meta().map(|_| vec![]),
         };
 
         for level in self.models.sides() {
@@ -202,37 +196,38 @@ impl WalkForward {
             else {
                 continue;
             };
-            let sides = row.sides();
-            let pair = model_set.pair();
-            let deciding::SideEvaluation { expected, picked } =
-                DecidingModels::evaluate_sides(pair, deciding::margins(&self.models), &sides)?;
+            let evaluation =
+                DecidingModels::evaluate(&self.models, model_set, &row.features, &row.sides())?;
             for level in self.models.sides() {
                 let side = level.side();
                 if let Some(judged) = judged.side_mut(side) {
                     judged.push(Judged {
                         valid_from,
                         example: Example::of_side(row, side),
-                        expected: expected.of(side),
-                        baseline: pair.side(side).baseline(),
-                        taken: picked.is_some_and(|picked| picked.side == side),
+                        expected: evaluation.expected.of(side),
+                        baseline: model_set.pair().side(side).baseline(),
+                        taken: evaluation
+                            .pick
+                            .as_ref()
+                            .is_some_and(|pick| pick.picked.side == side),
                     });
                 }
             }
 
-            if let (Some(margin), Some(meta), Some(picked), Some(judged)) =
-                (margin, model_set.meta(), picked, judged.meta.as_mut())
+            if let (Some(pick), Some(meta), Some(judged)) =
+                (evaluation.pick, model_set.meta(), judged.meta.as_mut())
+                && let Some(verdict) = pick.meta
             {
-                let example = Example {
-                    features: meta_row(&row.features, picked.side.order_side(), picked.expected),
-                    ..Example::of_side(row, picked.side)
+                let (expected, taken) = match verdict {
+                    MetaVerdict::Accepted(r) => (r.as_f64(), true),
+                    MetaVerdict::Declined(r) => (r, false),
                 };
-                let expected = meta.predict(&example.features)?;
                 judged.push(Judged {
                     valid_from,
                     expected,
                     baseline: meta.baseline(),
-                    taken: R::finite(expected).is_some_and(|expected| margin.takes(expected)),
-                    example,
+                    taken,
+                    example: Example::of_side(row, pick.picked.side),
                 });
             }
         }
@@ -884,11 +879,18 @@ mod tests {
     }
 
     /// Both clear zero. Long expects 0.30R and realizes -1R; short expects
-    /// 0.20R and realizes +1R. Both errors count, but only long is offered.
+    /// 0.20R and realizes +1R. Both errors count. Without a meta long is
+    /// offered; a meta expecting 0.10R against 0.15R declines it.
     #[rstest]
-    fn both_sides_are_scored_but_only_the_side_offered_without_a_meta_counts_as_picked() {
+    #[case::without_meta(false)]
+    #[case::declined(true)]
+    fn both_sides_score_and_the_long_pick_counts_even_when_declined(#[case] has_meta: bool) {
         let dir = tempfile::tempdir().unwrap();
-        let config = config();
+        let mut config = config();
+        if has_meta {
+            config.meta = with_meta().meta;
+            config.meta.as_mut().unwrap().margin = R::new(0.15);
+        }
         let walk = walk_of(dir.path(), &config);
         let start = at("2026-01-07T08:00:00Z");
         let end = start + SignedDuration::from_hours(1);
@@ -904,20 +906,31 @@ mod tests {
                 model
             })
             .collect();
-        publish_model_set(dir.path(), &config, start, sides, None);
+        let meta = config.meta.as_ref().map(|_| {
+            let mut meta = meta_model(dataset.fingerprint().to_string());
+            predict_constant(&mut meta, 0.0); // Calibrates to 0.1 + 0.5 * 0.
+            meta
+        });
+        publish_model_set(dir.path(), &config, start, sides, meta);
         let mut deciding = DecidingModels::new(&models(dir.path(), &config)).unwrap();
         let rows = dataset.read(start, end).unwrap();
         let row = &rows[0];
 
-        let taken = deciding
-            .decide(start, &row.features, &row.sides())
-            .unwrap()
-            .unwrap();
+        let taken = deciding.decide(start, &row.features, &row.sides()).unwrap();
         let scores = walk.scores(start, end).unwrap();
 
-        assert_eq!(taken.side, Side::Long);
-        close(Some(taken.expected_r.as_f64()), 0.30);
-        assert_eq!(taken.meta_expected_r, None);
+        if has_meta {
+            assert_eq!(taken, None);
+            let meta = scores.meta.unwrap();
+            assert_eq!(meta.score.rows, 1);
+            close(meta.score.mean_error, -1.10);
+            assert_eq!(meta.earnings.taken.count, 0);
+        } else {
+            let taken = taken.unwrap();
+            assert_eq!(taken.side, Side::Long);
+            close(Some(taken.expected_r.as_f64()), 0.30);
+            assert_eq!(taken.meta_expected_r, None);
+        }
         let (long, short) = (scores.long.unwrap(), scores.short.unwrap());
         assert_eq!((long.score.rows, short.score.rows), (1, 1));
         close(long.score.mean_error, -1.30);
