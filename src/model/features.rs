@@ -595,7 +595,7 @@ impl FeatureSet {
     /// the raw features from `actor`'s cache. Nautilus' indicators of the
     /// actor are not registered with: the warmup hands the set every update
     /// (see the module), so a set registered again, on a restart, gets each
-    /// once.
+    /// once. Temporary, helix-trader#16 and helix-trader#46.
     pub fn register<A: DataActor + DataActorNative>(self: &Rc<Self>, actor: &mut A) {
         *self.cache.borrow_mut() = Some(actor.cache_rc());
         let now = actor.clock().utc_now();

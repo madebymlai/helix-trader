@@ -621,7 +621,10 @@ impl ModelHandle {
 /// the live bars, quotes, trades, depth, deltas and custom data (`on_bar`,
 /// `on_quote`, `on_trade`, `on_book_depth`, `on_book_deltas`, `on_data`),
 /// which it holds while it is pending and then hands to the features and
-/// the target's ATR (`strategy::warmup`).
+/// the target's ATR (`strategy::warmup`). The live hooks are Temporary,
+/// marked each, until Nautilus holds live data for an actor while its
+/// requests are pending and hands history in time order across data types
+/// (helix-trader#16, helix-trader#46).
 #[macro_export]
 macro_rules! model_data_hooks {
     // The hooks expand in the strategy's module, which need not import the
@@ -667,6 +670,7 @@ macro_rules! model_data_hooks {
             self.$model.warmup().on_historical_book_deltas(deltas)
         }
 
+        // Temporary: live data through the warmup, helix-trader#16 and helix-trader#46.
         // nautilus-import-ok
         fn on_book_depth(
             &mut self,
@@ -675,6 +679,7 @@ macro_rules! model_data_hooks {
             self.$model.warmup().on_book_depth(depth)
         }
 
+        // Temporary: live data through the warmup, helix-trader#16 and helix-trader#46.
         // nautilus-import-ok
         fn on_book_deltas(
             &mut self,
@@ -687,21 +692,25 @@ macro_rules! model_data_hooks {
             self.$model.warmup().on_historical_data(self, data)
         }
 
+        // Temporary: live data through the warmup, helix-trader#16 and helix-trader#46.
         // nautilus-import-ok
         fn on_data(&mut self, data: &::nautilus_model::data::CustomData) -> ::anyhow::Result<()> {
             self.$model.warmup().on_data(data)
         }
 
+        // Temporary: live data through the warmup, helix-trader#16 and helix-trader#46.
         // nautilus-import-ok
         fn on_quote(&mut self, quote: &::nautilus_model::data::QuoteTick) -> ::anyhow::Result<()> {
             self.$model.warmup().on_quote(quote)
         }
 
+        // Temporary: live data through the warmup, helix-trader#16 and helix-trader#46.
         // nautilus-import-ok
         fn on_trade(&mut self, trade: &::nautilus_model::data::TradeTick) -> ::anyhow::Result<()> {
             self.$model.warmup().on_trade(trade)
         }
 
+        // Temporary: live data through the warmup, helix-trader#16 and helix-trader#46.
         // nautilus-import-ok
         fn on_bar(&mut self, bar: &::nautilus_model::data::Bar) -> ::anyhow::Result<()> {
             self.$model.warmup().on_bar(bar)

@@ -56,7 +56,8 @@
 //! feeds it its bars (`TargetSetter::warmed`), which no strategy declares:
 //! the strategy subscribes to them beside its own
 //! (`TargetSetter::atr_bar_type`, `strategy::subscriptions`) and hands the
-//! warmup each (`Warmup::on_bar`), none registered with Nautilus. A
+//! warmup each (`Warmup::on_bar`), none registered with Nautilus
+//! (Temporary, helix-trader#16 and helix-trader#46). A
 //! decision at which that ATR is not yet initialized opens no target, as a
 //! decision on cold features is none. Each exit is on the instrument's
 //! nearest tick (Nautilus' tick grid), a tie away from the decision's
