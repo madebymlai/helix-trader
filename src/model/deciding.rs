@@ -26,7 +26,7 @@
 //! decide together: no decision uses a long and a short of different
 //! trains, nor a meta beside sides of another train. A model set failing
 //! its checks fails the decision with an error naming it and the check: no
-//! side is picked until it loads, and it is read again at the next. `pick`
+//! side is picked until it loads, and it is read again at the next. `decide`
 //! picks among the sides of the model set valid at the time, by
 //! `pick_among`, the rule for a pair already in hand, which a train's meta
 //! also learns from, its out-of-fold pair being in no store: the pair's calibrated
@@ -94,6 +94,13 @@ pub struct Picked {
     pub expected_r: R,
     /// The decision's calibrated level and side call.
     pub expected: Expected,
+}
+
+/// The pair's calibrated expectation and the pick made from it, before any meta.
+#[derive(Debug)]
+pub(super) struct SideEvaluation {
+    pub expected: Expected,
+    pub picked: Option<Picked>,
 }
 
 /// A decision to trade: the side picked, taken by the meta if there is one.
@@ -197,18 +204,26 @@ impl DecidingModels {
         margins: impl IntoIterator<Item = (Side, R)>,
         sides: &PerSide<SideRow>,
     ) -> anyhow::Result<Option<Picked>> {
+        Ok(Self::evaluate_sides(pair, margins, sides)?.picked)
+    }
+
+    /// Score each fitted side and pick from the same joint calibration.
+    pub(super) fn evaluate_sides(
+        pair: &Pair,
+        margins: impl IntoIterator<Item = (Side, R)>,
+        sides: &PerSide<SideRow>,
+    ) -> anyhow::Result<SideEvaluation> {
         let expected = pair.expect(sides)?;
-        Ok(payoff::pick(margins.into_iter().filter_map(
-            |(side, margin)| {
-                let expected_r = R::finite(expected.of(side))?;
-                let picked = Picked {
-                    side,
-                    expected_r,
-                    expected,
-                };
-                Some((picked, expected_r, margin))
-            },
-        )))
+        let picked = payoff::pick(margins.into_iter().filter_map(|(side, margin)| {
+            let expected_r = R::finite(expected.of(side))?;
+            let picked = Picked {
+                side,
+                expected_r,
+                expected,
+            };
+            Some((picked, expected_r, margin))
+        }));
+        Ok(SideEvaluation { expected, picked })
     }
 }
 

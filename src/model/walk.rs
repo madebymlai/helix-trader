@@ -38,7 +38,7 @@
 //! model set, and what was earned there, in R (`earnings::Earnings`), beside
 //! every trade of those rows, its own, at the commission and at 1.5 times
 //! it. A side's trades taken are those picked for it on each row by the
-//! decision itself (`deciding::DecidingModels::pick_among`), before any
+//! decision itself (`deciding::DecidingModels::evaluate_sides`), before any
 //! meta: a row where both sides clear counts one trade, for the side
 //! expected the most, a tie none, so with no meta the sides' trades add up
 //! to the decisions returned. A meta's are the trades of the side picked its
@@ -173,7 +173,7 @@ impl WalkForward {
     /// each model's example of it, swapped in as the handle swaps it, a row
     /// whose model set fails its checks judged by none: each side's, on the
     /// side's trade; and the meta's, if the model set holds one, on the
-    /// trade of the side picked, if any (`DecidingModels::pick_among`).
+    /// trade of the side picked, if any (`DecidingModels::evaluate_sides`).
     ///
     /// # Errors
     ///
@@ -204,8 +204,8 @@ impl WalkForward {
             };
             let sides = row.sides();
             let pair = model_set.pair();
-            let expected = pair.expect(&sides)?;
-            let picked = DecidingModels::pick_among(pair, deciding::margins(&self.models), &sides)?;
+            let deciding::SideEvaluation { expected, picked } =
+                DecidingModels::evaluate_sides(pair, deciding::margins(&self.models), &sides)?;
             for level in self.models.sides() {
                 let side = level.side();
                 if let Some(judged) = judged.side_mut(side) {
@@ -868,19 +868,62 @@ mod tests {
                 );
 
                 if side == Side::Short {
-                    let width = opposed.manifest.feature_names.len();
-                    let set = TrainingSet::new(width, vec![0.0; width], vec![0.5]).unwrap();
-                    opposed.manifest.learner = LearnerConfig::Baseline {};
-                    opposed.model = LearnerConfig::Baseline {}
-                        .fit(&set)
-                        .unwrap()
-                        .save()
-                        .unwrap();
+                    predict_constant(&mut opposed, 0.5);
                 }
                 opposed
             })
             .collect();
         publish_model_set(dir, config, valid_from, sides, meta);
+    }
+
+    fn predict_constant(model: &mut StoredModel, expected: f64) {
+        let width = model.manifest.feature_names.len();
+        let set = TrainingSet::new(width, vec![0.0; width], vec![expected]).unwrap();
+        model.manifest.learner = LearnerConfig::Baseline {};
+        model.model = model.manifest.learner.fit(&set).unwrap().save().unwrap();
+    }
+
+    /// Both clear zero. Long expects 0.30R and realizes -1R; short expects
+    /// 0.20R and realizes +1R. Both errors count, but only long is offered.
+    #[rstest]
+    fn both_sides_are_scored_but_only_the_side_offered_without_a_meta_counts_as_picked() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config();
+        let walk = walk_of(dir.path(), &config);
+        let start = at("2026-01-07T08:00:00Z");
+        let end = start + SignedDuration::from_hours(1);
+        build(dir.path());
+        let dataset = dataset(dir.path(), &config);
+        let sides = Side::BOTH
+            .into_iter()
+            .map(|side| {
+                let mut model = model_of(&config, side, dataset.fingerprint().to_string(), 0.0);
+                if side == Side::Short {
+                    predict_constant(&mut model, 0.2);
+                }
+                model
+            })
+            .collect();
+        publish_model_set(dir.path(), &config, start, sides, None);
+        let mut deciding = DecidingModels::new(&models(dir.path(), &config)).unwrap();
+        let rows = dataset.read(start, end).unwrap();
+        let row = &rows[0];
+
+        let taken = deciding
+            .decide(start, &row.features, &row.sides())
+            .unwrap()
+            .unwrap();
+        let scores = walk.scores(start, end).unwrap();
+
+        assert_eq!(taken.side, Side::Long);
+        close(Some(taken.expected_r.as_f64()), 0.30);
+        assert_eq!(taken.meta_expected_r, None);
+        let (long, short) = (scores.long.unwrap(), scores.short.unwrap());
+        assert_eq!((long.score.rows, short.score.rows), (1, 1));
+        close(long.score.mean_error, -1.30);
+        close(short.score.mean_error, 0.80);
+        trades_are(long.earnings.taken, 1, -1.0);
+        assert_eq!(short.earnings.taken.count, 0);
     }
 
     /// The scores over the 7th and the 8th of `walk(dir)`, with `rows` and each
