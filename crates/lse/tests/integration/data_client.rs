@@ -45,9 +45,7 @@ use nautilus_common::{
         },
     },
 };
-use nautilus_core::{
-    Params, UUID4, UnixNanos, string::secret::SecretString, time::get_atomic_clock_realtime,
-};
+use nautilus_core::{Params, UUID4, UnixNanos, string::secret::SecretString};
 use nautilus_model::{
     data::{BarType, CustomData, CustomDataTrait, Data, DataType, HasTsInit, QuoteTick, TradeTick},
     enums::{AggressorSide, BookAction, RecordFlag},
@@ -77,7 +75,7 @@ async fn connected(lse: &MockLse, defined: bool) -> (Box<dyn DataClient>, Events
         .calls_per_minute(std::num::NonZeroU32::new(6000).unwrap())
         .build();
     let factory = LseDataClientFactory::new();
-    let clock: Rc<RefCell<dyn Clock>> = Rc::new(RefCell::new(VirtualClock::new()));
+    let clock = node_clock();
     let mut client = factory
         .create(
             factory.name(),
@@ -120,7 +118,7 @@ async fn connecting(
 ) -> (Box<dyn DataClient>, anyhow::Result<()>, Events) {
     let events = events();
     let factory = LseDataClientFactory::new();
-    let clock: Rc<RefCell<dyn Clock>> = Rc::new(RefCell::new(VirtualClock::new()));
+    let clock = node_clock();
     let mut client = factory
         .create(factory.name(), config, cache_of(definitions), clock)
         .unwrap();
@@ -174,13 +172,21 @@ const LISTED_FUTURES: [&str; 17] = [
     "SILVER",
 ];
 
-/// The first tick captured, GOLD.F's at 16:44:55.499567 on 13 November
-/// 2026: bid 3888.0, ask 3888.2.
-/// Now on the wall clock the data client reads, Nautilus' realtime clock.
+/// Now on the node's clock the data client reads: days after every
+/// window the tests ask for at fixed times, so that LSE has loaded each.
 fn now() -> Timestamp {
-    Timestamp::from(get_atomic_clock_realtime().get_time_ns())
+    "2026-11-16T12:00:00Z".parse().unwrap()
 }
 
+/// The node's clock at `now()`: Nautilus' virtual clock, set there.
+fn node_clock() -> Rc<RefCell<dyn Clock>> {
+    let clock = VirtualClock::new();
+    clock.set_time(UnixNanos::from(now()));
+    Rc::new(RefCell::new(clock))
+}
+
+/// The first tick captured, GOLD.F's at 16:44:55.499567 on 13 November
+/// 2026: bid 3888.0, ask 3888.2.
 #[tokio::test]
 async fn a_subscribed_lsedge_instrument_receives_lse_s_quotes_of_bid_and_ask_with_no_sizes() {
     let socket = MockLseSocket::start(|_, frame| data_ws_answer(frame));
@@ -759,7 +765,7 @@ async fn connected_with(
 ) -> (Box<dyn DataClient>, Events) {
     let events = events();
     let factory = LseDataClientFactory::new();
-    let clock: Rc<RefCell<dyn Clock>> = Rc::new(RefCell::new(VirtualClock::new()));
+    let clock = node_clock();
     let mut client = factory
         .create(factory.name(), &config, cache_of(instruments), clock)
         .unwrap();
@@ -1008,8 +1014,6 @@ async fn a_day_window_ending_at_a_midnight_is_one_export() {
 async fn a_trades_request_reaching_into_the_day_lse_has_not_loaded_is_answered_unwritten() {
     let lse = MockLse::start(vec![
         Reply::file(GOLD_TRADES),
-        Reply::refusal(404, DATA_UNAVAILABLE_TODAY),
-        // Should the request come after midnight.
         Reply::refusal(404, DATA_UNAVAILABLE_TODAY),
     ]);
     let (client, mut events) = connected(&lse, true).await;
@@ -2248,8 +2252,6 @@ async fn daily_weekly_and_monthly_candles_are_refused_naming_the_candles_to_decl
 async fn a_bars_request_reaching_into_the_day_lse_has_not_loaded_is_answered_unwritten() {
     let lse = MockLse::start(vec![
         Reply::file(GOLD_SPOT_MINUTES),
-        Reply::refusal(404, DATA_UNAVAILABLE_TODAY),
-        // Should the request come after midnight.
         Reply::refusal(404, DATA_UNAVAILABLE_TODAY),
     ]);
     let (client, mut events) = connected(&lse, true).await;

@@ -38,7 +38,7 @@ use nautilus_trading::{
 };
 use rstest::rstest;
 
-use crate::common::ic;
+use crate::common::{self, ic};
 
 /// LSE's gold trades over the captured second, `[10:00:00, 10:00:01)`.
 fn gold_trades() -> DataRequirements {
@@ -55,7 +55,8 @@ fn gold_trades() -> DataRequirements {
 
 /// Fills the catalog in `dir`, which holds the hand-written definition of
 /// `GOLD_FUTURES`, with its trades from the mock LSE peer, as fill-catalog
-/// does: what the catalog lacks, asked of LSE's client through the node.
+/// does: what the catalog lacks, asked of LSE's client through the node,
+/// five days on, after LSE loaded them.
 fn fill_gold(dir: &Path) {
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     catalog.write_instruments(vec![gold_futures()]).unwrap();
@@ -79,7 +80,7 @@ fn fill_gold(dir: &Path) {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(node.run(dir))
+        .block_on(node.run(dir, common::clock_at(common::ts("2026-10-26T12:00:00Z"))))
         .unwrap();
 }
 

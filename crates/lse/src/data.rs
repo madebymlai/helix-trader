@@ -50,7 +50,9 @@ mod exchange;
 mod served;
 mod streams;
 
-use std::{collections::HashMap, future::Future, num::NonZeroUsize, sync::Arc};
+use std::{
+    cell::RefCell, collections::HashMap, future::Future, num::NonZeroUsize, rc::Rc, sync::Arc,
+};
 
 use anyhow::Context;
 use async_trait::async_trait;
@@ -59,6 +61,7 @@ use jiff::{SignedDuration, Timestamp, tz::TimeZone};
 use nautilus_common::{
     cache::CacheView,
     clients::{DataClient, execute_instrument_subscriptions},
+    clock::Clock,
     live::{dst::time::Duration, runner::get_data_event_sender, sender::EventSender},
     messages::{
         DataEvent, DataResponse,
@@ -133,6 +136,11 @@ pub(crate) struct LseDataClient {
     tasks: TaskGroup,
     streams: LseStreams,
     data_sender: EventSender<DataEvent>,
+    /// The node's clock: the time a request is asked at, which what LSE
+    /// has loaded is judged as of.
+    node_clock: Rc<RefCell<dyn Clock>>,
+    /// Nautilus' realtime clock, which a request's task stamps its response
+    /// by and the streams their data.
     clock: &'static AtomicTime,
     connected: bool,
 }
@@ -143,7 +151,8 @@ impl LseDataClient {
     /// each key given or, if none is, read by `var` from its variable,
     /// `LSE_API_KEY`, `LSE_CME_API_KEY` and `LSE_NASDAQ_API_KEY`, streaming
     /// the instruments it
-    /// names on the LSE key; not connected.
+    /// names on the LSE key, asking at the times `node_clock` reads; not
+    /// connected.
     ///
     /// # Errors
     ///
@@ -161,6 +170,7 @@ impl LseDataClient {
         client_id: ClientId,
         config: &LseDataClientConfig,
         cache: CacheView,
+        node_clock: Rc<RefCell<dyn Clock>>,
         var: impl Fn(&str) -> Option<String>,
     ) -> anyhow::Result<Self> {
         let mut credentials = HashMap::new();
@@ -211,9 +221,15 @@ impl LseDataClient {
             tasks: TaskGroup::new(),
             streams,
             data_sender,
+            node_clock,
             clock,
             connected: false,
         })
+    }
+
+    /// Now, on the node's clock.
+    fn now(&self) -> Timestamp {
+        self.node_clock.borrow().utc_now()
     }
 
     /// Answers the request `request_id` with no data and `reason`, its
@@ -277,7 +293,7 @@ impl LseDataClient {
         select: impl FnOnce(&LseInstrument) -> anyhow::Result<(Rows, Reader<T>)>,
         respond: impl FnOnce(Vec<T>, UnixNanos) -> DataResponse + Send + 'static,
     ) {
-        let now = Timestamp::from(self.clock.get_time_ns());
+        let now = self.now();
         let checked = (|| {
             let instrument =
                 LseInstrument::from_instrument_id(id, now.to_zoned(TimeZone::UTC).year())?;
@@ -840,7 +856,7 @@ impl DataClient for LseDataClient {
                 return Ok(());
             }
         };
-        let now = Timestamp::from(self.clock.get_time_ns());
+        let now = self.now();
         let end = request.end.unwrap_or(now);
         let sender = self.data_sender.clone();
         let client_id = request.client_id;
@@ -921,7 +937,7 @@ impl DataClient for LseDataClient {
     fn request_bars(&self, request: RequestBars) -> anyhow::Result<()> {
         let bar_type = request.single_bar_type()?;
         let id = bar_type.instrument_id();
-        let now = Timestamp::from(self.clock.get_time_ns());
+        let now = self.now();
         let end = request.end.unwrap_or(now);
         let checked = (|| {
             let instrument =
@@ -1014,7 +1030,9 @@ mod tests {
 
     use std::{cell::RefCell, num::NonZeroU32, rc::Rc};
 
-    use nautilus_common::{cache::Cache, live::runner::replace_data_event_sender};
+    use nautilus_common::{
+        cache::Cache, clock::VirtualClock, live::runner::replace_data_event_sender,
+    };
     use nautilus_core::string::secret::SecretString;
     use nautilus_model::instruments::InstrumentAny;
     use rstest::rstest;
@@ -1050,6 +1068,16 @@ mod tests {
             .cme_calls_per_minute(NonZeroU32::new(6000).unwrap())
             .nasdaq_calls_per_minute(NonZeroU32::new(6000).unwrap())
             .build()
+    }
+
+    /// The node's clock, Nautilus' virtual clock, at 12:00 on 16 November
+    /// 2026, days after the second the tests ask for.
+    fn node_clock() -> Rc<RefCell<dyn Clock>> {
+        let clock = VirtualClock::new();
+        clock.set_time(UnixNanos::from(
+            "2026-11-16T12:00:00Z".parse::<Timestamp>().unwrap(),
+        ));
+        Rc::new(RefCell::new(clock))
     }
 
     fn cache_of(instruments: Vec<InstrumentAny>) -> CacheView {
@@ -1137,6 +1165,7 @@ mod tests {
             ClientId::from("LSE"),
             &config_without(&lse, product),
             cache_of(vec![instrument]),
+            node_clock(),
             |_| None,
         )
         .unwrap();
@@ -1157,6 +1186,7 @@ mod tests {
             ClientId::from("LSE"),
             &LseDataClientConfig::default(),
             cache_of(vec![]),
+            node_clock(),
             |_| None,
         )
         .unwrap_err()
@@ -1195,8 +1225,13 @@ mod tests {
     ) {
         let _events = events();
 
-        let Err(e) = LseDataClient::new(ClientId::from("LSE"), &config, cache_of(vec![]), |_| None)
-        else {
+        let Err(e) = LseDataClient::new(
+            ClientId::from("LSE"),
+            &config,
+            cache_of(vec![]),
+            node_clock(),
+            |_| None,
+        ) else {
             panic!("created a client streaming {id} with no key of its product")
         };
 

@@ -38,6 +38,7 @@ Released on TBD (UTC).
 - Removed `keepalive_secs` from `LseWebSocketClient::connect`; drop it, the client pings every 25 s
 - Removed `Deserialize` from `TickSeries`; read tick series through a strategy config's `[data]` series
 - Removed `Launcher::in_process` outside the crate's own tests
+- Changed `NodeFill::run` to take its node's clock factory, whose clock LSE's client reads the time from; pass `|| Rc::new(RefCell::new(LiveClock::default()))`
 
 ### Security
 
