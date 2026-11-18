@@ -212,6 +212,35 @@ async fn an_unsubscription_goes_to_lse(
     );
 }
 
+/// The symbol frames delimit the chain commands on the same ordered socket.
+#[tokio::test]
+async fn a_chain_subscribes_on_its_first_reference_and_unsubscribes_on_its_last() {
+    let peer = MockLseSocket::start(|_, frame| data_ws_answer(frame));
+    let (client, _) = connect(&peer).await.unwrap();
+
+    client.subscribe_options("AAPL").unwrap();
+    client.subscribe_options("AAPL").unwrap();
+    client.unsubscribe_options("AAPL").unwrap();
+    client.subscribe("SILVER.F").unwrap();
+    client.unsubscribe_options("AAPL").unwrap();
+    client.unsubscribe_options("AAPL").unwrap();
+    client.subscribe("GOLD.F").unwrap();
+
+    peer.wait_until_any(|frame| *frame == subscribe("GOLD.F"))
+        .await;
+    assert_eq!(
+        frames_of(&peer.received(), 0),
+        [
+            auth(),
+            subscribe_options("AAPL"),
+            subscribe("SILVER.F"),
+            json!({"action": "unsubscribe_options", "underlying": "AAPL"}),
+            subscribe("GOLD.F"),
+        ]
+    );
+    client.disconnect().await;
+}
+
 /// LSE's error names no symbol: it answers the oldest subscription not
 /// answered yet.
 #[tokio::test]
@@ -291,6 +320,69 @@ async fn lse_s_refusal_of_a_chain_is_passed_on_with_its_underlying_code_and_mess
         refusal.to_string(),
         "INVALID_UNDERLYING: No options available for NOSUCHX"
     );
+}
+
+/// Drop the first connection after another acquisition of the refused chain,
+/// and its replacement before acknowledging the chain's final release.
+#[tokio::test]
+async fn a_refused_chain_is_replayed_only_while_wanted_and_replay_takes_no_reference() {
+    let peer =
+        MockLseSocket::start(
+            |connection, frame| match (connection, frame["action"].as_str()) {
+                (0, Some("subscribe_options")) => vec![send(WS_LIMIT_REACHED)],
+                (0, Some("unsubscribe")) | (1, Some("unsubscribe_options")) => {
+                    vec![SocketAction::Close(1001, "going away".to_string())]
+                }
+                _ => data_ws_answer(frame),
+            },
+        );
+    let (client, mut out) = connect(&peer).await.unwrap();
+    client.subscribe_options("AAPL").unwrap();
+    assert!(
+        matches!(next(&mut out).await, LseWsMessage::OptionsRefused { underlying, .. } if underlying == "AAPL")
+    );
+
+    client.subscribe_options("AAPL").unwrap();
+    client.subscribe("SILVER.F").unwrap();
+    client.unsubscribe("SILVER.F").unwrap();
+    assert!(matches!(
+        next(&mut out).await,
+        LseWsMessage::Reconnected { .. }
+    ));
+
+    for _ in 0..5 {
+        assert!(matches!(next(&mut out).await, LseWsMessage::Tick(_)));
+    }
+    assert_eq!(
+        frames_of(&peer.received(), 0),
+        [
+            auth(),
+            subscribe_options("AAPL"),
+            subscribe("SILVER.F"),
+            json!({"action":"unsubscribe", "symbol":"SILVER.F"})
+        ]
+    );
+
+    client.unsubscribe_options("AAPL").unwrap();
+    client.unsubscribe_options("AAPL").unwrap();
+    assert!(matches!(
+        next(&mut out).await,
+        LseWsMessage::Reconnected { .. }
+    ));
+    client.subscribe("GOLD.F").unwrap();
+    peer.wait_until_any(|frame| *frame == subscribe("GOLD.F"))
+        .await;
+    let received = peer.received();
+    assert_eq!(
+        frames_of(&received, 1),
+        [
+            auth(),
+            subscribe_options("AAPL"),
+            json!({"action":"unsubscribe_options", "underlying":"AAPL"})
+        ]
+    );
+    assert_eq!(frames_of(&received, 2), [auth(), subscribe("GOLD.F")]);
+    client.disconnect().await;
 }
 
 /// The peer drops the first connection after the first tick of
