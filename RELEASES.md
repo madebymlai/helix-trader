@@ -13,6 +13,7 @@ Released on TBD (UTC).
 
 ### Breaking Changes
 
+- Changed LSE WebSocket option-chain subscriptions to count references; match each successful `subscribe_options` call with one `unsubscribe_options` call
 - Changed `SeriesSlice` to hold `CatalogSeries`, `from` and `to`; use `series.instrument_id()` for the contract and `series.key()` for the catalog key
 - Removed `FillRequest::instrument_id`; pass the `InstrumentId` to non-bar `FillData` variants and use `request.data.instrument_id()` to read the target
 - Changed `fill_catalog`, its fetch callback and `IbHistory::data` to use `CatalogSeries`; pass a slice to the writer and a series reference to each fetch

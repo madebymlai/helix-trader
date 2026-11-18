@@ -22,11 +22,11 @@ use lse::{
         GOLD_TRADES, HISTORY_LIMIT, LEVEL_REQUIRED_BOOK, LEVEL_REQUIRED_ORDERS, MockLse,
         MockLseSocket, NASDAQ_API_KEY, NVDA, NVDA_BOOK, NVDA_ORDERS, NVDA_QUOTES, NVDA_TRADES,
         PAIRS_GCZ6, PLAN_REQUIRED, PLAN_REQUIRED_NASDAQ, REFERENCE_CATALOGUE,
-        REFERENCE_DATA_UNAVAILABLE, Reply, SPX_TICKS, SYMBOL_UNKNOWN, TEAM_INSIDER_TRADES,
-        US_CORE_CPI_CALENDAR, US_CORE_CPI_RELEASES, US10Y_BOND_YIELDS, US10Y_BOND_YIELDS_MINUTE,
-        US10Y_YIELDS, WS_AUTHENTICATED_DATA, WS_AUTHENTICATED_LONDON, WS_AUTHENTICATED_TSX,
-        WS_TICKS_DATA, WS_TICKS_LONDON, WS_TICKS_TSX, ZN_COT, aapl_call, aapl_put_2027,
-        data_ws_answer, gcz26, gold_futures, gold_spot, nvda, socket_answer,
+        REFERENCE_DATA_UNAVAILABLE, Reply, SPX_TICKS, SYMBOL_UNKNOWN, SocketAction,
+        TEAM_INSIDER_TRADES, US_CORE_CPI_CALENDAR, US_CORE_CPI_RELEASES, US10Y_BOND_YIELDS,
+        US10Y_BOND_YIELDS_MINUTE, US10Y_YIELDS, WS_AUTHENTICATED_DATA, WS_AUTHENTICATED_LONDON,
+        WS_AUTHENTICATED_TSX, WS_TICKS_DATA, WS_TICKS_LONDON, WS_TICKS_TSX, ZN_COT, aapl_call,
+        aapl_put_2027, data_ws_answer, gcz26, gold_futures, gold_spot, nvda, socket_answer,
     },
 };
 use nautilus_common::{
@@ -44,6 +44,7 @@ use nautilus_common::{
             UnsubscribeQuotes, UnsubscribeTrades,
         },
     },
+    testing::wait_until_async,
 };
 use nautilus_core::{Params, UUID4, UnixNanos, string::secret::SecretString};
 use nautilus_model::{
@@ -230,7 +231,17 @@ async fn an_unsubscription_of_quotes_goes_to_lse() {
     let (mut client, connected, _) = streaming(&socket, &[GOLD_FUTURES], true).await;
     connected.unwrap();
     client.subscribe_quotes(quotes_of(&[GOLD_FUTURES])).unwrap();
-    let unsubscribe = UnsubscribeQuotes::new(
+    client.unsubscribe_quotes(&gold_quotes_ended()).unwrap();
+
+    socket.wait_until(|received| received.len() == 3).await;
+    assert_eq!(
+        sent(&socket)[1],
+        json!({"action": "unsubscribe", "symbol": "GOLD.F"})
+    );
+}
+
+fn gold_quotes_ended() -> UnsubscribeQuotes {
+    UnsubscribeQuotes::new(
         InstrumentId::from(GOLD_FUTURES),
         Some(ClientId::from("LSE")),
         None,
@@ -238,15 +249,7 @@ async fn an_unsubscription_of_quotes_goes_to_lse() {
         UnixNanos::default(),
         None,
         None,
-    );
-
-    client.unsubscribe_quotes(&unsubscribe).unwrap();
-
-    socket.wait_until(|received| received.len() == 3).await;
-    assert_eq!(
-        sent(&socket)[1],
-        json!({"action": "unsubscribe", "symbol": "GOLD.F"})
-    );
+    )
 }
 
 /// LSE would accept its subscription and send nothing.
@@ -332,13 +335,19 @@ async fn streaming_options(
 /// two come in order, the others' dropped.
 #[tokio::test]
 async fn subscribed_option_contracts_receive_their_trades_from_one_chain_of_their_underlying() {
-    let socket = MockLseSocket::start(|_, frame| data_ws_answer(frame));
+    let socket = MockLseSocket::start(|_, frame| {
+        let mut answer = data_ws_answer(frame);
+        if frame["action"] == "subscribe_options" {
+            answer.rotate_left(1); // Send the acknowledgement after all five ticks.
+        }
+        answer
+    });
     let (mut client, connected, mut events) =
         streaming_options(&socket, &[AAPL_CALL, AAPL_PUT_2027]).await;
     connected.unwrap();
 
     client
-        .subscribe_trades(trades_subscribed(&[AAPL_CALL, AAPL_PUT_2027]))
+        .subscribe_trades(trades_subscribed(&[AAPL_CALL, AAPL_CALL, AAPL_PUT_2027]))
         .unwrap();
 
     let mut trades = Vec::new();
@@ -391,29 +400,129 @@ async fn subscribed_option_contracts_receive_their_trades_from_one_chain_of_thei
     );
 }
 
-/// The chain stays while a contract of it is subscribed.
+/// The peer closes permanently. An ordinary symbol command probes the shared
+/// handler queue without changing option membership. Retrying the option
+/// command must still reach that closed queue, not succeed as a no-op.
+#[rstest]
+#[case::add(false)]
+#[case::remove(true)]
 #[tokio::test]
-async fn an_underlying_s_chain_ends_with_the_trades_of_its_last_contract_subscribed() {
-    let socket = MockLseSocket::start(|_, frame| data_ws_answer(frame));
-    let (mut client, connected, _) = streaming_options(&socket, &[AAPL_CALL, AAPL_PUT_2027]).await;
+async fn a_closed_socket_queue_leaves_an_option_trade_command_retryable(#[case] removing: bool) {
+    let socket = MockLseSocket::start(|_, frame| {
+        if frame["action"] == "unsubscribe" {
+            vec![
+                SocketAction::Send(
+                    json!({"type":"error", "code":"KEY_REVOKED", "message":"key revoked"})
+                        .to_string(),
+                ),
+                SocketAction::Close(1008, "key revoked".into()),
+            ]
+        } else {
+            data_ws_answer(frame)
+        }
+    });
+    let (mut client, connected, _) = streaming_options(&socket, &[AAPL_CALL, GOLD_FUTURES]).await;
     connected.unwrap();
+
+    if removing {
+        client
+            .subscribe_trades(trades_subscribed(&[AAPL_CALL]))
+            .unwrap();
+    }
+    let probe = gold_quotes_ended();
+    wait_until_async(
+        || std::future::ready(client.unsubscribe_quotes(&probe).is_err()),
+        Duration::from_secs(10),
+    )
+    .await;
+
+    for _ in 0..2 {
+        let result = if removing {
+            client.unsubscribe_trades(&trades_ended(AAPL_CALL))
+        } else {
+            client.subscribe_trades(trades_subscribed(&[AAPL_CALL]))
+        };
+        let reason = format!("{:#}", result.unwrap_err());
+        assert!(reason.contains("closed"), "{reason}");
+    }
+    client.disconnect().await.unwrap();
+}
+
+/// Drop the socket after the call leaves, then again after the put leaves.
+/// GOLD.F's first quote fences the replay on the final connection.
+#[tokio::test]
+async fn a_shared_chain_replays_only_while_a_distinct_contract_remains() {
+    let socket = MockLseSocket::start(|connection, frame| {
+        let mut answer = data_ws_answer(frame);
+        match (connection, frame["action"].as_str()) {
+            (0, Some("subscribe_options")) | (1, Some("subscribe")) => answer.truncate(1),
+            (0, Some("subscribe")) | (1, Some("unsubscribe_options")) => {
+                return vec![SocketAction::Close(1001, "going away".into())];
+            }
+            _ => (),
+        }
+        answer
+    });
+    let config = LseDataClientConfig::builder()
+        .api_key(SecretString::from(API_KEY))
+        .base_url_ws_data(socket.url().to_string())
+        .stream_ids(vec![
+            InstrumentId::from(AAPL_CALL),
+            InstrumentId::from(GOLD_FUTURES),
+        ])
+        .build();
+    let (mut client, connected, mut events) =
+        connecting(&config, vec![aapl_call(), aapl_put_2027(), gold_futures()]).await;
+    connected.unwrap();
+    client
+        .subscribe_trades(trades_subscribed(&[AAPL_CALL]))
+        .unwrap();
     client
         .subscribe_trades(trades_subscribed(&[AAPL_CALL, AAPL_PUT_2027]))
         .unwrap();
-
     client.unsubscribe_trades(&trades_ended(AAPL_CALL)).unwrap();
+    client.subscribe_quotes(quotes_of(&[GOLD_FUTURES])).unwrap();
+
+    let DataEvent::Data(Data::Trade(trade)) = next_event(&mut events).await else {
+        panic!("expected the remaining put's trade")
+    };
+    assert_eq!(trade.instrument_id, InstrumentId::from(AAPL_PUT_2027));
     client
         .unsubscribe_trades(&trades_ended(AAPL_PUT_2027))
         .unwrap();
+    assert!(matches!(
+        next_event(&mut events).await,
+        DataEvent::Data(Data::Quote(_))
+    ));
+    client.unsubscribe_quotes(&gold_quotes_ended()).unwrap();
+    let received = socket
+        .wait_until(|frames| {
+            frames
+                .iter()
+                .any(|(n, f)| *n == 2 && f["action"] == "unsubscribe")
+        })
+        .await;
+    client.disconnect().await.unwrap();
+    let subscribe = json!({"action": "subscribe_options", "underlying": "AAPL"});
+    let unsubscribe = json!({"action": "unsubscribe_options", "underlying": "AAPL"});
 
-    socket.wait_until(|received| received.len() == 3).await;
-    assert_eq!(
-        sent(&socket),
-        [
-            json!({"action": "subscribe_options", "underlying": "AAPL"}),
-            json!({"action": "unsubscribe_options", "underlying": "AAPL"}),
-        ]
-    );
+    for (connection, expected) in [
+        (0, vec![&subscribe]),
+        (1, vec![&subscribe, &unsubscribe]),
+        (2, vec![]),
+    ] {
+        let mut frames = received
+            .iter()
+            .filter(|(n, _)| *n == connection)
+            .map(|(_, f)| f);
+        assert_eq!(frames.next().unwrap()["action"], "auth");
+        assert_eq!(
+            frames
+                .filter(|f| f.get("underlying").is_some())
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
 }
 
 /// LSE's chain of AAPL carries every listed contract of AAPL, so the

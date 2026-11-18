@@ -266,11 +266,12 @@ impl LseWebSocketClient {
         )))
     }
 
-    /// Subscribes to the ticks of every listed contract of `underlying`'s
-    /// options, its chain, in one subscription, for the rest of the
-    /// connection, reconnects included. LSE sends no last prices of a
-    /// chain: its first ticks are its contracts' next trades. Its refusal
-    /// is passed on (`OptionsRefused`).
+    /// Acquires one reference to the ticks of every listed option contract of
+    /// `underlying`. Balance each successful call with one `unsubscribe_options`.
+    /// Only the first reference subscribes on the wire. Success means queued,
+    /// not confirmed: an `OptionsRefused` leaves the chain wanted for replay
+    /// after authentication on reconnect. Another acquisition is not a retry.
+    /// LSE sends no last prices: the first ticks are the contracts' next trades.
     ///
     /// # Errors
     ///
@@ -281,7 +282,8 @@ impl LseWebSocketClient {
         )))
     }
 
-    /// Ends the subscription of `underlying`'s chain.
+    /// Releases one reference to `underlying`'s chain. Only the final release
+    /// unsubscribes on the wire; an unmatched release does nothing.
     ///
     /// # Errors
     ///
@@ -414,13 +416,23 @@ impl LseWsHandler {
                 command = self.cmd_rx.recv() => match command {
                     Some(HandlerCommand::SetClient(client)) => self.client = Some(client),
                     Some(HandlerCommand::Subscribe(topic)) => {
-                        self.subscriptions.mark_subscribe(&topic.topic());
+                        let key = topic.topic();
+                        if matches!(topic, Topic::Options(_)) && !self.subscriptions.add_reference(&key) {
+                            continue;
+                        }
+                        self.subscriptions.mark_subscribe(&key);
+
                         if self.authenticated {
                             self.send_subscribe(topic).await;
                         }
                     }
                     Some(HandlerCommand::Unsubscribe(topic)) => {
-                        self.subscriptions.mark_unsubscribe(&topic.topic());
+                        let key = topic.topic();
+                        if matches!(topic, Topic::Options(_)) && !self.subscriptions.remove_reference(&key) {
+                            continue;
+                        }
+                        self.subscriptions.mark_unsubscribe(&key);
+
                         if self.authenticated && self.send(topic.unsubscribe()).await {
                             self.unanswered.push_back(Unanswered::Unsubscribe(topic));
                         }
