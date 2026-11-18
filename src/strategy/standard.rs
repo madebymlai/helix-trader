@@ -2739,22 +2739,22 @@ mod tests {
         }
 
         /// The model's violations are its target's ATR of an hourly bar
-        /// warming over longer than the warmup of nought, and its limit of
-        /// an hour, decided every hour, reported under their fields,
+        /// warming over longer than the warmup of nought, and its zero
+        /// limit, reported under their fields,
         /// `model.target.atr` and `model.target.limit`, after the standard
         /// ones and the strategy id's.
         #[rstest]
         fn reports_the_models_violations_with_the_standard_ones() {
             let toml = format!("{TOML}\n[base]\norder_id_tag = \"001\"\n")
                 .replace("\"1h\"\n", "\"0s\"\n")
-                .replace(r#"limit = "30m""#, r#"limit = "1h""#);
+                .replace(r#"limit = "30m""#, r#"limit = "0s""#);
             assert_eq!(
                 error_fields(&toml),
                 [
                     "data.warmup",
                     "base.strategy_id",
-                    "model.target.atr",
-                    "model.target.limit"
+                    "model.target.limit",
+                    "model.target.atr"
                 ]
             );
         }

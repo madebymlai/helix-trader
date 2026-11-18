@@ -259,8 +259,7 @@ impl ModelConfig {
     /// window, the calibration not positive or leaving no fit slice (see
     /// `validate_window`), the margins naming no side, the minimum of rows
     /// below one (see `validate_min_rows`), the meta model invalid (see
-    /// `MetaConfig::validate`), the target's limit not shorter than the
-    /// decision cadence (see `validate_cadence`), or shorter than the
+    /// `MetaConfig::validate`), or the target's limit shorter than the
     /// longest its dataset runs take to process a command (see
     /// `validate_latency`).
     pub fn validate(&self, requirements: &DataRequirements) -> ConfigResult<()> {
@@ -289,29 +288,9 @@ impl ModelConfig {
         if let Some(meta) = &self.meta {
             meta.validate(&self.target, &mut errors);
         }
-        validate_cadence(self.decision, &self.target, &mut errors);
         validate_latency(&self.target, &self.dataset, &mut errors);
         errors.into_result()
     }
-}
-
-/// Pushes onto `errors` the violation of `target` not closing before the
-/// next decision of `rule`: the sides trade the target, and a live
-/// account nets a new trade into one still open, where a dataset run's
-/// hedging venue keeps them apart.
-fn validate_cadence(rule: DecisionRule, target: &TargetConfig, errors: &mut ConfigErrorCollector) {
-    let DecisionRule::Every(cadence) = rule;
-    let limit = target.settles_within();
-    errors.check(
-        limit < cadence,
-        ConfigError::invalid_value(
-            "model.target.limit",
-            format!(
-                "the target's limit {limit:#} is not shorter than the decision cadence \
-                 {cadence:#}: a trade would still be open at the next decision"
-            ),
-        ),
-    );
 }
 
 /// Pushes onto `errors` the violation of the limit of `target` being
@@ -628,18 +607,15 @@ mod tests {
     }
 
     /// Time only, or a bracket: the target closes after its limit at the
-    /// latest, which the window must hold. Deciding every 72 hours, so that
-    /// the cadence holds these limits and the window alone refuses them, the
-    /// time-only target's ATR of one bar of 72 hours warm over a warmup as
-    /// long.
+    /// latest, which the window must hold.
     #[rstest]
     #[case::time_only(r#"target = { limit = "48h", atr = { period = 1 } }"#)]
     #[case::bracket(
         r#"target = { bracket = { take_profit = { bps = 7.5 }, stop = { bps = 5 } }, limit = "49h" }"#
     )]
     fn a_limit_not_shorter_than_the_window_is_refused_under_the_limit(#[case] target: &str) {
-        let warmup = SignedDuration::from_hours(72);
-        let toml = section(target).replace(r#"every = "1h""#, r#"every = "72h""#);
+        let warmup = SignedDuration::from_hours(1);
+        let toml = section(target);
 
         assert_eq!(
             refused_fields_warming(&toml, warmup),
@@ -647,32 +623,17 @@ mod tests {
         );
     }
 
-    /// Deciding every hour, a bracket closed after an hour, or a time-only
-    /// trade of an hour and a half, its ATR of one hourly bar warm over a
-    /// warmup of an hour, would still be open at the next decision.
+    /// A target may end at or after the next decision.
     #[rstest]
     #[case::bracket(
-        r#"bracket = { take_profit = { bps = 7.5 }, stop = { bps = 5 } }, limit = "1h""#,
-        "limit 1h"
+        r#"bracket = { take_profit = { bps = 7.5 }, stop = { bps = 5 } }, limit = "1h""#
     )]
-    #[case::time_only(r#"limit = "90m", atr = { period = 1 }"#, "limit 1h 30m")]
-    fn a_limit_not_shorter_than_the_decision_cadence_is_refused_naming_both(
-        #[case] target: &str,
-        #[case] named: &str,
-    ) {
+    #[case::time_only(r#"limit = "90m", atr = { period = 1 }"#)]
+    fn a_target_may_reach_or_outlast_the_next_decision(#[case] target: &str) {
         let warmup = SignedDuration::from_hours(1);
         let toml = section(&format!("target = {{ {target} }}"));
 
-        let err = format!("{:#}", load_warming(&toml, warmup).unwrap_err());
-
-        assert!(
-            err.contains(named) && err.contains("cadence 1h"),
-            "{named}: {err}"
-        );
-        assert_eq!(
-            refused_fields_warming(&toml, warmup),
-            ["model.target.limit"]
-        );
+        load_warming(&toml, warmup).unwrap();
     }
 
     /// A trade closed at its time alone: no exit, and the ATR its unit is

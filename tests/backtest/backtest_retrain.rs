@@ -33,7 +33,9 @@ use rstest::rstest;
 use tempfile::TempDir;
 
 use crate::common::{
-    dataset::{baseline_of, blueprint, config, missing, model_set, r, replay_on, trade_on, walk},
+    dataset::{
+        baseline_of, blueprint, hourly_trades, missing, model_set, r, replay_of, trade_on, walk,
+    },
     ic,
 };
 
@@ -50,7 +52,7 @@ fn config_daily() -> ModelConfig {
             long: Some(R::new(f64::MIN)),
             short: None,
         },
-        ..config()
+        ..hourly_trades()
     }
 }
 
@@ -95,7 +97,7 @@ fn trained(catalog: &TempDir, models: &Path) {
     let (first, last) = dataset::days(start, end);
     dataset
         .build(first, last, |from, to| {
-            replay_on(catalog, features(), from, to)
+            replay_of(catalog, features(), &config_daily(), from, to)
         })
         .unwrap();
 

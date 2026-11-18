@@ -226,6 +226,14 @@ pub(crate) fn config() -> ModelConfig {
         .build()
 }
 
+/// An hourly decision can trade even when its predecessor reached its
+/// time limit. For model tests observing every decision's prediction.
+pub(crate) fn hourly_trades() -> ModelConfig {
+    let mut config = config();
+    config.target.spec.limit = SignedDuration::from_mins(30);
+    config
+}
+
 /// A deterministic random walk in [0, 1).
 pub(crate) struct Lcg(pub u64);
 

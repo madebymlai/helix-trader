@@ -4,6 +4,7 @@ Released on TBD (UTC).
 
 ### Enhancements
 
+- Added overlapping model dataset targets while executable model entries wait for the previous trade to clear
 - Added `train --from --to`, training a periodic strategy at each retrain time of a span and listing the times that failed
 - Added a live retrain at a node's start of the latest retrain time whose model set the store lacks
 - Added a live retrain's `train` output to the node's Nautilus log, a log record per line

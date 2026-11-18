@@ -20,9 +20,10 @@ use helix_trader::{
     model::{
         config::{Margins, ModelConfig},
         dataset::DatasetRow,
+        decide::DecisionRule,
         learner::{LearnerConfig, LightGbmConfig, TrainingSet},
         store::{Probe, StoredModel},
-        targets::{BracketSpec, Distance, Side, Target, TargetConfig},
+        targets::{BracketSpec, Distance, Exit, Side, Target, TargetConfig},
     },
     strategy::risk::R,
 };
@@ -36,8 +37,8 @@ use crate::{
     backtest_targets::hand_worked_quotes,
     common::{
         dataset::{
-            baseline_of, blueprint, config, features, model_set, r, replay, replay_of, target,
-            trade, walk,
+            baseline_of, blueprint, config, features, hourly_trades, model_set, r, replay_of,
+            requirements, target, trade, walk,
         },
         ic,
     },
@@ -71,7 +72,7 @@ fn each_decision_uses_the_latest_model_valid_at_or_before_it() {
             long: Some(R::new(0.0)),
             short: None,
         },
-        ..config()
+        ..hourly_trades()
     };
 
     for (valid_from, tenths) in [
@@ -147,17 +148,16 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
     let config = ModelConfig {
         learner: learner.clone(),
         window: SignedDuration::from_hours(72),
-        // Every decision a long, to record its prediction.
         margins: Margins {
             long: Some(R::new(f64::MIN)),
             short: None,
         },
-        ..config()
+        ..hourly_trades()
     };
     let holdout = t - config.calibration;
     let rows = std::thread::scope(|scope| {
         scope
-            .spawn(|| replay(&catalog, t - config.window, t).unwrap())
+            .spawn(|| replay_of(&catalog, features(), &config, t - config.window, t).unwrap())
             .join()
             .unwrap()
     });
@@ -248,12 +248,12 @@ fn a_decision_reads_each_sides_row_as_its_dataset_row_holds_it() {
             long: Some(R::new(f64::MIN)),
             short: None,
         },
-        ..config()
+        ..hourly_trades()
     };
     let holdout = t - config.calibration;
     let rows: Vec<DatasetRow> = std::thread::scope(|scope| {
         scope
-            .spawn(|| replay(&catalog, t - config.window, t).unwrap())
+            .spawn(|| replay_of(&catalog, features(), &config, t - config.window, t).unwrap())
             .join()
             .unwrap()
     })
@@ -343,6 +343,83 @@ pub(crate) fn hand_worked(side: Side) -> ModelConfig {
         margins,
         ..config()
     }
+}
+
+/// Both minutes buy and sell one ounce in the dataset. The 10:01 long
+/// stops at 3998.00; its short takes profit ten seconds later at 3998.10.
+/// Only then is its row complete. The rise settles 10:00 second (long TP
+/// at 4003.10, short stopped at 4003.40). Each round trip costs $0.24.
+/// In execution the constant long signal must wait for that rise, not
+/// for the five-minute limit, to be eligible again at 10:02.
+#[rstest]
+fn overlapping_decisions_settle_independently_but_executable_entries_wait_until_flat() {
+    let mut config = hand_worked(Side::Long);
+    config.decision = DecisionRule::Every(SignedDuration::from_mins(1));
+    config.target.spec.limit = SignedDuration::from_mins(5);
+    config.validate(&requirements()).unwrap();
+
+    let (from, to) = (ic::at("09:59:59"), ic::at("10:02:01"));
+    let quotes = [
+        ("09:59:59", "4000.00", "4000.20"),
+        ("10:01:00", "4001.00", "4001.20"),
+        ("10:01:10", "3998.00", "3998.20"),
+        ("10:01:20", "3997.80", "3998.00"),
+        ("10:01:30", "4003.20", "4003.40"),
+        ("10:02:01", "4003.20", "4003.40"),
+    ];
+    let catalog = ic::catalog_of(
+        quotes.map(|(t, b, a)| ic::quote(ic::at(t), b, a)).to_vec(),
+        from,
+        to,
+    );
+    let rows = std::thread::scope(|scope| {
+        scope
+            .spawn(|| replay_of(&catalog, features(), &config, from, to))
+            .join()
+            .unwrap()
+            .unwrap()
+    });
+    let ns = |t| UnixNanos::from(ic::at(t));
+    let outcomes: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            let side = |o: helix_trader::model::targets::Outcome| (o.exit, o.pnl);
+            (
+                row.decision.ts_event,
+                row.settled_at,
+                side(row.outcomes.long),
+                side(row.outcomes.short),
+            )
+        })
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            (
+                ns("10:01:00.010"),
+                ns("10:01:20"),
+                (Exit::Stop, Money::from("-3.44 USD")),
+                (Exit::TakeProfit, Money::from("2.66 USD"))
+            ),
+            (
+                ns("10:00:00.010"),
+                ns("10:01:30"),
+                (Exit::TakeProfit, Money::from("2.66 USD")),
+                (Exit::Stop, Money::from("-3.64 USD"))
+            ),
+        ]
+    );
+
+    let models = tempfile::tempdir().unwrap();
+    publish(
+        models.path(),
+        &config,
+        from,
+        baseline_of(&features(), &config, Side::Long, 8),
+    );
+    let record = trade(&catalog, from, to, &config, models.path());
+    let entries: Vec<_> = record.entries.iter().map(|entry| entry.0).collect();
+    assert_eq!(entries, [ns("10:00:00.010"), ns("10:02:00.010")]);
 }
 
 /// Worked by hand on the quotes of the hand-worked targets: a dip at
