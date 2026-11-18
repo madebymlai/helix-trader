@@ -3164,6 +3164,29 @@ mod tests {
         assert_eq!(features.values(), Some(vec![-0.5]));
     }
 
+    /// The same history warms two features: the counter sees both points,
+    /// while the raw feature reads only the latest imbalance from the cache.
+    #[rstest]
+    fn two_features_share_custom_history_without_losing_or_repeating_a_point() {
+        let series = imbalance_series(AUD);
+        let features = crate::model::features::testing::custom_count(&series)
+            .custom(&series, "imbalance", read_imbalance)
+            .build()
+            .unwrap();
+        let (mut probe, _handle, _sent, _models) =
+            started_live_reading(&features, vec![], vec![series]);
+
+        probe.handle_data_response(&catalog_answer(
+            AUD,
+            vec![
+                imbalance(AUD, "2026-08-10T14:00:00Z", 0.25),
+                imbalance(AUD, "2026-08-10T14:29:00Z", -0.5),
+            ],
+        ));
+
+        assert_eq!(features.values(), Some(vec![2.0, -0.5]));
+    }
+
     /// Live on 2026-08-10 at 14:30, a feature on the imbalances under the
     /// root GC's id reads GCZ26's, the contract standing for it (GC rolls
     /// into GCZ26 on 2026-07-29, `rolls/README.md`): the start requests
