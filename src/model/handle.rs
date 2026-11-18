@@ -127,8 +127,8 @@
 //! too, so that the cache holds its latest price at the start, and its
 //! ticks, of the history and live, reach no feature, each reading those of
 //! its own series alone; the warmup's merge holds none of its history, nor
-//! any back for it, the handle feeding the warmup the features' series
-//! alone (`FeatureSet::bar_types`, `ticks`, `handled_custom`). It warms the target's ATR from
+//! any back for it. The feature set attaches only its own feeds
+//! (`FeatureSet::warmed`). The handle warms the target's ATR from
 //! the warmup request, as it does the features: the request builds the
 //! ATR's bars too (`TargetSetter::warmed`), and the warmup hands the bars of the
 //! response to both, so the first decision after a start sets the stop and
@@ -154,7 +154,7 @@ use std::{cell::RefCell, fmt::Debug, path::PathBuf, rc::Rc};
 
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
-    actor::{DataActor, DataActorNative, indicators::SharedActorIndicator},
+    actor::{DataActor, DataActorNative},
     msgbus::{self, ShareableMessageHandler, switchboard::get_custom_topic},
     timer::TimeEvent,
 };
@@ -180,7 +180,7 @@ use crate::{
         requirements::CustomSeries,
         risk::R,
         subscriptions::Subscriptions,
-        warmup::{self, BookIndicator, CustomIndicator, Warmup},
+        warmup::{self, Warmup},
     },
 };
 
@@ -360,23 +360,8 @@ impl ModelHandle {
         let warmup = match mode {
             Mode::Live { .. } => Warmup::live(requirements),
             Mode::Backtest { .. } | Mode::Dataset { .. } => Warmup::replayed(requirements),
-        }
-        .feeding(
-            &features.bar_types(),
-            Rc::clone(features) as SharedActorIndicator,
-        )
-        .feeding_ticks(
-            &features.ticks(),
-            Rc::clone(features) as SharedActorIndicator,
-        )
-        .feeding_books(
-            &features.ticks(),
-            Rc::clone(features) as Rc<dyn BookIndicator>,
-        )
-        .feeding_custom(
-            &features.handled_custom(),
-            Rc::clone(features) as Rc<dyn CustomIndicator>,
-        );
+        };
+        let warmup = features.warmed(warmup);
         let instrument_ids = ticks.iter().map(|tick| tick.instrument_id).collect();
         let roller = match mode {
             Mode::Live { .. } => Roller::live(instrument_ids),
@@ -3162,6 +3147,29 @@ mod tests {
         assert_eq!(imbalance_subscribers(AUD), 1);
         assert_eq!(cold, None);
         assert_eq!(features.values(), Some(vec![-0.5]));
+    }
+
+    /// The same history warms two features: the counter sees both points,
+    /// while the raw feature reads only the latest imbalance from the cache.
+    #[rstest]
+    fn two_features_share_custom_history_without_losing_or_repeating_a_point() {
+        let series = imbalance_series(AUD);
+        let features = crate::model::features::testing::custom_count(&series)
+            .custom(&series, "imbalance", read_imbalance)
+            .build()
+            .unwrap();
+        let (mut probe, _handle, _sent, _models) =
+            started_live_reading(&features, vec![], vec![series]);
+
+        probe.handle_data_response(&catalog_answer(
+            AUD,
+            vec![
+                imbalance(AUD, "2026-08-10T14:00:00Z", 0.25),
+                imbalance(AUD, "2026-08-10T14:29:00Z", -0.5),
+            ],
+        ));
+
+        assert_eq!(features.values(), Some(vec![2.0, -0.5]));
     }
 
     /// Live on 2026-08-10 at 14:30, a feature on the imbalances under the
