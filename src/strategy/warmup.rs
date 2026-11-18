@@ -448,6 +448,7 @@ impl Warmup {
             fed_ticks: Vec::new(),
             fed_custom: Vec::new(),
             merge: Merge::new(merge::HELD),
+            // Temporary: the hold of live data, helix-trader#16.
             hold: Hold::default(),
             end: Cell::new(UnixNanos::default()),
             group: Cell::new(UUID4::new()),
@@ -466,6 +467,7 @@ impl Warmup {
     #[must_use]
     pub fn feeding(mut self, bar_types: &[BarType], indicator: SharedActorIndicator) -> Self {
         self.fed_bars.extend(bar_types);
+        // Temporary: the hold of live data, helix-trader#16.
         self.hold.feeding_bars(indicator);
         self
     }
@@ -491,6 +493,7 @@ impl Warmup {
     #[must_use]
     pub fn feeding_books(mut self, ticks: &[TickSeries], books: Rc<dyn BookIndicator>) -> Self {
         self.fed_ticks.extend_from_slice(ticks);
+        // Temporary: the hold of live data, helix-trader#16.
         self.hold.feeding_books(books);
         self
     }
@@ -508,6 +511,7 @@ impl Warmup {
         custom: Rc<dyn CustomIndicator>,
     ) -> Self {
         self.fed_custom.extend_from_slice(series);
+        // Temporary: the hold of live data, helix-trader#16.
         self.hold.feeding_custom(custom);
         self
     }
@@ -523,6 +527,7 @@ impl Warmup {
     #[must_use]
     pub fn feeding_ticks(mut self, ticks: &[TickSeries], indicator: SharedActorIndicator) -> Self {
         self.fed_ticks.extend_from_slice(ticks);
+        // Temporary: the hold of live data, helix-trader#16.
         self.hold.feeding(indicator);
         self
     }
@@ -546,6 +551,7 @@ impl Warmup {
             self.end.set(UnixNanos::from(now));
             self.group.set(UUID4::new());
             self.warming.set(true);
+            // Temporary: the hold of live data, helix-trader#16.
             self.hold.hold();
             // The strategy's bar types and the harness's.
             let requirements = DataRequirements {
@@ -630,6 +636,7 @@ impl Warmup {
     fn end(&self) -> anyhow::Result<bool> {
         // Temporary: the merge's end, helix-trader#46.
         let cut = self.merge.end(&self.hold)?;
+        // Temporary: the hold of live data, helix-trader#16.
         self.hold.release()?;
         Ok(cut)
     }
@@ -722,6 +729,7 @@ impl Warmup {
     /// returns no error: a book indicator reads depth without failing, and
     /// the result is returned as the tick hand-overs' are.
     pub fn on_book_depth(&self, depth: &OrderBookDepth) -> anyhow::Result<()> {
+        // Temporary: the hold of live data, helix-trader#16.
         self.hold.live(Tick::Depth(Box::new(depth.clone())))
     }
 
@@ -729,6 +737,7 @@ impl Warmup {
     /// `on_book_depth` does a snapshot. It returns no error, as
     /// `on_book_depth`.
     pub fn on_book_deltas(&self, deltas: &OrderBookDeltas) -> anyhow::Result<()> {
+        // Temporary: the hold of live data, helix-trader#16.
         self.hold.live(Tick::Deltas(deltas.clone()))
     }
 
@@ -780,6 +789,7 @@ impl Warmup {
     /// then, and never if the history holds it (see `hold`). It returns no
     /// error: a custom indicator reads custom data without failing.
     pub fn on_data(&self, data: &CustomData) -> anyhow::Result<()> {
+        // Temporary: the hold of live data, helix-trader#16.
         self.hold.live(Tick::Custom(data.clone()))
     }
 
@@ -819,6 +829,7 @@ impl Warmup {
     ///
     /// Returns an error if an indicator reading it fails.
     pub fn on_bar(&self, bar: &Bar) -> anyhow::Result<()> {
+        // Temporary: the hold of live data, helix-trader#16.
         self.hold.live(Tick::Bar(*bar))
     }
 
@@ -831,6 +842,7 @@ impl Warmup {
     ///
     /// Returns an error if an indicator reading it fails.
     pub fn on_quote(&self, quote: &QuoteTick) -> anyhow::Result<()> {
+        // Temporary: the hold of live data, helix-trader#16.
         self.hold.live(Tick::Quote(*quote))
     }
 
@@ -841,6 +853,7 @@ impl Warmup {
     ///
     /// Returns an error if an indicator reading it fails.
     pub fn on_trade(&self, trade: &TradeTick) -> anyhow::Result<()> {
+        // Temporary: the hold of live data, helix-trader#16.
         self.hold.live(Tick::Trade(*trade))
     }
 

@@ -195,7 +195,8 @@ impl EmaCrossConfig {
 pub struct EmaCross {
     core: StrategyCore,
     config: EmaCrossConfig,
-    /// The crossover, registered with Nautilus as the strategy's indicator.
+    /// The crossover, fed its bars by the warmup, not registered with
+    /// Nautilus (Temporary, helix-trader#16 and helix-trader#46).
     signal: Rc<Signal>,
     /// Its warmup, which feeds the signal.
     warmup: Rc<Warmup>,
@@ -374,6 +375,7 @@ impl DataActor for EmaCross {
     /// the strategy decides on it once the warmup has ended and the signal
     /// is initialized.
     fn on_bar(&mut self, bar: &Bar) -> anyhow::Result<()> {
+        // Temporary: live bars through the warmup, helix-trader#16 and helix-trader#46.
         self.warmup.on_bar(bar)?;
         if self.warmup.is_warming() || !self.signal.initialized()? {
             return Ok(());

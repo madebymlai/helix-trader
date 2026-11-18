@@ -65,6 +65,7 @@ Released on TBD (UTC).
 - Added binary tests of the command line's refusals (`tests/backtest/cli.rs`) in place of in-process parses
 - Changed the backtest fee model and live recording to set Nautilus' `charge_commission_once` and `promote_on_close` rather than rely on their defaults
 - Removed `lse`'s `LseHttpClient::with_retry`, a test hook
+- Changed the live warmup's hold of live data and the hooks feeding it to be marked `Temporary` at each site, citing helix-trader#16
 
 ### Documentation Updates
 
