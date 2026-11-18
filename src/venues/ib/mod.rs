@@ -24,7 +24,6 @@
 //! data is stored as IB gives it.
 
 use std::{
-    str::FromStr,
     sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
 };
@@ -221,21 +220,14 @@ impl IbHistory {
             }
         }
         let instruments = self.instruments(&ids).await?;
-        fill_slices(
-            catalog,
-            &instruments,
-            slices,
-            async |data_type, identifier, from, to| {
-                self.data(data_type, identifier, from, to).await
-            },
-        )
+        fill_slices(catalog, &instruments, slices, async |series, from, to| {
+            self.data(series, from, to).await
+        })
         .await
     }
 
-    /// The series of `data_type` and `identifier` over `[start, end]`, for
-    /// `fill_catalog`, as IB gives it: the bars of the bar type
-    /// `identifier` names (see `bars`), or the quotes or trades of the
-    /// instrument it names (see `ticks`).
+    /// The resolved `series` over `[start, end]`, for `fill_catalog`: its
+    /// bars (see `bars`) or the instrument's quotes or trades (see `ticks`).
     ///
     /// # Errors
     ///
@@ -243,12 +235,11 @@ impl IbHistory {
     /// `serves`), or as `bars` and `ticks`.
     pub async fn data(
         &self,
-        data_type: &NautilusDataType,
-        identifier: &str,
+        series: &CatalogSeries,
         start: Timestamp,
         end: Timestamp,
     ) -> anyhow::Result<Vec<Data>> {
-        match served(data_type, identifier)? {
+        match served(series)? {
             Served::Bars(bar_type) => {
                 let bars = self.bars(bar_type, start, end).await?;
                 Ok(bars.into_iter().map(Data::Bar).collect())
@@ -600,12 +591,10 @@ enum Served {
 /// Returns an error if IB's history does not serve `source`, naming it and
 /// saying why.
 pub(crate) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
-    let (data_type, identifier) = source.key();
-    served(&data_type, &identifier).map(drop)
+    served(source).map(drop)
 }
 
-/// What IB's history is asked for the series of `data_type` and
-/// `identifier`, as Nautilus' IB clients serve it: IB's own (`EXTERNAL`)
+/// What IB's history is asked for `series`, as Nautilus' IB clients serve it: IB's own (`EXTERNAL`)
 /// time bars of a size IB has (Nautilus' `bar_type_to_ib_bar_size`) but a
 /// month, which Nautilus' IB history client reads no bars of (its
 /// `request_bars` parses seconds, minutes, hours, days and weeks alone),
@@ -619,49 +608,42 @@ pub(crate) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
 ///
 /// Returns an error if IB's history does not serve the series, naming it
 /// and saying why.
-fn served(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<Served> {
-    let instrument = || {
-        InstrumentId::from_str(identifier)
-            .with_context(|| format!("the {data_type} of {identifier}, no instrument id"))
-    };
-    match data_type {
-        NautilusDataType::Bar => {
-            let bar_type = BarType::from_str(identifier)?;
+fn served(series: &CatalogSeries) -> anyhow::Result<Served> {
+    match series {
+        CatalogSeries::Bars(bar_type) => {
             let spec = bar_type.spec();
             anyhow::ensure!(
                 bar_type.is_externally_aggregated()
                     && BAR_PRICES.contains(&spec.price_type)
-                    && bar_type_to_ib_bar_size(&bar_type).is_ok()
+                    && bar_type_to_ib_bar_size(bar_type).is_ok()
                     && spec.aggregation != BarAggregation::Month,
                 "IB's history serves its own (EXTERNAL) time bars of a size IB has and \
                  Nautilus' IB history client reads, 1, 5, 15 or 30 seconds, 1, 2, 3, 5, 10, \
                  15, 20 or 30 minutes, 1, 2, 3, 4 or 8 hours, a day or a week, priced LAST, \
-                 BID, ASK or MID, not {identifier}"
+                 BID, ASK or MID, not {bar_type}"
             );
             anyhow::ensure!(
                 !(bar_type.spec().price_type == PriceType::Last
                     && bar_type.instrument_id().venue.as_str() == FOREX_VENUE),
-                "IB has no TRADES bars of a forex pair, so its history serves no {identifier}: \
+                "IB has no TRADES bars of a forex pair, so its history serves no {bar_type}: \
                  read its BID, ASK or MID bars"
             );
-            Ok(Served::Bars(bar_type))
+            Ok(Served::Bars(*bar_type))
         }
-        NautilusDataType::QuoteTick => {
-            Ok(Served::Ticks(IbHistoricalTickType::BidAsk, instrument()?))
-        }
-        NautilusDataType::TradeTick => {
-            let instrument_id = instrument()?;
+        CatalogSeries::Ticks(tick) if tick.data == NautilusDataType::QuoteTick => Ok(
+            Served::Ticks(IbHistoricalTickType::BidAsk, tick.instrument_id),
+        ),
+        CatalogSeries::Ticks(tick) if tick.data == NautilusDataType::TradeTick => {
+            let instrument_id = tick.instrument_id;
             anyhow::ensure!(
                 !CURRENCY_PAIR_VENUES.contains(&instrument_id.venue.as_str()),
                 "Nautilus' IB client serves no trades of a currency pair, so IB's history \
-                 serves no trades of {identifier}: read its quotes"
+                 serves no trades of {instrument_id}: read its quotes"
             );
             Ok(Served::Ticks(IbHistoricalTickType::Trades, instrument_id))
         }
-        other => {
-            anyhow::bail!(
-                "IB's history serves bars, quotes and trades, not the {other} of {identifier}"
-            )
+        CatalogSeries::Ticks(other) => {
+            anyhow::bail!("IB's history serves bars, quotes and trades, not the {other}")
         }
     }
 }
@@ -820,7 +802,6 @@ impl SmallBarPacing {
 /// Returns an error if:
 /// - A slice of bars would be asked from earlier than the oldest start IB
 ///   holds, naming the bars and that start.
-/// - A slice of bars is keyed by no bar type, naming it.
 /// - `catalog::resumed` fails.
 pub(crate) fn check_held(
     catalog: &ParquetDataCatalog,
@@ -838,13 +819,7 @@ pub(crate) fn check_held(
         };
 
         if bar_type.spec().aggregation == BarAggregation::Second
-            && let (Some(from), _) = resumed(
-                catalog,
-                &NautilusDataType::Bar,
-                &bar_type.to_string(),
-                slice.from,
-                slice.to,
-            )?
+            && let (Some(from), _) = resumed(catalog, &slice.series, slice.from, slice.to)?
         {
             anyhow::ensure!(
                 from >= oldest,
@@ -1375,6 +1350,17 @@ mod tests {
         assert_eq!(requests.timeout_secs, 7);
     }
 
+    fn test_series(kind: NautilusDataType, identifier: &str) -> CatalogSeries {
+        if kind == NautilusDataType::Bar {
+            CatalogSeries::Bars(bar_type(identifier))
+        } else {
+            CatalogSeries::Ticks(crate::strategy::requirements::TickSeries {
+                data: kind,
+                instrument_id: InstrumentId::from(identifier),
+            })
+        }
+    }
+
     /// IB's own 1-minute TRADES bars; an IDEALPRO pair, which IB serves no
     /// TRADES bars of, has its own BID and ASK bars, of any size IB has,
     /// and IB serves MIDPOINT bars too.
@@ -1390,7 +1376,7 @@ mod tests {
     #[case::an_etf_s_mid("SXR8.IBIS-1-MINUTE-MID-EXTERNAL")]
     #[case::an_etf_s_daily_bid("SXR8.IBIS-1-DAY-BID-EXTERNAL")]
     fn ib_serves_its_own_last_bid_ask_and_mid_bars_of_any_size_it_has(#[case] identifier: &str) {
-        let served = served(&NautilusDataType::Bar, identifier).unwrap();
+        let served = served(&CatalogSeries::Bars(bar_type(identifier))).unwrap();
         assert_eq!(served, Served::Bars(bar_type(identifier)));
     }
 
@@ -1400,11 +1386,11 @@ mod tests {
     fn ib_serves_quotes_and_trades_as_its_historical_ticks() {
         let sxr8 = InstrumentId::from("SXR8.IBIS");
         assert_eq!(
-            served(&NautilusDataType::QuoteTick, "SXR8.IBIS").unwrap(),
+            served(&test_series(NautilusDataType::QuoteTick, "SXR8.IBIS")).unwrap(),
             Served::Ticks(IbHistoricalTickType::BidAsk, sxr8)
         );
         assert_eq!(
-            served(&NautilusDataType::TradeTick, "SXR8.IBIS").unwrap(),
+            served(&test_series(NautilusDataType::TradeTick, "SXR8.IBIS")).unwrap(),
             Served::Ticks(IbHistoricalTickType::Trades, sxr8)
         );
     }
@@ -1426,7 +1412,7 @@ mod tests {
         #[case] data_type: NautilusDataType,
         #[case] identifier: &str,
     ) {
-        let err = served(&data_type, identifier).unwrap_err();
+        let err = served(&test_series(data_type, identifier)).unwrap_err();
         assert!(err.to_string().contains(identifier), "{err}");
     }
 
@@ -1444,7 +1430,7 @@ mod tests {
         #[case] data_type: NautilusDataType,
         #[case] identifier: &str,
     ) {
-        served(&data_type, identifier).unwrap();
+        served(&test_series(data_type, identifier)).unwrap();
     }
 
     /// A price IB's adapter would ask TRADES for, a size IB has not,
@@ -1464,7 +1450,7 @@ mod tests {
     #[case::book_deltas(NautilusDataType::OrderBookDelta, "SXR8.IBIS")]
     #[case::book_depth(NautilusDataType::OrderBookDepth, "SXR8.IBIS")]
     fn ib_serves_no_other_series(#[case] data_type: NautilusDataType, #[case] identifier: &str) {
-        let err = served(&data_type, identifier).unwrap_err();
+        let err = served(&test_series(data_type, identifier)).unwrap_err();
         assert!(err.to_string().contains(identifier), "{err}");
     }
 

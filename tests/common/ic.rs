@@ -11,6 +11,7 @@ use std::path::Path;
 use helix_trader::{
     backtest::{Backtest, Commission},
     catalog::fill_catalog,
+    strategy::requirements::{CatalogSeries, TickSeries},
     venues,
 };
 use jiff::{SignedDuration, Timestamp};
@@ -266,7 +267,10 @@ pub(crate) fn store_defined(
     to: Timestamp,
 ) {
     let mut catalog = ParquetDataCatalog::new(dir, None, None, None, None);
-    let series = [(NautilusDataType::QuoteTick, defined.id().to_string())];
+    let series = [CatalogSeries::Ticks(TickSeries {
+        data: NautilusDataType::QuoteTick,
+        instrument_id: defined.id(),
+    })];
     let data: Vec<Data> = quotes.into_iter().map(Data::Quote).collect();
     let fill = fill_catalog(
         &mut catalog,
@@ -274,7 +278,7 @@ pub(crate) fn store_defined(
         &series,
         from,
         to,
-        async |_, _, _, _| Ok(data.clone()),
+        async |_, _, _| Ok(data.clone()),
     );
     tokio::runtime::Runtime::new()
         .unwrap()

@@ -20,7 +20,11 @@ use std::{cell::RefCell, collections::BTreeSet, rc::Rc, time::Duration};
 
 use helix_trader::{
     live::Live,
-    strategy::{requirements::DataRequirements, subscriptions::Subscriptions, warmup::Warmup},
+    strategy::{
+        requirements::{CatalogSeries, DataRequirements},
+        subscriptions::Subscriptions,
+        warmup::Warmup,
+    },
     venues::ib::{IbAccount, IbHistory},
 };
 use jiff::{SignedDuration, Timestamp};
@@ -30,7 +34,7 @@ use nautilus_common::{
     messages::data::DataResponseEnvelope,
 };
 use nautilus_model::{
-    data::{Bar, BarType, Data, NautilusDataType},
+    data::{Bar, BarType, Data},
     identifiers::{StrategyId, TraderId},
 };
 use nautilus_trading::{
@@ -159,7 +163,7 @@ async fn a_warmup_of_days_holds_every_minute_bar_of_ibs_history_and_builds_each_
     let source = composite().composite();
     let ib = IbHistory::connect(47, to, crate::now()).await.unwrap();
     let reference: BTreeSet<u64> = ib
-        .data(&NautilusDataType::Bar, &source.to_string(), from, to)
+        .data(&CatalogSeries::Bars(source), from, to)
         .await
         .unwrap()
         .into_iter()

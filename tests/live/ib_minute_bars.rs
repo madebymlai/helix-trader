@@ -32,7 +32,7 @@ use helix_trader::{
     live::Live,
     rolls::ContinuousBars,
     strategy::{
-        requirements::{DataRequirements, catalog_keys},
+        requirements::{CatalogSeries, DataRequirements},
         subscriptions::Subscriptions,
         warmup,
     },
@@ -207,10 +207,10 @@ async fn the_live_minute_bars_follow_the_warmup_with_no_gap_and_no_duplicate() {
         fill_catalog(
             &mut parquet,
             instruments,
-            &catalog_keys(&[composite]),
+            &[CatalogSeries::Bars(composite.composite())],
             now - WARMUP,
             catalog_end,
-            async |data_type, identifier, from, to| ib.data(data_type, identifier, from, to).await,
+            async |series, from, to| ib.data(series, from, to).await,
         )
         .await
         .unwrap();

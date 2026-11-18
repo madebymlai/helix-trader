@@ -19,7 +19,7 @@ use helix_trader::{
     },
     strategy::{
         Declared, Series,
-        requirements::{DataRequirements, catalog_keys},
+        requirements::{CatalogSeries, DataRequirements, catalog_keys},
     },
 };
 use jiff::{SignedDuration, Timestamp};
@@ -101,14 +101,14 @@ fn hour_bar(close: Timestamp) -> common::Ohlc {
 /// hour bars are built from, over 06:00 to 15:00, as `fill-catalog` does.
 fn fill(dir: &Path) {
     let mut catalog = ParquetDataCatalog::new(dir, None, None, None, None);
-    let series = catalog_keys(&[BarType::from(COMPOSITE)]);
+    let series = [CatalogSeries::Bars(BarType::from(COMPOSITE).composite())];
     let fill = fill_catalog(
         &mut catalog,
         vec![instrument()],
         &series,
         at("06:00"),
         at("15:00"),
-        async |_, _, from, to| Ok(minute_bars(from, to).into_iter().map(Data::Bar).collect()),
+        async |_, from, to| Ok(minute_bars(from, to).into_iter().map(Data::Bar).collect()),
     );
     // The node runs its own runtime: this one is gone before it starts.
     tokio::runtime::Runtime::new()
