@@ -43,15 +43,19 @@ use helix_trader::{
         },
     },
     strategy::{
-        AtrArgs, Declared, orders,
+        AtrArgs, Declared, Series, orders,
         requirements::{DataRequirements, TickSeries},
         risk::Risk,
         subscriptions::Subscriptions,
+        warmup::Warmup,
     },
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
-    actor::{DataActor, indicators::ActorIndicator},
+    actor::{
+        DataActor,
+        indicators::{ActorIndicator, SharedActorIndicator},
+    },
     logging::logger::LoggerConfig,
     msgbus::{self, ShareableMessageHandler, switchboard::get_custom_topic},
     timer::TimeEvent,
@@ -160,6 +164,9 @@ struct TargetProbe {
     every: SignedDuration,
     features: Rc<FeatureSet>,
     targets: Rc<Targets>,
+    /// The replay's warmup, handing the features and the targets' ATR the
+    /// bars, as a model strategy's does.
+    warmup: Warmup,
     /// What the targets fail the run with: a denial.
     settled: SettledRows,
     record: Rc<RefCell<Record>>,
@@ -194,13 +201,34 @@ impl TargetProbe {
             "#,
         );
         let features = match source {
-            Source::Quotes(id) => FeatureSet::builder().quotes(id, MID, &tables),
-            Source::Trades(id) => FeatureSet::builder().trades(id, LAST, &tables),
-            Source::Bars(bar_type) => FeatureSet::builder().bars(bar_type, CLOSE, &tables),
+            Source::Quotes(id) => {
+                FeatureSet::builder().feature(&[Series::quotes(id)], MID, &tables)
+            }
+            Source::Trades(id) => {
+                FeatureSet::builder().feature(&[Series::trades(id)], LAST, &tables)
+            }
+            Source::Bars(bar_type) => {
+                FeatureSet::builder().feature(&[Series::Bars(bar_type)], CLOSE, &tables)
+            }
         }
         .build()
         .unwrap();
         let record = Rc::new(RefCell::new(Record::default()));
+        let targets = Targets::new(
+            targets,
+            DecisionRule::Every(every),
+            &source.requirements(),
+            &DatasetVenue {
+                commission: backtest.commission,
+                balance: backtest.balance,
+                latency: backtest.latency,
+            },
+        )
+        .unwrap();
+        let warmup = targets.warmed(Warmup::replayed(&source.requirements()).feeding(
+            &features.bar_types(),
+            Rc::clone(&features) as SharedActorIndicator,
+        ));
         let probe = Self {
             core: StrategyCore::new(StrategyConfig {
                 strategy_id: Some(StrategyId::from(STRATEGY)),
@@ -210,17 +238,8 @@ impl TargetProbe {
             source,
             every,
             features,
-            targets: Targets::new(
-                targets,
-                DecisionRule::Every(every),
-                &source.requirements(),
-                &DatasetVenue {
-                    commission: backtest.commission,
-                    balance: backtest.balance,
-                    latency: backtest.latency,
-                },
-            )
-            .unwrap(),
+            targets,
+            warmup,
             settled: SettledRows::default(),
             record: Rc::clone(&record),
         };
@@ -285,15 +304,19 @@ impl DataActor for TargetProbe {
         decide::start(self, DecisionRule::Every(self.every), SignedDuration::ZERO)
     }
 
-    /// Hands the features its quotes and trades: the set is registered with
-    /// Nautilus for its bars alone, a model strategy's warmup handing it its
-    /// ticks.
+    /// Hands the features its quotes and trades, and its warmup its bars:
+    /// the set and the targets' ATR are registered with Nautilus for
+    /// nothing, a model strategy's warmup handing them its data.
     fn on_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
         self.features.handle_quote(quote)
     }
 
     fn on_trade(&mut self, trade: &TradeTick) -> anyhow::Result<()> {
         self.features.handle_trade(trade)
+    }
+
+    fn on_bar(&mut self, bar: &Bar) -> anyhow::Result<()> {
+        self.warmup.on_bar(bar)
     }
 
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {

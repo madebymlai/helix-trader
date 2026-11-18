@@ -14,7 +14,7 @@ use helix_trader::{
         decide::{self, DecisionRule, FeatureRow},
         features::FeatureSet,
     },
-    strategy::Declared,
+    strategy::{Declared, Series},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
@@ -24,7 +24,7 @@ use nautilus_common::{
 };
 use nautilus_core::UnixNanos;
 use nautilus_model::{
-    data::{BarType, CustomData, QuoteTick},
+    data::{Bar, BarType, CustomData, QuoteTick},
     identifiers::{InstrumentId, StrategyId},
 };
 use nautilus_trading::{
@@ -80,8 +80,12 @@ impl FeatureProbe {
             "#,
         );
         let features = FeatureSet::builder()
-            .quotes(instrument_id, MID_3_QUOTES, &tables)
-            .bars(BarType::from(MID_BAR_TYPE), CLOSE_2_HOURS, &tables)
+            .feature(&[Series::quotes(instrument_id)], MID_3_QUOTES, &tables)
+            .feature(
+                &[Series::Bars(BarType::from(MID_BAR_TYPE))],
+                CLOSE_2_HOURS,
+                &tables,
+            )
             .build()
             .unwrap();
         let rows = Rc::new(RefCell::new(vec![]));
@@ -116,10 +120,14 @@ impl DataActor for FeatureProbe {
         decide::start(self, EVERY, SignedDuration::ZERO)
     }
 
-    /// Hands the features its quotes: the set is registered with Nautilus
-    /// for its bars alone, a model strategy's warmup handing it its ticks.
+    /// Hands the features its quotes and bars: the set is registered with
+    /// Nautilus for nothing, a model strategy's warmup handing it its data.
     fn on_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
         self.features.handle_quote(quote)
+    }
+
+    fn on_bar(&mut self, bar: &Bar) -> anyhow::Result<()> {
+        self.features.handle_bar(bar)
     }
 
     fn on_time_event(&mut self, event: &TimeEvent) -> anyhow::Result<()> {

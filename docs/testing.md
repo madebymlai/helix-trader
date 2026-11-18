@@ -28,7 +28,7 @@ Test layers escalate in parallel. Start at the lowest layer that proves what mat
 | Fuzz test            | Untrusted or adversarial bytes cross an adapter's parser or decoder                |
 | Live acceptance test | Behavior depends on a venue's contract, on its demo or paper account               |
 
-Helix has no property or fuzz harness yet: their rows record when to add one.
+Helix has no fuzz harness yet, its row recording when to add one, and no `proptest` yet: its one property test, the warmup merge's (`strategy::warmup::merge`), draws its cases from a seeded generator (`fastrand`, already in the tree), each failure naming the seed that reproduces it.
 
 ### Projection rule
 

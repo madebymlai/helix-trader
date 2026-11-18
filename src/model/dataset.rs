@@ -815,7 +815,9 @@ mod tests {
             learner::LearnerConfig,
             targets::{BracketSpec, Distance, Exit, Outcome, Outcomes, Target},
         },
-        strategy::{Declared, EmaArgs, IndicatorsConfig, conversions::Conversions, risk::R},
+        strategy::{
+            Declared, EmaArgs, IndicatorsConfig, Series, conversions::Conversions, risk::R,
+        },
     };
 
     const GOLD: &str = "XAUUSD.ICMARKETS";
@@ -847,7 +849,7 @@ mod tests {
         MIDS[..width]
             .iter()
             .fold(FeatureSet::builder(), |builder, &mid| {
-                builder.quotes(InstrumentId::from(GOLD), mid, &tables)
+                builder.feature(&[Series::quotes(InstrumentId::from(GOLD))], mid, &tables)
             })
             .build()
             .unwrap()
@@ -1794,7 +1796,11 @@ mod tests {
     /// The dataset of one feature declaring a warmup of 2 hours.
     fn warmed(catalog: &Path) -> Dataset {
         let features = FeatureSet::builder()
-            .quotes(InstrumentId::from(GOLD), MIDS[0], &tables())
+            .feature(
+                &[Series::quotes(InstrumentId::from(GOLD))],
+                MIDS[0],
+                &tables(),
+            )
             .warmup(SignedDuration::from_hours(2))
             .build()
             .unwrap();

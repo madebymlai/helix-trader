@@ -19,10 +19,11 @@
 //! lists, and the FX pairs its equity converts through, a cTrader pair's
 //! quotes its warmup asks the history of and it subscribes to from its
 //! start through the same subscriptions; and
-//! `[indicators]` its fast and slow EMAs. Its signal is its Nautilus indicator, and it
-//! decides only once its indicators are initialized, on the replay in a
-//! backtest, on the warmup live. A minimal strategy to drive data,
-//! backtest and paper.
+//! `[indicators]` its fast and slow EMAs. Its signal is its Nautilus
+//! indicator, which the warmup feeds its bars (`Warmup::on_bar`), and it
+//! decides only once its signal is initialized, on the replay in a
+//! backtest, on the warmup live, and the warmup has ended. A minimal
+//! strategy to drive data, backtest and paper.
 
 mod signal;
 
@@ -30,7 +31,10 @@ use std::rc::Rc;
 
 use jiff::SignedDuration;
 use nautilus_common::{
-    actor::{DataActor, DataActorNative, indicators::SharedActorIndicator},
+    actor::{
+        DataActor,
+        indicators::{ActorIndicator, SharedActorIndicator},
+    },
     config::{ConfigError, ConfigErrorCollector, ConfigResult},
     messages::data::DataResponseEnvelope,
     timer::TimeEvent,
@@ -238,7 +242,15 @@ impl EmaCross {
         config.validate()?;
         let signal = Rc::new(Signal::new(&config));
         let requirements = config.data_requirements();
-        let warmup = warmup(&requirements).feeding(Rc::clone(&signal) as SharedActorIndicator);
+        // The signal reads every bar of the traded instrument.
+        let read: Vec<BarType> = requirements
+            .bar_types
+            .iter()
+            .filter(|bar_type| bar_type.instrument_id() == config.trade_instrument_id())
+            .copied()
+            .collect();
+        let warmup =
+            warmup(&requirements).feeding(&read, Rc::clone(&signal) as SharedActorIndicator);
         Ok(Self {
             core: StrategyCore::new_checked(config.base.clone())?,
             signal,
@@ -338,17 +350,14 @@ nautilus_strategy!(EmaCross, {
 impl DataActor for EmaCross {
     /// Refuses the traded instrument if a stake cannot size a trade on it
     /// (`orders::refuse_inverse`), sets the time of each trade still open
-    /// again, as after a restart (`orders::arm_open_trades`), registers the
-    /// signal for the traded instrument's bars, then, live after requesting
-    /// the warmup, subscribes to the bars, to the conversion pairs' quotes
-    /// and to the custom series from where the warmup ends.
+    /// again, as after a restart (`orders::arm_open_trades`), then, live
+    /// after requesting the warmup, subscribes to the bars, to the
+    /// conversion pairs' quotes and to the custom series from where the
+    /// warmup ends. The signal is not registered with Nautilus: the warmup
+    /// feeds it its bars (`on_bar`).
     fn on_start(&mut self) -> anyhow::Result<()> {
         orders::refuse_inverse(self, self.config.trade_instrument_id())?;
         orders::arm_open_trades(self)?;
-        let bar_type = self.config.trade_bar_type();
-        let signal = Rc::clone(&self.signal) as SharedActorIndicator;
-        self.core_mut()
-            .register_indicator_for_bars(bar_type, signal);
         let now = Rc::clone(&self.warmup).start(self)?;
         self.subscriptions.clone().start(self, now);
         Ok(())
@@ -360,10 +369,13 @@ impl DataActor for EmaCross {
         self.warmup.on_data_response(self, response)
     }
 
-    /// Nautilus has fed the bar to the signal; the strategy decides on it
-    /// once its indicators are initialized.
+    /// Hands the bar to the warmup, which feeds it to the signal, live
+    /// once the warmup has ended, holding it until then (`Warmup::on_bar`);
+    /// the strategy decides on it once the warmup has ended and the signal
+    /// is initialized.
     fn on_bar(&mut self, bar: &Bar) -> anyhow::Result<()> {
-        if !self.core().indicators_initialized()? {
+        self.warmup.on_bar(bar)?;
+        if self.warmup.is_warming() || !self.signal.initialized()? {
             return Ok(());
         }
         match self.signal.cross(bar) {

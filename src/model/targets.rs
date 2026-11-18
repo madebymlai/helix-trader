@@ -52,10 +52,11 @@
 //! prices of its trades, else, of its source bars alone, a composite bar
 //! type built from them. A backtest replays a source bar stamped at its
 //! close before the timer closing the bar of the cadence at that instant,
-//! so that bar holds it. The setter owns the ATR, and `TargetSetter::start`
-//! registers it for its bars, which no strategy declares: the strategy
-//! subscribes to them beside its own (`TargetSetter::atr_bar_type`,
-//! `strategy::subscriptions`). A
+//! so that bar holds it. The setter owns the ATR, and the strategy's warmup
+//! feeds it its bars (`TargetSetter::warmed`), which no strategy declares:
+//! the strategy subscribes to them beside its own
+//! (`TargetSetter::atr_bar_type`, `strategy::subscriptions`) and hands the
+//! warmup each (`Warmup::on_bar`), none registered with Nautilus. A
 //! decision at which that ATR is not yet initialized opens no target, as a
 //! decision on cold features is none. Each exit is on the instrument's
 //! nearest tick (Nautilus' tick grid), a tie away from the decision's
@@ -946,8 +947,8 @@ fn longest_dividing(sources: &[BarType], cadence: SignedDuration) -> Option<BarT
         .map(|(source, _)| source)
 }
 
-/// The average true range of a target, registered with the strategy's
-/// Nautilus indicators for the bars of its bar type.
+/// The average true range of a target, fed the bars of its bar type by the
+/// strategy's warmup (`Warmup::building`).
 struct TargetAtr {
     bars: AtrBars,
     indicator: RefCell<AverageTrueRange>,
@@ -965,18 +966,6 @@ impl TargetAtr {
     fn value(&self) -> Option<f64> {
         let indicator = self.indicator.borrow();
         indicator.initialized.then_some(indicator.value)
-    }
-
-    /// Registers it with `actor`'s Nautilus indicators for its bars (see
-    /// `TargetSetter::start`).
-    fn start<A>(self: &Rc<Self>, actor: &mut A)
-    where
-        A: DataActor + DataActorNative + Debug + 'static,
-    {
-        let shared = Rc::clone(self) as SharedActorIndicator;
-        actor
-            .core_mut()
-            .register_indicator_for_bars(self.bars.bar_type, shared);
     }
 
     /// `warmup` building its bars and handing them to it (see
@@ -1136,25 +1125,6 @@ impl TargetSetter {
         })
     }
 
-    /// Starts the target's average true range, if any, on `actor`, from
-    /// its `on_start`: registers it with the actor's Nautilus indicators
-    /// for its bars, which the actor subscribes to in the same `on_start`
-    /// (`atr_bar_type`, `strategy::subscriptions`), so the data engine
-    /// builds them, from the quotes, the trades or the source bars, and
-    /// hands it each before the actor's own handler, the first once the
-    /// start is over. Nautilus registers an indicator once per bar type and
-    /// keeps one subscription per bar type and actor, so starting again, on
-    /// a restart, or a strategy reading the same bars, feeds it each bar
-    /// once.
-    pub fn start<A>(&self, actor: &mut A)
-    where
-        A: DataActor + DataActorNative + Debug + 'static,
-    {
-        if let Some(atr) = &self.atr {
-            atr.start(actor);
-        }
-    }
-
     /// Whether a target can be set as far as its ATR goes: none, or
     /// initialized.
     #[must_use]
@@ -1171,9 +1141,12 @@ impl TargetSetter {
     }
 
     /// `warmup` building the bars of the target's ATR, if any, and handing
-    /// them to it (`Warmup::building`): the warmup's bars reach only the
-    /// cache, and live the first decision after a start then sets the stop
-    /// a dataset run sets there.
+    /// them to it (`Warmup::building`), of the history and those the
+    /// strategy hands it (`Warmup::on_bar`), which the actor subscribes to
+    /// (`atr_bar_type`, `strategy::subscriptions`): the warmup's bars reach
+    /// only the cache, and live the first decision after a start then sets
+    /// the stop a dataset run sets there. In a replay the warmup hands it
+    /// each bar as it comes.
     #[must_use]
     pub fn warmed(&self, warmup: Warmup) -> Warmup {
         match &self.atr {
@@ -1508,8 +1481,7 @@ impl Targets {
     /// (`TargetSetter::ensure_payable`), or whose dataset balance the
     /// target's pairs, as the cache defines them, do not reach its P&L
     /// currency from, by the check of a backtest's balance
-    /// (`backtest::refuse_balance`), then starts the target's ATR, if any
-    /// (`TargetSetter::start`). The refusal is here because a failed
+    /// (`backtest::refuse_balance`). The refusal is here because a failed
     /// `on_start` ends the node's run with its error, while an error at a
     /// decision is only logged by Nautilus and would leave an empty dataset.
     /// An instrument not in the cache is not refused here: it errs at each
@@ -1520,27 +1492,31 @@ impl Targets {
     /// Returns an error if the target's instrument in the cache is inverse,
     /// or the commission is charged in another currency than its P&L's, or
     /// the pairs do not reach its P&L currency from the balance's.
-    pub fn start<A>(&self, actor: &mut A) -> anyhow::Result<()>
+    pub fn start<A>(&self, actor: &A) -> anyhow::Result<()>
     where
-        A: DataActor + DataActorNative + Debug + 'static,
+        A: DataActor + DataActorNative,
     {
-        {
-            let cache = actor.cache();
-            if let Some(instrument) = cache.instrument(&self.config.instrument_id) {
-                self.setter.ensure_payable(&instrument)?;
-                let pairs: Vec<InstrumentAny> = self
-                    .config
-                    .conversions
-                    .pairs()
-                    .iter()
-                    .filter_map(|pair| cache.instrument(pair))
-                    .collect();
-                backtest::refuse_balance(self.setter.balance, &[instrument], &pairs)
-                    .context("the dataset balance, which the targets are sized at")?;
-            }
+        let cache = actor.cache();
+        if let Some(instrument) = cache.instrument(&self.config.instrument_id) {
+            self.setter.ensure_payable(&instrument)?;
+            let pairs: Vec<InstrumentAny> = self
+                .config
+                .conversions
+                .pairs()
+                .iter()
+                .filter_map(|pair| cache.instrument(pair))
+                .collect();
+            backtest::refuse_balance(self.setter.balance, &[instrument], &pairs)
+                .context("the dataset balance, which the targets are sized at")?;
         }
-        self.setter.start(actor);
         Ok(())
+    }
+
+    /// `warmup` building the bars of the targets' ATR, if any, and handing
+    /// them to it (`TargetSetter::warmed`).
+    #[must_use]
+    pub fn warmed(&self, warmup: Warmup) -> Warmup {
+        self.setter.warmed(warmup)
     }
 
     /// Whether the targets can be set as far as their ATR goes

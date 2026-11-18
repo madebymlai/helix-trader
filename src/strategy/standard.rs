@@ -612,6 +612,41 @@ impl Display for Series {
     }
 }
 
+/// The tick series of an instrument or root by their kind, as `[data]
+/// series` names them (see `TickSeries`).
+impl Series {
+    /// The quotes of `instrument_id`.
+    #[must_use]
+    pub const fn quotes(instrument_id: InstrumentId) -> Self {
+        Self::ticks(NautilusDataType::QuoteTick, instrument_id)
+    }
+
+    /// The trades of `instrument_id`.
+    #[must_use]
+    pub const fn trades(instrument_id: InstrumentId) -> Self {
+        Self::ticks(NautilusDataType::TradeTick, instrument_id)
+    }
+
+    /// The book depth snapshots of `instrument_id`.
+    #[must_use]
+    pub const fn depth(instrument_id: InstrumentId) -> Self {
+        Self::ticks(NautilusDataType::OrderBookDepth, instrument_id)
+    }
+
+    /// The book deltas of `instrument_id`.
+    #[must_use]
+    pub const fn deltas(instrument_id: InstrumentId) -> Self {
+        Self::ticks(NautilusDataType::OrderBookDelta, instrument_id)
+    }
+
+    const fn ticks(data: NautilusDataType, instrument_id: InstrumentId) -> Self {
+        Self::Ticks(TickSeries {
+            data,
+            instrument_id,
+        })
+    }
+}
+
 /// The keys of a series as the TOML has them: those of Nautilus'
 /// `DataType::try_new` beside the others for a custom series, and no
 /// other, Nautilus' own `DataType` deserializer taking a `topic`, which
@@ -1336,6 +1371,20 @@ mod tests {
             err.contains("bar_spec") && err.contains("ESH24.CME"),
             "{err}"
         );
+    }
+
+    #[rstest]
+    #[case::quotes(Series::quotes(InstrumentId::from("ESH24.CME")), "quotes")]
+    #[case::trades(Series::trades(InstrumentId::from("ESH24.CME")), "trades")]
+    #[case::depth(Series::depth(InstrumentId::from("ESH24.CME")), "order_book_depths")]
+    #[case::deltas(Series::deltas(InstrumentId::from("ESH24.CME")), "order_book_deltas")]
+    fn a_tick_series_built_in_code_is_the_one_its_entry_names(
+        #[case] built: Series,
+        #[case] data: &str,
+    ) {
+        let entry = format!("data = \"{data}\"\ninstrument_id = \"ESH24.CME\"");
+
+        assert_eq!(built, toml::from_str::<Series>(&entry).unwrap());
     }
 
     /// `candles` is no data type Nautilus parses; `instruments` is one, of

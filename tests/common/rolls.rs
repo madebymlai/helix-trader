@@ -9,7 +9,7 @@
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
-    data::{OrderBookDepth, TradeTick, stubs::stub_depth10},
+    data::{OrderBookDepth, QuoteTick, TradeTick, stubs::stub_depth10},
     enums::AggressorSide,
     identifiers::{InstrumentId, Symbol, TradeId},
     instruments::{InstrumentAny, stubs::futures_contract_es},
@@ -65,6 +65,22 @@ pub(crate) fn trade(id: &str, time: Timestamp, price: &str) -> TradeTick {
         Quantity::from(1),
         AggressorSide::Buy,
         TradeId::from(time.as_nanosecond().to_string().as_str()),
+        time.into(),
+        time.into(),
+    )
+}
+
+/// A quote of `id` at `time`, its bid and ask 10 cents either side of
+/// `mid`, of one contract each.
+pub(crate) fn quote(id: &str, time: Timestamp, mid: &str) -> QuoteTick {
+    let mid: Price = Price::from(mid);
+    let half = Price::from("0.10");
+    QuoteTick::new(
+        InstrumentId::from(id),
+        mid - half,
+        mid + half,
+        Quantity::from(1),
+        Quantity::from(1),
         time.into(),
         time.into(),
     )
@@ -157,6 +173,12 @@ pub(crate) fn catalog() -> TempDir {
 /// A catalog of both contracts and `trades`, of either, stored over 22:00
 /// Tuesday to 02:00 Wednesday.
 pub(crate) fn catalog_of_trades(trades: &[TradeTick]) -> TempDir {
+    catalog_of_ticks(trades, &[])
+}
+
+/// A catalog of both contracts, `trades` and `quotes`, of either, stored
+/// over 22:00 Tuesday to 02:00 Wednesday.
+pub(crate) fn catalog_of_ticks(trades: &[TradeTick], quotes: &[QuoteTick]) -> TempDir {
     let dir = tempfile::tempdir().unwrap();
     let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
     catalog
@@ -176,6 +198,15 @@ pub(crate) fn catalog_of_trades(trades: &[TradeTick]) -> TempDir {
             .copied()
             .collect();
         catalog.write_to_parquet(&of, from, to, None).unwrap();
+        let of: Vec<QuoteTick> = quotes
+            .iter()
+            .filter(|quote| quote.instrument_id == InstrumentId::from(contract))
+            .copied()
+            .collect();
+
+        if !of.is_empty() {
+            catalog.write_to_parquet(&of, from, to, None).unwrap();
+        }
     }
     dir
 }

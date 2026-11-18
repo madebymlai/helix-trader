@@ -126,8 +126,10 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
     };
     let record = Rc::new(RefCell::new(Record::default()));
     let fed = Rc::new(crate::FedBars::default());
-    let warming =
-        Rc::new(Warmup::live(&requirements).feeding(Rc::clone(&fed) as SharedActorIndicator));
+    let warming = Rc::new(Warmup::live(&requirements).feeding(
+        &requirements.bar_types,
+        Rc::clone(&fed) as SharedActorIndicator,
+    ));
     let recorder = Recorder {
         core: StrategyCore::new(StrategyConfig {
             strategy_id: Some(StrategyId::from("RECORDER-001")),

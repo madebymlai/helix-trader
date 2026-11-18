@@ -377,6 +377,9 @@ async-trait.workspace = true
 # The hooks of the demo test of the cTrader session's token renewal
 # (`tests/live/ctrader_token_demo.rs`).
 ctrader = { workspace = true, features = ["test-support"] }
+# The seeded generator of the property tests' draws (`prop_*`), already in
+# the tree through tempfile.
+fastrand = "2.5"
 # The crate's own `test-support`, for the unit tests and the binary the
 # integration tests run.
 helix-trader = { path = ".", features = ["test-support"] }

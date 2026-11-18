@@ -6,18 +6,27 @@
 //! subscribes to the quotes of IC's gold, the deltas of CME gold and its
 //! imbalances, keyed by its id, and records each it gets.
 //! A raw feature on the imbalances reads each from Nautilus' cache, where
-//! the data engine puts it before the strategy's handler runs. One node per
-//! thread, so one run per test.
+//! the data engine puts it before the strategy's handler runs; a feature on
+//! the imbalances and the quotes, of a model strategy's dataset run, gets
+//! both from its data hooks. One node per thread, so one run per test.
 
 use std::{cell::RefCell, rc::Rc};
 
 use helix_trader::{
     backtest::Backtest,
-    model::features::FeatureSet,
-    strategy::requirements::{CustomSeries, TickSeries},
+    model::{
+        features::{CustomHandler, Feature, FeatureSet},
+        handle::{Mode, SettledRows},
+    },
+    strategy::{
+        Declared, IndicatorArgs, Series,
+        requirements::{CustomSeries, DataRequirements, TickSeries},
+    },
 };
+use jiff::SignedDuration;
 use nautilus_common::actor::DataActor;
 use nautilus_core::UnixNanos;
+use nautilus_indicators::indicator::Indicator;
 use nautilus_model::{
     data::{CustomData, NautilusDataType, OrderBookDeltas, QuoteTick},
     enums::BookType,
@@ -29,7 +38,7 @@ use nautilus_trading::{
 };
 use rstest::rstest;
 
-use crate::common::{glbx, ic};
+use crate::common::{dataset, features::tables, glbx, ic};
 
 /// What the probe got, at its time.
 #[derive(Debug, Clone, PartialEq)]
@@ -249,4 +258,124 @@ fn a_raw_feature_reads_each_replayed_imbalance_from_the_cache() {
     backtest.run(reader).unwrap();
 
     assert_eq!(read.take(), [Some(vec![-0.25]), Some(vec![0.75])]);
+}
+
+thread_local! {
+    /// What the `Arrivals` feature of the run on this thread got.
+    static ARRIVED: RefCell<Vec<Got>> = const { RefCell::new(Vec::new()) };
+}
+
+/// A feature recording each quote and imbalance it gets in `ARRIVED`,
+/// never initialized.
+struct Arrivals;
+
+impl Indicator for Arrivals {
+    fn name(&self) -> String {
+        "Arrivals".to_string()
+    }
+
+    fn has_inputs(&self) -> bool {
+        false
+    }
+
+    fn initialized(&self) -> bool {
+        false
+    }
+
+    fn handle_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
+        ARRIVED.with_borrow_mut(|got| got.push(Got::Quote(quote.ts_init)));
+        Ok(())
+    }
+
+    fn reset(&mut self) {}
+}
+
+impl Feature for Arrivals {
+    fn value(&self) -> f64 {
+        0.0
+    }
+
+    fn custom_handler(&mut self) -> Option<&mut dyn CustomHandler> {
+        Some(self)
+    }
+}
+
+impl CustomHandler for Arrivals {
+    fn handle_custom(&mut self, data: &CustomData) -> anyhow::Result<()> {
+        let imbalance = data
+            .data
+            .as_any()
+            .downcast_ref::<glbx::Imbalance>()
+            .ok_or_else(|| anyhow::anyhow!("{} is no imbalance", data.data_type))?;
+        let got = Got::Imbalance(imbalance.value, imbalance.ts_init);
+        ARRIVED.with_borrow_mut(|arrived| arrived.push(got));
+        Ok(())
+    }
+}
+
+/// The arguments of `Arrivals`: none.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArrivalsArgs {}
+
+impl IndicatorArgs for ArrivalsArgs {
+    type Indicator = Arrivals;
+
+    fn build(self) -> anyhow::Result<Arrivals> {
+        Ok(Arrivals)
+    }
+}
+
+/// `[indicators.arrivals]`.
+const ARRIVALS: Declared<ArrivalsArgs> = Declared::new("arrivals");
+
+/// A model strategy's dataset run over `[09:00, 12:00]`, its one feature on
+/// IC's gold quotes and CME gold's imbalances: the strategy's data hooks
+/// (`model_data_hooks!`) hand the feature each replayed imbalance among
+/// the quotes, in time order, as a strategy's handlers get them.
+#[rstest]
+fn a_feature_on_custom_data_and_quotes_gets_both_replayed_in_time_order() {
+    let catalog = catalog();
+    let quotes = tick(NautilusDataType::QuoteTick, ic::INSTRUMENT_ID);
+    let features = FeatureSet::builder()
+        .feature(
+            &[Series::Ticks(quotes.clone()), Series::Custom(imbalances())],
+            ARRIVALS,
+            &tables("arrivals = {}"),
+        )
+        .build()
+        .unwrap();
+    let requirements = DataRequirements {
+        bar_types: vec![],
+        ticks: vec![quotes],
+        custom: vec![imbalances()],
+        warmup: SignedDuration::ZERO,
+    };
+    let (probe, _) = dataset::probe_reading(
+        features,
+        &dataset::config(),
+        &requirements,
+        &Mode::Dataset {
+            rows: SettledRows::default(),
+        },
+    );
+    let backtest = Backtest {
+        ticks: requirements.ticks.clone(),
+        custom: requirements.custom,
+        ..dataset::backtest(catalog.path(), ic::at("09:00:00"), ic::at("12:00:00"))
+    };
+
+    backtest.run_dataset(probe).unwrap();
+
+    let got = ARRIVED.take();
+    assert_eq!(
+        unquoted(&got),
+        [
+            Got::Imbalance(-0.25, at("09:30:00")),
+            Got::Imbalance(0.75, at("11:00:00")),
+        ]
+    );
+    assert_eq!(got.len(), 360 + 2);
+    let times: Vec<UnixNanos> = got.iter().map(Got::time).collect();
+    assert!(times.is_sorted(), "{got:?}");
 }

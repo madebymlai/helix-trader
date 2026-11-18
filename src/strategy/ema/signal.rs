@@ -68,9 +68,9 @@ impl Signal {
     }
 }
 
-/// Nautilus' side of the signal: registered for the traded instrument's
-/// bars, it is fed each of them before the strategy's `on_bar`, and is
-/// initialized once both EMAs are, by the bars that count alone.
+/// Nautilus' side of the signal: the warmup feeds it the strategy's bars
+/// (`Warmup::feeding`, `Warmup::on_bar`), and it is initialized once both
+/// EMAs are, by the bars that count alone.
 impl ActorIndicator for Signal {
     fn key(&self) -> usize {
         std::ptr::from_ref(self).addr()

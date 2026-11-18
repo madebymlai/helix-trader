@@ -2308,6 +2308,7 @@ dependencies = [
  "clap",
  "ctrader",
  "dotenvy",
+ "fastrand",
  "helix-trader",
  "ibapi",
  "jiff",

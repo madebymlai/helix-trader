@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use crate::{
     model::features::FeatureSet,
-    strategy::{Declared, EmaArgs},
+    strategy::{Declared, EmaArgs, Series},
 };
 
 use super::ModelEmaConfig;
@@ -29,7 +29,7 @@ pub(super) const SLOW: Declared<EmaArgs> = Declared::new("slow");
 /// without a bump.
 const VERSION: u32 = 1;
 
-// panics-doc-ok (transitive via FeatureSetBuilder::bars)
+// panics-doc-ok (transitive via FeatureSetBuilder::feature)
 /// The features of `config`: the averages of each of its bar types in
 /// turn, the fast then the slow, warmed by the strategy's warmup, which a
 /// dataset build replays before its first day.
@@ -51,7 +51,9 @@ pub(super) fn features(config: &ModelEmaConfig) -> anyhow::Result<Rc<FeatureSet>
             FeatureSet::builder()
                 .version(VERSION)
                 .warmup(config.data.warmup),
-            |builder, (bar_type, average)| builder.bars(bar_type, average, &config.indicators),
+            |builder, (bar_type, average)| {
+                builder.feature(&[Series::Bars(bar_type)], average, &config.indicators)
+            },
         )
         .build()
 }
