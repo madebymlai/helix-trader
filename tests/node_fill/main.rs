@@ -25,8 +25,7 @@ use std::{
 
 use helix_trader::{
     catalog::{FillData, FillRequest, NodeClient, NodeFill, missing},
-    rolls::Slice,
-    strategy::requirements::{DataRequirements, SeriesSlice, TickSeries},
+    strategy::requirements::{CatalogSeries, DataRequirements, SeriesSlice, TickSeries},
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
@@ -962,26 +961,25 @@ fn funding(at: &str) -> FundingRateUpdate {
     )
 }
 
-/// The slice of GCZ26's `series` over `[from, to]`.
-fn series_slice(series: (NautilusDataType, &str), from: Timestamp, to: Timestamp) -> SeriesSlice {
-    SeriesSlice {
-        series: (series.0, series.1.to_string()),
-        slice: Slice {
-            instrument_id: InstrumentId::from(GCZ26),
-            from,
-            to,
-        },
-    }
-}
-
 #[rstest]
 fn bars_and_funding_are_asked_a_day_a_request_and_written_back_under_their_series() {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::Data);
     let (from, to) = (ts(FRI), end_before(SUN));
     let slices = [
-        series_slice((NautilusDataType::FundingRateUpdate, GCZ26), from, to),
-        series_slice((NautilusDataType::Bar, BARS), from, to),
+        SeriesSlice {
+            series: CatalogSeries::Ticks(TickSeries {
+                data: NautilusDataType::FundingRateUpdate,
+                instrument_id: InstrumentId::from(GCZ26),
+            }),
+            from,
+            to,
+        },
+        SeriesSlice {
+            series: CatalogSeries::Bars(BarType::from(BARS)),
+            from,
+            to,
+        },
     ];
 
     fill_slices(dir.path(), &venue, &slices, DAY).unwrap();

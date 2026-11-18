@@ -131,9 +131,11 @@ async fn write_definitions(
     mut instrument: impl AsyncFnMut(InstrumentId) -> anyhow::Result<InstrumentAny>,
 ) -> anyhow::Result<()> {
     let mut ids: Vec<InstrumentId> = Vec::new();
-    for SeriesSlice { slice, .. } in slices {
-        if !ids.contains(&slice.instrument_id) {
-            ids.push(slice.instrument_id);
+
+    for slice in slices {
+        let id = slice.series.instrument_id();
+        if !ids.contains(&id) {
+            ids.push(id);
         }
     }
     let names: Vec<String> = ids.iter().map(ToString::to_string).collect();
@@ -206,11 +208,12 @@ pub fn requests(
     slices: &[SeriesSlice],
 ) -> anyhow::Result<Vec<FillRequest>> {
     let funding = slices.iter().map(|of| SeriesSlice {
-        series: (
-            NautilusDataType::FundingRateUpdate,
-            of.slice.instrument_id.to_string(),
-        ),
-        slice: of.slice,
+        series: CatalogSeries::Ticks(TickSeries {
+            data: NautilusDataType::FundingRateUpdate,
+            instrument_id: of.series.instrument_id(),
+        }),
+        from: of.from,
+        to: of.to,
     });
     let slices = SeriesSlice::merged(funding.chain(slices.iter().cloned()));
     Ok(missing(catalog, &slices)?
@@ -561,7 +564,11 @@ mod tests {
                 .slices(at("2026-10-01T00:00:00Z"), at("2026-10-08T00:00:00Z")),
             )
             .collect();
-        assert!(slices.iter().any(|s| s.series.1 == xperp_minutes));
+        assert!(
+            slices
+                .iter()
+                .any(|s| s.series == CatalogSeries::Bars(BarType::from(xperp_minutes)))
+        );
         let mut asked = Vec::new();
 
         write_definitions(&catalog, &slices, async |id| {

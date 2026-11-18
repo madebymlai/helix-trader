@@ -212,14 +212,12 @@ impl IbHistory {
         slices: &[SeriesSlice],
     ) -> anyhow::Result<()> {
         let mut ids: Vec<InstrumentId> = Vec::new();
-        for SeriesSlice {
-            series: (data_type, identifier),
-            slice,
-        } in slices
-        {
-            served(data_type, identifier)?;
-            if !ids.contains(&slice.instrument_id) {
-                ids.push(slice.instrument_id);
+
+        for slice in slices {
+            serves(&slice.series)?;
+            let id = slice.series.instrument_id();
+            if !ids.contains(&id) {
+                ids.push(id);
             }
         }
         let instruments = self.instruments(&ids).await?;
@@ -833,17 +831,20 @@ pub(crate) fn check_held(
         .to_zoned(TimeZone::UTC)
         .checked_sub(6.months())?
         .timestamp();
-    for SeriesSlice {
-        series: (data_type, identifier),
-        slice,
-    } in slices
-    {
-        if *data_type != NautilusDataType::Bar {
+
+    for slice in slices {
+        let CatalogSeries::Bars(bar_type) = slice.series else {
             continue;
-        }
-        let bar_type = BarType::from_str(identifier)?;
+        };
+
         if bar_type.spec().aggregation == BarAggregation::Second
-            && let (Some(from), _) = resumed(catalog, data_type, identifier, slice.from, slice.to)?
+            && let (Some(from), _) = resumed(
+                catalog,
+                &NautilusDataType::Bar,
+                &bar_type.to_string(),
+                slice.from,
+                slice.to,
+            )?
         {
             anyhow::ensure!(
                 from >= oldest,
@@ -1582,16 +1583,13 @@ mod tests {
     }
 
     /// The slices of `series`, each over `[from, to]` on its instrument.
-    fn slices_of(series: &[(NautilusDataType, &str, &str)], from: &str) -> Vec<SeriesSlice> {
+    fn slices_of(series: &[CatalogSeries], from: &str) -> Vec<SeriesSlice> {
         series
             .iter()
-            .map(|(data, identifier, instrument)| SeriesSlice {
-                series: (data.clone(), (*identifier).to_string()),
-                slice: crate::rolls::Slice {
-                    instrument_id: InstrumentId::from(*instrument),
-                    from: at(from),
-                    to: at("2026-11-14T00:00:00Z"),
-                },
+            .map(|series| SeriesSlice {
+                series: series.clone(),
+                from: at(from),
+                to: at("2026-11-14T00:00:00Z"),
             })
             .collect()
     }
@@ -1609,7 +1607,7 @@ mod tests {
         let held = |from| {
             check_held(
                 &catalog,
-                &slices_of(&[(NautilusDataType::Bar, small_bars, "SXR8.IBIS")], from),
+                &slices_of(&[CatalogSeries::Bars(BarType::from(small_bars))], from),
                 now,
             )
         };
@@ -1624,12 +1622,11 @@ mod tests {
             &catalog,
             &slices_of(
                 &[
-                    (
-                        NautilusDataType::Bar,
-                        "SXR8.IBIS-1-MINUTE-LAST-EXTERNAL",
-                        "SXR8.IBIS",
-                    ),
-                    (NautilusDataType::QuoteTick, "SXR8.IBIS", "SXR8.IBIS"),
+                    CatalogSeries::Bars(BarType::from("SXR8.IBIS-1-MINUTE-LAST-EXTERNAL")),
+                    CatalogSeries::Ticks(crate::strategy::requirements::TickSeries {
+                        data: NautilusDataType::QuoteTick,
+                        instrument_id: InstrumentId::from("SXR8.IBIS"),
+                    }),
                 ],
                 "2026-05-14T00:00:00Z",
             ),
@@ -1680,7 +1677,7 @@ mod tests {
             store_small_bars(&catalog, stored[0], stored[1]);
             check_held(
                 &catalog,
-                &slices_of(&[(NautilusDataType::Bar, small_bars, "SXR8.IBIS")], from),
+                &slices_of(&[CatalogSeries::Bars(BarType::from(small_bars))], from),
                 now,
             )
         };
@@ -1714,15 +1711,9 @@ mod tests {
         let (from, to) = ("2026-04-01T00:00:00Z", "2026-05-01T00:00:00Z");
         store_small_bars(&catalog, from, to);
         let slice = SeriesSlice {
-            series: (
-                NautilusDataType::Bar,
-                "SXR8.IBIS-5-SECOND-LAST-EXTERNAL".to_string(),
-            ),
-            slice: crate::rolls::Slice {
-                instrument_id: InstrumentId::from("SXR8.IBIS"),
-                from: at(from),
-                to: at(to),
-            },
+            series: CatalogSeries::Bars(BarType::from("SXR8.IBIS-5-SECOND-LAST-EXTERNAL")),
+            from: at(from),
+            to: at(to),
         };
 
         check_held(&catalog, &[slice], at("2026-11-30T12:00:00Z")).unwrap();

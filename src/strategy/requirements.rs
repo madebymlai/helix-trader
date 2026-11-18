@@ -366,8 +366,9 @@ impl DataRequirements {
                 .slices()
                 .into_iter()
                 .map(move |slice| SeriesSlice {
-                    series: source.on(slice.instrument_id).key(),
-                    slice,
+                    series: source.on(slice.instrument_id),
+                    from: slice.from,
+                    to: slice.to,
                 })
         });
         SeriesSlice::merged(slices)
@@ -459,10 +460,10 @@ fn merged<K: PartialEq + Clone>(
 /// A catalog series over the slice its contract stands for its root.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeriesSlice {
-    /// The series of the slice's contract: its Nautilus data type and
-    /// catalog identifier, as `catalog_keys` gives them.
-    pub series: (NautilusDataType, String),
-    pub slice: Slice,
+    /// The resolved source, on the contract storing it.
+    pub series: CatalogSeries,
+    pub from: Timestamp,
+    pub to: Timestamp,
 }
 
 impl SeriesSlice {
@@ -471,23 +472,10 @@ impl SeriesSlice {
     /// come: no part of a series is read twice.
     #[must_use]
     pub fn merged(slices: impl IntoIterator<Item = Self>) -> Vec<Self> {
-        let keyed = slices.into_iter().map(|of| {
-            (
-                (of.series, of.slice.instrument_id),
-                of.slice.from,
-                of.slice.to,
-            )
-        });
+        let keyed = slices.into_iter().map(|of| (of.series, of.from, of.to));
         merged(keyed)
             .into_iter()
-            .map(|((series, instrument_id), from, to)| Self {
-                series,
-                slice: Slice {
-                    instrument_id,
-                    from,
-                    to,
-                },
-            })
+            .map(|(series, from, to)| Self { series, from, to })
             .collect()
     }
 }
@@ -527,7 +515,7 @@ pub fn catalog_keys(bar_types: &[BarType]) -> Vec<(NautilusDataType, String)> {
 /// What a catalog series holds: external bars, or the ticks of an
 /// instrument. A venue's history serves some (`venues::serves`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CatalogSeries {
+pub enum CatalogSeries {
     Bars(BarType),
     Ticks(TickSeries),
 }
@@ -543,7 +531,8 @@ impl Display for CatalogSeries {
 }
 
 impl CatalogSeries {
-    pub(crate) fn instrument_id(&self) -> InstrumentId {
+    #[must_use]
+    pub fn instrument_id(&self) -> InstrumentId {
         match self {
             Self::Bars(bar_type) => bar_type.instrument_id(),
             Self::Ticks(tick) => tick.instrument_id,
@@ -567,7 +556,8 @@ impl CatalogSeries {
 
     /// Its key in the catalog: its Nautilus data type and catalog
     /// identifier.
-    pub(crate) fn key(&self) -> (NautilusDataType, String) {
+    #[must_use]
+    pub fn key(&self) -> (NautilusDataType, String) {
         match self {
             Self::Bars(bar_type) => (NautilusDataType::Bar, bar_type.to_string()),
             Self::Ticks(tick) => tick.catalog_key(),
@@ -610,7 +600,13 @@ fn sorted_sources(sources: impl Iterator<Item = CatalogSeries>) -> Vec<CatalogSe
             unique.push(source);
         }
     }
-    unique.sort_by_cached_key(|source| (source.instrument_id(), source.key().1));
+    unique.sort_by_cached_key(|source| {
+        let spec = match source {
+            CatalogSeries::Ticks(_) => None,
+            CatalogSeries::Bars(bar) => Some(bar.spec().to_string()),
+        };
+        (source.instrument_id(), spec)
+    });
     unique
 }
 
@@ -771,19 +767,41 @@ mod tests {
 
     fn series_slice(
         data_type: NautilusDataType,
-        identifier: &str,
         instrument_id: &str,
         from: Timestamp,
         to: Timestamp,
     ) -> SeriesSlice {
         SeriesSlice {
-            series: (data_type, identifier.to_string()),
-            slice: Slice {
-                instrument_id: InstrumentId::from(instrument_id),
-                from,
-                to,
-            },
+            series: CatalogSeries::Ticks(tick(data_type, instrument_id)),
+            from,
+            to,
         }
+    }
+
+    /// A shared contract does not merge different bars; a one-nanosecond
+    /// gap in BID coverage is not filled by ASK coverage.
+    #[rstest]
+    fn bar_windows_merge_only_for_the_same_full_bar_type_without_a_gap() {
+        let bid = CatalogSeries::Bars(BarType::from("GCZ26.GLBX-1-MINUTE-BID-EXTERNAL"));
+        let ask = CatalogSeries::Bars(BarType::from("GCZ26.GLBX-1-MINUTE-ASK-EXTERNAL"));
+        let window = |series, from: u64, to: u64| SeriesSlice {
+            series,
+            from: UnixNanos::from(from).into(),
+            to: UnixNanos::from(to).into(),
+        };
+        assert_eq!(
+            SeriesSlice::merged([
+                window(bid.clone(), 9, 12),
+                window(ask.clone(), 2, 14),
+                window(bid.clone(), 2, 3),
+                window(bid.clone(), 4, 7),
+            ]),
+            [
+                window(bid.clone(), 2, 7),
+                window(bid, 9, 12),
+                window(ask, 2, 14)
+            ]
+        );
     }
 
     #[rstest]
@@ -801,20 +819,8 @@ mod tests {
         assert_eq!(
             requirements.slices(start, end),
             [
-                series_slice(
-                    NautilusDataType::TradeTick,
-                    "GCZ26.GLBX",
-                    "GCZ26.GLBX",
-                    start,
-                    end
-                ),
-                series_slice(
-                    NautilusDataType::QuoteTick,
-                    "XAUUSD.ICMARKETS",
-                    "XAUUSD.ICMARKETS",
-                    start,
-                    end
-                ),
+                series_slice(NautilusDataType::TradeTick, "GCZ26.GLBX", start, end),
+                series_slice(NautilusDataType::QuoteTick, "XAUUSD.ICMARKETS", start, end),
             ]
         );
     }
@@ -843,27 +849,18 @@ mod tests {
                 series_slice(
                     NautilusDataType::TradeTick,
                     "GCQ26.GLBX",
-                    "GCQ26.GLBX",
                     start,
                     before(roll)
                 ),
-                series_slice(
-                    NautilusDataType::TradeTick,
-                    "GCZ26.GLBX",
-                    "GCZ26.GLBX",
-                    at(roll),
-                    end
-                ),
+                series_slice(NautilusDataType::TradeTick, "GCZ26.GLBX", at(roll), end),
                 series_slice(
                     NautilusDataType::OrderBookDepth,
-                    "GCQ26.GLBX",
                     "GCQ26.GLBX",
                     start,
                     before(roll)
                 ),
                 series_slice(
                     NautilusDataType::OrderBookDepth,
-                    "GCZ26.GLBX",
                     "GCZ26.GLBX",
                     at(roll),
                     end
@@ -893,17 +890,10 @@ mod tests {
                 series_slice(
                     NautilusDataType::TradeTick,
                     "GCQ26.GLBX",
-                    "GCQ26.GLBX",
                     start,
                     before(roll)
                 ),
-                series_slice(
-                    NautilusDataType::TradeTick,
-                    "GCZ26.GLBX",
-                    "GCZ26.GLBX",
-                    at(roll),
-                    end
-                ),
+                series_slice(NautilusDataType::TradeTick, "GCZ26.GLBX", at(roll), end),
             ]
         );
     }
@@ -925,16 +915,9 @@ mod tests {
         assert_eq!(
             requirements.slices(start, end),
             [
+                series_slice(NautilusDataType::TradeTick, "GCQ26.GLBX", start, end),
                 series_slice(
                     NautilusDataType::TradeTick,
-                    "GCQ26.GLBX",
-                    "GCQ26.GLBX",
-                    start,
-                    end
-                ),
-                series_slice(
-                    NautilusDataType::TradeTick,
-                    "GCZ26.GLBX",
                     "GCZ26.GLBX",
                     at("2026-07-29T00:00Z"),
                     end

@@ -406,6 +406,28 @@ fn pre_ticks_of_the_run() -> Vec<Got> {
 }
 
 #[rstest]
+fn december_trades_declared_beside_the_root_replay_once_over_the_whole_run() {
+    let catalog = rolls::catalog();
+    let trades = [ROOT, POST].map(|id| TickSeries {
+        data: NautilusDataType::TradeTick,
+        instrument_id: InstrumentId::from(id),
+    });
+    let got = run(&backtest(&catalog, trades.to_vec()), Subscribe::Contracts);
+
+    assert_eq!(
+        got,
+        [
+            Got::Alerts(vec![]),
+            tick(NautilusDataType::TradeTick, POST, "thu 23:15:00"),
+            tick(NautilusDataType::TradeTick, PRE, "thu 23:30:00"),
+            tick(NautilusDataType::TradeTick, PRE, "thu 23:59:59.999999999"),
+            tick(NautilusDataType::TradeTick, POST, "00:00:00"),
+            tick(NautilusDataType::TradeTick, POST, "00:45:00"),
+        ]
+    );
+}
+
+#[rstest]
 fn a_contract_declared_beside_its_root_is_replayed_once() {
     let catalog = rolls::catalog();
     let backtest = backtest(&catalog, [ticks(ROOT), ticks(PRE)].concat());

@@ -38,7 +38,7 @@ use crate::{
     rolls::ContinuousBars,
     strategy::{
         TradeConfig, conversions,
-        requirements::{CustomSeries, DataRequirements, SeriesSlice, TickSeries},
+        requirements::{CatalogSeries, CustomSeries, DataRequirements, SeriesSlice, TickSeries},
     },
     venues,
 };
@@ -249,7 +249,7 @@ impl Backtest {
         let (from, to) = (self.start, self.end);
         let catalog = ParquetDataCatalog::new(&self.catalog, None, None, None, None);
         let stored = |series: &SeriesSlice| {
-            let (data_type, identifier) = &series.series;
+            let (data_type, identifier) = &series.series.key();
             catalog
                 .query_last_timestamp(&data_type.clone().into(), Some(identifier))
                 .map(|last| last.is_some())
@@ -268,8 +268,12 @@ impl Backtest {
                 .contract_slices(from, to)
                 .into_iter()
                 .map(|slice| SeriesSlice {
-                    series: (data_type.clone(), slice.instrument_id.to_string()),
-                    slice,
+                    series: CatalogSeries::Ticks(TickSeries {
+                        data: data_type.clone(),
+                        instrument_id: slice.instrument_id,
+                    }),
+                    from: slice.from,
+                    to: slice.to,
                 })
                 .collect()
         };
@@ -418,7 +422,6 @@ mod tests {
     use rust_decimal::Decimal;
 
     use super::*;
-    use crate::rolls::Slice;
 
     const SWAP: &str = "BTC-USDT-SWAP.OKX";
     const XPERP: &str = "BTC-USD_UM_XPERP-310404.OKX";
@@ -456,18 +459,18 @@ mod tests {
         series
             .into_iter()
             .map(|(data_type, identifier)| {
-                let instrument_id = if data_type == NautilusDataType::Bar {
-                    BarType::from(identifier.as_str()).instrument_id()
+                let series = if data_type == NautilusDataType::Bar {
+                    CatalogSeries::Bars(BarType::from(identifier.as_str()))
                 } else {
-                    InstrumentId::from(identifier.as_str())
+                    CatalogSeries::Ticks(TickSeries {
+                        data: data_type,
+                        instrument_id: InstrumentId::from(identifier.as_str()),
+                    })
                 };
                 SeriesSlice {
-                    series: (data_type, identifier),
-                    slice: Slice {
-                        instrument_id,
-                        from: backtest.start,
-                        to: backtest.end,
-                    },
+                    series,
+                    from: backtest.start,
+                    to: backtest.end,
                 }
             })
             .collect()
@@ -583,12 +586,12 @@ mod tests {
         };
         let roll: Timestamp = "2026-07-29T00:00:00Z".parse().unwrap();
         let trades = |id: &str, from, to| SeriesSlice {
-            series: (NautilusDataType::TradeTick, id.to_string()),
-            slice: Slice {
+            series: CatalogSeries::Ticks(TickSeries {
+                data: NautilusDataType::TradeTick,
                 instrument_id: InstrumentId::from(id),
-                from,
-                to,
-            },
+            }),
+            from,
+            to,
         };
         let from = backtest.start;
         assert_eq!(
@@ -628,12 +631,12 @@ mod tests {
         assert_eq!(
             backtest.series().unwrap(),
             [SeriesSlice {
-                series: (NautilusDataType::OrderBookDepth, "GCQ26.GLBX".to_string()),
-                slice: Slice {
-                    instrument_id: InstrumentId::from("GCQ26.GLBX"),
-                    from: backtest.start,
-                    to: backtest.end,
-                },
+                series: CatalogSeries::Ticks(TickSeries {
+                    data: NautilusDataType::OrderBookDepth,
+                    instrument_id: InstrumentId::from("GCQ26.GLBX")
+                }),
+                from: backtest.start,
+                to: backtest.end,
             }]
         );
     }

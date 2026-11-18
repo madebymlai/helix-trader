@@ -202,8 +202,8 @@ pub(crate) async fn fill_slices(
         Timestamp,
     ) -> anyhow::Result<Vec<Data>>,
 ) -> anyhow::Result<()> {
-    for SeriesSlice { series, slice } in slices {
-        let id = slice.instrument_id;
+    for slice in slices {
+        let id = slice.series.instrument_id();
         let instrument = instruments
             .iter()
             .find(|instrument| instrument.id() == id)
@@ -211,7 +211,7 @@ pub(crate) async fn fill_slices(
         fill_catalog(
             catalog,
             vec![instrument.clone()],
-            std::slice::from_ref(series),
+            &[slice.series.key()],
             slice.from,
             slice.to,
             async |data_type, identifier, from, to| fetch(data_type, identifier, from, to).await,
@@ -257,10 +257,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::{
-        rolls::Slice,
-        strategy::requirements::{DataRequirements, SeriesSlice, TickSeries},
-    };
+    use crate::strategy::requirements::{CatalogSeries, DataRequirements, SeriesSlice, TickSeries};
 
     fn instrument() -> InstrumentAny {
         InstrumentAny::FuturesContract(futures_contract_es(None, None))
@@ -1129,12 +1126,12 @@ mod tests {
 
     fn quotes_slice(id: &str, from: u64, to: u64) -> SeriesSlice {
         SeriesSlice {
-            series: (NautilusDataType::QuoteTick, id.to_string()),
-            slice: Slice {
+            series: CatalogSeries::Ticks(TickSeries {
+                data: NautilusDataType::QuoteTick,
                 instrument_id: InstrumentId::from(id),
-                from: ns(from),
-                to: ns(to),
-            },
+            }),
+            from: ns(from),
+            to: ns(to),
         }
     }
 

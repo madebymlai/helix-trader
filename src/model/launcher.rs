@@ -430,7 +430,7 @@ impl RetrainActor {
         let catalog = ParquetDataCatalog::new(&self.catalog, None, None, None, None);
 
         for slice in self.requirements.slices(at, at) {
-            let (data_type, identifier) = &slice.series;
+            let (data_type, identifier) = &slice.series.key();
             let series = format!("the {} of {identifier}", data_path_prefix(data_type));
             let last = catalog
                 .query_last_timestamp(&data_type.clone().into(), Some(identifier))

@@ -822,7 +822,7 @@ fn add_ctrader_fill(
 fn of_source(slices: &[SeriesSlice], source: HistorySource) -> Vec<SeriesSlice> {
     slices
         .iter()
-        .filter(|slice| Row::of(slice.slice.instrument_id.venue).history == source)
+        .filter(|slice| Row::of(slice.series.instrument_id().venue).history == source)
         .cloned()
         .collect()
 }
@@ -842,7 +842,7 @@ fn of_custom_source(custom: &[CustomSlice], source: HistorySource) -> Vec<Custom
 fn of_definitions_source(slices: &[SeriesSlice], source: DefinitionsSource) -> Vec<SeriesSlice> {
     slices
         .iter()
-        .filter(|slice| Row::of(slice.slice.instrument_id.venue).definitions == source)
+        .filter(|slice| Row::of(slice.series.instrument_id().venue).definitions == source)
         .cloned()
         .collect()
 }
@@ -1899,7 +1899,7 @@ mod tests {
         let contracts = |source| {
             of_source(&slices, source)
                 .iter()
-                .map(|slice| slice.slice.instrument_id.to_string())
+                .map(|slice| slice.series.instrument_id().to_string())
                 .collect::<Vec<_>>()
         };
 

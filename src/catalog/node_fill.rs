@@ -51,7 +51,7 @@ use serde_json::json;
 
 use super::catalog_config;
 use crate::{
-    strategy::requirements::{CustomSlice, SeriesSlice},
+    strategy::requirements::{CatalogSeries, CustomSlice, SeriesSlice},
     time_range, venues,
 };
 
@@ -77,31 +77,22 @@ pub enum FillData {
 }
 
 impl FillData {
-    /// The series of `data_type` keyed by `identifier`, as the catalog
-    /// keys it (see `strategy::requirements::catalog_keys`): the bar type of bars, the
-    /// instrument id of anything else; an error for any other data type,
-    /// which no series slice holds (a custom series is asked by
-    /// `missing_custom`).
-    fn of(data_type: &NautilusDataType, identifier: &str) -> anyhow::Result<Self> {
-        Ok(match data_type {
+    /// The request kind for this resolved source, if served through the node.
+    fn of(series: &CatalogSeries) -> anyhow::Result<Self> {
+        let tick = match series {
+            CatalogSeries::Bars(bar_type) => return Ok(Self::Bars(*bar_type)),
+            CatalogSeries::Ticks(tick) => tick,
+        };
+        Ok(match &tick.data {
             NautilusDataType::QuoteTick => Self::Quotes,
             NautilusDataType::TradeTick => Self::Trades,
             NautilusDataType::OrderBookDepth => Self::Depth,
             NautilusDataType::OrderBookDelta => Self::Deltas,
-            NautilusDataType::Bar => Self::Bars(identifier.parse()?),
             NautilusDataType::FundingRateUpdate => Self::Funding,
             other => anyhow::bail!(
                 "no source filled through the node serves the {other} of an instrument"
             ),
         })
-    }
-
-    /// The instrument whose series of this kind `identifier` keys.
-    fn instrument_of(self, identifier: &str) -> String {
-        match self {
-            Self::Bars(bar_type) => bar_type.instrument_id().to_string(),
-            _ => identifier.to_string(),
-        }
     }
 }
 
@@ -161,18 +152,12 @@ pub fn missing(
     slices: &[SeriesSlice],
 ) -> anyhow::Result<Vec<FillRequest>> {
     let mut contracts: Vec<(InstrumentId, Vec<FillRequest>)> = Vec::new();
-    for SeriesSlice {
-        series: (data_type, identifier),
-        slice,
-    } in slices
-    {
-        let id = slice.instrument_id;
-        let data = FillData::of(data_type, identifier)
+
+    for slice in slices {
+        let id = slice.series.instrument_id();
+        let (data_type, identifier) = &slice.series.key();
+        let data = FillData::of(&slice.series)
             .with_context(|| format!("the {data_type} of {identifier}"))?;
-        anyhow::ensure!(
-            data.instrument_of(identifier) == id.to_string(),
-            "the {data} of {identifier} on a slice of {id}"
-        );
         let (from, to) = (nanos(slice.from), nanos(slice.to));
         let gaps = catalog
             .get_missing_intervals_for_request(
@@ -641,7 +626,7 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
-    use crate::{rolls::Slice, strategy::requirements::CustomSeries};
+    use crate::strategy::requirements::{CustomSeries, TickSeries};
 
     fn ts(s: &str) -> Timestamp {
         s.parse().unwrap()
@@ -658,12 +643,12 @@ mod tests {
 
     fn slice(data_type: NautilusDataType, id: &str, from: &str, to: &str) -> SeriesSlice {
         SeriesSlice {
-            series: (data_type, id.to_string()),
-            slice: Slice {
+            series: CatalogSeries::Ticks(TickSeries {
+                data: data_type,
                 instrument_id: InstrumentId::from(id),
-                from: ts(from),
-                to: ts(to),
-            },
+            }),
+            from: ts(from),
+            to: ts(to),
         }
     }
 
@@ -797,7 +782,7 @@ mod tests {
     )]
     #[case::bars(
         store_bars_over_wednesday,
-        bars_slice(BARS, "GCZ26.GLBX", "2026-10-20T00:00:00Z", "2026-10-22T00:00:00Z"),
+        bars_slice(BARS, "2026-10-20T00:00:00Z", "2026-10-22T00:00:00Z"),
         FillData::Bars(BarType::from(BARS)),
         "2026-10-22T00:00:00Z"
     )]
@@ -914,14 +899,11 @@ mod tests {
 
     const BARS: &str = "GCZ26.GLBX-1-MINUTE-LAST-EXTERNAL";
 
-    fn bars_slice(bar_type: &str, id: &str, from: &str, to: &str) -> SeriesSlice {
+    fn bars_slice(bar_type: &str, from: &str, to: &str) -> SeriesSlice {
         SeriesSlice {
-            series: (NautilusDataType::Bar, bar_type.to_string()),
-            slice: Slice {
-                instrument_id: InstrumentId::from(id),
-                from: ts(from),
-                to: ts(to),
-            },
+            series: CatalogSeries::Bars(BarType::from(bar_type)),
+            from: ts(from),
+            to: ts(to),
         }
     }
 
@@ -930,7 +912,7 @@ mod tests {
     /// book deltas as deltas.
     #[rstest]
     #[case::bars(
-        bars_slice(BARS, "GCZ26.GLBX", "2026-10-20T00:00:00Z", "2026-10-21T00:00:00Z"),
+        bars_slice(BARS, "2026-10-20T00:00:00Z", "2026-10-21T00:00:00Z"),
         FillData::Bars(BarType::from(BARS))
     )]
     #[case::funding(
@@ -957,7 +939,7 @@ mod tests {
     ) {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        let id = slice.slice.instrument_id.to_string();
+        let id = slice.series.instrument_id().to_string();
         let (from, to) = ("2026-10-20T00:00:00Z", "2026-10-21T00:00:00Z");
 
         let asked = missing(&catalog, &[slice]).unwrap();
@@ -969,23 +951,6 @@ mod tests {
                 request(data, &id, from, to),
             ]
         );
-    }
-
-    #[rstest]
-    fn bars_on_a_slice_of_another_contract_are_refused_naming_both() {
-        let dir = tempfile::tempdir().unwrap();
-        let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        let slices = [bars_slice(
-            BARS,
-            "GCQ26.GLBX",
-            "2026-10-20T00:00:00Z",
-            "2026-10-21T00:00:00Z",
-        )];
-
-        let err = format!("{:#}", missing(&catalog, &slices).unwrap_err());
-
-        assert!(err.contains(BARS), "{err}");
-        assert!(err.contains("GCQ26.GLBX"), "{err}");
     }
 
     fn bond_yields_metadata() -> Params {
