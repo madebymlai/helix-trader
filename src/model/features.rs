@@ -154,7 +154,10 @@ use std::{
 
 use jiff::SignedDuration;
 use nautilus_common::{
-    actor::{DataActor, DataActorNative, indicators::ActorIndicator},
+    actor::{
+        DataActor, DataActorNative,
+        indicators::{ActorIndicator, SharedActorIndicator},
+    },
     cache::Cache,
 };
 use nautilus_core::UnixNanos;
@@ -175,7 +178,7 @@ use crate::{
     strategy::{
         Declaration, Declared, IndicatorArgs, IndicatorsConfig, Series,
         requirements::{CustomSeries, TickSeries},
-        warmup::{BookIndicator, CustomIndicator},
+        warmup::{BookIndicator, CustomIndicator, Warmup},
     },
 };
 
@@ -587,6 +590,20 @@ impl FeatureSet {
             self.updated(bar.bar_type.instrument_id(), bar.ts_init);
         }
         read
+    }
+
+    /// Attaches the set to the warmup for its declared inputs. Raw custom
+    /// reads need only the cache; only handled custom series need callbacks.
+    pub(super) fn warmed(self: &Rc<Self>, warmup: Warmup) -> Warmup {
+        let ticks = self.ticks();
+        warmup
+            .feeding(&self.bar_types(), Rc::clone(self) as SharedActorIndicator)
+            .feeding_ticks(&ticks, Rc::clone(self) as SharedActorIndicator)
+            .feeding_books(&ticks, Rc::clone(self) as Rc<dyn BookIndicator>)
+            .feeding_custom(
+                &self.handled_custom(),
+                Rc::clone(self) as Rc<dyn CustomIndicator>,
+            )
     }
 
     /// Registers the set on `actor`, from its `on_start`: each tick
