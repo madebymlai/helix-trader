@@ -85,7 +85,7 @@ pub mod lse;
 pub mod okx;
 pub mod pepperstone;
 
-use std::{num::NonZeroUsize, path::Path};
+use std::{cell::RefCell, num::NonZeroUsize, path::Path, rc::Rc};
 
 use ::lse::{LseDataClientConfig, LseDataClientFactory, LseRow};
 use anyhow::Context;
@@ -95,7 +95,7 @@ use ctrader::{
     CTraderExecutionClientConfig, CTraderExecutionClientFactory,
 };
 use jiff::Timestamp;
-use nautilus_common::factories::DataClientFactory;
+use nautilus_common::{factories::DataClientFactory, live::clock::LiveClock};
 use nautilus_core::time::get_atomic_clock_realtime;
 use nautilus_databento::types::register_databento_custom_data;
 use nautilus_interactive_brokers::factories::InteractiveBrokersDataClientFactory;
@@ -963,7 +963,8 @@ pub async fn fill_history(
         )
         .await?;
     }
-    node.run(catalog_dir).await?;
+    node.run(catalog_dir, || Rc::new(RefCell::new(LiveClock::default())))
+        .await?;
     // Temporary until nautilus_trader#5472 is fixed: IB then fills through
     // the node.
     if !ib_ids.is_empty() {

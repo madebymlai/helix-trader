@@ -20,8 +20,10 @@ pub(crate) mod recorder;
 pub(crate) mod rolls;
 
 use std::{
+    cell::RefCell,
     collections::BTreeMap,
     path::{Path, PathBuf},
+    rc::Rc,
 };
 
 use helix_trader::{
@@ -35,7 +37,10 @@ use helix_trader::{
 };
 use jiff::{RoundMode, SignedDuration, Timestamp, TimestampRound, Unit, civil::time, tz::TimeZone};
 use nautilus_backtest::result::BacktestResult;
-use nautilus_common::logging::logger::LoggerConfig;
+use nautilus_common::{
+    clock::{Clock, VirtualClock},
+    logging::logger::LoggerConfig,
+};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::{Bar, BarSpecification, BarType, QuoteTick},
@@ -55,6 +60,16 @@ const NANOSECOND: SignedDuration = SignedDuration::from_nanos(1);
 
 pub(crate) fn ts(s: &str) -> Timestamp {
     s.parse().unwrap()
+}
+
+/// The clocks of a fill's node at `now` (`NodeFill::run`): Nautilus'
+/// virtual clock, set there.
+pub(crate) fn clock_at(now: Timestamp) -> impl Fn() -> Rc<RefCell<dyn Clock>> + 'static {
+    move || {
+        let clock = VirtualClock::new();
+        clock.set_time(UnixNanos::from(now));
+        Rc::new(RefCell::new(clock))
+    }
 }
 
 pub(crate) fn instrument() -> InstrumentAny {

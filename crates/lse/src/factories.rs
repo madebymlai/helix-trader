@@ -30,7 +30,8 @@ impl LseDataClientFactory {
 impl DataClientFactory for LseDataClientFactory {
     /// The client named `name`, on its config's keys and API, each key not
     /// given read from its variable, reading the instruments it converts
-    /// data of from `cache`.
+    /// data of from `cache` and the time a request is asked at from
+    /// `clock`, the node's.
     ///
     /// # Errors
     ///
@@ -43,7 +44,7 @@ impl DataClientFactory for LseDataClientFactory {
         name: &str,
         config: &dyn ClientConfig,
         cache: CacheView,
-        _clock: Rc<RefCell<dyn Clock>>,
+        clock: Rc<RefCell<dyn Clock>>,
     ) -> anyhow::Result<Box<dyn DataClient>> {
         let config = config
             .as_any()
@@ -55,6 +56,7 @@ impl DataClientFactory for LseDataClientFactory {
             ClientId::from(name),
             config,
             cache,
+            clock,
             |name| std::env::var(name).ok(),
         )?))
     }

@@ -48,7 +48,7 @@ use rstest::rstest;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::common::ic;
+use crate::common::{self, ic};
 
 fn november(time: &str) -> Timestamp {
     format!("2026-11-{time}Z").parse().unwrap()
@@ -125,7 +125,7 @@ fn us10y_type() -> DataType {
 /// Fills the catalog in `dir` with `us10y()` over the rows of the
 /// captured days, known from the 10th's 00:00 to the 13th's, from the mock
 /// LSE peer, as fill-catalog does: what the catalog lacks, asked of LSE's
-/// client through the node.
+/// client through the node, on the 16th, after LSE loaded them.
 fn fill_bond_yields(dir: &Path) {
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     let requests = missing_custom(
@@ -155,7 +155,7 @@ fn fill_bond_yields(dir: &Path) {
         .enable_all()
         .build()
         .unwrap()
-        .block_on(node.run(dir))
+        .block_on(node.run(dir, common::clock_at(november("16T12:00:00"))))
         .unwrap();
 }
 
