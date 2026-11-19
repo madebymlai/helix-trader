@@ -14,7 +14,7 @@
 //! trade of a model of either side realizes the P&L the dataset row of
 //! its decision recorded of that side.
 
-use std::path::Path;
+use std::{any::Any, cell::RefCell, path::Path, rc::Rc};
 
 use helix_trader::{
     model::{
@@ -28,8 +28,12 @@ use helix_trader::{
     strategy::risk::R,
 };
 use jiff::{SignedDuration, Timestamp};
+use nautilus_common::{
+    messages::execution::TradingCommand,
+    msgbus::{self, BusTap, Endpoint, MStr, MessagingSwitchboard, Topic},
+};
 use nautilus_core::UnixNanos;
-use nautilus_model::types::Money;
+use nautilus_model::types::{Money, Price};
 use rstest::rstest;
 use rust_decimal::Decimal;
 
@@ -343,6 +347,131 @@ pub(crate) fn hand_worked(side: Side) -> ModelConfig {
         margins,
         ..config()
     }
+}
+
+/// Observe the actual bracket commands, before the simulated venue fills one
+/// leg and cancels the other. A fill price alone cannot identify a stop.
+#[derive(Default)]
+struct BracketSubmissions(RefCell<Vec<(UnixNanos, Price, Price)>>);
+
+impl BusTap for BracketSubmissions {
+    fn on_publish(&self, _: MStr<Topic>, _: &dyn Any) {}
+
+    fn on_send(&self, endpoint: MStr<Endpoint>, message: &dyn Any) {
+        if endpoint == MessagingSwitchboard::risk_engine_queue_execute()
+            && let Some(TradingCommand::SubmitOrderList(list)) = message.downcast_ref()
+        {
+            let stop = list
+                .order_inits
+                .iter()
+                .find_map(|o| o.trigger_price)
+                .unwrap();
+            let take = list.order_inits.iter().find_map(|o| o.price).unwrap();
+            self.0.borrow_mut().push((list.ts_init, stop, take));
+        }
+    }
+}
+
+/// The quarter hours ending at 10:00 and 10:15 range 2 and 4, returning to
+/// 4000.10. Their two-bar simple ATR is 3, though the last minute is flat.
+/// The spike after 10:15 settles both sides; it makes the *forming* bar's
+/// range 10, but at 10:16 the distance is still 3 around the new 4010.10
+/// mid. The fall then settles the opposite exits. Each row risks 1 oz × $3.
+#[rstest]
+fn minute_decisions_label_and_submit_brackets_on_completed_quarter_hours() {
+    let mut config = hand_worked(Side::Long);
+    config.decision = DecisionRule::Every(SignedDuration::from_mins(1));
+    config.target.spec = toml::from_str(
+        r#"
+        limit = "45s"
+        [bracket]
+        take_profit = { atr = 1 }
+        stop = { atr = 1 }
+        atr = { period = 2, ma_type = "SIMPLE", bar_interval = "15m" }
+    "#,
+    )
+    .unwrap();
+    let (from, to) = (ic::at("09:45:00"), ic::at("10:16:40"));
+    let quotes = [
+        ("09:45:01", "4000.00", "4000.20"),
+        ("09:50:00", "4002.00", "4002.20"),
+        ("09:59:30", "4000.00", "4000.20"),
+        ("10:05:00", "4004.00", "4004.20"),
+        ("10:13:30", "4000.00", "4000.20"),
+        ("10:14:59", "4000.00", "4000.20"),
+        ("10:15:30", "4010.00", "4010.20"),
+        ("10:16:30", "4006.90", "4007.10"),
+        ("10:16:40", "4006.90", "4007.10"),
+    ];
+    let catalog = ic::catalog_of(
+        quotes.map(|(t, b, a)| ic::quote(ic::at(t), b, a)).to_vec(),
+        from,
+        to,
+    );
+    let rows = std::thread::scope(|scope| {
+        scope
+            .spawn(|| replay_of(&catalog, features(), &config, from, to))
+            .join()
+            .unwrap()
+            .unwrap()
+    });
+    let models = tempfile::tempdir().unwrap();
+    publish(
+        models.path(),
+        &config,
+        ic::at("10:15:00"),
+        baseline_of(&features(), &config, Side::Long, 8),
+    );
+    let submitted = Rc::new(BracketSubmissions::default());
+    msgbus::set_bus_tap(submitted.clone());
+    trade(&catalog, from, to, &config, models.path());
+    msgbus::clear_bus_tap();
+
+    let ns = |time| UnixNanos::from(ic::at(time));
+    let close = ns("10:15:00.010");
+    let between = ns("10:16:00.010");
+    let unit = Money::from("3 USD");
+    let outcomes: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            (
+                row.decision.ts_event,
+                row.settled_at,
+                row.outcomes.long.exit,
+                row.outcomes.short.exit,
+                row.outcomes.long.unit,
+                row.outcomes.short.unit,
+            )
+        })
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            (
+                close,
+                ns("10:15:30"),
+                Exit::TakeProfit,
+                Exit::Stop,
+                unit,
+                unit
+            ),
+            (
+                between,
+                ns("10:16:30"),
+                Exit::Stop,
+                Exit::TakeProfit,
+                unit,
+                unit
+            ),
+        ]
+    );
+    assert_eq!(
+        submitted.0.take(),
+        [
+            (close, Price::from("3997.10"), Price::from("4003.10")),
+            (between, Price::from("4007.10"), Price::from("4013.10")),
+        ]
+    );
 }
 
 /// Both minutes buy and sell one ounce in the dataset. The 10:01 long

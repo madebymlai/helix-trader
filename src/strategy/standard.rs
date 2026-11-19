@@ -2725,12 +2725,15 @@ mod tests {
                     bracket: Some(BracketSpec {
                         take_profit: Distance::Atr(2.into()),
                         stop: Distance::Atr(rust_decimal::Decimal::new(15, 1)),
-                        atr: Some(AtrArgs {
-                            period: 3,
-                            ma_type: Some(MovingAverageType::Simple),
-                            use_previous: Some(false),
-                            value_floor: Some(0.5),
-                        }),
+                        atr: Some(
+                            AtrArgs {
+                                period: 3,
+                                ma_type: Some(MovingAverageType::Simple),
+                                use_previous: Some(false),
+                                value_floor: Some(0.5),
+                            }
+                            .into()
+                        ),
                     }),
                     limit: SignedDuration::from_mins(45),
                     atr: None,

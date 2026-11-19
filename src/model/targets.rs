@@ -46,8 +46,9 @@
 //! ATR is built by
 //! Nautilus' `AverageTrueRange::new` as the config is validated, so that
 //! an argument Nautilus refuses panics at load. Its bars are Nautilus' bars of
-//! the instrument at the decision cadence, so a decision reads the bar
-//! closing at its time, built from what the strategy reads of it
+//! the instrument at `bar_interval` (the decision cadence if omitted), built
+//! from what the strategy reads of it. A decision reads only bars closed
+//! through its grid time, including a coincident close
 //! (`TargetConfig::atr_bars`): the mids of its quotes, else the last
 //! prices of its trades, else, of its source bars alone, a composite bar
 //! type built from them. A backtest replays a source bar stamped at its
@@ -238,7 +239,29 @@ pub struct Target {
     /// on none with a bracket, whose ATR is the bracket's
     /// (`TargetConfig::validate`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub atr: Option<AtrArgs>,
+    #[builder(into)]
+    pub atr: Option<TargetAtrConfig>,
+}
+
+/// Target-specific bar selection alongside the Nautilus indicator arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TargetAtrConfig {
+    /// Nautilus' ATR arguments; the period counts completed bars of this interval.
+    #[serde(flatten)]
+    pub args: AtrArgs,
+    /// The fixed length of each ATR bar, or the decision cadence when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bar_interval: Option<SignedDuration>,
+}
+
+impl From<AtrArgs> for TargetAtrConfig {
+    fn from(args: AtrArgs) -> Self {
+        Self {
+            args,
+            bar_interval: None,
+        }
+    }
 }
 
 /// A target's exits, each a distance from the decision's price, and the
@@ -254,7 +277,7 @@ pub struct BracketSpec {
     /// not `DEFAULT_ATR`: only with a distance in ATRs
     /// (`TargetConfig::validate`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub atr: Option<AtrArgs>,
+    pub atr: Option<TargetAtrConfig>,
 }
 
 /// How far an exit is from the decision's price, relative to it or to the
@@ -274,7 +297,7 @@ pub enum Distance {
 /// `AverageTrueRange` of Wilder's 14 bars, its other arguments Nautilus'
 /// defaults. An `atr` table gives Nautilus' arguments by their names
 /// (`AtrArgs`), `{ period = 20, ma_type = "WILDER", use_previous = true,
-/// value_floor = 0.0 }`; its bars are the decision cadence's (`AtrBars`).
+/// value_floor = 0.0 }`; `bar_interval` selects their bars (`AtrBars`).
 pub const DEFAULT_ATR: AtrArgs = AtrArgs {
     period: 14,
     ma_type: None,
@@ -294,8 +317,7 @@ const ATR_UNITS: [BarAggregation; 5] = [
 ];
 
 /// The average true range a target runs: `args`, on bars of `bar_type`,
-/// bars of the target's instrument at the decision cadence, so that a
-/// decision reads the bar closing at its time (`TargetConfig::atr_bars`).
+/// bars of the target's instrument at the resolved ATR interval (`TargetConfig::atr_bars`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AtrBars {
     pub bar_type: BarType,
@@ -583,7 +605,7 @@ impl TargetConfig {
         };
         if let Some(args) = spec.atr_args() {
             // Nautilus checks the arguments as it builds the ATR.
-            errors.collect(atr(args.build().map(drop)));
+            errors.collect(atr(args.args.build().map(drop)));
         }
         errors.collect(atr(self.atr_bars(rule, requirements).map(drop)));
         errors.into_result()
@@ -592,7 +614,7 @@ impl TargetConfig {
     /// The target's average true range deciding on `rule`, for a strategy
     /// of `requirements`, if it has one, a bracket with a distance in ATRs or
     /// a time-only target: its period, and its bars, Nautilus' internal bars
-    /// of the target's instrument at the decision cadence, built from what
+    /// of the target's instrument at its ATR interval, built from what
     /// the strategy reads of it, the first of:
     ///
     /// - its quotes: their mids, `XAUUSD.ICMARKETS-15-MINUTE-MID-INTERNAL`
@@ -601,20 +623,19 @@ impl TargetConfig {
     /// - its source bars (`DataRequirements::source_bars`): a composite bar
     ///   type built from them, priced as they are,
     ///   `..-15-MINUTE-LAST-INTERNAL@1-MINUTE-EXTERNAL`; of several, the
-    ///   longest whose length the cadence is a whole multiple of, the first
+    ///   longest whose length the interval is a whole multiple of, the first
     ///   in their order at a tie.
     ///
     /// Quotes and trades read through bars built from them count. The step
-    /// is the cadence in its largest whole unit, from days to
+    /// is the selected interval in its largest whole unit, from days to
     /// milliseconds.
     ///
     /// # Errors
     ///
-    /// Returns an error if Nautilus builds no bars of the cadence (a step
-    /// must divide the next unit, `BarSpecification::new_checked`, so that
-    /// bars close on the decisions' grid), the strategy reads neither
+    /// Returns an error if Nautilus builds no bars of the interval (a step
+    /// must divide the next unit, `BarSpecification::new_checked`), the strategy reads neither
     /// quotes, trades nor bars of the instrument, or, on bars alone, the
-    /// cadence is a whole multiple of none of them.
+    /// interval is a whole multiple of none of them.
     pub fn atr_bars(
         &self,
         rule: DecisionRule,
@@ -623,7 +644,17 @@ impl TargetConfig {
         let Some(config) = self.spec.atr_args() else {
             return Ok(None);
         };
-        let DecisionRule::Every(cadence) = rule;
+        let DecisionRule::Every(default_interval) = rule;
+        let cadence = config.bar_interval.unwrap_or(default_interval);
+        let setting = if config.bar_interval.is_some() {
+            "bar interval"
+        } else {
+            "decision cadence"
+        };
+        anyhow::ensure!(
+            cadence.is_positive(),
+            "the target's ATR {setting} {cadence:#} is not positive"
+        );
         let nanos = cadence.as_nanos();
         let Some((aggregation, step)) = ATR_UNITS
             .into_iter()
@@ -635,7 +666,7 @@ impl TargetConfig {
             .map(|(aggregation, unit)| (aggregation, nanos / unit))
         else {
             anyhow::bail!(
-                "the target's ATR has no bars of the decision cadence {cadence:#}, not whole \
+                "the target's ATR has no bars of the {setting} {cadence:#}, not whole \
                  milliseconds"
             );
         };
@@ -644,7 +675,7 @@ impl TargetConfig {
                 .map_err(anyhow::Error::from)
                 .and_then(|step| BarSpecification::new_checked(step, aggregation, price_type))
                 .with_context(|| {
-                    format!("the target's ATR has no bars of the decision cadence {cadence:#}")
+                    format!("the target's ATR has no bars of the {setting} {cadence:#}")
                 })
         };
         let traded = self.instrument_id;
@@ -668,7 +699,7 @@ impl TargetConfig {
             let Some(source) = longest_dividing(&sources, cadence) else {
                 let sources: Vec<String> = sources.iter().map(ToString::to_string).collect();
                 anyhow::bail!(
-                    "the target's ATR has no bars of the decision cadence {cadence:#}: it is \
+                    "the target's ATR has no bars of the {setting} {cadence:#}: it is \
                      not a whole multiple of the bars of {traded} the strategy reads, {}",
                     sources.join(", ")
                 );
@@ -685,7 +716,7 @@ impl TargetConfig {
         };
         Ok(Some(AtrBars {
             bar_type,
-            args: config,
+            args: config.args,
         }))
     }
 
@@ -795,11 +826,11 @@ impl Target {
 
     /// Its ATR: with a bracket, if a distance is in ATRs, the bracket's `atr`
     /// table's, else `DEFAULT_ATR`; time only, its own `atr` table's.
-    fn atr_args(&self) -> Option<AtrArgs> {
+    fn atr_args(&self) -> Option<TargetAtrConfig> {
         match self.bracket {
             Some(bracket) => bracket
                 .uses_atr()
-                .then(|| bracket.atr.unwrap_or(DEFAULT_ATR)),
+                .then(|| bracket.atr.unwrap_or_else(|| DEFAULT_ATR.into())),
             None => self.atr,
         }
     }
