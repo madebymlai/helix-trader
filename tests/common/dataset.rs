@@ -42,7 +42,6 @@ use nautilus_core::UnixNanos;
 use nautilus_indicators::indicator::Indicator;
 use nautilus_model::{
     data::{CustomData, NautilusDataType, QuoteTick},
-    enums::OmsType,
     events::{OrderCanceled, OrderDenied, OrderFilled, OrderRejected, PositionClosed},
     identifiers::{InstrumentId, StrategyId},
     types::{Money, Quantity},
@@ -369,7 +368,6 @@ pub(crate) fn backtest(catalog: &Path, from: Timestamp, to: Timestamp) -> Backte
         latency: venue().latency,
         pairs: vec![],
         balance: venue().balance,
-        venue_oms: |_| OmsType::Hedging,
         logging: LoggerConfig::default(),
     }
 }

@@ -30,7 +30,7 @@ use nautilus_core::{Params, UnixNanos};
 use nautilus_execution::engine::config::ExecutionEngineConfig;
 use nautilus_model::{
     data::{Data, DataBatch, NautilusDataType, QuoteTick},
-    enums::{AccountType, BookType},
+    enums::{AccountType, BookType, OmsType},
     identifiers::Venue,
     types::Money,
 };
@@ -100,8 +100,8 @@ enum Run {
 }
 
 /// The run config of `backtest`: one simulated venue per venue of the
-/// instruments, named after it, keeping positions as `backtest.venue_oms`
-/// says of it, each with the run's balance, or nothing if no broker trades
+/// instruments, named after it, keeping positions as `venues::oms_type`
+/// specifies, each with the run's balance, or nothing if no broker trades
 /// it or the run reads its pairs alone on it (`Backtest::funds`), and its
 /// fee model, which fills
 /// orders on the replayed data and settles funding, the series of the
@@ -183,7 +183,7 @@ fn config(backtest: &Backtest, run: Run) -> anyhow::Result<BacktestRunConfig> {
 }
 
 /// The simulated `venue` of `backtest` for `run`: a margin account keeping
-/// positions as `backtest.venue_oms` says, with the run's balance if a
+/// positions in the mode for this run, with the run's balance if a
 /// broker trades the venue and the run reads more on it than the pairs it
 /// converts through (`Backtest::funds`), else nothing in its
 /// currency, a backtest's with the balance's currency as its base if its
@@ -220,15 +220,15 @@ fn venue_config(
     } else {
         Money::zero(backtest.balance.currency)
     };
-    let leverage = match run {
-        Run::Backtest => Decimal::ONE,
-        Run::Dataset => DATASET_LEVERAGE,
+    let (oms_type, leverage) = match run {
+        Run::Backtest => (venues::oms_type(venue), Decimal::ONE),
+        Run::Dataset => (OmsType::Hedging, DATASET_LEVERAGE),
     };
     let base_currency = (run == Run::Backtest && venues::has_base_currency(venue))
         .then_some(backtest.balance.currency);
     Ok(BacktestVenueConfig::builder()
         .name(venue.as_str())
-        .oms_type((backtest.venue_oms)(venue))
+        .oms_type(oms_type)
         .account_type(AccountType::Margin)
         .book_type(BookType::L1_MBP)
         .starting_balances(vec![balance.to_string()])
@@ -484,7 +484,6 @@ mod tests {
     };
     use nautilus_model::{
         data::BarType,
-        enums::OmsType,
         identifiers::{InstrumentId, StrategyId, TraderId},
         types::{Currency, Money},
     };
@@ -510,7 +509,6 @@ mod tests {
             latency: None,
             pairs: vec![],
             balance: Money::from("10000 EUR"),
-            venue_oms: |_| OmsType::Netting,
             logging: LoggerConfig {
                 print_config: true,
                 ..LoggerConfig::default()
@@ -541,19 +539,6 @@ mod tests {
                 .iter()
                 .all(BacktestDataConfig::optimize_file_loading)
         );
-    }
-
-    #[rstest]
-    fn the_venue_keeps_positions_as_the_backtest_says() {
-        let dir = tempfile::tempdir().unwrap();
-        let netting = run_config(&backtest(dir.path())).unwrap();
-        let hedging = Backtest {
-            venue_oms: |_| OmsType::Hedging,
-            ..backtest(dir.path())
-        };
-        let hedging = run_config(&hedging).unwrap();
-        assert_eq!(netting.venues()[0].oms_type(), OmsType::Netting);
-        assert_eq!(hedging.venues()[0].oms_type(), OmsType::Hedging);
     }
 
     /// A backtest's margins are its instruments', each holding its
@@ -920,19 +905,26 @@ mod tests {
         assert!(err.to_string().contains("no instruments"), "{err}");
     }
 
+    /// GLBX trades through IB, which nets; IC Markets hedges. A dataset
+    /// needs separate long and short positions on both venues.
     #[rstest]
-    fn instruments_on_two_venues_get_a_venue_each_as_it_keeps_positions() {
+    #[case::trading(run_config, OmsType::Netting, Decimal::ONE)]
+    #[case::dataset(dataset_run_config, OmsType::Hedging, Decimal::MAX)]
+    fn the_run_sets_each_simulated_venues_position_mode(
+        #[case] configure: fn(&Backtest) -> anyhow::Result<BacktestRunConfig>,
+        #[case] glbx_mode: OmsType,
+        #[case] leverage: Decimal,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let backtest = Backtest {
             bar_types: vec![
                 BarType::from("XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL"),
                 BarType::from("GC.v.0.GLBX-1-MINUTE-MID-INTERNAL"),
             ],
-            venue_oms: crate::venues::oms_type,
             ..backtest(dir.path())
         };
 
-        let config = run_config(&backtest).unwrap();
+        let config = configure(&backtest).unwrap();
 
         let venues: Vec<_> = config
             .venues()
@@ -942,13 +934,13 @@ mod tests {
         assert_eq!(
             venues,
             [
-                ("GLBX".to_string(), OmsType::Netting),
+                ("GLBX".to_string(), glbx_mode),
                 ("ICMARKETS".to_string(), OmsType::Hedging),
             ]
         );
         for venue in config.venues() {
             assert_eq!(venue.starting_balances(), ["10000.00 EUR"]);
-            assert_eq!(venue.default_leverage(), Some(Decimal::ONE));
+            assert_eq!(venue.default_leverage(), Some(leverage));
             assert_eq!(venue.account_type(), AccountType::Margin);
             assert!(matches!(venue.fee_model(), Some(FeeModelAny::Fixed(_))));
         }
@@ -967,12 +959,7 @@ mod tests {
                 data: NautilusDataType::TradeTick,
                 instrument_id: InstrumentId::from("GOLD-FUTURES.LSEDGE"),
             }],
-            venue_oms: crate::venues::oms_type,
             ..backtest(dir.path())
-        };
-        let dataset = Backtest {
-            venue_oms: |_| OmsType::Hedging,
-            ..backtest.clone()
         };
         let venues = |config: BacktestRunConfig| -> Vec<(String, OmsType, Vec<String>)> {
             config
@@ -989,7 +976,7 @@ mod tests {
         };
 
         let normal = venues(run_config(&backtest).unwrap());
-        let dataset = venues(dataset_run_config(&dataset).unwrap());
+        let dataset = venues(dataset_run_config(&backtest).unwrap());
 
         let venue =
             |name: &str, oms, balance: &str| (name.to_string(), oms, vec![balance.to_string()]);

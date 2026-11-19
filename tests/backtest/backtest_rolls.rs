@@ -17,7 +17,6 @@ use helix_trader::{
         requirements::{CustomSeries, TickSeries},
         subscriptions::Subscriptions,
     },
-    venues,
 };
 use nautilus_common::{actor::DataActor, logging::logger::LoggerConfig, timer::TimeEvent};
 use nautilus_core::UnixNanos;
@@ -236,7 +235,6 @@ fn backtest(catalog: &tempfile::TempDir, ticks: Vec<TickSeries>) -> Backtest {
         latency: None,
         pairs: vec![],
         balance: Money::from("1000000 USD"),
-        venue_oms: venues::oms_type,
         logging: LoggerConfig::default(),
     }
 }

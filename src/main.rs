@@ -41,7 +41,6 @@ use nautilus_common::logging::{
 };
 use nautilus_core::{UUID4, UnixNanos, time::get_atomic_clock_realtime};
 use nautilus_model::{
-    enums::OmsType,
     identifiers::{InstrumentId, TraderId},
     types::Money,
 };
@@ -402,7 +401,6 @@ fn run_backtest(args: &BacktestArgs) -> anyhow::Result<()> {
     // NAUTILUS_LOG config through, rather than install a logger here.
     let logging = logger_config(std::env::var("NAUTILUS_LOG"))?;
     let dataset_logging = logging.clone();
-    // Each simulated venue keeps positions as the real one does.
     let backtest = |requirements: DataRequirements, pairs: &[InstrumentId]| Backtest {
         catalog: args.run.catalog.clone(),
         bar_types: requirements.bar_types,
@@ -414,7 +412,6 @@ fn run_backtest(args: &BacktestArgs) -> anyhow::Result<()> {
         latency: args.latency,
         pairs: pairs.to_vec(),
         balance: args.balance,
-        venue_oms: venues::oms_type,
         logging,
     };
     args.run.strategy.visit(Backtesting {
@@ -692,7 +689,6 @@ impl DatasetRun {
             latency: venue.latency,
             pairs: config.trade.untraded_pairs(),
             balance: venue.balance,
-            venue_oms: |_| OmsType::Hedging,
             logging: self.logging.clone(),
         };
         backtest.run_dataset(S::new(config.clone(), mode)?)?;

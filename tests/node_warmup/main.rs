@@ -30,7 +30,6 @@ use helix_trader::{
         subscriptions::Subscriptions,
         warmup::{self, BookIndicator, Warmup},
     },
-    venues,
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
@@ -1647,7 +1646,6 @@ fn replayed(dir: &Path, requirements: &DataRequirements, start: u64, end: u64) -
             latency: None,
             pairs: vec![],
             balance: Money::from("1000000 USD"),
-            venue_oms: venues::oms_type,
             logging: LoggerConfig::default(),
         };
         backtest.run(strategy).unwrap();

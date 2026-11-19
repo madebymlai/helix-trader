@@ -33,7 +33,6 @@ use helix_trader::{
         conversions::Conversions,
         ema::{EmaCross, EmaCrossConfig, EmaParams},
     },
-    venues,
 };
 use jiff::{RoundMode, SignedDuration, Timestamp, TimestampRound, Unit, civil::time, tz::TimeZone};
 use nautilus_backtest::result::BacktestResult;
@@ -240,7 +239,6 @@ pub(crate) fn backtest(
         latency: None,
         pairs: vec![],
         balance: Money::from("10000 EUR"),
-        venue_oms: venues::oms_type,
         logging: LoggerConfig::default(),
     }
 }

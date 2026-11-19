@@ -6,10 +6,7 @@
 //! LAST bars over a run from 23:00 to 01:00. One node per thread, so one
 //! run per test.
 
-use helix_trader::{
-    backtest::{Backtest, Commission},
-    venues,
-};
+use helix_trader::backtest::{Backtest, Commission};
 use jiff::Timestamp;
 use nautilus_common::logging::logger::LoggerConfig;
 use nautilus_model::{
@@ -43,7 +40,6 @@ fn backtest(catalog: &TempDir) -> Backtest {
         latency: None,
         pairs: vec![],
         balance: Money::from("1000000 USD"),
-        venue_oms: venues::oms_type,
         logging: LoggerConfig::default(),
     }
 }

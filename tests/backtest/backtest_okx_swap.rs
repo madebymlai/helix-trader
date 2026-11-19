@@ -9,10 +9,7 @@
 
 use std::path::Path;
 
-use helix_trader::{
-    backtest::{Backtest, Commission, report},
-    venues,
-};
+use helix_trader::backtest::{Backtest, Commission, report};
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::logging::logger::LoggerConfig;
 use nautilus_core::UnixNanos;
@@ -143,7 +140,6 @@ fn backtest(dir: &Path) -> Backtest {
         latency: None,
         pairs: vec![],
         balance: Money::from("10000 USDT"),
-        venue_oms: venues::oms_type,
         logging: LoggerConfig::default(),
     }
 }

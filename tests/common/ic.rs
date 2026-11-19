@@ -12,7 +12,6 @@ use helix_trader::{
     backtest::{Backtest, Commission},
     catalog::fill_catalog,
     strategy::requirements::{CatalogSeries, TickSeries},
-    venues,
 };
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::logging::logger::LoggerConfig;
@@ -302,7 +301,6 @@ pub(crate) fn backtest(catalog: &TempDir) -> Backtest {
         latency: None,
         pairs: vec![],
         balance: Money::from("2000000 USD"),
-        venue_oms: venues::oms_type,
         logging: LoggerConfig::default(),
     }
 }

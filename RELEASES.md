@@ -15,6 +15,7 @@ Released on TBD (UTC).
 
 ### Breaking Changes
 
+- Removed `Backtest::venue_oms`: `run` uses the broker's position mode and `run_dataset` hedges on every venue; omit the field from Rust struct literals
 - Changed the Rust target ATR fields to `Option<TargetAtrConfig>`; convert existing `AtrArgs` with `.into()` when setting them in struct literals
 - Changed LSE WebSocket option-chain subscriptions to count references; match each successful `subscribe_options` call with one `unsubscribe_options` call
 - Changed `SeriesSlice` to hold `CatalogSeries`, `from` and `to`; use `series.instrument_id()` for the contract and `series.key()` for the catalog key

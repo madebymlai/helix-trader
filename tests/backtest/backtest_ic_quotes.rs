@@ -11,8 +11,7 @@ use helix_trader::backtest::report;
 use jiff::Timestamp;
 use nautilus_model::{
     data::BarType,
-    enums::{OmsType, OrderSide},
-    identifiers::Venue,
+    enums::OrderSide,
     types::{Price, Quantity},
 };
 use rstest::rstest;
@@ -26,10 +25,6 @@ use crate::common::{
 fn ic_gold_quotes_fill_orders_at_the_ask_and_the_bid_and_report_the_spread() {
     let catalog = ic::catalog();
     let backtest = ic::backtest(&catalog);
-    assert_eq!(
-        (backtest.venue_oms)(Venue::from("ICMARKETS")),
-        OmsType::Hedging
-    );
     let (recorder, record) = Recorder::trading(
         BarType::from(ic::HOUR_BARS),
         vec![(OrderSide::Buy, Quantity::from(10_000))],
