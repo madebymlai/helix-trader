@@ -8,7 +8,7 @@
 //! not listed simply never trades. Their definitions, which Databento gives
 //! in a live run, filled into the catalog, are written into the node's
 //! cache by hand as Nautilus' Databento decoder gives Databento's: priced
-//! to a cent, a multiplier of 1. It needs the LSE key, `LSE_API_KEY`, from
+//! to a cent, a multiplier of 100. It needs the LSE key, `LSE_API_KEY`, from
 //! the environment or `.env`; the free key streams US options, on one
 //! connection a key, so no other live run may hold data-ws meanwhile.
 //!
@@ -38,7 +38,7 @@ use nautilus_live::{
 };
 use nautilus_model::{
     data::TradeTick,
-    enums::{AggressorSide, AssetClass, OptionKind},
+    enums::{AggressorSide, AssetClass, ExerciseStyle, OptionKind, SettlementType},
     identifiers::{InstrumentId, Symbol, TraderId},
     instruments::{Instrument, InstrumentAny, OptionContract},
     types::{Currency, Price, Quantity},
@@ -64,7 +64,8 @@ fn opted_in(test: &str) -> bool {
 /// after `now`'s UTC day, struck at 200 to 500 by 5, defined as Nautilus'
 /// Databento decoder defines an OPRA contract (`decode_option_contract`):
 /// an equity option in USD, priced to a cent, expiring at 16:00 New York,
-/// its multiplier and lot size 1, Databento giving neither.
+/// American and settled by delivery, its multiplier the standard contract's
+/// 100 and its lot size 1, Databento giving neither.
 fn contracts_of_the_week(now: Timestamp) -> Vec<InstrumentAny> {
     let today = now.to_zoned(TimeZone::UTC).date();
     let friday = (0..7)
@@ -98,8 +99,10 @@ fn contracts_of_the_week(now: Timestamp) -> Vec<InstrumentAny> {
                     .expiration_ns(UnixNanos::from(expiration))
                     .price_precision(2)
                     .price_increment(Price::from("0.01"))
-                    .multiplier(Quantity::from(1))
+                    .multiplier(Quantity::from(100))
                     .lot_size(Quantity::from(1))
+                    .exercise_style(ExerciseStyle::American)
+                    .settlement_type(SettlementType::Physical)
                     .ts_event(UnixNanos::from(now))
                     .ts_init(UnixNanos::from(now))
                     .build()

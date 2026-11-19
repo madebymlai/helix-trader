@@ -1812,7 +1812,7 @@ fn warm_deltas(dir: &Path) -> (Rc<Books>, Vec<(u64, u64)>) {
 
 /// The book holds one bid for each minute since the last UTC midnight, the
 /// day's snapshot among them, up to the latest minute, as the venue's feed
-/// builds it, whatever snapshots the windows opened with; and each delta of
+/// builds it, whatever snapshot the first window opened with; and each delta of
 /// the feed came once, in order, a minute after the one before or two across
 /// a midnight's snapshot. A repeat would not show in the book: an order added
 /// twice is one order.
@@ -1849,10 +1849,11 @@ fn deltas_a_venue_answers_in_windows_build_the_days_book() {
     assert_the_days_book(&books);
 }
 
-/// The catalog holds them: each window is read from its day's start and opens
-/// with a snapshot of the book at its own start.
+/// The catalog holds them: the first window is read from its day's start and
+/// opens with a snapshot of the book at the request's start, each later one
+/// read from its own start, continuing that book.
 #[rstest]
-fn deltas_a_catalog_answers_in_windows_build_the_days_book_across_their_snapshots() {
+fn deltas_a_catalog_answers_in_windows_build_the_days_book_from_the_requests_snapshot() {
     let dir = tempfile::tempdir().unwrap();
     warm_deltas(dir.path());
 

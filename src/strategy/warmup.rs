@@ -35,10 +35,15 @@
 //! its own and asking for the next, a catalog answering what it holds of each.
 //! One aggregator builds a request's bars across its windows, its params
 //! being the request's, not the windows'. Nautilus ignores the windows of a
-//! continuous future's request and takes none on custom data. A window of
-//! deltas whose day's start a catalog holds, earlier windows' write-back
-//! included, is read from there and opens with a snapshot of the book at its
-//! own start, so a book indicator reads one per window beside the day's. The
+//! continuous future's request and takes none on custom data. The first
+//! window of a request of deltas whose day's start a catalog holds is read
+//! from there and opens with a snapshot of the book at the request's start,
+//! rebuilt from the deltas before it; each later window, earlier windows'
+//! write-back included, is read from its own start and continues that book
+//! with no snapshot of its own (`time_range_book_deltas_child_params` in
+//! `crates/data/src/engine/time_range.rs`), so a book indicator reads one
+//! snapshot at the warmup's start, then the deltas as the venue's feed
+//! carries them. The
 //! node runs on between windows, so features can be
 //! initialized on the older windows alone; a decision waits for the end.
 //!
