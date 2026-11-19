@@ -251,6 +251,7 @@ pub struct TargetAtrConfig {
     #[serde(flatten)]
     pub args: AtrArgs,
     /// The fixed length of each ATR bar, or the decision cadence when omitted.
+    /// A distinct interval may not close another bar within the decision timer's margin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bar_interval: Option<SignedDuration>,
 }
@@ -656,6 +657,21 @@ impl TargetConfig {
             "the target's ATR {setting} {cadence:#} is not positive"
         );
         let nanos = cadence.as_nanos();
+        if cadence != default_interval && default_interval.is_positive() {
+            // Both timers have the same build delay. On their epoch-aligned grids,
+            // the smallest strictly positive gap from a decision to a bar close
+            // is the greatest common divisor of their periods.
+            let (mut gap, mut remainder) = (nanos, default_interval.as_nanos());
+            while remainder != 0 {
+                (gap, remainder) = (remainder, gap % remainder);
+            }
+            anyhow::ensure!(
+                gap > decide::DECISION_MARGIN.as_nanos(),
+                "the target's ATR bar interval {cadence:#} can close after a decision on \
+                 cadence {default_interval:#} but within its timer margin {:#}",
+                decide::DECISION_MARGIN
+            );
+        }
         let Some((aggregation, step)) = ATR_UNITS
             .into_iter()
             .map(|aggregation| {

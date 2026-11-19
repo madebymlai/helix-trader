@@ -292,6 +292,20 @@ fn target_atr_interval_selects_its_own_longest_compatible_source() {
     );
 }
 
+/// A 50ms ATR closes 5ms after the 45ms decision and 10ms after the
+/// 40ms decision. Both fall within the 10ms timer margin. At 75ms the
+/// next close is 25ms away, and that is the closest the two grids get.
+#[rstest]
+#[case(45, false)]
+#[case(40, false)]
+#[case(75, true)]
+fn explicit_atr_closes_after_the_decision_margin(#[case] millis: i64, #[case] safe: bool) {
+    let target =
+        of(toml::from_str("limit = '2h'\natr = { period = 1, bar_interval = '50ms' }").unwrap());
+    let rule = DecisionRule::Every(SignedDuration::from_millis(millis));
+    assert_eq!(target.validate(rule, &quotes()).is_ok(), safe);
+}
+
 /// Source bars of 1 minute, 5 minutes and an hour, each priced its own way.
 fn several_source_bars() -> DataRequirements {
     reading(
