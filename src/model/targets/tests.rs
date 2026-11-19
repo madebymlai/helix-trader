@@ -52,10 +52,7 @@ fn exits_of_config() -> BracketSpec {
     BracketSpec {
         take_profit: Distance::BasisPoints(Decimal::from(20)),
         stop: Distance::Atr(Decimal::new(15, 1)),
-        atr: Some(AtrArgs {
-            period: 14,
-            ..DEFAULT_ATR
-        }),
+        atr: Some(atr_of(14)),
     }
 }
 
@@ -113,11 +110,12 @@ fn time_only(limit: SignedDuration) -> TargetConfig {
 }
 
 /// The ATR of `period` bars, Nautilus' defaults besides.
-fn atr_of(period: usize) -> AtrArgs {
+fn atr_of(period: usize) -> TargetAtrConfig {
     AtrArgs {
         period,
         ..DEFAULT_ATR
     }
+    .into()
 }
 
 /// The target of `config` with both distances in basis points and no
@@ -280,6 +278,34 @@ fn the_atr_is_on_the_instruments_prices_built_at_the_decision_cadence(
     assert_eq!(atr_bar_type(rule, &requirements), expected);
 }
 
+/// The decision minute is buildable from bids, but the ATR's quarter hour
+/// can use the longer five-minute asks.
+#[rstest]
+fn target_atr_interval_selects_its_own_longest_compatible_source() {
+    let target =
+        of(toml::from_str("limit = '2h'\natr = { period = 14, bar_interval = '15m' }").unwrap());
+    let bars = atr_bars_reading(&target, every(1), &several_source_bars()).unwrap();
+
+    assert_eq!(
+        bars.0,
+        "XAUUSD.ICMARKETS-15-MINUTE-ASK-INTERNAL@5-MINUTE-EXTERNAL"
+    );
+}
+
+/// A 50ms ATR closes 5ms after the 45ms decision and 10ms after the
+/// 40ms decision. Both fall within the 10ms timer margin. At 75ms the
+/// next close is 25ms away, and that is the closest the two grids get.
+#[rstest]
+#[case(45, false)]
+#[case(40, false)]
+#[case(75, true)]
+fn explicit_atr_closes_after_the_decision_margin(#[case] millis: i64, #[case] safe: bool) {
+    let target =
+        of(toml::from_str("limit = '2h'\natr = { period = 1, bar_interval = '50ms' }").unwrap());
+    let rule = DecisionRule::Every(SignedDuration::from_millis(millis));
+    assert_eq!(target.validate(rule, &quotes()).is_ok(), safe);
+}
+
 /// Source bars of 1 minute, 5 minutes and an hour, each priced its own way.
 fn several_source_bars() -> DataRequirements {
     reading(
@@ -356,10 +382,7 @@ fn an_atr_distance_without_an_atr_table_has_an_atr_of_14_bars() {
         ..exits_of_config()
     }));
     let overridden = of(exiting(BracketSpec {
-        atr: Some(AtrArgs {
-            period: 20,
-            ..DEFAULT_ATR
-        }),
+        atr: Some(atr_of(20)),
         ..exits_of_config()
     }));
 
@@ -399,7 +422,7 @@ fn blueprint(target: TargetConfig) -> anyhow::Result<ModelBlueprint> {
 #[rstest]
 fn an_atr_table_beside_a_bracket_is_refused_under_the_targets() {
     let config = of(Target {
-        atr: Some(DEFAULT_ATR),
+        atr: Some(DEFAULT_ATR.into()),
         ..bracket()
     });
 
@@ -478,10 +501,7 @@ fn a_distance_or_a_limit_not_positive_is_refused_under_its_field(
 #[should_panic(expected = "period")]
 fn an_atr_of_no_bars_panics_as_validated() {
     let config = of(exiting(BracketSpec {
-        atr: Some(AtrArgs {
-            period: 0,
-            ..DEFAULT_ATR
-        }),
+        atr: Some(atr_of(0)),
         ..exits_of_config()
     }));
     let _ = config.validate(rule(), &quotes());
@@ -593,7 +613,7 @@ fn an_exit_rounding_onto_the_reference_gives_no_exits() {
 /// `config`, its ATR of 14 bars with `change` made to its arguments.
 fn config_atr(change: impl FnOnce(&mut AtrArgs)) -> TargetConfig {
     let mut atr = atr_of(14);
-    change(&mut atr);
+    change(&mut atr.args);
     of(exiting(BracketSpec {
         atr: Some(atr),
         ..exits_of_config()
@@ -671,6 +691,29 @@ fn a_time_only_and_a_bracket_target_of_one_limit_and_two_limits_are_keyed_apart(
     assert_eq!(keyed(&time), keyed(&time_only(limit)));
 }
 
+#[rstest]
+#[case::bracket("[bracket]\ntake_profit = { bps = 20 }\nstop = { atr = 1.5 }\n[bracket.atr]")]
+#[case::time_only("[atr]")]
+fn dataset_fingerprint_keys_the_effective_target_atr_interval(#[case] table: &str) {
+    let features = last_mid(InstrumentId::from(GOLD)).build().unwrap();
+    let keyed = |interval: &str| {
+        let spec =
+            toml::from_str(&format!("limit = '2h'\n{table}\nperiod = 14\n{interval}")).unwrap();
+        crate::model::dataset::fingerprint(
+            &features,
+            every(1),
+            &of(spec),
+            &quotes(),
+            &venue_of(commission()),
+        )
+        .unwrap()
+    };
+
+    let omitted = keyed("");
+    assert_eq!(omitted, keyed("bar_interval = '60s'"));
+    assert_ne!(omitted, keyed("bar_interval = '15m'"));
+}
+
 /// The ATR is fingerprinted as it runs: left to its defaults, its period
 /// and Nautilus' arguments, it keys the same target as one written out.
 #[rstest]
@@ -684,12 +727,15 @@ fn the_fingerprint_reads_the_atrs_default_period_as_written_out() {
         ..exits_of_config()
     }));
     let written_out = of(exiting(BracketSpec {
-        atr: Some(AtrArgs {
-            period: 14,
-            ma_type: Some(MovingAverageType::Wilder),
-            use_previous: Some(true),
-            value_floor: Some(0.0),
-        }),
+        atr: Some(
+            AtrArgs {
+                period: 14,
+                ma_type: Some(MovingAverageType::Wilder),
+                use_previous: Some(true),
+                value_floor: Some(0.0),
+            }
+            .into(),
+        ),
         ..exits_of_config()
     }));
 
@@ -1328,10 +1374,7 @@ fn symmetric() -> TargetConfig {
         bracket: Some(BracketSpec {
             take_profit: distance,
             stop: distance,
-            atr: Some(AtrArgs {
-                period: 4,
-                ..DEFAULT_ATR
-            }),
+            atr: Some(atr_of(4)),
         }),
         limit: SignedDuration::from_mins(5),
         atr: None,
@@ -1418,7 +1461,7 @@ fn a_setter_sharing_a_width_sets_its_exits_at_the_width_read_then() {
 #[case::of_another_period(
     Target {
         bracket: symmetric().spec.bracket.map(|bracket| BracketSpec {
-            atr: Some(DEFAULT_ATR),
+            atr: Some(DEFAULT_ATR.into()),
             ..bracket
         }),
         ..symmetric().spec

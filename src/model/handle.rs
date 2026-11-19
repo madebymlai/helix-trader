@@ -1507,10 +1507,13 @@ mod tests {
             bracket: Some(BracketSpec {
                 take_profit: Distance::Atr(Decimal::from(2)),
                 stop: Distance::Atr(Decimal::ONE),
-                atr: Some(AtrArgs {
-                    period: 2,
-                    ..DEFAULT_ATR
-                }),
+                atr: Some(
+                    AtrArgs {
+                        period: 2,
+                        ..DEFAULT_ATR
+                    }
+                    .into(),
+                ),
             }),
             limit: SignedDuration::from_hours(2),
             atr: None,
@@ -2117,10 +2120,13 @@ mod tests {
         config.target.spec.bracket = Some(BracketSpec {
             take_profit: Distance::Atr(Decimal::ONE),
             stop: Distance::Atr(Decimal::ONE),
-            atr: Some(AtrArgs {
-                period: 1,
-                ..DEFAULT_ATR
-            }),
+            atr: Some(
+                AtrArgs {
+                    period: 1,
+                    ..DEFAULT_ATR
+                }
+                .into(),
+            ),
         });
         let width = config
             .target

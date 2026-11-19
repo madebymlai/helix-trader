@@ -1027,6 +1027,86 @@ mod tests {
         assert!(err.contains("ATR") && err.contains("unit"), "{err}");
     }
 
+    #[rstest]
+    #[case::bracket(
+        atr_section(Some("{ period = 14, bar_interval = '15m' }")),
+        "model.target.bracket.atr"
+    )]
+    #[case::time_only(
+        section("target = { limit = '45m', atr = { period = 14, bar_interval = '15m' } }"),
+        "model.target.atr"
+    )]
+    fn target_atr_interval_requires_fourteen_complete_quarter_hours_of_warmup(
+        #[case] toml: String,
+        #[case] owner: &str,
+    ) {
+        let toml = toml.replace("every = \"1h\"", "every = \"1m\"");
+        let threshold = SignedDuration::from_mins(210);
+        assert_eq!(
+            refused_fields_warming(&toml, threshold - SignedDuration::from_nanos(1)),
+            [owner]
+        );
+        let config = load_warming(&toml, threshold).unwrap();
+        assert_eq!(
+            config.decision,
+            DecisionRule::Every(SignedDuration::from_mins(1))
+        );
+        let bars = config
+            .target
+            .atr_bars(config.decision, &reading(GOLD))
+            .unwrap()
+            .unwrap();
+        assert_eq!(bars.args.period, 14);
+        assert_eq!(
+            bars.bar_type,
+            BarType::from("XAUUSD.ICMARKETS-15-MINUTE-MID-INTERNAL")
+        );
+    }
+
+    #[rstest]
+    #[case::zero("0s")]
+    #[case::negative("-15m")]
+    #[case::submillisecond("1us")]
+    #[case::unsupported_step("7m")]
+    fn target_atr_interval_must_make_a_positive_supported_time_bar(#[case] interval: &str) {
+        let toml = atr_section(Some(&format!(
+            "{{ period = 1, bar_interval = '{interval}' }}"
+        )));
+        let fields = refused_fields_warming(&toml, SignedDuration::from_hours(14));
+        assert!(
+            fields
+                .iter()
+                .any(|f| f == "model.target.bracket.atr"
+                    || f == "model.target.bracket.atr.bar_interval"),
+            "{fields:?}"
+        );
+    }
+
+    #[rstest]
+    fn target_atr_interval_cannot_fall_back_to_buildable_decision_bars() {
+        let config = parse(&section(
+            "target = { limit = '45m', atr = { period = 1, bar_interval = '15m' } }",
+        ))
+        .unwrap();
+        let requirements = reading_gold(
+            &[],
+            &["XAUUSD.ICMARKETS-1-DAY-LAST-INTERNAL@1-HOUR-EXTERNAL"],
+        );
+        let err = config.validate(&requirements).unwrap_err();
+        assert!(err.to_string().contains("model.target.atr"), "{err}");
+    }
+
+    #[rstest]
+    fn target_atr_interval_is_not_a_setting_for_basis_point_exits() {
+        let toml = section(
+            "target = { limit = '45m', bracket = { take_profit = { bps = 20 }, stop = { bps = 10 }, atr = { period = 1, bar_interval = '15m' } } }",
+        );
+        assert_eq!(
+            refused_fields_warming(&toml, SignedDuration::from_hours(1)),
+            ["model.target.bracket.atr"]
+        );
+    }
+
     /// A time-only target's ATR warms as a bracket's does, its 3 hourly bars
     /// in 3 hours: over a shorter warmup it is refused under its own table.
     #[rstest]
@@ -1071,10 +1151,13 @@ mod tests {
             Some(BracketSpec {
                 take_profit: Distance::Atr(Decimal::new(15, 1)),
                 stop: Distance::BasisPoints(Decimal::new(75, 1)),
-                atr: Some(AtrArgs {
-                    period: 3,
-                    ..DEFAULT_ATR
-                }),
+                atr: Some(
+                    AtrArgs {
+                        period: 3,
+                        ..DEFAULT_ATR
+                    }
+                    .into()
+                ),
             })
         );
     }

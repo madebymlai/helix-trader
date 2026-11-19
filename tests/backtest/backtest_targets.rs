@@ -1283,10 +1283,13 @@ fn targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand() {
         bracket: Some(BracketSpec {
             take_profit: Distance::Atr(Decimal::from(2)),
             stop: Distance::Atr(Decimal::new(15, 1)),
-            atr: Some(AtrArgs {
-                period: 2,
-                ..DEFAULT_ATR
-            }),
+            atr: Some(
+                AtrArgs {
+                    period: 2,
+                    ..DEFAULT_ATR
+                }
+                .into(),
+            ),
         }),
         limit: SignedDuration::from_mins(45),
         atr: None,
@@ -1343,10 +1346,13 @@ fn a_stop_rounding_onto_the_decisions_price_opens_no_target() {
         bracket: Some(BracketSpec {
             take_profit: Distance::Atr(Decimal::from(2)),
             stop: Distance::Atr(Decimal::new(1, 2)),
-            atr: Some(AtrArgs {
-                period: 2,
-                ..DEFAULT_ATR
-            }),
+            atr: Some(
+                AtrArgs {
+                    period: 2,
+                    ..DEFAULT_ATR
+                }
+                .into(),
+            ),
         }),
         limit: SignedDuration::from_mins(45),
         atr: None,
@@ -1371,10 +1377,13 @@ fn btc_atr_targets() -> TargetConfig {
         bracket: Some(BracketSpec {
             take_profit: Distance::Atr(Decimal::from(2)),
             stop: Distance::Atr(Decimal::new(15, 1)),
-            atr: Some(AtrArgs {
-                period: 2,
-                ..DEFAULT_ATR
-            }),
+            atr: Some(
+                AtrArgs {
+                    period: 2,
+                    ..DEFAULT_ATR
+                }
+                .into(),
+            ),
         }),
         limit: SignedDuration::from_mins(45),
         atr: None,

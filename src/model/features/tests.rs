@@ -872,12 +872,15 @@ fn width_of(distance: Distance) -> Rc<BracketWidth> {
             bracket: Some(BracketSpec {
                 take_profit: distance,
                 stop: distance,
-                atr: matches!(distance, Distance::Atr(_)).then_some(AtrArgs {
-                    period: 1,
-                    ma_type: None,
-                    use_previous: None,
-                    value_floor: None,
-                }),
+                atr: matches!(distance, Distance::Atr(_)).then_some(
+                    AtrArgs {
+                        period: 1,
+                        ma_type: None,
+                        use_previous: None,
+                        value_floor: None,
+                    }
+                    .into(),
+                ),
             }),
             limit: SignedDuration::from_mins(5),
             atr: None,

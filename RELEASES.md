@@ -4,6 +4,7 @@ Released on TBD (UTC).
 
 ### Enhancements
 
+- Added `bar_interval` to model target ATR tables for sizing trades on bars other than the decision cadence
 - Added overlapping model dataset targets while executable model entries wait for the previous trade to clear
 - Added `train --from --to`, training a periodic strategy at each retrain time of a span and listing the times that failed
 - Added a live retrain at a node's start of the latest retrain time whose model set the store lacks
@@ -14,6 +15,7 @@ Released on TBD (UTC).
 
 ### Breaking Changes
 
+- Changed the Rust target ATR fields to `Option<TargetAtrConfig>`; convert existing `AtrArgs` with `.into()` when setting them in struct literals
 - Changed LSE WebSocket option-chain subscriptions to count references; match each successful `subscribe_options` call with one `unsubscribe_options` call
 - Changed `SeriesSlice` to hold `CatalogSeries`, `from` and `to`; use `series.instrument_id()` for the contract and `series.key()` for the catalog key
 - Removed `FillRequest::instrument_id`; pass the `InstrumentId` to non-bar `FillData` variants and use `request.data.instrument_id()` to read the target
