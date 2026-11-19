@@ -65,6 +65,7 @@ Released on TBD (UTC).
 
 ### Internal Improvements
 
+- Added issue templates: bug report, enhancement request and upstream tracking, each with its rules
 - Changed the model feature set to supply its warmup inputs from feature declarations
 - Changed walk-forward scoring to evaluate each side once per row and use the same meta verdict as trading decisions
 - Added `check-release-entries`, a pre-commit hook capping each entry of the release in progress at one line of 160 characters
