@@ -83,6 +83,7 @@ Released on TBD (UTC).
 
 ### Documentation Updates
 
+- Changed `docs/architecture.md` to state the architecture as rules, each naming the module that owns it
 - Changed the live guide to distinguish a catalog interval's end from the time of its last row
 - Changed the pull request template to cite upstream issues and pull requests without adding backlinks
 - Changed the release steps to open the next release's version in `Cargo.toml` with its section, as Nautilus does
