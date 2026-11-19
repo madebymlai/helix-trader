@@ -75,6 +75,7 @@ Released on TBD (UTC).
 - Changed the backtest fee model and live recording to set Nautilus' `charge_commission_once` and `promote_on_close` rather than rely on their defaults
 - Removed `lse`'s `LseHttpClient::with_retry`, a test hook
 - Changed the live warmup's hold of live data and the hooks feeding it to be marked `Temporary` at each site, citing helix-trader#16
+- Changed the Nautilus pin to `2d844b3`, a catalog's book delta warmup opening with one snapshot at its start rather than one per window
 
 ### Documentation Updates
 
