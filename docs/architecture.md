@@ -6,7 +6,7 @@ Helix Trader is a Rust workspace on NautilusTrader: the main crate, `helix-trade
 
 Each rule names the module that owns it; that module's doc comment and README hold the details.
 
-- Nautilus is used with no wrapper layer, in tests as in production code. Code that bypasses Nautilus for what it owns is agreed first and cites the issue that retires it, as `.pre-commit-hooks/check_workarounds.py` checks.
+- What Nautilus provides comes from Nautilus, used through its plain API with no wrapper layer, in tests as in production code. A workaround for what Nautilus lacks is agreed first, marked `Temporary`, and cites the issue retiring it: `nautilus_trader#N` when Nautilus tracks the gap, else a `helix-trader#N` titled "Drop X once Nautilus Y".
 - The strategy config is the universe. `fill-catalog`, `backtest`, `live` and `train` each take a strategy and its TOML and read the instruments, series, warmup and cadence from it (`strategy::requirements::DataRequirements`); no command takes instruments of its own.
 - The catalog is the store between the commands: `fill-catalog` asks Nautilus' data engine for the config's history, which the engine writes back (`update_catalog`), a backtest replays what it holds, and a live warmup reads it first and writes back what the venues' clients certify ([catalog](../src/catalog/README.md), [warmup](../src/strategy/README.md#warmup)).
 - One process runs one strategy, which decides its own trades. The same strategy type and Nautilus engine run in backtest, paper and live; [backtest](../src/backtest/README.md) and [live](../src/live/README.md) give the differences in operation.
