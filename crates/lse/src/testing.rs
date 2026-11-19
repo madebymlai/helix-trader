@@ -14,7 +14,7 @@ use std::{
 
 use nautilus_core::UnixNanos;
 use nautilus_model::{
-    enums::{AssetClass, OptionKind},
+    enums::{AssetClass, ExerciseStyle, OptionKind, SettlementType},
     identifiers::{InstrumentId, Symbol},
     instruments::{Equity, FuturesContract, IndexInstrument, InstrumentAny, OptionContract},
     types::{Currency, Price, Quantity},
@@ -465,7 +465,9 @@ pub fn nvda() -> InstrumentAny {
 /// gives Databento's definition of it of 12 November 2026
 /// (`decode_option_contract`), `AAPL_CALL`: an equity option in USD,
 /// priced to a cent, Databento giving no tick, expiring at 16:00 New York,
-/// its multiplier and lot size 1, Databento giving neither.
+/// American and settled by delivery, as Nautilus takes an equity option's
+/// root, its multiplier the standard contract's 100 and its lot size 1,
+/// Databento giving neither.
 #[must_use]
 pub fn aapl_call() -> InstrumentAny {
     let at = |time: &str| UnixNanos::from(time.parse::<jiff::Timestamp>().expect("a time"));
@@ -483,8 +485,10 @@ pub fn aapl_call() -> InstrumentAny {
             .expiration_ns(at("2026-11-20T21:00:00Z"))
             .price_precision(2)
             .price_increment(Price::from("0.01"))
-            .multiplier(Quantity::from(1))
+            .multiplier(Quantity::from(100))
             .lot_size(Quantity::from(1))
+            .exercise_style(ExerciseStyle::American)
+            .settlement_type(SettlementType::Physical)
             .ts_event(UnixNanos::from(1_794_483_001_860_225_968))
             .ts_init(UnixNanos::from(1_794_483_001_860_225_968))
             .build()

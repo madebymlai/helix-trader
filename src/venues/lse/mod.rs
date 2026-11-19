@@ -1680,7 +1680,8 @@ mod tests {
         else {
             panic!("not one option contract");
         };
-        // 16:00 New York, the close of the day it expires.
+        // 16:00 New York, the close of the day it expires; Databento's
+        // record gives no multiplier, so the standard contract's 100.
         assert_eq!(
             (
                 definition.raw_symbol.as_str(),
@@ -1689,6 +1690,7 @@ mod tests {
                 definition.strike_price,
                 Timestamp::from(definition.expiration_ns),
                 definition.price_increment,
+                definition.multiplier,
             ),
             (
                 "AAPL  261120C00355000",
@@ -1697,6 +1699,7 @@ mod tests {
                 Price::from("355.00"),
                 november("20T21:00:00"),
                 Price::from("0.01"),
+                Quantity::from(100),
             )
         );
         let trades = catalog
