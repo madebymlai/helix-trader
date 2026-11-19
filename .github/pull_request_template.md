@@ -9,7 +9,10 @@
 
 ## Related issues
 
-<!-- `Closes #N`, `Related to #N`, and the issue each workaround this adds or drops cites. -->
+<!-- Use `Closes #N` or `Related to #N` for this repository. Cite each workaround's issue.
+     For Nautilus issues and PRs, use redirect.github.com links to avoid upstream backlinks:
+     [Upstream issue 5546](https://redirect.github.com/nautechsystems/nautilus_trader/issues/5546).
+     For a PR, label it `Upstream PR N` and use `/pull/N`. -->
 
 ## Type of change
 

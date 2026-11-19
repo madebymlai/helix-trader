@@ -81,6 +81,7 @@ Released on TBD (UTC).
 
 ### Documentation Updates
 
+- Changed the pull request template to cite upstream issues and pull requests without adding backlinks
 - Changed the release steps to open the next release's version in `Cargo.toml` with its section, as Nautilus does
 - Changed `docs/releases.md` to cap an entry at 160 characters, its how and why going in the pull request
 
