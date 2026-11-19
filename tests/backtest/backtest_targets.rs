@@ -63,7 +63,7 @@ use nautilus_common::{
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::{Bar, BarType, CustomData, NautilusDataType, QuoteTick, TradeTick},
-    enums::{AggressorSide, OmsType},
+    enums::AggressorSide,
     events::{OrderCanceled, OrderDenied, OrderFilled, OrderRejected, PositionClosed},
     identifiers::{InstrumentId, StrategyId, Symbol, TradeId},
     instruments::{CryptoPerpetual, InstrumentAny, stubs::btcusd_bybit},
@@ -509,7 +509,6 @@ fn gold_backtest(catalog: PathBuf) -> Backtest {
         latency: None,
         pairs: vec![],
         balance: Money::from("10000000 USD"),
-        venue_oms: |_| OmsType::Hedging,
         logging: LoggerConfig::default(),
     }
 }

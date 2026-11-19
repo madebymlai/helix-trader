@@ -26,7 +26,6 @@ use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
 use nautilus_model::{
     data::{Bar, BarType, Data, NautilusDataType},
-    enums::OmsType,
     identifiers::InstrumentId,
     types::{Price, Quantity},
 };
@@ -202,7 +201,6 @@ fn a_decision_on_hour_bars_reads_the_bar_closing_on_its_grid() {
         },
     );
     backtest.bar_types = requirements.bar_types;
-    backtest.venue_oms = |_| OmsType::Hedging;
 
     backtest.run_dataset(probe).unwrap();
 

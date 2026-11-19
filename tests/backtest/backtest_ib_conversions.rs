@@ -24,7 +24,6 @@ use jiff::{SignedDuration, Timestamp};
 use nautilus_common::logging::logger::LoggerConfig;
 use nautilus_model::{
     data::QuoteTick,
-    enums::OmsType,
     types::{Currency, Money},
 };
 use rstest::rstest;
@@ -229,7 +228,6 @@ fn rows() -> Vec<TargetRow> {
         latency: venue.latency,
         pairs: config.trade.untraded_pairs(),
         balance: venue.balance,
-        venue_oms: |_| OmsType::Hedging,
         logging: LoggerConfig::default(),
     };
     let rows = SettledRows::default();

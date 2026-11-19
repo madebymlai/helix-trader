@@ -62,7 +62,7 @@ use nautilus_model::{
         Bar, BarType, Data, NautilusDataType, OrderBookDepth, QuoteTick, TradeTick,
         stubs::stub_depth10,
     },
-    enums::{AggressorSide, BookType, OmsType},
+    enums::{AggressorSide, BookType},
     identifiers::{ClientId, InstrumentId, TradeId, TraderId, Venue},
     instruments::{Instrument, InstrumentAny, stubs::audusd_sim},
     types::{Price, Quantity},
@@ -332,7 +332,6 @@ fn streamed_dataset() {
                 latency: venue.latency,
                 pairs: vec![],
                 balance: venue.balance,
-                venue_oms: |_| OmsType::Hedging,
                 logging: LoggerConfig::default(),
             }
             .run_dataset(ModelEma::new(config.clone(), mode)?)?;

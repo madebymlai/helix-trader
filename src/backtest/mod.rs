@@ -19,7 +19,7 @@ use nautilus_common::{
 };
 use nautilus_model::{
     data::{BarType, NautilusDataType},
-    enums::{ContinuousFutureAdjustmentType, OmsType},
+    enums::ContinuousFutureAdjustmentType,
     identifiers::{InstrumentId, Venue},
     instruments::{Instrument, InstrumentAny},
     types::Money,
@@ -100,18 +100,15 @@ pub struct Backtest {
     /// or read for the pairs alone, starts with nothing in its currency, so
     /// that it adds no money (`funds`).
     pub balance: Money,
-    /// How each simulated venue keeps positions: a normal run passes the
-    /// real venue's, `venues::oms_type`, and a dataset run hedging on every
-    /// venue. A strategy leaving its `oms_type` unset follows it, as it
-    /// follows the execution client's live.
-    pub venue_oms: fn(Venue) -> OmsType,
     /// The Nautilus logger: the node installs it, so nothing else may.
     pub logging: LoggerConfig,
 }
 
 impl Backtest {
     /// Runs `strategy` over the window on a `BacktestNode` and returns the
-    /// Nautilus result with the costs of the run's fills.
+    /// Nautilus result with the costs of the run's fills. Each simulated
+    /// venue uses its broker's position mode, or the venue default if no
+    /// broker trades it (`venues::oms_type`).
     ///
     /// # Errors
     ///
@@ -130,8 +127,9 @@ impl Backtest {
 
     /// Runs `strategy` over the window on a `BacktestNode` as `run` does,
     /// for what the strategy does alone, as a dataset run builds the
-    /// training table (`model::targets`): each venue's account is frozen at
-    /// the balance, whatever the run's trades lose, and margins nothing, so
+    /// training table (`model::targets`). Every venue hedges so the long and
+    /// short targets settle separately. Each account is frozen at the
+    /// balance, whatever the run's trades lose, and margins nothing, so
     /// that Nautilus' risk engine denies no order for its margin, its
     /// other checks kept (`node::dataset_run_config`); the execution engine
     /// purges the closed orders and positions from the cache a minute after
@@ -448,7 +446,6 @@ mod tests {
             latency: None,
             pairs: vec![],
             balance: Money::from("10000 USDT"),
-            venue_oms: crate::venues::oms_type,
             logging: LoggerConfig::default(),
         }
     }

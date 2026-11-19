@@ -18,7 +18,6 @@ use helix_trader::{
 use jiff::{SignedDuration, Timestamp};
 use nautilus_model::{
     data::QuoteTick,
-    enums::OmsType,
     types::{Currency, Money},
 };
 use rstest::rstest;
@@ -112,7 +111,6 @@ fn rows() -> Vec<TargetRow> {
         latency: venue.latency,
         pairs: config.trade.untraded_pairs(),
         balance: venue.balance,
-        venue_oms: |_| OmsType::Hedging,
         ..ic::backtest(&catalog)
     };
     let rows = SettledRows::default();
