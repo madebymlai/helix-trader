@@ -33,11 +33,10 @@
 //!
 //! A retrain at `t` trains as `train --at t` does, its model set stamped
 //! `t` and its data cut there, so that live and a backtest of the same span
-//! share every model set. It launches once every series the strategy reads
-//! at `t` has a stored point at or after `t` (each series' last stored
-//! timestamp, Nautilus' `ParquetDataCatalog::query_last_timestamp`), so
-//! that it never trains on data the catalog holds only part of: live, the
-//! data comes with the recording's daily promotion (`live::Recording`).
+//! share every model set. For the bar sources and tick series at `t`,
+//! Nautilus' `ParquetDataCatalog::query_last_timestamp` returns the end
+//! of the latest catalog interval. Each end must be at or after `t`, even
+//! if the last row is earlier. This does not check for gaps in the window.
 //! Until then it waits, the catalog checked again every minute on a second
 //! timer of the actor's clock, and the previous model set decides
 //! meanwhile. A retrain falling due while another waits takes its place,
@@ -378,11 +377,9 @@ impl RetrainActor {
         self.check(at)
     }
 
-    /// Launches the retrain at `at` if every series the strategy reads has
-    /// a stored point at or after it (`lacking`); else it waits, checked
-    /// again at each firing of the `RECHECK` timer, logged once as it
-    /// starts waiting, a catalog that cannot be read as a warning at each
-    /// check.
+    /// Launches the retrain for `at` when `lacking` finds no series
+    /// behind the cutoff. Otherwise `RECHECK` retries it. The actor logs
+    /// the wait once and warns on each catalog read error.
     fn check(&mut self, at: Timestamp) -> anyhow::Result<()> {
         match self.lacking(at) {
             Ok(None) => {
@@ -418,10 +415,9 @@ impl RetrainActor {
         Ok(())
     }
 
-    /// What the catalog lacks for a train at `at`: the first series the
-    /// strategy reads then with no stored point at or after `at` (Nautilus'
-    /// `ParquetDataCatalog::query_last_timestamp`), and how far it is
-    /// stored; none if every one has.
+    /// The first bar source or tick series in `DataRequirements::slices(at, at)`
+    /// with no catalog interval, or whose latest interval ends before `at`.
+    /// The message includes the end if known; `None` means all ends reached `at`.
     ///
     /// # Errors
     ///
