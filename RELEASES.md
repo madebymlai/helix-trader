@@ -61,6 +61,7 @@ Released on TBD (UTC).
 
 - Fixed a meta model deciding beside the sides of another train, as when a later train's meta waited or failed
 - Fixed a train whose meta failed, or that stopped between its sides' publishes, leaving its sides published without the rest of its models
+- Fixed IB quote and trade fills losing ticks at each page boundary and the window's last second, IB leaving out a request's end second
 
 ### Internal Improvements
 

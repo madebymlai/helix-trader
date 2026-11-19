@@ -40,7 +40,7 @@ use ibapi::{
     prelude::StreamExt,
     subscriptions::SubscriptionItem,
 };
-use jiff::{SignedDuration, Timestamp, ToSpan, tz::TimeZone};
+use jiff::{RoundMode, SignedDuration, Timestamp, TimestampRound, ToSpan, Unit, tz::TimeZone};
 use nautilus_core::UnixNanos;
 use nautilus_interactive_brokers::{
     common::{
@@ -318,9 +318,10 @@ impl IbHistory {
     /// provider lacks it, as Nautilus' `request_ticks` does. Nautilus'
     /// `request_ticks` is not used: it logs and skips an error in a page,
     /// which then reads as a short or an empty page, the latter ending the
-    /// paging, and it ends the paging at a second holding a full page too,
+    /// paging; it ends the paging at a second holding a full page too,
     /// answering the ticks so far with no error, which the writer would
-    /// store as the whole window.
+    /// store as the whole window; and it loses the rest of each full page's
+    /// earliest second, which IB cuts short (see `page_back`).
     ///
     /// # Errors
     ///
@@ -369,6 +370,7 @@ impl IbHistory {
             page_back(
                 start,
                 end,
+                TICKS_PER_PAGE as usize,
                 |(ts_event, _): &PagedTick| *ts_event,
                 async |cursor| pages.page(tick_type, cursor).await,
             )
@@ -390,7 +392,7 @@ impl IbHistory {
 type PagedTick = (UnixNanos, Option<Data>);
 
 /// How many ticks a request of IB's historical ticks asks, IB's most: IB
-/// answers more to complete a second.
+/// answers a few more, its earliest second cut short (see `page_back`).
 const TICKS_PER_PAGE: i32 = 1000;
 
 /// What the pages of an instrument's historical ticks are asked on: the
@@ -845,63 +847,98 @@ fn ensure_bars_closed(end: Timestamp, now: Timestamp) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The ticks over `[start, end]`, paged back from `end` as Nautilus' IB
-/// clients page IB's historical ticks (`extend_historical_tick_batch` in
-/// `data/convert.rs`), but failing where they end short: `fetch` sends one
-/// request ending at a cursor, first `end`, then 1 ns before the earliest
-/// tick so far, and answers IB's page, its items in the order IB sent them,
-/// each a tick or the error IB ended the page with. IB reads an end to the
-/// second, inclusive, so a page's ticks after its cursor, of a second the
-/// page before held, are dropped. The paging ends on an empty page, IB
-/// holding nothing earlier, or once the cursor is before `start`. Returns
-/// the ticks in `[start, end]`, oldest first, those of one time in IB's
-/// order.
+/// The ticks over `[start, end]`, paged back from `end`: `fetch` sends
+/// one request ending at a cursor and answers IB's page, its items in the
+/// order IB sent them, each a tick or the error IB ended the page with.
+/// IB stamps a tick to the second and reads an end to the second, leaving
+/// out the ticks of the second it reads, so the first cursor is the second
+/// after `end`'s. A page of `page_size` ticks or more ends where IB's count
+/// ran out, its earliest second cut short (probed on the paper gateway on
+/// 19 November 2026: a page's earliest second held 1 tick of EUR/USD's 7,
+/// 1 and 54 there), so its ticks of that second are dropped and the next
+/// cursor is the second after it, asking it whole. A shorter page holds
+/// all IB has up to its cursor in the session, so it is kept whole and the
+/// next cursor is its earliest second. The paging ends on an empty page,
+/// IB holding nothing earlier, or once a page reaches back to `start`.
+/// Nautilus' IB clients end each next page at the earliest second instead
+/// (`extend_historical_tick_batch` in `data/convert.rs`), losing the rest
+/// of a cut second. Returns the ticks in `[start, end]`, oldest first,
+/// those of one time in IB's order.
 ///
 /// # Errors
 ///
 /// Returns an error if:
 /// - A request fails (`fetch`'s error) or a page does (an item's), the
 ///   ticks paged so far dropped.
-/// - A page holds no tick at or before its cursor, naming the second: that
-///   second alone holds a full page, which IB cannot page past, so the
-///   ticks before it cannot be asked.
+/// - A full page reaches back no further than the page before, naming the
+///   second: that second alone holds a full page, which IB cannot page
+///   past, so the ticks before it cannot be asked.
 async fn page_back<T>(
     start: Timestamp,
     end: Timestamp,
+    page_size: usize,
     ts_event: impl Fn(&T) -> UnixNanos,
     mut fetch: impl AsyncFnMut(Timestamp) -> anyhow::Result<Vec<anyhow::Result<T>>>,
 ) -> anyhow::Result<Vec<T>> {
+    let second = SignedDuration::from_secs(1);
     let mut ticks: Vec<T> = Vec::new();
-    let mut cursor = end;
-    while cursor >= start {
+    let mut cursor = second_of(end)? + second;
+    let mut cut: Option<Timestamp> = None;
+
+    loop {
         let page = fetch(cursor)
             .await
-            .with_context(|| format!("requesting the ticks up to {cursor}"))?
+            .with_context(|| format!("requesting the ticks before {cursor}"))?
             .into_iter()
             .collect::<anyhow::Result<Vec<T>>>()
-            .with_context(|| format!("reading the ticks up to {cursor}"))?;
-        let Some(earliest_sent) = page.iter().map(&ts_event).min() else {
+            .with_context(|| format!("reading the ticks before {cursor}"))?;
+        let Some(earliest) = page.iter().map(&ts_event).min() else {
             break;
         };
-        let held: Vec<T> = page
-            .into_iter()
-            .filter(|tick| ts_event(tick) <= UnixNanos::from(cursor))
-            .collect();
-        let Some(earliest) = held.iter().map(&ts_event).min() else {
-            anyhow::bail!(
-                "the second of {} holds a full page of ticks, which IB cannot page past: the \
-                 ticks up to {cursor} cannot be asked",
-                Timestamp::from(earliest_sent)
+        let earliest = second_of(Timestamp::from(earliest))?;
+
+        if page.len() < page_size {
+            ticks.extend(page);
+
+            if earliest <= start {
+                break;
+            }
+            cursor = earliest;
+            cut = None;
+        } else {
+            anyhow::ensure!(
+                cut.is_none_or(|cut| earliest < cut),
+                "the second of {earliest} holds a full page of ticks, which IB cannot page \
+                 past: the ticks before it cannot be asked"
             );
-        };
-        ticks.extend(held);
-        cursor = Timestamp::from(earliest) - SignedDuration::from_nanos(1);
+            let whole = UnixNanos::from(earliest + second);
+            ticks.extend(page.into_iter().filter(|tick| ts_event(tick) >= whole));
+
+            if earliest < start {
+                break;
+            }
+            cursor = earliest + second;
+            cut = Some(earliest);
+        }
     }
     let window = UnixNanos::from(start)..=UnixNanos::from(end);
     ticks.retain(|tick| window.contains(&ts_event(tick)));
     // Pages come latest first, each oldest first.
     ticks.sort_by_key(&ts_event);
     Ok(ticks)
+}
+
+/// The whole second `at` falls in.
+///
+/// # Errors
+///
+/// Returns an error if `at` cannot be truncated, out of range.
+fn second_of(at: Timestamp) -> anyhow::Result<Timestamp> {
+    Ok(at.round(
+        TimestampRound::new()
+            .smallest(Unit::Second)
+            .mode(RoundMode::Trunc),
+    )?)
 }
 
 /// The bars over `[start, end]`, fetched by walking back from `end`:
@@ -1106,13 +1143,15 @@ mod tests {
         }
     }
 
-    /// Pages the ticks of `[10:00:00, 10:00:10]` on the 10th through `fetch`.
+    /// Pages the ticks of `[10:00:00, 10:00:10]` on the 10th through `fetch`,
+    /// a page of three ticks or more being full.
     async fn paged(
         fetch: impl AsyncFnMut(Timestamp) -> anyhow::Result<Vec<anyhow::Result<Tick>>>,
     ) -> anyhow::Result<Vec<&'static str>> {
         let ticks = page_back(
             on_the_10th("10:00:00"),
             on_the_10th("10:00:10"),
+            3,
             |tick: &Tick| tick.0,
             fetch,
         )
@@ -1120,54 +1159,73 @@ mod tests {
         Ok(ticks.into_iter().map(|(_, name)| name).collect())
     }
 
-    /// Worked by hand, IB re-delivering the second its end reads to: the
-    /// page ending at 10:00:10 holds a to d, 10:00:07 to 10:00:10; the next
-    /// ends 1 ns before a, its 10:00:07 tick re-delivered and dropped, and
-    /// holds e and f of 10:00:05 and g; the next h and i; the last, ending
-    /// 1 ns before h, holds j, before the window, k and l, which reach its
-    /// start. The ticks of the window, oldest first, each once, j left out.
+    /// Worked by hand, IB leaving out the second a request ends at and
+    /// cutting a full page's earliest second short, as the paper gateway
+    /// does: the first page ends at 10:00:11, holding 10:00:10's d, and
+    /// only c2 of 10:00:07, which is dropped; the next ends at 10:00:08 and
+    /// holds 10:00:07 whole, c1 and c2, and a2 of 10:00:05, cut, dropped;
+    /// the next ends at 10:00:06, holding a1 and a2 of 10:00:05 and z of
+    /// 10:00:00, cut; the last, ending at 10:00:01, holds 10:00:00 whole, y
+    /// and z, and x of 09:59:59, before the window. The ticks of the window,
+    /// oldest first, each once.
     #[tokio::test]
     async fn ticks_are_paged_back_to_the_windows_start_each_once() {
         let mut cursors = Vec::new();
         let answers = vec![
             Ok(vec![
-                Ok(tick_at("10:00:07", "a")),
+                Ok(tick_at("10:00:07", "c2")),
                 Ok(tick_at("10:00:08", "b")),
-                Ok(tick_at("10:00:09", "c")),
                 Ok(tick_at("10:00:10", "d")),
             ]),
             Ok(vec![
-                Ok(tick_at("10:00:05", "e")),
-                Ok(tick_at("10:00:05", "f")),
-                Ok(tick_at("10:00:06", "g")),
-                Ok(tick_at("10:00:07", "a")),
+                Ok(tick_at("10:00:05", "a2")),
+                Ok(tick_at("10:00:07", "c1")),
+                Ok(tick_at("10:00:07", "c2")),
             ]),
             Ok(vec![
-                Ok(tick_at("10:00:03", "h")),
-                Ok(tick_at("10:00:04", "i")),
+                Ok(tick_at("10:00:00", "z")),
+                Ok(tick_at("10:00:05", "a1")),
+                Ok(tick_at("10:00:05", "a2")),
             ]),
             Ok(vec![
-                Ok(tick_at("09:59:59", "j")),
-                Ok(tick_at("10:00:00", "k")),
-                Ok(tick_at("10:00:02", "l")),
+                Ok(tick_at("09:59:59", "x")),
+                Ok(tick_at("10:00:00", "y")),
+                Ok(tick_at("10:00:00", "z")),
             ]),
         ];
 
         let ticks = paged(pages(answers, &mut cursors)).await.unwrap();
 
-        assert_eq!(
-            ticks,
-            ["k", "l", "h", "i", "e", "f", "g", "a", "b", "c", "d"]
-        );
+        assert_eq!(ticks, ["y", "z", "a1", "a2", "c1", "c2", "b", "d"]);
         assert_eq!(
             cursors,
             [
-                on_the_10th("10:00:10"),
-                on_the_10th("10:00:06.999999999"),
-                on_the_10th("10:00:04.999999999"),
-                on_the_10th("10:00:02.999999999"),
+                on_the_10th("10:00:11"),
+                on_the_10th("10:00:08"),
+                on_the_10th("10:00:06"),
+                on_the_10th("10:00:01"),
             ]
         );
+    }
+
+    /// A page shorter than a full one holds all IB has up to its cursor in
+    /// its session, its earliest second whole: kept, and the next page ends
+    /// at that second, before it.
+    #[tokio::test]
+    async fn a_short_page_is_kept_whole_and_the_next_ends_at_its_earliest_second() {
+        let mut cursors = Vec::new();
+        let answers = vec![
+            Ok(vec![
+                Ok(tick_at("10:00:08", "b")),
+                Ok(tick_at("10:00:09", "c")),
+            ]),
+            Ok(vec![Ok(tick_at("10:00:00", "a"))]),
+        ];
+
+        let ticks = paged(pages(answers, &mut cursors)).await.unwrap();
+
+        assert_eq!(ticks, ["a", "b", "c"]);
+        assert_eq!(cursors, [on_the_10th("10:00:11"), on_the_10th("10:00:08")]);
     }
 
     /// An empty page with no error: IB holds nothing earlier, and the ticks
@@ -1186,10 +1244,7 @@ mod tests {
         let ticks = paged(pages(answers, &mut cursors)).await.unwrap();
 
         assert_eq!(ticks, ["a", "b"]);
-        assert_eq!(
-            cursors,
-            [on_the_10th("10:00:10"), on_the_10th("10:00:08.999999999")]
-        );
+        assert_eq!(cursors, [on_the_10th("10:00:11"), on_the_10th("10:00:09")]);
     }
 
     /// The second page fails: IB ends it with an error after one tick, or
@@ -1223,8 +1278,9 @@ mod tests {
         assert!(format!("{err:#}").contains(error), "{err:#}");
     }
 
-    /// The page ending 1 ns before 10:00:08 holds only ticks of 10:00:08,
-    /// re-delivered: that second holds a full page, which IB cannot page
+    /// The first page is full, its 10:00:08 cut; the page ending at
+    /// 10:00:09, asking that second whole, holds only ticks of 10:00:08 and
+    /// is full too: that second holds a full page, which IB cannot page
     /// past, so the ticks before it cannot be asked and the paging fails,
     /// naming the second.
     #[tokio::test]
@@ -1233,12 +1289,13 @@ mod tests {
         let answers = vec![
             Ok(vec![
                 Ok(tick_at("10:00:08", "a")),
-                Ok(tick_at("10:00:10", "b")),
+                Ok(tick_at("10:00:09", "b")),
+                Ok(tick_at("10:00:10", "c")),
             ]),
             Ok(vec![
                 Ok(tick_at("10:00:08", "a")),
-                Ok(tick_at("10:00:08", "c")),
                 Ok(tick_at("10:00:08", "d")),
+                Ok(tick_at("10:00:08", "e")),
             ]),
         ];
 
