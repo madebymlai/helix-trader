@@ -30,7 +30,7 @@ Released on TBD (UTC).
 - Changed a meta model to learn from an out-of-fold pair fitted a meta window before the retrain time, so a periodic strategy's meta ships from its first train
 - Changed a newest model set failing its load checks to stop new entries, naming it, until it loads; remove its directory and train it again
 - Changed a never-retrained `train --at t` to train a model set at `t` unless one is published there; train it only at the time it is to trade from
-- Changed a live retrain to wait until every series read has a stored point at or after its retrain time, skipping one due meanwhile
+- Changed live retrains to wait for a catalog interval end at or after the cutoff for each bar source and tick series, skipping one due while another runs
 - Changed `RetrainActor::new` to take the strategy's `ModelStore`; pass the store the strategy reads
 - Renamed the store of a strategy's model sets to `ModelStore` and `ModelBlueprint::model_set` to `model_store`, `ModelSet` now naming one train's models
 - Renamed `model::holdout` to `model::earnings`; import `Earnings`, `Trades`, `Trade`, `MetaMargin` and `STRESS` from it
@@ -81,6 +81,7 @@ Released on TBD (UTC).
 
 ### Documentation Updates
 
+- Changed the live guide to distinguish a catalog interval's end from the time of its last row
 - Changed the pull request template to cite upstream issues and pull requests without adding backlinks
 - Changed the release steps to open the next release's version in `Cargo.toml` with its section, as Nautilus does
 - Changed `docs/releases.md` to cap an entry at 160 characters, its how and why going in the pull request
