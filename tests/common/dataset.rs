@@ -62,7 +62,6 @@ use crate::common::{
 
 pub(crate) const STRATEGY: &str = "DATASET-001";
 
-/// Decides every hour on the last mid of IC's gold through its model handle.
 #[derive(Debug)]
 pub(crate) struct ModelProbe {
     core: StrategyCore,
@@ -74,15 +73,13 @@ pub(crate) struct ModelProbe {
 
 #[derive(Debug, Default)]
 pub(crate) struct Record {
-    /// The row of each decision on warm features.
     pub rows: Vec<FeatureRow>,
 
     pub trades: Vec<(UnixNanos, Decision)>,
 
     pub closed: Vec<(UnixNanos, Money)>,
 
-    /// Each entry filled: its time, its quantity and the risk its tags say it takes
-    /// (`orders::entry_risk`).
+    /// Each entry filled, with the risk its tags say it takes (`orders::entry_risk`).
     pub entries: Vec<(UnixNanos, Quantity, Option<EntryRisk>)>,
 }
 
@@ -177,10 +174,7 @@ pub(crate) fn features() -> Rc<FeatureSet> {
         .unwrap()
 }
 
-/// The risk is 4 USD of the dataset balance of 10M USD (`venue`).
-///
-/// That buys one ounce (IC's whole ounces) on a stop worth 2 to 4 USD per ounce, as 7.5 bps of
-/// gold near 4000 is.
+/// The risk is 4 USD of the dataset balance of 10M USD, which buys one ounce on a stop of 2 to 4 USD.
 pub(crate) const RISK: &str = "0.00004%";
 
 pub(crate) fn target() -> TargetConfig {
@@ -201,8 +195,6 @@ pub(crate) fn target() -> TargetConfig {
 }
 
 /// Builds the config of the fake learner: a window of 46 hours, the last 12 calibrated on.
-///
-/// Each slice has at least one row. Each side trades from an expected net P&L of 0.
 pub(crate) fn config() -> ModelConfig {
     ModelConfig::builder()
         .decision(rule())
@@ -243,7 +235,6 @@ pub(crate) fn walk(from: Timestamp, to: Timestamp) -> tempfile::TempDir {
     ic::catalog_of(walk_quotes(from, to), from, to)
 }
 
-/// Builds one quote every 5 s: the bid is a random walk of up to 0.30 a step, the ask 0.20 above.
 pub(crate) fn walk_quotes(from: Timestamp, to: Timestamp) -> Vec<QuoteTick> {
     let mut walk = Lcg(7);
     let mut bid = 4000.0_f64;
@@ -324,7 +315,6 @@ pub(crate) fn requirements() -> DataRequirements {
     }
 }
 
-/// Returns the dataset venue: 30 USD per million traded, and 10M USD.
 pub(crate) fn venue() -> DatasetVenue {
     DatasetVenue {
         commission: Commission::Rate(Decimal::new(3, 5)),
@@ -435,10 +425,8 @@ pub(crate) fn trade_staking(
     record.take()
 }
 
-/// Initialized by the first quote with its value missing.
-///
-/// The fake learner then predicts the mean of its training labels, so each model's prediction
-/// names it.
+/// Initialized by the first quote with its value missing, so that the fake learner predicts the
+/// mean of its training labels and each model's prediction names it.
 #[derive(Default)]
 pub(crate) struct Missing {
     quoted: bool,
@@ -495,25 +483,17 @@ pub(crate) fn missing() -> FeatureSetBuilder {
     )
 }
 
-/// The level line `0.1 + 0.5 E` of the baseline meta models.
-///
-/// A meta predicting an R of 0.1 expects 0.15.
 pub(crate) const CALIBRATION: Line = Line {
     alpha: 0.1,
     beta: 0.5,
 };
 
-/// Returns the R of a side's baseline of `tenths`: (`tenths` - 5) / 10.
-///
-/// Above 5 it is a gain, below a loss.
 pub(crate) fn r(tenths: usize) -> f64 {
     (tenths as f64 - 5.0) / 10.0
 }
 
-/// Returns the calibration that leaves each side's prediction as it is, up to rounding.
-///
-/// It is exact to the bit on one side. The level line is `C' = C`, and for two sides the side call
-/// is `D' = D`.
+/// Returns the calibration that leaves each side's prediction as it is, exact to the bit on one
+/// side: the level line is `C' = C`, and for two sides the side call is `D' = D`.
 pub(crate) fn unchanged(config: &ModelConfig) -> Ksplit {
     Ksplit {
         level: Line {
@@ -538,11 +518,8 @@ pub(crate) fn model_set(
     }
 }
 
-/// Builds a baseline side model of the probe.
-///
-/// Its rows are the features, then the target's payoff features (`features::side_names`). It
-/// predicts an R of `r(tenths)` whatever the row, calibrated as the model set says. It serves
-/// tests that set the models' predictions, which no train on the fixture's edgeless walk would.
+/// Builds a baseline side model of the probe, for tests that set the models' predictions, which no
+/// train on the fixture's edgeless walk would. It predicts an R of `r(tenths)` whatever the row.
 pub(crate) fn baseline_of(
     features: &Rc<FeatureSet>,
     config: &ModelConfig,
@@ -555,10 +532,7 @@ pub(crate) fn baseline_of(
     stored_baseline(features, config, names, Some(side), &set)
 }
 
-/// Builds a baseline meta model of the sides.
-///
-/// Its rows are the side picked, the decision's level and side call after their features. It
-/// predicts an R of `r(tenths)` whatever the row, calibrated by `CALIBRATION`.
+/// Builds a baseline meta model of the sides, predicting an R of `r(tenths)` whatever the row.
 pub(crate) fn meta_baseline_of(
     features: &Rc<FeatureSet>,
     config: &ModelConfig,
@@ -588,10 +562,7 @@ fn stored_baseline(
     baseline_stored(fingerprint.to_string(), feature_names, config, side, set)
 }
 
-/// Builds a model that predicts the mean of its labels whatever the row.
-///
-/// That mean is the baseline in its manifest. A meta is calibrated by `CALIBRATION`, a side by its
-/// pair's, the model set's.
+/// Builds a model that predicts the mean of its labels, its manifest's baseline, whatever the row.
 pub(crate) fn baseline_stored(
     fingerprint: String,
     feature_names: Vec<String>,

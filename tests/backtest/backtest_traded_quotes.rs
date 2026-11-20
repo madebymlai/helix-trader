@@ -52,10 +52,8 @@ impl Part for Reader {
     }
 }
 
-/// Builds the config that trades IC's gold and reads it through `data` alone.
-///
-/// The series is keyed by `key`: `instrument_id` or, for custom data, `identifier`. A custom type
-/// loads once registered. The process registers the custom types it compiles at its start.
+/// Builds the config that trades IC's gold and reads it through `data` alone, the series keyed by
+/// `key`: `instrument_id` or, for custom data, `identifier`.
 fn config(data: &str, key: &str) -> StandardConfig<Reader> {
     nautilus_serialization::ensure_custom_data_registered::<glbx::Imbalance>();
     StandardConfig::load(&format!(

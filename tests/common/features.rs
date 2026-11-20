@@ -8,9 +8,8 @@ use nautilus_indicators::average::sma::SimpleMovingAverage;
 use nautilus_model::enums::PriceType;
 use serde::{Deserialize, Serialize};
 
-/// The arguments of a Nautilus `SimpleMovingAverage`: `period` and `price_type`.
-///
-/// `price_type` is the price it reads from quotes (`LAST` left out; bars give their close).
+/// The arguments of a Nautilus `SimpleMovingAverage`. `price_type` is the price it reads from
+/// quotes, `LAST` left out, as bars give their close.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SmaArgs {

@@ -8,12 +8,11 @@
 //! - a config it cannot load
 //! - a train for a strategy with no model
 //!
-//! Each refusal exits non-zero and puts the flag or the facts in stderr ahead of clap's usage. It
-//! prints nothing and creates no catalog.
+//! Each refusal exits non-zero and puts the flag or the facts in stderr ahead of clap's usage,
+//! with no output and no catalog created.
 //!
-//! The binary runs in a directory of its own with no environment. The flags fall back on the
-//! environment, which `main` loads from `.env`. So neither the shell nor a `.env` above the
-//! crate's root gives a flag its value.
+//! The binary runs in a directory of its own with no environment, as the flags fall back on the
+//! environment, which `main` loads from `.env`.
 
 use std::process::Command;
 
@@ -275,7 +274,7 @@ fn the_binary_refuses_a_command_line_naming_why_and_runs_nothing(
     );
     assert!(!output.status.success(), "{stdout}{stderr}");
 
-    // Clap follows its refusal with the subcommand's usage, which lists every flag
+    // Clap follows its refusal with the usage, which lists every flag
     let refusal = stderr.split("\nUsage:").next().unwrap();
     for part in named {
         assert!(refusal.contains(part), "{part}: {stderr}");

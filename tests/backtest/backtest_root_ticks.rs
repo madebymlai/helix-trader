@@ -1,11 +1,12 @@
 //! Tests a model strategy's features on a futures root's ticks.
 //!
 //! The root is GC.GLBX (`common::rolls`). It rolls from GCQ26.GLBX to GCZ26.GLBX at 00:00 UTC on
-//! 29 July 2026. The strategy trades IC's gold, whose quotes the harness reads. A dataset run from
-//! 23:00 to 01:00 decides every 15 minutes.
+//! 29 July 2026. The strategy trades IC's gold, quoted at 30 s past each minute from 22:00 to 02:00
+//! at mid 4000.10, which makes each decision fresh. A dataset run from 23:00 to 01:00 decides every
+//! 15 minutes.
 //!
-//! The features read the pre contract, then reset at the roll. They stay cold until their window
-//! refills on the post contract, then read the post contract alone.
+//! The features read the pre contract, then reset at the roll, at the last nanosecond before
+//! 00:00. They stay cold until their window refills on the post contract, then read it alone.
 
 use std::rc::Rc;
 
@@ -49,7 +50,6 @@ fn trades() -> Vec<TradeTick> {
     ]
 }
 
-/// Quotes IC's gold at 30 s past each minute from 22:00 to 02:00, at mid 4000.10.
 fn catalog() -> tempfile::TempDir {
     catalog_of(&trades(), &[])
 }
@@ -171,14 +171,7 @@ fn assert_rows(got: &[(Timestamp, Vec<f64>)], expected: &[(Timestamp, Vec<f64>)]
 
 /// Replays August's trades at 23:10, 23:20 and 23:50, and December's at 00:05, 00:20 and 00:35.
 ///
-/// 23:15 has one trade. 23:30 and 23:45 read the mean of 3990 and 3991.
-///
-/// The roll's alert, at the last nanosecond before 00:00, resets the feature:
-/// - 00:00 has no trade.
-/// - 00:15 has one trade (3993 and 4041 would mix).
-/// - 00:30 and 00:45 read the means of 4041 and 4042, and of 4042 and 4043.
-///
-/// IC's gold quotes make each decision fresh.
+/// Without the reset, 00:15 would mix 3993 and 4041.
 #[rstest]
 fn features_on_a_root_read_each_contract_in_turn_reset_at_the_roll() {
     let rows = rows(root_trades());
@@ -194,10 +187,8 @@ fn features_on_a_root_read_each_contract_in_turn_reset_at_the_roll() {
     );
 }
 
-/// The root's feature is compared with the mean of IC's gold's last 60 mids.
-///
-/// The gold's feature is warm from the 60th quote at 23:59:30. The roll resets the root's feature
-/// alone. The gold's would stay cold until 00:59:30. 00:30 and 00:45 read mid 4000.10.
+/// The gold's feature of its last 60 mids is warm from 23:59:30. Reset by the roll, it would stay
+/// cold until 00:59:30.
 #[rstest]
 fn a_roll_leaves_the_features_of_other_instruments_untouched() {
     let tables = root_tables();
@@ -230,15 +221,8 @@ const ROOT_2_TICKS: Declared<SmaArgs> = Declared::new("root_2_ticks");
 
 /// Averages the last two ticks of a root's quotes and trades, in time order.
 ///
-/// August has quotes at mid 3990, 3992 and 3993 (23:05, 23:20, 23:40) and trades at 3991 and 3994
-/// (23:10, 23:50). December has trades at 4041 and 4043 (00:05, 00:20) and quotes at mid 4042 and
-/// 4044 (00:10, 00:35). August's quote at 00:25 and December's at 23:55 fall outside their slices.
-///
-/// - 23:15: (3990 + 3991) / 2 = 3990.5.
-/// - 23:30: (3991 + 3992) / 2 = 3991.5.
-/// - 23:45: (3992 + 3993) / 2 = 3992.5.
-/// - 00:00: none, after the reset.
-/// - 00:15, 00:30 and 00:45: 4041.5, 4042.5 and 4043.5.
+/// August's quote at 00:25 and December's at 23:55 fall outside their slices. 00:00 has no row,
+/// after the reset.
 #[rstest]
 fn a_feature_on_a_roots_quotes_and_trades_reads_them_in_time_order_across_the_roll() {
     let trades = [

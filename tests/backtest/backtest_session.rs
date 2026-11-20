@@ -1,16 +1,19 @@
-//! Tests the session on internal bars.
+//! Tests that bars outside the session neither move the EMAs nor trade.
 //!
-//! Bars outside the session neither move the EMAs nor trade. Overnight there are no quotes, so
-//! there are no bars at all.
+//! Quotes run 07:00 to 17:00 UTC each day from Wednesday 7 January 2026, with none overnight, so
+//! there are no bars then. The run starts at 09:00 and ends Thursday 10:00. The shortest crossover
+//! initializes short at 11:00, then trades three brackets of 10 units: crosses up at 15:00, down at
+//! 16:00 and up on Thursday 09:00. The first two end at their stops, -106.90 and -195.10, and the
+//! last ends long, so 9 orders and 9698.00 EUR.
+//!
+//! Counting the bars outside the session would give four trades, the second a cross at 17:00
+//! (620.60) and the last a cross down on Thursday 09:00 (610.60, below the EMA of 631.88).
 
 use jiff::Timestamp;
 use rstest::rstest;
 
 use crate::common::{self, stepped_quotes, ts};
 
-/// Quotes 07:00 to 17:00 UTC each day and nothing overnight, so there are no bars then.
-///
-/// The hour bars close at level + 0.60.
 fn level(close: Timestamp) -> Option<f64> {
     let (wednesday, thursday) = ("2026-01-07T", "2026-01-08T");
     let hour = |day: &str, hh: &str| ts(&format!("{day}{hh}:00:00Z"));
@@ -41,21 +44,6 @@ fn bars_outside_the_session_neither_move_the_emas_nor_trade() {
         .unwrap()
         .result;
 
-    // The run replays the bars closing 10:00 to 14:00 from 09:00. The crossover initializes at
-    // 11:00 and is short to 14:00, with 590.60 below the slow EMA of 600.60, which goes to 593.93.
-    // Each trade but the last ends at its stop, 50 bps away, on the first quote of the next bar,
-    // which jumps past the stop:
-    //
-    // - 15:00: 610.60 above 593.93, cross up: buy 10 at 610.65, stop 607.55, EMA to 605.04;
-    //   stopped at 15:01 at the bid 600.00 + 0.01 - 0.05 = 599.96: -106.90
-    // - 16:00: 600.60 below 605.04, cross down: sell 10 at 600.55, stop 603.60, EMA to 602.08;
-    //   stopped at 16:01 at the ask 620.00 + 0.01 + 0.05 = 620.06: -195.10
-    // - Thursday 09:00: 610.60 above 602.08, cross up: buy 10 at 610.65, stop 607.55, take profit
-    //   616.71; 10:00 at 615.60 touches neither, the run ends long
-    //
-    // The run has three brackets of 3 orders. Counting the bars outside the session would give
-    // four trades: 17:00 (620.60) crosses up, Thursday 08:00 (640.60) stays long and Thursday 09:00
-    // (610.60, below the EMA of 631.88) crosses down.
     assert_eq!(result.total_orders, 9);
     assert_eq!(common::balance(&result), "9698.00 EUR");
 }

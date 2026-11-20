@@ -6,6 +6,9 @@
 //! - its book deltas, as Databento's MBO fills the catalog;
 //! - custom data under its id (`Imbalance`);
 //! - its quotes, kept apart, as LSE streams CME Globex's Level 1.
+//!
+//! Each series of trades, snapshots, deltas and imbalances has one record before the backtests'
+//! start, then two or three inside them.
 
 use std::{path::Path, sync::Arc};
 
@@ -48,9 +51,7 @@ pub(crate) fn instrument() -> InstrumentAny {
     InstrumentAny::FuturesContract(gold)
 }
 
-/// Builds a snapshot of 10 levels a side at `time`.
-///
-/// The levels are 1.00 apart, and the best ask is 1.00 above `best_bid`.
+/// Builds a snapshot of 10 levels a side 1.00 apart.
 pub(crate) fn depth(time: Timestamp, best_bid: &str) -> OrderBookDepth {
     let mut depth = stub_depth10();
     let shift = Price::from(best_bid) - depth.bids[0].price;
@@ -63,7 +64,6 @@ pub(crate) fn depth(time: Timestamp, best_bid: &str) -> OrderBookDepth {
     depth
 }
 
-/// Builds one snapshot before the backtests' start, then three.
 pub(crate) fn depths() -> Vec<OrderBookDepth> {
     vec![
         depth(at("08:30:00"), "4010.00"),
@@ -120,7 +120,6 @@ pub(crate) fn trade(time: Timestamp, price: &str) -> TradeTick {
     )
 }
 
-/// Builds one trade before the backtests' start, then two.
 pub(crate) fn trades() -> Vec<TradeTick> {
     vec![
         trade(at("08:45:00"), "4010.50"),
@@ -141,7 +140,6 @@ pub(crate) fn store_trades(dir: &Path) {
         .unwrap();
 }
 
-/// Builds a delta, the last of its event if `last`.
 pub(crate) fn delta(time: Timestamp, price: &str, order_id: u64, last: bool) -> OrderBookDelta {
     OrderBookDelta::new(
         InstrumentId::from(INSTRUMENT_ID),
@@ -159,7 +157,6 @@ pub(crate) fn delta(time: Timestamp, price: &str, order_id: u64, last: bool) -> 
     )
 }
 
-/// Builds one event before the backtests' start, then two events: one of two deltas and one of one.
 pub(crate) fn deltas() -> Vec<OrderBookDelta> {
     vec![
         delta(at("08:40:00"), "4010.00", 1, true),
@@ -181,7 +178,6 @@ pub(crate) fn store_deltas(dir: &Path) {
         .unwrap();
 }
 
-/// An imbalance of gold's book.
 #[arrow_custom_data]
 #[custom_data]
 pub struct Imbalance {
@@ -192,21 +188,18 @@ pub struct Imbalance {
 
 pub(crate) const IMBALANCE: &str = "Imbalance";
 
-/// Returns the data type of gold's `Imbalance`s.
-///
-/// It is keyed by its id, as Nautilus' Databento client keys its custom data.
+/// Returns the data type of gold's `Imbalance`s, keyed by its id as Nautilus' Databento client
+/// keys its custom data.
 pub(crate) fn imbalance_type() -> DataType {
     DataType::new(IMBALANCE, None, Some(INSTRUMENT_ID.to_string()))
 }
 
-/// Builds one imbalance before the backtests' start, then two.
 pub(crate) fn imbalances() -> Vec<Imbalance> {
     [("08:50:00", 0.5), ("09:30:00", -0.25), ("11:00:00", 0.75)]
         .map(|(time, value)| Imbalance::new(value, at(time).into(), at(time).into()))
         .to_vec()
 }
 
-/// Registers `Imbalance` with Nautilus before storing, as any reader of it must.
 pub(crate) fn store_imbalances(dir: &Path) {
     store_imbalances_as(dir, &imbalance_type());
 }

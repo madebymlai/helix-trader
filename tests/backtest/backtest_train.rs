@@ -1,12 +1,13 @@
 //! Tests training at a time (`model::train`) on a fixture catalog with an edge.
 //!
 //! The dataset probe (`common::dataset`) replays the days the window lacks through
-//! `Backtest::run_dataset`. LightGBM fits each side's realized R on the rows.
+//! `Backtest::run_dataset`. LightGBM fits each side's realized R on the rows. The window is 70
+//! hours from 02:00 of 20 October 2026, the training time being midnight of the 23rd.
 //!
 //! IC's gold rises 4.00 over each even hour and falls back over each odd one
 //! (`ic::edge_quotes`). The probe's one feature, `cheap`, is 1 at the bottom of the hour and 0 at
 //! the top. So the long learns a high R at the bottom and the short at the top. The two sides are
-//! calibrated together on the calibration slice and published. Each model reloads to its probes.
+//! calibrated together and published, and each model reloads to its probes.
 
 use std::{path::Path, rc::Rc};
 
@@ -36,9 +37,7 @@ use crate::common::{
 const BOTTOM: f64 = ic::EDGE_BOTTOM;
 const RISE: f64 = ic::EDGE_RISE;
 
-/// Computes `cheap` from the last mid, clamped.
-///
-/// It is 0 at the top of the hours (4004.10) and 1 at their bottom (4000.10).
+/// Computes `cheap` from the last mid, clamped: 0 at 4004.10 and 1 at 4000.10.
 #[derive(Default)]
 struct Cheap {
     mid: Option<f64>,
@@ -99,10 +98,8 @@ fn features() -> Rc<FeatureSet> {
         .unwrap()
 }
 
-/// Builds the LightGBM config: leaves of 20 rows and a window of 70 hours.
-///
-/// The last 12 hours are for calibration, so 58 are fitted on split. Each slice has at least 5
-/// rows. Each side trades from an expected net R of 0.
+/// Builds the LightGBM config: leaves of 20 rows and a window of 70 hours, the last 12 of them for
+/// calibration.
 fn config() -> ModelConfig {
     ModelConfig::builder()
         .decision(rule())
@@ -144,15 +141,11 @@ fn catalog() -> TempDir {
     ic::catalog_of(ic::edge_quotes(from, to), from, to)
 }
 
-/// Returns midnight of the 23rd, so the window starts at 02:00 of the 20th.
 fn t() -> Timestamp {
     ic::at("00:00:00") + SignedDuration::from_hours(48)
 }
 
-/// Publishes each side at t in the model set valid from then, with the pair's calibration.
-///
-/// Each learner reloads its model. The model predicts its probes, rows of the calibration slice,
-/// to the bit.
+/// The probes are rows of the calibration slice.
 #[rstest]
 fn train_at_t_publishes_each_side_whose_probes_reload_to_identical_predictions() {
     let catalog = catalog();
@@ -176,8 +169,7 @@ fn train_at_t_publishes_each_side_whose_probes_reload_to_identical_predictions()
         .unwrap()
         .to_string();
 
-    // A side's model reads the strategy's features, then the bracket's payoff features, and the
-    // decision checks it against these names.
+    // A side's model reads the strategy's features, then the bracket's payoff features
     let names = side_names(features().names(), &target().payoff_names());
     let model_set = model_set(models.path(), t());
     assert_eq!(model_set.valid_from, t());
