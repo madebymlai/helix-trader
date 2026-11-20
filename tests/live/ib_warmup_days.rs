@@ -4,7 +4,7 @@
 //! warmup gets every minute bar IB's history holds over the windows, read a page at a time, and
 //! builds each hour bar from them once.
 //!
-//! The test is gated like `ib_gateway.rs`, by `NAUTILUS_IB_RUN=1` in the shell. It places no order.
+//! Gated as `ib_gateway.rs` is. It places no order.
 //! It tells only when run within a session of the instrument, SXR8.IBIS or the one
 //! `NAUTILUS_IB_INSTRUMENT` names, on a day with no weekend in the 72 hours:
 //!
@@ -58,7 +58,6 @@ struct Record {
     failure: Option<String>,
 }
 
-/// Warms up, then subscribes to its bars from where the warmup ends, as a strategy does, and stops.
 #[derive(Debug)]
 struct Probe {
     core: StrategyCore,
@@ -130,10 +129,8 @@ async fn a_warmup_of_days_holds_every_minute_bar_of_ibs_history_and_builds_each_
         record: Rc::clone(&record),
     };
 
-    // An empty catalog: IB answers the whole warmup
     let catalog = tempfile::tempdir().unwrap();
 
-    // Outside the catalog, as `Live` requires
     let staging = tempfile::tempdir().unwrap();
     let live = Live {
         trader_id: TraderId::from(TRADER),
@@ -144,7 +141,6 @@ async fn a_warmup_of_days_holds_every_minute_bar_of_ibs_history_and_builds_each_
     };
     let ran = Box::pin(tokio::time::timeout(
         Duration::from_secs(300),
-        // The probe trades nothing: it claims no instrument
         live.run(&requirements, &warmup, probe, None),
     ))
     .await;

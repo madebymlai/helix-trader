@@ -6,14 +6,13 @@
 //!   id and its commission is the broker's.
 //! - No order status waits on a fill that never comes.
 //!
-//! Each node runs in a child process of this test binary (`phase`), under its own trader. Its Redis
-//! cache is apart from `live`'s, and the test deletes it at the end. The probe sends one bracket of
-//! 1 oz of gold and stops the node once the position holds both legs, leaving it open. A later node
-//! reads it back. After each test the broker's execution client reads the account: no position, no
-//! order open.
+//! Each node runs in a child process of this test binary (`phase`), under its own trader and Redis
+//! cache. The probe sends one bracket of 1 oz of gold and stops the node once the position holds
+//! both legs, leaving it open. A later node reads it back. After each test the account is read: no
+//! position, no order open.
 //!
-//! Needs what `ctrader_orders_demo.rs` needs: the gate, gold's market open, the account flat in
-//! gold. The tests here trade the same account, so they run one at a time:
+//! Needs what `ctrader_orders_demo.rs` needs, with the account flat in gold. The tests trade the
+//! same account, so they run one at a time:
 //!
 //! ```sh
 //! NAUTILUS_CTRADER_RUN=pepperstone cargo test --test live ctrader_restart_demo:: -- --test-threads=1 --nocapture
@@ -59,26 +58,19 @@ const PHASE: &str = "HELIX_CTRADER_RESTART_PHASE";
 const STATE: &str = "HELIX_CTRADER_RESTART_STATE";
 const TRADER: &str = "HELIX_CTRADER_RESTART_TRADER";
 
-/// How long `Observe` lets the node run.
-///
-/// The node runs past startup reconciliation, three open-order checks and a position check
-/// (`live::node`'s intervals, 10 s and 30 s).
+/// How long `Observe` lets the node run: past startup reconciliation, three open-order checks and a
+/// position check (`live::node`'s intervals, 10 s and 30 s).
 const SETTLE: Duration = Duration::from_secs(40);
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 enum Step {
-    /// Opens a bracket on a flat account: a market buy of 1 oz, with its stop loss `distance` below
-    /// the bid and its take profit `distance` above the ask.
-    ///
-    /// Once the position holds both, it saves the orders and the entry's fills and stops with the
-    /// position open. With `reduce`, the bracket is of 2 oz and a sell naming the position reduces
-    /// it by 1 oz. The save then waits for the position and both legs to be of 1 oz.
+    /// Opens a bracket on a flat account: a market buy of 1 oz, with its stop loss and take profit
+    /// `distance` from the bid and the ask. It saves the orders and the entry's fills, and stops
+    /// with the position open. With `reduce`, the bracket is of 2 oz and a sell reduces the
+    /// position by 1 oz first.
     Open { distance: f64, reduce: bool },
 
-    /// Buys 1 oz at market on a flat account, and saves the order as the entry.
-    ///
-    /// Once the order is submitted, it stops the process as a crash would, before the broker's
-    /// answer is processed, so the order is in flight in the cache.
+    /// Buys 1 oz at market, and stops the process as a crash would once the order is submitted.
     Crash,
 
     /// Lets the node settle (`SETTLE`), then saves its open positions, live orders, and each of the
@@ -86,12 +78,9 @@ enum Step {
     Observe,
 
     /// Closes every position, then cancels every order left.
-    ///
-    /// It stops once flat, or `SETTLE` after its cancels, and notes the orders left.
     Flatten,
 }
 
-/// What a step leaves for the next, through `STATE`.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Saved {
     position_id: String,
@@ -126,9 +115,7 @@ struct Fill {
 }
 
 impl Fill {
-    /// Returns whether it is one of the broker's deals.
-    ///
-    /// cTrader's deal ids are numbers, and every deal of gold is charged.
+    /// Returns whether it is one of the broker's deals: cTrader's deal ids are numbers.
     fn is_a_deal(&self, currency: &str) -> bool {
         self.trade_id.parse::<i64>().is_ok()
             && self
@@ -138,9 +125,6 @@ impl Fill {
     }
 }
 
-/// Runs one step in a child process: a live node with the probe.
-///
-/// It runs only when the parent test names a step.
 #[tokio::test(flavor = "multi_thread")]
 async fn phase() {
     let Ok(step) = std::env::var(PHASE) else {
@@ -157,10 +141,8 @@ async fn phase() {
         warmup: SignedDuration::from_mins(2),
     };
 
-    // The catalog is empty, so the venue answers the whole warmup
     let catalog = tempfile::tempdir().unwrap();
 
-    // Outside the catalog, as `Live` requires
     let staging = tempfile::tempdir().unwrap();
     let live = Live {
         trader_id: TraderId::from(std::env::var(TRADER).unwrap().as_str()),
@@ -222,8 +204,8 @@ async fn a_bracket_held_over_a_restart_comes_back_as_it_was() {
     }
 }
 
-/// The restarted node fills the leg hit while it was down by the broker's closing deal, cancels the
-/// other, and holds nothing open.
+/// The restarted node fills the leg hit while it was down by the broker's closing deal, and
+/// cancels the other.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_bracket_leg_filled_while_the_node_was_down_fills_by_its_deal() {
     let Some(broker) = opted_in(
@@ -280,9 +262,7 @@ async fn a_bracket_leg_filled_while_the_node_was_down_fills_by_its_deal() {
 }
 
 /// A bracket of 2 oz is reduced by 1 oz, then closed by one of its legs while the node was down.
-///
-/// The broker's leg reports fill what is left, 1 oz, as its deal does. The restarted node fills
-/// that leg by the deal, with the deal's filled quantity, and cancels the other.
+/// The broker's leg reports fill what is left, 1 oz, as its deal does.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_leg_hit_after_a_partial_close_fills_what_is_left() {
     let Some(broker) = opted_in(
@@ -341,10 +321,8 @@ async fn a_leg_hit_after_a_partial_close_fills_what_is_left() {
     assert_eq!(other.status, Some(OrderStatus::Canceled), "{other:?}");
 }
 
-/// An order is in flight when the node dies, and the broker fills it meanwhile.
-///
-/// The restarted node fills it by the broker's deal, not by a fill inferred from its status, and
-/// holds the position.
+/// An order is in flight when the node dies, and the broker fills it meanwhile. The restarted node
+/// fills it by the broker's deal, not by a fill inferred from its status.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_market_order_in_flight_when_the_node_died_fills_by_its_deal() {
     let Some(broker) = opted_in(
@@ -382,8 +360,6 @@ async fn a_market_order_in_flight_when_the_node_died_fills_by_its_deal() {
     );
 }
 
-/// A run has a trader of its own and a file its steps share. Dropping it deletes the trader's Redis
-/// records.
 struct Run {
     trader: &'static str,
     state: tempfile::NamedTempFile,
@@ -465,10 +441,6 @@ async fn connected(broker: &DemoBroker) -> Box<dyn ExecutionClient> {
     client
 }
 
-/// Returns the open positions and orders the execution client reports.
-///
-/// It reads them as startup reconciliation does. The mass status also holds orders closed over its
-/// window.
 async fn open_at_broker(broker: &DemoBroker) -> (usize, usize) {
     let mut client = connected(broker).await;
     let mass_status = client.generate_mass_status(Some(60)).await;
@@ -489,12 +461,9 @@ async fn open_at_broker(broker: &DemoBroker) -> (usize, usize) {
     )
 }
 
-/// Returns whether the broker holds no open position: the bracket's position closed by one of its
-/// protections.
-///
-/// It reads at once, then every 5 s for up to `wait`. Call it once the node is down. Returns
-/// `None` if the first read finds the position closed already, as it may have closed while the node
-/// was up.
+/// Returns whether the broker holds no open position, the bracket's having closed by one of its
+/// protections. It reads at once, then every 5 s for up to `wait`. Returns `None` if the first read
+/// finds it closed already, as it may have closed while the node was up.
 async fn closed_at_broker(broker: &DemoBroker, wait: Duration) -> Option<bool> {
     let mut client = connected(broker).await;
     let deadline = tokio::time::Instant::now() + wait;
@@ -633,7 +602,6 @@ impl Probe {
             .collect()
     }
 
-    /// Returns the open and in-flight orders of gold, from any strategy.
     fn live_orders(&self) -> Vec<OrderAny> {
         let cache = self.cache();
         let id = Some(&self.gold);
@@ -835,7 +803,6 @@ impl Probe {
         self.finish()
     }
 
-    /// Sends the buy on a flat account (see `on_order_submitted`).
     fn crash(&mut self) -> anyhow::Result<()> {
         if !self.open_positions().is_empty() || !self.live_orders().is_empty() {
             self.note_state("not flat");
@@ -915,7 +882,6 @@ fn fills(order: &OrderAny) -> Vec<Fill> {
         .collect()
 }
 
-/// Interrupts as Ctrl-C would, so the node's signal handler stops it.
 fn interrupt() {
     let pid = std::process::id().to_string();
     let status = Command::new("kill").args(["-INT", &pid]).status();
@@ -923,16 +889,12 @@ fn interrupt() {
 }
 
 nautilus_strategy!(Probe, {
-    /// Returns the instruments its config claims. The live node registers them as it adds the
-    /// strategy.
     fn external_order_instrument_ids(&self) -> Option<Vec<InstrumentId>> {
         self.config().external_order_instrument_ids.clone()
     }
 
-    /// In `Crash`, aborts once the order is submitted.
-    ///
-    /// The sleep lets Redis receive the order, as its writer runs on another thread. Meanwhile the
-    /// held node thread does not process the broker's answer.
+    /// In `Crash`, aborts once the order is submitted. The sleep lets Redis receive the order, as
+    /// its writer runs on another thread.
     fn on_order_submitted(&mut self, event: OrderSubmitted) {
         if self.step == Step::Crash {
             std::thread::sleep(Duration::from_millis(500));

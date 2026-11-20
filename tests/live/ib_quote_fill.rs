@@ -36,9 +36,7 @@ const EUR_USD: &str = "EUR/USD.IDEALPRO";
 
 static GATEWAY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Returns whether the run is opted in, and claims the process (`claim_process`).
-///
-/// It reads the shell before `.env`, so that the file cannot opt in.
+/// Returns whether the run is opted in, reading the shell before `.env`, and claims the process.
 fn opted_in(test: &str) -> bool {
     let run = std::env::var("NAUTILUS_IB_RUN").is_ok_and(|value| value == "1");
     if run {
@@ -57,7 +55,6 @@ fn history_venues() -> HistoryVenueArgs {
     HistoryVenueArgs::from_arg_matches(&matches).unwrap()
 }
 
-/// Parses `time`, written `DDTHH:MM:SS`, as a time on a day of November 2026.
 fn november(time: &str) -> Timestamp {
     format!("2026-11-{time}Z").parse().unwrap()
 }
@@ -92,9 +89,6 @@ fn eur_usd_quotes() -> DataRequirements {
 
 /// fill-catalog fills the pair's definition and its quotes over an hour that FX trades through,
 /// Thursday 12 November 2026 from 10:00 UTC.
-///
-/// The test checks that every quote is within the hour and of the pair, that each bid is at or
-/// below its ask, and that the hour is covered.
 #[tokio::test(flavor = "multi_thread")]
 async fn fill_catalog_fills_an_hour_of_an_idealpro_pairs_quotes() {
     if !opted_in("fill_catalog_fills_an_hour_of_an_idealpro_pairs_quotes") {
@@ -150,7 +144,7 @@ async fn fill_catalog_fills_an_hour_of_an_idealpro_pairs_quotes() {
 ///
 /// A fill of EUR/USD's quotes over 21:30 to 22:30 UTC pages back across the break. IB answers no
 /// request across two sessions. A page ending in the break, answered empty, would end the paging
-/// with the quotes after it alone. The catalog holds quotes on both sides.
+/// with the quotes after it alone.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_quote_fill_across_idealpros_daily_break_holds_quotes_on_both_sides() {
     if !opted_in("a_quote_fill_across_idealpros_daily_break_holds_quotes_on_both_sides") {
@@ -188,8 +182,7 @@ async fn a_quote_fill_across_idealpros_daily_break_holds_quotes_on_both_sides() 
 ///
 /// A fill of its 5-second LAST bars from Thursday 12 November 2026 16:00 UTC to Friday 13 November
 /// 08:30 UTC walks back across the night, an hour a request (`ib::request_duration`). A request
-/// answered empty overnight would end the walk with the 13th's bars alone. The catalog holds the
-/// 12th's last half hour and the 13th's first.
+/// answered empty overnight would end the walk with the 13th's bars alone.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_small_bar_fill_across_a_night_holds_bars_of_both_sessions() {
     if !opted_in("a_small_bar_fill_across_a_night_holds_bars_of_both_sessions") {

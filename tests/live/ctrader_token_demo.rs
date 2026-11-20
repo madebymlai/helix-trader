@@ -1,14 +1,12 @@
 //! End to end on a cTrader broker's demo, for the token pair. The test forces a renewal of the
-//! access token on a running session. That session goes on receiving quotes and answering
-//! requests. Then a fresh session authenticates from the token file, without renewing.
+//! access token on a running session, which goes on receiving quotes and answering requests. Then a
+//! fresh session authenticates from the token file, without renewing.
 //!
 //! It ROTATES the login's real token pair, every broker's, in the token file
 //! (`$XDG_STATE_HOME/ctrader/token.json`, by default `~/.local/state/ctrader/token.json`). The file
 //! keeps the new pair, and `.env`'s is spent. It needs what `ctrader_demo.rs` needs, through the
-//! cTrader adapter's hooks (its `test-support` feature).
-//!
-//! Gated as `ctrader_demo.rs` is. It uses the demo only and places no order. Run it alone, so that
-//! no other demo session runs on the pair it rotates. Run it with:
+//! cTrader adapter's hooks (its `test-support` feature). Run it alone, so that no other demo
+//! session runs on the pair it rotates:
 //!
 //! ```sh
 //! NAUTILUS_CTRADER_RUN=ic cargo test --test live ctrader_token_demo:: -- --nocapture
@@ -42,7 +40,6 @@ impl log::Log for Captured {
 
 static CAPTURED: Captured = Captured(Mutex::new(Vec::new()));
 
-/// Prints the captured records when dropped, whether or not the test failed.
 struct ShowLogs;
 
 impl Drop for ShowLogs {
@@ -128,7 +125,6 @@ async fn the_demo_session_renews_its_token_and_keeps_receiving_quotes() {
         "{left:?}"
     );
 
-    // A fresh session, as the next run: from the file, no renewal
     let fresh = CTraderSession::connect(&connection).await.unwrap();
     let account = fresh.check_account().await;
     fresh.disconnect().await;

@@ -1,20 +1,18 @@
 //! Tests end to end on LSE that a node streams the trades of AAPL's options of the week, `OPRA`
-//! contracts, for a minute. It uses the LSE adapter's data client on data-ws, routed OPRA as the
-//! live node routes it, with one subscription to AAPL's chain. The contracts are the calls and
-//! puts of the week's Friday expiry, the first on or after the run's UTC day. They are
-//! struck at 200 to 500 by 5, a band that holds AAPL's listed strikes near the money (AAPL at about
-//! 355 in November 2026). A strike not listed never trades. Databento gives the definitions in a
-//! live run. The test writes them into the node's cache by hand, as Nautilus' Databento decoder
-//! gives them: priced to a cent, with a multiplier of 100.
+//! contracts, for a minute, through the LSE adapter's data client on data-ws, routed OPRA as the
+//! live node routes it, with one subscription to AAPL's chain. The contracts are the calls and puts
+//! of the week's Friday expiry, the first on or after the run's UTC day, struck at 200 to 500 by 5,
+//! a band that holds AAPL's listed strikes near the money (AAPL at about 355 in November 2026). A
+//! strike not listed never trades. Databento gives the definitions in a live run. The test writes
+//! them into the node's cache by hand, as Nautilus' Databento decoder gives them: priced to a cent,
+//! with a multiplier of 100.
 //!
 //! The test needs `LSE_API_KEY` from the environment or `.env`. The free key streams US options, on
 //! one connection a key, so no other live run may hold data-ws meanwhile.
 //!
 //! A chain sends no last prices, only the next trades of its contracts. Run the test while US
 //! options trade, 14:30 to 21:00 UTC on a trading day. At any other time no trade comes, and the
-//! test fails saying so.
-//!
-//! The test is gated like `lse_history.rs`, by `NAUTILUS_LSE_RUN=1` in the shell. Run it with:
+//! test fails saying so. It is gated as `lse_history.rs` is. Run it with:
 //!
 //! ```sh
 //! NAUTILUS_LSE_RUN=1 cargo test --test live lse_option_trades:: -- --nocapture
@@ -43,10 +41,7 @@ use nautilus_model::{
 
 const STREAMED: Duration = Duration::from_secs(60);
 
-/// Returns whether the run is opted in.
-///
-/// Reads the opt-in from the shell before `.env` is read, so the file cannot opt in. An opted-in
-/// run claims the process (`claim_process`).
+/// Returns whether the run is opted in, reading the shell before `.env`, and claims the process.
 fn opted_in(test: &str) -> bool {
     let run = std::env::var("NAUTILUS_LSE_RUN").is_ok_and(|value| value == "1");
     if run {
@@ -57,12 +52,9 @@ fn opted_in(test: &str) -> bool {
     run
 }
 
-/// Returns AAPL's calls and puts expiring on the week's Friday, struck at 200 to 500 by 5.
-///
-/// The expiry is the first Friday on or after `now`'s UTC day. Each contract is defined as
-/// Nautilus' Databento decoder defines an OPRA contract (`decode_option_contract`): an equity
-/// option in USD, priced to a cent, expiring at 16:00 New York, American, settled by delivery. The
-/// multiplier is the standard contract's 100 and the lot size is 1. Databento gives neither.
+/// Returns AAPL's calls and puts of the week, defined as Nautilus' Databento decoder defines an
+/// OPRA contract (`decode_option_contract`). Databento gives neither the lot size, 1, nor the
+/// multiplier.
 fn contracts_of_the_week(now: Timestamp) -> Vec<InstrumentAny> {
     let today = now.to_zoned(TimeZone::UTC).date();
     let friday = (0..7)

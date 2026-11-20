@@ -157,10 +157,8 @@ async fn a_live_start_warms_up_an_idealpro_pairs_bid_and_ask_bars_and_has_its_ra
         record: Rc::clone(&record),
     };
 
-    // The catalog is empty, so IB answers the whole warmup
     let catalog = tempfile::tempdir().unwrap();
 
-    // Outside the catalog, as `Live` requires
     let staging = tempfile::tempdir().unwrap();
     let live = Live {
         trader_id: TraderId::from(TRADER),
@@ -171,7 +169,6 @@ async fn a_live_start_warms_up_an_idealpro_pairs_bid_and_ask_bars_and_has_its_ra
     };
     let ran = Box::pin(tokio::time::timeout(
         Duration::from_secs(300),
-        // The probe trades nothing: it claims no instrument
         live.run(&requirements, &warmup, probe, None),
     ))
     .await;
