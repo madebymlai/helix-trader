@@ -1,6 +1,6 @@
-//! A run that fails once its node exists still disposes the node, so the next node of the thread
-//! starts alone: Nautilus runs nodes one after another when each is disposed first
-//! (`concepts/architecture.md`, "Processes and threads"), and disposing clears the thread's message
+//! Tests that a run failing once its node exists still disposes the node. The next node on the
+//! thread then starts alone. Nautilus runs nodes one after another when each is disposed first
+//! (`concepts/architecture.md`, "Processes and threads"). Disposing clears the thread's message
 //! bus.
 
 use helix_trader::backtest::Backtest;

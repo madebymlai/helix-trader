@@ -1,9 +1,9 @@
-//! CME gold on GLBX (`common::glbx`), P&L in USD, traded through IB, converting through IB's
-//! EUR/USD on IDEALPRO (`common::idealpro`), read as 1-minute BID and ASK bars. IB's account has no
-//! base currency, and Nautilus books such a simulated account in each currency apart, booking no
-//! loss in a currency it does not hold: a backtest on a balance in another currency than the
-//! gold's is refused, one in USD runs. A dataset run, whose account is frozen, takes a balance in
-//! EUR, its reference converted at the pair's bars.
+//! Tests CME gold on GLBX (`common::glbx`), with P&L in USD, traded through IB. It converts through
+//! IB's EUR/USD on IDEALPRO (`common::idealpro`), read as 1-minute BID and ASK bars. IB's account
+//! has no base currency. Nautilus books such a simulated account in each currency apart, and books
+//! no loss in a currency it does not hold. So a backtest on a balance in a different currency from
+//! the gold's is refused, and one in USD runs. A dataset run has a frozen account and takes a
+//! balance in EUR. Its reference is converted at the pair's bars.
 
 use std::{path::Path, process::Command};
 
@@ -36,8 +36,8 @@ fn gold_quotes() -> Vec<QuoteTick> {
     quotes
 }
 
-/// EUR/USD's BID and ASK bars are at 1.19990 and 1.20010, mid 1.2 USD per EUR, from `pair_from` to
-/// 12:00.
+/// Returns a catalog where EUR/USD's BID and ASK bars are at 1.19990 and 1.20010 from `pair_from`
+/// to 12:00. The mid is 1.2 USD per EUR.
 fn catalog(pair_from: Timestamp) -> tempfile::TempDir {
     let catalog = tempfile::tempdir().unwrap();
     glbx::store_quotes(
@@ -50,8 +50,8 @@ fn catalog(pair_from: Timestamp) -> tempfile::TempDir {
     catalog
 }
 
-/// The backtest command's output for the shortest EMA crossover on hour MID bars from 09:00 to
-/// 12:00, at a stake of 1%, no commission.
+/// Returns the backtest command's output for the shortest EMA crossover on hour MID bars from 09:00
+/// to 12:00, at a stake of 1% and no commission.
 fn backtest_command(catalog: &Path, balance: &str) -> std::process::Output {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("ema.toml");
@@ -91,9 +91,10 @@ fn backtest_command(catalog: &Path, balance: &str) -> std::process::Output {
         .unwrap()
 }
 
-/// IB's simulated account, holding EUR alone, would book none of the gold's USD losses: the
-/// backtest is refused before the run, naming the gold, its venue, both currencies and the
-/// Nautilus code booking such an account.
+/// IB's simulated account, holding EUR alone, would book none of the gold's USD losses.
+///
+/// The backtest is refused before the run. The error names the gold, its venue, both currencies and
+/// the Nautilus code that books such an account.
 #[rstest]
 fn a_backtest_through_ib_on_a_balance_off_the_pnl_currency_is_refused_naming_why() {
     let catalog = catalog(ic::at("08:00:00"));
@@ -134,8 +135,8 @@ fn a_backtest_through_ib_on_a_balance_in_the_pnl_currency_runs() {
     );
 }
 
-/// Nothing is traded on IDEALPRO, so its account starts empty, as a venue no broker trades does,
-/// and the run's money is GLBX's 100,000 USD.
+/// Nothing is traded on IDEALPRO, so its account starts empty, as a venue no broker trades does.
+/// The run's money is GLBX's 100,000 USD.
 #[rstest]
 fn a_venue_the_run_reads_for_its_pairs_alone_starts_with_nothing() {
     let catalog = catalog(ic::at("08:00:00"));
@@ -153,8 +154,10 @@ fn a_venue_the_run_reads_for_its_pairs_alone_starts_with_nothing() {
     );
 }
 
-/// Hourly decisions on 1-minute bars, averages of 1 and 2; a bracket 7.5 bps of the mid away,
-/// closed after 45 minutes, at a reference stake of 0.00004% of 20M EUR, converted through EUR/USD.
+/// Hourly decisions on 1-minute bars, with averages of 1 and 2.
+///
+/// The bracket is 7.5 bps of the mid away and closes after 45 minutes. The reference stake is
+/// 0.00004% of 20M EUR, converted through EUR/USD.
 fn model_config() -> String {
     format!(
         r#"
@@ -219,10 +222,13 @@ fn rows() -> Vec<TargetRow> {
     rows.take().unwrap()
 }
 
-/// At 09:00 no EUR/USD bar is cached: no rate, no row. From 10:00 its BID and ASK bars close at
-/// 1.19990 and 1.20010, mid 1.2: 20M EUR is 24M USD, 0.00004% of it 9.60 USD, over the stop's 3.00
-/// USD (7.5 bps of 4000.10, to the cent) 3.2 contracts, whole 3, one R 9 USD. Unconverted, 20M as
-/// USD would be 2 contracts, as would the rate swapped.
+/// The reference stake at each decision.
+///
+/// - At 09:00 no EUR/USD bar is cached, so there is no rate and no row.
+/// - From 10:00 its BID and ASK bars close at 1.19990 and 1.20010, so the mid is 1.2. Then 20M EUR
+///   is 24M USD, and 0.00004% of that is 9.60 USD. Over the stop's 3.00 USD (7.5 bps of 4000.10, to
+///   the cent) that is 3.2 contracts, whole 3, so one R is 9 USD.
+/// - Unconverted, 20M as USD would be 2 contracts, and so would the rate swapped.
 #[rstest]
 fn a_dataset_runs_reference_is_converted_at_its_ib_pairs_bid_and_ask_bars() {
     let rows = std::thread::spawn(rows).join().unwrap();

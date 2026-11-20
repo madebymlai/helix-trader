@@ -1,8 +1,8 @@
-//! A feature set fed by Nautilus and decisions on a clock cadence (`model::features`,
-//! `model::decide`): moving averages of the last three quote mids and the last two hour bars'
-//! closes, decided every 30 minutes. On a ramp of a cent a minute, the rows hold exactly the data
-//! up to each decision, the bar closing at it included, and none before both features are
-//! initialized.
+//! Tests a feature set fed by Nautilus, and decisions on a clock cadence (`model::features`,
+//! `model::decide`). The features are moving averages of the last three quote mids and the last two
+//! hour bars' closes, decided every 30 minutes. On a ramp of a cent a minute, the rows hold exactly
+//! the data up to each decision, including the bar closing at it. No row comes before both features
+//! are initialized.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -47,7 +47,7 @@ fn at(hh_mm: &str) -> Timestamp {
     ts(&format!("2026-01-07T{hh_mm}:00Z"))
 }
 
-/// 100 at 09:00, a cent more each minute.
+/// The mid is 100 at 09:00, and a cent more each minute.
 fn mid(close: Timestamp) -> f64 {
     let minutes = close.duration_since(at("09:00")).as_mins();
     100.0 + 0.01 * minutes as f64
@@ -110,7 +110,7 @@ impl DataActor for FeatureProbe {
         decide::start(self, EVERY, SignedDuration::ZERO)
     }
 
-    /// A model strategy's warmup would hand them data, but the set is registered with Nautilus for
+    /// A model strategy's warmup would hand them data. Here the set is registered with Nautilus for
     /// nothing.
     fn on_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
         self.features.handle_quote(quote)
@@ -143,10 +143,10 @@ fn each_decision_publishes_the_features_of_the_data_up_to_it() {
         .run(probe)
         .unwrap();
 
-    // A decision on the half hour fires 10 ms after it: the last three quotes close on it and the
-    // two minutes before, a mean of the mid a minute before; the last two bars close on the hour at
-    // or before it, the one closing on it included. The decisions at 09:30, 10:00 and 10:30 come
-    // before the second bar.
+    // A decision on the half hour fires 10 ms after it, the last three quotes close on it and the
+    // two minutes before, so the mean is the mid a minute before, the last two bars close on the
+    // hour at or before it, including the one closing on it, and the decisions at 09:30, 10:00 and
+    // 10:30 come before the second bar.
     let expected = [
         (
             "11:00",

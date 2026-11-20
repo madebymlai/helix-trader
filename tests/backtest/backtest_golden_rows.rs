@@ -1,10 +1,11 @@
-//! The `model_ema` dataset built over three days of the fixture's random walk of IC's gold, its
-//! rows printed exactly and compared with the snapshot `golden_rows.csv`.
+//! Tests the `model_ema` dataset, built over three days of the fixture's random walk of IC's gold.
+//! The test prints the rows exactly and compares them with the snapshot `golden_rows.csv`.
 //!
-//! The fingerprint a dataset and its models are stored under reads the config by value and the code
-//! by version: the dataset version (`model::dataset::VERSION`) and the strategy's feature version.
-//! A change of the rows, by the features, decisions, targets or a Nautilus pin changing indicators
-//! or fills, fails here until one is bumped and the snapshot written again with:
+//! A dataset and its models are stored under a fingerprint. The fingerprint reads the config by
+//! value and the code by version: the dataset version (`model::dataset::VERSION`) and the
+//! strategy's feature version. The rows can change through the features, decisions or targets, or
+//! through a Nautilus pin that changes indicators or fills. Any such change fails here until one
+//! version is bumped and the snapshot is written again with:
 //!
 //! ```sh
 //! GOLDEN_ROWS=write cargo test --test backtest backtest_golden_rows::
@@ -29,9 +30,11 @@ use crate::common::{
     ic,
 };
 
-/// Hourly decisions on 1-minute bars, averages of 10 and 30, warmed up 4 hours; a bracket 1.5 ATRs
-/// of 3 hourly bars in its favor, 7.5 bps against, closed after 45 minutes, at a reference stake of
-/// 4 USD of the 10M USD balance (`venue`): one ounce, IC's whole ounces, on stops of about 3 USD.
+/// Hourly decisions on 1-minute bars, with averages of 10 and 30, warmed up 4 hours.
+///
+/// The bracket is 1.5 ATRs of 3 hourly bars in its favor and 7.5 bps against, and closes after 45
+/// minutes. The reference stake is 4 USD of the 10M USD balance (`venue`). That is one ounce, IC's
+/// whole ounces, on stops of about 3 USD.
 const CONFIG: &str = r#"
     [data]
     series = [
@@ -107,7 +110,7 @@ fn the_rows_of_the_example_model_strategy_are_the_snapshots() {
     compare(&printed, Path::new(SNAPSHOT));
 }
 
-/// Printed exactly: Rust's shortest representation reads back to the same `f64`.
+/// Prints exactly, because Rust's shortest representation reads back to the same `f64`.
 fn print(features: &[String], payoff: &[String], rows: &[DatasetRow]) -> String {
     let mut out = String::from("ts_event,settled_at");
     for name in features {

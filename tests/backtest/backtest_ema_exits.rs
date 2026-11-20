@@ -1,11 +1,13 @@
-//! The EMA's brackets (`common::trades`), stop loss 50 bps and take profit 100 bps from the
-//! deciding bar's close, with a 4-hour hold longer than the run: a long ends at its take profit, a
-//! short at its stop loss, each on the first minute quote reaching it.
+//! Tests the EMA's brackets (`common::trades`). The stop loss is 50 bps and the take profit 100 bps
+//! from the deciding bar's close. The 4-hour hold is longer than the run. A long ends at its take
+//! profit and a short at its stop loss, each on the first minute quote that reaches it.
 
 use rstest::rstest;
 
 use crate::common::{self, trades};
 
+/// The run, bar by bar.
+///
 /// - 13:00 at 620.60 > 605.60: cross up, buy 10 at 620.65, take profit 626.81 (620.60 plus 1%, to
 ///   the cent), stop loss 617.50 (less 0.5%); slow EMA 615.60.
 /// - 14:00 bar's minute m bids 626.50 + 0.01 m − 0.05 = 626.81 at m = 36, 13:36: the take profit

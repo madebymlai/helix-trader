@@ -1,11 +1,13 @@
-//! The EMA crossover opens one trade per cross, none on a bar keeping the side (`common::trades`).
-//! Each trade but the last ends at its 50 bps stop loss on the next bar's first quote, which jumps
-//! past it: a triggered stop is a market order, so it fills there.
+//! Tests that the EMA crossover opens one trade per cross, and none on a bar that keeps the side
+//! (`common::trades`). Each trade but the last ends at its 50 bps stop loss on the next bar's first
+//! quote, which jumps past it. A triggered stop is a market order, so it fills there.
 
 use rstest::rstest;
 
 use crate::common::{self, trades};
 
+/// The run, bar by bar.
+///
 /// - 13:00 at 620.60 > 605.60: cross up, buy 10 at 620.65, stop loss 617.50 (620.60 less 0.5%, to
 ///   the cent); slow EMA 615.60.
 /// - 14:00 bar's first quote, 13:01, bids 600.00 + 0.01 − 0.05 = 599.96 < 617.50: the stop loss
