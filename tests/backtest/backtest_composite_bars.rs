@@ -44,7 +44,7 @@ use crate::common::{
 const COMPOSITE: &str = "SXR8.IBIS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL";
 const MINUTE_BARS: &str = "SXR8.IBIS-1-MINUTE-LAST-EXTERNAL";
 
-/// A live node waits this long after the close for the last minute.
+/// How long a live node waits after the close for the last minute.
 const BUILT_AFTER: SignedDuration = SignedDuration::from_secs(5);
 
 fn at(hh_mm: &str) -> Timestamp {

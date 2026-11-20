@@ -58,7 +58,6 @@ use nautilus_testkit::testers::{DataTester, DataTesterConfig};
 use rstest::rstest;
 use serde_json::json;
 
-/// Runs LSE's gold futures quotes until one reaches the message bus, then the node stops.
 #[tokio::test]
 async fn the_data_tester_receives_lse_s_quotes_and_ends_their_subscription_on_stop() {
     let socket = MockLseSocket::start(|_, frame| data_ws_answer(frame));
@@ -167,8 +166,6 @@ async fn the_data_tester_receives_lse_s_quotes_and_ends_their_subscription_on_st
     );
 }
 
-/// Runs the trades of AAPL's 355 call of 20 November 2026 from its underlying's chain, using the
-/// frames LSE's documentation gives, until one reaches the message bus.
 #[tokio::test]
 async fn the_data_tester_receives_an_option_s_trades_from_its_chain_and_ends_it_on_stop() {
     let socket = MockLseSocket::start(|_, frame| data_ws_answer(frame));
@@ -299,8 +296,7 @@ impl Streamed {
         }
     }
 
-    /// Starts LSE's API answering with `replies`, after GCZ6's listing, which the client looks up
-    /// first.
+    /// Starts LSE's API answering with `replies`, after GCZ6's listing.
     fn lse(self, replies: Vec<Reply>) -> MockLse {
         let lookup = match self {
             Self::Gcz26 => vec![Reply::json(PAIRS_GCZ6)],
@@ -310,8 +306,7 @@ impl Streamed {
     }
 
     /// Starts the stream, which answers each connection by its level. The Level 1 opening is
-    /// GCZ6's captured one and NVDA's documented one. The Level 2 and 3 sessions are as LSE's
-    /// documentation records them.
+    /// GCZ6's captured one and NVDA's documented one.
     fn stream(self) -> MockExchangeStream {
         let (opening, level_2, level_3) = match self {
             Self::Gcz26 => (
@@ -337,8 +332,6 @@ impl Streamed {
         }
     }
 
-    /// Returns the client's config with the plan's key, LSE's API on `lse` and, if given, the
-    /// stream on `stream`.
     fn config(self, lse: &MockLse, stream: Option<&MockExchangeStream>) -> LseDataClientConfig {
         let mut config = LseDataClientConfig::builder()
             .base_url_http(lse.url().to_string())
@@ -427,8 +420,6 @@ impl DataActor for BookHistory {
 
 nautilus_actor!(BookHistory);
 
-/// A contract's orders and book over the second, as LSE's docs record them, reach the actor on a
-/// node through the data engine. The definition is in the node's cache.
 #[rstest]
 #[case::cme_contract(Streamed::Gcz26, GCZ26_ORDERS, GCZ26_BOOK)]
 #[case::nasdaq_stock(Streamed::Nvda, NVDA_ORDERS, NVDA_BOOK)]
@@ -504,11 +495,8 @@ fn nvda_on_nasdaq(lse: &MockLse, stream: &MockExchangeStream) -> LseDataClientCo
     Streamed::Nvda.config(lse, Some(stream))
 }
 
-/// A Level 1 session as LSE's documentation records it, for ESZ6 on the CME stream and NVDA on the
-/// Nasdaq stream.
-///
-/// The tester's quotes open with the best bid and offer. The live records follow, and the last is a
-/// trade with no aggressor side.
+/// Level 1 as LSE's documentation records it, for ESZ6 on the CME stream and NVDA on the Nasdaq
+/// stream. The last record is a trade with no aggressor side.
 #[rstest]
 #[case::a_cme_contract(
     MockLse::start(vec![Reply::json(PAIRS_ESZ6)]),
@@ -663,16 +651,8 @@ async fn run_until(node: &mut LiveNode, done: impl Fn() -> bool) {
 
 type Best = (u64, (&'static str, u64), (&'static str, u64));
 
-/// Book depth at Level 2 as LSE's documentation records it, for GCZ6 on the CME stream and NVDA on
-/// the Nasdaq stream.
-///
-/// The depth opens with the last ten levels. A depth follows each change to the book, numbered by
-/// its sequence:
-/// - The best bid's size is cut.
-/// - An order joins the best ask.
-/// - The ninth ask level is removed.
-///
-/// Each case gives each depth's sequence and best bid and ask.
+/// Level 2 as LSE's documentation records it, for GCZ6 on the CME stream and NVDA on the Nasdaq
+/// stream. Each case gives each depth's sequence and best bid and ask.
 #[rstest]
 #[case::cme_contract(
     Streamed::Gcz26,
@@ -753,16 +733,9 @@ async fn the_data_tester_receives_a_contract_s_book_depth_from_lse(
     assert_eq!(received, expected);
 }
 
-/// Book deltas at Level 3 as LSE's documentation records it, for GCZ6 on the CME stream and NVDA
-/// on the Nasdaq stream.
-///
-/// The deltas start at the first order event, with no opening book. Each batch ends with `F_LAST`,
-/// and the batches are numbered 7312 to 7315:
-/// - The first adds a bid and an ask at the best.
-/// - The second changes the bid.
-/// - The third removes the ask.
-///
-/// The node stops once the three batches arrive.
+/// Level 3 as LSE's documentation records it, for GCZ6 on the CME stream and NVDA on the Nasdaq
+/// stream. The deltas start at the first order event, with no opening book. Each batch ends with
+/// `F_LAST`, and the batches are numbered 7312 to 7315.
 #[rstest]
 #[case::cme_contract(Streamed::Gcz26)]
 #[case::nasdaq_stock(Streamed::Nvda)]

@@ -81,7 +81,6 @@ fn a_second_build_of_the_same_span_replays_no_day_and_rows_read_back_as_written(
         .collect();
     written.sort_by_key(|row| row.ts_init);
 
-    // A decision every hour of the two days, and each is settled
     assert_eq!(written.len(), 48);
     assert_eq!(dataset.read(ic::at("00:00:00"), end).unwrap(), written);
 }
@@ -160,9 +159,6 @@ fn two_hour_mean() -> Rc<FeatureSet> {
         .unwrap()
 }
 
-/// Returns the rows of 22 October 2026 that a build from `first` to the 22nd stores.
-///
-/// The build runs on `walk` from 20:00 on the 20th to 03:00 on the 23rd.
 fn thursday_stored_by_a_build_from(catalog: &TempDir, first: Date) -> Vec<DatasetRow> {
     on_thread(|| {
         let thursday = Date::constant(2026, 10, 22);
@@ -180,9 +176,6 @@ fn thursday_stored_by_a_build_from(catalog: &TempDir, first: Date) -> Vec<Datase
     })
 }
 
-/// A build of Thursday alone replays from 21:00 on Wednesday, which is the warmup before it, as a
-/// build from Wednesday does. So the mean at Thursday's first decisions reads Wednesday's quotes.
-/// The build stores none of Wednesday's rows.
 #[rstest]
 fn a_day_built_alone_is_stored_as_inside_a_longer_build() {
     let catalog = walk(
@@ -198,7 +191,6 @@ fn a_day_built_alone_is_stored_as_inside_a_longer_build() {
     assert_eq!(alone, inside);
 }
 
-/// Runs a node on a thread of its own.
 fn on_thread<T: Send>(run: impl FnOnce() -> T + Send) -> T {
     std::thread::scope(|scope| scope.spawn(run).join().unwrap())
 }
@@ -225,8 +217,6 @@ fn on(date: Date, time: &str) -> Timestamp {
     format!("{date}T{time}Z").parse().unwrap()
 }
 
-/// Returns IC's gold as `walk` from 23:00 on Wednesday 21 October 2026 to 06:00 on Tuesday 27th.
-///
 /// There are no quotes from 21:00 on Friday 23rd to 22:00 on Sunday 25th.
 fn weekend_walk() -> TempDir {
     let (from, to) = (
@@ -281,13 +271,10 @@ fn friday_stored_by_a_build_to(catalog: &TempDir, last: Date) -> Vec<DatasetRow>
     )
 }
 
-/// A build cut on Friday replays to 02:00 on Saturday. A build cut on Monday replays to 02:00 on
-/// Tuesday.
-///
-/// The decision at 21:00, on Friday's last quote, settles at its time limit. The venue fills the
-/// time close, a market order, on the last quote it has. So neither build waits for Sunday's open,
-/// and both store the same Friday. The decisions at 22:00 and 23:00 have no quote since, so they
-/// store no row.
+/// The decision at 21:00, on Friday's last quote, settles at its time limit, as the venue fills the
+/// time close on the last quote it has. So a build cut on Friday, which replays to 02:00 on
+/// Saturday, and one cut on Monday store the same Friday. The decisions at 22:00 and 23:00 have no
+/// quote since, so they store no row.
 #[rstest]
 fn a_day_is_stored_the_same_by_a_build_cut_before_a_weekend_and_one_cut_after() {
     let catalog = weekend_walk();
@@ -300,10 +287,6 @@ fn a_day_is_stored_the_same_by_a_build_cut_before_a_weekend_and_one_cut_after() 
     assert_eq!(cut_before, cut_after);
 }
 
-/// No quote comes from Friday's close at 21:00 to Sunday's open at 22:00.
-///
-/// The decision at 21:00 reads the hour before it. Every decision up to Sunday's open is skipped as
-/// stale.
 #[rstest]
 fn a_closed_market_stores_no_row() {
     let (friday, sunday) = (Date::constant(2026, 10, 23), Date::constant(2026, 10, 25));
@@ -330,11 +313,8 @@ fn a_closed_market_stores_no_row() {
     );
 }
 
-/// The bracket is 1.5 ATRs away on both sides and closes after 45 minutes. The ATR uses its default
-/// 14 hourly bars, which the targets subscribe to.
-///
-/// A reference stake of 100 USD buys whole ounces on the walk's stops of some dollars. A stake of
-/// 4 USD would not.
+/// The bracket is 1.5 ATRs away on both sides and closes after 45 minutes. A reference stake of 100
+/// USD buys whole ounces on the walk's stops of some dollars, which 4 USD would not.
 fn atr_config() -> ModelConfig {
     let bracket = Target::builder()
         .bracket(BracketSpec {
@@ -366,9 +346,6 @@ fn mid_warming_for(warmup: SignedDuration) -> Rc<FeatureSet> {
         .unwrap()
 }
 
-/// Returns when each row of 22 October 2026, built alone, was decided.
-///
-/// The features and strategy warm for `warmup`, on `walk` from 09:00:02.5 on Wednesday.
 fn thursday_decided_after_a_warmup_of(warmup: SignedDuration) -> Vec<Timestamp> {
     std::thread::spawn(move || {
         let thursday = Date::constant(2026, 10, 22);
@@ -408,13 +385,10 @@ fn reading_quotes(warmup: SignedDuration) -> DataRequirements {
     }
 }
 
-/// A target's ATR of 14 hourly bars warms over exactly a warmup of 14 hours, which validation
-/// accepts.
-///
-/// A build of a day alone replays from 10:00 the day before. The data engine builds 14 hourly bars,
-/// the last at midnight, 10 ms before the day's first decision, which opens its target. The quotes
-/// are 2.5 s off the hour, because a quote at 10:00, the replay's first, would close a 15th bar and
-/// hide a warmup one bar short. A warmup an hour shorter is refused by validation.
+/// A target's ATR of 14 hourly bars warms over exactly a warmup of 14 hours. A build of a day alone
+/// replays from 10:00 the day before, so the 14th hourly bar closes at midnight, 10 ms before the
+/// day's first decision. The quotes are 2.5 s off the hour, because one at 10:00 would close a 15th
+/// bar and hide a warmup one bar short.
 #[rstest]
 fn a_target_atr_warming_over_exactly_the_warmup_opens_the_day_s_first_decision() {
     let (thursday, margin) = (
