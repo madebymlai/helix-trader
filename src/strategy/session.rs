@@ -1,8 +1,10 @@
 use jiff::{SignedDuration, Timestamp, civil::Time, tz::TimeZone};
 use serde::Deserialize;
 
-/// The hours the strategy trades, every day from `open` to `close` local time, so daylight saving
-/// moves them in UTC.
+/// The hours the strategy trades.
+///
+/// The session runs every day from `open` to `close` in local time. Daylight saving moves it in
+/// UTC.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Session {
@@ -27,7 +29,8 @@ impl Session {
         Ok(())
     }
 
-    /// Whether the span `[end - length, end]` lies inside the session of the local day of `end`.
+    /// Returns whether the span `[end - length, end]` lies inside the session on the local day of
+    /// `end`.
     pub(super) fn contains(&self, end: Timestamp, length: SignedDuration) -> bool {
         let local = |ts: Timestamp| self.time_zone.to_datetime(ts);
         let (start, end) = (local(end - length), local(end));
@@ -96,7 +99,7 @@ mod tests {
         assert_eq!(counts_utc(utc), expected);
     }
 
-    /// A session closing at or before its open is refused, naming both.
+    /// A session that closes at or before it opens is refused, naming both times.
     #[rstest]
     #[case::closing_after_the_open(time(17, 30, 0, 0), None)]
     #[case::closing_at_the_open(time(9, 0, 0, 0), Some("09:00"))]

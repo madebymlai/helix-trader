@@ -1,16 +1,16 @@
-//! The risk vocabulary: the unit a trade is measured in, and what it risks.
+//! Defines the units that measure a trade and what it risks.
 //!
-//! - `R`: one R is the money a trade risks, what its stop loses or, without a stop, what a move of
-//!   one ATR against it loses. P&L in R is P&L over that. A model's margins are in R
-//!   (`model::config::Margins`, `model::config::MetaConfig::margin`), the least net R its decision
-//!   expects of a trade it takes.
-//! - `Risk`: the fraction of equity a trade risks at the config's stake, `[trade] risk`, written
-//!   as a percentage, `"0.5%"`.
-//! - `Stake`: the config's `Risk` times the multiple a strategy picks. A trade sent at a stake
+//! - `R`: the money a trade risks. A stop's loss is one R. Without a stop, a move of one ATR
+//!   against the trade is one R. P&L in R is P&L divided by that money. A model's margins are in R
+//!   (`model::config::Margins`, `model::config::MetaConfig::margin`). Each is the least net R its
+//!   decision expects of a trade it takes.
+//! - `Risk`: the fraction of equity a trade risks at the config's stake. The config sets it as
+//!   `[trade] risk`, written as a percentage such as `"0.5%"`.
+//! - `Stake`: the config's `Risk` times a multiple the strategy picks. A trade sent at a stake
 //!   (`orders::Trade::send`) is sized to risk that fraction of equity over its one R.
 //!
-//! A config writes each with its suffix, `"0.5R"` or `"0.5%"`, and a bare number is refused: it
-//! could be money for an R, or a fraction for a risk.
+//! A config writes each with its suffix, `"0.5R"` or `"0.5%"`. A bare number is refused, because
+//! it could be money for an R or a fraction for a risk.
 
 use std::{fmt::Display, str::FromStr};
 
@@ -34,19 +34,21 @@ impl R {
         Self(value)
     }
 
-    /// Returns `value` R, or `None` for NaN or an infinity, which a model's prediction may be.
+    /// Returns `value` R, or `None` if it is NaN or infinite.
+    ///
+    /// A model's prediction may be either.
     #[must_use]
     pub fn finite(value: f64) -> Option<Self> {
         value.is_finite().then_some(Self(value))
     }
 
-    /// Returns its number of R.
+    /// Returns the number of R.
     #[must_use]
     pub const fn as_f64(self) -> f64 {
         self.0
     }
 
-    /// Whether `r` is at least this, which NaN is not.
+    /// Returns whether `r` is at least this value. NaN is not.
     #[must_use]
     pub fn reached_by(self, r: f64) -> bool {
         r >= self.0
@@ -109,13 +111,15 @@ impl de::Visitor<'_> for Written {
     }
 }
 
-/// The fraction of equity a trade risks at the config's stake, `[trade] risk`, written `"0.5%"`.
-/// The config's load holds it to a proper fraction (`is_proper`).
+/// The fraction of equity a trade risks at the config's stake.
+///
+/// The config sets it as `[trade] risk`, written `"0.5%"`. Loading the config holds it to a proper
+/// fraction (`is_proper`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Risk(Decimal);
 
 impl Risk {
-    /// Whether it is above none of equity and below all of it.
+    /// Returns whether it is above 0% of equity and below 100%.
     #[must_use]
     pub fn is_proper(self) -> bool {
         Decimal::ZERO < self.0 && self.0 < Decimal::ONE
@@ -166,7 +170,9 @@ impl de::Visitor<'_> for Percentage {
     }
 }
 
-/// What a trade risks: the config's `Risk` times a positive multiple, 1 at the config's stake
+/// What a trade risks.
+///
+/// It is the config's `Risk` times a positive multiple. The multiple is 1 at the config's stake
 /// (`StandardConfig::stake`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stake {
@@ -175,7 +181,7 @@ pub struct Stake {
 }
 
 impl Stake {
-    /// Returns the stake of `risk` alone, its multiple 1.
+    /// Returns the stake of `risk` alone, with a multiple of 1.
     #[must_use]
     pub const fn new(risk: Risk) -> Self {
         Self {
@@ -200,7 +206,7 @@ impl Stake {
         })
     }
 
-    /// Returns its multiple of the config's risk.
+    /// Returns the multiple applied to the config's risk.
     #[must_use]
     pub const fn multiple(self) -> Decimal {
         self.multiple
