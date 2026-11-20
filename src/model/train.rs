@@ -1,58 +1,67 @@
-//! Training at a time: turns a strategy's dataset into published models, or keeps the current
-//! ones.
+//! Training at a time: turns a strategy's dataset into published models, or keeps the current ones.
 //!
-//! Serves the binary's `train`, at one time or each retrain time of a span
-//! (`Training::retrain_times`), and live retrains. A backtest trains nothing (`walk`).
+//! The binary's `train` uses it at one time, or at each retrain time of a span
+//! (`Training::retrain_times`). Live retrains use it too. A backtest trains nothing (`walk`).
 //!
-//! A strategy has a model for each side it trades (`ModelConfig::margins`) and a meta model if it
-//! has one (`model::meta`). A side's model regresses its side's realized net R
-//! (`earnings::Example::realized`) on a row's features then its side's payoff features
-//! (`dataset::DatasetRow::side`), under the names its model store checks
-//! (`store::SideLevel::feature_names`). The sides share rows, window and calibration. A train
-//! publishes the models as one model set (`store::StoredModelSet`) valid from its time, or
-//! nothing: a decision uses the sides and meta of one train together.
+//! A strategy has a model for each side it trades (`ModelConfig::margins`). It has a meta model if
+//! it has one (`model::meta`). A side's model regresses that side's realized net R
+//! (`earnings::Example::realized`) on a row's features, then the side's payoff features
+//! (`dataset::DatasetRow::side`). It uses the names its model store checks
+//! (`store::SideLevel::feature_names`). The sides share rows, window and calibration.
 //!
-//! The schedule's plan (`schedule::Schedule::plan`) decides a train at `t`: a model set the store
-//! holds valid exactly from `t` is kept and replays nothing; else one is trained, its sides fitted
-//! as of `t` and its meta at `t` on the picks of an out-of-fold pair fitted as of `t` less the
-//! meta's window. Nothing else of the store is read.
+//! A train publishes the models as one model set (`store::StoredModelSet`) valid from its time, or
+//! publishes nothing. A decision uses the sides and meta of one train together.
 //!
-//! A model fitted as of `t'` takes the rows of the window ending at `t'` (`ModelConfig::window`)
-//! and drops the rows not settled at `t'`, so no row's target reaches past `t'`: the purge is the
-//! target's limit, by construction. One replay builds the dataset's missing days
-//! (`Dataset::settled`). The last `C` of the window is the calibration slice
-//! (`ModelConfig::calibration`), the rest before it the fit slice, each purged the same way
-//! (`split`). Each side is fitted on the rows of `[t' - W, t' - C)` settled by `t' - C`. The pair
-//! is calibrated together (`calibration::Ksplit`) on both sides' predictions and R on the rows of
-//! `[t' - C, t')` settled by `t'`.
+//! The schedule's plan (`schedule::Schedule::plan`) decides what a train at `t` does:
+//! - If the store holds a model set valid exactly from `t`, the train keeps it and replays nothing.
+//! - Otherwise it trains a model set. The sides are fitted as of `t`. The meta is fitted at `t` on
+//!   the picks of an out-of-fold pair, which is fitted as of `t` less the meta's window.
 //!
-//! There is no holdout and no gate: out-of-sample evidence is a backtest's
-//! (`walk::WalkForward::scores`). A train fails, publishing nothing, when:
+//! The train reads nothing else from the store.
+//!
+//! A model fitted as of `t'` takes the rows of the window that ends at `t'`
+//! (`ModelConfig::window`). It drops the rows not settled at `t'`, so no row's target reaches past
+//! `t'`. The purge is the target's limit, by construction. One replay builds the dataset's missing
+//! days (`Dataset::settled`).
+//!
+//! The last `C` of the window is the calibration slice (`ModelConfig::calibration`). The rest
+//! before it is the fit slice. Both slices are purged the same way (`split`).
+//! - Each side is fitted on the rows of `[t' - W, t' - C)` settled by `t' - C`.
+//! - The pair is calibrated together (`calibration::Ksplit`) on both sides' predictions and R, on
+//!   the rows of `[t' - C, t')` settled by `t'`.
+//!
+//! There is no holdout and no gate. Out-of-sample evidence comes from a backtest
+//! (`walk::WalkForward::scores`). A train fails, and publishes nothing, when:
 //! - A slice has fewer rows than its level's minimum (`ModelConfig::min_rows`).
 //! - A model's prediction on a calibration row, or a calibration, is no finite number.
-//! - A model reloaded from what it saved does not predict its probes as fitted, the check a reader
-//!   makes before use (`store::StoredModel`).
+//! - A model reloaded from what it saved does not predict its probes as fitted. A reader makes this
+//!   check before use (`store::StoredModel`).
 //!
-//! Otherwise the model set publishes whole (`store::ModelStore::publish`): the sides with the
-//! pair's calibration, each model with its baseline, the training mean of R on the rows it was
-//! fitted and calibrated on, and a manifest probing it on rows of its calibration slice. The
-//! manifest, written last, makes the set visible.
+//! Otherwise the model set publishes whole (`store::ModelStore::publish`). It holds:
+//! - The sides, with the pair's calibration.
+//! - Each model's baseline: the training mean of R on the rows it was fitted and calibrated on.
+//! - A manifest that probes each model on rows of the calibration slice.
 //!
-//! A meta's rows are the picks of an out-of-fold pair, fitted in the same train on the same replay
-//! as of `t - Wm`, `Wm` the meta's window (`MetaConfig::window`), and held to the sides' minimum,
-//! a short slice failing the train naming the pair. The pair decides every row of `[t - Wm, t)`
-//! settled by `t` through the decision path, its picks before any meta
-//! (`deciding::DecidingModels::pick_among`), whatever the store holds; these rows are out of
-//! sample for it (`meta::examples`). The meta regresses the realized net R of the picked side's
-//! trade on its own calibration slice (`MetaConfig::calibration`), calibrated by its level line
-//! alone, held to its own minimum (`MetaConfig::min_rows`) and checked as a side is. Its manifest
-//! records the pair's time (`store::ModelManifest::out_of_fold`). The pair is not published: the
-//! model set ships the sides fitted as of `t`, and every model set of a strategy with a meta holds
-//! a meta.
+//! The manifest is written last, and it makes the set visible.
 //!
-//! A train never errors: a failure is an outcome with its reason (`Failure`), nothing published
-//! and the current model set deciding on. `Reached` holds the figures it reached, failing or not:
-//! the days read and the rows of each slice, beside their minimum (`model::report`).
+//! A meta's rows are the picks of an out-of-fold pair. The train fits the pair in the same train on
+//! the same replay as of `t - Wm`, where `Wm` is the meta's window (`MetaConfig::window`). The pair
+//! is held to the sides' minimum, so a short slice fails the train, naming the pair.
+//!
+//! The pair decides every row of `[t - Wm, t)` settled by `t` through the decision path, and its
+//! picks come before any meta (`deciding::DecidingModels::pick_among`). It does so whatever the
+//! store holds. These rows are out of sample for the pair (`meta::examples`).
+//!
+//! The meta regresses the realized net R of the picked side's trade. It has its own calibration
+//! slice (`MetaConfig::calibration`) and is calibrated by its level line alone. It is held to its
+//! own minimum (`MetaConfig::min_rows`) and checked as a side is. Its manifest records the pair's
+//! time (`store::ModelManifest::out_of_fold`). The pair is not published: the model set ships the
+//! sides fitted as of `t`. Every model set of a strategy with a meta holds a meta.
+//!
+//! A train never errors. A failure is an outcome with its reason (`Failure`). It publishes nothing,
+//! and the current model set keeps deciding. `Reached` holds the figures the train reached, whether
+//! it failed or not: the days read, and the rows of each slice beside their minimum
+//! (`model::report`).
 
 use std::{fmt::Display, path::PathBuf};
 
@@ -137,14 +146,14 @@ pub enum Outcome {
     Failed(Failure),
 }
 
-/// The figures a train reached, none of a train whose model set is already published.
+/// The figures a train reached. A train whose model set is already published reached none.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Reached {
     /// The days of the dataset it read.
     pub days: Option<DaysRead>,
     /// The slices of the sides fitted as of its time.
     pub sides: Option<Slices>,
-    /// The slices of the out-of-fold pair, with a meta.
+    /// The slices of the out-of-fold pair, if the strategy has a meta.
     pub out_of_fold: Option<Slices>,
     /// The slices of the meta.
     pub meta: Option<Slices>,
@@ -162,9 +171,9 @@ pub struct Slices {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Failure {
     /// The replay, the dataset, a fit, a check or the store failed, or a slice had fewer rows than
-    /// the minimum: the error.
+    /// the minimum. Holds the error.
     Error(String),
-    /// The dataset holds rows that do not match the strategy's features: the mismatch.
+    /// The dataset holds rows that do not match the strategy's features. Holds the mismatch.
     SchemaMismatch(String),
 }
 
@@ -199,23 +208,25 @@ impl Training {
         }
     }
 
-    /// The retrain times of a train over `[from, to)`, in time order (`Schedule::retrain_times`).
+    /// Returns a train's retrain times over `[from, to)`, in time order
+    /// (`Schedule::retrain_times`).
     ///
     /// # Errors
     ///
-    /// Returns an error if the span is empty or the strategy is never retrained, trained at one
-    /// time alone.
+    /// Returns an error if the span is empty, or if the strategy is never retrained and so trains
+    /// at one time alone.
     pub fn retrain_times(&self, from: Timestamp, to: Timestamp) -> anyhow::Result<Vec<Timestamp>> {
         self.schedule.retrain_times(from, to)
     }
 
-    /// Trains at `at` as the schedule plans it (`Schedule::plan`): keeps the model set valid from
-    /// `at` if published, else trains and publishes one. A failure is the outcome, beside the
-    /// figures reached.
+    /// Trains at `at` as the schedule plans it (`Schedule::plan`).
     ///
-    /// `replay` runs the strategy over the days the dataset lacks and returns the rows it settled
-    /// (see `Dataset::settled`), once, from where the plan's fits start. It is not called if the
-    /// plan keeps a model set.
+    /// Keeps the model set valid from `at` if it is published. Otherwise trains and publishes one.
+    /// A failure is the outcome, beside the figures reached.
+    ///
+    /// `replay` runs the strategy once, from where the plan's fits start, over the days the dataset
+    /// lacks. It returns the rows it settled (see `Dataset::settled`). It is not called if the plan
+    /// keeps a model set.
     pub fn train_at(
         &self,
         at: Timestamp,
@@ -238,8 +249,8 @@ impl Training {
     ///
     /// # Errors
     ///
-    /// Returns an error if the replay, a fit, a check or the store fails, or a slice has fewer
-    /// rows than its level's minimum, the out-of-fold pair's and the meta's naming it.
+    /// Returns an error if the replay, a fit, a check or the store fails, or a slice has fewer rows
+    /// than its level's minimum. An error for the out-of-fold pair or the meta names it.
     fn model_set(
         &self,
         fits: &Fits,
@@ -269,7 +280,7 @@ impl Training {
         })
     }
 
-    /// The meta model of `level` at `at`, learned from the out-of-fold pair's picks on `rows`.
+    /// Learns the meta model of `level` at `at` from the out-of-fold pair's picks on `rows`.
     ///
     /// # Errors
     ///
@@ -307,7 +318,8 @@ impl Training {
             .context("checking the meta model")
     }
 
-    /// The pair of the sides fitted as `fit` says on `rows`, calibrated together (`Ksplit::fit`).
+    /// Fits the pair of sides on `rows` as `fit` says, and calibrates them together
+    /// (`Ksplit::fit`).
     ///
     /// # Errors
     ///
@@ -399,7 +411,7 @@ impl Training {
         })
     }
 
-    /// The model `fitted` of `level` checked as a reader checks it (`StoredModel::checked`).
+    /// Checks the model `fitted` of `level` as a reader does (`StoredModel::checked`).
     ///
     /// # Errors
     ///
@@ -439,7 +451,9 @@ impl Level {
     }
 
     /// Refuses a slice with fewer rows than the level's minimum, naming the slice, its count and
-    /// the minimum. Both counts go in `slices` first, refused or not.
+    /// the minimum.
+    ///
+    /// Both counts go in `slices` first, refused or not.
     ///
     /// # Errors
     ///
@@ -469,8 +483,9 @@ impl Level {
         Ok(())
     }
 
-    /// The meta model fitted as of `at` on `examples`, in time order, calibrated by its level line
-    /// alone.
+    /// Fits the meta model as of `at` on `examples`, in time order.
+    ///
+    /// The meta is calibrated by its level line alone.
     ///
     /// # Errors
     ///
@@ -536,7 +551,9 @@ impl Level {
 }
 
 impl Trained {
-    /// Whether the train succeeded: it did not fail, its model set published or already published.
+    /// Returns whether the train succeeded.
+    ///
+    /// A train succeeds if it published its model set or found it already published.
     #[must_use]
     pub const fn succeeded(&self) -> bool {
         !matches!(self.outcome, Outcome::Failed(_))
@@ -559,11 +576,13 @@ fn failed(e: &anyhow::Error) -> Outcome {
     })
 }
 
-/// `prediction`, the `model`'s on the calibration row of `ts_event`, if finite.
+/// Returns `prediction` if it is finite.
+///
+/// `prediction` is the `model`'s on the calibration row of `ts_event`.
 ///
 /// # Errors
 ///
-/// Returns an error if it is not.
+/// Returns an error if `prediction` is not finite.
 fn finite_prediction(prediction: f64, model: &str, ts_event: UnixNanos) -> anyhow::Result<f64> {
     anyhow::ensure!(
         prediction.is_finite(),
@@ -573,7 +592,9 @@ fn finite_prediction(prediction: f64, model: &str, ts_event: UnixNanos) -> anyho
     Ok(prediction)
 }
 
-/// The model of `side` of `level`, fitted on the fit slice and not calibrated yet.
+/// Fits the `side` model of `level` on the fit slice.
+///
+/// The model is not calibrated yet.
 ///
 /// # Errors
 ///
@@ -619,9 +640,14 @@ fn in_fit(rows: &[DatasetRow], Fit { from, at }: Fit) -> Vec<&DatasetRow> {
         .collect()
 }
 
-/// Splits settled `items` at the calibration slice's start `cut`: the fit slice, those before it
-/// settled by it, and the calibration slice, those from it. An item before `cut` settling after it
-/// is in neither. `of` reads an item's decision time and settlement.
+/// Splits settled `items` at `cut`, the start of the calibration slice.
+///
+/// Returns two slices:
+/// - The fit slice: the items before `cut` that settled by `cut`.
+/// - The calibration slice: the items from `cut` on.
+///
+/// An item before `cut` that settles after it is in neither. `of` reads an item's decision time and
+/// settlement.
 fn split<T>(
     items: Vec<T>,
     cut: Timestamp,
@@ -641,8 +667,9 @@ fn split<T>(
     (fitted, calibrating)
 }
 
-/// The training mean of the labels of `set`, which the baseline learner predicts on any row, `row`
-/// say.
+/// Returns the training mean of the labels of `set`.
+///
+/// The baseline learner predicts this mean on any row, `row` say.
 ///
 /// # Errors
 ///
@@ -731,9 +758,13 @@ mod tests {
             .unwrap()
     }
 
-    /// Hourly decisions, a bracket closed after 2 hours, the long from 1R and the short from 0.5R,
-    /// a 24 hour window with the last 12 calibrated on. The fake expects alike of both sides, which
-    /// tie where both clear their margins: one side clears alone between 0.5R and 1R.
+    /// Hourly decisions and a bracket closed after 2 hours.
+    ///
+    /// The long trades from 1R and the short from 0.5R. The window is 24 hours, and the last 12 are
+    /// calibrated on.
+    ///
+    /// The fake expects the same of both sides. They tie where both clear their margins. Between
+    /// 0.5R and 1R one side clears alone.
     fn config() -> ModelConfig {
         ModelConfig::builder()
             .decision(DecisionRule::Every(SignedDuration::from_hours(1)))
@@ -797,7 +828,7 @@ mod tests {
         .unwrap()
     }
 
-    /// The catalog holds no instrument, none being read.
+    /// The catalog holds no instrument because none is read.
     fn training(dir: &Path, config: ModelConfig) -> Training {
         let catalog = dir.join("catalog");
         std::fs::create_dir_all(&catalog).unwrap();
@@ -850,8 +881,9 @@ mod tests {
         time.parse().unwrap()
     }
 
-    /// The decision at `time` on `features`, settled `after` it: a stop worth 2 USD, a win 3 USD, a
-    /// loss -2 USD, net of 0.2 USD commission.
+    /// A decision at `time` on `features`, settled `after` it.
+    ///
+    /// Its stop is worth 2 USD, a win 3 USD and a loss -2 USD, net of 0.2 USD commission.
     fn row_of(
         time: &str,
         features: Vec<f64>,
@@ -899,12 +931,17 @@ mod tests {
         SignedDuration::from_hours(1)
     }
 
-    /// The decisions of the 6th, both sides winning 3 USD or losing 2 together, stops worth 2 USD
-    /// unless said. A train at midnight of the 7th has the 6th as its window and calibrates from
-    /// 12:00. Fit slice: 0.9 a win (1.5R) and a loss (-1R). Calibration slice: 0.25 a loss on a
-    /// 4 USD stop (-0.5R), 0.75 a win (1.5R). Wins at 0.1 around them would change the fit or
-    /// calibration if taken: one before the window, one before the calibration slice settling
-    /// after its start, one in it settling after the window's end.
+    /// The decisions of the 6th.
+    ///
+    /// Both sides win 3 USD or lose 2 together. Stops are worth 2 USD unless said. A train at
+    /// midnight of the 7th has the 6th as its window and calibrates from 12:00.
+    /// - Fit slice: a win (1.5R) and a loss (-1R), both at 0.9.
+    /// - Calibration slice: a loss at 0.25 on a 4 USD stop (-0.5R), and a win at 0.75 (1.5R).
+    ///
+    /// Wins at 0.1 around them would change the fit or calibration if taken:
+    /// - One before the window.
+    /// - One before the calibration slice that settles after the slice's start.
+    /// - One in the calibration slice that settles after the window's end.
     fn rows() -> Vec<TargetRow> {
         let both = |time, p, wins, after| row_of(time, vec![p], (wins, wins), after);
         let mut rows = vec![
@@ -932,11 +969,14 @@ mod tests {
         assert!((actual - expected).abs() < 1e-4, "{actual} != {expected}");
     }
 
-    /// Worked by hand: the fake predicts the feature, so the side call `D` is nought, with no
-    /// slope. Level `C` 0.25 and 0.75 against sides' mean R -0.5 and 1.5: slope 0.5 / 0.125 = 4,
-    /// clipped to 1.5, `alpha_C` 0.5 - 1.5 x 0.5 = -0.25. With the row settled after the window's
-    /// end too (0.1, a win of 1.5R): `alpha_C` 0.8333 - 1.5 x 0.3667 = 0.2833. Each side's `E'` is
-    /// `-0.25 + 1.5p`.
+    /// Worked by hand.
+    ///
+    /// The fake predicts the feature, so the side call `D` is nought, with no slope. Level `C` is
+    /// 0.25 and 0.75, against the sides' mean R of -0.5 and 1.5. The slope is 0.5 / 0.125 = 4,
+    /// clipped to 1.5. So `alpha_C` is 0.5 - 1.5 x 0.5 = -0.25.
+    ///
+    /// With the row settled after the window's end too (0.1, a win of 1.5R), `alpha_C` is 0.8333 -
+    /// 1.5 x 0.3667 = 0.2833. Each side's `E'` is `-0.25 + 1.5p`.
     const LINES: Ksplit = Ksplit {
         level: Line {
             alpha: -0.25,
@@ -945,12 +985,16 @@ mod tests {
         side_call: Some(0.0),
     };
 
-    /// Each side is fitted on the rows before 12:00 settled by then: R 1.5 and -1, mean 0.25, which
-    /// the fake predicts where its feature is missing; with the 11:30 row it would be 2/3. The pair
-    /// is calibrated together on the rows from 12:00 settled by the train (`LINES`), no side's
-    /// manifest holding a calibration. Probes are the calibration slice's rows with the fake's
-    /// predictions, their feature. Reached: the 6th built, 2 fit rows (08:00, 10:00), 2
-    /// calibration rows (13:00, 15:00).
+    /// Each side is fitted on the rows before 12:00 settled by then.
+    ///
+    /// Their R is 1.5 and -1, so the mean is 0.25. The fake predicts that mean where its feature is
+    /// missing. With the 11:30 row it would be 2/3.
+    ///
+    /// The pair is calibrated together on the rows from 12:00 settled by the train (`LINES`). No
+    /// side's manifest holds a calibration. The probes are the calibration slice's rows, with the
+    /// fake's predictions as their feature.
+    ///
+    /// Reached: the 6th built, 2 fit rows (08:00, 10:00), 2 calibration rows (13:00, 15:00).
     #[rstest]
     fn a_train_fits_on_rows_settled_by_the_calibrations_start_and_calibrates_on_the_rest_settled_by_its_time()
      {
@@ -992,7 +1036,7 @@ mod tests {
         }
     }
 
-    /// A calibration row with an infinite feature: the fake predicts it, and the train fails
+    /// A calibration row with an infinite feature. The fake predicts it, and the train fails,
     /// naming the model and the row.
     #[rstest]
     fn a_prediction_on_the_calibration_slice_that_is_no_finite_number_fails_the_train() {
@@ -1013,8 +1057,9 @@ mod tests {
         assert_eq!(model_sets(dir.path(), &config()), []);
     }
 
-    /// Features of the largest finite numbers, less at 13:00 and more at 15:00: predictions are
-    /// finite, but the level, the mean of both sides, overflows.
+    /// The features are the largest finite numbers, less at 13:00 and more at 15:00.
+    ///
+    /// Predictions are finite, but the level overflows. The level is the mean of both sides.
     #[rstest]
     fn a_calibration_that_is_no_finite_line_fails_the_train() {
         let dir = tempfile::tempdir().unwrap();
@@ -1036,7 +1081,9 @@ mod tests {
     }
 
     /// The short's stop on a fitted row is worth nought, so its R is no finite number and its fit
-    /// fails. The train fails naming the short, and the model set of the 6th stays current.
+    /// fails.
+    ///
+    /// The train fails, naming the short. The model set of the 6th stays current.
     #[rstest]
     fn a_side_whose_fit_fails_publishes_no_model_set() {
         let dir = tempfile::tempdir().unwrap();
@@ -1074,10 +1121,11 @@ mod tests {
         assert_eq!(models.model_sets().unwrap(), []);
     }
 
-    /// A one-sided strategy's level line is calibrated alone, on its side's prediction and R:
-    /// `rows` with the short's win at 15:00 a loss, which the long's line never reads. The long's
-    /// R on the calibration slice, -0.5 and 1.5, makes the line of `LINES` with no side call; the
-    /// sides' mean R, -0.5 and 0.25, would make `alpha_C` -0.875.
+    /// A one-sided strategy's level line is calibrated alone, on its side's prediction and R.
+    ///
+    /// The test uses `rows` with the short's win at 15:00 made a loss, which the long's line never
+    /// reads. The long's R on the calibration slice is -0.5 and 1.5, which makes the line of
+    /// `LINES` with no side call. The sides' mean R, -0.5 and 0.25, would make `alpha_C` -0.875.
     #[rstest]
     fn a_one_sided_strategy_calibrates_its_level_line_alone_on_its_sides_r() {
         let long_only = ModelConfig {
@@ -1214,9 +1262,10 @@ mod tests {
         assert_eq!(manifest.learner, LearnerConfig::Fake {});
     }
 
-    /// Each side's baseline is the mean of its R on the rows it was fitted and calibrated on, 1.5,
-    /// -1, -0.5 and 1.5, 0.375. With the wins of 1.5R outside them, at 23:00 of the 5th, 11:30 and
-    /// 23:30, it would be 0.6.
+    /// Each side's baseline is the mean of its R on the rows it was fitted and calibrated on.
+    ///
+    /// Those R are 1.5, -1, -0.5 and 1.5, so the mean is 0.375. With the wins of 1.5R outside them,
+    /// at 23:00 of the 5th, 11:30 and 23:30, it would be 0.6.
     #[rstest]
     fn a_published_sides_baseline_is_the_training_mean_of_the_rows_it_was_fitted_and_calibrated_on()
     {
@@ -1277,8 +1326,10 @@ mod tests {
         assert_eq!(model_sets(dir.path(), &config()), []);
     }
 
-    /// No calibration row settled by the train (the win at 23:30 settles after it): the train
-    /// fails naming the slice, 0 rows and the minimum. It reached the 6th, built, and 2 fit rows.
+    /// No calibration row settles by the train (the win at 23:30 settles after it).
+    ///
+    /// The train fails, naming the slice, 0 rows and the minimum. It reached the 6th, built, and 2
+    /// fit rows.
     #[rstest]
     fn a_calibration_slice_of_fewer_rows_than_the_minimum_fails() {
         let dir = tempfile::tempdir().unwrap();
@@ -1345,9 +1396,10 @@ mod tests {
             .build()
     }
 
-    /// Publishes a model set of `config` valid from `valid_from`: each side a baseline predicting
-    /// its R of `(long, short)`, left as it is by `unchanged`, and a meta baseline predicting
-    /// nought, if any.
+    /// Publishes a model set of `config` valid from `valid_from`.
+    ///
+    /// Each side is a baseline predicting its R of `(long, short)`, left as it is by `unchanged`.
+    /// If the config has a meta, a meta baseline predicting nought is published too.
     fn publish_model_set(
         dir: &Path,
         config: &ModelConfig,
@@ -1413,11 +1465,13 @@ mod tests {
         }
     }
 
-    /// The decisions of the 7th, of the sides as `rows` fit them (`LINES`): each side expects
-    /// `-0.25 + 1.5p` R, alike, so the short, from 0.5R, is picked alone below 1R. Each side's
-    /// stop is worth 2 USD, a win 1.5R and a loss -1R. Fit slice of a train at the 8th: shorts at
-    /// 0.6 (0.65R expected), a win and a loss. Calibration slice: a short at 0.55 (0.575R) losing
-    /// and one at 0.65 (0.725R) winning, with no side call.
+    /// The decisions of the 7th, for the sides as `rows` fit them (`LINES`).
+    ///
+    /// Each side expects `-0.25 + 1.5p` R, the same as the other, so the short, from 0.5R, is
+    /// picked alone below 1R. Each side's stop is worth 2 USD, a win 1.5R and a loss -1R.
+    /// - Fit slice of a train at the 8th: shorts at 0.6 (0.65R expected), a win and a loss.
+    /// - Calibration slice: a short at 0.55 (0.575R) that loses, and one at 0.65 (0.725R) that
+    ///   wins, with no side call.
     fn decisions_of_the_seventh() -> Vec<TargetRow> {
         let short = |time, p, wins| row_of(time, vec![p], (wins, wins), hour());
         vec![
@@ -1458,22 +1512,30 @@ mod tests {
             .unwrap()
     }
 
-    /// The meta's fake predicts 0.55 and 0.65 on its calibration slice, against R -1 and 1.5, means
-    /// 0.6 and 0.25: slope 0.125 / 0.005 = 25, clipped to 1.5, `alpha` 0.25 - 1.5 x 0.6 = -0.65.
+    /// The meta's fake predicts 0.55 and 0.65 on its calibration slice, against R of -1 and 1.5.
+    /// The means are 0.6 and 0.25. The slope is 0.125 / 0.005 = 25, clipped to 1.5, so `alpha` is
+    /// 0.25 - 1.5 x 0.6 = -0.65.
     const META_LINE: Line = Line {
         alpha: -0.65,
         beta: 1.5,
     };
 
-    /// On an empty store, retrained or never retrained, the train of the 8th fits the out-of-fold
-    /// pair as of the 7th on the 6th, as a train at the 7th would (`LINES`), and the meta on its
-    /// picks over the 7th: shorts, level `-0.25 + 1.5p`, 0.575 and 0.725 on the calibration slice,
-    /// no side call. With the win at 23:30 of the 6th, settled after the 7th, the pair's `alpha_C`
-    /// would be 0.2833, both sides clearing their margins alike, a tie picking none. The meta's
-    /// fit slice, the 7th to noon, has R 1.5 and -1, mean 0.25, which the fake predicts where its
-    /// feature is missing; the rest calibrates it (`META_LINE`). Its probes are the calibration
-    /// slice's shorts and their predictions. Reached: the 6th and 7th built, 2 rows in each slice
-    /// of the out-of-fold pair, the meta and the sides.
+    /// On an empty store, retrained or never retrained, the train of the 8th fits the pair and the
+    /// meta.
+    ///
+    /// The out-of-fold pair is fitted as of the 7th on the 6th, as a train at the 7th would
+    /// (`LINES`). The meta is fitted on the pair's picks over the 7th: shorts, level `-0.25 +
+    /// 1.5p`, 0.575 and 0.725 on the calibration slice, no side call.
+    ///
+    /// With the win at 23:30 of the 6th, settled after the 7th, the pair's `alpha_C` would be
+    /// 0.2833. Both sides would clear their margins alike, and a tie picks none.
+    ///
+    /// The meta's fit slice, the 7th to noon, has R 1.5 and -1, so the mean is 0.25. The fake
+    /// predicts that mean where its feature is missing. The rest calibrates the meta (`META_LINE`).
+    /// Its probes are the calibration slice's shorts and their predictions.
+    ///
+    /// Reached: the 6th and 7th built, 2 rows in each slice of the out-of-fold pair, the meta and
+    /// the sides.
     #[rstest]
     #[case::retrained(day_meta())]
     #[case::never_retrained(never_day_meta())]
@@ -1534,9 +1596,10 @@ mod tests {
         assert_eq!(model.predict(&[f64::NAN, -1.0, 0.6, 0.0]).unwrap(), 0.25);
     }
 
-    /// The meta's baseline is the mean R of the 7th's four shorts, 1.5, -1, -1 and 1.5, 0.25. With
-    /// the out-of-fold pair's pick at 15:00 of the 6th, a short of 0.875R winning 1.5R, it would
-    /// be 0.5.
+    /// The meta's baseline is the mean R of the 7th's four shorts.
+    ///
+    /// Their R is 1.5, -1, -1 and 1.5, so the mean is 0.25. With the out-of-fold pair's pick at
+    /// 15:00 of the 6th, a short of 0.875R winning 1.5R, it would be 0.5.
     #[rstest]
     fn a_metas_rows_are_its_out_of_fold_pairs_picks_over_its_window_alone() {
         let dir = tempfile::tempdir().unwrap();
@@ -1546,10 +1609,12 @@ mod tests {
         assert_eq!(meta_of_the_eighth(&models).manifest.baseline, 0.25);
     }
 
-    /// The sides published are fitted as of the 8th on the 7th: probes at 0.55 and 0.65, and a
-    /// calibration worked as `META_LINE` is on the same rows, `alpha_C` -0.65, slope 1.5, no side
-    /// call, where the out-of-fold pair's is `LINES`. The meta's manifest records the 7th as its
-    /// out-of-fold pair's time, and no side's has one.
+    /// The published sides are fitted as of the 8th on the 7th.
+    ///
+    /// Their probes are at 0.55 and 0.65. Their calibration is worked as `META_LINE` is on the same
+    /// rows: `alpha_C` -0.65, slope 1.5, no side call. The out-of-fold pair's calibration is
+    /// `LINES`. The meta's manifest records the 7th as the out-of-fold pair's time. No side's
+    /// manifest has one.
     #[rstest]
     fn a_model_set_with_a_meta_ships_sides_fitted_at_its_time_and_its_meta_records_its_out_of_fold_pairs()
      {
@@ -1575,9 +1640,10 @@ mod tests {
         );
     }
 
-    /// A train reads nothing of the store but the model set it would keep: with the 6th's model
-    /// set picking the long of 1.2R and the 7th's the short of 0.9R, each with its meta, the train
-    /// of the 8th publishes what it publishes on an empty store.
+    /// A train reads nothing from the store but the model set it would keep.
+    ///
+    /// The 6th's model set picks the long of 1.2R and the 7th's picks the short of 0.9R, each with
+    /// its meta. The train of the 8th publishes what it publishes on an empty store.
     #[rstest]
     fn a_trains_model_set_does_not_depend_on_the_model_sets_stored_before_it() {
         let (empty, stored) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -1610,10 +1676,12 @@ mod tests {
         );
     }
 
-    /// The out-of-fold pair's fit slice, the 6th's wins and losses before noon, has 2 rows, short
-    /// of a minimum of 3, while the 8th's sides have 3 in each slice with the 7th's shorts at 09:00
-    /// and 14:00 added: the train fails naming the out-of-fold pair, its slice, its count and the
-    /// minimum. It reached the 6th and 7th, built, and the pair's slices, 2 rows each.
+    /// The out-of-fold pair's fit slice has 2 rows, short of a minimum of 3.
+    ///
+    /// The slice is the 6th's wins and losses before noon. The 8th's sides have 3 rows in each
+    /// slice, with the 7th's shorts at 09:00 and 14:00 added. The train fails, naming the
+    /// out-of-fold pair, its slice, its count and the minimum. It reached the 6th and 7th, built,
+    /// and the pair's slices, 2 rows each.
     #[rstest]
     fn an_out_of_fold_pairs_slice_of_fewer_rows_than_the_sides_minimum_fails_the_train_naming_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -1654,8 +1722,10 @@ mod tests {
         assert_eq!(models.model_sets().unwrap(), []);
     }
 
-    /// `rows` as a time-only target has them: closed at their time, each side's payoff features
-    /// its entry cost alone, their unit 1 USD.
+    /// `rows` as a time-only target has them.
+    ///
+    /// They close at their time. Each side's payoff features are its entry cost alone, and the unit
+    /// is 1 USD.
     fn at_their_time(rows: Vec<TargetRow>) -> Vec<TargetRow> {
         let at_its_time = |outcome| TargetOutcome {
             exit: Exit::Time,
@@ -1677,11 +1747,15 @@ mod tests {
             .collect()
     }
 
-    /// A meta learns the R of the side picked on a target with no exits too: rows closed at their
-    /// time, a unit of 1 USD, a win 3R and a loss -2R. The pair's calibration slice, a loss at
-    /// 0.25 and a win at 0.75, means 0.5 and 0.5: slope 1.25 / 0.125 = 10, clipped to 1.5,
-    /// `alpha_C` 0.5 - 1.5 x 0.5 = -0.25, `LINES` again. It picks the 7th's four shorts, the
-    /// meta's baseline their mean R, 3, -2, -2 and 3, 0.5.
+    /// A meta learns the R of the picked side on a target with no exits too.
+    ///
+    /// Rows close at their time, with a unit of 1 USD. A win is 3R and a loss -2R. The pair's
+    /// calibration slice, a loss at 0.25 and a win at 0.75, has means of 0.5 and 0.5. The slope is
+    /// 1.25 / 0.125 = 10, clipped to 1.5, so `alpha_C` is 0.5 - 1.5 x 0.5 = -0.25, which is `LINES`
+    /// again.
+    ///
+    /// The pair picks the 7th's four shorts. The meta's baseline is their mean R: 3, -2, -2 and 3
+    /// give 0.5.
     #[rstest]
     fn a_meta_model_on_a_time_only_target_learns_from_its_out_of_fold_pairs_trades() {
         let dir = tempfile::tempdir().unwrap();
@@ -1702,9 +1776,11 @@ mod tests {
         assert_eq!(manifest.target.spec.bracket, None);
     }
 
-    /// Margins of the long alone, from nought: the meta's rows are the out-of-fold pair's longs,
-    /// each of the 7th expecting `-0.25 + 1.5p` of its level line, above nought. Its calibration
-    /// slice, a loss at 0.55 and a win at 0.65, are buys of levels 0.575 and 0.725, no side call.
+    /// Margins of the long alone, from nought.
+    ///
+    /// The meta's rows are the out-of-fold pair's longs. Each of the 7th expects `-0.25 + 1.5p` of
+    /// its level line, above nought. The meta's calibration slice, a loss at 0.55 and a win at
+    /// 0.65, holds buys of levels 0.575 and 0.725, with no side call.
     #[rstest]
     fn a_long_only_strategy_gives_its_meta_model_buys_alone() {
         let dir = tempfile::tempdir().unwrap();
@@ -1729,8 +1805,10 @@ mod tests {
         close(second[2], 0.725);
     }
 
-    /// The meta's example at 15:00 of the 7th, in its calibration slice, has an infinite feature
-    /// the fake predicts: the fit fails naming the row.
+    /// The meta's example at 15:00 of the 7th, in its calibration slice, has an infinite feature,
+    /// which the fake predicts.
+    ///
+    /// The fit fails, naming the row.
     #[rstest]
     fn a_meta_prediction_on_its_calibration_slice_that_is_no_finite_number_fails_its_fit() {
         let level = Level {

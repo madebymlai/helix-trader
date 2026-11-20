@@ -45,7 +45,7 @@ fn rule() -> DecisionRule {
     every(15)
 }
 
-/// A take profit 20 bps away, a stop 1.5 ATRs of 14 bars.
+/// A take profit 20 bps away and a stop 1.5 ATRs away. The ATR has 14 bars.
 fn exits_of_config() -> BracketSpec {
     BracketSpec {
         take_profit: Distance::BasisPoints(Decimal::from(20)),
@@ -174,10 +174,14 @@ fn atr_refused(rule: DecisionRule, requirements: &DataRequirements) -> String {
     format!("{:#}", config().validate(rule, requirements).unwrap_err())
 }
 
-/// The ATR's bars are of the cadence in its largest whole unit, on the mids where the strategy
-/// reads quotes, also through bars built from them, else on the last prices. On bars alone they
-/// are composite bars of the cadence built from the longest source bars whose length divides it:
-/// the fewest to a bar.
+/// The ATR's bars have the cadence in its largest whole unit.
+///
+/// Their prices are:
+/// - The mids, where the strategy reads quotes, also through bars built from them.
+/// - Otherwise the last prices.
+///
+/// On bars alone they are composite bars of the cadence. They are built from the longest source
+/// bars whose length divides it, so each bar takes the fewest source bars.
 #[rstest]
 #[case::quarters(quotes(), every(15), "XAUUSD.ICMARKETS-15-MINUTE-MID-INTERNAL")]
 #[case::hours(quotes(), every(60), "XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL")]
@@ -246,7 +250,7 @@ fn the_atr_is_on_the_instruments_prices_built_at_the_decision_cadence(
     assert_eq!(atr_bar_type(rule, &requirements), expected);
 }
 
-/// The decision minute is buildable from bids, but the ATR's quarter hour can use the longer
+/// The decision minute can be built from bids. The ATR's quarter hour can use the longer
 /// five-minute asks.
 #[rstest]
 fn target_atr_interval_selects_its_own_longest_compatible_source() {
@@ -260,8 +264,8 @@ fn target_atr_interval_selects_its_own_longest_compatible_source() {
     );
 }
 
-/// A 50ms ATR closes 5ms after the 45ms decision and 10ms after the 40ms one, both within the 10ms
-/// timer margin. At 75ms the next close is 25ms away, the closest the grids get.
+/// A 50ms ATR closes 5ms after the 45ms decision and 10ms after the 40ms one. Both are within the
+/// 10ms timer margin. At 75ms the next close is 25ms away, which is the closest the grids get.
 #[rstest]
 #[case(45, false)]
 #[case(40, false)]
@@ -284,8 +288,10 @@ fn several_source_bars() -> DataRequirements {
     )
 }
 
-/// Source bars the cadence is no whole multiple of, or of no length, cannot build the ATR's bars:
-/// the refusal names the cadence, 15 minutes, and the source bars.
+/// Source bars cannot build the ATR's bars if the cadence is not a whole multiple of their length,
+/// or if they have no length.
+///
+/// The refusal names the cadence, 15 minutes, and the source bars.
 #[rstest]
 #[case::hours(
     "XAUUSD.ICMARKETS-1-DAY-LAST-INTERNAL@1-HOUR-EXTERNAL",
@@ -336,8 +342,8 @@ fn an_atr_on_an_instrument_the_strategy_reads_no_prices_of_is_refused() {
     assert!(err.contains("model.target.atr"), "{err}");
 }
 
-/// Wilder's period: an `atr` distance without an `atr` table has an ATR of 14 bars, which
-/// `atr = { period = .. }` overrides.
+/// Wilder's period: an `atr` distance without an `atr` table has an ATR of 14 bars. `atr = { period
+/// = .. }` overrides it.
 #[rstest]
 fn an_atr_distance_without_an_atr_table_has_an_atr_of_14_bars() {
     let default = of(exiting(BracketSpec {
@@ -389,8 +395,8 @@ fn an_atr_table_beside_a_bracket_is_refused_under_the_targets() {
     assert!(reason.contains("bracket"), "{reason}");
 }
 
-/// Nautilus builds only bars whose step divides the next unit (`BarSpecification::new_checked`):
-/// neither 90 nor 7 minutes divide an hour. The refusal names the cadence.
+/// Nautilus builds only bars whose step divides the next unit (`BarSpecification::new_checked`).
+/// Neither 90 nor 7 minutes divides an hour. The refusal names the cadence.
 #[rstest]
 #[case::ninety_minutes(90, "1h 30m")]
 #[case::seven_minutes(7, "7m")]
@@ -446,8 +452,8 @@ fn a_distance_or_a_limit_not_positive_is_refused_under_its_field(
     assert!(err.contains(field), "{err}");
 }
 
-/// Nautilus' `AverageTrueRange::new` panics on arguments it refuses, and validating builds the ATR,
-/// so the load stops there.
+/// Nautilus' `AverageTrueRange::new` panics on arguments it refuses. Validating builds the ATR, so
+/// the load stops there.
 #[rstest]
 #[should_panic(expected = "period")]
 fn an_atr_of_no_bars_panics_as_validated() {
@@ -493,10 +499,15 @@ fn exits(target: Target, reference: &str, atr: Option<f64>) -> [(String, String)
     })
 }
 
-/// Each exit on the nearest half-point tick. 10 bps of 1000.0 is 1.0, on the tick; 12 bps 1.2,
-/// nearer 1.0 than 1.5; 13 bps 1.3, nearer 1.5. 12.5 bps is 1.25, half way between 1.0 and 1.5: a
-/// tie goes away from the reference. 1.5 ATRs of 2.1 is 3.15, nearer 3.0 than 3.5; 2 ATRs 4.2,
-/// nearer 4.0.
+/// Each exit lands on the nearest half-point tick.
+///
+/// On a reference of 1000.0:
+/// - 10 bps is 1.0, on the tick.
+/// - 12 bps is 1.2, nearer 1.0 than 1.5.
+/// - 13 bps is 1.3, nearer 1.5.
+/// - 12.5 bps is 1.25, half way between 1.0 and 1.5. A tie goes away from the reference.
+/// - 1.5 ATRs of 2.1 is 3.15, nearer 3.0 than 3.5.
+/// - 2 ATRs is 4.2, nearer 4.0.
 #[rstest]
 #[case::basis_points_on_and_below_a_half_tick(
     in_bps(10, 12),
@@ -537,10 +548,11 @@ fn exits_are_their_distances_from_the_reference_on_the_nearest_tick(
     );
 }
 
-/// A tiny ATR of 0.1 on half-point ticks from 1000.0: a stop of 1 ATR, 0.1, is nearer 1000.0 than
-/// 999.5, and a take profit of 1.5 ATRs, 0.15, nearer 1000.0 than 1000.5. An exit on the decision's
-/// price is no distance, a P&L in R of no stop, so neither is a target, as with a cold ATR; 10
-/// ATRs, 1.0, are.
+/// A tiny ATR of 0.1 on half-point ticks from 1000.0.
+///
+/// A stop of 1 ATR, 0.1, is nearer 1000.0 than 999.5. A take profit of 1.5 ATRs, 0.15, is nearer
+/// 1000.0 than 1000.5. An exit on the decision's price is no distance, so P&L in R has no stop to
+/// measure by. So neither is a target, as with a cold ATR. But 10 ATRs, 1.0, are targets.
 #[rstest]
 fn an_exit_rounding_onto_the_reference_gives_no_exits() {
     let exits_of = |take_profit: Decimal, stop: Decimal| {
@@ -611,8 +623,8 @@ fn the_fingerprint_changes_with_every_target_spec(#[case] changed: TargetConfig)
     );
 }
 
-/// Rows and models of a time-only target and of a bracket of one limit are never read for the
-/// other, nor for one closed at another time.
+/// Rows and models are keyed apart. A time-only target and a bracket with one limit never read each
+/// other's, nor those of a target closed at another time.
 #[rstest]
 fn a_time_only_and_a_bracket_target_of_one_limit_and_two_limits_are_keyed_apart() {
     let base = Fingerprint::default();
@@ -749,9 +761,10 @@ fn an_outcome_has_the_sign_of_its_pnl(#[case] pnl: &str, #[case] sign: i8) {
     assert_eq!(outcome.sign(), sign);
 }
 
-/// A stop of 3.00 on gold, whole ounces: on a dataset balance of 100 USD the reference stake, 0.30
-/// USD, buys 0.1 oz, rounded down to none, on either side: no target, saying which side and its
-/// one R.
+/// A stop of 3.00 on gold, which trades in whole ounces.
+///
+/// On a dataset balance of 100 USD the reference stake is 0.30 USD. It buys 0.1 oz, which rounds
+/// down to none on either side. So there is no target, and it says which side and its one R.
 #[rstest]
 fn a_target_whose_size_at_the_reference_stake_rounds_to_none_is_none() {
     let probe = Probe::holding(Some(gold()));
@@ -775,8 +788,10 @@ fn a_target_whose_size_at_the_reference_stake_rounds_to_none_is_none() {
 }
 
 /// A dataset run sends each side at the reference stake of the dataset balance, whatever the
-/// account holds: 428,571 AUD/USD on a stop of 0.0007 at 300 USD, its entry tagged with the R of
-/// the row's unit, 299.9997 USD, and the multiple 1.
+/// account holds.
+///
+/// At 300 USD on a stop of 0.0007 that is 428,571 AUD/USD. The entry is tagged with the R of the
+/// row's unit, 299.9997 USD, and the multiple 1.
 #[rstest]
 fn a_dataset_run_sends_each_side_at_the_size_its_row_is_priced_at() {
     let mut probe = Probe::holding(Some(aud()));
@@ -822,7 +837,7 @@ fn a_dataset_venue_in_another_currency_than_the_targets_pnl_is_refused_as_the_ta
     }
 }
 
-/// The pair a target on AUD/USD converts a dataset balance in EUR through.
+/// The pair through which a target on AUD/USD converts a dataset balance in EUR.
 const EURUSD: &str = "EUR/USD.SIM";
 
 fn converting_through_eurusd() -> TargetConfig {
@@ -852,10 +867,12 @@ fn holding_eurusd() -> Probe {
     probe
 }
 
-/// On 100,000 EUR, EUR/USD at 1.24990 / 1.25010, mid 1.25000: the reference stake is of 125,000
-/// USD, 0.3% of it 375 USD, over one R of 0.0007 on one AUD/USD 535,714.29, rounded down 535,714,
-/// its stop worth 374.9998 USD, the unit. Unconverted, 100,000 would be 428,571; at the rate
-/// swapped, 80,000 USD, 342,857.
+/// A balance of 100,000 EUR, with EUR/USD at 1.24990 / 1.25010 and mid 1.25000.
+///
+/// The reference stake is 125,000 USD, and 0.3% of it is 375 USD. One R is 0.0007 on one AUD/USD,
+/// so the stake buys 535,714.29, rounded down to 535,714. Its stop is worth 374.9998 USD, the unit.
+///
+/// Unconverted, 100,000 would buy 428,571. At the rate swapped, 80,000 USD would buy 342,857.
 #[rstest]
 fn the_reference_stake_is_of_the_dataset_balance_converted_at_the_decisions_rate() {
     let probe = holding_eurusd();
@@ -1017,8 +1034,9 @@ fn no_exits() -> Target {
         .build()
 }
 
-/// A stop a tenth of a basis point away: on AUD/USD's ticks of 0.00001, a tick from 0.70000, none
-/// from 0.07000.
+/// A stop a tenth of a basis point away.
+///
+/// AUD/USD ticks are 0.00001, so the stop is a tick from 0.70000 and none from 0.07000.
 fn tight_stop() -> Target {
     exiting(BracketSpec {
         take_profit: Distance::BasisPoints(Decimal::from(20)),
@@ -1088,10 +1106,11 @@ fn decision() -> FeatureRow {
     }
 }
 
-/// From the mid of 0.70000, 10 bps is 0.0007, one R; 20 bps is 0.0014. The long's stop is below
-/// the price, its take profit above, the short's the reverse. At 300 USD over 0.0007 on one
-/// AUD/USD each side is 428,571.43, rounded down 428,571, its stop worth 299.9997 USD, the unit.
-/// Each side is of 100,000 USD and closes after 2 hours.
+/// From the mid 0.70000, 10 bps is 0.0007, one R, and 20 bps is 0.0014.
+///
+/// The long's stop is below the price and its take profit above. The short's are the reverse. At
+/// 300 USD over 0.0007 on one AUD/USD each side is 428,571.43, rounded down to 428,571. Its stop is
+/// worth 299.9997 USD, the unit. Each side has equity of 100,000 USD and closes after 2 hours.
 #[rstest]
 fn a_bracket_is_set_on_each_side_with_the_worth_of_its_stop_at_the_reference_stake() {
     let probe = Probe::holding(Some(aud()));
@@ -1123,10 +1142,11 @@ fn a_bracket_is_set_on_each_side_with_the_worth_of_its_stop_at_the_reference_sta
     }
 }
 
-/// AUD/USD at 0.70000/0.70001: 3 bps of the mid 0.700005 is 0.00021, and the nearest ticks put each
-/// stop 0.000215 from the mid, outside the spread. On 1 USD the reference stake, 0.003 USD, buys
-/// 13.95 AUD/USD, rounded down 13, one R worth 0.002795 USD. A trade losing 0.00559 USD realized
-/// -2R.
+/// AUD/USD at 0.70000/0.70001.
+///
+/// 3 bps of the mid 0.700005 is 0.00021. The nearest ticks put each stop 0.000215 from the mid,
+/// outside the spread. On 1 USD the reference stake is 0.003 USD. It buys 13.95 AUD/USD, rounded
+/// down to 13, with one R worth 0.002795 USD. A trade losing 0.00559 USD realized -2R.
 #[rstest]
 fn a_trade_on_a_stop_worth_under_half_a_cent_realizes_over_its_exact_worth() {
     let probe = Probe::holding(Some(aud()));
@@ -1172,8 +1192,9 @@ fn a_trade_on_a_stop_worth_under_half_a_cent_realizes_over_its_exact_worth() {
 
 const SWAP: &str = "BTC-USDT-SWAP.OKX";
 
-/// BTC-USDT-SWAP as OKX defines it: 0.01 BTC a contract, settled in USDT, on ticks of 0.1 and lots
-/// of 0.01 contracts.
+/// BTC-USDT-SWAP as OKX defines it.
+///
+/// A contract is 0.01 BTC, settled in USDT. Ticks are 0.1 and lots are 0.01 contracts.
 fn swap() -> InstrumentAny {
     InstrumentAny::CryptoPerpetual(
         CryptoPerpetual::builder()
@@ -1196,10 +1217,12 @@ fn swap() -> InstrumentAny {
     )
 }
 
-/// Worked by hand. With no exits one R is the target's ATR: of one bar from 99,925 to 100,075, 150.
-/// The reference stake, 300 USDT, over 150 on a contract of 0.01 BTC, 1.5 USDT, buys 200
-/// contracts, one R worth 300 USDT on either side. The entry is a market order from the mid of
-/// 99,999.9/100,000.1, closed after the hour.
+/// Worked by hand.
+///
+/// With no exits one R is the target's ATR. One bar from 99,925 to 100,075 gives 150. The reference
+/// stake of 300 USDT, over 150 on a contract of 0.01 BTC (1.5 USDT), buys 200 contracts. One R is
+/// worth 300 USDT on either side. The entry is a market order from the mid of 99,999.9/100,000.1,
+/// closed after the hour.
 #[rstest]
 fn a_time_only_target_is_set_with_the_worth_of_its_atr_through_the_multiplier() {
     let probe = Probe::holding(Some(swap()));
@@ -1257,7 +1280,9 @@ fn a_target_with_no_price_to_set_it_from_says_so(#[case] spec: Target) {
     assert_eq!(set, Err(NoTarget::NoPrice));
 }
 
-/// 0.3 of Wilder's ATR of 4 bars a side, closed after 5 minutes: the gold scalpers' bracket.
+/// A bracket of 0.3 of Wilder's ATR of 4 bars on each side, closed after 5 minutes.
+///
+/// It is the gold scalpers' bracket.
 fn symmetric() -> TargetConfig {
     let distance = Distance::Atr(Decimal::new(3, 1));
     of(Target {
@@ -1271,7 +1296,7 @@ fn symmetric() -> TargetConfig {
     })
 }
 
-/// A 15-minute bar of gold's mids from 3999 to 4001, closing at 4000: a true range of 2.
+/// A 15-minute bar of gold's mids from 3999 to 4001, closing at 4000. Its true range is 2.
 fn gold_bar() -> Bar {
     let price = |p: &str| Price::from(p);
     Bar::new(
@@ -1286,7 +1311,7 @@ fn gold_bar() -> Bar {
     )
 }
 
-/// A 15-minute bar of gold's mids from 3997 to 4003, closing at 4000: a true range of 6.
+/// A 15-minute bar of gold's mids from 3997 to 4003, closing at 4000. Its true range is 6.
 fn wide_gold_bar() -> Bar {
     let price = |p: &str| Price::from(p);
     Bar::new(
@@ -1301,10 +1326,15 @@ fn wide_gold_bar() -> Bar {
     )
 }
 
-/// Worked by hand. The setter of `symmetric` sharing its width's ATR sets the long's stop from the
-/// mid 4000.00 at the width read then: none for 3 bars; after a 4th, Wilder's ATR seeded by the
-/// mean of 4 true ranges of 2 is 2, the width 0.6, the stop 3999.40; after a 5th of 6, (3 × 2 + 6)
-/// / 4 = 3, the width 0.9, the stop 3999.10.
+/// Worked by hand.
+///
+/// The setter of `symmetric` shares its width's ATR. It sets the long's stop from the mid 4000.00
+/// at the width read then:
+/// - After 3 bars there is none.
+/// - After a 4th bar, Wilder's ATR is seeded by the mean of 4 true ranges of 2, so it is 2. The
+///   width is 0.6 and the stop 3999.40.
+/// - After a 5th bar with a true range of 6, the ATR is (3 × 2 + 6) / 4 = 3. The width is 0.9 and
+///   the stop 3999.10.
 #[rstest]
 fn a_setter_sharing_a_width_sets_its_exits_at_the_width_read_then() {
     let config = symmetric();
@@ -1369,7 +1399,7 @@ fn a_setter_refuses_to_share_the_atr_of_another_width(#[case] other: Target, #[c
     assert!(err.contains("period: 4,"), "{err}");
 }
 
-/// 10 bps of 4000 is 4, of 2000 is 2, with no ATR to warm.
+/// 10 bps of 4000 is 4 and of 2000 is 2. There is no ATR to warm.
 #[rstest]
 fn a_width_in_basis_points_is_of_the_price_it_is_read_at() {
     let width = of(in_bps(10, 10)).width(rule(), &quotes()).unwrap();
@@ -1390,8 +1420,10 @@ fn a_width_needs_a_bracket_of_one_distance(#[case] config: TargetConfig, #[case]
     }
 }
 
-/// Read at the target's cadence, every 15 minutes, each firing 10 ms after its grid time: a quote
-/// then is the decision's, one later the next one's.
+/// The width is read at the target's cadence, every 15 minutes, each firing 10 ms after its grid
+/// time.
+///
+/// A quote then is the decision's. A later quote is the next decision's.
 #[rstest]
 fn a_width_is_read_at_the_decisions_of_its_cadence() {
     let width = symmetric().width(rule(), &quotes()).unwrap();
@@ -1423,7 +1455,7 @@ fn a_target_on_a_cold_atr_says_so_and_names_its_bars() {
     );
 }
 
-/// From 0.07000, the stop's 0.0000007 rounds onto the price.
+/// From 0.07000, the stop of 0.0000007 rounds onto the price.
 #[rstest]
 fn a_target_with_an_exit_on_the_price_says_so_and_names_the_price() {
     let probe = Probe::holding(Some(aud()));
@@ -1434,8 +1466,8 @@ fn a_target_with_an_exit_on_the_price_says_so_and_names_the_price() {
     assert_eq!(set, Err(NoTarget::ExitOnPrice(Price::from("0.07000"))));
 }
 
-/// Only an instrument seen to be inverse is refused: one missing from the cache is the error of
-/// each decision, as `TargetSetter::at` has it.
+/// Only an instrument seen to be inverse is refused. One missing from the cache is an error at each
+/// decision, as `TargetSetter::at` has it.
 #[rstest]
 fn a_bracket_on_an_instrument_not_in_the_cache_starts() {
     let probe = Probe::holding(None);
@@ -1456,8 +1488,10 @@ fn a_stop_with_no_worth_at_a_decision_is_an_error_before_any_order() {
     assert_eq!(probe.orders(), Vec::<String>::new());
 }
 
-/// A time-only target missing its instrument is the setter's error before any order, its ATR warm,
-/// and takes no number: the next decision is the first.
+/// A time-only target whose instrument is missing is the setter's error before any order, with its
+/// ATR warm.
+///
+/// It takes no number, so the next decision is the first.
 #[rstest]
 fn a_time_only_target_missing_its_instrument_errs_before_any_order() {
     let mut probe = Probe::holding(None);
@@ -1478,7 +1512,9 @@ fn a_time_only_target_missing_its_instrument_errs_before_any_order() {
     assert_eq!(probe.orders(), ["D0-L-E", "D0-S-E"]);
 }
 
-/// Gold at the reference stake, 300 USD: a lot, 100 oz, on a stop of 3.00, 150 oz on an ATR of 2.
+/// Gold at the reference stake, 300 USD.
+///
+/// A stop of 3.00 buys a lot of 100 oz. An ATR of 2 buys 150 oz.
 fn lot(spec: Target) -> TargetConfig {
     of(spec)
 }
@@ -1495,7 +1531,7 @@ fn per_order() -> Commission {
     Commission::PerOrder(Money::from("3 USD"))
 }
 
-/// Pepperstone's 0.035 USD an ounce, 3.50 USD a fill of a lot.
+/// Pepperstone's commission, 0.035 USD an ounce, is 3.50 USD a fill of a lot.
 fn per_ounce() -> Commission {
     Commission::PerQuantity(Money::from_str_exact("0.035 USD").unwrap())
 }
@@ -1534,16 +1570,27 @@ fn a_target_names_the_payoff_features_of_the_barriers_it_has() {
     assert_eq!(lot(no_exits()).payoff_names(), ["entry_cost"]);
 }
 
-/// Worked by hand. A lot of gold quoted 4001.50/4001.70: the mid 4001.60; 15 bps of it 6.0024 and
-/// 7.5 bps 3.0012, on the nearest cent: the long's take profit 4007.60 and stop 3998.60, the
-/// short's 3995.60 and 4004.60; each stop 3.00 away, worth 300 USD on 100 oz, the unit. The long
-/// enters at the ask, 4001.70, the short at the bid, 4001.50, a spread of 0.20, 20 USD. At IC's 30
-/// USD per million a fill of a lot costs 0.003 of its price, to the cent: 12.01 at 4001.70, 12.00
-/// at 4001.50, 12.02 at 4007.60, 12.00 at 3998.60, 11.99 at 3995.60, 12.01 at 4004.60. The long's
-/// take profit nets 590 − 12.01 − 12.02, its stop loses 310 + 12.01 + 12.00, its entry costs 20 +
-/// 12.01; the short's take profit nets 590 − 12.00 − 11.99, its stop loses 310 + 12.00 + 12.01, its
-/// entry costs 20 + 12.00. At 3 USD an order each fill costs 3: the take profit nets 590 − 6, the
-/// stop loses 310 + 6, the entry costs 20 + 3, on either side.
+/// Worked by hand.
+///
+/// A lot of gold is quoted 4001.50/4001.70, so the mid is 4001.60. 15 bps of it is 6.0024 and 7.5
+/// bps is 3.0012, on the nearest cent. That gives:
+/// - The long's take profit 4007.60 and stop 3998.60.
+/// - The short's take profit 3995.60 and stop 4004.60.
+///
+/// Each stop is 3.00 away, worth 300 USD on 100 oz, the unit. The long enters at the ask, 4001.70,
+/// and the short at the bid, 4001.50. The spread is 0.20, or 20 USD.
+///
+/// At IC's 30 USD per million a fill of a lot costs 0.003 of its price, to the cent:
+/// - 12.01 at 4001.70 and 12.00 at 4001.50.
+/// - 12.02 at 4007.60 and 12.00 at 3998.60.
+/// - 11.99 at 3995.60 and 12.01 at 4004.60.
+///
+/// So the long's take profit nets 590 − 12.01 − 12.02, its stop loses 310 + 12.01 + 12.00, and its
+/// entry costs 20 + 12.01. The short's take profit nets 590 − 12.00 − 11.99, its stop loses 310 +
+/// 12.00 + 12.01, and its entry costs 20 + 12.00.
+///
+/// At 3 USD an order each fill costs 3. On either side the take profit nets 590 − 6, the stop loses
+/// 310 + 6, and the entry costs 20 + 3.
 #[rstest]
 #[case::at_a_rate(
     commission(),
@@ -1567,10 +1614,14 @@ fn a_brackets_payoff_is_worked_out_by_hand_on_each_side(
     );
 }
 
-/// The reference stake, 300 USD, over the ATR of 2 buys 150 oz: the unit, the ATR's worth on them,
-/// is 300 USD, and the entry cost the spread's 0.20 on them, 30 USD, and the entry's commission.
-/// At IC's rate, 0.003 of 150 oz's price to the cent, 18.01 at the long's ask, 4001.70 (18.00765),
-/// and at the short's bid, 4001.50 (18.00675); at 3 an order, 3; at 0.035 an ounce, 5.25.
+/// The reference stake, 300 USD, over the ATR of 2 buys 150 oz.
+///
+/// The unit is the ATR's worth on those ounces, 300 USD. The entry cost is the spread's 0.20 on
+/// them, 30 USD, plus the entry's commission. The commission is:
+/// - At IC's rate, 0.003 of 150 oz's price to the cent: 18.01 at the long's ask, 4001.70
+///   (18.00765), and at the short's bid, 4001.50 (18.00675).
+/// - At 3 an order: 3.
+/// - At 0.035 an ounce: 5.25.
 #[rstest]
 #[case::at_a_rate(commission(), 48.01, 48.01)]
 #[case::per_order(per_order(), 33.0, 33.0)]
@@ -1591,10 +1642,12 @@ fn a_time_only_targets_entry_cost_is_over_the_worth_of_its_atr_on_each_side(
     );
 }
 
-/// A trade of gold at 4001.60, the reference of the bracket's tests, with no quote: both sides
-/// enter at the trade, no spread. The long's take profit nets 600 − 12.00 − 12.02 and its stop
-/// loses 300 + 12.00 + 12.00, the short's take profit nets 600 − 12.00 − 11.99 and its stop loses
-/// 300 + 12.00 + 12.01, each entry costing its commission alone, 12.00 at 4001.60.
+/// A trade of gold at 4001.60 with no quote. 4001.60 is the reference of the bracket's tests. Both
+/// sides enter at the trade, with no spread.
+///
+/// The long's take profit nets 600 − 12.00 − 12.02 and its stop loses 300 + 12.00 + 12.00. The
+/// short's take profit nets 600 − 12.00 − 11.99 and its stop loses 300 + 12.00 + 12.01. Each entry
+/// costs its commission alone, 12.00 at 4001.60.
 #[rstest]
 fn a_bracket_on_trades_alone_reads_its_payoff_from_the_last_trade_with_no_spread() {
     let probe = Probe::holding(Some(gold()));
@@ -1623,12 +1676,12 @@ fn a_bracket_on_trades_alone_reads_its_payoff_from_the_last_trade_with_no_spread
     );
 }
 
-/// 3 EUR an order on gold, whose P&L is in USD: the commission is not converted.
+/// A commission of 3 EUR an order on gold, whose P&L is in USD. The commission is not converted.
 fn in_euros() -> Commission {
     Commission::PerOrder(Money::from("3 EUR"))
 }
 
-/// Live, the instrument may come after the start: the setter refuses the commission at each
+/// Live, the instrument may come after the start. The setter refuses the commission at each
 /// decision instead.
 #[rstest]
 #[case::a_bracket(wide_take_profit())]
@@ -1645,8 +1698,9 @@ fn a_commission_in_another_currency_than_the_targets_pnl_is_an_error_at_a_decisi
     assert!(format!("{err:#}").contains("EUR"), "{err:#}");
 }
 
-/// A decision with no price is unsettled, its number taken; one with an exit on the price is none,
-/// as on cold features, and takes no number: the first orders are of the decision after the first.
+/// A decision with no price is unsettled and takes a number. One with an exit on the price is none,
+/// as on cold features, and takes no number. So the first orders belong to the decision after the
+/// first.
 #[rstest]
 fn a_decision_with_no_price_takes_a_number_and_one_with_an_exit_on_the_price_none() {
     let mut probe = Probe::holding(Some(aud()));
