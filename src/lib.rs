@@ -1,8 +1,5 @@
-//! helix-trader: strategies on NautilusTrader, from data to live, one at a time.
-//!
-//! Nautilus provides the engines, adapters and catalog. This crate adds the strategies, their model
-//! harness, the roll calendar, the venue routing table and the commands that drive Nautilus from a
-//! strategy's config.
+//! helix-trader: strategies on NautilusTrader, from data to live. Adds the strategies, their
+//! model harness, the roll calendar, the venue routing table and the commands driving Nautilus.
 
 pub mod backtest;
 pub mod catalog;

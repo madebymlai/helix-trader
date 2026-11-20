@@ -1,11 +1,7 @@
-//! Catalog filling, naming no venue: writes into the Nautilus catalog the traded instruments,
-//! the series their strategy bars are built from (the source bars of a composite bar type, or
-//! quotes) and funding, through a node (`NodeFill`) or directly (`fill_catalog`), from the
-//! history source of each instrument's venue (see `venues`), and custom data of no
-//! instrument, from the source its type names, through the node.
-//!
-//! Build step 1. Backtest reads what this module writes. The instruments come from the
-//! strategy's data requirements.
+//! Catalog filling, naming no venue (build step 1): writes the traded instruments, their
+//! strategy bars' series and funding into the Nautilus catalog, through a node (`NodeFill`) or
+//! directly (`fill_catalog`), from each instrument's venue history source (see `venues`). Custom
+//! data of no instrument goes through the node, from the source its type names.
 
 mod fill_catalog;
 pub use fill_catalog::fill_catalog;
@@ -25,8 +21,7 @@ pub use node_fill::{
     CustomFillRequest, FillData, FillRequest, NodeClient, NodeFill, missing, missing_custom,
 };
 
-/// The config a node takes of the catalog in directory `dir`, by its path as given: Nautilus
-/// resolves a relative one against the working directory when it opens the catalog.
+/// The config a node takes of the catalog in `dir`, by its path as given.
 ///
 /// # Errors
 ///
@@ -38,10 +33,10 @@ pub(crate) fn catalog_config(dir: &Path) -> anyhow::Result<DataCatalogConfig> {
     Ok(DataCatalogConfig::new(path.to_owned(), None, None))
 }
 
-/// The instruments of `instrument_ids`, in their order, as the catalog at `catalog` defines
-/// them: those a strategy trades, or the pairs it converts through. The catalog is opened
-/// through Nautilus' `ParquetDataCatalog::from_uri`, whose error a missing directory is, where
-/// `ParquetDataCatalog::new` panics.
+/// The instruments of `instrument_ids`, in their order, as the catalog at `catalog` defines them.
+///
+/// Opens it with `ParquetDataCatalog::from_uri`, which errors on a missing directory where `new`
+/// panics.
 ///
 /// # Errors
 ///
