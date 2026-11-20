@@ -1,39 +1,30 @@
 //! Nautilus orders as cTrader trade requests, on a hedging account.
 //!
-//! - **A new order** (`ProtoOANewOrderReq`) carries the Nautilus client
-//!   order id as its `clientOrderId`: a market order GTC, IOC or DAY as a
-//!   `MARKET`, whose time in force is cTrader's own (IOC); a limit order
-//!   GTC or GTD (its expiry in ms) as a `LIMIT`, IOC as a `MARKET_RANGE`
-//!   whose base is its price, with no slippage; a stop market order GTC
-//!   or GTD as a `STOP`, its trigger `DEFAULT` or `BID_ASK` as cTrader's
-//!   `TRADE`, `DOUBLE_BID_ASK` as `DOUBLE_TRADE`. cTrader bounds a
-//!   `MARKET_RANGE`'s slippage on the worse side alone: the demo filled
-//!   one based 3.00 on the better side of the market at the market, a buy
-//!   and a sell, and refused one whose fill would be worse, whole, with
-//!   its deal rejected (2026-11-16). cTrader holds a `LIMIT` or `STOP`
-//!   sent IOC or FOK as GTC, and refuses FOK on its immediate orders, so
-//!   FOK, a stop's IOC, DAY on a pending order and a session's open or
-//!   close are denied. Post-only, quote-quantity and display quantities
-//!   are denied: cTrader has none.
-//! - **A bracket's protections** go on its entry, absolute (`stopLoss`,
-//!   `takeProfit`): cTrader moves them to the position the entry opens,
-//!   as one `STOP_LOSS_TAKE_PROFIT` order, held as long as the position,
-//!   so a leg other than GTC is denied. Spotware's proto says absolute
-//!   protections are not supported for market orders; the demo took them
-//!   on a market order (2026-10-26) and a `MARKET_RANGE` (2026-11-16) and
-//!   set them on its position.
-//! - **An order naming a position** (`SubmitOrder.position_id`, the cTrader
-//!   `positionId`): a market order on the closing side closes that much of
-//!   the position (`ProtoOAClosePositionReq`), never more than it holds; any
-//!   other carries the `positionId`. A reduce-only order without a position
+//! - **A new order** (`ProtoOANewOrderReq`) carries the Nautilus client order id as its
+//!   `clientOrderId`: a market order GTC, IOC or DAY as a `MARKET`, whose time in force is
+//!   cTrader's own (IOC); a limit order GTC or GTD (its expiry in ms) as a `LIMIT`, IOC as a
+//!   `MARKET_RANGE` whose base is its price, with no slippage; a stop market order GTC or GTD as a
+//!   `STOP`, its trigger `DEFAULT` or `BID_ASK` as cTrader's `TRADE`, `DOUBLE_BID_ASK` as
+//!   `DOUBLE_TRADE`. cTrader bounds a `MARKET_RANGE`'s slippage on the worse side alone: the demo
+//!   filled one based 3.00 on the better side of the market at the market, a buy and a sell, and
+//!   refused one whose fill would be worse, whole, with its deal rejected (2026-11-16). cTrader
+//!   holds a `LIMIT` or `STOP` sent IOC or FOK as GTC, and refuses FOK on its immediate orders, so
+//!   FOK, a stop's IOC, DAY on a pending order and a session's open or close are denied. Post-only,
+//!   quote-quantity and display quantities are denied: cTrader has none.
+//! - **A bracket's protections** go on its entry, absolute (`stopLoss`, `takeProfit`): cTrader
+//!   moves them to the position the entry opens, as one `STOP_LOSS_TAKE_PROFIT` order, held as long
+//!   as the position, so a leg other than GTC is denied. Spotware's proto says absolute protections
+//!   are not supported for market orders; the demo took them on a market order (2026-10-26) and a
+//!   `MARKET_RANGE` (2026-11-16) and set them on its position.
+//! - **An order naming a position** (`SubmitOrder.position_id`, the cTrader `positionId`): a market
+//!   order on the closing side closes that much of the position (`ProtoOAClosePositionReq`), never
+//!   more than it holds; any other carries the `positionId`. A reduce-only order without a position
 //!   is denied: on a hedging account it would open one.
-//! - **Volumes** are in cents of a unit; prices go as doubles, at the
-//!   instrument's precision.
+//! - **Volumes** are in cents of a unit; prices go as doubles, at the instrument's precision.
 //!
-//! Each request goes under a `clientMsgId` naming what it does and the
-//! order (`Tag`): its answer and execution events come back under it.
-//! cTrader makes a close request's `clientMsgId` the `clientOrderId` of the
-//! closing order it creates (demo, 2026-10-26).
+//! Each request goes under a `clientMsgId` naming what it does and the order (`Tag`): its answer
+//! and execution events come back under it. cTrader makes a close request's `clientMsgId` the
+//! `clientOrderId` of the closing order it creates (demo, 2026-10-26).
 
 use std::{fmt::Display, str::FromStr};
 
@@ -53,8 +44,8 @@ use crate::common::messages::{
     ProtoOaTimeInForce, ProtoOaTradeSide,
 };
 
-/// What a trade request does, and to which Nautilus order: its
-/// `clientMsgId`, `<op>:<client order id>`.
+/// What a trade request does, and to which Nautilus order: its `clientMsgId`, `<op>:<client order
+/// id>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum Tag {
     /// A new order.
@@ -120,8 +111,7 @@ impl FromStr for Tag {
     }
 }
 
-/// A position's protection: cTrader holds at most one stop loss and one
-/// take profit on a position.
+/// A position's protection: cTrader holds at most one stop loss and one take profit on a position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum Leg {
     StopLoss,
@@ -136,8 +126,8 @@ impl Leg {
         }
     }
 
-    /// The Nautilus order type of the leg: a stop market at the stop loss,
-    /// a limit at the take profit.
+    /// The Nautilus order type of the leg: a stop market at the stop loss, a limit at the take
+    /// profit.
     pub(super) const fn order_type(self) -> OrderType {
         match self {
             Self::StopLoss => OrderType::StopMarket,
@@ -146,8 +136,7 @@ impl Leg {
     }
 }
 
-/// The venue order id of `leg` of position `position_id`: the position's
-/// id with `-SL` or `-TP`.
+/// The venue order id of `leg` of position `position_id`: the position's id with `-SL` or `-TP`.
 pub(super) fn protection_id(position_id: i64, leg: Leg) -> VenueOrderId {
     VenueOrderId::new(format!("{position_id}-{}", leg.suffix()))
 }
@@ -178,15 +167,14 @@ pub(super) enum Placement {
     Close(ProtoOaClosePositionReq),
 }
 
-/// The request placing `order`, of cTrader symbol `symbol_id`, into
-/// `position` if it names one, with the bracket's `protection` on it.
+/// The request placing `order`, of cTrader symbol `symbol_id`, into `position` if it names one,
+/// with the bracket's `protection` on it.
 ///
 /// # Errors
 ///
 /// Returns an error if:
-/// - The order has a type, trigger or flag cTrader lacks, a time in force
-///   it does not honor for the type, or is good till a date it does not
-///   name.
+/// - The order has a type, trigger or flag cTrader lacks, a time in force it does not honor for the
+///   type, or is good till a date it does not name.
 /// - It is reduce-only without a position.
 /// - It closes `position` and is larger than it, or carries protection.
 /// - `position` is not a cTrader position.
@@ -250,8 +238,9 @@ pub(super) fn placement(
             immediate(order)?;
             request.set_order_type(ProtoOaOrderType::Market);
         }
-        // cTrader fills a MARKET_RANGE within its slippage of its base or
-        // better, or refuses it: at no slippage, a limit IOC.
+
+        // cTrader fills a MARKET_RANGE within its slippage of its base or better, or refuses it: at
+        // no slippage, a limit IOC.
         OrderType::Limit if order.time_in_force() == TimeInForce::Ioc => {
             request.set_order_type(ProtoOaOrderType::MarketRange);
             request.base_slippage_price = order.price().map(|p| p.as_f64());
@@ -294,8 +283,7 @@ fn validate(order: &OrderAny) -> Result<(), OrderDeniedReason> {
 ///
 /// # Errors
 ///
-/// Returns an error if the quantity is finer than a cent of a unit: the
-/// order is denied.
+/// Returns an error if the quantity is finer than a cent of a unit: the order is denied.
 pub(super) fn volume(quantity: Quantity) -> Result<i64, OrderDeniedReason> {
     let cents = quantity.as_decimal() * Decimal::ONE_HUNDRED;
     (cents.fract().is_zero())
@@ -306,8 +294,8 @@ pub(super) fn volume(quantity: Quantity) -> Result<i64, OrderDeniedReason> {
         })
 }
 
-/// The cTrader id of a Nautilus position: on a hedging account the venue's
-/// `positionId`, which a position this client did not open also carries.
+/// The cTrader id of a Nautilus position: on a hedging account the venue's `positionId`, which a
+/// position this client did not open also carries.
 pub(super) fn venue_position_id(id: PositionId) -> Result<i64, OrderDeniedReason> {
     id.as_str()
         .parse()
@@ -328,9 +316,8 @@ const fn trade_side(side: OrderSide) -> ProtoOaTradeSide {
     }
 }
 
-/// cTrader's trigger method of a stop triggered as `trigger`: `TRADE` (a
-/// buy by the ask, a sell by the bid) for `DEFAULT` and `BID_ASK`,
-/// `DOUBLE_TRADE` for `DOUBLE_BID_ASK`.
+/// cTrader's trigger method of a stop triggered as `trigger`: `TRADE` (a buy by the ask, a sell by
+/// the bid) for `DEFAULT` and `BID_ASK`, `DOUBLE_TRADE` for `DOUBLE_BID_ASK`.
 pub(super) fn trigger_method(
     trigger: Option<TriggerType>,
 ) -> Result<ProtoOaOrderTriggerMethod, OrderDeniedReason> {
@@ -345,11 +332,10 @@ pub(super) fn trigger_method(
     }
 }
 
-/// Checks the time in force of the market `order`: cTrader executes a
-/// MARKET at once and cancels what it cannot fill (IOC), which honors
-/// GTC, IOC and DAY. It refuses a MARKET of FOK ("Such TIF is not
-/// supported by this Order type") and of MARKET_ON_OPEN ("Incorrect time
-/// of execution", demo, 2026-11-16), and has no market on close.
+/// Checks the time in force of the market `order`: cTrader executes a MARKET at once and cancels
+/// what it cannot fill (IOC), which honors GTC, IOC and DAY. It refuses a MARKET of FOK ("Such TIF
+/// is not supported by this Order type") and of MARKET_ON_OPEN ("Incorrect time of execution",
+/// demo, 2026-11-16), and has no market on close.
 fn immediate(order: &OrderAny) -> Result<(), OrderDeniedReason> {
     match order.time_in_force() {
         TimeInForce::Gtc | TimeInForce::Ioc | TimeInForce::Day => Ok(()),
@@ -357,10 +343,9 @@ fn immediate(order: &OrderAny) -> Result<(), OrderDeniedReason> {
     }
 }
 
-/// Sets on `request` the time in force of the pending `order`, a limit or
-/// a stop, and its expiry in ms: GTC, or GTD. cTrader takes a LIMIT or
-/// STOP sent IOC or FOK and holds it GTC (demo, 2026-11-16), and has no
-/// DAY nor the session's open or close.
+/// Sets on `request` the time in force of the pending `order`, a limit or a stop, and its expiry in
+/// ms: GTC, or GTD. cTrader takes a LIMIT or STOP sent IOC or FOK and holds it GTC (demo,
+/// 2026-11-16), and has no DAY nor the session's open or close.
 fn pending(request: &mut ProtoOaNewOrderReq, order: &OrderAny) -> Result<(), OrderDeniedReason> {
     let (time_in_force, expiry) = match order.time_in_force() {
         TimeInForce::Gtc => (ProtoOaTimeInForce::GoodTillCancel, None),
@@ -406,8 +391,8 @@ mod tests {
 
     const ORDER: &str = "O-20261026-150000-001-001-1";
 
-    /// A tag reads back as itself; a `clientMsgId` of no op and client
-    /// order id, as a probe's, is no tag.
+    /// A tag reads back as itself; a `clientMsgId` of no op and client order id, as a probe's, is
+    /// no tag.
     #[rstest]
     #[case::new(
         "N:O-20261026-150000-001-001-1",
@@ -445,8 +430,8 @@ mod tests {
         }
     }
 
-    /// A protection's venue order id is its position's id and its leg; a
-    /// cTrader order's id is none.
+    /// A protection's venue order id is its position's id and its leg; a cTrader order's id is
+    /// none.
     #[rstest]
     #[case::stop_loss("690004734-SL", Some((690_004_734, Leg::StopLoss)))]
     #[case::take_profit("690004734-TP", Some((690_004_734, Leg::TakeProfit)))]
@@ -506,9 +491,8 @@ mod tests {
         assert_eq!(request.time_in_force(), ProtoOaTimeInForce::GoodTillCancel);
     }
 
-    /// cTrader holds a LIMIT sent IOC as GTC (demo, 2026-11-16); its IOC
-    /// execution at a price or better is MARKET_RANGE, whose base the
-    /// demo filled better than on either side.
+    /// cTrader holds a LIMIT sent IOC as GTC (demo, 2026-11-16); its IOC execution at a price or
+    /// better is MARKET_RANGE, whose base the demo filled better than on either side.
     #[rstest]
     #[case::buy(OrderSide::Buy, ProtoOaTradeSide::Buy)]
     #[case::sell(OrderSide::Sell, ProtoOaTradeSide::Sell)]
@@ -558,8 +542,8 @@ mod tests {
         );
     }
 
-    /// The order of `order_type` and `time_in_force`, at 4000.00 if it
-    /// has a price, a GTD's expiring at `EXPIRY`.
+    /// The order of `order_type` and `time_in_force`, at 4000.00 if it has a price, a GTD's
+    /// expiring at `EXPIRY`.
     fn lasting(order_type: OrderType, time_in_force: TimeInForce) -> OrderAny {
         let mut builder = OrderTestBuilder::new(order_type);
         builder
@@ -582,8 +566,8 @@ mod tests {
     /// 2026-11-16 18:00 UTC.
     const EXPIRY: UnixNanos = UnixNanos::new(1_794_852_000_000_000_000);
 
-    /// A market order goes without a time in force, cTrader's own IOC; a
-    /// pending one GTC or GTD, its expiry in ms.
+    /// A market order goes without a time in force, cTrader's own IOC; a pending one GTC or GTD,
+    /// its expiry in ms.
     #[rstest]
     #[case::market_gtc(OrderType::Market, TimeInForce::Gtc, None, None)]
     #[case::market_ioc(OrderType::Market, TimeInForce::Ioc, None, None)]
@@ -626,10 +610,9 @@ mod tests {
         assert_eq!(request.expiration_timestamp, expiration);
     }
 
-    /// The demo refused FOK on MARKET and MARKET_RANGE ("Such TIF is not
-    /// supported by this Order type") and MARKET_ON_OPEN on MARKET
-    /// ("Incorrect time of execution"), and held a LIMIT or STOP sent IOC
-    /// or FOK as GTC (2026-11-16).
+    /// The demo refused FOK on MARKET and MARKET_RANGE ("Such TIF is not supported by this Order
+    /// type") and MARKET_ON_OPEN on MARKET ("Incorrect time of execution"), and held a LIMIT or
+    /// STOP sent IOC or FOK as GTC (2026-11-16).
     #[rstest]
     #[case::market_fok(OrderType::Market, TimeInForce::Fok)]
     #[case::market_at_the_open(OrderType::Market, TimeInForce::AtTheOpen)]
@@ -688,8 +671,8 @@ mod tests {
         Flag(&'static str),
     }
 
-    /// cTrader has no stop limit nor post-only orders, and a reduce-only
-    /// order on a hedging account needs the position it reduces.
+    /// cTrader has no stop limit nor post-only orders, and a reduce-only order on a hedging account
+    /// needs the position it reduces.
     #[rstest]
     #[case::stop_limit(stop_limit(), Denial::OrderType(OrderType::StopLimit))]
     #[case::post_only(post_only(), Denial::Flag("post-only"))]

@@ -1,9 +1,7 @@
-//! The cTrader session on the broker's account, which history, the data
-//! client's live quotes and the execution client share: the instruments of
-//! the broker's forex and metals and their tick history, merged into quotes
-//! (`ticks`), the spot subscriptions, and the account, its open positions,
-//! orders and deals, and its trade requests, over the connection
-//! (`websocket`).
+//! The cTrader session on the broker's account, which history, the data client's live quotes and
+//! the execution client share: the instruments of the broker's forex and metals and their tick
+//! history, merged into quotes (`ticks`), the spot subscriptions, and the account, its open
+//! positions, orders and deals, and its trade requests, over the connection (`websocket`).
 
 use std::collections::HashMap;
 
@@ -39,9 +37,8 @@ use super::{
 
 pub(crate) mod ticks;
 
-/// A cTrader session on the broker's account: history, the spot
-/// subscriptions of the data client, and the account, open positions and
-/// deals of the execution client.
+/// A cTrader session on the broker's account: history, the spot subscriptions of the data client,
+/// and the account, open positions and deals of the execution client.
 #[derive(Debug)]
 pub struct CTraderSession {
     client: CTraderWebSocketClient,
@@ -51,16 +48,16 @@ pub struct CTraderSession {
 }
 
 impl CTraderConnection {
-    /// Checks the account, on a session of its own closed again: hedging
-    /// and the credential's (see `CTraderSession::check_account`). Run
-    /// before a node is built, so a wrong account fails the start with its
-    /// reason.
+    /// Checks the account, on a session of its own closed again: hedging and the credential's (see
+    /// `CTraderSession::check_account`). Run before a node is built, so a wrong account fails the
+    /// start with its reason.
     ///
     /// # Errors
     ///
-    /// Returns an error if cTrader cannot be reached or refuses the
-    /// credential, or if the account does not suit (see
-    /// `CTraderSession::check_account`).
+    /// Returns an error if:
+    /// - Reaching cTrader fails.
+    /// - It refuses the credential.
+    /// - The account does not suit (see `CTraderSession::check_account`).
     pub async fn check_account(&self) -> anyhow::Result<()> {
         let session = CTraderSession::connect(self).await?;
         let checked = session.check_account().await;
@@ -70,14 +67,14 @@ impl CTraderConnection {
 }
 
 impl CTraderSession {
-    /// Connects to the environment of `connection` and authenticates its
-    /// credential, with the token file's pair (the credential's pair seeds
-    /// it), renewed when due; none is ever printed.
+    /// Connects to the environment of `connection` and authenticates its credential, with the token
+    /// file's pair (the credential's pair seeds it), renewed when due; none is ever printed.
     ///
     /// # Errors
     ///
-    /// Returns an error if cTrader cannot be reached, or if it refuses the
-    /// credential (naming its error code).
+    /// Returns an error if:
+    /// - Reaching cTrader fails.
+    /// - It refuses the credential, naming its error code.
     pub async fn connect(connection: &CTraderConnection) -> anyhow::Result<Self> {
         let (venue, environment) = (connection.venue, connection.environment);
         let (session, _) = Self::connect_to(
@@ -91,9 +88,9 @@ impl CTraderSession {
         Ok(session)
     }
 
-    /// Connects to `url` as `credential`, at the broker of `venue`, with
-    /// the spot events of the symbols `subscribe_spots` subscribes; its
-    /// socket under `socket`, a node's client's (see `websocket`).
+    /// Connects to `url` as `credential`, at the broker of `venue`, with the spot events of the
+    /// symbols `subscribe_spots` subscribes; its socket under `socket`, a node's client's (see
+    /// `websocket`).
     pub(crate) async fn connect_to(
         url: &str,
         venue: Venue,
@@ -120,14 +117,16 @@ impl CTraderSession {
     ///
     /// # Errors
     ///
-    /// Returns an error if a request fails, or the account is another one,
-    /// is not hedging or has a deposit asset Nautilus does not know.
+    /// Returns an error if:
+    /// - A request fails.
+    /// - The account is another one.
+    /// - The account is not hedging.
+    /// - Its deposit asset is one Nautilus does not know.
     pub async fn check_account(&self) -> anyhow::Result<()> {
         self.account().await.map(|_| ())
     }
 
-    /// The account, from the trader and the assets, checked (see
-    /// `CTraderAccount::check`).
+    /// The account, from the trader and the assets, checked (see `CTraderAccount::check`).
     pub(crate) async fn account(&self) -> anyhow::Result<CTraderAccount> {
         let (venue, account) = (self.venue, self.account_id.get());
         let (trader, assets) = tokio::try_join!(
@@ -159,8 +158,8 @@ impl CTraderSession {
         )
     }
 
-    /// The open positions and pending orders, their stop loss and take
-    /// profit in the positions' fields.
+    /// The open positions and pending orders, their stop loss and take profit in the positions'
+    /// fields.
     pub(crate) async fn reconcile(&self) -> anyhow::Result<ProtoOaReconcileRes> {
         self.client
             .request(&ProtoOaReconcileReq {
@@ -172,22 +171,21 @@ impl CTraderSession {
             .with_context(|| format!("requesting the {} open positions and orders", self.venue))
     }
 
-    /// The deals created over `[from_ms, to_ms]`, each once, oldest first;
-    /// none when the window is empty. cTrader's deal lists filter on a
-    /// deal's creation (or its last update, the same on every deal
-    /// measured), bounds included, which can come a millisecond before its
-    /// execution (demo, 2026-11-12): a deal executed at `from_ms` may be
-    /// left out. A window cTrader answers only in part (`hasMore`) is asked
-    /// again in halves, which needs no knowledge of the order or size of
-    /// its pages (neither is documented).
+    /// The deals created over `[from_ms, to_ms]`, each once, oldest first; none when the window is
+    /// empty. cTrader's deal lists filter on a deal's creation (or its last update, the same on
+    /// every deal measured), bounds included, which can come a millisecond before its execution
+    /// (demo, 2026-11-12): a deal executed at `from_ms` may be left out. A window cTrader answers
+    /// only in part (`hasMore`) is asked again in halves, which needs no knowledge of the order or
+    /// size of its pages (neither is documented).
     ///
     /// # Errors
     ///
-    /// Returns an error if a request fails, or a single millisecond holds
-    /// more deals than a page.
+    /// Returns an error if:
+    /// - A request fails.
+    /// - A single millisecond holds more deals than a page.
     pub(crate) async fn deals(&self, from_ms: i64, to_ms: i64) -> anyhow::Result<Vec<ProtoOaDeal>> {
-        // cTrader refuses a window not ending after its start
-        // (`INCORRECT_BOUNDARIES`, demo, 2026-10-26); it holds no deal.
+        // cTrader refuses a window not ending after its start (`INCORRECT_BOUNDARIES`, demo,
+        // 2026-10-26); it holds no deal.
         if from_ms >= to_ms {
             return Ok(Vec::new());
         }
@@ -206,9 +204,10 @@ impl CTraderSession {
                 .with_context(|| {
                     format!("requesting the {} deals over [{from}, {to}] ms", self.venue)
                 })?;
+
             if page.has_more {
-                // The halves overlap by a millisecond: whether cTrader's
-                // bounds are inclusive or not, no deal falls between them.
+                // The halves overlap by a millisecond: whether cTrader's bounds are inclusive or
+                // not, no deal falls between them.
                 anyhow::ensure!(
                     to - from > 2,
                     "{} holds more deals over [{from}, {to}] ms than one answer carries",
@@ -225,14 +224,15 @@ impl CTraderSession {
         Ok(deals)
     }
 
-    /// The deals of the account's position `position_id` created by
-    /// `to_ms`, oldest first, as `deals` reads them; none if the account
-    /// holds no such position (`POSITION_NOT_FOUND`, demo, 2026-11-12).
+    /// The deals of the account's position `position_id` created by `to_ms`, oldest first, as
+    /// `deals` reads them; none if the account holds no such position (`POSITION_NOT_FOUND`, demo,
+    /// 2026-11-12).
     ///
     /// # Errors
     ///
-    /// Returns an error if the request fails, or the position holds more
-    /// deals created by then than one answer carries.
+    /// Returns an error if:
+    /// - The request fails.
+    /// - The position holds more deals created by then than one answer carries.
     pub(crate) async fn position_deals(
         &self,
         position_id: i64,
@@ -271,9 +271,8 @@ impl CTraderSession {
         Ok(deals)
     }
 
-    /// Sends `request`, a trade request of the account, under
-    /// `client_msg_id`; its outcome comes as trade events under that id (see
-    /// `trade_events`). The answer says whether it was sent.
+    /// Sends `request`, a trade request of the account, under `client_msg_id`; its outcome comes as
+    /// trade events under that id (see `trade_events`). The answer says whether it was sent.
     pub(crate) fn trade<Req: TradeRequest>(
         &self,
         mut request: Req,
@@ -283,8 +282,7 @@ impl CTraderSession {
         self.client.trade(&request, client_msg_id)
     }
 
-    /// The account's trade events from now on (see
-    /// `CTraderWebSocketClient::trade_events`).
+    /// The account's trade events from now on (see `CTraderWebSocketClient::trade_events`).
     ///
     /// # Errors
     ///
@@ -297,8 +295,9 @@ impl CTraderSession {
     ///
     /// # Errors
     ///
-    /// Returns an error if cTrader does not hold the order, cTrader's
-    /// `ORDER_NOT_FOUND`, or if the request fails.
+    /// Returns an error if:
+    /// - The order is not held by cTrader (`ORDER_NOT_FOUND`).
+    /// - The request fails.
     pub(crate) async fn order_details(
         &self,
         order_id: i64,
@@ -312,14 +311,14 @@ impl CTraderSession {
             .await
     }
 
-    /// The orders updated over `[from_ms, to_ms]`, open or not, each once,
-    /// as `deals` reads deals: a window answered only in part is asked
-    /// again in halves.
+    /// The orders updated over `[from_ms, to_ms]`, open or not, each once, as `deals` reads deals:
+    /// a window answered only in part is asked again in halves.
     ///
     /// # Errors
     ///
-    /// Returns an error if a request fails, or a single millisecond holds
-    /// more orders than a page.
+    /// Returns an error if:
+    /// - A request fails.
+    /// - A single millisecond holds more orders than a page.
     pub(crate) async fn orders(
         &self,
         from_ms: i64,
@@ -364,17 +363,18 @@ impl CTraderSession {
         Ok(orders)
     }
 
-    /// The instruments of `ids`, from cTrader's current definitions: the
-    /// assets, the symbol list (each id's symbol name to its `symbolId` on
-    /// this server), the details of those symbols, and the leverage the
-    /// broker applies to each, from the account's and the symbol's dynamic
+    /// The instruments of `ids`, from cTrader's current definitions: the assets, the symbol list
+    /// (each id's symbol name to its `symbolId` on this server), the details of those symbols, and
+    /// the leverage the broker applies to each, from the account's and the symbol's dynamic
     /// leverage, which sets its margins (see `parse`).
     ///
     /// # Errors
     ///
-    /// Returns an error if an id is not on the session's venue (before any
-    /// request), if a request fails, if the broker lists no symbol of that
-    /// name, or if a symbol's assets are not both currencies Nautilus knows.
+    /// Returns an error if:
+    /// - An id is not on the session's venue, before any request.
+    /// - A request fails.
+    /// - The broker lists no symbol of that name.
+    /// - A symbol's assets are not both currencies Nautilus knows.
     pub async fn instruments(&self, ids: &[InstrumentId]) -> anyhow::Result<Vec<InstrumentAny>> {
         let symbols = self.symbols(ids).await?;
         Ok(symbols.into_iter().map(|s| s.instrument).collect())
@@ -482,22 +482,23 @@ impl CTraderSession {
             .collect()
     }
 
-    /// The quotes of `symbol` stamped in `[from, to]`, merged from its BID
-    /// and ASK ticks of those milliseconds and the last tick of each before
-    /// them (see `ticks::merge`), the two sides fetched side by side. A
-    /// failed tick request cuts its side short: the quotes then start where
+    /// The quotes of `symbol` stamped in `[from, to]`, merged from its BID and ASK ticks of those
+    /// milliseconds and the last tick of each before them (see `ticks::merge`), the two sides
+    /// fetched side by side. A failed tick request cuts its side short: the quotes then start where
     /// both sides' ticks do, with the failure. Logs the counts.
     ///
     /// # Errors
     ///
-    /// Returns an error if the window is out of range, or as `ticks::merge`.
+    /// Returns an error if:
+    /// - The window is out of range.
+    /// - The `ticks::merge` call fails.
     pub(crate) async fn quote_ticks(
         &self,
         symbol: &CTraderSymbol,
         from: Timestamp,
         to: Timestamp,
     ) -> anyhow::Result<FetchedQuotes> {
-        // [from, to] in ns holds the ticks of [from_ms, to_ms) in ms.
+        // [from, to] in ns holds the ticks of [from_ms, to_ms) in ms
         let ms = |ns: i128| i64::try_from(ns.div_euclid(1_000_000)).context("a time out of range");
         let from_ms = ms(from.as_nanosecond() + 999_999)?;
         let to_ms = ms(to.as_nanosecond())? + 1;
@@ -532,8 +533,8 @@ impl CTraderSession {
         })
     }
 
-    /// The `side` ticks of `symbol` over `[from_ms, to_ms)` and its last
-    /// tick before them, and the failure that cut them short, if any.
+    /// The `side` ticks of `symbol` over `[from_ms, to_ms)` and its last tick before them, and the
+    /// failure that cut them short, if any.
     async fn side_ticks(
         &self,
         symbol: &CTraderSymbol,
@@ -541,8 +542,8 @@ impl CTraderSession {
         from_ms: i64,
         to_ms: i64,
     ) -> (SideTicks, Option<anyhow::Error>) {
-        // A closure returning the future, not an async closure: the latter
-        // makes the future of a quote request not `Send`.
+        // A closure returning the future, not an async closure: the latter makes the future of a
+        // quote request not `Send`.
         let page = move |from, to| self.tick_page(symbol, side, from, to);
         let before = match ticks::last_before(from_ms, page).await {
             Ok(before) => before,
@@ -557,7 +558,7 @@ impl CTraderSession {
         };
         let pages = ticks::side_ticks(from_ms, to_ms, page).await;
         let side = SideTicks {
-            // Known only at the window's start.
+            // Known only at the window's start
             before: before.filter(|_| pages.from_ms == from_ms),
             ticks: pages.ticks,
             from_ms: pages.from_ms,
@@ -565,8 +566,8 @@ impl CTraderSession {
         (side, pages.failure)
     }
 
-    /// One tick request: the newest page of `side` ticks of `symbol` over
-    /// `[from_ms, to_ms)`, newest first, and whether there are more.
+    /// One tick request: the newest page of `side` ticks of `symbol` over `[from_ms, to_ms)`,
+    /// newest first, and whether there are more.
     async fn tick_page(
         &self,
         symbol: &CTraderSymbol,
@@ -595,8 +596,8 @@ impl CTraderSession {
         Ok((ticks::decode(&response.tick_data)?, response.has_more))
     }
 
-    /// Subscribes to the spot events of `symbol_id` for the rest of the
-    /// session (see `CTraderWebSocketClient::subscribe_spots`).
+    /// Subscribes to the spot events of `symbol_id` for the rest of the session (see
+    /// `CTraderWebSocketClient::subscribe_spots`).
     pub(crate) fn subscribe_spots(&self, symbol_id: i64) -> anyhow::Result<()> {
         Ok(self.client.subscribe_spots(symbol_id)?)
     }
@@ -606,20 +607,21 @@ impl CTraderSession {
         Ok(self.client.unsubscribe_spots(symbol_id)?)
     }
 
-    /// Renews the access token now, as on schedule: the token file holds
-    /// the new pair once cTrader answers.
+    /// Renews the access token now, as on schedule: the token file holds the new pair once cTrader
+    /// answers.
     #[cfg(any(test, feature = "test-support"))]
     pub fn renew_token(&self) {
         self.client.renew_token();
     }
 
-    /// Connects as `connect` does and subscribes to the spot events of
-    /// `instrument_ids`, which come as cTrader sends them.
+    /// Connects as `connect` does and subscribes to the spot events of `instrument_ids`, which come
+    /// as cTrader sends them.
     ///
     /// # Errors
     ///
-    /// Returns an error if `connect` fails, or if `instruments` fails for
-    /// `instrument_ids`.
+    /// Returns an error if:
+    /// - The `connect` call fails.
+    /// - The `instruments` call fails for `instrument_ids`.
     #[cfg(feature = "test-support")]
     pub async fn connect_with_spots(
         connection: &CTraderConnection,
@@ -644,9 +646,8 @@ impl CTraderSession {
         Ok((session, spots))
     }
 
-    /// Asks the session to close, as `disconnect` does, without waiting:
-    /// a token renewal out is still answered and saved, if `disconnect`
-    /// then awaits it.
+    /// Asks the session to close, as `disconnect` does, without waiting: a token renewal out is
+    /// still answered and saved, if `disconnect` then awaits it.
     pub(crate) fn begin_shutdown(&self) {
         self.client.begin_shutdown();
     }
@@ -657,9 +658,8 @@ impl CTraderSession {
     }
 }
 
-/// The quotes `CTraderSession::quote_ticks` got over a window, and the
-/// failure that cut them short, if any: then they start later than the
-/// window.
+/// The quotes `CTraderSession::quote_ticks` got over a window, and the failure that cut them short,
+/// if any: then they start later than the window.
 #[derive(Debug, Default)]
 pub(crate) struct FetchedQuotes {
     pub(crate) quotes: Vec<QuoteTick>,
@@ -714,8 +714,8 @@ mod tests {
         ticks_peer(vec![], vec![], 10_000)(connection, request)
     }
 
-    /// As `fixtures_peer`, with the BID and ASK ticks of every symbol,
-    /// oldest first, served in pages of `page_size` (see `tick_answer`).
+    /// As `fixtures_peer`, with the BID and ASK ticks of every symbol, oldest first, served in
+    /// pages of `page_size` (see `tick_answer`).
     fn ticks_peer(
         bids: Vec<Tick>,
         asks: Vec<Tick>,
@@ -825,8 +825,8 @@ mod tests {
         session.disconnect().await;
     }
 
-    /// The demo's leverages: the account 1:30, gold 1:200 and EUR/USD
-    /// 1:1000; the broker applies the account's to both.
+    /// The demo's leverages: the account 1:30, gold 1:200 and EUR/USD 1:1000; the broker applies
+    /// the account's to both.
     #[tokio::test]
     async fn instruments_carry_the_broker_s_margin_at_the_account_s_leverage() {
         let (session, _) = connected().await;
@@ -927,8 +927,8 @@ mod tests {
         session.disconnect().await;
     }
 
-    /// As `fixtures_peer`, answering a spot subscription with the captured
-    /// answer, then each symbol's captured first spot event.
+    /// As `fixtures_peer`, answering a spot subscription with the captured answer, then each
+    /// symbol's captured first spot event.
     fn spots_peer(connection: usize, request: &ProtoMessage) -> Vec<Action> {
         if request.payload_type != ProtoOaSubscribeSpotsReq::TYPE {
             return fixtures_peer(connection, request);
@@ -975,7 +975,8 @@ mod tests {
             stamped.push((spot.symbol_id, spot.timestamp));
         }
         stamped.sort_unstable();
-        // The symbol ids and times of `test_data/spot_event_*_first.txtpb`.
+
+        // The symbol ids and times of `test_data/spot_event_*_first.txtpb`
         assert_eq!(
             stamped,
             [(1, Some(1_793_017_476_361)), (41, Some(1_793_017_475_790))]
@@ -983,13 +984,12 @@ mod tests {
         session.disconnect().await;
     }
 
-    /// What Nautilus' risk engine makes of a market buy of 1 oz of gold,
-    /// `xau` here, on a margin account of 1,000 EUR, at the demo's first
-    /// captured spots (`test_data/spot_event_*_first`): XAUUSD 4017.96 /
-    /// 4018.01, EURUSD 1.11964 / 1.11965 (the account is in EUR, gold in
-    /// USD). The order's value, about 3,590 EUR, is above the balance; the
-    /// broker's margin at 1:30, about 120 EUR, is below it. The order events
-    /// the engine sends back, and whether it passed the order on.
+    /// What Nautilus' risk engine makes of a market buy of 1 oz of gold, `xau` here, on a margin
+    /// account of 1,000 EUR, at the demo's first captured spots (`test_data/spot_event_*_first`):
+    /// XAUUSD 4017.96 / 4018.01, EURUSD 1.11964 / 1.11965 (the account is in EUR, gold in USD). The
+    /// order's value, about 3,590 EUR, is above the balance; the broker's margin at 1:30, about 120
+    /// EUR, is below it. The order events the engine sends back, and whether it passed the order
+    /// on.
     fn risk_check_of_one_ounce(xau: Cfd, eur: InstrumentAny) -> (Vec<OrderEventAny>, usize) {
         let (events, saved_events) = get_typed_into_message_saving_handler::<OrderEventAny>(None);
         msgbus::register_order_event_endpoint(MessagingSwitchboard::exec_engine_process(), events);
@@ -1068,8 +1068,7 @@ mod tests {
         )
     }
 
-    /// XAUUSD and EURUSD as the live clients load them from the captured
-    /// details and leverages.
+    /// XAUUSD and EURUSD as the live clients load them from the captured details and leverages.
     async fn gold_and_euro_dollar() -> (Cfd, InstrumentAny) {
         let (session, _) = connected().await;
         let mut instruments = session
@@ -1097,8 +1096,8 @@ mod tests {
         assert_eq!(sent, 1);
     }
 
-    /// The same order on gold carrying margins of 1, as before the broker's
-    /// margin: denied, so the check above turns on the margin.
+    /// The same order on gold carrying margins of 1, as before the broker's margin: denied, so the
+    /// check above turns on the margin.
     #[tokio::test]
     async fn an_ounce_of_gold_at_margins_of_one_is_denied() {
         let (mut xau, eur) = gold_and_euro_dollar().await;

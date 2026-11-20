@@ -1,12 +1,10 @@
-//! The broker's trading account as cTrader states it (`ProtoOATrader`):
-//! checked for the adapter, and its balance and margin as Nautilus'
-//! account state.
+//! The broker's trading account as cTrader states it (`ProtoOATrader`): checked for the adapter,
+//! and its balance and margin as Nautilus' account state.
 //!
-//! The adapter trades a hedging account only: each cTrader position is one
-//! Nautilus position, its `positionId` the venue position id. A netting or
-//! spread betting account, or another account than the credential's, is
-//! refused. Money is an integer scaled by `moneyDigits`, in the deposit
-//! asset (`depositAssetId`).
+//! The adapter trades a hedging account only: each cTrader position is one Nautilus position, its
+//! `positionId` the venue position id. A netting or spread betting account, or another account than
+//! the credential's, is refused. Money is an integer scaled by `moneyDigits`, in the deposit asset
+//! (`depositAssetId`).
 
 use std::collections::HashMap;
 
@@ -20,8 +18,7 @@ use rust_decimal::Decimal;
 use super::messages::{ProtoOaAccountType, ProtoOaAsset, ProtoOaPosition, ProtoOaTrader};
 use crate::config::{CTraderAccountId, CTraderSettingNames};
 
-/// The account, checked: hedging, the configured one, in a currency
-/// Nautilus knows.
+/// The account, checked: hedging, the configured one, in a currency Nautilus knows.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CTraderAccount {
     /// The venue of the broker holding it, which errors name.
@@ -33,14 +30,15 @@ pub(crate) struct CTraderAccount {
 }
 
 impl CTraderAccount {
-    /// The account `trader` states, at the broker of `venue`, if it is
-    /// `account_id`'s, which `names` names, and hedging; `assets` name its
-    /// deposit asset.
+    /// The account `trader` states, at the broker of `venue`, if it is `account_id`'s, which
+    /// `names` names, and hedging; `assets` name its deposit asset.
     ///
     /// # Errors
     ///
-    /// Returns an error if the trader is another account, the account is
-    /// not hedging, or its deposit asset is no currency Nautilus knows.
+    /// Returns an error if:
+    /// - The trader is another account.
+    /// - The account is not hedging.
+    /// - Its deposit asset is no currency Nautilus knows.
     pub(crate) fn check(
         trader: &ProtoOaTrader,
         venue: Venue,
@@ -79,9 +77,9 @@ impl CTraderAccount {
         })
     }
 
-    /// The account state with `positions` open: one balance, the total the
-    /// account's balance, locked the margin the positions use, free the
-    /// rest; and that margin, account-wide, as initial and maintenance.
+    /// The account state with `positions` open: one balance, the total the account's balance,
+    /// locked the margin the positions use, free the rest; and that margin, account-wide, as
+    /// initial and maintenance.
     ///
     /// # Errors
     ///
@@ -107,8 +105,8 @@ impl CTraderAccount {
     }
 }
 
-/// A cTrader amount: `value` scaled by 10^`digits` (`moneyDigits`, 2 if
-/// absent, as on the demo's account).
+/// A cTrader amount: `value` scaled by 10^`digits` (`moneyDigits`, 2 if absent, as on the demo's
+/// account).
 fn money(value: i64, digits: Option<u32>) -> anyhow::Result<Decimal> {
     let digits = digits.unwrap_or(2);
     anyhow::ensure!(digits <= 28, "moneyDigits {digits} out of range");
