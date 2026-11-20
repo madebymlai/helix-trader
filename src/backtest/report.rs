@@ -301,7 +301,6 @@ mod tests {
         InstrumentAny::Equity(equity)
     }
 
-    /// Builds an order that is accepted, then filled at 2 ns.
     fn filled(
         id: &str,
         instrument: &InstrumentAny,
@@ -392,9 +391,6 @@ mod tests {
         cache.add_instrument(sxr8.clone()).unwrap();
         cache.add_instrument(aapl.clone()).unwrap();
 
-        // Three fills of 10 SXR8.IBIS in EUR, each 0.10 off the mid of 100.00 for 1.00 EUR of
-        // spread, two charged 3 EUR and one 1.25 GBP, which no PnL nets, and two fills of
-        // AAPL.XNAS in USD with no quote, each charged 0.25 USD.
         for order in [
             filled("O-1", &sxr8, OrderSide::Buy, 10, "100.10", "3 EUR"),
             filled("O-2", &sxr8, OrderSide::Sell, 10, "99.90", "3 EUR"),
@@ -450,15 +446,11 @@ mod tests {
         let mut cache = Cache::default();
         cache.add_instrument(sxr8.clone()).unwrap();
 
-        // Buys of 10 at 101.00, filled at 2, 4 and 9 ns
         for (id, ts) in [("O-1", 2), ("O-2", 4), ("O-3", 9)] {
             let order = filled_at(id, &sxr8, OrderSide::Buy, 10, "101.00", "0 EUR", ts);
             cache.add_order(order, None, None, false).unwrap();
         }
 
-        // The 2 ns fill uses mid 100.50 from the second stream's tie at 2 ns, the 4 ns fill uses
-        // mid 100.80 at 3 ns rather than the 5 ns quote after it, and the 9 ns fill uses mid
-        // 100.90 from the first stream's last quote.
         let first = [
             quote(&sxr8, "99.90", "100.10", 1),
             quote(&sxr8, "99.80", "100.00", 2),
@@ -472,7 +464,6 @@ mod tests {
         let streams = [first.map(Ok), second.map(Ok)];
         let outcome = Outcome::new(empty_result(), &cache, streams).unwrap();
 
-        // (101.00 - 100.50 + 101.00 - 100.80 + 101.00 - 100.90) * 10
         assert_eq!(outcome.costs["EUR"].spread, Decimal::from(8));
         assert_eq!(outcome.costs["EUR"].unquoted, 0);
     }
@@ -490,7 +481,6 @@ mod tests {
         ];
         let err = Outcome::new(empty_result(), &cache, [stream.map(Ok)]).unwrap_err();
 
-        // The 1 ns quote comes after the 3 ns quote
         let err = err.to_string();
         assert!(
             err.contains("SXR8.IBIS") && err.contains("1 after 3"),

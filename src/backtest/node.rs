@@ -544,8 +544,7 @@ mod tests {
         );
     }
 
-    /// Returns each venue's base latency, then its submit, modify and cancel latencies, in
-    /// nanoseconds.
+    /// Returns each venue's base, submit, modify and cancel latencies, in nanoseconds.
     fn latencies(config: &BacktestRunConfig) -> Vec<Option<[u64; 4]>> {
         let command = TradingCommand::CancelAllOrders(CancelAllOrders::new(
             TraderId::from("TESTER-001"),
@@ -576,8 +575,6 @@ mod tests {
             .collect()
     }
 
-    /// A latency of 150 ms gives a static model with that base latency and no extra, on every venue
-    /// of either run. With no latency, Nautilus' default applies.
     #[rstest]
     #[case::at_150_ms(Some(SignedDuration::from_millis(150)), Some([150_000_000; 4]))]
     #[case::without_a_latency(None, None)]
@@ -602,12 +599,10 @@ mod tests {
         );
     }
 
-    /// Pins two matching defaults of Nautilus' `BacktestVenueConfig` builder, which its guides do
-    /// not state.
-    ///
-    /// The defaults are bar execution and the rejection of a stop in the market, both on
-    /// (`crates/backtest/src/config.rs:489-491`, `:468-470`). `venue_config` sets neither, and the
-    /// backtest and model guides rely on both.
+    /// Pins two defaults of Nautilus' `BacktestVenueConfig` builder, bar execution and the
+    /// rejection of a stop in the market, both on (`crates/backtest/src/config.rs:489-491`,
+    /// `:468-470`).
+    /// `venue_config` sets neither, and the backtest and model guides rely on both.
     #[rstest]
     fn drift_the_venue_matches_on_bars_and_rejects_a_stop_in_the_market_by_default() {
         let dir = tempfile::tempdir().unwrap();
@@ -682,7 +677,6 @@ mod tests {
         );
     }
 
-    /// The run builds the bars 5 s after their close, as a live node does.
     #[rstest]
     fn a_run_on_a_composite_bar_type_builds_its_bars_as_late_as_a_live_node() {
         let dir = tempfile::tempdir().unwrap();
@@ -841,8 +835,6 @@ mod tests {
         assert!(err.to_string().contains("no instruments"), "{err}");
     }
 
-    /// GLBX trades through IB, which nets, and IC Markets hedges. A dataset needs both kept
-    /// separate.
     #[rstest]
     #[case::trading(run_config, OmsType::Netting, Decimal::ONE)]
     #[case::dataset(dataset_run_config, OmsType::Hedging, Decimal::MAX)]
@@ -882,8 +874,6 @@ mod tests {
         }
     }
 
-    /// The run trades IC's gold and reads LSE's. LSEDGE, which no broker trades, keeps positions
-    /// as Nautilus' venue default in a normal run, and hedges in a dataset run.
     #[rstest]
     fn a_venue_no_broker_trades_starts_with_nothing_in_the_run_s_currency() {
         let dir = tempfile::tempdir().unwrap();

@@ -256,7 +256,6 @@ mod tests {
         dir.to_path_buf()
     }
 
-    /// `--catalog` and `--staging` each take an absolute or a relative directory.
     #[rstest]
     #[case::both_absolute(absolute, absolute)]
     #[case::the_catalog_relative(relative, absolute)]

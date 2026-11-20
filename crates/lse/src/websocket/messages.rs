@@ -163,8 +163,8 @@ mod tests {
         );
     }
 
-    /// A chain's acknowledgements name its underlying. An option's tick is a trade, so the price
-    /// is the trade price and the volume is its size (LSE's WebSocket documentation, "The tick").
+    /// An option's tick is a trade, so the price is the trade price and the volume is its size
+    /// (LSE's WebSocket documentation, "The tick").
     #[rstest]
     fn the_documented_option_frames_read_as_their_types() {
         let LseWsFrame::OptionsSubscribed { underlying } = frame(WS_OPTIONS_SUBSCRIBED_AAPL) else {
@@ -197,8 +197,6 @@ mod tests {
         assert_eq!(authenticated.symbols.len(), 33);
     }
 
-    /// A second connection on a key limited to one gives the limit and the open count. An unknown
-    /// key gives no details.
     #[rstest]
     #[case::too_many_connections(
         WS_TOO_MANY_CONNECTIONS,

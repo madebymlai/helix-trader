@@ -919,7 +919,6 @@ mod tests {
         )
     }
 
-    /// As pyarrow reads the file: two alike at .619501, three at .690600, one at .901218.
     #[rstest]
     fn a_tick_slice_is_its_trades_at_the_instrument_s_precision_with_no_aggressor() {
         let trades = parse_trade_slice(Bytes::from_static(GOLD_TRADES), gold(), 1, 0).unwrap();
@@ -991,7 +990,6 @@ mod tests {
         parsed.rows.into_iter().map(|keyed| keyed.row).collect()
     }
 
-    /// The captured rows of US10Y, as pyarrow reads them.
     fn us10y_rows() -> Vec<LseRow> {
         rows_of(
             US10Y_BOND_YIELDS,
@@ -1014,8 +1012,6 @@ mod tests {
         UnixNanos::from(format!("{time}Z").parse::<jiff::Timestamp>().unwrap())
     }
 
-    /// The 9th's row is known at the 10th's 00:00 UTC, and the 12th's at the 13th's. A macro series
-    /// of yields is known as the daily bond yields are.
     #[rstest]
     #[case::bond_yields(US10Y_BOND_YIELDS, "bond_yields", "date")]
     #[case::macro_yield(US10Y_YIELDS, "macro_yield", "day")]
@@ -1049,8 +1045,6 @@ mod tests {
         assert_eq!(rows, [row("10", 4.884), row("11", 5.0), row("13", 5.133)]);
     }
 
-    /// LSE stamps the 10th's 4-hour rows at their open, 00:00 to 20:00. They are known at their
-    /// close, 04:00 to the 11th's 00:00.
     #[rstest]
     fn a_row_of_an_interval_is_stamped_at_its_close() {
         let rows: Vec<_> = rows_of(
@@ -1079,8 +1073,6 @@ mod tests {
         );
     }
 
-    /// The 10th's rows of each other interval, as pyarrow reads them, give the count and the first
-    /// and last row at their close.
     #[rstest]
     #[case::a_minute(US10Y_BOND_YIELDS_MINUTE, "bond_yields_minute", 1, 971, ("10T00:09:00", 4.876), "10T22:26:00")]
     #[case::five_minutes(US10Y_BOND_YIELDS_FIVE_MINUTES, "bond_yields_five_minute", 5, 265, ("10T00:10:00", 4.878), "10T22:30:00")]
@@ -1113,8 +1105,6 @@ mod tests {
         assert!(rows.iter().all(|row| row.ts_event == row.ts_init));
     }
 
-    /// A row is a field, as pyarrow reads them. Each row is known at the end of its date. The case
-    /// gives the count, and the first and last field and value.
     #[rstest]
     #[case::sovereign_yields(AUGB10Y_SOVEREIGN_YIELDS, "sovereign_yields", "AUGB10Y", 72, ("11", "ask", 94.373), ("12", "z_spread", -11.9303))]
     #[case::corporate_bonds(AT016322245_CORPORATE_BONDS, "corporate_bonds", "AT016322245", 3, ("10", "accrued_interest", 0.666), ("12", "accrued_interest", 0.6824))]
@@ -1153,8 +1143,6 @@ mod tests {
         );
     }
 
-    /// Earnings are keyed by report date, a dividend by ex-date and a split by effective date. Each
-    /// is known at the end of its date.
     #[rstest]
     #[case::earnings_calendar(AAPL_EARNINGS_CALENDAR, "earnings_calendar", "AAPL", "date", &["2026-01-30", "2026-05-01", "2026-07-31", "2026-10-30", "2026-11-03"])]
     #[case::dividends(AAPL_DIVIDENDS, "dividends", "AAPL", "effective_date", &["2026-02-10", "2026-05-12", "2026-08-11", "2026-11-13"])]
@@ -1176,7 +1164,6 @@ mod tests {
         assert_eq!(stamped, expected);
     }
 
-    /// A company's snapshot, updated on 13 October 2026 at 05:08:01 UTC.
     #[rstest]
     #[case::company_profiles(AHMA_COMPANY_PROFILES, "company_profiles")]
     #[case::stock_fundamentals(AHMA_STOCK_FUNDAMENTALS, "stock_fundamentals")]
@@ -1194,8 +1181,6 @@ mod tests {
         assert_eq!(read, [(at, at, serde_json::json!(37_156_248.0))]);
     }
 
-    /// US core inflation releases, as pyarrow reads them, in UTC: 12:30 in the American summer,
-    /// 13:30 in its winter.
     fn core_cpi_releases() -> Vec<(UnixNanos, Option<&'static str>)> {
         [
             ("2025-12-18T13:30:00", Some("2.6%")),
@@ -1223,7 +1208,6 @@ mod tests {
             .collect()
     }
 
-    /// The economic calendar keys a release by its day and times it in `datetime`.
     #[rstest]
     fn an_economic_release_is_stamped_at_the_time_it_came_out() {
         let rows = rows_of(
@@ -1239,7 +1223,6 @@ mod tests {
         assert!(rows.iter().all(|row| row.fields.contains_key("datetime")));
     }
 
-    /// A macro series of releases is keyed by release time.
     #[rstest]
     fn a_macro_release_is_stamped_at_the_time_it_came_out() {
         let rows = rows_of(
@@ -1253,9 +1236,7 @@ mod tests {
         assert_eq!(released(&rows), core_cpi_releases());
     }
 
-    /// ZN's reports, as pyarrow reads them. A Tuesday's report is stamped at the end of its Friday
-    /// `release_date`. Since 28 April 2026 there is none, so `created_at` is used, on the Friday at
-    /// about 20:30 UTC.
+    /// Since 28 April 2026 there is no `release_date`, so `created_at` is used.
     #[rstest]
     fn a_cot_report_is_stamped_at_its_release_date_s_end_or_when_lse_ingested_it() {
         let parsed = parse_rows(
@@ -1290,8 +1271,6 @@ mod tests {
         assert_eq!(stamped[613], report("2026-10-06", "2026-10-09T20:30:10"));
     }
 
-    /// A file of one row of `symbol` keyed `day` days from 1970, with `columns` and a time column
-    /// of `type_` holding nothing.
     fn keyed_with_empty(symbol: &str, day: i32, columns: &[(&str, DataType)]) -> Bytes {
         let mut fields = vec![
             Field::new("symbol", DataType::Utf8, false),
@@ -1314,11 +1293,8 @@ mod tests {
         Bytes::from(file)
     }
 
-    /// 22 September 2026, in days from 1970.
     const SEPTEMBER_22: i32 = 20_718;
 
-    /// A row that says when it was known nowhere is left out, named by its symbol, key, source and
-    /// empty columns.
     #[rstest]
     #[case::a_report_of_no_release_or_ingest(
         "cot",
@@ -1352,9 +1328,8 @@ mod tests {
         }
     }
 
-    /// AAPL's reports, as pyarrow reads them. A statement is known at its acceptance and a derived
-    /// row at its period's. The trailing twelve months' metrics and ratios of 7 October 2026 have
-    /// no statement, so they are left out and named.
+    /// The trailing twelve months' metrics and ratios of 7 October 2026 have no statement, so they
+    /// are left out and named.
     #[rstest]
     fn a_financial_report_is_stamped_when_its_period_s_statements_were_accepted() {
         let parsed = parse_rows(
@@ -1406,7 +1381,6 @@ mod tests {
         }
     }
 
-    /// Refused naming the column, a word of the reason, and LSE's type of it, or the file lacks it.
     #[rstest]
     #[case::dates_as_intervals(
         US10Y_BOND_YIELDS,
@@ -1443,8 +1417,6 @@ mod tests {
         );
     }
 
-    /// As pyarrow reads them: row id, country, maturity, currency, day's OHLC, and fetch time in
-    /// UTC.
     #[rstest]
     fn a_row_s_fields_are_its_other_columns_as_lse_sent_them() {
         let fields: Vec<_> = us10y_rows()
@@ -1485,7 +1457,6 @@ mod tests {
         assert!(err.to_string().contains("4136.4"), "{err:#}");
     }
 
-    /// Candles stamped by LSE at their open, 00:00, 04:00 and 08:00, as pyarrow reads them.
     #[rstest]
     fn candles_are_bars_stamped_at_their_close_at_the_instrument_s_precision() {
         let bar_type = BarType::from("GOLD-FUTURES.LSEDGE-4-HOUR-LAST-EXTERNAL");
@@ -1522,7 +1493,6 @@ mod tests {
         );
     }
 
-    /// A tick slice read as candles.
     #[rstest]
     fn a_file_of_no_candles_is_refused_naming_the_column_it_lacks() {
         let bar_type = BarType::from("GOLD-FUTURES.LSEDGE-1-MINUTE-LAST-EXTERNAL");
@@ -1549,8 +1519,6 @@ mod tests {
         UnixNanos::from(nanos)
     }
 
-    /// GCZ6's captured second, as pyarrow reads it: 636 quotes, the first and last two below, at
-    /// Databento's two decimals for GCZ26.GLBX.
     #[rstest]
     fn quotes_are_quote_ticks_with_lse_s_sizes_at_the_instrument_s_precision() {
         let quotes = parse_quotes(Bytes::from_static(GCZ26_QUOTES), gcz26(), 2, 0).unwrap();
@@ -1597,8 +1565,6 @@ mod tests {
         assert_eq!(quotes[0].bid_price.precision, 2);
     }
 
-    /// GCZ6's captured second of `data=trades`, read as a tick slice: 38 trades, three at one time
-    /// and three prices.
     #[rstest]
     fn a_cme_contract_s_trades_are_read_as_a_tick_slice_is() {
         let trades = parse_trade_slice(Bytes::from_static(GCZ26_TRADES), gcz26(), 2, 0).unwrap();
@@ -1637,8 +1603,6 @@ mod tests {
             .collect()
     }
 
-    /// The first row's ten levels a side (`test_data/README.md`): bids from 3908.10 down, asks from
-    /// 3908.30 up, 0.10 apart.
     fn first_book_levels() -> (Vec<Level>, Vec<Level>) {
         let level =
             |price: &str, size: u64, count: u32| (Price::from(price), Quantity::from(size), count);
@@ -1718,8 +1682,7 @@ mod tests {
         assert_eq!(last.asks[7].price, Price::from("3909.00"));
     }
 
-    /// The rows of one time are one event, its last row ending it (`F_LAST`), as in Nautilus'
-    /// Tardis loader. The second and third rows share a time.
+    /// The last row of one time ends the event (`F_LAST`), as in Nautilus' Tardis loader.
     #[rstest]
     fn the_last_row_of_each_time_of_the_book_ends_its_event() {
         let depths = parse_book(Bytes::from_static(GCZ26_BOOK), gcz26(), 2, 0).unwrap();
@@ -1740,9 +1703,8 @@ mod tests {
         );
     }
 
-    /// A, M and C are each a delta of the order. N gives none, as Nautilus' Databento decoder
-    /// gives none for an MBO record of no action (`decode_mbo_msg`). The last row is N: the delta
-    /// before it, of the same time, ends the event.
+    /// N gives no delta, as Nautilus' Databento decoder gives none for an MBO record of no action
+    /// (`decode_mbo_msg`).
     #[rstest]
     fn an_orders_export_is_the_deltas_of_its_orders() {
         let deltas = parse_orders(Bytes::from_static(GCZ26_ORDERS), gcz26(), 2, 0).unwrap();
@@ -1853,8 +1815,7 @@ mod tests {
         Bytes::from(file)
     }
 
-    /// LSE's docs give R, a cleared book, at Level 2 alone, and a trade (T) at Level 1. An action
-    /// they do not give fails, naming it.
+    /// LSE's docs give R at Level 2 alone, and a trade (T) at Level 1.
     #[rstest]
     #[case::cleared("R")]
     #[case::traded("T")]
@@ -1876,7 +1837,6 @@ mod tests {
         );
     }
 
-    /// A quotes file read as a book.
     #[rstest]
     fn a_file_of_no_book_is_refused_naming_the_column_it_lacks() {
         let err = parse_book(Bytes::from_static(GCZ26_QUOTES), gcz26(), 2, 0).unwrap_err();
@@ -1884,8 +1844,8 @@ mod tests {
         assert!(err.to_string().contains("no column sequence"), "{err:#}");
     }
 
-    /// An empty side, which LSE's schema allows (nullable prices) and no capture holds, so built
-    /// here. As in Nautilus' Databento decoder (`decode_mbp1_msg`), the row gives no quote.
+    /// An empty side, which LSE's schema allows and no capture holds, so built here, gives no
+    /// quote, as in Nautilus' Databento decoder (`decode_mbp1_msg`).
     #[rstest]
     fn a_quote_with_an_empty_side_gives_no_quote_tick() {
         let schema = Arc::new(Schema::new(vec![

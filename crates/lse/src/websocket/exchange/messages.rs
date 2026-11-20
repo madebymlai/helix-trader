@@ -209,10 +209,8 @@ mod tests {
         }
     }
 
-    /// GCZ6's opening record has the best bid and offer at CME's Friday close, with no price and
-    /// no side.
-    ///
-    /// LSE sent the same record in the `json` encoding (`test_data/cme_stream_gcz6_l1_json.txt`).
+    /// GCZ6's opening record has the best bid and offer at CME's Friday close, with no price and no
+    /// side.
     #[rstest]
     fn a_frame_is_lse_s_header_then_the_contract_s_level_1_record() {
         let captured = frames(CME_GCZ6_GCG7);
@@ -261,10 +259,6 @@ mod tests {
     }
 
     /// Synthetic: the captured frame is cut, has another kind, or has a header other than LSE's.
-    ///
-    /// A Level 1 record, `Mbp1Msg`, is 80 bytes after the 24-byte header. Cut at 60 bytes, 36
-    /// remain. With the header alone, none remain. The magic is `L3DB`, the kind is at byte 5, and
-    /// the record count is at byte 20.
     #[rstest]
     #[case::cut(|frame: &mut Vec<u8>| frame.truncate(60), &["36", "80"])]
     #[case::header_only(|frame: &mut Vec<u8>| frame.truncate(24), &["0", "80"])]
@@ -323,8 +317,6 @@ mod tests {
         );
     }
 
-    /// GCZ6's opening at Level 2 (`test_data/README.md`) has its last ten levels on each side, best
-    /// first, with each level's order count.
     #[rstest]
     fn a_level_2_frame_is_lse_s_header_then_the_contract_s_ten_levels_a_side() {
         let session = dbn_frames(CME_GCZ6_L2_DOCUMENTED);
@@ -364,8 +356,6 @@ mod tests {
         );
     }
 
-    /// GCZ6's first order event at Level 3 adds an order of 1 to the bid at 3908.10. It is not the
-    /// last event of its exchange message.
     #[rstest]
     fn a_level_3_frame_is_lse_s_header_then_one_order_event() {
         let session = dbn_frames(CME_GCZ6_L3_DOCUMENTED);
@@ -395,9 +385,7 @@ mod tests {
 
     /// A connection carries one level, so a record of another level is refused.
     ///
-    /// The refusal names the one record and the level's length: `Mbp1Msg` is 80 bytes, `Mbp10Msg`
-    /// 368 and `MboMsg` 56. The test looks for the one record beside the level's name, which holds
-    /// a 1 at Level 1.
+    /// The test looks for the one record beside the level's name, which holds a 1 at Level 1.
     #[rstest]
     #[case::level_1_at_level_2(CME_GCZ6_GCG7, 2, ExchangeLevel::Mbp10, "368")]
     #[case::level_2_at_level_1(CME_GCZ6_L2_DOCUMENTED, 2, ExchangeLevel::Mbp1, "80")]

@@ -499,8 +499,6 @@ mod tests {
         }
     }
 
-    /// Gold read for its book alone replays its book and no bar source. With its quotes stored, the
-    /// book is replayed beside them.
     #[rstest]
     #[case::alone(false, vec![(NautilusDataType::OrderBookDepth, GOLD.to_string())])]
     #[case::beside_the_source_of_its_bars(
@@ -519,7 +517,6 @@ mod tests {
         assert_eq!(backtest.series().unwrap(), whole(&backtest, replayed));
     }
 
-    /// GC.GLBX rolls from GCQ26.GLBX to GCZ26.GLBX at 00:00 UTC on 29 July 2026.
     #[rstest]
     fn the_trades_of_a_contract_read_beside_the_bars_of_its_root_are_replayed_once() {
         let dir = tempfile::tempdir().unwrap();
@@ -552,7 +549,6 @@ mod tests {
         );
     }
 
-    /// GC.GLBX rolls from GCQ26.GLBX to GCZ26.GLBX at 00:00 UTC on 29 July 2026.
     #[rstest]
     fn the_book_of_a_contract_read_beside_the_bars_of_its_root_is_replayed_once() {
         let dir = tempfile::tempdir().unwrap();
@@ -575,7 +571,6 @@ mod tests {
             ..backtest(dir.path(), &[])
         };
 
-        // No trades are stored, so the bars are left out
         assert_eq!(
             backtest.series().unwrap(),
             [SeriesSlice {
@@ -601,9 +596,6 @@ mod tests {
         InstrumentAny::Cfd(gold)
     }
 
-    /// The rule comes from the venues table alone. A broker without a base currency accepts a
-    /// balance in the contract's P&L currency, and a broker whose account has one accepts any
-    /// balance.
     #[rstest]
     #[case::in_the_pnl_currency_of_glbx("100000 USD", future("GCZ6.GLBX"))]
     #[case::in_the_pnl_currency_of_a_venue_of_no_row("100000 USD", future("GCZ6.IDEALPRO"))]

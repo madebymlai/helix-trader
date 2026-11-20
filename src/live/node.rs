@@ -238,7 +238,6 @@ mod tests {
             .unwrap()
     }
 
-    /// Claims the external orders of the gold only, not those of the conversion pair.
     #[tokio::test]
     async fn a_strategy_claims_the_external_orders_of_the_instruments_it_trades_alone() {
         let config = EmaCrossConfig::load(

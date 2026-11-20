@@ -748,7 +748,6 @@ mod tests {
         .await;
         let err = r.unwrap_err().to_string();
         assert!(err.contains("quotes of ESZ21.GLBX"), "{err}");
-        // Stored over the first fill's window, 100 to 200 ns, then asked from 50 ns
         assert!(
             err.contains("[100, 200]") && err.contains("1970-01-01T00:00:00.00000005Z"),
             "{err}"
@@ -996,7 +995,6 @@ mod tests {
         depth
     }
 
-    /// Trades at 10, 60 and 150 and snapshots at 20 and 180.
     async fn fill_ticks(
         catalog: &mut ParquetDataCatalog,
         start: u64,

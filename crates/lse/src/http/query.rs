@@ -500,8 +500,8 @@ mod tests {
         )
     }
 
-    /// Three 4-hour candles are cut after the first, not at 06:00, because LSE folds a candle from
-    /// the rows inside the export alone.
+    /// The cut is after the first candle, not at 06:00, because LSE folds a candle from the rows
+    /// inside the export alone.
     #[rstest]
     fn a_candle_export_halves_between_two_candles() {
         let (first, second) =
@@ -529,7 +529,6 @@ mod tests {
         );
     }
 
-    /// A day halves at noon. Three seconds halve at a second and a half.
     #[rstest]
     #[case::a_day("2026-10-21T00:00:00Z", "2026-10-21T12:00:00Z", "2026-10-22T00:00:00Z")]
     #[case::three_seconds(

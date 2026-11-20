@@ -143,7 +143,6 @@ mod tests {
             ["redis-server", "--appendonly", "yes"]
         );
         let host = container.host_config.unwrap();
-        // Redis' working directory
         assert_eq!(host.binds.unwrap(), ["helix-redis-data:/data"]);
     }
 
