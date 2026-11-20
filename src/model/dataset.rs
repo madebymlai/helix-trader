@@ -1,58 +1,62 @@
-//! The training table of a strategy, stored by day in the Nautilus catalog, whose coverage is the
-//! day cache.
+//! Holds the training table of a strategy, stored by day in the Nautilus catalog. The coverage of
+//! the catalog is the day cache.
 //!
-//! A dataset is the settled rows of one strategy (`TargetRow`, from a dataset run), stored as
-//! Nautilus custom data, `DatasetRow`. A row holds everything needed to read its trades, so
-//! training, scoring and the meta's examples read nothing else: each side's payoff features
-//! (`targets::SideTarget::payoff`), P&L, commission, exit and unit, beside the decision's features.
-//! A side's model reads the decision's features, then that side's payoff features
-//! (`DatasetRow::side`, `deciding::SideRow`).
+//! A dataset is the settled rows of one strategy (`TargetRow`, from a dataset run). They are
+//! stored as Nautilus custom data, `DatasetRow`. A row holds everything needed to read its trades,
+//! so training, scoring and the meta's examples read nothing else. That is each side's payoff
+//! features (`targets::SideTarget::payoff`), P&L, commission, exit and unit, beside the features
+//! of the decision. The model of a side reads the features of the decision, then the payoff
+//! features of that side (`DatasetRow::side`, `deciding::SideRow`).
 //!
-//! Rows are stored under an identifier of the strategy's id and fingerprint (`decide::fingerprint`
-//! extended by `targets::fingerprint`, the dataset runs' `DatasetVenue` and the dataset `VERSION`).
-//! A change to any of them finds no row and rebuilds the dataset: the feature names, their
-//! `[indicators]` arguments, warmup or version, the decision rule, the target, what its ATR is
-//! built from, the commission, balance or latency. The config is read by value, the code by
-//! version, each bumped by hand: the dataset's for the code making every strategy's rows, the
-//! strategy's for its features (`FeatureSetBuilder::version`).
+//! Rows are stored under an identifier made of the strategy's id and a fingerprint. The
+//! fingerprint is `decide::fingerprint` extended by `targets::fingerprint`, the `DatasetVenue` of
+//! the dataset runs and the dataset `VERSION`. A change to any of them finds no row and rebuilds
+//! the dataset. That covers the feature names, their `[indicators]` arguments, warmup or version,
+//! the decision rule, the target, what its ATR is built from, and the commission, balance or
+//! latency. The config is read by value and the code by version. Each version is bumped by hand:
+//! the dataset's for the code that makes every strategy's rows, and the strategy's for its
+//! features (`FeatureSetBuilder::version`).
 //!
-//! The feature names and the payoff names (`TargetConfig::payoff_names`) are in the metadata of the
-//! rows' data type. `read` checks them and each row's widths.
+//! The feature names and the payoff names (`TargetConfig::payoff_names`) are in the metadata of
+//! the data type of the rows. `read` checks them and the width of each row.
 //!
-//! The catalog's intervals of the rows are the cache: `missing` asks it for the days of a span it
-//! does not cover, and `build` replays them once, from the first missing day to the last plus the
-//! time a decision settles within, then writes them. That time is the target's limit
-//! (`TargetConfig::settles_within`) and, at a latency, the longest its time close waits to be
-//! processed (`DatasetVenue::delay`).
+//! The intervals the catalog holds for the rows are the cache. `missing` asks it for the days of a
+//! span it does not cover. `build` replays those days once, from the first missing day to the last
+//! plus the time a decision settles within, and then writes them. That time is the limit of the
+//! target (`TargetConfig::settles_within`) plus the delay of the venue (`DatasetVenue::delay`). At
+//! a latency, the delay is the longest the time close waits to be processed.
 //!
-//! The replay starts the features' warmup (`FeatureSet::warmup`) before the first day, so the
-//! indicators read the data before it at the day's first decisions. Rows decided before the day are
-//! not stored. A feature that is a function of the data within the warmup has the same value
-//! however long the build; one keeping a running sum may differ in its last bits. A recursive one,
-//! an exponential average or Wilder's ATR, never forgets its start value, whose weight decays by
-//! e^-1 (Wilder's) to e^-2 (an exponential average's) a period: a warmup of 5 to 10 times the
-//! longest recursive period makes that negligible, never zero to the bit.
+//! The replay starts the warmup of the features (`FeatureSet::warmup`) before the first day, so
+//! the indicators read the data before it at the first decisions of the day. Rows decided before
+//! the day are not stored. A feature that is a function of the data within the warmup has the same
+//! value however long the build. One that keeps a running sum may differ in its last bits. A
+//! recursive one, such as an exponential average or Wilder's ATR, never forgets its start value.
+//! The weight of that value decays by e^-1 a period (Wilder's) to e^-2 a period (an exponential
+//! average's). A warmup of 5 to 10 times the longest recursive period makes it negligible, but
+//! never zero to the bit.
 //!
-//! `write` files only the days a replay settled: those replayed whole, its end that far past
-//! theirs. Days without rows (a weekend's, cold features') go in the file of the day with rows
-//! before them, or the first after, because Nautilus writes no file without rows and such a day
-//! would stay missing and be replayed by every build. A filed day's decisions have all settled or
-//! been dropped for a reason of their own (a denial, a rejection, an entry unfilled by its time).
-//! The time close, a market order, fills at its time on the venue's last quote, even with no quote
-//! since (a weekend). At a latency it fills on the first quote after its arrival or, none coming,
-//! at the run's next timer, on the last, within the delay the replay runs past the day. So every
-//! build replaying a day stores it the same.
+//! `write` files only the days a replay settled. Those are the days replayed whole, where the
+//! replay ends that far past the end of the day. Days without rows, such as a weekend or cold
+//! features, go in the file of the day with rows before them, or of the first day after. Nautilus
+//! writes no file without rows, so such a day would stay missing and be replayed by every build.
+//! All decisions of a filed day have settled or been dropped for a reason of their own: a denial,
+//! a rejection, or an entry unfilled by its time. The time close is a market order. It fills at
+//! its time on the last quote of the venue, even with no quote since, as over a weekend. At a
+//! latency it fills on the first quote after it arrives. If none comes, it fills on the last
+//! quote at the next timer of the run, within the delay the replay runs past the day. So every
+//! build that replays a day stores it the same.
 //!
-//! A train at a time sees only what was settled then: `settled` replays the days it lacks to that
-//! time and no further, as `build` does, files the days the replay settled, and takes the rows of
-//! the others, the last before that time, from the replay alone.
+//! A train at a time sees only what was settled then. `settled` replays the days it lacks to that
+//! time and no further, as `build` does. It files the days the replay settled. It takes the rows
+//! of the other days, the last ones before that time, from the replay alone.
 //!
 //! Nautilus skips writing a file whose name, its interval, exists, and refuses one overlapping
-//! another, so `write` first deletes what the catalog holds over its days. The directory is never
-//! consolidated, which would merge the days' files and lose their intervals, the cache.
+//! another. So `write` first deletes what the catalog holds over its days. The directory is never
+//! consolidated, because that would merge the files of the days and lose their intervals, which
+//! are the cache.
 //!
 //! `manifest.json` beside the files holds the strategy, fingerprint, feature and payoff names and
-//! target spec, rewritten whole (write, then rename) at each write.
+//! target spec. It is rewritten whole (write, then rename) at each write.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -89,12 +93,13 @@ use crate::{
     strategy::{requirements::DataRequirements, warmup},
 };
 
-/// The version of the code that makes every strategy's rows (`decide`, `targets`, `features` and
-/// the Nautilus indicators, matching engine and fill model they run on) and of the `Manifest`. It
-/// is in every dataset's fingerprint, bumped by hand whenever that code makes something else of the
-/// same data and config, a Nautilus pin bump included. The golden rows
-/// (`tests/backtest/backtest_golden_rows.rs`) fail on a change of their rows made without a bump; a
-/// change reaching none of them is bumped all the same.
+/// The version of the code that makes every strategy's rows, and of the `Manifest`.
+///
+/// That code is `decide`, `targets`, `features` and the Nautilus indicators, matching engine and
+/// fill model they run on. The version is in every dataset's fingerprint. Bump it by hand whenever
+/// that code makes something else of the same data and config, a Nautilus pin bump included. The
+/// golden rows (`tests/backtest/backtest_golden_rows.rs`) fail on a change of their rows made
+/// without a bump. A change that reaches none of them is bumped all the same.
 pub const VERSION: u32 = 10;
 
 const FEATURE_NAMES: &str = "feature_names";
@@ -107,14 +112,14 @@ const MANIFEST: &str = "manifest.json";
 #[arrow_custom_data]
 #[custom_data]
 pub struct DatasetRow {
-    /// The value of each feature, in the order of the dataset's names.
+    /// The value of each feature, in the order of the names in the dataset.
     pub features: Vec<f64>,
     /// The long's payoff features (`targets::SideTarget::payoff`), in the order of the payoff
     /// names.
     pub long_payoff: Vec<f64>,
     /// The long's realized P&L, net of its commission, in the target's P&L currency.
     pub long_pnl: f64,
-    /// The commission the long's P&L is net of.
+    /// The commission that the long's P&L is net of.
     pub long_commission: f64,
     /// How the long closed (`targets::Exit::value`).
     pub long_exit: f64,
@@ -125,7 +130,7 @@ pub struct DatasetRow {
     pub short_payoff: Vec<f64>,
     /// The short's realized P&L, as the long's.
     pub short_pnl: f64,
-    /// The commission the short's P&L is net of.
+    /// The commission that the short's P&L is net of.
     pub short_commission: f64,
     /// How the short closed.
     pub short_exit: f64,
@@ -135,11 +140,11 @@ pub struct DatasetRow {
     pub settled_at: UnixNanos,
     /// The time of the decision.
     pub ts_event: UnixNanos,
-    /// The time of the decision too, which files the row in its day.
+    /// The time of the decision too. It files the row in its day.
     pub ts_init: UnixNanos,
 }
 
-/// The error of a dataset holding rows of other feature or payoff names, or of another width.
+/// The error of a dataset that holds rows of other feature or payoff names, or of another width.
 #[derive(Debug)]
 pub struct SchemaMismatch(String);
 
@@ -157,32 +162,37 @@ pub struct Manifest {
     pub strategy_id: StrategyId,
     /// The fingerprint of the features, the decision rule, the target and the dataset venue.
     pub fingerprint: String,
-    /// The names of the features, in the order of a row's features.
+    /// The names of the features, in the order of the features of a row.
     pub feature_names: Vec<String>,
-    /// The target's names of each side's payoff features, in their order.
+    /// The target's names for the payoff features of each side, in their order.
     pub payoff_names: Vec<String>,
     /// The target spec.
     pub target: TargetConfig,
 }
 
-/// The venue settings a dataset run takes, which its rows depend on: the commission its targets are
-/// net of, the balance, the equity the reference stake is sized at, and the latency, if any, which
-/// moves its fills. Its accounts margin nothing (`backtest::node`), so no leverage is among them.
-/// Normalized in the fingerprint. Declared in `ModelConfig::dataset`, such as
-/// `{ commission = { per_quantity = "0.035 USD" }, balance = "10000 USD" }`, the balance positive,
-/// and optionally `latency = "150ms"`.
+/// The venue settings a dataset run takes, which its rows depend on.
+///
+/// The settings are:
+/// - The commission its targets are net of.
+/// - The balance, the equity the reference stake is sized at.
+/// - The latency, if any, which moves its fills.
+///
+/// Its accounts margin nothing (`backtest::node`), so no leverage is among them. The settings are
+/// normalized in the fingerprint. They are declared in `ModelConfig::dataset`, such as
+/// `{ commission = { per_quantity = "0.035 USD" }, balance = "10000 USD" }`. The balance must be
+/// positive, and `latency = "150ms"` is optional.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DatasetVenue {
     pub commission: Commission,
     #[serde(deserialize_with = "positive_balance")]
     pub balance: Money,
-    /// Left out, none: each command reaches the venue as it is sent.
+    /// Left out, there is none, and each command reaches the venue as it is sent.
     #[serde(default)]
     pub latency: Option<Latency>,
 }
 
-/// Refuses a balance that is not positive: a reference stake of none sizes no target.
+/// Refuses a balance that is not positive, because a reference stake of none sizes no target.
 fn positive_balance<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Money, D::Error> {
     let text = String::deserialize(deserializer)?;
     let balance: Money = text.parse().map_err(serde::de::Error::custom)?;
@@ -196,8 +206,8 @@ fn positive_balance<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result
 }
 
 impl DatasetVenue {
-    /// Normalized so every spelling is one key. No latency reads as it did before latency was a
-    /// setting.
+    /// Returns the text normalized so every spelling is one key. No latency reads as it did before
+    /// latency was a setting.
     fn fingerprint_part(&self) -> String {
         self.to_string()
     }
@@ -220,15 +230,17 @@ impl Display for DatasetVenue {
 }
 
 impl DatasetVenue {
-    /// How much later than the target's limit a decision settles: the longest its time close waits
-    /// to be processed (`Latency::dataset_delay`), none without a latency.
+    /// How much later than the target's limit a decision settles.
+    ///
+    /// It is the longest its time close waits to be processed (`Latency::dataset_delay`), and none
+    /// without a latency.
     pub(super) fn delay(&self) -> SignedDuration {
         self.latency
             .map_or(SignedDuration::ZERO, Latency::dataset_delay)
     }
 }
 
-/// The days a train read (`Dataset::settled`): built by its replay or cached.
+/// The days a train read (`Dataset::settled`), either built by its replay or cached.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DaysRead {
     pub built: usize,
@@ -244,7 +256,7 @@ pub struct Dataset {
     feature_names: Vec<String>,
     payoff_names: Vec<String>,
     warmup: SignedDuration,
-    /// The target's limit (`TargetConfig::settles_within`) and the venue's delay
+    /// The target's limit (`TargetConfig::settles_within`) plus the venue's delay
     /// (`DatasetVenue::delay`).
     settles_within: SignedDuration,
     target: TargetConfig,
@@ -272,10 +284,11 @@ impl Dataset {
         }
     }
 
-    /// Builds the days `first` to `last` the dataset is missing: `replay` runs the strategy from
-    /// the warmup before the first missing day to the last's end plus the time a decision settles
-    /// within, and the rows it settled are written (see `write`). With no day missing, nothing is
-    /// replayed. Returns the missing days.
+    /// Builds the days `first` to `last` that the dataset is missing.
+    ///
+    /// `replay` runs the strategy from the warmup before the first missing day to the end of the
+    /// last plus the time a decision settles within. The rows it settled are written (see
+    /// `write`). With no day missing, nothing is replayed. Returns the missing days.
     ///
     /// # Errors
     ///
@@ -297,10 +310,12 @@ impl Dataset {
         Ok(missing)
     }
 
-    /// The rows of the decisions in `[from, at)` settled at `at`, in time order. `replay` runs once
-    /// over the days the dataset lacks, from the warmup before the first to `at`, and the days it
-    /// settled are written (see `write`). The unsettled days' rows come from the replay alone, and
-    /// a row whose positions close after `at` is dropped. Also returns the days read.
+    /// Returns the rows of the decisions in `[from, at)` settled at `at`, in time order.
+    ///
+    /// `replay` runs once over the days the dataset lacks, from the warmup before the first to
+    /// `at`. The days it settled are written (see `write`). The rows of the unsettled days come
+    /// from the replay alone, and a row whose positions close after `at` is dropped. Also returns
+    /// the days read.
     ///
     /// # Errors
     ///
@@ -342,13 +357,14 @@ impl Dataset {
         Ok((rows, read))
     }
 
-    /// The fingerprint the rows are stored under.
+    /// Returns the fingerprint that the rows are stored under.
     #[must_use]
     pub const fn fingerprint(&self) -> Fingerprint {
         self.fingerprint
     }
 
-    /// The days `first` to `last` the catalog does not cover, a partly covered day included.
+    /// Returns the days `first` to `last` that the catalog does not cover, a partly covered day
+    /// included.
     ///
     /// # Errors
     ///
@@ -376,8 +392,8 @@ impl Dataset {
     }
 
     /// Writes the `rows` of a replay over `[from, to]` for the days it settled, and the manifest.
-    /// What the catalog holds over those days is deleted first; the rows of other days are
-    /// dropped.
+    ///
+    /// Deletes what the catalog holds over those days first. The rows of other days are dropped.
     ///
     /// # Errors
     ///
@@ -568,7 +584,7 @@ impl Dataset {
 }
 
 impl DatasetRow {
-    /// The row storing `row`.
+    /// Returns the row that stores `row`.
     #[must_use]
     pub fn of(row: &TargetRow) -> Self {
         let (long, short) = (row.outcomes.long, row.outcomes.short);
@@ -590,7 +606,7 @@ impl DatasetRow {
         }
     }
 
-    /// `side`'s net P&L, commission and unit.
+    /// Returns the net P&L, commission and unit of `side`.
     #[must_use]
     pub const fn trade(&self, side: Side) -> Trade {
         match side {
@@ -607,7 +623,7 @@ impl DatasetRow {
         }
     }
 
-    /// `side`'s row (`deciding::SideRow`).
+    /// Returns the row of `side` (`deciding::SideRow`).
     #[must_use]
     pub fn side(&self, side: Side) -> SideRow {
         match side {
@@ -616,7 +632,7 @@ impl DatasetRow {
         }
     }
 
-    /// Each side's row (`side`).
+    /// Returns the row of each side (`side`).
     #[must_use]
     pub fn sides(&self) -> PerSide<SideRow> {
         PerSide {
@@ -626,9 +642,11 @@ impl DatasetRow {
     }
 }
 
-/// The fingerprint of a dataset: the decisions' (`decide::fingerprint`, with the bar build delay of
-/// `warmup::bar_build_delay`) extended by the target's (`targets::fingerprint`), the venue's
-/// settings and the dataset `VERSION`. Only a model's blueprint computes it
+/// Returns the fingerprint of a dataset.
+///
+/// It is the fingerprint of the decisions (`decide::fingerprint`, with the bar build delay of
+/// `warmup::bar_build_delay`), extended by the fingerprint of the target (`targets::fingerprint`),
+/// the settings of the venue and the dataset `VERSION`. Only the blueprint of a model computes it
 /// (`ModelBlueprint::fingerprint`).
 ///
 /// # Errors
@@ -669,7 +687,7 @@ fn row_type() -> NautilusDataType {
     }
 }
 
-/// The first and last UTC days of `[from, to)`.
+/// Returns the first and last UTC days of `[from, to)`.
 #[must_use]
 pub fn days(from: Timestamp, to: Timestamp) -> (Date, Date) {
     (
@@ -843,7 +861,7 @@ mod tests {
         }
     }
 
-    /// Settled an hour later: a long winning `pnl` at its take profit, a short losing as much.
+    /// Settled an hour later. A long wins `pnl` at its take profit, and a short loses as much.
     fn row(time: &str, features: Vec<f64>, pnl: &str) -> TargetRow {
         let ns = UnixNanos::from(at(time));
         let loss = format!("-{pnl}");
@@ -1062,9 +1080,9 @@ mod tests {
         );
     }
 
-    /// The time close sent at the 2 hour limit reaches the venue 30 s later and fills at the next
-    /// settlement point, at most a minute after (the execution engine's purge timer): the day is
-    /// settled 2 hours, 30 s and a minute after its end.
+    /// The time close sent at the 2 hour limit reaches the venue 30 s later. It fills at the next
+    /// settlement point, at most a minute after (the execution engine's purge timer). So the day
+    /// is settled 2 hours, 30 s and a minute after its end.
     #[rstest]
     fn at_a_latency_a_day_is_written_once_replay_has_passed_its_end_its_limit_its_latency_and_a_minute()
      {
@@ -1388,10 +1406,11 @@ mod tests {
         assert_ne!(current, at(VERSION + 1));
     }
 
-    /// The identifier of a fixed strategy's rows as a literal: its id, then the fingerprint of its
-    /// features, hourly decisions, bracket, requirements and venue. A change that rekeyed every
-    /// dataset, leaving rows and trained models behind, fails here. A deliberate rekey, a bump of
-    /// `VERSION` or a new fingerprint input, updates the literal and the store's pinned directory
+    /// The identifier of the rows of a fixed strategy, as a literal. It is the id, then the
+    /// fingerprint of its features, hourly decisions, bracket, requirements and venue. A change
+    /// that rekeyed every dataset, leaving rows and trained models behind, fails here. A deliberate
+    /// rekey is a bump of `VERSION` or a new fingerprint input. It updates the literal and the
+    /// pinned directory of the store
     /// (`store::tests::a_fixed_strategys_model_sets_keep_their_directory`).
     #[rstest]
     fn a_fixed_strategys_dataset_keeps_its_identifier() {
@@ -1427,7 +1446,7 @@ mod tests {
         assert_ne!(of(&composite), of(&requirements()));
     }
 
-    /// Another balance is another fingerprint, another spelling of one is not.
+    /// Another balance gives another fingerprint. Another spelling of one balance does not.
     #[rstest]
     fn another_balance_of_the_dataset_run_is_another_fingerprint() {
         let of = |venue: DatasetVenue| {
@@ -1556,8 +1575,8 @@ mod tests {
         .unwrap()
     }
 
-    /// Declaring pairs, or other pairs, is another fingerprint; none keeps the earlier one
-    /// (`a_fixed_strategys_dataset_keeps_its_identifier`).
+    /// Declaring pairs, or other pairs, gives another fingerprint. Declaring none keeps the earlier
+    /// one (`a_fixed_strategys_dataset_keeps_its_identifier`).
     #[rstest]
     fn the_conversions_key_the_dataset_only_when_declared() {
         let none = converting(&[]);
@@ -1804,8 +1823,8 @@ mod tests {
         );
     }
 
-    /// The 5th and 6th, settled by the first train's end, are cached; the unsettled 7th is built
-    /// again.
+    /// The 5th and 6th, settled by the end of the first train, are cached. The unsettled 7th is
+    /// built again.
     #[rstest]
     fn the_days_settled_at_the_end_are_cached_and_the_others_replayed_again() {
         let dir = tempfile::tempdir().unwrap();
