@@ -8,10 +8,10 @@
 //!
 //! Needs the login's `CTRADER_*` credential and the broker's account and environment, from the
 //! environment or `.env`. It accepts only the demo: any other environment fails the test before
-//! connecting.
+//! connecting. It places no order.
 //!
 //! Gated by `demo_broker::opted_in`: unless `NAUTILUS_CTRADER_RUN` names the broker in the shell,
-//! the test returns at once, saying it was skipped. It places no order. Run it with:
+//! the test returns at once, saying it was skipped. Run it with:
 //!
 //! ```sh
 //! NAUTILUS_CTRADER_RUN=pepperstone cargo test --test live ctrader_demo:: -- --nocapture
@@ -81,10 +81,8 @@ fn stored(catalog: &mut ParquetDataCatalog, instrument_id: InstrumentId) -> Vec<
         .unwrap()
 }
 
-/// Fills the catalog in `dir` through the node's data client, as fill-catalog does
-/// (`fill_history`).
-///
-/// It fills the quotes of `instrument_id` over `[start, end]`.
+/// Fills the catalog in `dir` with the quotes of `instrument_id` over `[start, end]`, through the
+/// node's data client, as fill-catalog does (`fill_history`).
 pub(crate) async fn fill_quotes_through_node(
     dir: &std::path::Path,
     instrument_id: InstrumentId,
@@ -106,8 +104,7 @@ pub(crate) async fn fill_quotes_through_node(
     fill_history(&requirements, start, end, &venues, dir).await
 }
 
-/// Covers Wednesday 21 October 2026 UTC. The resumed fill splits it at a time between two
-/// milliseconds.
+/// Covers Wednesday 21 October 2026 UTC, the resumed fill splitting it between two milliseconds.
 #[tokio::test(flavor = "current_thread")]
 async fn a_day_of_gold_quotes_fills_the_same_in_one_fill_and_resumed() {
     let Some(broker) = opted_in(
@@ -176,9 +173,6 @@ async fn a_day_of_gold_quotes_fills_the_same_in_one_fill_and_resumed() {
     );
 }
 
-/// Starts the client and connects it, then reads the startup mass status. It is read only.
-///
-/// The node registers the account state it publishes on connecting.
 #[tokio::test(flavor = "current_thread")]
 async fn the_execution_client_reads_the_hedged_demo_account_and_reconciles_it() {
     let Some(broker) = opted_in(
@@ -223,7 +217,6 @@ async fn the_execution_client_reads_the_hedged_demo_account_and_reconciles_it() 
     let (connected, state) = tokio::join!(client.connect(), register);
     connected.unwrap();
 
-    // A week's lookback, so the deal list is asked over a real window
     let mass_status = client.generate_mass_status(Some(7 * 24 * 60)).await;
     client.disconnect().await.unwrap();
 

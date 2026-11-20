@@ -1,14 +1,13 @@
 //! End to end on a cTrader broker's demo, running `Live` on XAU/USD with the broker's clients. The
 //! catalog holds gold's quotes up to `CATALOG_BEHIND` before now, filled as fill-catalog fills it.
 //!
-//! A recording strategy gets its minute bars warmed up over two windows: the catalog's, then the
-//! broker's data client's up to now. Each bar reaches its indicator once. Then the strategy gets
-//! live quotes and the bars built from them, until SIGINT. The broker's answer is written back to
-//! the catalog, and the live quotes the node receives are streamed into it. The test needs what
-//! `ctrader_demo.rs` needs, and gold's market open.
+//! A recording strategy, which warms up and subscribes as a real strategy does and sends no order,
+//! gets its minute bars warmed up over two windows: the catalog's, then the broker's data client's
+//! up to now. Each bar reaches its indicator once. Then the strategy gets live quotes and the bars
+//! built from them, until SIGINT. The broker's answer is written back to the catalog, and the live
+//! quotes the node receives are streamed into it.
 //!
-//! Gated as `ctrader_demo.rs` is. The strategy sends no order. The test deletes the trader's Redis
-//! records (`live::redis`) once the node has stopped cleanly. Run it with:
+//! Needs what `ctrader_demo.rs` needs, and gold's market open. Run it with:
 //!
 //! ```sh
 //! NAUTILUS_CTRADER_RUN=pepperstone cargo test --test live ctrader_live_demo:: -- --nocapture
@@ -50,8 +49,6 @@ struct Record {
     quotes: Vec<QuoteTick>,
 }
 
-/// Warms up and subscribes as a real strategy does, subscribes to the quotes, and records both.
-/// Sends no order.
 #[derive(Debug)]
 struct Recorder {
     core: StrategyCore,
@@ -109,7 +106,6 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
     let gold = broker.gold();
     let bar_type = BarType::from(format!("{gold}-1-MINUTE-MID-INTERNAL").as_str());
 
-    // Over 23 hours: two windows
     let warmup = SignedDuration::from_hours(26);
     let requirements = DataRequirements {
         bar_types: vec![bar_type],
@@ -134,7 +130,6 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
         record: Rc::clone(&record),
     };
 
-    // Gold and its quotes over [now - warmup, now - CATALOG_BEHIND], as fill-catalog stores them
     let catalog = tempfile::tempdir().unwrap();
     let now = crate::now();
     let catalog_end = now - CATALOG_BEHIND;
@@ -148,7 +143,6 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
     .unwrap();
     let started = crate::now();
 
-    // Outside the catalog, as `Live` requires
     let staging = tempfile::tempdir().unwrap();
     let live = Live {
         trader_id: TraderId::from("HELIXTEST-101"),
@@ -158,7 +152,6 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
         recording: crate::recording(staging.path()),
     };
 
-    // Interrupts as Ctrl-C would once the node runs, so its signal handler stops it
     let interrupt = get_runtime().spawn(async {
         tokio::time::sleep(LIVE_RUN).await;
         let status = Command::new("kill")
@@ -170,7 +163,6 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
 
     let ran = Box::pin(tokio::time::timeout(
         LIVE_RUN + Duration::from_secs(60),
-        // The recorder trades nothing: it claims no instrument
         live.run(&requirements, &warming, recorder, None),
     ))
     .await;
@@ -283,8 +275,6 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
             .all(|w| w[0].ts_event <= w[1].ts_event)
     );
 
-    // The warmup runs up to now and gives each bar once, so the first live bar is the minute after
-    // the last warmup bar
     assert!(warmup_bars.len() >= 20, "{} warmup bars", warmup_bars.len());
     assert!(
         warmup_bars
@@ -303,7 +293,6 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
             .all(|w| w[1].ts_event.as_u64() - w[0].ts_event.as_u64() == minute)
     );
 
-    // Live quotes are at the spot's time, sized as the history's, and ordered
     assert!(!quotes.is_empty());
     assert!(quotes.iter().all(|q| q.instrument_id == gold));
     assert!(quotes.iter().all(|q| q.bid_price <= q.ask_price));
@@ -315,13 +304,11 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
             .all(|q| q.bid_size == broker.gold_quote_size())
     );
 
-    // At the hand-off, every live quote is newer than the warmup's last, past the one repeat
-    // allowed
     let new = &quotes[usize::from(repeated)..];
     assert!(new.iter().all(|q| q.ts_event > warmup_end));
 
-    // The node streams the new live quotes the strategy got into the catalog, in order, then those
-    // received until the clients disconnected (`live/README.md`, "Recording into the catalog").
+    // The node streams the new live quotes into the catalog (`live/README.md`, "Recording into the
+    // catalog").
     let streamed: Vec<_> = stored
         .iter()
         .filter(|q| q.ts_event > warmup_end)

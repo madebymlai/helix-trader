@@ -76,11 +76,8 @@ struct Record {
     live: Vec<(Bar, UnixNanos)>,
 }
 
-/// Warms up on the composite hour bars and subscribes from where the warmup ends, as a strategy
-/// does.
-///
-/// It also subscribes to their source minute bars, to see each one, and stops the node after
-/// `LIVE_MINUTES` of them.
+/// Subscribes to the composite hour bars after their warmup, and to their source minute bars, to
+/// see each one. It stops the node after `LIVE_MINUTES` of them.
 #[derive(Debug)]
 struct Probe {
     core: StrategyCore,
@@ -153,7 +150,6 @@ impl DataActor for Probe {
     }
 }
 
-/// Interrupts as Ctrl-C would, so the node's signal handler stops it.
 fn interrupt() {
     let pid = std::process::id().to_string();
     let status = Command::new("kill").args(["-INT", &pid]).status();
@@ -192,8 +188,6 @@ async fn the_live_minute_bars_follow_the_warmup_with_no_gap_and_no_duplicate() {
         warmup: WARMUP,
     };
 
-    // The instrument and its minute bars over [now - WARMUP, now - CATALOG_BEHIND], as fill-catalog
-    // stores them.
     let catalog = tempfile::tempdir().unwrap();
     let now = crate::now();
     let catalog_end = now - CATALOG_BEHIND;
@@ -214,7 +208,6 @@ async fn the_live_minute_bars_follow_the_warmup_with_no_gap_and_no_duplicate() {
         .unwrap();
     }
 
-    // Outside the catalog, as `Live` requires
     let staging = tempfile::tempdir().unwrap();
     let live = Live {
         trader_id: TraderId::from(TRADER),
@@ -226,7 +219,6 @@ async fn the_live_minute_bars_follow_the_warmup_with_no_gap_and_no_duplicate() {
     let started = crate::now();
     let ran = Box::pin(tokio::time::timeout(
         Duration::from_secs(600),
-        // The probe trades nothing: it claims no instrument
         live.run(
             &requirements,
             &warmup::Warmup::live(&requirements),
@@ -260,8 +252,6 @@ async fn the_live_minute_bars_follow_the_warmup_with_no_gap_and_no_duplicate() {
         "the warmup did not complete"
     );
 
-    // Both the catalog and IB served it, as shown by bars on either side of the catalog's end and
-    // the largest step between two bars.
     let catalog_end = catalog_end.as_nanosecond() as i64;
     let from_catalog = warmup.iter().filter(|&&ts| ts <= catalog_end).count();
     let largest_step = warmup.windows(2).map(|pair| pair[1] - pair[0]).max();

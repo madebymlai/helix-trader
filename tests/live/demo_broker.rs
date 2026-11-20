@@ -1,6 +1,6 @@
-//! The cTrader brokers the demo modules (`ctrader_*`) run on. It says which broker a run names, and
-//! what each broker's demo account is expected to hold. The checks are the same on each broker. The
-//! venue, margins, sizes and costs are the broker's.
+//! The cTrader brokers the demo modules (`ctrader_*`) run on, and what each broker's demo account
+//! is expected to hold. The checks are the same on each broker. The venue, margins, sizes and costs
+//! are the broker's.
 //!
 //! The gate is `NAUTILUS_CTRADER_RUN=ic` or `pepperstone` in the shell. Without it, a test returns
 //! at once, saying it was skipped.
@@ -15,7 +15,6 @@ use nautilus_model::{
 };
 use rust_decimal::Decimal;
 
-/// A cTrader broker's demo account, as measured on it.
 #[derive(Debug)]
 pub(crate) struct DemoBroker {
     name: &'static str,
@@ -38,7 +37,7 @@ pub(crate) struct DemoBroker {
 
 /// The ounces of gold the orders test trades.
 ///
-/// It is 3. At Pepperstone's 0.035 USD an ounce, the commission is 0.105 USD, a half cent, so the
+/// At Pepperstone's 0.035 USD an ounce, 3 oz is a commission of 0.105 USD, a half cent, so the
 /// charge shows how the account rounds one.
 pub(crate) const GOLD_OUNCES: u32 = 3;
 
@@ -79,9 +78,9 @@ const BROKERS: [DemoBroker; 2] = [
 
 /// Returns the broker a run names, if it names one.
 ///
-/// It reads the shell before `.env`, so that the file cannot opt in. An opted-in run claims the
-/// process for `module` (`claim_process`). Then it reads `.env` and refuses any environment but the
-/// broker's demo, before anything connects.
+/// It reads the shell before `.env`, so that the file cannot opt in, and claims the process for
+/// `module` (`claim_process`). Then it reads `.env` and refuses any environment but the broker's
+/// demo, before anything connects.
 ///
 /// # Panics
 ///

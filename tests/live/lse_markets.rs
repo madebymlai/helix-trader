@@ -1,16 +1,15 @@
-//! Tests end to end on LSE that a node streams the quotes of a series of each LSE derived market.
-//! It uses the LSE adapter's data client, each series on the socket that carries its market, routed
+//! Tests end to end on LSE that a node streams the quotes of a series of each LSE derived market,
+//! through the LSE adapter's data client, each series on the socket that carries its market, routed
 //! LSEDGE as the live node routes it. LSE publishes no definitions, so the test writes them by hand
-//! into a temporary catalog. It asks the client for them as a live warmup does, and the catalog
-//! answers. LSE opens a subscription with the symbol's last tick, so each series quotes at once
-//! even with its market closed. The node stops once each series has quoted, or after a minute.
-//! Bitcoin's quote is from the last hour: data-ws also lists it, but sends only a tick of 8
-//! November, when crypto moved to london-ws.
+//! into a temporary catalog, which answers the client's request for them as in a live warmup. LSE
+//! opens a subscription with the symbol's last tick, so each series quotes at once even with its
+//! market closed. The node stops once each series has quoted, or after a minute. Bitcoin's quote is
+//! from the last hour: data-ws also lists it, but sends only a tick of 8 November, when crypto
+//! moved to london-ws.
 //!
 //! The test needs `LSE_API_KEY` from the environment or `.env`. The free key allows one connection
-//! a socket, so no other live run may hold data-ws, london-ws or tsx-ws meanwhile.
-//!
-//! The test is gated like `lse_history.rs`, by `NAUTILUS_LSE_RUN=1` in the shell. Run it with:
+//! a socket, so no other live run may hold data-ws, london-ws or tsx-ws meanwhile. It is gated as
+//! `lse_history.rs` is. Run it with:
 //!
 //! ```sh
 //! NAUTILUS_LSE_RUN=1 cargo test --test live lse_markets:: -- --nocapture
@@ -61,10 +60,7 @@ const WAITED: Duration = Duration::from_secs(60);
 /// The precision of every series' prices, which is finer than LSE's for any of them.
 const PRECISION: u8 = 5;
 
-/// Returns whether the run is opted in.
-///
-/// Reads the opt-in from the shell before `.env` is read, so the file cannot opt in. An opted-in
-/// run claims the process (`claim_process`).
+/// Returns whether the run is opted in, reading the shell before `.env`, and claims the process.
 fn opted_in(test: &str) -> bool {
     let run = std::env::var("NAUTILUS_LSE_RUN").is_ok_and(|value| value == "1");
     if run {
@@ -75,9 +71,6 @@ fn opted_in(test: &str) -> bool {
     run
 }
 
-/// Returns a hand-written definition of `id`.
-///
-/// It is an index of LSE's symbol `raw`, priced at `PRECISION`, with whole sizes.
 fn index(id: &str, raw: &str) -> InstrumentAny {
     InstrumentAny::IndexInstrument(
         IndexInstrument::builder()
@@ -95,10 +88,6 @@ fn index(id: &str, raw: &str) -> InstrumentAny {
     )
 }
 
-/// Asks LSE's client for each series' definition, as a live warmup does, and subscribes to its
-/// quotes.
-///
-/// It keeps the first quote of each series, and stops the node once every series has quoted.
 #[derive(Debug)]
 struct Quotes {
     core: DataActorCore,
@@ -189,7 +178,6 @@ async fn a_series_of_each_derived_market_quotes_from_its_socket() {
         let run = node.run();
         tokio::pin!(run);
 
-        // The actor stops the node once every series has quoted, the test past the wait
         tokio::select! {
             ran = &mut run => ran,
             () = tokio::time::sleep(WAITED) => {

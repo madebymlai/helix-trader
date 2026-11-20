@@ -5,6 +5,12 @@
 //! The catalog stores both contracts as fill-catalog does, each under its own id and definition.
 //! It holds their trades and book depth over 22:00 on Tuesday 28 July to 02:00 on 29 July. The
 //! root is not stored.
+//!
+//! August has six trades: two before the start of the backtests, which are not replayed, two in
+//! its slice, the last at its last nanosecond, and two after the roll. December has four: one
+//! before the roll, two in its slice, the first at the roll, and one after the end of the
+//! backtests. August has one depth in its slice and one after, December one before its slice and
+//! one in it.
 
 use jiff::{SignedDuration, Timestamp};
 use nautilus_core::UnixNanos;
@@ -29,12 +35,10 @@ pub(crate) const PRE: &str = "GCQ26.GLBX";
 /// Front contract from the roll on.
 pub(crate) const POST: &str = "GCZ26.GLBX";
 
-/// Parses `hh:mm:ss.fffffffff` as a UTC time on Tuesday 28 July 2026.
 pub(crate) fn tuesday(time: &str) -> Timestamp {
     ts(&format!("2026-07-28T{time}Z"))
 }
 
-/// Parses `hh:mm:ss.fffffffff` as a UTC time on Wednesday 29 July 2026.
 pub(crate) fn wednesday(time: &str) -> Timestamp {
     ts(&format!("2026-07-29T{time}Z"))
 }
@@ -68,7 +72,6 @@ pub(crate) fn trade(id: &str, time: Timestamp, price: &str) -> TradeTick {
     )
 }
 
-/// Returns a quote with bid and ask 10 cents either side of `mid`, one contract each.
 pub(crate) fn quote(id: &str, time: Timestamp, mid: &str) -> QuoteTick {
     let mid: Price = Price::from(mid);
     let half = Price::from("0.10");
@@ -91,11 +94,6 @@ fn depth(id: &str, time: Timestamp) -> OrderBookDepth {
     depth
 }
 
-/// Returns August's trades.
-///
-/// - Two before the start of the backtests, not replayed.
-/// - Two in its slice, the last at its last nanosecond.
-/// - Two after the roll.
 pub(crate) fn pre_trades() -> Vec<TradeTick> {
     vec![
         trade(PRE, tuesday("22:30:00"), "3990.00"),
@@ -107,11 +105,6 @@ pub(crate) fn pre_trades() -> Vec<TradeTick> {
     ]
 }
 
-/// Returns December's trades.
-///
-/// - One before the roll.
-/// - Two in its slice, the first at the roll.
-/// - One after the end of the backtests.
 pub(crate) fn post_trades() -> Vec<TradeTick> {
     vec![
         trade(POST, tuesday("23:15:00"), "4040.00"),
@@ -121,7 +114,6 @@ pub(crate) fn post_trades() -> Vec<TradeTick> {
     ]
 }
 
-/// Returns August's depths: one in its slice, one after.
 pub(crate) fn pre_depths() -> Vec<OrderBookDepth> {
     vec![
         depth(PRE, tuesday("23:45:00")),
@@ -129,7 +121,6 @@ pub(crate) fn pre_depths() -> Vec<OrderBookDepth> {
     ]
 }
 
-/// Returns December's depths: one before its slice, one in it.
 pub(crate) fn post_depths() -> Vec<OrderBookDepth> {
     vec![
         depth(POST, tuesday("23:50:00")),
@@ -137,7 +128,6 @@ pub(crate) fn post_depths() -> Vec<OrderBookDepth> {
     ]
 }
 
-/// Returns both contracts' trades and book depth over 22:00 Tuesday to 02:00 Wednesday.
 /// December's trades are left out unless `post_trades_stored`.
 pub(crate) fn catalog_storing(post_trades_stored: bool) -> TempDir {
     let dir = tempfile::tempdir().unwrap();
@@ -173,8 +163,7 @@ pub(crate) fn catalog_of_trades(trades: &[TradeTick]) -> TempDir {
     catalog_of_ticks(trades, &[])
 }
 
-/// Returns both contracts over 22:00 Tuesday to 02:00 Wednesday, with `trades` and `quotes` of
-/// either.
+/// `trades` and `quotes` go to the contract they name.
 pub(crate) fn catalog_of_ticks(trades: &[TradeTick], quotes: &[QuoteTick]) -> TempDir {
     let dir = tempfile::tempdir().unwrap();
     let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);

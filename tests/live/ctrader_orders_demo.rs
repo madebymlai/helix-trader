@@ -1,21 +1,17 @@
 //! End to end on a cTrader broker's demo, with orders. `Live` runs on XAU/USD and EUR/USD. Once a
-//! strategy has a quote of each, it sends one bracket of 3 oz of gold (`GOLD_OUNCES`):
+//! strategy has a quote of each, it sends one bracket of 3 oz of gold (`GOLD_OUNCES`): a market
+//! buy, a stop loss 30.00 below the bid and a take profit 30.00 above the ask.
 //!
-//! - A market buy.
-//! - A stop loss 30.00 below the bid.
-//! - A take profit 30.00 above the ask.
-//!
-//! The strategy closes the position at once by its id (`close_position`) and records every order
-//! event. The node stops once the position is closed. Then the broker's execution client reads the
-//! account, which has no position and no order open.
+//! The strategy closes the position at once by its id (`close_position`), and the node stops once
+//! it is closed. Then the broker's execution client reads the account, which has no position and no
+//! order open.
 //!
 //! EUR/USD's quotes are there for Nautilus' risk engine. On an account in EUR, as IC's demo is, the
 //! engine converts an order's USD margin at the cache's EUR/USD. It denies the order without one
 //! (`VALIDATION_FAILED: Account currency conversion failed: No exchange rate from USD to EUR`,
 //! demo, 2026-10-26). An account in USD does not need them.
 //!
-//! Needs what `ctrader_live_demo.rs` needs, and gold's market open. Gated as `ctrader_demo.rs` is.
-//! The test deletes the trader's Redis records. Run it with:
+//! Needs what `ctrader_live_demo.rs` needs, and gold's market open. Run it with:
 //!
 //! ```sh
 //! NAUTILUS_CTRADER_RUN=pepperstone cargo test --test live ctrader_orders_demo:: -- --nocapture
@@ -77,9 +73,7 @@ struct Record {
     closed: Option<PositionClosed>,
 }
 
-/// Sends one bracket on gold's first quote after a EUR/USD quote, and closes the position it opens.
-///
-/// It notifies `done` once the position has closed and both legs are canceled, or the bracket
+/// Notifies `done` once the position has closed and both legs are canceled, or the bracket
 /// failed.
 #[derive(Debug)]
 struct BracketOnce {
@@ -118,8 +112,6 @@ impl BracketOnce {
 }
 
 nautilus_strategy!(BracketOnce, {
-    /// Returns the instruments its config claims. The live node registers them as it adds the
-    /// strategy.
     fn external_order_instrument_ids(&self) -> Option<Vec<InstrumentId>> {
         self.config().external_order_instrument_ids.clone()
     }
@@ -260,10 +252,8 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
         sent: false,
     };
 
-    // The catalog is empty, so the venue answers the whole warmup
     let catalog = tempfile::tempdir().unwrap();
 
-    // Outside the catalog, as `Live` requires
     let staging = tempfile::tempdir().unwrap();
     let live = Live {
         trader_id: TraderId::from(TRADER),
@@ -273,7 +263,6 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
         recording: crate::recording(staging.path()),
     };
 
-    // Interrupts as Ctrl-C would, once the strategy is done or the deadline has passed
     let finished = Arc::clone(&done);
     let interrupt = get_runtime().spawn(async move {
         let _ = tokio::time::timeout(DEADLINE, finished.notified()).await;
@@ -362,10 +351,7 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
     assert_eq!(close.order_side, OrderSide::Sell);
 }
 
-/// Returns the open positions and orders the execution client reports on the demo account.
-///
-/// It reads them as startup reconciliation does. The mass status also holds orders closed over its
-/// window.
+/// Returns the open positions and orders the broker reports, as startup reconciliation reads them.
 async fn open_at_broker(broker: &DemoBroker) -> (usize, usize) {
     let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
     replace_exec_event_sender(tx);

@@ -72,9 +72,7 @@ use crate::common;
 /// Only one node runs per process.
 static GATEWAY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Returns whether the run is opted in, and claims the process (`claim_process`).
-///
-/// It reads the shell before `.env`, so that the file cannot opt in.
+/// Returns whether the run is opted in, reading the shell before `.env`, and claims the process.
 fn opted_in(test: &str) -> bool {
     let run = std::env::var("NAUTILUS_IB_RUN").is_ok_and(|value| value == "1");
     if run {
@@ -129,8 +127,8 @@ fn history_venues() -> HistoryVenueArgs {
     HistoryVenueArgs::from_arg_matches(&matches).unwrap()
 }
 
-/// fill-catalog fills the pair's definition and BID and ASK minute bars over an hour that FX trades
-/// through. The hour is Thursday 12 November 2026 from 10:00 UTC.
+/// fill-catalog fills the pair's definition and BID and ASK minute bars over Thursday 12 November
+/// 2026 from 10:00 UTC, an hour that FX trades through.
 #[tokio::test(flavor = "multi_thread")]
 async fn fill_catalog_fills_an_idealpro_pairs_bid_and_ask_minute_bars() {
     if !opted_in("fill_catalog_fills_an_idealpro_pairs_bid_and_ask_minute_bars") {
@@ -177,7 +175,6 @@ async fn fill_catalog_fills_an_idealpro_pairs_bid_and_ask_minute_bars() {
             "{identifier}: a bar of another type, outside the hour or off the minute"
         );
 
-        // IB gives BID and ASK bars no volume
         assert!(
             bars.iter().all(|bar| bar.volume.is_zero()),
             "{identifier}: a bar with a volume"
@@ -196,8 +193,6 @@ async fn fill_catalog_fills_an_idealpro_pairs_bid_and_ask_minute_bars() {
             .collect::<BTreeMap<UnixNanos, Price>>()
     });
 
-    // The BID bars are the bid's and the ASK bars are the ask's: in each minute both close, the bid
-    // closes at or below the ask, and below it in some.
     let closes: Vec<(Price, Price)> = bids
         .iter()
         .filter_map(|(ts, bid)| asks.get(ts).map(|ask| (*bid, *ask)))
@@ -217,9 +212,7 @@ async fn fill_catalog_fills_an_idealpro_pairs_bid_and_ask_minute_bars() {
 }
 
 /// Returns the EMA crossover on SXR8.IBIS hour bars, built from IB's minute bars and warmed up over
-/// two hours.
-///
-/// Its slow EMA needs 30 bars, so it never trades.
+/// two hours. Its slow EMA needs 30 bars, so it never trades.
 fn never_trading_ema_cross() -> EmaCrossConfig {
     EmaCrossConfig::load(
         r#"
@@ -261,10 +254,8 @@ async fn live_runs_on_the_paper_gateway_and_stops_cleanly_on_sigint() {
     let config = never_trading_ema_cross();
     let requirements = config.data_requirements();
 
-    // The catalog is empty, so the venue answers the whole warmup
     let catalog = tempfile::tempdir().unwrap();
 
-    // Outside the catalog, as `Live` requires
     let staging = tempfile::tempdir().unwrap();
     let live = Live {
         trader_id: TraderId::from("HELIXTEST-043"),
@@ -324,9 +315,8 @@ async fn paper_client() -> Client {
         .unwrap()
 }
 
-/// Returns one snapshot of IB's account updates, until the end of IB's download.
-///
-/// Nautilus' IB adapter reads `reqAccountUpdates` into the info of its account state.
+/// Returns one snapshot of IB's account updates, until the end of IB's download. Nautilus' IB
+/// adapter reads `reqAccountUpdates` into the info of its account state.
 async fn account_updates(client: &Client, account: &IbAccount) -> Vec<AccountUpdate> {
     let mut subscription = client
         .account_updates(&IbAccountId(account.to_string()))
@@ -354,10 +344,8 @@ fn account_values(updates: &[AccountUpdate]) -> Vec<&AccountValue> {
         .collect()
 }
 
-/// Returns the one currency with an `ExchangeRate` of 1, besides the `BASE` ledger.
-///
-/// IB defines it as "the exchange rate of the currency to your base currency". Values may carry a
-/// `$LEDGER-` prefix.
+/// Returns the one currency with an `ExchangeRate` of 1, besides the `BASE` ledger. Values may
+/// carry a `$LEDGER-` prefix.
 fn base_currency(values: &[&AccountValue]) -> String {
     let at_one: BTreeSet<&str> = values
         .iter()
@@ -379,8 +367,6 @@ fn base_currency(values: &[&AccountValue]) -> String {
 
 /// The tags Nautilus' IB adapter requests to build its account state (`execution/account.rs`,
 /// `open_account_summary`).
-///
-/// Each balance is under its row's currency.
 const SUMMARY_TAGS: &[&str] = &[
     AccountSummaryTags::NET_LIQUIDATION,
     AccountSummaryTags::TOTAL_CASH_VALUE,
@@ -395,10 +381,8 @@ const SUMMARY_TAGS: &[&str] = &[
 ];
 
 /// A trade on IB is sized on the balance that Nautilus' IB adapter builds from IB's account
-/// summary.
-///
-/// The balance is one amount, its net liquidation, in one currency, the base currency, if IB
-/// reports so. Rows that hold a ratio, such as the cushion, carry no currency.
+/// summary: one amount, its net liquidation, in the base currency, if IB reports so. Rows that
+/// hold a ratio, such as the cushion, carry no currency.
 #[tokio::test(flavor = "multi_thread")]
 async fn ib_reports_its_account_summary_in_the_accounts_base_currency_alone() {
     if !opted_in("ib_reports_its_account_summary_in_the_accounts_base_currency_alone") {
@@ -458,8 +442,7 @@ const HELD_SHARES: f64 = 50.0;
 
 const PNL_MOVE: f64 = 1.0;
 
-/// How long the test waits for that move, sampling every `SAMPLED`. IB updates its account values
-/// every three minutes.
+/// How long the test waits for that move, sampling every `SAMPLED`.
 const PNL_WAIT: Duration = Duration::from_secs(12 * 60);
 const SAMPLED: Duration = Duration::from_secs(30);
 
@@ -573,14 +556,13 @@ async fn samples_apart(client: &Client, account: &IbAccount) -> (Sample, Sample)
     (first, last)
 }
 
-/// Nautilus' IB adapter takes IB's net liquidation as the balance total. `Portfolio::equity` adds a
-/// margin account's open P&L to it. A trade on IB is sized on the balance alone, because the net
+/// Nautilus' IB adapter takes IB's net liquidation as the balance total, and `Portfolio::equity`
+/// adds a margin account's open P&L to it. A trade is sized on the balance alone, because the net
 /// liquidation holds that P&L already.
 ///
 /// With 50 SXR8 held on an account based in EUR and nothing else, the net liquidation over the cash
-/// (the value of the shares) moves with their P&L as IB reports it: between two account updates the
-/// P&L moved a euro or more across, by as much, give or take half. A net liquidation that left the
-/// position out would not move. The shares are sold before anything is judged.
+/// moves with their P&L between two account updates, by a euro or more, give or take half. The
+/// shares are sold before anything is judged.
 #[tokio::test(flavor = "multi_thread")]
 async fn net_liquidation_moves_with_an_open_positions_pnl() {
     let set = |name| std::env::var(name).is_ok_and(|value| value == "1");
