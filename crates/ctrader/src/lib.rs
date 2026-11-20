@@ -1,25 +1,23 @@
 //! A NautilusTrader adapter for Spotware's cTrader Open API, naming no broker: the caller names the
-//! broker's venue and the variables of its account (`config`), and the adapter serves the broker's
-//! forex and metals, their quotes from cTrader's tick history and live from its spot events, and
-//! trades a hedging account. See `README.md`.
+//! broker's venue and account variables (`config`). Serves forex and metals quotes from the tick
+//! history and live spot events, and trades a hedging account. See `README.md`.
 //!
 //! Nautilus has no cTrader adapter; this one is laid out as Nautilus' adapters are
 //! (`docs/developer_guide/adapters.md`):
-//! - `common`: Spotware's protobuf messages from the vendored `proto/`, the parsing of symbols into
-//!   instruments, the account check, the token pair and its token file.
-//! - `config`: the environment, the credential and the client configs.
+//! - `common`: the protobuf messages from the vendored `proto/`, symbol parsing, the account check,
+//!   the token pair and its file.
+//! - `config`: the environment, credential and client configs.
 //! - `websocket`: the connection, an outer client and its handler task.
-//! - `session`: `CTraderSession`, the cTrader session both clients share, with the tick history
-//!   merged into quotes, the spot subscriptions and the trade requests.
-//! - `data`: the data client, its live quotes from the spot events.
-//! - `execution`: the execution client, with the trade requests of orders, the dispatch of trade
-//!   events and the reconciliation reports.
+//! - `session`: `CTraderSession`, shared by both clients: tick history merged into quotes, spot
+//!   subscriptions and trade requests.
+//! - `data`: the data client.
+//! - `execution`: the execution client.
 //! - `factories`.
 //!
 //! # Feature Flags
 //!
-//! - `test-support`: Exposes the hooks of a caller's end-to-end test of a session's token renewal
-//!   on a real cTrader server (see `README.md`).
+//! - `test-support`: Exposes the hooks for an end-to-end test of token renewal on a real server
+//!   (see `README.md`).
 
 use jiff::SignedDuration;
 use nautilus_model::data::NautilusDataType;
@@ -33,8 +31,7 @@ pub use self::{
     factories::{CTraderDataClientFactory, CTraderExecutionClientFactory},
     session::CTraderSession,
 };
-// The types the hooks of a caller's test on a real server return, the hooks themselves coming with
-// the `test-support` feature.
+// Returned by the `test-support` hooks
 pub use self::{common::token::TokenPair, websocket::SpotEvents};
 
 mod common;
@@ -47,10 +44,9 @@ mod session;
 mod testing;
 mod websocket;
 
-/// The only data the adapter serves: quotes, from cTrader's BID and ASK ticks, from which Nautilus
-/// builds bars.
+/// The only data served: quotes from cTrader's BID and ASK ticks, from which Nautilus builds bars.
 pub const SERVED_DATA: NautilusDataType = NautilusDataType::QuoteTick;
 
-/// The longest window one tick request spans (Spotware's docs: a week), about 0.7 M BID and 0.7 M
-/// ASK ticks of XAUUSD.
+/// The longest window one tick request spans (a week, per Spotware's docs), about 0.7 M BID and
+/// 0.7 M ASK ticks of XAUUSD.
 pub const TICK_REQUEST_SPAN: SignedDuration = SignedDuration::from_hours(7 * 24);

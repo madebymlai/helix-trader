@@ -14,8 +14,8 @@
 //!   position `positionId`, the commission the charge cTrader states (a negative amount) as a
 //!   positive cost. A deal stating no charge fails its report, and the request that wanted it.
 //!
-//! Prices travel as IEEE-754 doubles: an order's or a deal's price, a stop loss and a take profit
-//! are on the instrument's tick, so they are read at its precision, and one finer is an error, not
+//! Prices travel as IEEE-754 doubles: an order's, a deal's, a stop loss's and a take profit's are
+//! on the instrument's tick, so they are read at its precision, and one finer is an error, not
 //! rounded. Volumes are in cents of a unit. Records of a symbol the client did not load are out of
 //! its scope: dropped, logged at debug.
 
@@ -41,8 +41,8 @@ use crate::common::messages::{
     ProtoOaOrderType, ProtoOaPosition, ProtoOaPositionStatus, ProtoOaTimeInForce, ProtoOaTradeSide,
 };
 
-/// What the reports of one collection share: the account, the loaded instruments by cTrader
-/// `symbolId`, the account's currency (of commissions) and the collection's start.
+/// The account, the loaded instruments by cTrader `symbolId`, the account's currency (of
+/// commissions) and the collection's start.
 pub(super) struct Reports<'a> {
     pub(super) account_id: AccountId,
     pub(super) instruments: &'a HashMap<i64, InstrumentAny>,
@@ -51,7 +51,7 @@ pub(super) struct Reports<'a> {
 }
 
 impl Reports<'_> {
-    /// The instrument of `symbol_id`, or `None`, logged, if not loaded.
+    /// Skipped, logged at debug, if the symbol is not loaded.
     fn instrument(&self, symbol_id: i64, what: &str) -> Option<&InstrumentAny> {
         let instrument = self.instruments.get(&symbol_id);
         if instrument.is_none() {
@@ -98,7 +98,6 @@ impl Reports<'_> {
         )))
     }
 
-    /// The report of position `id` of `instrument`, which cTrader no longer holds open: flat.
     pub(super) fn flat(&self, instrument: &InstrumentAny, id: i64) -> PositionStatusReport {
         PositionStatusReport::new(
             self.account_id,
@@ -113,8 +112,8 @@ impl Reports<'_> {
         )
     }
 
-    /// The stop loss and take profit of `position`, if open and of a loaded symbol, as its open
-    /// reduce-only orders.
+    /// The stop loss and take profit of `position` as its open reduce-only orders, if it is open
+    /// and of a loaded symbol.
     ///
     /// # Errors
     ///
@@ -235,8 +234,8 @@ impl Reports<'_> {
         }))
     }
 
-    /// The reports of `leg` of the protection order `order` filled by `deal`: its status, filled,
-    /// and the fill, under the leg's venue order id.
+    /// The status, filled, and the fill of `leg` of `order` filled by `deal`, under the leg's venue
+    /// order id.
     ///
     /// # Errors
     ///
@@ -263,9 +262,9 @@ impl Reports<'_> {
         Ok(Some((status, fill)))
     }
 
-    /// The reports of the legs of the protection order `order`, closed: filled by `deal`, the leg
-    /// it hit (see `triggered`) filled with the deal's fill under the leg's venue order id, and the
-    /// other cancelled; else, cancelled or expired, both legs cancelled. Only the legs the order
+    /// The reports of the legs of the protection order `order`, closed. Filled by `deal`: the leg
+    /// it hit (see `triggered`) filled with the deal's fill under the leg's venue order id, the
+    /// other cancelled. Else cancelled or expired: both legs cancelled. Only the legs the order
     /// holds, if of a loaded symbol.
     ///
     /// # Errors
@@ -300,8 +299,7 @@ impl Reports<'_> {
         Ok(reports)
     }
 
-    /// The instrument of `position`, if open and loaded: cTrader also lists a position created
-    /// empty for a pending order, which holds nothing.
+    /// cTrader also lists a position created empty for a pending order, which holds nothing.
     fn open_instrument(&self, position: &ProtoOaPosition) -> Option<&InstrumentAny> {
         if position.position_status() != ProtoOaPositionStatus::PositionStatusOpen {
             log::debug!(
@@ -314,9 +312,7 @@ impl Reports<'_> {
         self.instrument(position.trade_data.symbol_id, "position")
     }
 
-    /// The report of `order`, which the broker holds nowhere: its request never reached the broker,
-    /// so it is rejected for `reason`. Its venue order id is its own, else its client order id, the
-    /// broker having given it none.
+    /// Its venue order id is its own, else its client order id, the broker having given it none.
     pub(super) fn absent(&self, order: &OrderAny, reason: &str) -> OrderStatusReport {
         let venue = order
             .venue_order_id()
@@ -506,8 +502,8 @@ pub(super) fn explained<'d>(
     (kept, unexplained)
 }
 
-/// The Nautilus order an order of cTrader's is: its `clientOrderId`, or for a closing order the
-/// close request's tag cTrader made it.
+/// The Nautilus order is the `clientOrderId`, or for a closing order the close request's tag
+/// cTrader made it.
 pub(super) fn client_order_id(order: &ProtoOaOrder) -> Option<ClientOrderId> {
     let raw = order
         .client_order_id
@@ -519,8 +515,7 @@ pub(super) fn client_order_id(order: &ProtoOaOrder) -> Option<ClientOrderId> {
     }
 }
 
-/// Which leg of the protection order `order` filled `deal`: the one set alone, or the one whose
-/// price is nearer the deal's.
+/// The leg set alone, or the one whose price is nearer the deal's.
 pub(super) fn triggered(order: &ProtoOaOrder, deal: &ProtoOaDeal) -> Leg {
     let price = deal.execution_price.unwrap_or_default();
     match (
@@ -535,7 +530,6 @@ pub(super) fn triggered(order: &ProtoOaOrder, deal: &ProtoOaDeal) -> Leg {
     }
 }
 
-/// The signed volume, in cents, of each open position of `positions`.
 pub(super) fn open_volumes(positions: &[ProtoOaPosition]) -> HashMap<i64, i64> {
     positions
         .iter()
@@ -552,10 +546,9 @@ pub(super) fn open_volumes(positions: &[ProtoOaPosition]) -> HashMap<i64, i64> {
 }
 
 /// The commission cTrader charged on `deal` (a negative amount in the deposit currency `currency`,
-/// at its `moneyDigits`) as Nautilus' positive cost. A deal that states none has no commission to
-/// book: zero would be one cTrader did not report, so it fails, as Nautilus' OKX and Interactive
-/// Brokers adapters fail a fill without its fee (`developer_guide/adapters.md`, "Commission failure
-/// handling").
+/// at its `moneyDigits`) as Nautilus' positive cost. A deal that states none fails rather than book
+/// zero, as Nautilus' OKX and Interactive Brokers adapters fail a fill without its fee
+/// (`developer_guide/adapters.md`, "Commission failure handling").
 ///
 /// # Errors
 ///
@@ -570,7 +563,6 @@ pub(super) fn commission(deal: &ProtoOaDeal, currency: Currency) -> anyhow::Resu
     Money::from_decimal(-charged, currency).map_err(|e| anyhow::anyhow!("commission: {e}"))
 }
 
-/// Whether `deal` executed some volume.
 pub(super) fn fills(deal: &ProtoOaDeal) -> bool {
     matches!(
         deal.deal_status(),
@@ -589,9 +581,9 @@ pub(super) fn position_id(id: i64) -> PositionId {
     PositionId::new(id.to_string())
 }
 
-/// cTrader's trigger method as Nautilus': `TRADE` (a buy triggered by the ask, a sell by the bid)
-/// is `BID_ASK`, `DOUBLE_TRADE` `DOUBLE_BID_ASK`; the `OPPOSITE` methods have no Nautilus
-/// counterpart, and the venue holds the order: `DEFAULT`.
+/// `TRADE` (a buy triggered by the ask, a sell by the bid) is `BID_ASK`, `DOUBLE_TRADE`
+/// `DOUBLE_BID_ASK`; the `OPPOSITE` methods have no Nautilus counterpart, and the venue holds the
+/// order: `DEFAULT`.
 pub(super) fn trigger_type(method: ProtoOaOrderTriggerMethod) -> TriggerType {
     match method {
         ProtoOaOrderTriggerMethod::Trade => TriggerType::BidAsk,
@@ -602,7 +594,7 @@ pub(super) fn trigger_type(method: ProtoOaOrderTriggerMethod) -> TriggerType {
     }
 }
 
-/// The decimal a double was written from: its shortest round-trip form.
+/// The shortest round-trip decimal of a double.
 pub(super) fn decimal(value: f64) -> anyhow::Result<Decimal> {
     anyhow::ensure!(value.is_finite(), "price {value} is not finite");
     value
@@ -611,7 +603,6 @@ pub(super) fn decimal(value: f64) -> anyhow::Result<Decimal> {
         .with_context(|| format!("price {value} out of range"))
 }
 
-/// `value`, a price on `instrument`'s tick, at its precision.
 pub(super) fn price(instrument: &InstrumentAny, value: f64) -> anyhow::Result<Price> {
     let precision = instrument.price_precision();
     let value = decimal(value)?.normalize();
@@ -623,7 +614,6 @@ pub(super) fn price(instrument: &InstrumentAny, value: f64) -> anyhow::Result<Pr
     Price::from_decimal_dp(value, precision).map_err(|e| anyhow::anyhow!("price {value}: {e}"))
 }
 
-/// A volume, in cents of a unit, as a quantity of `instrument`.
 pub(super) fn quantity(instrument: &InstrumentAny, cents: i64) -> anyhow::Result<Quantity> {
     anyhow::ensure!(cents > 0, "volume {cents} is not positive");
     let precision = instrument.size_precision();
@@ -636,7 +626,6 @@ pub(super) fn quantity(instrument: &InstrumentAny, cents: i64) -> anyhow::Result
     Quantity::from_decimal_dp(units, precision).map_err(|e| anyhow::anyhow!("volume {units}: {e}"))
 }
 
-/// A Unix time in milliseconds, which must be there.
 pub(super) fn millis(ms: Option<i64>) -> anyhow::Result<UnixNanos> {
     let ms = ms.context("no time")?;
     UnixNanos::from_millis_checked(ms).with_context(|| format!("time {ms} ms out of range"))
