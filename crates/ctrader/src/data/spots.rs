@@ -3,9 +3,8 @@
 //!
 //! A spot event carries a side only when it changed, and the time of the change
 //! (`subscribeToSpotTimestamp`); the first one after a subscription carries both. On the demo the
-//! spot events of a minute were the ticks history serves for it, side for side and millisecond for
-//! millisecond (`README.md`, "Live quotes"), so live quotes are the quotes a fill stores. Each
-//! quote is stamped `ts_event` = the spot's time and `ts_init` = its receipt.
+//! spot events of a minute matched the ticks history served for it (`README.md`, "Live quotes").
+//! Each quote has `ts_event` the spot's time and `ts_init` its receipt.
 
 use std::collections::HashMap;
 
@@ -22,14 +21,12 @@ use crate::{
     session::ticks::{Merged, QuoteMerge},
 };
 
-/// The live quotes of the instruments of a session, by cTrader symbol.
 #[derive(Debug)]
 pub(super) struct SpotQuotes {
     streams: HashMap<i64, Stream>,
     symbol_ids: HashMap<InstrumentId, i64>,
 }
 
-/// One instrument's live quotes.
 #[derive(Debug)]
 struct Stream {
     merge: QuoteMerge,
@@ -143,8 +140,7 @@ mod tests {
         self, SPOT_EVENT_EURUSD_ASK, SPOT_EVENT_EURUSD_BID, SPOT_EVENT_EURUSD_FIRST,
     };
 
-    /// EURUSD as the clients load it, 5 decimals, maximum order 100,000,000, and its cTrader symbol
-    /// id on the server the fixtures come from.
+    /// EURUSD as the clients load it, 5 decimals, and its cTrader symbol id in the fixtures.
     fn eurusd() -> (InstrumentAny, i64) {
         (InstrumentAny::Cfd(testing::instrument("EURUSD")), 1)
     }
@@ -165,7 +161,6 @@ mod tests {
 
     const RECEIVED: UnixNanos = UnixNanos::new(1_793_017_476_613_000_000);
 
-    /// (ms of ts_event, bid, ask) of `quote`.
     fn prices(quote: &QuoteTick) -> (u64, String, String) {
         (
             quote.ts_event.as_u64() / 1_000_000,

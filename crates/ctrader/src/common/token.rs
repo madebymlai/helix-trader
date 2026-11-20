@@ -1,20 +1,18 @@
 //! The account's token pair and the file that keeps the latest one.
 //!
 //! cTrader's access token lasts about 30 days; the refresh token renews it
-//! (`ProtoOARefreshTokenReq`), and each renewal replaces both, the old pair invalidated
-//! (help.ctrader.com/open-api, "App and account authentication"). So the latest pair lives in a
-//! token file, readable by the user only (mode 0600, its directory 0700), where every session finds
-//! it, at the place the credential names (`token_file`).
+//! (`ProtoOARefreshTokenReq`), and each renewal replaces both, invalidating the old pair
+//! (help.ctrader.com/open-api, "App and account authentication"). So the latest pair lives in the
+//! credential's `token_file`, mode 0600 in a 0700 directory, where every session finds it.
 //!
-//! The first pair comes from the credential, which seeds the file once; wherever the caller read it
-//! from is never written. The file keeps a SHA-256 fingerprint of the pair that seeded it: when the
-//! credential holds another pair (a new one from the Playground), it seeds the file again.
+//! The credential's pair seeds the file once; wherever the caller read it from is never written.
+//! The file keeps a SHA-256 fingerprint of the seeding pair: a credential holding another pair (a
+//! new one from the Playground) seeds the file again.
 //!
-//! Sessions of several processes (a fill and a live node) share the file. A renewal holds an
-//! advisory lock (`flock`, on the token file's name with `.lock` appended, a file never replaced)
-//! from before its request until the new pair is written, so two sessions never spend the same
-//! refresh token; the file is replaced atomically (a temporary file renamed over it), so a reader
-//! sees a whole pair, the latest writer's.
+//! Sessions of several processes share the file. A renewal holds an advisory lock (`flock`, on the
+//! token file's name with `.lock` appended, a file never replaced) from before its request until
+//! the new pair is written, so two sessions never spend the same refresh token. The file is
+//! replaced atomically (a temporary file renamed over it), so a reader sees a whole pair.
 
 use std::{
     fmt::Write as _,
@@ -33,11 +31,10 @@ use zeroize::Zeroize;
 
 use crate::config::CTraderSettingNames;
 
-/// How long before the access token expires a session renews it.
 pub(crate) const RENEW_BEFORE: SignedDuration = SignedDuration::from_hours(24);
 
-/// An access token, the refresh token that renews it, and when the access token expires (unknown
-/// for a pair seeded from the credential).
+/// An access token, its refresh token and the expiry (unknown for a pair seeded from the
+/// credential).
 #[derive(Debug, Clone)]
 pub struct TokenPair {
     pub access_token: SecretString,
@@ -46,7 +43,6 @@ pub struct TokenPair {
 }
 
 impl TokenPair {
-    /// The pair a renewal at `now` returned, its access token valid for `expires_in` seconds.
     pub(crate) fn renewed(
         access_token: SecretString,
         refresh_token: SecretString,
@@ -60,18 +56,16 @@ impl TokenPair {
         }
     }
 
-    /// When to renew it: `RENEW_BEFORE` its expiry, or at once when the expiry is unknown.
     pub(crate) fn renew_at(&self) -> Option<Timestamp> {
         self.expires_at.map(|at| at - RENEW_BEFORE)
     }
 
-    /// Whether it is this pair's access token that `other` holds.
     #[must_use]
     pub fn same_access_token(&self, other: &Self) -> bool {
         self.access_token.expose_secret() == other.access_token.expose_secret()
     }
 
-    /// The fingerprint of the pair: SHA-256 of both tokens, in hex.
+    /// SHA-256 of both tokens, in hex.
     fn fingerprint(&self) -> String {
         let mut hasher = Sha256::new();
         hasher.update(self.access_token.expose_secret());
@@ -87,8 +81,6 @@ impl TokenPair {
     }
 }
 
-/// The token file, the credential's pair that seeds it, and what errors call the settings of that
-/// pair.
 #[derive(Debug, Clone)]
 pub(crate) struct TokenStore {
     path: PathBuf,
@@ -96,10 +88,9 @@ pub(crate) struct TokenStore {
     names: CTraderSettingNames,
 }
 
-/// The file's content.
 #[derive(Serialize, Deserialize)]
 struct Stored {
-    /// The fingerprint of the credential's pair that seeded the file.
+    /// The fingerprint of the pair that seeded the file.
     seed: String,
     access_token: String,
     refresh_token: String,
@@ -114,8 +105,6 @@ impl Drop for Stored {
 }
 
 impl TokenStore {
-    /// The store at `path`, seeded with `seed`, the credential's pair, whose settings `names`
-    /// names.
     pub(crate) fn new(path: PathBuf, seed: TokenPair, names: CTraderSettingNames) -> Self {
         Self { path, seed, names }
     }
@@ -124,9 +113,8 @@ impl TokenStore {
         &self.path
     }
 
-    /// The latest pair: the file's, or the seed, written to the file first, when there is no file
-    /// or the seed is another pair than the one that seeded it; `None` while another session renews
-    /// (it holds the lock).
+    /// The latest pair: the file's, or the seed (written first) when there is no file or another
+    /// pair seeded it. `None` while another session holds the renewal lock.
     ///
     /// # Errors
     ///
@@ -229,7 +217,6 @@ fn pair_of(stored: &Stored) -> TokenPair {
     }
 }
 
-/// The renewal lock on the token file, held until dropped.
 #[derive(Debug)]
 pub(crate) struct TokenLock {
     _file: File,
@@ -301,7 +288,6 @@ mod tests {
         TokenStore::new(dir.join("state").join("broker/token.json"), seed, NAMES)
     }
 
-    /// The tokens and expiry of `pair`, to compare pairs.
     fn exposed(pair: &TokenPair) -> (String, String, Option<Timestamp>) {
         (
             pair.access_token.expose_secret().to_owned(),
@@ -389,9 +375,8 @@ mod tests {
         );
     }
 
-    /// Two writers replace the pair over and over while a reader, which read the seed before they
-    /// started, reads on: every read is one whole pair, and the file ends with the last one
-    /// written.
+    /// Two writers replace the pair repeatedly while a reader that read the seed reads on: every
+    /// read is one whole pair, and the file ends with the last one written.
     #[rstest]
     fn concurrent_writers_never_leave_a_partial_pair_and_the_later_wins() {
         let dir = tempfile::tempdir().unwrap();

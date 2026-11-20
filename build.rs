@@ -1,8 +1,8 @@
-//! Finds the strategies: each folder of `src/strategy` with a `mod.rs`, named by its folder. Writes
-//! `strategies.rs` to `OUT_DIR`, which `strategy/mod.rs` includes: a module per strategy, and
-//! `StrategyName`, the command-line names, each handing its strategy to a `strategy::Visitor`
-//! through the folder's `visit`. No file names a strategy, so a folder kept out of the repository
-//! builds where it exists, and a checkout without it builds without it.
+//! Finds the strategies: each folder of `src/strategy` with a `mod.rs`, named by its folder.
+//!
+//! Writes `strategies.rs` to `OUT_DIR`, which `strategy/mod.rs` includes: a module per strategy and
+//! `StrategyName`, each handing its strategy to a `strategy::Visitor` through the folder's `visit`.
+//! No file names a strategy, so a folder kept out of the repository builds where it exists.
 
 use std::{
     env,
@@ -21,19 +21,17 @@ fn main() {
         .unwrap_or_else(|e| panic!("writing {}: {e}", out.display()));
 }
 
-/// A strategy's folder name, module and command-line name, and its `mod.rs`.
 struct Found {
     name: String,
     module: PathBuf,
 }
 
-/// The strategies under `root`, by name: its folders holding a `mod.rs`. A folder holding none is a
-/// module's (`orders/` beside `orders.rs`).
+/// The strategies under `root`, by name. A folder without a `mod.rs` belongs to a module
+/// (`orders/` beside `orders.rs`).
 ///
 /// # Panics
 ///
-/// Panics if a strategy's folder name is not a lowercase identifier, as it names a module and a
-/// command-line value.
+/// Panics if a strategy's folder name is not a lowercase identifier.
 fn strategies(root: &Path) -> Vec<Found> {
     let entries = fs::read_dir(root).unwrap_or_else(|e| panic!("reading {}: {e}", root.display()));
     let mut found: Vec<Found> = entries
@@ -68,7 +66,6 @@ fn is_lowercase_identifier(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
-/// `model_ema` as `ModelEma`, a variant of `StrategyName`.
 fn variant(name: &str) -> String {
     name.split('_')
         .flat_map(|word| {
@@ -82,7 +79,6 @@ fn variant(name: &str) -> String {
         .collect()
 }
 
-/// The source `strategy/mod.rs` includes.
 fn source(strategies: &[Found]) -> String {
     let mut src = String::new();
     for found in strategies {
