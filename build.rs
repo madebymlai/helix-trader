@@ -1,8 +1,10 @@
-//! Finds the strategies: each folder of `src/strategy` with a `mod.rs`, named by its folder.
+//! Finds the strategies. Each folder of `src/strategy` with a `mod.rs` is a strategy, named by its
+//! folder.
 //!
-//! Writes `strategies.rs` to `OUT_DIR`, which `strategy/mod.rs` includes: a module per strategy and
-//! `StrategyName`, each handing its strategy to a `strategy::Visitor` through the folder's `visit`.
-//! No file names a strategy, so a folder kept out of the repository builds where it exists.
+//! The script writes `strategies.rs` to `OUT_DIR`, and `strategy/mod.rs` includes it. The file
+//! holds a module per strategy and `StrategyName`. Each module hands its strategy to a
+//! `strategy::Visitor` through the folder's `visit`. No file names a strategy, so a folder kept out
+//! of the repository builds where it exists.
 
 use std::{
     env,
@@ -26,8 +28,9 @@ struct Found {
     module: PathBuf,
 }
 
-/// The strategies under `root`, by name. A folder without a `mod.rs` belongs to a module
-/// (`orders/` beside `orders.rs`).
+/// Returns the strategies under `root`, by name.
+///
+/// A folder without a `mod.rs` belongs to a module (`orders/` beside `orders.rs`).
 ///
 /// # Panics
 ///
