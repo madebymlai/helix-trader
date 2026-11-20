@@ -1,8 +1,7 @@
-//! IC Markets, over Spotware's cTrader Open API through the cTrader adapter (`ctrader`): its forex
-//! and metals and their quotes for the catalog, which fill-catalog fills through the node, and the
-//! live node's clients on a hedging account, both through `BROKER`, one of the routing table's
-//! cTrader brokers (`super`). Its instruments are on venue `ICMARKETS` (`XAUUSD.ICMARKETS`), its
-//! clients named `ICMARKETS`. See `README.md`.
+//! IC Markets, over Spotware's cTrader Open API through the cTrader adapter (`ctrader`): forex and
+//! metals quotes for the catalog and the live node's clients on a hedging account, both through
+//! `BROKER` (see `super`). Instruments are on venue `ICMARKETS` (`XAUUSD.ICMARKETS`), as are the
+//! clients' names. See `README.md`.
 //!
 //! The adapter names no broker and the credential is the cTrader login's, so this module names only
 //! the venue and the account variables.
@@ -23,8 +22,7 @@ pub(super) const BROKER: CTraderBroker = CTraderBroker {
     },
 };
 
-/// IC's connection, from the process' environment (or `.env`, once read): see
-/// `CTraderConnection::from_vars`.
+/// IC's connection, from the process' environment: see `CTraderConnection::from_vars`.
 ///
 /// # Errors
 ///

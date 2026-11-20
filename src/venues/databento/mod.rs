@@ -1,11 +1,9 @@
 //! Databento definitions of `GLBX` instruments (CME Globex, `GLBX.MDP3`), `XNAS` ones (Nasdaq
 //! TotalView, `XNAS.ITCH`) and `OPRA` ones (US options, `OPRA.PILLAR`), filled through the node
-//! (see `catalog::NodeFill`) by Nautilus' Databento data client (`DatabentoDataClient`), whose
-//! answers the data engine writes back to the catalog, each contract under its own id. Their
-//! history is LSE's (see `lse`).
+//! (see `catalog::NodeFill`) by Nautilus' `DatabentoDataClient`. Their history is LSE's (`lse`).
 //!
-//! What stays here is what Nautilus' client does not do: each definition asked within its dataset's
-//! end, which Databento refuses a request past, read before the node starts. See `README.md`.
+//! What stays here is what Nautilus' client does not do: asking each definition within its
+//! dataset's end, which Databento refuses a request past. See `README.md`.
 
 use std::{collections::BTreeMap, path::PathBuf};
 
@@ -26,9 +24,7 @@ use crate::catalog::{FillData, FillRequest, NodeClient};
 #[cfg(test)]
 pub(super) mod testing;
 
-/// Nautilus' map of Databento publishers to venues, copied from
-/// `crates/adapters/databento/publishers.json` at the pinned commit, since the client reads it from
-/// a path.
+/// Nautilus' `crates/adapters/databento/publishers.json` at the pinned commit, read from a path.
 const PUBLISHERS: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/src/venues/databento/publishers.json"
@@ -37,11 +33,8 @@ const PUBLISHERS: &str = concat!(
 /// Databento's historical API, for the definitions of `GLBX`, `XNAS` and `OPRA` instruments.
 #[derive(Debug)]
 pub struct DatabentoHistory {
-    /// Nautilus' historical client, for each dataset's end.
     metadata: DatabentoHistoricalClient,
-    /// Nautilus' map of venues to the datasets its data client asks their instruments of.
     datasets: DatabentoDataLoader,
-    /// The config of the node's data client.
     config: DatabentoDataClientConfig,
 }
 
@@ -67,7 +60,6 @@ impl DatabentoHistory {
         })
     }
 
-    /// The clients, with `api_key`, on the historical API at `base_url`, a mock peer's.
     #[cfg(test)]
     pub(super) fn with_base_url(api_key: &str, base_url: &str) -> anyhow::Result<Self> {
         let metadata = DatabentoHistoricalClient::new_with_base_url(
@@ -86,10 +78,7 @@ impl DatabentoHistory {
         })
     }
 
-    /// `requests` (see `catalog::missing`), definitions of `GLBX`, `XNAS` and `OPRA` instruments,
-    /// each within the data of the dataset of its venue, the one Nautilus' client asks
-    /// (`GLBX.MDP3`, `XNAS.ITCH`, `OPRA.PILLAR`). Each dataset's end is read once, before any is
-    /// asked for, since Databento refuses a request past it, which a fill ending today makes (see
+    /// `requests` (see `catalog::missing`), each within the end of its venue's dataset (see
     /// `within`).
     ///
     /// # Errors
@@ -119,7 +108,6 @@ impl DatabentoHistory {
             datasets.push(dataset.to_string());
         }
 
-        // The end of each dataset, read once
         let mut ends: BTreeMap<String, Timestamp> = BTreeMap::new();
         let mut within_ends = Vec::new();
         for (request, dataset) in requests.iter().zip(datasets) {
@@ -141,9 +129,8 @@ impl DatabentoHistory {
         Ok(within_ends)
     }
 
-    /// The node's data client: Nautilus' Databento client, on no venue, so asked only by the
-    /// requests naming it (see `NodeFill::add`). It opens no live feed: its `connect` starts
-    /// nothing, only a subscription would.
+    /// The node's data client, on no venue, so asked only by requests naming it (see
+    /// `NodeFill::add`). It opens no live feed: only a subscription would.
     #[must_use]
     pub fn node_client(&self) -> NodeClient {
         NodeClient {
@@ -153,16 +140,14 @@ impl DatabentoHistory {
     }
 }
 
-/// The config of Nautilus' data client with `api_key`: `GLBX` instruments on `GLBX`, not their
-/// exchanges' MICs, as IB maps them.
+// `GLBX` instruments on `GLBX`, not their exchanges' MICs, as IB maps them
 fn config(api_key: &str) -> DatabentoDataClientConfig {
     DatabentoDataClientConfig::new(api_key, PathBuf::from(PUBLISHERS), false, true)
 }
 
-/// Nautilus' map of venues to the datasets its data client asks their instruments of, from the
-/// publishers' map: `XNAS` to `XNAS.ITCH`, the first publisher of the venue there, `OPRA` to
-/// `OPRA.PILLAR`, the venue of its consolidated publisher, and `GLBX` to `GLBX.MDP3`, among the
-/// defaults Nautilus adds.
+/// Nautilus' map of venues to the datasets its client asks: `XNAS` to `XNAS.ITCH` (the venue's
+/// first publisher), `OPRA` to `OPRA.PILLAR` (its consolidated publisher's venue), `GLBX` to
+/// `GLBX.MDP3` (a default Nautilus adds).
 ///
 /// # Errors
 ///
@@ -172,30 +157,28 @@ fn datasets() -> anyhow::Result<DatabentoDataLoader> {
         .context("reading Databento's publishers")
 }
 
-/// The exclusive end of `range`, `dataset`'s, which Nautilus' client gives as the `Display` of
-/// Databento's `time::OffsetDateTime`, such as `2023-07-20 0:00:00.12 +00:00:00`: the hour
-/// unpadded, the fraction to its last nonzero digit (at least one), and the offset to the second.
+/// The exclusive end of `range`, which Nautilus' client gives as the `Display` of Databento's
+/// `time::OffsetDateTime`, such as `2023-07-20 0:00:00.12 +00:00:00`: hour unpadded, fraction to
+/// its last nonzero digit (at least one), offset to the second.
 fn end_of(dataset: &str, range: &DatasetRange) -> anyhow::Result<Timestamp> {
     Timestamp::strptime("%Y-%m-%d %H:%M:%S%.f %::z", &range.end)
         .with_context(|| format!("reading the end of {dataset}, {}", range.end))
 }
 
-/// `request`, a definition's, within its dataset's data, up to `available_end`, exclusive:
-/// unchanged if it ends before, else asked up to it, holding at least the last whole UTC day before
-/// it.
+/// `request` up to `available_end`, exclusive: unchanged if it ends before, else asked up to it,
+/// holding at least the last whole UTC day before it.
 ///
-/// Databento's historical API gives a snapshot of every definition active at each UTC midnight,
-/// Monday to Friday, for its publishers that do not send them daily, so that "any request for
-/// definitions for a 24-hour period beginning at UTC midnight is guaranteed to include definitions
-/// for all instruments active during that time period" (Databento's docs, "Instrument definitions",
-/// "Snapshots"). A definition holds over its contract's life, so one asked before the window's end
-/// defines the contract over all of it.
+/// Databento snapshots every active definition at each UTC midnight, Monday to Friday, for
+/// publishers that do not send them daily: "any request for definitions for a 24-hour period
+/// beginning at UTC midnight is guaranteed to include definitions for all instruments active during
+/// that time period" (Databento's docs, "Instrument definitions", "Snapshots"). A definition holds
+/// over its contract's life.
 fn within(request: FillRequest, available_end: Timestamp) -> FillRequest {
     if request.to < available_end {
         return request;
     }
 
-    // The window is closed, which Nautilus' client asks up to an instant past its end
+    // Nautilus' client asks up to an instant past a closed window's end
     let to = available_end - SignedDuration::from_nanos(1);
     let last_day = available_end
         .to_zoned(TimeZone::UTC)
@@ -229,10 +212,8 @@ mod tests {
         }
     }
 
-    /// GLBX.MDP3's end as captured on 13 November 2026: a window before it is asked as it is. One
-    /// reaching past it is asked up to it, from the window's start if it holds the last whole UTC
-    /// day before the end, 12 November, Databento's day of every definition active, else from that
-    /// day's midnight. One starting past the end too is asked so.
+    /// GLBX.MDP3's end as captured on 13 November 2026. A window reaching or starting past it is
+    /// asked up to it, from its start if that holds 12 November, else from 12 November's midnight.
     #[rstest]
     #[case::before_the_end(
         ("2026-11-12T00:00:00Z", "2026-11-12T23:59:59.999999999Z"),
@@ -268,9 +249,7 @@ mod tests {
     /// 1 ns before GLBX.MDP3's end as captured on 13 November 2026.
     const UP_TO_END: &str = "2026-11-13T09:31:40.093382999Z";
 
-    /// The ends Nautilus' client gives, as Databento's `time` crate writes them
-    /// (`time::OffsetDateTime`'s `Display` at the locked version, of the instants on the right),
-    /// read as the instants they are.
+    /// The ends as `time::OffsetDateTime`'s `Display` writes them at the locked version.
     #[rstest]
     #[case::of_a_tenth_of_a_second("2023-07-20 0:00:00.0 +00:00:00", "2023-07-20T00:00:00Z")]
     #[case::of_hundredths("2023-07-20 0:00:00.12 +00:00:00", "2023-07-20T00:00:00.12Z")]
@@ -293,7 +272,7 @@ mod tests {
         assert_eq!(end_of("GLBX.MDP3", &range).unwrap(), ts(instant));
     }
 
-    /// GLBX's history is LSE's; IB defines XCEC's instruments, as it gives their history.
+    /// GLBX's history is LSE's; IB defines XCEC's instruments.
     #[rstest]
     #[case::a_series_of_glbx(
         FillData::Trades(InstrumentId::from("GCZ26.GLBX")),
