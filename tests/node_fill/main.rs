@@ -1,10 +1,9 @@
 //! fill-catalog's fill through a Nautilus node, at its seam: what the catalog lacks
 //! (`catalog::missing`), filled by a `NodeFill` whose node holds fake data clients answering as
 //! Databento's does (a completed `DataResponseEnvelope`, `RequestFailed` on an error), each asked
-//! by the requests naming it, and the catalog. The data engine writes each answer back; the tests
-//! read the catalog, what each client was asked and by which name, and what the fill returns.
-//! Hermetic: no venue. Each test runs its nodes on its own thread, as Nautilus' message bus is
-//! thread-local.
+//! by the requests naming it. The data engine writes each answer back; the tests read the
+//! catalog, what each client was asked and by which name, and what the fill returns. Hermetic: no
+//! venue. Each test runs its nodes on its own thread, as Nautilus' message bus is thread-local.
 //!
 //! ```sh
 //! cargo test --test node_fill
@@ -81,17 +80,16 @@ fn ns(s: &str) -> u64 {
     UnixNanos::from(ts(s)).as_u64()
 }
 
-/// 1 ns before `s`: the end of the window before it.
+/// 1 ns before `s`, the end of the window before it.
 fn before(s: &str) -> u64 {
     ns(s) - 1
 }
 
-/// 1 ns after `s`: where the window after one ending at `s` starts.
+/// 1 ns after `s`, where the window after one ending at `s` starts.
 fn after(s: &str) -> u64 {
     ns(s) + 1
 }
 
-/// The time 1 ns before `s`.
 fn end_before(s: &str) -> Timestamp {
     ts(s) - SignedDuration::from_nanos(1)
 }
@@ -144,13 +142,11 @@ fn book() -> Vec<OrderBookDepth> {
     ]
 }
 
-/// How the fake venue answers a data request.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Answer {
     /// A completed envelope, at once.
     Data,
-    /// A completed envelope, 50 ms later from a task, as Databento's client answers from its HTTP
-    /// request.
+    /// A completed envelope 50 ms later from a task, as Databento's client answers over HTTP.
     Later,
     /// `RequestFailed` with the rows got, as Databento's client on an error.
     Failed,
@@ -160,19 +156,18 @@ enum Answer {
     Refused,
     /// Trades of GCQ26 to a request of GCZ26's: rows the engine cannot write back.
     OtherContract,
-    /// As `Data` for a window starting before this time, as `Failed` from it on: the venue cutting
-    /// the history part way through a request.
+    /// `Data` for a window starting before this time, `Failed` from it on: the venue cutting the
+    /// history part way through a request.
     FailedFrom(u64),
 }
 
-/// What the fake venue holds and was asked.
 #[derive(Debug)]
 struct FakeVenue {
     book: Vec<OrderBookDepth>,
     answer: Answer,
     /// Each request: what, from, to (ns).
     asked: Vec<(FillData, u64, u64)>,
-    /// The client each request named, in the same order.
+    /// The client each request named.
     named: Vec<Option<ClientId>>,
     /// Requests asked and not answered yet, and the most at once.
     in_flight: Arc<AtomicUsize>,
@@ -201,7 +196,6 @@ impl ClientConfig for FakeConfig {
     }
 }
 
-/// The factory of a client of the fake venue, named as given.
 #[derive(Debug)]
 struct FakeFactory(Rc<RefCell<FakeVenue>>, &'static str);
 
@@ -240,8 +234,7 @@ struct FakeClient {
 }
 
 impl FakeClient {
-    /// Records the request of `data` over `[start, end]` naming `client_id`, then answers it with
-    /// `response` as the venue says.
+    /// Records the request, then answers it with `response` as the venue says.
     fn answer(
         &self,
         data: FillData,
@@ -491,7 +484,6 @@ impl DataClient for FakeClient {
     }
 }
 
-/// The requirements reading `data` of GCZ26.
 fn reading(data: NautilusDataType) -> DataRequirements {
     DataRequirements {
         bar_types: vec![],
@@ -504,8 +496,8 @@ fn reading(data: NautilusDataType) -> DataRequirements {
     }
 }
 
-/// fill-catalog's fill through the node of the series `requirements` reads over `[start, end]` into
-/// the catalog in `dir`: what the catalog lacks, asked of the fake `venue` in windows of `period`.
+/// fill-catalog's fill through the node of `requirements` over `[start, end]` into `dir`: what the
+/// catalog lacks, asked of the fake `venue` in windows of `period`.
 fn fill(
     dir: &Path,
     venue: &Rc<RefCell<FakeVenue>>,
@@ -516,8 +508,7 @@ fn fill(
     fill_slices(dir, venue, &requirements.slices(start, end), period)
 }
 
-/// fill-catalog's fill through the node of `slices` into the catalog in `dir`: what the catalog
-/// lacks, asked of the fake `venue` in windows of `period`.
+/// As `fill`, for `slices`.
 fn fill_slices(
     dir: &Path,
     venue: &Rc<RefCell<FakeVenue>>,
@@ -531,8 +522,8 @@ fn fill_slices(
     run(node, dir)
 }
 
-/// Runs `node` into the catalog in `dir`, failing the test unless it ends within a minute:
-/// `NodeFill` sets no deadline of its own, so a client that never answers would hold it.
+/// Runs `node` into `dir`, failing the test unless it ends within a minute: `NodeFill` sets no
+/// deadline of its own.
 fn run(node: NodeFill, dir: &Path) -> anyhow::Result<()> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -545,7 +536,6 @@ fn run(node: NodeFill, dir: &Path) -> anyhow::Result<()> {
         .expect("the fill ends within a minute")
 }
 
-/// A client of the fake `venue` named `name`, on no venue.
 fn fake_client(venue: &Rc<RefCell<FakeVenue>>, name: &'static str) -> NodeClient {
     NodeClient {
         factory: Box::new(FakeFactory(Rc::clone(venue), name)),
@@ -559,7 +549,6 @@ fn depth_intervals(dir: &Path) -> Vec<(u64, u64)> {
         .unwrap()
 }
 
-/// What the catalog in `dir` lacks of GCZ26's book over `[from, to]`.
 fn depth_lacking(dir: &Path, (from, to): (&str, &str)) -> Vec<(u64, u64)> {
     ParquetDataCatalog::new(dir, None, None, None, None)
         .get_missing_intervals_for_request(
@@ -756,8 +745,8 @@ fn a_slow_client_is_asked_one_window_at_a_time_in_order() {
 }
 
 /// The venue holds only Tuesday's snapshot: every window but the last is empty, the most a request
-/// can hold, and none of them ends the fill. With no stored data beside them they record nothing,
-/// so the next fill asks for them again.
+/// can hold, and none ends the fill. With no stored data beside them they record nothing, so the
+/// next fill asks again.
 #[rstest]
 fn a_run_of_empty_windows_does_not_end_the_fill() {
     let dir = tempfile::tempdir().unwrap();
@@ -871,8 +860,8 @@ fn a_failed_request_fails_the_fill_naming_it_and_writes_nothing(
 }
 
 /// GCZ26's definition asked of one client and its book of another, both on no venue and with no
-/// route, as two sources of one venue share a fill's node: each request names its client, and that
-/// client answers it.
+/// route, as two sources of one venue share a fill's node: each request names its client, which
+/// answers it.
 #[rstest]
 fn each_request_is_answered_by_the_client_it_names() {
     let dir = tempfile::tempdir().unwrap();
@@ -966,7 +955,7 @@ fn book_deltas_are_asked_a_day_a_request_and_written_back() {
 
 const BARS: &str = "GCZ26.GLBX-1-MINUTE-LAST-EXTERNAL";
 
-/// GCZ26's minute bar closing at `close`, stamped at its close, as Databento's client stamps bars
+/// GCZ26's minute bar closing at `close`, stamped at its close as Databento's client stamps bars
 /// by default (`bars_timestamp_on_close`).
 fn bar(close: &str) -> Bar {
     let price = Price::from("4000.00");
