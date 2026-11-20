@@ -1,14 +1,11 @@
-//! A strategy reading custom data written into the catalog from outside
-//! helix, of a type no row of the routing table routes: the catalog's.
-//! Gold's `Imbalance`s (`common::glbx`), a type of the tests', which they
-//! register, stored by hand under the identifier `GOLD-IMBALANCE`, which
-//! keys no instrument, beside IC's gold (`common::ic`), the run's venue.
-//! Its config loads, and the backtest replays the series from the catalog
-//! by its data type, each point at its time: to a strategy whose
-//! subscriptions (`strategy::subscriptions`) subscribe it, and to a raw
-//! feature of a model's features over it, which reads each point from
-//! Nautilus' cache. A run of it with nothing stored goes on. One node per
-//! thread, so one run per test.
+//! A strategy reading custom data written into the catalog from outside helix, of a type no row of
+//! the routing table routes: the catalog's. Gold's `Imbalance`s (`common::glbx`), a type of the
+//! tests', which they register, stored by hand under the identifier `GOLD-IMBALANCE`, which keys no
+//! instrument, beside IC's gold (`common::ic`), the run's venue. Its config loads, and the backtest
+//! replays the series from the catalog by its data type, each point at its time: to a strategy
+//! whose subscriptions (`strategy::subscriptions`) subscribe it, and to a raw feature of a model's
+//! features over it, which reads each point from Nautilus' cache. A run of it with nothing stored
+//! goes on.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -57,10 +54,9 @@ impl Part for Reader {
     }
 }
 
-/// Gold's imbalances as a config declares them, of no metadata, under
-/// `GOLD-IMBALANCE`: the one custom series of its `[data] series`, loaded
-/// after registering the custom data types helix compiles, as the process
-/// does at its start, and the tests' `Imbalance`.
+/// Gold's imbalances as a config declares them, of no metadata, under `GOLD-IMBALANCE`: the one
+/// custom series of its `[data] series`, loaded after registering the custom data types helix
+/// compiles, as the process does at its start, and the tests' `Imbalance`.
 fn declared() -> CustomSeries {
     venues::register_custom_data();
     nautilus_serialization::ensure_custom_data_registered::<glbx::Imbalance>();
@@ -84,16 +80,15 @@ fn declared() -> CustomSeries {
     series
 }
 
-/// IC's catalog (`ic::catalog`), the imbalances written into it by hand
-/// under the series' identifier, from 08:50 to 11:00 (`glbx::imbalances`).
+/// IC's catalog (`ic::catalog`), the imbalances written into it by hand under the series'
+/// identifier, from 08:50 to 11:00 (`glbx::imbalances`).
 fn catalog() -> TempDir {
     let catalog = ic::catalog();
     glbx::store_imbalances_as(catalog.path(), declared().data_type());
     catalog
 }
 
-/// IC's backtest from 09:00 to 12:00 (`ic::backtest`) on `catalog`,
-/// declaring the series.
+/// IC's backtest from 09:00 to 12:00 (`ic::backtest`) on `catalog`, declaring the series.
 fn backtest(catalog: &TempDir) -> Backtest {
     Backtest {
         custom: vec![declared()],
@@ -110,16 +105,15 @@ fn value(data: &CustomData) -> f64 {
         .value
 }
 
-/// What a strategy got: each point's value and time, and the time of the
-/// run when it got it.
+/// What a strategy got: each point's value and time, and the time of the run when it got it.
 type Got = (f64, UnixNanos, UnixNanos);
 
 fn at(time: &str) -> UnixNanos {
     ic::at(time).into()
 }
 
-/// Starts its subscriptions at its start, as a strategy does, subscribing
-/// to nothing itself, and records each point it gets.
+/// Starts its subscriptions at its start, as a strategy does, subscribing to nothing itself, and
+/// records each point it gets.
 #[derive(Debug)]
 struct Subscribed {
     core: StrategyCore,
@@ -152,8 +146,8 @@ fn core() -> StrategyCore {
     })
 }
 
-/// What `backtest` replays to a strategy subscribed through its
-/// subscriptions of the backtest's custom series.
+/// What `backtest` replays to a strategy subscribed through its subscriptions of the backtest's
+/// custom series.
 fn got_through_subscriptions(backtest: Backtest) -> Vec<Got> {
     std::thread::spawn(move || {
         let got = Rc::new(RefCell::new(Vec::new()));
@@ -169,8 +163,8 @@ fn got_through_subscriptions(backtest: Backtest) -> Vec<Got> {
     .unwrap()
 }
 
-/// The imbalances of the run's window reach the strategy, each at its
-/// time, not the one of 08:50, before the run.
+/// The imbalances of the run's window reach the strategy, each at its time, not the one of 08:50,
+/// before the run.
 #[rstest]
 fn a_strategy_gets_a_custom_series_of_the_catalog_s_through_its_subscriptions() {
     let catalog = catalog();
@@ -186,8 +180,8 @@ fn a_strategy_gets_a_custom_series_of_the_catalog_s_through_its_subscriptions() 
     );
 }
 
-/// The catalog holds none of the series: the run warns of it and goes
-/// on, the strategy getting none of it.
+/// The catalog holds none of the series: the run warns of it and goes on, the strategy getting none
+/// of it.
 #[rstest]
 fn a_run_of_a_custom_series_the_catalog_holds_nothing_of_goes_on() {
     let catalog = ic::catalog();
@@ -197,8 +191,8 @@ fn a_run_of_a_custom_series_the_catalog_holds_nothing_of_goes_on() {
     assert_eq!(got, []);
 }
 
-/// Registers a raw feature on the series at its start, subscribes to it,
-/// and records the feature's values at each point it gets.
+/// Registers a raw feature on the series at its start, subscribes to it, and records the feature's
+/// values at each point it gets.
 #[derive(Debug)]
 struct Featured {
     core: StrategyCore,
@@ -222,9 +216,8 @@ impl DataActor for Featured {
     }
 }
 
-/// A model's raw feature over the series reads each imbalance replayed
-/// from the cache, where the data engine put it before the strategy's
-/// handler, with no strategy code.
+/// A model's raw feature over the series reads each imbalance replayed from the cache, where the
+/// data engine put it before the strategy's handler, with no strategy code.
 #[rstest]
 fn a_raw_feature_over_a_custom_series_of_the_catalog_s_reads_each_replayed_point() {
     let catalog = catalog();

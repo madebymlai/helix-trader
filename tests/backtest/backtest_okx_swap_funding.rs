@@ -1,13 +1,10 @@
-//! Funding on an OKX swap, settled by Nautilus' simulated venue: the
-//! catalog stores BTC-USDT-SWAP.OKX's minute bars and its funding rates as
-//! `fill-catalog` stores them (`ts_event` = `ts_init` = the funding time,
-//! an 8-hour interval), so the backtest replays the funding with the bars.
-//! A recorder on the hour bars buys 2 contracts (0.02 BTC) on the first
-//! one and holds them across two funding times: at each, the venue makes a
-//! `FundingSettlement` on the position, priced at the last bar's close (no
-//! mark price: the mid of the book the bars set), which adjusts the
-//! position and the balance. A long pays a positive rate and receives a
-//! negative one. One node per thread, so one run per test.
+//! Funding on an OKX swap, settled by Nautilus' simulated venue: the catalog stores
+//! BTC-USDT-SWAP.OKX's minute bars and its funding rates as `fill-catalog` stores them (`ts_event`
+//! = `ts_init` = the funding time, an 8-hour interval), so the backtest replays the funding with
+//! the bars. A recorder on the hour bars buys 2 contracts (0.02 BTC) on the first one and holds
+//! them across two funding times: at each, the venue makes a `FundingSettlement` on the position,
+//! priced at the last bar's close (no mark price: the mid of the book the bars set), which adjusts
+//! the position and the balance. A long pays a positive rate and receives a negative one.
 
 use std::path::Path;
 
@@ -37,8 +34,8 @@ fn at(hh_mm: &str) -> Timestamp {
     ts(&format!("2026-01-07T{hh_mm}:00Z"))
 }
 
-/// BTC-USDT-SWAP as OKX defines it: price tick 0.1, lot 0.01 contracts,
-/// 0.01 BTC a contract, with initial and maintenance margins of 1.
+/// BTC-USDT-SWAP as OKX defines it: price tick 0.1, lot 0.01 contracts, 0.01 BTC a contract, with
+/// initial and maintenance margins of 1.
 fn instrument() -> InstrumentAny {
     InstrumentAny::CryptoPerpetual(
         CryptoPerpetual::builder()
@@ -64,9 +61,8 @@ fn instrument() -> InstrumentAny {
     )
 }
 
-/// The flat minute bars opening in `[from, to)`: at 100,000 before noon,
-/// 101,000 from noon, 500 contracts, stamped at the open (`ts_event`) and
-/// the close (`ts_init`).
+/// The flat minute bars opening in `[from, to)`: at 100,000 before noon, 101,000 from noon, 500
+/// contracts, stamped at the open (`ts_event`) and the close (`ts_init`).
 fn minute_bars(from: Timestamp, to: Timestamp) -> Vec<Bar> {
     let mut open = from;
     let mut bars = vec![];
@@ -104,9 +100,8 @@ fn funding(time: Timestamp, rate: &str) -> FundingRateUpdate {
     )
 }
 
-/// A catalog of the instrument, its minute bars stored over `[06:00,
-/// bars_to]` and its funding at 08:00 (+0.01%) and 16:00 (-0.02%) stored
-/// over `[06:00, funding_to]`.
+/// A catalog of the instrument, its minute bars stored over `[06:00, bars_to]` and its funding at
+/// 08:00 (+0.01%) and 16:00 (-0.02%) stored over `[06:00, funding_to]`.
 fn catalog(dir: &Path, bars_to: &str, funding_to: &str) {
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     catalog.write_instruments(vec![instrument()]).unwrap();
@@ -161,7 +156,8 @@ fn a_held_swap_pays_and_receives_funding_on_its_notional_at_each_funding_time() 
     let outcome = backtest(dir.path(), "17:00").run(recorder).unwrap();
 
     let record = record.borrow();
-    // The first hour bar closes at 07:00 and is built 5 s after, as live.
+
+    // The first hour bar closes at 07:00 and is built 5 s after, as live
     assert_eq!(
         record.fills,
         [(
@@ -170,8 +166,9 @@ fn a_held_swap_pays_and_receives_funding_on_its_notional_at_each_funding_time() 
             UnixNanos::from(at("07:00") + SignedDuration::from_secs(5))
         )]
     );
-    // 0.02 BTC long: at 08:00, worth 2,000 USDT, it pays 0.01% (0.2); at
-    // 16:00, worth 2,020 USDT, it receives 0.02% (0.404).
+
+    // 0.02 BTC long: at 08:00, worth 2,000 USDT, it pays 0.01% (0.2); at 16:00, worth 2,020 USDT,
+    // it receives 0.02% (0.404).
     let settled: Vec<_> = record
         .adjustments
         .iter()

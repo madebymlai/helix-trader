@@ -1,9 +1,8 @@
-//! LAST bars built from trades: the EMA crossover on hour LAST bars of a
-//! catalog holding the instrument's trades alone, no quote. Nautilus builds
-//! the bars from the trades, and the venue fills on them (a trade of no
-//! aggressor moves its bid and ask both to the trade's price). The trades
-//! are those of `common::trades`' quotes, one a minute at the quote's mid,
-//! so each bar closes where its MID bar did.
+//! LAST bars built from trades: the EMA crossover on hour LAST bars of a catalog holding the
+//! instrument's trades alone, no quote. Nautilus builds the bars from the trades, and the venue
+//! fills on them (a trade of no aggressor moves its bid and ask both to the trade's price). The
+//! trades are those of `common::trades`' quotes, one a minute at the quote's mid, so each bar
+//! closes where its MID bar did.
 
 use helix_trader::{
     backtest::Backtest,
@@ -26,8 +25,8 @@ use tempfile::TempDir;
 
 use crate::common::{self, INSTRUMENT_ID, trades};
 
-/// A trade at the mid of each of `trades::quotes(levels)`, at its time,
-/// of 100 shares and no aggressor.
+/// A trade at the mid of each of `trades::quotes(levels)`, at its time, of 100 shares and no
+/// aggressor.
 fn trade_ticks(levels: &[f64]) -> Vec<TradeTick> {
     trades::quotes(levels)
         .iter()
@@ -46,8 +45,7 @@ fn trade_ticks(levels: &[f64]) -> Vec<TradeTick> {
         .collect()
 }
 
-/// The instrument and the trades of `levels`, stored from 09:00 to their
-/// end: no quote.
+/// The instrument and the trades of `levels`, stored from 09:00 to their end: no quote.
 fn trades_catalog(levels: &[f64]) -> TempDir {
     let dir = common::catalog_without_quotes();
     let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
@@ -85,16 +83,15 @@ fn ema_on_last_bars() -> EmaCross {
     EmaCross::new(config).unwrap()
 }
 
-/// `trades::TIME_EXIT` on trades: the crossover decides as on the MID
-/// bars, closes 610.60 (11:00) and 600.60 (12:00) warming it, short.
+/// `trades::TIME_EXIT` on trades: the crossover decides as on the MID bars, closes 610.60 (11:00)
+/// and 600.60 (12:00) warming it, short.
 ///
-/// - 13:00 at 620.60, above 605.60: a cross up, buy 10 at the last trade,
-///   620.60 (on quotes, the ask 620.65); its stop loss at 617.50 and take
-///   profit at 626.81;
-/// - 14:00 to 16:00 long, no cross; the trades after the entry, 624.01 to
-///   624.90 until 17:00, touch neither exit;
-/// - 17:00, 4 hours after the entry: the time alert sells 10 at the last
-///   trade, 624.90 (on quotes, the bid 624.85).
+/// - 13:00 at 620.60, above 605.60: a cross up, buy 10 at the last trade, 620.60 (on quotes, the
+///   ask 620.65); its stop loss at 617.50 and take profit at 626.81;
+/// - 14:00 to 16:00 long, no cross; the trades after the entry, 624.01 to 624.90 until 17:00, touch
+///   neither exit;
+/// - 17:00, 4 hours after the entry: the time alert sells 10 at the last trade, 624.90 (on quotes,
+///   the bid 624.85).
 ///
 /// The 10 shares gain 4.30 each: 10043.00 EUR, after 4 orders.
 #[rstest]

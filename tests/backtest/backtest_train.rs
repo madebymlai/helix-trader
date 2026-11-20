@@ -1,13 +1,10 @@
-//! Training at a time (`model::train`) on a fixture catalog with an edge:
-//! the dataset probe (`common::dataset`) replays the days the window lacks
-//! through `Backtest::run_dataset`, and LightGBM fits each side's realized
-//! R on the rows. IC's gold rises 4.00 over each even hour and falls back
-//! over each odd one (`ic::edge_quotes`), and the probe's one feature, `cheap`,
-//! marks where the hour starts: 1 at the bottom, 0 at the top. Each side
-//! learns its R from the feature, the long's high at the bottom, where it
-//! wins, and the short's at the top, and their pair is calibrated together
-//! on the calibration slice and published, each model reloading to its
-//! probes.
+//! Training at a time (`model::train`) on a fixture catalog with an edge: the dataset probe
+//! (`common::dataset`) replays the days the window lacks through `Backtest::run_dataset`, and
+//! LightGBM fits each side's realized R on the rows. IC's gold rises 4.00 over each even hour and
+//! falls back over each odd one (`ic::edge_quotes`), and the probe's one feature, `cheap`, marks
+//! where the hour starts: 1 at the bottom, 0 at the top. Each side learns its R from the feature,
+//! the long's high at the bottom, where it wins, and the short's at the top, and their pair is
+//! calibrated together on the calibration slice and published, each model reloading to its probes.
 
 use std::{path::Path, rc::Rc};
 
@@ -34,13 +31,12 @@ use crate::common::{
     ic,
 };
 
-/// The price of gold at the bottom of each even hour of `ic::edge_quotes`,
-/// and the rise over it.
+/// The price of gold at the bottom of each even hour of `ic::edge_quotes`, and the rise over it.
 const BOTTOM: f64 = ic::EDGE_BOTTOM;
 const RISE: f64 = ic::EDGE_RISE;
 
-/// Where the last mid is between the top of the hours, 4004.10, at 0, and
-/// their bottom, 4000.10, at 1, clamped.
+/// Where the last mid is between the top of the hours, 4004.10, at 0, and their bottom, 4000.10, at
+/// 1, clamped.
 #[derive(Default)]
 struct Cheap {
     mid: Option<f64>,
@@ -103,10 +99,10 @@ fn features() -> Rc<FeatureSet> {
         .unwrap()
 }
 
-/// The probe's decisions on `cheap`, learning the R of each side of the
-/// bracket by LightGBM, on leaves of 20 rows, on a window of 70 hours, the
-/// last 12 calibrated on, so that the 58 hours fitted on split, each slice
-/// of at least 5 rows; each side traded from an expected net R of nought.
+/// The probe's decisions on `cheap`, learning the R of each side of the bracket by LightGBM, on
+/// leaves of 20 rows, on a window of 70 hours, the last 12 calibrated on, so that the 58 hours
+/// fitted on split, each slice of at least 5 rows; each side traded from an expected net R of
+/// nought.
 fn config() -> ModelConfig {
     ModelConfig::builder()
         .decision(rule())
@@ -132,8 +128,7 @@ fn training(catalog: &TempDir, models: &Path) -> Training {
         .unwrap()
 }
 
-/// The model set under `models` valid from `valid_from` of a training, as
-/// `training` keys it.
+/// The model set under `models` valid from `valid_from` of a training, as `training` keys it.
 fn model_set(models: &Path, valid_from: Timestamp) -> StoredModelSet {
     blueprint(features(), config())
         .model_store(models)
@@ -156,9 +151,9 @@ fn t() -> Timestamp {
     ic::at("00:00:00") + SignedDuration::from_hours(48)
 }
 
-/// Each side published at t, in the model set valid from then, which
-/// holds their pair's calibration, and each side's model, reloaded by its
-/// learner, predicts its probes, rows of the calibration slice, to the bit.
+/// Each side published at t, in the model set valid from then, which holds their pair's
+/// calibration, and each side's model, reloaded by its learner, predicts its probes, rows of the
+/// calibration slice, to the bit.
 #[rstest]
 fn train_at_t_publishes_each_side_whose_probes_reload_to_identical_predictions() {
     let catalog = catalog();
@@ -181,8 +176,9 @@ fn train_at_t_publishes_each_side_whose_probes_reload_to_identical_predictions()
         .fingerprint()
         .unwrap()
         .to_string();
-    // A side's model reads the strategy's features, then the bracket's payoff
-    // features, the names the decision checks it against.
+
+    // A side's model reads the strategy's features, then the bracket's payoff features, the names
+    // the decision checks it against.
     let names = side_names(features().names(), &target().payoff_names());
     let model_set = model_set(models.path(), t());
     assert_eq!(model_set.valid_from, t());

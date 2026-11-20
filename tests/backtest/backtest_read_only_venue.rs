@@ -1,10 +1,8 @@
-//! A backtest trading IC's gold (`common::ic`) while reading LSE's gold
-//! futures trades, `GOLD-FUTURES.LSEDGE`, filled into the catalog through
-//! fill-catalog's node fill from a mock LSE peer replaying a captured
-//! export (`lse::testing`). No broker trades LSEDGE: its simulated venue
-//! starts with nothing, so the run ends with the balances and return
-//! statistics of the same run without the series. The fill and each run
-//! on a thread of its own, one node per thread.
+//! A backtest trading IC's gold (`common::ic`) while reading LSE's gold futures trades,
+//! `GOLD-FUTURES.LSEDGE`, filled into the catalog through fill-catalog's node fill from a mock LSE
+//! peer replaying a captured export (`lse::testing`). No broker trades LSEDGE: its simulated venue
+//! starts with nothing, so the run ends with the balances and return statistics of the same run
+//! without the series.
 
 use std::{
     cell::RefCell,
@@ -53,10 +51,9 @@ fn gold_trades() -> DataRequirements {
     }
 }
 
-/// Fills the catalog in `dir`, which holds the hand-written definition of
-/// `GOLD_FUTURES`, with its trades from the mock LSE peer, as fill-catalog
-/// does: what the catalog lacks, asked of LSE's client through the node,
-/// five days on, after LSE loaded them.
+/// Fills the catalog in `dir`, which holds the hand-written definition of `GOLD_FUTURES`, with its
+/// trades from the mock LSE peer, as fill-catalog does: what the catalog lacks, asked of LSE's
+/// client through the node, five days on, after LSE loaded them.
 fn fill_gold(dir: &Path) {
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     catalog.write_instruments(vec![gold_futures()]).unwrap();
@@ -84,8 +81,7 @@ fn fill_gold(dir: &Path) {
         .unwrap();
 }
 
-/// Buys 10 oz of XAUUSD on IC's first hour bar, reading LSE's gold trades
-/// if told to.
+/// Buys 10 oz of XAUUSD on IC's first hour bar, reading LSE's gold trades if told to.
 #[derive(Debug)]
 struct GoldReader {
     core: StrategyCore,
@@ -130,9 +126,8 @@ impl DataActor for GoldReader {
     }
 }
 
-/// IC's backtest on `catalog`, replaying LSE's gold trades if `reads_lse`,
-/// on a thread of its own: its result and the LSE trades the strategy
-/// read.
+/// IC's backtest on `catalog`, replaying LSE's gold trades if `reads_lse`, on a thread of its own:
+/// its result and the LSE trades the strategy read.
 fn run(catalog: &tempfile::TempDir, reads_lse: bool) -> (BacktestResult, usize) {
     let mut backtest = ic::backtest(catalog);
     if reads_lse {

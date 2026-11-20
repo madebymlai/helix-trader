@@ -1,14 +1,11 @@
-//! A strategy declaring book deltas as a tick series and custom data as a
-//! custom series, beside IC's gold quotes (`common::ic`): the run replays
-//! CME gold's deltas and its `Imbalance`s (`common::glbx`), the custom
-//! series under its id, from the catalog to the probe's handlers, in time
-//! order with the quotes, and nothing else the catalog stores. The probe
-//! subscribes to the quotes of IC's gold, the deltas of CME gold and its
-//! imbalances, keyed by its id, and records each it gets.
-//! A raw feature on the imbalances reads each from Nautilus' cache, where
-//! the data engine puts it before the strategy's handler runs; a feature on
-//! the imbalances and the quotes, of a model strategy's dataset run, gets
-//! both from its data hooks. One node per thread, so one run per test.
+//! A strategy declaring book deltas as a tick series and custom data as a custom series, beside
+//! IC's gold quotes (`common::ic`): the run replays CME gold's deltas and its `Imbalance`s
+//! (`common::glbx`), the custom series under its id, from the catalog to the probe's handlers, in
+//! time order with the quotes, and nothing else the catalog stores. The probe subscribes to the
+//! quotes of IC's gold, the deltas of CME gold and its imbalances, keyed by its id, and records
+//! each it gets. A raw feature on the imbalances reads each from Nautilus' cache, where the data
+//! engine puts it before the strategy's handler runs; a feature on the imbalances and the quotes,
+//! of a model strategy's dataset run, gets both from its data hooks.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -58,8 +55,8 @@ impl Got {
     }
 }
 
-/// Subscribes to the quotes of IC's gold, the deltas of CME gold and its
-/// imbalances, and records each it gets.
+/// Subscribes to the quotes of IC's gold, the deltas of CME gold and its imbalances, and records
+/// each it gets.
 #[derive(Debug)]
 struct Probe {
     core: StrategyCore,
@@ -100,8 +97,8 @@ impl DataActor for Probe {
     }
 }
 
-/// Registers a raw feature on CME gold's imbalances at its start,
-/// subscribes to them, and records the feature's values at each it gets.
+/// Registers a raw feature on CME gold's imbalances at its start, subscribes to them, and records
+/// the feature's values at each it gets.
 #[derive(Debug)]
 struct Reader {
     core: StrategyCore,
@@ -124,8 +121,8 @@ impl DataActor for Reader {
     }
 }
 
-/// A catalog of IC's gold and its quotes, CME gold, its book deltas and
-/// its imbalances, all stored over 08:00 to 12:00.
+/// A catalog of IC's gold and its quotes, CME gold, its book deltas and its imbalances, all stored
+/// over 08:00 to 12:00.
 fn catalog() -> tempfile::TempDir {
     let dir = ic::catalog();
     glbx::store(dir.path());
@@ -134,8 +131,8 @@ fn catalog() -> tempfile::TempDir {
     dir
 }
 
-/// Runs the probe over `[09:00, 12:00]` on `catalog`, declaring `ticks`,
-/// `custom` and no bar types, and returns what it got, in order.
+/// Runs the probe over `[09:00, 12:00]` on `catalog`, declaring `ticks`, `custom` and no bar types,
+/// and returns what it got, in order.
 fn run(catalog: &tempfile::TempDir, ticks: Vec<TickSeries>, custom: Vec<CustomSeries>) -> Vec<Got> {
     let got = Rc::new(RefCell::new(Vec::new()));
     let probe = Probe {
@@ -193,8 +190,8 @@ fn declared_deltas_and_custom_data_of_the_run_reach_the_handlers_in_time_order()
         vec![imbalances()],
     );
 
-    // The run's window only: not the event of 08:40 nor the imbalance of
-    // 08:50; the two deltas of 09:20 as one event.
+    // The run's window only: not the event of 08:40 nor the imbalance of 08:50; the two deltas of
+    // 09:20 as one event.
     assert_eq!(
         unquoted(&got),
         [
@@ -204,7 +201,8 @@ fn declared_deltas_and_custom_data_of_the_run_reach_the_handlers_in_time_order()
             Got::Imbalance(0.75, at("11:00:00")),
         ]
     );
-    // Among the 360 quotes of the run, each at its time.
+
+    // Among the 360 quotes of the run, each at its time
     assert_eq!(got.len(), 360 + 4);
     let times: Vec<UnixNanos> = got.iter().map(Got::time).collect();
     assert!(times.is_sorted(), "{got:?}");
@@ -224,8 +222,8 @@ fn deltas_and_custom_data_the_strategy_does_not_declare_are_not_replayed() {
     assert_eq!(got.len(), 360);
 }
 
-/// The feature reads each imbalance the run replays as the strategy gets
-/// it, the data engine having cached it first, from no strategy code.
+/// The feature reads each imbalance the run replays as the strategy gets it, the data engine having
+/// cached it first, from no strategy code.
 #[rstest]
 fn a_raw_feature_reads_each_replayed_imbalance_from_the_cache() {
     let catalog = catalog();
@@ -265,8 +263,7 @@ thread_local! {
     static ARRIVED: RefCell<Vec<Got>> = const { RefCell::new(Vec::new()) };
 }
 
-/// A feature recording each quote and imbalance it gets in `ARRIVED`,
-/// never initialized.
+/// A feature recording each quote and imbalance it gets in `ARRIVED`, never initialized.
 struct Arrivals;
 
 impl Indicator for Arrivals {
@@ -329,10 +326,9 @@ impl IndicatorArgs for ArrivalsArgs {
 /// `[indicators.arrivals]`.
 const ARRIVALS: Declared<ArrivalsArgs> = Declared::new("arrivals");
 
-/// A model strategy's dataset run over `[09:00, 12:00]`, its one feature on
-/// IC's gold quotes and CME gold's imbalances: the strategy's data hooks
-/// (`model_data_hooks!`) hand the feature each replayed imbalance among
-/// the quotes, in time order, as a strategy's handlers get them.
+/// A model strategy's dataset run over `[09:00, 12:00]`, its one feature on IC's gold quotes and
+/// CME gold's imbalances: the strategy's data hooks (`model_data_hooks!`) hand the feature each
+/// replayed imbalance among the quotes, in time order, as a strategy's handlers get them.
 #[rstest]
 fn a_feature_on_custom_data_and_quotes_gets_both_replayed_in_time_order() {
     let catalog = catalog();

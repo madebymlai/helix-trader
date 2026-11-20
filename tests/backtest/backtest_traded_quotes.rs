@@ -1,11 +1,8 @@
-//! A strategy whose config reads the instrument it trades only through
-//! data that gives Nautilus no market price for it, its custom data (a
-//! custom series under its id, which brings no instrument), its book
-//! deltas or its depth: the data requirements of its config
-//! (`StandardConfig::data_requirements`) still replay the instrument's
-//! quotes, so its market order on IC's gold (`common::ic`) is not denied
-//! for want of a price, nor of the instrument, and fills. One node per
-//! thread, so one run per test.
+//! A strategy whose config reads the instrument it trades only through data that gives Nautilus no
+//! market price for it, its custom data (a custom series under its id, which brings no instrument),
+//! its book deltas or its depth: the data requirements of its config
+//! (`StandardConfig::data_requirements`) still replay the instrument's quotes, so its market order
+//! on IC's gold (`common::ic`) is not denied for want of a price, nor of the instrument, and fills.
 
 use std::{cell::RefCell, num::NonZeroUsize, rc::Rc, sync::Arc};
 
@@ -54,10 +51,9 @@ impl Part for Reader {
     }
 }
 
-/// The config trading IC's gold, reading it through `data` alone, keyed
-/// by `key`, `instrument_id` or, of custom data, `identifier`. A custom
-/// type loads once registered, as the process registers those it compiles
-/// at its start: `Imbalance` here.
+/// The config trading IC's gold, reading it through `data` alone, keyed by `key`, `instrument_id`
+/// or, of custom data, `identifier`. A custom type loads once registered, as the process registers
+/// those it compiles at its start: `Imbalance` here.
 fn config(data: &str, key: &str) -> StandardConfig<Reader> {
     nautilus_serialization::ensure_custom_data_registered::<glbx::Imbalance>();
     StandardConfig::load(&format!(
@@ -191,8 +187,7 @@ fn store_deltas(catalog: &tempfile::TempDir) {
         .unwrap();
 }
 
-/// Stores a snapshot of IC gold's book at 09:20, its best bid 4001.00,
-/// over 08:00 to 12:00.
+/// Stores a snapshot of IC gold's book at 09:20, its best bid 4001.00, over 08:00 to 12:00.
 fn store_depth(catalog: &tempfile::TempDir) {
     let mut depth = stub_depth10();
     let shift = Price::from("4001.00") - depth.bids[0].price;
@@ -212,8 +207,8 @@ fn store_depth(catalog: &tempfile::TempDir) {
         .unwrap();
 }
 
-/// Runs a buyer on the requirements of `config` over IC's backtest window
-/// and returns how many positions it opened.
+/// Runs a buyer on the requirements of `config` over IC's backtest window and returns how many
+/// positions it opened.
 fn positions(catalog: &tempfile::TempDir, config: &StandardConfig<Reader>, reads: Reads) -> usize {
     let requirements = config.data_requirements();
     let backtest = Backtest {

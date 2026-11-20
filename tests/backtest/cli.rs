@@ -1,14 +1,11 @@
-//! The binary's refusals of a command line before it runs anything: a flag
-//! its subcommand does not take, one it requires left out, two that
-//! conflict, a value it cannot read, a strategy it does not know, a window
-//! or a train's span not ending after its start, a config it cannot load,
-//! and a train of a strategy with no model. Each exits non-zero, its stderr naming the flag
-//! or the facts ahead of the usage clap prints after a refusal, printing
-//! nothing and creating no catalog. The binary runs
-//! in a directory of its own with no environment, so that neither the
-//! shell nor a `.env` above the crate's root gives a flag its value: the
-//! flags fall back on the environment, which `main` loads from `.env`
-//! before it parses them.
+//! The binary's refusals of a command line before it runs anything: a flag its subcommand does not
+//! take, one it requires left out, two that conflict, a value it cannot read, a strategy it does
+//! not know, a window or a train's span not ending after its start, a config it cannot load, and a
+//! train of a strategy with no model. Each exits non-zero, its stderr naming the flag or the facts
+//! ahead of the usage clap prints after a refusal, printing nothing and creating no catalog. The
+//! binary runs in a directory of its own with no environment, so that neither the shell nor a
+//! `.env` above the crate's root gives a flag its value: the flags fall back on the environment,
+//! which `main` loads from `.env` before it parses them.
 
 use std::process::Command;
 
@@ -70,8 +67,8 @@ fn argv<'a>(parts: &[&[&'a str]]) -> Vec<&'a str> {
     parts.concat()
 }
 
-/// Each value joined to its flag, so that clap reads a value such as
-/// `-0.035 USD` or `-1s` as the value, not as a flag of its own.
+/// Each value joined to its flag, so that clap reads a value such as `-0.035 USD` or `-1s` as the
+/// value, not as a flag of its own.
 #[rstest]
 #[case::fill_catalog_given_an_ib_account(
     argv(&[&FILL_CATALOG, &["--account", "DU1234567"]]),
@@ -277,8 +274,8 @@ fn the_binary_refuses_a_command_line_naming_why_and_runs_nothing(
         String::from_utf8_lossy(&output.stderr),
     );
     assert!(!output.status.success(), "{stdout}{stderr}");
-    // Clap follows its refusal with the subcommand's usage, which lists
-    // every flag it takes.
+
+    // Clap follows its refusal with the subcommand's usage, which lists every flag it takes
     let refusal = stderr.split("\nUsage:").next().unwrap();
     for part in named {
         assert!(refusal.contains(part), "{part}: {stderr}");

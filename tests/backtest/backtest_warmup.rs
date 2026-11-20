@@ -1,18 +1,15 @@
-//! The EMA crossover warms up on the replay alone: a backtest makes no
-//! warmup request, and the crossover decides once its indicators are
-//! initialized, so a run trades from the bars it replays (`common::trades`).
-//! One node per thread, so one run per test.
+//! The EMA crossover warms up on the replay alone: a backtest makes no warmup request, and the
+//! crossover decides once its indicators are initialized, so a run trades from the bars it replays
+//! (`common::trades`).
 
 use rstest::rstest;
 
 use crate::common::{self, trades};
 
-/// From 12:30 the run replays the bar closing 13:00 from 12:31 on, at
-/// 620.60, then 14:00 at 624.60, 15:00 and 16:00 at 624.80: the slow EMA
-/// is initialized at 14:00, long (624.60 above 622.60), its first
-/// decision; 15:00 stays long (624.80 above 622.60), the slow EMA going to
-/// 624.07, and 16:00 too (624.80 above 624.07); 17:00 and 18:00 are out of
-/// the session. No cross, no order.
+/// From 12:30 the run replays the bar closing 13:00 from 12:31 on, at 620.60, then 14:00 at 624.60,
+/// 15:00 and 16:00 at 624.80: the slow EMA is initialized at 14:00, long (624.60 above 622.60), its
+/// first decision; 15:00 stays long (624.80 above 622.60), the slow EMA going to 624.07, and 16:00
+/// too (624.80 above 624.07); 17:00 and 18:00 are out of the session. No cross, no order.
 #[rstest]
 fn a_run_started_at_the_trade_is_cold_there_and_does_not_trade() {
     let levels = trades::TIME_EXIT;

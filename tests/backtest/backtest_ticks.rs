@@ -1,9 +1,7 @@
-//! A strategy declaring tick series and no bar types: the run replays
-//! exactly the declared series, IC's gold quotes (`common::ic`) and CME
-//! gold's trades and book depth (`common::glbx`), and nothing else the
-//! catalog stores. The probe subscribes to the quotes, trades and book
-//! depth of both instruments and records each it gets. One node per
-//! thread, so one run per test.
+//! A strategy declaring tick series and no bar types: the run replays exactly the declared series,
+//! IC's gold quotes (`common::ic`) and CME gold's trades and book depth (`common::glbx`), and
+//! nothing else the catalog stores. The probe subscribes to the quotes, trades and book depth of
+//! both instruments and records each it gets.
 
 use std::{cell::RefCell, num::NonZeroUsize, rc::Rc};
 
@@ -26,8 +24,7 @@ use crate::common::{glbx, ic};
 /// What the probe got: its kind, its instrument and its time.
 type Got = (NautilusDataType, InstrumentId, UnixNanos);
 
-/// Subscribes to every tick series of both instruments and records each
-/// tick it gets.
+/// Subscribes to every tick series of both instruments and records each tick it gets.
 #[derive(Debug)]
 struct TickProbe {
     core: StrategyCore,
@@ -84,8 +81,8 @@ impl DataActor for TickProbe {
     }
 }
 
-/// A catalog of IC's gold and its quotes, CME gold, its book depth and its
-/// trades, all stored over 08:00 to 12:00.
+/// A catalog of IC's gold and its quotes, CME gold, its book depth and its trades, all stored over
+/// 08:00 to 12:00.
 fn catalog() -> tempfile::TempDir {
     let dir = ic::catalog();
     glbx::store(dir.path());
@@ -93,8 +90,8 @@ fn catalog() -> tempfile::TempDir {
     dir
 }
 
-/// Runs the probe over `[09:00, 12:00]` on `catalog`, declaring `ticks`
-/// and no bar types, and returns what it got of each kind and instrument.
+/// Runs the probe over `[09:00, 12:00]` on `catalog`, declaring `ticks` and no bar types, and
+/// returns what it got of each kind and instrument.
 fn run(catalog: &tempfile::TempDir, ticks: Vec<TickSeries>) -> Vec<Got> {
     let got = Rc::new(RefCell::new(Vec::new()));
     let probe = TickProbe {
@@ -147,14 +144,13 @@ fn a_strategy_declaring_ticks_and_no_bar_types_gets_the_declared_ticks_of_the_ru
         ],
     );
 
-    // Two IC quotes a minute, at :07.250 and :37.750, over the run's three
-    // hours.
+    // Two IC quotes a minute, at :07.250 and :37.750, over the run's three hours
     let quotes = times(&got, &NautilusDataType::QuoteTick, ic::INSTRUMENT_ID);
     assert_eq!(quotes.len(), 360);
     assert_eq!(quotes[0], at("09:00:07.250"));
     assert_eq!(quotes[359], at("11:59:37.750"));
-    // The run's window only: not the trade of 08:45 nor the snapshot of
-    // 08:30.
+
+    // The run's window only: not the trade of 08:45 nor the snapshot of 08:30
     assert_eq!(
         times(&got, &NautilusDataType::TradeTick, glbx::INSTRUMENT_ID),
         [at("09:10:00"), at("11:50:00")]
@@ -163,7 +159,8 @@ fn a_strategy_declaring_ticks_and_no_bar_types_gets_the_declared_ticks_of_the_ru
         times(&got, &NautilusDataType::OrderBookDepth, glbx::INSTRUMENT_ID),
         [at("09:00:30"), at("10:15:00"), at("11:45:00")]
     );
-    // Nothing else: no IC trades or book, no CME quotes.
+
+    // Nothing else: no IC trades or book, no CME quotes
     assert_eq!(got.len(), 360 + 2 + 3);
 }
 
