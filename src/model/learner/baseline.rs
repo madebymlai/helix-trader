@@ -51,7 +51,6 @@ mod tests {
 
     use crate::model::learner::{LearnerConfig, TrainingSet};
 
-    /// (2.5 - 1.0 + 3.5 + 2.0) / 4 = 1.75.
     #[rstest]
     #[case::a_row_fitted_on([0.0, 1.0])]
     #[case::a_row_far_from_those_fitted_on([100.0, -5.0])]

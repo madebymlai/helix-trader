@@ -55,7 +55,6 @@ mod tests {
 
     use crate::model::learner::{LearnerConfig, TrainingSet};
 
-    /// The mean of the labels is (2.5 - 1.0 + 3.5 + 2.0) / 4 = 1.75.
     fn model() -> crate::model::learner::Model {
         let set = TrainingSet::new(2, vec![0.9; 8], vec![2.5, -1.0, 3.5, 2.0]).unwrap();
         LearnerConfig::Fake {}.fit(&set).unwrap()
