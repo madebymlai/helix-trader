@@ -369,10 +369,8 @@ impl Streamed {
     }
 }
 
-/// An actor that asks for a contract's history of book deltas, then its history of book depth.
-///
-/// `DataTester` requests neither. Nautilus' data testing specification asks for historical book
-/// deltas to be tested through a custom actor until it does.
+/// An actor that asks for a contract's history of book deltas, then of book depth, which
+/// `DataTester` requests neither of.
 #[derive(Debug)]
 struct BookHistory {
     core: DataActorCore,
@@ -506,12 +504,11 @@ fn nvda_on_nasdaq(lse: &MockLse, stream: &MockExchangeStream) -> LseDataClientCo
     Streamed::Nvda.config(lse, Some(stream))
 }
 
-/// A Level 1 session as LSE's documentation records it. ESZ6 is on the CME stream, and the client
-/// looks it up in LSE's catalogue. NVDA is on the Nasdaq stream, and the client looks it up by
-/// ticker.
+/// A Level 1 session as LSE's documentation records it, for ESZ6 on the CME stream and NVDA on the
+/// Nasdaq stream.
 ///
 /// The tester's quotes open with the best bid and offer. The live records follow, and the last is a
-/// trade with no aggressor side. The node stops once the trade reaches the message bus.
+/// trade with no aggressor side.
 #[rstest]
 #[case::a_cme_contract(
     MockLse::start(vec![Reply::json(PAIRS_ESZ6)]),
@@ -675,8 +672,7 @@ type Best = (u64, (&'static str, u64), (&'static str, u64));
 /// - An order joins the best ask.
 /// - The ninth ask level is removed.
 ///
-/// The node stops once the four depths reach the message bus. Each case gives each depth's
-/// sequence and best bid and ask.
+/// Each case gives each depth's sequence and best bid and ask.
 #[rstest]
 #[case::cme_contract(
     Streamed::Gcz26,
@@ -766,7 +762,7 @@ async fn the_data_tester_receives_a_contract_s_book_depth_from_lse(
 /// - The second changes the bid.
 /// - The third removes the ask.
 ///
-/// The node stops once the three batches reach the message bus.
+/// The node stops once the three batches arrive.
 #[rstest]
 #[case::cme_contract(Streamed::Gcz26)]
 #[case::nasdaq_stock(Streamed::Nvda)]

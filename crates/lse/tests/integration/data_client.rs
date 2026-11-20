@@ -1,6 +1,10 @@
 //! Tests the data client through its factory. Its requests run against the mock LSE peer, which
 //! replays LSE's captured exports, refusals and catalogues. Its subscriptions run against the mock
 //! sockets.
+//!
+//! Each test's doc says what its capture holds. A request for something the cache or the client
+//! does not know fails, naming it, before LSE is asked. LSE loads a day the morning after, so a
+//! request reaching into a day it has not loaded is answered plain, and a fill asks again.
 
 use std::{
     cell::RefCell,
@@ -721,7 +725,6 @@ fn subscribed(socket: &MockLseSocket) -> Vec<String> {
 }
 
 /// Each socket answers as LSE's did on 13 November 2026, with its list and the series' last tick.
-///
 /// data-ws lists `BTC/USD` too, and sent a tick of 8 November for it, bid 75891.65. Crypto has
 /// streamed on london-ws since.
 #[tokio::test]
@@ -1065,9 +1068,8 @@ async fn a_day_window_ending_at_a_midnight_is_one_export() {
     );
 }
 
-/// LSE sends the day before's trades and none of the current day's. It stores them the morning
-/// after. The data engine writes a plain response to no catalog (`DataEngine::response`), so a fill
-/// asks again.
+/// LSE sends the day before's trades and none of the current day's. The data engine writes a plain
+/// response to no catalog (`DataEngine::response`).
 #[tokio::test]
 async fn a_trades_request_reaching_into_the_day_lse_has_not_loaded_is_answered_unwritten() {
     let lse = MockLse::start(vec![
@@ -1201,9 +1203,8 @@ fn day(date: &str) -> UnixNanos {
     UnixNanos::from(at(&format!("{date}T00:00:00Z")))
 }
 
-/// The captured rows are of the 9th, 10th and 12th. Each is stamped at the end of its date, when
-/// its close is known. A window from the 10th's 00:00 to the 13th's is the dates of the 9th to the
-/// 12th.
+/// The captured rows are of the 9th, 10th and 12th, each stamped at the end of its date. A window
+/// from the 10th's 00:00 to the 13th's is the dates of the 9th to the 12th.
 #[tokio::test]
 async fn a_custom_data_request_is_answered_with_lse_s_rows_in_one_complete_envelope() {
     let lse = MockLse::start(vec![
@@ -1285,8 +1286,8 @@ async fn a_custom_data_request_is_answered_under_the_identifier_it_names() {
     assert_eq!(identifiers, vec![Some("TREASURY-10Y".to_string()); 4]);
 }
 
-/// The 11th's window is the 10th's date. Its export, which the mock answers with the three days,
-/// keeps the 10th's row alone, stamped at the 11th's 00:00.
+/// The 11th's window is the 10th's date. The mock answers with the three days, and the 10th's row
+/// alone is kept, stamped at the 11th's 00:00.
 #[tokio::test]
 async fn rows_outside_the_request_s_window_are_left_out() {
     let lse = MockLse::start(vec![
@@ -1316,8 +1317,7 @@ async fn rows_outside_the_request_s_window_are_left_out() {
 }
 
 /// The window runs from the start of the day before until now. LSE has the day before's row,
-/// stamped at today's 00:00, only once it has loaded the day, the morning after (`http::export`).
-/// It holds none yet, so the response is plain and a fill asks again.
+/// stamped at today's 00:00, only once it has loaded the day (`http::export`).
 #[tokio::test]
 async fn a_request_reaching_into_a_day_lse_has_not_loaded_is_answered_unwritten() {
     let lse = MockLse::start(vec![
@@ -1343,8 +1343,8 @@ async fn a_request_reaching_into_a_day_lse_has_not_loaded_is_answered_unwritten(
 
 /// LSE's catalogue, captured on 13 November 2026, held insider trades filed up to 13 October
 /// (`last`) and company profiles updated up to 05:08:52 on 13 October. A window whose last key is
-/// dated after it is not loaded, so the response is plain and a fill asks again. A window ending on
-/// the last date is complete, because LSE loads a day whole.
+/// dated after it is not loaded. A window ending on the last date is complete, because LSE loads a
+/// day whole.
 #[rstest]
 #[case::filed_after_the_last_date(
     "insider_trades", "TEAM", TEAM_INSIDER_TRADES,
@@ -1652,7 +1652,7 @@ async fn economic_releases_are_stamped_when_they_came_out_and_answered_complete(
 }
 
 /// February 2026 holds the release of the 11th. It is past, with no actual, because LSE has not
-/// filled it, so the response is plain.
+/// filled it.
 #[tokio::test]
 async fn a_window_of_releases_one_of_which_lse_has_not_filled_is_answered_unwritten() {
     let lse = MockLse::start(vec![
@@ -2266,8 +2266,7 @@ async fn daily_weekly_and_monthly_candles_are_refused_naming_the_candles_to_decl
     assert!(lse.calls().is_empty(), "{:?}", lse.calls());
 }
 
-/// The bars close from 00:01 the day before. LSE holds that day's candles and none of today's, and
-/// stores them the morning after, so the response is plain and a fill asks again.
+/// The bars close from 00:01 the day before. LSE holds that day's candles and none of today's.
 #[tokio::test]
 async fn a_bars_request_reaching_into_the_day_lse_has_not_loaded_is_answered_unwritten() {
     let lse = MockLse::start(vec![

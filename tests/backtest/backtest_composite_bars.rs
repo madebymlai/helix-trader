@@ -3,6 +3,9 @@
 //! (`strategy::requirements::catalog_keys`). The backtest replays them, and builds each hour bar
 //! `BUILT_AFTER` its close, as live does. A model strategy decides once the hour bar closing on
 //! its grid is built.
+//!
+//! The k-th minute bar after 06:00 opens at 600 + 0.01 x (37 k mod 101). The fill stores minute bars
+//! from 06:00 to 15:00, and the runs start at 10:30.
 
 use std::path::Path;
 
@@ -48,7 +51,6 @@ fn at(hh_mm: &str) -> Timestamp {
     ts(&format!("2026-01-07T{hh_mm}:00Z"))
 }
 
-/// The k-th minute after 06:00 opens at 600 + 0.01 x (37 k mod 101).
 fn minute_bar(close: Timestamp) -> Bar {
     let k = close.duration_since(at("06:00")).as_mins();
     let open = 600.0 + 0.01 * ((37 * k) % 101) as f64;
@@ -78,9 +80,8 @@ fn minute_bars(from: Timestamp, to: Timestamp) -> Vec<Bar> {
     bars
 }
 
-/// Returns the hour bar worked out from the minute bars closing in `(close − 1 h, close]`.
-///
-/// The bar is stamped `BUILT_AFTER` the close.
+/// Returns the hour bar worked out from the minute bars closing in `(close − 1 h, close]`, stamped
+/// `BUILT_AFTER` the close.
 fn hour_bar(close: Timestamp) -> common::Ohlc {
     let minutes = minute_bars(close - SignedDuration::from_mins(59), close);
     let high = minutes.iter().map(|bar| bar.high).max().unwrap();
@@ -127,8 +128,8 @@ fn hour_bars_built_from_stored_minute_bars_have_the_prices_of_their_minutes() {
     let record = record.borrow();
     let replay: Vec<_> = record.bars.iter().map(ohlc).collect();
 
-    // The run starts at 10:30, so the bar closing 11:00 lacks the minutes before 10:30, the bars
-    // closing 12:00 to 15:00 are whole, and the last is built at 15:00:05, before the run's end.
+    // The bar closing 11:00 lacks the minutes before 10:30, and the last is built at 15:00:05,
+    // before the run's end.
     let stamps: Vec<Timestamp> = replay.iter().map(|bar| bar.0).collect();
     assert_eq!(
         stamps,
@@ -142,11 +143,8 @@ fn hour_bars_built_from_stored_minute_bars_have_the_prices_of_their_minutes() {
 
 const CLOSE: Declared<SmaArgs> = Declared::new("close");
 
-/// A dataset run from 10:30 to 15:00 on a hedging venue decides every hour on the hour bar's close.
-///
-/// A live node builds the hour bars `BUILT_AFTER` their close and decides 10 ms later. The backtest
-/// does both. So each decision reads the hour bar closing on its grid, and its close is the last
-/// minute's. The hour closing 15:00 is built after the run's end.
+/// A dataset run from 10:30 to 15:00 on a hedging venue decides 10 ms after each hour bar is built.
+/// The hour closing 15:00 is built after the run's end.
 #[rstest]
 fn a_decision_on_hour_bars_reads_the_bar_closing_on_its_grid() {
     let dir = tempfile::tempdir().unwrap();

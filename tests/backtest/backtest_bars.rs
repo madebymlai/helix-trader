@@ -8,13 +8,9 @@ use rstest::rstest;
 
 use crate::common::{noise, ohlc, relative};
 
-/// Checks the bars of runs from 12:30 and 13:00.
-///
-/// - From 12:30, the bar closing 13:00 holds only the quotes from 12:31. The bars closing 14:00 and
-///   15:00 hold their whole hours.
-/// - From 13:00, the bar closing at the start is not replayed.
-///
-/// The catalog path is absolute or relative to the working directory, as `--catalog` takes.
+/// From 12:30, the bar closing 13:00 holds only the quotes from 12:31. From 13:00, the bar closing
+/// at the start is not replayed. The catalog path is absolute or relative to the working
+/// directory, as `--catalog` takes.
 #[rstest]
 #[case::off_an_hour(noise::at("12:30"), Path::to_path_buf, &["13:00", "14:00", "15:00"])]
 #[case::off_an_hour_on_a_relative_catalog(noise::at("12:30"), relative, &["13:00", "14:00", "15:00"])]

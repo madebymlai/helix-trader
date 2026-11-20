@@ -1,5 +1,9 @@
 //! Tests a commission rate on the EMA's time exit (backtest_ema_time_exit.rs). Each fill is charged
 //! the rate on its value, and the report shows the costs.
+//!
+//! The run buys 10 at 620.65 and sells at 624.85, so the fills are worth 6,206.50 and 6,248.50 EUR.
+//! Without commission the balance ends at 10042.00 EUR. Half spread 0.05 EUR on 20 shares is 1.00
+//! EUR.
 
 use helix_trader::backtest::{Commission, report};
 use rstest::rstest;
@@ -19,14 +23,12 @@ fn a_commission_rate_charges_the_value_of_every_fill_and_the_report_shows_the_co
     let outcome = backtest.run(trades::ema_cross()).unwrap();
     let result = &outcome.result;
 
-    // 10 bought at 620.65 and sold at 624.85, so 6,206.50 and 6,248.50 EUR, which are charged
-    // 124.13 and 124.97, or 249.10 in all, and without commission the balance ends at 10042.00 EUR.
+    // The fills are charged 124.13 and 124.97, or 249.10 in all
     assert_eq!(result.total_orders, trades::TIME_EXIT_ORDERS);
     assert_eq!(common::balance(result), "9792.90 EUR");
 
-    // Half spread 0.05 EUR on 20 shares is 1.00 EUR, PnL is -207.10 (9792.90 less 10,000), which
-    // is 43.00 before the 249.10 commission and the spread, and the cost per trade is 250.10 / 2
-    // fills.
+    // PnL is -207.10 (9792.90 less 10,000), which is 43.00 before commission and spread, and the
+    // cost per trade is 250.10 / 2 fills.
     let costs = "
 Costs (EUR)
   Commission: 249.100000

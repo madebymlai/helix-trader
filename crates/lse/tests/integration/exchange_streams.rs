@@ -2,6 +2,10 @@
 //!
 //! The tests cover `GLBX` contracts and `XNAS` stocks on the mock CME and Nasdaq streams, at
 //! Levels 1 to 3.
+//!
+//! GCZ6 is the front contract and GCG7 its next, which a roll subscribes. Once a contract has
+//! expired, LSE refuses a subscription naming it (`symbol unavailable`, a close with 1008, which is
+//! not reconnected), so a reconnection names the live contracts alone.
 
 use std::{
     cell::RefCell,
@@ -393,8 +397,7 @@ async fn a_contract_subscribed_after_the_start_is_looked_up_and_carried_from_a_n
 }
 
 /// GCG7's quotes end, as a roll ends its old contract's. When LSE drops the connection, the next
-/// one subscribes GCZ6 alone, so that GCG7, once expired, does not get the level's whole
-/// subscription refused (`symbol unavailable`, a close with 1008, which is not reconnected).
+/// one subscribes GCZ6 alone.
 #[tokio::test]
 async fn a_contract_whose_data_at_a_level_all_ended_is_left_out_of_its_next_connection() {
     let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6), Reply::json(PAIRS_GCG7)]);
@@ -470,9 +473,8 @@ async fn level_1_subscriptions(stream: &MockExchangeStream, count: usize) -> Vec
 /// GCG7. The client names both at Level 1 when it connects. GCZ6's depth, taken at Level 2, ends
 /// at the roll.
 ///
-/// GCZ6 takes no data at Level 1 either, so Level 1's next connection leaves it out. Once GCZ6
-/// expired, LSE would refuse a subscription naming it (`symbol unavailable`, 1008, not
-/// reconnected) and stop GCG7's quotes.
+/// GCZ6 takes no data at Level 1 either, so Level 1's next connection leaves it out, or LSE would
+/// refuse it and stop GCG7's quotes.
 #[tokio::test]
 async fn a_contract_whose_data_ended_at_one_level_is_left_out_of_every_level_it_takes_none_at() {
     let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6), Reply::json(PAIRS_GCG7)]);
@@ -503,8 +505,7 @@ async fn a_contract_whose_data_ended_at_one_level_is_left_out_of_every_level_it_
 }
 
 /// A run started just before a roll names GCZ6 and GCG7 at Level 1 on connect, but subscribes
-/// GCG7's quotes alone. Level 1's next connection names GCG7 alone, so that GCZ6, never taken and
-/// once expired, is not refused.
+/// GCG7's quotes alone. Level 1's next connection names GCG7 alone, as GCZ6 was never taken.
 #[tokio::test]
 async fn a_reconnect_names_only_the_contracts_taken_at_its_level_not_those_streamed_untaken() {
     let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6), Reply::json(PAIRS_GCG7)]);

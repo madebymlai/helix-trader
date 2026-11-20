@@ -71,8 +71,7 @@ fn backward_spread_bars_shift_the_pre_roll_bars_by_the_spread() {
         ContinuousFutureAdjustmentType::BackwardSpread,
     );
 
-    // August's trades plus 49.00 and December's as they are, and trades before 23:00 are not
-    // replayed
+    // August's trades plus 49.00 and December's as they are
     assert_eq!(
         got.bars,
         [
@@ -117,8 +116,7 @@ fn forward_ratio_bars_scale_the_post_roll_bars_by_the_ratio() {
         ContinuousFutureAdjustmentType::ForwardRatio,
     );
 
-    // August's trades as they are and December's times 3992.00 / 4041.00, so 4042.00 × 3992 /
-    // 4041 = 3992.98788, which is 3992.99 to the cent.
+    // August's trades as they are and December's times 3992.00 / 4041.00, so 4042.00 gives 3992.99
     assert_eq!(
         got.bars,
         [
