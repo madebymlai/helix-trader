@@ -1,16 +1,16 @@
-//! What a model's decisions took and earned on rows, as a backtest's out-of-sample scores read it
-//! (`walk`), and the examples a model is fitted on (`Example`).
+//! Measures what a model's decisions took and earned on rows, as a backtest's out-of-sample scores
+//! read it (`walk`). It also defines the examples a model is fitted on (`Example`).
 //!
-//! What the trades taken earned (`Earnings`) is Nautilus' `Expectancy` and `WinRate` of their net
-//! P&Ls in R (`calculate_from_realized_pnls`), each net P&L over its unit as the model learns it
-//! (`Example::realized`), so the figures hold whatever the trades' size or instrument. Beside
-//! them is the same of every trade of the rows, and both again at 1.5 times the commission
-//! (`STRESS`).
+//! `Earnings` holds what the trades taken earned. That is Nautilus' `Expectancy` and `WinRate` of
+//! their net P&Ls in R (`calculate_from_realized_pnls`). Each net P&L is divided by its unit as
+//! the model learns it (`Example::realized`), so the figures hold whatever the trades' size or
+//! instrument. `Earnings` holds the same figures for every trade of the rows, and both again at
+//! 1.5 times the commission (`STRESS`).
 //!
 //! Nautilus' `Expectancy` is the mean win times the win rate plus the mean loss times the loss
-//! rate, the rates among the trades that gained or lost: a trade at 0, counted among the trades,
-//! weighs in neither. These score trades, not predictions (`score::ExpectedScore`), and decide
-//! nothing about publishing a model (`train`).
+//! rate. The rates are among the trades that gained or lost, so a trade at 0 counts as a trade but
+//! weighs in neither. These figures score trades, not predictions (`score::ExpectedScore`). They
+//! decide nothing about publishing a model (`train`).
 
 use std::fmt::Display;
 
@@ -24,11 +24,13 @@ use serde::{Deserialize, Serialize};
 use super::{dataset::DatasetRow, targets::Side};
 use crate::strategy::risk::R;
 
-/// The multiple of the commission the stressed earnings are at.
+/// The multiple of the commission that the stressed earnings use.
 pub const STRESS: f64 = 1.5;
 
-/// A row's trade: its net P&L, the commission it is net of, and its unit, the money one R is
-/// (`targets::SideTarget::unit`), all in the target's P&L currency.
+/// A row's trade, all in the target's P&L currency.
+///
+/// It holds the net P&L, the commission that P&L is net of, and the unit. The unit is the money one
+/// R is (`targets::SideTarget::unit`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Trade {
     pub pnl: f64,
@@ -40,14 +42,16 @@ pub struct Trade {
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Example {
     pub features: Vec<f64>,
-    /// The trade of a side model's side, or of the side picked for a meta.
+    /// The trade on a side model's side, or on the side picked for a meta.
     pub trade: Trade,
     pub ts_event: UnixNanos,
     pub settled_at: UnixNanos,
 }
 
-/// What trades earned: their count, and `Expectancy` and `WinRate` of their net P&Ls in R, none
-/// without a trade.
+/// What trades earned.
+///
+/// It holds their count, and the `Expectancy` and `WinRate` of their net P&Ls in R. Both are
+/// `None` without a trade.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Trades {
     pub count: usize,
@@ -55,8 +59,10 @@ pub struct Trades {
     pub win_rate: Option<f64>,
 }
 
-/// What decisions earned on rows, beside every trade of the rows, at the commission and at
-/// `STRESS` times it.
+/// What decisions earned on rows.
+///
+/// It sits beside what every trade of the rows earned, both at the commission and at `STRESS`
+/// times it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Earnings {
     pub taken: Trades,
@@ -65,13 +71,16 @@ pub struct Earnings {
     pub every_stressed: Trades,
 }
 
-/// A meta model's decision rule: the trade of the side picked is taken when the meta's expected R
-/// is at least the margin (`MetaConfig::margin`), in a decision as in a backtest's scores.
+/// A meta model's decision rule, the same in a decision as in a backtest's scores.
+///
+/// The trade of the side picked is taken when the meta's expected R is at least the margin
+/// (`MetaConfig::margin`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MetaMargin(pub R);
 
 impl MetaMargin {
-    /// Whether a meta expecting `expected_r` takes the trade: at or above the margin.
+    /// Returns whether a meta expecting `expected_r` takes the trade, which it does at or above the
+    /// margin.
     #[must_use]
     pub fn takes(self, expected_r: R) -> bool {
         expected_r >= self.0
@@ -85,7 +94,7 @@ impl Trade {
 }
 
 impl Trades {
-    /// The earnings of trades of net P&Ls `rs`, in R.
+    /// Returns the earnings, in R, of trades with net P&Ls `rs`.
     #[must_use]
     pub fn of(rs: &[f64]) -> Self {
         let some = |value: Option<f64>| value.filter(|value| !value.is_nan());
@@ -98,7 +107,7 @@ impl Trades {
 }
 
 impl Earnings {
-    /// The earnings of `rows`, each whether the decision took it, and its trade.
+    /// Returns the earnings of `rows`. Each row pairs whether the decision took it with its trade.
     #[must_use]
     pub fn of(rows: &[(bool, Trade)]) -> Self {
         let trades = |taken_only: bool, factor: f64| {
@@ -186,12 +195,17 @@ mod tests {
         assert_eq!(MetaMargin(R::new(margin)).takes(R::new(expected_r)), taken);
     }
 
-    /// Taken: wins of 3 over units of 2, 1.5R twice, and a loss of 2 over a unit of 4, -0.5R, so
-    /// the mean is 5/6R, where their money would make 4/3. Every trade, besides: a win of 0.5 over
-    /// a unit of 1, 0.5R, and a loss of 2 over a unit of 2, -1R, so 0.4R and a win rate of 3/5.
-    /// At 1.5 times the commission of 0.3 each loses 0.15 more: taken 0.075R, 0.0375R, 0.075R,
-    /// 0.0625R a trade; every trade 0.15R, 0.075R besides, 0.0825R a trade. No sign changes, so
-    /// the win rates stay 2/3 and 3/5.
+    /// Taken: two wins of 3 over units of 2 (1.5R each) and a loss of 2 over a unit of 4 (-0.5R).
+    /// The mean is 5/6R, where their money would make 4/3.
+    ///
+    /// Every trade, besides: a win of 0.5 over a unit of 1 (0.5R) and a loss of 2 over a unit of 2
+    /// (-1R). That makes 0.4R and a win rate of 3/5.
+    ///
+    /// At 1.5 times the commission of 0.3, each trade loses 0.15 more.
+    /// - Taken: 0.075R, 0.0375R and 0.075R, so 0.0625R a trade.
+    /// - Every trade: those three, 0.15R and 0.075R, so 0.0825R a trade.
+    ///
+    /// No sign changes, so the win rates stay 2/3 and 3/5.
     #[rstest]
     fn the_earnings_are_nautilus_expectancy_and_win_rate_of_the_r_of_the_trades_taken_and_of_every_trade()
      {
@@ -219,8 +233,9 @@ mod tests {
         close(earnings.every_stressed.win_rate, 0.6);
     }
 
-    /// Pins that Nautilus' `Expectancy` is `avg_winner * win_rate + avg_loser * loss_rate`, the
-    /// rates among the trades that gained or lost
+    /// Pins that Nautilus' `Expectancy` is `avg_winner * win_rate + avg_loser * loss_rate`.
+    ///
+    /// The rates are among the trades that gained or lost
     /// (`crates/analysis/src/statistics/expectancy.rs:75-95`). `Trades::of` takes it, and a
     /// backtest's scores report it (`walk::WalkForward::scores`).
     ///

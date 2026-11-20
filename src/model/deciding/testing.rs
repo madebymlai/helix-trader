@@ -1,5 +1,7 @@
-//! The store and models of the decision tests: a strategy on the last mid of AUD/USD, baselines
-//! predicting a known R whatever the row, and IC's gold.
+//! Builds the store and models for the decision tests.
+//!
+//! The store has a strategy on the last mid of AUD/USD. The models are baselines that predict a
+//! known R whatever the row, and IC's gold.
 
 use std::{path::Path, rc::Rc};
 
@@ -38,8 +40,9 @@ pub(crate) const STRATEGY: &str = "HANDLE-001";
 pub(crate) const AUD: &str = "AUD/USD.SIM";
 pub(crate) const GOLD: &str = "XAUUSD.ICMARKETS";
 
-/// XAUUSD as IC defines it (`crates/ctrader/README.md`, "Instruments and account"): whole ounces
-/// quoted in USD on ticks of a cent.
+/// Returns XAUUSD as IC defines it (`crates/ctrader/README.md`, "Instruments and account").
+///
+/// It trades whole ounces quoted in USD, on ticks of a cent.
 pub(crate) fn gold() -> InstrumentAny {
     let margin = Decimal::ONE / Decimal::from(30);
     InstrumentAny::Cfd(
@@ -65,8 +68,9 @@ pub(crate) fn gold() -> InstrumentAny {
     )
 }
 
-/// The level line `0.1 + 0.5 E` of every meta model: a meta predicting 0.3 expects 0.25, one
-/// predicting 0 expects 0.1.
+/// The level line `0.1 + 0.5 E` of every meta model.
+///
+/// A meta predicting 0.3 expects 0.25, and one predicting 0 expects 0.1.
 pub(crate) const CALIBRATION: Line = Line {
     alpha: 0.1,
     beta: 0.5,
@@ -77,7 +81,7 @@ pub(crate) fn r(tenths: usize) -> f64 {
     (tenths as f64 - 5.0) / 10.0
 }
 
-/// The pair calibration `C' = C`, and for two sides `D' = D`, up to rounding.
+/// The pair calibration, up to rounding: `C' = C`, and `D' = D` for two sides.
 pub(crate) fn unchanged(config: &ModelConfig) -> Ksplit {
     Ksplit {
         level: Line {
@@ -96,8 +100,12 @@ pub(crate) fn features() -> Rc<FeatureSet> {
     last_mid(InstrumentId::from(AUD)).build().unwrap()
 }
 
-/// Hourly decisions on a time-only target of 1 hour of AUD/USD at a risk of 0.5%, its unit the
-/// ATR of one hourly bar of the mids, the long traded from 0 R, the baseline learner.
+/// Configures hourly decisions on a time-only target.
+///
+/// - The target is 1 hour of AUD/USD at a risk of 0.5%.
+/// - The unit is the ATR of one hourly bar of the mids.
+/// - The long is traded from 0 R.
+/// - The learner is the baseline.
 pub(crate) fn config() -> ModelConfig {
     ModelConfig::builder()
         .decision(DecisionRule::Every(SignedDuration::from_hours(1)))
@@ -129,7 +137,7 @@ pub(crate) fn config() -> ModelConfig {
         .build()
 }
 
-/// `config`, the short traded too, from 0 R.
+/// Returns `config` with the short traded too, from 0 R.
 pub(crate) fn both_sides() -> ModelConfig {
     ModelConfig {
         margins: Margins {
@@ -140,7 +148,7 @@ pub(crate) fn both_sides() -> ModelConfig {
     }
 }
 
-/// A meta taking a trade from an expected net R of 0.15.
+/// A meta that takes a trade from an expected net R of 0.15.
 pub(crate) fn meta() -> MetaConfig {
     MetaConfig {
         window: SignedDuration::from_hours(48),
@@ -170,7 +178,7 @@ pub(crate) fn requirements() -> DataRequirements {
     }
 }
 
-/// A commission rate of 30 per million, 10 million USD.
+/// A commission rate of 30 per million and a balance of 10 million USD.
 pub(crate) fn venue() -> DatasetVenue {
     DatasetVenue {
         commission: Commission::Rate(Decimal::new(3, 5)),
@@ -203,12 +211,12 @@ pub(crate) fn model_store(
         .unwrap()
 }
 
-/// The store of `config`, its long alone traded.
+/// The store of `config`, with only its long traded.
 pub(crate) fn store(models: &Path) -> ModelStore {
     model_store(models, &features(), &config())
 }
 
-/// A model set valid from `valid_from`, its long a baseline predicting `r(tenths)`.
+/// A model set valid from `valid_from`, with a baseline long that predicts `r(tenths)`.
 pub(crate) fn baseline(valid_from: &str, tenths: usize) -> StoredModelSet {
     model_set_of(
         &features(),
@@ -219,8 +227,10 @@ pub(crate) fn baseline(valid_from: &str, tenths: usize) -> StoredModelSet {
     )
 }
 
-/// A model set valid from `valid_from`: a baseline per side of `sides` (`baseline_for`), the pair
-/// calibrated by `unchanged`, and `meta`, if any.
+/// A model set valid from `valid_from`.
+///
+/// It holds a baseline per side of `sides` (`baseline_for`), the pair calibrated by `unchanged`,
+/// and `meta`, if any.
 pub(crate) fn model_set_of(
     features: &Rc<FeatureSet>,
     config: &ModelConfig,
@@ -239,7 +249,7 @@ pub(crate) fn model_set_of(
     }
 }
 
-/// A baseline of `config`'s `side` predicting `r(tenths)` whatever the row, probed on one row.
+/// A baseline for `config`'s `side` that predicts `r(tenths)` whatever the row, probed on one row.
 pub(crate) fn baseline_for(
     features: &Rc<FeatureSet>,
     config: &ModelConfig,
@@ -285,7 +295,7 @@ pub(crate) fn baseline_for(
     }
 }
 
-/// A baseline meta model predicting `r(tenths)` whatever the row, calibrated by `CALIBRATION`,
+/// A baseline meta model that predicts `r(tenths)` whatever the row, calibrated by `CALIBRATION`,
 /// with no probe.
 pub(crate) fn meta_baseline(
     features: &Rc<FeatureSet>,
