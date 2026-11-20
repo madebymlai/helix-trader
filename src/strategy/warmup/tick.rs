@@ -1,5 +1,5 @@
-//! What a warmup hands its indicators, and the series each belongs to, as `merge` and `hold` carry
-//! them.
+//! The data a warmup hands to its indicators, and the series each item belongs to. `merge` and
+//! `hold` carry both.
 
 use std::fmt::Display;
 
@@ -20,14 +20,16 @@ use crate::strategy::requirements::TickSeries;
 pub(super) enum Tick {
     Quote(QuoteTick),
     Trade(TradeTick),
-    /// Boxed: ten levels a side, against a quote's few fields.
+    /// Boxed because a depth snapshot holds ten levels a side, while a quote has few fields.
     Depth(Box<OrderBookDepth>),
     Deltas(OrderBookDeltas),
     Custom(CustomData),
     Bar(Bar),
 }
 
-/// The series of a tick as a node caches it, bars by their standard bar type (`BarType::standard`).
+/// The series a tick belongs to, as a node caches it.
+///
+/// Bars use their standard bar type (`BarType::standard`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) enum Series {
     Quotes(InstrumentId),
@@ -63,12 +65,13 @@ impl Tick {
         }
     }
 
-    /// The bytes the tick takes held, a custom data point's heap counted as the length of its JSON
-    /// (`CustomDataTrait::to_json`).
+    /// Returns the bytes the tick takes while held.
+    ///
+    /// A custom data point's heap counts as the length of its JSON (`CustomDataTrait::to_json`).
     ///
     /// # Errors
     ///
-    /// Returns an error if a point of custom data cannot be written as JSON, naming its data type.
+    /// Returns an error if a custom data point cannot be written as JSON, naming its data type.
     pub(super) fn size(&self) -> anyhow::Result<usize> {
         let heap = match self {
             Self::Quote(_) | Self::Trade(_) | Self::Bar(_) => 0,
@@ -101,7 +104,9 @@ impl Tick {
         }
     }
 
-    /// When the tick was made: a batch's last delta's, a bar's close.
+    /// Returns when the tick was made.
+    ///
+    /// A batch uses its last delta, and a bar uses its close.
     pub(super) fn ts_event(&self) -> UnixNanos {
         match self {
             Self::Quote(quote) => quote.ts_event,
