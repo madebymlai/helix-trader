@@ -1,25 +1,20 @@
-//! The report of the binary's `train`: run figures, not performance figures,
-//! one block per retrain time, so that training and evaluation stay apart
-//! and an operator can size a train against its interval. A train's
-//! out-of-sample evidence is a backtest's (`walk`).
+//! The report of the binary's `train`: run figures, not performance figures, one block per retrain
+//! time, so that training and evaluation stay apart and an operator can size a train against its
+//! interval. A train's out-of-sample evidence is a backtest's (`walk`).
 //!
-//! A block names the train's time and its outcome, the model set published
-//! (its directory) or the failure and its reason, then the figures the
-//! train reached, failing or not (`train::Reached`): its wall time, its CPU
-//! time, user and system, and the peak memory of the train process; the
-//! days of the dataset it read, built by its replay or taken from the
-//! cache; and the rows of the fit and calibration slices of its sides,
-//! fitted as of its time, the long's and the short's alike, of its
-//! out-of-fold pair and of its meta, beside each level's `min_rows`.
+//! A block names the train's time and its outcome, the model set published (its directory) or the
+//! failure and its reason, then the figures the train reached, failing or not (`train::Reached`):
+//! - Its wall time, its CPU time, user and system, and the peak memory of the train process.
+//! - The days of the dataset it read, built by its replay or taken from the cache.
+//! - The rows of the fit and calibration slices of its sides, fitted as of its time, the long's and
+//!   the short's alike, of its out-of-fold pair and of its meta, beside each level's `min_rows`.
 //!
-//! The process figures are read once at a train's end (`Meter::lap`): the
-//! wall time from Nautilus' real-time clock, the CPU time and the peak
-//! memory from `getrusage` of the process (`RUSAGE_SELF`), which Nautilus
-//! does not read, on Unix alone; off Unix they are reported as not
-//! measured. The CPU time and wall time of a block are those since the
-//! previous block's end, the first's since the train process started, so
-//! that the blocks of a span add up to the process's; the peak memory is
-//! the process's high-water mark by the block's end, which no block resets.
+//! The process figures are read once at a train's end (`Meter::lap`): the wall time from Nautilus'
+//! real-time clock, the CPU time and the peak memory from `getrusage` of the process
+//! (`RUSAGE_SELF`), which Nautilus does not read, on Unix alone; off Unix they are reported as not
+//! measured. The CPU time and wall time of a block are those since the previous block's end, the
+//! first's since the train process started, so that the blocks of a span add up to the process's.
+//! The peak memory is the process's high-water mark by the block's end, which no block resets.
 
 use std::{fmt::Display, time::Duration};
 
@@ -40,8 +35,8 @@ pub struct Meter {
     cpu: Cpu,
 }
 
-/// What a train took: its wall time, and the process's CPU time over it and
-/// its peak memory, where `getrusage` reads them.
+/// What a train took: its wall time, and the process's CPU time over it and its peak memory, where
+/// `getrusage` reads them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Usage {
     wall: Duration,
@@ -80,8 +75,7 @@ impl Meter {
         }
     }
 
-    /// What the process took since the last lap, or the meter's start, and
-    /// its peak memory by now.
+    /// What the process took since the last lap, or the meter's start, and its peak memory by now.
     pub fn lap(&mut self) -> Usage {
         let now = get_atomic_clock_realtime().get_time_ns();
         let wall = Duration::from_nanos(now.as_u64().saturating_sub(self.since.as_u64()));
@@ -101,9 +95,8 @@ impl Meter {
     }
 }
 
-/// The process's CPU time and peak memory in bytes, from `getrusage` of
-/// the process, its resident set's high-water mark the peak: in KiB on
-/// Linux and the BSDs, in bytes on macOS.
+/// The process's CPU time and peak memory in bytes, from `getrusage` of the process, its resident
+/// set's high-water mark the peak: in KiB on Linux and the BSDs, in bytes on macOS.
 #[cfg(unix)]
 #[allow(unsafe_code)]
 fn resources() -> Option<(Cpu, u64)> {
@@ -215,8 +208,7 @@ mod tests {
         "2026-10-23T00:00:00Z".parse().unwrap()
     }
 
-    /// 2.5 s of wall time, 1.25 s of user and 0.125 s of system CPU time,
-    /// 150 MiB at the peak.
+    /// 2.5 s of wall time, 1.25 s of user and 0.125 s of system CPU time, 150 MiB at the peak.
     fn usage() -> Usage {
         Usage {
             wall: Duration::from_millis(2500),
@@ -247,9 +239,8 @@ mod tests {
         .to_string()
     }
 
-    /// A train with a meta that published reports every figure: its
-    /// model set, its times and memory, its days and the rows of its
-    /// sides, its out-of-fold pair and its meta.
+    /// A train with a meta that published reports every figure: its model set, its times and
+    /// memory, its days and the rows of its sides, its out-of-fold pair and its meta.
     #[rstest]
     fn a_published_model_set_reports_its_directory_and_every_figure() {
         let trained = Trained {
@@ -281,8 +272,8 @@ mod tests {
         );
     }
 
-    /// A train failing at its out-of-fold pair reports its reason and the figures
-    /// it reached, no row of the sides or the meta, which it never counted.
+    /// A train failing at its out-of-fold pair reports its reason and the figures it reached, no
+    /// row of the sides or the meta, which it never counted.
     #[rstest]
     fn a_failed_train_reports_its_reason_and_the_figures_it_reached() {
         let trained = Trained {
@@ -308,8 +299,8 @@ mod tests {
         );
     }
 
-    /// A model set already published reads no day and counts no row; off
-    /// Unix, no CPU time or peak memory is measured.
+    /// A model set already published reads no day and counts no row; off Unix, no CPU time or peak
+    /// memory is measured.
     #[rstest]
     fn a_train_of_a_model_set_already_published_reports_its_times_alone() {
         let trained = Trained::from(Outcome::AlreadyPublished);

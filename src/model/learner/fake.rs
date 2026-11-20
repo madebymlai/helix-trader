@@ -1,5 +1,5 @@
-//! The fake, for tests: the row's first feature is the prediction, so a
-//! test steers the model through its features.
+//! The fake, for tests: the row's first feature is the prediction, so a test steers the model
+//! through its features.
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -23,9 +23,8 @@ impl Learner for Fake {
     }
 }
 
-/// The model and its saved text, JSON named by the adapter, so that no
-/// other adapter loads it. `mean` is that of the training labels, the
-/// prediction where the first feature is missing.
+/// The model and its saved text, JSON named by the adapter, so that no other adapter loads it.
+/// `mean` is that of the training labels, the prediction where the first feature is missing.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum Saved {

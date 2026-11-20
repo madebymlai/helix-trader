@@ -1,16 +1,16 @@
 //! Trading costs of the simulated venue.
 //!
-//! The commission of a run (`Commission`) is the one source of its costs: it
-//! builds the Nautilus `FeeModelAny` (`nautilus_execution`) that
-//! `BacktestVenueConfig` takes, which charges the fills of a backtest and of a
-//! dataset run alike, and it gives what a fill costs as that fee model charges
+//! The commission of a run (`Commission`) is the one source of its costs. It builds the Nautilus
+//! `FeeModelAny` (`nautilus_execution`) that `BacktestVenueConfig` takes, which charges the fills
+//! of a backtest and of a dataset run alike, and gives the cost of a fill as that fee model charges
 //! it (`Commission::cost`), the cost a model strategy's target is handed
-//! (`model::targets::TargetSetter`). A commission is fixed per order
-//! (`FixedFeeModel`), a rate on the trade value (`MakerTakerFeeModel`), or an
-//! amount per unit of quantity (`PerContractFeeModel`).
-//! The venue sets no fill model, so Nautilus fills on its default
-//! (`DefaultFillModel`), at the market with no slippage of its own: at the
-//! quote, so the spread is the cost, or, on bars, at the bar's prices.
+//! (`model::targets::TargetSetter`). A commission is fixed per order (`FixedFeeModel`), a rate on
+//! the trade value (`MakerTakerFeeModel`), or an amount per unit of quantity
+//! (`PerContractFeeModel`).
+//!
+//! The venue sets no fill model, so Nautilus fills on its default (`DefaultFillModel`), at the
+//! market with no slippage of its own: at the quote, so the spread is the cost, or, on bars, at the
+//! bar's prices.
 
 use std::fmt::Display;
 
@@ -26,30 +26,27 @@ use nautilus_model::{
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
-/// The commission of a run, as its command line or a model's config gives
-/// it, which every cost of the run reads: the fee model of its simulated
-/// venues (`fee_model`) and the cost of a fill (`cost`). In TOML, a table of
-/// one of its kinds, such as `{ per_quantity = "0.035 USD" }`, `{ rate =
-/// "0.0005" }` or `{ per_order = "3 EUR" }`, read as the flags read it
-/// (`per_order`, `rate`, `per_quantity`).
+/// The commission of a run, as its command line or a model's config gives it. Every cost of the run
+/// reads it: the fee model of its simulated venues (`fee_model`) and the cost of a fill (`cost`).
+/// In TOML, a table of one of its kinds, such as `{ per_quantity = "0.035 USD" }`, `{ rate =
+/// "0.0005" }` or `{ per_order = "3 EUR" }`, as the flags read it (`per_order`, `rate`,
+/// `per_quantity`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "CommissionFields")]
 pub enum Commission {
     /// Charged once per order, on its first fill.
     PerOrder(Money),
-    /// A share of the value (quantity × multiplier × price) of each fill,
-    /// maker and taker alike, with no minimum: 0.0005 charges 0.05%.
+    /// A share of the value (quantity × multiplier × price) of each fill, maker and taker alike,
+    /// with no minimum: 0.0005 charges 0.05%.
     Rate(Decimal),
-    /// Charged on each unit of the quantity of each fill, an amount exact
-    /// rather than rounded to its currency's precision: 0.035 USD charges
-    /// 3.50 USD on 100 oz of gold, Pepperstone's 3.5 USD a lot. Each fill's
-    /// charge is rounded to the currency's precision, a tie to the even cent
+    /// Charged on each unit of the quantity of each fill, an amount exact rather than rounded to
+    /// its currency's precision: 0.035 USD charges 3.50 USD on 100 oz of gold, Pepperstone's 3.5
+    /// USD a lot. Each fill's charge is rounded to the currency's precision, a tie to the even cent
     /// as Nautilus rounds money: 0.04 USD on 1 oz, 0.10 USD on 3.
     PerQuantity(Money),
 }
 
-/// A commission as TOML writes it: exactly one of its kinds, each an amount
-/// as text.
+/// A commission as TOML writes it: exactly one of its kinds, each an amount as text.
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum CommissionFields {
@@ -70,8 +67,8 @@ impl TryFrom<CommissionFields> for Commission {
     }
 }
 
-/// Its kind and its amount normalized (`normalized`), such as `rate
-/// 0.00003`, `per order 3 EUR` or `per quantity 0.035 USD`.
+/// Its kind and its normalized amount (`normalized`), such as `rate 0.00003`, `per order 3 EUR` or
+/// `per quantity 0.035 USD`.
 impl Display for Commission {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let kind = match self {
@@ -84,8 +81,8 @@ impl Display for Commission {
 }
 
 impl Commission {
-    /// A commission per order of `amount`, an amount and a currency code,
-    /// such as `"3 EUR"`, rounded to the currency's precision.
+    /// A commission per order of `amount`, an amount and a currency code such as `"3 EUR"`, rounded
+    /// to the currency's precision.
     ///
     /// # Errors
     ///
@@ -95,8 +92,7 @@ impl Commission {
         Self::PerOrder(amount.parse::<Money>().map_err(anyhow::Error::msg)?).checked()
     }
 
-    /// A commission of `rate`, a decimal, on the value of each fill, such as
-    /// `"0.0005"`.
+    /// A commission of `rate`, a decimal such as `"0.0005"`, on the value of each fill.
     ///
     /// # Errors
     ///
@@ -105,9 +101,9 @@ impl Commission {
         Self::Rate(rate.parse()?).checked()
     }
 
-    /// A commission of `amount` on each unit of quantity, an amount and a
-    /// currency code, exact rather than rounded to the currency's precision,
-    /// so that `"0.035 USD"` charges 3.50 USD on 100 units.
+    /// A commission of `amount` on each unit of quantity, an amount and a currency code, exact
+    /// rather than rounded to the currency's precision: `"0.035 USD"` charges 3.50 USD on 100
+    /// units.
     ///
     /// # Errors
     ///
@@ -123,8 +119,7 @@ impl Commission {
         Ok(self)
     }
 
-    /// The Nautilus fee model charging the commission on the fills of a
-    /// simulated venue.
+    /// The Nautilus fee model charging the commission on the fills of a simulated venue.
     ///
     /// # Errors
     ///
@@ -148,15 +143,17 @@ impl Commission {
         })
     }
 
-    /// What a fill of `quantity` of `instrument` at `price` costs, as the fee
-    /// model charges it on an order's first fill, in the currency it charges
-    /// it in: per order, the commission itself, in its own currency, so the
-    /// cost of an order filled at once; a rate, its share of the fill's
-    /// value as Nautilus computes it (`calculate_maker_taker_commission`), in
-    /// the instrument's quote currency (its base on an inverse one, its
-    /// settlement on a quanto); per quantity, its amount on each unit,
-    /// rounded as the fee model rounds it, in the amount's currency. The fee
-    /// model charges a generic spread per leg, which no target trades.
+    /// What a fill of `quantity` of `instrument` at `price` costs, as the fee model charges it on
+    /// an order's first fill, in the currency it charges it in:
+    /// - Per order: the commission itself, in its own currency, the cost of an order filled at
+    ///   once.
+    /// - Rate: its share of the fill's value as Nautilus computes it
+    ///   (`calculate_maker_taker_commission`), in the instrument's quote currency (its base on an
+    ///   inverse one, its settlement on a quanto).
+    /// - Per quantity: its amount on each unit, rounded as the fee model rounds it, in the amount's
+    ///   currency.
+    ///
+    /// The fee model charges a generic spread per leg, which no target trades.
     ///
     /// # Errors
     ///
@@ -183,9 +180,9 @@ impl Commission {
         }
     }
 
-    /// The currency it charges a fill of `instrument` in (see `cost`): an
-    /// amount's own, per order or per quantity; a rate's, the currency of
-    /// the fill's value, the instrument's cost currency.
+    /// The currency it charges a fill of `instrument` in (see `cost`): an amount's own, per order
+    /// or per quantity, or, for a rate, the currency of the fill's value, the instrument's cost
+    /// currency.
     #[must_use]
     pub fn currency(&self, instrument: &InstrumentAny) -> Currency {
         match *self {
@@ -194,10 +191,9 @@ impl Commission {
         }
     }
 
-    /// The commission's amount, normalized, so that every spelling of one
-    /// commission reads the same: a money without trailing zeros and its
-    /// currency code, `"3 EUR"` for 3.00 EUR, a rate without trailing
-    /// zeros, `"0.00003"` for 0.000030.
+    /// The commission's amount, normalized so that every spelling of one commission reads the same:
+    /// a money without trailing zeros and its currency code (`"3 EUR"` for 3.00 EUR), a rate
+    /// without trailing zeros (`"0.00003"` for 0.000030).
     #[must_use]
     pub fn normalized(&self) -> String {
         match *self {
@@ -235,8 +231,8 @@ mod tests {
         Price::from("4000.20")
     }
 
-    /// A market order for 100 oz of gold, accepted, as the matching engine
-    /// charges its fills: a taker.
+    /// A market order for 100 oz of gold, accepted, as the matching engine charges its fills: a
+    /// taker.
     fn order() -> OrderAny {
         let order = OrderTestBuilder::new(OrderType::Market)
             .instrument_id(gold().id())
@@ -297,15 +293,15 @@ mod tests {
 
     #[rstest]
     fn a_commission_rate_costs_its_share_of_the_fills_value_to_the_cent() {
-        // 0.00003 × 1 × 4000.20 = 0.120006, and × 100 = 12.0006.
+        // 0.00003 × 1 × 4000.20 = 0.120006, and × 100 = 12.0006
         assert_eq!(cost(rate(), 1), Money::from("0.12 USD"));
         assert_eq!(cost(rate(), 100), Money::from("12.00 USD"));
     }
 
     #[rstest]
     fn a_commission_per_quantity_costs_its_amount_on_each_unit_to_the_cent() {
-        // 0.035 × 100, Pepperstone's lot, and × 50; × 1 = 0.035, to the
-        // cent 0.04, as Pepperstone charges a side of an ounce.
+        // 0.035 × 100 (Pepperstone's lot) and × 50; × 1 = 0.035, to the cent 0.04, as Pepperstone
+        // charges a side of an ounce.
         assert_eq!(cost(per_ounce(), 100), Money::from("3.50 USD"));
         assert_eq!(cost(per_ounce(), 50), Money::from("1.75 USD"));
         assert_eq!(cost(per_ounce(), 1), Money::from("0.04 USD"));
@@ -324,14 +320,14 @@ mod tests {
 
     #[rstest]
     fn a_half_cent_of_a_commission_per_quantity_goes_to_the_even_cent() {
-        // 0.035 × 3 = 0.105, × 5 = 0.175, × 7 = 0.245.
+        // 0.035 × 3 = 0.105, × 5 = 0.175, × 7 = 0.245
         assert_eq!(cost(per_ounce(), 3), Money::from("0.10 USD"));
         assert_eq!(cost(per_ounce(), 5), Money::from("0.18 USD"));
         assert_eq!(cost(per_ounce(), 7), Money::from("0.24 USD"));
     }
 
-    /// The cost of a fill is what a backtest's and a dataset run's venue
-    /// charge it, on each kind of commission.
+    /// The cost of a fill is what a backtest's and a dataset run's venue charge it, on each kind of
+    /// commission.
     #[rstest]
     #[case::per_order_on_1_oz(per_order(), 1)]
     #[case::per_order_on_3_oz(per_order(), 3)]
@@ -349,9 +345,8 @@ mod tests {
         assert_eq!(charged(commission, &order(), oz), cost(commission, oz));
     }
 
-    /// A commission per order is charged once, on its order's first fill,
-    /// as the fee model is set to charge it: the 100 oz order filled 40 oz
-    /// then 60, the later fill is charged nothing.
+    /// A commission per order is charged once, on its order's first fill, as the fee model is set
+    /// to charge it: the 100 oz order filled 40 oz then 60, the later fill is charged nothing.
     #[rstest]
     fn a_commission_per_order_is_charged_once_nothing_on_later_fills_of_the_order() {
         let order = filled(order(), 40);
@@ -362,7 +357,8 @@ mod tests {
     fn a_commission_rate_charges_maker_and_taker_alike() {
         let mut order = order();
         order.set_liquidity_side(LiquiditySide::Maker);
-        // 0.00003 × 100 × 4000.20.
+
+        // 0.00003 × 100 × 4000.20
         assert_eq!(charged(rate(), &order, 100), Money::from("12.00 USD"));
     }
 
@@ -382,8 +378,8 @@ mod tests {
         assert!(error.contains("-0.00003"), "{error}");
     }
 
-    /// An amount is charged in its own currency, a rate in the currency of
-    /// the fill's value: gold's USD; an inverse perpetual's BTC, its base.
+    /// An amount is charged in its own currency, a rate in the currency of the fill's value: gold's
+    /// USD, an inverse perpetual's BTC, its base.
     #[rstest]
     fn a_commission_is_charged_in_its_amounts_currency_or_the_currency_of_the_value() {
         let inverse =
