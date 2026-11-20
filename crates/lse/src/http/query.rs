@@ -1,6 +1,10 @@
-//! The typed queries of LSE's calls, named as LSE's docs name their parameters: exports of an
-//! instrument (`/v3/export`), a reference collection (`/v3/reference/export`) and a macro series
-//! (`/v3/macro/export`), splits and dividends (`/v3/factors`), and catalogue lookups (`/v3/pairs`).
+//! Typed queries for LSE's calls, with parameters named as LSE's docs name them.
+//!
+//! The calls are:
+//! - Exports of an instrument (`/v3/export`), of a reference collection (`/v3/reference/export`)
+//!   and of a macro series (`/v3/macro/export`).
+//! - Splits and dividends (`/v3/factors`).
+//! - Catalogue lookups (`/v3/pairs`).
 
 use std::fmt::Display;
 
@@ -16,8 +20,8 @@ use crate::common::{
     symbol::{LseSymbol, NasdaqStock, OpraContract},
 };
 
-// The candle widths LSE serves below a day: unit, its letter, the steps served (LSE's docs, "The
-// selection", `timeframe`).
+// The candle widths LSE serves below a day, as the unit, its letter and the steps served (LSE's
+// docs, "The selection", `timeframe`).
 const CANDLE_WIDTHS: [(BarAggregation, char, &[usize]); 3] = [
     (BarAggregation::Second, 's', &[1, 5, 15, 30]),
     (BarAggregation::Minute, 'm', &[1, 3, 5, 15, 30]),
@@ -27,12 +31,12 @@ const CANDLE_WIDTHS: [(BarAggregation, char, &[usize]); 3] = [
 /// What an export's rows are, and the parameter that selects them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rows {
-    /// Trades, or an index's values of no size (`timeframe=tick`).
+    /// Trades, or index values that carry no size (`timeframe=tick`).
     TradeSlice,
     /// Candles, each stamped at its open (`timeframe=5m`).
     Candles(CandleWidth),
-    /// The trades of a paid exchange market (`data=trades`). US options serve their tick slice
-    /// alone.
+    /// The trades of a paid exchange market (`data=trades`). US options serve only their tick
+    /// slice.
     Trades,
     /// The quotes of an exchange market (`data=quotes`).
     Quotes,
@@ -71,7 +75,7 @@ impl Display for Rows {
 }
 
 // A symbol as `/v3/pairs` lists it, or a listing number, which always names one instrument (LSE's
-// docs, "Symbols")
+// docs, "Symbols").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Selection {
@@ -88,18 +92,19 @@ impl Display for Selection {
     }
 }
 
-/// A width of LSE's candles as a Nautilus bar specification: LSE's `1s` is `1-SECOND-LAST`, its
-/// `4h` `4-HOUR-LAST`.
+/// A width of LSE's candles, as a Nautilus bar specification.
 ///
-/// Widths below a day are stamped on a grid from 1970. LSE stamps daily, weekly and monthly candles
-/// at the session's first traded minute and gives no close, so such a bar is declared from a
-/// shorter LSE candle, which Nautilus aggregates.
+/// LSE's `1s` is `1-SECOND-LAST` and its `4h` is `4-HOUR-LAST`. Widths below a day are stamped on
+/// a grid from 1970. LSE stamps daily, weekly and monthly candles at the session's first traded
+/// minute and gives no close. So a bar of those widths is declared from a shorter LSE candle,
+/// which Nautilus aggregates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CandleWidth(BarSpecification);
 
 impl CandleWidth {
-    /// Returns the candles of `bar_type`: external bars of the last price, of a width LSE serves
-    /// below a day.
+    /// Returns the LSE candles that `bar_type` names.
+    ///
+    /// They are external bars of the last price, at a width LSE serves below a day.
     ///
     /// # Errors
     ///
@@ -137,10 +142,10 @@ impl CandleWidth {
         Ok(Self(spec))
     }
 
-    /// Returns the `[from, to)` span of the whole candles that close over `[start, end]`, or none
-    /// if none closes.
+    /// Returns the `[from, to)` span of the whole candles that close within `[start, end]`.
     ///
-    /// A candle opens on a multiple of its width from 1970, which divides a day.
+    /// Returns none if no candle closes. A candle opens on a multiple of its width from 1970. The
+    /// width divides a day.
     pub fn candles_closing(
         self,
         start: Timestamp,
@@ -163,7 +168,7 @@ impl CandleWidth {
     }
 }
 
-/// LSE's name of the width, such as `5m`.
+/// Writes the width as LSE names it, such as `5m`.
 impl Display for CandleWidth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let (_, unit, _) = CANDLE_WIDTHS
@@ -183,8 +188,7 @@ pub enum ExportFormat {
 
 /// An export of an instrument's rows over `[from, to)`, in UTC, at prices as published.
 ///
-/// LSE adjusts prices for splits unless told not to (`adjusted=0`), and the adapter adjusts
-/// nothing.
+/// LSE adjusts prices for splits unless told not to (`adjusted=0`). The adapter adjusts nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ExportQuery {
     market: String,
@@ -199,7 +203,7 @@ pub struct ExportQuery {
 }
 
 impl ExportQuery {
-    /// Returns the `rows` of `series`, a derived market's, over `[from, to)`.
+    /// Returns the `rows` of the derived-market `series` over `[from, to)`.
     pub fn series(series: &LseSymbol, rows: Rows, from: Timestamp, to: Timestamp) -> Self {
         Self::new(
             series.market(),
@@ -260,11 +264,15 @@ impl ExportQuery {
         (self.from, self.to)
     }
 
-    /// Returns the longest span one export is asked over, from a multiple of it from 1970: a UTC
-    /// hour of a book or of orders, a UTC day of every other.
+    /// Returns the longest span that one export is asked over.
     ///
-    /// LSE's docs ask an hour of a busy contract ("The market: cme": ESZ6's book of the minute from
-    /// 14:30 on 5 November 2026 held 99,104 rows, 33 MB as CSV, and of that day 10.8 GB).
+    /// The span is:
+    /// - One UTC hour for a book or for orders.
+    /// - One UTC day for every other kind of rows.
+    ///
+    /// A span starts on a multiple of its length counted from 1970. LSE's docs ask for an hour on a
+    /// busy contract ("The market: cme"). ESZ6's book for the minute from 14:30 on 5 November 2026
+    /// held 99,104 rows, 33 MB as CSV. Its book for that whole day was 10.8 GB.
     pub fn longest_span(&self) -> SignedDuration {
         match self.rows {
             Rows::Book | Rows::Orders => SignedDuration::from_hours(1),
@@ -281,12 +289,14 @@ impl ExportQuery {
         }
     }
 
-    /// Returns the export split at the middle of its span, or none if it spans a second or less.
+    /// Returns the export split at the middle of its span.
     ///
-    /// No second of any series holds the 2,500,000 rows one export may read (ESZ6's busiest minute
-    /// of book held 99,104, LSE's docs, "The market: cme"), so halving further would not get past
-    /// a refusal. Candles split between the two nearest the middle, as LSE folds a candle from the
-    /// rows inside the export alone, and one candle is not split.
+    /// Returns none if the span is a second or less. No second of any series holds the 2,500,000
+    /// rows that one export may read. ESZ6's busiest minute of book held 99,104 (LSE's docs, "The
+    /// market: cme"). So halving below a second would not get past a refusal.
+    ///
+    /// Candles split between the two candles nearest the middle, because LSE folds a candle from
+    /// the rows inside the export alone. One candle is not split.
     pub fn halves(&self) -> Option<(Self, Self)> {
         let span = self.to.duration_since(self.from);
         let middle = match self.rows {
@@ -318,10 +328,10 @@ impl Display for ExportQuery {
     }
 }
 
-/// The dates of a series' export, both included, which bound its time column.
+/// The dates of a series' export. Both dates are included, and they bound its time column.
 ///
-/// LSE refuses a time (`filter-bad`) of a collection keyed by dates, and selects a day's rows by
-/// its date either way. With no first date, the series is asked from its first.
+/// LSE refuses a time (`filter-bad`) on a collection keyed by dates. Either way, LSE selects a
+/// day's rows by its date. With no first date, the series is asked from its first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Dates {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -338,7 +348,7 @@ impl Display for Dates {
     }
 }
 
-/// An export of the rows of `symbol` in LSE's reference collection `dataset` over `dates`.
+/// An export of `symbol`'s rows in LSE's reference collection `dataset` over `dates`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReferenceQuery {
     dataset: String,
@@ -375,7 +385,7 @@ impl Display for ReferenceQuery {
     }
 }
 
-/// An export of LSE's macro series `code` of `kind` (`release`, `yield`) over `dates`.
+/// An export of LSE's macro series `code` over `dates`. The `kind` is `release` or `yield`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MacroQuery {
     kind: &'static str,
@@ -406,7 +416,7 @@ impl Display for MacroQuery {
     }
 }
 
-/// A call of an instrument's splits and dividends (`/v3/factors`).
+/// A call for an instrument's splits and dividends (`/v3/factors`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FactorsQuery {
     market: String,
@@ -433,8 +443,9 @@ impl Display for FactorsQuery {
     }
 }
 
-/// A lookup of the listings of one symbol, exactly, in one market (`/v3/pairs`). A symbol names a
-/// few listings, one page.
+/// A lookup of the listings of one symbol in one market (`/v3/pairs`).
+///
+/// The symbol matches exactly. A symbol names a few listings, so they fit on one page.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PairsQuery {
     market: String,
@@ -489,8 +500,8 @@ mod tests {
         )
     }
 
-    /// Three 4-hour candles cut after the first, not at 06:00: LSE folds a candle from the rows
-    /// inside the export alone.
+    /// Three 4-hour candles are cut after the first, not at 06:00, because LSE folds a candle from
+    /// the rows inside the export alone.
     #[rstest]
     fn a_candle_export_halves_between_two_candles() {
         let (first, second) =
@@ -518,7 +529,7 @@ mod tests {
         );
     }
 
-    /// A day halves at noon, three seconds at a second and a half.
+    /// A day halves at noon. Three seconds halve at a second and a half.
     #[rstest]
     #[case::a_day("2026-10-21T00:00:00Z", "2026-10-21T12:00:00Z", "2026-10-22T00:00:00Z")]
     #[case::three_seconds(

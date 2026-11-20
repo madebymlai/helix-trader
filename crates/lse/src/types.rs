@@ -1,26 +1,27 @@
-//! The custom data type of every LSE row that is not a price (`LseRow`), made with Nautilus' custom
-//! data macros (`docs/concepts/custom_data.md`).
+//! Defines `LseRow`, the custom data type for every LSE row that is not a price.
+//!
+//! It is made with Nautilus' custom data macros (`docs/concepts/custom_data.md`).
 
 use nautilus_core::UnixNanos;
 use nautilus_model::custom_data;
 use nautilus_serialization::arrow_custom_data;
 use serde_json::{Map, Value};
 
-// The metadata keys of an `LseRow` data type (`data::served::row_source`)
+// The metadata keys of the `LseRow` data type (`data::served::row_source`)
 pub(crate) const SOURCE: &str = "source";
 pub(crate) const SYMBOL: &str = "symbol";
 
-/// A row LSE serves that is not a price: its source (`bond_yields`), its symbol (`US10Y`) and the
-/// row's other fields as LSE sends them.
+/// A row that LSE serves and that is not a price.
 ///
-/// Both `ts_event` and `ts_init` are stamped when its values are known.
+/// It holds the source (`bond_yields`), the symbol (`US10Y`) and the other fields as LSE sends
+/// them. Both `ts_event` and `ts_init` are stamped once the row's values are known.
 #[arrow_custom_data]
 #[custom_data]
 pub struct LseRow {
     pub source: String,
     pub symbol: String,
-    /// The row's fields but its symbol and selecting time, by LSE's column names, as JSON, with
-    /// dates and times in ISO 8601.
+    /// Every field except the symbol and the selecting time, as JSON keyed by LSE's column names.
+    /// Dates and times are in ISO 8601.
     #[custom_data_field(serde)]
     pub fields: Map<String, Value>,
     pub ts_event: UnixNanos,
@@ -29,7 +30,8 @@ pub struct LseRow {
 
 impl LseRow {
     /// Registers the type with Nautilus, so that a catalog writes and reads its rows by type name.
-    /// Idempotent.
+    ///
+    /// Calling it again has no effect.
     pub fn register() {
         nautilus_serialization::ensure_custom_data_registered::<Self>();
     }

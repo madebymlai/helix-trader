@@ -1,9 +1,13 @@
-//! LSE's exchange streams for the tests, CME Globex's and Nasdaq TotalView's, of one protocol.
+//! Mocks LSE's exchange streams for the tests: CME Globex and Nasdaq TotalView, which share one
+//! protocol.
 //!
-//! It holds their frames, captured with the CME Group Lite+ key or built from LSE's documentation
-//! (`test_data/README.md`), and `MockExchangeStream`, a WebSocket server on 127.0.0.1. The mock
-//! takes a connection only with the key of the stream's plan in its `X-API-Key` header, as LSE
-//! does, answers its subscription as a script says, and records each subscription and key.
+//! The module holds their frames. They were captured with the CME Group Lite+ key or built from
+//! LSE's documentation (`test_data/README.md`). It also holds `MockExchangeStream`, a WebSocket
+//! server on 127.0.0.1. The mock:
+//! - Takes a connection only with the key of the stream's plan in its `X-API-Key` header, as LSE
+//!   does.
+//! - Answers the subscription as a script says.
+//! - Records each subscription and key.
 
 use std::{
     ffi::c_char,
@@ -27,11 +31,11 @@ use tungstenite::{
 use super::{CME_API_KEY, NASDAQ_API_KEY};
 
 /// LSE's CME stream at Level 1 in the `dbn` encoding, captured on 13 November 2026 after CME's
-/// Friday close: one connection subscribing GCZ6 and GCG7.
+/// Friday close.
 ///
-/// It holds the `hello`, then each contract's `snapshot_begin`, best bid and offer at the close as
-/// a binary frame, and `snapshot_end`. One frame a line: a text frame as sent, a binary frame in
-/// hex.
+/// One connection subscribes GCZ6 and GCG7. The capture holds the `hello`, then for each contract
+/// a `snapshot_begin`, the best bid and offer at the close as a binary frame, and a
+/// `snapshot_end`. Each line is one frame: a text frame as sent, or a binary frame in hex.
 pub const CME_GCZ6_GCG7: &str = include_str!("../../test_data/cme_stream_gcz6_gcg7_l1_dbn.txt");
 
 /// GCZ6's opening of `CME_GCZ6_GCG7` asked in the `json` encoding a minute before.
@@ -43,14 +47,18 @@ pub const CME_ESZ6_DOCUMENTED: &str =
     include_str!("../../test_data/cme_stream_esz6_l1_json_documented.txt");
 
 /// A Level 2 session of GCZ6 in the `json` encoding, built from LSE's WebSocket documentation
-/// ("What you receive", "The record"), as helix's key holds no Level 2: three changes of the book
-/// after the opening, the levels after each those of `GCZ26_BOOK`'s rows.
+/// ("What you receive", "The record"), as helix's key holds no Level 2.
+///
+/// It has three changes of the book after the opening. The levels after each change are those of
+/// `GCZ26_BOOK`'s rows.
 pub const CME_GCZ6_L2_DOCUMENTED: &str =
     include_str!("../../test_data/cme_stream_gcz6_l2_json_documented.txt");
 
 /// A Level 3 session of GCZ6 in the `json` encoding, built from LSE's WebSocket documentation, as
-/// helix's key holds no Level 3: an opening with no book, then five order events, the orders of
-/// `GCZ26_ORDERS`, the last of each exchange message flagged 128.
+/// helix's key holds no Level 3.
+///
+/// It has an opening with no book, then five order events. The orders are those of
+/// `GCZ26_ORDERS`. In each exchange message, the last one is flagged 128.
 pub const CME_GCZ6_L3_DOCUMENTED: &str =
     include_str!("../../test_data/cme_stream_gcz6_l3_json_documented.txt");
 
@@ -67,12 +75,12 @@ pub const CME_SYMBOL_UNAVAILABLE: &str =
 /// The contract of `CME_ESZ6_DOCUMENTED` under Databento's id.
 pub const ESZ26: &str = "ESZ26.GLBX";
 
-/// NVDA's sessions of Nasdaq TotalView at Levels 1, 2 and 3 in the `json` encoding, built from
-/// LSE's WebSocket documentation, which says the Nasdaq stream "sends the same messages for stocks"
-/// as the CME stream, as no key of helix's holds a Nasdaq plan (`test_data/README.md`).
+/// NVDA's sessions of Nasdaq TotalView at Levels 1, 2 and 3 in the `json` encoding.
 ///
-/// Each is as GCZ6's or ESZ6's session of its level, with prices at a cent and the rows of
-/// `NVDA_BOOK` and `NVDA_ORDERS`.
+/// They are built from LSE's WebSocket documentation, which says the Nasdaq stream "sends the same
+/// messages for stocks" as the CME stream. They are built because no helix key holds a Nasdaq plan
+/// (`test_data/README.md`). Each matches the GCZ6 or ESZ6 session of its level, with prices at a
+/// cent and the rows of `NVDA_BOOK` and `NVDA_ORDERS`.
 pub const NASDAQ_NVDA_L1_DOCUMENTED: &str =
     include_str!("../../test_data/nasdaq_stream_nvda_l1_json_documented.txt");
 pub const NASDAQ_NVDA_L2_DOCUMENTED: &str =
@@ -90,8 +98,9 @@ pub enum StreamFrame {
     Binary(Vec<u8>),
 }
 
-/// Returns the frames of a captured session, one a line: a JSON text frame or a binary frame in
-/// hex.
+/// Returns the frames of a captured session, one per line.
+///
+/// A line is a JSON text frame or a binary frame in hex.
 ///
 /// # Panics
 ///
@@ -144,13 +153,20 @@ pub fn dbn_frames(json_encoded: &str) -> Vec<StreamFrame> {
         .collect()
 }
 
-/// Returns the binary frame LSE sends in the `dbn` encoding for a record `message` of the `json`
+/// Returns the binary frame LSE sends in the `dbn` encoding for `message`, a record of the `json`
 /// encoding (`snapshot_book`, `mbp1`, `mbp10` or `mbo`), as LSE's documentation describes it.
 ///
-/// The frame is a 24-byte little-endian header, `L3DB`, version 1, a kind byte (1 in a snapshot, 2
-/// live), two unused bytes, the message's sequence in 8 bytes, the contract's number in 4 and a
-/// record count in 4, then the record as Databento's of the type its `rtype` names: `Mbp1Msg` (1),
-/// `Mbp10Msg` (10) or `MboMsg` (160), whose `channel_id`, not listed by LSE, is 0.
+/// The frame is a 24-byte little-endian header, then the record. The header holds:
+/// - `L3DB`.
+/// - Version 1.
+/// - A kind byte: 1 in a snapshot, 2 live.
+/// - Two unused bytes.
+/// - The message's sequence, in 8 bytes.
+/// - The contract's number, in 4 bytes.
+/// - A record count, in 4 bytes.
+///
+/// The record is Databento's, of the type its `rtype` names: `Mbp1Msg` (1), `Mbp10Msg` (10) or
+/// `MboMsg` (160). Its `channel_id`, which LSE does not list, is 0.
 ///
 /// # Panics
 ///
@@ -297,8 +313,8 @@ pub struct MockExchangeStream {
 }
 
 impl MockExchangeStream {
-    /// Starts LSE's CME stream answering each connection's subscription with `script`, taking
-    /// `CME_API_KEY` and refusing any other key with LSE's 401 (`CME_KEY_UNKNOWN`).
+    /// Starts LSE's CME stream. It answers each connection's subscription with `script`, takes
+    /// `CME_API_KEY` and refuses any other key with LSE's 401 (`CME_KEY_UNKNOWN`).
     ///
     /// # Panics
     ///
@@ -308,8 +324,8 @@ impl MockExchangeStream {
         Self::start(CME_API_KEY, CME_KEY_UNKNOWN, script)
     }
 
-    /// Starts LSE's Nasdaq stream answering each connection's subscription with `script`, taking
-    /// `NASDAQ_API_KEY` and refusing any other key with LSE's 401 (`NASDAQ_KEY_UNKNOWN`).
+    /// Starts LSE's Nasdaq stream. It answers each connection's subscription with `script`, takes
+    /// `NASDAQ_API_KEY` and refuses any other key with LSE's 401 (`NASDAQ_KEY_UNKNOWN`).
     ///
     /// # Panics
     ///
