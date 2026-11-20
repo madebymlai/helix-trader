@@ -15,11 +15,9 @@ use nautilus_model::{
 use super::EmaCrossConfig;
 use crate::strategy::Session;
 
-/// The crossings of the fast EMA over the slow one on the traded instrument's bars: long while
-/// the fast EMA is above the slow one, short otherwise, and a cross where a bar turns that
-/// side. Only bars of the traded instrument wholly inside the session count, if there is one:
-/// the others neither move the EMAs nor cross. It is the strategy's Nautilus indicator,
-/// initialized once both EMAs are.
+/// The crossings of the fast EMA over the slow one: long while the fast is above, short
+/// otherwise, a cross where a bar turns the side. Only bars of the traded instrument wholly
+/// inside the session count, if there is one; the others neither move the EMAs nor cross.
 #[derive(Debug)]
 pub(super) struct Signal {
     instrument_id: InstrumentId,
@@ -38,16 +36,14 @@ impl Signal {
         }
     }
 
-    /// Feeds a bar; one that does not count is ignored.
     pub(super) fn update(&self, bar: &Bar) {
         if self.counts(bar) {
             self.crossover.borrow_mut().update(bar);
         }
     }
 
-    /// The side `bar`, the last one fed, turned to: a buy if it took the fast EMA above the slow
-    /// one, a sell if below; `None` if it kept the side, does not count, or the EMAs were not both
-    /// warm before it.
+    /// The side `bar`, the last one fed, turned to; `None` if it kept the side, does not count,
+    /// or the EMAs were not both warm before it.
     pub(super) fn cross(&self, bar: &Bar) -> Option<OrderSide> {
         if !self.counts(bar) {
             return None;
@@ -55,8 +51,8 @@ impl Signal {
         self.crossover.borrow().cross()
     }
 
-    /// Whether the bar is of the traded instrument and, stamped on its close, lies wholly inside
-    /// the session; every such bar does without one.
+    /// Whether the bar is of the traded instrument and, stamped on its close, wholly inside the
+    /// session.
     fn counts(&self, bar: &Bar) -> bool {
         bar.bar_type.instrument_id() == self.instrument_id
             && self
@@ -66,8 +62,7 @@ impl Signal {
     }
 }
 
-/// Nautilus' side of the signal: the warmup feeds it the strategy's bars (`Warmup::feeding`,
-/// `Warmup::on_bar`), and it is initialized once both EMAs are, by the bars that count alone.
+/// The warmup feeds the signal the strategy's bars (`Warmup::feeding`, `Warmup::on_bar`).
 impl ActorIndicator for Signal {
     fn key(&self) -> usize {
         std::ptr::from_ref(self).addr()
@@ -99,8 +94,7 @@ impl ActorIndicator for Signal {
 struct Crossover {
     fast: ExponentialMovingAverage,
     slow: ExponentialMovingAverage,
-    /// Whether the fast EMA was above the slow one after the bar before the last, and after the
-    /// last; `None` while they were not both warm.
+    /// Whether the fast EMA was above the slow one after the last two bars; `None` while cold.
     long: [Option<bool>; 2],
 }
 
@@ -143,9 +137,8 @@ mod tests {
 
     use super::*;
 
-    /// The shortest crossover, 1 against 2 bars, on ESM24. The fast EMA is the close; the slow one
-    /// starts as the average of its first two closes and then moves two thirds of the way to each
-    /// new close. A close above the slow EMA of the bars before it is long.
+    /// The shortest crossover, 1 against 2 bars, on ESM24. The fast EMA is the close; the slow
+    /// one starts as the mean of its first two closes, then moves two thirds to each new close.
     fn config() -> EmaCrossConfig {
         EmaCrossConfig::load(
             r#"
@@ -186,26 +179,24 @@ mod tests {
         bar_on("ESM24.CME", close, ts)
     }
 
-    /// Hourly bars inside the session on 2026-01-07: the first closes at 10:00 Frankfurt time
-    /// (09:00 UTC in winter), the eighth and last at 17:00.
+    /// Hourly bars inside the session on 2026-01-07, the first closing at 10:00 Frankfurt time
+    /// (09:00 UTC), the eighth at 17:00.
     fn inside(n: usize) -> Timestamp {
         assert!(n < 8);
         let first: Timestamp = "2026-01-07T09:00:00Z".parse().unwrap();
         first + SignedDuration::from_hours(n as i64)
     }
 
-    /// Hourly bars after the close the same evening, from 18:00 to 23:00.
+    /// Hourly bars after the close, 18:00 to 23:00.
     fn outside(n: usize) -> Timestamp {
         assert!(n < 6);
         inside(7) + SignedDuration::from_hours(n as i64 + 1)
     }
 
-    /// The first bar inside the session the next day.
     fn next_morning() -> Timestamp {
         inside(0) + SignedDuration::from_hours(24)
     }
 
-    /// Feeds `closes` at `at(0)`, `at(1)`, ... and returns the cross of the last.
     fn feed(signal: &Signal, closes: &[&str], at: fn(usize) -> Timestamp) -> Option<OrderSide> {
         let mut last = None;
         for (i, close) in closes.iter().enumerate() {
@@ -216,8 +207,8 @@ mod tests {
         last
     }
 
-    /// The slow EMA, of 2 bars, is initialized by the second bar inside the session; a bar outside
-    /// it or of another instrument does not count.
+    /// The slow EMA is initialized by the second bar inside the session; bars outside it or of
+    /// another instrument do not count.
     #[rstest]
     fn the_indicator_is_initialized_by_the_bars_that_count_alone() {
         let signal = Signal::new(&config());
@@ -232,10 +223,8 @@ mod tests {
         assert!(ActorIndicator::initialized(&signal).unwrap());
     }
 
-    /// The cross of the last of `closes` inside the session: none while cold; none on the first
-    /// warm bar, 101 above the slow EMA of 100.5, long, but nothing before it; up on 102, above
-    /// 100.5, long after 100 below it, short; down on 99, below 100.5, short after 101 above it,
-    /// long; none on 102, above 100.5, still long after 101.
+    /// None while cold or on the first warm bar (101 above the slow EMA of 100.5). Up on 102
+    /// (above 100.5) after 100 (below it). Down on 99 after 101. None on 102 after 101.
     #[rstest]
     #[case::while_cold(&["100"], None)]
     #[case::on_the_first_warm_bar(&["100", "101"], None)]
@@ -252,8 +241,8 @@ mod tests {
 
     #[rstest]
     fn each_turn_is_a_cross() {
-        // Short at 100 (below 100.5), long at 102 (above 100.5, the slow EMA going to 101.5), short
-        // at 99 (below 101.5).
+        // Short at 100 (below 100.5), long at 102 (above 100.5, slow EMA 101.5), short at 99
+        // (below 101.5).
         let signal = Signal::new(&config());
         let crosses: Vec<_> = ["101", "100", "102", "99"]
             .iter()
@@ -272,7 +261,7 @@ mod tests {
 
     #[rstest]
     fn bars_of_an_instrument_not_traded_neither_move_the_emas_nor_cross() {
-        // ESH24 turning long and short in between leaves ESM24 short at 100 then long at 102
+        // ESH24 in between leaves ESM24 short at 100 then long at 102
         let signal = Signal::new(&config());
         feed(&signal, &["101", "100"], inside);
         for (n, close) in [(2, "90"), (3, "120")] {
@@ -285,11 +274,10 @@ mod tests {
         assert_eq!(signal.cross(&bar), Some(OrderSide::Buy));
     }
 
-    /// Bars outside the session neither warm nor move the EMAs. Had the 100 outside counted after
-    /// 101 inside, the EMAs would be warm and short (100 below 100.5), and 102 the next morning a
-    /// cross up; without it, 102 is the first warm bar. Had the 102 outside counted after 101 and
-    /// 100 inside, it would be long, the slow EMA going to 101.5, and 99 the next morning a cross
-    /// down; without it, 99 stays below 100.5, short as 100 was.
+    /// Counted, the 100 outside after 101 inside would warm the EMAs short (below 100.5), and
+    /// 102 the next morning would cross up. Counted, the 102 outside after 101 and 100 inside
+    /// would go long (slow EMA 101.5), and 99 the next morning would cross down. Uncounted, 102
+    /// is the first warm bar and 99 stays below 100.5.
     #[rstest]
     #[case::do_not_warm_the_emas(&["101"], "100", "102")]
     #[case::do_not_move_the_emas(&["101", "100"], "102", "99")]
