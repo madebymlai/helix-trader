@@ -1,7 +1,6 @@
 //! A mock LSE socket: a WebSocket server on 127.0.0.1 that opens each connection with LSE's
-//! captured welcome and records each frame it receives.
-//!
-//! It answers each frame with what a script says, replaying LSE's captured frames.
+//! captured welcome, records each frame it receives and answers it as a script says, replaying
+//! LSE's captured frames.
 
 use std::{
     net::TcpListener,
@@ -30,7 +29,7 @@ pub enum SocketAction {
     Close(u16, String),
 }
 
-/// The frames the peer received: the connection (0, 1, ... in the order they came) and the frame.
+// The connection (0, 1, ... in the order they came) and the frame
 pub(super) type Received = Arc<Mutex<Vec<(usize, Value)>>>;
 
 /// The peer: its address and the frames it received.
@@ -41,9 +40,8 @@ pub struct MockLseSocket {
 }
 
 impl MockLseSocket {
-    /// Starts a peer answering each frame received on a connection with `script` of the
-    /// connection's number and the frame, each connection on its own thread, opened with LSE's
-    /// welcome.
+    /// Starts a peer answering each frame with `script` of the connection's number and the frame,
+    /// each connection on its own thread, opened with LSE's welcome.
     ///
     /// # Panics
     ///
@@ -105,7 +103,7 @@ impl MockLseSocket {
         Self { url, received }
     }
 
-    /// Returns the peer's address, the adapter's socket address.
+    /// Returns the peer's address.
     #[must_use]
     pub fn url(&self) -> &str {
         &self.url
@@ -167,8 +165,8 @@ impl MockLseSocket {
 }
 
 /// Returns what LSE's data-ws answers the free key, from its first captures: the key with its
-/// futures (`WS_AUTHENTICATED_FUTURES`, 16 subscriptions a connection), and `GOLD.F`'s subscription
-/// with its three ticks captured (see `socket_answer`).
+/// futures (`WS_AUTHENTICATED_FUTURES`, 16 subscriptions a connection) and `GOLD.F`'s subscription
+/// with its three captured ticks (see `socket_answer`).
 ///
 /// # Panics
 ///
@@ -179,15 +177,15 @@ pub fn data_ws_answer(frame: &Value) -> Vec<SocketAction> {
 }
 
 /// Returns what an LSE socket answers the free key, from its captures:
-/// - The key, with `authenticated`, its authenticated frame.
+/// - The key, with `authenticated`.
 /// - A subscription, with its acknowledgement, then the ticks of its symbol among `ticks`, one a
 ///   line.
 /// - An unsubscription, with its acknowledgement.
 /// - A ping, with a pong.
 ///
-/// From LSE's documentation, an underlying's chain's subscription is answered with its
-/// acknowledgement, then the ticks of its contracts among `WS_TICKS_AAPL_OPTIONS`, and its
-/// unsubscription with its acknowledgement.
+/// From LSE's documentation, a chain's subscription is answered with its acknowledgement, then the
+/// ticks of its contracts among `WS_TICKS_AAPL_OPTIONS`, and its unsubscription with its
+/// acknowledgement.
 ///
 /// # Panics
 ///
