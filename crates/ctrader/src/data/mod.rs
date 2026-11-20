@@ -1,11 +1,13 @@
 //! The data client for the live node: Nautilus' `DataClient` on a cTrader session.
 //!
-//! On connect it authenticates, loads its instruments (as `CTraderSession` does) and sends them to
-//! the node. Quote subscriptions become spot subscriptions, their spot events quotes (see `spots`),
-//! sent again by the session after a reconnect. Quote requests are answered from the tick history,
-//! merged as a fill merges it, up to the request's end or now. Bars are left to Nautilus, built
-//! from the quotes. An instrument request asks cTrader anew; the instruments loaded at connect only
-//! read the spot events and the tick history.
+//! On connect, the client authenticates, loads its instruments (as `CTraderSession` does) and sends
+//! them to the node. Quote subscriptions become spot subscriptions, and the spot events become
+//! quotes (see `spots`). The session sends the subscriptions again after a reconnect.
+//!
+//! Quote requests are answered from the tick history, merged as a fill merges it, up to the
+//! request's end or now. Nautilus builds bars from the quotes. An instrument request asks cTrader
+//! anew. The instruments loaded at connect only serve to read the spot events and the tick
+//! history.
 
 use std::{
     collections::HashMap,
@@ -46,8 +48,9 @@ use super::{
 
 mod spots;
 
-/// The socket's label in Nautilus' socket state events and reconnect commands, beside the
-/// execution client's.
+/// The socket's label in Nautilus' socket state events and reconnect commands.
+///
+/// The execution client has its own label.
 const SOCKET_ENDPOINT: &str = "ctrader-open-api-data";
 
 const TASK_GRACE: Duration = Duration::from_secs(1);
@@ -76,8 +79,9 @@ struct Session {
 }
 
 impl CTraderDataClient {
-    /// A client on the environment of `connection` loading `instrument_ids`, ids on its venue, at
-    /// connect.
+    /// Returns a client on the environment of `connection`.
+    ///
+    /// The client loads `instrument_ids`, which are ids on its venue, at connect.
     ///
     /// # Panics
     ///
@@ -221,7 +225,8 @@ impl CTraderDataClient {
         }
     }
 
-    /// Drains the tasks, then closes the session, so a token renewal out at `stop` is saved.
+    /// Drains the tasks, then closes the session, so that a token renewal in flight at `stop` is
+    /// saved.
     async fn teardown(&mut self) -> anyhow::Result<()> {
         self.begin_shutdown();
         let (session, command) = tokio::join!(
@@ -256,7 +261,7 @@ impl DataClient for CTraderDataClient {
         Ok(())
     }
 
-    /// Begins the shutdown; `disconnect`, or the next `connect`, finishes it.
+    /// Begins the shutdown. `disconnect` or the next `connect` finishes it.
     fn stop(&mut self) -> anyhow::Result<()> {
         log::debug!("Stopping {}", self.client_id);
         self.begin_shutdown();
@@ -322,16 +327,17 @@ impl DataClient for CTraderDataClient {
         })
     }
 
-    /// Answers with the instrument as cTrader defines it now, in one completed response envelope:
-    /// the data engine writes it to the catalog if asked (`update_catalog`) and none of its id is
-    /// stored. A request cTrader does not answer fails (`DataRequestFailed`). An instrument request
-    /// fetches from the provider (Nautilus' `adapters.md`, "Data client").
+    /// Answers with the instrument as cTrader defines it now, in one completed response envelope.
+    ///
+    /// The data engine writes it to the catalog if asked (`update_catalog`) and no instrument with
+    /// its id is stored. A request cTrader does not answer fails (`DataRequestFailed`). An
+    /// instrument request fetches from the provider (Nautilus' `adapters.md`, "Data client").
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - The client is not connected.
-    /// - The request is of more than one instrument.
+    /// - The request is for more than one instrument.
     fn request_instrument(&self, request: RequestInstrument) -> anyhow::Result<()> {
         let session = self.session()?;
         let id = request.single_instrument_id()?;
@@ -371,15 +377,18 @@ impl DataClient for CTraderDataClient {
         Ok(())
     }
 
-    /// Answers with the quotes over `[start, end]` (end: now if none) from the tick history, the
-    /// newest `limit` if given, in one completed response envelope the data engine writes back to
-    /// the catalog if asked (`update_catalog`). A failure cutting the history short is the
-    /// envelope's failure reason, the quotes fetched before it kept.
+    /// Answers with the quotes over `[start, end]` from the tick history, in one completed
+    /// response envelope.
+    ///
+    /// `end` is now if none is given. The answer holds the newest `limit` quotes if `limit` is
+    /// given. The data engine writes the envelope back to the catalog if asked (`update_catalog`).
+    /// A failure that cuts the history short becomes the envelope's failure reason, and the quotes
+    /// fetched before it are kept.
     ///
     /// # Errors
     ///
     /// Returns an error if:
-    /// - The request is of more than one instrument.
+    /// - The request is for more than one instrument.
     /// - The instrument is not loaded.
     /// - The request has no start.
     fn request_quotes(&self, request: RequestQuotes) -> anyhow::Result<()> {
@@ -434,12 +443,16 @@ impl DataClient for CTraderDataClient {
     }
 }
 
-/// The spot quotes, locked. A panic elsewhere left them consistent: each change is one step.
+/// Returns the spot quotes, locked.
+///
+/// A panic elsewhere leaves them consistent, because each change is one step.
 fn lock(quotes: &Mutex<SpotQuotes>) -> MutexGuard<'_, SpotQuotes> {
     quotes.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Sends `event` to the node; a closed channel means the node is stopping.
+/// Sends `event` to the node.
+///
+/// A closed channel means the node is stopping.
 fn send(sender: &EventSender<DataEvent>, event: DataEvent) {
     if let Err(e) = sender.send(event) {
         log::warn!("data event not sent: {e}");
@@ -494,7 +507,7 @@ mod tests {
     const XAUUSD: &str = "XAUUSD.ACMEFX";
     const EURUSD: &str = "EURUSD.ACMEFX";
 
-    /// cTrader's XAUUSD and EURUSD symbol ids in the fixtures.
+    /// The cTrader symbol ids of XAUUSD and EURUSD in the fixtures.
     const XAUUSD_SYMBOL_ID: i64 = 41;
 
     fn first_spot(symbol_id: i64) -> Action {
@@ -513,8 +526,10 @@ mod tests {
         )
     }
 
-    /// A cTrader serving the captured assets, symbols and details, XAUUSD ticks `bids` and `asks`
-    /// (oldest first), spot subscriptions, and each symbol's captured first spot event.
+    /// Returns a cTrader that serves the captured assets, symbols and details.
+    ///
+    /// It also serves XAUUSD ticks `bids` and `asks` (oldest first), spot subscriptions, and each
+    /// symbol's captured first spot event.
     fn peer(bids: Vec<Tick>, asks: Vec<Tick>) -> impl FnMut(usize, &ProtoMessage) -> Vec<Action> {
         move |_, request| {
             if let Some(actions) = accept_auth(request) {
@@ -560,8 +575,9 @@ mod tests {
 
     type Events = tokio::sync::mpsc::UnboundedReceiver<DataEvent>;
 
-    /// A connected client of XAUUSD and EURUSD on the peer `script` plays: the node's data events,
-    /// the frames received and the token file's directory.
+    /// Connects a client of XAUUSD and EURUSD to the peer `script` plays.
+    ///
+    /// Returns the node's data events, the frames received and the token file's directory.
     async fn connected(
         script: impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static,
     ) -> (CTraderDataClient, Events, Received, tempfile::TempDir) {
@@ -692,8 +708,8 @@ mod tests {
 
         let quote = next_quote(&mut events).await;
 
-        // As captured: bid 401796000, ask 401801000 at 1793017475790 ms; 10,000 oz, XAUUSD's
-        // maximum order, as the history's quotes.
+        // As captured: bid 401796000, ask 401801000 at 1793017475790 ms, 10,000 oz, XAUUSD's
+        // maximum order, like the history's quotes.
         assert_eq!(quote.instrument_id, InstrumentId::from(XAUUSD));
         assert_eq!(quote.bid_price, Price::from("4017.96"));
         assert_eq!(quote.ask_price, Price::from("4018.01"));
@@ -776,7 +792,7 @@ mod tests {
         (ms.try_into().unwrap(), bid.to_owned(), ask.to_owned())
     }
 
-    /// One tick of each side before the window, two bids and an ask in it.
+    /// One tick of each side before the window, and two bids and an ask in it.
     fn window_ticks() -> (i64, Vec<Tick>, Vec<Tick>) {
         let s = at("2026-10-01T00:00:00Z").as_millisecond();
         let bids = vec![
@@ -881,8 +897,8 @@ mod tests {
         let reason = envelope.failure_reason().expect("no failure reason");
         assert!(reason.contains("REQUEST_FREQUENCY_EXCEEDED"), "{reason}");
 
-        // The BID ticks reach back to 2001 ms: the quotes start there, the ask of 2000 ms seeding
-        // them.
+        // The BID ticks reach back to 2001 ms, so the quotes start there and the ask of 2000 ms
+        // seeds them.
         assert_eq!(
             prices(&quotes_of(&envelope).data),
             [
@@ -893,7 +909,7 @@ mod tests {
         client.disconnect().await.unwrap();
     }
 
-    /// A data engine at `now` with a writable catalog in `dir` and `client` registered.
+    /// Returns a data engine at `now` with a writable catalog in `dir` and `client` registered.
     fn engine_with(client: CTraderDataClient, dir: &std::path::Path, now: &str) -> DataEngine {
         MessageBus::new(TraderId::from("TRADER-001"), UUID4::new(), None, None)
             .register_message_bus();
@@ -915,8 +931,9 @@ mod tests {
         engine
     }
 
-    /// Asks `engine` for the XAUUSD quotes over `[start, end]`, written back, and returns the
-    /// quotes of the client's answer.
+    /// Asks `engine` for the XAUUSD quotes over `[start, end]`, to be written back.
+    ///
+    /// Returns the quotes in the client's answer.
     async fn write_back_request(
         engine: &mut DataEngine,
         events: &mut Events,
@@ -998,7 +1015,7 @@ mod tests {
             ]
         );
 
-        // The catalog's quotes of [00:30, 01:00], then the broker's after 01:00
+        // The catalog's quotes for [00:30, 01:00], then the broker's after 01:00
         assert_eq!(
             prices(&second),
             [
@@ -1009,7 +1026,7 @@ mod tests {
             ]
         );
 
-        // Both answers of the broker written back, each once
+        // The broker's two answers, each written back once
         let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
         let stored = catalog
             .quote_ticks(Some(vec![XAUUSD.to_string()]), None, None)
@@ -1017,8 +1034,8 @@ mod tests {
         let written = [&first[..], &second[2..]].concat();
         assert_eq!(prices(&stored), prices(&written));
 
-        // The second request's tick windows, of each side: the last tick before the gap (from 1 ms
-        // after the stored end), and the gap.
+        // The second request's tick windows, for each side: the last tick before the gap (from 1
+        // ms after the stored end), and the gap.
         let all: Vec<ProtoOaGetTickDataReq> = received_of(&received);
         let mut windows: Vec<(i64, i64)> = all[asked_first.len()..]
             .iter()
@@ -1049,8 +1066,10 @@ mod tests {
         }
     }
 
-    /// Nautilus' regression for a fresh instrument request (`adapters.md`, "Data client"): the
-    /// XAUUSD definition changes between two requests, digits 2 to 3, and the second answer is new.
+    /// Nautilus' regression for a fresh instrument request (`adapters.md`, "Data client").
+    ///
+    /// The XAUUSD definition changes between two requests, from digits 2 to 3, and the second
+    /// answer is new.
     #[tokio::test]
     async fn an_instrument_request_answers_ctraders_definition_of_the_moment() {
         let changed = Arc::new(AtomicBool::new(false));
@@ -1092,7 +1111,7 @@ mod tests {
         client.disconnect().await.unwrap();
     }
 
-    /// cTrader lists no such symbol: the request fails, naming why.
+    /// cTrader lists no such symbol, so the request fails and names why.
     #[tokio::test]
     async fn an_instrument_request_ctrader_cannot_answer_fails() {
         let (mut client, mut events, _, _tokens) = connected(peer(vec![], vec![])).await;

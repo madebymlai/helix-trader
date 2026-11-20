@@ -1,10 +1,10 @@
-//! Live quotes: cTrader's spot events merged into quotes by the rule of the tick history
+//! Merges cTrader's spot events into live quotes, by the rule the tick history uses
 //! (`session::ticks::QuoteMerge`).
 //!
-//! A spot event carries a side only when it changed, and the time of the change
-//! (`subscribeToSpotTimestamp`); the first one after a subscription carries both. On the demo the
-//! spot events of a minute matched the ticks history served for it (`README.md`, "Live quotes").
-//! Each quote has `ts_event` the spot's time and `ts_init` its receipt.
+//! A spot event carries a side only when that side changed, with the time of the change
+//! (`subscribeToSpotTimestamp`). The first event after a subscription carries both sides. On the
+//! demo, the spot events of one minute matched the ticks history served for it (`README.md`, "Live
+//! quotes"). Each quote has the spot's time as `ts_event` and its receipt time as `ts_init`.
 
 use std::collections::HashMap;
 
@@ -34,7 +34,9 @@ struct Stream {
 }
 
 impl SpotQuotes {
-    /// The live quotes of `instruments`, each with its cTrader `symbolId`; none subscribed.
+    /// Returns the live quotes of `instruments`, each with its cTrader `symbolId`.
+    ///
+    /// No instrument is subscribed yet.
     ///
     /// # Errors
     ///
@@ -56,7 +58,7 @@ impl SpotQuotes {
         })
     }
 
-    /// The cTrader `symbolId` of `id`.
+    /// Returns the cTrader `symbolId` of `id`.
     ///
     /// # Errors
     ///
@@ -68,7 +70,7 @@ impl SpotQuotes {
             .with_context(|| format!("{id} is not an instrument the data client loaded"))
     }
 
-    /// Sends the live quotes of `id` from now on; returns its `symbolId`.
+    /// Sends the live quotes of `id` from now on, and returns its `symbolId`.
     ///
     /// # Errors
     ///
@@ -79,7 +81,7 @@ impl SpotQuotes {
         Ok(symbol_id)
     }
 
-    /// Sends no more live quotes of `id`; returns its `symbolId`.
+    /// Stops sending live quotes of `id`, and returns its `symbolId`.
     ///
     /// # Errors
     ///
@@ -90,13 +92,17 @@ impl SpotQuotes {
         Ok(symbol_id)
     }
 
-    /// Takes in `spot`, received at `ts_init`, and returns the quote to send now: none for an
-    /// instrument not subscribed, before both sides are known, or for a crossed quote.
+    /// Takes in `spot`, received at `ts_init`, and returns the quote to send now.
+    ///
+    /// Returns no quote if:
+    /// - The instrument is not subscribed.
+    /// - Both sides are not yet known.
+    /// - The quote is crossed.
     ///
     /// # Errors
     ///
     /// Returns an error if:
-    /// - The spot is of a symbol the session did not load.
+    /// - The spot is for a symbol the session did not load.
     /// - The spot has no time.
     /// - The spot's price is off the instrument's precision.
     pub(super) fn spot(

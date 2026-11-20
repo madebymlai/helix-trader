@@ -1,8 +1,9 @@
-//! The broker's trading account as cTrader states it (`ProtoOATrader`).
+//! The broker's trading account, as cTrader states it (`ProtoOATrader`).
 //!
-//! The adapter trades a hedging account only: each cTrader position is one Nautilus position, its
-//! `positionId` the venue position id. A netting or spread betting account, or another account than
-//! the credential's, is refused. Money is an integer scaled by `moneyDigits`, in the deposit asset.
+//! The adapter trades a hedging account only. Each cTrader position is one Nautilus position, and
+//! its `positionId` is the venue position id. The adapter refuses a netting or spread betting
+//! account, and any account other than the credential's. Money is an integer scaled by
+//! `moneyDigits`, in the deposit asset.
 
 use std::collections::HashMap;
 
@@ -20,19 +21,19 @@ use crate::config::{CTraderAccountId, CTraderSettingNames};
 pub(crate) struct CTraderAccount {
     pub(crate) venue: Venue,
     pub(crate) currency: Currency,
-    /// Deposits and realized PnL, without open positions.
+    /// Deposits and realized PnL, excluding open positions.
     pub(crate) balance: Decimal,
 }
 
 impl CTraderAccount {
-    /// The account `trader` states, if it is `account_id`'s and hedging.
+    /// Returns the account `trader` states, if it is `account_id` and hedging.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - The trader is another account.
     /// - The account is not hedging.
-    /// - Its deposit asset is no currency Nautilus knows.
+    /// - The deposit asset is not a currency Nautilus knows.
     pub(crate) fn check(
         trader: &ProtoOaTrader,
         venue: Venue,
@@ -71,8 +72,10 @@ impl CTraderAccount {
         })
     }
 
-    /// The account state with `positions` open: total is the balance, locked the positions' margin.
-    /// The margin is account-wide, as initial and maintenance.
+    /// Returns the account state with `positions` open.
+    ///
+    /// The total is the balance, and the locked amount is the margin of the positions. The margin
+    /// is account-wide, and counts as both initial and maintenance.
     ///
     /// # Errors
     ///
@@ -98,7 +101,9 @@ impl CTraderAccount {
     }
 }
 
-/// A cTrader amount: `value` scaled by 10^`digits` (`moneyDigits`, 2 if absent as on the demo).
+/// Returns a cTrader amount: `value` scaled by 10^`digits`.
+///
+/// `digits` is `moneyDigits`. It is 2 if absent, as on the demo.
 fn money(value: i64, digits: Option<u32>) -> anyhow::Result<Decimal> {
     let digits = digits.unwrap_or(2);
     anyhow::ensure!(digits <= 28, "moneyDigits {digits} out of range");

@@ -1,18 +1,19 @@
 //! The account's token pair and the file that keeps the latest one.
 //!
-//! cTrader's access token lasts about 30 days; the refresh token renews it
-//! (`ProtoOARefreshTokenReq`), and each renewal replaces both, invalidating the old pair
+//! cTrader's access token lasts about 30 days. The refresh token renews it
+//! (`ProtoOARefreshTokenReq`). Each renewal replaces both tokens and invalidates the old pair
 //! (help.ctrader.com/open-api, "App and account authentication"). So the latest pair lives in the
 //! credential's `token_file`, mode 0600 in a 0700 directory, where every session finds it.
 //!
-//! The credential's pair seeds the file once; wherever the caller read it from is never written.
-//! The file keeps a SHA-256 fingerprint of the seeding pair: a credential holding another pair (a
-//! new one from the Playground) seeds the file again.
+//! The credential's pair seeds the file once. The adapter never writes the place the caller read
+//! the pair from. The file keeps a SHA-256 fingerprint of the seeding pair. If a credential holds
+//! another pair (a new one from the Playground), it seeds the file again.
 //!
-//! Sessions of several processes share the file. A renewal holds an advisory lock (`flock`, on the
-//! token file's name with `.lock` appended, a file never replaced) from before its request until
-//! the new pair is written, so two sessions never spend the same refresh token. The file is
-//! replaced atomically (a temporary file renamed over it), so a reader sees a whole pair.
+//! Sessions of several processes share the file. A renewal holds an advisory lock (`flock`) from
+//! before its request until the new pair is written, so two sessions never spend the same refresh
+//! token. The lock is on a file named like the token file with `.lock` appended, and that file is
+//! never replaced. The file is replaced atomically (a temporary file renamed over it), so a reader
+//! sees a whole pair.
 
 use std::{
     fmt::Write as _,
@@ -33,8 +34,9 @@ use crate::config::CTraderSettingNames;
 
 pub(crate) const RENEW_BEFORE: SignedDuration = SignedDuration::from_hours(24);
 
-/// An access token, its refresh token and the expiry (unknown for a pair seeded from the
-/// credential).
+/// An access token with its refresh token and expiry.
+///
+/// The expiry is unknown for a pair seeded from the credential.
 #[derive(Debug, Clone)]
 pub struct TokenPair {
     pub access_token: SecretString,
@@ -113,12 +115,14 @@ impl TokenStore {
         &self.path
     }
 
-    /// The latest pair: the file's, or the seed (written first) when there is no file or another
-    /// pair seeded it. `None` while another session holds the renewal lock.
+    /// Returns the latest pair, or `None` while another session holds the renewal lock.
+    ///
+    /// The latest pair is the file's. It is the seed, written first, when there is no file or
+    /// another pair seeded it.
     ///
     /// # Errors
     ///
-    /// Returns an error if the file cannot be read, parsed or written; the error never holds a
+    /// Returns an error if the file cannot be read, parsed or written. The error never holds a
     /// token.
     pub(crate) fn try_load(&self) -> anyhow::Result<Option<TokenPair>> {
         let Some(lock) = self.try_lock()? else {
@@ -134,11 +138,11 @@ impl TokenStore {
         }
     }
 
-    /// The pair the file holds now.
+    /// Returns the pair the file holds now.
     ///
     /// # Errors
     ///
-    /// Returns an error if there is no file, or it cannot be read or parsed; the error never holds
+    /// Returns an error if there is no file, or it cannot be read or parsed. The error never holds
     /// a token.
     pub(crate) fn read(&self) -> anyhow::Result<TokenPair> {
         match self.stored()? {
@@ -147,7 +151,7 @@ impl TokenStore {
         }
     }
 
-    /// The renewal lock, or `None` while another session holds it.
+    /// Returns the renewal lock, or `None` while another session holds it.
     ///
     /// # Errors
     ///
@@ -229,7 +233,7 @@ impl TokenLock {
     ///
     /// # Errors
     ///
-    /// Returns an error if the file cannot be written; the error never holds a token.
+    /// Returns an error if the file cannot be written. The error never holds a token.
     pub(crate) fn save(&self, pair: &TokenPair) -> anyhow::Result<()> {
         let directory = self
             .path
@@ -375,8 +379,8 @@ mod tests {
         );
     }
 
-    /// Two writers replace the pair repeatedly while a reader that read the seed reads on: every
-    /// read is one whole pair, and the file ends with the last one written.
+    /// Two writers replace the pair repeatedly while a reader that read the seed keeps reading.
+    /// Every read is one whole pair, and the file ends with the last pair written.
     #[rstest]
     fn concurrent_writers_never_leave_a_partial_pair_and_the_later_wins() {
         let dir = tempfile::tempdir().unwrap();

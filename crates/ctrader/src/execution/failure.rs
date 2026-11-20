@@ -1,16 +1,17 @@
-//! What a trade request's failure proves, as Nautilus' `CommandFailure` classes
+//! Classifies what a trade request's failure proves, as Nautilus' `CommandFailure` classes
 //! (`developer_guide/adapters.md`, "Order command outcome policy" and "Naming the evidence
 //! classes"). `Dispatch::fail` emits each class's events.
 //!
-//! - **Not sent** (`NotSent`): the session never wrote the frame: it had failed, the connection
-//!   closed while the request waited, the transport refused it before the write began (see
-//!   `websocket::handler`), or the request could not be made.
+//! - **Not sent** (`NotSent`): the session never wrote the frame. Either the session had failed,
+//!   or the connection closed while the request waited, or the transport refused the frame before
+//!   the write began (see `websocket::handler`), or the request could not be made.
 //! - **Unknown** (`Ambiguous`): the session ended without saying what became of the frame, or
 //!   cTrader answered with a code in `UNKNOWN_OUTCOME`. A frame whose write began and failed counts
 //!   as sent (the handler's `failed_send`) and waits for its events.
-//! - **Rejected** (`VenueRejected`): cTrader refused the request by an order error event or an
-//!   error answer of any other code, or at execution by `ORDER_REJECTED` or by cancelling the order
-//!   unfilled with its deal rejected.
+//! - **Rejected** (`VenueRejected`): cTrader refused the request in one of three ways:
+//!   - An order error event, or an error answer of any other code.
+//!   - `ORDER_REJECTED` at execution.
+//!   - Cancelling the order unfilled with its deal rejected, at execution.
 
 use nautilus_live::execution::failure::CommandFailure;
 use nautilus_model::identifiers::Venue;
@@ -18,8 +19,10 @@ use nautilus_model::identifiers::Venue;
 use crate::common::messages::{CTraderError, ProtoOaDealStatus, ProtoOaExecutionEvent};
 
 /// Codes of cTrader's refusals (`ProtoErrorCode`, `ProtoOAErrorCode`) that do not say the request
-/// was not carried out. Nautilus leaves such an outcome unknown, as its Bybit and Binance adapters
-/// do their rate limits and server errors.
+/// was not carried out.
+///
+/// Nautilus leaves such an outcome unknown. Its Bybit and Binance adapters do the same for their
+/// rate limits and server errors.
 const UNKNOWN_OUTCOME: [&str; 6] = [
     // "Generic error."
     "UNKNOWN_ERROR",
@@ -35,9 +38,11 @@ const UNKNOWN_OUTCOME: [&str; 6] = [
     "SERVER_IS_UNDER_MAINTENANCE",
 ];
 
-/// The failure, if any, of a trade request whose sending ended as `sending`: none once its frame is
-/// written or its write began, `NotSent` if the session says it never was, `Ambiguous` if the
-/// session is gone without a word.
+/// Returns the failure, if any, of a trade request whose sending ended as `sending`.
+///
+/// - None once its frame is written or its write began.
+/// - `NotSent` if the session says the frame was never written.
+/// - `Ambiguous` if the session is gone without a word.
 pub(super) fn sending(
     sending: Result<Result<(), CTraderError>, tokio::sync::oneshot::error::RecvError>,
     venue: Venue,
@@ -62,18 +67,21 @@ pub(super) fn refusal(code: &str, description: Option<&str>) -> CommandFailure {
     }
 }
 
-/// An order's rejection by its `ORDER_REJECTED` event, whatever the code: the order is done.
+/// Returns an order's rejection by its `ORDER_REJECTED` event, whatever the code.
+///
+/// The order is done.
 pub(super) fn rejected(event: &ProtoOaExecutionEvent) -> CommandFailure {
     let code = event.error_code.as_deref().unwrap_or("ORDER_REJECTED");
     let description = event.deal.as_ref().and_then(|d| d.reject_reason.as_deref());
     CommandFailure::VenueRejected(joined(code, description))
 }
 
-/// The rejection of an order closed unfilled with its deal rejected, if `event` is one. cTrader
-/// refuses an order at execution (an IOC order out of range, no price, the liquidity provider's
-/// refusal) by cancelling it with the deal's `dealStatus` other than `FILLED` and
-/// `PARTIALLY_FILLED` (demo, 2026-11-16), not by `ORDER_REJECTED`. None for an order filled in
-/// part.
+/// Returns the rejection of an order closed unfilled with its deal rejected, if `event` is one.
+///
+/// cTrader refuses an order at execution (an IOC order out of range, no price, the liquidity
+/// provider's refusal) by cancelling it, not by `ORDER_REJECTED`. The deal's `dealStatus` is then
+/// other than `FILLED` and `PARTIALLY_FILLED` (demo, 2026-11-16). Returns `None` for an order
+/// filled in part.
 pub(super) fn deal_rejected(event: &ProtoOaExecutionEvent) -> Option<CommandFailure> {
     let unfilled = event
         .order
@@ -114,8 +122,9 @@ mod tests {
         sending(rx.await, Venue::from(VENUE))
     }
 
-    /// A frame written has not failed. The session answers an error only for a frame it never wrote
-    /// (see `websocket::handler`). A session gone without a word leaves cTrader maybe holding it.
+    /// A frame written has not failed. The session answers an error only for a frame it never
+    /// wrote (see `websocket::handler`). A session gone without a word leaves cTrader maybe
+    /// holding it.
     #[rstest]
     #[case::written(Some(Ok(())), None, &[])]
     #[case::connection_lost(
@@ -168,7 +177,7 @@ mod tests {
     }
 
     /// The refusals the demo answered (`test_data/order_error_*`) and the deal timeout Spotware
-    /// documents as "rejected" are rejections; a rate limit or an unavailable server is unknown.
+    /// documents as "rejected" are rejections. A rate limit or an unavailable server is unknown.
     #[rstest]
     #[case::bad_volume(
         "TRADING_BAD_VOLUME",

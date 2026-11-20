@@ -1,40 +1,46 @@
-//! cTrader's trade events as Nautilus order events and reports.
+//! Turns cTrader's trade events into Nautilus order events and reports.
 //!
-//! The execution client registers each order it sends (`track`) before the request goes out; the
+//! The execution client registers each order it sends (`track`) before the request goes out. The
 //! trade events then take one route each:
 //!
-//! - **Tracked**: an event of an order this client sent, by its `clientOrderId` (a close's being
-//!   its request's `clientMsgId`, see `orders`), becomes the order's events: accepted, filled (each
-//!   deal once, by `dealId`, with its price, volume, commission and `positionId`), updated,
-//!   cancelled, expired, rejected. A fill before the acceptance is preceded by the acceptance it
-//!   proves.
+//! - **Tracked**: an event for an order this client sent. The event is matched by its
+//!   `clientOrderId` (a close's is its request's `clientMsgId`, see `orders`). It becomes the
+//!   order's events: accepted, filled, updated, cancelled, expired or rejected. Each deal fills
+//!   once, by `dealId`, with its price, volume, commission and `positionId`. A fill before the
+//!   acceptance is preceded by the acceptance it proves.
 //! - **Protections**: a position's stop loss and take profit are one cTrader order,
-//!   `STOP_LOSS_TAKE_PROFIT`, its stop price the stop loss and its limit price the take profit,
-//!   named by the bracket entry's `clientOrderId`. Its acceptance accepts the bracket's legs (venue
-//!   order ids `<positionId>-SL`, `-TP`), its replacement updates them (a price gone cancels its
-//!   leg), its fill fills the leg whose price is nearer the deal's and cancels the other, its
-//!   cancellation cancels them. While the entry is pending its protections live on it, and its
-//!   replacement updates the legs the same way.
-//! - **External**: an event of an order not tracked (placed elsewhere, or before a restart) becomes
-//!   reports, which Nautilus reconciles. Such an order is tracked (`adopt`) once a modify or cancel
-//!   of it is sent, so that a refusal reaches it.
+//!   `STOP_LOSS_TAKE_PROFIT`. Its stop price is the stop loss, and its limit price is the take
+//!   profit. The bracket entry's `clientOrderId` names it. Its events act on the bracket's legs
+//!   (venue order ids `<positionId>-SL` and `-TP`):
+//!   - Acceptance accepts the legs.
+//!   - Replacement updates them (a price gone cancels its leg).
+//!   - Fill fills the leg whose price is nearer the deal's, and cancels the other.
+//!   - Cancellation cancels them.
+//!
+//!   While the entry is pending, its protections live on it, and its replacement updates the legs
+//!   the same way.
+//! - **External**: an event for an order not tracked (placed elsewhere, or before a restart)
+//!   becomes reports, which Nautilus reconciles. Such an order is tracked (`adopt`) once a modify
+//!   or cancel for it is sent, so that a refusal reaches it.
 //! - **Failures**: each failure of a request, under its `clientMsgId` (`Tag`), is one of Nautilus'
-//!   `CommandFailure` classes (see `failure`), which takes Nautilus' policy (`fail`). A request
-//!   never sent rejects a new order or a close, and the legs of a bracket entry; a modify or cancel
-//!   never sent is denied, by its command. cTrader's refusal (an order error, an error answer, an
-//!   order's `ORDER_REJECTED` or `ORDER_CANCEL_REJECTED`) rejects a new order or a close as well,
-//!   the modification of an amendment, the cancel of a cancellation, and each protection of the
-//!   position for a removal of protections; its reason is cTrader's code and description. A failure
-//!   of unknown outcome emits nothing: the order stays in flight for its events, a query or
-//!   reconciliation.
+//!   `CommandFailure` classes (see `failure`). The class takes Nautilus' policy (`fail`):
+//!   - A request never sent rejects a new order or a close, and the legs of a bracket entry. A
+//!     modify or cancel never sent is denied, by its command.
+//!   - cTrader's refusal (an order error, an error answer, an order's `ORDER_REJECTED` or
+//!     `ORDER_CANCEL_REJECTED`) rejects a new order or a close as well. It also rejects the
+//!     modification of an amendment, the cancel of a cancellation, and each protection of the
+//!     position for a removal of protections. Its reason is cTrader's code and description.
+//!   - A failure of unknown outcome emits nothing. The order stays in flight for its events, a
+//!     query or reconciliation.
 //! - **Protections asked**: a move or removal of a protection is recorded (`want`) until cTrader's
-//!   protection shows it done, or it is refused: an amendment, which sets both protections, carries
+//!   protection shows it done, or it is refused. An amendment sets both protections, so it carries
 //!   the other's.
 //!
-//! A terminal order's repeated events are suppressed; a fill with a new `dealId` after it goes as a
-//! report. A deal is remembered only once its outputs are built: one that cannot be (its commission
-//! not stated, see `reports::commission`) emits nothing and changes nothing, and its replay or
-//! reconciliation applies it once (Nautilus' `adapters.md`, "WebSocket trade processing").
+//! Repeated events of a terminal order are suppressed. A fill with a new `dealId` after it goes as
+//! a report. A deal is remembered only once its outputs are built. A deal whose outputs cannot be
+//! built (its commission not stated, see `reports::commission`) emits nothing and changes nothing.
+//! Its replay or reconciliation applies it once (Nautilus' `adapters.md`, "WebSocket trade
+//! processing").
 
 use std::collections::HashMap;
 
@@ -86,9 +92,9 @@ pub(super) enum Output {
 pub(super) struct Tracked {
     pub(super) identity: OrderIdentity,
     pub(super) quantity: Quantity,
-    /// The limit price, or a take profit's.
+    /// The limit price, or the take profit price of a leg.
     pub(super) price: Option<Price>,
-    /// The stop price, or a stop loss's.
+    /// The stop price, or the stop loss price of a leg.
     pub(super) trigger_price: Option<Price>,
     pub(super) venue_order_id: Option<VenueOrderId>,
     pub(super) accepted: bool,
@@ -98,8 +104,10 @@ pub(super) struct Tracked {
     pub(super) queued: bool,
 }
 
-/// A change of a protection asked of the broker. Until the broker shows it done, each amendment of
-/// the other protection carries it, since an amendment sets both.
+/// A change of a protection asked of the broker.
+///
+/// Until the broker shows it done, each amendment of the other protection carries it, since an
+/// amendment sets both.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) enum Want {
     Move(Price),
@@ -119,13 +127,13 @@ impl Want {
 pub(super) enum Role {
     /// An order of its own.
     Order,
-    /// A bracket's entry, its legs, and the position it opened once filled.
+    /// A bracket's entry. It holds its legs, and the position it opened once filled.
     Entry {
         stop_loss: Option<ClientOrderId>,
         take_profit: Option<ClientOrderId>,
         position: Option<i64>,
     },
-    /// A bracket's leg, of `entry`.
+    /// A leg of the bracket whose entry is `entry`.
     Leg { entry: ClientOrderId, leg: Leg },
 }
 
@@ -174,8 +182,9 @@ impl Dispatch {
         );
     }
 
-    /// Tracks `order`, sent before a restart or placed elsewhere, unless tracked, so a refusal of a
-    /// request about it reaches it.
+    /// Tracks `order` unless it is tracked, so that a refusal of a request about it reaches it.
+    ///
+    /// The order was sent before a restart or placed elsewhere.
     pub(super) fn adopt(&mut self, order: &OrderAny) {
         let id = order.client_order_id();
         if !self.orders.contains_key(&id) {
@@ -195,10 +204,15 @@ impl Dispatch {
         }
     }
 
-    /// The orders rejected once a query finds the broker holds no order `id` over its window: `id`
-    /// and a bracket entry's open legs. `None` while its request may still wait in the session's
-    /// queue, for a bracket's leg (the broker holds it on its entry or position), or for an order
-    /// closed. An order not tracked was not sent by this session: nothing of it waits.
+    /// Returns the orders to reject once a query finds the broker holds no order `id` over its
+    /// window: `id` and a bracket entry's open legs.
+    ///
+    /// Returns `None` if:
+    /// - The request may still wait in the session's queue.
+    /// - `id` is a bracket's leg (the broker holds it on its entry or position).
+    /// - The order is closed.
+    ///
+    /// An order not tracked was not sent by this session, so nothing of it waits.
     pub(super) fn absent(&mut self, id: ClientOrderId) -> Option<Vec<ClientOrderId>> {
         let Some(tracked) = self.orders.get(&id) else {
             return Some(vec![id]);
@@ -235,8 +249,9 @@ impl Dispatch {
         self.orders.get(&id).and_then(|t| t.want)
     }
 
-    /// The protections of the bracket `entry` as last asked: each open leg's wanted change, else
-    /// its price.
+    /// Returns the protections of the bracket `entry` as last asked.
+    ///
+    /// Each open leg gives its wanted change, else its price.
     pub(super) fn protection(&self, entry: ClientOrderId) -> Protection {
         let Some(Tracked {
             role:
@@ -264,7 +279,7 @@ impl Dispatch {
         }
     }
 
-    /// Forgets the changes of the protections of `position` that the broker now holds.
+    /// Forgets the protection changes for `position` that the broker now holds.
     fn settle(&mut self, position: i64, (stop_loss, take_profit): (Option<Price>, Option<Price>)) {
         for tracked in self.orders.values_mut() {
             let Some((of, leg)) = tracked.venue_order_id.and_then(parse_protection_id) else {
@@ -306,19 +321,22 @@ impl Dispatch {
         }
     }
 
-    /// The outputs of `failure` of the request `tag`, by Nautilus' policy for its class
-    /// (`developer_guide/adapters.md`, "Naming the evidence classes"). `commands` are each order's
-    /// modify or cancel the request carries, with its command's id: none for a new order or a
-    /// close, nor from cTrader's answer, which never says a request was not sent.
+    /// Returns the outputs of `failure` of the request `tag`, by Nautilus' policy for its class
+    /// (`developer_guide/adapters.md`, "Naming the evidence classes").
     ///
-    /// - `NotSent`: a new order or a close rejected, a bracket entry's legs with it; a modify or
-    ///   cancel denied by its command for each order still open, its wanted change forgotten.
-    /// - `VenueRejected`: a new order or a close rejected as above; an amendment's modification
-    ///   rejected; a cancellation's cancel rejected, a removal of protections' that of each
-    ///   protection of the position. A modified or cancelled order stays working, its wanted change
+    /// `commands` holds each order's modify or cancel that the request carries, with the command's
+    /// id. It has none for a new order or a close, and none from cTrader's answer, which never
+    /// says a request was not sent.
+    ///
+    /// - `NotSent`: A new order or a close is rejected, with a bracket entry's legs. A modify or
+    ///   cancel is denied by its command for each order still open, and its wanted change is
     ///   forgotten.
-    /// - `Ambiguous`: nothing, the trade events, a query or reconciliation resolve it. A wanted
-    ///   change stays: the broker may have made it.
+    /// - `VenueRejected`: A new order or a close is rejected as above. An amendment's modification
+    ///   is rejected. A cancellation's cancel is rejected. A removal of protections is rejected
+    ///   for each protection of the position. A modified or cancelled order stays working, and its
+    ///   wanted change is forgotten.
+    /// - `Ambiguous`: Nothing is emitted. The trade events, a query or reconciliation resolve it.
+    ///   A wanted change stays, because the broker may have made it.
     pub(super) fn fail(
         &mut self,
         tag: Tag,
@@ -349,8 +367,10 @@ impl Dispatch {
         }
     }
 
-    /// The outputs of what became of the request `tag`'s frame, `sending` (see `failure::sending`).
-    /// Unless never sent, nothing of it waits in the session's queue any more.
+    /// Returns the outputs for what became of the frame of the request `tag`, as `sending` says
+    /// (see `failure::sending`).
+    ///
+    /// Unless it was never sent, nothing of it waits in the session's queue any more.
     pub(super) fn sending(
         &mut self,
         tag: Tag,
@@ -367,8 +387,10 @@ impl Dispatch {
         }
     }
 
-    /// The `OrderModifyDenied` or `OrderCancelDenied` of each order still open that the request
-    /// `tag` modifies or cancels, caused by its command in `commands`; its wanted change forgotten.
+    /// Returns the `OrderModifyDenied` or `OrderCancelDenied` of each order still open that the
+    /// request `tag` modifies or cancels.
+    ///
+    /// Each is caused by its command in `commands`, and the order's wanted change is forgotten.
     fn denials(
         &mut self,
         tag: Tag,
@@ -422,7 +444,9 @@ impl Dispatch {
             .collect()
     }
 
-    /// The rejections of the request `tag`; its asked changes of protections are forgotten.
+    /// Returns the rejections of the request `tag`.
+    ///
+    /// Its asked changes of protections are forgotten.
     fn rejections(&mut self, tag: Tag, reason: Ustr, ts: UnixNanos) -> Vec<Output> {
         let id = tag.client_order_id();
         let Some(tracked) = self.orders.get(&id).filter(|t| !t.closed).cloned() else {
@@ -552,8 +576,9 @@ impl Dispatch {
         })
     }
 
-    /// Whether `deal` was applied already. A deal is remembered once its outputs are built, so a
-    /// failed one is applied by a replay.
+    /// Returns whether `deal` was applied already.
+    ///
+    /// A deal is remembered once its outputs are built, so a failed one is applied by a replay.
     fn seen(&self, deal: &ProtoOaDeal) -> bool {
         self.deals.contains(&deal.deal_id)
     }
@@ -846,8 +871,8 @@ impl Dispatch {
         })
     }
 
-    /// The updates of the accepted legs of `position` to its remaining `volume` after a partial
-    /// close.
+    /// Returns the updates that set the accepted legs of `position` to its remaining `volume` after
+    /// a partial close.
     fn resize_legs(
         &mut self,
         position: i64,
@@ -885,9 +910,10 @@ impl Dispatch {
         Ok(out)
     }
 
-    /// Brings the legs of bracket `entry` in line with the protection cTrader holds: a leg whose
-    /// price came is accepted (once the position holds it) or updated, one whose price went
-    /// cancelled.
+    /// Brings the legs of bracket `entry` in line with the protection cTrader holds.
+    ///
+    /// A leg whose price came is accepted (once the position holds it) or updated. A leg whose
+    /// price went is cancelled.
     fn align_legs(
         &mut self,
         entry: ClientOrderId,
@@ -1072,7 +1098,8 @@ impl Dispatch {
         Ok(vec![Output::Report(report)])
     }
 
-    /// The reports of a protection not tracked: the legs cTrader holds, filled or cancelled.
+    /// Returns the reports of a protection not tracked: the legs cTrader holds, filled or
+    /// cancelled.
     fn external_protection(
         &mut self,
         event: &ProtoOaExecutionEvent,
@@ -1135,10 +1162,11 @@ const REASON_MAX_CHARS: usize = 256;
 
 const NO_REASON: &str = "no reason given";
 
-/// `text`, a refusal's reason as an order event carries it, interned: each run of control
-/// characters and whitespace one space, `REASON_MAX_CHARS` characters at most, `NO_REASON` if
-/// nothing is left, as Nautilus asks (`developer_guide/adapters.md`, "Separate diagnostics from
-/// strategy-facing reasons").
+/// Returns `text`, a refusal's reason as an order event carries it, interned.
+///
+/// Each run of control characters and whitespace becomes one space. The reason has
+/// `REASON_MAX_CHARS` characters at most, and is `NO_REASON` if nothing is left, as Nautilus asks
+/// (`developer_guide/adapters.md`, "Separate diagnostics from strategy-facing reasons").
 fn interned(text: &str) -> Ustr {
     let words: Vec<&str> = text
         .split(|c: char| c.is_control() || c.is_whitespace())
@@ -1349,7 +1377,8 @@ mod tests {
         );
     }
 
-    /// A rate limit does not say the order was not placed: it stays in flight, its fill applies.
+    /// A rate limit does not say the order was not placed, so it stays in flight and its fill
+    /// applies.
     #[rstest]
     fn a_rate_limited_order_stays_in_flight_until_its_events_come() {
         let mut dispatch = dispatch();
@@ -1414,8 +1443,8 @@ mod tests {
         assert_eq!(kinds(&out), [row("PROBE-2", "canceled")]);
     }
 
-    /// The captured refusal at execution: cTrader cancels the order with its deal rejected, which
-    /// rejects it with the deal's status and `rejectReason`, and its legs with it.
+    /// The captured refusal at execution. cTrader cancels the order with its deal rejected. That
+    /// rejects the order with the deal's status and `rejectReason`, and its legs with it.
     #[rstest]
     fn an_order_cancelled_with_its_deal_rejected_is_rejected_with_the_deals_reason() {
         let mut dispatch = dispatch();
@@ -1447,8 +1476,8 @@ mod tests {
         );
     }
 
-    /// An order cancelled with its deal rejected after part of it filled is cancelled, its fill
-    /// standing.
+    /// An order cancelled with its deal rejected after part of it filled is cancelled, and its fill
+    /// stands.
     #[rstest]
     fn an_order_filled_in_part_and_cancelled_with_its_deal_rejected_is_cancelled() {
         let mut dispatch = dispatch();
@@ -1586,7 +1615,8 @@ mod tests {
         );
     }
 
-    /// The broker refused the modification: the order stays working, its cancellation cancels it.
+    /// The broker refused the modification, so the order stays working and its cancellation cancels
+    /// it.
     #[rstest]
     fn a_modify_the_broker_rejects_is_rejected_and_the_order_stays_working() {
         let mut dispatch = dispatch();
@@ -1638,8 +1668,9 @@ mod tests {
         assert_eq!(kinds(&out), [row("PROBE-2", "canceled")]);
     }
 
-    /// Never sent, a new order is rejected for the session's reason. Written, or maybe: its request
-    /// waits no more, and a query finding no such order at the broker concludes it absent.
+    /// A new order never sent is rejected for the session's reason. If its request was written, or
+    /// maybe written, it waits no more, and a query that finds no such order at the broker
+    /// concludes it absent.
     #[rstest]
     #[case::never_sent(
         Err(CommandFailure::not_sent("not sent to ACMEFX: the cTrader connection was lost")),
@@ -1674,7 +1705,7 @@ mod tests {
 
     // A deal whose commission cTrader does not state (Nautilus' `spec_exec_testing.md`, TC-E89)
 
-    /// The first delivery emits nothing and touches nothing: neither the acceptance the fill proves
+    /// The first delivery emits nothing and touches nothing. Neither the acceptance the fill proves
     /// nor the deal is spent. The repaired replay applies them once.
     #[rstest]
     fn a_fill_without_its_commission_is_left_and_its_repaired_replay_fills_once() {
@@ -1726,8 +1757,8 @@ mod tests {
         assert_eq!(fills[0].commission, Money::new(0.11, Currency::from("EUR")));
     }
 
-    /// The captured stop loss hit of bracket PROBE-5's position: no leg filled or accepted until
-    /// the deal states its commission.
+    /// The captured stop loss hit on the position of bracket PROBE-5. No leg is filled or accepted
+    /// until the deal states its commission.
     #[rstest]
     fn a_protection_hit_without_its_commission_fills_no_leg_until_repaired() {
         let mut dispatch = dispatch();
