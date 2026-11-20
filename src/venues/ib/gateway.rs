@@ -1,9 +1,12 @@
-//! The IB Gateway this process connects to: Nautilus' Docker one, started or reused, and logged in.
+//! The IB Gateway this process connects to.
 //!
-//! Uses `DockerizedIBGateway` (`nautilus_interactive_brokers::gateway`), started before the
-//! clients, which take its host and port. One container per trading mode, shared by every process
-//! of that mode. The adapter reads the login from `TWS_USERNAME` and `TWS_PASSWORD`; the Docker
-//! socket comes from `DOCKER_HOST`, else the local default.
+//! It is Nautilus' Docker gateway, started or reused, and logged in. This module uses
+//! `DockerizedIBGateway` (`nautilus_interactive_brokers::gateway`) and starts it before the
+//! clients, which take its host and port.
+//!
+//! - One container runs per trading mode, shared by every process in that mode.
+//! - The adapter reads the login from `TWS_USERNAME` and `TWS_PASSWORD`.
+//! - The Docker socket comes from `DOCKER_HOST`, else the local default.
 
 use std::{fmt::Display, str::FromStr};
 
@@ -12,12 +15,12 @@ use nautilus_interactive_brokers::{
     gateway::DockerizedIBGateway,
 };
 
-/// An IB account id without the client name: `DU1234567` (paper) or `U1234567` (live).
+/// An IB account id, without the client name, such as `DU1234567` (paper) or `U1234567` (live).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IbAccount(String);
 
 impl IbAccount {
-    /// Paper if the id starts with `D`, as IB's paper ids do.
+    /// Returns paper if the id starts with `D`, as IB's paper ids do.
     fn trading_mode(&self) -> TradingMode {
         if self.0.starts_with('D') {
             TradingMode::Paper
@@ -30,8 +33,8 @@ impl IbAccount {
 impl FromStr for IbAccount {
     type Err = anyhow::Error;
 
-    // The bare id: the execution factory prefixes the client name, and orders carry what follows
-    // the first `-`.
+    // Keeps the bare id, since the execution factory prefixes the client name and orders carry
+    // what follows the first `-`.
     fn from_str(s: &str) -> anyhow::Result<Self> {
         anyhow::ensure!(
             !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric()),
@@ -62,7 +65,7 @@ impl IbGateway {
         Self::start(account.trading_mode(), client_id).await
     }
 
-    /// The paper gateway: history needs no live login.
+    /// Starts the paper gateway. History needs no live login.
     ///
     /// # Errors
     ///
@@ -78,8 +81,8 @@ impl IbGateway {
     /// - The login credentials are not in the environment.
     /// - Docker is unreachable.
     /// - The container cannot be created or started.
-    /// - It is not logged in within the adapter's start timeout (on a live account, the 2FA must be
-    ///   approved in IBKR Mobile by then).
+    /// - The gateway is not logged in within the adapter's start timeout. On a live account, the
+    ///   2FA must be approved in IBKR Mobile by then.
     async fn start(trading_mode: TradingMode, client_id: i32) -> anyhow::Result<Self> {
         let mut gateway = DockerizedIBGateway::new(gateway_config(trading_mode))?;
         log::info!(
@@ -101,8 +104,9 @@ impl IbGateway {
     }
 }
 
-/// The adapter defaults, with the API open to orders, since a paper container started for history
-/// also serves a paper node.
+/// Returns the adapter defaults, with the API open to orders.
+///
+/// A paper container started for history also serves a paper node.
 fn gateway_config(trading_mode: TradingMode) -> DockerizedIBGatewayConfig {
     DockerizedIBGatewayConfig {
         trading_mode,

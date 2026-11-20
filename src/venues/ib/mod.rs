@@ -1,15 +1,17 @@
-//! Interactive Brokers: the account, the gateway (see `gateway`), the data client config history
-//! and live share, history for `fill_catalog` (`serves`, `IbHistory::data`) and the live node's
-//! clients (`live`, `streams`). See `README.md`.
+//! Interactive Brokers: the account, the gateway (see `gateway`) and the clients.
 //!
-//! Temporary: Nautilus writes none of IB's answers back, as IB's data client answers without a
-//! `DataResponseEnvelope`, so `IbHistory::fill` fetches and writes them itself. Once
+//! History and live share one data client config. History fills the catalog for `fill_catalog`
+//! (`serves`, `IbHistory::data`). The live node uses the clients (`live`, `streams`). See
+//! `README.md`.
+//!
+//! Temporary: IB's data client answers without a `DataResponseEnvelope`, so Nautilus writes none
+//! of IB's answers back, and `IbHistory::fill` fetches and writes them itself. Once
 //! nautilus_trader#5472 is fixed, IB fills through the node as LSE and IC do (see
 //! `catalog::NodeFill`), and `fill` and `data` go: helix-trader#4
 //! (<https://github.com/madebymlai/helix-trader/issues/4>).
 //!
-//! Uses `HistoricalInteractiveBrokersClient`, which needs no node, on the connection `connected`
-//! makes.
+//! History uses `HistoricalInteractiveBrokersClient`, which needs no node, on the connection that
+//! `connected` makes.
 
 use std::{
     sync::{Arc, Mutex, PoisonError},
@@ -73,7 +75,7 @@ pub(crate) use live::{IbLiveArgs, clients, streams};
 /// IB's settings of a catalog fill.
 #[derive(Debug, Args)]
 pub(crate) struct IbHistoryArgs {
-    /// IB client id of this process; not the adapter default 1, so a live node with the default id
+    /// IB client id of this process, not the adapter default 1, so a live node with the default id
     /// can run at the same time.
     #[arg(long, default_value_t = 10)]
     pub(super) client_id: i32,
@@ -105,8 +107,9 @@ impl HistoryRequests {
 }
 
 impl IbHistory {
-    /// Connects with `client_id` to the paper gateway, once IB can serve closed bars over a window
-    /// ending at `end`, checked before it starts.
+    /// Connects with `client_id` to the paper gateway.
+    ///
+    /// Before it starts, checks that IB can serve closed bars over a window ending at `end`.
     ///
     /// # Errors
     ///
@@ -135,7 +138,7 @@ impl IbHistory {
         })
     }
 
-    /// The latest end IB can serve closed bars over at `now`: a minute before it.
+    /// Returns the latest end IB can serve closed bars over at `now`, a minute before it.
     ///
     /// # Errors
     ///
@@ -144,14 +147,16 @@ impl IbHistory {
         Ok(now.checked_sub(SignedDuration::from_mins(1))?)
     }
 
-    /// The instruments of `ids`. An expired future, which IB does not resolve by id, is asked again
-    /// as an explicit contract with `includeExpired`.
+    /// Returns the instruments of `ids`.
+    ///
+    /// IB does not resolve an expired future by id, so it is asked again as an explicit contract
+    /// with `includeExpired`.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - The request fails.
-    /// - Any id is not returned (IB answers an unknown or expired id with nothing).
+    /// - Any id is not returned. IB answers an unknown or expired id with nothing.
     pub async fn instruments(&self, ids: &[InstrumentId]) -> anyhow::Result<Vec<InstrumentAny>> {
         let mut instruments = self
             .client
@@ -175,12 +180,13 @@ impl IbHistory {
     }
 
     /// Fills `catalog` with `slices` of series IB serves (`serves`) and holds (`check_held`).
-    /// Temporary until nautilus_trader#5472 is fixed; then IB fills through the node.
+    ///
+    /// Temporary until nautilus_trader#5472 is fixed. Then IB fills through the node.
     ///
     /// # Errors
     ///
     /// Returns an error if:
-    /// - A slice is not of a series IB serves (before any request).
+    /// - A slice is not of a series IB serves (checked before any request).
     /// - `instruments` or `fill_slices` fails.
     pub async fn fill(
         &self,
@@ -203,7 +209,7 @@ impl IbHistory {
         .await
     }
 
-    /// The `series` over `[start, end]`.
+    /// Returns the `series` over `[start, end]`.
     ///
     /// # Errors
     ///
@@ -279,10 +285,12 @@ impl IbHistory {
         pacing().sent(Instant::now(), request);
     }
 
-    /// Nautilus' `request_ticks` is not used: it skips a page's error, which reads as a short or
-    /// empty page, the latter ending the paging; it ends the paging at a second holding a full
-    /// page with no error, which the writer would store as the whole window; and it loses the rest
-    /// of each full page's cut second (see `page_back`).
+    /// Nautilus' `request_ticks` is not used because it:
+    /// - Skips a page's error. That reads as a short or empty page, and an empty page ends the
+    ///   paging.
+    /// - Ends the paging at a second that holds a full page with no error. The writer would store
+    ///   that as the whole window.
+    /// - Loses the rest of each full page's cut second (see `page_back`).
     ///
     /// # Errors
     ///
@@ -349,10 +357,12 @@ impl IbHistory {
     }
 }
 
-/// A tick's `ts_event` and the tick Nautilus' parsers make, none if its IB clients drop it.
+/// A tick's `ts_event`, and the tick Nautilus' parsers make from it.
+///
+/// The tick is `None` if Nautilus' IB clients drop it.
 type PagedTick = (UnixNanos, Option<Data>);
 
-/// IB's most ticks per request.
+/// The most ticks IB returns per request.
 const TICKS_PER_PAGE: i32 = 1000;
 
 struct TickPages<'a> {
@@ -366,7 +376,7 @@ struct TickPages<'a> {
 }
 
 impl TickPages<'_> {
-    /// The page of ticks up to `cursor`, asked as Nautilus' IB clients ask it.
+    /// Returns the page of ticks up to `cursor`, asked as Nautilus' IB clients ask it.
     ///
     /// # Errors
     ///
@@ -416,7 +426,7 @@ impl TickPages<'_> {
         (ts_event, self.kept("quote", quote.map(Data::Quote)))
     }
 
-    /// None, logged, for a tick of no size, which Nautilus' IB clients skip.
+    /// Returns `None` and logs a warning for a tick with no size, which Nautilus' IB clients skip.
     fn trade(&self, tick: &TickLast) -> PagedTick {
         let ts_event = ib_timestamp_to_unix_nanos(&tick.timestamp);
         let Some(size) = tick.size else {
@@ -448,8 +458,11 @@ impl TickPages<'_> {
     }
 }
 
-/// The items of `page`, ending with an error if it has one, including the notice that frames were
-/// dropped (`SUBSCRIPTION_LAG_CODE`), ticks lost. Other notices are logged.
+/// Returns the items of `page`.
+///
+/// The items end with an error if the page has one. The notice that frames were dropped
+/// (`SUBSCRIPTION_LAG_CODE`) counts as an error, because ticks were lost. Other notices are
+/// logged.
 async fn drained<T: TickDecoder<T> + Send + Unpin>(
     mut page: TickSubscription<T>,
     tick: impl Fn(T) -> PagedTick,
@@ -478,8 +491,10 @@ async fn drained<T: TickDecoder<T> + Send + Unpin>(
     items
 }
 
-/// The connection and provider Nautilus' `HistoricalInteractiveBrokersClient::connect` makes, held
-/// here so the ticks' pages use the client's own.
+/// Returns the connection and provider that Nautilus' `HistoricalInteractiveBrokersClient::connect`
+/// makes.
+///
+/// They are held here, so the tick pages use the client's own.
 ///
 /// # Errors
 ///
@@ -528,9 +543,12 @@ pub(crate) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
     served(source).map(drop)
 }
 
-/// IB's own (`EXTERNAL`) time bars of a size IB has (`bar_type_to_ib_bar_size`) but a month, which
-/// `request_bars` does not parse, priced at one of `BAR_PRICES`, and quotes and trades as
-/// historical ticks. Nautilus' IB clients request no book history.
+/// IB's history serves:
+/// - IB's own (`EXTERNAL`) time bars, priced at one of `BAR_PRICES`. The size must be one IB has
+///   (`bar_type_to_ib_bar_size`), and not a month, which `request_bars` does not parse.
+/// - Quotes and trades, as historical ticks.
+///
+/// Nautilus' IB clients request no book history.
 ///
 /// # Errors
 ///
@@ -577,15 +595,20 @@ fn served(series: &CatalogSeries) -> anyhow::Result<Served> {
 
 const FOREX_VENUE: &str = "IDEALPRO";
 
-/// The venues of currency pairs, forex (CASH) and crypto (CRYPTO) contracts (`providers/parse.rs`).
+/// The venues of currency pairs: forex (CASH) and crypto (CRYPTO) contracts (`providers/parse.rs`).
+///
 /// Nautilus' `request_trades` logs an error and answers nothing for them (`data/core.rs`), so a
-/// warmup asking would never end, and `subscribe_trades` streams nothing
-/// (`data/core.rs:1000-1006`). A venue is the test because `serves` and `streams` run before any
-/// definition is known; IB routes crypto to PAXOS and ZEROHASH (`common/symbology.rs`).
+/// warmup that asks would never end. `subscribe_trades` streams nothing for them
+/// (`data/core.rs:1000-1006`).
+///
+/// A venue is the test because `serves` and `streams` run before any definition is known. IB
+/// routes crypto to PAXOS and ZEROHASH (`common/symbology.rs`).
 const CURRENCY_PAIR_VENUES: [&str; 3] = [FOREX_VENUE, "PAXOS", "ZEROHASH"];
 
-/// The bar prices served and streamed (`price_type_to_ib_what_to_show`): LAST is IB's TRADES bars,
-/// MID its MIDPOINT bars. The adapter asks TRADES for any other price.
+/// The bar prices served and streamed (`price_type_to_ib_what_to_show`).
+///
+/// LAST is IB's TRADES bars, and MID is its MIDPOINT bars. The adapter asks TRADES for any other
+/// price.
 const BAR_PRICES: [PriceType; 4] = [
     PriceType::Last,
     PriceType::Bid,
@@ -593,9 +616,11 @@ const BAR_PRICES: [PriceType; 4] = [
     PriceType::Mid,
 ];
 
-/// The longest duration IB's step-size table admits (TWS API, "Historical Data Limitations", "Step
-/// Sizes"). A day is `86400 S` because `D` counts whole trading days: a `1 D` request ending in a
-/// session's first minute answers one bar and ends the walk back.
+/// Returns the longest duration that IB's step-size table admits (TWS API, "Historical Data
+/// Limitations", "Step Sizes").
+///
+/// A day is `86400 S` because `D` counts whole trading days. A `1 D` request ending in a session's
+/// first minute answers one bar and ends the walk back.
 fn request_duration(spec: BarSpecification) -> &'static str {
     use BarAggregation as A;
     match (spec.aggregation, spec.step.get()) {
@@ -618,11 +643,16 @@ struct SmallBarRequest {
     duration: &'static str,
 }
 
-/// IB's pacing of bars of 30 seconds or less (TWS API, "Historical Data Limitations", "Pacing
-/// Violations for Small Bars"), which Nautilus' IB clients do not pace: no request identical to one
-/// sent in the last 15 seconds, fewer than six of one contract, exchange and price within two
-/// seconds, no more than 60 within ten minutes. IB counts a BID_ASK request twice; Nautilus asks
-/// for BID and ASK bars apart, so each counts once.
+/// IB paces bars of 30 seconds or less (TWS API, "Historical Data Limitations", "Pacing Violations
+/// for Small Bars"). Nautilus' IB clients do not pace them.
+///
+/// The rules are:
+/// - No request identical to one sent in the last 15 seconds.
+/// - Fewer than six requests for one contract, exchange and price within two seconds.
+/// - No more than 60 requests within ten minutes.
+///
+/// IB counts a BID_ASK request twice. Nautilus asks for BID and ASK bars apart, so each counts
+/// once.
 #[derive(Debug, Default)]
 struct SmallBarPacing {
     sent: Vec<(Instant, SmallBarRequest)>,
@@ -675,9 +705,10 @@ impl SmallBarPacing {
     }
 }
 
-/// Checks that IB holds what a fill of `slices` asks at `now`: no bars of 30 seconds or less older
-/// than six months (TWS API, "Historical Data Limitations"). A slice is asked from where the writer
-/// resumes it (`catalog::resumed`).
+/// Checks that IB holds what a fill of `slices` asks at `now`.
+///
+/// IB holds no bars of 30 seconds or less older than six months (TWS API, "Historical Data
+/// Limitations"). A slice is asked from where the writer resumes it (`catalog::resumed`).
 ///
 /// # Errors
 ///
@@ -712,8 +743,8 @@ pub(crate) fn check_held(
     Ok(())
 }
 
-// A window ending within one bar of now gets the bar still in progress, which stored would never
-// be replaced.
+// A window ending within one bar of now gets the bar still in progress, which once stored would
+// never be replaced.
 fn ensure_bars_closed(end: Timestamp, now: Timestamp) -> anyhow::Result<()> {
     let latest = IbHistory::latest_end(now)?;
     anyhow::ensure!(
@@ -724,20 +755,25 @@ fn ensure_bars_closed(end: Timestamp, now: Timestamp) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The ticks over `[start, end]`, paged back from `end`: `fetch` answers the page ending at a
-/// cursor. IB leaves out an end's second, so the first cursor is the second after `end`'s. A page
-/// of `page_size` ticks or more has its earliest second cut short (probed on the paper gateway on
-/// 19 November 2026: 1 tick of EUR/USD's 7, 1 and 54), so that second is dropped and the next
-/// cursor is the second after it. A shorter page is kept whole and the next cursor is its earliest
-/// second. Nautilus' IB clients end each next page at the earliest second
-/// (`extend_historical_tick_batch`, `data/convert.rs`), losing the rest of a cut second.
+/// Returns the ticks over `[start, end]`, paged back from `end`.
+///
+/// `fetch` answers the page ending at a cursor. The paging follows these rules:
+/// - IB leaves out the end's second, so the first cursor is the second after it.
+/// - A page of `page_size` ticks or more has its earliest second cut short (probed on the paper
+///   gateway on 19 November 2026: 1 tick of EUR/USD's 7, 1 and 54). That second is dropped, and
+///   the next cursor is the second after it.
+/// - A shorter page is kept whole, and the next cursor is its earliest second.
+///
+/// Nautilus' IB clients end each next page at the earliest second (`extend_historical_tick_batch`,
+/// `data/convert.rs`), so they lose the rest of a cut second.
 ///
 /// # Errors
 ///
 /// Returns an error if:
-/// - A request fails (`fetch`'s error) or a page does (an item's), the ticks paged so far dropped.
-/// - A full page reaches back no further than the page before, naming its second, which IB cannot
-///   page past.
+/// - A request fails (`fetch`'s error) or a page fails (an item's error). The ticks paged so far
+///   are dropped.
+/// - A full page reaches back no further than the page before. IB cannot page past that second,
+///   and the error names it.
 async fn page_back<T>(
     start: Timestamp,
     end: Timestamp,
@@ -796,7 +832,7 @@ async fn page_back<T>(
 
 /// # Errors
 ///
-/// Returns an error if `at` cannot be truncated, out of range.
+/// Returns an error if `at` is out of range and cannot be truncated.
 fn second_of(at: Timestamp) -> anyhow::Result<Timestamp> {
     Ok(at.round(
         TimestampRound::new()
@@ -805,12 +841,16 @@ fn second_of(at: Timestamp) -> anyhow::Result<Timestamp> {
     )?)
 }
 
-/// The bars over `[start, end]`, walking back from `end`: `fetch` gets a request ending at a
-/// cursor, first `end`, then the oldest `ts_init` so far. Stops at a bar at or before `start`, an
-/// empty answer, or one with nothing older than its cursor.
+/// Returns the bars over `[start, end]`, walking back from `end`.
 ///
-/// One request over the whole window, which the adapter sends as one request between its bounds
-/// (nautilus_trader#5621), took 1,164 s for a year of minute bars, against 60 s (measured
+/// `fetch` gets a request ending at a cursor. The cursor is `end` first, then the oldest `ts_init`
+/// so far. The walk stops at:
+/// - A bar at or before `start`.
+/// - An empty answer.
+/// - An answer with nothing older than its cursor.
+///
+/// The adapter sends one request over the whole window as one request between its bounds
+/// (nautilus_trader#5621). That took 1,164 s for a year of minute bars, against 60 s (measured
 /// 2026-11-08). Temporary, as IB's fill: it goes with it (helix-trader issue #4).
 async fn walk_back(
     start: Timestamp,
@@ -837,10 +877,10 @@ async fn walk_back(
     Ok(bars)
 }
 
-// The full session, not regular trading hours: IB's first regular-hours bar of a day is partial
-// (13:30-14:00 UTC for ES) but the adapter stamps it at open + bar size, half an hour after its
-// close. `convert_exchange_to_mic_venue` is never set: it changes a CME contract's venue between
-// processes.
+// Uses the full session, not regular trading hours, because IB's first regular-hours bar of a day
+// is partial (13:30-14:00 UTC for ES) but the adapter stamps it at open + bar size, half an hour
+// after its close, and `convert_exchange_to_mic_venue` is never set, because it changes a CME
+// contract's venue between processes.
 fn data_client_config(gateway: IbGateway) -> InteractiveBrokersDataClientConfig {
     InteractiveBrokersDataClientConfig {
         host: gateway.host,
@@ -859,8 +899,10 @@ fn missing_ids(requested: &[InstrumentId], loaded: &[InstrumentAny]) -> Vec<Inst
         .collect()
 }
 
-/// The contract of the future `id` with `includeExpired`, the form IB resolves an expired future
-/// by. IB needs the root symbol (`ES` of `ESU5`), which `Symbology::contract` leaves empty.
+/// Returns the contract of the future `id` with `includeExpired`.
+///
+/// IB resolves an expired future in this form, with the root symbol (`ES` of `ESU5`) that
+/// `Symbology::contract` leaves empty.
 fn expired_future_contract(symbology: Symbology, id: InstrumentId) -> Option<Contract> {
     let mut contract = symbology.contract(id, None).ok()?;
     let root = parse_futures_symbol(&contract.local_symbol)?.root;
@@ -992,9 +1034,12 @@ mod tests {
         Ok(ticks.into_iter().map(|(_, name)| name).collect())
     }
 
-    /// Pages end at 10:00:11, 08, 06 and 01. The first holds d of :10 and c2 of :07 (cut, dropped);
-    /// the second c1, c2 of :07 and a2 of :05 (cut, dropped); the third a1, a2 of :05 and z of
-    /// 10:00:00 (cut, dropped); the last y, z of 10:00:00 and x of 09:59:59 (outside the window).
+    /// Pages end at 10:00:11, 08, 06 and 01.
+    ///
+    /// - The first holds d of :10 and c2 of :07 (cut, dropped).
+    /// - The second holds c1, c2 of :07 and a2 of :05 (cut, dropped).
+    /// - The third holds a1, a2 of :05 and z of 10:00:00 (cut, dropped).
+    /// - The last holds y, z of 10:00:00 and x of 09:59:59 (outside the window).
     #[tokio::test]
     async fn ticks_are_paged_back_to_the_windows_start_each_once() {
         let mut cursors = Vec::new();
@@ -1069,7 +1114,7 @@ mod tests {
         assert_eq!(cursors, [on_the_10th("10:00:11"), on_the_10th("10:00:09")]);
     }
 
-    /// The second page ends with an error or its request fails: the paging fails with it.
+    /// The paging fails if the second page ends with an error or its request fails.
     #[rstest]
     #[case::ib_ending_a_page_with_an_error(
         Ok(vec![
@@ -1098,7 +1143,8 @@ mod tests {
         assert!(format!("{err:#}").contains(error), "{err:#}");
     }
 
-    /// The first page is full, its 10:00:08 cut; the page ending at 10:00:09 is full of 10:00:08.
+    /// The first page is full, and its 10:00:08 is cut. The page ending at 10:00:09 is full of
+    /// 10:00:08.
     #[tokio::test]
     async fn a_second_holding_a_full_page_fails_the_paging_naming_it() {
         let mut cursors = Vec::new();
@@ -1353,7 +1399,7 @@ mod tests {
         pacing
     }
 
-    /// An identical request waits until 15 s after the first, so 5 s at 10 s.
+    /// An identical request waits until 15 s after the first, so a request at 10 s waits 5 s.
     #[rstest]
     fn an_identical_small_bar_request_waits_15_seconds_after_the_first() {
         let start = Instant::now();
@@ -1371,7 +1417,7 @@ mod tests {
         );
     }
 
-    /// Five LAST requests at 0 to 400 ms: a sixth at 500 ms waits until the first is 2 s old.
+    /// Five LAST requests come at 0 to 400 ms. A sixth at 500 ms waits until the first is 2 s old.
     #[rstest]
     fn a_sixth_small_bar_request_of_a_series_within_two_seconds_waits() {
         let start = Instant::now();
@@ -1388,8 +1434,8 @@ mod tests {
         assert_eq!(pacing.wait(at_500_ms, &small("BID", 100)), Duration::ZERO);
     }
 
-    /// 60 requests, one every 3 s from 0 to 177 s: the 61st at 180 s waits until the first is 600 s
-    /// old, 420 s.
+    /// 60 requests come one every 3 s, from 0 to 177 s. The 61st at 180 s waits until the first is
+    /// 600 s old, which is 420 s.
     #[rstest]
     fn a_61st_small_bar_request_within_ten_minutes_waits() {
         let start = Instant::now();
@@ -1483,8 +1529,9 @@ mod tests {
             .unwrap();
     }
 
-    /// On 30 November 2026 IB holds small bars from 30 May: bars stored over 20 May to 20 June
-    /// resume from 20 June, held; stored over 1 April to 1 May, from 1 May, refused.
+    /// On 30 November 2026 IB holds small bars from 30 May.
+    /// - Bars stored over 20 May to 20 June resume from 20 June, which is held.
+    /// - Bars stored over 1 April to 1 May resume from 1 May, which is refused.
     #[rstest]
     fn small_bars_stored_are_held_from_where_the_writer_resumes_them() {
         let now = at("2026-11-30T12:00:00Z");
