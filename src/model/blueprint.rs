@@ -1,14 +1,22 @@
-//! A strategy's model blueprint (`ModelBlueprint`): what its config alone determines about its
-//! model: Nautilus' strategy id, the shared feature set, its model config and its data
-//! requirements. The decision rule and the target are checked against the requirements as the
-//! blueprint is built, so nothing built of it checks them again.
+//! The model blueprint of a strategy (`ModelBlueprint`).
 //!
-//! Everything of a strategy's model is built of its blueprint, the one caller of the dataset
-//! fingerprint (`dataset::fingerprint`). The dataset, the model store and the schedule are built
-//! together (`Stored`) on the one fingerprint, keying the dataset and every store; the training and
-//! the walk-forward are built of them. A dataset alone and a model store alone, for a handle, which
-//! has no catalog, are built of it too. The handle (`handle::ModelHandle`) is built of it and a
-//! mode.
+//! The blueprint holds what the strategy's config alone determines about its model:
+//! - Nautilus' strategy id.
+//! - The shared feature set.
+//! - The model config.
+//! - The data requirements.
+//!
+//! The blueprint checks the decision rule and the target against the requirements as it is built,
+//! so nothing built from it checks them again.
+//!
+//! Every part of the strategy's model is built from its blueprint, the only caller of the dataset
+//! fingerprint (`dataset::fingerprint`).
+//! - The dataset, the model store and the schedule are built together (`Stored`) on one
+//!   fingerprint, which keys the dataset and every store.
+//! - The training and the walk-forward are built from them.
+//! - A handle has no catalog, so its dataset alone and its model store alone are built from the
+//!   blueprint too.
+//! - The handle (`handle::ModelHandle`) is built from the blueprint and a mode.
 
 use std::{path::Path, rc::Rc};
 
@@ -43,12 +51,14 @@ pub(super) struct Stored<'a> {
 }
 
 impl ModelBlueprint {
-    /// The model of `strategy_id`, deciding on `features` as `config` says.
+    /// Returns the model of `strategy_id`, which decides on `features` as `config` says.
     ///
     /// # Errors
     ///
-    /// Returns an error if the decision rule is invalid (`DecisionRule::validate`), or else the
-    /// target for it and `requirements` (`TargetConfig::validate`).
+    /// Returns an error if:
+    /// - The decision rule is invalid (`DecisionRule::validate`).
+    /// - The target is invalid for the decision rule and `requirements`
+    ///   (`TargetConfig::validate`).
     pub fn new(
         strategy_id: StrategyId,
         features: Rc<FeatureSet>,
@@ -65,7 +75,7 @@ impl ModelBlueprint {
         })
     }
 
-    /// The fingerprint of its dataset runs, which keys its dataset and its stores.
+    /// Returns the fingerprint of the dataset runs. It keys the dataset and the stores.
     ///
     /// # Errors
     ///
@@ -80,7 +90,7 @@ impl ModelBlueprint {
         )
     }
 
-    /// Its dataset in the catalog at `catalog`.
+    /// Returns the dataset in the catalog at `catalog`.
     ///
     /// # Errors
     ///
@@ -89,7 +99,7 @@ impl ModelBlueprint {
         Ok(Dataset::new(catalog, self, self.fingerprint()?))
     }
 
-    /// Its models under `models`.
+    /// Returns the models under `models`.
     ///
     /// # Errors
     ///
@@ -99,7 +109,7 @@ impl ModelBlueprint {
         ModelStore::new(models, self, self.fingerprint()?)
     }
 
-    /// The training of its models.
+    /// Returns the training of the models.
     ///
     /// # Errors
     ///
@@ -108,7 +118,7 @@ impl ModelBlueprint {
         Ok(Training::new(self.stored(catalog, models)?))
     }
 
-    /// The backtests of its models: the check of their start and their scores.
+    /// Returns the backtests of the models: the check of their start and their scores.
     ///
     /// # Errors
     ///
@@ -165,7 +175,8 @@ mod tests {
         )
     }
 
-    /// A cadence not positive is refused with the decision rule's error, before the target's ATR.
+    /// A cadence that is not positive is refused with the decision rule's error, before the ATR
+    /// check.
     #[rstest]
     fn a_decision_cadence_not_positive_is_refused() {
         let config = ModelConfig {
@@ -179,7 +190,7 @@ mod tests {
         assert!(!err.contains("model.target.atr"), "{err}");
     }
 
-    /// An ATR of an instrument the strategy does not read is refused, under the ATR's field.
+    /// An ATR for an instrument the strategy does not read is refused, under the ATR field.
     #[rstest]
     fn a_target_whose_atr_has_no_bars_to_be_built_from_is_refused() {
         let mut config = config();
@@ -191,7 +202,7 @@ mod tests {
         assert!(err.contains("EUR/USD.SIM"), "{err}");
     }
 
-    /// A model published under the dataset's fingerprint is the one the model store swaps in.
+    /// The model store swaps in a model published under the dataset's fingerprint.
     #[rstest]
     fn the_dataset_and_the_model_store_of_a_model_stored_carry_one_fingerprint() {
         let dir = tempfile::tempdir().unwrap();

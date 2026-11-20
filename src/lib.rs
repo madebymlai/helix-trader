@@ -1,5 +1,5 @@
-//! helix-trader: strategies on NautilusTrader, from data to live. Adds the strategies, their
-//! model harness, the roll calendar, the venue routing table and the commands driving Nautilus.
+//! helix-trader runs strategies on NautilusTrader, from data to live. It adds the strategies, the
+//! model harness, the roll calendar, the venue routing table and the commands that drive Nautilus.
 
 pub mod backtest;
 pub mod catalog;

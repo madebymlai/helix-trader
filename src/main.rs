@@ -1,7 +1,8 @@
-//! Command line: one subcommand per process (fill-catalog, backtest, live, train). Nautilus
-//! runs no two nodes of a process at once, so a live node's retrain is a process of its own; a
-//! backtest runs its nodes one after another, each disposed before the next. A strategy trading on
-//! a model runs through `model::ModelStrategy`.
+//! Command line with one subcommand per process (fill-catalog, backtest, live, train).
+//!
+//! Nautilus runs no two nodes of a process at once. So the retrain of a live node is a process of
+//! its own, and a backtest runs its nodes one after another, disposing each before the next. A
+//! strategy that trades on a model runs through `model::ModelStrategy`.
 
 use std::{
     ffi::OsString,
@@ -50,19 +51,20 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Fills the Nautilus catalog with the strategy's history from OKX (OKX instruments), LSE
-    /// (LSEDGE instruments, and GLBX, XNAS and OPRA instruments, defined by Databento), cTrader (IC
-    /// Markets' and Pepperstone's instruments) or Interactive Brokers (the others).
+    /// Fills the Nautilus catalog with the strategy's history. OKX supplies the OKX instruments.
+    /// LSE supplies the LSEDGE instruments, and the GLBX, XNAS and OPRA instruments that Databento
+    /// defines. cTrader supplies the IC Markets and Pepperstone instruments. Interactive Brokers
+    /// supplies the others.
     FillCatalog(FillCatalogArgs),
     /// Backtests the strategy over a window of the catalog and prints the results.
     Backtest(Box<BacktestArgs>),
-    /// Runs the strategy on a live node with Interactive Brokers, IC Markets, Pepperstone or OKX;
-    /// stops on Ctrl-C.
+    /// Runs the strategy on a live node with Interactive Brokers, IC Markets, Pepperstone or OKX.
+    /// Stops on Ctrl-C.
     Live(Box<LiveArgs>),
-    /// Trains the strategy's models at a time, or at each retrain time of a span, those without one
-    /// valid from it, replaying the days its dataset lacks, and prints a report of each train: its
-    /// model set published or already published, or why it failed, its times, memory, dataset days
-    /// and rows per slice; fails if any failed.
+    /// Trains the strategy's models at one time, or at each retrain time in a span, for those
+    /// without a model valid from that time. Replays the days its dataset lacks. Prints a report
+    /// for each train: the model set published or already published, or why the train failed, plus
+    /// its times, memory, dataset days and rows per slice. Fails if any train failed.
     Train(Box<TrainArgs>),
 }
 
@@ -110,15 +112,15 @@ struct BacktestArgs {
     /// dataset runs use its config's (`[model] dataset`).
     #[arg(long, value_parser = parse_money)]
     balance: Money,
-    /// The latency of the simulated account's venues, a duration such as "150ms": each order
+    /// The latency of the simulated account's venues, a duration such as "150ms". Each order
     /// command reaches a venue that long after it is sent, and a market order fills on the first
-    /// quote from then on. Left out, none. A model strategy's dataset runs use its config's
-    /// (`[model] dataset`).
+    /// quote from then on. Left out, there is none. A model strategy's dataset runs use its
+    /// config's (`[model] dataset`).
     #[arg(long, value_parser = Latency::from_str)]
     latency: Option<Latency>,
-    /// The model store a strategy trading on a model reads its models from: at each decision, the
-    /// latest valid then. A backtest trains none, `train` does: it refuses to run if the store
-    /// holds no model to trade on at its start.
+    /// The model store that a strategy trading on a model reads its models from. At each
+    /// decision, it reads the latest model valid then. A backtest trains none, but `train` does.
+    /// The backtest refuses to run if the store holds no model to trade on at its start.
     #[arg(long, default_value = "models")]
     models: PathBuf,
 }
@@ -130,16 +132,17 @@ struct TrainArgs {
     /// The strategy's TOML config.
     #[arg(long)]
     config: PathBuf,
-    /// The one time trained at, the models' valid-from: same format as --start. A strategy never
+    /// The one time to train at, the models' valid-from. Same format as --start. A strategy never
     /// retrained is trained so alone.
     #[arg(long, value_parser = parse_time, required_unless_present = "from", conflicts_with = "from")]
     at: Option<Timestamp>,
-    /// The start of a span trained over instead, at each retrain time in order, those a backtest
-    /// from --from to --to trades on: from the last not after --from. Same format as --start.
+    /// The start of a span to train over instead. It trains at each retrain time in order, which
+    /// are the times a backtest from --from to --to trades on, starting from the last one not
+    /// after --from. Same format as --start.
     #[arg(long, value_parser = parse_time, requires = "to")]
     from: Option<Timestamp>,
-    /// The end of the span, same format: a retrain time at it is not trained, as a backtest ending
-    /// there trades no model valid from it.
+    /// The end of the span, in the same format. A retrain time at the end is not trained, because
+    /// a backtest ending there trades no model valid from it.
     #[arg(long, value_parser = parse_time, requires = "from")]
     to: Option<Timestamp>,
     /// The catalog directory: the data replayed, and the dataset.
@@ -178,9 +181,9 @@ struct CommissionArgs {
     /// Commission rate on the value of each fill, with no minimum, for example 0.0005 (0.05%).
     #[arg(long, value_parser = Commission::rate)]
     commission_rate: Option<Commission>,
-    /// Commission charged on each unit of the quantity of each fill, each fill's charge rounded to
-    /// the currency's precision, for example "0.035 USD" (3.5 USD per 100 oz of gold,
-    /// Pepperstone's).
+    /// Commission charged on each unit of quantity in each fill, for example "0.035 USD" (3.5 USD
+    /// per 100 oz of gold, Pepperstone's). Each fill's charge is rounded to the currency's
+    /// precision.
     #[arg(long, value_parser = Commission::per_quantity)]
     commission_per_quantity: Option<Commission>,
 }
@@ -210,29 +213,29 @@ struct LiveArgs {
     venues: LiveVenueArgs,
     /// The node's trader, whose cache in Redis each run loads. Live processes running at once
     /// each need their own, and on one venue account their own tag, the part after the last
-    /// hyphen: Nautilus puts only the tag in client order, order list and position ids, so
-    /// `HELIX-001` and `OTHER-001` collide. Parsed by the checked `FromStr`, since clap would
-    /// otherwise pick `TraderId: From<&str>`, which panics.
+    /// hyphen. Nautilus puts only the tag in client order, order list and
+    /// position ids, so `HELIX-001` and `OTHER-001` collide. Parsed by the checked `FromStr`,
+    /// since clap would otherwise pick `TraderId: From<&str>`, which panics.
     #[arg(long, default_value = "HELIX-001", value_parser = TraderId::from_str)]
     trader_id: TraderId,
-    /// The catalog directory: the warmup is read from it first, and a cTrader broker's history is
-    /// written back to it. A strategy trading on a model requires it to exist and hold the
-    /// instruments it trades.
+    /// The catalog directory. The warmup is read from it first, and a cTrader broker's history is
+    /// written back to it. A strategy trading on a model requires it to exist and to hold the
+    /// instruments the strategy trades.
     #[arg(long, default_value = "catalog")]
     catalog: PathBuf,
-    /// The directory outside the catalog where the node stages the data it streams; it also keeps
+    /// The directory outside the catalog where the node stages the data it streams. It also keeps
     /// each trader's instance id.
     #[arg(long, default_value = "staging")]
     staging: PathBuf,
-    /// The model store a strategy trading on a model reads its models from, at each decision the
-    /// latest valid then, and its retrains publish in: the store of its config, keyed by `[model]
-    /// dataset`.
+    /// The model store that a strategy trading on a model reads its models from. At each decision
+    /// it reads the latest model valid then, and its retrains publish in the same store. Defaults
+    /// to the store in its config, keyed by `[model] dataset`.
     #[arg(long, default_value = "models")]
     models: PathBuf,
 }
 
 impl LiveArgs {
-    /// The arguments of the node's retrain `train` but its `--at`, which the launcher gives
+    /// The arguments of the node's retrain `train`, except its `--at`, which the launcher gives
     /// (`Launcher::process`).
     fn train_args(&self) -> Vec<OsString> {
         let strategy = self
@@ -302,7 +305,7 @@ fn logger_config(spec: Result<String, std::env::VarError>) -> anyhow::Result<Log
 async fn main() -> anyhow::Result<()> {
     // Before parsing, since arguments fall back on the environment
     dotenvy::dotenv().ok();
-    // Before any config loads: a config's custom series are checked against Nautilus' registry
+    // Before any config loads, since its custom series are checked against Nautilus' registry
     venues::register_custom_data();
     match Cli::parse().command {
         Command::FillCatalog(args) => run_fill_catalog(args).await,
@@ -315,8 +318,8 @@ async fn main() -> anyhow::Result<()> {
 async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     let requirements = data_requirements(args.run.strategy, &args.run.config)?;
-    // A fill whose catalog lacks nothing runs no node, so none installs Nautilus' logger: install
-    // it as Nautilus' logging guide says for a run without a kernel.
+    // A fill whose catalog lacks nothing runs no node, so install Nautilus' logger here, as its
+    // logging guide says for a run without a kernel.
     let _log_guard = init_logging(
         TraderId::default(),
         UUID4::new(),
@@ -332,8 +335,9 @@ async fn run_fill_catalog(args: FillCatalogArgs) -> anyhow::Result<()> {
 
 /// Runs the strategy over the window of the catalog and prints the results.
 ///
-/// A strategy trading on a model trades on the models `train` published (`model::walk`), builds
-/// its dataset over the span in this process and prints the out-of-sample scores of its models.
+/// A strategy trading on a model trades on the models that `train` published (`model::walk`). It
+/// builds its dataset over the span in this process and prints the out-of-sample scores of its
+/// models.
 fn run_backtest(args: &BacktestArgs) -> anyhow::Result<()> {
     let (start, end) = args.run.window()?;
     // The node installs Nautilus' logger from its engine config
@@ -382,11 +386,11 @@ impl<B: FnOnce(DataRequirements, &[InstrumentId]) -> Backtest> Visitor for Backt
     }
 }
 
-/// The backtest of `args` of the model strategy `S` on the models in its store.
+/// Runs the backtest of `args` for the model strategy `S` on the models in its store.
 ///
-/// Refused, before any replay, if the store holds no model to trade on at the start
-/// (`WalkForward::untrained`), naming the retrain time there and the `train` that fills it.
-/// Each node is disposed before the next starts, which Nautilus supports.
+/// Refuses to run, before any replay, if the store holds no model to trade on at the start
+/// (`WalkForward::untrained`). The error names the retrain time there and the `train` that fills
+/// it. Each node is disposed before the next starts, which Nautilus supports.
 fn backtest_on_models<S: ModelStrategy>(
     args: &BacktestArgs,
     logging: LoggerConfig,
@@ -490,12 +494,15 @@ impl<'a> Visitor for Running<'a> {
     }
 }
 
-/// Runs the model strategy `S` of `args` on `live` beside its retrain actor (`RetrainActor`),
-/// each retrain a child process (`LiveArgs::train_args`).
+/// Runs the model strategy `S` of `args` on `live` beside its retrain actor (`RetrainActor`).
 ///
-/// Refuses first, before any node is built, a catalog without the traded instruments or the
-/// pairs of `[trade] conversions`, and a dataset balance the pairs do not reach. Warns when the
-/// store holds no model to trade on yet (`ModelStore::trades_by`).
+/// Each retrain is a child process (`LiveArgs::train_args`).
+///
+/// Before any node is built, it refuses:
+/// - A catalog without the traded instruments or the pairs of `[trade] conversions`.
+/// - A dataset balance that the pairs do not reach.
+///
+/// It warns when the store holds no model to trade on yet (`ModelStore::trades_by`).
 async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyhow::Result<()> {
     let config = load_config::<S::Params>(&args.config)?;
     let program = std::env::current_exe().context("finding this binary to retrain")?;
@@ -537,23 +544,29 @@ async fn live_on_models<S: ModelStrategy>(args: &LiveArgs, live: &Live) -> anyho
 const DATASET_BALANCE: &str = "the dataset balance ([model] dataset), which a model's targets and \
                                the decisions' payoff features are sized at";
 
-/// The dataset runs of a process: the strategy over the catalog in `Mode::Dataset`, on hedging
-/// venues (`model::targets`), on the venue its config declares (`[model] dataset`). Its balance
-/// is the equity the targets' reference stake is of, which the trades leave whole, margining
-/// nothing (`Backtest::run_dataset`).
+/// The dataset runs of a process.
+///
+/// They run the strategy over the catalog in `Mode::Dataset`, on hedging venues
+/// (`model::targets`), on the venue that its config declares (`[model] dataset`). The balance is
+/// the equity that the reference stake of the targets is based on. The trades leave it whole and
+/// margin nothing (`Backtest::run_dataset`).
 struct DatasetRun {
     catalog: PathBuf,
     logging: LoggerConfig,
 }
 
 impl DatasetRun {
-    /// Refuses the runs, before any, unless the strategy's `[trade] conversions` reach each traded
-    /// instrument's P&L currency from the balance's (`backtest::refuse_balance`).
+    /// Refuses the runs, before any starts, unless the strategy's `[trade] conversions` reach the
+    /// P&L currency of each traded instrument from the balance currency
+    /// (`backtest::refuse_balance`).
     ///
     /// # Errors
     ///
-    /// Returns an error if the catalog cannot be read, a traded instrument or a pair is not in it,
-    /// or the pairs do not reach a traded instrument's P&L currency from the balance's.
+    /// Returns an error if:
+    /// - The catalog cannot be read.
+    /// - A traded instrument or a pair is not in the catalog.
+    /// - The pairs do not reach the P&L currency of a traded instrument from the balance
+    ///   currency.
     fn refuse_balance<S: ModelStrategy>(
         &self,
         config: &StandardConfig<S::Params>,
@@ -566,12 +579,14 @@ impl DatasetRun {
             .context(DATASET_BALANCE)
     }
 
-    /// The rows the model strategy `S` of `config` settles over `[start, end]`.
+    /// Returns the rows that the model strategy `S` of `config` settles over `[start, end]`.
     ///
     /// # Errors
     ///
-    /// Returns an error if the strategy cannot be built, the run fails, or a target's order was
-    /// denied (`SettledRows::take`).
+    /// Returns an error if:
+    /// - The strategy cannot be built.
+    /// - The run fails.
+    /// - A target's order was denied (`SettledRows::take`).
     fn replay<S: ModelStrategy>(
         &self,
         config: &StandardConfig<S::Params>,
@@ -616,7 +631,7 @@ fn reported(mut meter: Meter, at: Timestamp, trained: &Trained) -> anyhow::Resul
     Ok(())
 }
 
-/// Prints the report of each of `trains` as it comes: a failed train does not stop the next.
+/// Prints the report of each of `trains` as it comes. A failed train does not stop the next.
 ///
 /// # Errors
 ///
@@ -937,7 +952,8 @@ mod tests {
         );
     }
 
-    /// A span ending at or before its start trains at no time: refused, naming both ends.
+    /// A span ending at or before its start trains at no time, so it is refused. The error names
+    /// both ends.
     #[rstest]
     #[case::ending_before_it_starts("2026-10-23", "2026-10-21")]
     #[case::ending_where_it_starts("2026-10-23", "2026-10-23")]

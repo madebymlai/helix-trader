@@ -1,7 +1,9 @@
-//! Catalog filling, naming no venue (build step 1): writes the traded instruments, their
-//! strategy bars' series and funding into the Nautilus catalog, through a node (`NodeFill`) or
-//! directly (`fill_catalog`), from each instrument's venue history source (see `venues`). Custom
-//! data of no instrument goes through the node, from the source its type names.
+//! Fills the Nautilus catalog and names no venue (build step 1).
+//!
+//! It writes the traded instruments, the series of their strategy bars and their funding. Each
+//! instrument's venue history source supplies the data (see `venues`). The fill runs through a
+//! node (`NodeFill`) or directly (`fill_catalog`). Custom data that belongs to no instrument goes
+//! through the node, from the source that its type names.
 
 mod fill_catalog;
 pub use fill_catalog::fill_catalog;
@@ -21,7 +23,7 @@ pub use node_fill::{
     CustomFillRequest, FillData, FillRequest, NodeClient, NodeFill, missing, missing_custom,
 };
 
-/// The config a node takes of the catalog in `dir`, by its path as given.
+/// Returns the config a node takes for the catalog in `dir`, using the path as given.
 ///
 /// # Errors
 ///
@@ -33,15 +35,16 @@ pub(crate) fn catalog_config(dir: &Path) -> anyhow::Result<DataCatalogConfig> {
     Ok(DataCatalogConfig::new(path.to_owned(), None, None))
 }
 
-/// The instruments of `instrument_ids`, in their order, as the catalog at `catalog` defines them.
+/// Returns the instruments of `instrument_ids`, in order, as the catalog at `catalog` defines them.
 ///
-/// Opens it with `ParquetDataCatalog::from_uri`, which errors on a missing directory where `new`
-/// panics.
+/// Opens the catalog with `ParquetDataCatalog::from_uri`. It errors on a missing directory, where
+/// `new` panics.
 ///
 /// # Errors
 ///
-/// Returns an error if the catalog cannot be opened or read, or an instrument of
-/// `instrument_ids` is not in it.
+/// Returns an error if:
+/// - The catalog cannot be opened or read.
+/// - An instrument in `instrument_ids` is not in the catalog.
 pub fn instruments(
     catalog: &Path,
     instrument_ids: &[InstrumentId],

@@ -1,5 +1,5 @@
-//! Test support: captures the log records of a test run alone in its own process (`alone`, then
-//! `capture`). Nautilus has none: its tests each install a `log::Log`.
+//! Test support that captures the log records of a test run alone in its own process (`alone`,
+//! then `capture`). Nautilus has no such support: its tests each install a `log::Log`.
 
 use std::{process::Command, sync::Mutex};
 
@@ -22,14 +22,17 @@ static CAPTURED: Captured = Captured(Mutex::new(Vec::new()));
 
 const ALONE: &str = "HELIX_TRADER_TEST_ALONE";
 
-/// Whether this is the process the test `name` of `module` runs alone in, else runs it so.
+/// Returns whether this process is the one running test `name` in `module` alone.
 ///
-/// The test binary's own process holds Nautilus' logger, which refuses one installed before it.
+/// If not, runs the test alone in a new process.
+///
+/// The test binary's own process holds Nautilus' logger, which refuses a logger installed before
+/// it.
 pub(crate) fn alone(module: &str, name: &str) -> bool {
     if std::env::var_os(ALONE).is_some() {
         return true;
     }
-    // The test's path in the binary, the crate left out
+    // The test's path in the binary, without the crate
     let (_, module) = module.split_once("::").unwrap();
     let output = Command::new(std::env::current_exe().unwrap())
         .args([
@@ -50,17 +53,17 @@ pub(crate) fn alone(module: &str, name: &str) -> bool {
     false
 }
 
-/// Installs the process's logger, keeping records at `level` or above.
+/// Installs the process's logger. It keeps records at `level` or above.
 ///
 /// # Panics
 ///
-/// Panics if the process has a logger already.
+/// Panics if the process already has a logger.
 pub(crate) fn capture(level: log::LevelFilter) {
     log::set_logger(&CAPTURED).unwrap();
     log::set_max_level(level);
 }
 
-/// The records kept so far, each as `WARN the message`.
+/// Returns the records kept so far, each as `WARN the message`.
 pub(crate) fn lines() -> Vec<String> {
     CAPTURED.0.lock().unwrap().clone()
 }
