@@ -353,7 +353,6 @@ mod tests {
         instrument_from(&raw_xperp(), Decimal::from(25), UnixNanos::default()).unwrap()
     }
 
-    /// The margin is 1 / 10 at leverage 10 and 4% at 25.
     #[rstest]
     #[case::a_swap_a_crypto_perpetual(btc_instrument(), "CryptoPerpetual", (1, 2), Decimal::new(1, 1))]
     #[case::an_x_perp_a_crypto_future(xperp_instrument(), "CryptoFuture", (1, 0), Decimal::new(4, 2))]

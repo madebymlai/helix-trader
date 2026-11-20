@@ -251,7 +251,6 @@ mod tests {
         assert_eq!(leverage_of(xperp(), body).unwrap(), Decimal::from(3));
     }
 
-    /// Each error names the code, instrument or leverages that caused it.
     #[rstest]
     #[case::refused(
         br#"{"code":"51001","msg":"Instrument ID doesn't exist","data":[]}"#,
