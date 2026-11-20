@@ -1,55 +1,64 @@
-//! Merges a live warmup's history across its series, handing it to the hold (`hold`) in `ts_init`
-//! order. A replay requests no warmup and merges nothing.
+//! Merges a live warmup's history across its series. It hands the history to the hold (`hold`) in
+//! `ts_init` order. A replay requests no warmup and merges nothing.
 //!
-//! Time is `ts_init` throughout, its order, watermark and ties: a backtest streams data by it, and
-//! requests cut their windows by it (`DataResponse::trim_to_bounds`, `range_for_bounds` in
-//! `crates/common/src/messages/data/response.rs`). Every history a warmup reads stamps it so: a
-//! tick's as made (IB, OKX's trades, cTrader, LSE) or received (Databento, equal to its
-//! `ts_event`), a bar's at its close (its `ts_event` is the close for IB, Databento and Nautilus'
-//! built bars, the open for OKX's history bars). The hold drops a live tick the history holds by
-//! `ts_event` within its series, as a live tick's `ts_init` is when its client received it.
+//! Time is `ts_init` throughout: the order, the watermark and the ties. A backtest streams data by
+//! `ts_init`, and requests cut their windows by it (`DataResponse::trim_to_bounds`,
+//! `range_for_bounds` in `crates/common/src/messages/data/response.rs`). Every history a warmup
+//! reads is stamped this way:
+//! - A tick is stamped as made (IB, OKX's trades, cTrader, LSE) or as received (Databento, equal to
+//!   its `ts_event`).
+//! - A bar is stamped at its close. Its `ts_event` is the close for IB, Databento and Nautilus'
+//!   built bars, and the open for OKX's history bars.
+//!
+//! The hold drops a live tick that the history already holds, matching by `ts_event` within the
+//! series, because a live tick's `ts_init` is when its client received it.
 //!
 //! Temporary until Nautilus hands a warmup's history in time order across data types:
 //! helix-trader#46 (<https://github.com/madebymlai/helix-trader/issues/46>), which holds the
 //! evidence and the upstream fix. Each Nautilus request runs its own window pipeline
-//! (`dispatch_next_time_range_pipeline_request` in `crates/data/src/engine/time_range.rs`) and its
-//! responses reach the actor as they arrive, while `RequestJoin` orders the legs of one data type
-//! alone. Once it goes, the warmup requests each window's series as one join. It is separate from
-//! the hold, which goes with helix-trader#16.
+//! (`dispatch_next_time_range_pipeline_request` in `crates/data/src/engine/time_range.rs`), and its
+//! responses reach the actor as they arrive. `RequestJoin` orders the legs of one data type alone.
+//! Once this merge goes, the warmup requests each window's series as one join. The merge is
+//! separate from the hold, which goes with helix-trader#16.
 //!
-//! The merge hands a tick on once no pending series can bring an older one. Its watermark is the
-//! earliest, over the pending series, of the latest `ts_init` each has brought, and a series that
-//! has brought nothing holds everything back. The bars a request builds are a series per bar type,
+//! The merge hands a tick on once no pending series can bring an older one. The watermark is the
+//! earliest, across the pending series, of the latest `ts_init` each has brought. A series that has
+//! brought nothing holds everything back. The bars a request builds form one series per bar type,
 //! read from the cache at each response (`Merge::response`). Nautilus builds a time bar once data
-//! past its close comes, stamping it with that close (`TimeBarAggregator::build_bar` in
-//! `crates/data/src/aggregation.rs`), so a bar built later closes no earlier than the latest
+//! past its close comes, and stamps it with that close (`TimeBarAggregator::build_bar` in
+//! `crates/data/src/aggregation.rs`). So a bar built later closes no earlier than the latest
 //! `ts_init` its data has brought.
 //!
-//! Ties across series at one `ts_init` go in the order a replay hands them (`tie_rank`): custom
-//! data, then ticks in the order a backtest reads its catalog series
-//! (`DataRequirements::catalog_series`), then bars, a backtest firing the bar-building timer after
-//! the data of its instant (`BacktestEngine::flush_accumulator_events` in
-//! `crates/backtest/src/engine.rs`). Within a series, ticks go in the order they came.
+//! Ties across series at one `ts_init` go in the order a replay hands them (`tie_rank`):
+//! - Custom data goes first.
+//! - Ticks go next, in the order a backtest reads its catalog series
+//!   (`DataRequirements::catalog_series`).
+//! - Bars go last, because a backtest fires the bar-building timer after the data of its instant
+//!   (`BacktestEngine::flush_accumulator_events` in `crates/backtest/src/engine.rs`).
 //!
-//! A series whose request completes, answered or failed, holds the others back no longer, and the
-//! rest of its queue goes on in order, its bars too, ahead of the live bars Nautilus builds from
-//! then on. A bar built at completion from live data Nautilus held, closing after the warmup's end,
-//! goes to the hold as a live one. When the group ends, everything held goes on in order. A
-//! response of a series no fed indicator reads goes on at once (see `Warmup::feeding`).
+//! Within a series, ticks go in the order they came.
 //!
-//! Each series must answer in time order. A tick initialized before the latest its series brought,
-//! or a bar before the latest its request's data brought, ends the merge as its bound does, and
-//! the warmup ends incomplete, naming the series.
+//! A series whose request completes, answered or failed, no longer holds the others back. The rest
+//! of its queue goes on in order, its bars too, ahead of the live bars Nautilus builds from then
+//! on. Nautilus may build a bar at completion from live data it held. If that bar closes after the
+//! warmup's end, it goes to the hold as a live one. When the group ends, everything held goes on in
+//! order. A response for a series no fed indicator reads goes on at once (see `Warmup::feeding`).
 //!
-//! The history held is bounded by `HELD` bytes (`Tick::size`), set by no configuration. Past it
-//! the merge hands on everything held, leaves out the rest of the history, and the warmup ends
-//! incomplete, naming the series held back and those holding them; the live ticks the hold holds
-//! are handed over and the warmup stops warming (`Merge::is_cut`). The merge logs a series of which
-//! it holds more than a window, once a warmup, naming those it waits on.
+//! Each series must answer in time order. Two cases end the merge, as the bound does:
+//! - A tick is initialized before the latest tick its series brought.
+//! - A bar is initialized before the latest `ts_init` its request's data brought.
 //!
-//! The warmup reaches it through `Merge` alone, at five points, each marked `Temporary` with
-//! helix-trader#46: `Merge::start`, `Merge::history`, `Merge::response`, `Merge::end` and
-//! `Merge::is_cut`. `Queues` knows nothing of Nautilus; `Merge` reads built bars from the cache.
+//! The warmup then ends incomplete and names the series.
+//!
+//! The history held is bounded by `HELD` bytes (`Tick::size`). No configuration sets it. Past the
+//! bound, the merge hands on everything held and leaves out the rest of the history. The warmup
+//! ends incomplete, naming the series held back and the series holding them. The live ticks the
+//! hold holds are handed over, and the warmup stops warming (`Merge::is_cut`). Once per warmup, the
+//! merge logs a series of which it holds more than a window, naming the series it waits on.
+//!
+//! The warmup reaches the merge through `Merge` alone, at five points, each marked `Temporary`
+//! with helix-trader#46: `Merge::start`, `Merge::history`, `Merge::response`, `Merge::end` and
+//! `Merge::is_cut`. `Queues` knows nothing of Nautilus. `Merge` reads built bars from the cache.
 
 use std::{
     cell::RefCell,
@@ -77,14 +86,15 @@ use crate::{
 
 /// The most bytes the merge holds across its series (`Tick::size`): 2 GiB.
 ///
-/// A series answered from the catalog at once while another waits on its venue is held whole.
+/// The merge holds a series whole when the catalog answers it at once while another series waits
+/// on its venue.
 pub(super) const HELD: usize = 2 << 30;
 
 #[derive(Debug)]
 pub(super) struct Merge {
     queues: Queues,
     building: RefCell<HashMap<UUID4, Vec<BarType>>>,
-    /// The close of the latest bar of each bar type read from the cache.
+    /// The close of the latest bar read from the cache, for each bar type.
     read: RefCell<HashMap<BarType, UnixNanos>>,
 }
 
@@ -96,7 +106,7 @@ struct Queues {
 
 #[derive(Debug)]
 enum State {
-    /// A replay, a warmup whose group ended, or one before its start.
+    /// A replay, a warmup whose group has ended, or a warmup that has not started.
     Passing,
     Merging(Vec<Queue>),
     Cut,
@@ -109,7 +119,7 @@ struct Queue {
     /// Each tick with its `Tick::size`.
     held: VecDeque<(Tick, usize)>,
     bytes: usize,
-    /// The latest `ts_init` brought, none before the first tick.
+    /// The latest `ts_init` brought. It is `None` before the first tick.
     latest: Option<UnixNanos>,
     pending: bool,
     logged: bool,
@@ -118,13 +128,14 @@ struct Queue {
 /// Why the merge ended a warmup incomplete.
 #[derive(Debug)]
 pub(super) enum Cut {
-    /// Past its bound: the ticks and bytes held of each series, and the series waited on.
+    /// The merge went past its bound. Carries the ticks and bytes held per series, and the series
+    /// waited on.
     Overflow {
         limit: usize,
         held: Vec<(Series, usize, usize)>,
         waiting: Vec<Series>,
     },
-    /// A response of `series` brought a tick initialized at `at`, before its `latest`.
+    /// A response for `series` brought a tick initialized at `at`, before the series' `latest`.
     Unordered {
         series: Series,
         at: UnixNanos,
@@ -147,8 +158,10 @@ impl Merge {
         }
     }
 
-    /// Starts merging the `fed` series among `requested`, ranked on a tie as a replay of `own`
-    /// hands them (`tie_rank`). What it held of a warmup before is forgotten.
+    /// Starts merging the `fed` series among `requested`.
+    ///
+    /// Ties rank as a replay of `own` hands them (`tie_rank`). Anything held from an earlier warmup
+    /// is forgotten.
     pub(super) fn start(
         &self,
         requested: &[Requested],
@@ -188,9 +201,9 @@ impl Merge {
     /// # Errors
     ///
     /// Returns an error if:
-    /// - An indicator reading a tick fails, the first of which ends the hand-over.
-    /// - The merge goes past its bound, ending the warmup incomplete (`ended`).
-    /// - A series' history comes out of time order, ending the warmup incomplete (`ended`).
+    /// - An indicator fails to read a tick. The first failure ends the hand-over.
+    /// - The merge goes past its bound, which ends the warmup incomplete (`ended`).
+    /// - A series' history is out of time order, which ends the warmup incomplete (`ended`).
     pub(super) fn history(
         &self,
         ticks: impl IntoIterator<Item = Tick>,
@@ -199,17 +212,17 @@ impl Merge {
         ended(self.queues.history(ticks, |tick| hold.history(tick))?, hold)
     }
 
-    /// Takes the bars the request of `response` built since its last response, oldest first.
+    /// Takes the bars that the request of `response` built since its last response, oldest first.
     ///
-    /// Bars closing after `end`, the warmup's end, go to `hold` as live ones. At the request's
-    /// completion, failed or not, its series holds the others back no longer.
+    /// Bars closing after `end`, the warmup's end, go to `hold` as live ones. When the request
+    /// completes, failed or not, its series no longer holds the others back.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - An indicator fails to read a bar or tick handed on.
-    /// - The merge goes past its bound, ending the warmup incomplete (`ended`).
-    /// - The bars of a series come out of time order, ending the warmup incomplete (`ended`).
+    /// - The merge goes past its bound, which ends the warmup incomplete (`ended`).
+    /// - The bars of a series are out of time order, which ends the warmup incomplete (`ended`).
     pub(super) fn response<A>(
         &self,
         actor: &A,
@@ -248,8 +261,8 @@ impl Merge {
     ///
     /// # Errors
     ///
-    /// Returns an error if an indicator reading a tick fails; the merge passes history on all the
-    /// same, the ticks after the failing one lost.
+    /// Returns an error if an indicator fails to read a tick. The merge still passes history on,
+    /// but the ticks after the failing one are lost.
     pub(super) fn end(&self, hold: &Hold) -> anyhow::Result<bool> {
         let cut = self.queues.is_cut();
         self.queues.end(|tick| hold.history(tick))?;
@@ -265,8 +278,8 @@ impl Merge {
         self.building.borrow().keys().copied().collect()
     }
 
-    /// A node caches a bar type's bars under its standard type, a composite's without its source
-    /// (`BarType::standard`, `TimeBarAggregator::new`).
+    /// A node caches a bar type's bars under its standard type. For a composite bar type, that
+    /// drops the source (`BarType::standard`, `TimeBarAggregator::new`).
     fn built_bars<A>(&self, actor: &A, bar_types: &[BarType]) -> Vec<Bar>
     where
         A: DataActor + DataActorNative,
@@ -296,13 +309,15 @@ impl Merge {
     }
 }
 
-/// Ends the warmup incomplete if `cut`, handing over the live ticks `hold` holds.
+/// Ends the warmup incomplete if `cut`.
+///
+/// Hands over the live ticks `hold` holds.
 ///
 /// # Errors
 ///
 /// Returns an error if:
 /// - An indicator reading a live tick fails.
-/// - The merge was cut, saying why.
+/// - The merge was cut. The error says why.
 fn ended(cut: Option<Cut>, hold: &Hold) -> anyhow::Result<()> {
     let Some(cut) = cut else {
         return Ok(());
@@ -311,7 +326,7 @@ fn ended(cut: Option<Cut>, hold: &Hold) -> anyhow::Result<()> {
     anyhow::bail!("the warmup is incomplete: {cut}")
 }
 
-// Bars by their standard type, a root's ticks and custom series on its front contract
+// Bars use their standard type, and a root's ticks and custom series use its front contract
 // (`rolls::front`, `CustomSeries::at`).
 fn fed_series(fed: &DataRequirements, now: Timestamp) -> Vec<Series> {
     let bars = fed
@@ -331,9 +346,10 @@ fn fed_series(fed: &DataRequirements, now: Timestamp) -> Vec<Series> {
     bars.chain(ticks).chain(custom).collect()
 }
 
-// Custom data first, a backtest adding its stream before the catalog's (`backtest::node`), then
-// ticks in the order of `catalog` with the harness's bars left out, then built bars, the
-// aggregator firing after the data of its instant. Within one, the order requested.
+// Custom data ranks first, because a backtest adds its stream before the catalog's
+// (`backtest::node`), then ticks rank in the order of `catalog` without the harness's bars, then
+// built bars rank last, because the aggregator fires after the data of its instant, and series of
+// one rank keep the order requested.
 fn tie_rank(series: &Series, catalog: &[CatalogSeries], now: Timestamp) -> (u8, usize) {
     match series {
         Series::Custom(_) => (0, 0),
@@ -374,7 +390,7 @@ impl Queues {
         }
     }
 
-    /// `requests` are in the order their ticks go on a tie.
+    /// Takes `requests` in the order their ticks go on a tie.
     fn start(&self, requests: impl IntoIterator<Item = (UUID4, Series)>) {
         let queues = requests
             .into_iter()
@@ -391,17 +407,17 @@ impl Queues {
         *self.state.borrow_mut() = State::Merging(queues);
     }
 
-    /// Passing, hands `ticks` on as they come, and cut, none.
+    /// Hands `ticks` on as they come when passing, and none when cut.
     ///
     /// # Errors
     ///
     /// Returns an error if:
-    /// - `hand` fails, the ticks after the failure kept held.
+    /// - `hand` fails, and the ticks after the failure stay held.
     /// - A tick cannot be sized (`Tick::size`).
     ///
     /// Returns the cut if a tick is initialized before the latest its series brought, or if the
-    /// merge holds more than its bound once it handed on what it could. Having handed on all it
-    /// held, it is cut.
+    /// merge still holds more than its bound after handing on what it could. The merge then hands
+    /// on all it held and is cut.
     fn history(
         &self,
         ticks: impl IntoIterator<Item = Tick>,
@@ -410,7 +426,7 @@ impl Queues {
         self.take(ticks, None, hand)
     }
 
-    /// `through` is the latest `ts_init` of the response's data: a bar built later closes no
+    /// `through` is the latest `ts_init` in the response's data. A bar built later closes no
     /// earlier.
     ///
     /// # Errors
@@ -509,7 +525,7 @@ impl Queues {
         handed.map(|()| Some(overflow))
     }
 
-    /// Ends `request`: its series holds the others back no longer.
+    /// Ends `request`, so its series no longer holds the others back.
     ///
     /// # Errors
     ///
@@ -530,11 +546,11 @@ impl Queues {
         hand_on(queues, &mut hand)
     }
 
-    /// Ends the group: hands on everything held, then passes history on.
+    /// Ends the group. Hands on everything held, then passes history on.
     ///
     /// # Errors
     ///
-    /// Returns an error if `hand` fails, as `history`; the ticks after the failing one are lost.
+    /// Returns an error if `hand` fails, as `history`. The ticks after the failing one are lost.
     fn end(&self, mut hand: impl FnMut(&Tick) -> anyhow::Result<()>) -> anyhow::Result<()> {
         let state = std::mem::replace(&mut *self.state.borrow_mut(), State::Passing);
         let State::Merging(mut queues) = state else {
@@ -673,13 +689,14 @@ mod tests {
 
     use super::*;
 
-    /// Warmups drawn, each from a seed in `0..CASES`, so a failure names its seed.
+    /// The number of warmups drawn. Each comes from a seed in `0..CASES`, so a failure names its
+    /// seed.
     const CASES: u64 = 10_000;
 
-    /// History is initialized at `0..SPAN` ns: few, so ties are common.
+    /// History is initialized at `0..SPAN` ns. The range is small, so ties are common.
     const SPAN: u64 = 12;
 
-    /// Series, `ts_init` and serial, the unique `ts_event` a tick was drawn with.
+    /// Series, `ts_init` and serial. The serial is the unique `ts_event` a tick was drawn with.
     type Key = (Series, UnixNanos, UnixNanos);
 
     fn key(tick: &Tick) -> Key {
@@ -776,10 +793,12 @@ mod tests {
         ]
     }
 
-    /// History in windows, each in time order and no older than the last, and built bars, each
-    /// initialized no earlier than the data brought before, as Nautilus builds a bar once data
-    /// past its close comes; then, unless the group ends first, the end. A failed request answers
-    /// only its first windows.
+    /// Draws the events of a request.
+    ///
+    /// History comes in windows, each in time order and no older than the last. Built bars come
+    /// with each initialized no earlier than the data brought before, as Nautilus builds a bar once
+    /// data past its close comes. Unless the group ends first, the end follows. A failed request
+    /// answers only its first windows.
     fn events_of(rng: &mut fastrand::Rng, request: &Request, serial: &mut u64) -> Vec<Event> {
         let mut next = |series: &Series, at: u64| {
             *serial += 1;
@@ -856,7 +875,7 @@ mod tests {
         taken_bytes: usize,
         handed: Vec<Key>,
         handed_bytes: usize,
-        /// Ticks taken when it went past its bound.
+        /// The number of ticks taken when the merge went past its bound.
         cut: Option<usize>,
     }
 
@@ -866,7 +885,7 @@ mod tests {
         }
     }
 
-    /// Returns whether the warmup of `seed` went past its bound and whether it handed on ties
+    /// Returns whether the warmup for `seed` went past its bound, and whether it handed on ties
     /// across series.
     fn check(seed: u64) -> (bool, bool) {
         let mut rng = fastrand::Rng::with_seed(seed);
@@ -993,10 +1012,10 @@ mod tests {
         (tally.cut.is_some(), tied)
     }
 
-    /// The merge hands on every tick once, in `ts_init` order, ties across series in start order,
-    /// whatever the windows, response order and failed or unended requests. It never holds more
-    /// than its bound, past which it hands on all and takes no more. Each draw is up to four
-    /// requests, a quarter bounded at a few ticks' worth.
+    /// The merge hands on every tick once, in `ts_init` order, whatever the windows, the response
+    /// order and the failed or unended requests. Ties across series go in start order. The merge
+    /// never holds more than its bound. Past the bound, it hands on all and takes no more. Each
+    /// draw is up to four requests, a quarter bounded at a few ticks' worth.
     #[rstest]
     fn prop_the_merge_hands_on_every_tick_once_in_ts_init_and_tie_order_within_its_bound() {
         let (mut cut, mut tied) = (0, 0);
