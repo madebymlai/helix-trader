@@ -1,6 +1,5 @@
-//! Nautilus' continuous bars on roots: the params of a bar request or
-//! subscription on a root, its transition table's rows with their roll
-//! prices, read from the catalog, and an adjustment mode.
+//! Nautilus' continuous bars on roots: the params of a bar request or subscription on a root, its
+//! transition table's rows with their roll prices, read from the catalog, and an adjustment mode.
 
 use std::{
     collections::{BTreeMap, btree_map::Entry},
@@ -25,15 +24,14 @@ use super::{Slice, TransitionTable};
 const TRANSITIONS: &str = "continuous_future_transitions";
 const ADJUSTMENT_MODE: &str = "continuous_future_adjustment_mode";
 
-/// How far a read for a roll price reaches at a time: a slice spans months
-/// of trades, of which the price needs one.
+/// How far a read for a roll price reaches at a time: a slice spans months of trades, of which the
+/// price needs one.
 const READ_WINDOW: SignedDuration = SignedDuration::from_hours(24);
 
-/// The continuous futures of a strategy's bars on roots over a span: the
-/// `continuous_future_*` params Nautilus' data engine builds a root's bars
-/// from (see `docs/concepts/continuous_futures.md` in Nautilus), the same
-/// for a live warmup request and the subscription. The default holds none: a
-/// strategy reading no root.
+/// The continuous futures of a strategy's bars on roots over a span: the `continuous_future_*`
+/// params Nautilus' data engine builds a root's bars from (see
+/// `docs/concepts/continuous_futures.md` in Nautilus), the same for a live warmup request and the
+/// subscription. The default holds none: a strategy reading no root.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContinuousBars {
     /// The `continuous_future_transitions` of each root.
@@ -42,19 +40,17 @@ pub struct ContinuousBars {
 }
 
 impl ContinuousBars {
-    /// The continuous futures of the roots among the instruments of
-    /// `bar_types` over `[start, end]`, adjusted in `mode`, their roll
-    /// prices read from the catalog at `catalog`: at each transition, the
-    /// pre contract's last trade of its slice and the post contract's
-    /// first, as Nautilus takes them. A plain instrument has none. Bars on
-    /// a root are built from its trades: the strategy config's load refuses
-    /// others (see `strategy::DataConfig`).
+    /// The continuous futures of the roots among the instruments of `bar_types` over `[start,
+    /// end]`, adjusted in `mode`, their roll prices read from the catalog at `catalog`: at each
+    /// transition, the pre contract's last trade of its slice and the post contract's first, as
+    /// Nautilus takes them. A plain instrument has none. Bars on a root are built from its trades:
+    /// the strategy config's load refuses others (see `strategy::DataConfig`).
     ///
     /// # Errors
     ///
-    /// Returns an error if a root does not roll over the span (Nautilus'
-    /// continuous bars need a transition), or if a contract has no trade in
-    /// its slice to price a roll, or its trades cannot be read.
+    /// Returns an error if:
+    /// - A root does not roll over the span (Nautilus' continuous bars need a transition).
+    /// - A contract has no trade in its slice to price a roll, or its trades cannot be read.
     pub fn read(
         catalog: &Path,
         bar_types: &[BarType],
@@ -67,7 +63,8 @@ impl ContinuousBars {
         for bar_type in bar_types {
             let instrument_id = bar_type.instrument_id();
             let table = TransitionTable::of(instrument_id, start, end);
-            // A plain instrument stands for itself.
+
+            // A plain instrument stands for itself
             if table.contract_at(start) == instrument_id {
                 continue;
             }
@@ -84,9 +81,8 @@ impl ContinuousBars {
         Ok(Self { transitions, mode })
     }
 
-    /// The params of a request or subscription of bars on `instrument_id`
-    /// that make them its continuous future, none if it is a plain
-    /// instrument.
+    /// The params of a request or subscription of bars on `instrument_id` that make them its
+    /// continuous future, none if it is a plain instrument.
     #[must_use]
     pub fn params(&self, instrument_id: InstrumentId) -> Option<[(String, Value); 2]> {
         let transitions = self.transitions.get(&instrument_id)?;
@@ -98,9 +94,8 @@ impl ContinuousBars {
 }
 
 impl TransitionTable {
-    /// The transitions as Nautilus' `continuous_future_transitions` rows,
-    /// each priced from `catalog`: its pre contract's last trade of its
-    /// slice, its post contract's first.
+    /// The transitions as Nautilus' `continuous_future_transitions` rows, each priced from
+    /// `catalog`: its pre contract's last trade of its slice, its post contract's first.
     fn priced(&self, catalog: &mut ParquetDataCatalog) -> anyhow::Result<Value> {
         let slices = self.slices();
         let rows = self
@@ -129,8 +124,8 @@ impl TransitionTable {
     }
 }
 
-/// The price of the last trade of `slice`'s contract in it if `last`, of
-/// the first otherwise, read `READ_WINDOW` at a time from that end.
+/// The price of the last trade of `slice`'s contract in it if `last`, of the first otherwise, read
+/// `READ_WINDOW` at a time from that end.
 fn roll_price(
     catalog: &mut ParquetDataCatalog,
     slice: &Slice,
@@ -199,9 +194,9 @@ mod tests {
     fn a_roll_is_priced_from_the_trades_nearest_it_days_away() {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
-        // August's contract trades days before the roll (00:00 on Wednesday
-        // 29 July) and not on its eve; December's not on the day of the
-        // roll.
+
+        // August's contract trades days before the roll (00:00 on Wednesday 29 July) and not on its
+        // eve; December's not on the day of the roll.
         let pre = [
             trade("GCQ26.GLBX", "2026-07-24T10:00Z", "3980.00"),
             trade("GCQ26.GLBX", "2026-07-27T10:00Z", "3985.00"),
@@ -222,7 +217,7 @@ mod tests {
         )
         .unwrap();
 
-        // The roll at 2026-07-29T00:00Z is 1_785_283_200 s after the epoch.
+        // The roll at 2026-07-29T00:00Z is 1_785_283_200 s after the epoch
         assert_eq!(
             continuous.params(InstrumentId::from("GC.GLBX")).unwrap(),
             [
@@ -244,9 +239,9 @@ mod tests {
         );
     }
 
-    /// The roll at 00:00 on Wednesday 29 July hands GC to December's
-    /// contract, whose slice runs from the roll to the span's end and holds
-    /// none of its trades: the catalog stores August's alone.
+    /// The roll at 00:00 on Wednesday 29 July hands GC to December's contract, whose slice runs
+    /// from the roll to the span's end and holds none of its trades: the catalog stores August's
+    /// alone.
     #[rstest]
     fn a_roll_without_a_trade_of_the_post_contract_in_its_slice_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -273,8 +268,7 @@ mod tests {
         );
     }
 
-    /// Reads the continuous bars of `bar_type` over July 2026 from an
-    /// empty catalog.
+    /// Reads the continuous bars of `bar_type` over July 2026 from an empty catalog.
     fn read(bar_type: &str) -> anyhow::Result<ContinuousBars> {
         let dir = tempfile::tempdir().unwrap();
         ContinuousBars::read(

@@ -1,15 +1,13 @@
 //! The latency of the simulated venue.
 //!
-//! A run's latency (`Latency`), if it has one, builds the Nautilus
-//! `StaticLatencyModel` (`nautilus_execution::models::latency`) that
-//! `BacktestVenueConfig` takes: each order command reaches the venue that
-//! long after it is sent, a submit, a modify and a cancel alike, and is
-//! processed at the first settlement point from then on: market data of its
-//! instrument, after the venue has taken it in, or a timer
-//! (`concepts/backtesting/execution-flow.md`, "Latency-delayed commands").
-//! A market order then fills on the first quote of its instrument at or
-//! after its arrival, not on the one it was sent on. Without one, a command
-//! reaches the venue as it is sent, Nautilus' default.
+//! A run's latency (`Latency`), if it has one, builds the Nautilus `StaticLatencyModel`
+//! (`nautilus_execution::models::latency`) that `BacktestVenueConfig` takes. Each order command, a
+//! submit, a modify or a cancel, reaches the venue that long after it is sent, and is processed at
+//! the first settlement point from then on: market data of its instrument, after the venue has
+//! taken it in, or a timer (`concepts/backtesting/execution-flow.md`, "Latency-delayed commands").
+//! A market order then fills on the first quote of its instrument at or after its arrival, not on
+//! the one it was sent on. Without a latency, a command reaches the venue as it is sent, Nautilus'
+//! default.
 
 use std::{fmt::Display, str::FromStr};
 
@@ -20,10 +18,9 @@ use serde::Deserialize;
 
 use super::node::DATASET_PURGE_MINS;
 
-/// How long after it is sent an order command reaches the simulated
-/// venue: positive. Written as other durations are, by jiff, such as
-/// `"150ms"`, on the command line (`--latency 150ms`) as in a model's config
-/// (`latency = "150ms"`).
+/// How long after it is sent an order command reaches the simulated venue: positive. Written as
+/// jiff writes durations, such as `"150ms"`, on the command line (`--latency 150ms`) as in a
+/// model's config (`latency = "150ms"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "SignedDuration")]
 pub struct Latency(DurationNanos);
@@ -58,24 +55,20 @@ impl Display for Latency {
 }
 
 impl Latency {
-    /// The Nautilus latency model delaying every command by the latency:
-    /// a `StaticLatencyModel` of that base latency and no extra for a
-    /// submit, a modify or a cancel, as Nautilus' guides configure it
-    /// (`concepts/backtesting/execution-flow.md`, `bar-execution.md`).
+    /// The Nautilus latency model delaying every command by the latency: a `StaticLatencyModel` of
+    /// that base latency and no extra for a submit, a modify or a cancel, as Nautilus' guides
+    /// configure it (`concepts/backtesting/execution-flow.md`, `bar-execution.md`).
     #[must_use]
     pub fn model(self) -> LatencyModelAny {
         let none = DurationNanos::ZERO;
         LatencyModelAny::Static(StaticLatencyModel::new(self.0, none, none, none))
     }
 
-    /// The longest a command of a dataset run at the latency waits from
-    /// its send to its processing: the latency, then until the run's next
-    /// settlement point, which is a minute at most, its execution engine
-    /// purging the cache every minute by a timer
-    /// (`node::DATASET_PURGE_MINS`), which releases every command due
-    /// (`concepts/backtesting/execution-flow.md`, "Latency-delayed
-    /// commands"). Market data of the command's instrument releases it
-    /// sooner.
+    /// The longest a command of a dataset run at the latency waits from its send to its processing:
+    /// the latency, then until the run's next settlement point. That is a minute at most, as its
+    /// execution engine purges the cache every minute by a timer (`node::DATASET_PURGE_MINS`),
+    /// which releases every command due (`concepts/backtesting/execution-flow.md`, "Latency-delayed
+    /// commands"). Market data of the command's instrument releases it sooner.
     #[must_use]
     pub(crate) fn dataset_delay(self) -> SignedDuration {
         SignedDuration::from(self.0) + SignedDuration::from_mins(i64::from(DATASET_PURGE_MINS))
