@@ -1,6 +1,7 @@
-//! Tests of the adapter's public boundaries, against the mock LSE peers of `lse::testing`, which
-//! the crate's dev-dependency on itself enables (`test-support`). Pure protocol logic is tested in
-//! `src`.
+//! Tests the adapter's public boundaries against the mock LSE peers of `lse::testing`.
+//!
+//! The crate's dev-dependency on itself enables those mocks (`test-support`). Pure protocol logic
+//! is tested in `src`.
 
 mod data_client;
 mod data_tester;

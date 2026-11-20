@@ -1,7 +1,7 @@
 //! Backtests a strategy over the catalog, costs included.
 //!
-//! Build step 2: each run goes through a Nautilus `BacktestNode` of its own, disposed at its end. A
-//! process runs them one after another, never two at once.
+//! This is build step 2. Each run goes through its own Nautilus `BacktestNode`, which is disposed
+//! of at the end of the run. A process runs them one after another, never two at once.
 
 mod costs;
 mod latency;
@@ -41,43 +41,55 @@ use crate::{
     venues,
 };
 
-/// One backtest: a window of the catalog and the costs. Every field is required.
+/// One backtest, over a window of the catalog and with its costs.
+///
+/// Every field is required.
 #[derive(Debug, Clone)]
 pub struct Backtest {
-    /// The catalog directory. It serves no request: the strategy warms up on the replay.
+    /// The catalog directory. It serves no request, because the strategy warms up on the replay.
     pub catalog: PathBuf,
-    /// The internal bar types the strategy trades on, and the external bars of a pair it converts
-    /// through (`strategy::requirements::DataRequirements::bar_types`). Their instruments are each
-    /// a simulated venue. Replayed are the series the bars are built from
-    /// (`strategy::requirements::catalog_keys`) and the stored books (see `series`).
+    /// The internal bar types the strategy trades on, and the external bars of each pair it
+    /// converts through (`strategy::requirements::DataRequirements::bar_types`).
+    ///
+    /// Each of their instruments is a simulated venue. The run replays the series the bars are
+    /// built from (`strategy::requirements::catalog_keys`) and the stored books (see `series`).
     pub bar_types: Vec<BarType>,
-    /// The tick series the strategy reads as they are (see `series`). Their instruments are each a
-    /// simulated venue.
+    /// The tick series the strategy reads as they are (see `series`).
+    ///
+    /// Each of their instruments is a simulated venue.
     pub ticks: Vec<TickSeries>,
-    /// The custom series the strategy reads (`strategy::requirements::DataRequirements::custom`),
-    /// each row replayed when it is known (`lse::LseRow`: a date's at its end). Its type's history
-    /// source fills it, or the catalog does, written from outside helix (`venues::serves_custom`).
-    /// They bring no instrument. Nautilus decodes custom data by its type's name, registered as the
-    /// process starts (`venues::register_custom_data`).
+    /// The custom series the strategy reads (`strategy::requirements::DataRequirements::custom`).
+    ///
+    /// The run replays each row when it is known (`lse::LseRow`: a date's row is known at its end).
+    /// The history source of the series' type fills the series, or the catalog does when it is
+    /// written from outside helix (`venues::serves_custom`). Custom series bring no instrument.
+    /// Nautilus decodes custom data by its type's name, which is registered as the process starts
+    /// (`venues::register_custom_data`).
     pub custom: Vec<CustomSeries>,
     pub start: Timestamp,
     pub end: Timestamp,
-    /// The commission of each venue's fee model (`Commission::fee_model`).
+    /// The commission that each venue's fee model charges (`Commission::fee_model`).
     pub commission: Commission,
-    /// The latency of each venue (`Latency::model`). With none, a command reaches it as it is sent.
+    /// The latency of each venue (`Latency::model`).
+    ///
+    /// With none, a command reaches the venue as it is sent.
     pub latency: Option<Latency>,
     /// The FX pairs the strategy converts through and does not trade
-    /// (`TradeConfig::untraded_pairs`). They decide no venue's money (see `balance`).
+    /// (`TradeConfig::untraded_pairs`).
+    ///
+    /// They decide no venue's money (see `balance`).
     pub pairs: Vec<InstrumentId>,
-    /// The starting balance of each venue a broker trades (`funds`). Any other venue starts with
-    /// nothing.
+    /// The starting balance of each venue that a broker trades (`funds`).
+    ///
+    /// Any other venue starts with nothing.
     pub balance: Money,
-    /// The Nautilus logger: the node installs it, so nothing else may.
+    /// The Nautilus logger. The node installs it, so nothing else may.
     pub logging: LoggerConfig,
 }
 
 impl Backtest {
     /// Runs `strategy` over the window and returns the Nautilus result with the costs of the fills.
+    ///
     /// Each venue uses its broker's position mode, or the venue default (`venues::oms_type`).
     ///
     /// # Errors
@@ -94,11 +106,13 @@ impl Backtest {
         node::run(config, node::custom_data(self)?, strategy)
     }
 
-    /// Runs `strategy` as `run` does, for what it does alone, as a dataset run builds the training
-    /// table (`model::targets`). Every venue hedges so the long and short targets settle
-    /// separately. Each account is frozen at the balance and margins nothing, so that Nautilus'
-    /// risk engine denies no order for its margin (`node::dataset_run_config`). The cache is purged
-    /// as the run goes, so there is no result to read.
+    /// Runs `strategy` as `run` does, for what it does alone.
+    ///
+    /// A dataset run builds the training table this way (`model::targets`). Every venue hedges, so
+    /// the long and short targets settle separately. Each account is frozen at the balance and
+    /// holds no margin, so Nautilus' risk engine denies no order for its margin
+    /// (`node::dataset_run_config`). The run purges the cache as it goes, so there is no result to
+    /// read.
     ///
     /// # Errors
     ///
@@ -111,12 +125,17 @@ impl Backtest {
         node::run_dataset(config, node::custom_data(self)?, strategy)
     }
 
-    /// Refuses the run unless its balance's currency is the P&L currency of each instrument `trade`
-    /// trades whose broker's account has no base currency (`refuse_unheld_pnl_currency`), and
-    /// reaches the P&L currency of each through the pairs of `[trade] conversions`
-    /// (`refuse_balance`). A trade sent at a stake is sized on the equity converted into its P&L
-    /// currency (`strategy::orders::Trade::send`), so on a balance the pairs do not convert it
-    /// would send nothing. A dataset run's balance is checked by `refuse_balance` alone.
+    /// Refuses the run unless its balance suits the instruments `trade` trades.
+    ///
+    /// Two checks apply:
+    /// - For each instrument whose broker's account has no base currency, the balance's currency
+    ///   must be the instrument's P&L currency (`refuse_unheld_pnl_currency`).
+    /// - The pairs of `[trade] conversions` must convert the balance's currency into the P&L
+    ///   currency of each instrument (`refuse_balance`).
+    ///
+    /// A trade sent at a stake is sized on the equity converted into its P&L currency
+    /// (`strategy::orders::Trade::send`). On a balance the pairs do not convert, it would send
+    /// nothing. A dataset run's balance is checked by `refuse_balance` alone.
     ///
     /// # Errors
     ///
@@ -131,14 +150,16 @@ impl Backtest {
         refuse_balance(self.balance, &traded, &pairs)
     }
 
-    /// The continuous bars of the bar types on roots over the run, adjusted in `mode`, which the
-    /// strategy subscribes to through `strategy::subscriptions::Subscriptions::continuous`.
+    /// Returns the continuous bars of the bar types on roots over the run, adjusted in `mode`.
+    ///
+    /// The strategy subscribes to them through
+    /// `strategy::subscriptions::Subscriptions::continuous`.
     ///
     /// # Errors
     ///
-    /// Returns an error if `ContinuousBars::read` fails: a root without a roll over `[start, end]`,
-    /// or a roll without a trade to price it. A bar type on a root not built from trades is refused
-    /// by the config's load (`strategy::DataConfig`).
+    /// Returns an error if `ContinuousBars::read` fails. It fails when a root has no roll over
+    /// `[start, end]`, or a roll has no trade to price it. The config's load
+    /// (`strategy::DataConfig`) refuses a bar type on a root not built from trades.
     pub fn continuous_bars(
         &self,
         mode: ContinuousFutureAdjustmentType,
@@ -146,9 +167,11 @@ impl Backtest {
         ContinuousBars::read(&self.catalog, &self.bar_types, self.start, self.end, mode)
     }
 
-    /// Whether the simulated `venue` starts with the balance: a broker trades it
-    /// (`venues::has_broker`) and the strategy reads an instrument on it besides the untraded
-    /// `pairs`: IDEALPRO's EUR/USD for gold on GLBX leaves IDEALPRO with nothing.
+    /// Returns whether the simulated `venue` starts with the balance.
+    ///
+    /// It does when a broker trades the venue (`venues::has_broker`) and the strategy reads an
+    /// instrument on it besides the untraded `pairs`. For example, IDEALPRO's EUR/USD for gold on
+    /// GLBX leaves IDEALPRO with nothing.
     fn funds(&self, venue: Venue) -> bool {
         venues::has_broker(venue)
             && self
@@ -171,15 +194,18 @@ impl Backtest {
         }
     }
 
-    /// The catalog series the run replays, each over the slice of `[start, end]` its contract
-    /// stands for its instrument (`strategy::requirements::DataRequirements::slices`), merged
-    /// (`SeriesSlice::merged`) so no part is replayed twice. They are:
-    /// - Those the bars are built from (`strategy::requirements::catalog_keys`) and the ticks.
+    /// Returns the catalog series the run replays.
+    ///
+    /// Each series covers the slice of `[start, end]` in which its contract stands for its
+    /// instrument (`strategy::requirements::DataRequirements::slices`). The slices are merged
+    /// (`SeriesSlice::merged`) so no part is replayed twice. The series are:
+    /// - The series the bars are built from (`strategy::requirements::catalog_keys`), and the
+    ///   ticks.
     /// - The book depth of each contract of the bar types' instruments whose catalog stores one.
     /// - The funding of each contract whose catalog stores it, which the venue settles.
     ///
-    /// An instrument none of whose bar source series is stored (CME gold's book without its quotes)
-    /// has its book replayed and no bar built. An instrument of the ticks alone has no book
+    /// An instrument with no bar source series stored (CME gold's book without its quotes) has its
+    /// book replayed and no bar built. An instrument read through ticks alone has no book
     /// replayed.
     ///
     /// # Errors
@@ -268,16 +294,19 @@ impl Backtest {
     }
 }
 
-/// Refuses `balance` unless its currency reaches the P&L currency (`Instrument::cost_currency`) of
-/// each instrument of `traded` through `pairs` (`conversions::reaches`, Nautilus' own path search).
-/// Nautilus' fixed-risk sizer reads the equity as given, so a currency the pairs do not reach is
-/// not converted.
+/// Refuses `balance` unless `pairs` convert its currency into the P&L currency of each instrument
+/// in `traded`.
+///
+/// The P&L currency is `Instrument::cost_currency`, and `conversions::reaches` finds the path with
+/// Nautilus' own path search. Nautilus' fixed-risk sizer reads the equity as given, so it does not
+/// convert a currency the pairs do not reach.
 ///
 /// # Errors
 ///
 /// Returns an error if:
-/// - A pair of `pairs` is defined without a base currency, which gives no rate.
-/// - The pairs do not reach the P&L currency of an instrument of `traded` from the balance's.
+/// - A pair in `pairs` is defined without a base currency, which gives no rate.
+/// - The pairs do not reach the P&L currency of an instrument in `traded` from the balance's
+///   currency.
 pub fn refuse_balance(
     balance: Money,
     traded: &[InstrumentAny],
@@ -306,13 +335,15 @@ pub fn refuse_balance(
 }
 
 /// Refuses `balance` for a backtest's simulated accounts unless its currency is the P&L currency
-/// (`Instrument::cost_currency`) of each instrument of `traded` whose venue's broker keeps an
-/// account without a base currency (`venues::has_base_currency`). Nautilus books such an account in
-/// each currency apart: a fill's loss or commission in a currency the account does not hold is not
-/// booked, while a gain is (`AccountsManager::update_balance_multi_currency` in Nautilus'
-/// portfolio crate, its branches "intentionally asymmetric until cross-currency equity tracking is
-/// implemented"). A dataset run, whose accounts are frozen, and a live run, whose broker books its
-/// own account, are not refused.
+/// (`Instrument::cost_currency`) of each such instrument in `traded`.
+///
+/// An instrument qualifies when the broker of its venue keeps an account without a base currency
+/// (`venues::has_base_currency`). Nautilus books such an account in each currency apart. It does
+/// not book a fill's loss or commission in a currency the account does not hold, but it books a
+/// gain (`AccountsManager::update_balance_multi_currency` in Nautilus' portfolio crate, whose
+/// branches are "intentionally asymmetric until cross-currency equity tracking is implemented").
+/// A dataset run has frozen accounts and a live run has a broker that books its own account, so
+/// neither is refused.
 ///
 /// # Errors
 ///
@@ -354,7 +385,7 @@ mod tests {
     const SWAP: &str = "BTC-USDT-SWAP.OKX";
     const XPERP: &str = "BTC-USD_UM_XPERP-310404.OKX";
 
-    // Source bars of the composite hour bars, sorted by instrument: `BTC-USDT` before `BTC-USD_`
+    // The source bars of the composite hour bars, sorted by instrument with `BTC-USDT` first
     const SWAP_MINUTE_BARS: &str = "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL";
     const XPERP_MINUTE_BARS: &str = "BTC-USD_UM_XPERP-310404.OKX-1-MINUTE-LAST-EXTERNAL";
 
@@ -468,7 +499,7 @@ mod tests {
         }
     }
 
-    /// Gold read for its book alone replays its book and no bar source; with its quotes stored, the
+    /// Gold read for its book alone replays its book and no bar source. With its quotes stored, the
     /// book is replayed beside them.
     #[rstest]
     #[case::alone(false, vec![(NautilusDataType::OrderBookDepth, GOLD.to_string())])]
@@ -544,7 +575,7 @@ mod tests {
             ..backtest(dir.path(), &[])
         };
 
-        // No trades stored: the bars are left out
+        // No trades are stored, so the bars are left out
         assert_eq!(
             backtest.series().unwrap(),
             [SeriesSlice {
@@ -570,8 +601,9 @@ mod tests {
         InstrumentAny::Cfd(gold)
     }
 
-    /// The rule is the venues table's alone: a balance in the contract's P&L currency is accepted
-    /// on a broker without a base currency, any balance on a broker whose account has one.
+    /// The rule comes from the venues table alone. A broker without a base currency accepts a
+    /// balance in the contract's P&L currency, and a broker whose account has one accepts any
+    /// balance.
     #[rstest]
     #[case::in_the_pnl_currency_of_glbx("100000 USD", future("GCZ6.GLBX"))]
     #[case::in_the_pnl_currency_of_a_venue_of_no_row("100000 USD", future("GCZ6.IDEALPRO"))]

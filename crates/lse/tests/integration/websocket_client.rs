@@ -1,4 +1,4 @@
-//! One of LSE's sockets against the mock socket (`lse::testing::MockLseSocket`).
+//! Tests one of LSE's sockets against the mock socket (`lse::testing::MockLseSocket`).
 
 use lse::{
     common::{
@@ -78,8 +78,9 @@ async fn the_key_answers_the_welcome_and_the_socket_s_list_and_limit_are_kept() 
     assert_eq!(client.max_subscriptions(), Some(16));
 }
 
-/// A key LSE does not know, or a connection beyond the key's (after which LSE closes with 1008),
-/// fails the connect with LSE's code and its message or limit, without showing the key.
+/// The connect fails with LSE's code and its message or limit, without showing the key, if:
+/// - LSE does not know the key.
+/// - The connection is beyond the key's limit (after which LSE closes with 1008).
 #[rstest]
 #[case::a_key_lse_does_not_know(
     vec![send(WS_INVALID_KEY)],
@@ -126,9 +127,9 @@ async fn a_subscription_brings_the_ticks_of_its_symbol() {
     assert_eq!(peer.received(), [(0, auth()), (0, subscribe("GOLD.F"))]);
 }
 
-/// The clock is paused once the key is authenticated, moved on 25 s (the interval LSE's Python
-/// client keeps), then run for the 10 s the peer waits for the ping: a ping arrives within about
-/// 35 s, which bounds the interval without pinning it at 25 s.
+/// The test pauses the clock once the key is authenticated and moves it on 25 s (the interval
+/// LSE's Python client keeps). It then runs the clock for the 10 s the peer waits for the ping. A
+/// ping arrives within about 35 s, which bounds the interval without pinning it at 25 s.
 #[tokio::test]
 async fn the_keepalive_is_lse_s_ping() {
     let peer = MockLseSocket::start(|_, frame| data_ws_answer(frame));
@@ -142,7 +143,7 @@ async fn the_keepalive_is_lse_s_ping() {
         .await;
 }
 
-/// A frame not read is skipped: the ticks after it come through.
+/// The client skips a frame it cannot read, and the ticks after it come through.
 #[tokio::test]
 async fn a_malformed_frame_loses_none_of_the_frames_after_it() {
     let peer = MockLseSocket::start(|_, frame| match frame["action"].as_str() {
@@ -228,7 +229,7 @@ async fn a_chain_subscribes_on_its_first_reference_and_unsubscribes_on_its_last(
     client.disconnect().await;
 }
 
-/// LSE's error names no symbol: it answers the oldest subscription not answered yet.
+/// LSE's error names no symbol. It answers the oldest subscription not answered yet.
 #[tokio::test]
 async fn lse_s_refusal_of_a_subscription_is_passed_on_with_its_symbol_code_and_message() {
     let peer = MockLseSocket::start(|_, frame| match frame["symbol"].as_str() {
@@ -249,8 +250,8 @@ async fn lse_s_refusal_of_a_subscription_is_passed_on_with_its_symbol_code_and_m
     );
 }
 
-/// LSE's documented AAPL chain: one subscription, then its contracts' ticks under their OSI symbols
-/// without spaces.
+/// LSE's documented AAPL chain: one subscription, then ticks for its contracts under their OSI
+/// symbols without spaces.
 #[tokio::test]
 async fn a_chain_s_subscription_brings_the_ticks_of_its_contracts() {
     let peer = MockLseSocket::start(|_, frame| data_ws_answer(frame));
@@ -281,7 +282,7 @@ async fn a_chain_s_subscription_brings_the_ticks_of_its_contracts() {
     );
 }
 
-/// LSE's error names no underlying: it answers the oldest subscription not answered yet.
+/// LSE's error names no underlying. It answers the oldest subscription not answered yet.
 #[tokio::test]
 async fn lse_s_refusal_of_a_chain_is_passed_on_with_its_underlying_code_and_message() {
     let peer = MockLseSocket::start(|_, frame| match frame["underlying"].as_str() {
@@ -307,8 +308,8 @@ async fn lse_s_refusal_of_a_chain_is_passed_on_with_its_underlying_code_and_mess
     );
 }
 
-/// Drops the first connection after another acquisition of the refused chain, and its replacement
-/// before the chain's final release is acknowledged.
+/// Drops the first connection after another acquisition of the refused chain. Drops its
+/// replacement before the final release of the chain is acknowledged.
 #[tokio::test]
 async fn a_refused_chain_is_replayed_only_while_wanted_and_replay_takes_no_reference() {
     let peer =
