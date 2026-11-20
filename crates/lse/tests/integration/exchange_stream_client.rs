@@ -1,5 +1,5 @@
-//! The client of an LSE exchange stream against `lse::testing::MockExchangeStream`: subscriptions
-//! per level, records and gaps, refusals, closes and reconnects.
+//! Tests the client of an LSE exchange stream against `lse::testing::MockExchangeStream`. They
+//! cover subscriptions per level, records and gaps, refusals, closes and reconnects.
 
 use lse::{
     common::{
@@ -110,10 +110,10 @@ async fn the_key_goes_in_the_header_and_each_contract_opens_with_its_best_bid_an
     assert_eq!(peer.received(), [(0, subscription(&["GCG7", "GCZ6"]))]);
 }
 
-/// Each level as LSE's documentation records it:
-/// - Level 1: ESZ6's opening, then a change of its best bid and offer and a trade.
-/// - Level 2: GCZ6's opening, its last ten levels, then three changes of its book.
-/// - Level 3: GCZ6's order events, no opening ("the stream carries order events and no opening
+/// Covers each level as LSE's documentation records it:
+/// - Level 1: ESZ6's opening, then a change to its best bid and offer and a trade.
+/// - Level 2: GCZ6's opening with its last ten levels, then three changes to its book.
+/// - Level 3: GCZ6's order events and no opening ("the stream carries order events and no opening
 ///   book").
 #[rstest]
 #[case::level_1(
@@ -175,7 +175,7 @@ async fn a_contract_s_live_records_follow_its_opening_in_sequence(
     );
 }
 
-/// Synthetic: LSE's documented session without its record 555.
+/// Synthetic: LSE's documented session, without its record 555.
 #[tokio::test]
 async fn a_jump_of_a_contract_s_sequence_is_passed_on_as_a_gap() {
     let peer = MockExchangeStream::cme(|_, _| {
@@ -198,8 +198,9 @@ async fn a_jump_of_a_contract_s_sequence_is_passed_on_as_a_gap() {
     assert_eq!(record(&next(&mut out).await), ("ESZ6", 556, false, b'T'));
 }
 
-/// LSE's captured closes: at Level 1 naming NGZ6, which the stream does not carry, and at Level 2
-/// or 3 on the CME Group Lite+ key, which holds Level 1 alone.
+/// LSE's captured closes:
+/// - At Level 1, a subscription names NGZ6, which the stream does not carry.
+/// - At Level 2 or 3, the CME Group Lite+ key holds Level 1 alone.
 #[rstest]
 #[case::a_contract_the_stream_does_not_carry(
     ExchangeLevel::Mbp1,
@@ -261,8 +262,8 @@ async fn a_key_lse_does_not_take_fails_the_connect_without_showing_the_key() {
     assert!(!err.contains(other), "{err}");
 }
 
-/// GCZ6 named and opened, then subscribed, and GCG7 asked: a second connection carries both, and
-/// GCZ6's opening there brings nothing new.
+/// The client names and opens GCZ6, then subscribes it and asks for GCG7. A second connection
+/// carries both, and GCZ6's opening there brings nothing new.
 #[tokio::test]
 async fn a_contract_not_carried_yet_is_carried_from_a_new_connection() {
     let peer = MockExchangeStream::cme(|_, subscription| {
@@ -298,8 +299,8 @@ async fn a_contract_not_carried_yet_is_carried_from_a_new_connection() {
     assert!(out.recv().await.is_none(), "GCZ6 passed on again");
 }
 
-/// GCZ6 and GCG7 subscribed, then GCG7 no longer, as a roll leaves its old contract: the peer drops
-/// the connection, and the next subscription names GCZ6 alone.
+/// The client subscribes GCZ6 and GCG7, then drops GCG7, as a roll leaves its old contract. The
+/// peer drops the connection, and the next subscription names GCZ6 alone.
 #[tokio::test]
 async fn a_contract_carried_no_longer_is_left_out_of_the_next_connection_s_subscription() {
     let peer = MockExchangeStream::cme(|connection, _| {
@@ -348,8 +349,9 @@ async fn a_new_subscriber_of_a_contract_carried_is_passed_on_after_its_records()
     assert_eq!(peer.received().len(), 1);
 }
 
-/// ESZ6 subscribed, the peer drops the first connection after its record 555, and the second
-/// replays LSE's documented session from its opening, of which only the trade 556 is new.
+/// The client subscribes ESZ6, and the peer drops the first connection after its record 555. The
+/// second connection replays LSE's documented session from its opening, and only the trade 556 is
+/// new.
 #[tokio::test]
 async fn a_dropped_connection_subscribes_again_and_passes_on_only_what_is_new() {
     let peer = MockExchangeStream::cme(|connection, _| {
@@ -385,8 +387,8 @@ async fn a_dropped_connection_subscribes_again_and_passes_on_only_what_is_new() 
     );
 }
 
-/// Started with no contract, the client connects with its first subscription, which another made
-/// before the connection opened joins.
+/// A client started with no contract connects with its first subscription. Another subscription
+/// made before the connection opened joins it.
 #[tokio::test]
 async fn a_client_started_with_no_contract_connects_with_those_subscribed_by_then() {
     let peer = MockExchangeStream::cme(|_, _| sent(frames(CME_GCZ6_GCG7)));
@@ -411,7 +413,7 @@ async fn a_client_started_with_no_contract_connects_with_those_subscribed_by_the
     assert_eq!(peer.received(), [(0, subscription(&["GCG7", "GCZ6"]))]);
 }
 
-/// A client started on its own learns LSE's refusal from its opening and stops: a later
+/// A client started on its own learns LSE's refusal from its opening and stops. A later
 /// subscription fails.
 #[tokio::test]
 async fn a_client_whose_first_subscription_lse_refuses_stops() {
@@ -440,9 +442,9 @@ async fn a_client_whose_first_subscription_lse_refuses_stops() {
     assert!(client.subscriber().subscribe("GCZ6", false).is_err());
 }
 
-/// Synthetic: LSE closes the first connection with 1013, a contract not ready, which a new
-/// connection may lift. The contract is subscribed, as a connection after the first carries the
-/// contracts taken at its level.
+/// Synthetic: LSE closes the first connection with 1013, a contract not ready, and a new connection
+/// may lift that close. The contract is subscribed, because a connection after the first carries
+/// the contracts taken at its level.
 #[tokio::test]
 async fn a_client_whose_first_subscription_is_closed_for_now_carries_it_from_its_next_connection() {
     let peer = MockExchangeStream::cme(|connection, _| {

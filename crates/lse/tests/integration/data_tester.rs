@@ -1,21 +1,21 @@
-//! The data client on a Nautilus node, driven by Nautilus' `DataTester` as its data testing
+//! Tests the data client on a Nautilus node, driven by Nautilus' `DataTester` as its data testing
 //! specification runs an adapter (`docs/developer_guide/spec_data_testing.md`).
 //!
-//! A series' quotes and an option contract's trades run against the mock LSE socket replaying
-//! captured frames and, for the option, the frames LSE's documentation gives. A `GLBX` contract and
-//! an `XNAS` stock run against the mock CME and Nasdaq streams replaying the records LSE's
-//! documentation gives.
+//! A series' quotes and an option contract's trades run against the mock LSE socket. The socket
+//! replays captured frames and, for the option, the frames LSE's documentation gives. A `GLBX`
+//! contract and an `XNAS` stock run against the mock CME and Nasdaq streams, which replay the
+//! records LSE's documentation gives.
 //!
 //! The cases are:
-//! - The definition loaded from the node's catalog (TC-D01), LSE publishing none.
-//! - Quotes and trades flowing after start (TC-D20, TC-D30), ended on stop (TC-D70).
-//! - Book depth (TC-D12) and deltas (TC-D10) from the Level 2 and 3 records, ended on stop
+//! - The node loads the definition from its catalog (TC-D01), because LSE publishes none.
+//! - Quotes and trades flow after start (TC-D20, TC-D30) and end on stop (TC-D70).
+//! - Book depth (TC-D12) and deltas (TC-D10) come from the Level 2 and 3 records and end on stop
 //!   (TC-D70).
 //!
-//! TC-D21, historical quotes, is skipped: LSE has no quotes of a derived market's past, and a CME
-//! contract's run against LSE in `examples/node_data_tester.rs`. A custom actor on a node against
-//! the mock LSE peer requests the history of book deltas and depth, which `DataTester` does not,
-//! as the specification asks historical book deltas to be tested.
+//! TC-D21 (historical quotes) is skipped. LSE has no quotes for a derived market's past, and a CME
+//! contract's run against LSE is in `examples/node_data_tester.rs`. A custom actor on a node
+//! against the mock LSE peer requests the history of book deltas and depth. `DataTester` does not
+//! request it, but the specification asks historical book deltas to be tested.
 
 use std::{cell::RefCell, num::NonZeroUsize, rc::Rc, time::Duration};
 
@@ -58,7 +58,7 @@ use nautilus_testkit::testers::{DataTester, DataTesterConfig};
 use rstest::rstest;
 use serde_json::json;
 
-/// LSE's gold futures quotes, until one reaches the message bus, then the node stops.
+/// Runs LSE's gold futures quotes until one reaches the message bus, then the node stops.
 #[tokio::test]
 async fn the_data_tester_receives_lse_s_quotes_and_ends_their_subscription_on_stop() {
     let socket = MockLseSocket::start(|_, frame| data_ws_answer(frame));
@@ -167,8 +167,8 @@ async fn the_data_tester_receives_lse_s_quotes_and_ends_their_subscription_on_st
     );
 }
 
-/// The trades of AAPL's 355 call of 20 November 2026 from its underlying's chain, as LSE's
-/// documentation gives its frames, until one reaches the message bus.
+/// Runs the trades of AAPL's 355 call of 20 November 2026 from its underlying's chain, using the
+/// frames LSE's documentation gives, until one reaches the message bus.
 #[tokio::test]
 async fn the_data_tester_receives_an_option_s_trades_from_its_chain_and_ends_it_on_stop() {
     let socket = MockLseSocket::start(|_, frame| data_ws_answer(frame));
@@ -274,8 +274,10 @@ async fn the_data_tester_receives_an_option_s_trades_from_its_chain_and_ends_it_
     );
 }
 
-/// A contract on an LSE exchange stream: GCZ6 of 2026 on CME, looked up in LSE's catalogue with
-/// the CME key, and NVDA on Nasdaq, by ticker with the Nasdaq key.
+/// A contract on an LSE exchange stream.
+///
+/// GCZ6 of 2026 is on CME, and the client looks it up in LSE's catalogue with the CME key. NVDA is
+/// on Nasdaq, and the client looks it up by ticker with the Nasdaq key.
 #[derive(Debug, Clone, Copy)]
 enum Streamed {
     Gcz26,
@@ -297,7 +299,8 @@ impl Streamed {
         }
     }
 
-    /// LSE's API answering with `replies`, after GCZ6's listing, which the client looks up first.
+    /// Starts LSE's API answering with `replies`, after GCZ6's listing, which the client looks up
+    /// first.
     fn lse(self, replies: Vec<Reply>) -> MockLse {
         let lookup = match self {
             Self::Gcz26 => vec![Reply::json(PAIRS_GCZ6)],
@@ -306,8 +309,9 @@ impl Streamed {
         MockLse::start(lookup.into_iter().chain(replies).collect())
     }
 
-    /// The stream answering each connection by its level: Level 1 opening, GCZ6's captured and
-    /// NVDA's documented, and the Level 2 and 3 sessions as LSE's documentation records them.
+    /// Starts the stream, which answers each connection by its level. The Level 1 opening is
+    /// GCZ6's captured one and NVDA's documented one. The Level 2 and 3 sessions are as LSE's
+    /// documentation records them.
     fn stream(self) -> MockExchangeStream {
         let (opening, level_2, level_3) = match self {
             Self::Gcz26 => (
@@ -333,8 +337,8 @@ impl Streamed {
         }
     }
 
-    /// The client's config: the plan's key, LSE's API on `lse` and, if given, the stream on
-    /// `stream`.
+    /// Returns the client's config with the plan's key, LSE's API on `lse` and, if given, the
+    /// stream on `stream`.
     fn config(self, lse: &MockLse, stream: Option<&MockExchangeStream>) -> LseDataClientConfig {
         let mut config = LseDataClientConfig::builder()
             .base_url_http(lse.url().to_string())
@@ -365,9 +369,9 @@ impl Streamed {
     }
 }
 
-/// An actor asking for a contract's history of book deltas, then of its book depth.
+/// An actor that asks for a contract's history of book deltas, then its history of book depth.
 ///
-/// `DataTester` requests neither, and Nautilus' data testing specification asks historical book
+/// `DataTester` requests neither. Nautilus' data testing specification asks for historical book
 /// deltas to be tested through a custom actor until it does.
 #[derive(Debug)]
 struct BookHistory {
@@ -378,8 +382,8 @@ struct BookHistory {
 }
 
 impl BookHistory {
-    /// The second of the documented books and orders, `[start, end]`: the captured second of GCZ6's
-    /// trades and quotes.
+    /// Returns the second of the documented books and orders as `[start, end]`. It is the captured
+    /// second of GCZ6's trades and quotes.
     fn second() -> (Option<jiff::Timestamp>, Option<jiff::Timestamp>) {
         (
             Some("2026-11-12T14:30:00Z".parse().unwrap()),
@@ -426,7 +430,7 @@ impl DataActor for BookHistory {
 nautilus_actor!(BookHistory);
 
 /// A contract's orders and book over the second, as LSE's docs record them, reach the actor on a
-/// node through the data engine, the definition in the node's cache.
+/// node through the data engine. The definition is in the node's cache.
 #[rstest]
 #[case::cme_contract(Streamed::Gcz26, GCZ26_ORDERS, GCZ26_BOOK)]
 #[case::nasdaq_stock(Streamed::Nvda, NVDA_ORDERS, NVDA_BOOK)]
@@ -502,11 +506,12 @@ fn nvda_on_nasdaq(lse: &MockLse, stream: &MockExchangeStream) -> LseDataClientCo
     Streamed::Nvda.config(lse, Some(stream))
 }
 
-/// A Level 1 session as LSE's documentation records it: ESZ6 on the CME stream, looked up in LSE's
-/// catalogue, and NVDA on the Nasdaq stream, by ticker.
+/// A Level 1 session as LSE's documentation records it. ESZ6 is on the CME stream, and the client
+/// looks it up in LSE's catalogue. NVDA is on the Nasdaq stream, and the client looks it up by
+/// ticker.
 ///
-/// The tester's quotes open with the best bid and offer. The live records follow, the last a trade
-/// of no aggressor side, and the node stops once it reached the message bus.
+/// The tester's quotes open with the best bid and offer. The live records follow, and the last is a
+/// trade with no aggressor side. The node stops once the trade reaches the message bus.
 #[rstest]
 #[case::a_cme_contract(
     MockLse::start(vec![Reply::json(PAIRS_ESZ6)]),
@@ -661,12 +666,16 @@ async fn run_until(node: &mut LiveNode, done: impl Fn() -> bool) {
 
 type Best = (u64, (&'static str, u64), (&'static str, u64));
 
-/// Book depth at Level 2 as LSE's documentation records it, GCZ6 on the CME stream and NVDA on the
-/// Nasdaq stream.
+/// Book depth at Level 2 as LSE's documentation records it, for GCZ6 on the CME stream and NVDA on
+/// the Nasdaq stream.
 ///
-/// The depth opens with the last ten levels, then a depth per change of the book: the best bid's
-/// size cut, an order joining the best ask, and the ninth ask level removed, each numbered by its
-/// sequence. The node stops once the four reached the message bus. Each case gives each depth's
+/// The depth opens with the last ten levels. A depth follows each change to the book, numbered by
+/// its sequence:
+/// - The best bid's size is cut.
+/// - An order joins the best ask.
+/// - The ninth ask level is removed.
+///
+/// The node stops once the four depths reach the message bus. Each case gives each depth's
 /// sequence and best bid and ask.
 #[rstest]
 #[case::cme_contract(
@@ -748,12 +757,16 @@ async fn the_data_tester_receives_a_contract_s_book_depth_from_lse(
     assert_eq!(received, expected);
 }
 
-/// Book deltas at Level 3 as LSE's documentation records it, GCZ6 on the CME stream and NVDA on
-/// the Nasdaq stream.
+/// Book deltas at Level 3 as LSE's documentation records it, for GCZ6 on the CME stream and NVDA
+/// on the Nasdaq stream.
 ///
-/// The deltas start at the first order event, no book opening them, each batch ending `F_LAST`:
-/// the first adding a bid and an ask at the best, the second changing the bid, the third removing
-/// the ask, numbered 7312 to 7315. The node stops once the three batches reached the message bus.
+/// The deltas start at the first order event, with no opening book. Each batch ends with `F_LAST`,
+/// and the batches are numbered 7312 to 7315:
+/// - The first adds a bid and an ask at the best.
+/// - The second changes the bid.
+/// - The third removes the ask.
+///
+/// The node stops once the three batches reach the message bus.
 #[rstest]
 #[case::cme_contract(Streamed::Gcz26)]
 #[case::nasdaq_stock(Streamed::Nvda)]

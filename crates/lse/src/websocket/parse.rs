@@ -1,8 +1,8 @@
-//! A tick into Nautilus data, at the instrument's precision: a series' into a quote, an option
-//! contract's into a trade.
+//! Turns a tick into Nautilus data at the instrument's precision. A series' tick becomes a quote,
+//! and an option contract's tick becomes a trade.
 //!
-//! LSE sends prices and sizes as doubles, each converted once through its shortest decimal form,
-//! which must fit the precision, as an export's are.
+//! LSE sends prices and sizes as doubles. The parser converts each one once, through its shortest
+//! decimal form, which must fit the precision. Exports convert the same way.
 
 use anyhow::Context;
 use jiff::Timestamp;
@@ -17,8 +17,9 @@ use nautilus_model::{
 use super::messages::LseTick;
 use crate::http::parse::{TradeIds, decimal};
 
-/// Returns `tick` as a quote of `instrument_id` at the given precisions, with zero sizes: LSE's
-/// socket ticks carry none.
+/// Returns `tick` as a quote of `instrument_id` at the given precisions, with zero sizes.
+///
+/// LSE's socket ticks carry no sizes.
 ///
 /// # Errors
 ///
@@ -50,14 +51,14 @@ pub fn parse_quote(
     )
 }
 
-/// Returns `tick`, an option contract's, as a trade of `instrument_id`, its volume the size.
+/// Returns `tick`, an option contract's tick, as a trade of `instrument_id` sized by its volume.
 ///
-/// It has no aggressor side, LSE sending none, and gets its id from `ids`, as an export's trade
-/// does.
+/// The trade has no aggressor side, because LSE sends none. Its id comes from `ids`, as an
+/// export's trade id does.
 ///
 /// # Errors
 ///
-/// Returns an error if the tick has no price, no volume or a volume of 0, a quote's, if its price
+/// Returns an error if the tick has no price, no volume or a volume of 0 (a quote's), if its price
 /// or volume has more decimals than its precision, or if its time is no timestamp.
 pub fn parse_trade(
     tick: &LseTick,
@@ -125,7 +126,7 @@ mod tests {
         UnixNanos::from(time.parse::<Timestamp>().unwrap())
     }
 
-    /// GOLD.F, the first tick captured: 2026-11-13 16:44:55.499567, bid 3888.0, ask 3888.2, price
+    /// GOLD.F is the first tick captured: 2026-11-13 16:44:55.499567, bid 3888.0, ask 3888.2, price
     /// 3888.0, volume 1.
     #[rstest]
     fn a_tick_is_a_quote_of_its_bid_and_ask_with_no_sizes_at_lse_s_time() {
@@ -154,8 +155,10 @@ mod tests {
         );
     }
 
-    /// The forms LSE's documentation gives of its feeds' times: commodities' with a space, forex
-    /// majors' to the nanosecond in Z, UK stocks' to the second.
+    /// Time forms from LSE's documentation:
+    /// - Commodities: with a space.
+    /// - Forex majors: to the nanosecond, in Z.
+    /// - UK stocks: to the second.
     #[rstest]
     #[case("2026-10-23 20:59:56.585500+00:00", "2026-10-23T20:59:56.5855Z")]
     #[case("2026-10-23T20:59:05.029000000Z", "2026-10-23T20:59:05.029Z")]
@@ -218,8 +221,8 @@ mod tests {
         )
     }
 
-    /// AAPL's 355 call, 1 contract at 6.70 at 2026-11-12 14:30:00.816861166, as LSE exported it:
-    /// its export's first tick has the same trade and id.
+    /// AAPL's 355 call traded 1 contract at 6.70 at 2026-11-12 14:30:00.816861166, as LSE exported
+    /// it. The first tick of the export has the same trade and id.
     #[rstest]
     fn an_option_tick_is_a_trade_of_its_price_and_volume_with_no_aggressor_at_lse_s_time() {
         let exported = parse_trade_slice(
@@ -247,8 +250,8 @@ mod tests {
         assert_eq!(exported.ts_event, trade.ts_event);
     }
 
-    /// Trades alike in time, price and size, as OPRA reports one order's fills, get distinct ids,
-    /// the same each time.
+    /// Trades with the same time, price and size get distinct ids, as OPRA reports one order's
+    /// fills. Each run gives the same ids.
     #[rstest]
     fn trades_alike_get_ids_of_their_own_and_the_same_ones_each_time() {
         let tick = option_tick(0);
@@ -264,8 +267,8 @@ mod tests {
         assert_eq!(ids, ids_of());
     }
 
-    /// Its volume is the trade's size, 0 on a quote (LSE's WebSocket documentation, "The tick"),
-    /// which Nautilus' trade cannot have.
+    /// The volume is the trade's size, and it is 0 on a quote (LSE's WebSocket documentation, "The
+    /// tick"). Nautilus' trade cannot have a size of 0.
     #[rstest]
     #[case::of_no_volume(None)]
     #[case::of_volume_zero(Some(0.0))]

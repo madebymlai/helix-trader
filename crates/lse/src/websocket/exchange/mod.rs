@@ -1,5 +1,6 @@
-//! LSE's exchange streams, CME Globex's and Nasdaq TotalView's: their messages (`messages`) and
-//! the client of one connection (`client`).
+//! LSE's exchange streams for CME Globex and Nasdaq TotalView.
+//!
+//! The `messages` module holds their messages, and `client` holds the client of one connection.
 
 pub mod client;
 pub mod messages;
