@@ -1,5 +1,4 @@
-//! The listings of CME contracts in LSE's catalogue, against the mock LSE peer replaying its
-//! captured answers.
+//! Listings of CME contracts in LSE's catalogue, against the mock LSE peer.
 
 use std::num::NonZeroU32;
 
@@ -35,7 +34,6 @@ fn contract(id: &str) -> CmeContract {
     CmeContract::from_instrument_id(InstrumentId::from(id), 2026).unwrap()
 }
 
-/// The symbols looked up, in order.
 fn looked_up(lse: &MockLse) -> Vec<String> {
     lse.calls()
         .iter()
@@ -85,8 +83,7 @@ async fn a_contract_not_listed_under_its_year_s_last_digit_is_looked_up_under_it
     assert_eq!(looked_up(&lse), ["NGZ6", "NGZ26"]);
 }
 
-/// ESZ36: LSE's ESZ6 names the contracts of 2016 and 2026, and its ESZ36 nothing (LSE's answer for
-/// a name it lists nothing under, captured for ESZ26).
+/// LSE's ESZ6 names the contracts of 2016 and 2026, its ESZ36 nothing (answer captured for ESZ26).
 #[tokio::test]
 async fn a_contract_lse_lists_under_neither_name_fails_naming_it_and_what_lse_lists() {
     let lse = MockLse::start(vec![Reply::json(PAIRS_ESZ6), Reply::json(PAIRS_ESZ26)]);
