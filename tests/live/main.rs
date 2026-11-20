@@ -1,23 +1,19 @@
-//! The end to end tests on real venues: one test binary, a module per venue
-//! run, each gated by its own variables and passing at once, saying it was
-//! skipped, without them. Run one module per process, by its path:
+//! The end to end tests on real venues: one test binary, a module per venue run, each gated by its
+//! own variables and passing at once, saying it was skipped, without them. Run one module per
+//! process, by its path:
 //!
 //! ```sh
 //! NAUTILUS_CTRADER_RUN=pepperstone cargo test --test live ctrader_demo:: -- --nocapture
 //! ```
 //!
-//! A module's tests share the process as they did when each module was its
-//! own binary; two modules opted in together would share it too, and they
-//! cannot: a node stops on the SIGINT its test sends to the whole process,
-//! the `tracing` subscriber `Live::run` installs can be installed only once
-//! per process, there is one node per process (`docs/architecture.md`,
-//! "Process constraints"), and modules of one venue read and trade the
-//! same account. So the first module to opt in claims the process
-//! (`claim_process`), and another module's test fails before connecting.
+//! Two modules opted in together would share a process, and they cannot: a node stops on the SIGINT
+//! its test sends to the whole process, the `tracing` subscriber `Live::run` installs can be
+//! installed only once per process, there is one node per process (`docs/architecture.md`, "Process
+//! constraints"), and modules of one venue read and trade the same account. So the first module to
+//! opt in claims the process (`claim_process`), and another module's test fails before connecting.
 //!
-//! `streaming` is the exception: hermetic and ungated, it runs its nodes in
-//! child processes, none in this one, so it claims nothing and runs beside
-//! any module.
+//! `streaming` is the exception: hermetic and ungated, it runs its nodes in child processes, none
+//! in this one, so it claims nothing and runs beside any module.
 
 use std::{cell::RefCell, path::Path, sync::OnceLock};
 
@@ -90,8 +86,8 @@ impl ActorIndicator for FedBars {
 /// The module whose gated tests run in this process.
 static CLAIMED: OnceLock<&'static str> = OnceLock::new();
 
-/// Claims the process for the gated tests of `module`, its
-/// `module_path!()`, once they are opted in.
+/// Claims the process for the gated tests of `module`, its `module_path!()`, once they are opted
+/// in.
 ///
 /// # Panics
 ///
@@ -105,9 +101,8 @@ fn claim_process(module: &'static str) {
     );
 }
 
-/// The venues' settings of a venue test's node from `flags`, the live
-/// command's venue flags, parsed as `live` parses them: the IB account
-/// falls back on `NAUTILUS_IB_ACCOUNT_ID`.
+/// The venue settings of a venue test's node from `flags`, the live command's venue flags, parsed
+/// as `live` parses them: the IB account falls back on `NAUTILUS_IB_ACCOUNT_ID`.
 fn venues(flags: &[&str]) -> LiveVenueArgs {
     let matches = LiveVenueArgs::augment_args(Command::new("live"))
         .try_get_matches_from(["live"].into_iter().chain(flags.iter().copied()))
@@ -115,8 +110,8 @@ fn venues(flags: &[&str]) -> LiveVenueArgs {
     LiveVenueArgs::from_arg_matches(&matches).unwrap()
 }
 
-/// The recording of a venue test's node: staged in `staging`, a directory
-/// of the test's own, promoted daily, as every node, and on its stop.
+/// The recording of a venue test's node: staged in `staging`, a directory of the test's own, and
+/// promoted daily, as every node's is, and on its stop.
 fn recording(staging: &Path) -> Recording {
     Recording {
         staging: staging.to_path_buf(),
