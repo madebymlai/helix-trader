@@ -1,6 +1,5 @@
-//! The module's seam: trades sent from a strategy registered without a node, its orders read
-//! from the cache, its fills played into the cache as the execution engine does, its time
-//! events from a virtual clock.
+//! The module's seam: a strategy registered without a node, its orders read from the cache, its
+//! fills played into the cache as the execution engine does, its time events from a virtual clock.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -44,7 +43,6 @@ const STRATEGY: &str = "ORDERS-001";
 const AUD: &str = "AUDUSD.PEPPERSTONE";
 /// AUD/USD on IDEALPRO, IB's venue, whose execution client takes neither.
 const IB_AUD: &str = "AUD/USD.IDEALPRO";
-/// AUD/USD at IC, a cTrader broker as Pepperstone is.
 const IC_AUD: &str = "AUDUSD.ICMARKETS";
 
 /// 2026-10-26T10:00:00Z.
@@ -60,7 +58,6 @@ nautilus_strategy!(Probe);
 
 impl DataActor for Probe {}
 
-/// A strategy `strategy` registered without a node on `cache` at `now`, and its clock.
 fn registered_on(
     cache: &Rc<RefCell<Cache>>,
     strategy: &str,
@@ -95,14 +92,10 @@ fn registered_on(
     (probe, clock)
 }
 
-/// A cache holding AUD/USD at Pepperstone and on IDEALPRO, each venue's margin account holding
-/// 100,000 USD.
 fn cache() -> Rc<RefCell<Cache>> {
     cache_holding("100000 USD")
 }
 
-/// A cache holding AUD/USD at Pepperstone and on IDEALPRO, each venue's margin account holding
-/// `balance`, its equity.
 fn cache_holding(balance: &str) -> Rc<RefCell<Cache>> {
     let cache = Rc::new(RefCell::new(Cache::default()));
     for aud in [aud(InstrumentId::from(AUD)), ib_aud()] {
@@ -114,20 +107,16 @@ fn cache_holding(balance: &str) -> Rc<RefCell<Cache>> {
     cache
 }
 
-/// The margin account `account` holding `balance`, none of it locked, its state calculated by
-/// Nautilus from its fills, as a backtest's simulated account's is.
 fn margin_account(account: AccountId, balance: &str) -> AccountAny {
     AccountAny::Margin(MarginAccount::new(margin_state(account, balance), true))
 }
 
-/// The margin account `account` holding `balance`, none of it locked, as its broker reports
-/// it: the cache keeps an execution client's account as its first reported state makes it
-/// (`Cache::update_account_state`), its state not calculated by Nautilus.
+/// The margin account `account` holding `balance`, as its broker reports it: the cache keeps an
+/// execution client's account as its first reported state makes it (`Cache::update_account_state`).
 fn reported_margin_account(account: AccountId, balance: &str) -> AccountAny {
     AccountAny::from(margin_state(account, balance))
 }
 
-/// A reported state of the margin account `account` holding `balance`, none of it locked.
 fn margin_state(account: AccountId, balance: &str) -> AccountState {
     let total = Money::from(balance);
     AccountState::new(
@@ -147,8 +136,6 @@ fn margin_state(account: AccountId, balance: &str) -> AccountState {
     )
 }
 
-/// AUD/USD at a cTrader broker as `id`, a CFD on 5 decimals and whole units, priced and sized
-/// as Nautilus' AUD/USD.
 fn aud(id: InstrumentId) -> InstrumentAny {
     let pair = audusd_sim();
     InstrumentAny::Cfd(
@@ -175,14 +162,12 @@ fn aud(id: InstrumentId) -> InstrumentAny {
     )
 }
 
-/// AUD/USD on IDEALPRO, IB's cash FX pair, on 5 decimals and whole units.
 fn ib_aud() -> InstrumentAny {
     let mut pair = audusd_sim();
     pair.id = InstrumentId::from(IB_AUD);
     InstrumentAny::CurrencyPair(pair)
 }
 
-/// The strategy on a cache of AUD/USD at `NOW`, and its clock.
 fn registered() -> (Probe, Rc<RefCell<VirtualClock>>) {
     registered_on(&cache(), STRATEGY, NOW)
 }
@@ -191,7 +176,6 @@ fn id(s: &str) -> ClientOrderId {
     ClientOrderId::from(s)
 }
 
-/// The ids of the trade of entry `entry`: `<entry>-TP`, `<entry>-SL`.
 fn ids(entry: &str) -> OrderIds {
     OrderIds {
         entry: id(entry),
@@ -204,25 +188,20 @@ fn decimal(s: &str) -> Decimal {
     s.parse().unwrap()
 }
 
-/// The stake the trades are sent at, unless a test says: 0.5% of equity, 500 USD of the
-/// accounts' 100,000.
+/// The stake the trades are sent at unless a test says: 0.5% of the accounts' 100,000 USD, 500 USD.
 fn stake() -> Stake {
     Stake::new("0.5%".parse().unwrap())
 }
 
-/// The rates of a config converting through no pair, which the trades are sent at unless a
-/// test says.
 fn unconverted() -> Rates {
     Conversions::default().rates()
 }
 
-/// The equity of the accounts of `cache`, which a trade named by its ids is sent at.
 fn equity() -> Money {
     Money::from("100000 USD")
 }
 
-/// A buy of AUD/USD set from 0.70150, one R of it 0.00500, the distance to the stop of
-/// `bracket`: at `stake`, 500 USD buys 100,000 AUD/USD.
+/// A buy set from 0.70150 with one R of 0.00500: 500 USD buys 100,000 AUD/USD.
 fn buy(exits: Exits) -> Trade {
     Trade::new(
         InstrumentId::from(AUD),
@@ -233,7 +212,6 @@ fn buy(exits: Exits) -> Trade {
     )
 }
 
-/// A take profit at 0.70700 and a stop loss at 0.69650, held `hours`.
 fn bracket(hours: i64) -> Exits {
     Exits {
         bracket: Some(Bracket {
@@ -244,7 +222,6 @@ fn bracket(hours: i64) -> Exits {
     }
 }
 
-/// No exit but a time limit of `hours`.
 fn held(hours: i64) -> Exits {
     Exits {
         bracket: None,
@@ -252,7 +229,6 @@ fn held(hours: i64) -> Exits {
     }
 }
 
-/// Plays the cached order `order` through its acceptance by the venue.
 fn accept(probe: &Probe, order: &str) {
     let cache = probe.cache_rc();
     let order = cache.borrow().order_owned(&id(order)).unwrap();
@@ -269,14 +245,12 @@ fn accept(probe: &Probe, order: &str) {
     }
 }
 
-/// Fills the cached order `order`, accepted, whole into `position` at `ts`, as `fill_of`.
 fn fill(probe: &Probe, order: &str, position: &str, ts: u64, oms: OmsType) {
     fill_of(probe, order, None, position, ts, oms);
 }
 
-/// Fills `quantity` of the cached order `order`, accepted, its whole quantity if none, into
-/// `position` at `ts`, as the execution engine does: the order, the order's position, the
-/// position, kept as `oms`; a closed position opened again as a new one under its id.
+/// Fills `quantity` (all if none) of the accepted order into `position` at `ts` as the execution
+/// engine does, kept as `oms`: a closed position opened again is a new one under its id.
 fn fill_of(
     probe: &Probe,
     order: &str,
@@ -328,7 +302,6 @@ fn fill_of(
     }
 }
 
-/// Sends `trade` named after `entry` from `probe` at `stake` and accepts its orders.
 fn sent(probe: &mut Probe, entry: &str, trade: Trade) {
     trade.send_at(probe, stake(), equity(), ids(entry)).unwrap();
     accept(probe, entry);
@@ -338,8 +311,7 @@ fn sent(probe: &mut Probe, entry: &str, trade: Trade) {
     }
 }
 
-/// Advances `clock` to `to` and hands each event fired to the module, the names of those it
-/// takes as its own.
+/// Advances `clock` to `to` and returns the names of the events the module takes as its own.
 fn advance(probe: &mut Probe, clock: &Rc<RefCell<VirtualClock>>, to: u64) -> Vec<String> {
     let events = clock.borrow_mut().advance_time(UnixNanos::from(to), true);
     events
@@ -349,8 +321,6 @@ fn advance(probe: &mut Probe, clock: &Rc<RefCell<VirtualClock>>, to: u64) -> Vec
         .collect()
 }
 
-/// The orders of the cache other than the trades' entries and legs (named `T-*`): the closes,
-/// each its side, quantity, whether reduce-only and a time close.
 fn closes(probe: &Probe) -> Vec<(OrderSide, Quantity, bool, bool)> {
     probe
         .cache()
@@ -372,19 +342,16 @@ fn status(probe: &Probe, order: &str) -> OrderStatus {
     probe.cache().order(&id(order)).unwrap().status()
 }
 
-/// When the clock holds the time alert of the trade of `entry`.
 fn alert(clock: &Rc<RefCell<VirtualClock>>, entry: &str) -> Option<UnixNanos> {
     clock.borrow().next_time_ns(&time_alert(id(entry)))
 }
 
-/// The time close of a long of 100,000 on its position.
 fn close() -> (OrderSide, Quantity, bool, bool) {
     (OrderSide::Sell, Quantity::from(100_000), true, true)
 }
 
-/// Its legs are reduce-only, and its take profit post-only, where the venue's live broker takes
-/// such orders: at Pepperstone, not on IB, whose execution client denies them. A stop is never
-/// post-only.
+/// Its legs are reduce-only and its take profit post-only where the venue's live broker takes such
+/// orders: Pepperstone, not IB, whose execution client denies them. A stop is never post-only.
 #[rstest]
 #[case::pepperstone(AUD, true, true)]
 #[case::ib(IB_AUD, false, false)]
@@ -450,7 +417,6 @@ fn a_trade_with_both_exits_is_a_bracket_its_legs_on_them(
     );
 }
 
-/// `trade` on AUD/USD on IDEALPRO.
 fn on_ib(trade: Trade) -> Trade {
     Trade {
         instrument_id: InstrumentId::from(IB_AUD),
@@ -458,8 +424,6 @@ fn on_ib(trade: Trade) -> Trade {
     }
 }
 
-/// The OCA group and type IB's execution client sends `order` in, its tags read as Nautilus' IB
-/// adapter reads them (`IBOrderTags`).
 fn oca_at_ib(order: &OrderAny) -> (String, OcaType) {
     let provider = InteractiveBrokersInstrumentProvider::new(
         InteractiveBrokersInstrumentProviderConfig::default(),
@@ -470,7 +434,6 @@ fn oca_at_ib(order: &OrderAny) -> (String, OcaType) {
     (sent.oca_group, sent.oca_type)
 }
 
-/// The orders of `probe`'s cache a bracket's entry is the parent of, its exits.
 fn exits(probe: &Probe) -> Vec<OrderAny> {
     orders(probe)
         .into_iter()
@@ -479,8 +442,8 @@ fn exits(probe: &Probe) -> Vec<OrderAny> {
 }
 
 /// IB links an API bracket's exits itself, in an OCA group named after the entry's permId that
-/// cancels the other exit when one fills (paper, 2026-11-14 and 2026-11-16): a trade on IB
-/// sends its exits in no OCA group of its own, and Nautilus' tags alone.
+/// cancels the other exit when one fills (paper, 2026-11-14 and 2026-11-16): a trade on IB sends
+/// its exits in no OCA group of its own, with Nautilus' tags alone.
 #[rstest]
 fn a_trade_on_ib_sends_its_exits_in_no_oca_group_of_its_own() {
     let (mut probe, _) = registered();
@@ -566,12 +529,10 @@ fn a_trade_without_a_bracket_is_one_market_entry() {
     );
 }
 
-/// The orders of `probe`'s cache.
 fn orders(probe: &Probe) -> Vec<OrderAny> {
     probe.cache().orders(None, None, None, None, None)
 }
 
-/// The quantity of the one entry `probe` sent, a market order.
 fn entry_quantity(probe: &Probe) -> Quantity {
     let orders = orders(probe);
     let [entry] = orders.as_slice() else {
@@ -580,9 +541,9 @@ fn entry_quantity(probe: &Probe) -> Quantity {
     entry.quantity()
 }
 
-/// 0.5% of 100,000 USD is 500 USD, and one R of 0.00360 is worth 0.0036 USD on one AUD/USD:
-/// 138,888.9 of it, rounded down to whole units, 138,888, which risk 499.9968 USD. Rounded to
-/// the nearest, 138,889, they would risk 500.0004 USD.
+/// 0.5% of 100,000 USD is 500 USD; one R of 0.00360 is 0.0036 USD per AUD/USD: 500 / 0.0036 =
+/// 138,888.9, rounded down to 138,888, which risk 499.9968 USD. Rounded to the nearest, 138,889
+/// would risk 500.0004 USD.
 #[rstest]
 fn a_trade_risks_its_stake_of_equity_over_its_one_r_rounded_down_to_its_size() {
     let (mut probe, _) = registered();
@@ -599,10 +560,10 @@ fn a_trade_risks_its_stake_of_equity_over_its_one_r_rounded_down_to_its_size() {
     assert_eq!(entry_quantity(&probe), Quantity::from(138_888));
 }
 
-/// One R of 0.0043215 from 0.70000 is no whole count of ticks: the stop of a buy, at 0.6956785,
-/// is sized at the tick below, 0.69567, 0.00433 away, and of a sell, at 0.7043215, at the tick
-/// above, 0.70433, so 500 USD buys 115,473, which risk 499.02 USD over one R. At the nearer
-/// ticks, 0.00432 away, 115,740 would risk 500.17 USD.
+/// One R of 0.0043215 from 0.70000 is no whole count of ticks: a buy's stop at 0.6956785 is sized
+/// at the tick below, 0.69567, 0.00433 away, a sell's at 0.7043215 at the tick above, 0.70433. 500
+/// / 0.00433 = 115,473, which risk 499.02 USD over one R. At the nearer ticks, 0.00432 away,
+/// 115,740 would risk 500.17 USD.
 #[rstest]
 #[case::buy(OrderSide::Buy)]
 #[case::sell(OrderSide::Sell)]
@@ -621,8 +582,7 @@ fn a_trade_is_sized_at_its_stop_on_the_tick_away_from_its_price(#[case] side: Or
     assert_eq!(entry_quantity(&probe), Quantity::from(115_473));
 }
 
-/// Its 100,000 AUD/USD are worth 500 USD over one R of 0.00500, and its stake is the config's,
-/// multiple 1: the bracket's entry carries both, beside its time limit.
+/// 100,000 AUD/USD are worth 500 USD over one R of 0.00500, at multiple 1.
 #[rstest]
 fn a_trades_entry_is_tagged_with_its_r_in_money_and_its_stakes_multiple() {
     let (mut probe, _) = registered();
@@ -640,9 +600,8 @@ fn a_trades_entry_is_tagged_with_its_r_in_money_and_its_stakes_multiple() {
     assert_eq!(time_limit(&entry), Some(SignedDuration::from_hours(4)));
 }
 
-/// 0.5% of 0.50 USD is 0.0025 USD, half of one AUD/USD's worth over one R: its size rounds down
-/// to none, and it sends nothing, no order and no time alert, and says why, naming the
-/// instrument, the stake and the equity.
+/// 0.5% of 0.50 USD is 0.0025 USD, half an AUD/USD's worth over one R: the size rounds down to
+/// none.
 #[rstest]
 fn a_trade_whose_size_rounds_to_none_sends_nothing_and_logs_why() {
     let name = "a_trade_whose_size_rounds_to_none_sends_nothing_and_logs_why";
@@ -669,8 +628,7 @@ fn a_trade_whose_size_rounds_to_none_sends_nothing_and_logs_why() {
     }
 }
 
-/// Pepperstone's account holds 100,000 EUR, and no USD, the currency of AUD/USD's P&L: the
-/// trade is not sized on EUR, and it sends nothing, saying so.
+/// Pepperstone's account holds 100,000 EUR and no USD, AUD/USD's P&L currency.
 #[rstest]
 fn a_trade_without_equity_in_its_pnl_currency_sends_nothing_and_logs_why() {
     let name = "a_trade_without_equity_in_its_pnl_currency_sends_nothing_and_logs_why";
@@ -695,10 +653,8 @@ fn a_trade_without_equity_in_its_pnl_currency_sends_nothing_and_logs_why() {
     );
 }
 
-/// The cache holds no account of Pepperstone yet, as before its execution client reports one:
-/// there is no equity to size the trade on, and it sends nothing, saying so as an error naming
-/// the instrument and the account, the one of Pepperstone, not warning that its size rounds
-/// down to zero.
+/// No account of Pepperstone is cached yet, as before its execution client reports one: the error
+/// names the instrument and the account, not a size rounding down to zero.
 #[rstest]
 fn a_trade_on_an_account_holding_no_equity_sends_nothing_and_logs_why() {
     let name = "a_trade_on_an_account_holding_no_equity_sends_nothing_and_logs_why";
@@ -728,12 +684,10 @@ fn a_trade_on_an_account_holding_no_equity_sends_nothing_and_logs_why() {
     );
 }
 
-/// EUR/USD at Pepperstone, the pair a config converts EUR through into USD, the P&L currency of
-/// AUD/USD: a CFD as AUD/USD at Pepperstone is, of EUR.
+/// EUR/USD at Pepperstone, the pair a config converts EUR through into USD, a CFD as AUD/USD is.
 const EURUSD: &str = "EURUSD.PEPPERSTONE";
 
-/// A cache as `cache_holding("100000 EUR")`, defining Pepperstone's EUR/USD too, of which it
-/// holds no quote yet.
+/// A cache as `cache_holding("100000 EUR")`, defining Pepperstone's EUR/USD with no quote yet.
 fn cache_converting() -> Rc<RefCell<Cache>> {
     let cache = cache_holding("100000 EUR");
     let InstrumentAny::Cfd(mut eurusd) = aud(InstrumentId::from(EURUSD)) else {
@@ -747,17 +701,13 @@ fn cache_converting() -> Rc<RefCell<Cache>> {
     cache
 }
 
-/// The rates of a config converting through Pepperstone's EUR/USD.
 fn through_eurusd() -> Rates {
     Conversions::new(vec![InstrumentId::from(EURUSD)]).rates()
 }
 
-/// Pepperstone's account holds 100,000 EUR, converted into USD through EUR/USD, whose first
-/// quote has not come yet, as at a live start: there is no rate, and the trade sends nothing,
-/// no order and no time alert, and says why, naming the instrument and, beside its id and the
-/// account's name, both of which hold Pepperstone, the currencies, EUR held and USD its P&L's,
-/// and the venue whose rates it lacks, Pepperstone: no client is routed to Pepperstone, so the
-/// account is named as the one of its venue.
+/// Pepperstone's account holds 100,000 EUR, converted through EUR/USD, whose first quote has not
+/// come yet, as at a live start. The message names the venue whose rates it lacks, Pepperstone: no
+/// client is routed to Pepperstone, so the account is named as its venue's.
 #[rstest]
 fn a_trade_sent_before_its_pairs_first_quote_sends_nothing_and_logs_why() {
     let name = "a_trade_sent_before_its_pairs_first_quote_sends_nothing_and_logs_why";
@@ -784,10 +734,10 @@ fn a_trade_sent_before_its_pairs_first_quote_sends_nothing_and_logs_why() {
     }
 }
 
-/// IB's account is issued under IB, not under IDEALPRO, the venue of the AUD/USD it trades, and
-/// the cache registers it for IB's execution client, the default client the live node routes
-/// IDEALPRO's orders to, as Nautilus' risk engine picks an order's account: the trade is sized
-/// on its 200,000 USD, 0.5% of it, 1,000 USD, over one R of 0.00500, 200,000 AUD/USD.
+/// IB's account is issued under IB, not IDEALPRO, the venue of the AUD/USD it trades, and the cache
+/// registers it for IB's execution client, the default client the live node routes IDEALPRO's
+/// orders to, as Nautilus' risk engine picks an order's account: the trade is sized on its 200,000
+/// USD, 0.5% of it, 1,000 USD, over one R of 0.00500, 200,000 AUD/USD.
 #[rstest]
 fn a_trade_is_sized_on_the_account_of_the_client_its_venue_routes_to() {
     let cache = Rc::new(RefCell::new(Cache::default()));
@@ -812,9 +762,8 @@ fn a_trade_is_sized_on_the_account_of_the_client_its_venue_routes_to() {
     assert_eq!(entry_quantity(&probe), Quantity::from(200_000));
 }
 
-/// A cache holding `instrument`, its venue routed to the execution client `client`, whose
-/// account `account` holds 200,000 USD and a long of 1,000,000 of it bought at 0.70000, bid at
-/// 0.72000 now: 20,000 USD of open P&L.
+/// A cache of `instrument`, routed to `client`, whose account `account` holds 200,000 USD and a
+/// long of 1,000,000 bought at 0.70000, bid at 0.72000: 20,000 USD of open P&L.
 fn holding_open_pnl(
     instrument: &InstrumentAny,
     client: &str,
@@ -863,8 +812,6 @@ fn holding_open_pnl(
     cache
 }
 
-/// The quantity a buy of `instrument_id` set from 0.70150, one R of it 0.00500, is sent at from
-/// `cache`: at the 0.5% stake, one AUD/USD for each USD of the equity it is sized on.
 fn sized_from(cache: &Rc<RefCell<Cache>>, instrument_id: InstrumentId) -> Quantity {
     let (mut probe, _) = registered_on(cache, STRATEGY, NOW);
     let trade = Trade {
@@ -875,13 +822,12 @@ fn sized_from(cache: &Rc<RefCell<Cache>>, instrument_id: InstrumentId) -> Quanti
     entry_quantity(&probe)
 }
 
-/// An account holding 200,000 USD and an open position's 20,000 USD of P&L. IB reports its net
-/// liquidation as the account's balance, which holds that P&L already: the trade is sized on
-/// the 200,000 USD it reports, 200,000 AUD/USD, not on 220,000 USD with that P&L counted again.
-/// A cTrader broker reports its account's balance without its open positions, and a backtest
-/// simulates IB's account, its balance calculated by Nautilus from its fills and holding no
-/// open P&L, whatever IB reports live: the trade is sized on the balance and the P&L, 220,000
-/// AUD/USD.
+/// The account holds 200,000 USD and an open position's 20,000 USD of P&L. IB reports its net
+/// liquidation as the balance, which holds that P&L already: the trade is sized on the 200,000
+/// reported, 200,000 AUD/USD, not on 220,000 with the P&L counted again. A cTrader broker reports
+/// its balance without open positions, and a backtest simulates IB's account with its balance
+/// calculated from fills, holding no open P&L, whatever IB reports live: both are sized on balance
+/// plus P&L, 220,000 AUD/USD.
 #[rstest]
 #[case::reported_by_ib(
     ib_aud(),
@@ -914,16 +860,12 @@ fn a_trade_is_sized_on_its_open_pnl_counted_once(
     assert_eq!(sized, quantity);
 }
 
-/// IB's EUR/USD on IDEALPRO, the pair a config on IB converts EUR through into USD: Nautilus'
-/// FX pair, of EUR.
 const IB_EURUSD: &str = "EUR/USD.IDEALPRO";
 
-/// The rates of a config converting through IB's EUR/USD.
 fn through_ib_eurusd() -> Rates {
     Conversions::new(vec![InstrumentId::from(IB_EURUSD)]).rates()
 }
 
-/// `cache` defining IB's EUR/USD too, none of its quotes or bars cached.
 fn defining_ib_eurusd(cache: &Rc<RefCell<Cache>>) {
     let mut pair = audusd_sim();
     pair.id = InstrumentId::from(IB_EURUSD);
@@ -934,10 +876,10 @@ fn defining_ib_eurusd(cache: &Rc<RefCell<Cache>>) {
         .unwrap();
 }
 
-/// An account without a base currency holds each currency apart: 100,000 EUR, and the open
-/// long's 20,000 USD of P&L. IB's EUR/USD quoted 1.24990 / 1.25010, its mid 1.25, the trade is
-/// sized on both, converted and summed: 145,000 USD, 0.5% of it, 725 USD, over one R of
-/// 0.00500, 145,000 AUD/USD. On the EUR alone it would be 125,000, on the P&L alone 20,000.
+/// An account without a base currency holds each currency apart: 100,000 EUR and the open long's
+/// 20,000 USD of P&L. With IB's EUR/USD quoted 1.24990 / 1.25010, mid 1.25, they are 125,000 and
+/// 20,000 USD, 145,000 summed; 0.5% is 725 USD, over one R of 0.00500, 145,000 AUD/USD. On the EUR
+/// alone it would be 125,000, on the P&L alone 20,000.
 #[rstest]
 fn a_trade_on_an_account_without_a_base_currency_is_sized_on_each_currency_converted_and_summed() {
     let account = margin_account(AccountId::from("IDEALPRO-001"), "100000 EUR");
@@ -990,9 +932,8 @@ fn an_inverse_instrument_is_refused_naming_it() {
     refuse_inverse(&probe, InstrumentId::from(AUD)).unwrap();
 }
 
-/// A dataset run's trade is sized at its balance, not at the account's equity: 0.5% of 40,000
-/// USD, 200 USD, over one R of 0.00500 buys 40,000 AUD/USD, where the account's 100,000 USD
-/// would buy 100,000.
+/// 0.5% of 40,000 USD is 200 USD, over one R of 0.00500 buys 40,000 AUD/USD, where the account's
+/// 100,000 USD would buy 100,000.
 #[rstest]
 fn a_trade_sent_at_an_equity_is_sized_on_it_not_on_the_accounts() {
     let (mut probe, _) = registered();
@@ -1012,8 +953,8 @@ fn a_trade_sent_at_an_equity_is_sized_on_it_not_on_the_accounts() {
     );
 }
 
-/// What sending sizes it at, without sending: 0.5% of 100,000 USD over one R of 0.00500 is
-/// 100,000 AUD/USD, whose R is 500 USD; of 0.50 USD, none, whose R is none.
+/// 0.5% of 100,000 USD over one R of 0.00500 is 100,000 AUD/USD, whose R is 500 USD; of 0.50 USD,
+/// none, whose R is none.
 #[rstest]
 #[case::of_the_accounts_equity("100000 USD", 100_000, "500 USD")]
 #[case::of_too_little("0.50 USD", 0, "0 USD")]
@@ -1034,8 +975,7 @@ fn a_trades_size_and_its_r_are_those_it_is_sent_at(
     assert_eq!(risked, Money::from(r));
 }
 
-/// Sent at 10:00 and held 4 hours: its alert is the module's at 14:00, not a nanosecond
-/// earlier.
+/// Sent at 10:00 and held 4 hours: its alert is at 14:00, not a nanosecond earlier.
 #[rstest]
 fn a_trades_time_limit_runs_from_its_send() {
     let (mut probe, clock) = registered();
@@ -1071,10 +1011,9 @@ fn another_time_event_is_not_the_modules() {
     assert!(advance(&mut probe, &clock, NOW + MINUTE).is_empty());
 }
 
-/// Filled into its position, on a hedging venue at Pepperstone or a netting one on IB, neither
-/// leg filled: at its time the legs are cancelled and its position closed by a market sell of
-/// its 100,000, a time close, reduce-only but on IB, whose execution client denies a
-/// reduce-only order.
+/// Filled into its position on a hedging venue (Pepperstone) or a netting one (IB), neither leg
+/// filled: at its time the legs are cancelled and the position closed by a market sell of its
+/// 100,000, a time close, reduce-only except on IB, whose execution client denies it.
 #[rstest]
 #[case::pepperstone(AUD, OmsType::Hedging, true)]
 #[case::ib(IB_AUD, OmsType::Netting, false)]
@@ -1101,9 +1040,8 @@ fn at_its_time_an_open_trade_is_closed_and_its_legs_cancelled(
     );
 }
 
-/// A dataset run purges closed orders a minute after they close (Nautilus'
-/// `purge_closed_orders`), the filled entry with them: its open legs and its open position
-/// still end the trade at its time.
+/// A dataset run purges closed orders a minute after they close (Nautilus' `purge_closed_orders`),
+/// the filled entry with them: the open legs and open position still end the trade at its time.
 #[rstest]
 fn at_its_time_a_trade_its_filled_entry_purged_is_closed_and_its_legs_cancelled() {
     let (mut probe, clock) = registered();
@@ -1133,8 +1071,8 @@ fn at_its_time_an_unfilled_entry_is_cancelled_and_nothing_closed() {
     assert_eq!(closes(&probe), []);
 }
 
-/// On a netting venue two trades, sent at 10:00 and 10:30, add into one position: the first's
-/// time closes it whole, 200,000, and the second's then finds it closed.
+/// On a netting venue two trades sent at 10:00 and 10:30 add into one 200,000 position, which the
+/// first's time closes whole and the second's then finds closed.
 #[rstest]
 fn on_a_netting_venue_a_trades_time_closes_the_position_with_the_trades_it_holds() {
     let (mut probe, clock) = registered();
@@ -1168,8 +1106,6 @@ fn on_a_netting_venue_a_trades_time_closes_the_position_with_the_trades_it_holds
     );
 }
 
-/// On a netting venue the first of two trades in the position ended at its stop loss: its time
-/// closes nothing, the second's closes the position, its 100,000 left.
 #[rstest]
 fn a_trade_its_leg_ended_is_not_closed_at_its_time() {
     let (mut probe, clock) = registered();
@@ -1192,9 +1128,6 @@ fn a_trade_its_leg_ended_is_not_closed_at_its_time() {
     assert_eq!(closes(&probe), [close()]);
 }
 
-/// Its take profit filled 40,000 of its 100,000 on a hedging venue: the trade is not ended, a
-/// leg closed alone ends it, so at its time the legs are cancelled and its position, the 60,000
-/// left, closed.
 #[rstest]
 fn a_trade_its_leg_partly_filled_is_closed_at_its_time() {
     let (mut probe, clock) = registered();
@@ -1219,8 +1152,6 @@ fn a_trade_its_leg_partly_filled_is_closed_at_its_time() {
     );
 }
 
-/// On a netting venue the first trade's position closed at 10:20 by another order and opened
-/// again by a third trade at 10:30: the first's time leaves the third's position open.
 #[rstest]
 fn a_trade_whose_position_closed_and_opened_again_is_not_closed_at_its_time() {
     let (mut probe, clock) = registered();
@@ -1247,8 +1178,7 @@ fn a_trade_whose_position_closed_and_opened_again_is_not_closed_at_its_time() {
     assert_eq!(closes(&probe), []);
 }
 
-/// Trades sent at 05:00 and 09:40, each into a position of its own, held 4 hours, as a restart
-/// at 10:00 finds them in the cache.
+/// Trades sent at 05:00 and 09:40, each in a position of its own, held 4 hours.
 fn before_a_restart(cache: &Rc<RefCell<Cache>>) {
     let (mut before, clock) = registered_on(cache, STRATEGY, NOW - 300 * MINUTE);
     sent(&mut before, "T-1", buy(bracket(4)));
@@ -1260,8 +1190,8 @@ fn before_a_restart(cache: &Rc<RefCell<Cache>>) {
     fill(&before, "T-2", "P-2", NOW - 19 * MINUTE, OmsType::Hedging);
 }
 
-/// The trade sent 20 minutes before the restart, filled a minute later, is closed 3 hours 40
-/// minutes after it, 4 hours after its send; the one sent 5 hours before at once.
+/// Sent 20 minutes before the restart and filled a minute later, it is closed 3 hours 40 minutes
+/// after the restart, 4 hours after its send; the one sent 5 hours before is closed at once.
 #[rstest]
 fn a_restart_sets_each_open_trades_time_again_from_its_send() {
     let cache = cache();
@@ -1277,7 +1207,6 @@ fn a_restart_sets_each_open_trades_time_again_from_its_send() {
     );
 }
 
-/// The trade whose 4 hours are over at the restart is closed at once.
 #[rstest]
 fn a_trade_open_at_a_restart_is_closed_at_its_time() {
     let cache = cache();
@@ -1318,8 +1247,6 @@ fn a_restart_sets_no_time_for_a_trade_without_a_time_limit() {
     assert_eq!(clock.borrow().timer_names(), Vec::<&str>::new());
 }
 
-/// On a netting venue two trades, sent 50 and 20 minutes before the restart, in one position:
-/// each its own time again.
 #[rstest]
 fn a_restart_sets_the_time_of_each_trade_in_a_netting_position_again() {
     let cache = cache();
@@ -1345,8 +1272,6 @@ fn a_restart_sets_the_time_of_each_trade_in_a_netting_position_again() {
     );
 }
 
-/// The first of two trades in a netting position ended at its stop loss before the restart: the
-/// second's time alone is set again.
 #[rstest]
 fn a_restart_sets_no_time_for_a_trade_its_leg_ended() {
     let cache = cache();
@@ -1376,8 +1301,6 @@ fn a_restart_sets_no_time_for_a_trade_its_leg_ended() {
     );
 }
 
-/// A trade sent 20 minutes before the restart, its take profit since filled 40,000 of its
-/// 100,000: still open, its time is set again.
 #[rstest]
 fn a_restart_sets_the_time_of_a_trade_its_leg_partly_filled_again() {
     let cache = cache();
@@ -1402,8 +1325,6 @@ fn a_restart_sets_the_time_of_a_trade_its_leg_partly_filled_again() {
     );
 }
 
-/// A trade sent 20 minutes before the restart, its entry still unfilled: its time is set
-/// again, 4 hours after its send.
 #[rstest]
 fn a_restart_sets_the_time_of_an_unfilled_entry_again() {
     let cache = cache();
@@ -1419,8 +1340,6 @@ fn a_restart_sets_the_time_of_an_unfilled_entry_again() {
     );
 }
 
-/// A trade sent 20 minutes before the restart, its entry filled 40,000 of its 100,000, open as
-/// an order and held by a position: its time is set again.
 #[rstest]
 fn a_restart_sets_the_time_of_a_partly_filled_entry_again() {
     let cache = cache();
@@ -1444,8 +1363,6 @@ fn a_restart_sets_the_time_of_a_partly_filled_entry_again() {
     );
 }
 
-/// The first trade's netting position closed 30 minutes before the restart, inside its 4
-/// hours, and opened again by a later trade: the later trade's time alone is set again.
 #[rstest]
 fn a_restart_sets_no_time_for_a_trade_whose_position_closed_since() {
     let cache = cache();
