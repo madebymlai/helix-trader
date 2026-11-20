@@ -1,11 +1,8 @@
-//! IC Markets' gold on its tick quotes (`common::ic`). A recorder on the
-//! hour MID bars Nautilus builds from them buys the maximum on its first
-//! bar and closes that position by its id on the second, as on IC's
-//! hedging venue a sell would open a position of its own: each order fills
-//! whole at the ask, or the bid, of the last quote before the bar's close,
-//! IC's commission of 30 USD per million is charged on each fill's value,
-//! and the report shows the spread paid. One node per thread, so one run
-//! per test.
+//! IC Markets' gold on its tick quotes (`common::ic`). A recorder on the hour MID bars Nautilus
+//! builds from them buys the maximum on its first bar and closes that position by its id on the
+//! second, as a sell on IC's hedging venue would open a position of its own. Each order fills whole
+//! at the ask, or the bid, of the last quote before the bar's close, IC's commission of 30 USD per
+//! million is charged on each fill's value, and the report shows the spread paid.
 
 use helix_trader::backtest::report;
 use jiff::Timestamp;
@@ -33,9 +30,10 @@ fn ic_gold_quotes_fill_orders_at_the_ask_and_the_bid_and_report_the_spread() {
     let outcome = backtest.run(recorder.closing_on(vec![1])).unwrap();
 
     let record = record.borrow();
-    // The run starts at 09:00, so the first hour bar closes at 10:00. Each order fills whole, in one fill, at its bar's close: the
-    // buy at the ask of the last quote before 10:00, the close at the bid of
-    // the last before 11:00.
+
+    // The run starts at 09:00, so the first hour bar closes at 10:00. Each order fills in one fill
+    // at its bar's close: the buy at the ask of the last quote before 10:00, the close at the bid
+    // of the last before 11:00.
     let fills: Vec<_> = record
         .fills
         .iter()
@@ -53,11 +51,10 @@ fn ic_gold_quotes_fill_orders_at_the_ask_and_the_bid_and_report_the_spread() {
     };
     assert!(position.is_closed(), "{position:?}");
 
-    // 10,000 oz bought at 4006.10 (40,061,000 USD) and sold at 4011.90
-    // (40,119,000 USD), charged 30 per million: 1,201.83 and 1,203.57.
-    // Each paid half its quote's spread on 10,000 oz: 0.10 (spread 0.20)
-    // and 0.125 (spread 0.25), 1,000 and 1,250 USD. The gross PnL is the
-    // mids' move, 4006.00 to 4012.025, on 10,000 oz: 60,250 USD.
+    // 10,000 oz bought at 4006.10 (40,061,000 USD) and sold at 4011.90 (40,119,000 USD), charged 30
+    // per million: 1,201.83 and 1,203.57. Each paid half its quote's spread on 10,000 oz: 0.10
+    // (spread 0.20) and 0.125 (spread 0.25), 1,000 and 1,250 USD. The gross PnL is the mids' move,
+    // 4006.00 to 4012.025, on 10,000 oz: 60,250 USD.
     let costs = "
 Costs (USD)
   Commission: 2405.400000

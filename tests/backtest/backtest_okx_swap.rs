@@ -1,11 +1,9 @@
-//! An OKX swap on 1-minute candles: BTC-USDT-SWAP.OKX, a `CryptoPerpetual`
-//! of 0.01 BTC a contract settled in USDT, with the margins of 1
-//! `fill-catalog` gives it, and its minute bars stamped as `fill-catalog`
-//! stores OKX's candles: `ts_event` at the minute's open, `ts_init` at its
-//! close. A recorder on the hour bars Nautilus builds from them (a composite
-//! bar type) gets each hour bar holding the minutes opening in its hour;
-//! a run on the candles alone, with no quote, reports no spread. One node
-//! per thread, so one run per test.
+//! An OKX swap on 1-minute candles: BTC-USDT-SWAP.OKX, a `CryptoPerpetual` of 0.01 BTC a contract
+//! settled in USDT, with the margins of 1 `fill-catalog` gives it, and its minute bars stamped as
+//! `fill-catalog` stores OKX's candles: `ts_event` at the minute's open, `ts_init` at its close. A
+//! recorder on the hour bars Nautilus builds from them (a composite bar type) gets each hour bar
+//! holding the minutes opening in its hour; a run on the candles alone, with no quote, reports no
+//! spread.
 
 use std::path::Path;
 
@@ -30,8 +28,8 @@ const INSTRUMENT_ID: &str = "BTC-USDT-SWAP.OKX";
 const MINUTE_BARS: &str = "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL";
 const HOUR_BARS: &str = "BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL";
 
-/// How long after its close the node builds an hour bar of minute bars,
-/// and stamps it: 5 s, as a live node waits for the last minute.
+/// How long after its close the node builds an hour bar of minute bars, and stamps it: 5 s, as a
+/// live node waits for the last minute.
 const BUILT_AFTER: SignedDuration = SignedDuration::from_secs(5);
 
 /// `hh:mm` UTC on Wednesday 7 January 2026.
@@ -39,8 +37,8 @@ fn at(hh_mm: &str) -> Timestamp {
     ts(&format!("2026-01-07T{hh_mm}:00Z"))
 }
 
-/// BTC-USDT-SWAP as OKX defines it: price tick 0.1, lot 0.01 contracts,
-/// 0.01 BTC a contract, with initial and maintenance margins of 1.
+/// BTC-USDT-SWAP as OKX defines it: price tick 0.1, lot 0.01 contracts, 0.01 BTC a contract, with
+/// initial and maintenance margins of 1.
 fn instrument() -> InstrumentAny {
     InstrumentAny::CryptoPerpetual(
         CryptoPerpetual::builder()
@@ -66,12 +64,11 @@ fn instrument() -> InstrumentAny {
     )
 }
 
-/// The minute bar opening at `open`, the k-th minute after 08:00: it
-/// opens at 100,000 plus k tenths, its high is 2 above, its low 1 below,
-/// its close 0.5 above, 500 contracts. The minute opening at 08:59 has its
-/// low 50 lower, the one opening at 10:00 its high 50 higher, so that a
-/// minute in the wrong hour shows. Stamped as `fill-catalog` stores OKX's
-/// candles: `ts_event` at the open, `ts_init` at the close.
+/// The minute bar opening at `open`, the k-th minute after 08:00: it opens at 100,000 plus k
+/// tenths, its high is 2 above, its low 1 below, its close 0.5 above, 500 contracts. The minute
+/// opening at 08:59 has its low 50 lower, the one opening at 10:00 its high 50 higher, so that a
+/// minute in the wrong hour shows. Stamped as `fill-catalog` stores OKX's candles: `ts_event` at
+/// the open, `ts_init` at the close.
 fn minute_bar(open: Timestamp) -> Bar {
     let k = open.duration_since(at("08:00")).as_mins();
     let first = 100_000.0 + 0.1 * k as f64;
@@ -101,9 +98,8 @@ fn minute_bars(from: Timestamp, to: Timestamp) -> Vec<Bar> {
     bars
 }
 
-/// The hour bar closing at `close`, worked out here: the minutes opening
-/// in `[close − 1 h, close)`, or from `from` if later, stamped
-/// `BUILT_AFTER` its close.
+/// The hour bar closing at `close`, worked out here: the minutes opening in `[close − 1 h, close)`,
+/// or from `from` if later, stamped `BUILT_AFTER` its close.
 fn hour_bar(close: Timestamp, from: Timestamp) -> Ohlc {
     let minutes = minute_bars(from.max(close - SignedDuration::from_hours(1)), close);
     let high = minutes.iter().map(|bar| bar.high).max().unwrap();
@@ -112,8 +108,8 @@ fn hour_bar(close: Timestamp, from: Timestamp) -> Ohlc {
     (close + BUILT_AFTER, first.open, high, low, last.close)
 }
 
-/// A catalog in `dir` of the instrument and its minute bars opening from
-/// 08:00 to 10:59, stored over `[08:00, 11:00]`.
+/// A catalog in `dir` of the instrument and its minute bars opening from 08:00 to 10:59, stored
+/// over `[08:00, 11:00]`.
 fn catalog(dir: &Path) {
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     catalog.write_instruments(vec![instrument()]).unwrap();
@@ -152,13 +148,11 @@ fn each_hour_bar_of_okx_candles_holds_the_minutes_opening_in_its_hour() {
 
     backtest(dir.path()).run(recorder).unwrap();
 
-    // The run starts at 08:30: the first bar replayed is the minute opening
-    // 08:29, stamped (`ts_init`) at its close, 08:30, so the hour bar
-    // closing 09:00 holds the minutes opening from 08:29. Each hour bar
-    // holds the minutes opening in its hour, built 5 s after its close:
-    // 09:00 has the minute opening 08:59, 10:00 has 09:00 to 09:59, not the
-    // minute opening at 10:00, and 11:00, built before the run's end, has
-    // 10:00 to 10:59.
+    // The run starts at 08:30: the first bar replayed is the minute opening 08:29, stamped
+    // (`ts_init`) at its close, 08:30, so the hour bar closing 09:00 holds the minutes opening from
+    // 08:29. Each hour bar holds the minutes opening in its hour, built 5 s after its close: 09:00
+    // has the minute opening 08:59, 10:00 has 09:00 to 09:59, not the minute opening at 10:00, and
+    // 11:00, built before the run's end, has 10:00 to 10:59.
     let replay: Vec<_> = record.borrow().bars.iter().map(ohlc).collect();
     assert_eq!(
         replay,
@@ -172,8 +166,7 @@ fn each_hour_bar_of_okx_candles_holds_the_minutes_opening_in_its_hour() {
     assert_eq!(replay[2].2, Price::from("100064.0"));
 }
 
-/// A buy on the first hour bar fills on a candle, with no quote to measure
-/// a spread on.
+/// A buy on the first hour bar fills on a candle, with no quote to measure a spread on.
 #[rstest]
 fn a_run_on_candles_alone_reports_its_spread_as_not_applicable() {
     let dir = tempfile::tempdir().unwrap();

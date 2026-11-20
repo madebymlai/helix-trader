@@ -1,21 +1,15 @@
-//! A strategy reading LSE's daily bond yields (`lse::LseRow`), a custom
-//! series of its config's `[data] series` under the identifier
-//! `TREASURY-10Y`, which it chooses, not the symbol, and filled
-//! into the catalog under it through fill-catalog's node fill from a mock
-//! LSE peer replaying a
-//! captured export (`lse::testing`): US10Y's rows of 9, 10 and 12 November
-//! 2026, each stamped at its date's end, when its close is known. The
-//! backtest declares the series by the config's data type, unchanged,
-//! beside IC's gold (`common::ic`), the run's venue, and replays the rows
-//! of its window to the strategy, each of the data type it is subscribed
-//! to, when it is known: to one whose subscriptions
-//! (`strategy::subscriptions`) subscribe it, as a strategy's do; and a raw
-//! feature of a model's features over the series reads each row from
-//! Nautilus' cache. The fill and the run each on a thread of its own, one
-//! node per thread. A config naming that identifier with other metadata
-//! fails the run naming both data types, before a probe subscribing itself
-//! to the stored rows' data type gets any, rather than replay rows under a
-//! data type its strategy is not subscribed to.
+//! A strategy reading LSE's daily bond yields (`lse::LseRow`), a custom series of its config's
+//! `[data] series` under the identifier `TREASURY-10Y`, which it chooses, not the symbol, and
+//! filled into the catalog under it through fill-catalog's node fill from a mock LSE peer replaying
+//! a captured export (`lse::testing`): US10Y's rows of 9, 10 and 12 November 2026, each stamped at
+//! its date's end, when its close is known. The backtest declares the series by the config's data
+//! type, unchanged, beside IC's gold (`common::ic`), the run's venue, and replays the rows of its
+//! window to the strategy, each of the data type it is subscribed to, when it is known: to one
+//! whose subscriptions (`strategy::subscriptions`) subscribe it, as a strategy's do; and a raw
+//! feature of a model's features over the series reads each row from Nautilus' cache. A config
+//! naming that identifier with other metadata fails the run naming both data types, before a probe
+//! subscribing itself to the stored rows' data type gets any, rather than replay rows under a data
+//! type its strategy is not subscribed to.
 
 use std::{cell::RefCell, path::Path, rc::Rc};
 
@@ -78,10 +72,9 @@ impl Part for Reader {
 /// The identifier the config keys the series by, not its symbol.
 const TREASURY: &str = "TREASURY-10Y";
 
-/// The daily bond yields of `symbol` as a config declares them, under the
-/// identifier `TREASURY`: the one custom series of its `[data] series`,
-/// loaded after registering the custom data types helix compiles, as the
-/// process does at its start.
+/// The daily bond yields of `symbol` as a config declares them, under the identifier `TREASURY`:
+/// the one custom series of its `[data] series`, loaded after registering the custom data types
+/// helix compiles, as the process does at its start.
 fn declared(symbol: &str) -> CustomSeries {
     venues::register_custom_data();
     let config: StandardConfig<Reader> = StandardConfig::load(&format!(
@@ -109,8 +102,7 @@ fn us10y() -> CustomSeries {
     declared("US10Y")
 }
 
-/// The data type of US10Y's daily bond yields under `TREASURY`, as
-/// Nautilus builds it.
+/// The data type of US10Y's daily bond yields under `TREASURY`, as Nautilus builds it.
 fn us10y_type() -> DataType {
     let metadata = Params::new(
         [
@@ -122,10 +114,9 @@ fn us10y_type() -> DataType {
     DataType::new("LseRow", Some(metadata), Some(TREASURY.to_string()))
 }
 
-/// Fills the catalog in `dir` with `us10y()` over the rows of the
-/// captured days, known from the 10th's 00:00 to the 13th's, from the mock
-/// LSE peer, as fill-catalog does: what the catalog lacks, asked of LSE's
-/// client through the node, on the 16th, after LSE loaded them.
+/// Fills the catalog in `dir` with `us10y()` over the rows of the captured days, known from the
+/// 10th's 00:00 to the 13th's, from the mock LSE peer, as fill-catalog does: what the catalog
+/// lacks, asked of LSE's client through the node, on the 16th, after LSE loaded them.
 fn fill_bond_yields(dir: &Path) {
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     let requests = missing_custom(
@@ -159,8 +150,8 @@ fn fill_bond_yields(dir: &Path) {
         .unwrap();
 }
 
-/// What the probe got: each row's data type, time and close, and the time
-/// of the run when it got it.
+/// What the probe got: each row's data type, time and close, and the time of the run when it got
+/// it.
 type Got = (DataType, UnixNanos, Value, UnixNanos);
 
 /// What a strategy got of `data`, a row, at `now`.
@@ -209,8 +200,8 @@ impl DataActor for Probe {
     }
 }
 
-/// Starts its subscriptions at its start, as a strategy does, subscribing
-/// to nothing itself, and records each row it gets.
+/// Starts its subscriptions at its start, as a strategy does, subscribing to nothing itself, and
+/// records each row it gets.
 #[derive(Debug)]
 struct Subscribed {
     core: StrategyCore,
@@ -234,8 +225,8 @@ impl DataActor for Subscribed {
     }
 }
 
-/// The catalog filled with `us10y()` (`fill_bond_yields`) and a backtest
-/// on it from the 12th's 00:00 to noon on the 13th declaring the series.
+/// The catalog filled with `us10y()` (`fill_bond_yields`) and a backtest on it from the 12th's
+/// 00:00 to noon on the 13th declaring the series.
 fn bond_yields_backtest() -> (tempfile::TempDir, Backtest) {
     let catalog = ic::catalog();
     let dir = catalog.path().to_path_buf();
@@ -251,12 +242,11 @@ fn bond_yields_backtest() -> (tempfile::TempDir, Backtest) {
     (catalog, backtest)
 }
 
-/// The catalog holds the 10-year yields under `TREASURY`; a config naming
-/// that identifier with the 2-year's metadata would replay them under the
-/// 10-year's data type, which its strategy is not subscribed to, so that it
-/// would get nothing, and fill-catalog would find nothing missing: the run
-/// fails before it starts, naming both, and the probe, subscribed to the
-/// 10-year's data type, gets none of them.
+/// The catalog holds the 10-year yields under `TREASURY`; a config naming that identifier with the
+/// 2-year's metadata would replay them under the 10-year's data type, which its strategy is not
+/// subscribed to, so that it would get nothing, and fill-catalog would find nothing missing: the
+/// run fails before it starts, naming both, and the probe, subscribed to the 10-year's data type,
+/// gets none of them.
 #[rstest]
 fn a_backtest_of_rows_stored_under_other_metadata_fails_naming_both() {
     let (_catalog, backtest) = bond_yields_backtest();
@@ -284,13 +274,11 @@ fn a_backtest_of_rows_stored_under_other_metadata_fails_naming_both() {
     assert_eq!(replayed, []);
 }
 
-/// A strategy's subscriptions of the backtest's custom series, as a
-/// strategy builds them of its data requirements
-/// (`DataRequirements::custom`), subscribe it to the series: its `on_data`
-/// gets the 12th's close at the 13th's 00:00, when the day it closes has
-/// ended, and at no time of the 12th, though it subscribes to nothing
-/// itself; the 10th's, known at the 11th's 00:00, before the run, does not
-/// reach it.
+/// A strategy's subscriptions of the backtest's custom series, as a strategy builds them of its
+/// data requirements (`DataRequirements::custom`), subscribe it to the series: its `on_data` gets
+/// the 12th's close at the 13th's 00:00, when the day it closes has ended, and at no time of the
+/// 12th, though it subscribes to nothing itself; the 10th's, known at the 11th's 00:00, before the
+/// run, does not reach it.
 #[rstest]
 fn a_strategy_gets_a_custom_series_through_its_subscriptions() {
     let (_catalog, backtest) = bond_yields_backtest();
@@ -312,9 +300,8 @@ fn a_strategy_gets_a_custom_series_through_its_subscriptions() {
     assert_eq!(got, [(us10y_type(), thirteenth, json!(5.133), thirteenth)]);
 }
 
-/// Registers a raw feature on the 10-year yields' closes at its start,
-/// subscribes to them, and records the feature's values at each row it
-/// gets.
+/// Registers a raw feature on the 10-year yields' closes at its start, subscribes to them, and
+/// records the feature's values at each row it gets.
 #[derive(Debug)]
 struct Featured {
     core: StrategyCore,
@@ -337,9 +324,9 @@ impl DataActor for Featured {
     }
 }
 
-/// A model's raw feature over the custom series reads the 12th's close,
-/// replayed at the 13th's 00:00, from the cache, where the data engine
-/// put it before the strategy's handler, with no strategy code.
+/// A model's raw feature over the custom series reads the 12th's close, replayed at the 13th's
+/// 00:00, from the cache, where the data engine put it before the strategy's handler, with no
+/// strategy code.
 #[rstest]
 fn a_raw_feature_over_a_custom_series_reads_each_replayed_row_from_the_cache() {
     let (_catalog, backtest) = bond_yields_backtest();
