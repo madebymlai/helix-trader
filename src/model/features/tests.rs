@@ -34,9 +34,10 @@ fn id(s: &str) -> InstrumentId {
     InstrumentId::from(s)
 }
 
-/// The last mid, price or close: an exponential average of one, `[indicators.last]`.
+/// The `[indicators.last]` exponential average of one value: the last mid, price or close.
 const LAST: Declared<EmaArgs> = Declared::new("last");
-/// An exponential average of two, the mean of the first two once both came, `[indicators.two]`.
+/// The `[indicators.two]` exponential average of two values. It is the mean of the first two
+/// once both have come.
 const TWO: Declared<EmaArgs> = Declared::new("two");
 const FAILING: Declared<FailingQuotesArgs> = Declared::new("failing");
 
@@ -143,8 +144,8 @@ impl CustomDataTrait for Level {
     }
 }
 
-/// A custom series of no metadata under the instrument's id, as Nautilus' Databento client keys
-/// it.
+/// A custom series with no metadata, under the instrument's id. Nautilus' Databento client keys
+/// it this way.
 fn level_series(instrument: &str) -> CustomSeries {
     CustomSeries::new("Level", instrument.to_string(), None).unwrap()
 }
@@ -312,7 +313,7 @@ fn a_bar_reaches_only_the_features_on_its_bar_type() {
     assert!((values[1] - 0.6).abs() < 1e-9, "{values:?}");
 }
 
-/// The deltas feature is cold until deltas of its instrument come, and each counts one.
+/// The deltas feature is cold until deltas for its instrument arrive. Each update counts as one.
 #[rstest]
 fn depth_and_deltas_reach_only_the_features_on_their_kind_and_instrument() {
     let tables = tables();
@@ -331,7 +332,7 @@ fn depth_and_deltas_reach_only_the_features_on_their_kind_and_instrument() {
     assert_eq!(features.values(), Some(vec![1.0, 1.0]));
 }
 
-/// A moving average has no depth, deltas or trade handler: Nautilus' defaults panic.
+/// A moving average has no depth, deltas or trade handler. Nautilus' defaults panic.
 #[rstest]
 fn an_update_of_a_kind_no_feature_reads_is_a_no_op() {
     let features = FeatureSet::builder()
@@ -429,13 +430,13 @@ fn the_values_wait_for_every_feature() {
     assert!(ActorIndicator::initialized(&*features).unwrap());
 }
 
-/// Caches `data` as Nautilus' data engine does before the strategy's handlers run.
+/// Caches `data` the way Nautilus' data engine does before it runs the strategy's handlers.
 fn cached(probe: &Probe, data: CustomData) {
     probe.cache_rc().borrow_mut().add_custom_data(data);
 }
 
-/// Cold before registration, whatever the cache holds. Then the latest level under AUD/USD's id
-/// from one cached before registration on, not another instrument's.
+/// Cold before registration, whatever the cache holds. Then reads the latest level under
+/// AUD/USD's id, counting one cached before registration. Another instrument's level is ignored.
 #[rstest]
 fn a_raw_feature_reads_the_latest_point_of_its_data_type_in_the_cache() {
     let mut probe = registered();
@@ -459,8 +460,8 @@ fn a_raw_feature_reads_the_latest_point_of_its_data_type_in_the_cache() {
     assert_eq!(features.values(), Some(vec![2.5]));
 }
 
-/// Cold before registration and until the cache holds a point of its data type, not of another
-/// identifier. Then the latest point.
+/// Cold before registration, and until the cache holds a point of its data type. A point with
+/// another identifier does not count. Then reads the latest point.
 #[rstest]
 fn a_raw_feature_of_a_custom_series_reads_the_latest_point_of_its_data_type_in_the_cache() {
     let mut probe = registered();
@@ -492,10 +493,13 @@ fn yields_type(identifier: &str) -> DataType {
     levels("yields", identifier).data_type().clone()
 }
 
-/// The values of a raw feature over the levels under `identifier`, registered on 2026-11-25 at
-/// 23:00 when GCZ26 stands for the root GC, then handed GC's roll into GCG27 at 00:00 UTC on
-/// 2026-11-26 (`rolls/README.md`): after GCZ26's and GCG27's levels are cached before the roll,
-/// after the roll, and after another of GCZ26's.
+/// Returns the values of a raw feature over the levels under `identifier`, at three points.
+///
+/// The feature registers on 2026-11-25 at 23:00, when GCZ26 stands for the root GC. It is then
+/// handed GC's roll into GCG27 at 00:00 UTC on 2026-11-26 (`rolls/README.md`). The points are:
+/// - After the levels of GCZ26 and GCG27 are cached, before the roll.
+/// - After the roll.
+/// - After another level of GCZ26 is cached.
 fn levels_across_the_roll(identifier: &str) -> [Option<Vec<f64>>; 3] {
     let start: jiff::Timestamp = "2026-11-25T23:00:00Z".parse().unwrap();
     let mut probe = registered_at(start.into());
@@ -516,9 +520,9 @@ fn levels_across_the_roll(identifier: &str) -> [Option<Vec<f64>>; 3] {
     [before_the_roll, rolled, features.values()]
 }
 
-/// A raw feature over a custom series on the root GC reads GCZ26's latest point, the contract
-/// standing for it. At the roll it moves to GCG27's latest at once, and no later point of GCZ26
-/// reaches it. GCZ26's own series is not moved by the roll.
+/// A raw feature over a custom series on the root GC reads the latest point of GCZ26, the
+/// contract standing for it. At the roll it moves to the latest point of GCG27 at once. No later
+/// point of GCZ26 reaches it. The roll does not move GCZ26's own series.
 #[rstest]
 #[case::of_the_root("GC.GLBX", [0.25, 0.75, 0.75])]
 #[case::of_a_contract("GCZ26.GLBX", [0.25, 0.25, -0.25])]
@@ -585,8 +589,8 @@ fn an_update_no_feature_reads_and_custom_data_are_no_update_of_an_instrument() {
     assert_eq!(features.last_update(id(AUD)), None);
 }
 
-/// Each kind of tick of each instrument once, in the order declared, no bars and no custom series
-/// under an instrument's id.
+/// Lists each kind of tick of each instrument once, in the order declared. It lists no bars and
+/// no custom series under an instrument's id.
 #[rstest]
 fn a_sets_ticks_are_those_of_its_tick_features_each_once() {
     let tables = tables();
@@ -616,8 +620,8 @@ fn a_sets_ticks_are_those_of_its_tick_features_each_once() {
     );
 }
 
-/// Each custom series a raw feature reads (`model::reads`) once, in the order declared, one under
-/// an instrument's id among them; none is a tick series.
+/// Lists each custom series a raw feature reads (`model::reads`) once, in the order declared. One
+/// is under an instrument's id. None is a tick series.
 #[rstest]
 fn a_sets_custom_series_are_those_of_its_raw_features_each_once() {
     let (us10y, us2y, aud) = (
@@ -637,7 +641,7 @@ fn a_sets_custom_series_are_those_of_its_raw_features_each_once() {
     assert_eq!(features.ticks(), []);
 }
 
-/// Each bar type once, in the order declared, and no ticks.
+/// Lists each bar type once, in the order declared. It lists no ticks.
 #[rstest]
 fn a_sets_bar_types_are_those_of_its_bar_features_each_once() {
     let tables = tables();
@@ -698,7 +702,7 @@ fn a_negative_warmup_is_an_error() {
     assert!(err.contains("1h ago"), "{err}");
 }
 
-/// A raw feature has no table, so its name and the series it reads are in the fingerprint.
+/// A raw feature has no table, so the fingerprint holds its name and the series it reads.
 fn fingerprint(names: [&str; 2], version: u32) -> Fingerprint {
     FeatureSet::builder()
         .custom(&level_series(AUD), names[0], read_level)
@@ -721,8 +725,8 @@ fn the_fingerprint_changes_with_a_name_their_order_or_the_version() {
     assert_ne!(fingerprint(["ab", "c"], 1), fingerprint(["a", "bc"], 1));
 }
 
-/// Another series rebuilds the dataset and the models: the data type's identifier, metadata and
-/// type name are in the fingerprint.
+/// Another series rebuilds the dataset and the models. The fingerprint holds the data type's
+/// identifier, metadata and type name.
 #[rstest]
 fn the_fingerprint_changes_with_the_custom_series_a_raw_feature_reads() {
     let reading = |series: CustomSeries| {
@@ -797,9 +801,9 @@ fn registered_at(now: UnixNanos) -> Probe {
     probe
 }
 
-/// The set is registered for no indicator: its bars, quotes and trades come through the strategy's
-/// warmup (`Warmup::feeding`, `Warmup::feeding_ticks`), so through Nautilus the features read
-/// nothing.
+/// The set is registered for no indicator, so the features read nothing through Nautilus. Its
+/// bars, quotes and trades come through the strategy's warmup (`Warmup::feeding`,
+/// `Warmup::feeding_ticks`).
 #[rstest]
 fn registered_features_get_nothing_through_nautilus() {
     let mut probe = registered();
@@ -820,7 +824,8 @@ fn registered_features_get_nothing_through_nautilus() {
     assert_eq!(features.last_update(id(AUD)), None);
 }
 
-/// The width of AUD/USD's bracket `distance` a side, deciding every 15 minutes on its quotes.
+/// Returns the width of AUD/USD's bracket, with `distance` on each side. The target decides every
+/// 15 minutes, on AUD/USD's quotes.
 fn width_of(distance: Distance) -> Rc<BracketWidth> {
     let target = TargetConfig::builder()
         .instrument_id(id(AUD))
@@ -860,7 +865,7 @@ fn over(width: &Rc<BracketWidth>) -> Rc<FeatureSet> {
     testing::mid_over(id(AUD), width).build().unwrap()
 }
 
-/// 10 bps of the mid 0.7 is 0.0007: the mid is 1000 of it.
+/// 10 bps of the mid 0.7 is 0.0007. The mid is 1000 widths.
 #[rstest]
 fn a_feature_over_the_bracket_reads_its_quotes_over_its_width() {
     let features = over(&width_of(Distance::BasisPoints(Decimal::from(10))));
@@ -890,7 +895,7 @@ fn features_over_one_width_hand_it_to_the_target() {
     assert!(std::ptr::eq(handed, Rc::as_ptr(&width)));
 }
 
-/// The target's setter runs on one width: a set given a second is refused when built.
+/// The target's setter runs on one width. A set given a second width is refused when built.
 #[rstest]
 fn a_second_width_of_the_bracket_is_refused_when_the_set_is_built() {
     let in_bps = || width_of(Distance::BasisPoints(Decimal::from(10)));
@@ -907,7 +912,8 @@ fn a_second_width_of_the_bracket_is_refused_when_the_set_is_built() {
     }
 }
 
-/// A set with a feature over the bracket and no width is refused when built, naming the feature.
+/// A set with a feature over the bracket and no width is refused when built. The error names the
+/// feature.
 #[rstest]
 fn a_feature_over_the_bracket_with_no_width_is_refused_when_the_set_is_built() {
     let err = FeatureSet::builder()
@@ -921,7 +927,7 @@ fn a_feature_over_the_bracket_with_no_width_is_refused_when_the_set_is_built() {
     }
 }
 
-/// A width no feature reads is refused when the set is built.
+/// A width that no feature reads is refused when the set is built.
 #[rstest]
 fn a_width_of_the_bracket_no_feature_reads_is_refused_when_the_set_is_built() {
     let err = testing::last_mid(id(AUD))
@@ -952,8 +958,12 @@ fn bars(bar_type: &str) -> Series {
     Series::Bars(BarType::from(bar_type))
 }
 
-/// Records each update by its kind (a quote 1, a trade 2, a bar 3, depth 4, deltas 5, custom data
-/// 6) and each reset (9): initialized once an update came since the last reset.
+/// Records each update and each reset as a digit.
+///
+/// - A quote is 1, a trade 2, a bar 3, depth 4, deltas 5 and custom data 6.
+/// - A reset is 9.
+///
+/// The indicator is initialized once an update has come since the last reset.
 #[derive(Default)]
 struct Sequence {
     digits: u64,
@@ -1037,9 +1047,9 @@ impl IndicatorArgs for SequenceArgs {
 
 const SEQUENCE: Declared<SequenceArgs> = Declared::new("sequence");
 
-/// The feature on AUD's quotes, GBP's trades, AUD's mid bars and the stub's book depth and deltas
-/// records 1 2 3 4 5, then 1. GBP's quote, AUD's trade, AUD's bid bars and GBP's deltas reach it
-/// not.
+/// The feature reads AUD's quotes, GBP's trades, AUD's mid bars, and the stub's book depth and
+/// deltas. It records 1 2 3 4 5, then 1. GBP's quote, AUD's trade, AUD's bid bars and GBP's
+/// deltas do not reach it.
 #[rstest]
 fn a_feature_on_several_series_gets_each_of_their_updates_in_the_order_it_comes() {
     let depth = stub_depth10();
@@ -1073,7 +1083,7 @@ fn a_feature_on_several_series_gets_each_of_their_updates_in_the_order_it_comes(
     assert_eq!(features.values(), Some(vec![123_451.0]));
 }
 
-/// GCZ26 stands for the root GC from 2026-11-25 to its roll into GCG27 at 00:00 UTC on
+/// GCZ26 stands for the root GC from 2026-11-25 until the root rolls into GCG27 at 00:00 UTC on
 /// 2026-11-26 (`rolls/README.md`).
 const GC: &str = "GC.GLBX";
 const GCZ26: &str = "GCZ26.GLBX";
@@ -1083,8 +1093,8 @@ fn before_gcs_roll() -> jiff::Timestamp {
     "2026-11-25T23:00:00Z".parse().unwrap()
 }
 
-/// A quote of GCZ26 is one of both its own quotes and the root's: it reaches the feature once on
-/// both.
+/// A quote of GCZ26 matches both its own quote series and the root's. It reaches the feature
+/// once for both.
 #[rstest]
 fn an_update_matching_several_of_a_features_series_reaches_it_once() {
     let mut probe = registered_at(before_gcs_roll().into());
@@ -1099,9 +1109,9 @@ fn an_update_matching_several_of_a_features_series_reaches_it_once() {
     assert_eq!(features.values(), Some(vec![1.0]));
 }
 
-/// The feature on GC's quotes and trades and AUD's quotes reads GCZ26's ticks until the roll. The
-/// roll moves both of GC's series to GCG27 and resets the feature once (9), cold until its next
-/// update.
+/// The feature reads GC's quotes and trades and AUD's quotes. It reads GCZ26's ticks until the
+/// roll. The roll moves both GC series to GCG27 and resets the feature once (9). The feature is
+/// cold until its next update.
 #[rstest]
 fn a_roll_moves_every_series_of_a_feature_on_the_root_and_resets_it_once() {
     let start = before_gcs_roll();
@@ -1129,7 +1139,8 @@ fn a_roll_moves_every_series_of_a_feature_on_the_root_and_resets_it_once() {
     assert_eq!(features.values(), Some(vec![1_219_211.0]));
 }
 
-/// Each kind of tick of each instrument once, each bar type once, in the order declared.
+/// Lists each kind of tick of each instrument once, and each bar type once, in the order
+/// declared.
 #[rstest]
 fn a_sets_ticks_and_bar_types_gather_over_every_series_of_its_features_each_once() {
     let tables = tables();
@@ -1177,8 +1188,8 @@ fn a_sets_ticks_and_bar_types_gather_over_every_series_of_its_features_each_once
     );
 }
 
-/// A quote of GCZ26 updates both GC and GCZ26, each a series of the feature. GBP's trade updates
-/// GBP, its quote, of a series no feature reads, does not.
+/// A quote of GCZ26 updates both GC and GCZ26, which are both series of the feature. GBP's trade
+/// updates GBP. GBP's quote does not, because no feature reads that series.
 #[rstest]
 fn the_last_updates_gather_over_every_series_of_a_feature() {
     let mut probe = registered_at(before_gcs_roll().into());
@@ -1203,7 +1214,7 @@ fn the_last_updates_gather_over_every_series_of_a_feature() {
     assert_eq!(features.last_update(id(GBP)), Some(UnixNanos::from(20)));
 }
 
-/// A feature's series in its name are its whole list, in the order declared.
+/// A feature's name lists all its series, in the order declared.
 #[rstest]
 fn a_table_feeding_several_features_names_each_after_its_whole_list_of_series() {
     let tables = tables();
@@ -1224,8 +1235,8 @@ fn a_table_feeding_several_features_names_each_after_its_whole_list_of_series() 
     );
 }
 
-/// The fingerprint and names of a feature of each kind on one series are as before a feature read
-/// a list.
+/// The fingerprint and names of a feature of each kind on one series match those from before a
+/// feature could read a list.
 #[rstest]
 fn a_single_series_features_names_and_fingerprint_are_unchanged() {
     let tables = tables();
@@ -1259,7 +1270,7 @@ fn a_single_series_features_names_and_fingerprint_are_unchanged() {
     );
 }
 
-/// Each table feeds one feature, so is named after it alone.
+/// Each table feeds one feature, so the name uses that feature alone.
 fn listing(last: &[Series], two: &[Series]) -> Fingerprint {
     let tables = tables();
     FeatureSet::builder()
@@ -1284,8 +1295,8 @@ fn the_fingerprint_changes_with_a_features_list_of_series() {
     assert_ne!(base, listing(&[quotes(AUD)], &[trades(AUD), quotes(GBP)]));
 }
 
-/// Nautilus' exponential average reads no custom data (no `Feature::custom_handler`): declared on
-/// a custom series it is refused, naming the series and its table.
+/// Nautilus' exponential average reads no custom data (it has no `Feature::custom_handler`).
+/// Declaring it on a custom series is refused. The error names the series and its table.
 #[rstest]
 fn a_feature_on_a_custom_series_is_refused_when_the_set_is_built() {
     let yields = levels("yields", "US10Y");
@@ -1315,7 +1326,7 @@ fn a_feature_on_no_series_is_refused_when_the_set_is_built() {
     assert!(err.contains("last"), "{err}");
 }
 
-/// The feature reads GBP's over the width it is handed: 10 bps of the mid 1.3 is 1000 of it.
+/// The feature reads GBP's mid over the width it is handed. 10 bps of the mid 1.3 is 1000 widths.
 #[rstest]
 fn a_feature_over_the_bracket_reads_its_list_of_series_over_its_width() {
     let width = width_of(Distance::BasisPoints(Decimal::from(10)));
@@ -1339,8 +1350,8 @@ fn custom(series: &CustomSeries) -> Series {
     Series::Custom(series.clone())
 }
 
-/// The feature on AUD's quotes and the yields under US10Y records 1 6 1 6. Yields of another
-/// identifier, and the bonds' under US10Y of other metadata, reach it not.
+/// The feature reads AUD's quotes and the yields under US10Y. It records 1 6 1 6. Yields with
+/// another identifier do not reach it, nor do bonds under US10Y with other metadata.
 #[rstest]
 fn a_feature_on_a_custom_series_and_a_tick_series_gets_both_in_the_order_they_come() {
     let yields = levels("yields", "US10Y");
@@ -1359,8 +1370,8 @@ fn a_feature_on_a_custom_series_and_a_tick_series_gets_both_in_the_order_they_co
     assert_eq!(features.values(), Some(vec![1616.0]));
 }
 
-/// The feature on the yields under the root GC reads GCZ26's, not GCG27's nor the root's own. The
-/// roll resets it (9) and moves it to GCG27's.
+/// The feature reads the yields under the root GC. It reads GCZ26's, not GCG27's or the root's
+/// own. The roll resets it (9) and moves it to GCG27's.
 #[rstest]
 fn a_feature_on_a_roots_custom_series_reads_the_contract_in_front_and_moves_at_its_roll() {
     let start = before_gcs_roll();
@@ -1385,8 +1396,8 @@ fn a_feature_on_a_roots_custom_series_reads_the_contract_in_front_and_moves_at_i
     assert_eq!(features.values(), Some(vec![696.0]));
 }
 
-/// Each custom series among a feature's series once, in the order declared, and none a raw feature
-/// alone reads, which reads the cache.
+/// Lists each custom series among a feature's series once, in the order declared. A series that
+/// only a raw feature reads is left out, because a raw feature reads the cache.
 #[rstest]
 fn a_sets_handled_custom_series_are_its_features_not_its_raw_features() {
     let tables = tables();
@@ -1401,8 +1412,8 @@ fn a_sets_handled_custom_series_are_its_features_not_its_raw_features() {
     assert_eq!(features.handled_custom(), [yields]);
 }
 
-/// Each custom series a raw feature or a feature reads (`model::reads`) once, in the order
-/// declared; none is a tick series.
+/// Lists each custom series that a raw feature or a feature reads (`model::reads`) once, in the
+/// order declared. None is a tick series.
 #[rstest]
 fn a_sets_custom_series_gather_over_its_raw_features_and_the_series_of_its_features() {
     let tables = tables();
@@ -1436,8 +1447,8 @@ fn reading_custom(series: &CustomSeries) -> Fingerprint {
         .fingerprint()
 }
 
-/// Another identifier, metadata or type name rebuilds the dataset and the models: the series'
-/// whole data type is in the fingerprint.
+/// Another identifier, metadata or type name rebuilds the dataset and the models. The
+/// fingerprint holds the series' whole data type.
 #[rstest]
 fn the_fingerprint_changes_with_the_custom_series_a_feature_reads() {
     let base = reading_custom(&levels("yields", "US10Y"));
