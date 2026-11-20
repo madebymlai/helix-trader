@@ -9,24 +9,21 @@ use nautilus_indicators::{
 use nautilus_model::enums::PriceType;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de, de::DeserializeOwned};
 
-/// `[indicators]`: each `[indicators.<name>]` table as the TOML has it,
-/// the arguments of the indicator the strategy declares by that name
-/// (`Part::INDICATORS`), which parses and builds it (see `IndicatorArgs`).
-/// A table is no feature or logic of its own: a model strategy's code
-/// makes one a feature by handing it to its feature set
-/// (`model::features::FeatureSetBuilder`), and builds any other itself
-/// (`build`).
+/// `[indicators]`: each `[indicators.<name>]` table as the TOML has it, the arguments of the
+/// indicator the strategy declares by that name (`Part::INDICATORS`), which parses and builds
+/// it (see `IndicatorArgs`). A table is no feature or logic of its own: a model strategy's
+/// code makes one a feature by handing it to its feature set
+/// (`model::features::FeatureSetBuilder`), and builds any other itself (`build`).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(transparent)]
 pub struct IndicatorsConfig(pub BTreeMap<String, toml::Table>);
 
-/// The arguments of an indicator, its `[indicators.<name>]` table, and how
-/// it is built: a Nautilus `Indicator`, Nautilus' own or the strategy's,
-/// registered by the strategy as any other. For Nautilus' indicators the
-/// arguments are its constructor's, by their Nautilus names (`EmaArgs`,
-/// `AtrArgs`); a custom indicator brings its own. They serialize as they
-/// parse, Nautilus' types through their own serde, so that a feature's
-/// arguments enter its fingerprint by value (`canonical_args`).
+/// The arguments of an indicator, its `[indicators.<name>]` table, and how it is built: a
+/// Nautilus `Indicator`, Nautilus' own or the strategy's, registered by the strategy as any
+/// other. For Nautilus' indicators the arguments are its constructor's, by their Nautilus names
+/// (`EmaArgs`, `AtrArgs`); a custom indicator brings its own. They serialize as they parse,
+/// Nautilus' types through their own serde, so that a feature's arguments enter its
+/// fingerprint by value (`canonical_args`).
 pub trait IndicatorArgs: DeserializeOwned + Serialize {
     type Indicator: Indicator;
 
@@ -36,9 +33,9 @@ pub trait IndicatorArgs: DeserializeOwned + Serialize {
     fn build(self) -> anyhow::Result<Self::Indicator>;
 }
 
-/// An indicator the strategy reads, by its name in `[indicators]` and its
-/// arguments `A`: a strategy declares it as a constant, lists it in
-/// `Part::INDICATORS` and receives it built (`IndicatorsConfig::build`).
+/// An indicator the strategy reads, by its name in `[indicators]` and its arguments `A`: a
+/// strategy declares it as a constant, lists it in `Part::INDICATORS` and receives it built
+/// (`IndicatorsConfig::build`).
 #[derive(Debug)]
 pub struct Declared<A> {
     name: &'static str,
@@ -63,15 +60,15 @@ impl<A> Clone for Declared<A> {
 
 impl<A> Copy for Declared<A> {}
 
-/// A declared indicator, of whatever arguments, as `[indicators]` checks
-/// it: its name, and its table parsed and built.
+/// A declared indicator, of whatever arguments, as `[indicators]` checks it: its name, and its
+/// table parsed and built.
 pub trait Declaration {
     fn name(&self) -> &'static str;
 
     /// # Errors
     ///
-    /// Returns an error if `table` does not parse into the arguments, or
-    /// the indicator of them does not build.
+    /// Returns an error if `table` does not parse into the arguments, or the indicator of them
+    /// does not build.
     fn check(&self, table: &toml::Table) -> anyhow::Result<()>;
 }
 
@@ -86,9 +83,9 @@ impl<A: IndicatorArgs> Declaration for Declared<A> {
     }
 }
 
-/// The arguments of a Nautilus `ExponentialMovingAverage`, built by its
-/// `new_checked`: `period`, and `price_type`, the price it reads of quotes
-/// (`LAST` left out; bars give their close).
+/// The arguments of a Nautilus `ExponentialMovingAverage`, built by its `new_checked`:
+/// `period`, and `price_type`, the price it reads of quotes (`LAST` left out; bars give their
+/// close).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmaArgs {
@@ -105,10 +102,9 @@ impl IndicatorArgs for EmaArgs {
     }
 }
 
-/// The arguments of a Nautilus `AverageTrueRange`, built by its `new`
-/// (its `new_checked` is not public, so an argument it refuses panics):
-/// `period`, `ma_type` (a `MovingAverageType` by the name its `FromStr`
-/// parses, `"WILDER"` left out), `use_previous` and `value_floor`.
+/// The arguments of a Nautilus `AverageTrueRange`, built by its `new` (its `new_checked` is not
+/// public, so an argument it refuses panics): `period`, `ma_type` (a `MovingAverageType` by the
+/// name its `FromStr` parses, `"WILDER"` left out), `use_previous` and `value_floor`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AtrArgs {
@@ -150,8 +146,8 @@ impl IndicatorsConfig {
     ///
     /// # Panics
     ///
-    /// Panics if its table is missing, does not parse or is refused by its
-    /// builder, which `validate` refuses of a declared indicator.
+    /// Panics if its table is missing, does not parse or is refused by its builder, which
+    /// `validate` refuses of a declared indicator.
     #[must_use]
     pub fn build<A: IndicatorArgs>(&self, declared: Declared<A>) -> A::Indicator {
         self.parsed(declared)
@@ -159,16 +155,15 @@ impl IndicatorsConfig {
             .unwrap_or_else(|e| panic!("indicator {} validated: {e}", declared.name))
     }
 
-    /// The arguments of `declared` in canonical form: its table parsed,
-    /// then serialized as JSON, so that the arguments its type parses
-    /// equal are one string however the TOML spells them (a duration
-    /// `"15m"` or `"900s"`, a Nautilus `PriceType` `"MID"` or `"mid"`, the
-    /// keys in any order), and different ones are two.
+    /// The arguments of `declared` in canonical form: its table parsed, then serialized as JSON,
+    /// so that the arguments its type parses equal are one string however the TOML spells them (a
+    /// duration `"15m"` or `"900s"`, a Nautilus `PriceType` `"MID"` or `"mid"`, the keys in any
+    /// order), and different ones are two.
     ///
     /// # Panics
     ///
-    /// Panics if its table is missing or does not parse, which `validate`
-    /// refuses of a declared indicator.
+    /// Panics if its table is missing or does not parse, which `validate` refuses of a declared
+    /// indicator.
     #[must_use]
     pub fn canonical_args<A: IndicatorArgs>(&self, declared: Declared<A>) -> String {
         serde_json::to_string(&self.parsed(declared))
@@ -179,16 +174,14 @@ impl IndicatorsConfig {
     ///
     /// # Panics
     ///
-    /// Panics if its table is missing or does not parse (see
-    /// `canonical_args`).
+    /// Panics if its table is missing or does not parse (see `canonical_args`).
     fn parsed<A: IndicatorArgs>(&self, declared: Declared<A>) -> A {
         parse(&self.0[declared.name])
             .unwrap_or_else(|e| panic!("indicator {} validated: {e}", declared.name))
     }
 
-    /// Whether the table of every indicator of `declared` is there, parses
-    /// and builds: what `validate` asks of them, and what the strategy's
-    /// code needs to build them.
+    /// Whether the table of every indicator of `declared` is there, parses and builds: what
+    /// `validate` asks of them, and what the strategy's code needs to build them.
     pub(super) fn builds(&self, declared: &[&dyn Declaration]) -> bool {
         declared.iter().all(|declaration| {
             self.0
@@ -197,10 +190,9 @@ impl IndicatorsConfig {
         })
     }
 
-    /// Pushes the violations of `[indicators]` against the indicators the
-    /// strategy declares: one of them missing, or its table refused by its
-    /// arguments or its builder, and a table it does not declare, each
-    /// under `indicators.<name>`.
+    /// Pushes the violations of `[indicators]` against the indicators the strategy declares: one of
+    /// them missing, or its table refused by its arguments or its builder, and a table it does not
+    /// declare, each under `indicators.<name>`.
     pub(super) fn validate(
         &self,
         declared: &[&dyn Declaration],
@@ -235,8 +227,7 @@ fn parse<A: DeserializeOwned>(table: &toml::Table) -> anyhow::Result<A> {
     Ok(toml::Value::Table(table.clone()).try_into()?)
 }
 
-/// A Nautilus `MovingAverageType` by the name its `FromStr` parses: it has
-/// no serde of its own.
+/// A Nautilus `MovingAverageType` by the name its `FromStr` parses: it has no serde of its own.
 fn moving_average_type<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<MovingAverageType>, D::Error> {
@@ -246,8 +237,8 @@ fn moving_average_type<'de, D: Deserializer<'de>>(
         .map_err(|e| de::Error::custom(format!("invalid ma_type {name}: {e}")))
 }
 
-/// A Nautilus `MovingAverageType` by the name its `Display` writes, which
-/// its `FromStr` parses back (`moving_average_type`).
+/// A Nautilus `MovingAverageType` by the name its `Display` writes, which its `FromStr` parses
+/// back (`moving_average_type`).
 fn moving_average_type_name<S: Serializer>(
     ma_type: &Option<MovingAverageType>,
     serializer: S,
@@ -267,8 +258,7 @@ mod tests {
     use super::*;
     use crate::strategy::{Part, Series, StandardConfig};
 
-    /// A custom Nautilus indicator: initialized once a bar closes above
-    /// its `level`.
+    /// A custom Nautilus indicator: initialized once a bar closes above its `level`.
     #[derive(Debug)]
     struct Breakout {
         level: f64,
@@ -320,8 +310,7 @@ mod tests {
     const RANGE: Declared<AtrArgs> = Declared::new("range");
     const BREAKOUT: Declared<BreakoutArgs> = Declared::new("breakout");
 
-    /// A strategy reading an EMA `fast`, an ATR `range` and a custom
-    /// `breakout`.
+    /// A strategy reading an EMA `fast`, an ATR `range` and a custom `breakout`.
     #[derive(Debug, Clone, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Trend {}
@@ -334,7 +323,6 @@ mod tests {
             StrategyConfig::default()
         }
 
-        /// Every series it lists.
         fn reads(config: &StandardConfig<Self>) -> ConfigResult<Vec<Series>> {
             Ok(config.data.series.clone())
         }
@@ -423,14 +411,12 @@ mod tests {
         assert_eq!(breakout.level, 100.5);
     }
 
-    /// Pins the defaults Nautilus' indicators take for an argument left
-    /// out, an EMA's `LAST` price (`crates/indicators/src/average/
-    /// ema.rs:119`) and an ATR's Wilder average using the previous close
-    /// (`crates/indicators/src/volatility/atr.rs:131-132`): `EmaArgs` and
-    /// `AtrArgs` hand a left-out argument over as none, and
-    /// `canonical_args` leaves it out of a feature's fingerprint, so a
-    /// changed default changes the features under the same fingerprint
-    /// unless `model::dataset::VERSION` is bumped.
+    /// Pins the defaults Nautilus' indicators take for an argument left out, an EMA's `LAST` price
+    /// (`crates/indicators/src/average/ema.rs:119`) and an ATR's Wilder average using the previous
+    /// close (`crates/indicators/src/volatility/atr.rs:131-132`): `EmaArgs` and `AtrArgs` hand a
+    /// left-out argument over as none, and `canonical_args` leaves it out of a feature's
+    /// fingerprint, so a changed default changes the features under the same fingerprint unless
+    /// `model::dataset::VERSION` is bumped.
     #[rstest]
     fn drift_arguments_left_out_take_nautilus_defaults() {
         let toml = TOML
@@ -463,9 +449,8 @@ mod tests {
         load(toml).unwrap_err().downcast().unwrap()
     }
 
-    /// A declared indicator without its table is a missing field, a table
-    /// the strategy does not declare an unsupported one, each under its
-    /// name.
+    /// A declared indicator without its table is a missing field, a table the strategy does not
+    /// declare an unsupported one, each under its name.
     #[rstest]
     #[case::missing(without("breakout"), ConfigError::missing_field("indicators.breakout"))]
     #[case::not_declared(
@@ -479,9 +464,8 @@ mod tests {
         assert_eq!(refusal(&toml), expected);
     }
 
-    /// A table its arguments or its builder refuses is refused under the
-    /// indicator, saying why: the argument, the value or the builder's
-    /// reason.
+    /// A table its arguments or its builder refuses is refused under the indicator, saying why: the
+    /// argument, the value or the builder's reason.
     #[rstest]
     #[case::an_argument_nautilus_refuses("period = 5", "period = 0", "period", "indicators.fast")]
     #[case::an_argument_a_custom_builder_refuses(
