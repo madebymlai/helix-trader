@@ -1,6 +1,7 @@
-//! A mock LSE socket: a WebSocket server on 127.0.0.1 that opens each connection with LSE's
-//! captured welcome, records each frame it receives and answers it as a script says, replaying
-//! LSE's captured frames.
+//! A mock LSE socket: a WebSocket server on 127.0.0.1 that replays LSE's captured frames.
+//!
+//! It opens each connection with LSE's captured welcome, records each frame it receives, and
+//! answers the frame as a script says.
 
 use std::{
     net::TcpListener,
@@ -40,8 +41,8 @@ pub struct MockLseSocket {
 }
 
 impl MockLseSocket {
-    /// Starts a peer answering each frame with `script` of the connection's number and the frame,
-    /// each connection on its own thread, opened with LSE's welcome.
+    /// Starts a peer that answers each frame with `script`, which takes the connection's number
+    /// and the frame. Each connection runs on its own thread and opens with LSE's welcome.
     ///
     /// # Panics
     ///
@@ -164,9 +165,11 @@ impl MockLseSocket {
     }
 }
 
-/// Returns what LSE's data-ws answers the free key, from its first captures: the key with its
-/// futures (`WS_AUTHENTICATED_FUTURES`, 16 subscriptions a connection) and `GOLD.F`'s subscription
-/// with its three captured ticks (see `socket_answer`).
+/// Returns what LSE's data-ws answers the free key, from its first captures.
+///
+/// It answers:
+/// - The key, with its futures (`WS_AUTHENTICATED_FUTURES`, 16 subscriptions a connection).
+/// - `GOLD.F`'s subscription, with its three captured ticks (see `socket_answer`).
 ///
 /// # Panics
 ///
@@ -178,14 +181,15 @@ pub fn data_ws_answer(frame: &Value) -> Vec<SocketAction> {
 
 /// Returns what an LSE socket answers the free key, from its captures:
 /// - The key, with `authenticated`.
-/// - A subscription, with its acknowledgement, then the ticks of its symbol among `ticks`, one a
-///   line.
+/// - A subscription, with its acknowledgement, then the ticks of its symbol among `ticks`, one
+///   per line.
 /// - An unsubscription, with its acknowledgement.
 /// - A ping, with a pong.
 ///
-/// From LSE's documentation, a chain's subscription is answered with its acknowledgement, then the
-/// ticks of its contracts among `WS_TICKS_AAPL_OPTIONS`, and its unsubscription with its
-/// acknowledgement.
+/// From LSE's documentation, it also answers:
+/// - A chain's subscription, with its acknowledgement, then the ticks of its contracts among
+///   `WS_TICKS_AAPL_OPTIONS`.
+/// - A chain's unsubscription, with its acknowledgement.
 ///
 /// # Panics
 ///

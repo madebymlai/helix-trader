@@ -1,13 +1,15 @@
-//! A NautilusTrader adapter for London Strategic Edge's market data (LSE Data 3.0): a data client
-//! and no execution client, LSE trading nothing.
+//! A NautilusTrader adapter for London Strategic Edge's market data (LSE Data 3.0).
 //!
-//! It names no symbol and decides nothing a key may have: it asks LSE, and LSE's refusal is the
-//! answer, passed on with its code, message and required plan. See `README.md`.
+//! It has a data client and no execution client, because LSE trades nothing.
+//!
+//! The adapter names no symbol and decides nothing about what a key may have. It asks LSE. If LSE
+//! refuses, the refusal is the answer, passed on with its code, message and required plan. See
+//! `README.md`.
 //!
 //! `common`, `http` and `websocket` are public, as in Nautilus' adapters
-//! (`docs/developer_guide/adapters.md`), so that the tests of the clients' boundaries (`tests/`)
-//! drive them as a caller does. `testing`, the mock LSE peers and their captured payloads, comes
-//! with `test-support`.
+//! (`docs/developer_guide/adapters.md`). The tests in `tests/` can then drive the clients'
+//! boundaries as a caller does. `testing` holds the mock LSE peers and their captured payloads. It
+//! comes with `test-support`.
 //!
 //! # Feature Flags
 //!

@@ -1,18 +1,20 @@
-//! The rows of LSE's sources that are not prices, as `LseRow`s, each stamped when its values are
-//! known (`Stamp`): reference collections, macro releases and yields, and an instrument's splits
-//! and dividends.
+//! Fetches the rows of LSE's sources that are not prices, as `LseRow`s.
 //!
-//! A row known at the time its key says (`Stamp::known`) is asked by the dates of the keys of the
-//! rows known in the window (`Stamp::key`). A row known at another column's time, which may be any
-//! time after its key, is asked of the whole series up to the window's last date, so that none
-//! known in the window is missed. Rows outside the window are left out.
+//! The sources are reference collections, macro releases and yields, and an instrument's splits
+//! and dividends. Each row is stamped when its values are known (`Stamp`).
+//!
+//! A row known at the time its key says (`Stamp::known`) is asked by date. The dates are the keys
+//! of the rows known in the window (`Stamp::key`). A row known at another column's time may be
+//! known any time after its key. It is asked of the whole series up to the window's last date, so
+//! that no row known in the window is missed. Rows outside the window are left out.
 //!
 //! LSE stores a date the morning after it (see `export`), so the window's last key date may not be
-//! loaded:
-//! - The current UTC day, or the day before while LSE holds no row of it (`export::loaded`).
-//! - Of a reference collection, any after the last key LSE's catalogue says it holds (`last`): on
-//!   13 November 2026 the catalogue held insider trades filed up to 13 October.
-//! - A release LSE has not filled yet is a row of no actual, so a past window holding one is not
+//! loaded. It is not loaded in these cases:
+//! - It is the current UTC day, or the day before while LSE holds no row of it
+//!   (`export::loaded`).
+//! - For a reference collection, it is any date after the last key that LSE's catalogue says it
+//!   holds (`last`). On 13 November 2026 the catalogue held insider trades filed up to 13 October.
+//! - A release LSE has not filled yet is a row with no actual. A past window holding one is not
 //!   loaded either.
 
 use std::fmt::Display;
@@ -68,7 +70,7 @@ enum Call {
 enum MacroKind {
     /// Releases, keyed by `released_at` and known then.
     Release,
-    /// Yields, a day's close each, keyed by `day` and known at its end.
+    /// Yields, each a day's close, keyed by `day` and known at its end.
     Yield,
 }
 
@@ -116,16 +118,18 @@ impl Factor {
 pub struct Fetched {
     /// The rows known over the window, in the order they are known.
     pub rows: Vec<LseRow>,
-    /// Where the span LSE may not have loaded yet starts, if the window reaches into it.
+    /// The start of the span LSE may not have loaded yet, if the window reaches into it.
     pub unloaded_from: Option<Timestamp>,
 }
 
 impl RowSource {
     /// Returns the series `symbol` of LSE's `source`.
     ///
-    /// A reference collection is named by its name (`bond_yields`), macro releases and yields by
-    /// their code, and splits or dividends by LSE's symbol, a hyphen and the market in capitals
-    /// (`factors_splits` of `AAPL-US_STOCKS`).
+    /// The symbol is:
+    /// - The name, for a reference collection (`bond_yields`).
+    /// - The code, for macro releases and yields.
+    /// - LSE's symbol, a hyphen and the market in capitals, for splits or dividends
+    ///   (`factors_splits` of `AAPL-US_STOCKS`).
     ///
     /// # Errors
     ///
@@ -134,7 +138,7 @@ impl RowSource {
     /// - It is a macro series of observations, keyed by the day of the period, not when it came
     ///   out.
     /// - It is a reference collection the client has not classified.
-    /// - It is factors of a symbol naming no market.
+    /// - It is factors for a symbol that names no market.
     ///
     /// Each fails before LSE is asked.
     pub fn of(source: &str, symbol: &str) -> anyhow::Result<Self> {
@@ -209,18 +213,21 @@ impl Display for RowSource {
     }
 }
 
-/// Returns the rows of `source` known over `[start, end]` in the order they are known, and where
-/// the span LSE has not loaded as of `now` starts, if the window reaches into it (see the module's
-/// doc). A row known at no time LSE gives is left out, with a warning.
+/// Returns the rows of `source` known over `[start, end]`, in the order they are known.
+///
+/// Also returns where the span LSE has not loaded as of `now` starts, if the window reaches into
+/// it (see the module's doc). A row for which LSE gives no known time is left out, with a warning.
 ///
 /// # Errors
 ///
 /// Returns an error if:
-/// - A call fails: LSE refused it, answered as its docs do not say, or could not be reached.
+/// - A call fails because LSE refused it, answered in a way its docs do not say, or could not be
+///   reached.
 /// - LSE's catalogue does not list the reference collection.
-/// - Its `last` is neither a date nor a time (see `ReferenceCollection::last_key`).
+/// - The collection's `last` is neither a date nor a time (see `ReferenceCollection::last_key`).
 /// - A file is not read (see `parse_rows`).
-/// - The window is from before the oldest of an instrument's dividends LSE cut to their newest.
+/// - The window starts before the oldest dividend LSE gives for an instrument, after LSE cut the
+///   dividends to the newest ones.
 pub async fn fetch(
     http: &LseHttpClient,
     source: &RowSource,
@@ -236,7 +243,7 @@ pub async fn fetch(
         call,
     } = source;
 
-    // The key of the last rows LSE holds, per its reference catalogue
+    // The key of the last row that LSE's reference catalogue says it holds
     let (parsed, held) = match call {
         Call::Reference(_) => {
             let collection = http
@@ -319,7 +326,9 @@ pub async fn fetch(
     })
 }
 
-/// Returns the rows of `file`, LSE's answer to `query`, keyed by `time_column` (see `parse_rows`).
+/// Returns the rows of `file`, keyed by `time_column` (see `parse_rows`).
+///
+/// The file is LSE's answer to `query`.
 ///
 /// # Errors
 ///
@@ -338,8 +347,10 @@ fn read(
         .with_context(|| format!("reading {query}"))
 }
 
-/// Returns the dates of the keys of the rows known over `[start, end]` (see `Stamp::key`), or, for
-/// rows known at another column's time, every date up to the window's last.
+/// Returns the dates to ask LSE for.
+///
+/// These are the dates of the keys of the rows known over `[start, end]` (see `Stamp::key`). For
+/// rows known at another column's time, they are every date up to the window's last.
 fn dates(stamp: Stamp, start: Timestamp, end: Timestamp) -> Dates {
     let date = |at: Timestamp| at.to_zoned(TimeZone::UTC).date();
     match (stamp.key(start), stamp.key(end)) {
@@ -354,13 +365,17 @@ fn dates(stamp: Stamp, start: Timestamp, end: Timestamp) -> Dates {
     }
 }
 
-/// Returns the rows of `factors`' `factor`, each keyed by its day (`Factor::day_field`) and known
-/// at its end, a dividend with the unit of its amount (`unit`).
+/// Returns the rows of `factor` in `factors`, each keyed by its day (`Factor::day_field`) and
+/// known at its end.
+///
+/// A dividend carries the unit of its amount (`unit`).
 ///
 /// # Errors
 ///
-/// Returns an error if a row has no day, or if LSE cut the dividends to their newest and `start` is
-/// not after the oldest of them: the reference collection `dividends` holds the rest.
+/// Returns an error if:
+/// - A row has no day.
+/// - LSE cut the dividends to the newest ones and `start` is not after the oldest of them. The
+///   reference collection `dividends` holds the rest.
 fn factor_rows(
     factors: LseFactors,
     factor: Factor,

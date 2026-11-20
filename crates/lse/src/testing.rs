@@ -1,6 +1,8 @@
-//! Mock LSE peers for the adapter's and its callers' tests: an HTTP server on 127.0.0.1 answering
-//! each call with the next reply of a script, and a socket (`MockLseSocket`) answering each frame
-//! as a script says.
+//! Mock LSE peers for the tests of the adapter and its callers.
+//!
+//! There are two peers. One is an HTTP server on 127.0.0.1 that answers each call with the next
+//! reply of a script. The other is a socket (`MockLseSocket`) that answers each frame as a script
+//! says.
 //!
 //! Both replay payloads captured from LSE (`test_data/`, see its `README.md`) and record what they
 //! receive. The `test-support` feature exposes them to a caller's tests.
@@ -46,7 +48,7 @@ pub const US10Y_BOND_YIELDS: &[u8] =
 /// `US10Y` in `bond_yields_four_hour`, 10 November 2026: six rows, 00:00 to 20:00.
 pub const US10Y_BOND_YIELDS_FOUR_HOURS: &[u8] =
     include_bytes!("../test_data/reference_bond_yields_four_hour_us10y.parquet");
-/// `US10Y` in the other interval collections, 10 November 2026, each row stamped at its
+/// `US10Y` in the other interval collections, 10 November 2026. Each row is stamped at its
 /// interval's open.
 pub const US10Y_BOND_YIELDS_MINUTE: &[u8] =
     include_bytes!("../test_data/reference_bond_yields_minute_us10y.parquet");
@@ -83,11 +85,11 @@ pub const AHMA_COMPANY_PROFILES: &[u8] =
     include_bytes!("../test_data/reference_company_profiles_ahma.parquet");
 pub const AHMA_STOCK_FUNDAMENTALS: &[u8] =
     include_bytes!("../test_data/reference_stock_fundamentals_ahma.parquet");
-/// The whole series of `US.Core Inflation Rate YoY`: 14 rows, the past releases of 11 February
-/// and 10 November 2026 with no actual.
+/// The whole series of `US.Core Inflation Rate YoY`: 14 rows. The past releases of 11 February
+/// and 10 November 2026 have no actual.
 pub const US_CORE_CPI_CALENDAR: &[u8] =
     include_bytes!("../test_data/reference_economic_calendar_us_core_cpi.parquet");
-/// The whole series of `ZN` in `cot`: 614 reports, those since 28 April 2026 with no release
+/// The whole series of `ZN` in `cot`: 614 reports. Those since 28 April 2026 have no release
 /// date.
 pub const ZN_COT: &[u8] = include_bytes!("../test_data/reference_cot_zn.parquet");
 /// AAPL's 38 financial rows: statements, derived rows and trailing twelve months.
@@ -115,7 +117,7 @@ pub const EUR_USD_MINUTES: &[u8] = include_bytes!("../test_data/export_eur_usd_f
 pub const SPX_MINUTES: &[u8] = include_bytes!("../test_data/export_spx_indices_1m.parquet");
 /// `SPX` in `indices`, tick slice: three values of size 0.
 pub const SPX_TICKS: &[u8] = include_bytes!("../test_data/export_spx_indices_tick.parquet");
-/// LSE's refusals. The calls a minute and the quotas are LSE's documented answers, not captured.
+/// LSE's refusals. The calls-a-minute and quota answers are LSE's documented ones, not captured.
 pub const SYMBOL_UNKNOWN: &str = include_str!("../test_data/refusal_symbol_unknown.json");
 pub const PLAN_REQUIRED: &str = include_str!("../test_data/refusal_plan_required.json");
 pub const DATA_UNAVAILABLE: &str = include_str!("../test_data/refusal_data_unavailable.json");
@@ -132,7 +134,7 @@ pub const DATA_UNAVAILABLE_TODAY: &str =
     include_str!("../test_data/refusal_data_unavailable_today.json");
 /// The tick slice of `forex`, which stores no trades.
 pub const TICKS_NOT_STORED: &str = include_str!("../test_data/refusal_data_unavailable_tick.json");
-/// A derived market's quotes, a 400: LSE serves them as timeframes alone.
+/// A 400 for a derived market's quotes: LSE serves them as timeframes alone.
 pub const DATA_UNAVAILABLE_QUOTES: &str =
     include_str!("../test_data/refusal_data_unavailable_quotes.json");
 /// CME rows older than CME Group Lite+'s twelve years of Level 1.
@@ -141,15 +143,16 @@ pub const HISTORY_LIMIT: &str = include_str!("../test_data/refusal_history_limit
 /// LSE's catalogue of CME Globex (`/v3/pairs?market=cme&symbol=…`).
 ///
 /// ESZ6 and GCZ6 name the contracts of 2016 and 2026. GCZ4 names 2014's and 2024's, the second by
-/// its symbol alone. NGZ6 names 2016's alone, 2026's being NGZ26. LSE lists no ESZ26.
+/// its symbol alone. NGZ6 names 2016's alone, because 2026's is NGZ26. LSE lists no ESZ26.
 pub const PAIRS_ESZ6: &str = include_str!("../test_data/pairs_cme_esz6.json");
 pub const PAIRS_GCZ6: &str = include_str!("../test_data/pairs_cme_gcz6.json");
 pub const PAIRS_GCZ4: &str = include_str!("../test_data/pairs_cme_gcz4.json");
 pub const PAIRS_NGZ6: &str = include_str!("../test_data/pairs_cme_ngz6.json");
 pub const PAIRS_NGZ26: &str = include_str!("../test_data/pairs_cme_ngz26.json");
 pub const PAIRS_ESZ26: &str = include_str!("../test_data/pairs_cme_esz26.json");
-/// LSE's catalogue of GCG7: the contracts of 2017 and 2027, the next GC contract after GCZ6 on the
-/// CME stream (`CME_GCZ6_GCG7`).
+/// LSE's catalogue of GCG7, the contracts of 2017 and 2027.
+///
+/// GCG7 is the next GC contract after GCZ6 on the CME stream (`CME_GCZ6_GCG7`).
 pub const PAIRS_GCG7: &str = include_str!("../test_data/pairs_cme_gcg7.json");
 
 /// The pair id LSE gives GCZ6 of 2026, `GCZ26.GLBX`.
@@ -157,8 +160,9 @@ pub const GCZ26_PAIR_ID: u64 = 4_000_000_002;
 /// The trades and quotes of GCZ6 of 2026 by pair id.
 pub const GCZ26_TRADES: &[u8] = include_bytes!("../test_data/export_gcz6_trades.parquet");
 pub const GCZ26_QUOTES: &[u8] = include_bytes!("../test_data/export_gcz6_quotes.parquet");
-/// GCZ6's book and orders, built, not captured (`test_data/README.md`). The book has four rows,
-/// ten levels a side but the last, of eight asks. The orders have five rows, one of no action.
+/// GCZ6's book and orders, built and not captured (`test_data/README.md`). The book has four rows
+/// with ten levels a side, except the last row, which has eight asks. The orders have five rows,
+/// one with no action.
 pub const GCZ26_BOOK: &[u8] = include_bytes!("../test_data/export_gcz6_book.parquet");
 pub const GCZ26_ORDERS: &[u8] = include_bytes!("../test_data/export_gcz6_orders.parquet");
 /// LSE's refusals of GCZ6's book and orders to the CME Group Lite+ key, Level 1 alone.
@@ -170,7 +174,7 @@ pub const LEVEL_REQUIRED_ORDERS: &str =
 pub const GCZ26: &str = "GCZ26.GLBX";
 
 /// AAPL's 355 call of 20 November 2026 (`AAPL 261120C00355000` in `us_options`): trades, and
-/// 1-minute candles from 14:30 to 14:33, none at 14:34 for want of a trade.
+/// 1-minute candles from 14:30 to 14:33. There is none at 14:34, for want of a trade.
 pub const AAPL_CALL_TRADES: &[u8] = include_bytes!("../test_data/export_aapl_call_tick.parquet");
 pub const AAPL_CALL_MINUTES: &[u8] = include_bytes!("../test_data/export_aapl_call_1m.parquet");
 
@@ -191,9 +195,11 @@ pub const PAIRS_NASDAQ_BRK: &str = include_str!("../test_data/pairs_nasdaq_brk.j
 pub const PLAN_REQUIRED_NASDAQ: &str =
     include_str!("../test_data/refusal_plan_required_nasdaq.json");
 
-/// NVDA's trades, quotes, book and orders, built, not captured, as no key of helix's holds a Nasdaq
-/// plan (`test_data/README.md`): four trades, two alike, four quotes, and a book and orders shaped
-/// as `GCZ26_BOOK` and `GCZ26_ORDERS`.
+/// NVDA's trades, quotes, book and orders, built and not captured, as no helix key holds a Nasdaq
+/// plan (`test_data/README.md`).
+///
+/// They hold four trades, two of them alike, four quotes, and a book and orders shaped as
+/// `GCZ26_BOOK` and `GCZ26_ORDERS`.
 pub const NVDA_TRADES: &[u8] = include_bytes!("../test_data/export_nvda_trades.parquet");
 pub const NVDA_QUOTES: &[u8] = include_bytes!("../test_data/export_nvda_quotes.parquet");
 pub const NVDA_BOOK: &[u8] = include_bytes!("../test_data/export_nvda_book.parquet");
@@ -205,9 +211,14 @@ pub const NVDA: &str = "NVDA.XNAS";
 /// The Nasdaq key the tests give the adapter.
 pub const NASDAQ_API_KEY: &str = "lse-nasdaq-test-key-0123456789";
 
-/// LSE's data-ws frames (`test_data/README.md`): the welcome, the authenticated frame trimmed to
-/// the futures, `GOLD.F`'s subscription, unsubscription and first three ticks, a pong, and the
-/// refusals of a 17th symbol on the key's 16, of a second connection and of an unknown key.
+/// LSE's data-ws frames (`test_data/README.md`).
+///
+/// They are:
+/// - The welcome.
+/// - The authenticated frame, trimmed to the futures.
+/// - `GOLD.F`'s subscription, unsubscription and first three ticks.
+/// - A pong.
+/// - The refusals of a 17th symbol on the key's 16, of a second connection and of an unknown key.
 pub const WS_WELCOME: &str = include_str!("../test_data/ws_welcome.json");
 pub const WS_AUTHENTICATED_FUTURES: &str =
     include_str!("../test_data/ws_authenticated_futures.json");
@@ -220,9 +231,11 @@ pub const WS_TOO_MANY_CONNECTIONS: &str =
     include_str!("../test_data/ws_error_too_many_connections.json");
 pub const WS_INVALID_KEY: &str = include_str!("../test_data/ws_error_invalid_key.json");
 
-/// LSE's socket frames (`test_data/README.md`): each socket's authenticated frame, its list
-/// trimmed, and the first tick, LSE's last, after subscribing a series of each market streamed
-/// there. data-ws sent only a tick of 8 November for crypto, which streams on london-ws since.
+/// LSE's socket frames (`test_data/README.md`).
+///
+/// Each socket has its authenticated frame with the list trimmed, and the first tick (LSE's last)
+/// after subscribing a series of each market streamed there. data-ws sent only a tick of 8
+/// November for crypto, which has streamed on london-ws since.
 pub const WS_AUTHENTICATED_DATA: &str = include_str!("../test_data/ws_authenticated_data.json");
 pub const WS_TICKS_DATA: &str = include_str!("../test_data/ws_ticks_data.jsonl");
 pub const WS_AUTHENTICATED_LONDON: &str = include_str!("../test_data/ws_authenticated_london.json");
@@ -230,10 +243,11 @@ pub const WS_TICKS_LONDON: &str = include_str!("../test_data/ws_ticks_london.jso
 pub const WS_AUTHENTICATED_TSX: &str = include_str!("../test_data/ws_authenticated_tsx.json");
 pub const WS_TICKS_TSX: &str = include_str!("../test_data/ws_ticks_tsx.jsonl");
 
-/// LSE's data-ws frames of an option chain (`test_data/README.md`): the acknowledgements of AAPL's
-/// chain and the refusal of `NOSUCHX`, which lists no options, captured with US options closed.
-/// The five option ticks are built on the tick LSE's WebSocket documentation gives, from trades of
-/// AAPL's chain.
+/// LSE's data-ws frames of an option chain (`test_data/README.md`).
+///
+/// They are the acknowledgements of AAPL's chain and the refusal of `NOSUCHX`, which lists no
+/// options. They were captured with US options closed. The five option ticks are built on the tick
+/// that LSE's WebSocket documentation gives, from trades of AAPL's chain.
 pub const WS_OPTIONS_SUBSCRIBED_AAPL: &str =
     include_str!("../test_data/ws_options_subscribed_aapl.json");
 pub const WS_OPTIONS_UNSUBSCRIBED_AAPL: &str =
@@ -323,8 +337,10 @@ pub fn gcz26() -> InstrumentAny {
     )
 }
 
-/// ESZ6 of 2026, `ESZ26.GLBX`, the contract of `CME_ESZ6_DOCUMENTED`, listed on 17 September 2021
-/// as `PAIRS_ESZ6` lists it, trading ending on the third Friday of December 2026 at 09:30 New York.
+/// ESZ6 of 2026, `ESZ26.GLBX`, the contract of `CME_ESZ6_DOCUMENTED`.
+///
+/// It was listed on 17 September 2021 as `PAIRS_ESZ6` lists it. Trading ends on the third Friday
+/// of December 2026 at 09:30 New York.
 #[must_use]
 pub fn esz26() -> InstrumentAny {
     let at = |time: &str| UnixNanos::from(time.parse::<jiff::Timestamp>().expect("a time"));
@@ -350,8 +366,8 @@ pub fn esz26() -> InstrumentAny {
     )
 }
 
-/// NVDA as Nautilus' Databento decoder (`decode_equity`) gives Databento's last definition of 12
-/// November 2026 in `XNAS.ITCH`, stamped when Databento received it.
+/// NVDA as Nautilus' Databento decoder (`decode_equity`) gives it from Databento's last definition
+/// of 12 November 2026 in `XNAS.ITCH`. It is stamped when Databento received the definition.
 #[must_use]
 pub fn nvda() -> InstrumentAny {
     InstrumentAny::Equity(
@@ -369,8 +385,8 @@ pub fn nvda() -> InstrumentAny {
     )
 }
 
-/// `AAPL_CALL` as Nautilus' Databento decoder (`decode_option_contract`) gives Databento's
-/// definition, expiring at 16:00 New York. Databento gives no root, multiplier or lot size:
+/// `AAPL_CALL` as Nautilus' Databento decoder (`decode_option_contract`) gives it from Databento's
+/// definition. It expires at 16:00 New York. Databento gives no root, multiplier or lot size, so
 /// Nautilus takes the root, a multiplier of 100 and a lot size of 1.
 #[must_use]
 pub fn aapl_call() -> InstrumentAny {
@@ -556,8 +572,8 @@ pub struct MockLse {
 }
 
 impl MockLse {
-    /// Starts a peer answering its calls with `script` in order, each on its own thread, and with a
-    /// 500 once the script is done.
+    /// Starts a peer that answers its calls with `script` in order, each on its own thread. Once
+    /// the script is done, it answers with a 500.
     ///
     /// # Panics
     ///

@@ -1,23 +1,24 @@
-//! The client of one LSE socket: an outer client and the handler task that owns Nautilus'
+//! The client of one LSE socket, made of an outer client and the handler task that owns Nautilus'
 //! `WebSocketClient` ("WebSocket client patterns" in Nautilus' adapter guide).
 //!
-//! The client is connected once LSE authenticates the key, keeping the symbols the socket lists to
-//! it and the subscriptions it allows a connection, or fails with LSE's refusal (`INVALID_KEY`,
-//! `TOO_MANY_CONNECTIONS`, ...).
+//! The client is connected once LSE authenticates the key. It keeps the symbols the socket lists
+//! to the key and the subscriptions the socket allows a connection. If LSE refuses the key,
+//! connecting fails with LSE's refusal (`INVALID_KEY`, `TOO_MANY_CONNECTIONS`, ...).
 //!
-//! The handler tracks subscriptions in Nautilus' `SubscriptionState`: a symbol's ticks, or every
-//! listed contract of an underlying's chain in one subscription (`Topic`). It sends each once the
-//! connection is authenticated and passes LSE's refusal on with its symbol or underlying: LSE
-//! answers subscriptions and unsubscriptions in turn, and its error names neither.
+//! The handler tracks subscriptions in Nautilus' `SubscriptionState`. A subscription covers either
+//! a symbol's ticks or every listed contract of an underlying's chain (`Topic`). The handler sends
+//! each subscription once the connection is authenticated. It passes LSE's refusal on with its
+//! symbol or underlying, because LSE answers subscriptions and unsubscriptions in turn and its
+//! error names neither.
 //!
 //! Nautilus' transport reconnects a dropped connection with backoff. The handler then
-//! authenticates and sends every subscription again (`reset_after_reconnect`), and passes on the
-//! gap from the dropped connection's last frame to the new one's authentication, which it does not
-//! fetch. A connection LSE closes for a refusal that a new connection cannot lift (`TERMINAL`) is
-//! not reconnected.
+//! authenticates and sends every subscription again (`reset_after_reconnect`). It passes on the
+//! gap from the dropped connection's last frame to the new connection's authentication, and does
+//! not fetch it. A connection that LSE closes for a refusal a new connection cannot lift
+//! (`TERMINAL`) is not reconnected.
 //!
-//! Every frame is bound to its connection (`send_text_on_connection`), so none reaches a
-//! connection before its authentication, and one not sent waits in the subscription state. The
+//! Every frame is bound to its connection (`send_text_on_connection`). So no frame reaches a
+//! connection before its authentication, and a frame not sent waits in the subscription state. The
 //! transport's heartbeat is the keepalive LSE asks for (`{"action": "ping"}`).
 
 use std::{
@@ -54,7 +55,7 @@ const POLICY_VIOLATION: u16 = 1008;
 
 // Refusals that a new connection would not lift ("Error codes"): a newer connection took the slot,
 // the key is in use elsewhere or revoked, or the month's streaming is used up. The others clear
-// once a connection LSE still counts is gone, so the transport keeps reconnecting.
+// once a connection that LSE still counts is gone, so the transport keeps reconnecting.
 const TERMINAL: [&str; 4] = [
     "CONNECTION_REPLACED",
     "KEY_IN_USE",
@@ -71,18 +72,18 @@ const OPTIONS_CHANNEL: &str = "options";
 #[derive(Debug, Clone)]
 pub enum LseWsMessage {
     Tick(LseTick),
-    /// LSE refused the subscription of `symbol`.
+    /// LSE refused the subscription to `symbol`.
     Refused {
         symbol: String,
         refusal: LseWsRefusal,
     },
-    /// LSE refused the subscription of the chain of `underlying`.
+    /// LSE refused the subscription to the chain of `underlying`.
     OptionsRefused {
         underlying: String,
         refusal: LseWsRefusal,
     },
-    /// The connection dropped and its replacement is authenticated, its subscriptions sent again:
-    /// nothing came from `last`, the dropped connection's last frame, to `at`.
+    /// The connection dropped and its replacement is authenticated, with its subscriptions sent
+    /// again. Nothing came from `last`, the dropped connection's last frame, to `at`.
     Reconnected {
         last: Option<UnixNanos>,
         at: UnixNanos,
@@ -102,13 +103,17 @@ pub struct LseWebSocketClient {
 }
 
 impl LseWebSocketClient {
-    /// Connects to `socket` at `url` and authenticates with the key of `credential`, sending the
-    /// keepalive every `KEEPALIVE_SECS`, and passing ticks, refusals and reconnects to `out`.
+    /// Connects to `socket` at `url` and authenticates with the key of `credential`.
+    ///
+    /// Sends the keepalive every `KEEPALIVE_SECS`, and passes ticks, refusals and reconnects to
+    /// `out`.
     ///
     /// # Errors
     ///
-    /// Returns an error if the connection fails, or if LSE refuses the key (with its code, message
-    /// and details) or does not authenticate it within `AUTH_TIMEOUT`.
+    /// Returns an error if:
+    /// - The connection fails.
+    /// - LSE refuses the key (with its code, message and details).
+    /// - LSE does not authenticate the key within `AUTH_TIMEOUT`.
     pub async fn connect(
         socket: LseSocket,
         url: &str,
@@ -221,8 +226,9 @@ impl LseWebSocketClient {
         self.max_subscriptions
     }
 
-    /// Subscribes to the ticks of `symbol`, as the socket spells it, for the rest of the
-    /// connection, reconnects included.
+    /// Subscribes to the ticks of `symbol`, as the socket spells it.
+    ///
+    /// The subscription lasts for the rest of the connection, including reconnects.
     ///
     /// LSE's refusal comes after this returns (`Refused`).
     ///
@@ -247,9 +253,9 @@ impl LseWebSocketClient {
     /// Acquires one reference to the ticks of every listed option contract of `underlying`.
     ///
     /// Balance each successful call with one `unsubscribe_options`. Only the first reference
-    /// subscribes on the wire. Success means queued, not confirmed: an `OptionsRefused` leaves the
+    /// subscribes on the wire. Success means queued, not confirmed. An `OptionsRefused` leaves the
     /// chain wanted for replay after authentication on reconnect. Another acquisition is not a
-    /// retry. LSE sends no last prices: the first ticks are the contracts' next trades.
+    /// retry. LSE sends no last prices, so the first ticks are the contracts' next trades.
     ///
     /// # Errors
     ///
@@ -412,8 +418,8 @@ impl LseWsHandler {
             return;
         };
 
-        // A replacement's frames, its welcome among them, can come before the transport's
-        // `RECONNECTED`: whichever comes first starts the new connection.
+        // A replacement's frames, including its welcome, can come before the transport's
+        // `RECONNECTED`, and whichever comes first starts the new connection.
         if epoch > self.epoch {
             self.reconnected(epoch);
         }
@@ -538,8 +544,9 @@ impl LseWsHandler {
         }
     }
 
-    // Returns whether `frame` was sent. One not sent never is: subscriptions wait in their state
-    // for the next connection. The frame is not logged, an auth holding the key.
+    // Returns whether `frame` was sent, where a frame not sent is never sent later, since
+    // subscriptions wait in their state for the next connection. The frame is not logged, since an
+    // auth frame holds the key.
     async fn send(&self, frame: String) -> bool {
         let Some(client) = self.client.as_ref().filter(|client| client.is_active()) else {
             return false;
