@@ -1,22 +1,19 @@
-//! The stop loss and the take profit of the EMA's brackets (`common::trades`), 50 and 100 bps from
-//! the close of the bar the trade was decided on, held 4 hours, longer than the run: a long ends at
-//! its take profit, a short at its stop loss, each on the first minute quote reaching it.
+//! The EMA's brackets (`common::trades`), stop loss 50 bps and take profit 100 bps from the
+//! deciding bar's close, with a 4-hour hold longer than the run: a long ends at its take profit, a
+//! short at its stop loss, each on the first minute quote reaching it.
 
 use rstest::rstest;
 
 use crate::common::{self, trades};
 
-/// - 13:00 at 620.60, a cross up (above 605.60): buy 10 at 620.65, the take profit at 626.81
-///   (620.60 plus 1%, to the cent), the stop loss at 617.50 (less 0.5%); the slow EMA going to
-///   615.60.
-/// - The 14:00 bar's minute m bids 626.50 + 0.01 m − 0.05: 626.81 at the 36th, 13:36: the take
-///   profit sells 10 at 626.81 and its stop loss is cancelled. The bar closes at 627.10, above
-///   615.60: long, no cross; the slow EMA going to 623.27.
-/// - 15:00 at 600.60, a cross down: sell 10 at the bid, 600.55, the stop loss at 603.60 (600.60
-///   plus 0.5%, to the cent), the take profit at 594.59 (less 1%); the slow EMA going to 608.16.
-/// - The 16:00 bar's minute m asks 603.20 + 0.01 m + 0.05: 603.60 at the 35th, 15:35: the stop loss
-///   buys 10 at 603.60 and the take profit is cancelled. The bar closes at 603.80, below 608.16:
-///   short, no cross.
+/// - 13:00 at 620.60 > 605.60: cross up, buy 10 at 620.65, take profit 626.81 (620.60 plus 1%, to
+///   the cent), stop loss 617.50 (less 0.5%); slow EMA 615.60.
+/// - 14:00 bar's minute m bids 626.50 + 0.01 m − 0.05 = 626.81 at m = 36, 13:36: the take profit
+///   sells 10 there, cancelling the stop loss. Close 627.10 > 615.60: no cross; slow EMA 623.27.
+/// - 15:00 at 600.60: cross down, sell 10 at the bid 600.55, stop loss 603.60 (600.60 plus 0.5%),
+///   take profit 594.59 (less 1%); slow EMA 608.16.
+/// - 16:00 bar's minute m asks 603.20 + 0.01 m + 0.05 = 603.60 at m = 35, 15:35: the stop loss buys
+///   10 there, cancelling the take profit. Close 603.80 < 608.16: no cross.
 const LEVELS: [f64; 4] = [620.0, 626.5, 600.0, 603.2];
 
 #[rstest]

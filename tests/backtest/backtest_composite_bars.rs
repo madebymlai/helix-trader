@@ -1,8 +1,7 @@
-//! A strategy on a composite bar type, hour bars Nautilus builds from external minute bars:
-//! `fill_catalog` stores the minute bars a source returns, as the strategy's bar types ask
-//! (`strategy::requirements::catalog_keys`), and the backtest replays them, so that every hour bar
-//! has the open, high, low and close of its minute bars, built `BUILT_AFTER` its close as live. A
-//! model strategy deciding on them decides once the hour bar closing on its grid is built.
+//! A composite bar type, hour bars Nautilus builds from external minute bars: `fill_catalog`
+//! stores the minute bars as the strategy's bar types ask (`strategy::requirements::catalog_keys`)
+//! and the backtest replays them, each hour bar built `BUILT_AFTER` its close as live. A model
+//! strategy decides once the hour bar closing on its grid is built.
 
 use std::path::Path;
 
@@ -41,17 +40,14 @@ use crate::common::{
 const COMPOSITE: &str = "SXR8.IBIS-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL";
 const MINUTE_BARS: &str = "SXR8.IBIS-1-MINUTE-LAST-EXTERNAL";
 
-/// How long after its close the node builds an hour bar of minute bars, and stamps it: 5 s, as a
-/// live node waits for the last minute.
+/// A live node waits this long after the close for the last minute.
 const BUILT_AFTER: SignedDuration = SignedDuration::from_secs(5);
 
-/// `hh:mm` UTC on Wednesday 7 January 2026.
 fn at(hh_mm: &str) -> Timestamp {
     ts(&format!("2026-01-07T{hh_mm}:00Z"))
 }
 
-/// The minute bar closing at `close`, stamped at its close: the k-th minute after 06:00 opens at
-/// 600 plus 0.01 times `37 k mod 101`, with its own high, low and close around it.
+/// The k-th minute after 06:00 opens at 600 + 0.01 x (37 k mod 101).
 fn minute_bar(close: Timestamp) -> Bar {
     let k = close.duration_since(at("06:00")).as_mins();
     let open = 600.0 + 0.01 * ((37 * k) % 101) as f64;
@@ -68,7 +64,6 @@ fn minute_bar(close: Timestamp) -> Bar {
     )
 }
 
-/// The minute bars closing in `[from, to]`.
 fn minute_bars(from: Timestamp, to: Timestamp) -> Vec<Bar> {
     let minute = SignedDuration::from_mins(1);
     let mut close = from;
@@ -82,8 +77,8 @@ fn minute_bars(from: Timestamp, to: Timestamp) -> Vec<Bar> {
     bars
 }
 
-/// The hour bar closing at `close`, worked out here from its minute bars, those closing in `(close
-/// − 1 h, close]`, stamped `BUILT_AFTER` its close.
+/// Worked out from the minute bars closing in `(close − 1 h, close]`, stamped `BUILT_AFTER` its
+/// close.
 fn hour_bar(close: Timestamp) -> common::Ohlc {
     let minutes = minute_bars(close - SignedDuration::from_mins(59), close);
     let high = minutes.iter().map(|bar| bar.high).max().unwrap();
@@ -92,8 +87,6 @@ fn hour_bar(close: Timestamp) -> common::Ohlc {
     (close + BUILT_AFTER, first.open, high, low, last.close)
 }
 
-/// Fills the catalog in `dir` with the instrument and the minute bars the hour bars are built from,
-/// over 06:00 to 15:00, as `fill-catalog` does.
 fn fill(dir: &Path) {
     let mut catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     let series = [CatalogSeries::Bars(BarType::from(COMPOSITE).composite())];
@@ -145,15 +138,12 @@ fn hour_bars_built_from_stored_minute_bars_have_the_prices_of_their_minutes() {
     assert_eq!(replay[1..], whole);
 }
 
-/// The close of a bar, Nautilus' simple average of one, `[indicators.close]`.
 const CLOSE: Declared<SmaArgs> = Declared::new("close");
 
-/// A model strategy deciding every hour on the close of the hour bars, in a dataset run from 10:30
-/// to 15:00 on a hedging venue, opening the targets of `dataset::config` on the instrument. A live
-/// node builds the hour bars `BUILT_AFTER` their close, so that the minute closing on the hour is
-/// in, and decides 10 ms after that; the backtest does both as live, so each decision reads the
-/// hour bar closing on its grid, whose close is that minute's. The hour closing 15:00 is built
-/// after the run's end.
+/// A dataset run from 10:30 to 15:00 on a hedging venue deciding every hour on the hour bars'
+/// close. A live node builds the hour bars `BUILT_AFTER` their close and decides 10 ms later; the
+/// backtest does both, so each decision reads the hour bar closing on its grid, whose close is the
+/// last minute's. The hour closing 15:00 is built after the run's end.
 #[rstest]
 fn a_decision_on_hour_bars_reads_the_bar_closing_on_its_grid() {
     let dir = tempfile::tempdir().unwrap();
