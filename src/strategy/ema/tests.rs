@@ -109,7 +109,6 @@ fn defaults_its_base_and_leaves_the_oms_to_the_venue() {
     assert_eq!(config.base.oms_type, None);
 }
 
-/// The periods are read from `[indicators]`, and the exits are fixed in code.
 #[rstest]
 #[case::a_period("fast_period = 5", "fast_period")]
 #[case::exits("hold = \"1h\"", "hold")]
@@ -125,7 +124,6 @@ fn rejects_fast_period_not_below_slow() {
     assert_eq!(error_fields(&toml), ["indicators.fast.period"]);
 }
 
-/// A wrong count of traded instruments is the only violation reported.
 #[rstest]
 #[case::two(
     "instruments = [{ instrument_id = \"ESM24.CME\" }, { instrument_id = \"ESH24.CME\" }]"
@@ -155,12 +153,8 @@ fn listing(series: &str) -> String {
     )
 }
 
-/// Only the first bars series of the traded instrument is read. Each of these is refused under
-/// its listing:
-/// - a second bars series of the traded instrument
-/// - bars of another instrument
-/// - ticks
-/// - custom data (LSE's daily 10-year US yield)
+/// Only the first bars series of the traded instrument is read, and any other series is refused
+/// under its listing.
 #[rstest]
 #[case::a_second_bars_series_of_the_trade_instrument(
     r#"{ data = "bars", instrument_id = "ESM24.CME", bar_spec = { step = 2, aggregation = "HOUR", price_type = "MID" } }"#,
@@ -188,7 +182,6 @@ fn rejects_a_series_it_does_not_read_as_unread(#[case] series: &str, #[case] nam
     }
 }
 
-/// A bars series listed again is refused under its second listing.
 #[rstest]
 fn rejects_its_bars_series_listed_twice() {
     let toml = listing(
@@ -247,7 +240,6 @@ fn price(s: &str) -> Decimal {
     s.parse().unwrap()
 }
 
-/// Long: 620.60 plus 1%, less 0.5%. Short: 600.60 less 1%, plus 0.5%.
 #[rstest]
 #[case::long("620.60", OrderSide::Buy, "626.806", "617.497")]
 #[case::short("600.60", OrderSide::Sell, "594.594", "603.603")]
@@ -325,7 +317,6 @@ fn register(
     (strategy, clock)
 }
 
-/// Returns a cache holding `instrument` and the SIM venue's margin account with 100,000 USD.
 fn holding(instrument: InstrumentAny) -> Rc<RefCell<Cache>> {
     let cache = Rc::new(RefCell::new(Cache::default()));
     let balance = Money::from("100000 USD");
@@ -420,7 +411,6 @@ fn a_restart_sets_the_time_of_its_open_trade_again() {
     );
 }
 
-/// Returns AUD/USD with ticks of 0.00025, finer than its precision.
 fn aud_in_quarter_ticks() -> InstrumentAny {
     InstrumentAny::CurrencyPair(
         CurrencyPair::builder()
@@ -439,8 +429,6 @@ fn aud_in_quarter_ticks() -> InstrumentAny {
     )
 }
 
-/// A long on a close of 0.70010. Take profit 0.707101 and stop 0.6965995 land on ticks 0.70700
-/// and 0.69650, not at the precision (0.70710, 0.69660). One R is 0.70010 - 0.69650 = 0.00360.
 #[rstest]
 fn a_trade_takes_profit_and_stops_on_the_nearest_ticks_its_one_r_to_its_stop() {
     let cache = holding(aud_in_quarter_ticks());
@@ -478,8 +466,7 @@ fn a_trade_takes_profit_and_stops_on_the_nearest_ticks_its_one_r_to_its_stop() {
 }
 
 /// Nautilus' sizer reads P&L as a multiple of a price distance. An inverse instrument's P&L is
-/// not. The crossover refuses to start on Bybit's inverse BTC/USD perpetual, naming it, and
-/// sends the data engine nothing.
+/// not.
 #[rstest]
 fn trading_an_inverse_instrument_it_refuses_to_start() {
     let (handler, sent) = get_typed_into_message_saving_handler::<DataCommand>(None);
@@ -515,7 +502,7 @@ fn converting() -> EmaCrossConfig {
 }
 
 /// Live, the strategy requests the quotes of IC's EURUSD over its warmup, which ends now. That
-/// way the cache holds a rate when it sizes a trade. It then subscribes from now.
+/// way the cache holds a rate when it sizes a trade.
 #[rstest]
 fn live_it_warms_up_its_conversion_pairs_quotes_then_subscribes_to_them_from_its_start() {
     let (handler, sent) = get_typed_into_message_saving_handler::<DataCommand>(None);

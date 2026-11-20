@@ -66,7 +66,6 @@ mod tests {
         xetra().contains(utc.parse().unwrap(), HOUR)
     }
 
-    /// An hourly bar counts when its whole hour lies inside 09:00 to 17:30 on one day.
     #[rstest]
     #[case::inside("2026-01-07T12:00", true)]
     #[case::before_the_open("2026-01-07T07:00", false)]
@@ -83,7 +82,6 @@ mod tests {
         assert_eq!(counts(local), expected);
     }
 
-    /// The session stays 09:00 to 17:30 in Frankfurt as daylight saving moves it in UTC.
     #[rstest]
     // Friday in CET (UTC+1), Monday in CEST (UTC+2)
     #[case::march_friday_morning("2026-03-27T08:00Z", false)]
@@ -99,7 +97,6 @@ mod tests {
         assert_eq!(counts_utc(utc), expected);
     }
 
-    /// A session that closes at or before it opens is refused, naming both times.
     #[rstest]
     #[case::closing_after_the_open(time(17, 30, 0, 0), None)]
     #[case::closing_at_the_open(time(9, 0, 0, 0), Some("09:00"))]

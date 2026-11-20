@@ -293,8 +293,6 @@ mod tests {
         )
     }
 
-    /// EUR/USD is quoted 1.24990 / 1.25010, mid 1.25 USD per EUR. USD/JPY is quoted 149.990 /
-    /// 150.010, mid 150 JPY per USD.
     fn quoted() -> Cache {
         let mut cache = defining(&[EURUSD, USDJPY]);
         cache
@@ -310,8 +308,6 @@ mod tests {
         amounts.iter().map(|&amount| Money::from(amount)).collect()
     }
 
-    /// 100,000 EUR are 125,000 USD, a loss of 2,000 USD is itself, and 150,000 JPY are 1,000 USD.
-    /// The sum is 124,000 USD.
     #[rstest]
     fn an_equity_in_several_currencies_is_the_sum_of_each_converted() {
         let equity = money(&["100000 EUR", "-2000 USD", "150000 JPY"]);
@@ -323,7 +319,6 @@ mod tests {
         assert_eq!(converted, Some(Money::from("124000 USD")));
     }
 
-    /// No pair reaches GBP, but none is held, so the equity is the EUR alone.
     #[rstest]
     fn an_amount_of_zero_needs_no_rate() {
         let equity = money(&["100000 EUR", "0 GBP"]);
@@ -335,8 +330,6 @@ mod tests {
         assert_eq!(converted, Some(Money::from("125000 USD")));
     }
 
-    /// Either 5 GBP are held, which no pair reaches, or 100,000 EUR are held, and their pair
-    /// EUR/USD is defined but not quoted yet.
     #[rstest]
     #[case::of_a_currency_no_pair_reaches(quoted(), &["100000 EUR", "5 GBP"])]
     #[case::of_a_pair_not_quoted_yet(defining(&[EURUSD]), &["100000 EUR"])]
@@ -372,7 +365,7 @@ mod tests {
     /// `crates/common/src/cache/mod.rs:7463-7472`).
     ///
     /// `venues::rate_series` reads an IB pair as those bars alone, and `Rates::convert` takes its
-    /// rate from `get_xrate`. The closes are 1.24990 and 1.25010, mid 1.25 USD per EUR.
+    /// rate from `get_xrate`.
     #[rstest]
     fn drift_a_pair_without_quotes_is_read_at_its_bid_and_ask_bars() {
         let mut cache = defining(&[EURUSD]);

@@ -1095,8 +1095,6 @@ mod tests {
         assert_eq!(config.base.order_id_tag, None);
     }
 
-    /// A key that no table takes is refused, naming it, in any table. A top-level key is the
-    /// part's.
     #[rstest]
     #[case::of_data(TOML, "[data]", "[data]\nsesion = 1", "sesion")]
     #[case::of_a_series(
@@ -1140,8 +1138,6 @@ mod tests {
         assert!(err.contains(&format!("`{unknown}`")), "{err}");
     }
 
-    /// `[pairs_trade]` is the part's key. It is refused as unknown before `[trade]` is reported
-    /// missing.
     #[rstest]
     #[case::misspelt(TOML.replace("[trade]", "[pairs_trade]"), "`pairs_trade`")]
     #[case::left_out(TOML[..TOML.find("[trade]").unwrap()].to_string(), "`trade`")]
@@ -1157,8 +1153,6 @@ mod tests {
         assert_eq!(error_fields(&toml), ["trade.instruments"]);
     }
 
-    /// Every trade is sized at a stake of `[trade] risk`. An instrument listed with a size of its
-    /// own is refused at that size, pointing to the risk.
     #[rstest]
     fn a_trade_size_is_refused_at_its_field_pointing_to_the_risk() {
         let toml = TOML.replace(
@@ -1189,8 +1183,7 @@ mod tests {
         assert!(err.contains("`risk`"), "{err}");
     }
 
-    /// GC.GLBX is a root of the roll calendar, so an order to it would go to no contract. It is
-    /// refused as traded, whether a series reads it or not.
+    /// GC.GLBX is a root of the roll calendar, so an order to it would go to no contract.
     #[rstest]
     fn a_futures_root_traded_is_refused_naming_it() {
         let toml = TOML.replace(
@@ -1396,8 +1389,7 @@ mod tests {
         );
     }
 
-    /// A session needs a bar's span. Nautilus builds bars from quotes or trades alone. So ESM24's
-    /// 100-tick BID bars and ESH24's hourly bars priced MARK are refused under their bar spec.
+    /// A session needs a bar's span, and Nautilus builds bars from quotes or trades alone.
     #[rstest]
     #[case::not_aggregated_on_time(
         "step = 5, aggregation = \"MINUTE\"",
@@ -1609,8 +1601,6 @@ mod tests {
         );
     }
 
-    /// Custom data has one spelling. An entry naming its `instrument_id` is refused, pointing at
-    /// the identifier.
     #[rstest]
     fn a_custom_series_naming_an_instrument_in_place_of_an_identifier_is_refused_pointing_at_it() {
         let toml = with_custom(&[r#"{ data = "Custom:Imbalance", instrument_id = "ESM24.CME" }"#]);
@@ -1798,8 +1788,7 @@ mod tests {
         );
     }
 
-    /// `US/10Y` is stored under `US10Y`'s folder, and `US^10Y` under `US_10Y`'s. Nautilus removes
-    /// `/` and makes `^` `_`. The later is a duplicate of data.series[3].
+    /// Nautilus removes `/` and makes `^` `_`.
     #[rstest]
     #[case::a_slash_removed("US10Y", "US/10Y")]
     #[case::a_caret_made_an_underscore("US_10Y", "US^10Y")]
@@ -1836,9 +1825,6 @@ mod tests {
         r#"{ data = "Custom:Signal", identifier = "GC.GLBX", metadata = { window = "5m" } }"#;
     const GCZ26_SIGNALS: &str = r#"{ data = "Custom:Signal", identifier = "GCZ26.GLBX" }"#;
 
-    /// GC.GLBX's series is stored on GCZ26.GLBX, under GCZ26.GLBX's folder, while GCZ26 stands for
-    /// the root. GCZ26.GLBX's series with other metadata is stored there too, whichever comes
-    /// first.
     #[rstest]
     #[case::the_root_s_first([GC_SIGNALS, GCZ26_SIGNALS])]
     #[case::the_contract_s_first([GCZ26_SIGNALS, GC_SIGNALS])]
@@ -1866,8 +1852,7 @@ mod tests {
         );
     }
 
-    /// GCZ26.GLBX's series with the root's metadata is the root's series on GCZ26, and is read
-    /// once. GCV26 is no contract GC rolls through, so its folder is its own.
+    /// GCV26 is no contract GC rolls through, so its folder is its own.
     #[rstest]
     fn a_contract_s_custom_series_beside_its_root_s_loads_if_it_is_the_root_s_on_it_or_one_it_never_rolls_through()
      {
@@ -1936,7 +1921,6 @@ mod tests {
     }
 
     /// Depth and book deltas give Nautilus no price for a market order, and deltas move no L1 book.
-    /// An instrument that only they read adds its quotes.
     #[rstest]
     #[case::depth("order_book_depths")]
     #[case::deltas("order_book_deltas")]
@@ -1963,7 +1947,7 @@ mod tests {
     }
 
     /// A custom series under a traded instrument's id gives Nautilus no price and brings no
-    /// instrument. An instrument that only it reads adds its quotes.
+    /// instrument.
     #[rstest]
     fn a_traded_instrument_read_only_through_a_custom_series_under_its_id_loads_its_quotes() {
         nautilus_serialization::ensure_custom_data_registered::<Signal>();
@@ -2039,8 +2023,7 @@ mod tests {
     }
 
     /// IB's history serves an FX pair as 1-minute BID and ASK bars, not quotes. Nautilus' rates
-    /// read those bars when a pair has no quotes. So an IDEALPRO pair loads its bars, after the
-    /// series' bar types, and no ticks.
+    /// read those bars when a pair has no quotes.
     #[rstest]
     fn an_ib_pair_converted_through_loads_its_bid_and_ask_minute_bars_into_the_requirements() {
         let config = load(&converting(r#"["EUR/USD.IDEALPRO"]"#)).unwrap();
@@ -2066,8 +2049,7 @@ mod tests {
     }
 
     /// OKX's history serves no pair's BID and ASK bars, because its candles are of trades, and
-    /// serves no quotes. So no rate of an OKX pair could be read, and the pair is refused, naming
-    /// the pair and venue.
+    /// serves no quotes. So no rate of an OKX pair could be read.
     #[rstest]
     fn a_pair_whose_venue_serves_neither_its_bars_nor_its_quotes_is_refused_naming_both() {
         let err = load(&converting(r#"["USDC-USDT.OKX"]"#)).unwrap_err();
@@ -2104,8 +2086,7 @@ mod tests {
     }
 
     /// An IC Markets account has a base currency. Nautilus converts its margins, commissions and
-    /// P&L into it only through rates on the traded instrument's venue. So an IDEALPRO pair is
-    /// refused for the gold IC trades.
+    /// P&L into it only through rates on the traded instrument's venue.
     #[rstest]
     fn a_pair_off_the_venue_of_an_instrument_whose_account_has_a_base_currency_is_refused() {
         let err = load(&trading_gold_converting(r#"["EUR/USD.IDEALPRO"]"#)).unwrap_err();
@@ -2120,8 +2101,7 @@ mod tests {
     }
 
     /// IB's account, as helix configures it, has no base currency, so only the sizer converts, at
-    /// the pairs' venue. So for CME futures, a pair of any one venue is taken. IC's account has a
-    /// base currency, and IC's own pair is on the venue of the gold.
+    /// the pairs' venue.
     #[rstest]
     #[case::of_ib_for_futures_on_cme(converting(r#"["EUR/USD.IDEALPRO"]"#), "EUR/USD.IDEALPRO")]
     #[case::of_ic_for_futures_on_cme(converting(r#"["EURUSD.ICMARKETS"]"#), "EURUSD.ICMARKETS")]
@@ -2215,8 +2195,6 @@ mod tests {
             assert_eq!(config.trade.conversions.pairs(), []);
         }
 
-        /// A risk it would never read is refused as a key its `[trade]` does not take. So are
-        /// pairs, since it converts none.
         #[rstest]
         #[case::a_risk("risk = \"0.5%\"", "risk")]
         #[case::conversions("conversions = [\"EUR/USD.IDEALPRO\"]", "conversions")]
@@ -2314,10 +2292,7 @@ mod tests {
             shape_of(&load(toml).unwrap_err())
         }
 
-        /// Returns `TOML` with a bracket 2 ATRs out and 1.5 ATRs against, closed after 45 minutes,
-        /// and its ATR set to `atr`.
-        ///
-        /// The warmup is 3 hours, the 3 hourly bars an ATR of 3 bars needs.
+        /// Returns `TOML` with its ATR set to `atr`.
         fn with_atr(atr: &str) -> String {
             TOML.replace(r#"warmup = "1h""#, r#"warmup = "3h""#).replace(
                 r#"target = { limit = "30m", atr = { period = 1 } }"#,
@@ -2513,10 +2488,6 @@ mod tests {
         }
 
         /// Reports the model's violations after the standard ones and the strategy id's.
-        ///
-        /// - The target's ATR of an hourly bar warms over longer than the warmup of nought, under
-        ///   `model.target.atr`.
-        /// - The target's limit is zero, under `model.target.limit`.
         #[rstest]
         fn reports_the_models_violations_with_the_standard_ones() {
             let toml = format!("{TOML}\n[base]\norder_id_tag = \"001\"\n")

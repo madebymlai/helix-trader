@@ -259,7 +259,6 @@ mod tests {
         assert!(err.to_string().starts_with(&format!("{text} ")), "{err}");
     }
 
-    /// The text reads back, so a store keyed by it is keyed by the value.
     #[rstest]
     #[case::half(R::new(0.5), "0.5R")]
     #[case::negative(R::new(-0.25), "-0.25R")]
@@ -314,7 +313,6 @@ mod tests {
         assert_eq!(R::deserialize(text).unwrap(), R::new(0.5));
     }
 
-    /// The refusal names the number and shows the value written in R.
     #[rstest]
     #[case::float(refusal::<F64Deserializer<Error>>(0.5.into_deserializer()), "0.5")]
     #[case::integer(refusal::<I64Deserializer<Error>>(1_i64.into_deserializer()), "1")]
@@ -354,7 +352,6 @@ mod tests {
         assert!(err.contains(&format!("{written:?}")), "{err}");
     }
 
-    /// The refusal names the number and shows a percentage.
     #[rstest]
     fn a_bare_number_is_refused_saying_a_risk_is_a_percentage() {
         let float: F64Deserializer<Error> = 0.005.into_deserializer();
@@ -400,7 +397,6 @@ mod tests {
         assert!(err.to_string().contains(multiple), "{err}");
     }
 
-    /// A target's manifest holds the risk as the config writes it.
     #[rstest]
     fn a_risk_serializes_as_written_and_reads_back() {
         let json = serde_json::to_string(&risk("0.25%")).unwrap();

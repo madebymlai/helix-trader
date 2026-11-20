@@ -544,7 +544,6 @@ mod tests {
         }
     }
 
-    /// IC gold's hour bars and quotes, and CME gold's trades and book depth as ticks.
     fn gold() -> DataRequirements {
         DataRequirements {
             bar_types: vec![BarType::from("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL")],
@@ -571,7 +570,6 @@ mod tests {
         }
     }
 
-    /// Gold's bars put IC's gold before CME gold, whose trades are the first tick.
     #[rstest]
     #[case::of_bar_types(ibis(), &["SXR8.IBIS", "EUNL.IBIS"])]
     #[case::of_ticks_after_bar_types(
@@ -648,8 +646,6 @@ mod tests {
         );
     }
 
-    /// The deltas of one contract are a catalog series of that contract. The imbalances of another
-    /// bring no instrument and no catalog series.
     #[rstest]
     fn a_custom_series_under_an_instruments_id_brings_no_instrument_and_no_catalog_series() {
         let requirements = DataRequirements {
@@ -689,7 +685,6 @@ mod tests {
         }
     }
 
-    /// ASK coverage does not fill a one-nanosecond gap in BID coverage.
     #[rstest]
     fn bar_windows_merge_only_for_the_same_full_bar_type_without_a_gap() {
         let bid = CatalogSeries::Bars(BarType::from("GCZ26.GLBX-1-MINUTE-BID-EXTERNAL"));
@@ -735,11 +730,8 @@ mod tests {
         );
     }
 
-    /// GC rolls from GCQ26 into GCZ26 at 00:00 UTC on 29 July 2026.
-    ///
-    /// That is two business days before the last business day of the month before delivery
-    /// (`rolls/calendar.toml`, `rolls/README.md`). Each tick series of the root is GCQ26's up to
-    /// 1 ns before the roll, and GCZ26's from the roll.
+    /// GC rolls from GCQ26 into GCZ26 at 00:00 UTC on 29 July 2026 (`rolls/calendar.toml`,
+    /// `rolls/README.md`).
     #[rstest]
     fn the_ticks_of_a_root_are_its_contracts_ticks_over_their_slices() {
         let requirements = DataRequirements {
@@ -779,8 +771,6 @@ mod tests {
         );
     }
 
-    /// LAST bars are built from GCQ26's trades up to 1 ns before the roll of 29 July, and from
-    /// GCZ26's trades from the roll.
     #[rstest]
     fn the_bars_of_a_root_are_built_from_its_contracts_trades_over_their_slices() {
         let requirements = DataRequirements {
@@ -805,7 +795,6 @@ mod tests {
         );
     }
 
-    /// GCQ26 stands for GC up to the roll of 29 July and is read as itself over the whole span.
     #[rstest]
     fn a_contract_read_beside_its_root_is_one_slice_of_each_series_over_both() {
         let requirements = DataRequirements {
@@ -832,7 +821,6 @@ mod tests {
         );
     }
 
-    /// GCQ26 is one slice over the whole span. GCZ26 is one slice from the roll of 29 July.
     #[rstest]
     fn the_contracts_of_a_root_and_of_a_contract_beside_it_are_one_slice_each() {
         let requirements = DataRequirements {
@@ -860,7 +848,6 @@ mod tests {
         CustomSeries::new("Imbalance", identifier.to_string(), None).unwrap()
     }
 
-    /// LSE's 10-year US yields under `identifier`.
     fn yields(identifier: &str) -> CustomSeries {
         let metadata = Params::new(
             [
@@ -887,7 +874,6 @@ mod tests {
         );
     }
 
-    /// The series is GCQ26's up to 1 ns before the roll of 29 July, and GCZ26's from the roll.
     #[rstest]
     fn a_custom_series_on_a_root_is_at_each_time_the_series_of_the_contract_in_front() {
         let series = yields("GC.GLBX");
@@ -937,8 +923,6 @@ mod tests {
         );
     }
 
-    /// GCQ26's imbalances listed beside GC's are read once over the whole window. The window holds
-    /// the root's GCQ26 slice.
     #[rstest]
     fn a_contract_s_custom_series_listed_beside_its_root_s_is_one_slice_over_both() {
         let requirements = DataRequirements {
@@ -968,11 +952,6 @@ mod tests {
         catalog_keys(&bar_types)
     }
 
-    /// Each kind of bar needs a different series.
-    ///
-    /// - Internal bars need their instrument's quotes, or its trades if priced LAST.
-    /// - Composite bars need their source bars, or what those are built from.
-    /// - External bars are their own series.
     #[rstest]
     #[case::internal_bars_of_quotes(
         "SXR8.IBIS-1-HOUR-MID-INTERNAL",
