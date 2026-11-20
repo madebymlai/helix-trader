@@ -7,8 +7,8 @@ Comments and doc comments follow Nautilus' standard, adapted to helix: its codin
 1. Leave one blank line above a comment block, so that it stands apart from the code above it.
 2. Write in sentence case: capitalize the first letter and keep the rest lowercase, except proper nouns and acronyms.
 3. Leave one space after a period, not two.
-4. End a single-line comment without a period, unless it ends with a URL or an inline Markdown link, which keeps the punctuation the link needs.
-5. Join the sentences of a multi-line comment with commas rather than a period per line, and end its last line with a period.
+4. End a single-line `//` comment without a period, unless it ends with a URL or an inline Markdown link, which keeps the punctuation the link needs.
+5. Join the sentences of a multi-line `//` comment with commas rather than a period per line, and end its last line with a period.
 6. Keep comments concise, explaining only what is not obvious.
 7. Leave out emoji.
 
@@ -21,7 +21,7 @@ Do not divide a module's contents with box-style banner or separator comments (`
 - Add doc comments to public items. Document private behavior with a normal comment only when non-obvious context prevents a likely misreading.
 - Add module documentation to public modules and modules with a non-obvious contract, and no boilerplate to a private leaf module.
 - Write in the indicative mood: "Returns the account ID", not "Return the account ID".
-- End the documentation of a public field or enum variant with a period.
+- End a doc comment (`///` or `//!`) with a period, whether it is one line or several, a public field's or enum variant's included.
 - Match the density of neighboring items, with no filler comments to make a bare block look uniform.
 - Put important context for private fields in the type's documentation rather than documenting each field.
 
