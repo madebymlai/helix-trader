@@ -487,6 +487,7 @@ impl CTraderExecutionClient {
         );
 
         if let Some(open) = self.session.take() {
+            // The tasks are done, so this is the last handle
             if let Ok(session) = Arc::try_unwrap(open.ctrader) {
                 session.disconnect().await;
             }
