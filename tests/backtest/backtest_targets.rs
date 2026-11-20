@@ -1,11 +1,15 @@
-//! Targets from orders (`model::targets`): a probe decides every hour on one feature and opens its
-//! target on each side, a bracket or a time-only trade, on a hedging venue through
-//! `Backtest::run_dataset`, recording the target rows published. The runs use quotes, trades and
-//! minute bars, with exits and paths chosen so that each target is worked out by hand. The probe
-//! subscribes to the ATR's hourly bars as a model handle does (`Targets::atr_bar_type`,
-//! `strategy::subscriptions`). Deciding on LAST bars built from the trades alone is deciding on
-//! the trades. A denied order fails the run with its reason. A dataset run settles the rows a
-//! backtest does, net of the run's commission.
+//! Tests targets from orders (`model::targets`).
+//!
+//! A probe decides every hour on one feature. It opens its target on each side, as a bracket or a
+//! time-only trade, on a hedging venue through `Backtest::run_dataset`, and records the target rows
+//! published. The runs use quotes, trades and minute bars. Exits and paths are chosen so that each
+//! target is worked out by hand.
+//!
+//! - The probe subscribes to the ATR's hourly bars as a model handle does
+//!   (`Targets::atr_bar_type`, `strategy::subscriptions`).
+//! - Deciding on LAST bars built from the trades alone is deciding on the trades.
+//! - A denied order fails the run with its reason.
+//! - A dataset run settles the rows a backtest does, net of the run's commission.
 
 use std::{cell::RefCell, collections::BTreeSet, path::PathBuf, rc::Rc, thread};
 
@@ -114,7 +118,7 @@ struct Record {
     filled: Vec<String>,
     commissions: Vec<Money>,
     rejected: Vec<String>,
-    /// The denial that failed the run (`Targets::on_order_denied`).
+    /// Records the denial that failed the run (`Targets::on_order_denied`).
     denial: Option<String>,
 }
 
@@ -139,7 +143,7 @@ impl TargetProbe {
         Self::every(source, targets, SignedDuration::from_hours(1), backtest)
     }
 
-    /// The probe deciding every `every`; its ATR, if any, is on bars of `every`.
+    /// Builds the probe that decides every `every`, with its ATR, if any, on bars of `every`.
     fn every(
         source: Source,
         targets: TargetConfig,
@@ -257,8 +261,9 @@ impl DataActor for TargetProbe {
         decide::start(self, DecisionRule::Every(self.every), SignedDuration::ZERO)
     }
 
-    /// Hands the features its quotes and trades, and its warmup its bars: the features and the
-    /// targets' ATR are registered with Nautilus for nothing.
+    /// Hands quotes and trades to the features, and bars to the warmup.
+    ///
+    /// The features and the targets' ATR are registered with Nautilus for nothing.
     fn on_quote(&mut self, quote: &QuoteTick) -> anyhow::Result<()> {
         self.features.handle_quote(quote)
     }
@@ -298,8 +303,9 @@ impl DataActor for TargetProbe {
     }
 }
 
-/// The risk at which the reference stake is `money` of the runs' balance of 10M: a target whose one
-/// R is worth `money` on one unit, and less on two, trades one unit.
+/// Returns the risk at which the reference stake is `money` of the runs' balance of 10M.
+///
+/// A target whose one R is worth `money` on one unit, and less on two, trades one unit.
 fn risking(money: &str) -> Risk {
     let fraction = Decimal::from_str_exact(money).unwrap() / Decimal::from(10_000_000);
     format!("{}%", (fraction * Decimal::ONE_HUNDRED).normalize())
@@ -338,7 +344,7 @@ fn time_only(instrument_id: &str, risk: Risk) -> TargetConfig {
     trading(spec, instrument_id, risk)
 }
 
-/// The decision at `at`: it fires 10 ms after.
+/// Builds the decision at `at`, which fires 10 ms after.
 fn decision(at: Timestamp, features: f64) -> FeatureRow {
     let time = UnixNanos::from(at + SignedDuration::from_millis(10));
     FeatureRow {
@@ -380,7 +386,9 @@ fn of_unit(long: Outcome, short: Outcome, unit: f64) -> Outcomes {
     }
 }
 
-/// A target row as the tests compare it, its payoff features apart, to 1e-12 (`assert_payoff`).
+/// A target row as the tests compare it, to 1e-12 (`assert_payoff`).
+///
+/// The payoff features are kept apart.
 type Settled = (FeatureRow, Outcomes, UnixNanos);
 
 fn row(decision: FeatureRow, outcomes: Outcomes, settled_at: Timestamp) -> Settled {
@@ -393,8 +401,10 @@ fn settled(rows: &[TargetRow]) -> Vec<Settled> {
         .collect()
 }
 
-/// Asserts that each row has the payoff features `long` and `short`, each within 1e-12: a bracket's
-/// take profit's R, stop's nominal loss and entry cost, a time-only target's entry cost.
+/// Asserts that each row has the payoff features `long` and `short`, each within 1e-12.
+///
+/// - A bracket has the take profit's R, the stop's nominal loss and the entry cost.
+/// - A time-only target has the entry cost.
 fn assert_payoff(rows: &[TargetRow], long: &[f64], short: &[f64]) {
     assert!(!rows.is_empty());
     for row in rows {
@@ -442,8 +452,9 @@ fn gold_backtest(catalog: PathBuf) -> Backtest {
     }
 }
 
-/// A dip at 09:20, a spike at 10:45:00.010, the time limit of the 10:00 decision, and a rise of
-/// 0.90 from 11:20.
+/// Returns quotes with a dip at 09:20, a spike at 10:45:00.010 and a rise of 0.90 from 11:20.
+///
+/// The spike is the time limit of the 10:00 decision.
 pub(crate) fn hand_worked_quotes() -> Vec<QuoteTick> {
     gold_quotes(
         |t| match t {
@@ -455,12 +466,16 @@ pub(crate) fn hand_worked_quotes() -> Vec<QuoteTick> {
     )
 }
 
-/// One ounce, exits 7.5 bps from the mid of 4000.10, 3.000075, on the nearest cent: a long enters
-/// at the ask, 4000.20, its take profit a sell limit at 4003.10, its stop a sell stop at 3997.10;
-/// a short enters at the bid, 4000.00, and exits on the ask. Each stop, 3.00 away, is worth 3 USD,
-/// each fill 0.12 (30 USD per million). On 4000.00/4000.20 either side's take profit nets
-/// 2.90 - 0.24, its stop loses 3.10 + 0.24, its entry costs 0.20 + 0.12: over 3 USD, the payoff
-/// features.
+/// The probe trades one ounce with exits 7.5 bps (3.000075) from the mid of 4000.10, on the
+/// nearest cent.
+///
+/// - A long enters at the ask, 4000.20. Its take profit is a sell limit at 4003.10 and its stop is
+///   a sell stop at 3997.10.
+/// - A short enters at the bid, 4000.00, and exits on the ask.
+/// - Each stop is 3.00 away and worth 3 USD. Each fill costs 0.12 (30 USD per million).
+///
+/// On 4000.00/4000.20, either side's take profit nets 2.90 - 0.24, its stop loses 3.10 + 0.24 and
+/// its entry costs 0.20 + 0.12. All are over 3 USD: the payoff features.
 #[rstest]
 fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
     let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
@@ -477,9 +492,9 @@ fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
 
     let at = |hh_mm: &str| ic::at(&format!("{hh_mm}:00"));
     let expected = [
-        // The dip at 09:20, 3996.80/3997.00: the long's stop fills at the bid, 3996.80
-        // (-3.40 - 0.24), the short's take profit at its limit, 3997.10 (+2.90 - 0.24), settling
-        // the row.
+        // The dip at 09:20 is 3996.80/3997.00, so the long's stop fills at the bid, 3996.80
+        // (-3.40 - 0.24), and the short's take profit fills at its limit, 3997.10 (+2.90 - 0.24),
+        // which settles the row.
         row(
             decision(at("09:00"), 4000.10),
             of_unit(
@@ -489,8 +504,8 @@ fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
             ),
             ic::at("09:20:00"),
         ),
-        // The spike at the time limit's nanosecond is inside the window: the long's take profit
-        // fills at 4003.10, the short's stop at the ask, 4003.40.
+        // The spike at the time limit's nanosecond is inside the window, so the long's take profit
+        // fills at 4003.10 and the short's stop fills at the ask, 4003.40.
         row(
             decision(at("10:00"), 4000.10),
             of_unit(
@@ -500,7 +515,8 @@ fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
             ),
             ic::at("10:45:00.010"),
         ),
-        // No exit reached: closed by time on 4001.00/4001.20, long +0.80, short -1.20, less fees
+        // No exit is reached, so time closes both on 4001.00/4001.20, long +0.80 and short -1.20,
+        // less fees.
         row(
             decision(at("11:00"), 4000.10),
             of_unit(
@@ -520,7 +536,7 @@ fn targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
     assert!((take_profit.pnl.as_f64() / take_profit.unit.as_f64() - side[0]).abs() < 1e-12);
 }
 
-/// Pepperstone's commission on gold, 3.5 USD per lot of 100 oz: 0.035 USD an ounce.
+/// Returns Pepperstone's commission on gold: 3.5 USD per lot of 100 oz, or 0.035 USD an ounce.
 fn per_ounce() -> Commission {
     Commission::PerQuantity(Money::from_str_exact("0.035 USD").unwrap())
 }
@@ -550,11 +566,14 @@ fn hand_worked_run(commission: Commission, dataset: bool) -> Record {
     .unwrap()
 }
 
-/// A fill of an ounce costs 0.035 USD, 0.04 to the cent, so each side's trade 0.08. The backtest
-/// charges each of its 14 fills that cost and the dataset run settles the same rows net of it: the
-/// long stopped -3.48 (-3.40 - 0.08), taking profit 2.82, closed by time 0.72; the short closed by
-/// time -1.28. Payoff features: take profit 2.90 - 0.08, stop 3.10 + 0.08, entry 0.20 + 0.04, over
-/// 3 USD.
+/// A fill of an ounce costs 0.035 USD, or 0.04 to the cent, so each side's trade costs 0.08.
+///
+/// The backtest charges each of its 14 fills that cost. The dataset run settles the same rows net
+/// of it:
+/// - The long: stopped at -3.48 (-3.40 - 0.08), take profit at 2.82, closed by time at 0.72.
+/// - The short: closed by time at -1.28.
+///
+/// Payoff features: take profit 2.90 - 0.08, stop 3.10 + 0.08, entry 0.20 + 0.04, all over 3 USD.
 #[rstest]
 fn a_backtest_and_a_dataset_run_charge_a_commission_per_quantity_alike() {
     let cost = per_ounce()
@@ -604,8 +623,9 @@ fn a_backtest_and_a_dataset_run_charge_a_commission_per_quantity_alike() {
     assert_payoff(&backtest.rows, &side, &side);
 }
 
-/// A run to 09:50, one decision settling, quoted 4000.00/4000.01 throughout: the mid, 4000.005, is
-/// on a half tick.
+/// Builds a run to 09:50 in which one decision settles.
+///
+/// Quotes are 4000.00/4000.01 throughout, so the mid, 4000.005, is on a half tick.
 fn half_tick_run() -> (tempfile::TempDir, Backtest) {
     let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
     let quotes = gold_quotes(|_| Some(("4000.00", "4000.01")), &[]);
@@ -617,10 +637,12 @@ fn half_tick_run() -> (tempfile::TempDir, Backtest) {
     (catalog, backtest)
 }
 
-/// One ounce, exits 7.5 bps of the mid of 4000.005, 3.00000375, on the nearest cent: the long's
-/// take profit 4003.01 and stop 3997.00, the short's the reverse, each stop 3.005 away and worth
-/// 3.005 USD, not the cents around it. No exit is reached: each side closes by time at -0.01, the
-/// spread's cent, less two fees of 0.12.
+/// The probe trades one ounce with exits 7.5 bps (3.00000375) from the mid of 4000.005, on the
+/// nearest cent.
+///
+/// The long's take profit is 4003.01 and its stop is 3997.00. The short's are the reverse. Each
+/// stop is 3.005 away and worth 3.005 USD, not the cents around it. No exit is reached, so each
+/// side closes by time at -0.01, the spread's cent, less two fees of 0.12.
 #[rstest]
 fn a_stop_from_a_mid_on_a_half_tick_settles_at_its_exact_worth() {
     let (_catalog, backtest) = half_tick_run();
@@ -645,8 +667,10 @@ fn a_stop_from_a_mid_on_a_half_tick_settles_at_its_exact_worth() {
     assert_eq!(settled(&record.borrow().rows), expected);
 }
 
-/// One ounce, exits 0.01 bp of the mid of 4000.005: each stop is half a cent from the mid, on the
-/// touch, in the market, so the venue rejects it and the decision stores no row.
+/// The probe trades one ounce with exits 0.01 bp from the mid of 4000.005.
+///
+/// Each stop is half a cent from the mid, on the touch, in the market. The venue rejects it and the
+/// decision stores no row.
 #[rstest]
 fn a_stop_half_a_tick_from_a_mid_on_a_half_tick_is_rejected_and_stores_no_row() {
     let (_catalog, backtest) = half_tick_run();
@@ -665,11 +689,15 @@ fn a_stop_half_a_tick_from_a_mid_on_a_half_tick_is_rejected_and_stores_no_row() 
     assert_eq!(record.rows, []);
 }
 
-/// One ounce, no exits: each side enters as a bracket does and closes 30 minutes after its send,
-/// each fill paying 0.12 USD. The unit is the worth of the ATR of 2 hourly bars of the mids: 09:00
-/// ranges 0; 10:00 from 3996.90 (09:20) to 4000.10, 3.20, ATR 1.60, Wilder's seeded by the mean of
-/// the two; 11:00 from 4000.10 to 4003.30 (10:45), 3.20, ATR (1.60 + 3.20) / 2 = 2.40. The ATR has
-/// one bar at 09:00: that decision opens no target. An entry costs 0.20 + 0.12 USD, over the unit.
+/// The probe trades one ounce with no exits and closes each side 30 minutes after its send.
+///
+/// Each side enters as a bracket does. Each fill pays 0.12 USD. The unit is the worth of the ATR of
+/// 2 hourly bars of the mids. 09:00 ranges 0. 10:00 ranges 3.20, from 3996.90 (09:20) to 4000.10,
+/// so the ATR is 1.60, Wilder's seeded by the mean of the two. 11:00 ranges 3.20, from 4000.10 to
+/// 4003.30 (10:45), so the ATR is (1.60 + 3.20) / 2 = 2.40.
+///
+/// The ATR has one bar at 09:00, so that decision opens no target. An entry costs 0.20 + 0.12 USD,
+/// over the unit.
 #[rstest]
 fn time_only_targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
     let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
@@ -714,7 +742,7 @@ fn time_only_targets_on_quotes_are_the_outcomes_worked_out_by_hand() {
     assert!(record.filled[0].starts_with("D0-"), "{:?}", record.filled);
 }
 
-/// Each order's id is its decision's number, its side and its leg.
+/// Names each order by its decision's number, its side and its leg.
 #[rstest]
 fn a_targets_orders_are_named_by_their_decision_side_and_leg() {
     let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
@@ -737,10 +765,11 @@ fn a_targets_orders_are_named_by_their_decision_side_and_leg() {
     assert_eq!(filled, ["D0-L-E", "D0-L-SL", "D0-S-E", "D0-S-TP"]);
 }
 
-/// Half of 100,000 USD, 50,000, over a stop of 3.00 buys 16,666 oz, which Nautilus' sizer caps at
-/// gold's largest order, 10,000 oz: margin at IC's 1 / 30 of 1.33M USD, beyond the account. A
-/// dataset run's account locks no margin, so nothing is denied and each unit is its stop's worth
-/// on 10,000 oz, 30,000 USD.
+/// Half of 100,000 USD, 50,000, over a stop of 3.00 buys 16,666 oz.
+///
+/// Nautilus' sizer caps that at gold's largest order, 10,000 oz. Margin at IC's 1 / 30 would be
+/// 1.33M USD, beyond the account. A dataset run's account locks no margin, so nothing is denied.
+/// Each unit is its stop's worth on 10,000 oz, 30,000 USD.
 #[rstest]
 fn a_dataset_run_locks_no_margin_so_a_size_beyond_its_balance_settles() {
     let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
@@ -787,9 +816,11 @@ fn a_dataset_run_locks_no_margin_so_a_size_beyond_its_balance_settles() {
     );
 }
 
-/// A commission of 4M USD an order: the 09:00 decision's four fills cost 16M USD, more than the
-/// 10M USD balance. A dataset run's account is frozen, its balance whole whatever its trades lose,
-/// so every later decision settles as the hand-worked targets do.
+/// The commission is 4M USD an order, so the 09:00 decision's four fills cost 16M USD, more than
+/// the 10M USD balance.
+///
+/// A dataset run's account is frozen. Its balance stays whole, so every later decision settles as
+/// the hand-worked targets do.
 #[rstest]
 fn a_dataset_runs_account_keeps_its_balance_whatever_its_trades_lose() {
     let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
@@ -816,9 +847,10 @@ fn a_dataset_runs_account_keeps_its_balance_whatever_its_trades_lose() {
     );
 }
 
-/// With a minimum of 5 oz, the one ounce is below it and Nautilus' risk engine, its checks kept in
-/// a dataset run, denies the first entry: the run fails with the reason at the 09:00 decision, no
-/// row, no later decision.
+/// The minimum is 5 oz, so the one ounce is below it.
+///
+/// Nautilus' risk engine keeps its checks in a dataset run and denies the first entry. The run
+/// fails with the reason at the 09:00 decision, with no row and no later decision.
 #[rstest]
 fn a_size_below_the_instruments_minimum_fails_the_dataset_run_and_stops_it() {
     let InstrumentAny::Cfd(mut gold) = ic::instrument() else {
@@ -850,8 +882,8 @@ fn a_size_below_the_instruments_minimum_fails_the_dataset_run_and_stops_it() {
 const BTC: &str = "BTC-USDT-SWAP.OKX";
 const BTC_MINUTE: &str = "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL";
 
-/// BTC-USDT-SWAP as OKX defines it: price tick 0.1, lot 0.01 contracts, 0.01 BTC a contract,
-/// margins of 1.
+/// Returns BTC-USDT-SWAP as OKX defines it: price tick 0.1, lot 0.01 contracts, 0.01 BTC a
+/// contract, margins of 1.
 fn btc() -> InstrumentAny {
     InstrumentAny::CryptoPerpetual(
         CryptoPerpetual::builder()
@@ -877,8 +909,10 @@ fn btc() -> InstrumentAny {
     )
 }
 
-/// The minute bar opening at `open`, stamped as fill-catalog stores OKX's candles (`ts_event` at
-/// the open, `ts_init` at the close).
+/// Builds the minute bar opening at `open`.
+///
+/// The bar is stamped as fill-catalog stores OKX's candles: `ts_event` at the open and `ts_init`
+/// at the close.
 fn btc_bar(open: Timestamp) -> Bar {
     let (high, low) = match open {
         t if t == ic::at("09:10:00") => (100_150.0, 99_850.0),
@@ -927,13 +961,17 @@ fn btc_backtest(catalog: &tempfile::TempDir) -> Backtest {
     }
 }
 
-/// One contract (0.01 BTC), exits 10 bps, 100, from the close of 100,000, on minute bars alone: the
-/// venue fills a market order at the last close, a take profit at its limit and a stop at its
-/// trigger, replaying each bar's open, high, low and close in that order. Each stop is worth 1
-/// USDT, each fill OKX's 0.05%: 0.5 at 100,000, 0.5005 at 100,100, 0.4995 at 99,900. With no
-/// quote both sides enter at the close, no spread: the long's take profit nets 1 - 0.5 - 0.5005,
-/// its stop loses 1 + 0.5 + 0.4995; the short's take profit nets 1 - 0.5 - 0.4995, its stop loses
-/// 1 + 0.5 + 0.5005; an entry costs 0.5; all over 1 USDT.
+/// The probe trades one contract (0.01 BTC) with exits 10 bps (100) from the close of 100,000, on
+/// minute bars alone.
+///
+/// The venue fills a market order at the last close, a take profit at its limit and a stop at its
+/// trigger. It replays each bar's open, high, low and close in that order. Each stop is worth 1
+/// USDT. Each fill costs OKX's 0.05%: 0.5 at 100,000, 0.5005 at 100,100 and 0.4995 at 99,900.
+///
+/// With no quote, both sides enter at the close, with no spread. All are over 1 USDT:
+/// - The long's take profit nets 1 - 0.5 - 0.5005, and its stop loses 1 + 0.5 + 0.4995.
+/// - The short's take profit nets 1 - 0.5 - 0.4995, and its stop loses 1 + 0.5 + 0.5005.
+/// - An entry costs 0.5.
 #[rstest]
 fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
     let catalog = btc_catalog(btc_bar);
@@ -955,8 +993,9 @@ fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
         )
     };
     let expected = [
-        // The bar touching both exits replays its high first: the long's take profit fills at
-        // 100,100 (+1 - 1.0005 of fees, a loss), the short's stop at its trigger (-1 - 1.0005).
+        // The bar touching both exits replays its high first, so the long's take profit fills at
+        // 100,100 (+1 - 1.0005 of fees, a loss) and the short's stop fills at its trigger
+        // (-1 - 1.0005).
         row(
             decision(at("09:00"), 100_000.0),
             of_unit(
@@ -966,8 +1005,8 @@ fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
             ),
             ic::at("09:11:00"),
         ),
-        // The fall: the long's stop at 99,900 (-1 - 0.9995), the short's take profit at its limit
-        // (+1 - 0.9995).
+        // The fall fills the long's stop at 99,900 (-1 - 0.9995) and the short's take profit at its
+        // limit (+1 - 0.9995).
         row(
             decision(at("10:00"), 100_000.0),
             of_unit(
@@ -991,18 +1030,19 @@ fn targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
         &[0.0005, 2.0005, 0.5],
     );
 
-    // A take profit can lose net of fees: its sign is the P&L's
+    // A take profit can lose net of fees, so its sign is the P&L's
     let outcomes = record.rows[0].outcomes;
     assert_eq!((outcomes.long.sign(), outcomes.short.sign()), (-1, -1));
     assert_eq!(record.rows[1].outcomes.short.sign(), 1);
 }
 
-/// One contract, no exits: each side enters at the last close, 100,000, and closes 30 minutes
-/// later at 100,000 still: two fees of 0.5 USDT lost. The unit is the worth of the ATR of 2 of
-/// Nautilus' hourly bars built from the minute bars
-/// (`BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`): 09:00 ranges 0; 10:00 from
-/// 99,850 to 100,150 (09:10), 300, ATR 150; 11:00 from 99,850 (10:20) to 100,000, 150, ATR 150;
-/// on 0.01 BTC, 1.5 USDT.
+/// The probe trades one contract with no exits. Each side enters at the last close, 100,000, and
+/// closes 30 minutes later at 100,000 still, so it loses two fees of 0.5 USDT.
+///
+/// The unit is the worth of the ATR of 2 of Nautilus' hourly bars built from the minute bars
+/// (`BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`). 09:00 ranges 0. 10:00 ranges 300,
+/// from 99,850 to 100,150 (09:10). 11:00 ranges 150, from 99,850 (10:20) to 100,000. The ATR is
+/// 150 at both, and on 0.01 BTC the unit is 1.5 USDT.
 #[rstest]
 fn time_only_targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
     let catalog = btc_catalog(btc_bar);
@@ -1035,7 +1075,7 @@ fn time_only_targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
     let record = record.borrow();
     assert_eq!(settled(&record.rows), expected);
 
-    // On bars, no spread: each entry costs its fee alone, over the unit
+    // On bars, no spread, so each entry costs its fee alone, over the unit
     assert_payoff(&record.rows, &[0.5 / 1.5], &[0.5 / 1.5]);
     assert_eq!(
         record.fills.first(),
@@ -1046,8 +1086,10 @@ fn time_only_targets_on_minute_bars_are_the_outcomes_worked_out_by_hand() {
 const INVERSE: &str = "BTCUSD.BYBIT";
 const INVERSE_MINUTE: &str = "BTCUSD.BYBIT-1-MINUTE-LAST-EXTERNAL";
 
-/// Flat 100,000-contract minute bars of Bybit's inverse BTCUSD, so the venue fills 1000 at the
-/// close, and a run of them alone on a hedging venue, 0.05% of each fill, 10 BTC.
+/// Builds flat minute bars of Bybit's inverse BTCUSD, and a run on them alone.
+///
+/// The bars are 100,000 contracts, so the venue fills 1000 at the close. The run is on a hedging
+/// venue, with 0.05% of each fill and 10 BTC.
 fn inverse_run() -> (tempfile::TempDir, Backtest) {
     let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
     let mut bars = vec![];
@@ -1083,9 +1125,11 @@ fn inverse_run() -> (tempfile::TempDir, Backtest) {
     (dir, backtest)
 }
 
-/// Refused as the targets start, before any decision: an error at a decision would only be logged
-/// by Nautilus and leave an empty dataset. A time-only target's unit, its ATR's worth, is no
-/// multiple of a distance in price on an inverse instrument, as a stop's is not.
+/// Refuses a target on an inverse instrument as the targets start, before any decision.
+///
+/// An error at a decision would only be logged by Nautilus and leave an empty dataset. The unit of
+/// a time-only target is the worth of its ATR. On an inverse instrument that is no multiple of a
+/// distance in price, and neither is a stop's.
 #[rstest]
 #[case::bracket(bracket(INVERSE, risking("1"), Decimal::from(10)))]
 #[case::time_only(time_only(INVERSE, risking("1")))]
@@ -1118,10 +1162,14 @@ fn ranging_quotes() -> Vec<QuoteTick> {
     )
 }
 
-/// One ounce, deciding every hour until 10:50: a take profit 2 and a stop 1.5 average true ranges
-/// away, the ATR of 2 hourly bars of the mids, which the targets subscribe to and the probe does
-/// not. 09:00 ranges 0.30; 10:00 from 3999.90 to 4000.40, 0.50: ATR 0.40, the exits 0.80 and 0.60
-/// from 4000.10, each stop worth 0.60 USD.
+/// The probe trades one ounce and decides every hour until 10:50.
+///
+/// The take profit is 2 average true ranges away and the stop is 1.5. The ATR is of 2 hourly bars
+/// of the mids, which the targets subscribe to and the probe does not. 09:00 ranges 0.30. 10:00
+/// ranges 0.50, from 3999.90 to 4000.40. The ATR is 0.40, so the exits are 0.80 and 0.60 from
+/// 4000.10.
+///
+/// Each stop is worth 0.60 USD.
 #[rstest]
 fn targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand() {
     let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
@@ -1153,7 +1201,7 @@ fn targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand() {
 
     let expected = [
         // The rise at 10:20 fills the long's take profit at its limit, 4000.90 (+0.70 - 0.24),
-        // and the short's stop at the ask, 4001.10 (-1.10 - 0.24), settling the row.
+        // and the short's stop at the ask, 4001.10 (-1.10 - 0.24), which settles the row.
         row(
             decision(ic::at("10:00:00"), 4000.10),
             of_unit(
@@ -1167,7 +1215,7 @@ fn targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand() {
     let record = record.borrow();
     assert_eq!(settled(&record.rows), expected);
 
-    // The 09:00 decision sent no order: the first fill is the first numbered decision's
+    // The 09:00 decision sent no order, so the first fill is the first numbered decision's
     assert_eq!(
         record.fills.first(),
         Some(&UnixNanos::from(ic::at("10:00:00.010")))
@@ -1175,9 +1223,11 @@ fn targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand() {
     assert!(record.filled[0].starts_with("D0-"), "{:?}", record.filled);
 }
 
-/// The ATR of `targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand`, 0.40 at
-/// 10:00, with a stop of a hundredth of it, 0.004 from 4000.10: on gold's cent ticks the stop
-/// rounds onto the decision's price, so the decision opens no target: no row, no order.
+/// A stop rounding onto the decision's price opens no target: no row, no order.
+///
+/// The ATR is that of `targets_an_atr_of_cadence_bars_away_are_the_outcomes_worked_out_by_hand`,
+/// 0.40 at 10:00. The stop is a hundredth of it, 0.004 from 4000.10. On gold's cent ticks it rounds
+/// onto the decision's price.
 #[rstest]
 fn a_stop_rounding_onto_the_decisions_price_opens_no_target() {
     let (from, to) = (ic::at("08:00:00"), ic::at("13:00:00"));
@@ -1232,7 +1282,7 @@ fn btc_atr_targets() -> TargetConfig {
     trading(spec, BTC, risking("0.825"))
 }
 
-/// No aggressor: the venue's bid and ask both move to the price.
+/// Builds a trade with no aggressor, so the venue's bid and ask both move to the price.
 fn btc_trade(time: Timestamp, price: f64) -> TradeTick {
     TradeTick::new(
         InstrumentId::from(BTC),
@@ -1270,10 +1320,13 @@ fn btc_trades_catalog() -> tempfile::TempDir {
     dir
 }
 
-/// On BTC's trades alone, no quote, until 10:50: the ATR's bars are the last prices of the trades
-/// at the cadence (`BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL`). 09:00 ranges 30; 10:00 from 99,970
-/// to 100,050, 80: ATR 55, Wilder's average of 30 and 80, the exits 110 and 82.5 from the last
-/// trade, each stop worth 0.825 USDT.
+/// The run uses BTC's trades alone, with no quote, until 10:50.
+///
+/// The ATR's bars are the last prices of the trades at the cadence
+/// (`BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL`). 09:00 ranges 30. 10:00 ranges 80, from 99,970 to
+/// 100,050. The ATR is 55, Wilder's average of 30 and 80.
+///
+/// The exits are 110 and 82.5 from the last trade. Each stop is worth 0.825 USDT.
 #[rstest]
 fn targets_an_atr_of_cadence_bars_of_trades_away_are_the_outcomes_worked_out_by_hand() {
     let catalog = btc_trades_catalog();
@@ -1294,26 +1347,27 @@ fn targets_an_atr_of_cadence_bars_of_trades_away_are_the_outcomes_worked_out_by_
     let record = record.borrow();
     assert_eq!(settled(&record.rows), btc_trades_atr_rows());
 
-    // No quote, so both sides enter at the last trade, 100,000: the long's take profit nets
-    // 1.10 - 0.5 - 0.50055, its stop loses 0.825 + 0.5 + 0.4995875; the short's take profit nets
-    // 1.10 - 0.5 - 0.49945, its stop loses 0.825 + 0.5 + 0.5004125; an entry costs 0.5; all over
-    // 0.825 USDT.
+    // No quote, so both sides enter at the last trade, 100,000. The long's take profit nets
+    // 1.10 - 0.5 - 0.50055 and its stop loses 0.825 + 0.5 + 0.4995875, the short's take profit
+    // nets 1.10 - 0.5 - 0.49945 and its stop loses 0.825 + 0.5 + 0.5004125, and an entry costs
+    // 0.5, all over 0.825 USDT.
     assert_payoff(
         &record.rows,
         &[0.09945 / 0.825, 1.8245875 / 0.825, 0.5 / 0.825],
         &[0.10055 / 0.825, 1.8254125 / 0.825, 0.5 / 0.825],
     );
 
-    // The 09:00 decision sent no order: the first fill is the 10:00 one's
+    // The 09:00 decision sent no order, so the first fill is the 10:00 one's
     assert_eq!(
         record.fills.first(),
         Some(&UnixNanos::from(ic::at("10:00:00.010")))
     );
 }
 
-/// The probe deciding on the close of BTC's hourly LAST bars, which the run builds from its trades
-/// alone: each bar closes on the hour's last trade, so the decisions, ATR and targets are those of
-/// deciding on the trades.
+/// Decides on the close of BTC's hourly LAST bars.
+///
+/// The run builds those bars from its trades alone. Each bar closes on the hour's last trade, so
+/// the decisions, ATR and targets are those of deciding on the trades.
 #[rstest]
 fn targets_on_last_bars_of_trades_are_those_on_the_trades() {
     let catalog = btc_trades_catalog();
@@ -1334,7 +1388,7 @@ fn targets_on_last_bars_of_trades_are_those_on_the_trades() {
 fn btc_trades_atr_rows() -> [Settled; 1] {
     [
         // The trade at 100,120 fills the long's take profit at 100,110 (+1.10 - 0.5 - 0.50055) and
-        // the short's stop at 100,120 (-1.20 - 0.5 - 0.5006), settling the row.
+        // the short's stop at 100,120 (-1.20 - 0.5 - 0.5006), which settles the row.
         row(
             decision(ic::at("10:00:00"), 100_000.0),
             of_unit(
@@ -1362,10 +1416,14 @@ fn ranging_btc_bar(open: Timestamp) -> Bar {
     }
 }
 
-/// On BTC's minute bars alone, until 10:50: the ATR's bars are Nautilus' composite bars of the
-/// cadence built from them (`BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`). 09:00
-/// ranges 30; 10:00 from 99,970 to 100,050, 80, its high in the minute replayed at 10:00, before
-/// the timer closing the hour: ATR 55, the exits 110 and 82.5 from the last close.
+/// The run uses BTC's minute bars alone, until 10:50.
+///
+/// The ATR's bars are Nautilus' composite bars of the cadence built from them
+/// (`BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL`). 09:00 ranges 30. 10:00 ranges 80,
+/// from 99,970 to 100,050, its high in the minute replayed at 10:00, before the timer closing the
+/// hour. The ATR is 55.
+///
+/// The exits are 110 and 82.5 from the last close.
 #[rstest]
 fn targets_an_atr_of_cadence_bars_of_source_bars_away_are_the_outcomes_worked_out_by_hand() {
     let catalog = btc_catalog(ranging_btc_bar);
@@ -1379,8 +1437,9 @@ fn targets_an_atr_of_cadence_bars_of_source_bars_away_are_the_outcomes_worked_ou
     backtest.run_dataset(probe).unwrap();
 
     let expected = [
-        // The minute opening 10:20 replays its high first: the long's take profit fills at its
-        // limit, 100,110, the short's stop at its trigger, 100,082.5, at the minute's close, 10:21.
+        // The minute opening 10:20 replays its high first, so the long's take profit fills at its
+        // limit, 100,110, and the short's stop fills at its trigger, 100,082.5, at the minute's
+        // close, 10:21.
         row(
             decision(ic::at("10:00:00"), 100_000.0),
             of_unit(
@@ -1469,8 +1528,8 @@ fn targets_are_the_same_with_the_cache_purged_and_without() {
     let (purged, closed_purged) = walk_run(catalog.path().to_path_buf(), start, end, true);
     let (kept, closed_kept) = walk_run(catalog.path().to_path_buf(), start, end, false);
 
-    // Every decision whose time limit, two hours on, passes before the end settles, none denied
-    // on 10M USD; a later one settles if its exits are hit before the end.
+    // Every decision settles if its time limit, two hours on, passes before the end, with none
+    // denied on 10M USD, and a later one settles if its exits are hit before the end.
     let settled: BTreeSet<UnixNanos> = purged.iter().map(|row| row.decision.ts_event).collect();
     let mut due = 0;
     let mut decision = start + SignedDuration::from_millis(10);
@@ -1481,8 +1540,8 @@ fn targets_are_the_same_with_the_cache_purged_and_without() {
     }
     assert_eq!(purged, kept);
 
-    // Unpurged, the cache holds each closed order, three or more a side of a decision; purged,
-    // only those closed in the last minutes.
+    // Unpurged, the cache holds every closed order, three or more a side of a decision, but
+    // purged, it holds only those closed in the last minutes.
     assert!(closed_kept >= 3 * 2 * due, "{closed_kept} kept");
     assert!(closed_purged < 50, "{closed_purged} left after purging");
 }

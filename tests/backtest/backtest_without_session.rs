@@ -1,13 +1,15 @@
-//! No session, as on a market open around the clock: every bar counts, the one spanning midnight
-//! included.
+//! Tests a run with no session, as on a market open around the clock.
+//!
+//! Every bar counts, including the one spanning midnight.
 
 use jiff::Timestamp;
 use rstest::rstest;
 
 use crate::common::{self, stepped_quotes, ts};
 
-/// Quoted from Wednesday 7 January 2026, 19:00 UTC, to Thursday 02:00, all outside Xetra's session;
-/// the hour bars close at level + 0.60.
+/// Quotes from Wednesday 7 January 2026, 19:00 UTC, to Thursday 02:00, all outside Xetra's session.
+///
+/// The hour bars close at level + 0.60.
 fn level(close: Timestamp) -> f64 {
     let hour = |at: &str| ts(&format!("2026-01-{at}:00:00Z"));
     match close {
@@ -39,9 +41,9 @@ fn without_a_session_every_bar_counts_across_midnight() {
         .unwrap()
         .result;
 
-    // The run replays the bars closing 21:00 and 22:00 from 20:00: the crossover, initialized at
-    // 22:00, is short (600.60 below the slow EMA of 605.60). Each trade but the last ends at its
-    // stop, 50 bps away, on the first quote of the next bar, which jumps past it:
+    // The run replays the bars closing 21:00 and 22:00 from 20:00. The crossover initializes at
+    // 22:00 and is short, with 600.60 below the slow EMA of 605.60. Each trade but the last ends at
+    // its stop, 50 bps away, on the first quote of the next bar, which jumps past the stop:
     //
     // - 23:00: 620.60 above 605.60, cross up: buy 10 at 620.65, stop 617.50, EMA to 615.60;
     //   stopped at 23:01 at the bid 600.00 + 0.01 - 0.05 = 599.96: -206.90
@@ -51,7 +53,7 @@ fn without_a_session_every_bar_counts_across_midnight() {
     //   02:00 at 615.60 touches neither, the run ends long
     //
     // Dropping the bar closing at midnight, as a session of 00:00 to 23:59 does, would leave 01:00
-    // below the EMA of 615.60: a sell instead of a buy.
+    // below the EMA of 615.60, which gives a sell instead of a buy.
     assert_eq!(result.total_orders, 9);
     assert_eq!(common::balance(&result), "9698.00 EUR");
 }

@@ -1,7 +1,10 @@
-//! A strategy whose config reads the instrument it trades only through data that gives Nautilus no
-//! market price for it (custom data, which brings no instrument, book deltas, depth): the data
-//! requirements of its config (`StandardConfig::data_requirements`) still replay the instrument's
-//! quotes, so its market order on IC's gold (`common::ic`) is not denied for want of a price.
+//! Tests a strategy whose config reads the instrument it trades only through data that gives
+//! Nautilus no market price for it.
+//!
+//! Such data is custom data (which brings no instrument), book deltas and depth. The data
+//! requirements of the config (`StandardConfig::data_requirements`) still replay the instrument's
+//! quotes. So the strategy's market order on IC's gold (`common::ic`) is not denied for want of a
+//! price.
 
 use std::{cell::RefCell, num::NonZeroUsize, rc::Rc, sync::Arc};
 
@@ -49,9 +52,10 @@ impl Part for Reader {
     }
 }
 
-/// The config trading IC's gold, reading it through `data` alone, keyed by `key`, `instrument_id`
-/// or, of custom data, `identifier`. A custom type loads once registered, as the process registers
-/// those it compiles at its start.
+/// Builds the config that trades IC's gold and reads it through `data` alone.
+///
+/// The series is keyed by `key`: `instrument_id` or, for custom data, `identifier`. A custom type
+/// loads once registered. The process registers the custom types it compiles at its start.
 fn config(data: &str, key: &str) -> StandardConfig<Reader> {
     nautilus_serialization::ensure_custom_data_registered::<glbx::Imbalance>();
     StandardConfig::load(&format!(
