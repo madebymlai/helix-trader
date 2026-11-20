@@ -1,10 +1,9 @@
 //! The IB Gateway this process connects to: Nautilus' Docker one, started or reused, and logged in.
 //!
-//! Uses `DockerizedIBGateway` (`nautilus_interactive_brokers::gateway`), as Nautilus documents it:
-//! started before the clients, which then take its host and port. One container per trading mode,
-//! shared by every process of that mode. The login comes from `TWS_USERNAME` and `TWS_PASSWORD`,
-//! which the adapter reads from the environment; the Docker socket from `DOCKER_HOST`, else the
-//! local default.
+//! Uses `DockerizedIBGateway` (`nautilus_interactive_brokers::gateway`), started before the
+//! clients, which take its host and port. One container per trading mode, shared by every process
+//! of that mode. The adapter reads the login from `TWS_USERNAME` and `TWS_PASSWORD`; the Docker
+//! socket comes from `DOCKER_HOST`, else the local default.
 
 use std::{fmt::Display, str::FromStr};
 
@@ -13,13 +12,12 @@ use nautilus_interactive_brokers::{
     gateway::DockerizedIBGateway,
 };
 
-/// An IB account id as IB shows it, without the client name: `DU1234567` on a paper account,
-/// `U1234567` on a live one.
+/// An IB account id without the client name: `DU1234567` (paper) or `U1234567` (live).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IbAccount(String);
 
 impl IbAccount {
-    /// The trading mode of the account: paper if its id starts with `D`, as IB's paper ids do.
+    /// Paper if the id starts with `D`, as IB's paper ids do.
     fn trading_mode(&self) -> TradingMode {
         if self.0.starts_with('D') {
             TradingMode::Paper
@@ -32,8 +30,8 @@ impl IbAccount {
 impl FromStr for IbAccount {
     type Err = anyhow::Error;
 
-    /// Takes the bare id: the execution factory prefixes it with the client name, and orders carry
-    /// what follows the first `-`.
+    // The bare id: the execution factory prefixes the client name, and orders carry what follows
+    // the first `-`.
     fn from_str(s: &str) -> anyhow::Result<Self> {
         anyhow::ensure!(
             !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric()),
@@ -49,7 +47,6 @@ impl Display for IbAccount {
     }
 }
 
-/// A logged-in IB Gateway and the client id this process connects with.
 #[derive(Debug, Clone)]
 pub(super) struct IbGateway {
     pub(super) host: String,
@@ -58,8 +55,6 @@ pub(super) struct IbGateway {
 }
 
 impl IbGateway {
-    /// The gateway of `account`'s trading mode, for `client_id`
-    ///
     /// # Errors
     ///
     /// Returns an error if `start` fails.
@@ -67,7 +62,7 @@ impl IbGateway {
         Self::start(account.trading_mode(), client_id).await
     }
 
-    /// The paper gateway, for `client_id`: history needs no live login
+    /// The paper gateway: history needs no live login.
     ///
     /// # Errors
     ///
@@ -76,8 +71,6 @@ impl IbGateway {
         Self::start(TradingMode::Paper, client_id).await
     }
 
-    /// Starts the Docker gateway of `trading_mode`, or reuses its container, and waits for its
-    /// login: the adapter's `safe_start`, within its start timeout.
     ///
     /// # Errors
     ///
@@ -108,9 +101,8 @@ impl IbGateway {
     }
 }
 
-/// The container config of `trading_mode`: the adapter defaults (the credentials from the
-/// environment, its image and start timeout), with the API open to orders, since a paper container
-/// started for history also serves a paper node.
+/// The adapter defaults, with the API open to orders, since a paper container started for history
+/// also serves a paper node.
 fn gateway_config(trading_mode: TradingMode) -> DockerizedIBGatewayConfig {
     DockerizedIBGatewayConfig {
         trading_mode,
@@ -142,8 +134,7 @@ mod tests {
         assert!(err.contains(&format!("{account:?}")), "{err}");
     }
 
-    /// The port is the adapter's, by trading mode (its own tests cover it): building its gateway
-    /// needs a Docker socket, so this checks the mode the config of each account asks for.
+    /// Building the gateway needs a Docker socket, so this checks the config's mode.
     #[rstest]
     fn the_container_of_an_account_has_its_trading_mode() {
         let mode = |account: &str| {
