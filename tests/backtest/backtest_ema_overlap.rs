@@ -1,6 +1,6 @@
-//! On simulated IC Markets the EMA's second cross opens a short beside its still-open long, each
-//! closing on its own 4-hour hold alert (`common::trades`). The moves are too small to reach a
-//! stop loss (50 bps) or take profit (100 bps).
+//! Tests that on simulated IC Markets the EMA's second cross opens a short beside the still-open
+//! long. Each closes on its own 4-hour hold alert (`common::trades`). The moves are too small to
+//! reach a stop loss (50 bps) or take profit (100 bps).
 
 use helix_trader::{
     backtest::{Backtest, Commission},
@@ -11,8 +11,9 @@ use rstest::rstest;
 
 use crate::common::{self, ic, trades};
 
-/// With 10,000 USD and no fees the risk budget is 32 USD: a stop about 3.10 USD from entry sizes
-/// the long at 10 ounces, and the short still rounds down to 10 after the long's unrealized loss.
+/// With 10,000 USD and no fees the risk budget is 32 USD. A stop about 3.10 USD from entry sizes
+/// the long at 10 ounces. The short still rounds down to 10 after the long's unrealized loss.
+///
 /// - 13:00 at 610.60 > 605.60: cross up, buy 10 at 610.65, stop loss 607.55, take profit 616.71
 ///   (610.60 less 0.5%, plus 1%, to the cent); slow EMA 608.93.
 /// - 14:00 at 608.60 < 608.93: cross down, sell 10 at 608.55, stop loss 611.64, take profit 602.51

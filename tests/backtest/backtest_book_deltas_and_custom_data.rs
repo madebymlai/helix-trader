@@ -1,9 +1,9 @@
-//! A strategy declaring book deltas as a tick series and custom data as a custom series beside IC's
-//! gold quotes (`common::ic`): the run replays CME gold's deltas and `Imbalance`s (`common::glbx`)
-//! from the catalog to the probe's handlers in time order with the quotes, and nothing else the
-//! catalog stores. A raw feature on the imbalances reads each from Nautilus' cache, where the data
-//! engine puts it before the strategy's handler; a model strategy's dataset run hands a feature
-//! both through its data hooks.
+//! Tests a strategy that declares book deltas as a tick series and custom data as a custom series,
+//! beside IC's gold quotes (`common::ic`). The run replays CME gold's deltas and `Imbalance`s
+//! (`common::glbx`) from the catalog to the probe's handlers, in time order with the quotes. It
+//! replays nothing else the catalog stores. A raw feature on the imbalances reads each from
+//! Nautilus' cache, where the data engine puts it before the strategy's handler. A model
+//! strategy's dataset run hands a feature both through its data hooks.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -176,8 +176,8 @@ fn declared_deltas_and_custom_data_of_the_run_reach_the_handlers_in_time_order()
         vec![imbalances()],
     );
 
-    // The run's window only: not the event of 08:40 nor the imbalance of 08:50; the two deltas of
-    // 09:20 as one event.
+    // Only the run's window is replayed, so not the event of 08:40 nor the imbalance of 08:50, and
+    // the two deltas of 09:20 arrive as one event.
     assert_eq!(
         unquoted(&got),
         [
@@ -188,7 +188,7 @@ fn declared_deltas_and_custom_data_of_the_run_reach_the_handlers_in_time_order()
         ]
     );
 
-    // Among the 360 quotes of the run, each at its time
+    // The 360 quotes of the run, and each event, arrive at their times
     assert_eq!(got.len(), 360 + 4);
     let times: Vec<UnixNanos> = got.iter().map(Got::time).collect();
     assert!(times.is_sorted(), "{got:?}");
@@ -208,7 +208,7 @@ fn deltas_and_custom_data_the_strategy_does_not_declare_are_not_replayed() {
     assert_eq!(got.len(), 360);
 }
 
-/// The feature reads each replayed imbalance, the data engine having cached it first.
+/// The feature reads each replayed imbalance, because the data engine cached it first.
 #[rstest]
 fn a_raw_feature_reads_each_replayed_imbalance_from_the_cache() {
     let catalog = catalog();
@@ -308,8 +308,8 @@ impl IndicatorArgs for ArrivalsArgs {
 
 const ARRIVALS: Declared<ArrivalsArgs> = Declared::new("arrivals");
 
-/// The data hooks (`model_data_hooks!`) hand the feature each replayed imbalance among the quotes,
-/// in time order.
+/// The data hooks (`model_data_hooks!`) hand the feature each replayed imbalance, in time order
+/// with the quotes.
 #[rstest]
 fn a_feature_on_custom_data_and_quotes_gets_both_replayed_in_time_order() {
     let catalog = catalog();

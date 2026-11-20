@@ -1,7 +1,8 @@
-//! A composite bar type, hour bars Nautilus builds from external minute bars: `fill_catalog`
-//! stores the minute bars as the strategy's bar types ask (`strategy::requirements::catalog_keys`)
-//! and the backtest replays them, each hour bar built `BUILT_AFTER` its close as live. A model
-//! strategy decides once the hour bar closing on its grid is built.
+//! Tests a composite bar type: hour bars that Nautilus builds from external minute bars.
+//! `fill_catalog` stores the minute bars as the strategy's bar types ask
+//! (`strategy::requirements::catalog_keys`). The backtest replays them, and builds each hour bar
+//! `BUILT_AFTER` its close, as live does. A model strategy decides once the hour bar closing on
+//! its grid is built.
 
 use std::path::Path;
 
@@ -77,8 +78,9 @@ fn minute_bars(from: Timestamp, to: Timestamp) -> Vec<Bar> {
     bars
 }
 
-/// Worked out from the minute bars closing in `(close − 1 h, close]`, stamped `BUILT_AFTER` its
-/// close.
+/// Returns the hour bar worked out from the minute bars closing in `(close − 1 h, close]`.
+///
+/// The bar is stamped `BUILT_AFTER` the close.
 fn hour_bar(close: Timestamp) -> common::Ohlc {
     let minutes = minute_bars(close - SignedDuration::from_mins(59), close);
     let high = minutes.iter().map(|bar| bar.high).max().unwrap();
@@ -99,7 +101,7 @@ fn fill(dir: &Path) {
         async |_, from, to| Ok(minute_bars(from, to).into_iter().map(Data::Bar).collect()),
     );
 
-    // The node runs its own runtime: this one is gone before it starts
+    // The node runs its own runtime, and this one is gone before it starts
     tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(fill)
@@ -125,8 +127,8 @@ fn hour_bars_built_from_stored_minute_bars_have_the_prices_of_their_minutes() {
     let record = record.borrow();
     let replay: Vec<_> = record.bars.iter().map(ohlc).collect();
 
-    // The run starts at 10:30: the bar closing 11:00 lacks the minutes before it; those closing
-    // 12:00 to 15:00 are whole, the last built at 15:00:05, before the run's end.
+    // The run starts at 10:30, so the bar closing 11:00 lacks the minutes before 10:30, the bars
+    // closing 12:00 to 15:00 are whole, and the last is built at 15:00:05, before the run's end.
     let stamps: Vec<Timestamp> = replay.iter().map(|bar| bar.0).collect();
     assert_eq!(
         stamps,
@@ -140,10 +142,11 @@ fn hour_bars_built_from_stored_minute_bars_have_the_prices_of_their_minutes() {
 
 const CLOSE: Declared<SmaArgs> = Declared::new("close");
 
-/// A dataset run from 10:30 to 15:00 on a hedging venue deciding every hour on the hour bars'
-/// close. A live node builds the hour bars `BUILT_AFTER` their close and decides 10 ms later; the
-/// backtest does both, so each decision reads the hour bar closing on its grid, whose close is the
-/// last minute's. The hour closing 15:00 is built after the run's end.
+/// A dataset run from 10:30 to 15:00 on a hedging venue decides every hour on the hour bar's close.
+///
+/// A live node builds the hour bars `BUILT_AFTER` their close and decides 10 ms later. The backtest
+/// does both. So each decision reads the hour bar closing on its grid, and its close is the last
+/// minute's. The hour closing 15:00 is built after the run's end.
 #[rstest]
 fn a_decision_on_hour_bars_reads_the_bar_closing_on_its_grid() {
     let dir = tempfile::tempdir().unwrap();

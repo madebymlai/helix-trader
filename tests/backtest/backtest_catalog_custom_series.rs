@@ -1,8 +1,9 @@
-//! Custom data written into the catalog from outside helix, of a type no row of the routing table
-//! routes: gold's `Imbalance`s (`common::glbx`), stored by hand under `GOLD-IMBALANCE`, which keys
-//! no instrument, beside IC's gold (`common::ic`). The backtest replays the series by its data
-//! type, each point at its time, to a strategy subscribed through `strategy::subscriptions` and to
-//! a raw feature, which reads each from Nautilus' cache. A run with nothing stored goes on.
+//! Tests custom data written into the catalog from outside helix, of a type no row in the routing
+//! table routes. The data is gold's `Imbalance`s (`common::glbx`), stored by hand under
+//! `GOLD-IMBALANCE`, which keys no instrument, beside IC's gold (`common::ic`). The backtest
+//! replays the series by data type, each point at its time. It replays them to a strategy
+//! subscribed through `strategy::subscriptions`, and to a raw feature, which reads each from
+//! Nautilus' cache. A run with nothing stored goes on.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -50,8 +51,8 @@ impl Part for Reader {
     }
 }
 
-/// Loaded after registering helix's custom data types and the tests' `Imbalance`, as the process
-/// does at its start.
+/// Returns the custom series, loaded after registering helix's custom data types and the tests'
+/// `Imbalance`, as the process does at its start.
 fn declared() -> CustomSeries {
     venues::register_custom_data();
     nautilus_serialization::ensure_custom_data_registered::<glbx::Imbalance>();
@@ -102,7 +103,7 @@ fn at(time: &str) -> UnixNanos {
     ic::at(time).into()
 }
 
-/// Starts its subscriptions at its start, as a strategy does.
+/// Starts its subscriptions when it starts, as a strategy does.
 #[derive(Debug)]
 struct Subscribed {
     core: StrategyCore,
@@ -149,7 +150,7 @@ fn got_through_subscriptions(backtest: Backtest) -> Vec<Got> {
     .unwrap()
 }
 
-/// The imbalances of the run's window reach the strategy at their times, not the one of 08:50.
+/// The imbalances in the run's window reach the strategy at their times, but not the 08:50 one.
 #[rstest]
 fn a_strategy_gets_a_custom_series_of_the_catalog_s_through_its_subscriptions() {
     let catalog = catalog();
@@ -165,7 +166,7 @@ fn a_strategy_gets_a_custom_series_of_the_catalog_s_through_its_subscriptions() 
     );
 }
 
-/// With none of the series stored, the run warns and goes on, the strategy getting none.
+/// With none of the series stored, the run warns and goes on. The strategy gets no data.
 #[rstest]
 fn a_run_of_a_custom_series_the_catalog_holds_nothing_of_goes_on() {
     let catalog = ic::catalog();
@@ -198,8 +199,8 @@ impl DataActor for Featured {
     }
 }
 
-/// A raw feature reads each imbalance from the cache, where the data engine put it before the
-/// strategy's handler.
+/// A raw feature reads each imbalance from the cache. The data engine puts it there before the
+/// strategy's handler runs.
 #[rstest]
 fn a_raw_feature_over_a_custom_series_of_the_catalog_s_reads_each_replayed_point() {
     let catalog = catalog();

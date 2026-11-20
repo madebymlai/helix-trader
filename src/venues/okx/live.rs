@@ -1,12 +1,13 @@
 //! OKX clients for the live node.
 //!
-//! Client factories and configs from `nautilus_okx`, in the EEA region (`eea.okx.com`, where an EEA
-//! account trades X-Perps), in cross margin, on the environment `OKX_ENVIRONMENT` names. The
-//! adapter reads the credentials; this module only checks they are set.
+//! Builds client factories and configs from `nautilus_okx`. They use the EEA region (`eea.okx.com`,
+//! where an EEA account trades X-Perps) and cross margin. They run on the environment
+//! `OKX_ENVIRONMENT` names. The adapter reads the credentials. This module only checks they are
+//! set.
 //!
-//! Before the node starts, the account is checked (`account::Account`): net position mode, and each
-//! instrument's leverage the one its catalog definition holds as margin (see `instrument_from`).
-//! This module never changes the account.
+//! Before the node starts, this module checks the account (`account::Account`). The account must be
+//! in net position mode. Each instrument's leverage must match the one its catalog definition
+//! holds as margin (see `instrument_from`). This module never changes the account.
 //!
 //! The data client does not implement `request_quotes`, so bars built from quotes get no warmup
 //! (`venues::serves`) and start at the live quotes. A live start refuses a series the client does
@@ -39,20 +40,26 @@ use crate::{
     venues::BookFormat,
 };
 
-/// OKX's book as the data client streams it (`venues::book_format`): L2_MBP deltas, any other book
-/// type failing (`subscribe_book_deltas`, `data.rs:2136-2142`), and depth snapshots of at most five
-/// levels a side, `books5` (`subscribe_book_depth`, `:2159-2172`, `BOOK_SNAPSHOT_DEPTH`, `:112`).
-/// Deltas of no depth take the 400-level `books` channel (`book_channel`, `:354-382`;
-/// `resolve_book_depth`, `common/consts.rs:525-531`; `select_book_channel`, `:533-540`).
+/// The book format the OKX data client streams (`venues::book_format`).
+///
+/// - Deltas are L2_MBP. Any other book type fails (`subscribe_book_deltas`, `data.rs:2136-2142`).
+/// - Depth snapshots hold at most five levels a side, on `books5` (`subscribe_book_depth`,
+///   `:2159-2172`, `BOOK_SNAPSHOT_DEPTH`, `:112`).
+/// - Deltas with no depth use the 400-level `books` channel (`book_channel`, `:354-382`;
+///   `resolve_book_depth`, `common/consts.rs:525-531`; `select_book_channel`, `:533-540`).
 pub(in crate::venues) const BOOK: BookFormat = BookFormat {
     deltas: BookType::L2_MBP,
     depth: NonZeroUsize::new(5),
 };
 
-/// Checks that the OKX data client streams `source`: quotes (`subscribe_quotes`, `data.rs:2214`),
-/// trades (`subscribe_trades`, `:2244`), candles (`subscribe_bars`, `:2314`, subscribing
-/// `bar_spec_as_okx_channel`, `websocket/client.rs:1709-1715`, which fails other bar types: see
-/// `is_candle`) and the book in `BOOK` format.
+/// Checks that the OKX data client streams `source`.
+///
+/// The client streams:
+/// - Quotes (`subscribe_quotes`, `data.rs:2214`).
+/// - Trades (`subscribe_trades`, `:2244`).
+/// - Candles (`subscribe_bars`, `:2314`). It subscribes through `bar_spec_as_okx_channel`
+///   (`websocket/client.rs:1709-1715`), which fails other bar types: see `is_candle`.
+/// - The book in `BOOK` format.
 ///
 /// # Errors
 ///
@@ -86,7 +93,7 @@ pub(crate) struct OkxClients {
     pub(super) exec: OKXExecutionClientConfig,
 }
 
-/// Builds the client configs of `instrument_ids`, checks the credentials are set, then checks the
+/// Builds the client configs for `instrument_ids`, checks the credentials are set, then checks the
 /// account.
 ///
 /// # Errors
@@ -98,7 +105,7 @@ pub(crate) struct OkxClients {
 /// - A credential is not set.
 /// - OKX cannot be reached or refuses the key.
 /// - The account is not in net position mode.
-/// - An instrument's leverage is not its definition's, or OKX does not list it.
+/// - An instrument's leverage differs from its definition's, or OKX does not list it.
 pub(crate) async fn clients(
     instrument_ids: &[InstrumentId],
     catalog: &Path,
@@ -143,7 +150,7 @@ fn configs(
 }
 
 impl OkxClients {
-    /// OKX is one venue, so Nautilus routes to these clients without a route of ours.
+    /// Returns the node clients. OKX is one venue, so Nautilus routes to them without our route.
     pub(crate) fn into_node_clients(self) -> Clients {
         let data_config: Box<dyn ClientConfig> = Box::new(self.data);
         let exec_config: Box<dyn ClientConfig> = Box::new(self.exec);
@@ -163,7 +170,7 @@ impl OkxClients {
     }
 }
 
-/// Net mode, as Nautilus' netting and the strategy's target book assume.
+/// Checks the account is in net mode, which Nautilus' netting and the target book assume.
 fn ensure_net_mode(mode: OKXPositionMode) -> anyhow::Result<()> {
     anyhow::ensure!(
         mode == OKXPositionMode::NetMode,
@@ -264,7 +271,7 @@ mod tests {
         assert!(err.contains("LongShortMode"), "{err}");
     }
 
-    /// The catalog's margin 0.2 is leverage 5: an account at leverage 10 is refused.
+    /// The catalog margin 0.2 means leverage 5, so an account at leverage 10 is refused.
     #[rstest]
     fn a_leverage_other_than_the_catalogs_is_refused_naming_both() {
         ensure_leverage(xperp(), Decimal::TEN, Decimal::new(1, 1)).unwrap();
