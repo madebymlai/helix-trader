@@ -12,27 +12,25 @@ pub enum LseHttpError {
     /// LSE was not reached, or did not answer in time.
     #[error("{0}")]
     Transport(#[from] HttpClientError),
-    /// LSE refused the call, with its HTTP status, and the `Retry-After`
-    /// it gave, if any.
+    /// LSE refused the call, with its HTTP status, and the `Retry-After` it gave, if any.
     #[error("LSE refused it with {status} {refusal}")]
     Refusal {
         status: u16,
         refusal: Box<LseRefusal>,
         retry_after: Option<Duration>,
     },
-    /// An answer LSE's docs do not describe: its status and the start of
-    /// its body.
+    /// An answer LSE's docs do not describe: its status and the start of its body.
     #[error("LSE answered {status}, not as its docs say: {body}")]
     Unexpected { status: u16, body: String },
-    /// An answer whose body is not what LSE's docs say it holds: what it
-    /// should have been and why it is not.
+    /// An answer whose body is not what LSE's docs say it holds: what it should have been and why
+    /// it is not.
     #[error("LSE's {what} is not as its docs say: {source}")]
     Malformed {
         what: &'static str,
         source: serde_json::Error,
     },
-    /// A whole file whose SHA-256 is not the one LSE gave with it, with
-    /// LSE's id of the export (`x-export-id`), if it gave one.
+    /// A whole file whose SHA-256 is not the one LSE gave with it, with LSE's id of the export
+    /// (`x-export-id`), if it gave one.
     #[error(
         "the file of LSE's export {}, {len} bytes, does not have the SHA-256 LSE gave for it",
         export_id.as_deref().unwrap_or("with no id")
@@ -47,13 +45,13 @@ pub enum LseHttpError {
 }
 
 impl LseHttpError {
-    /// Whether asking again may get the answer: a transport failure or a
-    /// timeout, a file cut short among them, and LSE's refusals for the
-    /// moment, a 429 of calls or of the one download at a time and a busy
-    /// 503, but not a 429 of a quota, which lasts until it resets. A whole
-    /// file whose SHA-256 is not LSE's is no transient failure: LSE builds
-    /// the file before sending it, so that its checksum is exact (LSE's
-    /// docs, "Files").
+    /// Returns whether asking again may get the answer.
+    ///
+    /// A transient failure is a transport failure or a timeout, a file cut short among them, and
+    /// LSE's refusals for the moment: a 429 of calls or of the one download at a time, and a busy
+    /// 503. A 429 of a quota is not, as it lasts until it resets. A whole file whose SHA-256 is not
+    /// LSE's is no transient failure either: LSE builds the file before sending it, so its checksum
+    /// is exact (LSE's docs, "Files").
     pub fn is_transient(&self) -> bool {
         match self {
             Self::Transport(e) => matches!(
@@ -70,13 +68,12 @@ impl LseHttpError {
         }
     }
 
-    /// Whether LSE refused the export as too wide: shorter dates may be
-    /// served.
+    /// Returns whether LSE refused the export as too wide: shorter dates may be served.
     pub fn is_too_wide(&self) -> bool {
         matches!(self, Self::Refusal { refusal, .. } if refusal.is_too_wide())
     }
 
-    /// How long LSE asked to wait before asking again (`Retry-After`).
+    /// Returns how long LSE asked to wait before asking again (`Retry-After`).
     pub fn retry_after(&self) -> Option<Duration> {
         match self {
             Self::Refusal { retry_after, .. } => *retry_after,

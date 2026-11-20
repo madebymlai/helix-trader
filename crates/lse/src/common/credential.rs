@@ -1,6 +1,5 @@
-//! The LSE keys, sent in the `X-API-Key` header of every call: one for
-//! LSE's own markets and one for each exchange plan's market, each given
-//! or read from its variable, and never printed.
+//! The LSE keys, sent in the `X-API-Key` header of every call: one for LSE's own markets and one
+//! for each exchange plan's market, each given or read from its variable, and never printed.
 
 use std::fmt::Display;
 
@@ -8,19 +7,19 @@ use nautilus_core::string::secret::SecretString;
 
 use super::consts::{LSE_API_KEY, LSE_CME_API_KEY, LSE_NASDAQ_API_KEY};
 
-/// What an LSE key opens. An exchange plan issues a key of its own, which
-/// authenticates only where its market is carried (LSE's `/v3/usage`:
-/// `product`, `global` for an LSE key, else the exchange), so each market
-/// is asked with its product's key.
+/// What an LSE key opens.
+///
+/// An exchange plan issues a key of its own, which authenticates only where its market is carried
+/// (LSE's `/v3/usage`: `product`, `global` for an LSE key, else the exchange), so each market is
+/// asked with its product's key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LseProduct {
-    /// LSE's own markets, the derived ones and US options, an included
-    /// market: the LSE key, `LSE_API_KEY`.
+    /// LSE's own markets, the derived ones and US options, an included market: the LSE key,
+    /// `LSE_API_KEY`.
     Global,
     /// CME Globex (`cme`): a CME Group plan's key, `LSE_CME_API_KEY`.
     Cme,
-    /// Nasdaq TotalView (`nasdaq`): a Nasdaq plan's key,
-    /// `LSE_NASDAQ_API_KEY`.
+    /// Nasdaq TotalView (`nasdaq`): a Nasdaq plan's key, `LSE_NASDAQ_API_KEY`.
     Nasdaq,
 }
 
@@ -28,7 +27,7 @@ impl LseProduct {
     /// Every product, in the order a missing key's error names them.
     pub const ALL: [Self; 3] = [Self::Global, Self::Cme, Self::Nasdaq];
 
-    /// The variable holding the product's key.
+    /// Returns the variable holding the product's key.
     pub const fn api_key_var(self) -> &'static str {
         match self {
             Self::Global => LSE_API_KEY,
@@ -48,16 +47,17 @@ impl Display for LseProduct {
     }
 }
 
-/// An LSE key. Its `Debug` shows `<redacted>`, the key's own.
+/// An LSE key, whose `Debug` shows `<redacted>`, not the key.
 #[derive(Debug, Clone)]
 pub struct LseCredential {
     api_key: SecretString,
 }
 
 impl LseCredential {
-    /// The key `api_key` of `product`, or, if none is given, the one `var`
-    /// reads from the product's variable; none if neither holds one, an
-    /// empty key being none.
+    /// Returns the key `api_key` of `product` or, if none is given, the one `var` reads from the
+    /// product's variable.
+    ///
+    /// It returns none if neither holds one, an empty key being none.
     pub fn resolve(
         product: LseProduct,
         api_key: Option<SecretString>,
@@ -69,7 +69,7 @@ impl LseCredential {
             .map(|api_key| Self { api_key })
     }
 
-    /// The key, for the header that carries it.
+    /// Returns the key, for the header that carries it.
     pub fn api_key(&self) -> &str {
         self.api_key.expose_secret()
     }
@@ -119,9 +119,8 @@ mod tests {
         );
     }
 
-    /// A product reads its own variable alone, an empty key being none: an
-    /// exchange plan's key opens its market alone, so the CME key is no LSE
-    /// key, nor a Nasdaq key.
+    /// A product reads its own variable alone, an empty key being none: an exchange plan's key
+    /// opens its market alone, so the CME key is no LSE key, nor a Nasdaq key.
     #[rstest]
     #[case::cme_key_for_lse(LseProduct::Global, LSE_CME_API_KEY, Some(KEY))]
     #[case::cme_key_for_nasdaq(LseProduct::Nasdaq, LSE_CME_API_KEY, Some(KEY))]

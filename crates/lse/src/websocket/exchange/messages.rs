@@ -1,11 +1,11 @@
-//! The messages of LSE's exchange streams, CME Globex's and Nasdaq
-//! TotalView's, which are one protocol (LSE's WebSocket documentation, "The
-//! CME Group stream": the Nasdaq stream "sends the same messages for
-//! stocks"): the one subscription a connection sends, at
-//! one level, the text frames LSE answers with (`hello`, then each
-//! contract's `snapshot_begin` and `snapshot_end`), and the binary frame of
-//! a record in the `dbn` encoding, LSE's 24-byte header then the record in
-//! Databento's DBN format, of the level's schema.
+//! The messages of LSE's exchange streams, CME Globex's and Nasdaq TotalView's, which are one
+//! protocol (LSE's WebSocket documentation, "The CME Group stream": the Nasdaq stream "sends the
+//! same messages for stocks").
+//!
+//! They are the one subscription a connection sends, at one level, the text frames LSE answers with
+//! (`hello`, then each contract's `snapshot_begin` and `snapshot_end`), and the binary frame of a
+//! record in the `dbn` encoding: LSE's 24-byte header then the record in Databento's DBN format, of
+//! the level's schema.
 
 use std::fmt::Display;
 
@@ -29,23 +29,22 @@ const HEADER_LEN: usize = 24;
 const SNAPSHOT: u8 = 1;
 const LIVE: u8 = 2;
 
-/// A level of an LSE exchange stream, which a connection's subscription
-/// names: its records are Databento's of one schema ("to change the
-/// contracts or the level, open another connection").
+/// A level of an LSE exchange stream, which a connection's subscription names: its records are
+/// Databento's of one schema ("to change the contracts or the level, open another connection").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ExchangeLevel {
-    /// Level 1: every trade and the best bid and offer (`mbp1`), each
-    /// contract opening with its last best bid and offer.
+    /// Level 1: every trade and the best bid and offer (`mbp1`), each contract opening with its
+    /// last best bid and offer.
     Mbp1,
-    /// Level 2: the ten best levels a side after each change of one
-    /// (`mbp10`), each contract opening with its last ten levels.
+    /// Level 2: the ten best levels a side after each change of one (`mbp10`), each contract
+    /// opening with its last ten levels.
     Mbp10,
     /// Level 3: every order event (`mbo`), with no opening book.
     Mbo,
 }
 
 impl ExchangeLevel {
-    /// LSE's number of the level.
+    /// Returns LSE's number of the level.
     const fn number(self) -> u8 {
         match self {
             Self::Mbp1 => 1,
@@ -54,7 +53,7 @@ impl ExchangeLevel {
         }
     }
 
-    /// The length of a record of the level.
+    /// Returns the length of a record of the level.
     const fn record_len(self) -> usize {
         match self {
             Self::Mbp1 => size_of::<Mbp1Msg>(),
@@ -70,8 +69,8 @@ impl Display for ExchangeLevel {
     }
 }
 
-/// The one message a connection sends, within five seconds of opening: the
-/// contracts by their names at LSE, at one level, in the `dbn` encoding.
+/// The one message a connection sends, within five seconds of opening: the contracts by their names
+/// at LSE, at one level, in the `dbn` encoding.
 #[derive(Debug, Serialize)]
 pub struct ExchangeSubscription<'a> {
     op: &'static str,
@@ -81,7 +80,7 @@ pub struct ExchangeSubscription<'a> {
 }
 
 impl<'a> ExchangeSubscription<'a> {
-    /// The subscription of `symbols`, each named once, at `level`.
+    /// Returns the subscription of `symbols`, each named once, at `level`.
     pub fn new(level: ExchangeLevel, symbols: &'a [String]) -> Self {
         Self {
             op: "subscribe",
@@ -96,18 +95,15 @@ impl<'a> ExchangeSubscription<'a> {
     }
 }
 
-/// A text frame of the stream. Its other fields, and other types, are not
-/// read.
+/// A text frame of the stream. Its other fields, and other types, are not read.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ExchangeText {
-    /// First on a connection: the feed's `epoch`, which every later message
-    /// repeats; a new one after the feed's reset, its contracts' sequences
-    /// starting again.
+    /// First on a connection: the feed's `epoch`, which every later message repeats, a new one
+    /// after the feed's reset, its contracts' sequences starting again.
     Hello { epoch: u64 },
-    /// A contract opens: its name, the stream's number for it, and the
-    /// sequence its live records continue: its opening record's, if the
-    /// level opens with one.
+    /// A contract opens: its name, the stream's number for it, and the sequence its live records
+    /// continue: its opening record's, if the level opens with one.
     SnapshotBegin {
         symbol: String,
         instrument_id: u32,
@@ -128,8 +124,8 @@ pub enum ExchangeRecord {
 /// A binary frame of the stream: one record of a contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExchangeRecordFrame {
-    /// Whether it is the contract's opening, its last best bid and offer or
-    /// ten levels, rather than a live record.
+    /// Whether it is the contract's opening, its last best bid and offer or ten levels, rather than
+    /// a live record.
     pub snapshot: bool,
     /// The contract's sequence of the record, one more than the last.
     pub sequence: u64,
@@ -139,16 +135,16 @@ pub struct ExchangeRecordFrame {
 }
 
 impl ExchangeRecordFrame {
-    /// The record `frame` holds, of a connection at `level`: LSE's header,
-    /// `L3DB`, version 1, the kind, 1 in a snapshot and 2 live, two unused
-    /// bytes, the sequence, the contract's number and the count of records,
-    /// little-endian, then the record, of the level's schema (`Mbp1Msg`,
-    /// `Mbp10Msg` or `MboMsg`), as each of the stream's messages holds one.
+    /// Returns the record `frame` holds, of a connection at `level`.
+    ///
+    /// LSE's header is `L3DB`, version 1, the kind (1 in a snapshot and 2 live), two unused bytes,
+    /// the sequence, the contract's number and the count of records, little-endian. The record
+    /// follows, of the level's schema (`Mbp1Msg`, `Mbp10Msg` or `MboMsg`), as each of the stream's
+    /// messages holds one.
     ///
     /// # Errors
     ///
-    /// Returns an error if `frame` is not such a frame of one record of
-    /// `level`.
+    /// Returns an error if `frame` is not such a frame of one record of `level`.
     pub fn parse(frame: &[u8], level: ExchangeLevel) -> anyhow::Result<Self> {
         anyhow::ensure!(
             frame.len() >= HEADER_LEN,
@@ -188,7 +184,7 @@ impl ExchangeRecordFrame {
     }
 }
 
-/// The one record of type `R` in `records`, a record of `level`.
+/// Returns the one record of type `R` in `records`, a record of `level`.
 fn decode<R: HasRType + Clone>(records: &[u8], level: ExchangeLevel) -> anyhow::Result<R> {
     Ok(RecordDecoder::new(records)
         .decode_record::<R>()
@@ -215,8 +211,8 @@ mod tests {
     }
 
     /// GCZ6's opening, as LSE sent the same record in the `json` encoding
-    /// (`test_data/cme_stream_gcz6_l1_json.txt`): its best bid and offer at
-    /// CME's Friday close, no price of its own, no side.
+    /// (`test_data/cme_stream_gcz6_l1_json.txt`): its best bid and offer at CME's Friday close, no
+    /// price of its own, no side.
     #[rstest]
     fn a_frame_is_lse_s_header_then_the_contract_s_level_1_record() {
         let captured = frames(CME_GCZ6_GCG7);
@@ -257,7 +253,7 @@ mod tests {
         );
     }
 
-    /// The words of `reason`, its numbers among them.
+    /// Returns the words of `reason`, its numbers among them.
     fn words(reason: &str) -> Vec<&str> {
         reason
             .split(|c: char| !c.is_ascii_alphanumeric())
@@ -265,12 +261,11 @@ mod tests {
             .collect()
     }
 
-    /// Synthetic: the captured frame cut, of another kind, or of a header
-    /// other than LSE's. A Level 1 record, Databento's `Mbp1Msg`, is 80
-    /// bytes after the 24 of LSE's header: cut at 60, 36 remain, and none
-    /// of a header alone; the header's magic is `L3DB`, its kind at byte 5
-    /// and its count of records at byte 20, each named as the frame holds
-    /// it.
+    /// Synthetic: the captured frame cut, of another kind, or of a header other than LSE's.
+    ///
+    /// A Level 1 record, Databento's `Mbp1Msg`, is 80 bytes after the 24 of LSE's header: cut at
+    /// 60, 36 remain, and none of a header alone. The header's magic is `L3DB`, its kind at byte 5
+    /// and its count of records at byte 20, each named as the frame holds it.
     #[rstest]
     #[case::cut(|frame: &mut Vec<u8>| frame.truncate(60), &["36", "80"])]
     #[case::header_only(|frame: &mut Vec<u8>| frame.truncate(24), &["0", "80"])]
@@ -329,8 +324,8 @@ mod tests {
         );
     }
 
-    /// GCZ6's opening at Level 2 (`test_data/README.md`): its last ten
-    /// levels a side, best first, with each level's count of orders.
+    /// GCZ6's opening at Level 2 (`test_data/README.md`): its last ten levels a side, best first,
+    /// with each level's count of orders.
     #[rstest]
     fn a_level_2_frame_is_lse_s_header_then_the_contract_s_ten_levels_a_side() {
         let session = dbn_frames(CME_GCZ6_L2_DOCUMENTED);
@@ -370,8 +365,8 @@ mod tests {
         );
     }
 
-    /// GCZ6's first order event at Level 3: an order of 1 added to the bid
-    /// at 3908.10, not the last of its exchange message.
+    /// GCZ6's first order event at Level 3: an order of 1 added to the bid at 3908.10, not the last
+    /// of its exchange message.
     #[rstest]
     fn a_level_3_frame_is_lse_s_header_then_one_order_event() {
         let session = dbn_frames(CME_GCZ6_L3_DOCUMENTED);
@@ -399,11 +394,10 @@ mod tests {
         );
     }
 
-    /// A connection carries one level: a record of another is no record of
-    /// it, refused naming its one record and the level's length of one,
-    /// Databento's `Mbp1Msg` 80 bytes, `Mbp10Msg` 368 and `MboMsg` 56. The
-    /// one record is looked for beside the level's name, which holds a 1 at
-    /// Level 1.
+    /// A connection carries one level: a record of another is no record of it, refused naming its
+    /// one record and the level's length of one, Databento's `Mbp1Msg` 80 bytes, `Mbp10Msg` 368 and
+    /// `MboMsg` 56. The one record is looked for beside the level's name, which holds a 1 at Level
+    /// 1.
     #[rstest]
     #[case::level_1_at_level_2(CME_GCZ6_GCG7, 2, ExchangeLevel::Mbp10, "368")]
     #[case::level_2_at_level_1(CME_GCZ6_L2_DOCUMENTED, 2, ExchangeLevel::Mbp1, "80")]
