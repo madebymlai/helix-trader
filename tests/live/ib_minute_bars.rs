@@ -1,24 +1,22 @@
 //! IB's 1-minute bars on the live node, end to end on the Docker paper gateway, with a catalog
-//! already holding the instrument's minute bars up to `CATALOG_BEHIND` before now, as fill-catalog
-//! leaves it: the warmup of a composite bar type is the catalog's bars, then IB's answer to the
-//! source bars' `request_bars` for the rest, the live minute bars come from `subscribe_bars`, and
-//! the two meet with no gap and no duplicate: the warmup request ends at now, so the data engine
-//! drops the minute still in progress from IB's answer, and the live stream starts with it, not at
-//! the catalog's end (no replay: the subscription's `start_ns` is now). Prints how long after its
-//! close each live minute bar arrived, which `SOURCE_BAR_DELAY_MICROS` in `strategy::warmup` must
-//! exceed.
+//! holding the instrument's minute bars up to `CATALOG_BEHIND` before now, as fill-catalog leaves
+//! it. The warmup of a composite bar type is the catalog's bars, then IB's answer to the source
+//! bars' `request_bars`; the live minute bars come from `subscribe_bars`. The two meet with no gap
+//! and no duplicate: the warmup request ends at now, so the data engine drops the minute still in
+//! progress from IB's answer and the live stream starts with it, not at the catalog's end (no
+//! replay: the subscription's `start_ns` is now). Prints how long after its close each live minute
+//! bar arrived, which `SOURCE_BAR_DELAY_MICROS` in `strategy::warmup` must exceed.
 //!
-//! Gated as `ib_gateway.rs`: it returns at once, saying it was skipped, unless `NAUTILUS_IB_RUN=1`
-//! is set in the shell. It places no order. It needs SXR8.IBIS quoted on IB (Xetra's full session,
-//! 07:30-22:00 Frankfurt time, on a trading day), or the instrument `NAUTILUS_IB_INSTRUMENT` names,
-//! trading then, and takes about five minutes:
+//! Gated as `ib_gateway.rs`. It places no order. Needs SXR8.IBIS quoted on IB (Xetra's full
+//! session, 07:30-22:00 Frankfurt time, on a trading day), or the instrument
+//! `NAUTILUS_IB_INSTRUMENT` names, trading then, and takes about five minutes:
 //!
 //! ```sh
 //! NAUTILUS_IB_RUN=1 cargo test --test live ib_minute_bars:: -- --nocapture
 //! ```
 //!
-//! The node's cache in Redis is under the test's trader, `HELIXTEST-046`, whose records the test
-//! deletes once the node has stopped. Client id 46 for the node, 47 for filling the catalog.
+//! The test deletes the node's Redis records (trader `HELIXTEST-046`) once the node has stopped.
+//! Client id 46 for the node, 47 for filling the catalog.
 
 use std::{cell::RefCell, process::Command, rc::Rc, time::Duration};
 
@@ -50,7 +48,6 @@ use nautilus_trading::{
 
 use crate::common;
 
-/// The hour bars of the instrument, built from IB's minute bars.
 fn composite() -> BarType {
     let instrument =
         std::env::var("NAUTILUS_IB_INSTRUMENT").unwrap_or_else(|_| "SXR8.IBIS".to_string());
@@ -59,28 +56,22 @@ fn composite() -> BarType {
 const TRADER: &str = "HELIXTEST-046";
 const WARMUP: SignedDuration = SignedDuration::from_hours(2);
 
-/// How far before now the catalog's minute bars end.
 const CATALOG_BEHIND: SignedDuration = SignedDuration::from_mins(30);
 
-/// The live minute bars the probe waits for before it stops the node.
 const LIVE_MINUTES: usize = 4;
 
-/// What the probe got: the minute bars of the warmup response, then each live minute bar with the
-/// time it arrived.
 #[derive(Debug, Default)]
 struct Record {
-    /// When the warmup was requested.
     requested_at: UnixNanos,
     warmup: Vec<Bar>,
 
-    /// How the warmup ended: `Ok` complete, or the error.
+    /// `Ok` if complete, else the error.
     warmup_end: Option<Result<(), String>>,
     live: Vec<(Bar, UnixNanos)>,
 }
 
-/// Warms up on the composite hour bars through `strategy::warmup` and subscribes to them from where
-/// it ends through `strategy::subscriptions`, as a strategy does, and to their source minute bars
-/// too, to see each one; stops the node after `LIVE_MINUTES` of them.
+/// Warms up on the composite hour bars and subscribes from where it ends, as a strategy does, and
+/// to their source minute bars too, to see each one; stops the node after `LIVE_MINUTES` of them.
 #[derive(Debug)]
 struct Probe {
     core: StrategyCore,
@@ -153,7 +144,7 @@ impl DataActor for Probe {
     }
 }
 
-/// Stops the node as Ctrl-C would: its signal handler stops it.
+/// As Ctrl-C would: the node's signal handler stops it.
 fn interrupt() {
     let pid = std::process::id().to_string();
     let status = Command::new("kill").args(["-INT", &pid]).status();
@@ -192,8 +183,8 @@ async fn the_live_minute_bars_follow_the_warmup_with_no_gap_and_no_duplicate() {
         warmup: WARMUP,
     };
 
-    // The catalog: the instrument and its minute bars over [now - WARMUP, now - CATALOG_BEHIND], as
-    // fill-catalog stores them.
+    // The instrument and its minute bars over [now - WARMUP, now - CATALOG_BEHIND], as fill-catalog
+    // stores them.
     let catalog = tempfile::tempdir().unwrap();
     let now = crate::now();
     let catalog_end = now - CATALOG_BEHIND;

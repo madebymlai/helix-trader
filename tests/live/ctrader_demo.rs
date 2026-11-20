@@ -1,13 +1,14 @@
 //! End to end on a cTrader broker's demo: the session authenticates the app and the demo account,
 //! XAU/USD and EUR/USD load as CFDs at the broker's margins, a day of XAU/USD's quotes fills a
-//! temporary catalog through the node (the broker's data client), in one fill and resumed, and the
-//! execution client reads the account: its state and its startup reconciliation. It needs the
-//! login's `CTRADER_*` credential, and the broker's account and environment, its demo (any other
-//! environment fails the test before connecting), from the environment or `.env`.
+//! temporary catalog through the node's data client in one fill and resumed, and the execution
+//! client reads the account: its state and its startup reconciliation.
+//!
+//! Needs the login's `CTRADER_*` credential, and the broker's account and environment, from the
+//! environment or `.env`. Only its demo is accepted: any other environment fails the test before
+//! connecting.
 //!
 //! Gated by `demo_broker::opted_in`: the test returns at once, saying it was skipped, unless
-//! `NAUTILUS_CTRADER_RUN` names the broker in the shell. It only reads and places no order. Run it
-//! with:
+//! `NAUTILUS_CTRADER_RUN` names the broker in the shell. It places no order. Run it with:
 //!
 //! ```sh
 //! NAUTILUS_CTRADER_RUN=pepperstone cargo test --test live ctrader_demo:: -- --nocapture
@@ -71,7 +72,6 @@ async fn the_demo_account_loads_gold_and_euro_dollar_as_cfds() {
     }
 }
 
-/// The stored quotes of `instrument_id`.
 fn stored(catalog: &mut ParquetDataCatalog, instrument_id: InstrumentId) -> Vec<QuoteTick> {
     catalog
         .quote_ticks(Some(vec![instrument_id.to_string()]), None, None)
@@ -79,8 +79,7 @@ fn stored(catalog: &mut ParquetDataCatalog, instrument_id: InstrumentId) -> Vec<
 }
 
 /// Fills the catalog in `dir` with the quotes of `instrument_id` over `[start, end]` through the
-/// node, as fill-catalog does (`fill_history`): the data client of its broker on the connection of
-/// the environment.
+/// node's data client, as fill-catalog does (`fill_history`).
 pub(crate) async fn fill_quotes_through_node(
     dir: &std::path::Path,
     instrument_id: InstrumentId,
@@ -102,8 +101,7 @@ pub(crate) async fn fill_quotes_through_node(
     fill_history(&requirements, start, end, &venues, dir).await
 }
 
-/// A day of XAU/USD: Wednesday 21 October 2026 UTC, split for the resumed fill at a time between
-/// two milliseconds.
+/// Wednesday 21 October 2026 UTC, split for the resumed fill at a time between two milliseconds.
 #[tokio::test(flavor = "current_thread")]
 async fn a_day_of_gold_quotes_fills_the_same_in_one_fill_and_resumed() {
     let Some(broker) = opted_in(
@@ -172,8 +170,8 @@ async fn a_day_of_gold_quotes_fills_the_same_in_one_fill_and_resumed() {
     );
 }
 
-/// The execution client on the demo account, as the node drives it: started, connected (the node
-/// registering the account state it publishes), then the startup mass status. Read only: no order.
+/// Started, connected (the node registers the account state it publishes), then the startup mass
+/// status. Read only.
 #[tokio::test(flavor = "current_thread")]
 async fn the_execution_client_reads_the_hedged_demo_account_and_reconciles_it() {
     let Some(broker) = opted_in(
