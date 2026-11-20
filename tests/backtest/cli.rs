@@ -1,10 +1,19 @@
-//! The binary's refusals of a command line before it runs anything: a flag its subcommand does not
-//! take, a required one left out, two that conflict, a value it cannot read, an unknown strategy, a
-//! window or a train's span not ending after its start, a config it cannot load, and a train of a
-//! strategy with no model. Each exits non-zero, its stderr naming the flag or the facts ahead of
-//! clap's usage, printing nothing and creating no catalog. The binary runs in a directory of its
-//! own with no environment, so that neither the shell nor a `.env` above the crate's root gives a
-//! flag its value: the flags fall back on the environment, which `main` loads from `.env`.
+//! Tests the binary's refusals of a command line before it runs anything. It refuses:
+//! - a flag its subcommand does not take
+//! - a required flag left out
+//! - two flags that conflict
+//! - a value it cannot read
+//! - an unknown strategy
+//! - a window, or a train's span, that does not end after its start
+//! - a config it cannot load
+//! - a train for a strategy with no model
+//!
+//! Each refusal exits non-zero and puts the flag or the facts in stderr ahead of clap's usage. It
+//! prints nothing and creates no catalog.
+//!
+//! The binary runs in a directory of its own with no environment. The flags fall back on the
+//! environment, which `main` loads from `.env`. So neither the shell nor a `.env` above the
+//! crate's root gives a flag its value.
 
 use std::process::Command;
 
@@ -59,8 +68,7 @@ fn argv<'a>(parts: &[&[&'a str]]) -> Vec<&'a str> {
     parts.concat()
 }
 
-/// Each value is joined to its flag, so that clap reads `-0.035 USD` or `-1s` as a value, not a
-/// flag.
+/// Joins each value to its flag, so that clap reads `-0.035 USD` or `-1s` as a value, not a flag.
 #[rstest]
 #[case::fill_catalog_given_an_ib_account(
     argv(&[&FILL_CATALOG, &["--account", "DU1234567"]]),

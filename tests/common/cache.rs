@@ -1,6 +1,7 @@
-//! The live tests' records in the node's Redis cache (`live::redis`): each test runs its nodes
-//! under a trader of its own, whose keys Nautilus prefixes with `trader-<trader id>:`, and deletes
-//! them at the end.
+//! Holds the live tests' records in the node's Redis cache (`live::redis`).
+//!
+//! Each test runs its nodes under a trader of its own. Nautilus prefixes the keys of that trader
+//! with `trader-<trader id>:`. The test deletes them at the end.
 
 use redis::AsyncCommands;
 

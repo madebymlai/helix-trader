@@ -1,6 +1,8 @@
-//! Trades sized at a stake (`strategy::orders::Trade::send`) on 10,000 EUR: the EMA crossover's at
-//! the config's stake, on its trades of `common::trades`, and a recorder's at stakes of its
-//! choosing, on the same quotes. Each is a buy set from its bar's close, one R of 30 EUR a share.
+//! Tests trades sized at a stake (`strategy::orders::Trade::send`) on 10,000 EUR.
+//!
+//! The EMA crossover trades at the config's stake, on its trades of `common::trades`. A recorder
+//! trades at stakes of its choosing, on the same quotes. Each trade is a buy set from its bar's
+//! close, with one R of 30 EUR a share.
 
 use std::{path::Path, process::Command};
 
@@ -38,10 +40,13 @@ fn crossover_at(risk: &str) -> BacktestResult {
         .result
 }
 
-/// The crossover's one trade, the buy of 13:00 (`trades::TIME_EXIT`), is set from the close,
-/// 620.60, its stop at 617.50: one R of 3.10 EUR a share. At 0.45%, 45 EUR, it buys 45 / 3.10 =
-/// 14.5 shares, 14 rounded down, and its time exit gains 4.20 a share: 58.80 EUR. At 0.01%, 1 EUR,
-/// it buys a third of a share: the trade sends nothing, and the run completes.
+/// The crossover's one trade, the buy at 13:00 (`trades::TIME_EXIT`), is set from the close.
+///
+/// The close is 620.60 and the stop is at 617.50, so one R is 3.10 EUR a share.
+/// - At 0.45%, or 45 EUR, it buys 45 / 3.10 = 14.5 shares, rounded down to 14. Its time exit gains
+///   4.20 a share, or 58.80 EUR.
+/// - At 0.01%, or 1 EUR, it would buy a third of a share. The trade sends nothing and the run
+///   completes.
 #[rstest]
 #[case::fourteen_shares("0.45%", trades::TIME_EXIT_ORDERS, "10058.80 EUR")]
 #[case::less_than_a_share("0.01%", 0, "10000.00 EUR")]
@@ -56,8 +61,9 @@ fn the_crossovers_trade_risks_its_stake_of_the_balance_over_its_stop(
     assert_eq!(common::balance(&result), balance);
 }
 
-/// The recorder's trades on the bars of `trades::TIME_EXIT`'s quotes in `catalog`: the 11:00 bar
-/// (closing 610.60) at 1% of equity, the 12:00 bar (600.60) at twice that.
+/// Records the recorder's trades on the bars of `trades::TIME_EXIT`'s quotes in `catalog`.
+///
+/// The 11:00 bar (closing 610.60) trades at 1% of equity and the 12:00 bar (600.60) at twice that.
 fn staked(
     catalog: &tempfile::TempDir,
 ) -> std::rc::Rc<std::cell::RefCell<common::recorder::Record>> {
@@ -76,9 +82,10 @@ fn staked(
     record
 }
 
-/// 1% of 10,000 EUR, 100 EUR, buys 3.3 shares at 30 EUR a share, 3; twice the stake, on about 9,970
-/// EUR once the first long is 30 EUR down, buys 6.6, 6. Each entry is tagged with its R in money,
-/// 90 and 180 EUR, and its stake's multiple.
+/// 1% of 10,000 EUR is 100 EUR, which buys 3.3 shares at 30 EUR a share, rounded down to 3.
+///
+/// Twice the stake, on about 9,970 EUR once the first long is 30 EUR down, buys 6.6 shares, rounded
+/// down to 6. Each entry is tagged with its R in money (90 and 180 EUR) and its stake's multiple.
 #[rstest]
 fn a_trade_at_twice_the_stake_fills_twice_the_size_tagged_with_its_multiple() {
     let catalog = trades::catalog(&trades::TIME_EXIT);
@@ -106,8 +113,10 @@ fn a_trade_at_twice_the_stake_fills_twice_the_size_tagged_with_its_multiple() {
     );
 }
 
-/// SXR8 with a minimum of 5 shares: Nautilus' risk engine denies the first trade's 3 shares, the
-/// run goes on, and the second trade's 6, on the untouched 10,000 EUR, fill.
+/// SXR8 has a minimum of 5 shares.
+///
+/// Nautilus' risk engine denies the first trade's 3 shares and the run goes on. The second trade's
+/// 6 shares fill, on the untouched 10,000 EUR.
 #[rstest]
 fn a_size_below_the_instruments_minimum_is_denied_and_the_run_goes_on() {
     let InstrumentAny::Equity(mut sxr8) = common::instrument() else {
@@ -133,8 +142,10 @@ fn a_size_below_the_instruments_minimum_is_denied_and_the_run_goes_on() {
     assert_eq!(filled, [Quantity::from(0), Quantity::from(6)]);
 }
 
-/// Runs the backtest command on the crossover over `levels` in `catalog` on `balance`, `more` being
-/// lines of TOML at the end of `[trade]`: whether it succeeded, its stdout and stderr.
+/// Runs the backtest command on the crossover over `levels` in `catalog` on `balance`.
+///
+/// `more` is lines of TOML at the end of `[trade]`. Returns whether it succeeded, its stdout and
+/// its stderr.
 fn crossover_command(
     catalog: &Path,
     levels: &[f64],
@@ -186,8 +197,9 @@ fn crossover_command(
     )
 }
 
-/// SXR8's P&L is in EUR: the backtest command refuses a balance of 10,000 USD, naming both
-/// currencies, before printing any result.
+/// Refuses a balance of 10,000 USD, because SXR8's P&L is in EUR.
+///
+/// The backtest command names both currencies and refuses before printing any result.
 #[rstest]
 fn a_backtest_whose_balance_is_not_in_a_traded_instruments_pnl_currency_is_refused() {
     let levels = trades::TIME_EXIT;
@@ -205,9 +217,11 @@ fn a_backtest_whose_balance_is_not_in_a_traded_instruments_pnl_currency_is_refus
     assert!(!stdout.contains("Orders:"), "{stdout}");
 }
 
-/// CME's gold future, a conversion pair, is a `FuturesContract` with no base currency, which
-/// Nautilus' exchange rates read a pair by: no rate. The backtest command refuses to run, naming
-/// it, before printing any result, even on a balance in SXR8's own P&L currency.
+/// CME's gold future is a conversion pair and a `FuturesContract` with no base currency.
+///
+/// Nautilus' exchange rates read a pair by its base currency, so there is no rate. The backtest
+/// command refuses to run and names the future before printing any result, even on a balance in
+/// SXR8's own P&L currency.
 #[rstest]
 fn a_backtest_converting_through_a_pair_defined_without_a_base_currency_is_refused() {
     let levels = trades::TIME_EXIT;
