@@ -344,9 +344,6 @@ mod tests {
             .collect()
     }
 
-    /// Runs `roller` on the probe from `start` to `end`, a day at a time.
-    ///
-    /// Returns what the probe sent and the rolls made.
     fn run(roller: &Roller, start: &str, end: &str) -> (Vec<Sent>, Vec<Transition>) {
         let (mut probe, clock, commands) = registered(start);
         roller.start(&mut probe, start.parse().unwrap()).unwrap();
@@ -363,9 +360,8 @@ mod tests {
         (sent(&commands), rolls)
     }
 
-    /// GC rolls into GCG27 at 00:00 UTC on 2026-11-26 and into GCJ27 on 2027-01-27
-    /// (`calendar.toml`). GCJ27 rolls into GCM27. Each post contract is requested from IB's client,
-    /// which resolves GLBX contracts, not from LSE's, which publishes no definitions.
+    /// Each post contract is requested from IB's client, which resolves GLBX contracts, not from
+    /// LSE's, which publishes no definitions.
     #[rstest]
     #[case::live_requesting_each_post_contract_before_its_roll(
         Roller::live(vec![id("GC.GLBX")]),
@@ -407,9 +403,6 @@ mod tests {
         ]
     }
 
-    /// The post contracts of GC's two rolls and the roll after them.
-    ///
-    /// They are requested from IB's client, past the catalog.
     fn gc_post_contracts() -> Vec<Sent> {
         vec![
             Sent::Request(id("GCG27.GLBX"), true, Some(ClientId::from("IB"))),
@@ -418,12 +411,8 @@ mod tests {
         ]
     }
 
-    /// A live start a minute before GC rolls from GCZ26 into GCG27 (00:00 UTC on 2026-11-26).
-    ///
-    /// The strategy subscribes on GCZ26 from the warmup's `now`, 23:59. The clock is past the roll
-    /// when the roller arms it, so Nautilus fires the alert at once
-    /// (`validate_and_prepare_time_alert`). The roller returns the roll it armed, out of GCZ26,
-    /// not the next one after the alert's time.
+    /// A live start a minute before GC rolls from GCZ26 into GCG27. The clock is past the roll when
+    /// the roller arms it, so Nautilus fires the alert at once (`validate_and_prepare_time_alert`).
     #[rstest]
     fn a_roll_armed_after_its_time_is_the_one_out_of_the_contract_standing_at_the_start() {
         let roller = Roller::live(vec![id("GC.GLBX")]);

@@ -367,8 +367,6 @@ mod tests {
         gold.roll_out_of(Contract { year, month })
     }
 
-    /// The last weekday of July 2026 is Fri the 31st. For March 2026 it is Tue the 31st, and the
-    /// three weekdays before it are Mon the 30th, Fri the 27th and Thu the 26th.
     #[rstest]
     #[case::with_no_days_before("0", MonthCode::Q, "2026-07-31T00:00Z")]
     #[case::days_before_counted_in_weekdays_across_a_weekend(

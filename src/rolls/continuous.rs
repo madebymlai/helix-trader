@@ -193,8 +193,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
 
-        // GCQ26 trades days before the roll (00:00 Wed 29 July), not on its eve, and GCZ26 does
-        // not trade on the roll's day.
+        // GCQ26 trades days before the roll, not on its eve, and GCZ26 does not trade on the
+        // roll's day.
         let pre = [
             trade("GCQ26.GLBX", "2026-07-24T10:00Z", "3980.00"),
             trade("GCQ26.GLBX", "2026-07-27T10:00Z", "3985.00"),
@@ -215,7 +215,6 @@ mod tests {
         )
         .unwrap();
 
-        // The roll at 2026-07-29T00:00Z is 1_785_283_200 s after the epoch
         assert_eq!(
             continuous.params(InstrumentId::from("GC.GLBX")).unwrap(),
             [
@@ -237,8 +236,7 @@ mod tests {
         );
     }
 
-    /// The roll at 00:00 Wed 29 July hands GC to GCZ26. Its slice runs from the roll to the end of
-    /// the span and holds none of its trades, because the catalog stores only GCQ26's.
+    /// The catalog stores only GCQ26's trades, so the roll's slice holds none of GCZ26's.
     #[rstest]
     fn a_roll_without_a_trade_of_the_post_contract_in_its_slice_is_refused() {
         let dir = tempfile::tempdir().unwrap();
