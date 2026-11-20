@@ -1,8 +1,10 @@
-//! A live warmup at its seam: a `Warmup` on a Nautilus node whose fake data client answers as a
-//! venue does, its bars built by Nautilus' own data engine. The tests read what the venue was
-//! asked and what the warmup handed its indicator. Hermetic: no venue. The node's clock is the
-//! real one, so the tests compare windows and bars against each other, not against a time. Each
-//! test runs its nodes on its own thread, as Nautilus' message bus is thread-local.
+//! Tests a live warmup at its seam.
+//!
+//! A `Warmup` runs on a Nautilus node. A fake data client answers as a venue does, and Nautilus'
+//! own data engine builds the bars. The tests read what the venue was asked and what the warmup
+//! handed its indicator. They are hermetic, with no venue. The node's clock is the real one, so
+//! the tests compare windows and bars against each other, not against a time. Each test runs its
+//! nodes on its own thread, as Nautilus' message bus is thread-local.
 //!
 //! ```sh
 //! cargo test --test node_warmup
@@ -82,8 +84,10 @@ use rstest::rstest;
 
 const GCZ26: &str = "GCZ26.GLBX";
 
-/// CME's E-mini S&P 500 of December 2026, whose history, IB's, serves its own minute bars, unlike
-/// GLBX's, LSE's (`venues::serves`).
+/// The CME E-mini S&P 500 future for December 2026.
+///
+/// Its history source is IB, which serves its own minute bars, unlike GLBX and LSE
+/// (`venues::serves`).
 const ESZ26: &str = "ESZ26.CME";
 
 /// Hour bars built from the venue's minute bars.
@@ -99,7 +103,7 @@ const MINUTE_NS: u64 = 60_000_000_000;
 const DAY_NS: u64 = 24 * HOUR_NS;
 const WARMUP: SignedDuration = SignedDuration::from_hours(72);
 
-/// Delay after its close at which a node builds and stamps a composite bar
+/// Delay after the close at which a node builds and stamps a composite bar
 /// (`warmup::bar_build_delay`).
 const COMPOSITE_DELAY_NS: u64 = 5_000_000_000;
 
@@ -115,13 +119,15 @@ fn esz26() -> InstrumentAny {
     InstrumentAny::FuturesContract(contract)
 }
 
-/// The venue's price at the minute closing at `ns`: its number since the epoch, in dollars. It
-/// moves by one a minute, so every hour's true range is 60.
+/// Returns the venue's price at the minute closing at `ns`.
+///
+/// The price is the minute number since the epoch, in dollars. It moves by one a minute, so every
+/// hour's true range is 60.
 fn price_at(ns: u64) -> Price {
     Price::from(format!("{}.00", ns / MINUTE_NS).as_str())
 }
 
-/// The closes of the minutes in `[start, end]`, outside `closed`.
+/// Returns the closes of the minutes in `[start, end]` that fall outside `closed`.
 fn minutes(start: u64, end: u64, closed: Option<(u64, u64)>) -> impl Iterator<Item = u64> {
     (start.div_ceil(MINUTE_NS)..=end / MINUTE_NS)
         .map(|minute| minute * MINUTE_NS)
@@ -130,13 +136,13 @@ fn minutes(start: u64, end: u64, closed: Option<(u64, u64)>) -> impl Iterator<It
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Answer {
-    /// A completed envelope, as cTrader's, Databento's and OKX's clients.
+    /// A completed envelope, as the cTrader, Databento and OKX clients send.
     Envelope,
 
-    /// No envelope, as IB's client: Nautilus takes it as complete and writes nothing back.
+    /// No envelope, as the IB client sends. Nautilus takes it as complete and writes nothing back.
     Plain,
 
-    /// As `Envelope` until the request of this index, which fails with the rows it got.
+    /// As `Envelope` until the request at this index, which fails with the rows it received.
     FailedAt(usize),
 }
 
@@ -144,32 +150,35 @@ enum Answer {
 struct FakeVenue {
     answer: Answer,
 
-    /// A span it holds no data over, in ns: a closed market.
+    /// A span in ns over which the venue holds no data, as in a closed market.
     closed: Option<(u64, u64)>,
 
-    /// Time to answer a request; none answers at once.
+    /// Time to answer a request. None answers at once.
     latency: Option<Duration>,
 
-    /// Time to answer a request of quotes, if not `latency`.
+    /// Time to answer a quotes request, when it differs from `latency`.
     quotes_latency: Option<Duration>,
 
-    /// Overrides the latencies above, given a request's kind, instrument and how many of its kind
-    /// and instrument were asked before.
+    /// Overrides the latencies above.
+    ///
+    /// It takes the request's kind, its instrument and the count of earlier requests with the
+    /// same kind and instrument.
     window_latency: Option<fn(&str, InstrumentId, usize) -> Duration>,
 
-    /// How long before each minute's close its trade is made, in ns; none makes it on the close,
-    /// as its quote.
+    /// How long before each minute's close the trade is made, in ns. None makes it on the close,
+    /// as the quote is.
     trades_early: u64,
 
-    /// The warmup's length, if a subscription first resends the warmup's last tick as made and
-    /// stamped on receipt, as IC does; with the first window's start, an empty catalog's, it gives
-    /// the warmup's end.
+    /// The warmup length, set if a subscription first resends the warmup's last tick, as IC does.
+    ///
+    /// The resent tick is made, then stamped on receipt. This length plus the first window's
+    /// start, from an empty catalog, gives the warmup's end.
     resends: Option<SignedDuration>,
 
-    /// Each request's window, in ns.
+    /// The window of each request, in ns.
     asked: Vec<(u64, u64)>,
 
-    /// The kind of each request, in order: `bar`, `deltas`, `quote` or `trade`.
+    /// The kind of each request in order: `bar`, `deltas`, `quote` or `trade`.
     kinds: Vec<&'static str>,
 
     instruments: Vec<InstrumentId>,
@@ -179,10 +188,11 @@ struct FakeVenue {
 
 #[derive(Debug, Clone, Copy)]
 struct Live {
-    /// When it was made (`ts_event`), in ns.
+    /// When the tick was made (`ts_event`), in ns.
     made: u64,
 
-    /// Windows asked by then; fewer than in all, the tick came before the warmup's last.
+    /// Windows asked by then. Fewer than the total means the tick came before the warmup's last
+    /// window.
     asked: usize,
 }
 
@@ -241,7 +251,7 @@ impl DataClientFactory for FakeFactory {
     }
 }
 
-/// On no venue, so routed by the node's routing.
+/// A client on no venue, so the node's routing routes it.
 struct FakeClient {
     id: ClientId,
     venue: Rc<RefCell<FakeVenue>>,
@@ -310,8 +320,10 @@ impl FakeClient {
         Ok(())
     }
 
-    /// Sends one live tick made and stamped now, after the warmup's last minute's if the venue
-    /// resends it (`FakeVenue::resends`), made at or before the warmup's end.
+    /// Sends one live tick, made and stamped now.
+    ///
+    /// If the venue resends (`FakeVenue::resends`), the warmup's last minute's tick goes first,
+    /// made at or before the warmup's end.
     ///
     /// # Panics
     ///
@@ -343,7 +355,7 @@ impl FakeClient {
     }
 }
 
-/// A quote at the venue's price, made at `made` and stamped at `stamped`, in ns.
+/// Returns a quote at the venue's price, made at `made` and stamped at `stamped`, in ns.
 fn quote_at(instrument_id: InstrumentId, made: u64, stamped: u64) -> QuoteTick {
     let price = price_at(made);
     QuoteTick::new(
@@ -357,7 +369,7 @@ fn quote_at(instrument_id: InstrumentId, made: u64, stamped: u64) -> QuoteTick {
     )
 }
 
-/// As `quote_at`, with the time made as its id.
+/// Returns a trade as `quote_at` does, with the time made as its id.
 fn trade_at(instrument_id: InstrumentId, made: u64, stamped: u64) -> TradeTick {
     TradeTick::new(
         instrument_id,
@@ -503,7 +515,7 @@ impl DataClient for FakeClient {
         self.answer(request.request_id, (start, end), response)
     }
 
-    /// A quote at once, as IC and IB send one on a subscription.
+    /// Sends a quote at once, as IC and IB do on a subscription.
     fn subscribe_quotes(&mut self, cmd: SubscribeQuotes) -> anyhow::Result<()> {
         for id in cmd.instrument_ids {
             self.subscribed(id, |id, made, stamped| {
@@ -523,14 +535,16 @@ impl DataClient for FakeClient {
     }
 }
 
-/// When the trades `venue` holds in `[start, end]` were made, in ns.
+/// Returns when the trades `venue` holds in `[start, end]` were made, in ns.
 fn trades_made(venue: &FakeVenue, start: u64, end: u64) -> impl Iterator<Item = u64> {
     let early = venue.trades_early;
     minutes(start + early, end, venue.closed).map(move |ns| ns - early)
 }
 
-/// The venue's deltas at the minute closing at `ns`: one bid added, its order id the minute, after
-/// a clear if the minute opens a UTC day, a snapshot of that bid alone.
+/// Returns the venue's deltas at the minute closing at `ns`.
+///
+/// The deltas add one bid, with the minute as its order id. If the minute opens a UTC day, a clear
+/// comes first and the bid is a snapshot of its own.
 fn deltas_at(id: InstrumentId, ns: u64) -> Vec<OrderBookDelta> {
     let order = BookOrder::new(
         OrderSide::Buy,
@@ -570,7 +584,7 @@ fn deltas_at(id: InstrumentId, ns: u64) -> Vec<OrderBookDelta> {
 struct Books {
     book: RefCell<OrderBook>,
 
-    /// The stamp of each delta of the feed, a snapshot's aside.
+    /// The stamp of each delta of the feed, leaving out snapshot deltas.
     fed: RefCell<Vec<u64>>,
 }
 
@@ -588,7 +602,7 @@ impl BookIndicator for Books {
     }
 }
 
-/// Records each bar the warmup hands it and when each quote and trade was made.
+/// Records each bar the warmup hands it, and when each quote and trade was made.
 #[derive(Debug, Default)]
 struct Fed {
     bars: RefCell<Vec<Bar>>,
@@ -631,14 +645,15 @@ struct Warming {
     core: DataActorCore,
     warmup: Rc<Warmup>,
 
-    /// Started where the warmup ends, as a model handle starts them; no series rolls.
+    /// Started where the warmup ends, as a model handle starts them. No series rolls.
     subscriptions: Subscriptions,
 
     traded: Option<Rc<TargetSetter>>,
     exits: Rc<RefCell<Option<SideTarget>>>,
     failure: Rc<RefCell<Option<String>>>,
 
-    /// The close of each live bar the strategy got, in ns, and whether the warmup was pending then.
+    /// The close in ns of each live bar the strategy received, and whether the warmup was pending
+    /// then.
     live_bars: Rc<RefCell<Vec<(u64, bool)>>>,
 }
 
@@ -653,7 +668,7 @@ impl DataActor for Warming {
         Ok(())
     }
 
-    /// The hooks hand the warmup its data, historical and live, as a model strategy does
+    /// Hands the warmup its data, historical and live, as a model strategy does
     /// (`model_data_hooks!`).
     fn on_historical_book_deltas(&mut self, deltas: &[OrderBookDelta]) -> anyhow::Result<()> {
         self.warmup.on_historical_book_deltas(deltas)
@@ -732,8 +747,9 @@ fn warm(
     }
 }
 
-/// Runs `warmup`, subscribed to the bars of `requirements` and `traded`'s ATR and to `ticks`, on a
-/// node with the catalog in `dir`.
+/// Runs `warmup` on a node with the catalog in `dir`.
+///
+/// The node subscribes to the bars of `requirements`, the ATR bars of `traded` and `ticks`.
 fn run(
     dir: &Path,
     venue: &Rc<RefCell<FakeVenue>>,
@@ -820,13 +836,13 @@ fn close_of(bar: &Bar) -> u64 {
     bar.ts_event.as_u64()
 }
 
-/// Whether `bars` are one every `step` ns, oldest first, so each once.
+/// Returns whether `bars` come one every `step` ns, oldest first, so each appears once.
 fn one_every(bars: &[Bar], step: u64) -> bool {
     bars.windows(2)
         .all(|pair| close_of(&pair[1]) == close_of(&pair[0]) + step)
 }
 
-/// Each window starts 1 ns after the one before, from the warmup's start to its end.
+/// Each window starts 1 ns after the previous one, from the warmup's start to its end.
 #[rstest]
 fn a_long_warmup_is_asked_in_windows_covering_it_all() {
     let dir = tempfile::tempdir().unwrap();
@@ -844,9 +860,11 @@ fn a_long_warmup_is_asked_in_windows_covering_it_all() {
     assert_eq!(last - first, 72 * HOUR_NS, "{asked:?}");
 }
 
-/// A window with the source bar before its start (which IB's client asks too) spans at most a day:
-/// ibapi asks a span in seconds up to 86,400, a longer one in sessions, one more than the days it
-/// spans, so a day and a minute fetches three sessions.
+/// A window that includes the source bar before its start spans at most a day.
+///
+/// The IB client asks for that bar too. ibapi asks in seconds for a span up to 86,400. It asks in
+/// sessions for a longer span, one more than the days spanned, so a day and a minute fetches three
+/// sessions.
 #[rstest]
 fn each_window_with_the_bar_before_it_spans_at_most_a_day() {
     let dir = tempfile::tempdir().unwrap();
@@ -864,9 +882,11 @@ fn each_window_with_the_bar_before_it_spans_at_most_a_day() {
     );
 }
 
-/// Over 72 hours, less the first, partial, bar: 71 closes on the hour, 72 or 70 on an hour's edge;
-/// each closes at its last minute's price and opens at its first, the venue's 60 minutes up to its
-/// close.
+/// Over 72 hours, minus the first, partial bar, 71 bars close on the hour, or 72 or 70 on an
+/// hour's edge.
+///
+/// Each bar closes at its last minute's price and opens at its first, the venue's 60 minutes up to
+/// the close.
 #[rstest]
 fn a_composite_bar_types_warmup_hands_every_bar_once_oldest_first() {
     let dir = tempfile::tempdir().unwrap();
@@ -886,7 +906,8 @@ fn a_composite_bar_types_warmup_hands_every_bar_once_oldest_first() {
     }
 }
 
-/// So are the bars Nautilus builds from a window's quotes: a warmup of 30 hours spans two windows.
+/// Bars that Nautilus builds from a window's quotes are handed over once each too. A warmup of 30
+/// hours spans two windows.
 #[rstest]
 fn bars_built_from_quotes_are_handed_over_once_each_across_windows() {
     let dir = tempfile::tempdir().unwrap();
@@ -905,8 +926,10 @@ fn bars_built_from_quotes_are_handed_over_once_each_across_windows() {
     assert!(one_every(&warmed.bars, MINUTE_NS));
 }
 
-/// A weekend's market closed over several windows: Nautilus moves to the next duration after an
-/// empty window and ends a request, reporting success, when they run out.
+/// A weekend's closed market covers several windows.
+///
+/// Nautilus moves to the next duration after an empty window. It ends the request, reporting
+/// success, when the windows run out.
 #[rstest]
 fn a_run_of_empty_windows_does_not_end_the_warmup() {
     let dir = tempfile::tempdir().unwrap();
@@ -922,8 +945,8 @@ fn a_run_of_empty_windows_does_not_end_the_warmup() {
     assert!(now - last <= 2 * HOUR_NS, "the last bar closes at {last}");
 }
 
-/// IB's client answers without an envelope: Nautilus takes it as complete and asks the next
-/// window, else a warmup on IB would wait for ever.
+/// The IB client answers without an envelope, and Nautilus takes that as complete and asks the next
+/// window. Otherwise a warmup on IB would wait forever.
 #[rstest]
 fn an_answer_without_an_envelope_moves_to_the_next_window() {
     let dir = tempfile::tempdir().unwrap();
@@ -937,7 +960,7 @@ fn an_answer_without_an_envelope_moves_to_the_next_window() {
     assert!(one_every(&warmed.bars, HOUR_NS));
 }
 
-/// The venue cuts the history at the third window: the warmup ends naming the reason.
+/// The venue cuts the history at the third window, and the warmup ends with the reason.
 #[rstest]
 fn a_window_failing_ends_the_warmup_with_what_was_built_handed_over() {
     let dir = tempfile::tempdir().unwrap();
@@ -993,7 +1016,7 @@ fn a_warmup_the_catalog_holds_asks_the_venue_only_for_the_rest(
     assert!(one_every(&warmed.bars, MINUTE_NS));
 }
 
-/// `dir` by a path relative to the working directory: up to the root, then down to it.
+/// Returns `dir` as a path relative to the working directory, going up to the root then down.
 fn relative(dir: &Path) -> PathBuf {
     let cwd = std::env::current_dir().unwrap();
     let mut relative: PathBuf = std::iter::repeat_n("..", cwd.components().count() - 1).collect();
@@ -1001,8 +1024,10 @@ fn relative(dir: &Path) -> PathBuf {
     relative
 }
 
-/// The long side's target when a warmup of 72 hours of `requirements` ends: a bracket's take profit
-/// two ATRs away, its stop one, the ATR of model_ema's config, on hourly bars.
+/// Returns the long side's target when a 72-hour warmup of `requirements` ends.
+///
+/// The bracket's take profit is two ATRs away and its stop is one. The ATR is the one in
+/// model_ema's config, on hourly bars.
 fn bracket_of(bar_types: Vec<BarType>, ticks: Vec<TickSeries>) -> SideTarget {
     let dir = tempfile::tempdir().unwrap();
     let venue = FakeVenue::new(Answer::Envelope);
@@ -1051,17 +1076,19 @@ fn bracket_of(bar_types: Vec<BarType>, ticks: Vec<TickSeries>) -> SideTarget {
     exits.expect("a bracket: the ATR is warm when the warmup ends")
 }
 
-/// Every hour's true range is 60, so the bracket is 3 ATRs wide, 180, within what the first bar's
-/// range, 59, still weighs after Wilder's 70 bars. A bar handed over again would throw the true
-/// range off by hundreds.
+/// Asserts the bracket is 3 ATRs wide.
+///
+/// Every hour's true range is 60, so the width is 180, within what the first bar's range of 59
+/// still weighs after Wilder's 70 bars. A bar handed over again would throw the true range off by
+/// hundreds.
 fn assert_three_atrs_wide(exits: &SideTarget) {
     let bracket = exits.bracket.unwrap();
     let width = bracket.take_profit.as_f64() - bracket.stop_loss.as_f64();
     assert!((179.0..=181.0).contains(&width), "{exits:?}");
 }
 
-/// Over quotes, the ATR's bars are built from them across the windows; over composite bars, the ATR
-/// is on the same hour bars.
+/// Over quotes, Nautilus builds the ATR's bars from them across the windows. Over composite bars,
+/// the ATR runs on the same hour bars.
 #[rstest]
 #[case::quotes(vec![], vec![of_gcz26(NautilusDataType::QuoteTick)])]
 #[case::composite_bars(vec![BarType::from(COMPOSITE)], vec![])]
@@ -1081,7 +1108,7 @@ fn of_gcz26(data: NautilusDataType) -> TickSeries {
     }
 }
 
-/// Runs a live warmup of `length` of `series` as a model handle does and returns the features.
+/// Runs a live warmup of `series` for `length`, as a model handle does, and returns the features.
 fn read_live(
     dir: &Path,
     venue: &Rc<RefCell<FakeVenue>>,
@@ -1114,8 +1141,9 @@ fn assert_live_before_the_last_window(venue: &FakeVenue) {
     );
 }
 
-/// The venue answers each window after a delay and sends a tick at once on the subscription: two
-/// windows of 23 hours over 30, then the live tick, in time order.
+/// The venue answers each window after a delay and sends a tick at once on the subscription.
+///
+/// Two windows of 23 hours cover 30, then the live tick follows, in time order.
 #[rstest]
 #[case::quotes(NautilusDataType::QuoteTick, |fed: &Fed| fed.quotes.borrow().clone())]
 #[case::trades(NautilusDataType::TradeTick, |fed: &Fed| fed.trades.borrow().clone())]
@@ -1147,8 +1175,10 @@ fn features_read_every_warmup_tick_before_a_live_one(
     );
 }
 
-/// The venue resends its latest quote on the subscription, as IC does, made at the warmup's last
-/// minute, which the history holds, then sends a new one. The features read that minute once.
+/// The venue resends its latest quote on the subscription, as IC does, then sends a new one.
+///
+/// The resent quote is made at the warmup's last minute, which the history holds. The features
+/// read that minute once.
 #[rstest]
 fn the_venues_resend_of_the_warmups_last_quote_is_read_once() {
     let dir = tempfile::tempdir().unwrap();
@@ -1186,9 +1216,14 @@ fn the_venues_resend_of_the_warmups_last_quote_is_read_once() {
     assert_eq!(older, None, "a quote older than the one read before it");
 }
 
-/// A catalog holds quotes up to 30 hours ago of a warmup of 72 hours: of the four windows of 23
-/// hours, the first is read from it, the second from it up to its end, and the venue is asked the
-/// rest of the second and the two after, each delayed, the live quote coming meanwhile.
+/// A catalog holds quotes up to 30 hours ago, for a 72-hour warmup.
+///
+/// The warmup has four windows of 23 hours:
+/// - The first is read from the catalog.
+/// - The second is read from the catalog up to its end.
+/// - The venue is asked for the rest of the second and for the last two, each delayed.
+///
+/// The live quote comes meanwhile.
 #[rstest]
 fn features_read_a_catalogs_windows_then_the_venues_before_a_live_quote() {
     let dir = tempfile::tempdir().unwrap();
@@ -1268,9 +1303,11 @@ impl ActorIndicator for Flow {
     }
 }
 
-/// Two windows each of 23 hours over 30: the venue answers the quotes' windows after a delay and
-/// the trades' at once, so both trades' windows reach the strategy before the quotes' first. The
-/// trades are made 30 seconds before each minute's quote.
+/// Two windows of 23 hours each cover 30.
+///
+/// The venue answers the quotes' windows after a delay and the trades' at once, so both trades'
+/// windows reach the strategy before the first quotes' window. The trades are made 30 seconds
+/// before each minute's quote.
 #[rstest]
 fn a_feature_on_two_series_reads_their_history_in_time_order_however_it_arrives() {
     let dir = tempfile::tempdir().unwrap();
@@ -1328,13 +1365,15 @@ fn a_feature_on_two_series_reads_their_history_in_time_order_however_it_arrives(
     assert_eq!(live_made, sent);
 }
 
-/// GCZ26's bars of a second, which a warmup builds from its trades.
+/// GCZ26's one-second bars, which a warmup builds from its trades.
 const LAST_SECONDS: &str = "GCZ26.GLBX-1-SECOND-LAST-INTERNAL";
 
-/// Trades and quotes each asked in two windows of 23 hours over 30: the venue answers the trades at
-/// once and the quotes after 1.5 s each, so the trades' bars are built while the quotes' request is
-/// pending, and Nautilus' aggregator goes live on the live trade, building a live bar a second on.
-/// The trades are made 30 seconds before each minute's quote, so each bar closes then.
+/// Trades and quotes are each asked in two windows of 23 hours covering 30.
+///
+/// The venue answers the trades at once and the quotes after 1.5 s each. The trades' bars are
+/// built while the quotes' request is pending, and Nautilus' aggregator goes live on the live
+/// trade, building a live bar a second on. The trades are made 30 seconds before each minute's
+/// quote, so each bar closes then.
 #[rstest]
 fn a_feature_on_built_bars_and_quotes_reads_them_in_time_order_however_they_arrive() {
     let dir = tempfile::tempdir().unwrap();
@@ -1402,14 +1441,14 @@ fn a_feature_on_built_bars_and_quotes_reads_them_in_time_order_however_they_arri
         made
     };
 
-    // The history's, then the live one
+    // The history first, then the live one
     let quotes_read = made("quote");
     assert_eq!(quotes_read[..quotes_read.len() - 1], asked("quote"));
     let trades = asked("trade");
     assert_eq!(made("trade"), trades);
 
-    // Each of the history's closes on the second of its one trade, the first, partial, dropped;
-    // then the live one.
+    // Each history bar closes on the second of its one trade, with the first, partial bar dropped,
+    // then comes the live bar.
     let bars = made("bar");
     assert!(bars.len() >= 29 * 60, "{} bars", bars.len());
     assert_eq!(bars[..bars.len() - 1], trades[1..]);
@@ -1433,8 +1472,9 @@ impl Handled {
     }
 }
 
-/// Records every quote and trade and the bars of `bar_types`, as a feature set routes bars by type,
-/// the warmup handing every bar to each indicator it feeds.
+/// Records every quote and trade, and the bars of `bar_types`.
+///
+/// A feature set routes bars by type, and the warmup hands every bar to each indicator it feeds.
 #[derive(Debug, Default)]
 struct Handling {
     bar_types: Vec<BarType>,
@@ -1472,8 +1512,9 @@ impl ActorIndicator for Handling {
     }
 }
 
-/// Also builds GCZ26's minute MID bars for a target's ATR, as `TargetSetter::warmed` does, which no
-/// feature reads.
+/// Hands the warmup to `handling`, and also builds GCZ26's minute MID bars for a target's ATR.
+///
+/// `TargetSetter::warmed` builds the same bars, and no feature reads them.
 fn handing(requirements: &DataRequirements, warmup: Warmup, handling: &Rc<Handling>) -> Warmup {
     let atr = Rc::new(Handling::default());
     warmup
@@ -1563,8 +1604,11 @@ fn replayed(dir: &Path, requirements: &DataRequirements, start: u64, end: u64) -
     .unwrap()
 }
 
-/// The delay of each window of each series: GCZ26's quotes 300 ms then at once, ESZ26's quotes
-/// 100 ms then 400 ms, GCZ26's trades at once then 700 ms.
+/// Returns the delay of each window of each series.
+///
+/// - GCZ26 quotes: 300 ms, then at once.
+/// - ESZ26 quotes: 100 ms, then 400 ms.
+/// - GCZ26 trades: at once, then 700 ms.
 fn shuffled(kind: &str, instrument_id: InstrumentId, window: usize) -> Duration {
     let millis: &[u64] = match (kind, instrument_id.symbol.as_str()) {
         ("quote", "GCZ26") => &[300, 0],
@@ -1574,10 +1618,12 @@ fn shuffled(kind: &str, instrument_id: InstrumentId, window: usize) -> Duration 
     Duration::from_millis(millis[window.min(millis.len() - 1)])
 }
 
-/// The venue holds a quote of each instrument and a trade of GCZ26 on every minute, so every minute
-/// ties the three ticks and the bars closing then; it answers each series' two windows of 23 hours
-/// over 30 after the delays of `shuffled`. A live warmup drops the first bar, which misses the data
-/// before the warmup's start (`skip_first_non_full_bar`), so the replay's first bar is left out.
+/// The venue holds a quote of each instrument and a trade of GCZ26 on every minute.
+///
+/// So every minute ties the three ticks and the bars closing then. The venue answers each series'
+/// two windows of 23 hours covering 30 after the delays of `shuffled`. A live warmup drops the
+/// first bar, which misses the data before the warmup's start (`skip_first_non_full_bar`), so the
+/// replay's first bar is left out.
 #[rstest]
 fn a_live_warmup_hands_a_feature_its_history_as_a_replay_of_the_same_data_does() {
     let live_dir = tempfile::tempdir().unwrap();
@@ -1699,9 +1745,11 @@ fn warm_deltas(dir: &Path) -> (Rc<Books>, Vec<(u64, u64)>) {
     (books, asked)
 }
 
-/// The book holds one bid for each minute since the last UTC midnight, up to the latest minute; and
-/// each delta of the feed came once, a minute after the one before or two across a midnight's
-/// snapshot. A repeat would not show in the book: an order added twice is one order.
+/// Asserts the book holds one bid for each minute from the last UTC midnight to the latest minute.
+///
+/// It also asserts that each delta of the feed came once. A delta comes a minute after the previous
+/// one, or two across a midnight's snapshot. A repeat would not show in the book, because an order
+/// added twice is one order.
 fn assert_the_days_book(books: &Books) {
     let book = books.book.borrow();
     let best = book.best_bid_price().expect("a bid");
@@ -1722,8 +1770,8 @@ fn assert_the_days_book(books: &Books) {
     );
 }
 
-/// The venue answers the first window of an empty catalog, and each after it from its day's start
-/// as the windows before wrote it back.
+/// The venue answers the first window of an empty catalog. It answers each later window from its
+/// day's start, as the earlier windows wrote it back.
 #[rstest]
 fn deltas_a_venue_answers_in_windows_build_the_days_book() {
     let dir = tempfile::tempdir().unwrap();
@@ -1734,8 +1782,8 @@ fn deltas_a_venue_answers_in_windows_build_the_days_book() {
     assert_the_days_book(&books);
 }
 
-/// The catalog holds them: the first window is read from its day's start and opens with a snapshot
-/// of the book at the request's start, each later one from its own start.
+/// The catalog holds the deltas. The first window is read from its day's start and opens with a
+/// snapshot of the book at the request's start. Each later window is read from its own start.
 #[rstest]
 fn deltas_a_catalog_answers_in_windows_build_the_days_book_from_the_requests_snapshot() {
     let dir = tempfile::tempdir().unwrap();
@@ -1753,8 +1801,10 @@ struct Streamed {
     gcz26: Option<InstrumentAny>,
 }
 
-/// Starts a warmup and its subscriptions as a model handle does, with GCZ26's definition in the
-/// cache as its broker's client puts it; stops the node on LSE's first gold series quote.
+/// Starts a warmup and its subscriptions as a model handle does, and stops the node on LSE's first
+/// gold series quote.
+///
+/// The cache holds GCZ26's definition as the broker's client puts it.
 #[derive(Debug)]
 struct Streaming {
     core: DataActorCore,
@@ -1800,13 +1850,14 @@ impl DataActor for Streaming {
     }
 }
 
-/// The catalog holds the gold series' definition, written by hand as LSE publishes none, and an
-/// older GCZ26 than the broker's. The LSE client, routed LSEDGE as the live node routes it, runs
-/// against the mock LSE socket. The catalog answers the warmup's request for the gold definition
-/// and the data engine caches it before the subscription reaches the LSE client, which reads its
-/// precision: LSE's quote streams at it, bid and ask with no sizes. GCZ26's, which the cache holds,
-/// is not asked, so the broker's stays. The mock peer refuses the gold series' past quotes as LSE
-/// does (`400 data-unavailable`).
+/// The LSE client runs against the mock LSE socket, routed LSEDGE as the live node routes it.
+///
+/// The catalog holds the gold series' definition, written by hand because LSE publishes none, and
+/// an older GCZ26 than the broker's. The catalog answers the warmup's request for the gold
+/// definition, and the data engine caches it before the subscription reaches the LSE client. The
+/// client reads its precision, and LSE's quote streams at it, with bid and ask and no sizes. The
+/// warmup does not ask for GCZ26's definition, which the cache holds, so the broker's stays. The
+/// mock peer refuses the gold series' past quotes as LSE does (`400 data-unavailable`).
 #[rstest]
 fn an_lsedge_definition_the_cache_lacks_comes_from_the_catalog_before_lse_streams_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -1991,12 +2042,13 @@ impl DataActor for GlbxStreaming {
     }
 }
 
-/// LSE's client routed GLBX, against the mock LSE peer and the mock CME stream replaying LSE's
-/// documented ESZ6, beside another client on no venue, as IB's is. The warmup's two days of history
-/// are asked of LSE, which holds none (`404 data-unavailable`); the other client is asked nothing.
-/// Neither is made the default route, as on the live node: Nautilus' node builder makes the first
-/// client on no venue it registers the default, in no set order, and refuses another made the
-/// default after it.
+/// The LSE client is routed GLBX, beside another client on no venue, as IB's is.
+///
+/// The LSE client runs against the mock LSE peer and the mock CME stream replaying LSE's
+/// documented ESZ6. The warmup asks LSE for two days of history, and LSE holds none
+/// (`404 data-unavailable`). The other client is asked nothing. Neither client is made the default
+/// route, as on the live node. Nautilus' node builder makes the first client on no venue it
+/// registers the default, in no set order, and refuses another made the default after it.
 #[rstest]
 fn glbx_data_comes_from_lse_s_cme_stream_routed_glbx_beside_another_client() {
     let dir = tempfile::tempdir().unwrap();
@@ -2163,7 +2215,7 @@ fn glbx_data_comes_from_lse_s_cme_stream_routed_glbx_beside_another_client() {
 #[path = "../common/mod.rs"]
 mod common;
 
-/// A model strategy's first decision on a live node, as its handle's warmup ends.
+/// A model strategy's first decision on a live node, as the handle's warmup ends.
 mod model_handle {
     use helix_trader::{
         model::{
@@ -2188,7 +2240,7 @@ mod model_handle {
 
     const STRATEGY: &str = "WARMUP-MODEL-001";
 
-    /// The last mid of GCZ26, Nautilus' exponential average of one, `[indicators.mid_0]`.
+    /// The last mid of GCZ26, as Nautilus' exponential average of length one, `[indicators.mid_0]`.
     const MID: Declared<EmaArgs> = Declared::new("mid_0");
 
     #[derive(Debug)]
@@ -2233,9 +2285,11 @@ mod model_handle {
         }
     }
 
-    /// Hourly decisions on GCZ26 of a bracket whose take profit is two ATRs away and its stop one,
-    /// the ATR of model_ema's config on hourly bars, the long traded from an expected R of nought,
-    /// on the baseline learner, never retrained.
+    /// Returns the config for hourly decisions on GCZ26.
+    ///
+    /// The bracket's take profit is two ATRs away and its stop is one. The ATR is model_ema's
+    /// config on hourly bars. The long trades from an expected R of nought, on the baseline
+    /// learner, which is never retrained.
     fn config() -> ModelConfig {
         let spec: Target = toml::from_str(
             r#"
@@ -2304,8 +2358,9 @@ mod model_handle {
         .unwrap()
     }
 
-    /// Publishes under `models` the long model of `blueprint`, valid from the epoch, a baseline
-    /// expecting 0.4R of every row.
+    /// Publishes the long model of `blueprint` under `models`, valid from the epoch.
+    ///
+    /// It is a baseline expecting 0.4R of every row.
     fn publish_long(blueprint: &ModelBlueprint, models: &Path) {
         let config = config();
         let names = side_names(features().names(), &config.target.payoff_names());
@@ -2395,11 +2450,13 @@ mod model_handle {
         (failure, decisions)
     }
 
-    /// Worked by hand. Every hour's true range is 60, so Wilder's ATR of 14 hourly bars, warmed
-    /// over 72 hours, is 60 within a third of a dollar, the weight the first bar's range, 59, still
-    /// has (as `assert_three_atrs_wide`). The first decision trades the long, of 0.4R, its stop one
-    /// ATR from the mid: one R on one contract of GCZ26, whose multiplier is 1, is the ATR in USD.
-    /// Without the warmup the ATR is cold and the decision no trade.
+    /// Worked by hand.
+    ///
+    /// Every hour's true range is 60, so Wilder's ATR of 14 hourly bars, warmed over 72 hours, is
+    /// 60 within a third of a dollar. That is the weight the first bar's range of 59 still has (as
+    /// in `assert_three_atrs_wide`). The first decision trades the long at 0.4R, with its stop one
+    /// ATR from the mid. One R on one contract of GCZ26, whose multiplier is 1, is the ATR in USD.
+    /// Without the warmup the ATR is cold and the decision is no trade.
     #[rstest]
     fn a_live_warmup_sets_the_first_decisions_stop_from_the_targets_atr() {
         let dir = tempfile::tempdir().unwrap();
