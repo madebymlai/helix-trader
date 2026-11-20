@@ -1,13 +1,12 @@
 //! Holds the backtests in one test binary.
 //!
 //! Its modules run the real strategy or a recorder through `Backtest::run` on fixture catalogs
-//! (`common`). Each test runs one node.
+//! (`common`), one node a test.
 //!
-//! The tests run in parallel, one thread each, so their nodes run at once. Nautilus does not
-//! support that. Its message bus and registries are thread-local. Its logger, the logging mode and
-//! clock each backtest switches, its logging worker and its Tokio runtime are shared by every
-//! node, so a log line may carry another test's simulated time (`docs/architecture.md`, "Process
-//! constraints"). Run one module with:
+//! The tests run in parallel, one thread each, so their nodes run at once, which Nautilus does not
+//! support. Its logger, the logging mode and clock each backtest switches, its logging worker and
+//! its Tokio runtime are shared by every node, so a log line may carry another test's simulated
+//! time (`docs/architecture.md`, "Process constraints"). Run one module with:
 //!
 //! ```sh
 //! cargo test --test backtest backtest_warmup::

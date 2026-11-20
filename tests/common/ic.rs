@@ -1,8 +1,8 @@
 //! IC Markets' gold (XAUUSD.ICMARKETS) and FX pairs, as tick quotes stored by `fill-catalog`.
 //!
 //! The gold is a `Cfd` in ounces, quoted in USD. It has IC's demo margin (1:30) and a 10,000 oz
-//! maximum order. Quotes are stamped at their tick's millisecond, at irregular times. Both sides
-//! are sized 10,000.
+//! maximum order. Quotes are on Wednesday 21 October 2026, stamped at their tick's millisecond, at
+//! irregular times. Both sides are sized 10,000.
 
 use std::path::Path;
 
@@ -34,12 +34,11 @@ pub(crate) const EURUSD: &str = "EURUSD.ICMARKETS";
 
 pub(crate) const USDJPY: &str = "USDJPY.ICMARKETS";
 
-/// Parses `hh:mm:ss.fff` as a UTC time on Wednesday 21 October 2026.
 pub(crate) fn at(time: &str) -> Timestamp {
     ts(&format!("2026-10-21T{time}Z"))
 }
 
-/// Returns 1 / 30, the account's 1:30 under the symbol's 1:200 (`src/venues/ic/README.md`).
+/// Returns the account's 1:30, under the symbol's 1:200 (`src/venues/ic/README.md`).
 pub(crate) fn margin() -> Decimal {
     Decimal::ONE / Decimal::from(30)
 }
@@ -69,9 +68,8 @@ pub(crate) fn instrument() -> InstrumentAny {
     )
 }
 
-/// Returns a forex symbol as the cTrader adapter defines it (`crates/ctrader/README.md`).
-///
-/// It has IC's margin. The sizes, by the thousand, are this fixture's.
+/// Returns a forex symbol as the cTrader adapter defines it (`crates/ctrader/README.md`), with
+/// IC's margin and this fixture's sizes.
 pub(crate) fn pair(
     id: &str,
     base: Currency,
@@ -108,12 +106,10 @@ pub(crate) fn pair(
     )
 }
 
-/// Returns one quote a minute at :15, from 08:00 to 12:00.
 pub(crate) fn pair_quotes(id: &str, bid: &str, ask: &str) -> Vec<QuoteTick> {
     pair_quotes_over(id, bid, ask, at("08:00:00"), at("12:00:00"))
 }
 
-/// Returns one quote a minute at :15 from `from` to `to`.
 pub(crate) fn pair_quotes_over(
     id: &str,
     bid: &str,
@@ -160,10 +156,8 @@ pub(crate) fn quote(time: Timestamp, bid: &str, ask: &str) -> QuoteTick {
 pub(crate) const EDGE_BOTTOM: f64 = 4000.0;
 pub(crate) const EDGE_RISE: f64 = 4.0;
 
-/// Returns quotes over `[from, to)` every 45 s, with the ask 0.20 above the bid.
-///
-/// On even hours the bid rises from 4000.00 by 0.05 a quote, to 4003.95. On odd hours it falls
-/// from 4004.00 to 4000.05.
+/// Returns quotes every 45 s. On even hours the bid rises from 4000.00 by 0.05 a quote, and on odd
+/// hours it falls from 4004.00.
 pub(crate) fn edge_quotes(from: Timestamp, to: Timestamp) -> Vec<QuoteTick> {
     let mut quotes = vec![];
     let mut time = from;
@@ -185,10 +179,8 @@ pub(crate) fn edge_quotes(from: Timestamp, to: Timestamp) -> Vec<QuoteTick> {
     quotes
 }
 
-/// Returns quotes from 08:00 to 12:00 at :07.250 and :37.750.
-///
-/// The bid steps from 4000.00 to 4000.90 by the minute, and the ask is 0.20 above it. The last
-/// quote of the hours closing 10:00 and 11:00 is set apart.
+/// Returns quotes from 08:00 to 12:00 at :07.250 and :37.750, the bid stepping from 4000.00 to
+/// 4000.90 by the minute. The last quote of the hours closing 10:00 and 11:00 is set apart.
 pub(crate) fn quotes() -> Vec<QuoteTick> {
     let mut quotes = vec![];
     let mut time = at("08:00:07.250");
@@ -220,7 +212,6 @@ pub(crate) fn catalog_of(quotes: Vec<QuoteTick>, from: Timestamp, to: Timestamp)
     dir
 }
 
-/// Replaces the gold's definition with `defined`.
 pub(crate) fn catalog_defining(
     defined: InstrumentAny,
     quotes: Vec<QuoteTick>,
@@ -263,10 +254,8 @@ pub(crate) fn store_defined(
         .unwrap();
 }
 
-/// Returns hour bars over `[09:00, 12:00]` on a hedging venue (`venues::oms_type`).
-///
-/// It charges IC's Raw commission of 30 USD per million traded. IC's leverage is in the
-/// instrument's margin.
+/// Returns hour bars on a hedging venue (`venues::oms_type`), with IC's Raw commission of 30 USD
+/// per million traded.
 pub(crate) fn backtest(catalog: &TempDir) -> Backtest {
     Backtest {
         catalog: catalog.path().to_path_buf(),

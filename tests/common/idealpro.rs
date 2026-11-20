@@ -2,8 +2,7 @@
 //! them from IB's history. The date is 21 October 2026, the day of `common::ic`.
 //!
 //! Each bar is stamped at its close and has no volume, as IB's BID and ASK bars carry none. A
-//! strategy that converts through the pair reads its rates from these bars. They are the first
-//! form of a pair that IB's history serves (`venues::rate_series`).
+//! strategy that converts through the pair reads its rates from them (`venues::rate_series`).
 
 use std::path::Path;
 
@@ -34,7 +33,7 @@ pub(crate) fn bar_type(price_type: PriceType) -> BarType {
     )
 }
 
-/// Returns flat bars at `price`, one a minute, closing from `from` + 1 minute to 12:00.
+/// Returns flat bars at `price`, one a minute, closing after `from` to 12:00.
 pub(crate) fn bars(price_type: PriceType, price: &str, from: Timestamp) -> Vec<Bar> {
     let price = Price::from(price);
     let mut bars = vec![];
@@ -55,7 +54,6 @@ pub(crate) fn bars(price_type: PriceType, price: &str, from: Timestamp) -> Vec<B
     bars
 }
 
-/// Stores the pair, its BID bars at `bid` and its ASK bars at `ask`, from `from` to 12:00.
 pub(crate) fn store(dir: &Path, bid: &str, ask: &str, from: Timestamp) {
     store_definition(dir);
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);

@@ -1,7 +1,8 @@
 //! Tests a strategy that declares tick series and no bar types.
 //!
 //! The run replays exactly the declared series: IC's gold quotes (`common::ic`) and CME gold's
-//! trades and book depth (`common::glbx`). It replays nothing else the catalog stores.
+//! trades and book depth (`common::glbx`). It replays nothing else the catalog stores, which spans
+//! 08:00 to 12:00. The run covers `[09:00, 12:00]`.
 
 use std::{cell::RefCell, num::NonZeroUsize, rc::Rc};
 
@@ -79,7 +80,6 @@ impl DataActor for TickProbe {
     }
 }
 
-/// Builds a catalog of IC's gold quotes and CME gold's book depth and trades over 08:00 to 12:00.
 fn catalog() -> tempfile::TempDir {
     let dir = ic::catalog();
     glbx::store(dir.path());
@@ -87,7 +87,7 @@ fn catalog() -> tempfile::TempDir {
     dir
 }
 
-/// Runs the probe over `[09:00, 12:00]` declaring `ticks` and no bar types.
+/// Runs the probe declaring `ticks` and no bar types.
 fn run(catalog: &tempfile::TempDir, ticks: Vec<TickSeries>) -> Vec<Got> {
     let got = Rc::new(RefCell::new(Vec::new()));
     let probe = TickProbe {
@@ -145,7 +145,7 @@ fn a_strategy_declaring_ticks_and_no_bar_types_gets_the_declared_ticks_of_the_ru
     assert_eq!(quotes[0], at("09:00:07.250"));
     assert_eq!(quotes[359], at("11:59:37.750"));
 
-    // Only the run's window, so not the trade of 08:45 or the snapshot of 08:30
+    // Not the trade of 08:45 or the snapshot of 08:30
     assert_eq!(
         times(&got, &NautilusDataType::TradeTick, glbx::INSTRUMENT_ID),
         [at("09:10:00"), at("11:50:00")]
@@ -155,7 +155,6 @@ fn a_strategy_declaring_ticks_and_no_bar_types_gets_the_declared_ticks_of_the_ru
         [at("09:00:30"), at("10:15:00"), at("11:45:00")]
     );
 
-    // Nothing else: no IC trades or book, no CME quotes
     assert_eq!(got.len(), 360 + 2 + 3);
 }
 

@@ -105,8 +105,8 @@ fn golds_book_from_glbx_and_a_trade_on_ic_each_venue_with_its_account() {
     assert_eq!(result.total_orders, 1);
     assert_eq!(result.total_positions, 1);
 
-    // Bought at the ask of the last quote of the 10:00 bar, 4006.10, so 10 oz cost 40,061.00 USD,
-    // and IC's commission of 30 USD per million on that is 1.20.
+    // 10 oz at the ask of the 10:00 bar's last quote, 4006.10, cost 40,061.00 USD, and IC's
+    // commission of 30 USD per million on that is 1.20
     let summary = &result.summary;
     assert_eq!(summary["venues.total"], "2");
     assert_eq!(

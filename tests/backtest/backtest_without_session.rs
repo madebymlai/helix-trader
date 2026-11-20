@@ -1,15 +1,19 @@
-//! Tests a run with no session, as on a market open around the clock.
+//! Tests that a run with no session, as on a market open around the clock, counts every bar,
+//! including the one closing at midnight.
 //!
-//! Every bar counts, including the one spanning midnight.
+//! Quotes run from Wednesday 7 January 2026, 19:00 UTC, to Thursday 02:00, all outside Xetra's
+//! session. The run starts at 20:00. The crossover initializes short at 22:00, then trades three
+//! brackets of 10 units: crosses up at 23:00, down at 00:00 and up at 01:00. The first two end at
+//! their stops, -206.90 and -95.10, and the last ends long, so 9 orders and 9698.00 EUR.
+//!
+//! Dropping the bar closing at midnight, as a session of 00:00 to 23:59 does, would leave 01:00
+//! below the EMA of 615.60, which gives a sell instead of a buy.
 
 use jiff::Timestamp;
 use rstest::rstest;
 
 use crate::common::{self, stepped_quotes, ts};
 
-/// Quotes from Wednesday 7 January 2026, 19:00 UTC, to Thursday 02:00, all outside Xetra's session.
-///
-/// The hour bars close at level + 0.60.
 fn level(close: Timestamp) -> f64 {
     let hour = |at: &str| ts(&format!("2026-01-{at}:00:00Z"));
     match close {
@@ -41,19 +45,6 @@ fn without_a_session_every_bar_counts_across_midnight() {
         .unwrap()
         .result;
 
-    // The run replays the bars closing 21:00 and 22:00 from 20:00. The crossover initializes at
-    // 22:00 and is short, with 600.60 below the slow EMA of 605.60. Each trade but the last ends at
-    // its stop, 50 bps away, on the first quote of the next bar, which jumps past the stop:
-    //
-    // - 23:00: 620.60 above 605.60, cross up: buy 10 at 620.65, stop 617.50, EMA to 615.60;
-    //   stopped at 23:01 at the bid 600.00 + 0.01 - 0.05 = 599.96: -206.90
-    // - 00:00: 600.60 below 615.60, cross down: sell 10 at 600.55, stop 603.60, EMA to 605.60;
-    //   stopped at 00:01 at the ask 610.00 + 0.01 + 0.05 = 610.06: -95.10
-    // - 01:00: 610.60 above 605.60, cross up: buy 10 at 610.65, stop 607.55, take profit 616.71;
-    //   02:00 at 615.60 touches neither, the run ends long
-    //
-    // Dropping the bar closing at midnight, as a session of 00:00 to 23:59 does, would leave 01:00
-    // below the EMA of 615.60, which gives a sell instead of a buy.
     assert_eq!(result.total_orders, 9);
     assert_eq!(common::balance(&result), "9698.00 EUR");
 }
