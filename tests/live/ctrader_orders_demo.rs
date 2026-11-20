@@ -1,18 +1,17 @@
-//! End to end on a cTrader broker's demo, with orders: `Live` on XAU/USD and EUR/USD with the
-//! broker's clients, a strategy sending, once it has a quote of each, one bracket of 3 oz of gold
-//! (`GOLD_OUNCES`) (a market buy, its stop loss 30.00 below the bid, its take profit 30.00 above
-//! the ask), closing the position it opens at once by its id (`close_position`), and recording
-//! every order event. The node stops once the position is closed; then the broker's execution
-//! client reads the account: no position, no order open.
+//! End to end on a cTrader broker's demo, with orders: `Live` on XAU/USD and EUR/USD, a strategy
+//! sending, once it has a quote of each, one bracket of 3 oz of gold (`GOLD_OUNCES`): a market buy,
+//! its stop loss 30.00 below the bid, its take profit 30.00 above the ask. It closes the position
+//! at once by its id (`close_position`) and records every order event. The node stops once the
+//! position is closed; then the broker's execution client reads the account: no position, no order
+//! open.
 //!
 //! EUR/USD's quotes are there for Nautilus' risk engine: on an account in EUR, as IC's demo is, it
 //! converts an order's USD margin at the cache's EUR/USD, and denies the order without one
 //! (`VALIDATION_FAILED: Account currency conversion failed: No exchange rate from USD to EUR`,
 //! demo, 2026-10-26). An account in USD does not need them.
 //!
-//! It needs what `ctrader_live_demo.rs` needs, and gold's market open. Gated as `ctrader_demo.rs`
-//! is. One node per process, hence its own module, run alone (`main.rs`). The node keeps its cache
-//! in Redis under the test's trader, `HELIXTEST-102`, whose records the test deletes. Run it with:
+//! Needs what `ctrader_live_demo.rs` needs, and gold's market open. Gated as `ctrader_demo.rs` is.
+//! The test deletes the trader's Redis records. Run it with:
 //!
 //! ```sh
 //! NAUTILUS_CTRADER_RUN=pepperstone cargo test --test live ctrader_orders_demo:: -- --nocapture
@@ -64,7 +63,7 @@ use crate::{
 
 const TRADER: &str = "HELIXTEST-102";
 
-/// What the strategy saw, in order: each order event as `(client order id, what)`, and the fills.
+/// Each order event as `(client order id, what)`, and the fills.
 #[derive(Debug, Default)]
 struct Record {
     events: Vec<(String, String)>,
@@ -74,9 +73,8 @@ struct Record {
     closed: Option<PositionClosed>,
 }
 
-/// Sends one bracket on gold's first quote after a EUR/USD quote, and closes the position it opens;
-/// notifies `done` once the position has closed and both legs are canceled, the last events of the
-/// run, or the bracket failed.
+/// Sends one bracket on gold's first quote after a EUR/USD quote and closes the position it opens;
+/// notifies `done` once the position has closed and both legs are canceled, or the bracket failed.
 #[derive(Debug)]
 struct BracketOnce {
     core: StrategyCore,
@@ -99,7 +97,6 @@ impl BracketOnce {
             .push((id.to_string(), what));
     }
 
-    /// Notifies `done` once the position has closed and both its legs are canceled.
     fn done_if_flat(&self) {
         let record = self.record.lock().unwrap();
         let canceled = record
@@ -115,7 +112,7 @@ impl BracketOnce {
 }
 
 nautilus_strategy!(BracketOnce, {
-    /// The instruments its config claims, which the live node registers as it adds it.
+    /// The instruments its config claims, which the live node registers as it adds the strategy.
     fn external_order_instrument_ids(&self) -> Option<Vec<InstrumentId>> {
         self.config().external_order_instrument_ids.clone()
     }
@@ -211,7 +208,6 @@ impl DataActor for BracketOnce {
         self.submit_order_list(orders, None, None, None)
     }
 
-    /// Leaves nothing open, whatever happened.
     fn on_stop(&mut self) -> anyhow::Result<()> {
         let id = self.gold;
         self.cancel_all_orders(id, None, None, true, None)?;
@@ -219,7 +215,6 @@ impl DataActor for BracketOnce {
     }
 }
 
-/// How long the bracket gets, from the node's start, to open and close.
 const DEADLINE: Duration = Duration::from_secs(180);
 
 #[tokio::test(flavor = "multi_thread")]
@@ -258,7 +253,7 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
         sent: false,
     };
 
-    // An empty catalog of its own: the venue answers the whole warmup
+    // An empty catalog: the venue answers the whole warmup
     let catalog = tempfile::tempdir().unwrap();
 
     // Outside the catalog, as `Live` requires
@@ -360,9 +355,8 @@ async fn a_minimal_bracket_fills_closes_at_once_and_leaves_the_demo_account_flat
     assert_eq!(close.order_side, OrderSide::Sell);
 }
 
-/// The open positions and orders the execution client of `broker` reports on the demo account, as
-/// the node's startup reconciliation reads them: the mass status also holds the orders closed over
-/// its window.
+/// The open positions and orders the execution client reports on the demo account, as startup
+/// reconciliation reads them: the mass status also holds orders closed over its window.
 async fn open_at_broker(broker: &DemoBroker) -> (usize, usize) {
     let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
     replace_exec_event_sender(tx);

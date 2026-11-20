@@ -1,9 +1,9 @@
-//! IC Markets' gold on its tick quotes: XAUUSD.ICMARKETS, a `Cfd` on gold in ounces quoted in USD
-//! as `fill-catalog` loads it from IC (IC's margin on the demo, 1:30, at most 10,000 oz an order),
-//! and quotes as fill-catalog stores them: stamped at their tick's millisecond, at irregular times,
-//! both sides sized 10,000 (the instrument's maximum order), written through `fill_catalog`. Beside
-//! it, IC's FX pairs a strategy converts through (`pair`), with quotes of their own
-//! (`pair_quotes`).
+//! IC Markets' gold, XAUUSD.ICMARKETS, and its FX pairs on tick quotes as `fill-catalog` stores
+//! them.
+//!
+//! The gold is a `Cfd` in ounces quoted in USD, with IC's demo margin (1:30) and a 10,000 oz
+//! maximum order. Quotes are stamped at their tick's millisecond, at irregular times, both sides
+//! sized 10,000.
 
 use std::path::Path;
 
@@ -31,10 +31,8 @@ use super::ts;
 pub(crate) const INSTRUMENT_ID: &str = "XAUUSD.ICMARKETS";
 pub(crate) const HOUR_BARS: &str = "XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL";
 
-/// IC's euro in US dollars.
 pub(crate) const EURUSD: &str = "EURUSD.ICMARKETS";
 
-/// IC's US dollar in yen.
 pub(crate) const USDJPY: &str = "USDJPY.ICMARKETS";
 
 /// `hh:mm:ss.fff` UTC on Wednesday 21 October 2026.
@@ -42,13 +40,12 @@ pub(crate) fn at(time: &str) -> Timestamp {
     ts(&format!("2026-10-21T{time}Z"))
 }
 
-/// IC's margin of XAUUSD on the demo account: 1 / 30, the account's 1:30 under the symbol's 1:200
-/// (`src/venues/ic/README.md`, "Account, margins and costs").
+/// 1 / 30: the account's 1:30 under the symbol's 1:200 (`src/venues/ic/README.md`).
 pub(crate) fn margin() -> Decimal {
     Decimal::ONE / Decimal::from(30)
 }
 
-/// XAUUSD as IC defines it (`crates/ctrader/README.md`, "Instruments and account").
+/// XAUUSD as IC defines it (`crates/ctrader/README.md`).
 pub(crate) fn instrument() -> InstrumentAny {
     InstrumentAny::Cfd(
         Cfd::builder()
@@ -73,9 +70,8 @@ pub(crate) fn instrument() -> InstrumentAny {
     )
 }
 
-/// The FX pair `id` as the cTrader adapter defines a forex symbol (`crates/ctrader/README.md`,
-/// "Instruments and account"): a `Cfd` of class FX on `base`, quoted in `quote` on
-/// `price_precision` decimals, at IC's margin; its sizes, by the thousand, are this fixture's.
+/// A forex symbol as the cTrader adapter defines it (`crates/ctrader/README.md`), at IC's margin.
+/// Sizes, by the thousand, are this fixture's.
 pub(crate) fn pair(
     id: &str,
     base: Currency,
@@ -112,13 +108,12 @@ pub(crate) fn pair(
     )
 }
 
-/// Quotes of the pair `id` at `bid` and `ask`, one a minute at :15 from 08:00 to 12:00.
+/// One quote a minute at :15, 08:00 to 12:00.
 pub(crate) fn pair_quotes(id: &str, bid: &str, ask: &str) -> Vec<QuoteTick> {
     pair_quotes_over(id, bid, ask, at("08:00:00"), at("12:00:00"))
 }
 
-/// Quotes of the pair `id` at `bid` and `ask`, one a minute 15 s after each minute from `from` to
-/// `to`.
+/// One quote a minute at :15 from `from` to `to`.
 pub(crate) fn pair_quotes_over(
     id: &str,
     bid: &str,
@@ -144,13 +139,10 @@ pub(crate) fn pair_quotes_over(
     quotes
 }
 
-/// Stores the pair `pair` and its `quotes` in the catalog in `dir`, from 08:00 to 12:00, as `store`
-/// stores the gold's.
 pub(crate) fn store_pair(dir: &Path, pair: InstrumentAny, quotes: Vec<QuoteTick>) {
     store_defined(dir, pair, quotes, at("08:00:00"), at("12:00:00"));
 }
 
-/// An IC quote at `time`, sized as IC's fill sizes XAUUSD's.
 pub(crate) fn quote(time: Timestamp, bid: &str, ask: &str) -> QuoteTick {
     let size = Quantity::from(10_000);
     QuoteTick::new(
@@ -164,13 +156,12 @@ pub(crate) fn quote(time: Timestamp, bid: &str, ask: &str) -> QuoteTick {
     )
 }
 
-/// The price of gold at the bottom of each even hour of `edge_quotes`, and the rise over it.
+/// Bottom price of each even hour of `edge_quotes`, and the rise over it.
 pub(crate) const EDGE_BOTTOM: f64 = 4000.0;
 pub(crate) const EDGE_RISE: f64 = 4.0;
 
-/// IC's gold's quotes over `[from, to)`, one every 45 s, the ask 0.20 above the bid: over each even
-/// hour of the day the bid rises from 4000.00 by 0.05 a quote, to 4003.95, and over each odd hour
-/// falls from 4004.00 by as much, to 4000.05.
+/// Quotes over `[from, to)` every 45 s, ask 0.20 above bid: the bid rises from 4000.00 by 0.05 a
+/// quote to 4003.95 on even hours, and falls from 4004.00 to 4000.05 on odd hours.
 pub(crate) fn edge_quotes(from: Timestamp, to: Timestamp) -> Vec<QuoteTick> {
     let mut quotes = vec![];
     let mut time = from;
@@ -192,9 +183,8 @@ pub(crate) fn edge_quotes(from: Timestamp, to: Timestamp) -> Vec<QuoteTick> {
     quotes
 }
 
-/// Quotes from 08:00 to 12:00, two a minute at :07.250 and :37.750, the bid stepping through
-/// 4000.00 to 4000.90 by the minute, the ask 0.20 above; the last of the hours closing 10:00 and
-/// 11:00 set apart.
+/// Quotes 08:00 to 12:00 at :07.250 and :37.750, bid stepping 4000.00 to 4000.90 by the minute,
+/// ask 0.20 above, the last quote of the hours closing 10:00 and 11:00 set apart.
 pub(crate) fn quotes() -> Vec<QuoteTick> {
     let mut quotes = vec![];
     let mut time = at("08:00:07.250");
@@ -216,22 +206,17 @@ pub(crate) fn quotes() -> Vec<QuoteTick> {
     quotes
 }
 
-/// A catalog of the instrument and its quotes from 08:00 to 12:00, stored over that window as
-/// fill-catalog's node writes them back, written through `fill_catalog`.
 pub(crate) fn catalog() -> TempDir {
     catalog_of(quotes(), at("08:00:00"), at("12:00:00"))
 }
 
-/// A catalog of the instrument and `quotes`, stored over `[from, to]` as fill-catalog's node writes
-/// them back, written through `fill_catalog`.
 pub(crate) fn catalog_of(quotes: Vec<QuoteTick>, from: Timestamp, to: Timestamp) -> TempDir {
     let dir = tempfile::tempdir().unwrap();
     store(dir.path(), quotes, from, to);
     dir
 }
 
-/// A catalog of `defined`, the gold as another definition of it gives it, and `quotes`, stored over
-/// `[from, to]` as `catalog_of` does.
+/// `defined` replaces the gold's definition.
 pub(crate) fn catalog_defining(
     defined: InstrumentAny,
     quotes: Vec<QuoteTick>,
@@ -243,14 +228,10 @@ pub(crate) fn catalog_defining(
     dir
 }
 
-/// Stores the instrument and `quotes` in the catalog in `dir`, over `[from, to]`, as `catalog_of`
-/// does.
 pub(crate) fn store(dir: &Path, quotes: Vec<QuoteTick>, from: Timestamp, to: Timestamp) {
     store_defined(dir, instrument(), quotes, from, to);
 }
 
-/// Stores `defined` and its `quotes` in the catalog in `dir`, over `[from, to]`, as `catalog_of`
-/// does: the gold as another definition gives it, or a pair beside it.
 pub(crate) fn store_defined(
     dir: &Path,
     defined: InstrumentAny,
@@ -278,9 +259,8 @@ pub(crate) fn store_defined(
         .unwrap();
 }
 
-/// A backtest of the hour bars over `[09:00, 12:00]` on the venue as IC keeps positions
-/// (`venues::oms_type`: hedging), charged IC's Raw commission of 30 USD per million USD traded,
-/// unleveraged as every backtest: IC's leverage is in the instrument's margin.
+/// Hour bars over `[09:00, 12:00]` on a hedging venue (`venues::oms_type`), charged IC's Raw
+/// commission of 30 USD per million traded. IC's leverage is in the instrument's margin.
 pub(crate) fn backtest(catalog: &TempDir) -> Backtest {
     Backtest {
         catalog: catalog.path().to_path_buf(),
