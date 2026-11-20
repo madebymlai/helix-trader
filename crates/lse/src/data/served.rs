@@ -1,6 +1,9 @@
-//! What the client serves of the past, checked before a fill or warmup requests it: an instrument's
-//! series (`serves`) and custom data rows (`serves_custom`). They are the twins of
-//! `streams::streams` and `streams::streams_custom`.
+//! Checks what history the client serves, before a fill or warmup requests it.
+//!
+//! - `serves` checks an instrument's series.
+//! - `serves_custom` checks custom data rows.
+//!
+//! They are the twins of `streams::streams` and `streams::streams_custom`.
 
 use std::str::FromStr;
 
@@ -19,16 +22,18 @@ use crate::{
     types::{LseRow, SOURCE, SYMBOL},
 };
 
-/// Checks that the client serves the history of `series`, a Nautilus data type and its catalog
-/// identifier (an instrument id, or a bar type for bars).
+/// Checks that the client serves the history of `series`.
 ///
-/// It checks what a request checks before LSE is asked:
+/// `series` is a Nautilus data type and its catalog identifier: an instrument id, or a bar type
+/// for bars.
+///
+/// It runs the checks a request runs before LSE is asked:
 /// - Quotes, trades, book depths and book deltas of an `LSEDGE`, `GLBX`, `XNAS` or `OPRA`
-///   instrument, except the trades of an `LSEDGE` index, whose ticks are quotes.
-/// - Bars, from LSE's candles (`CandleWidth::of`), of an `LSEDGE` series or `OPRA` contract.
+///   instrument. The exception is the trades of an `LSEDGE` index, whose ticks are quotes.
+/// - Bars of an `LSEDGE` series or `OPRA` contract, built from LSE's candles (`CandleWidth::of`).
 ///
-/// Custom data is judged apart (`serves_custom`). What LSE itself refuses is not checked here:
-/// the quotes of an `LSEDGE` index or an `OPRA` contract, and the book of either.
+/// `serves_custom` judges custom data apart. This function does not check what LSE itself
+/// refuses: the quotes of an `LSEDGE` index or an `OPRA` contract, and the book of either.
 ///
 /// # Errors
 ///
@@ -75,11 +80,10 @@ pub fn serves(series: &(NautilusDataType, String)) -> anyhow::Result<()> {
     }
 }
 
-/// Checks that the client serves `data_type`, custom data of no instrument, as its request checks
-/// it before LSE is asked (`row_source`).
+/// Checks that the client serves `data_type`, which is custom data of no instrument.
 ///
-/// It serves LSE's rows of a source and a symbol, under the identifier the data type names, which
-/// keys them in a catalog.
+/// It runs the check a request runs before LSE is asked (`row_source`). The client serves LSE's
+/// rows for a source and a symbol. The identifier the data type names keys them in a catalog.
 ///
 /// # Errors
 ///
@@ -89,15 +93,18 @@ pub fn serves_custom(data_type: &DataType) -> anyhow::Result<()> {
     row_source(data_type).map(drop)
 }
 
-/// Returns the rows `data_type` asks for: an `LseRow` data type whose metadata names a `source` and
-/// a `symbol` string, and no other key (see `RowSource::of`).
+/// Returns the rows `data_type` asks for.
 ///
-/// The identifier is the caller's: the rows are stored under the data type as asked.
+/// The data type must be `LseRow`. Its metadata must name a `source` string and a `symbol` string,
+/// and no other key (see `RowSource::of`). The identifier is the caller's: the rows are stored
+/// under the data type as asked.
 ///
 /// # Errors
 ///
-/// Returns an error if the data type, which it names, is not `LseRow`'s, if its metadata names no
-/// source or symbol, a key not a string, or another key, or if `RowSource::of` fails.
+/// Returns an error if:
+/// - The data type is not `LseRow`'s. The error names it.
+/// - The metadata names no source or symbol, or a key that is not a string, or another key.
+/// - `RowSource::of` fails.
 pub(super) fn row_source(data_type: &DataType) -> anyhow::Result<RowSource> {
     let rows = LseRow::type_name_static();
     anyhow::ensure!(
@@ -136,7 +143,7 @@ mod tests {
 
     use super::*;
 
-    /// Under the identifier `RATES`, which no metadata derives.
+    /// Builds a data type under the identifier `RATES`, which no metadata derives.
     fn custom(type_name: &str, metadata: &[(&str, &str)]) -> DataType {
         let metadata = metadata
             .iter()
@@ -183,7 +190,7 @@ mod tests {
 
         assert!(err.contains(why), "{err}");
     }
-    /// The client asks LSE for no other data, funding say: each is refused naming data and series.
+    /// The client asks LSE for no other data, funding say. Each is refused, naming data and series.
     #[rstest]
     #[case::of_an_lsedge_series("GOLD-FUTURES.LSEDGE")]
     #[case::of_an_lsedge_index("SPX-INDICES.LSEDGE")]

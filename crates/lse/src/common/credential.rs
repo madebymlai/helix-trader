@@ -1,5 +1,7 @@
-//! The LSE keys, sent in the `X-API-Key` header: one for LSE's own markets, one per exchange plan.
-//! Each is given or read from its variable, and never printed.
+//! Holds the LSE keys, which go in the `X-API-Key` header.
+//!
+//! One key covers LSE's own markets, and each exchange plan has its own. A key is given or read
+//! from its variable. It is never printed.
 
 use std::fmt::Display;
 
@@ -9,8 +11,8 @@ use super::consts::{LSE_API_KEY, LSE_CME_API_KEY, LSE_NASDAQ_API_KEY};
 
 /// What an LSE key opens.
 ///
-/// An exchange plan's key authenticates only its own market (LSE's `/v3/usage`: `product` is
-/// `global` for an LSE key, else the exchange).
+/// An exchange plan's key authenticates only its own market. LSE's `/v3/usage` reports `product`
+/// as `global` for an LSE key, else as the exchange.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LseProduct {
     /// LSE's own markets, including derived ones and US options: `LSE_API_KEY`.
@@ -22,7 +24,7 @@ pub enum LseProduct {
 }
 
 impl LseProduct {
-    /// Every product, in the order a missing key's error names them.
+    /// Lists every product in the order a missing-key error names them.
     pub const ALL: [Self; 3] = [Self::Global, Self::Cme, Self::Nasdaq];
 
     /// Returns the variable holding the product's key.
@@ -45,16 +47,16 @@ impl Display for LseProduct {
     }
 }
 
-/// An LSE key, whose `Debug` shows `<redacted>`, not the key.
+/// An LSE key. Its `Debug` shows `<redacted>`, not the key.
 #[derive(Debug, Clone)]
 pub struct LseCredential {
     api_key: SecretString,
 }
 
 impl LseCredential {
-    /// Returns `api_key`, else the key `var` reads from the product's variable.
+    /// Returns `api_key` if given, else the key that `var` reads from the product's variable.
     ///
-    /// Returns `None` if neither holds a key, an empty key being none.
+    /// Returns `None` if neither holds a key. An empty key counts as none.
     pub fn resolve(
         product: LseProduct,
         api_key: Option<SecretString>,
@@ -66,7 +68,7 @@ impl LseCredential {
             .map(|api_key| Self { api_key })
     }
 
-    /// Returns the key, for the header that carries it.
+    /// Returns the key for the header that carries it.
     pub fn api_key(&self) -> &str {
         self.api_key.expose_secret()
     }
@@ -115,7 +117,7 @@ mod tests {
         );
     }
 
-    /// A product reads its own variable alone, and an empty key is none.
+    /// A product reads only its own variable, and an empty key counts as none.
     #[rstest]
     #[case::cme_key_for_lse(LseProduct::Global, LSE_CME_API_KEY, Some(KEY))]
     #[case::cme_key_for_nasdaq(LseProduct::Nasdaq, LSE_CME_API_KEY, Some(KEY))]

@@ -1,59 +1,67 @@
-//! The data client's exchange data: the `GLBX` contracts of CME Globex and the `XNAS` stocks of
-//! Nasdaq TotalView, streamed on their exchange's stream.
+//! Streams the data client's exchange data: the `GLBX` contracts of CME Globex and the `XNAS`
+//! stocks of Nasdaq TotalView. Each exchange has its own stream.
 //!
-//! LSE's CME and Nasdaq streams speak one protocol (LSE's WebSocket documentation, "The CME Group
-//! stream": the Nasdaq stream "sends the same messages for stocks"). They carry Level 1 as quotes
-//! and trades, Level 2 as book depth and Level 3 as book deltas. An `ExchangeStreams` of its own
-//! streams each exchange's contracts, on its plan's key.
+//! LSE's CME and Nasdaq streams speak one protocol. LSE's WebSocket documentation says so in "The
+//! CME Group stream": the Nasdaq stream "sends the same messages for stocks". They carry Level 1
+//! as quotes and trades, Level 2 as book depth and Level 3 as book deltas. Each exchange gets its
+//! own `ExchangeStreams`, which streams that exchange's contracts on its plan's key.
 //!
-//! `open` names each configured contract as the stream takes it: a CME contract by its listing's
-//! symbol, looked up in LSE's catalogue with the CME key (see `http::listing`), a Nasdaq stock by
-//! its ticker. It then connects, naming them all in Level 1's first subscription (see
-//! `ExchangeStreamClient`), which LSE checks. It fails with LSE's refusal of a lookup or of the
-//! subscription.
+//! `open` names each configured contract as the stream takes it:
+//! - A CME contract is named by its listing's symbol, looked up in LSE's catalogue with the CME
+//!   key (see `http::listing`).
+//! - A Nasdaq stock is named by its ticker.
 //!
-//! A subscription reads the contract's price precision from the cache and has the stream carry the
-//! contract at the level of its data: quotes and trades at Level 1, depth at Level 2, deltas at
-//! Level 3. Each level has its own connection, LSE taking one level a connection ("to change the
+//! It then connects and names all contracts in Level 1's first subscription (see
+//! `ExchangeStreamClient`). LSE checks that subscription. `open` fails with LSE's refusal of a
+//! lookup or of the subscription.
+//!
+//! A subscription reads the contract's price precision from the cache. It has the stream carry the
+//! contract at the level of its data:
+//! - Quotes and trades at Level 1.
+//! - Depth at Level 2.
+//! - Deltas at Level 3.
+//!
+//! Each level has its own connection, because LSE takes one level per connection ("to change the
 //! contracts or the level, open another connection").
 //!
-//! The first depth or deltas subscription opens its level's connection. LSE's refusal of it, such
-//! as of a level the key's plan lacks, is logged as an error, and a later subscription of the level
-//! asks again on a new connection.
+//! The first depth or deltas subscription opens its level's connection. If LSE refuses it, for
+//! example because the key's plan lacks the level, the refusal is logged as an error. A later
+//! subscription to the level asks again on a new connection.
 //!
-//! A contract already carried opens for a new quotes or depth subscriber with its latest best bid
-//! and offer or ten levels, unless they went out already. A contract not yet carried at the level
-//! is named, a CME contract looked up, and carried from the level's next connection.
+//! A new quotes or depth subscriber gets an opening from a contract the stream already carries:
+//! its latest best bid and offer, or its ten levels. It gets none if they went out already. A
+//! contract not yet carried at the level is named, and a CME contract is looked up. It is carried
+//! from the level's next connection.
 //!
-//! A level's later connections name only the contracts taking data at that level. A configured
-//! contract that no subscription takes is named on Level 1's first connection alone, and one whose
-//! subscriptions end is left out of every level it then takes no data at. So a rolled-out, expired
-//! contract, which LSE would refuse (`symbol unavailable`, closing the connection with 1008, not
-//! reconnected), does not stop the level's data.
+//! A level's later connections name only the contracts that take data at that level. A configured
+//! contract that no subscription takes is named on Level 1's first connection alone. A contract
+//! whose subscriptions end is left out of every level where it then takes no data. So a rolled-out,
+//! expired contract does not stop the level's data. LSE would refuse such a contract (`symbol
+//! unavailable`, closing the connection with 1008, not reconnected).
 //!
-//! Each record becomes Nautilus data through Nautilus' Databento decoder, LSE's records being
-//! Databento's, at the contract's price precision:
-//! - Level 1 (`decode_mbp1_msg`): the best bid and offer is a quote, with LSE's sizes. A trade that
-//!   is not an opening is a trade with LSE's aggressor side, none for the `N` LSE gives every trade
-//!   ("the feed does not say which side took it").
-//! - Level 2 (`decode_mbp10_msg`): the ten levels a side, after the record's change, are an
-//!   `OrderBookDepth` with each level's order count, an empty level none. The contract opens with
-//!   its last ten levels.
-//! - Level 3 (`decode_mbo_msg`): an order added (`A`), changed (`M`) or removed (`C`) is an
-//!   `OrderBookDelta`. An event of no action (`N`) gives none.
+//! Nautilus' Databento decoder turns each record into Nautilus data, because LSE's records are
+//! Databento's. It uses the contract's price precision:
+//! - Level 1 (`decode_mbp1_msg`): the best bid and offer becomes a quote, with LSE's sizes. A trade
+//!   that is not an opening becomes a trade. It has LSE's aggressor side, which is none for the `N`
+//!   LSE gives every trade ("the feed does not say which side took it").
+//! - Level 2 (`decode_mbp10_msg`): the ten levels on each side, after the record's change, become
+//!   an `OrderBookDepth` with each level's order count. An empty level has none. The contract
+//!   opens with its last ten levels.
+//! - Level 3 (`decode_mbo_msg`): an order added (`A`), changed (`M`) or removed (`C`) becomes an
+//!   `OrderBookDelta`. An event with no action (`N`) gives none.
 //!
-//! LSE's Level 3 opens with no book ("the stream carries order events and no opening book"), so a
-//! contract's deltas start at its first order event and none is invented. LSE flags the last event
-//! of each exchange message (128, `F_LAST`): the deltas are gathered until it, then sent as one
-//! `OrderBookDeltas`, as Nautilus' Databento client sends a live event's. A flagged event of no
-//! delta ends its message too, its `F_LAST` put on the message's last delta, as the decoder does on
-//! history (`MboDeltaBuffer`), so that every event ends `F_LAST` (Nautilus' adapter guide: "Each
-//! logical update ends with `F_LAST`").
+//! LSE's Level 3 opens with no book ("the stream carries order events and no opening book"). So a
+//! contract's deltas start at its first order event, and none is invented. LSE flags the last
+//! event of each exchange message (128, `F_LAST`). The deltas are gathered until that event, then
+//! sent as one `OrderBookDeltas`, as Nautilus' Databento client sends a live event's. A flagged
+//! event with no delta also ends its message. Its `F_LAST` goes on the message's last delta, as
+//! the decoder does on history (`MboDeltaBuffer`). So every event ends `F_LAST` (Nautilus' adapter
+//! guide: "Each logical update ends with `F_LAST`").
 //!
 //! Data is stamped `ts_event` at the record's `ts_recv`, when LSE received it, as Nautilus'
-//! Databento client does, and `ts_init` when the record came. LSE leaves the record's own sequence
-//! 0, so a trade, depth or delta takes the stream's sequence of its record, one per contract and
-//! level. A gap in a contract's sequence is logged and left.
+//! Databento client does. It is stamped `ts_init` when the record came. LSE leaves the record's
+//! own sequence at 0. So a trade, depth or delta takes the stream's sequence for its record, one
+//! per contract and level. A gap in a contract's sequence is logged and left.
 
 use std::{fmt::Display, sync::Arc};
 
@@ -109,8 +117,8 @@ impl StreamKind {
         }
     }
 
-    // Whether a new subscriber gets the contract's latest record, its best bid and offer or ten
-    // levels.
+    // Whether a new subscriber gets the contract's latest record, either its best bid and offer or
+    // its ten levels.
     const fn reopens(self) -> bool {
         matches!(self, Self::Quotes | Self::Depth)
     }
@@ -145,10 +153,10 @@ impl Subscribed {
     }
 }
 
-// The contracts subscribed, by their names on the stream
+// The subscribed contracts, keyed by their names on the stream
 type SubscribedByName = Arc<AtomicMap<String, Subscribed>>;
 
-// A contract's latest Level 1 or 2 record, its sequence, and whether its data went out
+// A contract's latest Level 1 or 2 record, with its sequence and whether its data went out
 struct Latest {
     record: ExchangeRecord,
     sequence: u64,
@@ -161,8 +169,10 @@ pub(super) struct ExchangeAccess {
     pub(super) http: Arc<LseHttpClient>,
 }
 
-/// A CME Globex contract, which the stream names by its listing's symbol, or a Nasdaq TotalView
-/// stock, which it names by its ticker.
+/// A contract on an exchange stream.
+///
+/// The stream names a CME Globex contract by its listing's symbol, and a Nasdaq TotalView stock by
+/// its ticker.
 #[derive(Debug, Clone)]
 pub(super) enum ExchangeInstrument {
     Cme(CmeContract),
@@ -193,8 +203,8 @@ impl ExchangeInstrument {
         }
     }
 
-    // A stock's ticker, its name on the stream without LSE's catalogue, none for a CME contract
-    // (see `name`).
+    // A stock's ticker, which names it on the stream without LSE's catalogue, or none for a CME
+    // contract (see `name`).
     fn ticker(&self) -> Option<&str> {
         match self {
             Self::Cme(_) => None,
@@ -202,16 +212,18 @@ impl ExchangeInstrument {
         }
     }
 
-    /// Returns the contract's name on its stream: a CME contract's listing's symbol, looked up in
-    /// `listings` (LSE's WebSocket documentation, "Contracts": the names "the HTTP API downloads
-    /// the same contracts by"), a stock's ticker.
+    /// Returns the contract's name on its stream.
+    ///
+    /// A CME contract is named by its listing's symbol, looked up in `listings` (LSE's WebSocket
+    /// documentation, "Contracts": the names "the HTTP API downloads the same contracts by"). A
+    /// stock is named by its ticker.
     ///
     /// # Errors
     ///
     /// Returns an error if:
-    /// - LSE delisted the CME contract's listing: its symbol recurs every ten years, so the stream
-    ///   would carry the later contract's records under its id (`ESZ16.GLBX`, delisted in 2016, is
-    ///   `ESZ6`, which names 2026's contract).
+    /// - LSE delisted the CME contract's listing. Its symbol recurs every ten years, so the stream
+    ///   would carry the later contract's records under its id. For example, `ESZ16.GLBX` was
+    ///   delisted in 2016, and its symbol `ESZ6` names 2026's contract.
     /// - `CmeListings::listing` fails.
     async fn name(&self, listings: &CmeListings, http: &LseHttpClient) -> anyhow::Result<String> {
         match self {
@@ -258,12 +270,12 @@ pub(super) struct ExchangeStreams {
 }
 
 impl ExchangeStreams {
-    /// Creates the streams of `streamed` on `exchange`'s stream at `url`, none open.
+    /// Creates the streams for `streamed` on `exchange`'s stream at `url`. None is open.
     ///
     /// # Errors
     ///
-    /// Returns an error if a contract is streamed with no key of the plan, naming the key's
-    /// variable and the contracts.
+    /// Returns an error if a contract is streamed and the plan has no key. The error names the
+    /// key's variable and the contracts.
     pub(super) fn new(
         exchange: LseExchange,
         streamed: Vec<ExchangeInstrument>,
@@ -300,13 +312,18 @@ impl ExchangeStreams {
         })
     }
 
-    /// Names the streamed contracts as the stream takes them and connects, naming them all in
-    /// Level 1's first subscription, which LSE checks. It does nothing if no contract is streamed.
+    /// Names the streamed contracts as the stream takes them, then connects.
+    ///
+    /// It names them all in Level 1's first subscription, which LSE checks. It does nothing if no
+    /// contract is streamed.
     ///
     /// # Errors
     ///
-    /// Returns an error if a lookup fails, or as `ExchangeStreamClient::connect`, LSE's refusal of
-    /// the subscription among them, leaving the stream closed.
+    /// Returns an error if:
+    /// - A lookup fails.
+    /// - `ExchangeStreamClient::connect` fails, including when LSE refuses the subscription.
+    ///
+    /// The stream stays closed after an error.
     pub(super) async fn open(&mut self) -> anyhow::Result<()> {
         if self.streamed.is_empty() {
             return Ok(());
@@ -346,13 +363,16 @@ impl ExchangeStreams {
         Ok(())
     }
 
-    /// Returns the subscriber of `level`'s connection: the open one, or a new one subscribed with
-    /// the contracts taken at the level, which connects with its first contract.
+    /// Returns the subscriber for `level`'s connection.
+    ///
+    /// That is the open subscriber, or a new one subscribed with the contracts taken at the level.
+    /// A new one connects with its first contract.
     ///
     /// # Errors
     ///
-    /// Returns an error if the client has no key of the exchange's plan, or a new connection's
-    /// client or tasks do not start.
+    /// Returns an error if:
+    /// - The client has no key for the exchange's plan.
+    /// - A new connection's client or tasks do not start.
     fn subscriber(&mut self, level: ExchangeLevel) -> anyhow::Result<ExchangeSubscriber> {
         if let Some(client) = self.clients.get(&level)
             && !client.is_closed()
@@ -388,11 +408,11 @@ impl ExchangeStreams {
         Ok(subscriber)
     }
 
-    /// Returns the key of the exchange's plan and LSE's API on it.
+    /// Returns the exchange plan's key and LSE's API on it.
     ///
     /// # Errors
     ///
-    /// Returns an error if the client has no such key, naming the exchange.
+    /// Returns an error if the client has no such key. The error names the exchange.
     fn access(&self) -> anyhow::Result<&ExchangeAccess> {
         self.access.as_ref().with_context(|| {
             format!(
@@ -461,7 +481,7 @@ impl ExchangeStreams {
                             match subscribed.get_cloned(&symbol).filter(|of| of.deltas) {
                                 Some(of) => gather(&sender, clock, of, &record, sequence, event),
 
-                                // Of a contract whose deltas are not taken
+                                // The contract does not take deltas
                                 None => event.clear(),
                             }
                         }
@@ -509,18 +529,20 @@ impl ExchangeStreams {
             })
     }
 
-    /// Subscribes to `kind` of the contract `id`, at the price precision of its definition in
-    /// `cache`, opening the level's connection if none is.
+    /// Subscribes to `kind` of the contract `id`.
+    ///
+    /// It uses the price precision of the contract's definition in `cache`. It opens the level's
+    /// connection if none is open.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - The stream is not open.
     /// - `id` is no contract of an exchange stream.
-    /// - `cache` has no definition of `id`: LSE publishes none, and prices are read at its
+    /// - `cache` has no definition of `id`. LSE publishes none, and prices are read at its
     ///   precision.
     ///
-    /// Each names `id`.
+    /// Each error names `id`.
     pub(super) fn subscribe(
         &mut self,
         id: InstrumentId,
@@ -575,8 +597,8 @@ impl ExchangeStreams {
 
     /// Ends `kind` of the contract `id`.
     ///
-    /// Each level's connection where it then takes no data stops carrying it from its next
-    /// connection (see `ExchangeSubscriber::unsubscribe`), and carries it until then.
+    /// Each level's connection that then takes no data stops carrying the contract from its next
+    /// connection (see `ExchangeSubscriber::unsubscribe`). It carries the contract until then.
     ///
     /// # Errors
     ///
@@ -620,8 +642,8 @@ impl ExchangeStreams {
     }
 }
 
-// Sends the data of `record` that `of` takes, an `opening` carrying no event of its own, and
-// returns whether the data a new subscriber opens with, a quote or a depth, went out.
+// Sends the data of `record` that `of` takes, treats an `opening` as having no event of its own,
+// and returns whether the data a new subscriber opens with, a quote or a depth, went out.
 fn emit(
     sender: &EventSender<DataEvent>,
     clock: &'static AtomicTime,
@@ -639,8 +661,8 @@ fn emit(
     }
 }
 
-// Sends `record`'s best bid and offer as a quote, and its trade, unless an `opening`, with
-// `sequence` as its id, and returns whether a quote went out.
+// Sends `record`'s best bid and offer as a quote, and its trade unless the record is an `opening`,
+// using `sequence` as the id, and returns whether a quote went out.
 fn emit_mbp1(
     sender: &EventSender<DataEvent>,
     clock: &'static AtomicTime,
@@ -678,7 +700,7 @@ fn emit_mbp1(
     quoted
 }
 
-// Sends `record`'s ten levels a side as a depth numbered `sequence`, if `of` takes depth, and
+// Sends `record`'s ten levels on each side as a depth numbered `sequence` if `of` takes depth, and
 // returns whether it went out.
 fn emit_mbp10(
     sender: &EventSender<DataEvent>,
@@ -711,8 +733,8 @@ fn emit_mbp10(
     }
 }
 
-// Adds the delta of `record` to `event`, the deltas of its exchange message so far, and at the
-// message's last event, flagged `F_LAST` by LSE, sends them as one `OrderBookDeltas`.
+// Adds the delta of `record` to `event`, which holds the deltas of its exchange message so far,
+// and sends them as one `OrderBookDeltas` at the message's last event, which LSE flags `F_LAST`.
 fn gather(
     sender: &EventSender<DataEvent>,
     clock: &'static AtomicTime,

@@ -1,6 +1,6 @@
 //! The data client: Nautilus' `DataClient` on LSE's REST API and sockets.
 //!
-//! It serves the instruments LSE serves, each asked of its market with its product's key (see
+//! It serves the instruments LSE serves. Each is asked of its market with its product's key (see
 //! `LseInstrument`):
 //! - An `LSEDGE` series: trades (tick slices) and bars (candles, 1 second to 4 hours, stamped at
 //!   their close), by symbol, with the LSE key.
@@ -8,41 +8,45 @@
 //!   by its listing's number, looked up once in LSE's catalogue (see `http::listing`), with the CME
 //!   key.
 //! - An `XNAS` stock: Levels 1 to 3 alike, by ticker, with the Nasdaq key.
-//! - An `OPRA` contract: trades and bars as an `LSEDGE` series', by OSI symbol, with the LSE key.
+//! - An `OPRA` contract: trades and bars, as for an `LSEDGE` series, by OSI symbol, with the LSE
+//!   key.
 //!
-//! LSE refuses the quotes of an `LSEDGE` series and an `OPRA` contract, serving their past as
-//! timeframes alone. An index's quotes are the values of its tick slice, each a quote of no spread
-//! and no sizes, as its socket streams them. Its trades are refused: it has none.
+//! LSE refuses the quotes of an `LSEDGE` series and an `OPRA` contract. It serves their past as
+//! timeframes alone. An index's quotes are the values of its tick slice. Each is a quote with no
+//! spread and no sizes, as its socket streams them. An index's trades are refused, because it has
+//! none.
 //!
-//! Exports are asked a UTC day per export, and a book or orders a UTC hour, one download at a time
-//! on each key. An export LSE refuses as too wide is asked again in halves (see `http::export`).
+//! Each export is asked for one UTC day, except a book or orders, which are asked for one UTC hour.
+//! Downloads run one at a time on each key. If LSE refuses an export as too wide, it is asked again
+//! in halves (see `http::export`).
 //!
 //! Custom data is the rows of LSE's reference collections (`LseRow`), with the LSE key: macro
 //! releases and yields, and an instrument's splits and dividends. The data type's metadata names
-//! the source and symbol, and each row is stamped when its values are known (see `http::rows`). A
-//! definitions request fails, LSE publishing none, and so does one of LSE's options chain, which
-//! LSE serves as it stands, with no history.
+//! the source and symbol. Each row is stamped when its values are known (see `http::rows`). A
+//! definitions request fails, because LSE publishes none. So does a request for LSE's options
+//! chain, which LSE serves as it stands, with no history.
 //!
 //! Live, it streams:
 //! - The quotes of the config's `LSEDGE` series, on their sockets.
-//! - The trades of its `OPRA` contracts, through one subscription of each underlying's chain on
-//!   data-ws.
-//! - Levels 1 to 3 of its `GLBX` contracts and `XNAS` stocks, on LSE's CME stream with the CME key
-//!   and its Nasdaq stream with the Nasdaq key, a connection a level (see `streams` and
-//!   `exchange`).
+//! - The trades of the config's `OPRA` contracts, through one subscription to each underlying's
+//!   chain on data-ws.
+//! - Levels 1 to 3 of the config's `GLBX` contracts and `XNAS` stocks, with one connection per
+//!   level (see `streams` and `exchange`). They use LSE's CME stream with the CME key, and its
+//!   Nasdaq stream with the Nasdaq key.
 //!
 //! Every other request fails as unsupported, and every other subscription is logged as not
 //! implemented, as Nautilus' defaults do.
 //!
-//! A request is answered from a task in one completed response envelope, which the data engine
-//! writes back to the catalog if asked (`update_catalog`). A failure is the envelope's, carrying
-//! LSE's refusal with its code, message and required plan.
+//! A request is answered from a task in one completed response envelope. The data engine writes it
+//! back to the catalog if asked (`update_catalog`). A failure is the envelope's: it carries LSE's
+//! refusal with its code, message and required plan.
 //!
-//! A request reaching into the span LSE has not loaded yet, the current UTC day and the day before
-//! until LSE holds rows of it, gets a plain response of what LSE holds, which completes the request
-//! and is written to no catalog (`DataEngine::response`: "Payload-only replies do not certify
-//! coverage for catalog write-back"), as Nautilus' OKX client answers a window it cannot confirm,
-//! so a fill asks again. The span is logged.
+//! LSE has not loaded the most recent span yet. That span is the current UTC day and the day
+//! before, until LSE holds rows for it. A request reaching into it gets a plain response with what
+//! LSE holds. The response completes the request but is written to no catalog
+//! (`DataEngine::response`: "Payload-only replies do not certify coverage for catalog
+//! write-back"). Nautilus' OKX client answers a window it cannot confirm the same way. So a fill
+//! asks again. The span is logged.
 
 mod exchange;
 mod served;
@@ -117,9 +121,9 @@ const TASK_FORCE: Duration = Duration::from_secs(2);
 /// Reads an export's file into Nautilus data, at an instrument's price and size precisions.
 type Reader<T> = fn(Bytes, InstrumentId, u8, u8) -> anyhow::Result<Vec<T>>;
 
-/// The data client, on no venue: a request names it or its node routes venues to it.
+/// The data client. It has no venue: a request names it, or its node routes venues to it.
 ///
-/// History uses the keys given, live data the LSE key.
+/// History uses the keys given. Live data uses the LSE key.
 #[derive(Debug)]
 pub(crate) struct LseDataClient {
     client_id: ClientId,
@@ -138,24 +142,25 @@ pub(crate) struct LseDataClient {
 
 impl LseDataClient {
     // panics-doc-ok (transitive via get_data_event_sender)
-    /// Creates the client `client_id` on the keys, API and sockets of `config`, not connected.
+    /// Creates the client `client_id`, not connected.
     ///
-    /// Each key is the config's or, if none, read by `var` from `LSE_API_KEY`, `LSE_CME_API_KEY` or
-    /// `LSE_NASDAQ_API_KEY`. The config's instruments stream on the LSE key, and requests are asked
-    /// at the times `node_clock` reads.
+    /// It uses the keys, API and sockets from `config`. Each key is the config's. If the config has
+    /// none, `var` reads it from `LSE_API_KEY`, `LSE_CME_API_KEY` or `LSE_NASDAQ_API_KEY`. The
+    /// config's instruments stream on the LSE key. Requests are asked at the times `node_clock`
+    /// reads.
     ///
     /// # Errors
     ///
     /// Returns an error if:
-    /// - No key is given or in the variables, naming them.
+    /// - No key is given or in the variables. The error names them.
     /// - An HTTP client cannot be built.
     /// - A streamed instrument is not an `LSEDGE` series streamed on a socket, or is streamed with
     ///   no LSE key (see `LseStreams::new`).
     ///
     /// # Panics
     ///
-    /// Panics if the node's data event sender is not set on this thread, as it is when the node's
-    /// factory creates the client.
+    /// Panics if the node's data event sender is not set on this thread. The node's factory sets it
+    /// when it creates the client.
     pub(crate) fn new(
         client_id: ClientId,
         config: &LseDataClientConfig,
@@ -260,14 +265,21 @@ impl LseDataClient {
 
     /// Answers `request_id` with `id`'s rows over `[start, end]` (end: now if none).
     ///
-    /// `select` chooses the export and the reader of each file (see `answer_export`). The export is
-    /// asked by the instrument's product's key: a series' by its symbol, a CME contract's by its
-    /// listing's number (see `http::listing`), a stock's by its ticker, an option's by its OSI
-    /// symbol.
+    /// `select` chooses the export and the reader for each file (see `answer_export`). The export
+    /// is asked with the product's key, by an identifier that depends on the instrument:
+    /// - A series: its symbol.
+    /// - A CME contract: its listing's number (see `http::listing`).
+    /// - A stock: its ticker.
+    /// - An option: its OSI symbol.
     ///
-    /// A failure is the envelope's, with no rows: before LSE is asked, if the instrument is not
-    /// served, `select` refuses its rows, its product has no key, the cache has no definition or
-    /// the request has no start; else LSE's refusal of the lookup, or as `answer_export`.
+    /// A failure is the envelope's, with no rows. It happens before LSE is asked if:
+    /// - The instrument is not served.
+    /// - `select` refuses its rows.
+    /// - Its product has no key.
+    /// - The cache has no definition.
+    /// - The request has no start.
+    ///
+    /// Otherwise the failure is LSE's refusal of the lookup, or one from `answer_export`.
     fn answer_rows<T: Send + 'static>(
         &self,
         request_id: UUID4,
@@ -325,13 +337,13 @@ impl LseDataClient {
     /// Answers `request_id` from a task, with the rows of the export `query` gives (see
     /// `http::export::fetch`).
     ///
-    /// Each file is read by `read`, keeping the newest `limit` if given, and `respond` builds the
-    /// response from the rows and the time it is made. No export answers with no rows, asking
-    /// nothing. If the export reaches into the span LSE has not loaded as of `now`, the response is
-    /// a plain one.
+    /// `read` reads each file and keeps the newest `limit` if given. `respond` builds the response
+    /// from the rows and the time it is made. If there is no export, it answers with no rows and
+    /// asks nothing. If the export reaches into the span LSE has not loaded as of `now`, the
+    /// response is a plain one.
     ///
-    /// A failure is the envelope's, with no rows: `query`'s, LSE's refusal of an export, or a file
-    /// not read.
+    /// A failure is the envelope's, with no rows. It is `query`'s, LSE's refusal of an export, or a
+    /// file that is not read.
     #[expect(clippy::too_many_arguments, reason = "one request's parts")]
     fn answer_export<T: Send + 'static>(
         &self,
@@ -449,13 +461,14 @@ impl DataClient for LseDataClient {
 
     /// Opens the sockets of the streamed instruments and reopens the request tasks a stop closed.
     ///
-    /// A failure is logged too, as the node logs none of its reason.
+    /// A failure is also logged, because the node logs none of its reason.
     ///
     /// # Errors
     ///
-    /// Returns an error if the request tasks cannot be reopened, or `LseStreams::open` fails: a
-    /// connection fails, LSE refuses the key, a symbol is not listed on a socket, or more symbols
-    /// are asked than a socket allows.
+    /// Returns an error if:
+    /// - The request tasks cannot be reopened.
+    /// - `LseStreams::open` fails: a connection fails, LSE refuses the key, a symbol is not listed
+    ///   on a socket, or more symbols are asked than a socket allows.
     async fn connect(&mut self) -> anyhow::Result<()> {
         if self.is_connected() {
             return Ok(());
@@ -482,11 +495,13 @@ impl DataClient for LseDataClient {
         finished
     }
 
-    /// Streams the quotes of each instrument, at the precision of its definition in the cache,
-    /// opening with its latest (see `LseStreams`).
+    /// Streams the quotes of each instrument (see `LseStreams`).
     ///
-    /// An `LSEDGE` series' quote has a bid and ask with no sizes, a `GLBX` contract's or an `XNAS`
-    /// stock's LSE's sizes.
+    /// Each quote uses the precision of the instrument's definition in the cache. The stream opens
+    /// with the latest quote.
+    ///
+    /// An `LSEDGE` series' quote has a bid and ask with no sizes. A `GLBX` contract's or an `XNAS`
+    /// stock's quote has LSE's sizes.
     ///
     /// # Errors
     ///
@@ -509,24 +524,25 @@ impl DataClient for LseDataClient {
         })
     }
 
-    /// Streams the trades of each instrument, at the precision of its definition in the cache, with
-    /// no aggressor side (see `LseStreams`).
+    /// Streams the trades of each instrument, with no aggressor side (see `LseStreams`).
     ///
-    /// An `OPRA` contract's trades come through one subscription of its underlying's chain, every
-    /// listed contract of it.
+    /// Each trade uses the precision of the instrument's definition in the cache. An `OPRA`
+    /// contract's trades come through one subscription to its underlying's chain, which covers
+    /// every listed contract.
     ///
     /// # Errors
     ///
-    /// Returns an error if an instrument is an `LSEDGE` series, whose ticks LSE's sockets stream as
-    /// quotes, or is not streamed by the client or not defined in the cache.
+    /// Returns an error if:
+    /// - An instrument is an `LSEDGE` series, whose ticks LSE's sockets stream as quotes.
+    /// - An instrument is not streamed by the client or not defined in the cache.
     fn subscribe_trades(&mut self, cmd: SubscribeTrades) -> anyhow::Result<()> {
         execute_instrument_subscriptions(&cmd.instrument_ids, |id| {
             self.streams.subscribe_trades(id, &self.cache)
         })
     }
 
-    /// Ends the trades of each instrument, and an `OPRA` underlying's chain with its last
-    /// contract's.
+    /// Ends the trades of each instrument. It ends an `OPRA` underlying's chain with the chain's
+    /// last contract.
     ///
     /// # Errors
     ///
@@ -538,17 +554,19 @@ impl DataClient for LseDataClient {
         })
     }
 
-    /// Streams the book depth of each instrument, at the price precision of its definition in the
-    /// cache, from Level 2, opening with its last ten levels (see `LseStreams`).
+    /// Streams the book depth of each instrument from Level 2 (see `LseStreams`).
     ///
-    /// The first depth subscription opens the level's connection, and LSE's refusal of it, such as
-    /// of a key whose plan lacks Level 2, is logged as an error.
+    /// Depth uses the price precision of the instrument's definition in the cache. The stream opens
+    /// with the last ten levels.
+    ///
+    /// The first depth subscription opens the level's connection. If LSE refuses it, for example
+    /// because the key's plan lacks Level 2, the refusal is logged as an error.
     ///
     /// # Errors
     ///
     /// Returns an error if:
-    /// - The depth asked is not ten, the levels LSE streams, as Nautilus' Databento client serves
-    ///   MBP-10's alone.
+    /// - The depth asked is not ten, the levels LSE streams, just as Nautilus' Databento client
+    ///   serves MBP-10 alone.
     /// - An instrument is neither a `GLBX` contract nor an `XNAS` stock, or is not streamed by the
     ///   client or not defined in the cache.
     fn subscribe_book_depth(&mut self, cmd: SubscribeBookDepth) -> anyhow::Result<()> {
@@ -580,14 +598,15 @@ impl DataClient for LseDataClient {
         })
     }
 
-    /// Streams the book deltas of each instrument, at the price precision of its definition in the
-    /// cache, from Level 3 (see `LseStreams`).
+    /// Streams the book deltas of each instrument from Level 3 (see `LseStreams`).
     ///
-    /// The stream opens with no book, so deltas start at the first order event, each exchange
-    /// message's ending `F_LAST`. The first deltas subscription opens the level's connection, and
-    /// LSE's refusal of it, such as of a key whose plan lacks Level 3, is logged as an error. The
-    /// book type asked is not read: LSE's orders are Level 3, as Nautilus' Databento client serves
-    /// MBO for any.
+    /// Deltas use the price precision of the instrument's definition in the cache.
+    ///
+    /// The stream opens with no book, so deltas start at the first order event. Each exchange
+    /// message ends `F_LAST`. The first deltas subscription opens the level's connection. If LSE
+    /// refuses it, for example because the key's plan lacks Level 3, the refusal is logged as an
+    /// error. The book type asked is not read: LSE's orders are Level 3, just as Nautilus'
+    /// Databento client serves MBO for any.
     ///
     /// # Errors
     ///
@@ -611,7 +630,7 @@ impl DataClient for LseDataClient {
         })
     }
 
-    /// Fails naming the instruments, in the response envelope: LSE publishes no definitions.
+    /// Fails in the response envelope, naming the instruments. LSE publishes no definitions.
     ///
     /// The data engine asks only for an instrument its catalogs lack
     /// (`DataEngine::dispatch_instrument_request`).
@@ -634,8 +653,8 @@ impl DataClient for LseDataClient {
     /// Answers with the trades over `[start, end]` (end: now if none), keeping the newest `limit`
     /// if given (see `answer_rows`).
     ///
-    /// An `LSEDGE` series' or `OPRA` contract's trades are its tick slices, with no aggressor side,
-    /// LSE sending none. An index's request fails naming it before LSE is asked.
+    /// An `LSEDGE` series' or `OPRA` contract's trades are its tick slices, with no aggressor side
+    /// because LSE sends none. A request for an index fails before LSE is asked, naming the index.
     ///
     /// # Errors
     ///
@@ -677,8 +696,8 @@ impl DataClient for LseDataClient {
     /// Answers with the quotes over `[start, end]` (end: now if none), keeping the newest `limit`
     /// if given (see `answer_rows`), with LSE's sizes.
     ///
-    /// LSE refuses an `LSEDGE` series' and an `OPRA` contract's (`400 data-unavailable`), but an
-    /// index's are the values of its tick slice, with no sizes
+    /// LSE refuses an `LSEDGE` series' and an `OPRA` contract's (`400 data-unavailable`). An
+    /// index's quotes are the values of its tick slice, with no sizes
     /// (`http::parse::parse_index_quotes`).
     ///
     /// # Errors
@@ -715,12 +734,12 @@ impl DataClient for LseDataClient {
     }
 
     /// Answers with the depth snapshots over `[start, end]` (end: now if none), keeping the newest
-    /// `limit` if given (see `answer_rows`), ten levels a side.
+    /// `limit` if given (see `answer_rows`), ten levels on each side.
     ///
-    /// Each row is the book after its event, the last of each time ending the event
-    /// (`http::parse::parse_book`). A depth other than ten fails naming it before LSE is asked, as
-    /// Nautilus' Databento client serves MBP-10's alone. LSE refuses a key whose plan does not sell
-    /// Level 2 (`level-required`) and an `LSEDGE` series'.
+    /// Each row is the book after its event. The last row of each time ends the event
+    /// (`http::parse::parse_book`). A depth other than ten fails before LSE is asked, naming the
+    /// depth, just as Nautilus' Databento client serves MBP-10 alone. LSE refuses a key whose plan
+    /// does not sell Level 2 (`level-required`) and an `LSEDGE` series'.
     ///
     /// # Errors
     ///
@@ -758,7 +777,7 @@ impl DataClient for LseDataClient {
     /// Answers with the book deltas over `[start, end]` (end: now if none), keeping the newest
     /// `limit` if given (see `answer_rows`).
     ///
-    /// Each order added, changed or removed is a delta, the last of each time ending the event
+    /// Each order added, changed or removed is a delta. The last delta of each time ends the event
     /// (`http::parse::parse_orders`). LSE refuses a key whose plan does not sell Level 3
     /// (`level-required`) and an `LSEDGE` series'.
     ///
@@ -792,14 +811,17 @@ impl DataClient for LseDataClient {
     /// `served::row_source`), known over `[start, end]` (end: now if none), keeping the newest
     /// `limit` if given.
     ///
-    /// Each row is an `LseRow` of the data type as asked, stamped when its values are known, with
-    /// the caller's identifier (see `http::rows`).
+    /// Each row is an `LseRow` of the data type as asked. It is stamped when its values are known,
+    /// and carries the caller's identifier (see `http::rows`).
     ///
-    /// A failure is the envelope's, with no rows: before LSE is asked, if the data type is not
-    /// `LseRow`'s, names no source or symbol or another key, names a source the client does not
-    /// stamp, or asks LSE's macro observations or options chain (`options_chain`), which LSE serves
-    /// as it stands, with no history (`serves_custom` checks the same); else LSE's refusal of a
-    /// call.
+    /// A failure is the envelope's, with no rows. It happens before LSE is asked if:
+    /// - The data type is not `LseRow`'s.
+    /// - The data type names no source or symbol, or names another key.
+    /// - The data type names a source the client does not stamp.
+    /// - The data type asks LSE's macro observations or options chain (`options_chain`), which LSE
+    ///   serves as it stands, with no history (`serves_custom` checks the same).
+    ///
+    /// Otherwise the failure is LSE's refusal of a call.
     fn request_data(&self, request: RequestCustomData) -> anyhow::Result<()> {
         let data_type = request.data_type.clone();
         let checked = (|| {
@@ -880,14 +902,16 @@ impl DataClient for LseDataClient {
     /// Answers with the bars of the bar type that close over `[start, end]` (end: now if none),
     /// keeping the newest `limit` if given.
     ///
-    /// The bars are built from LSE's candles of an `LSEDGE` series or an `OPRA` contract (see
-    /// `http::export`). LSE stamps a candle at its open, and its bar is stamped at its close, as
+    /// The bars are built from LSE's candles for an `LSEDGE` series or an `OPRA` contract (see
+    /// `http::export`). LSE stamps a candle at its open, but the bar is stamped at its close, as
     /// Nautilus' adapters stamp bars by default (Databento's `bars_timestamp_on_close`). Only whole
-    /// candles are asked, LSE folding a candle from the rows inside the export alone.
+    /// candles are asked, because LSE folds a candle from the rows inside the export alone.
     ///
-    /// A failure is the envelope's, with no bars: the instrument is neither an `LSEDGE` series nor
-    /// an `OPRA` contract, the bars are not of LSE's candles, the instrument is not in the cache,
-    /// or LSE refuses an export.
+    /// A failure is the envelope's, with no bars. It happens if:
+    /// - The instrument is neither an `LSEDGE` series nor an `OPRA` contract.
+    /// - The bars are not of LSE's candles.
+    /// - The instrument is not in the cache.
+    /// - LSE refuses an export.
     ///
     /// # Errors
     ///
@@ -979,8 +1003,8 @@ fn send(sender: &EventSender<DataEvent>, event: DataEvent) {
 
 #[cfg(test)]
 mod tests {
-    //! The client made with no environment (`LseDataClient::new`, `var` answering nothing), so its
-    //! keys are the config's alone. Every other test of the client goes through its factory, in
+    //! Tests the client made with no environment (`LseDataClient::new`, `var` answering nothing).
+    //! Its keys are the config's alone. Every other test of the client goes through its factory, in
     //! `tests/`.
 
     use std::{cell::RefCell, num::NonZeroU32, rc::Rc};
@@ -1023,8 +1047,8 @@ mod tests {
             .build()
     }
 
-    /// The node's clock, Nautilus' virtual clock, at 12:00 on 16 November 2026, days after the
-    /// second the tests ask for.
+    /// The node's clock is Nautilus' virtual clock, at 12:00 on 16 November 2026. That is days
+    /// after the second the tests ask for.
     fn node_clock() -> Rc<RefCell<dyn Clock>> {
         let clock = VirtualClock::new();
         clock.set_time(UnixNanos::from(
@@ -1082,8 +1106,8 @@ mod tests {
         config
     }
 
-    /// The client holds every key but the instrument's product's, and the environment none: LSE
-    /// would answer were it asked.
+    /// The client holds every key but the instrument's product's, and the environment holds none.
+    /// LSE would answer if it were asked.
     #[rstest]
     #[case::a_cme_contract(
         LseProduct::Cme,
@@ -1145,8 +1169,8 @@ mod tests {
         }
     }
 
-    /// The client streams the instrument holding every key but its product's, the environment
-    /// holding none.
+    /// The client streams the instrument. It holds every key but its product's, and the environment
+    /// holds none.
     #[rstest]
     #[case::a_glbx_contract(
         crate::testing::GCZ26,
