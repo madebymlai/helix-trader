@@ -1,8 +1,8 @@
-//! A strategy declaring a rolled root (`common::rolls`: GC.GLBX, rolling from GCQ26.GLBX to
-//! GCZ26.GLBX at 00:00 UTC on 29 July 2026) over a run from 23:00 to 01:00 across the roll: the run
-//! replays each contract's series over its slice only, and a `Roller` tells the strategy of the
-//! roll, at which its `Subscriptions` switch contracts. A custom series under the root's id, the
-//! contracts' imbalances, rolls alike, and a raw feature over it moves at the roll.
+//! A strategy declares a rolled root (`common::rolls`: GC.GLBX, rolling from GCQ26.GLBX to
+//! GCZ26.GLBX at 00:00 UTC on 29 July 2026). The run goes from 23:00 to 01:00, across the roll. It
+//! replays each contract's series over its slice only. A `Roller` tells the strategy of the roll,
+//! and its `Subscriptions` switch contracts at the roll. The contracts' imbalances form a custom
+//! series under the root's id, which rolls alike, and a raw feature over it moves at the roll.
 
 use std::{cell::RefCell, num::NonZeroUsize, path::Path, rc::Rc, sync::Arc};
 
@@ -50,14 +50,15 @@ enum Got {
 
 #[derive(Debug)]
 enum Subscribe {
-    /// As a strategy does: subscriptions to the declared series and a roller of their instruments.
+    /// Holds subscriptions to the declared series and a roller of their instruments, as a strategy
+    /// does.
     Rolled(Roller, Subscriptions),
-    /// As `Rolled`, its features registered at its start and rolled at each roll, as a model
-    /// strategy's handle does.
+    /// Works as `Rolled`, with its features registered at its start and rolled at each roll, as a
+    /// model strategy's handle does.
     Featured(Roller, Subscriptions, Rc<FeatureSet>),
-    /// Both contracts' trades and book depth, subscribed to directly.
+    /// Subscribes directly to both contracts' trades and book depth.
     Contracts,
-    /// Both contracts' imbalances, subscribed to directly.
+    /// Subscribes directly to both contracts' imbalances.
     ContractImbalances,
 }
 
@@ -258,9 +259,9 @@ fn a_rolled_root_replays_each_contract_only_within_its_slice() {
 
     let got = run(&backtest(&catalog, ticks(ROOT)), Subscribe::Contracts);
 
-    // What reaches the probe is what the run replays: August's up to 1 ns before the roll, not its
-    // trade at the roll nor after; December's from the roll on, not its trade at 23:15 nor its
-    // snapshot at 23:50
+    // What reaches the probe is what the run replays: August's up to 1 ns before the roll, without
+    // its trade at the roll or after, and December's from the roll on, without its trade at 23:15
+    // or its snapshot at 23:50.
     assert_eq!(
         got,
         [
@@ -282,8 +283,8 @@ fn the_roller_tells_the_strategy_of_the_roll_at_which_its_subscriptions_switch()
 
     let got = run(&backtest, rolled(ticks(ROOT)));
 
-    // Told after August's last tick, at its slice's last nanosecond, and before December's first,
-    // at the roll
+    // The strategy is told after August's last tick, at its slice's last nanosecond, and before
+    // December's first, at the roll.
     assert_eq!(
         got,
         [
@@ -315,8 +316,8 @@ fn the_subscriptions_alone_keep_the_strategy_on_the_contract_standing_for_the_ro
 
     let got = run(&backtest, rolled(ticks(ROOT)));
 
-    // Not August's trade at the roll nor its ticks after it, not December's trade at 23:15 nor its
-    // snapshot at 23:50
+    // The strategy gets none of August's trade at the roll, its ticks after it, December's trade at
+    // 23:15 or its snapshot at 23:50.
     assert_eq!(
         got,
         [
@@ -369,7 +370,8 @@ fn ticks_of(got: &[Got], instrument_id: &str) -> Vec<Got> {
         .collect()
 }
 
-/// August's ticks of the run, each once, the trade at the roll and the ticks after it included.
+/// Returns August's ticks of the run, each once, including the trade at the roll and the ticks
+/// after it.
 fn pre_ticks_of_the_run() -> Vec<Got> {
     vec![
         tick(NautilusDataType::TradeTick, PRE, "thu 23:30:00"),
@@ -411,7 +413,7 @@ fn a_contract_declared_beside_its_root_is_replayed_once() {
     let got = run(&backtest, Subscribe::Contracts);
 
     // August's contract stands for the root up to the roll and is read as itself over the whole
-    // run, so its ticks before the roll come once
+    // run, so its ticks before the roll come once.
     assert_eq!(ticks_of(&got, PRE), pre_ticks_of_the_run());
 }
 
@@ -423,8 +425,8 @@ fn the_subscriptions_keep_a_contract_declared_beside_its_root_after_the_root_rol
 
     let got = run(&backtest, rolled(declared));
 
-    // The root rolls from August's contract to December's; August's, declared as itself, keeps
-    // arriving after the roll
+    // The root rolls from August's contract to December's, and August's, declared as itself, keeps
+    // arriving after the roll.
     assert_eq!(ticks_of(&got, PRE), pre_ticks_of_the_run());
 }
 
@@ -441,8 +443,9 @@ fn deltas(instrument_id: &str) -> TickSeries {
     }
 }
 
-/// Writes a delta event at each of `deltas` and an imbalance at each of `imbalances`, stored over
-/// 22:00 Tuesday to 02:00 Wednesday.
+/// Writes a delta event at each of `deltas` and an imbalance at each of `imbalances`.
+///
+/// They are stored over 22:00 Tuesday to 02:00 Wednesday.
 fn store_deltas_and_imbalances(
     dir: &Path,
     instrument_id: &str,
@@ -477,8 +480,10 @@ fn store_deltas_and_imbalances(
     store_imbalances(dir, instrument_id, &imbalances);
 }
 
-/// Writes an imbalance of each of `values` at its time, keyed by `instrument_id`, stored over 22:00
-/// Tuesday to 02:00 Wednesday. Registers `Imbalance` with Nautilus first, as any reader of it must.
+/// Writes an imbalance for each of `values` at its time, keyed by `instrument_id`.
+///
+/// They are stored over 22:00 Tuesday to 02:00 Wednesday. It registers `Imbalance` with Nautilus
+/// first, as any reader of it must.
 fn store_imbalances(dir: &Path, instrument_id: &str, values: &[(&str, f64)]) {
     nautilus_serialization::ensure_custom_data_registered::<Imbalance>();
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
@@ -506,8 +511,8 @@ fn store_imbalances(dir: &Path, instrument_id: &str, values: &[(&str, f64)]) {
         .unwrap();
 }
 
-/// The root's book deltas and its imbalances, a custom series under its id, rolled by a roller of
-/// the root.
+/// The root's book deltas and its imbalances are rolled by a roller of the root. The imbalances are
+/// a custom series under the root's id.
 #[rstest]
 fn the_subscriptions_roll_book_deltas_and_custom_data_keyed_by_the_contract() {
     let catalog = rolls::catalog();
@@ -562,7 +567,8 @@ fn the_subscriptions_roll_book_deltas_and_custom_data_keyed_by_the_contract() {
     );
 }
 
-/// Under the root's id, the imbalances of the contract standing for it.
+/// Returns the imbalance series. Under the root's id, it holds the imbalances of the contract
+/// standing for the root.
 fn imbalance_series(identifier: &str) -> CustomSeries {
     CustomSeries::new(glbx::IMBALANCE, identifier.to_string(), None).unwrap()
 }
@@ -604,7 +610,7 @@ fn a_feature_over_a_roots_custom_series_reads_the_pre_then_the_post_contract() {
     store_both_contracts_imbalances(catalog.path());
 
     // Both contracts' own series beside the root's, each replayed over the whole run, so that the
-    // cache holds both sides of the roll
+    // cache holds both sides of the roll.
     let custom = vec![
         imbalance_series(ROOT),
         imbalance_series(PRE),
@@ -629,8 +635,8 @@ fn a_feature_over_a_roots_custom_series_reads_the_pre_then_the_post_contract() {
         Subscribe::Featured(roller, subscriptions, features),
     );
 
-    // August's imbalance before the roll, December's at it and after; not December's before, nor
-    // August's after
+    // August's imbalance before the roll, December's at it and after, and not December's before or
+    // August's after.
     assert_eq!(
         got,
         [

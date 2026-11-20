@@ -1,8 +1,9 @@
-//! IC Markets' gold on its tick quotes (`common::ic`) at a latency of 30 s, Nautilus' static
-//! latency model (`backtest::Latency`). A recorder on the hour MID bars buys on the first bar and
-//! closes on the second. Each command fills on the first quote at or after its arrival, not on the
-//! one it was sent on, nor on the first after it: IC's quotes come at :07.250 and :37.750 each
-//! minute, so a command sent on the hour fills on the quote at :37.750.
+//! IC Markets' gold on its tick quotes (`common::ic`) at a latency of 30 s, set with Nautilus'
+//! static latency model (`backtest::Latency`). A recorder on the hour MID bars buys on the first
+//! bar and closes on the second. Each command fills on the first quote at or after its arrival. It
+//! does not fill on the quote it was sent on, nor on the first quote after the send. IC's quotes
+//! come at :07.250 and :37.750 each minute, so a command sent on the hour fills on the quote at
+//! :37.750.
 
 use helix_trader::backtest::{Backtest, Latency};
 use jiff::{SignedDuration, Timestamp};
@@ -40,9 +41,9 @@ fn at_a_latency_a_market_order_fills_on_the_first_quote_after_its_arrival() {
 
     backtest.run(recorder.closing_on(vec![1])).unwrap();
 
-    // The buy, sent at 10:00 (last ask 4006.10), arrives at 10:00:30, after the 10:00:07.250 quote
-    // (ask 4003.20), and fills at the next ask, 4000.20. The close, sent at 11:00, fills at the
-    // 11:00:37.750 bid, 4000.00.
+    // The buy is sent at 10:00 (last ask 4006.10) and arrives at 10:00:30, after the 10:00:07.250
+    // quote (ask 4003.20), so it fills at the next ask, 4000.20, the close is sent at 11:00 and
+    // fills at the 11:00:37.750 bid, 4000.00.
     let fills: Vec<_> = record
         .borrow()
         .fills
