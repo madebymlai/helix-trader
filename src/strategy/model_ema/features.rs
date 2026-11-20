@@ -1,7 +1,9 @@
-//! The `model_ema` strategy's features: the fast and slow `ExponentialMovingAverage` of the
-//! closes of each bar type it reads, of `[indicators.fast]` and `[indicators.slow]`. Named after
-//! the table when one bar type is read (`fast`), after the bar type and the table when several
-//! are (`XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL:fast`).
+//! Defines the features of the `model_ema` strategy.
+//!
+//! They are the fast and slow `ExponentialMovingAverage` of the closes of each bar type the
+//! strategy reads, built from `[indicators.fast]` and `[indicators.slow]`. A feature is named
+//! after its table when one bar type is read (`fast`). When several are read, it is named after
+//! the bar type and the table (`XAUUSD.ICMARKETS-1-MINUTE-MID-INTERNAL:fast`).
 
 use std::rc::Rc;
 
@@ -16,14 +18,17 @@ pub(super) const FAST: Declared<EmaArgs> = Declared::new("fast");
 pub(super) const SLOW: Declared<EmaArgs> = Declared::new("slow");
 
 /// The version of these features, in the fingerprint of the strategy's dataset and models.
-/// Bumped when what they compute changes and their names and tables do not, such as the kind of
-/// average; the periods, the price read and the bar type are in the fingerprint by value. The
-/// golden rows (`tests/backtest/backtest_golden_rows.rs`) fail on a change without a bump.
+///
+/// Bumped when what the features compute changes and their names and tables do not, such
+/// as the kind of average. The periods, the price read and the bar type are in the fingerprint
+/// by value. The golden rows (`tests/backtest/backtest_golden_rows.rs`) fail on a change without
+/// a bump.
 const VERSION: u32 = 1;
 
 // panics-doc-ok (transitive via FeatureSetBuilder::feature)
-/// The averages of each bar type in turn, the fast then the slow, warmed by the strategy's
-/// warmup, which a dataset build replays before its first day.
+/// Builds the averages of each bar type in turn, the fast then the slow.
+///
+/// The strategy's warmup warms them. A dataset build replays that warmup before its first day.
 ///
 /// # Errors
 ///
@@ -62,8 +67,12 @@ mod tests {
     const SILVER: &str = "XAGUSD.ICMARKETS-1-MINUTE-MID-INTERNAL";
     const GOLD_BARS: &str = r#"{ data = "bars", instrument_id = "XAUUSD.ICMARKETS", bar_spec = { step = 1, aggregation = "MINUTE", price_type = "MID" } },"#;
 
-    /// Gold's minute bars, fast average 2 bars, slow 3, warmup 3 hours, time-only target, unit
-    /// the ATR of 3 hourly bars.
+    /// Test config:
+    /// - gold's minute bars
+    /// - a fast average of 2 bars and a slow average of 3
+    /// - a warmup of 3 hours
+    /// - a time-only target
+    /// - a unit of the ATR of 3 hourly bars
     const CONFIG: &str = r#"
         [data]
         series = [
@@ -120,8 +129,8 @@ mod tests {
         assert_eq!(features_of(CONFIG).warmup(), SignedDuration::from_hours(3));
     }
 
-    /// Each table feeds a feature of each bar type, named after the table alone for one bar
-    /// type, after each bar type and the table for several.
+    /// Each table feeds a feature of each bar type. A feature is named after the table alone for
+    /// one bar type, and after the bar type and the table for several.
     #[rstest]
     #[case::of_one_bar_type(CONFIG.to_string(), vec!["fast".to_string(), "slow".to_string()])]
     #[case::of_several_bar_types(
@@ -140,7 +149,7 @@ mod tests {
         assert_eq!(features_of(&toml).names(), names);
     }
 
-    /// Closes of 1, 2 and 3: the averages start from the mean of their first period, then weigh
+    /// Closes of 1, 2 and 3. The averages start from the mean of their first period, then weigh
     /// each close 2 / (period + 1). Fast: 1.5 after two bars, then 1.5 + 2/3 (3 - 1.5) = 2.5.
     /// Slow: warm after three, at 2.
     #[rstest]
@@ -157,8 +166,8 @@ mod tests {
         assert!((values[1] - 2.0).abs() < 1e-9, "{values:?}");
     }
 
-    /// A changed period, bar spec or instrument changes the fingerprint with no version bump,
-    /// though one series names the features after their tables alone.
+    /// A changed period, bar spec or instrument changes the fingerprint with no version bump.
+    /// This holds even though one series names the features after their tables alone.
     #[rstest]
     #[case::a_period(CONFIG.replace("period = 2", "period = 4"))]
     #[case::a_bar_spec(CONFIG.replace("step = 1,", "step = 5,"))]

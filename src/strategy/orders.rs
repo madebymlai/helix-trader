@@ -1,36 +1,49 @@
-//! Trades: what a strategy sends, closes at its time limit and arms again at a restart, on
-//! Nautilus' own orders, cache and clock.
+//! Sends trades, closes them at their time limit and arms them again at a restart, on Nautilus'
+//! own orders, cache and clock.
 //!
-//! A `Trade` is an instrument, a side, its `Exits` and its one R, the distance in price from
-//! the exits' reference price to the stop. `Trade::send` sizes it at a `Stake` with Nautilus'
-//! fixed-risk sizer over its one R (`Trade::size`; `Trade::send_at` at a fixed equity, a dataset
-//! run's balance) and tags the entry with its R in money and the multiple (`entry_risk`). With
-//! a `Bracket` it sends a Nautilus bracket, the legs reduce-only and the take profit post-only
-//! where the broker takes such orders (`venues::takes_reduce_only_and_post_only`), in a
-//! backtest as live; without one, a market entry. A time limit sets a time alert named after
-//! the entry (`TIME_ALERT`) and tags the entry with the limit (`TIME_LIMIT_TAG`), which the
-//! cache, persisted live, keeps.
+//! A `Trade` is an instrument, a side, its `Exits` and its one R. One R is the distance in price
+//! from the exits' reference price to the stop.
 //!
-//! The limit runs from the send (the entry's `ts_init`), not the fill: a dataset run labels a
+//! `Trade::send` sizes the trade at a `Stake` with Nautilus' fixed-risk sizer over its one R
+//! (`Trade::size`). `Trade::send_at` sizes at a fixed equity instead, a dataset run's balance.
+//! The send tags the entry with its R in money and the multiple (`entry_risk`).
+//!
+//! The send places:
+//! - With a `Bracket`, it sends a Nautilus bracket, in a backtest as live. The legs are
+//!   reduce-only. The take profit is post-only where the broker takes such orders
+//!   (`venues::takes_reduce_only_and_post_only`).
+//! - Without one, it sends a market entry.
+//!
+//! A time limit sets a time alert named after the entry (`TIME_ALERT`) and tags the entry with
+//! the limit (`TIME_LIMIT_TAG`). The cache keeps the tag, and is persisted live.
+//!
+//! The limit runs from the send (the entry's `ts_init`), not the fill. A dataset run labels a
 //! target from the decision, and on a market entry the two differ by the venue's latency only.
 //!
-//! Time events reach the strategy alone, which hands each to `on_time_event`. At a trade's
-//! alert that cancels the open orders and, if the trade is open, closes the position without
-//! waiting for the cancels (`close_position`, reduce-only, tagged `TIME_CLOSE_TAG`, see
-//! `is_time_close` and `venues/ib/README.md` for the risk on IB). A trade is open while an open
-//! position holds its entry's fill and no leg (an order Nautilus names a child of the entry) is
-//! filled whole; a partly filled leg leaves the rest open. On a hedging venue the position is
-//! the entry's own. On a netting venue it is the venue's one, so closing a trade closes the
-//! trades it holds and a later alert finds it closed. A position closed and reopened is a new
-//! one, with none of the earlier fills. Open orders and positions are never purged from the
-//! cache.
+//! Time events reach only the strategy, which hands each to `on_time_event`. At a trade's alert
+//! the strategy cancels the open orders. If the trade is open, it also closes the position
+//! without waiting for the cancels. The close is `close_position`, reduce-only and tagged
+//! `TIME_CLOSE_TAG` (see `is_time_close`, and `venues/ib/README.md` for the risk on IB).
+//!
+//! A trade is open while both of these hold:
+//! - An open position holds its entry's fill.
+//! - No leg is filled whole. A leg is an order Nautilus names a child of the entry. A partly
+//!   filled leg leaves the rest open.
+//!
+//! On a hedging venue the position is the entry's own. On a netting venue it is the venue's one,
+//! so closing a trade closes the trades it holds, and a later alert finds each closed. A position
+//! closed and reopened is a new one, with none of the earlier fills. Open orders and positions
+//! are never purged from the cache.
 //!
 //! Nautilus has no time limit on a position, so the alert and close are ours, and
 //! `arm_open_trades` sets the alerts again at a restart. Nautilus' GTD expiry on the legs does
-//! not fit: an expired leg leaves the position open, IC sends no leg's time in force (its legs
-//! become the position's stop loss and take profit), and OKX takes GTC orders alone in an order
-//! list. OKX denies a bracket whole, its stop loss a stop order in an order list, until
-//! nautilus_trader#5668 is fixed.
+//! not fit:
+//! - An expired leg leaves the position open.
+//! - IC sends no leg's time in force (its legs become the position's stop loss and take profit).
+//! - OKX takes GTC orders alone in an order list.
+//!
+//! OKX denies a bracket whole, since its stop loss is a stop order in an order list. That holds
+//! until nautilus_trader#5668 is fixed.
 
 use std::{cmp::Ordering, collections::BTreeSet, str::FromStr};
 
@@ -74,8 +87,9 @@ const R_TAG: &str = "R:";
 /// Tag prefix of an entry's stake multiple, `MULTIPLE:2` (`entry_risk`).
 const MULTIPLE_TAG: &str = "MULTIPLE:";
 
-/// A trade to send: of `instrument_id` on `side`, one R of it spanning `one_r` in price from
-/// `reference`, the price its exits are set from.
+/// A trade to send, of `instrument_id` on `side`.
+///
+/// One R spans `one_r` in price from `reference`. The exits are set from `reference`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Trade {
     instrument_id: InstrumentId,
@@ -88,9 +102,9 @@ pub struct Trade {
 /// What an entry sent at a stake risks, as its tags say (`entry_risk`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EntryRisk {
-    /// Its R in money, in the instrument's P&L currency.
+    /// The R in money, in the instrument's P&L currency.
     pub r: Money,
-    /// The multiple of the config's risk it was staked at.
+    /// The multiple of the config's risk that the entry was staked at.
     pub multiple: Decimal,
 }
 
@@ -108,10 +122,11 @@ pub struct Bracket {
     pub stop_loss: Price,
 }
 
-/// Rounds `price` to the nearer of `instrument`'s ticks around it. A tie goes the way `away`
-/// points from the decision's price (1 up, -1 down), so an exit is not nearer than its
-/// distance. Nautilus' `make_price` rounds to the precision alone, which is no tick when the
-/// tick is coarser.
+/// Rounds `price` to the nearer of the `instrument`'s ticks around it.
+///
+/// A tie goes the way `away` points from the decision's price (1 up, -1 down), so an exit is not
+/// nearer than its distance. Nautilus' `make_price` rounds to the precision alone. That is no
+/// tick when the tick is coarser.
 ///
 /// # Errors
 ///
@@ -149,8 +164,10 @@ pub struct OrderIds {
 }
 
 impl Trade {
-    /// Creates a trade ended by `exits`, one R of it spanning `one_r` from `reference`: the
-    /// distance to its stop, or an ATR's for a trade ended by its time alone.
+    /// Creates a trade ended by `exits`.
+    ///
+    /// One R spans `one_r` from `reference`. It is the distance to the stop, or an ATR's for a
+    /// trade ended by its time alone.
     #[must_use]
     pub const fn new(
         instrument_id: InstrumentId,
@@ -168,23 +185,34 @@ impl Trade {
         }
     }
 
-    /// Sends the trade at `stake` of the account's equity: a bracket with a `Bracket`, a market
-    /// entry without, and its time alert if it has a time limit.
+    /// Sends the trade at `stake` of the account's equity.
     ///
-    /// The equity is of the account the risk engine checks orders against (`routed_account`),
-    /// as its broker reports it (`equity`), converted into the P&L currency at `rates`. Live on
-    /// IB it is net liquidation, which counts every position of the account, on any venue and
-    /// of any process; otherwise positions on the broker's other venues are left out.
+    /// It sends a bracket with a `Bracket` and a market entry without. It also sets the time
+    /// alert if the trade has a time limit.
     ///
-    /// It sends nothing, and logs why, if the account holds no equity, `rates` do not convert
-    /// it, or the size rounds down to none. The risk engine denies a quantity below the
-    /// instrument's minimum or a margin beyond the free balance.
+    /// The equity is that of the account the risk engine checks orders against
+    /// (`routed_account`), as its broker reports it (`equity`), converted into the P&L currency
+    /// at `rates`. Live on IB it is net liquidation. That counts every position of the account,
+    /// on any venue and of any process. Otherwise positions on the broker's other venues are left
+    /// out.
+    ///
+    /// It sends nothing, and logs why, if:
+    /// - the account holds no equity
+    /// - `rates` do not convert it
+    /// - the size rounds down to none
+    ///
+    /// The risk engine denies a quantity below the instrument's minimum or a margin beyond the
+    /// free balance.
     ///
     /// # Errors
     ///
-    /// Returns an error if the instrument is not in the cache or is inverse (as `refuse_inverse`
-    /// refuses it), the equity converted overflows, its stop is outside its prices, Nautilus fails
-    /// to size it, or Nautilus refuses an order or the alert.
+    /// Returns an error if:
+    /// - The instrument is not in the cache.
+    /// - The instrument is inverse (as `refuse_inverse` refuses it).
+    /// - The converted equity overflows.
+    /// - The stop is outside the instrument's prices.
+    /// - Nautilus fails to size the trade.
+    /// - Nautilus refuses an order or the alert.
     pub fn send<S>(&self, strategy: &mut S, stake: Stake, rates: Rates) -> anyhow::Result<()>
     where
         S: Strategy + StrategyNative + DataActor + DataActorNative,
@@ -220,15 +248,19 @@ impl Trade {
         self.sized(strategy, &instrument, stake, equity, None)
     }
 
-    /// Sends the trade at `stake` of a fixed `equity`, its orders named `ids`: a dataset run's
-    /// balance, converted at the decision's rate, which a target's row is priced at whatever the
-    /// run's P&L (`model::targets`).
+    /// Sends the trade at `stake` of a fixed `equity`, with its orders named `ids`.
+    ///
+    /// The equity is a dataset run's balance, converted at the decision's rate. A target's row is
+    /// priced at that rate whatever the run's P&L (`model::targets`).
     ///
     /// # Errors
     ///
-    /// Returns an error if the instrument is not in the cache or is inverse (as `refuse_inverse`
-    /// refuses it), its stop is outside its prices, Nautilus fails to size it, or Nautilus refuses
-    /// an order or the alert (see `send`).
+    /// Returns an error if:
+    /// - The instrument is not in the cache.
+    /// - The instrument is inverse (as `refuse_inverse` refuses it).
+    /// - The stop is outside the instrument's prices.
+    /// - Nautilus fails to size the trade.
+    /// - Nautilus refuses an order or the alert (see `send`).
     pub fn send_at<S>(
         &self,
         strategy: &mut S,
@@ -243,16 +275,18 @@ impl Trade {
         self.sized(strategy, &instrument, stake, equity, Some(ids))
     }
 
-    /// Returns the size at `stake` of `equity` in the P&L currency: Nautilus' fixed-risk size
-    /// (`calculate_fixed_risk_position_size`), rounded down to the size increment, at most the
-    /// maximum quantity, no commission counted. The stop is one R from the reference, on the
-    /// tick grid, the tick away when one R is no whole count of ticks, so the size never risks
-    /// more than the stake over one R. Zero if it rounds down to none.
+    /// Returns the size at `stake` of `equity` in the P&L currency.
+    ///
+    /// This is Nautilus' fixed-risk size (`calculate_fixed_risk_position_size`). It is rounded
+    /// down to the size increment, is at most the maximum quantity, and counts no commission. The
+    /// stop is one R from the reference, on the tick grid. When one R is no whole count of ticks,
+    /// the stop is the tick away, so the size never risks more than the stake over one R. The
+    /// size is zero if it rounds down to none.
     ///
     /// # Errors
     ///
-    /// Returns an error if its stop is outside the instrument's prices or Nautilus fails to size
-    /// it.
+    /// Returns an error if the stop is outside the instrument's prices or Nautilus fails to size
+    /// the trade.
     pub fn size(
         &self,
         instrument: &InstrumentAny,
@@ -275,8 +309,9 @@ impl Trade {
         .map_err(|e| anyhow::anyhow!("sizing the {} of {}: {e}", self.side, self.instrument_id))
     }
 
-    /// Returns its R in money on `quantity`: what one R is worth in the P&L currency, exact
-    /// (`worth`).
+    /// Returns the R in money on `quantity`.
+    ///
+    /// This is what one R is worth in the P&L currency, exact (`worth`).
     ///
     /// # Errors
     ///
@@ -432,14 +467,16 @@ impl Trade {
     }
 }
 
-/// The account an order on `venue` is checked against, as Nautilus' risk engine selects it
-/// (`docs/concepts/execution/index.md`, "Account selection", rules 4 and 5;
-/// `RiskEngine::order_account_id`): the one the cache registers for the execution client routed
-/// for the venue, else the default client (`Cache::client_id_for_venue`). A live node routes by
-/// its clients' `RoutingConfig` (IB the default, its account issued under IB, not under the
-/// exchanges its instruments name), a backtest each simulated venue to its own client. With
-/// none, the account issued under `venue`. Read from the native cache (`cache_ref`): the
-/// strategy's cache facade holds no client's account.
+/// Returns the account an order on `venue` is checked against, as Nautilus' risk engine selects
+/// it (`docs/concepts/execution/index.md`, "Account selection", rules 4 and 5;
+/// `RiskEngine::order_account_id`).
+///
+/// It is the account the cache registers for the execution client routed for the venue, else for
+/// the default client (`Cache::client_id_for_venue`). A live node routes by its clients'
+/// `RoutingConfig`. IB is the default, and its account is issued under IB, not under the
+/// exchanges its instruments name. A backtest routes each simulated venue to its own client. With
+/// none, it is the account issued under `venue`. It is read from the native cache (`cache_ref`),
+/// since the strategy's cache facade holds no client's account.
 fn routed_account<S>(strategy: &S, venue: Venue) -> Option<AccountId>
 where
     S: DataActorNative,
@@ -451,13 +488,17 @@ where
         .copied()
 }
 
-/// The equity of `account` per currency, from the source its broker names
-/// (`venues::equity_source`): `Portfolio::equity`, balance totals plus the open P&L of its
-/// positions on `venue`; or, for IB, whose balance holds that P&L already, balance totals
-/// alone. The latter is read only while the account is as its broker reports it: a backtest's
-/// simulated account, whose state Nautilus calculates from its fills
-/// (`Account::calculated_account_state`), holds no open P&L and is read from
-/// `Portfolio::equity`, as is the account issued under `venue` when none is routed.
+/// Returns the equity of `account` per currency, from the source its broker names
+/// (`venues::equity_source`).
+///
+/// The source is one of:
+/// - `Portfolio::equity`, which is balance totals plus the open P&L of its positions on `venue`.
+/// - For IB, balance totals alone, since its balance holds that P&L already.
+///
+/// The latter is read only while the account is as its broker reports it. A backtest's simulated
+/// account holds no open P&L, since Nautilus calculates its state from its fills
+/// (`Account::calculated_account_state`). It is read from `Portfolio::equity`, as is the account
+/// issued under `venue` when none is routed.
 fn equity<S>(strategy: &S, venue: Venue, account: Option<AccountId>) -> Vec<Money>
 where
     S: Strategy + StrategyNative + DataActorNative,
@@ -491,7 +532,7 @@ where
         .with_context(|| format!("instrument {instrument_id} not in cache"))
 }
 
-/// The instrument from `strategy`'s cache, linear.
+/// Returns the linear instrument from `strategy`'s cache.
 ///
 /// # Errors
 ///
@@ -505,8 +546,9 @@ where
     Ok(instrument)
 }
 
-/// Refuses an instrument `strategy` trades, from its start, if it is inverse. One not in the
-/// cache yet is refused at its first send.
+/// Refuses an inverse instrument that `strategy` trades, from its start.
+///
+/// An instrument not in the cache yet is refused at its first send.
 ///
 /// # Errors
 ///
@@ -521,9 +563,10 @@ where
     }
 }
 
-/// Checks that `instrument` is linear: Nautilus' fixed-risk sizer reads P&L as a multiple of a
-/// distance in price, which an inverse instrument's is not, nor are the worths of distances on
-/// it (`worth`).
+/// Checks that `instrument` is linear.
+///
+/// Nautilus' fixed-risk sizer reads P&L as a multiple of a distance in price. An inverse
+/// instrument's P&L is not, and neither are the worths of distances on it (`worth`).
 ///
 /// # Errors
 ///
@@ -539,10 +582,12 @@ pub(crate) fn ensure_linear(instrument: &InstrumentAny) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// What a `distance` in price is worth on `quantity` of linear `instrument`, in its P&L
-/// currency: quantity times multiplier times distance, unrounded. Nautilus' notional value of
-/// the distance is rounded and it has no call returning one unrounded, so this product is ours,
-/// written as `Position` makes its P&L.
+/// Returns what a `distance` in price is worth on `quantity` of linear `instrument`, in its P&L
+/// currency.
+///
+/// This is quantity times multiplier times distance, unrounded. Nautilus' notional value of the
+/// distance is rounded, and Nautilus has no call returning one unrounded. So this product is
+/// ours. It is written as `Position` makes its P&L.
 ///
 /// # Errors
 ///
@@ -564,8 +609,10 @@ pub(crate) fn worth(
         })
 }
 
-/// At a trade's time alert, cancels its orders still open and closes its position if the trade
-/// is open, tagged as a time close. Returns whether `event` is a trade's time alert.
+/// Returns whether `event` is a trade's time alert.
+///
+/// At the alert, it cancels the trade's orders that are still open. If the trade is open, it
+/// also closes the position, tagged as a time close.
 ///
 /// # Errors
 ///
@@ -609,10 +656,13 @@ where
     Ok(true)
 }
 
-/// Sets again, from a restart, the time alert of each open trade, at its entry's creation plus
-/// the tagged limit, or now if that has passed. A trade is open if its entry is an open order
-/// of the strategy (as Nautilus' `reactivate_gtd_timers` walks them), or its fill is held by
-/// an open position of the strategy and no leg of it is filled whole.
+/// Sets the time alert of each open trade again after a restart.
+///
+/// The alert is at the entry's creation plus the tagged limit, or now if that has passed. A
+/// trade is open if either holds:
+/// - Its entry is an open order of the strategy (as Nautilus' `reactivate_gtd_timers` walks
+///   them).
+/// - An open position of the strategy holds its fill, and no leg of it is filled whole.
 ///
 /// # Errors
 ///
@@ -656,7 +706,7 @@ where
     Ok(())
 }
 
-/// Whether `order` is the close of a trade at its time limit (`on_time_event`).
+/// Returns whether `order` is the close of a trade at its time limit (`on_time_event`).
 #[must_use]
 pub fn is_time_close(order: &OrderAny) -> bool {
     order
@@ -664,14 +714,14 @@ pub fn is_time_close(order: &OrderAny) -> bool {
         .is_some_and(|tags| tags.contains(&Ustr::from(TIME_CLOSE_TAG)))
 }
 
-/// Whether `position` holds the trade of `entry` open (see the module doc).
+/// Returns whether `position` holds the trade of `entry` open (see the module doc).
 ///
-/// Read from the position's fills and the legs' parent link, not from the entry's order or
-/// `Cache::position_for_order`: Nautilus purges a closed order with its index
+/// It reads the position's fills and the legs' parent link, not the entry's order or
+/// `Cache::position_for_order`. Nautilus purges a closed order with its index
 /// (`purge_closed_orders`, a dataset run's a minute after it closes) unless an order linked to
-/// it is still open, so a market entry with a time limit, linked to none, goes while its
-/// position stays open. A bracket's filled entry stays while a leg is open. Live keeps closed
-/// orders a week (`live::node`).
+/// it is still open. So a market entry with a time limit, which is linked to none, goes while
+/// its position stays open. A bracket's filled entry stays while a leg is open. Live keeps
+/// closed orders a week (`live::node`).
 fn holds_open(cache: &CacheApi<'_>, position: &Position, entry: ClientOrderId) -> bool {
     let filled = position.client_order_ids();
     filled.contains(&entry)
@@ -682,8 +732,9 @@ fn holds_open(cache: &CacheApi<'_>, position: &Position, entry: ClientOrderId) -
         })
 }
 
-/// What `entry` risks, as tagged by a send at a stake (`Trade::send`). None of an order sent
-/// otherwise.
+/// Returns what `entry` risks, as tagged by a send at a stake (`Trade::send`).
+///
+/// Returns `None` for an order sent otherwise.
 #[must_use]
 pub fn entry_risk(entry: &OrderAny) -> Option<EntryRisk> {
     let tags = entry.tags()?;
