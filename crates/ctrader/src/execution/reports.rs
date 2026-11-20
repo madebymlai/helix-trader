@@ -1,23 +1,28 @@
-//! cTrader's positions, orders and deals as Nautilus' reconciliation reports, on a hedging account.
+//! Converts cTrader's positions, orders and deals into Nautilus' reconciliation reports, on a
+//! hedging account.
 //!
-//! - **Positions** (`ProtoOAPosition`, open): one `PositionStatusReport` each, its `positionId` the
-//!   venue position id, `price` (the VWAP of its executions) the entry average, unrounded.
+//! - **Positions** (`ProtoOAPosition`, open) give one `PositionStatusReport` each. The `positionId`
+//!   is the venue position id. `price` (the VWAP of its executions) is the entry average,
+//!   unrounded.
 //! - **Stop loss and take profit**: cTrader holds them on the position (`stopLoss`, `takeProfit`,
-//!   amended by position id), so each becomes an open reduce-only order of the position, its venue
-//!   order id the position's with `-SL` or `-TP`: a stop market order at the stop loss, a limit
-//!   order at the take profit, for the position's volume. cTrader holds both as one protection
-//!   order (`STOP_LOSS_TAKE_PROFIT`): its deal fills the leg it hit, under the leg's venue order
-//!   id, and cancels the other; its cancellation cancels both.
-//! - **Pending orders** (`ProtoOAOrder`): an `OrderStatusReport` each, by `orderId`, with the
-//!   position it opens into or closes, if any.
-//! - **Deals** (`ProtoOADeal`, filled): a `FillReport` each, by `dealId`, of order `orderId` and
-//!   position `positionId`, the commission the charge cTrader states (a negative amount) as a
-//!   positive cost. A deal stating no charge fails its report, and the request that wanted it.
+//!   amended by position id).
+//!   - Each becomes an open reduce-only order of the position. Its venue order id is the
+//!     position's with `-SL` or `-TP`. The stop loss is a stop market order and the take profit is
+//!     a limit order, each for the position's volume.
+//!   - cTrader holds both as one protection order (`STOP_LOSS_TAKE_PROFIT`). Its deal fills the
+//!     leg it hit, under the leg's venue order id, and cancels the other. Its cancellation cancels
+//!     both.
+//! - **Pending orders** (`ProtoOAOrder`) give one `OrderStatusReport` each, by `orderId`, with the
+//!   position the order opens into or closes, if any.
+//! - **Deals** (`ProtoOADeal`, filled) give one `FillReport` each, by `dealId`, for order
+//!   `orderId` and position `positionId`. The commission is the charge cTrader states (a negative
+//!   amount), as a positive cost. A deal stating no charge fails its report, and the request that
+//!   wanted it.
 //!
-//! Prices travel as IEEE-754 doubles: an order's, a deal's, a stop loss's and a take profit's are
-//! on the instrument's tick, so they are read at its precision, and one finer is an error, not
-//! rounded. Volumes are in cents of a unit. Records of a symbol the client did not load are out of
-//! its scope: dropped, logged at debug.
+//! Prices travel as IEEE-754 doubles. An order's, a deal's, a stop loss's and a take profit's are
+//! on the instrument's tick, so they are read at its precision. A price finer than that is an
+//! error, not rounded. Volumes are in cents of a unit. Records of a symbol the client did not load
+//! are out of its scope: they are dropped and logged at debug.
 
 use std::collections::HashMap;
 
@@ -41,8 +46,11 @@ use crate::common::messages::{
     ProtoOaOrderType, ProtoOaPosition, ProtoOaPositionStatus, ProtoOaTimeInForce, ProtoOaTradeSide,
 };
 
-/// The account, the loaded instruments by cTrader `symbolId`, the account's currency (of
-/// commissions) and the collection's start.
+/// What the reports are built from:
+/// - The account.
+/// - The loaded instruments, by cTrader `symbolId`.
+/// - The account's currency, for commissions.
+/// - The collection's start.
 pub(super) struct Reports<'a> {
     pub(super) account_id: AccountId,
     pub(super) instruments: &'a HashMap<i64, InstrumentAny>,
@@ -51,7 +59,7 @@ pub(super) struct Reports<'a> {
 }
 
 impl Reports<'_> {
-    /// Skipped, logged at debug, if the symbol is not loaded.
+    /// Skips the record, logging at debug, if the symbol is not loaded.
     fn instrument(&self, symbol_id: i64, what: &str) -> Option<&InstrumentAny> {
         let instrument = self.instruments.get(&symbol_id);
         if instrument.is_none() {
@@ -62,7 +70,7 @@ impl Reports<'_> {
         instrument
     }
 
-    /// The report of `position`, if open and of a loaded symbol.
+    /// Returns the report of `position`, if it is open and its symbol is loaded.
     ///
     /// # Errors
     ///
@@ -112,8 +120,9 @@ impl Reports<'_> {
         )
     }
 
-    /// The stop loss and take profit of `position` as its open reduce-only orders, if it is open
-    /// and of a loaded symbol.
+    /// Returns the stop loss and take profit of `position` as open reduce-only orders.
+    ///
+    /// The position must be open and its symbol loaded.
     ///
     /// # Errors
     ///
@@ -172,9 +181,11 @@ impl Reports<'_> {
         Ok(reports)
     }
 
-    /// The report of `leg` of the protection order `order` (a position's `STOP_LOSS_TAKE_PROFIT`
-    /// order, its stop price the stop loss, its limit price the take profit) as `status`, if the
-    /// order holds the leg and is of a loaded symbol.
+    /// Returns the report for `leg` of the protection order `order`, as `status`.
+    ///
+    /// The order is a position's `STOP_LOSS_TAKE_PROFIT` order. Its stop price is the stop loss and
+    /// its limit price is the take profit. There is no report unless the order holds the leg and
+    /// its symbol is loaded.
     ///
     /// # Errors
     ///
@@ -234,8 +245,9 @@ impl Reports<'_> {
         }))
     }
 
-    /// The status, filled, and the fill of `leg` of `order` filled by `deal`, under the leg's venue
-    /// order id.
+    /// Returns the filled status and the fill for `leg` of `order`, which `deal` filled.
+    ///
+    /// Both go under the leg's venue order id.
     ///
     /// # Errors
     ///
@@ -262,10 +274,13 @@ impl Reports<'_> {
         Ok(Some((status, fill)))
     }
 
-    /// The reports of the legs of the protection order `order`, closed. Filled by `deal`: the leg
-    /// it hit (see `triggered`) filled with the deal's fill under the leg's venue order id, the
-    /// other cancelled. Else cancelled or expired: both legs cancelled. Only the legs the order
-    /// holds, if of a loaded symbol.
+    /// Returns the reports for the legs of the closed protection order `order`.
+    ///
+    /// - If `deal` filled the order, the leg it hit (see `triggered`) is filled with the deal's
+    ///   fill under the leg's venue order id, and the other leg is cancelled.
+    /// - Otherwise the order was cancelled or expired, and both legs are cancelled.
+    ///
+    /// Only the legs the order holds are reported, and only if its symbol is loaded.
     ///
     /// # Errors
     ///
@@ -312,7 +327,7 @@ impl Reports<'_> {
         self.instrument(position.trade_data.symbol_id, "position")
     }
 
-    /// Its venue order id is its own, else its client order id, the broker having given it none.
+    /// Its venue order id is its own, or its client order id when the broker has given it none.
     pub(super) fn absent(&self, order: &OrderAny, reason: &str) -> OrderStatusReport {
         let venue = order
             .venue_order_id()
@@ -336,7 +351,7 @@ impl Reports<'_> {
         .with_cancel_reason(reason.to_owned())
     }
 
-    /// The report of `order`, if of a loaded symbol.
+    /// Returns the report of `order`, if its symbol is loaded.
     ///
     /// # Errors
     ///
@@ -434,7 +449,7 @@ impl Reports<'_> {
         Ok(Some(report))
     }
 
-    /// The fill of `deal`, if filled and of a loaded symbol.
+    /// Returns the fill of `deal`, if it is filled and its symbol is loaded.
     ///
     /// # Errors
     ///
@@ -473,10 +488,14 @@ impl Reports<'_> {
     }
 }
 
-/// Of `deals`, those that explain their positions: a position's deals are kept when their volumes
-/// add up to the position as cTrader holds it in `open` (signed volume by `positionId`), or to
-/// nothing for a position no longer open; else its history starts before them, and applying them
-/// would open a position that does not exist. Also returns the positions whose deals were dropped.
+/// Keeps the `deals` that explain their positions.
+///
+/// A position's deals are kept when their volumes add up to:
+/// - The position as cTrader holds it in `open` (signed volume by `positionId`).
+/// - Nothing, for a position no longer open.
+///
+/// Otherwise its history starts before them, and applying them would open a position that does not
+/// exist. Also returns the positions whose deals were dropped.
 pub(super) fn explained<'d>(
     deals: &'d [ProtoOaDeal],
     open: &HashMap<i64, i64>,
@@ -502,8 +521,9 @@ pub(super) fn explained<'d>(
     (kept, unexplained)
 }
 
-/// The Nautilus order is the `clientOrderId`, or for a closing order the close request's tag
-/// cTrader made it.
+/// Returns the Nautilus order id.
+///
+/// It is the `clientOrderId`. For a closing order, cTrader made the close request's tag the id.
 pub(super) fn client_order_id(order: &ProtoOaOrder) -> Option<ClientOrderId> {
     let raw = order
         .client_order_id
@@ -515,7 +535,7 @@ pub(super) fn client_order_id(order: &ProtoOaOrder) -> Option<ClientOrderId> {
     }
 }
 
-/// The leg set alone, or the one whose price is nearer the deal's.
+/// Returns the leg that is set alone, or else the one whose price is nearer the deal's.
 pub(super) fn triggered(order: &ProtoOaOrder, deal: &ProtoOaDeal) -> Leg {
     let price = deal.execution_price.unwrap_or_default();
     match (
@@ -545,10 +565,12 @@ pub(super) fn open_volumes(positions: &[ProtoOaPosition]) -> HashMap<i64, i64> {
         .collect()
 }
 
-/// The commission cTrader charged on `deal` (a negative amount in the deposit currency `currency`,
-/// at its `moneyDigits`) as Nautilus' positive cost. A deal that states none fails rather than book
-/// zero, as Nautilus' OKX and Interactive Brokers adapters fail a fill without its fee
-/// (`developer_guide/adapters.md`, "Commission failure handling").
+/// Returns the commission cTrader charged on `deal`, as Nautilus' positive cost.
+///
+/// cTrader states it as a negative amount in the deposit currency `currency`, at its
+/// `moneyDigits`. A deal that states none fails rather than book zero, as Nautilus' OKX and
+/// Interactive Brokers adapters fail a fill without its fee (`developer_guide/adapters.md`,
+/// "Commission failure handling").
 ///
 /// # Errors
 ///
@@ -581,9 +603,11 @@ pub(super) fn position_id(id: i64) -> PositionId {
     PositionId::new(id.to_string())
 }
 
-/// `TRADE` (a buy triggered by the ask, a sell by the bid) is `BID_ASK`, `DOUBLE_TRADE`
-/// `DOUBLE_BID_ASK`; the `OPPOSITE` methods have no Nautilus counterpart, and the venue holds the
-/// order: `DEFAULT`.
+/// Returns the Nautilus trigger type for a cTrader trigger method.
+///
+/// - `TRADE` (a buy triggered by the ask, a sell by the bid) is `BID_ASK`.
+/// - `DOUBLE_TRADE` is `DOUBLE_BID_ASK`.
+/// - The `OPPOSITE` methods have no Nautilus counterpart, and the venue holds the order: `DEFAULT`.
 pub(super) fn trigger_type(method: ProtoOaOrderTriggerMethod) -> TriggerType {
     match method {
         ProtoOaOrderTriggerMethod::Trade => TriggerType::BidAsk,
