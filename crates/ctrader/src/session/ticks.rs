@@ -1,10 +1,9 @@
 //! cTrader's tick history and the quotes made from it.
 //!
-//! cTrader serves the ticks of a symbol as two series, BID and ASK, each
-//! asked for over `[fromTimestamp, toTimestamp)` in Unix milliseconds
-//! (`ProtoOAGetTickDataReq`) and answered newest first, a page at a time
-//! (`hasMore`). A tick carries a time and a price, no size. Quotes are
-//! made by merging the two series (see `merge`).
+//! cTrader serves the ticks of a symbol as two series, BID and ASK, each asked for over
+//! `[fromTimestamp, toTimestamp)` in Unix milliseconds (`ProtoOAGetTickDataReq`) and answered
+//! newest first, a page at a time (`hasMore`). A tick carries a time and a price, no size. Quotes
+//! are made by merging the two series (see `merge`).
 
 use anyhow::Context;
 use nautilus_core::UnixNanos;
@@ -18,29 +17,25 @@ use rust_decimal::Decimal;
 
 use crate::{TICK_REQUEST_SPAN, common::messages::ProtoOaTickData};
 
-/// The longest window one tick request may span, in milliseconds (see
-/// `TICK_REQUEST_SPAN`).
+/// The longest window one tick request may span, in milliseconds (see `TICK_REQUEST_SPAN`).
 pub(super) const WEEK_MS: i64 = TICK_REQUEST_SPAN.as_millis() as i64;
 
-/// The decimals of cTrader's integer prices: a tick of 412847000 is
-/// 4128.47000.
+/// The decimals of cTrader's integer prices: a tick of 412847000 is 4128.47000.
 const PRICE_SCALE: u32 = 5;
 
-/// The nominal size of both sides of a quote, in units, unless the
-/// instrument's maximum order is smaller (see `quote_size`).
+/// The nominal size of both sides of a quote, in units, unless the instrument's maximum order is
+/// smaller (see `quote_size`).
 const QUOTE_SIZE: f64 = 100_000.0;
 
-/// A tick of one side: its time in Unix milliseconds and its price in
-/// 1/100000.
+/// A tick of one side: its time in Unix milliseconds and its price in 1/100000.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Tick {
     pub(crate) ms: i64,
     pub(crate) price: i64,
 }
 
-/// The ticks of `tick_data`, newest first, absolute: the first element
-/// holds the time and price, each following one the difference in both
-/// from the element before.
+/// The ticks of `tick_data`, newest first, absolute: the first element holds the time and price,
+/// each following one the difference in both from the element before.
 ///
 /// # Errors
 ///
@@ -70,21 +65,18 @@ pub(super) fn decode(tick_data: &[ProtoOaTickData]) -> anyhow::Result<Vec<Tick>>
     Ok(ticks)
 }
 
-/// The ticks of one side over `[from_ms, to_ms)`, oldest first, through
-/// `page(from, to)`, which answers cTrader's tick request over `[from,
-/// to)`: the newest ticks first, at most a page, and whether there are
-/// more. Requests span at most `WEEK_MS`, walking back from `to_ms`.
-/// `page` returns a future rather than being an async closure, whose
-/// futures the compiler cannot prove `Send` for a spawned request.
+/// The ticks of one side over `[from_ms, to_ms)`, oldest first, through `page(from, to)`, which
+/// answers cTrader's tick request over `[from, to)`: the newest ticks first, at most a page, and
+/// whether there are more. Requests span at most `WEEK_MS`, walking back from `to_ms`. `page`
+/// returns a future rather than being an async closure, whose futures the compiler cannot prove
+/// `Send` for a spawned request.
 ///
-/// Within a window, the next page ends 1 ms after the oldest tick of the
-/// page before, whose ticks of that millisecond are dropped: the next page
-/// holds all of them, so ticks sharing a millisecond across a page boundary
-/// are neither lost nor doubled.
+/// Within a window, the next page ends 1 ms after the oldest tick of the page before, whose ticks
+/// of that millisecond are dropped: the next page holds all of them, so ticks sharing a millisecond
+/// across a page boundary are neither lost nor doubled.
 ///
-/// A failed request, or a page with more after it holding a single
-/// millisecond (no progress), ends the walk: the ticks then cover the
-/// window from where it stopped, with the error.
+/// A failed request, or a page with more after it holding a single millisecond (no progress), ends
+/// the walk: the ticks then cover the window from where it stopped, with the error.
 pub(super) async fn side_ticks<Page>(
     from_ms: i64,
     to_ms: i64,
@@ -93,7 +85,7 @@ pub(super) async fn side_ticks<Page>(
 where
     Page: Future<Output = anyhow::Result<(Vec<Tick>, bool)>>,
 {
-    // Newest first until reversed at the end.
+    // Newest first until reversed at the end
     let mut ticks = Vec::new();
     let mut window_to = to_ms;
     let mut failure = None;
@@ -144,9 +136,8 @@ where
     }
 }
 
-/// The ticks of one side `side_ticks` got: those of `[from_ms, to_ms)`,
-/// oldest first, `from_ms` the window's start unless `failure` cut the
-/// walk short.
+/// The ticks of one side `side_ticks` got: those of `[from_ms, to_ms)`, oldest first, `from_ms` the
+/// window's start unless `failure` cut the walk short.
 #[derive(Debug)]
 pub(super) struct Pages {
     pub(super) ticks: Vec<Tick>,
@@ -154,8 +145,7 @@ pub(super) struct Pages {
     pub(super) failure: Option<anyhow::Error>,
 }
 
-/// The last tick of one side before `ms`, if any in the week before, as
-/// `side_ticks` asks.
+/// The last tick of one side before `ms`, if any in the week before, as `side_ticks` asks.
 ///
 /// # Errors
 ///
@@ -171,8 +161,8 @@ where
     Ok(answer.first().copied())
 }
 
-/// One side's ticks for `merge`: those from `from_ms` on, oldest first,
-/// and the last one before `from_ms`, if known.
+/// One side's ticks for `merge`: those from `from_ms` on, oldest first, and the last one before
+/// `from_ms`, if known.
 #[derive(Debug, Default)]
 pub(super) struct SideTicks {
     pub(super) before: Option<Tick>,
@@ -181,8 +171,8 @@ pub(super) struct SideTicks {
 }
 
 impl SideTicks {
-    /// The last tick before `ms`, at or after `from_ms`: the newest of the
-    /// ticks before it, or `before` if none.
+    /// The last tick before `ms`, at or after `from_ms`: the newest of the ticks before it, or
+    /// `before` if none.
     fn before(&self, ms: i64) -> Option<Tick> {
         self.ticks
             .iter()
@@ -204,12 +194,11 @@ pub(super) struct MergedQuotes {
     pub(super) crossed: usize,
 }
 
-/// The quotes of `instrument` from `bid` and `ask`: one per millisecond
-/// with a tick of either side, ticks of the same millisecond combined (the
-/// last of each side wins), by the rule of `QuoteMerge`, the ticks before
-/// the window seeding it. `ts_event = ts_init` = the tick's millisecond.
-/// The quotes start where both sides' ticks do: the ticks of the side
-/// reaching further back before that only seed it.
+/// The quotes of `instrument` from `bid` and `ask`: one per millisecond with a tick of either side,
+/// ticks of the same millisecond combined (the last of each side wins), by the rule of
+/// `QuoteMerge`, the ticks before the window seeding it. `ts_event = ts_init` = the tick's
+/// millisecond. The quotes start where both sides' ticks do: the ticks of the side reaching further
+/// back before that only seed it.
 ///
 /// # Errors
 ///
@@ -258,12 +247,11 @@ pub(super) fn merge(
     Ok(merged)
 }
 
-/// The rule making an instrument's quotes of its BID and ASK ticks, one
-/// millisecond at a time, the same for history and live spots: the side
-/// without a tick is carried from its last one; no quote before both sides
-/// are known; a crossed quote (ask below bid) is dropped, so an order fills
-/// on the quote before it; a locked one (ask = bid) is kept. Prices at the
-/// instrument's precision, sizes `quote_size`.
+/// The rule making an instrument's quotes of its BID and ASK ticks, one millisecond at a time, the
+/// same for history and live spots: the side without a tick is carried from its last one; no quote
+/// before both sides are known; a crossed quote (ask below bid) is dropped, so an order fills on
+/// the quote before it; a locked one (ask = bid) is kept. Prices at the instrument's precision,
+/// sizes `quote_size`.
 #[derive(Debug)]
 pub(crate) struct QuoteMerge {
     instrument_id: InstrumentId,
@@ -289,8 +277,7 @@ impl QuoteMerge {
     ///
     /// # Errors
     ///
-    /// Returns an error if the quote size is not on the instrument's size
-    /// precision.
+    /// Returns an error if the quote size is not on the instrument's size precision.
     pub(crate) fn new(instrument: &InstrumentAny) -> anyhow::Result<Self> {
         Ok(Self {
             instrument_id: instrument.id(),
@@ -301,16 +288,15 @@ impl QuoteMerge {
         })
     }
 
-    /// The quote at millisecond `ms` after its last `bid` and `ask` ticks
-    /// (in 1/100000), either of them absent when that side has no tick
-    /// then; stamped `ts_event` = `ms` and `ts_init` = `ts_init`, or `ms`
-    /// without one.
+    /// The quote at millisecond `ms` after its last `bid` and `ask` ticks (in 1/100000), either of
+    /// them absent when that side has no tick then; stamped `ts_event` = `ms` and `ts_init` =
+    /// `ts_init`, or `ms` without one.
     ///
     /// # Errors
     ///
-    /// Returns an error if a price is not on the instrument's precision, or
-    /// `ms` is out of Nautilus' range of Unix times (before 1970 among
-    /// them).
+    /// Returns an error if:
+    /// - A price is not on the instrument's precision.
+    /// - The `ms` is out of Nautilus' range of Unix times, before 1970 among them.
     pub(crate) fn next(
         &mut self,
         ms: i64,
@@ -340,16 +326,14 @@ impl QuoteMerge {
     }
 }
 
-/// The size of both sides of `instrument`'s quotes: cTrader's ticks have
-/// none. `QUOTE_SIZE`, or the instrument's maximum order if smaller, which
-/// the risk engine never lets an order exceed, at its size precision.
+/// The size of both sides of `instrument`'s quotes: cTrader's ticks have none. `QUOTE_SIZE`, or the
+/// instrument's maximum order if smaller, which the risk engine never lets an order exceed, at its
+/// size precision.
 ///
-/// The matching engine fills a market order up to the quote's size and
-/// the rest one tick worse; the data engine adds each quote's size to the
-/// volume of the bar it builds, a `Quantity` that panics past
-/// 18,446,744,073. The size bounds both: orders up to it fill whole at the
-/// quote, and a bar may hold up to 18,446,744,073 / size quotes (see
-/// `README.md`, "Tick history").
+/// The matching engine fills a market order up to the quote's size and the rest one tick worse; the
+/// data engine adds each quote's size to the volume of the bar it builds, a `Quantity` that panics
+/// past 18,446,744,073. The size bounds both: orders up to it fill whole at the quote, and a bar
+/// may hold up to 18,446,744,073 / size quotes (see `README.md`, "Tick history").
 fn quote_size(instrument: &InstrumentAny) -> anyhow::Result<Quantity> {
     let precision = instrument.size_precision();
     let nominal = Quantity::new_checked(QUOTE_SIZE, precision)?;
@@ -384,8 +368,7 @@ mod tests {
         Tick { ms, price }
     }
 
-    /// The most one tick request spans, as Spotware's docs give it: a
-    /// week, 7 × 86,400,000 ms.
+    /// The most one tick request spans, as Spotware's docs give it: a week, 7 × 86,400,000 ms.
     const A_WEEK: i64 = 604_800_000;
 
     /// The ticks of `pages`, which no failure cut short.
@@ -400,8 +383,7 @@ mod tests {
 
         let ticks = decode(&res.tick_data).unwrap();
 
-        // As captured: the first absolute, the second 350 ms older and
-        // 0.15 higher.
+        // As captured: the first absolute, the second 350 ms older and 0.15 higher
         assert_eq!(ticks.len(), 14);
         assert_eq!(ticks[0], tick(1_792_591_204_967, 412_847_000));
         assert_eq!(ticks[1], tick(1_792_591_204_617, 412_862_000));
@@ -409,8 +391,8 @@ mod tests {
         assert!(!res.has_more);
     }
 
-    /// Synthetic: a difference forward in time. The ticks are at 1,000 ms,
-    /// 999 ms (-1), then 1,001 ms (+2): 2 ms after the one before.
+    /// Synthetic: a difference forward in time. The ticks are at 1,000 ms, 999 ms (-1), then 1,001
+    /// ms (+2): 2 ms after the one before.
     #[rstest]
     fn a_tick_newer_than_the_one_before_is_refused() {
         let data = |timestamp, tick| ProtoOaTickData { timestamp, tick };
@@ -420,8 +402,8 @@ mod tests {
         assert!(err.to_string().contains("2 ms"), "{err}");
     }
 
-    /// Answers like cTrader over `ticks` (oldest first), pages of 3, and
-    /// records each request's window.
+    /// Answers like cTrader over `ticks` (oldest first), pages of 3, and records each request's
+    /// window.
     fn venue(
         ticks: &[Tick],
         asked: &mut Vec<(i64, i64)>,
@@ -434,8 +416,8 @@ mod tests {
 
     #[tokio::test]
     async fn pages_walk_back_and_keep_every_tick_sharing_a_millisecond_across_a_boundary() {
-        // Pages of 3, newest first: 15, 9, 9 | 9, 9, 7 | 7, 7, 3 | 3, 1:
-        // the two ticks of 7 ms straddle the second and third pages.
+        // Pages of 3, newest first: 15, 9, 9 | 9, 9, 7 | 7, 7, 3 | 3, 1: the two ticks of 7 ms
+        // straddle the second and third pages.
         let all = [
             tick(1, 10),
             tick(3, 11),
@@ -525,8 +507,8 @@ mod tests {
 
         let pages = side_ticks(0, 20, page).await;
 
-        // Pages of 2, the oldest millisecond of each asked again: 16, 15 |
-        // 15, 12 | failed over [0, 13).
+        // Pages of 2, the oldest millisecond of each asked again: 16, 15 | 15, 12 | failed over [0,
+        // 13).
         assert_eq!(pages.ticks, [tick(15, 16), tick(16, 17)]);
         assert_eq!(pages.from_ms, 13);
         assert!(pages.failure.unwrap().to_string().contains("timed out"));
@@ -624,7 +606,8 @@ mod tests {
             Some(tick(-5, 116_000)),
             &[tick(1, 116_010), tick(3, 116_020), tick(5, 116_030)],
         );
-        // Cut short at 4 ms: the last ask before is unknown.
+
+        // Cut short at 4 ms: the last ask before is unknown
         let ask = SideTicks {
             before: None,
             ticks: vec![tick(4, 116_050), tick(6, 116_060)],
@@ -686,7 +669,8 @@ mod tests {
     fn quotes_are_stamped_at_their_millisecond_with_a_size_of_100000() {
         let bid = side(None, &[tick(1_792_591_200_040, 116_000)]);
         let ask = side(None, &[tick(1_792_591_200_040, 116_010)]);
-        // EURUSD's maximum order is 100,000,000.
+
+        // EURUSD's maximum order is 100,000,000
         let instrument = instrument();
 
         let merged = merge(&instrument, &bid, &ask).unwrap();
@@ -704,7 +688,8 @@ mod tests {
         let bid = side(None, &[tick(1, 116_000)]);
         let ask = side(None, &[tick(1, 116_010)]);
         let mut eur = testing::instrument("EURUSD");
-        // XAUUSD's on the demo: 10,000 oz.
+
+        // XAUUSD's on the demo: 10,000 oz
         eur.max_quantity = Some(Quantity::from(10_000));
 
         let merged = merge(&InstrumentAny::Cfd(eur), &bid, &ask).unwrap();
@@ -730,8 +715,7 @@ mod tests {
         )
         .unwrap();
 
-        // The 14 ticks of each side share their milliseconds (see the
-        // .txtpb fixtures).
+        // The 14 ticks of each side share their milliseconds (see the .txtpb fixtures)
         assert_eq!(merged.quotes.len(), 14);
         assert_eq!(
             prices(&merged)[0],
