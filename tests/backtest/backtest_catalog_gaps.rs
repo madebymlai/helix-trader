@@ -1,7 +1,6 @@
 //! A backtest, and a dataset build through it, replay what the catalog stores over its window, with
-//! no check of ours before. The gaps between files a live node promoted, a window reaching past the
-//! stored data, or a series with no data at all, which Nautilus only warns of ("No data found for
-//! config"), each run on what exists.
+//! no check of ours. A gap between files, a window past the stored data, or a series with no data
+//! ("No data found for config", which Nautilus only warns of) each runs on what exists.
 
 use helix_trader::backtest::Backtest;
 use jiff::{SignedDuration, civil::Date};
@@ -14,10 +13,9 @@ use crate::common::{
     self, INSTRUMENT_ID, dataset, hour_bars, ic, noise, ohlc, recorder::Recorder, trades,
 };
 
-/// The time exit's quotes written as a live node promotes them, in two files each named by its
-/// rows' first and last stamps, the one closing 11:59:59.999999999 and the next opening a minute
-/// later: the catalog's intervals miss the sliver between them, and the run from 10:00 trades as on
-/// one file (`backtest_ema_time_exit.rs`).
+/// The time exit's quotes in two files as a live node promotes them, the one closing
+/// 11:59:59.999999999 and the next opening a minute later: the catalog's intervals miss the
+/// sliver, and the run from 10:00 trades as on one file (`backtest_ema_time_exit.rs`).
 #[rstest]
 fn a_sliver_between_promoted_files_is_replayed_through() {
     let levels = trades::TIME_EXIT;
@@ -49,8 +47,8 @@ fn a_sliver_between_promoted_files_is_replayed_through() {
     assert_eq!(common::balance(&result), trades::TIME_EXIT_BALANCE);
 }
 
-/// The noise is stored from 06:00 to 15:00; a run from 05:00 to 16:00 gets the bars of what is
-/// stored: from the one closing 07:00, the first whose hour is quoted, to the one closing 15:00.
+/// Noise stored from 06:00 to 15:00; a run from 05:00 to 16:00 gets the bars closing 07:00, the
+/// first whose hour is quoted, to 15:00.
 #[rstest]
 fn a_window_reaching_past_the_stored_quotes_runs_on_what_is_stored() {
     let catalog = noise::catalog();
@@ -70,8 +68,7 @@ fn a_window_reaching_past_the_stored_quotes_runs_on_what_is_stored() {
     assert_eq!(bars, expected);
 }
 
-/// A catalog storing the instrument and no quotes: Nautilus warns the series has no data, and the
-/// run completes on none, in no iteration, the recorder getting no bar and sending no order.
+/// With no quotes stored Nautilus warns of no data, and the run completes with no iteration.
 #[rstest]
 fn a_catalog_without_quotes_runs_to_completion() {
     let catalog = common::catalog_without_quotes();
@@ -88,9 +85,7 @@ fn a_catalog_without_quotes_runs_to_completion() {
     assert_eq!(result.total_positions, 0);
 }
 
-/// A dataset build over quotes written as a live node promotes them, in two files with a sliver
-/// between them at noon of the 21st: it replays the day through the sliver and stores a row for
-/// each hour's decision.
+/// A sliver at noon of the 21st is replayed through, storing a row for each hour's decision.
 #[rstest]
 fn a_dataset_build_replays_through_a_sliver_between_promoted_files() {
     let (from, to) = (

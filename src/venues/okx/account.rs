@@ -1,11 +1,8 @@
-//! The OKX account, read through its key before anything trades on it or is filled for it: its
-//! position mode through the adapter (`get_account_configuration`), and the leverage OKX applies to
-//! an instrument, which the adapter does not read, so that is our signed `GET
-//! /api/v5/account/leverage-info`, signed with the adapter's `Credential`; to be removed if
-//! Nautilus gains it. OKX sets the leverage, by hand on the account; nothing here changes the
-//! account. The key is the adapter's, from `OKX_API_KEY`, `OKX_API_SECRET` and
-//! `OKX_API_PASSPHRASE`, on the environment `OKX_ENVIRONMENT` names: `demo` or `live`, required,
-//! read by us since the adapter takes it only as a config field.
+//! The OKX account, read through its key: the position mode through the adapter, and the leverage
+//! through our signed `GET /api/v5/account/leverage-info`, which the adapter does not read. Nothing
+//! here changes the account. The key is the adapter's (`OKX_API_KEY`, `OKX_API_SECRET`,
+//! `OKX_API_PASSPHRASE`) on the environment `OKX_ENVIRONMENT` names, `demo` or `live`, which we
+//! read because the adapter takes it only as a config field.
 
 use std::collections::HashMap;
 
@@ -25,7 +22,6 @@ use nautilus_okx::{
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
-/// The variable naming the OKX environment of the run, `demo` or `live`.
 pub(super) const ENVIRONMENT_VAR: &str = "OKX_ENVIRONMENT";
 
 /// The region of an account opened on my.okx.com, which trades X-Perps.
@@ -34,8 +30,7 @@ pub(super) const REGION: OKXRegion = OKXRegion::Eea;
 /// Cross margin: the account's whole balance backs every position.
 pub(super) const MARGIN_MODE: OKXMarginMode = OKXMarginMode::Cross;
 
-/// The OKX environment `value` of `OKX_ENVIRONMENT` names: `demo` or `live`, exactly, as Nautilus'
-/// serde names them. No default: a missing, empty or other value is an error naming both.
+/// The OKX environment `value` names, `demo` or `live` exactly, as Nautilus' serde does.
 pub(super) fn environment_of(value: Option<&str>) -> anyhow::Result<OKXEnvironment> {
     let refused = || {
         anyhow::anyhow!(
@@ -48,20 +43,16 @@ pub(super) fn environment_of(value: Option<&str>) -> anyhow::Result<OKXEnvironme
     serde_json::from_value(serde_json::Value::from(value)).map_err(|_| refused())
 }
 
-/// The OKX account, read through its key: its leverage, which the adapter does not read, and its
-/// position mode.
 pub(super) struct Account {
-    /// The adapter's client, for what it reads.
     okx: OKXHttpClient,
-    /// Ours, for the leverage the adapter does not read.
+    /// Ours, for the leverage.
     http: HttpClient,
     base_url: String,
     credential: Credential,
 }
 
 impl Account {
-    /// The account of the environment `OKX_ENVIRONMENT` names, in `REGION`, as the live node's
-    /// clients reach it, with the credentials from the environment
+    /// The account of the environment `OKX_ENVIRONMENT` names, in `REGION`.
     ///
     /// # Errors
     ///
@@ -76,7 +67,6 @@ impl Account {
         })
     }
 
-    /// Clients on the endpoints of `exec`, with the credentials from the environment.
     pub(super) fn connect(exec: &OKXExecutionClientConfig) -> anyhow::Result<Self> {
         let credential = Credential::resolve(None, None, None).context(
             "OKX credentials missing: set OKX_API_KEY, OKX_API_SECRET and \
@@ -117,7 +107,6 @@ impl Account {
         })
     }
 
-    /// The account's position mode.
     pub(super) async fn position_mode(&self) -> anyhow::Result<OKXPositionMode> {
         let configs = self
             .okx
@@ -131,7 +120,6 @@ impl Account {
         Ok(config.position_mode)
     }
 
-    /// The leverage OKX applies to `id` in `MARGIN_MODE`.
     pub(super) async fn leverage(&self, id: InstrumentId) -> anyhow::Result<Decimal> {
         let mode = serde_json::to_value(MARGIN_MODE)?;
         let mode = mode.as_str().context("a margin mode is a string")?;
@@ -140,7 +128,7 @@ impl Account {
             id.symbol
         );
 
-        // As the adapter signs: an ISO 8601 time to the millisecond
+        // As the adapter signs: ISO 8601 to the millisecond
         let timestamp = format!(
             "{:.3}",
             get_atomic_clock_realtime().get_time_ns().to_datetime_utc()
@@ -178,7 +166,6 @@ impl Account {
     }
 }
 
-/// OKX's answer to a leverage request.
 #[derive(Debug, Deserialize)]
 struct LeverageAnswer {
     code: String,
@@ -193,9 +180,8 @@ struct LeverageInfo {
     lever: Decimal,
 }
 
-/// The leverage of `id` in `body`, OKX's answer to a leverage request: the one of all its rows (one
-/// in net mode), or an error if OKX refused the request, listed another instrument or none, or the
-/// rows disagree.
+/// The leverage of `id` in `body`; an error if OKX refused, listed another instrument or none, or
+/// the rows disagree.
 fn leverage_of(id: InstrumentId, body: &[u8]) -> anyhow::Result<Decimal> {
     let answer: LeverageAnswer =
         serde_json::from_slice(body).with_context(|| format!("parsing OKX's leverage of {id}"))?;
@@ -263,8 +249,7 @@ mod tests {
         assert_eq!(leverage_of(xperp(), body).unwrap(), Decimal::from(3));
     }
 
-    /// OKX's refusal, named by its code; an empty answer, naming the instrument asked; another
-    /// instrument's leverage, naming it; and two leverages of the instrument, naming both.
+    /// Each error names the code, instrument or leverages at fault.
     #[rstest]
     #[case::refused(
         br#"{"code":"51001","msg":"Instrument ID doesn't exist","data":[]}"#,

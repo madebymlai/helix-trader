@@ -1,7 +1,7 @@
-//! A run that fails once its node exists still disposes the node, as a completed one does, so the
-//! next node of the thread starts alone: Nautilus runs nodes one after another when each is
-//! disposed before the next starts (`concepts/architecture.md`, "Processes and threads"), and
-//! disposing clears the thread's message bus.
+//! A run that fails once its node exists still disposes the node, so the next node of the thread
+//! starts alone: Nautilus runs nodes one after another when each is disposed first
+//! (`concepts/architecture.md`, "Processes and threads"), and disposing clears the thread's message
+//! bus.
 
 use helix_trader::backtest::Backtest;
 use nautilus_common::{actor::DataActor, msgbus::get_message_bus};
@@ -14,7 +14,6 @@ use rstest::rstest;
 
 use crate::common::trades;
 
-/// A strategy refusing to start, which fails the run once the node is built and the strategy added.
 #[derive(Debug)]
 struct Refusing {
     core: StrategyCore,
@@ -40,14 +39,12 @@ impl DataActor for Refusing {
     }
 }
 
-/// The thread's message bus holds no endpoint: no node's engines are left on it.
 fn assert_no_node_left() {
     let bus = get_message_bus();
     let endpoints = bus.borrow().endpoints().join(", ");
     assert!(endpoints.is_empty(), "endpoints left: {endpoints}");
 }
 
-/// A run, or a dataset run, of the refusing strategy: what it fails with.
 type Run = fn(&Backtest, Refusing) -> anyhow::Result<()>;
 
 #[rstest]

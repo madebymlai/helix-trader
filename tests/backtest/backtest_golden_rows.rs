@@ -1,12 +1,10 @@
-//! The golden rows: the dataset of the `model_ema` strategy built over three days of the fixture's
-//! random walk of IC's gold, its rows (their times, features and each side's payoff features, P&L,
-//! commission, exit and unit) printed exactly and compared with the committed snapshot
-//! `golden_rows.csv`.
+//! The `model_ema` dataset built over three days of the fixture's random walk of IC's gold, its
+//! rows printed exactly and compared with the snapshot `golden_rows.csv`.
 //!
 //! The fingerprint a dataset and its models are stored under reads the config by value and the code
 //! by version: the dataset version (`model::dataset::VERSION`) and the strategy's feature version.
-//! A change of the rows, by the features, the decisions, the targets or a Nautilus pin changing
-//! indicators or fills, fails here until one of them is bumped and the snapshot written again with:
+//! A change of the rows, by the features, decisions, targets or a Nautilus pin changing indicators
+//! or fills, fails here until one is bumped and the snapshot written again with:
 //!
 //! ```sh
 //! GOLDEN_ROWS=write cargo test --test backtest backtest_golden_rows::
@@ -31,10 +29,9 @@ use crate::common::{
     ic,
 };
 
-/// Hourly decisions on IC's gold's 1-minute bars, its averages of 10 and 30 of them, warmed up 4
-/// hours; a bracket 1.5 ATRs of 3 hourly bars in its favor, 7.5 bps against, closed after 45
-/// minutes, at the reference stake of 4 USD of the dataset balance of 10M USD (`venue`), one ounce,
-/// IC's whole ounces, on its stops of about 3 USD.
+/// Hourly decisions on 1-minute bars, averages of 10 and 30, warmed up 4 hours; a bracket 1.5 ATRs
+/// of 3 hourly bars in its favor, 7.5 bps against, closed after 45 minutes, at a reference stake of
+/// 4 USD of the 10M USD balance (`venue`): one ounce, IC's whole ounces, on stops of about 3 USD.
 const CONFIG: &str = r#"
     [data]
     series = [
@@ -64,16 +61,13 @@ const CONFIG: &str = r#"
     learner = { kind = "fake" }
 "#;
 
-/// The snapshot, beside this file.
 const SNAPSHOT: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/backtest/golden_rows.csv"
 );
 
-/// The variable that writes the snapshot instead of comparing with it.
 const WRITE: &str = "GOLDEN_ROWS";
 
-/// The rows of the 21st to the 23rd of October 2026 are the snapshot's.
 #[rstest]
 fn the_rows_of_the_example_model_strategy_are_the_snapshots() {
     let config = ModelEmaConfig::load(CONFIG).unwrap();
@@ -113,9 +107,7 @@ fn the_rows_of_the_example_model_strategy_are_the_snapshots() {
     compare(&printed, Path::new(SNAPSHOT));
 }
 
-/// The rows as CSV, a header of the times, `features`, each side's `payoff` features and each
-/// side's values, then each row's decision and settling times and its values, printed exactly:
-/// Rust's shortest representation reading back to the same `f64`.
+/// Printed exactly: Rust's shortest representation reads back to the same `f64`.
 fn print(features: &[String], payoff: &[String], rows: &[DatasetRow]) -> String {
     let mut out = String::from("ts_event,settled_at");
     for name in features {
@@ -162,7 +154,6 @@ fn print(features: &[String], payoff: &[String], rows: &[DatasetRow]) -> String 
     out
 }
 
-/// Fails, naming the first line that differs, if `printed` is not the snapshot at `snapshot`.
 fn compare(printed: &str, snapshot: &Path) {
     let committed = fs::read_to_string(snapshot).unwrap_or_default();
     if printed == committed {
