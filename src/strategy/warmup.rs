@@ -1401,8 +1401,7 @@ mod tests {
         }
     }
 
-    /// The harness's bars are built once, after the strategy's, even if the strategy reads them:
-    /// both are MID bars of SXR8, built by the one request of its quotes.
+    /// The harness's bars are built once, after the strategy's, even if the strategy reads them.
     #[rstest]
     fn a_warmup_builds_the_harness_bars_once_after_the_strategys() {
         let minutes = BarType::from("SXR8.IBIS-1-MINUTE-MID-INTERNAL");
@@ -1439,9 +1438,6 @@ mod tests {
         }
     }
 
-    /// A contract's deltas are requested at the book type of its venue's book, as the strategy
-    /// subscribes (`venues::book_format`). A GLBX contract's book is requested as such, and LSE's
-    /// orders as L3_MBO.
     #[rstest]
     fn a_live_warmup_requests_deltas_at_the_book_type_of_their_venue() {
         let deltas = tick(NautilusDataType::OrderBookDelta, "GCZ26.GLBX");
@@ -1464,11 +1460,7 @@ mod tests {
         );
     }
 
-    /// A live start requests the ticks of the requirements too, and a root's on the contract
-    /// standing for it then. GC rolls into GCZ26 on 2026-07-29 and out on 2026-11-26
-    /// (`rolls/README.md`). So on 2026-08-10 the root's trades and depth are GCZ26's, requested
-    /// once beside GCZ26's own trades. IC's gold quotes, which build the strategy's bars, are
-    /// requested once.
+    /// GC rolls into GCZ26 on 2026-07-29 and out on 2026-11-26 (`rolls/README.md`).
     #[rstest]
     fn a_live_warmup_requests_a_roots_ticks_on_its_front_contract() {
         let bars = BarType::from("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL");
@@ -1509,10 +1501,6 @@ mod tests {
         );
     }
 
-    /// A series its venue's history does not serve is requested no history (`venues::serves`).
-    /// OKX's client requests no quotes, so the warmup asks for neither the quotes behind OKX's MID
-    /// bars nor its quotes as ticks. It asks for no SXR8 book depth either, as IB serves none. It
-    /// does ask for OKX's trades. The definitions are asked all the same, before any series.
     #[rstest]
     fn a_live_warmup_requests_no_series_its_venue_does_not_serve_but_asks_its_definition() {
         let swap = "BTC-USDT-SWAP.OKX";
@@ -1554,11 +1542,6 @@ mod tests {
         InstrumentAny::FuturesContract(contract)
     }
 
-    /// The series are LSE's gold futures quotes, SXR8's trades and book depth, and IC's gold
-    /// quotes, which build the strategy's bars. IC's client put its gold in the cache. The warmup
-    /// asks once for each instrument the cache lacks, before any of its series, from the client its
-    /// row names (`venues::live_definitions_client`). That is LSE's for LSEDGE, which has no
-    /// broker, and IB's for IBIS. Three series are requested, as IB serves no book depth.
     #[rstest]
     fn a_live_warmup_asks_the_definitions_the_cache_lacks_before_any_series() {
         let warmup = Warmup::live(&reading_ticks(
@@ -1616,8 +1599,6 @@ mod tests {
         CustomSeries::new("Imbalance", identifier.to_string(), None).unwrap()
     }
 
-    /// A custom series brings no instrument, under a plain id or a root's. It asks no definition,
-    /// not even for the contract standing for the root.
     #[rstest]
     fn a_live_warmup_asks_no_definition_for_a_custom_series_under_an_instruments_id() {
         let warmup = Warmup::live(&DataRequirements {
@@ -1632,10 +1613,7 @@ mod tests {
         assert_eq!(custom_requests(&commands).len(), 2);
     }
 
-    /// Live at 14:30, the catalog holds imbalances under GC's id, and no row routes their type. The
-    /// warmup requests them as GCZ26's (GC rolls into GCZ26 on 2026-07-29, `rolls/README.md`) over
-    /// the day ending now. It names `CATALOG` and sends no params, as no client answers anything to
-    /// write back.
+    /// GC rolls into GCZ26 on 2026-07-29 (`rolls/README.md`).
     #[rstest]
     fn a_live_warmup_requests_a_roots_custom_series_of_the_catalog_on_its_front_contract() {
         let warmup = Warmup::live(&DataRequirements {
@@ -1705,8 +1683,6 @@ mod tests {
             .collect()
     }
 
-    /// Live at 14:30, a custom series is requested of its row's live data client (LSE's for LSE's
-    /// rows) over the day ending now, by data type, catalog first and written back.
     #[rstest]
     fn a_live_warmup_requests_a_custom_series_of_its_type_s_client_over_the_window() {
         let warmup = Warmup::live(&reading_us10y());
@@ -1759,9 +1735,6 @@ mod tests {
             .collect()
     }
 
-    /// The yields under GC's id are requested as GCZ26's, keeping their type and metadata. GC is a
-    /// root that rolls into GCZ26 on 2026-07-29 (`rolls/README.md`). GCZ26's own yields listed
-    /// beside them are the same data type, so they are requested once.
     #[rstest]
     #[case::the_root_alone(&["GC.GLBX"])]
     #[case::the_root_and_its_contract(&["GC.GLBX", "GCZ26.GLBX"])]
@@ -1804,8 +1777,7 @@ mod tests {
             .collect()
     }
 
-    /// The response's rows reach the cache, where the data engine puts none, oldest first, so the
-    /// cache holds them latest first.
+    /// The response's rows are cached oldest first, so the cache holds them latest first.
     #[rstest]
     fn the_rows_of_a_warmup_s_custom_series_land_in_the_cache() {
         let warmup = Warmup::live(&reading_us10y());
@@ -1819,9 +1791,6 @@ mod tests {
         assert_eq!(cached_us10y_closes(&probe), [json!(4.5), json!(4.25)]);
     }
 
-    /// A live row of 2026-08-10, closing at 4.40, is cached while the request is pending. The
-    /// response's rows of 2026-08-08, 09 and 10 are no later than it, so they are left out. The
-    /// cache holds the live row once, as the latest.
     #[rstest]
     fn a_warmup_response_older_than_a_live_row_leaves_it_the_latest() {
         let warmup = Warmup::live(&reading_us10y());
@@ -1858,9 +1827,8 @@ mod tests {
         }
     }
 
-    /// Custom data as quotes. The history answers the rows of 2026-08-09 and 2026-08-10. Live, the
-    /// source resends the row of 2026-08-10 and sends that of 2026-08-11, which is held until the
-    /// group ends. The indicator reads the history's rows, then the row of 2026-08-11.
+    /// The history answers 2026-08-09 and 2026-08-10. Live, 2026-08-10 is resent and 2026-08-11 is
+    /// held until the group ends.
     #[rstest]
     fn live_custom_data_is_held_and_dropped_at_the_seam_as_ticks_are() {
         let rows = Rc::new(Rows::default());
@@ -1883,7 +1851,6 @@ mod tests {
         assert_eq!(rows.closes.take(), [json!(4.25), json!(4.5), json!(4.4)]);
     }
 
-    /// A replay holds nothing: each row reaches the custom indicator as it comes.
     #[rstest]
     fn replayed_custom_data_goes_straight_to_the_custom_indicator() {
         let rows = Rc::new(Rows::default());
@@ -1932,9 +1899,8 @@ mod tests {
         )
     }
 
-    /// Nautilus answers a deltas request with the deltas alone. The warmup hands them over in
-    /// batches closed by `F_LAST`. The trailing deltas without it form a batch of their own, as the
-    /// data engine publishes a response's deltas.
+    /// Nautilus answers a deltas request with the deltas alone, so the warmup batches them by
+    /// `F_LAST`.
     #[rstest]
     fn the_warmup_hands_book_deltas_over_in_the_batches_the_live_stream_carries() {
         let books = Rc::new(Books::default());
@@ -1969,10 +1935,6 @@ mod tests {
         )
     }
 
-    /// Depth and deltas as quotes. The history answers snapshots at 1 and 2 and a delta batch at 3.
-    /// Live, the venue resends the snapshot of 2 and the batch of 3, and sends a snapshot at 5 and
-    /// a batch at 6, which are held until the group ends. The book indicators read the history's,
-    /// then the live 5 and 6.
     #[rstest]
     fn live_book_depth_and_deltas_are_held_and_dropped_at_the_seam_as_ticks_are() {
         let books = Rc::new(Books::default());
@@ -2015,8 +1977,6 @@ mod tests {
         assert_eq!(warmup.cache_config().unwrap().bar_capacity, 10_000 + 1_441);
     }
 
-    /// Each bar type's history is requested from what Nautilus builds it from: LAST bars from
-    /// trades, MID bars from quotes, bars of source bars from those, one request per series.
     #[rstest]
     fn each_bar_type_warms_up_on_what_its_price_type_builds_it_from() {
         let hour_last = BarType::from("ESM24.CME-1-HOUR-LAST-INTERNAL");
@@ -2058,9 +2018,8 @@ mod tests {
         );
     }
 
-    /// An external bar type, an IDEALPRO pair's BID and ASK bars, is requested as it is and builds
-    /// nothing, as Nautilus' data engine refuses an external type in `bar_types`. An external type
-    /// that is also a composite's source is requested once, building the composite.
+    /// An external bar type is requested as it is and builds nothing, as Nautilus' data engine
+    /// refuses it in `bar_types`.
     #[rstest]
     fn an_external_bar_type_is_requested_as_it_is_building_nothing() {
         let bid = BarType::from("EUR/USD.IDEALPRO-1-MINUTE-BID-EXTERNAL");
@@ -2087,10 +2046,6 @@ mod tests {
         );
     }
 
-    /// A request's completion hands its built bars on, each once, under the standard type a node
-    /// caches them by. A composite's has no source. The quotes' request completes first and waits
-    /// for the request for the composite's source bars, which may bring older ones. The quotes'
-    /// own bars go after them on their tie.
     #[rstest]
     fn each_requests_built_bars_are_handed_over_once_as_the_merge_frees_them() {
         let hour_mid = BarType::from("ESM24.CME-1-HOUR-MID-INTERNAL");
@@ -2135,15 +2090,14 @@ mod tests {
             .unwrap();
         assert_eq!(recorder.bar_types.take(), [hour_mid, composite.standard()]);
 
-        // Its completion reads once: nothing is handed over again
         warmup
             .on_data_response(&probe, &completed(minutes))
             .unwrap();
         assert_eq!(recorder.bar_types.take(), []);
     }
 
-    /// A day of every series is asked in windows of 23 hours, under a day by more than a bar, so
-    /// that IB is asked in seconds (see `WINDOW`).
+    /// Windows of 23 hours stay under a day by more than a bar, so that IB is asked in seconds (see
+    /// `WINDOW`).
     #[rstest]
     fn every_series_is_asked_in_windows_under_a_day() {
         let warmup = Warmup::live(&reading_ticks(
@@ -2174,9 +2128,6 @@ mod tests {
         }
     }
 
-    /// A live start's warmup goes on until its group ends, whatever its requests answered by then.
-    /// It is warming once started and still warming once its first series is answered. It is no
-    /// longer warming once the group ends.
     #[rstest]
     #[case::of_bars(reading(&["SXR8.IBIS-1-HOUR-MID-INTERNAL"]))]
     #[case::of_a_custom_series_alone(reading_us10y())]
@@ -2263,7 +2214,6 @@ mod tests {
         UnixNanos::from(at)
     }
 
-    /// A quote of `instrument_id` made at `made` (`ts_event`), stamped at `received` (`ts_init`).
     fn quote_of(instrument_id: &str, made: &str, received: &str) -> QuoteTick {
         QuoteTick::new(
             InstrumentId::from(instrument_id),
@@ -2310,10 +2260,6 @@ mod tests {
         (warmup, probe)
     }
 
-    /// Worked by hand. Started at 14:30, the warmup is answered in two windows: 23 hours up to
-    /// 13:30, then the hour since. The quotes are at 12:00 and 13:29, then 14:00 and 14:29. Live
-    /// quotes at 14:30:01 (before the second window) and 14:30:02 (before the group ends) are held.
-    /// The features read the four of the history, then the two live ones, in time order.
     #[rstest]
     fn live_quotes_reach_the_features_after_the_warmups_last_window_in_the_order_they_came() {
         let ticks = Rc::new(Ticks::default());
@@ -2346,10 +2292,6 @@ mod tests {
         );
     }
 
-    /// The hold ends with the group, not with one of its requests. The quotes' request answers a
-    /// quote made at 14:29:00 and the trades' request a trade at 14:29:30, and then the quotes'
-    /// request completes. A live quote at 14:30:01 comes with the trades pending and is held. The
-    /// features read the history while the group is pending, and the live quote last.
     #[rstest]
     fn live_ticks_are_held_until_the_group_ends_not_one_of_its_requests() {
         let ticks = Rc::new(Ticks::default());
@@ -2394,12 +2336,8 @@ mod tests {
         );
     }
 
-    /// Worked by hand: the overlap at the seam. The history's last quote was made at 14:29:59.
-    /// While the group is pending, the hold keeps three quotes. The first is the venue's resend of
-    /// that quote (made 14:29:59, received 14:30:00.200). The second was made at 14:29:57 and
-    /// received at 14:30:00.300. The third was made at 14:30:00.400. The first two are at or before
-    /// the history's last by `ts_event`, so they are dropped whatever their `ts_init`. The third is
-    /// read.
+    /// A resend at or before the history's last quote by `ts_event` is dropped, whatever its
+    /// `ts_init`.
     #[rstest]
     fn live_quotes_at_or_before_the_historys_last_are_dropped_whatever_their_ts_init() {
         let ticks = Rc::new(Ticks::default());
@@ -2427,9 +2365,6 @@ mod tests {
         );
     }
 
-    /// The overlap is judged within a series, which is one instrument's quotes or trades. GCZ26's
-    /// quote history ends at 14:29:59. A live GCZ26 trade made at 14:29:30 and a live EURUSD quote
-    /// made at 14:29:00 belong to series without history, so both are read.
     #[rstest]
     fn a_series_without_history_drops_none_of_its_live_ticks() {
         let ticks = Rc::new(Ticks::default());
@@ -2452,10 +2387,6 @@ mod tests {
         );
     }
 
-    /// Worked by hand: trades as quotes. The history answers a trade made at 14:29:58. A live trade
-    /// at 14:30:01 is held. The history answers a trade at 14:29:59, which the venue resends live
-    /// (received 14:30:01.500), and the resend is dropped. The features read the history's two,
-    /// then the live one.
     #[rstest]
     fn live_trades_are_held_and_dropped_at_the_seam_as_quotes_are() {
         let ticks = Rc::new(Ticks::default());
@@ -2481,9 +2412,6 @@ mod tests {
         );
     }
 
-    /// Once the group has ended, with the history's last quote made at 14:29:59, a live quote at
-    /// 14:30:05 is read as it comes. The venue can resend the last quote (made 14:29:59, received
-    /// 14:30:00.200) after a warmup the catalog answered at once. That resend is dropped too.
     #[rstest]
     #[case::after_the_history("14:30:05", "14:30:05.050", &["14:29:59", "14:30:05"])]
     #[case::held_by_the_history("14:29:59", "14:30:00.200", &["14:29:59"])]
@@ -2503,8 +2431,6 @@ mod tests {
         assert_eq!(*ticks.read.borrow(), read);
     }
 
-    /// A group that ends failed ends the warmup all the same. The held live quote, made at
-    /// 14:30:01, is read, then the later live ones as they come.
     #[rstest]
     fn a_failed_warmup_hands_over_the_live_ticks_it_held() {
         let ticks = Rc::new(Ticks::default());
@@ -2525,8 +2451,6 @@ mod tests {
         );
     }
 
-    /// A replay holds nothing: a quote, a depth snapshot made at 5 and a delta batch made at 6
-    /// reach the features and the book indicators as they come.
     #[rstest]
     fn a_replays_ticks_and_books_reach_the_features_as_they_come() {
         let ticks = Rc::new(Ticks::default());
@@ -2653,9 +2577,6 @@ mod tests {
         (kind, on_the_day(made))
     }
 
-    /// Worked by hand: quotes and trades, each in two windows, answered in any order. The quotes
-    /// are at 12:00 and 13:00, then 14:00. The trades are at 12:00:30 and 13:00:30, then 14:00:30.
-    /// The feature reads the six ticks in time order once the group ends.
     #[rstest]
     #[case::the_quotes_first(&[0, 1, 2, 3])]
     #[case::the_trades_first(&[2, 3, 0, 1])]
@@ -2693,9 +2614,6 @@ mod tests {
         );
     }
 
-    /// With both requests pending, the history is handed on up to the series that lags behind. The
-    /// trades are answered up to 14:00:30 and the quotes up to 13:00. The feature has read what was
-    /// made by 13:00.
     #[rstest]
     fn a_pending_series_holds_the_others_history_made_after_its_latest() {
         let log = Rc::new(Log::default());
@@ -2721,9 +2639,7 @@ mod tests {
         );
     }
 
-    /// A series no fed indicator reads is no part of the merge. EURUSD's quotes, a conversion
-    /// pair's, are requested but not read. GCZ26's quotes answer 12:00 and 13:00 with EURUSD's
-    /// request pending, and the feature reads them at once.
+    /// EURUSD's quotes, a conversion pair's, are requested but not read.
     #[rstest]
     fn a_series_no_fed_indicator_reads_holds_no_history_back() {
         let log = Rc::new(Log::default());
@@ -2751,10 +2667,6 @@ mod tests {
         );
     }
 
-    /// The quotes answered 12:00 and 14:00 and the trades nothing, so the quotes wait. Then the
-    /// trades' request ends, either with nothing (a closed market) or failed. It no longer holds
-    /// the quotes back, so the feature reads them while the group is pending. A failed request
-    /// still ends the warmup incomplete with its group.
     #[rstest]
     #[case::completed(None)]
     #[case::failed(Some("venue cut the history"))]
@@ -2814,16 +2726,8 @@ mod tests {
         }
     }
 
-    /// Ties across series go in the order a replay hands them:
-    /// - Custom data comes first, as a backtest adds its stream before the catalog's.
-    /// - Then come the catalog series in backtest order (`DataRequirements::catalog_series`), by
-    ///   instrument. A bar's source comes before the ticks, and the ticks follow `[data]`.
-    /// - Built bars come last.
-    ///
-    /// `[data]` lists GCZ26's deltas, trades, quotes, depth and hourly MID bars. So the order is
-    /// custom data, quotes, deltas, trades, depth, bar. Every series answers one point initialized
-    /// at midnight. The quotes answer first, with the hourly bar closing then built. The others
-    /// answer in the reverse order.
+    /// Ties across series go in the order a replay hands them: custom data, then the catalog series
+    /// in backtest order (`DataRequirements::catalog_series`), then built bars.
     #[rstest]
     fn ties_across_series_reach_a_feature_in_the_order_a_replay_hands_them() {
         let log = Rc::new(Log::default());
@@ -2872,10 +2776,8 @@ mod tests {
         );
     }
 
-    /// The ties go as a replay of the strategy's own series hands them, not the harness's bars
-    /// (`Backtest::series`). `[data]` lists the trades, then the quotes. The warmup builds hourly
-    /// MID bars from the quotes for the target's ATR. A trade and a quote initialized at midnight
-    /// go trade first, whichever the venue answers first.
+    /// Ties go as a replay of the strategy's own series hands them (`Backtest::series`), not the
+    /// harness's bars.
     #[rstest]
     fn ties_go_as_a_replay_of_the_strategys_own_series_hands_them() {
         let log = Rc::new(Log::default());
@@ -2905,9 +2807,6 @@ mod tests {
         );
     }
 
-    /// Custom data merges as ticks do. The yields of 2026-08-09 and 2026-08-10, at midnight, are
-    /// answered at once. They wait for GCZ26's quotes, which are answered in two windows
-    /// (2026-08-09 12:00, then 2026-08-10 06:00). The feature reads them in time order.
     #[rstest]
     fn custom_data_reaches_a_feature_in_time_order_among_ticks() {
         let log = Rc::new(Log::default());
@@ -2942,10 +2841,6 @@ mod tests {
         );
     }
 
-    /// Past the bound the warmup ends incomplete, naming the series held back. The bound is two
-    /// quotes (a quote keeps nothing on the heap). The quotes answer three and the trades nothing.
-    /// The warmup is no longer warming, the feature has read the three quotes, and the later
-    /// trades are left out, as they are older.
     #[rstest]
     fn past_its_bound_the_warmup_ends_incomplete_naming_the_series_held_back() {
         let log = Rc::new(Log::default());
@@ -2976,9 +2871,6 @@ mod tests {
         );
     }
 
-    /// The merge trusts no history out of time order. The trades are pending, and the quotes answer
-    /// 13:00, then 12:00, in one response or a later one. The warmup ends incomplete, naming the
-    /// quotes. The feature has read the 13:00 quote alone, and the later trades are left out.
     #[rstest]
     #[case::within_a_response(vec![vec!["13:00:00", "12:00:00"]])]
     #[case::across_windows(vec![vec!["13:00:00"], vec!["12:00:00"]])]
@@ -3008,10 +2900,6 @@ mod tests {
         assert_eq!(*log.read.borrow(), [entry("quote", "13:00:00")]);
     }
 
-    /// A held tick counts against the bound with its heap size as well as its own size. That is its
-    /// deltas for a batch of ten deltas, its box for a depth snapshot, and its data for a custom
-    /// point. With the bound a byte short of the least one takes, a warmup holding it alone ends
-    /// incomplete, naming its series.
     #[rstest]
     #[case::deltas("deltas of GCZ26.GLBX")]
     #[case::depth("depth of GCZ26.GLBX")]
@@ -3053,10 +2941,6 @@ mod tests {
         assert!(!warmup.is_warming());
     }
 
-    /// Live ticks held follow the history, deduplicated. The quotes answer 14:29:59, held for the
-    /// trades. Live, the venue resends that quote, then a quote at 14:30:01 and a trade at 14:30:02
-    /// come. The trades answer 14:29:58. The feature reads the history in time order, then the live
-    /// ticks except the resend.
     #[rstest]
     fn live_ticks_held_follow_the_merged_history_deduplicated() {
         let log = Rc::new(Log::default());
@@ -3092,7 +2976,6 @@ mod tests {
         reading_ticks(&[XAU_HOURS], vec![tick(NautilusDataType::TradeTick, XAU)])
     }
 
-    /// Returns the live warmup of `bars_and_trades`, which hands everything to `log`.
     fn logging_bars(log: &Rc<Log>) -> (Warmup, Probe, TypedIntoMessageSavingHandler<DataCommand>) {
         let read = reading_ticks(
             &[XAU_HOURS],
@@ -3104,7 +2987,6 @@ mod tests {
         logging_with(Warmup::live(&bars_and_trades()), &read, log)
     }
 
-    /// An hourly MID bar of GCZ26 closing at `close`, stamped then, as Nautilus builds it.
     fn hour_bar(close: &str) -> Bar {
         let price = Price::from("4000.00");
         Bar::new(
@@ -3120,9 +3002,6 @@ mod tests {
     }
 
     /// Answers a window of GCZ26's quotes, request `request`, as a node does.
-    ///
-    /// The data engine builds `built` into `probe`'s cache. Then the strategy gets the window's
-    /// quotes (`on_historical_quotes`) and its non-final response (`on_data_response`).
     fn answer_quotes(
         warmup: &Warmup,
         probe: &Probe,
@@ -3148,11 +3027,6 @@ mod tests {
         warmup.on_data_response(probe, &window).unwrap();
     }
 
-    /// Worked by hand: GCZ26's hourly MID bars (built from quotes) and trades, each in two windows,
-    /// answered in any order. The quotes at 12:00 and 13:00 build the 12:00 bar, 14:00 builds
-    /// 13:00's, and completion builds 14:00's. The trades are at 12:00:30 and 13:00:30, then
-    /// 14:00:30. The feature reads bars in time order among the ticks, each bar after the quote of
-    /// its close.
     #[rstest]
     #[case::the_quotes_first(&[0, 1, 2, 3])]
     #[case::the_trades_first(&[2, 3, 0, 1])]
@@ -3185,7 +3059,6 @@ mod tests {
             }
         }
 
-        // Built at the quotes' completion
         let last = hour_bar("14:00:00");
         probe.cache_rc().borrow_mut().add_bar(last).unwrap();
         warmup.complete(&probe).unwrap();
@@ -3206,9 +3079,8 @@ mod tests {
         );
     }
 
-    /// The merge orders by `ts_init`, as a replay does. The quotes answer 12:00 and 13:00, building
-    /// the bar with `ts_event` 12:00 and `ts_init` 13:00. The trades answer 12:30. By `ts_event`
-    /// the bar would precede the trade. By `ts_init` it follows the trade and the 13:00 quote.
+    /// The merge orders by `ts_init`, as a replay does: the bar has `ts_event` 12:00 and `ts_init`
+    /// 13:00.
     #[rstest]
     fn the_merge_orders_series_by_ts_init_not_ts_event() {
         let log = Rc::new(Log::default());
@@ -3242,9 +3114,6 @@ mod tests {
         );
     }
 
-    /// The quotes' first window, 12:00 and 13:00, builds the bar of 12:00 alone, so no later bar
-    /// closes before 13:00. With the trades answered up to 12:45, the feature reads everything made
-    /// by then.
     #[rstest]
     fn a_pending_requests_bars_stand_at_the_latest_its_data_brought() {
         let log = Rc::new(Log::default());
@@ -3273,9 +3142,6 @@ mod tests {
         );
     }
 
-    /// The quotes' window, 12:00 and 13:00, builds the bar of 12:00, and completion builds 13:00's.
-    /// The trades answered 12:00:30 alone and may still bring ticks older than the 13:00 bar. So
-    /// the feature reads up to 12:00:30, and the rest once the trades complete.
     #[rstest]
     fn a_request_completing_while_another_pends_hands_its_bars_on_as_far_as_the_other_reached() {
         let log = Rc::new(Log::default());
@@ -3314,9 +3180,6 @@ mod tests {
         );
     }
 
-    /// Live bars are held as live ticks are. GCZ26's quotes built the bar of 14:00 and completed
-    /// with the trades pending. The live bar of 15:00 is read once the group ends, after the
-    /// history.
     #[rstest]
     fn live_bars_are_held_behind_the_history_until_the_group_ends() {
         let log = Rc::new(Log::default());
@@ -3350,11 +3213,8 @@ mod tests {
         );
     }
 
-    /// A bar built at completion from the live data the request held
-    /// (`finish_historical_bar_aggregator`) is live, as it closes after the warmup's end, 14:30.
-    /// Quotes answer 14:00 and trades 14:00:30. Live, a quote comes at 14:45, a trade at 14:50 and
-    /// a quote at 15:00:01, which closes the bar of 15:00. The feature reads in `ts_init` order:
-    /// the history, then 14:45, 14:50, the bar, the 15:00:01 quote.
+    /// A bar built at completion from held live data (`finish_historical_bar_aggregator`) is live,
+    /// as it closes after the warmup's end.
     #[rstest]
     fn a_bar_built_from_the_live_data_a_request_held_is_read_among_the_live_ticks() {
         let log = Rc::new(Log::default());
@@ -3401,8 +3261,6 @@ mod tests {
         );
     }
 
-    /// The history's last bar closes at 14:00. A live bar closing then, whether held or after the
-    /// warmup, is read once, from the history. A bar closing at 15:00 is read.
     #[rstest]
     #[case::held(true)]
     #[case::after_the_warmup(false)]
@@ -3439,7 +3297,6 @@ mod tests {
         assert_eq!(bars, [entry("bar", "14:00:00"), entry("bar", "15:00:00")]);
     }
 
-    /// A replay holds no bar: each reaches the features as it comes.
     #[rstest]
     fn a_replays_bars_reach_the_features_as_they_come() {
         let log = Rc::new(Log::default());
@@ -3454,7 +3311,6 @@ mod tests {
         assert_eq!(*log.read.borrow(), [entry("bar", "14:00:00")]);
     }
 
-    /// Custom data for the tests: an imbalance in a book.
     #[nautilus_serialization::arrow_custom_data]
     #[nautilus_model::custom_data]
     pub struct Imbalance {
@@ -3467,9 +3323,6 @@ mod tests {
     /// client from the catalog alone, and asks no client for what it lacks
     /// (`dispatch_date_range_request`, `crates/data/src/engine/streaming.rs:489-497`).
     /// `custom_request` names `CATALOG` for a custom series no source serves.
-    ///
-    /// The test uses GCZ26's imbalances, which no client serves. The request is answered with the
-    /// points in its window and fails none of it.
     #[rstest]
     fn drift_a_custom_data_request_naming_the_catalog_is_answered_from_the_catalog_alone() {
         MessageBus::new(TraderId::from("TRADER-001"), UUID4::new(), None, None)
@@ -3549,8 +3402,6 @@ mod tests {
         assert_eq!(values, [-0.25, 0.75]);
     }
 
-    /// The warmup finishes on its group's response alone. A failed group is an error naming the
-    /// reason.
     #[rstest]
     #[case::another_groups_failed(false, Some("lost"), Ok(false))]
     #[case::its_group_complete(true, None, Ok(true))]
@@ -3613,9 +3464,8 @@ mod tests {
         }
     }
 
-    /// Bars built from quotes close on time. Bars built from source bars wait 5 s (5,000,000 us)
-    /// for the last source bar, and so do all bars of a strategy reading one. The delay is the same
-    /// in a backtest, a dataset run and a live node.
+    /// Bars built from source bars wait 5 s (5,000,000 us) for the last source bar, as in a
+    /// backtest, a dataset run and a live node.
     #[rstest]
     #[case::of_quotes(&["SXR8.IBIS-1-HOUR-MID-INTERNAL"], SignedDuration::ZERO, 0)]
     #[case::of_source_bars(
