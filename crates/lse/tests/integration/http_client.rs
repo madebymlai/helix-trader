@@ -148,8 +148,6 @@ async fn an_answer_other_than_a_200_beside_lse_s_sha_256_is_no_file_but_an_unexp
     assert_eq!(lse.calls().len(), 1);
 }
 
-/// LSE's documented 429, with its wait cut to two seconds, which is longer than the retry's first
-/// backoff of one second, so the second call shows the `Retry-After` was waited out.
 #[tokio::test]
 async fn a_429_of_calls_is_waited_out_by_its_retry_after_then_asked_again() {
     let lse = MockLse::start(vec![
@@ -178,7 +176,6 @@ async fn a_file_cut_short_is_fetched_again() {
     assert_eq!(lse.calls().len(), 2);
 }
 
-/// A whole file whose SHA-256 is not the one LSE gave. The error names the export by LSE's id.
 #[tokio::test]
 async fn a_file_whose_sha_256_is_not_lse_s_fails_naming_lse_s_export_asked_once() {
     let lse = MockLse::start(vec![
@@ -215,7 +212,6 @@ async fn calls_come_no_faster_than_the_calls_a_minute_allow() {
     assert!(apart >= Duration::from_millis(450), "{apart:?}");
 }
 
-/// Two exports run at once, each file taking 300 ms. The second is asked once the first has come.
 #[tokio::test]
 async fn one_export_downloads_at_a_time() {
     let slow = || Reply::file(GOLD_TRADES).after(Duration::from_millis(300));
@@ -362,7 +358,6 @@ async fn a_lookup_asks_lse_s_catalogue_for_a_symbol_s_listings() {
     );
 }
 
-/// The query selects a listing's rows by its number and `data`, with no symbol or timeframe.
 #[tokio::test]
 async fn an_export_of_a_listing_asks_for_its_rows_by_its_pair_id() {
     let lse = MockLse::start(vec![Reply::file(GCZ26_QUOTES)]);

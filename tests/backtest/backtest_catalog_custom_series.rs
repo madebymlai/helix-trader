@@ -3,7 +3,8 @@
 //! `GOLD-IMBALANCE`, which keys no instrument, beside IC's gold (`common::ic`). The backtest
 //! replays the series by data type, each point at its time. It replays them to a strategy
 //! subscribed through `strategy::subscriptions`, and to a raw feature, which reads each from
-//! Nautilus' cache. A run with nothing stored goes on.
+//! Nautilus' cache, where the data engine puts each before the strategy's handler runs. A run with
+//! nothing stored goes on.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -103,7 +104,6 @@ fn at(time: &str) -> UnixNanos {
     ic::at(time).into()
 }
 
-/// Starts its subscriptions when it starts, as a strategy does.
 #[derive(Debug)]
 struct Subscribed {
     core: StrategyCore,
@@ -199,8 +199,6 @@ impl DataActor for Featured {
     }
 }
 
-/// A raw feature reads each imbalance from the cache. The data engine puts it there before the
-/// strategy's handler runs.
 #[rstest]
 fn a_raw_feature_over_a_custom_series_of_the_catalog_s_reads_each_replayed_point() {
     let catalog = catalog();

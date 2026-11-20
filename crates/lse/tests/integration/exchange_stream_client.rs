@@ -110,11 +110,8 @@ async fn the_key_goes_in_the_header_and_each_contract_opens_with_its_best_bid_an
     assert_eq!(peer.received(), [(0, subscription(&["GCG7", "GCZ6"]))]);
 }
 
-/// Covers each level as LSE's documentation records it:
-/// - Level 1: ESZ6's opening, then a change to its best bid and offer and a trade.
-/// - Level 2: GCZ6's opening with its last ten levels, then three changes to its book.
-/// - Level 3: GCZ6's order events and no opening ("the stream carries order events and no opening
-///   book").
+/// Covers each level as LSE's documentation records it: ESZ6 at Level 1, and GCZ6 at Level 2 and 3
+/// ("the stream carries order events and no opening book").
 #[rstest]
 #[case::level_1(
     ExchangeLevel::Mbp1,
@@ -262,8 +259,6 @@ async fn a_key_lse_does_not_take_fails_the_connect_without_showing_the_key() {
     assert!(!err.contains(other), "{err}");
 }
 
-/// The client names and opens GCZ6, then subscribes it and asks for GCG7. A second connection
-/// carries both, and GCZ6's opening there brings nothing new.
 #[tokio::test]
 async fn a_contract_not_carried_yet_is_carried_from_a_new_connection() {
     let peer = MockExchangeStream::cme(|_, subscription| {
@@ -299,8 +294,6 @@ async fn a_contract_not_carried_yet_is_carried_from_a_new_connection() {
     assert!(out.recv().await.is_none(), "GCZ6 passed on again");
 }
 
-/// The client subscribes GCZ6 and GCG7, then drops GCG7, as a roll leaves its old contract. The
-/// peer drops the connection, and the next subscription names GCZ6 alone.
 #[tokio::test]
 async fn a_contract_carried_no_longer_is_left_out_of_the_next_connection_s_subscription() {
     let peer = MockExchangeStream::cme(|connection, _| {
@@ -349,9 +342,6 @@ async fn a_new_subscriber_of_a_contract_carried_is_passed_on_after_its_records()
     assert_eq!(peer.received().len(), 1);
 }
 
-/// The client subscribes ESZ6, and the peer drops the first connection after its record 555. The
-/// second connection replays LSE's documented session from its opening, and only the trade 556 is
-/// new.
 #[tokio::test]
 async fn a_dropped_connection_subscribes_again_and_passes_on_only_what_is_new() {
     let peer = MockExchangeStream::cme(|connection, _| {
@@ -387,8 +377,6 @@ async fn a_dropped_connection_subscribes_again_and_passes_on_only_what_is_new() 
     );
 }
 
-/// A client started with no contract connects with its first subscription. Another subscription
-/// made before the connection opened joins it.
 #[tokio::test]
 async fn a_client_started_with_no_contract_connects_with_those_subscribed_by_then() {
     let peer = MockExchangeStream::cme(|_, _| sent(frames(CME_GCZ6_GCG7)));
@@ -413,8 +401,6 @@ async fn a_client_started_with_no_contract_connects_with_those_subscribed_by_the
     assert_eq!(peer.received(), [(0, subscription(&["GCG7", "GCZ6"]))]);
 }
 
-/// A client started on its own learns LSE's refusal from its opening and stops. A later
-/// subscription fails.
 #[tokio::test]
 async fn a_client_whose_first_subscription_lse_refuses_stops() {
     let peer = MockExchangeStream::cme(|_, _| level_required());

@@ -127,9 +127,9 @@ async fn a_subscription_brings_the_ticks_of_its_symbol() {
     assert_eq!(peer.received(), [(0, auth()), (0, subscribe("GOLD.F"))]);
 }
 
-/// The test pauses the clock once the key is authenticated and moves it on 25 s (the interval
-/// LSE's Python client keeps). It then runs the clock for the 10 s the peer waits for the ping. A
-/// ping arrives within about 35 s, which bounds the interval without pinning it at 25 s.
+/// The clock moves on 25 s (the interval LSE's Python client keeps), then runs for the 10 s the
+/// peer waits for the ping. A ping within about 35 s bounds the interval without pinning it at
+/// 25 s.
 #[tokio::test]
 async fn the_keepalive_is_lse_s_ping() {
     let peer = MockLseSocket::start(|_, frame| data_ws_answer(frame));
@@ -143,7 +143,6 @@ async fn the_keepalive_is_lse_s_ping() {
         .await;
 }
 
-/// The client skips a frame it cannot read, and the ticks after it come through.
 #[tokio::test]
 async fn a_malformed_frame_loses_none_of_the_frames_after_it() {
     let peer = MockLseSocket::start(|_, frame| match frame["action"].as_str() {

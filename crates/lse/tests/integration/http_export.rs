@@ -228,8 +228,6 @@ const ON_THE_22ND: &str = "2026-10-22T16:00:00Z";
 /// - The day before is loaded once LSE answers rows of any hour of it, because its answer cannot
 ///   tell a day not loaded from one with no trading.
 /// - An earlier day is loaded, whether or not it has rows.
-///
-/// Each case gives the calls, the files and where the span not loaded starts.
 #[rstest]
 #[case::the_current_day_whatever_lse_answers(
     vec![Reply::file(GOLD_TRADES), Reply::file(GOLD_TRADES)],

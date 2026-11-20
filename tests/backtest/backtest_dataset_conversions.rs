@@ -2,6 +2,16 @@
 //! `[trade] conversions`. The `model_ema` strategy trades IC's gold with P&L in USD (`common::ic`),
 //! on a balance in EUR. It converts through IC's EURUSD, whose quotes the dataset run replays. Each
 //! row's reference stake is a share of the balance, converted at the rate cached at its decision.
+//!
+//! - Decisions are hourly on 1-minute bars. The bracket is 7.5 bps of the mid away and closes after
+//!   45 minutes, so with gold's mid at 4000.10 one R is 3.00 USD an ounce. The stake is 0.00004% of
+//!   20M EUR.
+//! - EURUSD is 1.20000 from 09:30, and 1.60000 from 10:30 to 12:00. At 09:00 none is cached, so
+//!   there is no rate and no row.
+//! - At 10:00 the stake is 9.60 USD, so 3 whole oz and one R of 9 USD. At 11:00 and 12:00 it is
+//!   12.80 USD, so 4 oz and one R of 12 USD. Unconverted it would be 2 oz at each.
+//! - On the flat quotes neither exit is reached, and each side closes at its limit across the
+//!   spread, losing 0.20 USD an ounce plus the commission on its two fills at 30 USD per million.
 
 use helix_trader::{
     backtest::Backtest,
@@ -22,9 +32,6 @@ use rstest::rstest;
 use crate::common::ic;
 
 /// Hourly decisions on 1-minute bars, with averages of 1 and 2.
-///
-/// The bracket is 7.5 bps of the mid away and closes after 45 minutes. The reference stake is
-/// 0.00004% of 20M EUR, converted through EURUSD.
 const CONFIG: &str = r#"
     [data]
     series = [
@@ -55,8 +62,6 @@ const CONFIG: &str = r#"
     learner = { kind = "fake" }
 "#;
 
-/// Returns the gold quotes. The mid is 4000.10 and each exit is 7.5 bps away, which is 3.000075, or
-/// 3.00 to the cent. So one R is 3.00 USD an ounce.
 fn gold_quotes() -> Vec<QuoteTick> {
     let mut quotes = vec![];
     let mut time = ic::at("08:00:00");
@@ -67,8 +72,6 @@ fn gold_quotes() -> Vec<QuoteTick> {
     quotes
 }
 
-/// Returns EURUSD quotes of 1.19990 / 1.20010 from 09:30, and 1.59990 / 1.60010 from 10:30 to
-/// 12:00.
 fn eurusd_quotes() -> Vec<QuoteTick> {
     let between = |bid, ask, from: &str, to: &str| {
         let (from, to) = (ic::at(from), ic::at(to));
@@ -127,15 +130,6 @@ fn units(rows: &[TargetRow]) -> Vec<(Timestamp, Money, Money)> {
         .collect()
 }
 
-/// The reference stake at each decision.
-///
-/// - At 09:00 no EURUSD quote is cached, so there is no rate and no row.
-/// - At 10:00 the mid is 1.20000, so 20M EUR is 24M USD. 0.00004% of that is 9.60 USD. Over the
-///   stop's 3.00 USD that is 3.2 oz, whole 3, so one R is 9 USD.
-/// - At 11:00 and 12:00 the mid is 1.60000, so the balance is 32M USD and the stake 12.80 USD. That
-///   is 4.27 oz, whole 4, so one R is 12 USD.
-/// - Unconverted, 20M as USD would be 2 oz at each. At the rate swapped, 2 oz at 10:00 and 1 at
-///   11:00.
 #[rstest]
 fn each_rows_reference_stake_is_of_the_balance_converted_at_its_decisions_rate() {
     let rows = std::thread::spawn(rows).join().unwrap();
@@ -163,12 +157,8 @@ fn pnls(rows: &[TargetRow]) -> Vec<(Timestamp, Money, Money)> {
         .collect()
 }
 
-/// Each side is sent at its row's size.
-///
-/// On the flat quotes neither exit is reached. Each side closes at its limit across the spread. It
-/// loses 0.20 USD an ounce, plus the commission on its two fills at 30 USD per million:
-/// - 3 oz: 0.60 + 2 x 0.36 = -1.32 USD.
-/// - 4 oz: 0.80 + 2 x 0.48 = -1.76 USD.
+/// Each side is sent at its row's size: 3 oz loses 0.60 + 2 x 0.36 = -1.32 USD, and 4 oz 0.80 + 2 x
+/// 0.48 = -1.76 USD.
 #[rstest]
 fn the_dataset_run_sends_each_side_at_the_size_its_row_is_priced_at() {
     let rows = std::thread::spawn(rows).join().unwrap();
