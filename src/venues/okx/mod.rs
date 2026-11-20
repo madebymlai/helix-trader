@@ -1,14 +1,12 @@
-//! OKX: its history, filled through the node (see `catalog::NodeFill`) by
-//! Nautilus' OKX data client, and the live node's clients (see `live`),
-//! both keying an instrument by its contract (`Contract`). See `README.md`.
+//! OKX: its history, filled through the node (see `catalog::NodeFill`) by Nautilus' OKX data
+//! client, and the live node's clients (see `live`), both keying an instrument by its contract
+//! (`Contract`). See `README.md`.
 //!
-//! The node asks Nautilus' `OKXDataClient` for the bars of OKX swaps and
-//! X-Perps and for their funding over what the catalog lacks of them
-//! (`requests`), and the data engine writes back the windows the client
-//! answers in full. The definitions are not asked of the node, for their
-//! margins (see `README.md`): `OkxHistory` writes them, from OKX's public
-//! REST API through the adapter's `OKXRawHttpClient` and
-//! `parse_instrument_any`, with the account's margins, 1 / the leverage it
+//! The node asks Nautilus' `OKXDataClient` for the bars of OKX swaps and X-Perps and for their
+//! funding over what the catalog lacks of them (`requests`), and the data engine writes back the
+//! windows the client answers in full. The definitions are not asked of the node, for their margins
+//! (see `README.md`): `OkxHistory` writes them, from OKX's public REST API through the adapter's
+//! `OKXRawHttpClient` and `parse_instrument_any`, with the account's margins, 1 / the leverage it
 //! trades each at (see `instrument_from`, `account`).
 
 use anyhow::Context;
@@ -48,37 +46,37 @@ mod live;
 pub(in crate::venues) use live::BOOK;
 pub(crate) use live::{clients, streams};
 
-/// The window one funding request holds at most: two weeks, 336 funding
-/// times at an hourly interval, within the one page of 400 the client
-/// reads. The oldest update of each window comes without the interval
-/// before it, which a backtest does not settle, so the windows are long.
+/// The window one funding request holds at most: two weeks, 336 funding times at an hourly
+/// interval, within the one page of 400 the client reads. The oldest update of each window comes
+/// without the interval before it, which a backtest does not settle, so the windows are long.
 const FUNDING_PERIOD: SignedDuration = SignedDuration::from_hours(14 * 24);
 
-/// The window one request of bars holds at most: a day, 1,440 minute
-/// bars, 15 of the client's history pages of 100.
+/// The window one request of bars holds at most: a day, 1,440 minute bars, 15 of the client's
+/// history pages of 100.
 const DAY: SignedDuration = SignedDuration::from_hours(24);
 
-/// OKX's public REST API, through the adapter's default client (no key),
-/// for the definitions of OKX instruments, and the account, through its
-/// key, for the leverage it trades each at (`account::Account`).
+/// OKX's public REST API, through the adapter's default client (no key), for the definitions of OKX
+/// instruments, and the account, through its key, for the leverage it trades each at
+/// (`account::Account`).
 #[derive(Debug, Default)]
 pub struct OkxHistory {
     client: OKXHttpClient,
 }
 
 impl OkxHistory {
-    /// Writes into `catalog` the definition of each instrument of `slices`
-    /// it lacks, as OKX's API defines it now, with the account's margins at
-    /// the leverage it trades it at now (see `instrument_from`): the
-    /// account, of the environment's key, is read only if a definition is
+    /// Writes into `catalog` the definition of each instrument of `slices` it lacks, as OKX's API
+    /// defines it now, with the account's margins at the leverage it trades it at now (see
+    /// `instrument_from`): the account, of the environment's key, is read only if a definition is
     /// lacking.
     ///
     /// # Errors
     ///
-    /// Returns an error if an instrument is not an OKX swap or X-Perp, if
-    /// OKX does not define it, if the account cannot be read (its
-    /// environment or key missing, OKX unreachable or refusing it, no
-    /// leverage listed), or if the catalog cannot be read or written.
+    /// Returns an error if:
+    /// - An instrument is not an OKX swap or X-Perp.
+    /// - OKX does not define an instrument.
+    /// - The account cannot be read (its environment or key missing, OKX unreachable or refusing
+    ///   it, no leverage listed).
+    /// - The catalog cannot be read or written.
     pub async fn write_definitions(
         &self,
         catalog: &ParquetDataCatalog,
@@ -98,8 +96,8 @@ impl OkxHistory {
         .await
     }
 
-    /// The instrument of `id`, an OKX swap or X-Perp, with the account's
-    /// margins at `leverage` (see `instrument_from`).
+    /// The instrument of `id`, an OKX swap or X-Perp, with the account's margins at `leverage` (see
+    /// `instrument_from`).
     async fn instrument(
         &self,
         id: InstrumentId,
@@ -123,8 +121,8 @@ impl OkxHistory {
     }
 }
 
-/// Writes into `catalog` the definition of each instrument of `slices` it
-/// lacks, once, as `instrument` gives it.
+/// Writes into `catalog` the definition of each instrument of `slices` it lacks, once, as
+/// `instrument` gives it.
 async fn write_definitions(
     catalog: &ParquetDataCatalog,
     slices: &[SeriesSlice],
@@ -155,14 +153,12 @@ async fn write_definitions(
     Ok(())
 }
 
-/// Checks that Nautilus' OKX data client, which OKX's fill and a live
-/// warmup ask, serves the history of `source`, an OKX instrument's: its
-/// trades (`request_trades`) and its candles (`request_bars`), EXTERNAL
-/// bars of the LAST price at a width OKX has a candle of
-/// (`bar_spec_as_okx_channel`, the widths the client asks the candles
-/// endpoint in). The client asks for trade-price candles whatever price a
-/// bar type names, so it serves no other price, and it requests no quotes
-/// and no book (Nautilus' `DataClient` defaults refuse them).
+/// Checks that Nautilus' OKX data client, which OKX's fill and a live warmup ask, serves the
+/// history of `source`, an OKX instrument's: its trades (`request_trades`) and its candles
+/// (`request_bars`), EXTERNAL bars of the LAST price at a width OKX has a candle of
+/// (`bar_spec_as_okx_channel`, the widths the client asks the candles endpoint in). The client asks
+/// for trade-price candles whatever price a bar type names, so it serves no other price, and it
+/// requests no quotes and no book (Nautilus' `DataClient` defaults refuse them).
 ///
 /// # Errors
 ///
@@ -186,18 +182,16 @@ pub(super) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Whether `bar_type` is of OKX's candles, which Nautilus' OKX client asks
-/// its history (`request_bars`) and its candle channels
-/// (`subscribe_bars`) for alike: EXTERNAL bars at a spec OKX has a
-/// trade-price candle of (`bar_spec_as_okx_channel`).
+/// Whether `bar_type` is of OKX's candles, which Nautilus' OKX client asks its history
+/// (`request_bars`) and its candle channels (`subscribe_bars`) for alike: EXTERNAL bars at a spec
+/// OKX has a trade-price candle of (`bar_spec_as_okx_channel`).
 fn is_candle(bar_type: &BarType) -> bool {
     bar_type.is_externally_aggregated() && bar_spec_as_okx_channel(bar_type.spec()).is_ok()
 }
 
-/// What `catalog` lacks of `slices`, series of OKX instruments
-/// (`DataRequirements::slices`), and of the funding of each slice's
-/// instrument over the slice, the funding first (see `catalog::missing`),
-/// without the definitions, which `OkxHistory::write_definitions` writes
+/// What `catalog` lacks of `slices`, series of OKX instruments (`DataRequirements::slices`), and of
+/// the funding of each slice's instrument over the slice, the funding first (see
+/// `catalog::missing`), without the definitions, which `OkxHistory::write_definitions` writes
 /// rather than the node (see the module doc).
 ///
 /// # Errors
@@ -222,8 +216,8 @@ pub fn requests(
         .collect())
 }
 
-/// The window one request of `data` holds at most (see `NodeFill::add`):
-/// `FUNDING_PERIOD` of funding, a day of bars.
+/// The window one request of `data` holds at most (see `NodeFill::add`): `FUNDING_PERIOD` of
+/// funding, a day of bars.
 #[must_use]
 pub fn period(data: FillData) -> SignedDuration {
     match data {
@@ -232,9 +226,8 @@ pub fn period(data: FillData) -> SignedDuration {
     }
 }
 
-/// The node's data client: Nautilus' OKX data client loading the instrument
-/// types and families of `instrument_ids` (see `selection`), on OKX's
-/// public API with no key.
+/// The node's data client: Nautilus' OKX data client loading the instrument types and families of
+/// `instrument_ids` (see `selection`), on OKX's public API with no key.
 ///
 /// # Errors
 ///
@@ -251,9 +244,8 @@ pub fn node_client(instrument_ids: &[InstrumentId]) -> anyhow::Result<NodeClient
     })
 }
 
-/// The instrument types and families of `instrument_ids`, OKX swaps or
-/// X-Perps, each once in the order they first come: what Nautilus' OKX
-/// clients load (see `Contract`).
+/// The instrument types and families of `instrument_ids`, OKX swaps or X-Perps, each once in the
+/// order they first come: what Nautilus' OKX clients load (see `Contract`).
 fn selection(
     instrument_ids: &[InstrumentId],
 ) -> anyhow::Result<(Vec<OKXInstrumentType>, Vec<String>)> {
@@ -272,8 +264,8 @@ fn selection(
     Ok((instrument_types, families))
 }
 
-/// The margin of a position on an account trading it at `leverage`, as a
-/// fraction of its notional: 1 / `leverage`, which OKX locks.
+/// The margin of a position on an account trading it at `leverage`, as a fraction of its notional:
+/// 1 / `leverage`, which OKX locks.
 ///
 /// # Errors
 ///
@@ -286,15 +278,12 @@ fn margin_at(leverage: Decimal) -> anyhow::Result<Decimal> {
     Ok(Decimal::ONE / leverage)
 }
 
-/// The instrument of `raw`, an OKX swap or X-Perp (a future whose rule
-/// type is `xperp`), through the adapter's `parse_instrument_any`, with
-/// the initial and maintenance margins of an account trading it at
-/// `leverage` (`margin_at`); a dated future is refused. OKX locks notional
-/// / leverage on a position, which is Nautilus' default margin model
-/// (notional / leverage x the instrument's margin) at a backtest's
-/// leverage of 1, so the catalog holds the account's margin, as IC's
-/// definitions hold IC's. The adapter would leave them at 0, which locks
-/// nothing.
+/// The instrument of `raw`, an OKX swap or X-Perp (a future whose rule type is `xperp`), through
+/// the adapter's `parse_instrument_any`, with the initial and maintenance margins of an account
+/// trading it at `leverage` (`margin_at`); a dated future is refused. OKX locks notional / leverage
+/// on a position, which is Nautilus' default margin model (notional / leverage x the instrument's
+/// margin) at a backtest's leverage of 1, so the catalog holds the account's margin, as IC's
+/// definitions hold IC's. The adapter would leave them at 0, which locks nothing.
 fn instrument_from(
     raw: &OKXInstrument,
     leverage: Decimal,
@@ -313,16 +302,13 @@ fn instrument_from(
         .with_context(|| format!("{id} is not an instrument Nautilus supports"))
 }
 
-/// An OKX swap (`BTC-USDT-SWAP.OKX`) or future
-/// (`BTC-USD_UM_XPERP-310404.OKX`), keyed in OKX's API and in the clients'
-/// configs by its instrument type and family.
+/// An OKX swap (`BTC-USDT-SWAP.OKX`) or future (`BTC-USD_UM_XPERP-310404.OKX`), keyed in OKX's API
+/// and in the clients' configs by its instrument type and family.
 #[derive(Debug, Clone, Copy)]
 struct Contract {
-    /// `Swap` or `Futures`, from the symbol (the adapter's
-    /// `okx_instrument_type_from_symbol`).
+    /// `Swap` or `Futures`, from the symbol (the adapter's `okx_instrument_type_from_symbol`).
     inst_type: OKXInstrumentType,
-    /// `BTC-USDT`, `BTC-USD_UM_XPERP`, from the symbol (the adapter's
-    /// `extract_inst_family`).
+    /// `BTC-USDT`, `BTC-USD_UM_XPERP`, from the symbol (the adapter's `extract_inst_family`).
     family: &'static str,
 }
 
@@ -368,8 +354,8 @@ mod tests {
         serde_json::from_str(INSTRUMENT).unwrap()
     }
 
-    /// BTC-USDT-SWAP.OKX as OKX's public API defined it on 2026-10-21, on
-    /// an account trading it at leverage 10.
+    /// BTC-USDT-SWAP.OKX as OKX's public API defined it on 2026-10-21, on an account trading it at
+    /// leverage 10.
     fn btc_instrument() -> InstrumentAny {
         instrument_from(&raw_instrument(), Decimal::TEN, UnixNanos::default()).unwrap()
     }
@@ -381,15 +367,14 @@ mod tests {
         serde_json::from_str(XPERP_INSTRUMENT).unwrap()
     }
 
-    /// BTC-USD_UM_XPERP-310404.OKX as OKX's public API defined it on
-    /// 2026-10-22, on an account trading it at leverage 25.
+    /// BTC-USD_UM_XPERP-310404.OKX as OKX's public API defined it on 2026-10-22, on an account
+    /// trading it at leverage 25.
     fn xperp_instrument() -> InstrumentAny {
         instrument_from(&raw_xperp(), Decimal::from(25), UnixNanos::default()).unwrap()
     }
 
-    /// The account's margin of a position, a tenth of its notional at
-    /// leverage 10, as IC's definitions hold the account's; at leverage 25,
-    /// 4% of the notional.
+    /// The account's margin of a position, a tenth of its notional at leverage 10, as IC's
+    /// definitions hold the account's; at leverage 25, 4% of the notional.
     #[rstest]
     #[case::a_swap_a_crypto_perpetual(btc_instrument(), "CryptoPerpetual", (1, 2), Decimal::new(1, 1))]
     #[case::an_x_perp_a_crypto_future(xperp_instrument(), "CryptoFuture", (1, 0), Decimal::new(4, 2))]
@@ -492,8 +477,8 @@ mod tests {
         }
     }
 
-    /// The slices of strategy bars on BTC built from its 1-minute and
-    /// 5-minute bars over `[from, to]`.
+    /// The slices of strategy bars on BTC built from its 1-minute and 5-minute bars over `[from,
+    /// to]`.
     fn btc_slices(from: &str, to: &str) -> Vec<SeriesSlice> {
         DataRequirements {
             bar_types: vec![
@@ -528,8 +513,8 @@ mod tests {
         );
     }
 
-    /// Funding stored through October 4 covers neither bar series, but
-    /// the next funding request starts on October 5, not October 1.
+    /// Funding stored through October 4 covers neither bar series, but the next funding request
+    /// starts on October 5, not October 1.
     #[rstest]
     fn stored_funding_shortens_only_the_funding_request() {
         let dir = tempfile::tempdir().unwrap();

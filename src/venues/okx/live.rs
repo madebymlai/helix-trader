@@ -1,28 +1,23 @@
 //! OKX clients for the live node.
 //!
-//! Provides the Nautilus client factories and configs from `nautilus_okx`:
-//! `OKXDataClientFactory`, `OKXExecutionClientFactory` and their configs,
-//! in the EEA region (`eea.okx.com`, where an EEA account trades X-Perps),
-//! in cross margin, on the environment `OKX_ENVIRONMENT` names: `demo` or
-//! `live`, required, read by us since the adapter takes it only as a
-//! config field. The adapter reads the credentials from `OKX_API_KEY`,
-//! `OKX_API_SECRET` and `OKX_API_PASSPHRASE`; this module only checks they
-//! are set.
+//! Provides the Nautilus client factories and configs from `nautilus_okx`: `OKXDataClientFactory`,
+//! `OKXExecutionClientFactory` and their configs, in the EEA region (`eea.okx.com`, where an EEA
+//! account trades X-Perps), in cross margin, on the environment `OKX_ENVIRONMENT` names: `demo` or
+//! `live`, required, read by us since the adapter takes it only as a config field. The adapter
+//! reads the credentials from `OKX_API_KEY`, `OKX_API_SECRET` and `OKX_API_PASSPHRASE`; this module
+//! only checks they are set.
 //!
-//! Before the node starts, the account is checked (`account::Account`):
-//! net position mode, and each instrument's leverage the one its
-//! definition in the catalog holds, as its margin, which backtests run at
-//! (see `instrument_from`). This module never changes the account.
+//! Before the node starts, the account is checked (`account::Account`): net position mode, and each
+//! instrument's leverage the one its definition in the catalog holds, as its margin, which
+//! backtests run at (see `instrument_from`). This module never changes the account.
 //!
-//! The strategy trades OKX instruments on bars built from OKX's 1-minute
-//! candles (a composite bar type): the data client serves their warmup
-//! from OKX's REST candles, up to now, and the live bars from the candle
-//! channel. OKX serves no quote history (the data client does not
-//! implement `request_quotes`), so bars built from quotes get no warmup,
-//! which requests no series a venue's history does not serve
-//! (`venues::serves`), and start at the live quotes. A live start refuses
-//! a series the data client does not stream (`streams`); it streams an
-//! instrument's book in OKX's format (`BOOK`), which a run subscribes to.
+//! The strategy trades OKX instruments on bars built from OKX's 1-minute candles (a composite bar
+//! type): the data client serves their warmup from OKX's REST candles, up to now, and the live bars
+//! from the candle channel. OKX serves no quote history (the data client does not implement
+//! `request_quotes`), so bars built from quotes get no warmup, which requests no series a venue's
+//! history does not serve (`venues::serves`), and start at the live quotes. A live start refuses a
+//! series the data client does not stream (`streams`); it streams an instrument's book in OKX's
+//! format (`BOOK`), which a run subscribes to.
 
 use std::{num::NonZeroUsize, path::Path};
 
@@ -51,36 +46,29 @@ use crate::{
     venues::BookFormat,
 };
 
-/// OKX's book as Nautilus' OKX data client streams it
-/// (`venues::book_format`): its deltas of an L2_MBP book, OKX's price
-/// levels, the client failing a subscription of any other book type
-/// (`subscribe_book_deltas`, `data.rs:2136-2142`), and its depth snapshots
-/// of five levels a side, OKX's `books5`, the most the client subscribes
-/// to, failing more (`subscribe_book_depth`, `:2159-2172`,
-/// `BOOK_SNAPSHOT_DEPTH`, `:112`). A deltas subscription of no depth takes
-/// OKX's book 400 levels deep, the client keeping no depth as 0
-/// (`book_channel`, `:354-382`; `resolve_book_depth`,
-/// `common/consts.rs:525-531`), which subscribes OKX's `books` channel
+/// OKX's book as Nautilus' OKX data client streams it (`venues::book_format`): its deltas of an
+/// L2_MBP book, OKX's price levels, the client failing a subscription of any other book type
+/// (`subscribe_book_deltas`, `data.rs:2136-2142`), and its depth snapshots of five levels a side,
+/// OKX's `books5`, the most the client subscribes to, failing more (`subscribe_book_depth`,
+/// `:2159-2172`, `BOOK_SNAPSHOT_DEPTH`, `:112`). A deltas subscription of no depth takes OKX's book
+/// 400 levels deep, the client keeping no depth as 0 (`book_channel`, `:354-382`;
+/// `resolve_book_depth`, `common/consts.rs:525-531`), which subscribes OKX's `books` channel
 /// (`select_book_channel`, `:533-540`).
 pub(in crate::venues) const BOOK: BookFormat = BookFormat {
     deltas: BookType::L2_MBP,
     depth: NonZeroUsize::new(5),
 };
 
-/// Checks that Nautilus' OKX data client, the live node's, streams
-/// `source`, an OKX instrument's series, as a run subscribes to it: its
-/// quotes (`subscribe_quotes`, `data.rs:2214`), its trades
-/// (`subscribe_trades`, `:2244`) and its candles (`subscribe_bars`,
-/// `:2314`, whose task subscribes the channel of
-/// `bar_spec_as_okx_channel`, `websocket/client.rs:1709-1715`, failing any
-/// other bar type: see `is_candle`); and its book, which a run subscribes
-/// to in OKX's format (`BOOK`, through `venues::book_format`), its deltas
-/// of an L2_MBP book and its depth five levels a side.
+/// Checks that Nautilus' OKX data client, the live node's, streams `source`, an OKX instrument's
+/// series, as a run subscribes to it: its quotes (`subscribe_quotes`, `data.rs:2214`), its trades
+/// (`subscribe_trades`, `:2244`) and its candles (`subscribe_bars`, `:2314`, whose task subscribes
+/// the channel of `bar_spec_as_okx_channel`, `websocket/client.rs:1709-1715`, failing any other bar
+/// type: see `is_candle`); and its book, which a run subscribes to in OKX's format (`BOOK`, through
+/// `venues::book_format`), its deltas of an L2_MBP book and its depth five levels a side.
 ///
 /// # Errors
 ///
-/// Returns an error if the client does not stream `source`, naming it and
-/// saying why.
+/// Returns an error if the client does not stream `source`, naming it and saying why.
 pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
     use NautilusDataType as D;
 
@@ -104,28 +92,28 @@ pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The OKX data and execution client configs of a node trading OKX swaps
-/// or X-Perps.
+/// The OKX data and execution client configs of a node trading OKX swaps or X-Perps.
 #[derive(Debug, Clone)]
 pub(crate) struct OkxClients {
     pub(super) data: OKXDataClientConfig,
     pub(super) exec: OKXExecutionClientConfig,
 }
 
-/// Reads the definitions of `instrument_ids` in `catalog` and the
-/// environment (see `environment_of`), builds the client configs of the
-/// instruments on it (see `configs`), checks the credentials are set, then
-/// checks the account: net position mode, and each instrument's leverage
-/// the one its definition holds as its margin, which backtests run at.
+/// Reads the definitions of `instrument_ids` in `catalog` and the environment (see
+/// `environment_of`), builds the client configs of the instruments on it (see `configs`), checks
+/// the credentials are set, then checks the account: net position mode, and each instrument's
+/// leverage the one its definition holds as its margin, which backtests run at.
 ///
 /// # Errors
 ///
-/// Returns an error if the catalog cannot be read or lacks an
-/// instrument's definition, if `OKX_ENVIRONMENT` is not `demo` or `live`,
-/// if an id is not an OKX swap or X-Perp, if a credential is not set (all
-/// checked before any request), if OKX cannot be reached or refuses the
-/// key, if the account is not in net position mode, or if an instrument's
-/// leverage is not its definition's (or OKX does not list it).
+/// Returns an error if:
+/// - The catalog cannot be read or lacks an instrument's definition.
+/// - `OKX_ENVIRONMENT` is not `demo` or `live`.
+/// - An id is not an OKX swap or X-Perp.
+/// - A credential is not set (all checked before any request).
+/// - OKX cannot be reached or refuses the key.
+/// - The account is not in net position mode.
+/// - An instrument's leverage is not its definition's (or OKX does not list it).
 pub(crate) async fn clients(
     instrument_ids: &[InstrumentId],
     catalog: &Path,
@@ -145,10 +133,9 @@ pub(crate) async fn clients(
     Ok(clients)
 }
 
-/// The client configs of `instrument_ids`, OKX swaps or X-Perps: their
-/// instrument types and families are loaded (see `selection`), on
-/// `environment` and `REGION`, orders in `MARGIN_MODE`; no credential, so
-/// the adapter reads them from the environment.
+/// The client configs of `instrument_ids`, OKX swaps or X-Perps: their instrument types and
+/// families are loaded (see `selection`), on `environment` and `REGION`, orders in `MARGIN_MODE`;
+/// no credential, so the adapter reads them from the environment.
 fn configs(
     instrument_ids: &[InstrumentId],
     environment: OKXEnvironment,
@@ -174,8 +161,8 @@ fn configs(
 }
 
 impl OkxClients {
-    /// The factories and configs, for the node. OKX is one venue, so
-    /// Nautilus routes it to these clients without a route of ours.
+    /// The factories and configs, for the node. OKX is one venue, so Nautilus routes it to these
+    /// clients without a route of ours.
     pub(crate) fn into_node_clients(self) -> Clients {
         let data_config: Box<dyn ClientConfig> = Box::new(self.data);
         let exec_config: Box<dyn ClientConfig> = Box::new(self.exec);
@@ -195,8 +182,8 @@ impl OkxClients {
     }
 }
 
-/// Fails unless the account is in net position mode: one position per
-/// instrument, as Nautilus' netting and the strategy's target book assume.
+/// Fails unless the account is in net position mode: one position per instrument, as Nautilus'
+/// netting and the strategy's target book assume.
 fn ensure_net_mode(mode: OKXPositionMode) -> anyhow::Result<()> {
     anyhow::ensure!(
         mode == OKXPositionMode::NetMode,
@@ -207,10 +194,9 @@ fn ensure_net_mode(mode: OKXPositionMode) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Fails unless `margin`, the margin of `id` its definition in the catalog
-/// holds, is the account's at `leverage`, the leverage OKX applies to `id`
-/// (`margin_at`): the catalog was filled at another, which backtests ran
-/// at.
+/// Fails unless `margin`, the margin of `id` its definition in the catalog holds, is the account's
+/// at `leverage`, the leverage OKX applies to `id` (`margin_at`): the catalog was filled at
+/// another, which backtests ran at.
 fn ensure_leverage(id: InstrumentId, leverage: Decimal, margin: Decimal) -> anyhow::Result<()> {
     if margin_at(leverage)? == margin {
         return Ok(());
@@ -301,8 +287,8 @@ mod tests {
         assert!(err.contains("LongShortMode"), "{err}");
     }
 
-    /// The catalog's definition holds a margin of 0.2, leverage 5, which
-    /// backtests ran at: an account at leverage 10 is refused, naming both.
+    /// The catalog's definition holds a margin of 0.2, leverage 5, which backtests ran at: an
+    /// account at leverage 10 is refused, naming both.
     #[rstest]
     fn a_leverage_other_than_the_catalogs_is_refused_naming_both() {
         ensure_leverage(xperp(), Decimal::TEN, Decimal::new(1, 1)).unwrap();

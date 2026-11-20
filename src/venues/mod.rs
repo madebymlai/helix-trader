@@ -1,82 +1,79 @@
-//! The venues: each one's history, live clients and command-line settings in a
-//! module of its own, and the routing table, a row per venue (`Row`) saying,
-//! each on its own, where its instruments' definitions (`DefinitionsSource`),
-//! history (`HistorySource`) and live data (`LiveDataSource`) come from, and
-//! which broker trades them (`Broker`), if one does. The table has two keys,
-//! a venue and a custom data type's name, with one set of sources: a custom
-//! series (`strategy::requirements::CustomSeries`, an entry of a config's
-//! `[data] series`) has no venue, so its type's row (`CustomRow`) alone
-//! says where its history and its live data come from, each on its own and
-//! each optional, of the same sources, LSE's rows from LSE, whatever its
-//! identifier. Everything else asks here
-//! and names no venue, each caller the row's part it needs: fill-catalog for
-//! its fill (`fill_history`: the definitions and history), the live runner for
-//! its node's clients (`live_clients`: the live data), a live warmup for the
-//! client it asks a definition of (`live_definitions_client`: the broker, or
-//! the live data), a backtest for how a venue keeps positions (`oms_type`,
-//! its broker's answer), whether it has money (`has_broker`: a venue no
-//! broker trades has none) and whether its account has a base currency
-//! (`has_base_currency`, its broker's answer), a trade where it reads its
-//! account's equity (`equity_source`, its broker's answer), whether its
-//! orders may be reduce-only and post-only
-//! (`takes_reduce_only_and_post_only`, its broker's answer), fill-catalog and a live warmup whether a venue's history serves
-//! a series (`serves`, its history source's answer, each a copy of the data
-//! client its fill asks, so that a fill and a warmup agree on what history
-//! there is), a live start whether a venue's live data streams a series
-//! (`streams`, its live data source's answer, each a copy of the
-//! subscriptions its data client implements), a strategy's subscriptions, a
-//! live warmup and a fill the format of a venue's book, the book type of its deltas and the
-//! levels of its depth (`book_format`, its live data source's answer, the
-//! one format of the venue's book in the catalog), and a strategy the series an
-//! FX pair it converts through is read in (`rate_series`: the first form
-//! `serves` takes, the pair's 1-minute BID and ASK bars, then its quotes);
-//! venue code checks its own instruments against the table. `serves`,
-//! `streams` and `book_format` answer what a venue's client does for any
-//! account, not what one account is entitled to: an account's market data
-//! permissions and limits (a market data subscription, IB's depth slots)
-//! are left to the venue, whose refusal the client logs. A custom series is
-//! asked by its type alone, its type's row answering, each source judging
-//! its data type by its type, metadata and identifier shape, as Nautilus
-//! routes a custom data command by its client id alone, naming no venue:
-//! a strategy's config and fill-catalog which history source serves it
-//! (`serves_custom`, its history source's answer, LSE's the check its
-//! client makes), fill-catalog which source fills it (`fill_history`), a
-//! live start whether its live data streams it (`streams_custom`, its live
-//! data source's answer: none does yet), and the client of its live data
-//! source on the live node (`custom_data_client`), which a live strategy's
-//! subscription to it names, so that Nautilus sends that client the
-//! subscription by its client id alone, a live warmup asks its history of
-//! if its type's history serves it, and the node has whether or not an
-//! instrument of the run routes to it (`live_clients`); a type with no row,
-//! or a row with no live data source, has none. On a root, its contracts'
-//! series are routed as it is, by their type, the source asked for each
-//! over its slice (`DataRequirements::custom_slices`). A type the table has no
-//! row of, or a row with no history source, is the catalog's: data
-//! written into the catalog from outside helix, which a config loads,
-//! fill-catalog skips, a replay reads, a live warmup asks of the catalog
-//! alone and a live start refuses, nothing streaming it. A venue's row
-//! never answers for a custom series, whatever its identifier, an
-//! instrument's id or a root's included, and no venue's source answers
-//! custom data: custom data is of one kind, a custom series, routed by its
-//! type alone. Every custom data type helix
-//! compiles is registered with Nautilus once, as the process starts
-//! (`register_custom_data`).
-//! The settings each command takes of the venues are composed here,
-//! `LiveVenueArgs` for live and `HistoryVenueArgs` for fill-catalog, which
-//! the commands flatten.
+//! The venues: each one's history, live clients and command-line settings in a module of its own,
+//! and the routing table, a row per venue (`Row`) saying, each on its own, where its instruments'
+//! definitions (`DefinitionsSource`), history (`HistorySource`) and live data (`LiveDataSource`)
+//! come from, and which broker trades them (`Broker`), if one does.
 //!
-//! The cTrader brokers are one kind (`CTraderBroker`), which both dispatches
-//! loop over: each one's module names its venue and account, and its row of
-//! the table is a line of `CTRADER_BROKERS`, all another such broker takes.
-//! What they share is the adapter's (`ctrader`), its clients built for helix
-//! here (`ctrader_node_client`, `ctrader_clients`).
+//! The table has two keys, a venue and a custom data type's name, with one set of sources: a custom
+//! series (`strategy::requirements::CustomSeries`, an entry of a config's `[data] series`) has no
+//! venue, so its type's row (`CustomRow`) alone says where its history and its live data come from,
+//! each on its own and each optional, of the same sources, LSE's rows from LSE, whatever its
+//! identifier.
 //!
-//! No trait stands for a venue: Nautilus' factories, configs and
-//! `RoutingConfig` are already the seam, and the venues' needs differ too much
-//! for a trait to hide them. OKX needs its account's leverage, IB an account, a client id
-//! and its fill after the node's, Databento an API key and its own check,
-//! LSE a key per market and, for its own series, definitions written into
-//! the catalog by hand.
+//! Everything else asks here and names no venue, each caller the row's part it needs:
+//! - fill-catalog for its fill (`fill_history`: the definitions and history).
+//! - The live runner for its node's clients (`live_clients`: the live data).
+//! - A live warmup for the client it asks a definition of (`live_definitions_client`: the broker,
+//!   or the live data).
+//! - A backtest for how a venue keeps positions (`oms_type`, its broker's answer), whether it has
+//!   money (`has_broker`: a venue no broker trades has none) and whether its account has a base
+//!   currency (`has_base_currency`, its broker's answer).
+//! - A trade where it reads its account's equity (`equity_source`, its broker's answer) and whether
+//!   its orders may be reduce-only and post-only (`takes_reduce_only_and_post_only`, its broker's
+//!   answer).
+//! - fill-catalog and a live warmup whether a venue's history serves a series (`serves`, its
+//!   history source's answer, each a copy of the data client its fill asks, so that a fill and a
+//!   warmup agree on what history there is).
+//! - A live start whether a venue's live data streams a series (`streams`, its live data source's
+//!   answer, each a copy of the subscriptions its data client implements).
+//! - A strategy's subscriptions, a live warmup and a fill the format of a venue's book, the book
+//!   type of its deltas and the levels of its depth (`book_format`, its live data source's answer,
+//!   the one format of the venue's book in the catalog).
+//! - A strategy the series an FX pair it converts through is read in (`rate_series`: the first form
+//!   `serves` takes, the pair's 1-minute BID and ASK bars, then its quotes).
+//!
+//! Venue code checks its own instruments against the table. `serves`, `streams` and `book_format`
+//! answer what a venue's client does for any account, not what one account is entitled to: an
+//! account's market data permissions and limits (a market data subscription, IB's depth slots) are
+//! left to the venue, whose refusal the client logs.
+//!
+//! A custom series is asked by its type alone, its type's row answering, each source judging its
+//! data type by its type, metadata and identifier shape, as Nautilus routes a custom data command
+//! by its client id alone, naming no venue:
+//! - A strategy's config and fill-catalog which history source serves it (`serves_custom`, its
+//!   history source's answer, LSE's the check its client makes).
+//! - fill-catalog which source fills it (`fill_history`).
+//! - A live start whether its live data streams it (`streams_custom`, its live data source's
+//!   answer: none does yet).
+//! - The client of its live data source on the live node (`custom_data_client`), which a live
+//!   strategy's subscription to it names, so that Nautilus sends that client the subscription by
+//!   its client id alone, a live warmup asks its history of if its type's history serves it, and
+//!   the node has whether or not an instrument of the run routes to it (`live_clients`).
+//!
+//! A type with no row, or a row with no live data source, has none. On a root, its contracts'
+//! series are routed as it is, by their type, the source asked for each over its slice
+//! (`DataRequirements::custom_slices`).
+//!
+//! A type the table has no row of, or a row with no history source, is the catalog's: data written
+//! into the catalog from outside helix, which a config loads, fill-catalog skips, a replay reads, a
+//! live warmup asks of the catalog alone and a live start refuses, nothing streaming it. A venue's
+//! row never answers for a custom series, whatever its identifier, an instrument's id or a root's
+//! included, and no venue's source answers custom data: custom data is of one kind, a custom
+//! series, routed by its type alone. Every custom data type helix compiles is registered with
+//! Nautilus once, as the process starts (`register_custom_data`).
+//!
+//! The settings each command takes of the venues are composed here, `LiveVenueArgs` for live and
+//! `HistoryVenueArgs` for fill-catalog, which the commands flatten.
+//!
+//! The cTrader brokers are one kind (`CTraderBroker`), which both dispatches loop over: each one's
+//! module names its venue and account, and its row of the table is a line of `CTRADER_BROKERS`, all
+//! another such broker takes. What they share is the adapter's (`ctrader`), its clients built for
+//! helix here (`ctrader_node_client`, `ctrader_clients`).
+//!
+//! No trait stands for a venue: Nautilus' factories, configs and `RoutingConfig` are already the
+//! seam, and the venues' needs differ too much for a trait to hide them. OKX needs its account's
+//! leverage, IB an account, a client id and its fill after the node's, Databento an API key and its
+//! own check, LSE a key per market and, for its own series, definitions written into the catalog by
+//! hand.
 
 pub mod databento;
 pub mod ib;
@@ -120,9 +117,9 @@ use crate::{
     },
 };
 
-/// A cTrader broker: the venue of its instruments, which names its clients
-/// too, and the variables of its account. Its module declares it and
-/// `CTRADER_BROKERS` routes it; the adapter (`ctrader`) does the rest.
+/// A cTrader broker: the venue of its instruments, which names its clients too, and the variables
+/// of its account. Its module declares it and `CTRADER_BROKERS` routes it; the adapter (`ctrader`)
+/// does the rest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CTraderBroker {
     venue: &'static str,
@@ -130,8 +127,8 @@ pub(crate) struct CTraderBroker {
 }
 
 impl CTraderBroker {
-    /// The broker's connection, from the process' environment (or `.env`,
-    /// once read): see `CTraderConnection::from_vars`.
+    /// The broker's connection, from the process' environment (or `.env`, once read): see
+    /// `CTraderConnection::from_vars`.
     ///
     /// # Errors
     ///
@@ -143,8 +140,8 @@ impl CTraderBroker {
     }
 }
 
-/// The cTrader brokers, each a row of the routing table (see `row`), in the
-/// order a fill asks them and a node takes their clients.
+/// The cTrader brokers, each a row of the routing table (see `row`), in the order a fill asks them
+/// and a node takes their clients.
 const CTRADER_BROKERS: &[CTraderBroker] = &[ic::BROKER, pepperstone::BROKER];
 
 /// The cTrader broker of `venue`, if one of `CTRADER_BROKERS` is on it.
@@ -155,8 +152,8 @@ fn ctrader_broker(venue: Venue) -> Option<CTraderBroker> {
         .find(|broker| venue.as_str() == broker.venue)
 }
 
-/// The cTrader brokers among `ids`, in the order of `CTRADER_BROKERS` whatever
-/// the order of `ids`, each with its instruments in the order they come.
+/// The cTrader brokers among `ids`, in the order of `CTRADER_BROKERS` whatever the order of `ids`,
+/// each with its instruments in the order they come.
 fn ctrader_brokers_present(
     ids: &[(CTraderBroker, InstrumentId)],
 ) -> Vec<(CTraderBroker, Vec<InstrumentId>)> {
@@ -177,17 +174,16 @@ fn ctrader_brokers_present(
 /// The source of a venue's instrument definitions in the catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DefinitionsSource {
-    /// The catalog alone: definitions written into it by hand, which
-    /// Nautilus' data engine answers a fill's definition requests with
-    /// before asking any client.
+    /// The catalog alone: definitions written into it by hand, which Nautilus' data engine answers
+    /// a fill's definition requests with before asking any client.
     Catalog,
     /// OKX's public API, written into the catalog before the node starts
     /// (`OkxHistory::write_definitions`).
     Okx,
     /// A cTrader broker's symbols.
     CTrader(CTraderBroker),
-    /// Databento's datasets: `GLBX.MDP3` of `GLBX`'s, `XNAS.ITCH` of
-    /// `XNAS`'s, `OPRA.PILLAR` of `OPRA`'s.
+    /// Databento's datasets: `GLBX.MDP3` of `GLBX`'s, `XNAS.ITCH` of `XNAS`'s, `OPRA.PILLAR` of
+    /// `OPRA`'s.
     Databento,
     /// Interactive Brokers' contract details.
     Ib,
@@ -213,29 +209,27 @@ pub(crate) enum LiveDataSource {
     Okx,
     /// A cTrader broker's data client.
     CTrader(CTraderBroker),
-    /// The LSE adapter's data client, streaming LSE's quotes, CME Globex's
-    /// and Nasdaq TotalView's Levels 1 to 3 and US options' trades.
+    /// The LSE adapter's data client, streaming LSE's quotes, CME Globex's and Nasdaq TotalView's
+    /// Levels 1 to 3 and US options' trades.
     Lse,
     /// Interactive Brokers' data client, on the gateway.
     Ib,
 }
 
-/// The format of a venue's book as its live data streams it
-/// (`book_format`): the book type of its deltas, L3_MBO if each is an
-/// order, by its id, L2_MBP if each is a level of the book, OKX's a price
-/// level, IB's a row of its market depth, and the levels a side of its
-/// depth snapshots, if it streams any.
+/// The format of a venue's book as its live data streams it (`book_format`): the book type of its
+/// deltas, L3_MBO if each is an order, by its id, L2_MBP if each is a level of the book, OKX's a
+/// price level, IB's a row of its market depth, and the levels a side of its depth snapshots, if it
+/// streams any.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BookFormat {
     /// The book type of its deltas.
     pub(crate) deltas: BookType,
-    /// The levels a side of its depth snapshots; none if it streams no
-    /// depth.
+    /// The levels a side of its depth snapshots; none if it streams no depth.
     pub(crate) depth: Option<NonZeroUsize>,
 }
 
-/// The broker trading a venue's instruments: its execution client on the
-/// live node, whose account a backtest simulates.
+/// The broker trading a venue's instruments: its execution client on the live node, whose account a
+/// backtest simulates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Broker {
     /// OKX's execution client.
@@ -246,26 +240,23 @@ pub(crate) enum Broker {
     Ib,
 }
 
-/// Where a trade reads the equity of an account as its broker reports it
-/// (`Broker::equity_source`).
+/// Where a trade reads the equity of an account as its broker reports it (`Broker::equity_source`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EquitySource {
-    /// Nautilus' `Portfolio::equity`: the account's balance totals and its
-    /// open positions' P&L, for a broker whose balance leaves them out.
+    /// Nautilus' `Portfolio::equity`: the account's balance totals and its open positions' P&L, for
+    /// a broker whose balance leaves them out.
     Portfolio,
-    /// The account's balance totals alone (`Account::balances_total`), for
-    /// a broker whose balance holds its open positions' P&L already.
+    /// The account's balance totals alone (`Account::balances_total`), for a broker whose balance
+    /// holds its open positions' P&L already.
     BalanceTotals,
 }
 
 impl Broker {
-    /// How the broker's accounts keep positions. Nautilus answers this only
-    /// on an execution client it has built, so this is a copy of its answer,
-    /// the cTrader brokers' and IB's pinned by a test creating that client
-    /// through its factory from the config the node gets, OKX's not: the
-    /// cTrader brokers' accounts hedge, each trade a position of its own;
-    /// OKX's derivatives net, in the net position mode live requires; IB's
-    /// account nets.
+    /// How the broker's accounts keep positions. Nautilus answers this only on an execution client
+    /// it has built, so this is a copy of its answer, the cTrader brokers' and IB's pinned by a
+    /// test creating that client through its factory from the config the node gets, OKX's not: the
+    /// cTrader brokers' accounts hedge, each trade a position of its own; OKX's derivatives net, in
+    /// the net position mode live requires; IB's account nets.
     #[must_use]
     pub(crate) fn oms_type(self) -> OmsType {
         match self {
@@ -274,18 +265,15 @@ impl Broker {
         }
     }
 
-    /// Where a trade reads the equity of the broker's account as its
-    /// execution client reports it. A copy of the adapters: the cTrader
-    /// adapter reports an account's balance, its deposits and realized P&L
-    /// (`ctrader`'s execution client, `account_state`), and OKX's its cash
-    /// (`parse_account_state`), leaving open positions out, so their equity
-    /// is Nautilus' `Portfolio::equity`, which adds the open positions'
-    /// P&L. IB's adapter reports IB's net liquidation as the balance's
-    /// total (`execution/account.rs`, `AccountSummaryBalance`), which holds
-    /// that P&L already, so its equity is the account's balance totals
-    /// alone: `Portfolio::equity` adds a reported margin account's open P&L
-    /// to them again, as Nautilus documents it, and will not change
-    /// (nautilus_trader#3565, closed as not planned).
+    /// Where a trade reads the equity of the broker's account as its execution client reports it. A
+    /// copy of the adapters: the cTrader adapter reports an account's balance, its deposits and
+    /// realized P&L (`ctrader`'s execution client, `account_state`), and OKX's its cash
+    /// (`parse_account_state`), leaving open positions out, so their equity is Nautilus'
+    /// `Portfolio::equity`, which adds the open positions' P&L. IB's adapter reports IB's net
+    /// liquidation as the balance's total (`execution/account.rs`, `AccountSummaryBalance`), which
+    /// holds that P&L already, so its equity is the account's balance totals alone:
+    /// `Portfolio::equity` adds a reported margin account's open P&L to them again, as Nautilus
+    /// documents it, and will not change (nautilus_trader#3565, closed as not planned).
     #[must_use]
     pub(crate) fn equity_source(self) -> EquitySource {
         match self {
@@ -294,16 +282,13 @@ impl Broker {
         }
     }
 
-    /// Whether the broker's accounts have a base currency, one currency
-    /// Nautilus books their margins, commissions and P&L in, converting
-    /// through the rates of the traded instrument's venue. Nautilus answers
-    /// this only in an account state the execution client reports once
-    /// connected, so this is a copy of the adapters: the cTrader adapter's
-    /// account state carries the account's deposit currency
-    /// (`ctrader`'s execution client, `account_state`); OKX's adapter
-    /// reports none (`parse_account_state`), its accounts holding each
-    /// currency apart, nor does IB's execution client, whose config sets
-    /// none (`ib::live`).
+    /// Whether the broker's accounts have a base currency, one currency Nautilus books their
+    /// margins, commissions and P&L in, converting through the rates of the traded instrument's
+    /// venue. Nautilus answers this only in an account state the execution client reports once
+    /// connected, so this is a copy of the adapters: the cTrader adapter's account state carries
+    /// the account's deposit currency (`ctrader`'s execution client, `account_state`); OKX's
+    /// adapter reports none (`parse_account_state`), its accounts holding each currency apart, nor
+    /// does IB's execution client, whose config sets none (`ib::live`).
     #[must_use]
     pub(crate) fn has_base_currency(self) -> bool {
         match self {
@@ -312,14 +297,12 @@ impl Broker {
         }
     }
 
-    /// Whether the broker's execution client takes reduce-only and
-    /// post-only orders, which Nautilus' bracket makes of its exits and take
-    /// profit and `close_position` of its close unless told otherwise. A
-    /// copy of IB's adapter (`crates/adapters/interactive_brokers/src/
-    /// execution`): `core.rs` `validate_order` denies a reduce-only order,
-    /// and a list holding one whole, and `commands.rs` `prepare_submit_order`
-    /// a post-only order sent alone, one in a list going to IB as a plain
-    /// order. Unlike `oms_type` no test pins this copy by building the
+    /// Whether the broker's execution client takes reduce-only and post-only orders, which
+    /// Nautilus' bracket makes of its exits and take profit and `close_position` of its close
+    /// unless told otherwise. A copy of IB's adapter (`crates/adapters/interactive_brokers/src/
+    /// execution`): `core.rs` `validate_order` denies a reduce-only order, and a list holding one
+    /// whole, and `commands.rs` `prepare_submit_order` a post-only order sent alone, one in a list
+    /// going to IB as a plain order. Unlike `oms_type` no test pins this copy by building the
     /// client: Nautilus' `ExecutionClient` gives no such answer.
     #[must_use]
     pub(crate) fn takes_reduce_only_and_post_only(self) -> bool {
@@ -329,9 +312,9 @@ impl Broker {
         }
     }
 
-    /// The broker's data client on the live node, by the name the node
-    /// registers it under, its factory's: OKX's and IB's adapters name
-    /// theirs, the cTrader adapter names each broker's after its venue.
+    /// The broker's data client on the live node, by the name the node registers it under, its
+    /// factory's: OKX's and IB's adapters name theirs, the cTrader adapter names each broker's
+    /// after its venue.
     fn data_client(self) -> ClientId {
         match self {
             Self::Okx => ClientId::new(OKXDataClientFactory::new().name()),
@@ -342,8 +325,8 @@ impl Broker {
 }
 
 impl LiveDataSource {
-    /// The source's data client on the live node, by the name the node
-    /// registers it under, its factory's.
+    /// The source's data client on the live node, by the name the node registers it under, its
+    /// factory's.
     fn client(self) -> ClientId {
         match self {
             Self::Okx => Broker::Okx.data_client(),
@@ -354,9 +337,8 @@ impl LiveDataSource {
     }
 }
 
-/// A venue's row of the routing table: where its instruments' definitions,
-/// history and live data come from, each on its own, and the broker
-/// trading them, if one does.
+/// A venue's row of the routing table: where its instruments' definitions, history and live data
+/// come from, each on its own, and the broker trading them, if one does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Row {
     definitions: DefinitionsSource,
@@ -380,20 +362,16 @@ impl Row {
         }
     }
 
-    /// The row of `venue`. A venue of `CTRADER_BROKERS` takes everything
-    /// from its broker, and OKX from OKX. GLBX, CME Globex as Databento
-    /// names it, takes its definitions from Databento, LSE publishing
-    /// none, its history and live data from LSE's CME Globex, and its
-    /// orders from IB; XNAS, Nasdaq TotalView as Databento names it, its
-    /// definitions from Databento, its history and live data from LSE's
-    /// Nasdaq TotalView, and its orders from IB, whose adapter maps XNAS to
-    /// its NASDAQ; OPRA, US options as Databento names them, its
-    /// definitions from Databento, its history and live data from LSE's US
-    /// options, and its orders from IB. LSEDGE,
-    /// LSE's own series, takes its definitions from the catalog alone, its
-    /// history and live data from LSE, and has no broker: LSE trades
-    /// nothing. Every venue without a row of its own takes everything from
-    /// IB.
+    /// The row of `venue`. A venue of `CTRADER_BROKERS` takes everything from its broker, and OKX
+    /// from OKX. GLBX, CME Globex as Databento names it, takes its definitions from Databento, LSE
+    /// publishing none, its history and live data from LSE's CME Globex, and its orders from IB;
+    /// XNAS, Nasdaq TotalView as Databento names it, its definitions from Databento, its history
+    /// and live data from LSE's Nasdaq TotalView, and its orders from IB, whose adapter maps XNAS
+    /// to its NASDAQ; OPRA, US options as Databento names them, its definitions from Databento, its
+    /// history and live data from LSE's US options, and its orders from IB. LSEDGE, LSE's own
+    /// series, takes its definitions from the catalog alone, its history and live data from LSE,
+    /// and has no broker: LSE trades nothing. Every venue without a row of its own takes everything
+    /// from IB.
     #[rustfmt::skip]
     fn of(venue: Venue) -> Self {
         use {Broker as B, DefinitionsSource as D, HistorySource as H, LiveDataSource as L};
@@ -414,17 +392,14 @@ impl Row {
     }
 }
 
-/// A custom data type's row of the routing table: where the history and
-/// the live data of its custom series come from, each on its own and each
-/// optional, of the sources a venue's row takes them from (`Row`). A
-/// custom series has no venue, so its row is keyed by its type's name
-/// alone (`CustomRow::of`), whatever its identifier: Nautilus routes a
-/// custom data command by its client id alone, naming no venue, and a
-/// custom type is one adapter's. Its metadata and its identifier are its
-/// source's and the config's: nothing here reads either. A type the table
-/// has no row of has a row of no source: with no history source, a custom
-/// series is the catalog's, written into the catalog from outside helix
-/// (`serves_custom`), and with no live data source nothing streams it
+/// A custom data type's row of the routing table: where the history and the live data of its custom
+/// series come from, each on its own and each optional, of the sources a venue's row takes them
+/// from (`Row`). A custom series has no venue, so its row is keyed by its type's name alone
+/// (`CustomRow::of`), whatever its identifier: Nautilus routes a custom data command by its client
+/// id alone, naming no venue, and a custom type is one adapter's. Its metadata and its identifier
+/// are its source's and the config's: nothing here reads either. A type the table has no row of has
+/// a row of no source: with no history source, a custom series is the catalog's, written into the
+/// catalog from outside helix (`serves_custom`), and with no live data source nothing streams it
 /// (`streams_custom`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct CustomRow {
@@ -435,9 +410,8 @@ struct CustomRow {
 }
 
 impl CustomRow {
-    /// Each custom data type a source serves, by its name, and its row:
-    /// LSE's rows (`lse::LseRow`) take their history and their live data
-    /// from LSE.
+    /// Each custom data type a source serves, by its name, and its row: LSE's rows (`lse::LseRow`)
+    /// take their history and their live data from LSE.
     fn table() -> [(&'static str, Self); 1] {
         use HistorySource as H;
         use LiveDataSource as L;
@@ -459,23 +433,19 @@ impl CustomRow {
     }
 }
 
-/// The history source of `series`, a custom series, as its type's row
-/// answers (`CustomRow::of`), if it serves it, judging its data type by
-/// its type, metadata and identifier alone: LSE's the check its client
-/// makes before asking LSE, its rows of a source and a symbol
-/// (`lse::serves_custom`); the other sources serve none. None if its type
-/// has no row, or one with no history source: the series is the
-/// catalog's, data written into the catalog from outside helix, which
-/// fill-catalog hands to no source (`fill_history`), a replay reads as any
-/// other, and a live warmup asks of the catalog alone
-/// (`strategy::warmup::custom_request`). A config's custom series are checked here
-/// (`StandardConfig::validate`), and so are a fill's before anything
-/// connects.
+/// The history source of `series`, a custom series, as its type's row answers (`CustomRow::of`), if
+/// it serves it, judging its data type by its type, metadata and identifier alone: LSE's the check
+/// its client makes before asking LSE, its rows of a source and a symbol (`lse::serves_custom`);
+/// the other sources serve none. None if its type has no row, or one with no history source: the
+/// series is the catalog's, data written into the catalog from outside helix, which fill-catalog
+/// hands to no source (`fill_history`), a replay reads as any other, and a live warmup asks of the
+/// catalog alone (`strategy::warmup::custom_request`). A config's custom series are checked here
+/// (`StandardConfig::validate`), and so are a fill's before anything connects.
 ///
 /// # Errors
 ///
-/// Returns an error if its type's history source does not serve `series`,
-/// naming its data type and why.
+/// Returns an error if its type's history source does not serve `series`, naming its data type and
+/// why.
 pub(crate) fn serves_custom(series: &CustomSeries) -> anyhow::Result<Option<HistorySource>> {
     let data_type = series.data_type();
     let Some(source) = CustomRow::of(series).history else {
@@ -493,20 +463,17 @@ pub(crate) fn serves_custom(series: &CustomSeries) -> anyhow::Result<Option<Hist
     Ok(Some(source))
 }
 
-/// Checks that the live data of `series`, a custom series, streams it, as
-/// its type's row's live data source answers (`CustomRow::of`): LSE's
-/// client streams none (`lse::streams_custom`), nor do the others, and
-/// nothing streams a series of a type with no row, the catalog's. A live start
-/// checks every one it reads here before anything connects
-/// (`live_clients`), as it checks a series of an instrument (`streams`).
+/// Checks that the live data of `series`, a custom series, streams it, as its type's row's live
+/// data source answers (`CustomRow::of`): LSE's client streams none (`lse::streams_custom`), nor do
+/// the others, and nothing streams a series of a type with no row, the catalog's. A live start
+/// checks every one it reads here before anything connects (`live_clients`), as it checks a series
+/// of an instrument (`streams`).
 ///
 /// # Errors
 ///
 /// Returns an error if:
-/// - Its type has no row, or one with no live data source, naming `series`
-///   and its type.
-/// - Its live data source does not stream it, naming its data type and
-///   why.
+/// - Its type has no row, or one with no live data source, naming `series` and its type.
+/// - Its live data source does not stream it, naming its data type and why.
 pub(crate) fn streams_custom(series: &CustomSeries) -> anyhow::Result<()> {
     let data_type = series.data_type();
     match CustomRow::of(series).live_data {
@@ -529,41 +496,35 @@ pub(crate) fn streams_custom(series: &CustomSeries) -> anyhow::Result<()> {
     }
 }
 
-/// The data client of `series`, a custom series, on the live node: its
-/// type's row's live data source's (`CustomRow::of`), LSE's for its rows,
-/// by the name the node registers it under. A live strategy's subscription
-/// to the series names it (`strategy::subscriptions`), a live warmup asks
-/// it the series' history if its type's history serves it, the node's
-/// catalog answering first (`strategy::warmup`), and the node has it
-/// whether or not an instrument of the run routes to it (`live_clients`).
-/// None if its type has no row, or one with no live data source: nothing
-/// streams the series.
+/// The data client of `series`, a custom series, on the live node: its type's row's live data
+/// source's (`CustomRow::of`), LSE's for its rows, by the name the node registers it under. A live
+/// strategy's subscription to the series names it (`strategy::subscriptions`), a live warmup asks
+/// it the series' history if its type's history serves it, the node's catalog answering first
+/// (`strategy::warmup`), and the node has it whether or not an instrument of the run routes to it
+/// (`live_clients`). None if its type has no row, or one with no live data source: nothing streams
+/// the series.
 pub(crate) fn custom_data_client(series: &CustomSeries) -> Option<ClientId> {
     CustomRow::of(series).live_data.map(LiveDataSource::client)
 }
 
-/// Registers with Nautilus every custom data type helix compiles, each
-/// once as the process starts, before any config loads (`main`), so that a
-/// config's custom series of it loads (`StandardConfig::validate` refuses
-/// a type Nautilus holds no schema of), a catalog's are read and a
-/// client's answers written back: Nautilus decodes and encodes custom data
-/// by its type's registered schema (`ensure_custom_data_registered`).
-/// LSE's rows (`lse::LseRow`), and Databento's imbalances and statistics
-/// (`DatabentoImbalance`, `DatabentoStatistics`), compiled in with
-/// Nautilus' Databento adapter, which registers neither itself
-/// (`register_databento_custom_data`): no row routes them, so they are the
-/// catalog's. A type of no row, written into the catalog from outside
-/// helix, is compiled in and registered here too. Idempotent.
+/// Registers with Nautilus every custom data type helix compiles, each once as the process starts,
+/// before any config loads (`main`), so that a config's custom series of it loads
+/// (`StandardConfig::validate` refuses a type Nautilus holds no schema of), a catalog's are read
+/// and a client's answers written back: Nautilus decodes and encodes custom data by its type's
+/// registered schema (`ensure_custom_data_registered`). LSE's rows (`lse::LseRow`), and Databento's
+/// imbalances and statistics (`DatabentoImbalance`, `DatabentoStatistics`), compiled in with
+/// Nautilus' Databento adapter, which registers neither itself (`register_databento_custom_data`):
+/// no row routes them, so they are the catalog's. A type of no row, written into the catalog from
+/// outside helix, is compiled in and registered here too. Idempotent.
 pub fn register_custom_data() {
     LseRow::register();
     register_databento_custom_data();
 }
 
-/// How the accounts of `venue` keep positions: as those of its broker do
-/// (`Broker::oms_type`), so every venue without a row of its own as IB's;
-/// a venue no broker trades as Nautilus' venue default
-/// (`OmsType::Unspecified`). A backtest's normal run simulates each venue
-/// so, as Nautilus' docs ask of a backtest venue.
+/// How the accounts of `venue` keep positions: as those of its broker do (`Broker::oms_type`), so
+/// every venue without a row of its own as IB's; a venue no broker trades as Nautilus' venue
+/// default (`OmsType::Unspecified`). A backtest's normal run simulates each venue so, as Nautilus'
+/// docs ask of a backtest venue.
 #[must_use]
 pub fn oms_type(venue: Venue) -> OmsType {
     Row::of(venue)
@@ -571,42 +532,37 @@ pub fn oms_type(venue: Venue) -> OmsType {
         .map_or(OmsType::Unspecified, Broker::oms_type)
 }
 
-/// Whether a broker trades the instruments of `venue`: every venue's but
-/// LSEDGE's, which is only read. A backtest gives a venue no broker trades
-/// no money.
+/// Whether a broker trades the instruments of `venue`: every venue's but LSEDGE's, which is only
+/// read. A backtest gives a venue no broker trades no money.
 #[must_use]
 pub fn has_broker(venue: Venue) -> bool {
     Row::of(venue).broker.is_some()
 }
 
-/// Whether the account of `venue`'s broker has a base currency
-/// (`Broker::has_base_currency`), so every venue without a row of its own
-/// as IB's has none; a venue no broker trades has none. A backtest's
-/// simulated account of the venue takes the balance's currency as its base
-/// if so, as the live account keeps its own.
+/// Whether the account of `venue`'s broker has a base currency (`Broker::has_base_currency`), so
+/// every venue without a row of its own as IB's has none; a venue no broker trades has none. A
+/// backtest's simulated account of the venue takes the balance's currency as its base if so, as the
+/// live account keeps its own.
 #[must_use]
 pub fn has_base_currency(venue: Venue) -> bool {
     Row::of(venue).broker.is_some_and(Broker::has_base_currency)
 }
 
-/// The series the rates of `pair`, an FX pair a strategy converts equity
-/// through (`[trade] conversions`), are read from: the first form of the
-/// pair its venue's history serves (`serves`), its 1-minute BID and ASK
-/// bars, then its quotes; an IB pair's bars, a cTrader pair's quotes.
-/// Bars first: a rate needs the pair's latest value alone, which Nautilus
-/// reads of a pair with no quote cached at the closes of its latest BID
-/// and ASK bars (`Cache::get_xrate`), and bars are the lighter history to
-/// fill and warm up on. The strategy's data requirements carry them
-/// (`StandardConfig::data_requirements`), so that fill-catalog fills them,
-/// a backtest replays them and a live warmup requests them as any series
-/// served, and the rates are read from one form of the pair, the same in
-/// a backtest as live: Nautilus reads a pair's quotes before its bars,
+/// The series the rates of `pair`, an FX pair a strategy converts equity through (`[trade]
+/// conversions`), are read from: the first form of the pair its venue's history serves (`serves`),
+/// its 1-minute BID and ASK bars, then its quotes; an IB pair's bars, a cTrader pair's quotes. Bars
+/// first: a rate needs the pair's latest value alone, which Nautilus reads of a pair with no quote
+/// cached at the closes of its latest BID and ASK bars (`Cache::get_xrate`), and bars are the
+/// lighter history to fill and warm up on. The strategy's data requirements carry them
+/// (`StandardConfig::data_requirements`), so that fill-catalog fills them, a backtest replays them
+/// and a live warmup requests them as any series served, and the rates are read from one form of
+/// the pair, the same in a backtest as live: Nautilus reads a pair's quotes before its bars,
 /// however old.
 ///
 /// # Errors
 ///
-/// Returns an error if its venue's history serves neither form, OKX's,
-/// naming the pair and its venue, and why: no rate of it could be read.
+/// Returns an error if its venue's history serves neither form, OKX's, naming the pair and its
+/// venue, and why: no rate of it could be read.
 pub fn rate_series(pair: InstrumentId) -> anyhow::Result<Vec<Series>> {
     let bars = [PriceType::Bid, PriceType::Ask].map(|price_type| {
         BarType::new(
@@ -637,23 +593,19 @@ pub fn rate_series(pair: InstrumentId) -> anyhow::Result<Vec<Series>> {
     )
 }
 
-/// Checks that the history of the venue of `source`'s instrument serves
-/// it, as its row's history source answers (`Row::of`, so every venue
-/// without a row of its own as IB's), each a copy of what the data client
-/// its fill asks requests: a cTrader broker's quotes alone
-/// (`ctrader::quoted`); OKX's trades and candles (`okx::serves`); the
-/// series LSE's client asks LSE for (`lse::serves`); IB's time bars,
-/// quotes and trades (`ib::serves`). fill-catalog checks every series it
-/// fills here before anything connects, and a live warmup requests the
-/// history of a series only if served (`strategy::warmup`), so the two
-/// agree; a conversion pair is read in a form served (`rate_series`).
-/// Custom data is never asked here: it is a custom series, routed by its
-/// type (`serves_custom`).
+/// Checks that the history of the venue of `source`'s instrument serves it, as its row's history
+/// source answers (`Row::of`, so every venue without a row of its own as IB's), each a copy of what
+/// the data client its fill asks requests: a cTrader broker's quotes alone (`ctrader::quoted`);
+/// OKX's trades and candles (`okx::serves`); the series LSE's client asks LSE for (`lse::serves`);
+/// IB's time bars, quotes and trades (`ib::serves`). fill-catalog checks every series it fills here
+/// before anything connects, and a live warmup requests the history of a series only if served
+/// (`strategy::warmup`), so the two agree; a conversion pair is read in a form served
+/// (`rate_series`). Custom data is never asked here: it is a custom series, routed by its type
+/// (`serves_custom`).
 ///
 /// # Errors
 ///
-/// Returns an error if its venue's history does not serve `source`, naming
-/// it and saying why.
+/// Returns an error if its venue's history does not serve `source`, naming it and saying why.
 pub(crate) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
     match Row::of(source.instrument_id().venue).history {
         HistorySource::CTrader(broker) => {
@@ -665,29 +617,22 @@ pub(crate) fn serves(source: &CatalogSeries) -> anyhow::Result<()> {
     }
 }
 
-/// Checks that the live data of the venue of `source`'s instrument streams
-/// it as a run subscribes to it, as its row's live data source answers
-/// (`Row::of`, so every venue without a row of its own as IB's), each a
-/// copy of the subscriptions its data client implements: a cTrader
-/// broker's quotes alone (`ctrader::quoted`), the adapter's one rule of
-/// its history and its spots; OKX's quotes, trades, candles and book
-/// (`okx::streams`); the series LSE's client streams
-/// (`lse::streams`); IB's quotes, trades, time bars and book deltas
-/// (`ib::streams`). A book is checked as a run subscribes to it, in its
-/// venue's format (`book_format`). Custom data is never asked here: it is a
-/// custom series, routed by its type (`streams_custom`). A live start
-/// checks every series it
-/// subscribes to here before anything connects (`live_clients`): a
-/// subscription a client does not take would not fail the run, Nautilus'
-/// `DataClient` defaults logging "Handler not implemented" and the data
-/// engine logging a subscription's error alone
-/// (`crates/data/src/engine/mod.rs:875-877`), so the strategy would run
-/// deaf to it.
+/// Checks that the live data of the venue of `source`'s instrument streams it as a run subscribes
+/// to it, as its row's live data source answers (`Row::of`, so every venue without a row of its own
+/// as IB's), each a copy of the subscriptions its data client implements: a cTrader broker's quotes
+/// alone (`ctrader::quoted`), the adapter's one rule of its history and its spots; OKX's quotes,
+/// trades, candles and book (`okx::streams`); the series LSE's client streams (`lse::streams`);
+/// IB's quotes, trades, time bars and book deltas (`ib::streams`). A book is checked as a run
+/// subscribes to it, in its venue's format (`book_format`). Custom data is never asked here: it is
+/// a custom series, routed by its type (`streams_custom`). A live start checks every series it
+/// subscribes to here before anything connects (`live_clients`): a subscription a client does not
+/// take would not fail the run, Nautilus' `DataClient` defaults logging "Handler not implemented"
+/// and the data engine logging a subscription's error alone
+/// (`crates/data/src/engine/mod.rs:875-877`), so the strategy would run deaf to it.
 ///
 /// # Errors
 ///
-/// Returns an error if its venue's live data does not stream `source`,
-/// naming it and saying why.
+/// Returns an error if its venue's live data does not stream `source`, naming it and saying why.
 pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
     match Row::of(source.instrument_id().venue).live_data {
         LiveDataSource::CTrader(broker) => {
@@ -699,23 +644,18 @@ pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
     }
 }
 
-/// The format of the book of `venue`'s instruments, as its row's live data
-/// source streams it (`Row::of`, so every venue without a row of its own
-/// as IB's), each a copy of its data client: LSE's orders and depth of ten
-/// levels a side (`lse::BOOK`); IB's rows of its market depth and no
-/// depth (`ib::BOOK`); OKX's price levels and depth of five levels a side
-/// (`okx::BOOK`); none of a cTrader broker's, whose client streams its
-/// quotes alone (`ctrader::quoted`). A venue has one format, its live
-/// data's: a subscription names it, each client streaming its own alone
-/// (`streams` takes a book at it), and the catalog keeps one series of a
-/// venue's book, which its live stream records into, its history fills
-/// and a backtest and a warmup replay, so a history serving a book serves
-/// it in that format: LSE's, the one history serving a book (`serves`), is
-/// the live data of each of its rows. So a strategy subscribes to a book
-/// at it (`strategy::subscriptions`), a live warmup requests the history of its
-/// deltas at its book type, onto which Nautilus replays them
-/// (`strategy::warmup`), and a fill asks its depth at its levels
-/// (`catalog::NodeFill`).
+/// The format of the book of `venue`'s instruments, as its row's live data source streams it
+/// (`Row::of`, so every venue without a row of its own as IB's), each a copy of its data client:
+/// LSE's orders and depth of ten levels a side (`lse::BOOK`); IB's rows of its market depth and no
+/// depth (`ib::BOOK`); OKX's price levels and depth of five levels a side (`okx::BOOK`); none of a
+/// cTrader broker's, whose client streams its quotes alone (`ctrader::quoted`). A venue has one
+/// format, its live data's: a subscription names it, each client streaming its own alone (`streams`
+/// takes a book at it), and the catalog keeps one series of a venue's book, which its live stream
+/// records into, its history fills and a backtest and a warmup replay, so a history serving a book
+/// serves it in that format: LSE's, the one history serving a book (`serves`), is the live data of
+/// each of its rows. So a strategy subscribes to a book at it (`strategy::subscriptions`), a live
+/// warmup requests the history of its deltas at its book type, onto which Nautilus replays them
+/// (`strategy::warmup`), and a fill asks its depth at its levels (`catalog::NodeFill`).
 pub(crate) fn book_format(venue: Venue) -> Option<BookFormat> {
     match Row::of(venue).live_data {
         LiveDataSource::CTrader(_) => None,
@@ -725,10 +665,9 @@ pub(crate) fn book_format(venue: Venue) -> Option<BookFormat> {
     }
 }
 
-/// Where a trade on `venue` reads the equity of its broker's account as the
-/// broker reports it (`Broker::equity_source`), so every venue without a
-/// row of its own as IB; a venue no broker trades, whose account is
-/// Nautilus' alone, from `Portfolio::equity`.
+/// Where a trade on `venue` reads the equity of its broker's account as the broker reports it
+/// (`Broker::equity_source`), so every venue without a row of its own as IB; a venue no broker
+/// trades, whose account is Nautilus' alone, from `Portfolio::equity`.
 #[must_use]
 pub fn equity_source(venue: Venue) -> EquitySource {
     Row::of(venue)
@@ -736,9 +675,8 @@ pub fn equity_source(venue: Venue) -> EquitySource {
         .map_or(EquitySource::Portfolio, Broker::equity_source)
 }
 
-/// The data client a live node asks the definition of an instrument of
-/// `venue` of: its broker's, if a broker trades it, its live data
-/// source's otherwise, LSEDGE's LSE, which publishes none (see
+/// The data client a live node asks the definition of an instrument of `venue` of: its broker's, if
+/// a broker trades it, its live data source's otherwise, LSEDGE's LSE, which publishes none (see
 /// `strategy::warmup`). The node's catalog answers first either way.
 #[must_use]
 pub fn live_definitions_client(venue: Venue) -> ClientId {
@@ -748,10 +686,9 @@ pub fn live_definitions_client(venue: Venue) -> ClientId {
 }
 
 /// Whether the broker of `venue` takes reduce-only and post-only orders
-/// (`Broker::takes_reduce_only_and_post_only`), so every venue without a
-/// row of its own as IB; a venue no broker trades takes none. A trade asks
-/// it in a backtest as live, so that a backtest sends the orders live
-/// sends.
+/// (`Broker::takes_reduce_only_and_post_only`), so every venue without a row of its own as IB; a
+/// venue no broker trades takes none. A trade asks it in a backtest as live, so that a backtest
+/// sends the orders live sends.
 #[must_use]
 pub fn takes_reduce_only_and_post_only(venue: Venue) -> bool {
     Row::of(venue)
@@ -759,25 +696,24 @@ pub fn takes_reduce_only_and_post_only(venue: Venue) -> bool {
         .is_some_and(Broker::takes_reduce_only_and_post_only)
 }
 
-/// The venues' settings of a live node, the live command's flags, each
-/// venue's declared in its module: IB's account and client id. The live
-/// runner holds them and hands them to `live_clients`.
+/// The venues' settings of a live node, the live command's flags, each venue's declared in its
+/// module: IB's account and client id. The live runner holds them and hands them to `live_clients`.
 #[derive(Debug, Clone, Args)]
 pub struct LiveVenueArgs {
     #[command(flatten)]
     ib: ib::IbLiveArgs,
 }
 
-/// The venues' settings of a catalog fill, fill-catalog's flags, each
-/// venue's declared in its module: IB's client id.
+/// The venues' settings of a catalog fill, fill-catalog's flags, each venue's declared in its
+/// module: IB's client id.
 #[derive(Debug, Args)]
 pub struct HistoryVenueArgs {
     #[command(flatten)]
     ib: ib::IbHistoryArgs,
 }
 
-/// The data client of a cTrader broker for a fill through the node (see
-/// `NodeFill::add`), on `connection`, loading `instrument_ids`.
+/// The data client of a cTrader broker for a fill through the node (see `NodeFill::add`), on
+/// `connection`, loading `instrument_ids`.
 #[must_use]
 fn ctrader_node_client(
     connection: CTraderConnection,
@@ -790,16 +726,14 @@ fn ctrader_node_client(
     }
 }
 
-/// Adds to `node` the fill of `slices`, the quotes of `instrument_ids`,
-/// instruments of a cTrader broker, which its history serves (`serves`),
-/// over what the catalog misses of them, a window holding at most what one
-/// tick request spans, the broker's data client loading `instrument_ids`.
-/// The connection is read only if something is missing, so a complete
-/// catalog needs no credential.
+/// Adds to `node` the fill of `slices`, the quotes of `instrument_ids`, instruments of a cTrader
+/// broker, which its history serves (`serves`), over what the catalog misses of them, a window
+/// holding at most what one tick request spans, the broker's data client loading `instrument_ids`.
+/// The connection is read only if something is missing, so a complete catalog needs no credential.
 ///
-/// # Errors
-///
-/// Returns an error if the catalog cannot be read, or as `connection`.
+/// Returns an error if:
+/// - The catalog cannot be read.
+/// - `connection` fails.
 fn add_ctrader_fill(
     node: &mut NodeFill,
     catalog: &ParquetDataCatalog,
@@ -827,9 +761,8 @@ fn of_source(slices: &[SeriesSlice], source: HistorySource) -> Vec<SeriesSlice> 
         .collect()
 }
 
-/// Those of `custom`, custom series over their slices, whose history
-/// `source` fills, their type's row's (`CustomRow::of`); none of a type
-/// with no row, the catalog's.
+/// Those of `custom`, custom series over their slices, whose history `source` fills, their type's
+/// row's (`CustomRow::of`); none of a type with no row, the catalog's.
 fn of_custom_source(custom: &[CustomSlice], source: HistorySource) -> Vec<CustomSlice> {
     custom
         .iter()
@@ -847,49 +780,43 @@ fn of_definitions_source(slices: &[SeriesSlice], source: DefinitionsSource) -> V
         .collect()
 }
 
-/// Fills the catalog in `catalog_dir` with the instruments and the series
-/// `requirements` reads over `[start, end]`, those its bars are built from
-/// and its ticks (see `DataRequirements::catalog_keys`), each on a contract
-/// over its slice (`DataRequirements::slices`), every history source
-/// (`Row::of`, `HistorySource`) given its slices, and its custom series
-/// (`DataRequirements::custom`), which have no venue, each by its data type
-/// as given, from the history source its type's row names
-/// (`CustomRow::of`, `of_custom_source`): LSE's rows (`lse::LseRow`) from
-/// LSE, stored under the data type's identifier; none of the catalog's. The cTrader brokers',
-/// OKX's and LSE's fill through a Nautilus node (see `catalog::NodeFill`), each request naming
-/// the client that answers it: each cTrader broker's data client for its
-/// own instruments (`add_ctrader_fill`), OKX's for OKX instruments (their
-/// series and funding) and LSE's for LSEDGE, GLBX, XNAS and OPRA
-/// instruments and LSE's rows (`lse::add_fill`). Then IB, connected only if it has
-/// instruments, on the client id of `venues`, fills the others, without a
-/// node until its client answers with response envelopes. Each contract's
-/// definition comes from its row's definitions source
-/// (`DefinitionsSource`): the cTrader brokers and IB ask the definition of
-/// each contract they fill the series of; OKX writes the definitions it
-/// gives before the node starts; GLBX's, XNAS's and OPRA's are asked of
-/// Databento's data client in LSE's fill, each within the end of its
-/// dataset; LSEDGE's are the catalog's alone, which the data
-/// engine answers LSE's client's definition requests from.
-/// Before anything connects, every series is checked against its venue's
-/// history (`serves`), each custom series against its type's history
-/// (`serves_custom`), one of a type with no row, or one with no history
-/// source, being the catalog's, written into it from outside helix and
-/// handed to no source, and IB's against what IB holds
-/// (`ib::check_held`). A source with nothing missing reads no credential,
+/// Fills the catalog in `catalog_dir` with the instruments and the series `requirements` reads over
+/// `[start, end]`, those its bars are built from and its ticks (see
+/// `DataRequirements::catalog_keys`), each on a contract over its slice
+/// (`DataRequirements::slices`), every history source (`Row::of`, `HistorySource`) given its
+/// slices, and its custom series (`DataRequirements::custom`), which have no venue, each by its
+/// data type as given, from the history source its type's row names (`CustomRow::of`,
+/// `of_custom_source`): LSE's rows (`lse::LseRow`) from LSE, stored under the data type's
+/// identifier; none of the catalog's. The cTrader brokers', OKX's and LSE's fill through a Nautilus
+/// node (see `catalog::NodeFill`), each request naming the client that answers it: each cTrader
+/// broker's data client for its own instruments (`add_ctrader_fill`), OKX's for OKX instruments
+/// (their series and funding) and LSE's for LSEDGE, GLBX, XNAS and OPRA instruments and LSE's rows
+/// (`lse::add_fill`). Then IB, connected only if it has instruments, on the client id of `venues`,
+/// fills the others, without a node until its client answers with response envelopes. Each
+/// contract's definition comes from its row's definitions source (`DefinitionsSource`): the cTrader
+/// brokers and IB ask the definition of each contract they fill the series of; OKX writes the
+/// definitions it gives before the node starts; GLBX's, XNAS's and OPRA's are asked of Databento's
+/// data client in LSE's fill, each within the end of its dataset; LSEDGE's are the catalog's alone,
+/// which the data engine answers LSE's client's definition requests from. Before anything connects,
+/// every series is checked against its venue's history (`serves`), each custom series against its
+/// type's history (`serves_custom`), one of a type with no row, or one with no history source,
+/// being the catalog's, written into it from outside helix and handed to no source, and IB's
+/// against what IB holds (`ib::check_held`). A source with nothing missing reads no credential,
 /// IB's connection aside.
 ///
 /// # Errors
 ///
-/// Returns an error if the history source of a custom series' type does
-/// not serve it (`serves_custom`), if a venue's history does not serve a
-/// series, or if IB holds no bars of a series as old as its slice, each
-/// before anything connects; if the catalog cannot be read, if
-/// `DATABENTO_API_KEY` is missing while Databento has a definition to give,
-/// or as `add_ctrader_fill`, `OkxHistory::write_definitions`,
-/// `lse::add_fill` (`DatabentoHistory::new` and
-/// `DatabentoHistory::within_datasets` among them), `NodeFill::run` (`LSE_API_KEY`, `LSE_CME_API_KEY` or
-/// `LSE_NASDAQ_API_KEY` missing while LSE has something to fill of its
-/// market among them), `IbHistory::connect` and `IbHistory::fill`.
+/// Returns an error if:
+/// - The history source of a custom series' type does not serve it (`serves_custom`), before
+///   anything connects.
+/// - A venue's history does not serve a series, before anything connects.
+/// - IB holds no bars of a series as old as its slice, before anything connects.
+/// - The catalog cannot be read.
+/// - `DATABENTO_API_KEY` is missing while Databento has a definition to give.
+/// - `add_ctrader_fill`, `OkxHistory::write_definitions`, `lse::add_fill` (`DatabentoHistory::new`
+///   and `DatabentoHistory::within_datasets` among them), `NodeFill::run` (`LSE_API_KEY`,
+///   `LSE_CME_API_KEY` or `LSE_NASDAQ_API_KEY` missing while LSE has something to fill of its
+///   market among them), `IbHistory::connect` or `IbHistory::fill` fails.
 pub async fn fill_history(
     requirements: &DataRequirements,
     start: Timestamp,
@@ -903,8 +830,9 @@ pub async fn fill_history(
     for source in requirements.catalog_series() {
         serves(&source)?;
     }
-    // Every source takes the series slices of its instruments: a rolled
-    // root's series contract by contract, each over its slice.
+
+    // Every source takes the series slices of its instruments: a rolled root's series contract by
+    // contract, each over its slice.
     let slices = requirements.slices(start, end);
     let ib_slices = of_source(&slices, HistorySource::Ib);
     let mut catalog = ParquetDataCatalog::new(catalog_dir, None, None, None, None);
@@ -965,8 +893,8 @@ pub async fn fill_history(
     }
     node.run(catalog_dir, || Rc::new(RefCell::new(LiveClock::default())))
         .await?;
-    // Temporary until nautilus_trader#5472 is fixed: IB then fills through
-    // the node.
+
+    // Temporary until nautilus_trader#5472 is fixed: IB then fills through the node
     if !ib_ids.is_empty() {
         let ib = IbHistory::connect(
             venues.ib.client_id,
@@ -979,9 +907,8 @@ pub async fn fill_history(
     Ok(())
 }
 
-/// The clients of a node trading `instrument_ids` of a cTrader broker, on
-/// `connection`. Both are on its venue, so Nautilus routes the broker's data
-/// and orders to them without a route of ours.
+/// The clients of a node trading `instrument_ids` of a cTrader broker, on `connection`. Both are on
+/// its venue, so Nautilus routes the broker's data and orders to them without a route of ours.
 fn ctrader_clients(connection: CTraderConnection, instrument_ids: Vec<InstrumentId>) -> Clients {
     let data = CTraderDataClientConfig::new(connection.clone(), instrument_ids.clone());
     let exec = CTraderExecutionClientConfig::new(connection, instrument_ids);
@@ -997,9 +924,9 @@ fn ctrader_clients(connection: CTraderConnection, instrument_ids: Vec<Instrument
     }
 }
 
-/// The instruments of each adapter's clients on the live node, the venues
-/// IB's data client is routed, and the live data sources of the custom
-/// series, whose clients their subscriptions name (`custom_data_client`).
+/// The instruments of each adapter's clients on the live node, the venues IB's data client is
+/// routed, and the live data sources of the custom series, whose clients their subscriptions name
+/// (`custom_data_client`).
 #[derive(Debug, Default, PartialEq, Eq)]
 struct LiveRoutes {
     okx: Vec<InstrumentId>,
@@ -1011,18 +938,14 @@ struct LiveRoutes {
 }
 
 impl LiveRoutes {
-    /// Each of `instrument_ids` to the clients of its row's live data
-    /// source, and to IB's too if IB is its broker: IB's clients come as a
-    /// pair, the data client, which loads the instruments it is given
-    /// (`load_ids`), and the execution client, which resolves the
-    /// instruments of the orders it takes from them; so GLBX, XNAS and OPRA,
-    /// whose live data is LSE's and whose orders go to IB, are given to
-    /// both. IB's
-    /// data client is routed the venues whose live data is IB's, each once.
-    /// OKX's and the cTrader brokers' rows take their live data from their
-    /// broker. Each of `custom`, custom series, to its type's row's live
-    /// data source (`CustomRow::of`), each source once, whether or not an
-    /// instrument routes to it; none if its type has none.
+    /// Each of `instrument_ids` to the clients of its row's live data source, and to IB's too if IB
+    /// is its broker: IB's clients come as a pair, the data client, which loads the instruments it
+    /// is given (`load_ids`), and the execution client, which resolves the instruments of the
+    /// orders it takes from them; so GLBX, XNAS and OPRA, whose live data is LSE's and whose orders
+    /// go to IB, are given to both. IB's data client is routed the venues whose live data is IB's,
+    /// each once. OKX's and the cTrader brokers' rows take their live data from their broker. Each
+    /// of `custom`, custom series, to its type's row's live data source (`CustomRow::of`), each
+    /// source once, whether or not an instrument routes to it; none if its type has none.
     fn of(instrument_ids: &[InstrumentId], custom: &[CustomSeries]) -> Self {
         let mut routes = Self::default();
         for &id in instrument_ids {
@@ -1051,18 +974,15 @@ impl LiveRoutes {
         routes
     }
 
-    /// The live node's clients of the routes, as `live_clients` sets them
-    /// up past its checks: LSE's if an instrument or a custom series routes
-    /// to it, streaming no instrument if none does (`lse::live_clients`).
-    /// OKX's, the cTrader brokers' and IB's live data stream no custom data,
-    /// so a live start refuses a custom series of theirs before this
-    /// (`streams_custom`), and their clients are set up for their
-    /// instruments alone.
+    /// The live node's clients of the routes, as `live_clients` sets them up past its checks: LSE's
+    /// if an instrument or a custom series routes to it, streaming no instrument if none does
+    /// (`lse::live_clients`). OKX's, the cTrader brokers' and IB's live data stream no custom data,
+    /// so a live start refuses a custom series of theirs before this (`streams_custom`), and their
+    /// clients are set up for their instruments alone.
     ///
     /// # Errors
     ///
-    /// Returns an error if `live_clients` would, past its checks of what
-    /// the run reads.
+    /// Returns an error if `live_clients` would, past its checks of what the run reads.
     async fn clients(self, venues: &LiveVenueArgs, catalog: &Path) -> anyhow::Result<Vec<Clients>> {
         let Self {
             okx: okx_ids,
@@ -1100,63 +1020,53 @@ impl LiveRoutes {
     }
 }
 
-/// The live node's clients of `instrument_ids` (see `LiveRoutes`), for the
-/// instruments `requirements` reads, and of its custom series' live data
-/// sources: OKX's, each cTrader broker's (`ctrader_brokers_present`),
-/// LSE's, then IB's. OKX's, the cTrader brokers' and IB's are each a data
-/// client with the execution client of the same adapter on its connection;
-/// LSE's is a data client alone, routed the venues of its instruments,
-/// LSEDGE, which no broker trades, and GLBX, XNAS and OPRA, whose orders go
-/// to IB's execution client (see `lse::live_clients`), its keys read when
-/// the node creates it, and set up for a custom series of LSE's rows whether
-/// or not an instrument of the run is LSE's, streaming none and routed no
-/// venue if none is: a custom series' subscription names its client
-/// (`custom_data_client`), not a venue. IB's data
-/// client is routed the venues whose live data is IB's, and its execution
-/// client takes the default route of orders, every order but OKX's and the
-/// cTrader brokers'. So every venue the run reads has a route of its data,
-/// and helix makes no data client the default: Nautilus makes the first
-/// data client on no venue it registers the default itself, LSE's or IB's
-/// in no set order, and would refuse IB's made the default after LSE's
-/// (see `live::node::Clients`); nothing depends on which, every venue read
-/// having a route. A run reading a series its venue's live data does not
-/// stream as the run subscribes to it (`streams`) is refused before
-/// anything connects: every series the run subscribes to is checked,
-/// those its bars are built from and its ticks, a traded instrument's
-/// quotes and a conversion pair's series among them
-/// (`DataRequirements::catalog_series`), rather than have the client log
-/// the subscription and the run go deaf to it; and so is a run reading a
-/// custom series its type's live data does not stream (`streams_custom`):
-/// LSE's client streams none of its rows, and nothing the catalog's. The cTrader
-/// brokers' environments and credential are read before anything
-/// connects, each broker's clients loading its instruments of `instrument_ids`; OKX's
-/// clients are set up once its account trades each instrument at the
-/// leverage its definition in `catalog` holds, IB's trading the IB account
-/// of `venues` with its client id.
+/// The live node's clients of `instrument_ids` (see `LiveRoutes`), for the instruments
+/// `requirements` reads, and of its custom series' live data sources: OKX's, each cTrader broker's
+/// (`ctrader_brokers_present`), LSE's, then IB's. OKX's, the cTrader brokers' and IB's are each a
+/// data client with the execution client of the same adapter on its connection; LSE's is a data
+/// client alone, routed the venues of its instruments, LSEDGE, which no broker trades, and GLBX,
+/// XNAS and OPRA, whose orders go to IB's execution client (see `lse::live_clients`), its keys read
+/// when the node creates it, and set up for a custom series of LSE's rows whether or not an
+/// instrument of the run is LSE's, streaming none and routed no venue if none is: a custom series'
+/// subscription names its client (`custom_data_client`), not a venue. IB's data client is routed
+/// the venues whose live data is IB's, and its execution client takes the default route of orders,
+/// every order but OKX's and the cTrader brokers'. So every venue the run reads has a route of its
+/// data, and helix makes no data client the default: Nautilus makes the first data client on no
+/// venue it registers the default itself, LSE's or IB's in no set order, and would refuse IB's made
+/// the default after LSE's (see `live::node::Clients`); nothing depends on which, every venue read
+/// having a route. A run reading a series its venue's live data does not stream as the run
+/// subscribes to it (`streams`) is refused before anything connects: every series the run
+/// subscribes to is checked, those its bars are built from and its ticks, a traded instrument's
+/// quotes and a conversion pair's series among them (`DataRequirements::catalog_series`), rather
+/// than have the client log the subscription and the run go deaf to it; and so is a run reading a
+/// custom series its type's live data does not stream (`streams_custom`): LSE's client streams none
+/// of its rows, and nothing the catalog's. The cTrader brokers' environments and credential are
+/// read before anything connects, each broker's clients loading its instruments of
+/// `instrument_ids`; OKX's clients are set up once its account trades each instrument at the
+/// leverage its definition in `catalog` holds, IB's trading the IB account of `venues` with its
+/// client id.
 ///
 /// # Errors
 ///
 /// Returns an error if:
-/// - `requirements` reads a series its venue's live data does not stream
-///   (see `streams`) or a custom series its type's live data does not
-///   stream (see `streams_custom`), naming them, before anything connects.
-/// - A cTrader broker's environment or credential is missing (see
-///   `CTraderConnection::from_vars`), before anything connects.
-/// - OKX's clients cannot be set up or the OKX account does not suit the
-///   run (see `okx::clients`).
-/// - cTrader is unreachable or a broker's account is not hedging or not the
-///   credential's (see `CTraderConnection::check_account`).
-/// - The strategy trades IB instruments and no account is given, or IB's
-///   clients cannot be set up (see `ib::clients`).
+/// - `requirements` reads a series its venue's live data does not stream (see `streams`) or a
+///   custom series its type's live data does not stream (see `streams_custom`), naming them, before
+///   anything connects.
+/// - A cTrader broker's environment or credential is missing (see `CTraderConnection::from_vars`),
+///   before anything connects.
+/// - OKX's clients cannot be set up or the OKX account does not suit the run (see `okx::clients`).
+/// - cTrader is unreachable or a broker's account is not hedging or not the credential's (see
+///   `CTraderConnection::check_account`).
+/// - The strategy trades IB instruments and no account is given, or IB's clients cannot be set up
+///   (see `ib::clients`).
 pub(crate) async fn live_clients(
     requirements: &DataRequirements,
     instrument_ids: &[InstrumentId],
     venues: &LiveVenueArgs,
     catalog: &Path,
 ) -> anyhow::Result<Vec<Clients>> {
-    // Checked before anything connects: every series the run subscribes
-    // to, a rolled root's by its venue, its contracts', and its custom
-    // series, by its type's row.
+    // Checked before anything connects: every series the run subscribes to, a rolled root's by its
+    // venue, its contracts', and its custom series, by its type's row.
     for series in requirements.catalog_series() {
         streams(&series)?;
     }
@@ -1221,8 +1131,7 @@ mod tests {
         strategy::subscriptions::Subscriptions,
     };
 
-    /// A demo account of `broker`, through its account's variables, beside
-    /// the login's credential.
+    /// A demo account of `broker`, through its account's variables, beside the login's credential.
     fn demo_connection(broker: CTraderBroker) -> CTraderConnection {
         let map: HashMap<&str, &str> = HashMap::from([
             ("CTRADER_CLIENT_ID", "12345_clientIdValue"),
@@ -1239,8 +1148,7 @@ mod tests {
         CTraderConnection::from_vars(Venue::new(broker.venue), broker.account, var).unwrap()
     }
 
-    /// Each broker's account by its own variables, on the login's one
-    /// credential and token file.
+    /// Each broker's account by its own variables, on the login's one credential and token file.
     #[rstest]
     fn each_ctrader_venue_reads_its_own_account_beside_the_login_s_credential() {
         let ic = demo_connection(ic::BROKER);
@@ -1267,10 +1175,9 @@ mod tests {
         }
     }
 
-    /// The brokers present, the only ones whose connection either dispatch
-    /// reads: none of no instruments, a broker without instruments not
-    /// among them, and IC before Pepperstone, as `CTRADER_BROKERS` lists
-    /// them, whatever the order of the instruments.
+    /// The brokers present, the only ones whose connection either dispatch reads: none of no
+    /// instruments, a broker without instruments not among them, and IC before Pepperstone, as
+    /// `CTRADER_BROKERS` lists them, whatever the order of the instruments.
     #[rstest]
     #[case::no_instruments(vec![], vec![])]
     #[case::one_broker_s(
@@ -1304,10 +1211,9 @@ mod tests {
         assert_eq!(ctrader_brokers_present(&ids), present);
     }
 
-    /// The instruments of a cTrader broker's bars and those it reads as
-    /// quotes alone, a pair of `[trade] conversions`, no bars built from
-    /// them, go to its clients, which load them, so that the strategy's
-    /// subscriptions to them are served.
+    /// The instruments of a cTrader broker's bars and those it reads as quotes alone, a pair of
+    /// `[trade] conversions`, no bars built from them, go to its clients, which load them, so that
+    /// the strategy's subscriptions to them are served.
     #[rstest]
     fn a_ctrader_broker_s_clients_take_the_instruments_of_its_bars_and_of_its_quotes_read_alone() {
         let (gold, eurusd) = (
@@ -1333,8 +1239,8 @@ mod tests {
         );
     }
 
-    /// As the node does: each client created by its factory, under the
-    /// factory's name, from its config.
+    /// As the node does: each client created by its factory, under the factory's name, from its
+    /// config.
     #[rstest]
     fn the_node_gets_factories_that_create_the_broker_s_clients_on_its_venue() {
         let (data_tx, _data_events) = tokio::sync::mpsc::unbounded_channel();
@@ -1387,9 +1293,9 @@ mod tests {
         A::from_arg_matches(&matches)
     }
 
-    /// The account given in each, since the developer's environment may
-    /// set `NAUTILUS_IB_ACCOUNT_ID`, which the flag falls back on; the
-    /// client id the adapter's default, 1, unless given.
+    /// The account given in each, since the developer's environment may set
+    /// `NAUTILUS_IB_ACCOUNT_ID`, which the flag falls back on; the client id the adapter's default,
+    /// 1, unless given.
     #[rstest]
     #[case::the_client_id_given(&["--account", "DU1234567", "--client-id", "7"], 7)]
     #[case::the_adapter_s_default_client(&["--account", "DU1234567"], 1)]
@@ -1399,9 +1305,8 @@ mod tests {
         assert_eq!(venues.ib.client_id, client_id);
     }
 
-    /// Read from the arguments' definition: setting the variable would race
-    /// the other tests, and the developer's environment may have it. Not
-    /// required: a run on OKX alone has no IB account.
+    /// Read from the arguments' definition: setting the variable would race the other tests, and
+    /// the developer's environment may have it. Not required: a run on OKX alone has no IB account.
     #[rstest]
     fn the_live_account_falls_back_on_nautilus_ib_account_id() {
         let live = LiveVenueArgs::augment_args(Command::new("live"));
@@ -1427,10 +1332,9 @@ mod tests {
         assert_eq!(venues.ib.client_id, client_id);
     }
 
-    /// Refused before anything connects: the run has no OKX or IC
-    /// instrument, and IB's gateway starts only once the account is known.
-    /// An IB instrument's run, and GLBX's and OPRA's, whose data is LSE's
-    /// but whose orders are IB's.
+    /// Refused before anything connects: the run has no OKX or IC instrument, and IB's gateway
+    /// starts only once the account is known. An IB instrument's run, and GLBX's and OPRA's, whose
+    /// data is LSE's but whose orders are IB's.
     #[rstest]
     #[case::an_ib_instrument(ticks(&[]), "SXR8.IBIS")]
     #[case::glbx(ticks(&[(NautilusDataType::QuoteTick, "GCZ26.GLBX")]), "GCZ26.GLBX")]
@@ -1460,8 +1364,8 @@ mod tests {
         );
     }
 
-    /// How the execution client of `clients` keeps positions, created as the
-    /// node creates it, from the config the node gets, connecting to nothing.
+    /// How the execution client of `clients` keeps positions, created as the node creates it, from
+    /// the config the node gets, connecting to nothing.
     pub(in crate::venues) fn created_oms_type(clients: Clients) -> OmsType {
         let (exec_tx, _exec_events) = tokio::sync::mpsc::unbounded_channel();
         replace_exec_event_sender(exec_tx);
@@ -1498,9 +1402,9 @@ mod tests {
     }
 
     const FILL_START: &str = "2026-10-01T00:00:00Z";
-    /// An end IB's connection refuses, before it starts a gateway, as not
-    /// yet closed (`IbHistory::connect`): a fill reaching IB says so at once,
-    /// with no gateway, and a fill not reaching it does not say so.
+    /// An end IB's connection refuses, before it starts a gateway, as not yet closed
+    /// (`IbHistory::connect`): a fill reaching IB says so at once, with no gateway, and a fill not
+    /// reaching it does not say so.
     const FILL_END: &str = "2099-01-01T00:00:00Z";
     const IB_REFUSES: &str = "within a minute of now";
     const SWAP: &str = "BTC-USDT-SWAP.OKX";
@@ -1556,8 +1460,7 @@ mod tests {
             .unwrap();
     }
 
-    /// Stores the definition of the OKX swap `id`, so that a fill asks OKX's
-    /// API for none.
+    /// Stores the definition of the OKX swap `id`, so that a fill asks OKX's API for none.
     fn store_okx_definition(catalog: &ParquetDataCatalog, id: &str) {
         let mut swap = crypto_perpetual_ethusdt();
         swap.id = InstrumentId::from(id);
@@ -1566,9 +1469,9 @@ mod tests {
             .unwrap();
     }
 
-    /// Every window of every source but IB's stored: no node starts, and
-    /// with no IB instrument IB is not connected, though it would refuse this
-    /// end. A credential read where none is set would fail the fill.
+    /// Every window of every source but IB's stored: no node starts, and with no IB instrument IB
+    /// is not connected, though it would refuse this end. A credential read where none is set would
+    /// fail the fill.
     #[tokio::test]
     async fn a_complete_catalog_fills_with_no_credential_no_node_and_no_ib() {
         let dir = tempfile::tempdir().unwrap();
@@ -1612,13 +1515,11 @@ mod tests {
         .unwrap();
     }
 
-    /// A custom series of a type no row routes is the catalog's, written
-    /// from outside helix: a fill hands it to no source, asks no venue
-    /// about it, loads no definition for it, and fills the config's other
-    /// series, here GCZ26's trades, all stored, so no node starts and no
-    /// credential is read. An instrument's custom data, under its id, a
-    /// contract's (GCZ26's) or a root's (GC's, contract by contract), and
-    /// the tests' signal, under an identifier of no instrument.
+    /// A custom series of a type no row routes is the catalog's, written from outside helix: a fill
+    /// hands it to no source, asks no venue about it, loads no definition for it, and fills the
+    /// config's other series, here GCZ26's trades, all stored, so no node starts and no credential
+    /// is read. An instrument's custom data, under its id, a contract's (GCZ26's) or a root's
+    /// (GC's, contract by contract), and the tests' signal, under an identifier of no instrument.
     #[rstest]
     #[case::an_instrument_s_custom_data(vec![imbalances("GCZ26.GLBX"), imbalances("GC.GLBX")])]
     #[case::a_custom_series_of_no_instrument(vec![signal()])]
@@ -1665,15 +1566,15 @@ mod tests {
         assert!(format!("{err:#}").contains(FILL_END), "{err:#}");
     }
 
-    /// The node's fill fails at its first step, before any node: its catalog
-    /// path is not UTF-8 (`NodeFill::run`). OKX has something to ask, its
-    /// definition stored, and IB would refuse the end. The fill stops on the
-    /// node's failure, so IB comes after the node's run.
+    /// The node's fill fails at its first step, before any node: its catalog path is not UTF-8
+    /// (`NodeFill::run`). OKX has something to ask, its definition stored, and IB would refuse the
+    /// end. The fill stops on the node's failure, so IB comes after the node's run.
     #[tokio::test]
     async fn the_node_s_fill_runs_before_ib_connects() {
         let dir = tempfile::tempdir().unwrap();
         let catalog_dir = dir.path().join(OsStr::from_bytes(b"not-utf8-\xFF"));
-        // Where the catalog opens it: its path, made UTF-8.
+
+        // Where the catalog opens it: its path, made UTF-8
         std::fs::create_dir(catalog_dir.to_string_lossy().as_ref()).unwrap();
         let catalog = ParquetDataCatalog::new(&catalog_dir, None, None, None, None);
         store_okx_definition(&catalog, SWAP);
@@ -1692,14 +1593,13 @@ mod tests {
         .await
         .unwrap_err();
 
-        // The path as `Path::display` shows it, its invalid byte replaced.
+        // The path as `Path::display` shows it, its invalid byte replaced
         assert!(format!("{err:#}").contains("not-utf8-\u{FFFD}"), "{err:#}");
     }
 
-    /// LSE's macro observations, which its client refuses before asking
-    /// LSE, fail the fill with LSE's answer before anything connects: an
-    /// IB instrument beside them would connect IB, which would refuse the
-    /// end, and LSE's fill would read its key, missing here.
+    /// LSE's macro observations, which its client refuses before asking LSE, fail the fill with
+    /// LSE's answer before anything connects: an IB instrument beside them would connect IB, which
+    /// would refuse the end, and LSE's fill would read its key, missing here.
     #[tokio::test]
     async fn a_custom_series_its_type_s_source_does_not_serve_fails_the_fill_with_its_answer_before_anything_connects()
      {
@@ -1729,15 +1629,15 @@ mod tests {
         );
     }
 
-    /// A custom series of the tests' own type, `Signal`, which no row
-    /// routes, under an identifier of no instrument.
+    /// A custom series of the tests' own type, `Signal`, which no row routes, under an identifier
+    /// of no instrument.
     fn signal() -> CustomSeries {
         CustomSeries::new("Signal", "GOLD-SIGNAL".to_string(), None).unwrap()
     }
 
-    /// LSE's rows are LSE's: its history serves them, and their data
-    /// client on a live node is LSE's. A type with no row is the catalog's:
-    /// no source serves it, and it has no data client on a live node.
+    /// LSE's rows are LSE's: its history serves them, and their data client on a live node is
+    /// LSE's. A type with no row is the catalog's: no source serves it, and it has no data client
+    /// on a live node.
     #[rstest]
     #[case::lse_s_rows(
         lse_rows("bond_yields", "US10Y"),
@@ -1754,13 +1654,11 @@ mod tests {
         assert_eq!(custom_data_client(&series), client.map(ClientId::from));
     }
 
-    /// Every series of a fill is checked against its venue's history
-    /// before anything connects: OKX's quotes, which its client does not
-    /// request, and a cTrader broker's bars, its history being quotes, each
-    /// fail the fill naming them, before OKX writes a definition, which
-    /// would read its account's environment, missing here, before a
-    /// cTrader broker's connection is read, and before IB, which would
-    /// refuse the end.
+    /// Every series of a fill is checked against its venue's history before anything connects:
+    /// OKX's quotes, which its client does not request, and a cTrader broker's bars, its history
+    /// being quotes, each fail the fill naming them, before OKX writes a definition, which would
+    /// read its account's environment, missing here, before a cTrader broker's connection is read,
+    /// and before IB, which would refuse the end.
     #[rstest]
     #[case::okx_s_quotes(
         ticks(&[
@@ -1798,9 +1696,8 @@ mod tests {
         assert!(err.contains(refused) && !err.contains(IB_REFUSES), "{err}");
     }
 
-    /// IB holds no bars of 30 seconds or less older than six months: a
-    /// fill of them reaching earlier fails naming that before IB connects,
-    /// which would refuse the end.
+    /// IB holds no bars of 30 seconds or less older than six months: a fill of them reaching
+    /// earlier fails naming that before IB connects, which would refuse the end.
     #[tokio::test]
     async fn a_fill_of_small_ib_bars_older_than_six_months_fails_before_ib_connects() {
         let dir = tempfile::tempdir().unwrap();
@@ -1886,8 +1783,8 @@ mod tests {
         assert_eq!(node.asked(), []);
     }
 
-    /// GC.GLBX rolls from GCQ26 to GCZ26 at 00:00 UTC on 29 July 2026: its
-    /// slices are LSE's, contract by contract, as LSEDGE's are.
+    /// GC.GLBX rolls from GCQ26 to GCZ26 at 00:00 UTC on 29 July 2026: its slices are LSE's,
+    /// contract by contract, as LSEDGE's are.
     #[rstest]
     fn each_history_source_takes_the_slices_of_its_own_contracts() {
         let requirements = ticks(&[
@@ -1942,10 +1839,9 @@ mod tests {
         }
     }
 
-    /// The error of a live start of a run reading `read` and an OKX swap's
-    /// quotes, which OKX streams, loading the instruments read: OKX's
-    /// clients, set up first of the node's, would fail, the catalog holding
-    /// no definition of the swap, so an error naming another series is
+    /// The error of a live start of a run reading `read` and an OKX swap's quotes, which OKX
+    /// streams, loading the instruments read: OKX's clients, set up first of the node's, would
+    /// fail, the catalog holding no definition of the swap, so an error naming another series is
     /// before anything connects.
     async fn refused_at_start(read: DataRequirements) -> String {
         let requirements = DataRequirements {
@@ -1969,10 +1865,9 @@ mod tests {
         format!("{e:#}")
     }
 
-    /// A cTrader broker streams its quotes alone: each refused naming it
-    /// before anything connects, a broker's environment read among them.
-    /// Its 1-minute LAST bars a composite bar type is built from, its BID
-    /// bars, bars built from its trades, and its trades.
+    /// A cTrader broker streams its quotes alone: each refused naming it before anything connects,
+    /// a broker's environment read among them. Its 1-minute LAST bars a composite bar type is built
+    /// from, its BID bars, bars built from its trades, and its trades.
     #[rstest]
     #[case::the_last_bars_a_composite_is_built_from(
         reading(&["XAUUSD.PEPPERSTONE-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL"]),
@@ -2000,9 +1895,9 @@ mod tests {
         assert!(err.contains(series), "{err}");
     }
 
-    /// The cTrader brokers' accounts hedge; IB's and OKX's net, whether the
-    /// venue has a row of its own, as GLBX has, or none; LSEDGE, which no
-    /// broker trades, keeps positions as Nautilus' venue default.
+    /// The cTrader brokers' accounts hedge; IB's and OKX's net, whether the venue has a row of its
+    /// own, as GLBX has, or none; LSEDGE, which no broker trades, keeps positions as Nautilus'
+    /// venue default.
     #[rstest]
     #[case::icmarkets("ICMARKETS", OmsType::Hedging)]
     #[case::pepperstone("PEPPERSTONE", OmsType::Hedging)]
@@ -2022,10 +1917,9 @@ mod tests {
         assert_eq!(oms_type(Venue::new(venue)), kept);
     }
 
-    /// IB's adapter reports IB's net liquidation as its account's balance,
-    /// holding its open positions' P&L, GLBX's and every venue's without a
-    /// row of its own; a cTrader broker's balance and OKX's cash leave
-    /// them out; LSEDGE, which no broker trades, has no account of a
+    /// IB's adapter reports IB's net liquidation as its account's balance, holding its open
+    /// positions' P&L, GLBX's and every venue's without a row of its own; a cTrader broker's
+    /// balance and OKX's cash leave them out; LSEDGE, which no broker trades, has no account of a
     /// broker.
     #[rstest]
     #[case::icmarkets("ICMARKETS", EquitySource::Portfolio)]
@@ -2042,11 +1936,10 @@ mod tests {
         assert_eq!(equity_source(Venue::new(venue)), source);
     }
 
-    /// A cTrader account's state carries its deposit currency as its base
-    /// (`ctrader`'s execution client); OKX's adapter reports none, nor does
-    /// IB's execution client as helix configures it, GLBX's and every
-    /// venue's without a row of its own; LSEDGE, which no broker trades,
-    /// has no account of a broker.
+    /// A cTrader account's state carries its deposit currency as its base (`ctrader`'s execution
+    /// client); OKX's adapter reports none, nor does IB's execution client as helix configures it,
+    /// GLBX's and every venue's without a row of its own; LSEDGE, which no broker trades, has no
+    /// account of a broker.
     #[rstest]
     #[case::icmarkets("ICMARKETS", true)]
     #[case::pepperstone("PEPPERSTONE", true)]
@@ -2062,11 +1955,10 @@ mod tests {
         assert_eq!(has_base_currency(Venue::new(venue)), based);
     }
 
-    /// A pair's rates are read in the first form its venue's history serves
-    /// of its 1-minute BID and ASK bars, then its quotes: a cTrader
-    /// broker's as its quotes, serving no bars; IB's, an IDEALPRO pair's,
-    /// IDEALPRO having no row of its own, as its bars, which IB serves
-    /// beside its quotes.
+    /// A pair's rates are read in the first form its venue's history serves of its 1-minute BID and
+    /// ASK bars, then its quotes: a cTrader broker's as its quotes, serving no bars; IB's, an
+    /// IDEALPRO pair's, IDEALPRO having no row of its own, as its bars, which IB serves beside its
+    /// quotes.
     #[rstest]
     #[case::icmarkets("EURUSD.ICMARKETS", quotes_of("EURUSD.ICMARKETS"))]
     #[case::pepperstone("EURUSD.PEPPERSTONE", quotes_of("EURUSD.PEPPERSTONE"))]
@@ -2093,9 +1985,8 @@ mod tests {
             .to_vec()
     }
 
-    /// OKX's history serves no BID or ASK bars, its candles being of trades,
-    /// and no quotes: no rate of an OKX pair can be read, which names the
-    /// pair and its venue.
+    /// OKX's history serves no BID or ASK bars, its candles being of trades, and no quotes: no rate
+    /// of an OKX pair can be read, which names the pair and its venue.
     #[rstest]
     fn a_pair_whose_venue_serves_neither_form_has_no_rate_series() {
         let err = rate_series(InstrumentId::from("USDC-USDT.OKX"))
@@ -2121,8 +2012,7 @@ mod tests {
         })
     }
 
-    /// Asserts each of `served` is served and each of `refused` refused,
-    /// the error naming it.
+    /// Asserts each of `served` is served and each of `refused` refused, the error naming it.
     fn assert_serves(served: &[CatalogSeries], refused: &[CatalogSeries]) {
         for source in served {
             if let Err(e) = serves(source) {
@@ -2139,10 +2029,9 @@ mod tests {
         }
     }
 
-    /// Nautilus' OKX data client requests trades and candles alone
-    /// (`request_trades`, `request_bars`), no quotes and no book: its
-    /// candles are of trade prices, at a width OKX has a candle of
-    /// (`bar_spec_as_okx_channel`), whatever price a bar type names.
+    /// Nautilus' OKX data client requests trades and candles alone (`request_trades`,
+    /// `request_bars`), no quotes and no book: its candles are of trade prices, at a width OKX has
+    /// a candle of (`bar_spec_as_okx_channel`), whatever price a bar type names.
     #[rstest]
     fn okx_s_history_serves_its_trades_and_its_candles() {
         use NautilusDataType as D;
@@ -2167,11 +2056,9 @@ mod tests {
         );
     }
 
-    /// LSE's client asks LSE for the quotes, trades and books of an
-    /// instrument of its venues, but an index's trades, which it has none
-    /// of, and for its candles of an LSEDGE series and an OPRA contract
-    /// alone, EXTERNAL bars of the LAST price below a day wide
-    /// (`lse::serves`).
+    /// LSE's client asks LSE for the quotes, trades and books of an instrument of its venues, but
+    /// an index's trades, which it has none of, and for its candles of an LSEDGE series and an OPRA
+    /// contract alone, EXTERNAL bars of the LAST price below a day wide (`lse::serves`).
     #[rstest]
     fn lse_s_history_serves_what_its_client_asks_lse_for() {
         use NautilusDataType as D;
@@ -2198,8 +2085,7 @@ mod tests {
         );
     }
 
-    /// Asserts each of `streamed` is streamed and each of `refused`
-    /// refused, the error naming it.
+    /// Asserts each of `streamed` is streamed and each of `refused` refused, the error naming it.
     fn assert_streams(streamed: &[CatalogSeries], refused: &[CatalogSeries]) {
         for source in streamed {
             if let Err(e) = streams(source) {
@@ -2216,16 +2102,14 @@ mod tests {
         }
     }
 
-    /// Nautilus' IB data client streams quotes, trades and IB's own bars
-    /// (`subscribe_quotes`, `subscribe_trades`, `subscribe_bars`): its
-    /// 5-second bars as IB's real-time bars, and the other sizes IB has as
-    /// its historical bars kept up to date, which IB keeps of 5 seconds or
-    /// more, priced LAST, BID, ASK or MID, a crypto
-    /// pair's LAST from IB's AGGTRADES, and its book deltas, of an L2_MBP
-    /// book (`subscribe_book_deltas`), every venue without a row of its
-    /// own. No trades of a currency pair, which its `subscribe_trades`
-    /// logs as unsupported, no TRADES bars of a forex pair, which IB has
-    /// none of, and no book depth, which it does not subscribe to.
+    /// Nautilus' IB data client streams quotes, trades and IB's own bars (`subscribe_quotes`,
+    /// `subscribe_trades`, `subscribe_bars`): its 5-second bars as IB's real-time bars, and the
+    /// other sizes IB has as its historical bars kept up to date, which IB keeps of 5 seconds or
+    /// more, priced LAST, BID, ASK or MID, a crypto pair's LAST from IB's AGGTRADES, and its book
+    /// deltas, of an L2_MBP book (`subscribe_book_deltas`), every venue without a row of its own.
+    /// No trades of a currency pair, which its `subscribe_trades` logs as unsupported, no TRADES
+    /// bars of a forex pair, which IB has none of, and no book depth, which it does not subscribe
+    /// to.
     #[rstest]
     fn ib_s_client_streams_its_quotes_trades_bars_and_book_deltas() {
         use NautilusDataType as D;
@@ -2260,12 +2144,11 @@ mod tests {
         );
     }
 
-    /// IB's refusal of bars of a size it does not stream offers exactly the
-    /// sizes it streams: those IB has as Nautilus' IB client asks them
-    /// (`bar_type_to_ib_bar_size`: 1, 5, 15 and 30 seconds, 1, 2, 3, 5, 10,
-    /// 15, 20 and 30 minutes, 1, 2, 3, 4 and 8 hours, a day, a week, a
-    /// month) but 1 second, which IB does not keep up to date. No 10-second
-    /// bars, of which the client has no size.
+    /// IB's refusal of bars of a size it does not stream offers exactly the sizes it streams: those
+    /// IB has as Nautilus' IB client asks them (`bar_type_to_ib_bar_size`: 1, 5, 15 and 30 seconds,
+    /// 1, 2, 3, 5, 10, 15, 20 and 30 minutes, 1, 2, 3, 4 and 8 hours, a day, a week, a month) but 1
+    /// second, which IB does not keep up to date. No 10-second bars, of which the client has no
+    /// size.
     #[rstest]
     fn ib_s_refusal_of_bars_offers_exactly_the_sizes_it_streams() {
         let units = ["SECOND", "MINUTE", "HOUR", "DAY", "WEEK", "MONTH"];
@@ -2310,10 +2193,9 @@ mod tests {
         );
     }
 
-    /// Nautilus' OKX data client streams quotes, trades and candles
-    /// (`subscribe_quotes`, `subscribe_trades`, `subscribe_bars`, the
-    /// candles of `bar_spec_as_okx_channel`, trade-priced), and its book,
-    /// deltas of an L2_MBP book and depth of five levels a side
+    /// Nautilus' OKX data client streams quotes, trades and candles (`subscribe_quotes`,
+    /// `subscribe_trades`, `subscribe_bars`, the candles of `bar_spec_as_okx_channel`,
+    /// trade-priced), and its book, deltas of an L2_MBP book and depth of five levels a side
     /// (`subscribe_book_deltas`, `subscribe_book_depth`).
     #[rstest]
     fn okx_s_client_streams_its_quotes_trades_candles_and_book() {
@@ -2336,14 +2218,12 @@ mod tests {
         );
     }
 
-    /// Each venue's book as its live data's client streams it: LSE's, of
-    /// GLBX, XNAS, OPRA and LSEDGE, orders (L3_MBO) and ten levels a side
-    /// of depth, the one depth its client streams and serves; IB's, of
-    /// every venue without a row of its own, rows of its market depth
-    /// (L2_MBP), its client publishing no L3_MBO book, and no depth, which
-    /// it does not subscribe to; OKX's price levels (L2_MBP), the one book type its
-    /// client takes, and five levels a side of depth, the most it takes; a
-    /// cTrader broker's none, its client streaming quotes alone.
+    /// Each venue's book as its live data's client streams it: LSE's, of GLBX, XNAS, OPRA and
+    /// LSEDGE, orders (L3_MBO) and ten levels a side of depth, the one depth its client streams and
+    /// serves; IB's, of every venue without a row of its own, rows of its market depth (L2_MBP),
+    /// its client publishing no L3_MBO book, and no depth, which it does not subscribe to; OKX's
+    /// price levels (L2_MBP), the one book type its client takes, and five levels a side of depth,
+    /// the most it takes; a cTrader broker's none, its client streaming quotes alone.
     #[rstest]
     #[case::glbx("GLBX", Some(lse_book()))]
     #[case::xnas("XNAS", Some(lse_book()))]
@@ -2387,15 +2267,15 @@ mod tests {
         }
     }
 
-    /// The imbalances under `identifier`, a custom series of a type no row
-    /// routes, the catalog's: an instrument's custom data under its id.
+    /// The imbalances under `identifier`, a custom series of a type no row routes, the catalog's:
+    /// an instrument's custom data under its id.
     fn imbalances(identifier: &str) -> CustomSeries {
         CustomSeries::new("Imbalance", identifier.to_string(), None).unwrap()
     }
 
-    /// A history request of each kind a data client takes, of `id`, its
-    /// bars `id`'s 1-minute LAST bars, over an hour, as a fill or a warmup
-    /// sends it: the kind's name, the source it asks for and the request.
+    /// A history request of each kind a data client takes, of `id`, its bars `id`'s 1-minute LAST
+    /// bars, over an hour, as a fill or a warmup sends it: the kind's name, the source it asks for
+    /// and the request.
     fn requests_of(id: InstrumentId) -> Vec<(&'static str, CatalogSeries, RequestCommand)> {
         use NautilusDataType as D;
         let (start, end): (Timestamp, Timestamp) = (
@@ -2485,9 +2365,8 @@ mod tests {
         ]
     }
 
-    /// Whether `client` refuses `request` as a kind it does not take:
-    /// Nautilus' `DataClient` default refusal (`does not support`), which
-    /// a client implementing the kind never gives.
+    /// Whether `client` refuses `request` as a kind it does not take: Nautilus' `DataClient`
+    /// default refusal (`does not support`), which a client implementing the kind never gives.
     fn unsupported(client: &dyn DataClient, request: RequestCommand) -> bool {
         let answer = match request {
             RequestCommand::Quotes(request) => client.request_quotes(request),
@@ -2508,16 +2387,14 @@ mod tests {
     /// An address nothing listens on, for the clients' HTTP.
     const UNREACHABLE: &str = "http://127.0.0.1:1";
 
-    /// `serves` against the data clients its answers copy: each of
-    /// `clients`, a history source's client with instruments of its venues,
-    /// built as its fill builds it and unconnected, refuses as a kind it
-    /// does not take exactly the kinds of request of which `serves` refuses
-    /// the source of every instrument of its venues tried; a kind it takes
-    /// the source of one of them, it does not. Each kind is tried on the
-    /// 1-minute LAST bars of each instrument, its quotes, its trades and its
-    /// book; a bar type a client takes but `serves` refuses (a price, a
-    /// width) is not checked here. The kinds where the two disagree, each
-    /// named with its client and whether `serves` serves it.
+    /// `serves` against the data clients its answers copy: each of `clients`, a history source's
+    /// client with instruments of its venues, built as its fill builds it and unconnected, refuses
+    /// as a kind it does not take exactly the kinds of request of which `serves` refuses the source
+    /// of every instrument of its venues tried; a kind it takes the source of one of them, it does
+    /// not. Each kind is tried on the 1-minute LAST bars of each instrument, its quotes, its trades
+    /// and its book; a bar type a client takes but `serves` refuses (a price, a width) is not
+    /// checked here. The kinds where the two disagree, each named with its client and whether
+    /// `serves` serves it.
     fn request_kinds_against_serves(clients: Vec<(NodeClient, Vec<InstrumentId>)>) -> Vec<String> {
         let (data_tx, _data_events) = tokio::sync::mpsc::unbounded_channel();
         replace_data_event_sender(data_tx);
@@ -2550,16 +2427,15 @@ mod tests {
         disagreeing
     }
 
-    /// Pins the kinds of history request Nautilus' OKX data client
-    /// implements, trades and bars (`crates/adapters/okx/src/data.rs:3005`,
-    /// `:3055`), every other kind refused by the `DataClient` default
-    /// (`crates/common/src/clients/data.rs:622-699`): `serves` copies them
-    /// (`okx::serves`), which a fill checks before anything connects and a
-    /// live warmup before it requests a series.
+    /// Pins the kinds of history request Nautilus' OKX data client implements, trades and bars
+    /// (`crates/adapters/okx/src/data.rs:3005`, `:3055`), every other kind refused by the
+    /// `DataClient` default (`crates/common/src/clients/data.rs:622-699`): `serves` copies them
+    /// (`okx::serves`), which a fill checks before anything connects and a live warmup before it
+    /// requests a series.
     ///
-    /// OKX's client, on an unreachable address, refuses as a kind it does
-    /// not take exactly the kinds of request of which `serves` refuses the
-    /// swap's source (see `request_kinds_against_serves`).
+    /// OKX's client, on an unreachable address, refuses as a kind it does not take exactly the
+    /// kinds of request of which `serves` refuses the swap's source (see
+    /// `request_kinds_against_serves`).
     #[tokio::test]
     async fn drift_okx_s_client_takes_the_kinds_of_request_its_history_serves() {
         let okx = NodeClient {
@@ -2575,10 +2451,9 @@ mod tests {
         assert_eq!(disagreeing, Vec::<String>::new());
     }
 
-    /// `serves` against the cTrader and LSE data clients its answers copy,
-    /// LSE's on an unreachable address: each refuses as a kind it does not
-    /// take exactly the kinds of request of which `serves` refuses the
-    /// source of every instrument of its venues tried (see
+    /// `serves` against the cTrader and LSE data clients its answers copy, LSE's on an unreachable
+    /// address: each refuses as a kind it does not take exactly the kinds of request of which
+    /// `serves` refuses the source of every instrument of its venues tried (see
     /// `request_kinds_against_serves`).
     #[tokio::test]
     async fn the_ctrader_and_lse_clients_take_the_kinds_of_request_their_history_serves() {
@@ -2614,8 +2489,7 @@ mod tests {
         assert_eq!(disagreeing, Vec::<String>::new());
     }
 
-    /// A strategy registered without a node at `FILL_START`, to subscribe
-    /// through.
+    /// A strategy registered without a node at `FILL_START`, to subscribe through.
     #[derive(Debug)]
     struct Subscriber {
         core: StrategyCore,
@@ -2625,15 +2499,13 @@ mod tests {
 
     impl DataActor for Subscriber {}
 
-    /// The subscription of each kind a strategy makes, of `id`, as a run
-    /// makes it: through `strategy::subscriptions::Subscriptions`, started on
-    /// a strategy registered without a node, the commands it sends the data
-    /// engine captured. Its bars are `id`'s 1-minute LAST bars. The kind's
-    /// name, the series it subscribes to and the command. Custom data is no
-    /// series of an instrument: a custom series, its subscription naming
-    /// its type's client live (`custom_data_client`), whose answer
-    /// `streams_custom` copies by its type, not by a venue, is not tried
-    /// here.
+    /// The subscription of each kind a strategy makes, of `id`, as a run makes it: through
+    /// `strategy::subscriptions::Subscriptions`, started on a strategy registered without a node,
+    /// the commands it sends the data engine captured. Its bars are `id`'s 1-minute LAST bars. The
+    /// kind's name, the series it subscribes to and the command. Custom data is no series of an
+    /// instrument: a custom series, its subscription naming its type's client live
+    /// (`custom_data_client`), whose answer `streams_custom` copies by its type, not by a venue, is
+    /// not tried here.
     fn subscriptions_of(
         id: InstrumentId,
     ) -> Vec<(&'static str, CatalogSeries, Option<SubscribeCommand>)> {
@@ -2716,13 +2588,12 @@ mod tests {
         subscriptions
     }
 
-    /// Whether `client`, unconnected, streams nothing of `subscription` by
-    /// its answer: `Ok`, as Nautilus' `DataClient` defaults answer once they
-    /// have logged "Handler not implemented", and as a client answers a
-    /// subscription it refuses by logging, IB's of L3_MBO book deltas. A
-    /// subscription a client implements fails unconnected, its connection
-    /// or the instrument's definition missing. A subscription the data engine
-    /// is not sent reaches no client, which streams nothing of it.
+    /// Whether `client`, unconnected, streams nothing of `subscription` by its answer: `Ok`, as
+    /// Nautilus' `DataClient` defaults answer once they have logged "Handler not implemented", and
+    /// as a client answers a subscription it refuses by logging, IB's of L3_MBO book deltas. A
+    /// subscription a client implements fails unconnected, its connection or the instrument's
+    /// definition missing. A subscription the data engine is not sent reaches no client, which
+    /// streams nothing of it.
     fn streams_none(client: &mut dyn DataClient, subscription: Option<SubscribeCommand>) -> bool {
         let Some(subscription) = subscription else {
             return true;
@@ -2738,15 +2609,13 @@ mod tests {
         answer.is_ok()
     }
 
-    /// `streams` against the data clients its answers copy: the cTrader
-    /// and LSE clients, created as the node creates them and
-    /// unconnected, streams nothing of exactly the kinds of subscription of
-    /// which `streams` refuses the series of every instrument of its venues
-    /// tried (see `streams_none`); of a kind it fails unconnected, `streams`
-    /// takes one of them. Each kind is tried on the 1-minute LAST bars of
-    /// each instrument, its quotes, its trades and its book, each
-    /// subscription as a run sends it (`subscriptions_of`); a series of a kind a client takes but `streams` refuses (a
-    /// width, a currency pair's trades) is not checked here.
+    /// `streams` against the data clients its answers copy: the cTrader and LSE clients, created as
+    /// the node creates them and unconnected, streams nothing of exactly the kinds of subscription
+    /// of which `streams` refuses the series of every instrument of its venues tried (see
+    /// `streams_none`); of a kind it fails unconnected, `streams` takes one of them. Each kind is
+    /// tried on the 1-minute LAST bars of each instrument, its quotes, its trades and its book,
+    /// each subscription as a run sends it (`subscriptions_of`); a series of a kind a client takes
+    /// but `streams` refuses (a width, a currency pair's trades) is not checked here.
     #[tokio::test]
     async fn the_ctrader_and_lse_clients_take_the_kinds_of_subscription_they_stream() {
         let (data_tx, _data_events) = tokio::sync::mpsc::unbounded_channel();
@@ -2795,8 +2664,8 @@ mod tests {
         assert_eq!(drift, Vec::<String>::new());
     }
 
-    /// IB's execution client denies reduce-only and post-only orders, GLBX's
-    /// and every venue's without a row of its own.
+    /// IB's execution client denies reduce-only and post-only orders, GLBX's and every venue's
+    /// without a row of its own.
     #[rstest]
     #[case::icmarkets("ICMARKETS", true)]
     #[case::pepperstone("PEPPERSTONE", true)]
@@ -2812,10 +2681,9 @@ mod tests {
         assert_eq!(takes_reduce_only_and_post_only(Venue::new(venue)), takes);
     }
 
-    /// GLBX takes its definitions from Databento, its history and live data
-    /// from LSE and its orders from IB, and XNAS and OPRA the same; OKX and
-    /// each cTrader broker take all four from themselves; LSEDGE its
-    /// definitions from the catalog and its history and live data from LSE,
+    /// GLBX takes its definitions from Databento, its history and live data from LSE and its orders
+    /// from IB, and XNAS and OPRA the same; OKX and each cTrader broker take all four from
+    /// themselves; LSEDGE its definitions from the catalog and its history and live data from LSE,
     /// with no broker; and every other venue all four from IB.
     #[rstest]
     #[case::an_lsedge_series("GOLD-FUTURES.LSEDGE", lsedge_row())]
@@ -2856,11 +2724,10 @@ mod tests {
         }
     }
 
-    /// An exchange's listings, under the ids Databento gives them, CME
-    /// Globex's, Nasdaq TotalView's and US options', streamed from LSE; a
-    /// row is its venue's, so a GLBX root and a Databento continuous symbol
-    /// take GLBX's too, which LSE's client refuses the latter of, serving
-    /// dated contracts alone.
+    /// An exchange's listings, under the ids Databento gives them, CME Globex's, Nasdaq TotalView's
+    /// and US options', streamed from LSE; a row is its venue's, so a GLBX root and a Databento
+    /// continuous symbol take GLBX's too, which LSE's client refuses the latter of, serving dated
+    /// contracts alone.
     fn exchange_row() -> Row {
         Row {
             definitions: DefinitionsSource::Databento,
@@ -2888,10 +2755,9 @@ mod tests {
         }
     }
 
-    /// GLBX's, XNAS's and OPRA's data from LSE's client and their orders
-    /// through IB's, which loads their instruments; LSEDGE's data from LSE's
-    /// alone; every other venue's from its broker's, IB's routed its venues
-    /// alone.
+    /// GLBX's, XNAS's and OPRA's data from LSE's client and their orders through IB's, which loads
+    /// their instruments; LSEDGE's data from LSE's alone; every other venue's from its broker's,
+    /// IB's routed its venues alone.
     #[rstest]
     fn each_instrument_goes_to_the_clients_of_its_live_data_and_of_its_broker() {
         let routes = LiveRoutes::of(
@@ -2930,10 +2796,9 @@ mod tests {
         );
     }
 
-    /// The custom series' live data sources go to the node beside the
-    /// instruments' routes, each once, whether or not an instrument of the
-    /// run routes to them: LSE's for LSE's yields, here of no LSE
-    /// instrument; none for the tests' signal, of a type with no row.
+    /// The custom series' live data sources go to the node beside the instruments' routes, each
+    /// once, whether or not an instrument of the run routes to them: LSE's for LSE's yields, here
+    /// of no LSE instrument; none for the tests' signal, of a type with no row.
     #[rstest]
     fn a_custom_series_routes_its_type_s_live_data_source_to_the_node_with_no_instrument_of_it() {
         let routes = LiveRoutes::of(
@@ -2956,11 +2821,10 @@ mod tests {
         );
     }
 
-    /// A run reading LSE's yields alone, of no instrument LSE streams, has
-    /// LSE's data client on its node, the client its subscription names
-    /// (`custom_data_client`): LSE's alone, streaming no instrument and
-    /// taking no venue's route, and the node builds it, given the test key
-    /// a run reads from the environment, connecting nothing.
+    /// A run reading LSE's yields alone, of no instrument LSE streams, has LSE's data client on its
+    /// node, the client its subscription names (`custom_data_client`): LSE's alone, streaming no
+    /// instrument and taking no venue's route, and the node builds it, given the test key a run
+    /// reads from the environment, connecting nothing.
     #[tokio::test]
     async fn a_run_reading_a_custom_series_alone_has_lse_s_client_on_its_node_streaming_no_instrument()
      {
@@ -3001,8 +2865,8 @@ mod tests {
         assert_eq!(on_node, Some(ClientId::from("LSE")));
     }
 
-    /// LSE's data client, routed GLBX, streams the contracts; routed OPRA,
-    /// the contracts, the trades of each through its underlying's chain.
+    /// LSE's data client, routed GLBX, streams the contracts; routed OPRA, the contracts, the
+    /// trades of each through its underlying's chain.
     #[rstest]
     #[case::glbx(&["GCZ26.GLBX", "GCG27.GLBX"], "GLBX")]
     #[case::opra(&["AAPL  261120C00355000.OPRA", "AAPL  261120P00355000.OPRA"], "OPRA")]
@@ -3026,10 +2890,9 @@ mod tests {
         assert_eq!(config.stream_ids, instrument_ids(ids));
     }
 
-    /// A live node with `clients`, added as `Live` adds them
-    /// (`live::node::add_clients`), on Nautilus' defaults otherwise: no
-    /// streaming, whose writer drops through Nautilus' runtime when a test's
-    /// thread ends.
+    /// A live node with `clients`, added as `Live` adds them (`live::node::add_clients`), on
+    /// Nautilus' defaults otherwise: no streaming, whose writer drops through Nautilus' runtime
+    /// when a test's thread ends.
     fn live_node(clients: Vec<Clients>) -> anyhow::Result<LiveNode> {
         let config = LiveNodeConfig {
             environment: Environment::Live,
@@ -3039,10 +2902,9 @@ mod tests {
         crate::live::node::add_clients(LiveNodeBuilder::from_config(config)?, clients)?.build()
     }
 
-    /// The clients `live_clients` sets up for a run reading `ids`, LSE's and
-    /// IB's, IB's on a gateway that is not started and LSE's given the test
-    /// keys a run reads from the environment: created, they connect to
-    /// nothing.
+    /// The clients `live_clients` sets up for a run reading `ids`, LSE's and IB's, IB's on a
+    /// gateway that is not started and LSE's given the test keys a run reads from the environment:
+    /// created, they connect to nothing.
     fn lse_and_ib_clients(ids: &[InstrumentId]) -> Vec<Clients> {
         let routes = LiveRoutes::of(ids, &[]);
         let mut lse = lse::live_clients(&routes.lse);
@@ -3064,8 +2926,7 @@ mod tests {
         ]
     }
 
-    /// The client the node routes `venue`'s data to, and the one it takes
-    /// for the default.
+    /// The client the node routes `venue`'s data to, and the one it takes for the default.
     fn data_clients(node: &LiveNode, venue: &str) -> (Option<ClientId>, Option<ClientId>) {
         let mut engine = node.kernel().data_engine.borrow_mut();
         (
@@ -3092,14 +2953,12 @@ mod tests {
             .collect()
     }
 
-    /// Builds the live node of a run reading `ids`, LSE's and IB's clients
-    /// among its own, until Nautilus' builder has registered each of the
-    /// two first, which it does in no set order (`LiveNodeBuilder`'s clients
-    /// are a `HashMap`): each build must succeed and route each venue's
-    /// data and orders as `routed` says, a venue and the client of its data
-    /// and of its orders. The first client on no venue the builder
-    /// registers becomes the default (Nautilus' `DataEngine::register_client`),
-    /// and LSE's and IB's are both on no venue.
+    /// Builds the live node of a run reading `ids`, LSE's and IB's clients among its own, until
+    /// Nautilus' builder has registered each of the two first, which it does in no set order
+    /// (`LiveNodeBuilder`'s clients are a `HashMap`): each build must succeed and route each
+    /// venue's data and orders as `routed` says, a venue and the client of its data and of its
+    /// orders. The first client on no venue the builder registers becomes the default (Nautilus'
+    /// `DataEngine::register_client`), and LSE's and IB's are both on no venue.
     fn assert_routed_whichever_registers_first(ids: &[&str], routed: &[(&str, &str, &str, &str)]) {
         let ids: Vec<InstrumentId> = ids.iter().map(|&id| InstrumentId::from(id)).collect();
         let mut first = HashSet::new();
@@ -3132,9 +2991,8 @@ mod tests {
         panic!("one client registered first in 64 builds: {first:?}");
     }
 
-    /// GLBX's, XNAS's and OPRA's data from LSE's client, their orders
-    /// through IB's; LSEDGE's data from LSE's client, an IB venue's data
-    /// and orders from IB's.
+    /// GLBX's, XNAS's and OPRA's data from LSE's client, their orders through IB's; LSEDGE's data
+    /// from LSE's client, an IB venue's data and orders from IB's.
     #[rstest]
     #[case::an_exchange_run(
         &["GCZ26.GLBX", "GCG27.GLBX", "NVDA.XNAS", "AAPL  261120C00355000.OPRA"],
@@ -3170,9 +3028,8 @@ mod tests {
         assert_eq!(Row::of(*LSEDGE_VENUE).history, HistorySource::Lse);
     }
 
-    /// LSE's data client alone, on the route of LSEDGE, not made the
-    /// default; its key is read when the node creates it, so nothing is read
-    /// or connected here.
+    /// LSE's data client alone, on the route of LSEDGE, not made the default; its key is read when
+    /// the node creates it, so nothing is read or connected here.
     #[tokio::test]
     async fn a_run_reading_lsedge_instruments_streams_them_from_lse_routed_lsedge_with_no_broker() {
         let requirements = ticks(&[
@@ -3211,9 +3068,9 @@ mod tests {
         );
     }
 
-    /// The broker's data client where a broker trades the venue, GLBX's and
-    /// XNAS's IB among them; LSEDGE's LSE, which streams it. Each by the
-    /// name its factory gives the client, which the node registers it under.
+    /// The broker's data client where a broker trades the venue, GLBX's and XNAS's IB among them;
+    /// LSEDGE's LSE, which streams it. Each by the name its factory gives the client, which the
+    /// node registers it under.
     #[rstest]
     #[case::okx("BTC-USDT-SWAP.OKX", "OKX")]
     #[case::icmarkets("XAUUSD.ICMARKETS", "ICMARKETS")]
@@ -3235,12 +3092,11 @@ mod tests {
         assert_eq!(lse.data_factory.name(), "LSE");
     }
 
-    /// LSE streams none of them: each refused naming it before anything
-    /// connects, OKX's clients among them, which would fail on its missing
-    /// environment. A GLBX contract's external bars, which IB streamed
-    /// before LSE took GLBX's live data, an LSEDGE series' trades, LSE's
-    /// sockets giving quotes, an option's quotes, LSE streaming its trades
-    /// alone, and an LSEDGE series' book.
+    /// LSE streams none of them: each refused naming it before anything connects, OKX's clients
+    /// among them, which would fail on its missing environment. A GLBX contract's external bars,
+    /// which IB streamed before LSE took GLBX's live data, an LSEDGE series' trades, LSE's sockets
+    /// giving quotes, an option's quotes, LSE streaming its trades alone, and an LSEDGE series'
+    /// book.
     #[rstest]
     #[case::a_glbx_contract_s_external_bars(
         reading(&["GCZ26.GLBX-1-MINUTE-LAST-EXTERNAL"]),
@@ -3292,13 +3148,12 @@ mod tests {
         assert!(err.contains(series), "{err}");
     }
 
-    /// IB's and OKX's clients stream none of them: each refused naming it
-    /// before anything connects, OKX's clients among them, which would fail
-    /// on its missing environment. An IB instrument's book depth, a forex
-    /// pair's trades and the bars built from them, and the 1-second bars a
-    /// composite bar type is built from, which IB keeps up to date at 5
-    /// seconds or more; and the mid-priced 1-minute bars of an OKX swap a
-    /// composite bar type is built from, OKX's candles being of trades.
+    /// IB's and OKX's clients stream none of them: each refused naming it before anything connects,
+    /// OKX's clients among them, which would fail on its missing environment. An IB instrument's
+    /// book depth, a forex pair's trades and the bars built from them, and the 1-second bars a
+    /// composite bar type is built from, which IB keeps up to date at 5 seconds or more; and the
+    /// mid-priced 1-minute bars of an OKX swap a composite bar type is built from, OKX's candles
+    /// being of trades.
     #[rstest]
     #[case::an_ib_instrument_s_book_depth(
         ticks(&[(NautilusDataType::OrderBookDepth, "SXR8.IBIS")]),
@@ -3330,11 +3185,9 @@ mod tests {
         assert!(err.contains(series), "{err}");
     }
 
-    /// IB's clients stream an IB instrument's book deltas, and OKX's an
-    /// OKX swap's deltas and depth, each in its venue's format
-    /// (`book_format`): a run reading them gets past the check to set up
-    /// OKX's clients, which fail, the catalog holding no definition of the
-    /// swap.
+    /// IB's clients stream an IB instrument's book deltas, and OKX's an OKX swap's deltas and
+    /// depth, each in its venue's format (`book_format`): a run reading them gets past the check to
+    /// set up OKX's clients, which fail, the catalog holding no definition of the swap.
     #[tokio::test]
     async fn a_run_reading_ib_s_book_deltas_and_okx_s_book_gets_past_the_streams_check() {
         use NautilusDataType as D;
@@ -3352,9 +3205,8 @@ mod tests {
         );
     }
 
-    /// The custom series of the rows of `symbol` in LSE's `source`: both
-    /// in its metadata, under an identifier of the config's, here the
-    /// symbol.
+    /// The custom series of the rows of `symbol` in LSE's `source`: both in its metadata, under an
+    /// identifier of the config's, here the symbol.
     fn lse_rows(source: &str, symbol: &str) -> CustomSeries {
         let metadata = nautilus_core::Params::new(
             [
@@ -3366,9 +3218,9 @@ mod tests {
         CustomSeries::new("LseRow", symbol.to_string(), Some(metadata)).unwrap()
     }
 
-    /// Refused by its type's live data source's streams answer, LSE's,
-    /// whose client streams none, before anything connects, OKX's clients
-    /// among them, which would fail on its missing environment.
+    /// Refused by its type's live data source's streams answer, LSE's, whose client streams none,
+    /// before anything connects, OKX's clients among them, which would fail on its missing
+    /// environment.
     #[tokio::test]
     async fn a_run_reading_a_custom_series_is_refused_by_its_type_s_streams_answer_before_anything_connects()
      {
@@ -3393,12 +3245,10 @@ mod tests {
         assert!(err.contains(&us10y.to_string()), "{err}");
     }
 
-    /// Nothing streams the catalog's data: a custom series of a type with
-    /// no row is refused, naming it, before anything connects, OKX's
-    /// clients among them, which would fail on its missing environment. The
-    /// tests' signal, and an instrument's custom data, imbalances under a
-    /// root's id and under a contract's: no venue's live data is asked of
-    /// any.
+    /// Nothing streams the catalog's data: a custom series of a type with no row is refused, naming
+    /// it, before anything connects, OKX's clients among them, which would fail on its missing
+    /// environment. The tests' signal, and an instrument's custom data, imbalances under a root's
+    /// id and under a contract's: no venue's live data is asked of any.
     #[rstest]
     #[case::the_tests_signal(signal())]
     #[case::a_root_s_imbalances(imbalances("GC.GLBX"))]
