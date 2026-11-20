@@ -1,4 +1,4 @@
-//! The factories the node creates the clients by, each named after its config's client id.
+//! The factories the node uses to create the clients. Each is named after its config's client id.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -28,7 +28,9 @@ pub struct CTraderDataClientFactory {
 }
 
 impl CTraderDataClientFactory {
-    /// The factory of the client `config` configures, named after its client id.
+    /// Creates the factory for the client `config` configures.
+    ///
+    /// The factory takes its name from the config's client id.
     #[must_use]
     pub fn new(config: &CTraderDataClientConfig) -> Self {
         Self {
@@ -67,16 +69,19 @@ impl DataClientFactory for CTraderDataClientFactory {
     }
 }
 
-/// Creates `CTraderExecutionClient`s from a `CTraderExecutionClientConfig`: a hedging venue (each
-/// cTrader position one Nautilus position), a margin account named after the venue and the
-/// environment (`CTraderConnection::account_id`).
+/// Creates `CTraderExecutionClient`s from a `CTraderExecutionClientConfig`.
+///
+/// The venue is hedging, so each cTrader position is one Nautilus position. The account is a margin
+/// account named after the venue and the environment (`CTraderConnection::account_id`).
 #[derive(Debug)]
 pub struct CTraderExecutionClientFactory {
     name: ClientId,
 }
 
 impl CTraderExecutionClientFactory {
-    /// The factory of the client `config` configures, named after its client id.
+    /// Creates the factory for the client `config` configures.
+    ///
+    /// The factory takes its name from the config's client id.
     #[must_use]
     pub fn new(config: &CTraderExecutionClientConfig) -> Self {
         Self {
@@ -146,7 +151,7 @@ mod tests {
         vec![InstrumentId::from("XAUUSD.ACMEFX")]
     }
 
-    /// As the node does: the client created by its factory, under the factory's name.
+    /// Creates the client through its factory, as the node does, under the factory's name.
     #[rstest]
     fn the_data_client_is_named_after_its_config_on_the_venue_of_its_connection() {
         let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
@@ -175,7 +180,8 @@ mod tests {
         assert!(client.is_disconnected());
     }
 
-    /// As the node does: a hedging margin account named after the venue and the environment.
+    /// Creates the client as the node does, with a hedging margin account named after the venue and
+    /// the environment.
     #[rstest]
     fn the_execution_client_is_named_after_its_config_on_a_hedging_account_of_the_venue() {
         let (tx, _events) = tokio::sync::mpsc::unbounded_channel();
