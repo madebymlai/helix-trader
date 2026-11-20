@@ -117,7 +117,6 @@ mod tests {
         );
     }
 
-    /// A product reads only its own variable, and an empty key counts as none.
     #[rstest]
     #[case::cme_key_for_lse(LseProduct::Global, LSE_CME_API_KEY, Some(KEY))]
     #[case::cme_key_for_nasdaq(LseProduct::Nasdaq, LSE_CME_API_KEY, Some(KEY))]

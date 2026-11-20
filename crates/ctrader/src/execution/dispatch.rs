@@ -1197,7 +1197,6 @@ mod tests {
         EXECUTION_STOP_LOSS_FILLED,
     };
 
-    /// XAUUSD's cTrader symbol id in the fixtures.
     const GOLD: i64 = 41;
 
     fn gold() -> InstrumentAny {
@@ -1353,7 +1352,6 @@ mod tests {
         assert_eq!(dispatch.absent(id("O-1")), Some(vec![id("O-1")]));
     }
 
-    /// An error answer is the same evidence as an order error: the same reason, no client envelope.
     #[rstest]
     fn an_error_answer_rejects_with_ctraders_code_and_description() {
         let mut dispatch = dispatch();
@@ -1377,8 +1375,6 @@ mod tests {
         );
     }
 
-    /// A rate limit does not say the order was not placed, so it stays in flight and its fill
-    /// applies.
     #[rstest]
     fn a_rate_limited_order_stays_in_flight_until_its_events_come() {
         let mut dispatch = dispatch();
@@ -1398,7 +1394,6 @@ mod tests {
         );
     }
 
-    /// A removal the broker may have made stays asked: the next amendment carries it.
     #[rstest]
     fn a_removal_of_a_protection_with_an_unknown_outcome_stays_wanted() {
         let mut dispatch = dispatch();
@@ -1425,7 +1420,6 @@ mod tests {
         assert_eq!(dispatch.wanted(id("O-SL")), Some(Want::Remove));
     }
 
-    /// `ORDER_CANCEL_REJECTED`: the order stays working, and its cancellation then cancels it.
     #[rstest]
     fn a_cancel_rejected_by_execution_event_leaves_the_order_working() {
         let mut dispatch = dispatch();
@@ -1443,8 +1437,6 @@ mod tests {
         assert_eq!(kinds(&out), [row("PROBE-2", "canceled")]);
     }
 
-    /// The captured refusal at execution. cTrader cancels the order with its deal rejected. That
-    /// rejects the order with the deal's status and `rejectReason`, and its legs with it.
     #[rstest]
     fn an_order_cancelled_with_its_deal_rejected_is_rejected_with_the_deals_reason() {
         let mut dispatch = dispatch();
@@ -1476,8 +1468,6 @@ mod tests {
         );
     }
 
-    /// An order cancelled with its deal rejected after part of it filled is cancelled, and its fill
-    /// stands.
     #[rstest]
     fn an_order_filled_in_part_and_cancelled_with_its_deal_rejected_is_cancelled() {
         let mut dispatch = dispatch();
@@ -1497,7 +1487,6 @@ mod tests {
         assert_eq!(kinds(&out), [row("PROBE-REJECT-1", "canceled")]);
     }
 
-    /// `ORDER_REJECTED` rejects the order with its code and its deal's `rejectReason`, if any.
     #[rstest]
     #[case::without_a_deal(false, "NOT_ENOUGH_MONEY")]
     #[case::with_its_deal(true, "NOT_ENOUGH_MONEY: Market VWAP is worse than Limit price")]
@@ -1579,7 +1568,6 @@ mod tests {
         );
     }
 
-    /// One amendment removes both protections of a position: no cancel was sent.
     #[rstest]
     fn a_removal_of_protections_not_sent_denies_each_cancel_by_its_command() {
         let mut dispatch = dispatch();
@@ -1615,8 +1603,6 @@ mod tests {
         );
     }
 
-    /// The broker refused the modification, so the order stays working and its cancellation cancels
-    /// it.
     #[rstest]
     fn a_modify_the_broker_rejects_is_rejected_and_the_order_stays_working() {
         let mut dispatch = dispatch();
@@ -1641,7 +1627,6 @@ mod tests {
         assert_eq!(kinds(&out), [row("PROBE-2", "canceled")]);
     }
 
-    /// No definitive event, whatever the request: events, a query or reconciliation resolve it.
     #[rstest]
     #[case::new_order(Tag::New(id("PROBE-2")))]
     #[case::amend(Tag::Amend(id("PROBE-2")))]
@@ -1668,9 +1653,6 @@ mod tests {
         assert_eq!(kinds(&out), [row("PROBE-2", "canceled")]);
     }
 
-    /// A new order never sent is rejected for the session's reason. If its request was written, or
-    /// maybe written, it waits no more, and a query that finds no such order at the broker
-    /// concludes it absent.
     #[rstest]
     #[case::never_sent(
         Err(CommandFailure::not_sent("not sent to ACMEFX: the cTrader connection was lost")),
@@ -1705,8 +1687,6 @@ mod tests {
 
     // A deal whose commission cTrader does not state (Nautilus' `spec_exec_testing.md`, TC-E89)
 
-    /// The first delivery emits nothing and touches nothing. Neither the acceptance the fill proves
-    /// nor the deal is spent. The repaired replay applies them once.
     #[rstest]
     fn a_fill_without_its_commission_is_left_and_its_repaired_replay_fills_once() {
         let mut dispatch = dispatch();
@@ -1728,7 +1708,6 @@ mod tests {
             unreachable!()
         };
 
-        // The captured deal's charge: 0.11 EUR
         assert_eq!(
             fill.commission,
             Some(Money::new(0.11, Currency::from("EUR")))
@@ -1757,8 +1736,6 @@ mod tests {
         assert_eq!(fills[0].commission, Money::new(0.11, Currency::from("EUR")));
     }
 
-    /// The captured stop loss hit on the position of bracket PROBE-5. No leg is filled or accepted
-    /// until the deal states its commission.
     #[rstest]
     fn a_protection_hit_without_its_commission_fills_no_leg_until_repaired() {
         let mut dispatch = dispatch();

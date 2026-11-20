@@ -123,8 +123,7 @@ mod tests {
     }
 
     /// A frame written has not failed. The session answers an error only for a frame it never
-    /// wrote (see `websocket::handler`). A session gone without a word leaves cTrader maybe
-    /// holding it.
+    /// wrote (see `websocket::handler`).
     #[rstest]
     #[case::written(Some(Ok(())), None, &[])]
     #[case::connection_lost(
@@ -177,7 +176,7 @@ mod tests {
     }
 
     /// The refusals the demo answered (`test_data/order_error_*`) and the deal timeout Spotware
-    /// documents as "rejected" are rejections. A rate limit or an unavailable server is unknown.
+    /// documents as "rejected" are rejections.
     #[rstest]
     #[case::bad_volume(
         "TRADING_BAD_VOLUME",

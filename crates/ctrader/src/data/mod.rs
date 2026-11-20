@@ -507,7 +507,6 @@ mod tests {
     const XAUUSD: &str = "XAUUSD.ACMEFX";
     const EURUSD: &str = "EURUSD.ACMEFX";
 
-    /// The cTrader symbol ids of XAUUSD and EURUSD in the fixtures.
     const XAUUSD_SYMBOL_ID: i64 = 41;
 
     fn first_spot(symbol_id: i64) -> Action {
@@ -526,10 +525,8 @@ mod tests {
         )
     }
 
-    /// Returns a cTrader that serves the captured assets, symbols and details.
-    ///
-    /// It also serves XAUUSD ticks `bids` and `asks` (oldest first), spot subscriptions, and each
-    /// symbol's captured first spot event.
+    /// Serves the captured assets, symbols, details, spot subscriptions and first spot events,
+    /// and XAUUSD ticks `bids` and `asks` (oldest first).
     fn peer(bids: Vec<Tick>, asks: Vec<Tick>) -> impl FnMut(usize, &ProtoMessage) -> Vec<Action> {
         move |_, request| {
             if let Some(actions) = accept_auth(request) {
@@ -575,8 +572,6 @@ mod tests {
 
     type Events = tokio::sync::mpsc::UnboundedReceiver<DataEvent>;
 
-    /// Connects a client of XAUUSD and EURUSD to the peer `script` plays.
-    ///
     /// Returns the node's data events, the frames received and the token file's directory.
     async fn connected(
         script: impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static,
@@ -639,7 +634,6 @@ mod tests {
         }
     }
 
-    /// Skips the two instruments sent at connect.
     async fn skip_instruments(events: &mut Events) {
         for _ in 0..2 {
             assert!(matches!(
@@ -708,8 +702,7 @@ mod tests {
 
         let quote = next_quote(&mut events).await;
 
-        // As captured: bid 401796000, ask 401801000 at 1793017475790 ms, 10,000 oz, XAUUSD's
-        // maximum order, like the history's quotes.
+        // Size is XAUUSD's maximum order, 10,000 oz, like the history's quotes
         assert_eq!(quote.instrument_id, InstrumentId::from(XAUUSD));
         assert_eq!(quote.bid_price, Price::from("4017.96"));
         assert_eq!(quote.ask_price, Price::from("4018.01"));
@@ -792,7 +785,6 @@ mod tests {
         (ms.try_into().unwrap(), bid.to_owned(), ask.to_owned())
     }
 
-    /// One tick of each side before the window, and two bids and an ask in it.
     fn window_ticks() -> (i64, Vec<Tick>, Vec<Tick>) {
         let s = at("2026-10-01T00:00:00Z").as_millisecond();
         let bids = vec![
@@ -854,7 +846,6 @@ mod tests {
         client.disconnect().await.unwrap();
     }
 
-    /// Synthetic: cTrader refuses the third page of BID ticks, as at its request limit.
     #[tokio::test]
     async fn a_failed_page_answers_the_quotes_before_it_with_the_failure() {
         let s = at("2026-10-01T00:00:00Z").as_millisecond();
@@ -870,7 +861,6 @@ mod tests {
                 let asked =
                     ProtoOaGetTickDataReq::decode(request.payload.as_deref().unwrap()).unwrap();
 
-                // Pages of 2, newest first: 4, 3 | 3, 2 | refused below 2001 ms
                 if asked.from_timestamp == Some(s) && asked.to_timestamp == Some(s + 2_001) {
                     let refused = ProtoOaErrorRes {
                         error_code: "REQUEST_FREQUENCY_EXCEEDED".to_owned(),
@@ -897,8 +887,6 @@ mod tests {
         let reason = envelope.failure_reason().expect("no failure reason");
         assert!(reason.contains("REQUEST_FREQUENCY_EXCEEDED"), "{reason}");
 
-        // The BID ticks reach back to 2001 ms, so the quotes start there and the ask of 2000 ms
-        // seeds them.
         assert_eq!(
             prices(&quotes_of(&envelope).data),
             [
@@ -909,7 +897,6 @@ mod tests {
         client.disconnect().await.unwrap();
     }
 
-    /// Returns a data engine at `now` with a writable catalog in `dir` and `client` registered.
     fn engine_with(client: CTraderDataClient, dir: &std::path::Path, now: &str) -> DataEngine {
         MessageBus::new(TraderId::from("TRADER-001"), UUID4::new(), None, None)
             .register_message_bus();
@@ -931,8 +918,6 @@ mod tests {
         engine
     }
 
-    /// Asks `engine` for the XAUUSD quotes over `[start, end]`, to be written back.
-    ///
     /// Returns the quotes in the client's answer.
     async fn write_back_request(
         engine: &mut DataEngine,
@@ -986,7 +971,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut engine = engine_with(client, dir.path(), "2026-10-01T03:00:00Z");
 
-        // An empty catalog: the broker answers the whole window, written back
         let first = write_back_request(
             &mut engine,
             &mut events,
@@ -996,7 +980,6 @@ mod tests {
         .await;
         let asked_first: Vec<ProtoOaGetTickDataReq> = received_of(&received);
 
-        // Then over a window reaching an hour further
         let second = write_back_request(
             &mut engine,
             &mut events,
@@ -1015,7 +998,6 @@ mod tests {
             ]
         );
 
-        // The catalog's quotes for [00:30, 01:00], then the broker's after 01:00
         assert_eq!(
             prices(&second),
             [
@@ -1026,7 +1008,6 @@ mod tests {
             ]
         );
 
-        // The broker's two answers, each written back once
         let mut catalog = ParquetDataCatalog::new(dir.path(), None, None, None, None);
         let stored = catalog
             .quote_ticks(Some(vec![XAUUSD.to_string()]), None, None)
@@ -1034,8 +1015,6 @@ mod tests {
         let written = [&first[..], &second[2..]].concat();
         assert_eq!(prices(&stored), prices(&written));
 
-        // The second request's tick windows, for each side: the last tick before the gap (from 1
-        // ms after the stored end), and the gap.
         let all: Vec<ProtoOaGetTickDataReq> = received_of(&received);
         let mut windows: Vec<(i64, i64)> = all[asked_first.len()..]
             .iter()
@@ -1067,9 +1046,6 @@ mod tests {
     }
 
     /// Nautilus' regression for a fresh instrument request (`adapters.md`, "Data client").
-    ///
-    /// The XAUUSD definition changes between two requests, from digits 2 to 3, and the second
-    /// answer is new.
     #[tokio::test]
     async fn an_instrument_request_answers_ctraders_definition_of_the_moment() {
         let changed = Arc::new(AtomicBool::new(false));
@@ -1105,13 +1081,11 @@ mod tests {
         assert_eq!(after.id(), InstrumentId::from(XAUUSD));
         assert_eq!(after.price_precision(), 3);
 
-        // The details asked for at connect, then for each request
         let asked: Vec<ProtoOaSymbolByIdReq> = received_of(&received);
         assert_eq!(asked.len(), 3);
         client.disconnect().await.unwrap();
     }
 
-    /// cTrader lists no such symbol, so the request fails and names why.
     #[tokio::test]
     async fn an_instrument_request_ctrader_cannot_answer_fails() {
         let (mut client, mut events, _, _tokens) = connected(peer(vec![], vec![])).await;
@@ -1203,7 +1177,6 @@ mod tests {
         client.disconnect().await.unwrap();
     }
 
-    /// The renewal is answered once the test opens the gate, after `stop`, mid-disconnect.
     #[tokio::test]
     async fn a_token_renewal_in_flight_at_stop_is_saved_by_the_disconnect() {
         let (open, gate) = std::sync::mpsc::channel::<()>();
@@ -1263,7 +1236,6 @@ mod tests {
         assert!(received_of::<ProtoOaGetTickDataReq>(&received).is_empty());
     }
 
-    /// As `a_quote_request_without_a_start_is_refused`, nothing is asked.
     #[tokio::test]
     async fn quotes_of_an_instrument_not_loaded_are_refused() {
         let (mut client, _events, received, _tokens) = connected(peer(vec![], vec![])).await;

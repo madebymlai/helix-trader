@@ -146,7 +146,7 @@ mod tests {
         self, SPOT_EVENT_EURUSD_ASK, SPOT_EVENT_EURUSD_BID, SPOT_EVENT_EURUSD_FIRST,
     };
 
-    /// EURUSD as the clients load it, 5 decimals, and its cTrader symbol id in the fixtures.
+    /// Returns EURUSD as the clients load it, with its cTrader symbol id in the fixtures.
     fn eurusd() -> (InstrumentAny, i64) {
         (InstrumentAny::Cfd(testing::instrument("EURUSD")), 1)
     }
@@ -188,7 +188,6 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        // As captured: bid 111964, ask 111965 at 1793017476361 ms
         assert_eq!(
             prices(&made),
             quote(1_793_017_476_361, "1.11964", "1.11965")
@@ -211,7 +210,6 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        // The bid 111965 alone at 1793017480320 ms; the ask carried
         assert_eq!(
             prices(&made),
             quote(1_793_017_480_320, "1.11965", "1.11965")
@@ -263,7 +261,6 @@ mod tests {
         );
     }
 
-    /// Synthetic: a spot of a symbol the session did not load.
     #[rstest]
     fn a_spot_of_a_symbol_not_loaded_is_an_error() {
         let mut quotes = subscribed();

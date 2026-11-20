@@ -379,8 +379,6 @@ mod tests {
         );
     }
 
-    /// Two writers replace the pair repeatedly while a reader that read the seed keeps reading.
-    /// Every read is one whole pair, and the file ends with the last pair written.
     #[rstest]
     fn concurrent_writers_never_leave_a_partial_pair_and_the_later_wins() {
         let dir = tempfile::tempdir().unwrap();
