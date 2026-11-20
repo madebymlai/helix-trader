@@ -1,6 +1,8 @@
-//! The data requirements of a strategy, stated by its config: the series it reads and the catalog
-//! series they are built from, over the slices their contracts stand for. Filling the catalog,
-//! backtesting and going live all read them from here.
+//! Defines the data a strategy needs, as its config states it.
+//!
+//! The requirements list the series the strategy reads and the catalog series those are built
+//! from. Each catalog series is read over the slices its contracts stand for. Filling the catalog,
+//! backtesting and going live all read the requirements from here.
 
 use std::{fmt::Display, str::FromStr};
 
@@ -20,25 +22,34 @@ use crate::rolls::{self, Slice, Transition, TransitionTable, front};
 /// What a strategy needs from data, stated by its config.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataRequirements {
-    /// The bar types read and warmed up on, a conversion pair's own among them if read as bars
+    /// The bar types read and warmed up on.
+    ///
+    /// This includes a conversion pair's own bar type if it is read as bars
     /// (`venues::rate_series`).
     pub bar_types: Vec<BarType>,
-    /// The tick series read as they are, book deltas and a conversion pair's quotes among them
-    /// (`venues::rate_series`). Live subscribes to none at start: the strategy does
-    /// (`strategy::subscriptions`), refusing one its venue does not stream (`venues::streams`).
+    /// The tick series read as they are.
+    ///
+    /// This includes book deltas and a conversion pair's quotes (`venues::rate_series`). Live
+    /// subscribes to none at start. The strategy subscribes (`strategy::subscriptions`) and refuses
+    /// one its venue does not stream (`venues::streams`).
     pub ticks: Vec<TickSeries>,
-    /// The custom series read, such as LSE's daily bond yields. Its type's row alone routes it
-    /// (`venues::serves_custom`), whatever its identifier. One of a type with no row or no history
-    /// source is written into the catalog from outside helix. A live run refuses one its type's
-    /// live data does not stream (`venues::streams_custom`). They bring no instrument.
+    /// The custom series read, such as LSE's daily bond yields.
+    ///
+    /// - Only its type's row routes a series (`venues::serves_custom`), whatever its identifier.
+    /// - A series whose type has no row or no history source is written into the catalog from
+    ///   outside helix.
+    /// - A live run refuses a series whose type's live data does not stream
+    ///   (`venues::streams_custom`).
+    /// - A custom series brings no instrument.
     pub custom: Vec<CustomSeries>,
-    /// How far back before a live start the warmup history starts: a backtest requests none.
+    /// How far back before a live start the warmup history starts. A backtest requests none.
     pub warmup: SignedDuration,
 }
 
-/// A series a strategy reads as it is: one Nautilus data type of one instrument, `{ data =
-/// "quotes", instrument_id = "XAUUSD.ICMARKETS" }` in `[data] series`. `data` is `"quotes"`,
-/// `"trades"`, `"order_book_depths"` or `"order_book_deltas"` (`tick_data`).
+/// A series a strategy reads as it is: one Nautilus data type of one instrument.
+///
+/// In `[data] series` it is written `{ data = "quotes", instrument_id = "XAUUSD.ICMARKETS" }`.
+/// `data` is `"quotes"`, `"trades"`, `"order_book_depths"` or `"order_book_deltas"` (`tick_data`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TickSeries {
     pub data: NautilusDataType,
@@ -59,23 +70,26 @@ pub(super) fn tick_data(name: &str) -> Result<NautilusDataType, String> {
     }
 }
 
-/// A custom series: custom data of one Nautilus data type under the identifier keying it in the
-/// catalog and on the message bus, with the metadata its source asks for, `{ data =
+/// A custom series: custom data of one Nautilus data type.
+///
+/// The data sits under an identifier that keys it in the catalog and on the message bus. It
+/// carries the metadata its source asks for. In `[data] series` it is written `{ data =
 /// "Custom:LseRow", identifier = "US10Y", metadata = { source = "bond_yields", symbol = "US10Y" }
-/// }` in `[data] series`. Built only through `new`.
+/// }`. It is built only through `new`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomSeries(DataType);
 
 impl CustomSeries {
-    /// The series of `type_name` under `identifier`, of `metadata`, empty metadata counting as
-    /// none: Nautilus' data type of either has one topic.
+    /// Returns the series of `type_name` under `identifier` with `metadata`.
+    ///
+    /// Empty metadata counts as none. Nautilus' data type has one topic for either.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - `metadata` holds the key Nautilus reserves for the identifier.
     /// - `identifier` holds a backslash, or its catalog folder is empty or blank
-    ///   (`check_valid_string_utf8`): an empty folder is its type's own.
+    ///   (`check_valid_string_utf8`). An empty folder is its type's own.
     pub fn new(
         type_name: &str,
         identifier: String,
@@ -99,19 +113,19 @@ impl CustomSeries {
         )?))
     }
 
-    /// Its data type as the config names it.
+    /// Returns the data type as the config names it.
     #[must_use]
     pub fn data_type(&self) -> &DataType {
         &self.0
     }
 
-    /// Its type's name, which routes it.
+    /// Returns the name of its type, which routes the series.
     #[must_use]
     pub fn type_name(&self) -> &str {
         self.0.type_name()
     }
 
-    /// The identifier keying it in the catalog.
+    /// Returns the identifier that keys it in the catalog.
     #[must_use]
     pub fn identifier(&self) -> &str {
         self.0
@@ -119,17 +133,20 @@ impl CustomSeries {
             .expect("a custom series is built with an identifier")
     }
 
-    /// The folder Nautilus' catalog stores it under, below its type's folder
-    /// (`ParquetDataCatalog::make_path_custom_data`): its identifier made URI-safe
-    /// (`urisafe_instrument_id`). A backslash would be written as a separator and read back as a
-    /// character, so `new` refuses it.
+    /// Returns the folder Nautilus' catalog stores it under, below its type's folder.
+    ///
+    /// The catalog builds the folder (`ParquetDataCatalog::make_path_custom_data`) from the
+    /// identifier made URI-safe (`urisafe_instrument_id`). A backslash would be written as a
+    /// separator and read back as a character, so `new` refuses it.
     #[must_use]
     pub fn catalog_folder(&self) -> String {
         urisafe_instrument_id(self.identifier())
     }
 
-    /// The root of the roll calendar its identifier names (`GC.GLBX`), if any. Any other identifier
-    /// stands for itself: a contract's, a plain instrument's, or none (`US10Y`).
+    /// Returns the root of the roll calendar its identifier names (`GC.GLBX`), if any.
+    ///
+    /// Any other identifier stands for itself: a contract's, a plain instrument's, or none
+    /// (`US10Y`).
     #[must_use]
     pub fn root(&self) -> Option<InstrumentId> {
         InstrumentId::from_str(self.identifier())
@@ -137,16 +154,18 @@ impl CustomSeries {
             .filter(|&id| Transition::after(id, Timestamp::UNIX_EPOCH).is_some())
     }
 
-    /// The series read at `time`: on a root, that of the contract in front (`rolls::front`); itself
-    /// otherwise.
+    /// Returns the series read at `time`.
+    ///
+    /// On a root, this is the series of the contract in front (`rolls::front`). Otherwise it is the
+    /// series itself.
     #[must_use]
     pub fn at(&self, time: Timestamp) -> Self {
         self.root()
             .map_or_else(|| self.clone(), |root| self.on(front(root, time)))
     }
 
-    /// The series of `contract`, keyed as Nautilus' Databento client keys custom data of a contract
-    /// (`custom_data_for_instrument`).
+    /// Returns the series of `contract`, keyed as Nautilus' Databento client keys custom data for a
+    /// contract (`custom_data_for_instrument`).
     pub(crate) fn on(&self, contract: InstrumentId) -> Self {
         Self(DataType::new(
             self.type_name(),
@@ -155,10 +174,12 @@ impl CustomSeries {
         ))
     }
 
-    /// The contract whose catalog folder it and `other` share through a root, if any, where a fill
-    /// and a replay would take the folder for two series: one is on a root and the other stored
-    /// under a contract standing for it. The root's series on that contract is one series. A roll
-    /// calendar contract holds no `/` or `^`, so its folder names it.
+    /// Returns the contract whose catalog folder this series and `other` share through a root, if
+    /// any.
+    ///
+    /// A fill and a replay would take that folder for two series: one is on a root and the other is
+    /// stored under a contract standing for it. The root's series on that contract is one series. A
+    /// roll calendar contract holds no `/` or `^`, so its folder names it.
     #[must_use]
     pub fn contract_folder_shared_with(&self, other: &Self) -> Option<InstrumentId> {
         let through = |on_root: &Self, series: &Self| {
@@ -174,8 +195,10 @@ impl CustomSeries {
         through(self, other).or_else(|| through(other, self))
     }
 
-    /// Its slices over `[start, end]`: on a root, each contract's series over the slice it stands
-    /// for, in time order; itself otherwise.
+    /// Returns the slices over `[start, end]`.
+    ///
+    /// On a root, these are each contract's series over the slice it stands for, in time order.
+    /// Otherwise the only slice is the series itself.
     #[must_use]
     pub fn slices(&self, start: Timestamp, end: Timestamp) -> Vec<CustomSlice> {
         let Some(root) = self.root() else {
@@ -197,17 +220,18 @@ impl CustomSeries {
     }
 }
 
-/// A custom series over the part of a window it is read in, both ends included as the catalog's
-/// ranges are.
+/// A custom series over the part of a window it is read in.
+///
+/// Both ends are included, as the catalog's ranges are.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomSlice {
-    /// The series read, a root's on the contract.
+    /// The series read. For a root, this is the root's series on the contract.
     pub series: CustomSeries,
     pub from: Timestamp,
     pub to: Timestamp,
 }
 
-/// The data type as Nautilus writes it (`LseRow.source=bond_yields.symbol=US10Y.identifier=US10Y`).
+/// Writes the data type as Nautilus writes it (`LseRow.source=bond_yields.symbol=US10Y.identifier=US10Y`).
 impl Display for CustomSeries {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
@@ -215,7 +239,7 @@ impl Display for CustomSeries {
 }
 
 impl DataRequirements {
-    /// The instruments read: those of the bar types, then of the ticks.
+    /// Returns the instruments read: those of the bar types, then those of the ticks.
     #[must_use]
     pub fn instrument_ids(&self) -> Vec<InstrumentId> {
         let bars = self.bar_types.iter().map(BarType::instrument_id);
@@ -229,7 +253,7 @@ impl DataRequirements {
         ids
     }
 
-    /// These requirements on `instrument_ids` alone: their bar types and ticks.
+    /// Returns these requirements restricted to `instrument_ids`: their bar types and ticks.
     #[must_use]
     pub fn of_instruments(&self, instrument_ids: &[InstrumentId]) -> Self {
         Self {
@@ -250,7 +274,7 @@ impl DataRequirements {
         }
     }
 
-    /// The keys in the catalog of `catalog_series`.
+    /// Returns the catalog keys of `catalog_series`.
     #[must_use]
     pub fn catalog_keys(&self) -> Vec<(NautilusDataType, String)> {
         self.catalog_series()
@@ -259,7 +283,7 @@ impl DataRequirements {
             .collect()
     }
 
-    /// The source bars of the composite bar types.
+    /// Returns the source bars of the composite bar types.
     #[must_use]
     pub fn source_bars(&self) -> Vec<BarType> {
         self.catalog_series()
@@ -271,9 +295,10 @@ impl DataRequirements {
             .collect()
     }
 
-    /// The catalog series read over `[start, end]`, contract by contract, in time order, merged so
-    /// nothing is read twice. Bars on a root are built from its contracts' trades, as the config's
-    /// load requires (see `DataConfig`).
+    /// Returns the catalog series read over `[start, end]`, contract by contract, in time order.
+    ///
+    /// Slices are merged so nothing is read twice. Bars on a root are built from the trades of its
+    /// contracts, as the config's load requires (see `DataConfig`).
     #[must_use]
     pub fn slices(&self, start: Timestamp, end: Timestamp) -> Vec<SeriesSlice> {
         let slices = self.catalog_series().into_iter().flat_map(|source| {
@@ -289,8 +314,10 @@ impl DataRequirements {
         SeriesSlice::merged(slices)
     }
 
-    /// The contracts standing for the instruments read over `[start, end]`, each with its slices
-    /// merged: a root's and a contract's read beside it are one.
+    /// Returns the contracts standing for the instruments read over `[start, end]`.
+    ///
+    /// Each contract's slices are merged. A root's slices and those of a contract read beside it
+    /// are one.
     #[must_use]
     pub fn contract_slices(&self, start: Timestamp, end: Timestamp) -> Vec<Slice> {
         let keyed = self.instrument_ids().into_iter().flat_map(|id| {
@@ -309,8 +336,9 @@ impl DataRequirements {
             .collect()
     }
 
-    /// The custom series read over `[start, end]`, contract by contract, merged per series, so a
-    /// contract's series listed beside its root's is read once.
+    /// Returns the custom series read over `[start, end]`, contract by contract.
+    ///
+    /// Slices are merged per series, so a contract's series listed beside its root's is read once.
     #[must_use]
     pub fn custom_slices(&self, start: Timestamp, end: Timestamp) -> Vec<CustomSlice> {
         let keyed = self.custom.iter().flat_map(|series| {
@@ -359,7 +387,7 @@ fn merged<K: PartialEq + Clone>(
         .collect()
 }
 
-/// A catalog series over the slice its contract stands for its root.
+/// A catalog series over the slice where its contract stands for its root.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeriesSlice {
     /// The resolved source, on the contract storing it.
@@ -369,7 +397,7 @@ pub struct SeriesSlice {
 }
 
 impl SeriesSlice {
-    /// `slices` merged per series where they overlap or touch.
+    /// Returns `slices` merged per series where they overlap or touch.
     #[must_use]
     pub fn merged(slices: impl IntoIterator<Item = Self>) -> Vec<Self> {
         let keyed = slices.into_iter().map(|of| (of.series, of.from, of.to));
@@ -380,7 +408,7 @@ impl SeriesSlice {
     }
 }
 
-/// The ticks by their Nautilus data type and instrument, `QuoteTick of XAUUSD.ICMARKETS`.
+/// Writes the ticks as their Nautilus data type and instrument, `QuoteTick of XAUUSD.ICMARKETS`.
 impl Display for TickSeries {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} of {}", self.data, self.instrument_id)
@@ -388,16 +416,21 @@ impl Display for TickSeries {
 }
 
 impl TickSeries {
-    /// The key of these ticks: their data type and the instrument id.
+    /// Returns the key of these ticks: their data type and the instrument id.
     #[must_use]
     pub fn catalog_key(&self) -> (NautilusDataType, String) {
         (self.data.clone(), self.instrument_id.to_string())
     }
 }
 
-/// The catalog keys of the series `bar_types` are built from, as Nautilus' data engine builds them:
-/// a composite bar type from its source bars, internal bars from their instrument's trades if
-/// priced LAST, its quotes otherwise. Each comes once, sorted by instrument, then identifier.
+/// Returns the catalog keys of the series `bar_types` are built from, as Nautilus' data engine
+/// builds them.
+///
+/// - A composite bar type comes from its source bars.
+/// - Internal bars come from their instrument's trades if priced LAST, and from its quotes
+///   otherwise.
+///
+/// Each key comes once, sorted by instrument, then identifier.
 #[must_use]
 pub fn catalog_keys(bar_types: &[BarType]) -> Vec<(NautilusDataType, String)> {
     sorted_sources(bar_sources(bar_types))
@@ -406,7 +439,9 @@ pub fn catalog_keys(bar_types: &[BarType]) -> Vec<(NautilusDataType, String)> {
         .collect()
 }
 
-/// External bars or the ticks of an instrument. A venue's history serves some (`venues::serves`).
+/// Either external bars or the ticks of an instrument.
+///
+/// A venue's history serves some of them (`venues::serves`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CatalogSeries {
     Bars(BarType),
@@ -445,7 +480,7 @@ impl CatalogSeries {
         }
     }
 
-    /// Its key in the catalog: its data type and catalog identifier.
+    /// Returns its key in the catalog: its data type and catalog identifier.
     #[must_use]
     pub fn key(&self) -> (NautilusDataType, String) {
         match self {
@@ -509,7 +544,7 @@ mod tests {
         }
     }
 
-    /// IC gold's hour bars and quotes, CME gold's trades and book depth as ticks.
+    /// IC gold's hour bars and quotes, and CME gold's trades and book depth as ticks.
     fn gold() -> DataRequirements {
         DataRequirements {
             bar_types: vec![BarType::from("XAUUSD.ICMARKETS-1-HOUR-MID-INTERNAL")],
@@ -613,8 +648,8 @@ mod tests {
         );
     }
 
-    /// The deltas of one contract are a catalog series of it; the imbalances of another bring no
-    /// instrument and no catalog series.
+    /// The deltas of one contract are a catalog series of that contract. The imbalances of another
+    /// bring no instrument and no catalog series.
     #[rstest]
     fn a_custom_series_under_an_instruments_id_brings_no_instrument_and_no_catalog_series() {
         let requirements = DataRequirements {
@@ -700,9 +735,11 @@ mod tests {
         );
     }
 
-    /// GC rolls from GCQ26 into GCZ26 at 00:00 UTC on 29 July 2026, two business days before the
-    /// last business day of the month before delivery (`rolls/calendar.toml`, `rolls/README.md`):
-    /// each of the root's tick series is GCQ26's up to 1 ns before the roll, GCZ26's from it.
+    /// GC rolls from GCQ26 into GCZ26 at 00:00 UTC on 29 July 2026.
+    ///
+    /// That is two business days before the last business day of the month before delivery
+    /// (`rolls/calendar.toml`, `rolls/README.md`). Each tick series of the root is GCQ26's up to
+    /// 1 ns before the roll, and GCZ26's from the roll.
     #[rstest]
     fn the_ticks_of_a_root_are_its_contracts_ticks_over_their_slices() {
         let requirements = DataRequirements {
@@ -742,8 +779,8 @@ mod tests {
         );
     }
 
-    /// LAST bars are built from GCQ26's trades up to 1 ns before the roll of 29 July, GCZ26's from
-    /// it.
+    /// LAST bars are built from GCQ26's trades up to 1 ns before the roll of 29 July, and from
+    /// GCZ26's trades from the roll.
     #[rstest]
     fn the_bars_of_a_root_are_built_from_its_contracts_trades_over_their_slices() {
         let requirements = DataRequirements {
@@ -795,7 +832,7 @@ mod tests {
         );
     }
 
-    /// GCQ26 is one slice over the whole span, GCZ26 one from the roll of 29 July.
+    /// GCQ26 is one slice over the whole span. GCZ26 is one slice from the roll of 29 July.
     #[rstest]
     fn the_contracts_of_a_root_and_of_a_contract_beside_it_are_one_slice_each() {
         let requirements = DataRequirements {
@@ -850,7 +887,7 @@ mod tests {
         );
     }
 
-    /// GCQ26's series up to 1 ns before the roll of 29 July, GCZ26's from it.
+    /// The series is GCQ26's up to 1 ns before the roll of 29 July, and GCZ26's from the roll.
     #[rstest]
     fn a_custom_series_on_a_root_is_at_each_time_the_series_of_the_contract_in_front() {
         let series = yields("GC.GLBX");
@@ -900,8 +937,8 @@ mod tests {
         );
     }
 
-    /// GCQ26's imbalances beside GC's are read once over the whole window, which holds the root's
-    /// GCQ26 slice.
+    /// GCQ26's imbalances listed beside GC's are read once over the whole window. The window holds
+    /// the root's GCQ26 slice.
     #[rstest]
     fn a_contract_s_custom_series_listed_beside_its_root_s_is_one_slice_over_both() {
         let requirements = DataRequirements {
@@ -931,8 +968,11 @@ mod tests {
         catalog_keys(&bar_types)
     }
 
-    /// Internal bars need their instrument's quotes, or trades if priced LAST; composite bars their
-    /// source bars, or what those are built from; external bars are their own series.
+    /// Each kind of bar needs a different series.
+    ///
+    /// - Internal bars need their instrument's quotes, or its trades if priced LAST.
+    /// - Composite bars need their source bars, or what those are built from.
+    /// - External bars are their own series.
     #[rstest]
     #[case::internal_bars_of_quotes(
         "SXR8.IBIS-1-HOUR-MID-INTERNAL",
