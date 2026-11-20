@@ -44,7 +44,7 @@ nautilus_strategy!(Probe);
 
 impl DataActor for Probe {}
 
-/// A strategy registered without a node at `now`, as the EMA's tests do.
+/// A strategy registered without a node at `now`, as the EMA tests do.
 fn registered(now: u64) -> (Probe, Rc<RefCell<VirtualClock>>) {
     let mut probe = Probe {
         core: StrategyCore::new(StrategyConfig {
@@ -81,7 +81,7 @@ fn every(minutes: i64) -> DecisionRule {
 
 /// The last mid, an exponential average of one.
 const MID: Declared<EmaArgs> = Declared::new("mid");
-/// An exponential average of two mids, the mean of the first two once both came.
+/// An exponential average of two mids. Once both have arrived, it is their mean.
 const MID_2: Declared<EmaArgs> = Declared::new("mid_2");
 
 fn tables() -> IndicatorsConfig {
@@ -145,8 +145,8 @@ fn a_cadence_must_be_positive(#[case] minutes: i64, #[case] refused: Option<&str
     }
 }
 
-/// A 15 minute cadence decides at its grid times plus its delay and `MARGIN`, also if started on a
-/// grid time or inside the delay.
+/// A 15 minute cadence decides at its grid times plus its delay and `MARGIN`. It does so also if
+/// started on a grid time or inside the delay.
 #[rstest]
 #[case::started_off_the_grid(NOW, SignedDuration::ZERO, QUARTER + MARGIN)]
 #[case::started_on_the_grid(QUARTER, SignedDuration::ZERO, QUARTER + MARGIN)]
@@ -171,9 +171,9 @@ fn a_cadence_decides_just_after_the_grid_of_its_interval(
     );
 }
 
-/// Data made up to a decision's firing, its grid time plus delay and `MARGIN`, is read first by it,
-/// later data by the next. The grid starts at the epoch: a 4 ms cadence, shorter than `MARGIN`,
-/// reads data made less than an interval before the epoch's firing there.
+/// A decision reads data made up to its firing, which is its grid time plus delay and `MARGIN`.
+/// The next decision reads later data first. The grid starts at the epoch. A 4 ms cadence, shorter
+/// than `MARGIN`, reads data made less than an interval before the epoch's firing there.
 #[rstest]
 #[case::before_the_grid_time(every(15), SignedDuration::ZERO, QUARTER - 1, QUARTER)]
 #[case::at_the_grid_time(every(15), SignedDuration::ZERO, QUARTER, QUARTER)]
@@ -288,8 +288,8 @@ fn a_cadence_without_data_since_its_previous_decision_skips_and_publishes_nothin
     assert!(rows.borrow().is_empty());
 }
 
-/// The decision 15 minutes ago saw the data up to it: a quote made then is stale, a nanosecond
-/// later fresh.
+/// The decision 15 minutes ago saw the data up to it. A quote made then is stale, and one a
+/// nanosecond later is fresh.
 #[rstest]
 fn data_since_the_previous_decision_is_fresh_and_data_up_to_it_stale() {
     let (probe, _clock) = registered(NOW);
@@ -302,7 +302,8 @@ fn data_since_the_previous_decision_is_fresh_and_data_up_to_it_stale() {
     assert!(decide(&probe, &warm_until(previous + 1), every(15), aud()).is_some());
 }
 
-/// The epoch is the previous decision: a quote made then is stale, a nanosecond later fresh.
+/// The epoch is the previous decision. A quote made then is stale, and one a nanosecond later is
+/// fresh.
 #[rstest]
 fn the_decision_an_interval_after_the_epoch_judges_its_data_from_the_epoch() {
     let (probe, _clock) = registered(900 * SECOND);
@@ -326,7 +327,8 @@ fn a_decision_within_an_interval_of_the_epoch_is_refused() {
     let _ = decide(&probe, &features(), every(15), aud());
 }
 
-/// The traded instrument is closed, another open: the decision would trade on stale prices.
+/// The traded instrument is closed and another is open, so the decision would trade on stale
+/// prices.
 #[rstest]
 fn data_of_another_instrument_makes_no_decision_fresh() {
     let (probe, _clock) = registered(NOW);
@@ -347,7 +349,7 @@ fn data_of_another_instrument_makes_no_decision_fresh() {
     assert!(decide(&probe, &features, every(15), InstrumentId::from(GBP)).is_some());
 }
 
-/// No feature reads AUD/USD: its last trade in the cache, a second old, makes the decision fresh.
+/// No feature reads AUD/USD. Its last trade in the cache, a second old, makes the decision fresh.
 #[rstest]
 fn a_trade_of_the_traded_instrument_in_the_cache_makes_the_decision_fresh() {
     let (probe, _clock) = registered(NOW);
@@ -395,7 +397,7 @@ fn the_fingerprint_changes_with_the_rule() {
     );
 }
 
-/// Another build delay, 5 s for composite bars or none, is another fingerprint.
+/// A different build delay, 5 s for composite bars or none, gives a different fingerprint.
 #[rstest]
 fn the_fingerprint_changes_with_the_build_delay() {
     let features = features();
@@ -405,8 +407,8 @@ fn the_fingerprint_changes_with_the_build_delay() {
     assert_ne!(delayed(5), delayed(6));
 }
 
-/// Without a build delay the rule's part is as before the delay was keyed, so existing datasets
-/// keep their fingerprints.
+/// Without a build delay, the part for the rule is as before the delay was keyed. Existing
+/// datasets keep their fingerprints.
 #[rstest]
 fn a_fingerprint_without_a_build_delay_keeps_the_rules_part_as_it_was() {
     let features = features();

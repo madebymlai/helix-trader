@@ -1,9 +1,9 @@
-//! Calibration of a model's predictions into what a decision weighs.
+//! Calibrates a model's predictions into what a decision weighs.
 //!
-//! A pair's side models are calibrated together (`Ksplit`) on the calibration period's rows, which
-//! no model was fitted on:
-//! - The level, the mean of the sides' predictions, by a line.
-//! - The side call, the long's prediction less the short's, by a slope through nought.
+//! The side models of a pair are calibrated together (`Ksplit`) on the rows of the calibration
+//! period. No model was fitted on those rows. Two parts are fitted:
+//! - The level: a line on the mean of the sides' predictions.
+//! - The side call: a slope through nought on the long's prediction less the short's.
 //!
 //! Each slope is clipped to `[0, 1.5]`. A one-sided strategy and a meta model use the level line
 //! alone (`Line`). Nautilus has no calibration.
@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use super::targets::Side;
 
-/// No slope below nought: a part ranking the rows the wrong way shows no signal.
+/// The slope bounds. A slope below nought is not allowed: a part that ranks the rows the wrong way
+/// shows no signal.
 const SLOPES: (f64, f64) = (0.0, 1.5);
 
 /// A line, `alpha + beta x`.
@@ -30,13 +31,14 @@ impl Line {
     }
 }
 
-/// The level `C' = alpha_C + beta_C C` and the side call `D' = beta_D D`, the latter none of one
-/// side.
+/// The level `C' = alpha_C + beta_C C` and the side call `D' = beta_D D`.
+///
+/// The side call is none for one side.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Ksplit {
-    /// The level's line.
+    /// The line of the level.
     pub level: Line,
-    /// The side call's slope, `beta_D`; none of one side.
+    /// The slope `beta_D` of the side call, none for one side.
     pub side_call: Option<f64>,
 }
 
@@ -59,10 +61,13 @@ impl Expected {
 }
 
 impl Ksplit {
-    /// Fits `rows`, each a row's one or two sides, the long first, as (prediction, realized R).
-    /// `beta_C` is the least squares slope of the mean R on `C`, `beta_D` that of the long's R less
-    /// the short's on `D`, through nought. A slope is nought where its predictions never vary, to
-    /// the bit. `alpha_C` is the mean R less `beta_C` times the mean `C`, after the clip.
+    /// Fits the calibration to `rows`.
+    ///
+    /// Each row holds one or two sides, the long first, as (prediction, realized R).
+    /// `beta_C` is the least squares slope of the mean R on `C`. `beta_D` is the least squares
+    /// slope, through nought, of the long's R less the short's on `D`. A slope is nought where its
+    /// predictions never vary, to the bit. `alpha_C` is the mean R less `beta_C` times the mean
+    /// `C`, after the clip.
     ///
     /// # Errors
     ///
@@ -91,7 +96,7 @@ impl Ksplit {
             ((x - c).mul_add(r - y, cov), (x - c).mul_add(x - c, var))
         });
 
-        // The rounded mean of constant levels would give a slope of noise
+        // A rounded mean of constant levels would give a noise slope
         let beta = if varies(levels.iter().map(|level| level.0)) {
             slope(covariance, variance)
         } else {
@@ -122,7 +127,7 @@ impl Ksplit {
         })
     }
 
-    /// The calibrated expectation of `predictions`, the long's first.
+    /// Returns the calibrated expectation of `predictions`, the long's first.
     #[must_use]
     pub fn apply(&self, predictions: &[f64]) -> Expected {
         let level = self.level.apply(mean(predictions.iter().copied()));
@@ -171,9 +176,10 @@ mod tests {
             .collect()
     }
 
-    /// Means 1 and 0.8, covariance (-1)(-0.5) + (1)(0.7) = 1.2 over variance 2: beta_C = 0.6,
-    /// alpha_C = 0.8 - 0.6 = 0.2. beta_D = (0.5 + 0.5 + 2) / (1 + 1 + 4) = 0.5. At predictions 1
-    /// and 0, C = 0.5, D = 1: C' = 0.2 + 0.3 = 0.5, D' = 0.5, E' 0.75 and 0.25.
+    /// The means are 1 and 0.8. The covariance is (-1)(-0.5) + (1)(0.7) = 1.2 over variance 2, so
+    /// beta_C = 0.6 and alpha_C = 0.8 - 0.6 = 0.2. Also beta_D = (0.5 + 0.5 + 2) / (1 + 1 + 4) =
+    /// 0.5. At predictions 1 and 0, C = 0.5 and D = 1, so C' = 0.2 + 0.3 = 0.5, D' = 0.5, and E' is
+    /// 0.75 and 0.25.
     #[rstest]
     fn a_pairs_level_and_side_call_are_fitted_by_least_squares() {
         let rows = pair_rows(
@@ -235,8 +241,8 @@ mod tests {
         near(expected.of(Side::Short), long_and_short.1);
     }
 
-    /// At 0.5, E' is the level: 0.2 + 0.6 x 0.5 = 0.5, or, the slope 2 clipped to 1.5, alpha
-    /// 2 - 1.5 = 0.5 and E' 0.5 + 0.75 = 1.25.
+    /// At 0.5, E' is the level. Fitted: 0.2 + 0.6 x 0.5 = 0.5. Clipped: the slope 2 clips to 1.5,
+    /// so alpha = 2 - 1.5 = 0.5 and E' = 0.5 + 0.75 = 1.25.
     #[rstest]
     #[case::fitted([0.3, 0.6, 1.5], (0.2, 0.6), 0.5)]
     #[case::clipped_and_its_alpha_refitted([0.0, 2.0, 4.0], (0.5, 1.5), 1.25)]
@@ -262,8 +268,8 @@ mod tests {
         near(expected.of(Side::Short), expected_r);
     }
 
-    /// The mean R is 0.5. Least squares through nought would give the side call 0.2 / 0.02,
-    /// clipped to 1.5.
+    /// The mean R is 0.5. Least squares through nought would give the side call 0.2 / 0.02, which
+    /// clips to 1.5.
     #[rstest]
     fn predictions_that_never_vary_fit_no_slope() {
         let rows: Vec<Vec<(f64, f64)>> = [(0.5, -0.5), (1.5, 0.5)]
@@ -280,8 +286,8 @@ mod tests {
         near(expected.of(Side::Short), 0.5);
     }
 
-    /// The mean R is (m + 0.4) / 2, m the mean of `i % 3`: 1 over 24 or 30 rows; (12 + 2 x 12) / 37
-    /// over 37; (17 + 2 x 16) / 50 = 0.98 over 50.
+    /// The mean R is (m + 0.4) / 2, where m is the mean of `i % 3`. It is 1 over 24 or 30 rows,
+    /// (12 + 2 x 12) / 37 over 37 rows, and (17 + 2 x 16) / 50 = 0.98 over 50 rows.
     #[rstest]
     #[case::of_24_rows(24, 0.7)]
     #[case::of_30_rows(30, 0.7)]

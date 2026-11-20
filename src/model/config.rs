@@ -1,8 +1,9 @@
-//! The model section of a strategy's TOML.
+//! Holds the model section of a strategy's TOML.
 //!
 //! A strategy has at most two levels of models: the side models of a `ModelConfig`, and one meta
-//! model (`MetaConfig`) deciding whether to take the trade of the side picked. A meta section has
-//! no meta section of its own, and writing one is refused at load as an unknown field.
+//! model (`MetaConfig`). The meta model decides whether to take the trade of the picked side. A
+//! meta section has no meta section of its own. Writing one is refused at load as an unknown
+//! field.
 
 use jiff::SignedDuration;
 use nautilus_common::config::{ConfigError, ConfigErrorCollector, ConfigResult};
@@ -22,7 +23,9 @@ use crate::strategy::{
     risk::{R, Risk},
 };
 
-/// A strategy's model, such as
+/// A strategy's model.
+///
+/// For example:
 ///
 /// ```toml
 /// [model]
@@ -43,46 +46,50 @@ use crate::strategy::{
 pub struct ModelConfig<T = TargetConfig> {
     /// When the strategy decides.
     pub decision: DecisionRule,
-    /// The target whose net R of each side the side models learn.
+    /// The target. The side models learn its net R for each side.
     pub target: T,
-    /// How often the model is retrained, at every multiple of it since the Unix epoch
-    /// (`model::schedule`). Left out, never: each `train --at` trains a model set at its time
-    /// (`Retrain::Never`).
+    /// How often the model is retrained, at every multiple of the interval since the Unix epoch
+    /// (`model::schedule`).
+    ///
+    /// Left out, the model never retrains (`Retrain::Never`), and each `train --at` trains a model
+    /// set at its time.
     #[serde(default)]
     #[builder(default, into)]
     pub retrain: Retrain,
-    /// How far back from a retrain its rows go.
+    /// How far back from a retrain the rows go.
     pub window: SignedDuration,
-    /// The last part of the window that the models are calibrated on and not fitted on (`train`).
+    /// The last part of the window. The models are calibrated on it and not fitted on it (`train`).
     pub calibration: SignedDuration,
     /// The sides traded, each with its margin.
     pub margins: Margins,
-    /// The fewest rows of each slice, at least one: a train with fewer fails.
+    /// The fewest rows of each slice, at least one. A train with fewer fails.
     pub min_rows: usize,
     /// The learner and its settings.
     pub learner: LearnerConfig,
-    /// The `[model.meta]` table deciding whether to take each trade; none takes every trade.
+    /// The `[model.meta]` table. It decides whether to take each trade. None takes every trade.
     pub meta: Option<MetaConfig>,
-    /// The venue its dataset runs are made at. It keys the dataset and the stores
-    /// (`dataset::fingerprint`), so `train`, a backtest and a live node read the one store,
-    /// whatever a backtest's own commission, balance and latency.
+    /// The venue the dataset runs are made at. It keys the dataset and the stores
+    /// (`dataset::fingerprint`). So `train`, a backtest and a live node read the one store,
+    /// whatever the commission, balance and latency of the backtest.
     pub dataset: DatasetVenue,
 }
 
-/// A meta model: on each decision that picks a side, it learns the realized net R of that side's
-/// trade from the sides' features, the side picked and the decision's calibrated level and side
-/// call. It is retrained right after the sides, or at each `train --at` if they never are.
+/// A meta model.
+///
+/// On each decision that picks a side, it learns the realized net R of that side's trade. It
+/// learns from the sides' features, the side picked, and the calibrated level and side call of the
+/// decision. It is retrained right after the sides, or at each `train --at` if they never are.
 ///
 /// A probability `threshold` or a `size` is refused at parsing (`MetaFields`).
 #[derive(Debug, Clone, PartialEq, Deserialize, bon::Builder)]
 #[serde(try_from = "MetaFields")]
 pub struct MetaConfig {
-    /// How far back from a retrain its rows go: its train fits an out-of-fold pair of the sides as
-    /// of this much before, whose out-of-sample picks over the window are the rows.
+    /// How far back from a retrain its rows go. Its train fits an out-of-fold pair of the sides as
+    /// of this much before. The out-of-sample picks of that pair over the window are the rows.
     pub window: SignedDuration,
-    /// The last part of the window that the model is calibrated on and not fitted on.
+    /// The last part of the window. The model is calibrated on it and not fitted on it.
     pub calibration: SignedDuration,
-    /// The calibrated net R the meta must expect of the trade (`earnings::MetaMargin`).
+    /// The calibrated net R the meta model must expect from the trade (`earnings::MetaMargin`).
     pub margin: R,
     /// The fewest rows of each slice, at least one.
     pub min_rows: usize,
@@ -90,8 +97,10 @@ pub struct MetaConfig {
     pub learner: LearnerConfig,
 }
 
-/// A `MetaConfig`'s keys and `threshold` and `size`, each refused naming what takes its place
-/// before a margin is looked for.
+/// The keys of a `MetaConfig`, plus `threshold` and `size`.
+///
+/// Parsing refuses `threshold` and `size`, naming what takes their place, before it looks for a
+/// margin.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MetaFields {
@@ -142,8 +151,8 @@ impl TryFrom<MetaFields> for MetaConfig {
 }
 
 /// The sides a strategy trades, each with the calibrated expected net R a trade must clear
-/// (`payoff`). A side without one has no model, trained, stored, scored nor traded:
-/// `{ long = "0.5R" }` is a long-only model.
+/// (`payoff`). A side without one has no model, so it is not trained, stored, scored or traded.
+/// For example, `{ long = "0.5R" }` is a long-only model.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Margins {
@@ -210,8 +219,10 @@ impl ModelSection {
 }
 
 impl ModelConfig {
-    /// Checks the section against the strategy's data `requirements`, reporting every violation as
-    /// a `ConfigError` under its field, `ConfigError::Multiple` if several.
+    /// Checks the section against the strategy's data `requirements`.
+    ///
+    /// Reports every violation as a `ConfigError` under its field, or as `ConfigError::Multiple`
+    /// if there are several.
     ///
     /// # Errors
     ///
@@ -219,15 +230,16 @@ impl ModelConfig {
     /// - The decision rule, the target or the learner is invalid (see `DecisionRule::validate`,
     ///   `TargetConfig::validate`, `LearnerConfig::validate`).
     /// - The retrain interval is not positive.
-    /// - The target's ATR has no bars built from what the strategy reads of the traded instrument
-    ///   (see `TargetConfig::atr_bars`), or warms over longer than its warmup.
+    /// - The target's ATR has no bars built from what the strategy reads for the traded instrument
+    ///   (see `TargetConfig::atr_bars`).
+    /// - The target's ATR warms over longer than its warmup.
     /// - The target's limit is not shorter than the window.
     /// - The calibration is not positive or leaves no fit slice (see `validate_window`).
     /// - The margins name no side.
-    /// - The minimum of rows is below one (see `validate_min_rows`).
+    /// - The minimum number of rows is below one (see `validate_min_rows`).
     /// - The meta model is invalid (see `MetaConfig::validate`).
-    /// - The target's limit is shorter than the longest its dataset runs take to process a command
-    ///   (see `validate_latency`).
+    /// - The target's limit is shorter than the longest time its dataset runs take to process a
+    ///   command (see `validate_latency`).
     pub fn validate(&self, requirements: &DataRequirements) -> ConfigResult<()> {
         let mut errors = ConfigErrorCollector::new();
         validate_decisions(
@@ -259,10 +271,12 @@ impl ModelConfig {
     }
 }
 
-/// Refuses a `target` limit shorter than the longest a dataset run takes to process a command
-/// (`DatasetVenue::delay`): the time alert would find the entry neither open nor filled
-/// (`Order::is_open`) and not cancel it. A limit of exactly that delay is taken: the purge timer
-/// fires once a minute, so the entry is processed before the alert.
+/// Refuses a `target` limit shorter than the longest time a dataset run takes to process a command
+/// (`DatasetVenue::delay`).
+///
+/// The time alert would find the entry neither open nor filled (`Order::is_open`), and so not
+/// cancel it. A limit of exactly that delay is taken, because the purge timer fires once a minute
+/// and the entry is processed before the alert.
 fn validate_latency(
     target: &TargetConfig,
     dataset: &DatasetVenue,
@@ -287,9 +301,13 @@ fn validate_latency(
 }
 
 impl MetaConfig {
-    /// Pushes onto `errors` every violation of the meta model against the sides' `target`: an
-    /// invalid learner, a limit not shorter than the window, a calibration not positive or leaving
-    /// no fit slice, or a minimum of rows below one.
+    /// Pushes onto `errors` every violation of the meta model against the sides' `target`.
+    ///
+    /// The violations are:
+    /// - An invalid learner.
+    /// - A limit not shorter than the window.
+    /// - A calibration that is not positive or leaves no fit slice.
+    /// - A minimum number of rows below one.
     pub fn validate(&self, target: &TargetConfig, errors: &mut ConfigErrorCollector) {
         errors.collect(learner(&self.learner, "model.meta.learner"));
         validate_window(
@@ -344,8 +362,10 @@ fn learner(learner: &LearnerConfig, field: &str) -> ConfigResult<()> {
         .map_err(|e| ConfigError::invalid_value(field, format!("{e:#}")))
 }
 
-/// Refuses a `target` limit not shorter than `window`, under `limit_field`, and a `calibration` not
-/// positive or leaving no fit slice (`train`): a fitted row settles by the calibration's start.
+/// Refuses a `target` limit not shorter than `window`, under `limit_field`.
+///
+/// Also refuses a `calibration` that is not positive or leaves no fit slice (`train`), because a
+/// fitted row settles by the start of the calibration.
 fn validate_window(
     window: SignedDuration,
     calibration: SignedDuration,
@@ -406,7 +426,7 @@ mod tests {
 
     const GOLD: &str = "XAUUSD.ICMARKETS";
 
-    /// Hourly decisions, a 45 minute bracket, a 48 hour window of which 12 calibrated, 30 rows.
+    /// Hourly decisions, a 45 minute bracket, a 48 hour window with 12 hours calibrated, 30 rows.
     const SECTION: &str = r#"
         decision = { every = "1h" }
         target = { bracket = { take_profit = { bps = 7.5 }, stop = { bps = 5 } }, limit = "45m" }
@@ -467,7 +487,7 @@ mod tests {
         format!("{:#}", load(toml).unwrap_err())
     }
 
-    /// The parse error's message, which is no config error: nothing else was looked at.
+    /// The parse error's message. It is no config error, because nothing else was looked at.
     fn refused_parsing(toml: &str) -> String {
         let err = load(toml).unwrap_err();
         assert!(err.downcast_ref::<ConfigError>().is_none(), "{err:#}");
@@ -568,7 +588,7 @@ mod tests {
         load_warming(&toml, warmup).unwrap();
     }
 
-    /// No exit, and the ATR its unit is measured in, as a bracket's: 3 hourly bars of gold's mids.
+    /// No exit. The ATR that measures its unit is as for a bracket: 3 hourly bars of gold's mids.
     #[rstest]
     fn a_time_only_target_loads_with_its_atr_and_no_exits() {
         let toml = section(r#"target = { limit = "30m", atr = { period = 3 } }"#);
@@ -591,7 +611,7 @@ mod tests {
         );
     }
 
-    /// One exit alone is refused at parsing, on its own: no other violation is reported.
+    /// One exit alone is refused at parsing, on its own. No other violation is reported.
     #[rstest]
     #[case::take_profit_alone("take_profit = { bps = 7.5 }", "stop")]
     #[case::stop_alone("stop = { bps = 5 }", "take_profit")]
@@ -610,7 +630,8 @@ mod tests {
         assert!(!err.contains("min_rows"), "{err}");
     }
 
-    /// Exits beside the limit are unknown fields of the target: one named, together the stop.
+    /// Exits beside the limit are unknown fields of the target. The refusal names one, together the
+    /// stop.
     #[rstest]
     #[case::both(
         r#"target = { take_profit = { bps = 7.5 }, stop = { bps = 5 }, limit = "45m" }"#,
@@ -627,8 +648,8 @@ mod tests {
         assert!(err.contains(&format!("`{key}`")), "{err}");
     }
 
-    /// A 48 hour window less a 45 minute limit: 47 hours of calibration leave a fit slice, 47 hours
-    /// and 15 minutes none.
+    /// A 48 hour window less a 45 minute limit: 47 hours of calibration leave a fit slice, and 47
+    /// hours and 15 minutes leave none.
     #[rstest]
     #[case::to_the_limit("47h15m")]
     #[case::of_nought("0h")]
@@ -693,8 +714,8 @@ mod tests {
         assert_eq!(dataset.commission, expected);
     }
 
-    /// Nautilus refuses a negative amount per order or quantity as it builds the fee model, helix a
-    /// negative rate.
+    /// Nautilus refuses a negative amount per order or quantity as it builds the fee model. Helix
+    /// refuses a negative rate.
     #[rstest]
     #[case::per_order(r#"per_order = "-3 USD""#, "greater than or equal to zero")]
     #[case::rate(r#"rate = "-0.0005""#, "commission rate -0.0005 must not be negative")]
@@ -727,7 +748,7 @@ mod tests {
         }
     }
 
-    /// The refusal names the balance as Nautilus' money reads it, to the cent.
+    /// The refusal names the balance as Nautilus' money type reads it, to the cent.
     #[rstest]
     #[case::nought("0 USD", "0.00 USD")]
     #[case::negative("-1000 USD", "-1000.00 USD")]
@@ -743,7 +764,7 @@ mod tests {
         assert!(err.contains(refused), "{err}");
     }
 
-    /// 150 ms: each command reaches the venue 150 ms after it is sent.
+    /// With 150 ms, each command reaches the venue 150 ms after it is sent.
     #[rstest]
     fn a_dataset_venue_may_declare_the_latency_of_its_runs() {
         let line = r#"dataset = { commission = { rate = "0.0005" }, balance = "1000 USD", latency = "150ms" }"#;
@@ -772,8 +793,8 @@ mod tests {
             .join("\n")
     }
 
-    /// A command is processed at most its latency and a minute after it is sent. 30 s against 1 m
-    /// and a minute; 1 m against 150 ms and a minute.
+    /// A command is processed at most its latency and a minute after it is sent. The cases are 30 s
+    /// against 1 m and a minute, and 1 m against 150 ms and a minute.
     #[rstest]
     #[case::of_half_a_minute("30s", "1m")]
     #[case::of_a_minute("1m", "150ms")]
@@ -791,7 +812,7 @@ mod tests {
         );
     }
 
-    /// 61 s against 1 s and a minute, the shortest limit taken; 45 m against 150 ms.
+    /// 61 s against 1 s and a minute is the shortest limit taken. Also 45 m against 150 ms.
     #[rstest]
     #[case::the_shortest("61s", "1s")]
     #[case::of_45_minutes("45m", "150ms")]
@@ -802,7 +823,7 @@ mod tests {
         assert!(load(&at_latency(limit, latency)).is_ok());
     }
 
-    /// The refusal names the latency in jiff's friendly format, a negative one as ago.
+    /// The refusal names the latency in jiff's friendly format, and a negative one as ago.
     #[rstest]
     #[case::negative("-1s", "1s ago")]
     #[case::nought("0s", "0s")]
@@ -830,7 +851,8 @@ mod tests {
         assert!(err.contains("leverage"), "{err}");
     }
 
-    /// The floor is the adapter's dataset's 20 rows, not the default 200 a leaf: 20 and 50 load.
+    /// The floor is the 20 rows of the adapter's dataset, not the default 200 of a leaf. 20 and 50
+    /// load.
     #[rstest]
     #[case::of_one_row(1, &["model.learner"])]
     #[case::of_19_rows(19, &["model.learner"])]
@@ -874,7 +896,7 @@ mod tests {
         }
     }
 
-    /// Deciding hourly, the ATR's bars are hours: its default 14 warm in 14 hours, 3 in 3.
+    /// Deciding hourly, the ATR's bars are hours. Its default 14 bars warm in 14 hours, and 3 in 3.
     #[rstest]
     #[case::of_14_bars(None, 14)]
     #[case::of_3_bars(Some("{ period = 3 }"), 3)]
@@ -895,7 +917,7 @@ mod tests {
         assert!(config.validate(&reading_gold_for(warmup)).is_ok());
     }
 
-    /// Reads `ticks` of gold by the name Nautilus parses and `bar_types`, warming 14 hours.
+    /// Reads the `ticks` of gold by the name Nautilus parses, and `bar_types`, warming 14 hours.
     fn reading_gold(ticks: &[&str], bar_types: &[&str]) -> DataRequirements {
         DataRequirements {
             bar_types: bar_types
@@ -1007,7 +1029,7 @@ mod tests {
         );
     }
 
-    /// Its 3 hourly bars warm in 3 hours: over a shorter warmup it is refused under its table.
+    /// Its 3 hourly bars warm in 3 hours. Over a shorter warmup it is refused under its table.
     #[rstest]
     fn a_time_only_targets_atr_warming_longer_than_the_warmup_is_refused_under_it() {
         let toml = section(r#"target = { limit = "30m", atr = { period = 3 } }"#);
@@ -1127,8 +1149,8 @@ mod tests {
         assert!(config.meta.is_some());
     }
 
-    /// A threshold, alone or beside a margin, is refused at parsing as replaced by the margin, not
-    /// as an unknown field.
+    /// A threshold, alone or beside a margin, is refused at parsing as replaced by the margin. It
+    /// is not refused as an unknown field.
     #[rstest]
     #[case::alone(META.replace(r#"margin = "0.25R""#, "threshold = 0.55"))]
     #[case::beside_a_margin(format!("{META}\nthreshold = 0.55"))]
@@ -1151,8 +1173,8 @@ mod tests {
         assert!(err.contains("missing field `margin`"), "{err}");
     }
 
-    /// A size is refused at parsing, pointing to the stake, `[trade] risk` and the strategy's
-    /// multiple of it.
+    /// A size is refused at parsing. The refusal points to the stake: `[trade] risk` and the
+    /// strategy's multiple of it.
     #[rstest]
     fn a_meta_size_is_refused_at_parsing_pointing_to_the_stake() {
         let toml = format!("{SECTION}\n{META}\nsize = {{ min = 0.5, max = 2 }}");
@@ -1176,7 +1198,7 @@ mod tests {
         refused(&format!("{SECTION}\n{}", meta.join("\n")))
     }
 
-    /// The 45 minute limit does not fit the meta's window, which is the meta's own to widen.
+    /// The 45 minute limit does not fit the meta window. The meta model must widen its own window.
     #[rstest]
     fn a_meta_window_not_longer_than_the_targets_limit_is_refused() {
         let err = meta_refused(r#"window = "45m""#);
