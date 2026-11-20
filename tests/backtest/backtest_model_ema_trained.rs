@@ -4,8 +4,8 @@
 //! The fixture catalog is IC's gold with an edge (`ic::edge_quotes`). It rises 4.00 over each even
 //! hour and falls back over each odd one, so a short at the top of an odd hour wins and one at the
 //! bottom of an even hour loses. The fake learner predicts the fast average, which is near the top
-//! at odd hours' decisions. The calibrated short is expected to win at odd hours alone, clearing
-//! its margin of 0, and each train with rows to fit and calibrate on publishes.
+//! at odd hours' decisions, so the calibrated short wins at odd hours alone, and each train with
+//! rows to fit and calibrate on publishes.
 //!
 //! The catalog starts at 21:00 of 18 October 2026, a Sunday. The train at midnight of the 19th has
 //! no row before its calibration slice to fit on, and fails. The trains from the 20th on publish.
@@ -55,8 +55,6 @@ fn day(day: i64) -> Timestamp {
 }
 
 /// Builds the edge's quotes from 21:00 of the 18th to 01:00 after midnight of the `last`th.
-///
-/// A backtest to that midnight settles its last decision's short half an hour after it.
 fn catalog(last: i64) -> TempDir {
     let (from, to) = (
         day(18) + SignedDuration::from_hours(21),
@@ -128,7 +126,6 @@ fn train_at(files: &Files, catalog: &Path, at: Timestamp) {
     assert!(succeeded, "{stdout}\n{stderr}");
 }
 
-/// Runs `backtest` with the costs of the dataset runs.
 fn backtest(
     files: &Files,
     catalog: &Path,
@@ -176,11 +173,8 @@ fn train_line_at(text: &str, at: Timestamp) -> usize {
     text.find(train_line(text, at)).unwrap()
 }
 
-/// A span from the 21st to the 23rd holds the retrain times of the 21st and 22nd. Each is trained
-/// and published, in order.
-///
-/// A second train over it publishes nothing. One from the 20th trains the 20th alone, which the
-/// store lacked.
+/// A span from the 21st to the 23rd holds the retrain times of the 21st and 22nd. A second train
+/// over it publishes nothing. One from the 20th trains the 20th alone, which the store lacked.
 #[rstest]
 fn a_train_over_a_span_publishes_each_retrain_time_in_order_then_only_those_the_store_lacks() {
     let catalog = catalog(23);
@@ -229,16 +223,7 @@ fn a_train_over_a_span_publishes_each_retrain_time_in_order_then_only_those_the_
     }
 }
 
-/// The train of the 19th fails with no row to fit on, because the catalog starts at 21:00 of the
-/// 18th. The trains of the 20th and 21st publish.
-///
-/// The report of the failed train holds the figures it reached:
-/// - The 17th and 18th are built (window from 02:00 of the 17th).
-/// - No fit row.
-/// - 2 calibration rows, the decisions of 22:00 and 23:00 of the 18th (the slow average of 30 bars
-///   is warm from 21:30).
-///
-/// The command fails, listing the 19th alone, with its reason.
+/// The command lists the failed train of the 19th alone, with its reason.
 #[rstest]
 fn a_train_over_a_span_goes_on_past_a_failed_retrain_time_and_fails_listing_it() {
     let catalog = catalog(22);
@@ -287,10 +272,7 @@ fn never_retrained() -> String {
     CONFIG.replace(daily, "")
 }
 
-/// A strategy that is never retrained has no retrain times, so a train over a span is refused
-/// before any replay.
-///
-/// The error names why and the time the train runs at instead.
+/// A strategy that is never retrained has no retrain times to train over a span.
 #[rstest]
 fn a_train_over_a_span_of_a_strategy_never_retrained_is_refused_before_any_replay() {
     let catalog = catalog(23);
@@ -318,11 +300,8 @@ fn trained_at(files: &Files, catalog: &Path, at: Timestamp) -> String {
     stdout
 }
 
-/// For a strategy never retrained, a train skips only a model set valid exactly from its time.
-///
-/// With the 21st's stored, `train --at` the 22nd publishes one valid from the 22nd, and a repeat
-/// reports it already published. A backtest of the 21st trades on the 21st's model set, 12 shorts,
-/// as each decision uses the latest set valid by then.
+/// With the 21st's model set stored, `train --at` the 22nd publishes one valid from the 22nd, and a
+/// repeat reports it already published. A backtest of the 21st still trades on the 21st's set.
 #[rstest]
 fn never_retrained_a_train_publishes_at_its_time_beside_an_older_model_set_which_decides_before_it()
 {
@@ -346,10 +325,8 @@ fn never_retrained_a_train_publishes_at_its_time_beside_an_older_model_set_which
     assert_day_decided_by(section(&stdout, day(21), day(22)), day(21));
 }
 
-/// A backtest from 06:00 of the 22nd on an empty store is refused before any replay.
-///
-/// The error names the retrain time at its start, midnight of the 22nd, and the train commands that
-/// fill the store, at that time or over the span.
+/// The refusal names the retrain time at the backtest's start and the train commands that fill the
+/// store.
 #[rstest]
 fn a_backtest_on_an_empty_store_is_refused_naming_its_retrain_time_and_the_train_to_run() {
     let catalog = catalog(23);
@@ -386,8 +363,6 @@ fn section(stdout: &str, from: Timestamp, to: Timestamp) -> &str {
 }
 
 /// Asserts that the section reads a day decided by the model valid from `valid_from`.
-///
-/// The section has 24 hourly rows, every short, with 12 taken, at the odd hours.
 fn assert_day_decided_by(section: &str, valid_from: Timestamp) {
     for line in [
         format!("  Model valid from: {valid_from}"),
@@ -399,11 +374,8 @@ fn assert_day_decided_by(section: &str, valid_from: Timestamp) {
     }
 }
 
-/// A backtest of the span on a store `train` filled over the 21st and 22nd trains nothing.
-///
-/// It builds the days the trains left unwritten for its scores (the 21st, whose last decision
-/// settles after the 22nd's train, and the 22nd). It trades the short at each odd hour, 12 a day,
-/// each an open and a close order. Each day is scored with its own model.
+/// It builds the days the trains left unwritten for its scores. Each day is scored with its own
+/// model.
 #[rstest]
 fn a_backtest_on_a_store_train_filled_over_its_span_trains_nothing_and_scores_each_period() {
     let catalog = catalog(23);
@@ -426,9 +398,7 @@ fn a_backtest_on_a_store_train_filled_over_its_span_trains_nothing_and_scores_ea
 }
 
 /// With models trained at the 21st and 23rd alone, a backtest from the 21st to the 24th runs over
-/// the hole.
-///
-/// The 21st's model decides the 22nd too. Its 12 shorts are traded and scored, as live would.
+/// the hole: the 21st's model decides the 22nd too, as live would.
 #[rstest]
 fn a_backtest_over_a_missing_retrain_time_runs_the_previous_model_deciding_through_it() {
     let catalog = catalog(24);
@@ -446,8 +416,7 @@ fn a_backtest_over_a_missing_retrain_time_runs_the_previous_model_deciding_throu
     assert_day_decided_by(section(&stdout, day(23), day(24)), day(23));
 }
 
-/// Returns the config with a fake-learner meta: a window of 24 hours with the last 12 calibrated
-/// on, and margin -1000R.
+/// Returns the config with a fake-learner meta, margin -1000R.
 fn with_meta() -> String {
     format!(
         "{CONFIG}
@@ -461,12 +430,8 @@ fn with_meta() -> String {
     )
 }
 
-/// With a meta, the span's first retrain time, the 21st, publishes a meta beside the short.
-///
-/// The short of its out-of-fold pair is fitted as of the 20th, as the train of the 20th fits it. It
-/// picks the shorts of the 20th's odd hours, which are the meta's rows. A backtest of the span
-/// trades from that time: the short at each odd hour of the 21st and 22nd, 12 a day, each an open
-/// and a close order, and its day's meta takes every one.
+/// The short of the 21st's out-of-fold pair is fitted as of the 20th. It picks the shorts of the
+/// 20th's odd hours, which are the meta's rows.
 #[rstest]
 fn a_periodic_strategy_with_a_meta_publishes_it_from_its_first_train_and_trades_from_that_retrain_time()
  {

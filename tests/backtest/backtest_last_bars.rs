@@ -2,6 +2,10 @@
 //! Nautilus builds the bars from the trades, and the venue fills on them (a trade with no aggressor
 //! moves both bid and ask to its price). The trades come one a minute at the mid of
 //! `common::trades`' quotes, so each bar closes where its MID bar did.
+//!
+//! The run is `trades::TIME_EXIT`. At 13:00 the crossover buys 10 at the last trade, 620.60 (on
+//! quotes, the ask 620.65). At 17:00 the time alert sells 10 at 624.90 (on quotes, the bid
+//! 624.85). The trades from 624.01 to 624.90 touch neither exit.
 
 use helix_trader::{
     backtest::Backtest,
@@ -77,16 +81,6 @@ fn ema_on_last_bars() -> EmaCross {
     EmaCross::new(config).unwrap()
 }
 
-/// Runs `trades::TIME_EXIT` on trades.
-///
-/// The closes 610.60 (11:00) and 600.60 (12:00) warm up the crossover. Then:
-///
-/// - 13:00 at 620.60, above 605.60: buys 10 at the last trade (on quotes, the ask 620.65), with
-///   stop loss 617.50 and take profit 626.81.
-/// - 17:00, 4 hours after the entry: the time alert sells 10 at 624.90 (on quotes, the bid 624.85).
-///   The trades from 624.01 to 624.90 touch neither exit.
-///
-/// The run gains 10 x 4.30 = 43.00, ending at 10043.00 EUR after 4 orders.
 #[rstest]
 fn the_ema_trades_on_last_bars_built_from_trades_alone() {
     let levels = trades::TIME_EXIT;

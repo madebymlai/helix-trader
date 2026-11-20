@@ -8,6 +8,8 @@
 //! entry is its stake of the account, rounded down, over the stop for a bracket and over the ATR
 //! for a time-only target, at a multiple of the stake. The rows stay at the reference stake
 //! whatever the dataset run's P&L or replay start.
+//!
+//! The reference stake is 4 USD of 10M. The entries' stake is 10 USD of the 25M account.
 
 use std::{path::Path, thread};
 
@@ -35,9 +37,6 @@ use crate::{
     },
 };
 
-/// Returns an account of 25M USD, where the dataset runs hold 10M.
-///
-/// The config's stake of it, 0.00004%, is 10 USD.
 fn account(multiple: i64) -> Account {
     Account {
         balance: Money::from("25000000 USD"),
@@ -105,13 +104,6 @@ fn units(rows: &[TargetRow]) -> Vec<(UnixNanos, Money, Money)> {
         .collect()
 }
 
-/// The hand-worked bracket's long: 7.5 bps of the 4000.10 mid on both sides, with the stop 3.00
-/// away (4001.10 and 3.00 after the rise at 11:20).
-///
-/// - Rows are at the reference stake, 4 USD of 10M (`RISK`): one ounce, R 3 USD.
-/// - On 25M USD at the config's stake, 10 USD: 10 / 3.00 = 3.33, 3 oz, R 9 USD.
-/// - At twice the stake: 20 / 3.00 = 6.67, 6 oz, R 18 USD.
-///
 /// P&L before an entry moves the equity by a few dollars, not the size.
 #[rstest]
 fn a_model_strategys_bracket_trade_fills_at_its_stake_of_the_accounts_equity() {
@@ -148,10 +140,7 @@ fn a_model_strategys_bracket_trade_fills_at_its_stake_of_the_accounts_equity() {
 }
 
 /// The time-only target of `backtest_targets` closes after 30 minutes. Its R is the ATR of 2 hourly
-/// mid bars.
-///
-/// The ATR is none at 09:00, 1.60 at 10:00 and 2.40 at 11:00. At 12:00 the hour runs from 4000.10
-/// to 4001.10 (the rise at 11:20), the true range is 1.00, and the ATR is (2.40 + 1.00) / 2 = 1.70.
+/// mid bars: none at 09:00, 1.60 at 10:00, 2.40 at 11:00 and 1.70 at 12:00.
 fn time_only() -> ModelConfig {
     let spec = Target::builder()
         .limit(SignedDuration::from_mins(30))
@@ -169,12 +158,6 @@ fn time_only() -> ModelConfig {
     }
 }
 
-/// The time-only target's long on its ATR.
-///
-/// - Rows at 4 USD of 10M: 4 / 1.60 = 2.5, 2 oz, R 3.20 USD at 10:00. 4 / 2.40 = 1.67, 1 oz, 2.40
-///   USD at 11:00.
-/// - Entries at 10 USD on 25M: 10 / 1.60 = 6.25, 6 oz, and 10 / 2.40 = 4.17, 4 oz, each R 9.60 USD.
-///   At 12:00, 10 / 1.70 = 5.88, 5 oz, R 5 x 1.70 = 8.50 USD.
 #[rstest]
 fn a_model_strategys_time_only_trade_fills_at_its_stake_over_its_atr() {
     let config = time_only();
@@ -209,12 +192,9 @@ fn a_model_strategys_time_only_trade_fills_at_its_stake_over_its_atr() {
     );
 }
 
-/// At a reference stake of 3 USD of 10M, a stop of 3.00 buys exactly one ounce.
-///
-/// The 09:00 long loses 3.64 USD at 09:20. On the dataset run's equity, that would leave 2.99999891
-/// USD to stake at 10:00, under an ounce. Rows are sized at the balance, not the equity: the 10:00
-/// and 11:00 rows are one ounce, R 3 USD, whether the replay started at 08:30 or after the loss at
-/// 09:30.
+/// At a reference stake of 3 USD of 10M, a stop of 3.00 buys exactly one ounce. The 09:00 long
+/// loses 3.64 USD at 09:20, which on the run's equity would leave under an ounce to stake at 10:00.
+/// Rows are sized at the balance, not the equity, whether the replay started at 08:30 or 09:30.
 #[rstest]
 fn the_rows_are_at_the_reference_stake_whatever_the_runs_pnl_and_its_start() {
     let config = ModelConfig {

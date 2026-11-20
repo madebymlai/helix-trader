@@ -1,7 +1,8 @@
 //! IC Markets' gold on its tick quotes (`common::ic`). A recorder on the hour MID bars buys the
 //! maximum on the first bar. It closes that position by id on the second bar. Each order fills
-//! whole at the ask (or the bid) of the last quote before the bar's close. IC's commission is 30
-//! USD per million of each fill's value. The report shows the spread paid.
+//! whole at the ask (or the bid) of the last quote before the bar's close: the buy at 4006.10, the
+//! close at 4011.90. IC's commission is 30 USD per million of each fill's value. The report shows
+//! the spread paid.
 
 use helix_trader::backtest::report;
 use jiff::Timestamp;
@@ -30,7 +31,6 @@ fn ic_gold_quotes_fill_orders_at_the_ask_and_the_bid_and_report_the_spread() {
 
     let record = record.borrow();
 
-    // The buy fills at the last ask before 10:00, the close at the last bid before 11:00
     let fills: Vec<_> = record
         .fills
         .iter()
@@ -48,10 +48,7 @@ fn ic_gold_quotes_fill_orders_at_the_ask_and_the_bid_and_report_the_spread() {
     };
     assert!(position.is_closed(), "{position:?}");
 
-    // Commission at 30 per million: 10,000 x 4006.10 = 40,061,000 USD and 10,000 x 4011.90 =
-    // 40,119,000 give 1,201.83 + 1,203.57, the spread paid is half of each quote's spread, 10,000 x
-    // 0.10 + 10,000 x 0.125 = 1,000 + 1,250, the gross PnL is the move of the mids, 10,000 x
-    // (4012.025 - 4006.00) = 60,250.
+    // The spread paid is half of each quote's spread, and the gross PnL is the move of the mids
     let costs = "
 Costs (USD)
   Commission: 2405.400000

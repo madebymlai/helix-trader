@@ -38,7 +38,6 @@ use rstest::rstest;
 
 use crate::common::{self, ic};
 
-/// Returns LSE's gold trades over the captured second, `[10:00:00, 10:00:01)`.
 fn gold_trades() -> DataRequirements {
     DataRequirements {
         bar_types: vec![],
@@ -52,10 +51,7 @@ fn gold_trades() -> DataRequirements {
 }
 
 /// Fills the catalog in `dir` with the `GOLD_FUTURES` trades from the mock LSE peer, as
-/// fill-catalog does.
-///
-/// The catalog already holds the hand-written `GOLD_FUTURES` definition. The node asks LSE's client
-/// for what the catalog lacks, five days on.
+/// fill-catalog does. The catalog already holds the hand-written `GOLD_FUTURES` definition.
 fn fill_gold(dir: &Path) {
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     catalog.write_instruments(vec![gold_futures()]).unwrap();
