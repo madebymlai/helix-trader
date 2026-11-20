@@ -1,16 +1,18 @@
-//! When a strategy's models are trained, and what each train does.
+//! Decides when a strategy's models are trained and what each train does.
 //!
-//! A retrain is every interval, on the UTC grid of its multiples since the Unix epoch whatever the
-//! run start, or never: a model set trained only by `train --at`. Only `Retrain`'s arms here tell
-//! them apart, so callers do not.
+//! A strategy retrains in one of two ways:
+//! - Every interval, on the UTC grid of multiples since the Unix epoch, whatever the run start.
+//! - Never. Only `train --at` trains a model set.
+//!
+//! Only the arms of `Retrain` tell them apart, so callers do not.
 //!
 //! The grid is a Nautilus timer set from an epoch-aligned time (`last_grid_time`). Live, the
-//! retrain actor sets it on its own clock; a train over a span and a backtest's periods take the
-//! times it fires on a virtual clock (`Schedule::times`).
+//! retrain actor sets the timer on its own clock. A train over a span and a backtest's periods
+//! read the times it fires on a virtual clock (`Schedule::times`).
 //!
 //! `Schedule::plan` keeps a model set valid exactly from the train's time, since a train is
-//! deterministic, and otherwise fits a new one, whatever else the store holds. A kept model set
-//! reads no replay: its baselines are published with it (`store::ModelManifest::baseline`).
+//! deterministic. Otherwise it fits a new one, whatever else the store holds. A kept model set
+//! reads no replay, because its baselines are published with it (`store::ModelManifest::baseline`).
 
 use jiff::{SignedDuration, Timestamp};
 use nautilus_common::{
@@ -27,7 +29,9 @@ use super::{config::ModelConfig, targets::Side};
 /// The name of the timer `times` fires.
 const GRID: &str = "RETRAIN";
 
-/// How a strategy's models are retrained, such as `retrain = "168h"`; never by default.
+/// How a strategy's models are retrained, such as `retrain = "168h"`.
+///
+/// The default is never.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(from = "SignedDuration")]
 pub enum Retrain {
@@ -38,7 +42,7 @@ pub enum Retrain {
     Never,
 }
 
-/// A strategy's retrain and the windows of its models' rows.
+/// A strategy's retrain and the row windows of its models.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Schedule {
     retrain: Retrain,
@@ -46,7 +50,9 @@ pub struct Schedule {
     meta: Option<SignedDuration>,
 }
 
-/// A value for each model of a strategy, `None` for a model it lacks.
+/// A value for each model of a strategy.
+///
+/// A model the strategy lacks has `None`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Models<T> {
     pub long: Option<T>,
@@ -66,16 +72,18 @@ pub enum Plan {
 /// What a train fits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Fits {
-    /// The train's time, which the model set is valid from.
+    /// The train's time. The model set is valid from it.
     pub at: Timestamp,
-    /// The sides' fit.
+    /// The fit of the sides.
     pub sides: Fit,
-    /// With a meta, the sides fitted as of the meta's window before `at`, whose picks over
-    /// `[its time, at)` are the meta's rows. Not published.
+    /// Set with a meta. Holds the sides fitted as of the meta's window before `at`. Their picks
+    /// over `[its time, at)` are the meta's rows. Not published.
     pub out_of_fold: Option<Fit>,
 }
 
-/// A fit as of `at`, on the rows of `[from, at)` settled by `at`.
+/// A fit as of `at`.
+///
+/// It uses the rows in `[from, at)` that are settled by `at`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Fit {
     pub from: Timestamp,
@@ -83,7 +91,7 @@ pub struct Fit {
 }
 
 impl Schedule {
-    /// The schedule of a `[model]` section.
+    /// Returns the schedule of a `[model]` section.
     #[must_use]
     pub fn of_model(config: &ModelConfig) -> Self {
         Self {
@@ -99,8 +107,10 @@ impl Schedule {
         self.retrain
     }
 
-    /// The train times of a run over `[from, to)`: the last grid time not after `from`, then each
-    /// grid time before `to`, or `from` alone if never retrained.
+    /// Returns the train times of a run over `[from, to)`.
+    ///
+    /// These are the last grid time not after `from`, then each grid time before `to`. If the
+    /// strategy is never retrained, the only time is `from`.
     ///
     /// # Errors
     ///
@@ -115,7 +125,7 @@ impl Schedule {
         }
     }
 
-    /// The retrain times of a span `[from, to)`, as `times`.
+    /// Returns the retrain times of a span `[from, to)`, as `times`.
     ///
     /// # Errors
     ///
@@ -130,7 +140,9 @@ impl Schedule {
         }
     }
 
-    /// The plan of a train at `at`, given the valid-froms of the store's model sets.
+    /// Returns the plan of a train at `at`.
+    ///
+    /// `model_sets` holds the valid-froms of the model sets in the store.
     #[must_use]
     pub fn plan(&self, at: Timestamp, model_sets: &[Timestamp]) -> Plan {
         if model_sets.contains(&at) {
@@ -149,7 +161,7 @@ impl Schedule {
 }
 
 impl Fits {
-    /// Where the train's one replay starts: the first row a fit reads.
+    /// Returns where the train's one replay starts, which is the first row a fit reads.
     #[must_use]
     pub fn replay_from(&self) -> Timestamp {
         self.out_of_fold.unwrap_or(self.sides).from
@@ -178,7 +190,7 @@ impl From<SignedDuration> for Retrain {
 }
 
 impl<T> Models<T> {
-    /// The value of the model of `side`.
+    /// Returns the value for the model of `side`.
     #[must_use]
     pub const fn side(&self, side: Side) -> Option<&T> {
         match side {
@@ -187,7 +199,7 @@ impl<T> Models<T> {
         }
     }
 
-    /// The value of the model of `side`, mutably.
+    /// Returns the value for the model of `side`, mutably.
     pub const fn side_mut(&mut self, side: Side) -> Option<&mut T> {
         match side {
             Side::Long => self.long.as_mut(),
@@ -195,7 +207,7 @@ impl<T> Models<T> {
         }
     }
 
-    /// Sets the value of the model of `side`.
+    /// Sets the value for the model of `side`.
     pub fn set_side(&mut self, side: Side, value: T) {
         match side {
             Side::Long => self.long = Some(value),
@@ -227,10 +239,10 @@ pub fn start<A: DataActor + DataActorNative>(
     )
 }
 
-/// The times the timer `start` sets fires over `[from, to)`, read off a `VirtualClock`.
+/// Returns the times the timer set by `start` fires over `[from, to)`, read off a `VirtualClock`.
 ///
-/// The clock registers the timer as the live clock does (`validate_and_prepare_timer`), which a
-/// bare `VirtualTimer` would skip.
+/// The clock registers the timer as the live clock does (`validate_and_prepare_timer`). A bare
+/// `VirtualTimer` would skip that.
 ///
 /// # Errors
 ///
@@ -262,7 +274,7 @@ fn times(every: SignedDuration, from: Timestamp, to: Timestamp) -> anyhow::Resul
         .collect())
 }
 
-/// The last multiple of `every` since the epoch not after `now`.
+/// Returns the last multiple of `every` since the epoch that is not after `now`.
 ///
 /// # Errors
 ///
@@ -363,7 +375,7 @@ mod tests {
         SignedDuration::from_hours(hours)
     }
 
-    /// Sides on a window of 24 hours, their meta on 48, retrained every day.
+    /// A schedule retrained every day, with a 24-hour window for the sides and 48 for the meta.
     fn daily() -> Schedule {
         Schedule {
             retrain: Retrain::Every(day()),
@@ -412,9 +424,10 @@ mod tests {
     const SEVENTH: &str = "2026-01-07T00:00:00Z";
     const EIGHTH: &str = "2026-01-08T00:00:00Z";
 
-    /// A model set valid exactly from the train is kept, one valid before it is not. Sides: 24
-    /// hours back from the 7th. Out-of-fold pair: as of the 5th (48 hours before), 24 hours back
-    /// from there.
+    /// A model set valid exactly from the train is kept, and one valid before it is not.
+    ///
+    /// The sides fit 24 hours back from the 7th. The out-of-fold pair is as of the 5th (48 hours
+    /// before) and fits 24 hours back from there.
     #[rstest]
     #[case::retrained_of_the_train(daily(), &[SIXTH, SEVENTH], Plan::Keep)]
     #[case::retrained_of_the_day_before(daily(), &[SIXTH], train(SEVENTH, fit(SIXTH, SEVENTH), Some(fit(FOURTH, FIFTH))))]
@@ -428,8 +441,8 @@ mod tests {
         assert_eq!(schedule.plan(at(SEVENTH), &model_sets(valid_froms)), plan);
     }
 
-    /// The store's other model sets do not change the fits: out-of-fold pair as of the 5th, sides
-    /// as of the 7th.
+    /// The store's other model sets do not change the fits. The out-of-fold pair is as of the 5th
+    /// and the sides are as of the 7th.
     #[rstest]
     #[case::retrained_on_an_empty_store(daily(), &[])]
     #[case::retrained_on_a_store_of_a_model_set_after_the_train(daily(), &[EIGHTH])]
@@ -456,7 +469,8 @@ mod tests {
         );
     }
 
-    /// The first row read is the out-of-fold pair's, the 4th, or without a meta the sides', the 6th.
+    /// The first row read is the 4th, from the out-of-fold pair. Without a meta it is the 6th, from
+    /// the sides.
     #[rstest]
     #[case::with_a_meta(daily(), FOURTH)]
     #[case::without_a_meta(without_meta(daily()), SIXTH)]
