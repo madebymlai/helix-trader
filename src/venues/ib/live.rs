@@ -1,11 +1,10 @@
-//! Interactive Brokers clients for the live node, what their data client
-//! streams (`streams`), and the live command's IB flags (`IbLiveArgs`).
+//! Interactive Brokers clients for the live node, what their data client streams (`streams`), and
+//! the live command's IB flags (`IbLiveArgs`).
 //!
-//! Provides the Nautilus client factories and configs from
-//! `nautilus_interactive_brokers`: `InteractiveBrokersDataClientFactory`,
-//! `InteractiveBrokersExecutionClientFactory` and their configs, on the
-//! gateway of the account's trading mode (`IbGateway`); the account id
-//! goes in the execution config.
+//! Provides the Nautilus client factories and configs from `nautilus_interactive_brokers`:
+//! `InteractiveBrokersDataClientFactory`, `InteractiveBrokersExecutionClientFactory` and their
+//! configs, on the gateway of the account's trading mode (`IbGateway`); the account id goes in the
+//! execution config.
 
 use clap::Args;
 use jiff::SignedDuration;
@@ -33,12 +32,11 @@ use crate::{
     venues::BookFormat,
 };
 
-/// IB's settings of a live node, the live command's flags: the account
-/// traded and the client id of the node's IB clients (see `clients`).
+/// IB's settings of a live node, the live command's flags: the account traded and the client id of
+/// the node's IB clients (see `clients`).
 #[derive(Debug, Clone, Args)]
 pub(crate) struct IbLiveArgs {
-    /// The IB account traded, for example DU1234567 (paper); needed only
-    /// for IB instruments.
+    /// The IB account traded, for example DU1234567 (paper); needed only for IB instruments.
     #[arg(long, env = "NAUTILUS_IB_ACCOUNT_ID")]
     pub(in crate::venues) account: Option<IbAccount>,
     /// IB client id of the node, the adapter default.
@@ -46,23 +44,23 @@ pub(crate) struct IbLiveArgs {
     pub(in crate::venues) client_id: i32,
 }
 
-/// The IB data and execution client configs of a node trading `account`
-/// on `instrument_ids` through `gateway`, both on one connection.
+/// The IB data and execution client configs of a node trading `account` on `instrument_ids` through
+/// `gateway`, both on one connection.
 #[derive(Debug, Clone)]
 pub(crate) struct IbClients {
     pub(super) data: InteractiveBrokersDataClientConfig,
     pub(super) exec: InteractiveBrokersExecutionClientConfig,
 }
 
-/// Checks `client_id`, then starts or reuses the gateway of `account`'s
-/// trading mode and waits for its login (see `IbGateway::of_account`), and
-/// returns the client configs on it (see `configs`).
+/// Checks `client_id`, then starts or reuses the gateway of `account`'s trading mode and waits for
+/// its login (see `IbGateway::of_account`), and returns the client configs on it (see `configs`).
 ///
 /// # Errors
 ///
-/// Returns an error if the client id is a multiple of 1000 (IB reserves
-/// those for the execution client), checked before any gateway starts, or
-/// if the gateway does not start and log in.
+/// Returns an error if:
+/// - The client id is a multiple of 1000 (IB reserves those for the execution client), checked
+///   before any gateway starts.
+/// - The gateway does not start and log in.
 pub(crate) async fn clients(
     account: &IbAccount,
     client_id: i32,
@@ -76,16 +74,13 @@ pub(crate) async fn clients(
     Ok(configs(&gateway, account, instrument_ids))
 }
 
-/// The client configs for `account` on `gateway`, loading `instrument_ids`
-/// at startup.
+/// The client configs for `account` on `gateway`, loading `instrument_ids` at startup.
 ///
-/// The data client is the history's (`data_client_config`: the full
-/// session, the symbology and venues of the catalog's instruments), so its
-/// 1-minute bars, requested for the warmup and subscribed to live, are
-/// those `fill-catalog` stores. Quotes a strategy subscribes to come tick
-/// by tick (`batch_quotes: false`; the adapter falls back to `reqMktData`
-/// where IB refuses them). Data and exec share `gateway`'s client id, hence
-/// one connection.
+/// The data client is the history's (`data_client_config`: the full session, the symbology and
+/// venues of the catalog's instruments), so its 1-minute bars, requested for the warmup and
+/// subscribed to live, are those `fill-catalog` stores. Quotes a strategy subscribes to come tick
+/// by tick (`batch_quotes: false`; the adapter falls back to `reqMktData` where IB refuses them).
+/// Data and exec share `gateway`'s client id, hence one connection.
 fn configs(gateway: &IbGateway, account: &IbAccount, instrument_ids: &[InstrumentId]) -> IbClients {
     let instrument_provider = InteractiveBrokersInstrumentProviderConfig {
         load_ids: instrument_ids.iter().copied().collect(),
@@ -109,12 +104,11 @@ fn configs(gateway: &IbGateway, account: &IbAccount, instrument_ids: &[Instrumen
 }
 
 impl IbClients {
-    /// The factories and configs, for the node: the data client routed the
-    /// venues of `data_venues`, those whose live data is IB's, and none if
-    /// none is, helix making it not the default, which Nautilus may make it,
-    /// nothing depending on that (see `live::node::Clients`); the execution
-    /// client the default route of orders, since IB trades many venues, GLBX
-    /// among them, whose data is LSE's.
+    /// The factories and configs, for the node: the data client routed the venues of `data_venues`,
+    /// those whose live data is IB's, and none if none is, helix making it not the default, which
+    /// Nautilus may make it, nothing depending on that (see `live::node::Clients`); the execution
+    /// client the default route of orders, since IB trades many venues, GLBX among them, whose data
+    /// is LSE's.
     pub(crate) fn into_node_clients(self, data_venues: &[Venue]) -> Clients {
         Clients {
             data_factory: Box::new(InteractiveBrokersDataClientFactory::new()),
@@ -133,51 +127,44 @@ impl IbClients {
     }
 }
 
-/// IB's book as Nautilus' IB data client streams it
-/// (`venues::book_format`): its deltas of an L2_MBP book, the rows of IB's
-/// market depth, each by its position, and by the exchange posting it on
-/// IB's SMART depth, the client's default, an update able to move a row to
-/// another price (`subscribe_book_deltas`, `data/core.rs:1249`,
-/// `:1301-1306`; `data/streams.rs:1952-2027`), the client logging an L3_MBO
-/// subscription as unpublished by IB and streaming nothing
-/// (`core.rs:1262-1268`); no depth snapshots, which it does not subscribe
-/// to (Nautilus' `DataClient` default, `common/src/clients/data.rs:171-174`).
-/// A deltas subscription of no depth asks IB for 20 rows a side
-/// (`core.rs:1299`).
+/// IB's book as Nautilus' IB data client streams it (`venues::book_format`): its deltas of an
+/// L2_MBP book, the rows of IB's market depth, each by its position, and by the exchange posting it
+/// on IB's SMART depth, the client's default, an update able to move a row to another price
+/// (`subscribe_book_deltas`, `data/core.rs:1249`, `:1301-1306`; `data/streams.rs:1952-2027`). The
+/// client logs an L3_MBO subscription as unpublished by IB and streams nothing
+/// (`core.rs:1262-1268`). It streams no depth snapshots, which it does not subscribe to (Nautilus'
+/// `DataClient` default, `common/src/clients/data.rs:171-174`). A deltas subscription of no depth
+/// asks IB for 20 rows a side (`core.rs:1299`).
 pub(in crate::venues) const BOOK: BookFormat = BookFormat {
     deltas: BookType::L2_MBP,
     depth: None,
 };
 
-/// The narrowest bars IB keeps up to date: its historical bars streamed
-/// with `keepUpToDate`, "only ... with bar sizes 5 seconds or greater"
-/// (TWS API, "Historical Bar Data"), and its real-time bars, 5 seconds
-/// wide.
+/// The narrowest bars IB keeps up to date: its historical bars streamed with `keepUpToDate`, "only
+/// ... with bar sizes 5 seconds or greater" (TWS API, "Historical Bar Data"), and its real-time
+/// bars, 5 seconds wide.
 const KEPT_UP_TO_DATE: SignedDuration = SignedDuration::from_secs(5);
 
-/// Checks that Nautilus' IB data client, the live node's, streams
-/// `source`, the series of an instrument of a venue whose live data is
-/// IB's, as a run subscribes to it: its quotes (`subscribe_quotes`,
-/// `data/core.rs:724`), its trades (`subscribe_trades`, `:979`) but a
-/// currency pair's, which the client logs as unsupported and streams
-/// none of (`:1000-1006`, see `CURRENCY_PAIR_VENUES`), and IB's own
-/// (`EXTERNAL`) time bars (`subscribe_bars`, `:1093`) of a size IB has
-/// (`bar_type_to_ib_bar_size`, on which the client's subscription task
-/// fails any other) but 1 second: its 5-second bars as IB's real-time
-/// bars (`:1166`), the others as its historical bars kept up to date
-/// (`data/streams.rs:817-821`), which IB keeps only at 5 seconds or more
-/// (`KEPT_UP_TO_DATE`), each priced at one of `BAR_PRICES`, a forex
-/// pair's LAST bars aside, IB having no TRADES of them; and its book
-/// deltas, which a run subscribes to in IB's format (`BOOK`, through
-/// `venues::book_format`), of an L2_MBP book. It subscribes to no book
-/// depth, `BOOK` having none: Nautilus' `DataClient` default logs
-/// "Handler not implemented" and streams nothing
-/// (`common/src/clients/data.rs:171-174`).
+/// Checks that Nautilus' IB data client, the live node's, streams `source`, the series of an
+/// instrument of a venue whose live data is IB's, as a run subscribes to it:
+/// - Its quotes (`subscribe_quotes`, `data/core.rs:724`).
+/// - Its trades (`subscribe_trades`, `:979`), but a currency pair's, which the client logs as
+///   unsupported and streams none of (`:1000-1006`, see `CURRENCY_PAIR_VENUES`).
+/// - IB's own (`EXTERNAL`) time bars (`subscribe_bars`, `:1093`) of a size IB has
+///   (`bar_type_to_ib_bar_size`, on which the client's subscription task fails any other) but 1
+///   second: its 5-second bars as IB's real-time bars (`:1166`), the others as its historical bars
+///   kept up to date (`data/streams.rs:817-821`), which IB keeps only at 5 seconds or more
+///   (`KEPT_UP_TO_DATE`), each priced at one of `BAR_PRICES`, a forex pair's LAST bars aside, IB
+///   having no TRADES of them.
+/// - Its book deltas, which a run subscribes to in IB's format (`BOOK`, through
+///   `venues::book_format`), of an L2_MBP book.
+///
+/// It subscribes to no book depth, `BOOK` having none: Nautilus' `DataClient` default logs "Handler
+/// not implemented" and streams nothing (`common/src/clients/data.rs:171-174`).
 ///
 /// # Errors
 ///
-/// Returns an error if the client does not stream `source`, naming it and
-/// saying why.
+/// Returns an error if the client does not stream `source`, naming it and saying why.
 pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
     use NautilusDataType as D;
     match source {
@@ -225,17 +212,15 @@ pub(crate) fn streams(source: &CatalogSeries) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Whether IB streams bars of `bar_type`'s size: one IB has
-/// (`bar_type_to_ib_bar_size`, on which the client's subscription task
-/// fails any other) and keeps up to date (`KEPT_UP_TO_DATE`).
+/// Whether IB streams bars of `bar_type`'s size: one IB has (`bar_type_to_ib_bar_size`, on which
+/// the client's subscription task fails any other) and keeps up to date (`KEPT_UP_TO_DATE`).
 fn streamed_size(bar_type: &BarType) -> bool {
     bar_type_to_ib_bar_size(bar_type).is_ok() && bar_type.spec().timedelta() >= KEPT_UP_TO_DATE
 }
 
-/// The sizes IB streams bars of `instrument_id` of (`streamed_size`), as
-/// Nautilus writes a bar's step and aggregation (`5-SECOND`), shortest
-/// first: each valid step to 60 of each time aggregation tried, so that the
-/// sizes a refusal offers are the rule's.
+/// The sizes IB streams bars of `instrument_id` of (`streamed_size`), as Nautilus writes a bar's
+/// step and aggregation (`5-SECOND`), shortest first: each valid step to 60 of each time
+/// aggregation tried, so that the sizes a refusal offers are the rule's.
 fn streamed_sizes(instrument_id: InstrumentId) -> Vec<String> {
     use BarAggregation as A;
     [
@@ -265,9 +250,8 @@ fn streamed_sizes(instrument_id: InstrumentId) -> Vec<String> {
     .collect()
 }
 
-/// IB's clients of a node trading `instrument_ids` on the paper account
-/// DU1234567, on a gateway at 127.0.0.1:4002 that is not started: created,
-/// they connect to nothing.
+/// IB's clients of a node trading `instrument_ids` on the paper account DU1234567, on a gateway at
+/// 127.0.0.1:4002 that is not started: created, they connect to nothing.
 #[cfg(test)]
 pub(in crate::venues) fn offline_clients(instrument_ids: &[InstrumentId]) -> IbClients {
     let gateway = IbGateway {
@@ -301,13 +285,12 @@ mod tests {
         InstrumentId::from("SXR8.IBIS")
     }
 
-    /// Pins that Nautilus' IB execution client keeps positions netting,
-    /// whatever its config (`crates/adapters/interactive_brokers/src/
-    /// factories.rs:182`): `Broker::oms_type` copies it, which a backtest
-    /// simulates every venue IB trades by (`venues::oms_type`).
+    /// Pins that Nautilus' IB execution client keeps positions netting, whatever its config
+    /// (`crates/adapters/interactive_brokers/src/factories.rs:182`): `Broker::oms_type` copies it,
+    /// which a backtest simulates every venue IB trades by (`venues::oms_type`).
     ///
-    /// Against the adapter's client: the broker's answer is our copy of it.
-    /// The client needs no credential and connects to nothing.
+    /// Against the adapter's client: the broker's answer is our copy of it. The client needs no
+    /// credential and connects to nothing.
     #[rstest]
     fn drift_the_execution_client_keeps_positions_as_the_broker_answers() {
         let clients = configs(&gateway(), &paper(), &[sxr8()]);
@@ -317,8 +300,8 @@ mod tests {
         assert_eq!(created, Broker::Ib.oms_type());
     }
 
-    /// Not made the default of data: Nautilus makes the first data client
-    /// on no venue the default itself, and refuses another made it after.
+    /// Not made the default of data: Nautilus makes the first data client on no venue the default
+    /// itself, and refuses another made it after.
     #[rstest]
     fn the_data_client_is_routed_its_venues_and_the_execution_client_takes_every_order() {
         let ibis = || configs(&gateway(), &paper(), &[sxr8()]);
@@ -365,8 +348,8 @@ mod tests {
         assert_eq!(exec.instrument_provider.load_ids, [sxr8()].into());
     }
 
-    /// Starting the gateway would fail without credentials or Docker, or
-    /// start a container: the client id is checked first.
+    /// Starting the gateway would fail without credentials or Docker, or start a container: the
+    /// client id is checked first.
     #[tokio::test]
     async fn rejects_a_client_id_ib_reserves_before_starting_the_gateway() {
         let Err(e) = clients(&paper(), 2000, &[sxr8()]).await else {

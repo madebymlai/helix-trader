@@ -1,13 +1,11 @@
-//! The OKX account, read through its key before anything trades on it or
-//! is filled for it: its position mode through the adapter
-//! (`get_account_configuration`), and the leverage OKX applies to an
-//! instrument, which the adapter does not read, so that is our signed `GET
-//! /api/v5/account/leverage-info`, signed with the adapter's `Credential`;
-//! to be removed if Nautilus gains it. OKX sets the leverage, by hand on the
-//! account; nothing here changes the account. The key is the adapter's,
-//! from `OKX_API_KEY`, `OKX_API_SECRET` and `OKX_API_PASSPHRASE`, on the
-//! environment `OKX_ENVIRONMENT` names: `demo` or `live`, required, read by
-//! us since the adapter takes it only as a config field.
+//! The OKX account, read through its key before anything trades on it or is filled for it: its
+//! position mode through the adapter (`get_account_configuration`), and the leverage OKX applies to
+//! an instrument, which the adapter does not read, so that is our signed `GET
+//! /api/v5/account/leverage-info`, signed with the adapter's `Credential`; to be removed if
+//! Nautilus gains it. OKX sets the leverage, by hand on the account; nothing here changes the
+//! account. The key is the adapter's, from `OKX_API_KEY`, `OKX_API_SECRET` and
+//! `OKX_API_PASSPHRASE`, on the environment `OKX_ENVIRONMENT` names: `demo` or `live`, required,
+//! read by us since the adapter takes it only as a config field.
 
 use std::collections::HashMap;
 
@@ -36,9 +34,8 @@ pub(super) const REGION: OKXRegion = OKXRegion::Eea;
 /// Cross margin: the account's whole balance backs every position.
 pub(super) const MARGIN_MODE: OKXMarginMode = OKXMarginMode::Cross;
 
-/// The OKX environment `value` of `OKX_ENVIRONMENT` names: `demo` or
-/// `live`, exactly, as Nautilus' serde names them. No default: a missing,
-/// empty or other value is an error naming both.
+/// The OKX environment `value` of `OKX_ENVIRONMENT` names: `demo` or `live`, exactly, as Nautilus'
+/// serde names them. No default: a missing, empty or other value is an error naming both.
 pub(super) fn environment_of(value: Option<&str>) -> anyhow::Result<OKXEnvironment> {
     let refused = || {
         anyhow::anyhow!(
@@ -51,8 +48,8 @@ pub(super) fn environment_of(value: Option<&str>) -> anyhow::Result<OKXEnvironme
     serde_json::from_value(serde_json::Value::from(value)).map_err(|_| refused())
 }
 
-/// The OKX account, read through its key: what the adapter does not read
-/// of it, its leverage, and its position mode.
+/// The OKX account, read through its key: its leverage, which the adapter does not read, and its
+/// position mode.
 pub(super) struct Account {
     /// The adapter's client, for what it reads.
     okx: OKXHttpClient,
@@ -63,9 +60,8 @@ pub(super) struct Account {
 }
 
 impl Account {
-    /// The account of the environment `OKX_ENVIRONMENT` names, in
-    /// `REGION`, as the live node's clients reach it, with the credentials
-    /// from the environment.
+    /// The account of the environment `OKX_ENVIRONMENT` names, in `REGION`, as the live node's
+    /// clients reach it, with the credentials from the environment
     ///
     /// # Errors
     ///
@@ -80,8 +76,7 @@ impl Account {
         })
     }
 
-    /// Clients on the endpoints of `exec`, with the credentials from the
-    /// environment.
+    /// Clients on the endpoints of `exec`, with the credentials from the environment.
     pub(super) fn connect(exec: &OKXExecutionClientConfig) -> anyhow::Result<Self> {
         let credential = Credential::resolve(None, None, None).context(
             "OKX credentials missing: set OKX_API_KEY, OKX_API_SECRET and \
@@ -101,8 +96,9 @@ impl Account {
             None,
         )
         .context("building the OKX HTTP client")?;
-        // Temporary: the leverage, which the adapter does not read, through
-        // OKX's bare API, until Nautilus' OKX client reads it: helix-trader#21.
+
+        // Temporary: the leverage, which the adapter does not read, through OKX's bare API, until
+        // Nautilus' OKX client reads it: helix-trader#21.
         let mut headers = HashMap::new();
         if exec.environment == OKXEnvironment::Demo {
             headers.insert("x-simulated-trading".to_string(), "1".to_string());
@@ -143,7 +139,8 @@ impl Account {
             "/api/v5/account/leverage-info?instId={}&mgnMode={mode}",
             id.symbol
         );
-        // As the adapter signs: an ISO 8601 time to the millisecond.
+
+        // As the adapter signs: an ISO 8601 time to the millisecond
         let timestamp = format!(
             "{:.3}",
             get_atomic_clock_realtime().get_time_ns().to_datetime_utc()
@@ -196,9 +193,9 @@ struct LeverageInfo {
     lever: Decimal,
 }
 
-/// The leverage of `id` in `body`, OKX's answer to a leverage request: the
-/// one of all its rows (one in net mode); an error if OKX refused the
-/// request, listed another instrument or none, or rows disagree.
+/// The leverage of `id` in `body`, OKX's answer to a leverage request: the one of all its rows (one
+/// in net mode), or an error if OKX refused the request, listed another instrument or none, or the
+/// rows disagree.
 fn leverage_of(id: InstrumentId, body: &[u8]) -> anyhow::Result<Decimal> {
     let answer: LeverageAnswer =
         serde_json::from_slice(body).with_context(|| format!("parsing OKX's leverage of {id}"))?;
@@ -266,9 +263,8 @@ mod tests {
         assert_eq!(leverage_of(xperp(), body).unwrap(), Decimal::from(3));
     }
 
-    /// OKX's refusal, named by its code; an empty answer, naming the
-    /// instrument asked; another instrument's leverage, naming it; and two
-    /// leverages of the instrument, naming both.
+    /// OKX's refusal, named by its code; an empty answer, naming the instrument asked; another
+    /// instrument's leverage, naming it; and two leverages of the instrument, naming both.
     #[rstest]
     #[case::refused(
         br#"{"code":"51001","msg":"Instrument ID doesn't exist","data":[]}"#,
