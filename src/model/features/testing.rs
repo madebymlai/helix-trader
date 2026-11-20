@@ -1,7 +1,4 @@
 //! Declares features for the tests in `[indicators]`.
-//!
-//! They are the last mid of an instrument's quotes, the same mid over the bracket's width, and
-//! counts of book depth and deltas and of custom points.
 
 use std::rc::Rc;
 
@@ -19,22 +16,17 @@ use crate::{
     },
 };
 
-/// The last mid of a quote, an exponential average of period 1.
 pub(crate) const MID: Declared<EmaArgs> = Declared::new("mid");
 
 pub(crate) fn tables() -> IndicatorsConfig {
     toml::from_str(r#"mid = { period = 1, price_type = "MID" }"#).unwrap()
 }
 
-/// The feature `mid`, warm once a quote came.
 pub(crate) fn last_mid(instrument_id: InstrumentId) -> FeatureSetBuilder {
     FeatureSet::builder().feature(&[Series::quotes(instrument_id)], MID, &tables())
 }
 
-/// The last mid of a quote over the bracket's width there.
-///
-/// It is initialized once a quote came and the width has a length. Reading a width never handed
-/// panics.
+/// The last mid of a quote over the bracket's width there. Reading a width never handed panics.
 pub(crate) struct MidOverWidth {
     mid: Option<f64>,
     width: Option<Rc<BracketWidth>>,
@@ -105,7 +97,6 @@ impl IndicatorArgs for MidOverWidthArgs {
 
 pub(crate) const OVER: Declared<MidOverWidthArgs> = Declared::new("over");
 
-/// The feature `over`, the last mid over the bracket's `width`.
 pub(crate) fn mid_over(instrument_id: InstrumentId, width: &Rc<BracketWidth>) -> FeatureSetBuilder {
     let tables: IndicatorsConfig = toml::from_str("over = {}").unwrap();
     FeatureSet::builder()
@@ -123,7 +114,6 @@ pub(crate) fn book_counts(instrument_id: InstrumentId) -> FeatureSetBuilder {
         .feature(&[Series::deltas(instrument_id)], BOOK, &tables)
 }
 
-/// Counts the depth and deltas it gets, initialized by the first.
 pub(crate) struct BookCount {
     count: usize,
 }
@@ -174,13 +164,11 @@ impl IndicatorArgs for BookCountArgs {
 
 pub(crate) const CUSTOM: Declared<CustomCountArgs> = Declared::new("custom");
 
-/// The count of the points of `series`, warm once one came.
 pub(crate) fn custom_count(series: &CustomSeries) -> FeatureSetBuilder {
     let tables: IndicatorsConfig = toml::from_str("custom = {}").unwrap();
     FeatureSet::builder().feature(&[Series::Custom(series.clone())], CUSTOM, &tables)
 }
 
-/// Counts the custom data it gets, initialized by the first.
 pub(crate) struct CustomCount {
     count: usize,
 }
