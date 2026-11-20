@@ -1,22 +1,19 @@
 //! The risk vocabulary: the unit a trade is measured in, and what it risks.
 //!
-//! - `R`: the unit a trade is measured in. One R is the money the trade
-//!   risks, what its stop loses, or, a trade without a stop, what a move of
-//!   one ATR against it loses. A trade's P&L in R is its P&L over that, so
-//!   that trades of any size, on any instrument, are measured alike. A
-//!   model's margins are in R (`model::config::Margins`,
-//!   `model::config::MetaConfig::margin`), the least net R its decision
-//!   expects of a trade it takes.
-//! - `Risk`: the fraction of equity a trade risks at the config's stake,
-//!   `[trade] risk`, written as a percentage, `"0.5%"`.
-//! - `Stake`: what a trade risks, the config's `Risk` times the multiple a
-//!   strategy picks. A trade sent at a stake (`orders::Trade::send`) is
-//!   sized to risk that fraction of equity over its one R.
+//! - `R`: the unit a trade is measured in. One R is the money the trade risks: what its stop loses,
+//!   or, for a trade without a stop, what a move of one ATR against it loses. A trade's P&L in R is
+//!   its P&L over that, so that trades of any size, on any instrument, are measured alike. A
+//!   model's margins are in R (`model::config::Margins`, `model::config::MetaConfig::margin`), the
+//!   least net R its decision expects of a trade it takes.
+//! - `Risk`: the fraction of equity a trade risks at the config's stake, `[trade] risk`, written as
+//!   a percentage, `"0.5%"`.
+//! - `Stake`: what a trade risks, the config's `Risk` times the multiple a strategy picks. A trade
+//!   sent at a stake (`orders::Trade::send`) is sized to risk that fraction of equity over its one
+//!   R.
 //!
-//! Each is read as a config writes it, a bare number refused: a value in R
-//! with an R suffix, `"0.5R"`, so that a number, of money say, is never
-//! taken for R, and a risk with a percent sign, since a bare number could
-//! be a fraction or a percentage.
+//! Each is read as a config writes it, a bare number refused: a value in R with an R suffix,
+//! `"0.5R"`, so that a number, of money say, is never taken for R, and a risk with a percent sign,
+//! since a bare number could be a fraction or a percentage.
 
 use std::{fmt::Display, str::FromStr};
 
@@ -29,7 +26,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 pub struct R(f64);
 
 impl R {
-    /// `value` R.
+    /// `value` R
     ///
     /// # Panics
     ///
@@ -40,8 +37,7 @@ impl R {
         Self(value)
     }
 
-    /// `value` R, if it is finite: none of NaN or an infinity, which a
-    /// model's prediction may be.
+    /// `value` R if it is finite, `None` for NaN or an infinity, which a model's prediction may be.
     #[must_use]
     pub fn finite(value: f64) -> Option<Self> {
         value.is_finite().then_some(Self(value))
@@ -86,8 +82,7 @@ impl Display for R {
 }
 
 impl<'de> Deserialize<'de> for R {
-    /// An R from its text (`from_str`); a bare number refused, saying that
-    /// the value is in R.
+    /// An R from its text (`from_str`), refusing a bare number and saying the value is in R.
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         deserializer.deserialize_any(Written)
     }
@@ -120,15 +115,13 @@ impl de::Visitor<'_> for Written {
     }
 }
 
-/// The fraction of equity a trade risks at the config's stake, `[trade]
-/// risk`, written as a percentage, `"0.5%"`. The config's load holds it
-/// to a proper fraction (`is_proper`).
+/// The fraction of equity a trade risks at the config's stake, `[trade] risk`, written as a
+/// percentage, `"0.5%"`. The config's load holds it to a proper fraction (`is_proper`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Risk(Decimal);
 
 impl Risk {
-    /// Whether it is a proper fraction of equity: above none of it and
-    /// below all of it.
+    /// Whether it is a proper fraction of equity: above none of it and below all of it.
     #[must_use]
     pub fn is_proper(self) -> bool {
         Decimal::ZERO < self.0 && self.0 < Decimal::ONE
@@ -168,8 +161,8 @@ impl Serialize for Risk {
     }
 }
 
-/// Reads a `Risk` from its string, saying what it takes of anything else:
-/// a bare number could be a fraction or a percentage.
+/// Reads a `Risk` from its string, saying what it takes of anything else: a bare number could be a
+/// fraction or a percentage.
 struct Percentage;
 
 impl de::Visitor<'_> for Percentage {
@@ -184,10 +177,8 @@ impl de::Visitor<'_> for Percentage {
     }
 }
 
-/// How much a trade risks: the config's `Risk` times a positive multiple
-/// the strategy picks, 1 at the config's stake (`StandardConfig::stake`).
-/// A trade sent at a stake (`orders::Trade::send`) is sized to risk that
-/// fraction of equity over its one R.
+/// How much a trade risks: the config's `Risk` times a positive multiple the strategy picks, 1 at
+/// the config's stake (`StandardConfig::stake`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Stake {
     risk: Risk,
@@ -204,7 +195,7 @@ impl Stake {
         }
     }
 
-    /// The stake `multiple` times this one.
+    /// The stake `multiple` times this one
     ///
     /// # Errors
     ///
@@ -258,10 +249,9 @@ mod tests {
         assert_eq!(text.parse::<R>().unwrap(), R::new(value));
     }
 
-    /// A number without its suffix is not taken for R, nor a suffix
-    /// without its number, nor an R that is not finite; the refusal opens
-    /// with the text written, which the example it offers, `"0.5R"`, would
-    /// otherwise hold for `0.5`.
+    /// A number without its suffix is not taken for R, nor a suffix without its number, nor an R
+    /// that is not finite. The refusal opens with the text written, which the example it offers,
+    /// `"0.5R"`, would otherwise hold for `0.5`.
     #[rstest]
     #[case::bare("0.5")]
     #[case::lowercase("0.5r")]
@@ -277,8 +267,7 @@ mod tests {
         assert!(err.to_string().starts_with(&format!("{text} ")), "{err}");
     }
 
-    /// Its text reads back to it, so a store keyed by its text is keyed
-    /// by its value.
+    /// Its text reads back to it, so a store keyed by its text is keyed by its value.
     #[rstest]
     #[case::half(R::new(0.5), "0.5R")]
     #[case::negative(R::new(-0.25), "-0.25R")]
@@ -335,8 +324,8 @@ mod tests {
         assert_eq!(R::deserialize(text).unwrap(), R::new(0.5));
     }
 
-    /// A bare number, an old margin in money say, is refused naming it and
-    /// showing the value written in R, an integer as a float.
+    /// A bare number, an old margin in money say, is refused naming it and showing the value
+    /// written in R, an integer as a float.
     #[rstest]
     #[case::float(refusal::<F64Deserializer<Error>>(0.5.into_deserializer()), "0.5")]
     #[case::integer(refusal::<I64Deserializer<Error>>(1_i64.into_deserializer()), "1")]
@@ -377,8 +366,8 @@ mod tests {
         assert!(err.contains(&format!("{written:?}")), "{err}");
     }
 
-    /// A bare number could be a fraction or a percentage: it is refused
-    /// naming it and showing a risk written as a percentage.
+    /// A bare number could be a fraction or a percentage: it is refused naming it and showing a
+    /// risk written as a percentage.
     #[rstest]
     fn a_bare_number_is_refused_saying_a_risk_is_a_percentage() {
         let float: F64Deserializer<Error> = 0.005.into_deserializer();
