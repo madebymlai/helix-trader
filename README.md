@@ -39,6 +39,7 @@ Real-venue live tests are gated by `NAUTILUS_IB_RUN=1`, `NAUTILUS_OKX_RUN=1`, `N
 
 - [Architecture](docs/architecture.md): design and process constraints.
 - [Testing](docs/testing.md): the test seams, where expected values come from, and the live tests.
+- [Documenting code](docs/documenting-code.md): comments, doc comments and their Rustdoc sections.
 - [Catalog](src/catalog/README.md): catalog filling; each venue's history and live clients are documented in its module under `src/venues`.
 - [cTrader](crates/ctrader/README.md): the cTrader Open API adapter, a crate of the workspace, which [IC Markets](src/venues/ic) and [Pepperstone](src/venues/pepperstone/README.md) run on.
 - [LSE](crates/lse/README.md): the London Strategic Edge adapter, a crate of the workspace, a data client only.
