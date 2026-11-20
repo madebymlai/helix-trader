@@ -1,20 +1,25 @@
-//! The sockets of the instruments the data client streams, and LSE's exchange streams.
+//! The sockets for the instruments the data client streams, and LSE's exchange streams.
 //!
 //! The sockets carry the quotes of `LSEDGE` series and the trades of `OPRA` contracts. LSE's CME
-//! stream carries the `GLBX` contracts and its Nasdaq stream the `XNAS` stocks (see `exchange`).
+//! stream carries the `GLBX` contracts. Its Nasdaq stream carries the `XNAS` stocks (see
+//! `exchange`).
 //!
-//! `open` makes one connection a socket (see `LseSymbol::stream` and `OpraContract::stream`). It
-//! fails unless the socket lists every series' symbol to the key and allows all its subscriptions
-//! (`max_subscriptions`). LSE accepts a subscription to a symbol it does not list and sends
-//! nothing, and refuses one beyond its limit (`LIMIT_REACHED`) only once asked.
+//! `open` turns one connection into a socket (see `LseSymbol::stream` and `OpraContract::stream`).
+//! It fails unless:
+//! - The socket lists the symbol of every series to the key.
+//! - The socket allows all its subscriptions (`max_subscriptions`).
 //!
-//! An option contract streams on data-ws in its underlying's chain, every listed contract in one
-//! subscription, which LSE refuses for an underlying with no listed options
-//! (`INVALID_UNDERLYING`). A trades subscription of any contract of a chain the config streams
-//! subscribes the chain, so a strategy following strikes needs no subscription beyond those `open`
-//! checked. Ticks of other contracts of the chain are dropped (see `parse_trade`).
+//! LSE accepts a subscription to a symbol it does not list, and then sends nothing. It refuses a
+//! subscription beyond its limit (`LIMIT_REACHED`) only once the subscription is asked.
 //!
-//! LSE's refusal of a subscription is logged as an error, a reconnect's gap as a warning.
+//! An option contract streams on data-ws in its underlying's chain. One subscription covers every
+//! listed contract. LSE refuses it for an underlying with no listed options
+//! (`INVALID_UNDERLYING`). A trades subscription to any contract of a chain the config streams
+//! subscribes the whole chain, so a strategy that follows strikes needs no subscription beyond
+//! those `open` checked. Ticks of other contracts in the chain are dropped (see `parse_trade`).
+//!
+//! The client logs LSE's refusal of a subscription as an error, and the gap after a reconnect as a
+//! warning.
 
 use std::{str::FromStr, sync::Arc};
 
@@ -79,16 +84,19 @@ pub(super) struct LseStreams {
 }
 
 impl LseStreams {
-    /// Creates the streams of the instruments `config` streams, none open.
+    /// Creates the streams for the instruments `config` streams. None is open.
     ///
-    /// `LSEDGE` series and `OPRA` contracts use `credential`, `GLBX` contracts `cme` (looked up in
-    /// `listings`), and `XNAS` stocks `nasdaq`.
+    /// Each instrument uses one key:
+    /// - `LSEDGE` series and `OPRA` contracts use `credential`.
+    /// - `GLBX` contracts use `cme` (looked up in `listings`).
+    /// - `XNAS` stocks use `nasdaq`.
     ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - An instrument is neither an `LSEDGE` series, an `OPRA` contract, a `GLBX` contract nor an
-    ///   `XNAS` stock, or is a series of a market with no socket here.
+    ///   `XNAS` stock.
+    /// - An instrument is a series of a market with no socket here.
     /// - An instrument is streamed with no key of its product.
     pub(super) fn new(
         config: &LseDataClientConfig,
@@ -170,11 +178,15 @@ impl LseStreams {
     /// Connects to each socket streamed, then opens the CME and Nasdaq streams (see
     /// `ExchangeStreams::open`).
     ///
+    /// After an error, no socket is left open.
+    ///
     /// # Errors
     ///
-    /// Returns an error if a connection fails or LSE refuses the key (see
-    /// `LseWebSocketClient::connect`), if a socket does not list a series or its subscriptions
-    /// exceed the limit, or as `ExchangeStreams::open`. No socket is then left open.
+    /// Returns an error if:
+    /// - A connection fails or LSE refuses the key (see `LseWebSocketClient::connect`).
+    /// - A socket does not list a series.
+    /// - The subscriptions exceed the limit.
+    /// - `ExchangeStreams::open` fails.
     pub(super) async fn open(&mut self) -> anyhow::Result<()> {
         if !self.tasks.is_open() {
             self.close().await?;
@@ -300,8 +312,8 @@ impl LseStreams {
                                     );
                                     (of, trade.map(Data::Trade))
                                 } else {
-                                    // A subscription just ended, or a contract of a chain not
-                                    // subscribed
+                                    // A subscription just ended, or a contract in a chain that
+                                    // is not subscribed.
                                     continue;
                                 };
                             match parsed {
@@ -338,8 +350,10 @@ impl LseStreams {
     ///
     /// # Errors
     ///
-    /// Returns an error if `id` is not streamed by the client, if its socket is not open, or if
-    /// `cache` has no definition of it: LSE publishes none.
+    /// Returns an error if:
+    /// - `id` is not streamed by the client.
+    /// - Its socket is not open.
+    /// - `cache` has no definition of it, as LSE publishes none.
     pub(super) fn subscribe_quotes(
         &mut self,
         id: InstrumentId,
@@ -363,7 +377,9 @@ impl LseStreams {
     ///
     /// # Errors
     ///
-    /// Returns an error if `id` is not streamed by the client, or if its socket is not open.
+    /// Returns an error if:
+    /// - `id` is not streamed by the client.
+    /// - Its socket is not open.
     pub(super) fn unsubscribe_quotes(&self, id: InstrumentId) -> anyhow::Result<()> {
         if let Some(exchange) = LseExchange::of_venue(id.venue) {
             return self.exchange(exchange).unsubscribe(id, StreamKind::Quotes);
@@ -375,14 +391,16 @@ impl LseStreams {
 
     /// Subscribes to the trades of `id`, at the precision of its definition in `cache`.
     ///
-    /// An `OPRA` contract subscribes its underlying's chain unless one of its contracts is
-    /// subscribed. It does nothing if its trades are subscribed.
+    /// An `OPRA` contract subscribes to its underlying's chain, unless one of the chain's contracts
+    /// is subscribed. Nothing happens if its trades are subscribed.
     ///
     /// # Errors
     ///
-    /// Returns an error if `id` is not a `GLBX` contract, an `XNAS` stock or an `OPRA` contract of
-    /// a chain the client streams (LSE's sockets stream a series' ticks as quotes), if its socket
-    /// is not open, or if `cache` has no definition of it.
+    /// Returns an error if:
+    /// - `id` is not a `GLBX` contract, an `XNAS` stock or an `OPRA` contract of a chain the client
+    ///   streams (LSE's sockets stream a series' ticks as quotes).
+    /// - Its socket is not open.
+    /// - `cache` has no definition of it.
     pub(super) fn subscribe_trades(
         &mut self,
         id: InstrumentId,
@@ -411,13 +429,15 @@ impl LseStreams {
 
     /// Ends the trades of `id`.
     ///
-    /// An `OPRA` contract ends its underlying's chain with its last contract subscribed. It does
-    /// nothing if its trades are not subscribed.
+    /// An `OPRA` contract ends its underlying's chain with its last subscribed contract. Nothing
+    /// happens if its trades are not subscribed.
     ///
     /// # Errors
     ///
-    /// Returns an error if `id` is not a `GLBX` contract, an `XNAS` stock or an `OPRA` contract of
-    /// a chain the client streams, or if its socket is not open.
+    /// Returns an error if:
+    /// - `id` is not a `GLBX` contract, an `XNAS` stock or an `OPRA` contract of a chain the client
+    ///   streams.
+    /// - Its socket is not open.
     pub(super) fn unsubscribe_trades(&self, id: InstrumentId) -> anyhow::Result<()> {
         if let Some(exchange) = LseExchange::of_venue(id.venue) {
             return self.exchange(exchange).unsubscribe(id, StreamKind::Trades);
@@ -439,8 +459,9 @@ impl LseStreams {
     ///
     /// # Errors
     ///
-    /// Returns an error if `id` is neither a `GLBX` contract nor an `XNAS` stock, or if
-    /// `ExchangeStreams::subscribe` fails.
+    /// Returns an error if:
+    /// - `id` is neither a `GLBX` contract nor an `XNAS` stock.
+    /// - `ExchangeStreams::subscribe` fails.
     pub(super) fn subscribe_book_depth(
         &mut self,
         id: InstrumentId,
@@ -455,8 +476,9 @@ impl LseStreams {
     ///
     /// # Errors
     ///
-    /// Returns an error if `id` is neither a `GLBX` contract nor an `XNAS` stock, or is not
-    /// subscribed.
+    /// Returns an error if:
+    /// - `id` is neither a `GLBX` contract nor an `XNAS` stock.
+    /// - `id` is not subscribed.
     pub(super) fn unsubscribe_book_depth(&self, id: InstrumentId) -> anyhow::Result<()> {
         self.exchange(booked(id, &NautilusDataType::OrderBookDepth)?)
             .unsubscribe(id, StreamKind::Depth)
@@ -467,8 +489,9 @@ impl LseStreams {
     ///
     /// # Errors
     ///
-    /// Returns an error if `id` is neither a `GLBX` contract nor an `XNAS` stock, or if
-    /// `ExchangeStreams::subscribe` fails.
+    /// Returns an error if:
+    /// - `id` is neither a `GLBX` contract nor an `XNAS` stock.
+    /// - `ExchangeStreams::subscribe` fails.
     pub(super) fn subscribe_book_deltas(
         &mut self,
         id: InstrumentId,
@@ -483,8 +506,9 @@ impl LseStreams {
     ///
     /// # Errors
     ///
-    /// Returns an error if `id` is neither a `GLBX` contract nor an `XNAS` stock, or is not
-    /// subscribed.
+    /// Returns an error if:
+    /// - `id` is neither a `GLBX` contract nor an `XNAS` stock.
+    /// - `id` is not subscribed.
     pub(super) fn unsubscribe_book_deltas(&self, id: InstrumentId) -> anyhow::Result<()> {
         self.exchange(booked(id, &NautilusDataType::OrderBookDelta)?)
             .unsubscribe(id, StreamKind::Deltas)
@@ -566,11 +590,14 @@ impl LseStreams {
 /// Checks that the client streams `series`, a Nautilus data type and its catalog identifier (an
 /// instrument id, or a bar type for bars).
 ///
-/// It streams an `LSEDGE` series' quotes, an `OPRA` contract's trades, and a `GLBX` contract's or
-/// an `XNAS` stock's quotes, trades, book depth and book deltas, a rolled root's on its contracts.
+/// The client streams:
+/// - An `LSEDGE` series' quotes.
+/// - An `OPRA` contract's trades.
+/// - A `GLBX` contract's or an `XNAS` stock's quotes, trades, book depth and book deltas. A rolled
+///   root's go on its contracts.
 ///
-/// A live run checks before anything connects, so that no subscription the client cannot serve
-/// fails after the node started. An error names the series and what LSE streams instead.
+/// A live run checks before anything connects, so no subscription the client cannot serve fails
+/// after the node has started. An error names the series and what LSE streams instead.
 ///
 /// # Errors
 ///
@@ -580,7 +607,9 @@ impl LseStreams {
 /// - The series is an `LSEDGE` series' trades: its sockets' ticks are quotes.
 /// - The series is an `OPRA` contract's quotes: LSE's US options feed carries trades alone.
 /// - The series is the book of either.
-/// - The series is any other data, or an instrument of another venue, or has no instrument id.
+/// - The series is any other data.
+/// - The series is an instrument of another venue.
+/// - The series has no instrument id.
 pub fn streams(series: &(NautilusDataType, String)) -> anyhow::Result<()> {
     let (data, identifier) = series;
     if *data == NautilusDataType::Bar {
@@ -596,8 +625,8 @@ pub fn streams(series: &(NautilusDataType, String)) -> anyhow::Result<()> {
 
 /// Checks that the client streams `data_type`, custom data.
 ///
-/// It streams none: LSE's rows are history alone, and Nautilus' default custom data subscription
-/// would only log it as not implemented.
+/// It streams none, because LSE's rows are history alone. Nautilus' default custom data
+/// subscription would only log it as not implemented.
 ///
 /// # Errors
 ///

@@ -1,15 +1,16 @@
 //! An export over any span.
 //!
-//! An export is asked a UTC day, or for a book or orders a UTC hour (`ExportQuery::longest_span`).
+//! One export asks for one UTC day, or for a book or orders one UTC hour
+//! (`ExportQuery::longest_span`).
 //!
-//! LSE loads a UTC day the morning after it ends (LSE's API docs, "The newest date"), and answers
-//! an unloaded day as one with no rows (`data-unavailable`, `test_data/`). So:
+//! LSE loads a UTC day the morning after it ends (LSE's API docs, "The newest date"). It answers
+//! an unloaded day as if the day had no rows (`data-unavailable`, `test_data/`). So:
 //! - The current UTC day is not loaded, whatever LSE answers.
-//! - The day before is loaded once LSE answers rows of it.
-//! - An earlier day LSE holds no row of had none.
+//! - The day before is loaded once LSE answers with rows for it.
+//! - An earlier day with no rows at LSE had none.
 //!
-//! Other sources follow the same rule (`loaded`, see `rows`): on 13 November 2026 the catalogue
-//! held the bond yields of the 12th as of the 13th's 01:34 UTC.
+//! Other sources follow the same rule (`loaded`, see `rows`). On 13 November 2026, the catalogue
+//! held the bond yields for the 12th as of 01:34 UTC on the 13th.
 
 use std::cmp::Ordering;
 
@@ -22,18 +23,20 @@ use super::{client::LseHttpClient, query::ExportQuery};
 const DAY: SignedDuration = SignedDuration::from_hours(24);
 const INSTANT: SignedDuration = SignedDuration::from_nanos(1);
 
-/// What LSE holds of an export.
+/// The files LSE holds for an export.
 #[derive(Debug)]
 pub struct Exported {
-    /// The files LSE sent, each beside its export, in time order.
+    /// The files LSE sent, in time order, each paired with its export.
     pub files: Vec<(ExportQuery, Bytes)>,
-    /// Where the unloaded span starts, if the export reaches into it: the files may lack rows from
-    /// there.
+    /// Where the unloaded span starts, if the export reaches into it.
+    ///
+    /// The files may lack rows from there.
     pub unloaded_from: Option<Timestamp>,
 }
 
-/// Returns the files of the export `query`, halving an export LSE refuses as too wide
-/// (`export-too-wide`) down to a second.
+/// Returns the files of the export `query`.
+///
+/// Halves an export LSE refuses as too wide (`export-too-wide`), down to a second.
 ///
 /// # Errors
 ///
@@ -73,7 +76,7 @@ async fn fetch_halving(
 ) -> anyhow::Result<Vec<(ExportQuery, Bytes)>> {
     let mut files = Vec::new();
 
-    // The next export is last
+    // The next export to fetch is last
     let mut pending = vec![query];
     while let Some(export) = pending.pop() {
         let file = match http.export(&export).await {
@@ -93,9 +96,9 @@ async fn fetch_halving(
     Ok(files)
 }
 
-// A span ending 1 ns past a boundary (a closed window ending at midnight, asked as
-// `[start, end + 1 ns)` as Nautilus' Databento client does) keeps that instant in the previous
-// export, as LSE serves exports across midnight.
+// A span that ends 1 ns past a boundary keeps that instant in the previous export, because LSE
+// serves exports across midnight, as with a closed window ending at midnight that Nautilus'
+// Databento client asks as `[start, end + 1 ns)`.
 fn pieces(query: &ExportQuery, unit: SignedDuration) -> Vec<ExportQuery> {
     let (start, end) = query.window();
     let mut pieces = Vec::new();
@@ -113,7 +116,9 @@ fn pieces(query: &ExportQuery, unit: SignedDuration) -> Vec<ExportQuery> {
     pieces
 }
 
-/// Returns whether LSE has loaded the UTC day of `time` as of `now`, given its `rows` of the day.
+/// Returns whether LSE has loaded the UTC day of `time` as of `now`.
+///
+/// `rows` says whether LSE holds rows for that day.
 pub fn loaded(time: Timestamp, rows: bool, now: Timestamp) -> bool {
     match midnight(time).cmp(&(midnight(now) - DAY)) {
         Ordering::Less => true,
