@@ -6,6 +6,10 @@
 //! At each, the venue makes a `FundingSettlement` on the position, priced at the last bar's close
 //! (no mark price: the mid of the book the bars set). The settlement adjusts the position and the
 //! balance. A long pays a positive rate and receives a negative one.
+//!
+//! The price is 100,000 before noon and 101,000 from noon, and the run starts at 06:30. The funding
+//! rate is +0.01% at 08:00 and -0.02% at 16:00. The first hour bar closes at 07:00 and is built 5 s
+//! after, as live, so the buy fills there.
 
 use std::path::Path;
 
@@ -35,8 +39,7 @@ fn at(hh_mm: &str) -> Timestamp {
     ts(&format!("2026-01-07T{hh_mm}:00Z"))
 }
 
-/// Returns BTC-USDT-SWAP as OKX defines it: price tick 0.1, lot 0.01 contracts, 0.01 BTC a
-/// contract, and initial and maintenance margins of 1.
+/// Returns BTC-USDT-SWAP as OKX defines it.
 fn instrument() -> InstrumentAny {
     InstrumentAny::CryptoPerpetual(
         CryptoPerpetual::builder()
@@ -62,8 +65,6 @@ fn instrument() -> InstrumentAny {
     )
 }
 
-/// Returns flat minute bars opening in `[from, to)`. The price is 100,000 before noon and 101,000
-/// from noon, with 500 contracts. `ts_event` is at the open and `ts_init` at the close.
 fn minute_bars(from: Timestamp, to: Timestamp) -> Vec<Bar> {
     let mut open = from;
     let mut bars = vec![];
@@ -100,8 +101,6 @@ fn funding(time: Timestamp, rate: &str) -> FundingRateUpdate {
     )
 }
 
-/// Writes minute bars over `[06:00, bars_to]` and funding over `[06:00, funding_to]`, at 08:00
-/// (+0.01%) and 16:00 (-0.02%).
 fn catalog(dir: &Path, bars_to: &str, funding_to: &str) {
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     catalog.write_instruments(vec![instrument()]).unwrap();
@@ -156,7 +155,6 @@ fn a_held_swap_pays_and_receives_funding_on_its_notional_at_each_funding_time() 
 
     let record = record.borrow();
 
-    // The first hour bar closes at 07:00 and is built 5 s after, as live
     assert_eq!(
         record.fills,
         [(
@@ -166,8 +164,7 @@ fn a_held_swap_pays_and_receives_funding_on_its_notional_at_each_funding_time() 
         )]
     );
 
-    // The 0.02 BTC long is worth 2,000 USDT at 08:00 and pays 0.01% = 0.2, it is worth 2,020 USDT
-    // at 16:00 and receives 0.02% = 0.404.
+    // The long's notional is 2,000 USDT at 08:00 and 2,020 at 16:00
     let settled: Vec<_> = record
         .adjustments
         .iter()

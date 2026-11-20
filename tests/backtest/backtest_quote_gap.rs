@@ -1,5 +1,8 @@
 //! The market is closed in some hours (a night, a weekend, a holiday), so they have no quotes. The
 //! data engine builds no bar for them.
+//!
+//! There is a quote a minute from 06:00 to 15:00 UTC on Wednesday 7 January 2026, none in the
+//! hours closing 09:00 and 13:00, and the run starts at 07:00.
 
 use jiff::Timestamp;
 use nautilus_model::data::BarType;
@@ -9,8 +12,6 @@ use crate::common::{self, hour_bars, minute_quotes, noise, ohlc, recorder::Recor
 
 #[rstest]
 fn an_hour_without_quotes_yields_no_bar() {
-    // There is a quote a minute from 06:00 to 15:00 UTC on Wednesday 7 January 2026, none in the
-    // hours closing 09:00 and 13:00, and the run starts at 07:00.
     let at = noise::at;
     let gap = |close: Timestamp| {
         (close > at("08:00") && close <= at("09:00"))
@@ -27,7 +28,6 @@ fn an_hour_without_quotes_yields_no_bar() {
         .run(recorder)
         .unwrap();
 
-    // No bar closes 09:00 or 13:00
     let record = record.borrow();
     let bars: Vec<_> = record.bars.iter().map(ohlc).collect();
     let closes: Vec<_> = bars.iter().map(|bar| bar.0).collect();

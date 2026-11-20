@@ -10,6 +10,10 @@
 //! ```sh
 //! GOLDEN_ROWS=write cargo test --test backtest backtest_golden_rows::
 //! ```
+//!
+//! The strategy decides hourly on 1-minute bars, with averages of 10 and 30. The bracket is 1.5
+//! ATRs of 3 hourly bars in its favor and 7.5 bps against, and closes after 45 minutes. The
+//! reference stake is one ounce, IC's whole ounces, on stops of about 3 USD.
 
 use std::{fmt::Write as _, fs, path::Path};
 
@@ -30,11 +34,6 @@ use crate::common::{
     ic,
 };
 
-/// Hourly decisions on 1-minute bars, with averages of 10 and 30, warmed up 4 hours.
-///
-/// The bracket is 1.5 ATRs of 3 hourly bars in its favor and 7.5 bps against, and closes after 45
-/// minutes. The reference stake is 4 USD of the 10M USD balance (`venue`). That is one ounce, IC's
-/// whole ounces, on stops of about 3 USD.
 const CONFIG: &str = r#"
     [data]
     series = [

@@ -34,10 +34,8 @@ fn decimal(s: &str) -> Decimal {
     s.parse().unwrap()
 }
 
-/// The recorder buys at 1% of equity on the 10:00 bar, with one R of `one_r` USD an ounce.
-///
-/// It buys again on the bars of `again`, after closing its positions on them. `pair` is quoted at
-/// `[bid, ask]` every minute.
+/// The recorder buys at 1% of equity on the 10:00 bar, with one R of `one_r` USD an ounce, and
+/// again on the bars of `again`, after closing. `pair` is quoted at `[bid, ask]` every minute.
 fn converted_run(
     balance: &str,
     pair: (&str, Currency, Currency, u8),
@@ -81,9 +79,8 @@ fn filled(record: &Rc<RefCell<Record>>) -> Vec<(Quantity, Option<EntryRisk>)> {
         .collect()
 }
 
-/// 100,000 EUR at mid 1.25000 USD per EUR is 125,000 USD. 1% of that is 1,250 USD, which over one R
-/// of 10.00 USD an ounce buys 125 oz. At the bid it would buy 124. Taken as USD it would buy 100,
-/// and at the rate swapped 80.
+/// 1% of 125,000 USD over one R of 10.00 USD an ounce buys 125 oz. At the bid it would buy 124,
+/// taken as USD 100, and at the rate swapped 80.
 #[rstest]
 fn a_trade_is_sized_on_the_equity_converted_into_its_pnl_currency_at_the_mid() {
     let eurusd = (ic::EURUSD, Currency::EUR(), Currency::USD(), 5);
@@ -109,13 +106,8 @@ fn a_trade_is_sized_on_the_equity_converted_into_its_pnl_currency_at_the_mid() {
     );
 }
 
-/// EURUSD is at 1.25000, which is 0.80 EUR per USD. Each order costs 4 USD, booked in EUR alone.
-///
-/// - The 10:00 buy of 125 oz is charged 3.20 EUR.
-/// - Closed at 11:00 it gains 125 x (4011.90 - 4006.10) = 725 USD = 580 EUR, less 3.20.
-/// - It buys again on 100,573.60 EUR = 125,717 USD, 125 oz at 4012.15, and is charged 3.20.
-/// - The balance is 100,000 - 9.60 + 580 EUR.
-/// - The open position holds margin 1/30 of 501,518.75 USD = 16,717.29 USD = 13,373.83 EUR.
+/// Each order costs 4 USD, booked in EUR alone: 3.20 EUR. The 725 USD gain is 580 EUR. The balance
+/// is 100,000 - 9.60 + 580 EUR. The open position holds margin 1/30 of 501,518.75 USD.
 #[rstest]
 fn the_account_books_its_margin_commissions_and_pnl_in_the_balances_currency() {
     let eurusd = (ic::EURUSD, Currency::EUR(), Currency::USD(), 5);
@@ -149,8 +141,6 @@ fn the_account_books_its_margin_commissions_and_pnl_in_the_balances_currency() {
     assert_eq!(margin.maintenance, Money::from("13373.83 EUR"));
 }
 
-/// Returns the backtest command's output for the EMA crossover on `traded`, 09:00 to 12:00, at a
-/// stake of 1%, converting through IC's EURUSD.
 fn backtest_command(catalog: &Path, traded: &str, balance: &str) -> std::process::Output {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("ema.toml");
@@ -199,12 +189,7 @@ fn catalog_with_eurusd() -> tempfile::TempDir {
     catalog
 }
 
-/// EUR reaches USD through EURUSD, so a balance in EUR runs.
-///
-/// The crossover is initialized at 11:00, long. It crosses down at 12:00 (close 4001.00, below the
-/// slow EMA) and sells at the bid 4000.90. The size is 1% of 125,000 USD over its stop 0.5% away,
-/// 4021.01, so 1,250 / 20.01 = 62.5 oz, which is 62. A bracket is open at the run's end. There is
-/// no commission, so the balance ends at 100000.00 EUR.
+/// The crossover sells at 12:00 and leaves a bracket open, so the balance stays 100000.00 EUR.
 #[rstest]
 fn a_backtest_runs_on_a_balance_its_conversions_reach_the_pnl_currency_from() {
     let catalog = catalog_with_eurusd();
@@ -223,8 +208,6 @@ fn a_backtest_runs_on_a_balance_its_conversions_reach_the_pnl_currency_from() {
     assert!(stdout.contains("Orders: 3"), "{stdout}");
 }
 
-/// EURUSD reaches no yen, so a balance in JPY is refused before the run. The error names yen and
-/// dollar.
 #[rstest]
 fn a_backtest_on_a_balance_its_conversions_do_not_reach_the_pnl_currency_from_is_refused() {
     let catalog = catalog_with_eurusd();
@@ -245,11 +228,7 @@ fn a_backtest_on_a_balance_its_conversions_do_not_reach_the_pnl_currency_from_is
     assert!(!stdout.contains("Orders:"), "{stdout}");
 }
 
-/// EURUSD traded on a balance in EUR converts through itself.
-///
-/// EURUSD is one of the strategy's instruments, so IC starts with the balance. A venue read for its
-/// pairs alone starts with nothing instead. The flat quotes cross no average, so nothing is
-/// traded.
+/// EURUSD is one of the strategy's instruments, so IC starts with the balance.
 #[rstest]
 fn a_venue_trading_one_of_its_pairs_starts_with_the_balance() {
     let catalog = catalog_with_eurusd();

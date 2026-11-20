@@ -6,6 +6,11 @@
 //! Nautilus builds hour bars from the minute bars (a composite bar type). A recorder on them gets
 //! each hour bar holding the minutes opening in its hour. A run on the candles alone, with no
 //! quote, reports no spread.
+//!
+//! The minute k after 08:00 opens at 100,000 + k tenths, with its high 2 above, its low 1 below and
+//! its close 0.5 above. The minute opening at 08:59 has a low 50 lower, and the one opening at
+//! 10:00 has a high 50 higher, so that a minute in the wrong hour shows. The catalog holds the
+//! minutes from 08:00 to 11:00, and the run starts at 08:30 at OKX's taker fee, 0.05%.
 
 use std::path::Path;
 
@@ -38,8 +43,7 @@ fn at(hh_mm: &str) -> Timestamp {
     ts(&format!("2026-01-07T{hh_mm}:00Z"))
 }
 
-/// Returns BTC-USDT-SWAP as OKX defines it: price tick 0.1, lot 0.01 contracts, 0.01 BTC a
-/// contract, and initial and maintenance margins of 1.
+/// Returns BTC-USDT-SWAP as OKX defines it.
 fn instrument() -> InstrumentAny {
     InstrumentAny::CryptoPerpetual(
         CryptoPerpetual::builder()
@@ -65,11 +69,6 @@ fn instrument() -> InstrumentAny {
     )
 }
 
-/// Returns the minute bar opening at `open`, the k-th minute after 08:00.
-///
-/// It opens at 100,000 + k tenths, with its high 2 above, its low 1 below and its close 0.5 above,
-/// and 500 contracts. The minute opening at 08:59 has a low 50 lower, and the one opening at 10:00
-/// has a high 50 higher, so that a minute in the wrong hour shows.
 fn minute_bar(open: Timestamp) -> Bar {
     let k = open.duration_since(at("08:00")).as_mins();
     let first = 100_000.0 + 0.1 * k as f64;
@@ -98,9 +97,6 @@ fn minute_bars(from: Timestamp, to: Timestamp) -> Vec<Bar> {
     bars
 }
 
-/// Returns the hour bar closing at `close`, stamped `BUILT_AFTER` after its close.
-///
-/// It holds the minutes opening in `[close - 1 h, close)`, or from `from` if later.
 fn hour_bar(close: Timestamp, from: Timestamp) -> Ohlc {
     let minutes = minute_bars(from.max(close - SignedDuration::from_hours(1)), close);
     let high = minutes.iter().map(|bar| bar.high).max().unwrap();
@@ -122,7 +118,6 @@ fn catalog(dir: &Path) {
         .unwrap();
 }
 
-/// Runs at OKX's taker fee, 0.05%.
 fn backtest(dir: &Path) -> Backtest {
     Backtest {
         catalog: dir.to_path_buf(),
@@ -147,10 +142,7 @@ fn each_hour_bar_of_okx_candles_holds_the_minutes_opening_in_its_hour() {
 
     backtest(dir.path()).run(recorder).unwrap();
 
-    // The run starts at 08:30 and the first bar replayed is the minute opening 08:29, so the 09:00
-    // hour bar holds the minutes from 08:29, 09:00 has the minute opening 08:59, 10:00 has 09:00 to
-    // 09:59 and not the one opening at 10:00, and 11:00, built before the run's end, has 10:00 to
-    // 10:59.
+    // The first bar replayed is the minute opening 08:29, so the 09:00 hour bar starts there
     let replay: Vec<_> = record.borrow().bars.iter().map(ohlc).collect();
     assert_eq!(
         replay,
@@ -164,7 +156,6 @@ fn each_hour_bar_of_okx_candles_holds_the_minutes_opening_in_its_hour() {
     assert_eq!(replay[2].2, Price::from("100064.0"));
 }
 
-/// A buy on the first hour bar fills on a candle, with no quote to measure a spread on.
 #[rstest]
 fn a_run_on_candles_alone_reports_its_spread_as_not_applicable() {
     let dir = tempfile::tempdir().unwrap();

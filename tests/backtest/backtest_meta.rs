@@ -1,7 +1,7 @@
-//! Meta-labeling on a fixture catalog (`model::meta`). The features are a missing one
-//! (`common::dataset::Missing`). The run covers three days, retrained every midnight. The models
-//! are trained at each retrain time, and each train publishes its model set. The models traded on
-//! are then published straight in their place, with baselines named by their predictions
+//! Meta-labeling on a fixture catalog (`model::meta`), with a missing feature
+//! (`common::dataset::Missing`). The run covers the 23rd to the 25th of October 2026, retrained
+//! every midnight. The models are trained at each retrain time, then the models traded on are
+//! published straight in their place, with baselines named by their predictions
 //! (`common::dataset::baseline_of`). A decision trades only if the meta model of the model set in
 //! use takes the trade of the picked side, given the decision's level and side call.
 //!
@@ -67,9 +67,6 @@ fn long_only() -> ModelConfig {
 }
 
 /// Builds the catalog from 03:00 of 19 October 2026 to 03:00 of the 26th.
-///
-/// It starts an hour before the first out-of-fold pair's window (fitted as of 02:00 of the 21st, on
-/// 46 hours back). It ends at the span's end plus the target's limit.
 fn catalog() -> TempDir {
     walk(
         ic::at("00:00:00") - SignedDuration::from_hours(45),
@@ -77,9 +74,6 @@ fn catalog() -> TempDir {
     )
 }
 
-/// Builds the catalog for a run that trains nothing.
-///
-/// It runs from 23:00 of 22 October 2026 to 03:00 of the 26th, where `catalog` ends.
 fn run_catalog() -> TempDir {
     walk(
         ic::at("00:00:00") + SignedDuration::from_hours(47),
@@ -87,7 +81,6 @@ fn run_catalog() -> TempDir {
     )
 }
 
-/// Covers the 23rd to the 25th, with a retrain at each midnight.
 fn span() -> (Timestamp, Timestamp) {
     let start = ic::at("00:00:00") + SignedDuration::from_hours(48);
     (start, start + SignedDuration::from_hours(72))
@@ -102,11 +95,8 @@ fn on_thread<T: Send>(run: impl FnOnce() -> T + Send) -> T {
     std::thread::scope(|scope| scope.spawn(run).join().unwrap())
 }
 
-/// Trains the long and its meta at each retrain time of the span.
-///
-/// It replays the days the window lacks. It then republishes the model set with a baseline long of
-/// `r(tenths)` (`tenths` is 3 at the span's start, one more each day), calibrated as it is, beside
-/// the trained meta.
+/// Trains at each retrain time, then republishes the model set with a baseline long of `r(tenths)`
+/// (3 at the span's start, one more each day) beside the trained meta.
 fn train_model(catalog: &TempDir, models: &Path) -> Vec<(Timestamp, Trained)> {
     let (start, end) = span();
     let training = || {
@@ -142,13 +132,8 @@ fn model_store(models: &Path) -> ModelStore {
         .unwrap()
 }
 
-/// Each train, the first included, publishes a model set with the long it fits and the meta learned
-/// from the longs of its out-of-fold pair.
-///
-/// Meta models are then published in their place. A day's decisions are longs at the level of the
-/// long's baseline published at the day's start (r(3) = -0.2, r(4) = -0.1, r(5) = 0). The meta
-/// takes them at its expected R: baseline r(4), r(6), r(8) = -0.1, 0.1, 0.3 through `CALIBRATION`,
-/// 0.1 + 0.5 r, so 0.05, 0.15, 0.25.
+/// A day's decisions are longs at the level of that day's baseline long, r(3), r(4), r(5). The meta
+/// takes them at 0.1 + 0.5 r through `CALIBRATION`, on baselines r(4), r(6), r(8).
 #[rstest]
 fn a_meta_model_trains_on_its_out_of_fold_pairs_trades_and_takes_them_in_the_run_from_its_first_retrain()
  {
@@ -237,10 +222,8 @@ fn by_day(record: &crate::common::dataset::Record) -> Vec<Vec<(f64, Option<R>)>>
         .collect()
 }
 
-/// Publishes the model sets of the span's first two retrain times.
-///
-/// The first holds a long of `r(4)` beside a meta of `r(6)`, which takes it at 0.1 + 0.5 r(6) =
-/// 0.15R. The second holds a long of `r(5)` beside `second_meta`.
+/// Publishes the model sets of the span's first two retrain times: a long of `r(4)` beside a meta
+/// of `r(6)`, and a long of `r(5)` beside `second_meta`.
 fn publish_two(models: &Path, second_meta: helix_trader::model::store::StoredModel) {
     let (start, _) = span();
     let long = |tenths| baseline_of(&features(), &long_only(), Side::Long, tenths);
@@ -253,11 +236,7 @@ fn publish_two(models: &Path, second_meta: helix_trader::model::store::StoredMod
 }
 
 /// Guards against the original defect: a store holding a meta from one train and sides from another
-/// never combines them.
-///
-/// Day one trades its long at r(4) = -0.1, taken at the first meta's 0.15R. Days two and three
-/// trade at r(5) = 0, taken at the second meta's 0.1 + 0.5 r(2) = -0.05R. The first meta never
-/// decides beside the second's long.
+/// never combines them. Days two and three trade at r(5) on the second meta's r(2).
 #[rstest]
 fn a_meta_from_one_train_never_decides_beside_the_sides_of_another() {
     let catalog = run_catalog();
@@ -298,10 +277,8 @@ fn a_meta_from_one_train_never_decides_beside_the_sides_of_another() {
 }
 
 /// The second day's model set holds a meta with another fingerprint, so it fails its load check.
-///
-/// Nothing trades on days two and three, on that set or on the first day's set, and the error is
-/// logged at each. Published again whole, the set loads and the run trades on it: a long at r(5) =
-/// 0, taken at 0.1 + 0.5 r(8) = 0.25R.
+/// Nothing trades on days two and three, even on the first day's set. Published again whole, the
+/// set loads and the run trades on it.
 #[rstest]
 fn a_model_set_failing_a_check_stops_new_entries_and_is_used_once_it_loads() {
     let catalog = run_catalog();

@@ -1,13 +1,14 @@
 //! The `model_ema` strategy (`strategy::model_ema`) runs end to end on a fixture catalog of IC's
-//! gold. `train` replays the strategy's dataset run and publishes a model at a time. A backtest
-//! trades on the store.
+//! gold: `train` publishes a model at a time, and a backtest trades on the store. The fake learner
+//! takes every trade, so `train` publishes, and fails only on a slice of fewer rows than
+//! `min_rows`, as a live node's launcher (`model::launcher`) does when it starts `train`. A
+//! baseline published straight to the store (`common::dataset`) trades from its valid-from: a long
+//! at every decision on a time-only target closed 30 minutes later.
 //!
-//! The fake learner takes every trade, with no edge on the walk and no gate, so `train` publishes
-//! it. `train` fails, publishing nothing, only on a slice of fewer rows than `min_rows`. The error
-//! names the slice, its count and the minimum. A live node's launcher (`model::launcher`) fails the
-//! same way when it starts `train`. A baseline published straight to the store
-//! (`common::dataset`) trades from its valid-from: a long at every decision on a time-only target
-//! closed 30 minutes later.
+//! The strategy decides hourly on 1-minute bars, with a window of 46 hours whose last 12 are
+//! calibrated on. Each decision settles before the next. The train time t is midnight of the 23rd,
+//! so its window starts at 02:00 of the 21st and its replay, warmed up, at 23:00 of the 20th. The
+//! catalog runs from 21:00 of the 20th to 04:00 of the 23rd.
 
 use std::{
     cell::RefCell,
@@ -53,8 +54,6 @@ use crate::common::{
     ic,
 };
 
-/// Hourly decisions on 1-minute bars, with a window of 46 hours whose last 12 are calibrated on.
-/// Every decision is a long on a 30-minute time-only target.
 const CONFIG: &str = r#"
     [data]
     series = [
@@ -106,9 +105,6 @@ const META: &str = r#"
 "#;
 
 /// Returns midnight of the 23rd.
-///
-/// Its window starts at 02:00 of the 21st. The replay for that window starts at 23:00 of the 20th,
-/// the warmup.
 fn t() -> Timestamp {
     ic::at("00:00:00") + SignedDuration::from_hours(48)
 }
@@ -171,10 +167,6 @@ fn assert_too_few_rows(text: &str, slice: &str, rows: usize, min_rows: usize) {
     }
 }
 
-/// Publishes a model set valid from `at`.
-///
-/// The set holds a baseline long of 0.1R under its blueprint's fingerprint, as its dataset names
-/// its features.
 fn publish(models: &Path, at: Timestamp) {
     publish_with(models, at, |_| {});
 }
@@ -200,7 +192,6 @@ fn publish_with(models: &Path, at: Timestamp, change: impl FnOnce(&mut StoredMod
         .unwrap();
 }
 
-/// Builds the catalog from 21:00 of the 20th to 04:00 of the 23rd.
 fn catalog() -> TempDir {
     walk(
         ic::at("00:00:00") - SignedDuration::from_hours(3),
@@ -208,9 +199,6 @@ fn catalog() -> TempDir {
     )
 }
 
-/// The fake has no edge and no gate. Its store holds a model from t.
-///
-/// 22:00 and 23:00 have no model. 00:00 to 02:00 each give a long and its close.
 #[rstest]
 fn the_train_subcommand_publishes_a_model_without_an_edge_which_trades_from_its_valid_from() {
     let catalog = catalog();
@@ -228,16 +216,8 @@ fn the_train_subcommand_publishes_a_model_without_an_edge_which_trades_from_its_
     assert_eq!(traded(&catalog, models), (6, 3));
 }
 
-/// Hourly decisions close 30 minutes later, so each settles before the next.
-///
-/// - At t, the window starts at 02:00 of the 21st. The fit slice is the decisions before noon of
-///   the 22nd (the calibration's start), 22 + 12 = 34. The calibration slice is noon to t, 12.
-/// - At 00:15, the window starts at 02:15 of the 21st. The fit slice is 03:00 of the 21st to 11:00
-///   of the 22nd, 21 + 12 = 33 (12:00 settles at 12:15, after the calibration's start). The
-///   calibration slice is 13:00 to 23:00, 11 (00:00 settles after the train).
-///
-/// A `min_rows` above a count fails the train and publishes nothing. The error names the slice,
-/// count and minimum, the fit slice first.
+/// At t the slices are 34 and 12. At 00:15 the 12:00 decision settles after the calibration's
+/// start, so they are 33 and 11.
 #[rstest]
 #[case::fit_at_t(SignedDuration::ZERO, 35, "fit slice", 34)]
 #[case::calibration_at_t(SignedDuration::ZERO, 13, "calibration slice", 12)]
@@ -261,13 +241,6 @@ fn a_train_with_a_slice_of_fewer_rows_than_the_minimum_fails_naming_it_and_publi
     assert_eq!(model_sets(&config, &models), []);
 }
 
-/// The train at t fits the long of its out-of-fold pair as of midnight of the 22nd, from 02:00 of
-/// the 20th.
-///
-/// It gives the meta the 24 decisions of the 22nd. The fit slice is 00:00 to 17:00 (settled by
-/// 18:00, the calibration's start), 18 rows. The calibration slice is 18:00 to 23:00, 6 rows. A
-/// meta `min_rows` above a count fails the train. The error names the meta, slice, count and
-/// minimum, and no model set is published.
 #[rstest]
 #[case::fit(19, "fit slice", 18)]
 #[case::calibration(7, "calibration slice", 6)]
@@ -355,15 +328,7 @@ fn assert_no_performance(report: &[&str]) {
     }
 }
 
-/// Each train reports the days it read and its slice counts.
-///
-/// - The train at t reads the 21st and 22nd, both built, with the dataset empty. The sides' fit
-///   slice is 34 and the calibration slice 12. It writes the 21st alone, as the 21st's last
-///   decision settles by t and the 22nd's does not.
-/// - The train at 00:15 reads the 21st to the 23rd: the 21st is cached, the 22nd and 23rd are
-///   built. The slices are 33 and 11.
-///
-/// Each report names the model set published under its time and gives no performance figure.
+/// The train at t writes the 21st alone, as the 22nd's last decision does not settle by t.
 #[rstest]
 fn a_train_reports_its_model_set_run_figures_dataset_days_and_rows_of_each_slice() {
     let catalog = catalog();
@@ -407,12 +372,7 @@ fn a_train_reports_its_model_set_run_figures_dataset_days_and_rows_of_each_slice
     }
 }
 
-/// The train at t reads from the window of its out-of-fold pair, from 02:00 of the 20th, so it
-/// builds the 20th to the 22nd.
-///
-/// The pair, fitted as of midnight of the 22nd, has 34 fit rows (22 of the 20th from 02:00 + 12 of
-/// the 21st before noon) and 12 calibration rows from noon. The sides at t have 34 and 12 alike.
-/// The meta has 18 and 6.
+/// The train at t builds the 20th to the 22nd, from the window of its out-of-fold pair.
 #[rstest]
 fn a_train_with_a_meta_reports_the_rows_of_its_sides_out_of_fold_pair_and_meta() {
     let catalog = walk(
@@ -440,12 +400,7 @@ fn a_train_with_a_meta_reports_the_rows_of_its_sides_out_of_fold_pair_and_meta()
     assert_no_performance(&report);
 }
 
-/// A failed train reports the figures it reached and its reason, on the meta's catalog.
-///
-/// - The sides' fit slice is short of a `min_rows` of 35: the train built its days and counted the
-///   sides' slices, 34 and 12.
-/// - The meta's fit slice is short of a meta `min_rows` of 19: the train counted the pair's slices
-///   and the meta's, 18 and 6. It fitted no sides, as the meta trains first.
+/// When the meta fails, no sides are fitted, as the meta trains first.
 #[rstest]
 #[case::sides(
     of_min_rows(35),
@@ -493,11 +448,6 @@ fn a_failed_train_reports_the_figures_it_reached_and_its_reason(
     assert_eq!(model_sets(&config, &models), []);
 }
 
-/// A backtest from the valid-from, midnight of the 23rd, warms its features on its own 1-minute
-/// bars.
-///
-/// It has no features at 00:00 and decides first at 01:00, and its slow average of 30 bars
-/// initializes at 00:30. 01:00 and 02:00 each give a long and its close.
 #[rstest]
 fn a_backtest_from_the_valid_from_first_decides_once_its_features_are_initialized() {
     let catalog = catalog();
@@ -547,10 +497,6 @@ fn live_train_args(config: &Path, catalog: &Path, models: &Path) -> Vec<OsString
     .to_vec()
 }
 
-/// A live node's retrain fails as `train` does, because the fit slice at t, 34 rows, is short of a
-/// `min_rows` of 35.
-///
-/// The reason names the slice, its count and the minimum. Nothing trades.
 #[rstest]
 fn a_live_retrain_through_the_train_subcommand_failing_fails_with_its_reason() {
     let catalog = catalog();
@@ -571,9 +517,6 @@ fn a_live_retrain_through_the_train_subcommand_failing_fails_with_its_reason() {
     assert_eq!(traded(&catalog, models), (0, 0));
 }
 
-/// Adds `actor` at `now` as a node's trader does, then returns its id.
-///
-/// The actor gets a clock of its own, is kept in Nautilus' registries, and is then started.
 fn added(mut actor: RetrainActor, now: Timestamp) -> Ustr {
     let clock = Rc::new(RefCell::new(VirtualClock::new()));
     clock.borrow_mut().advance_time(UnixNanos::from(now), true);
@@ -590,11 +533,8 @@ fn added(mut actor: RetrainActor, now: Timestamp) -> Ustr {
     id
 }
 
-/// Starts a live node at 00:30 on the 23rd, after the retrain time t, with an empty store.
-///
-/// Its retrain actor trains t at start through the launcher's `train`, on a catalog with quotes to
-/// 04:00. Its model set equals the one `train --at t` publishes into another store on the same
-/// catalog: valid from t, with the same models, calibration, baselines and probes, cut at t.
+/// Starts a live node at 00:30 on the 23rd with an empty store. Its model set equals the one
+/// `train --at t` publishes into another store on the same catalog.
 #[rstest]
 fn a_live_node_started_after_a_retrain_time_trains_it_at_start_as_train_at_it_does() {
     let catalog = catalog();
@@ -665,8 +605,6 @@ fn backtest_at(
 }
 
 /// Builds the catalog from 21:00 of the 22nd to 03:00 of the 25th.
-///
-/// It starts two hours before the first replay (warmup).
 fn backtest_catalog() -> TempDir {
     walk(
         t() - SignedDuration::from_hours(3),
@@ -674,11 +612,8 @@ fn backtest_catalog() -> TempDir {
     )
 }
 
-/// With a model published at each retrain time, a backtest runs at its own commission, balance and
-/// latency.
-///
-/// These belong to its simulated account alone. Its models are the config's (`[model] dataset`).
-/// The report shows that dataset's costs, then each period's scores of its model.
+/// Commission, balance and latency belong to the backtest's account alone. Its models are the
+/// config's (`[model] dataset`).
 #[rstest]
 fn the_binarys_backtest_reports_its_own_costs_and_its_models_then_each_periods_scores() {
     let catalog = backtest_catalog();
@@ -731,11 +666,7 @@ fn the_binarys_backtest_reports_its_own_costs_and_its_models_then_each_periods_s
     assert!(stdout.contains("over the span"), "{stdout}");
 }
 
-/// The store holds a model set at t and one at the next retrain time. The long in the second has
-/// another fingerprint, so it fails its load check.
-///
-/// The backtest logs an error naming the set and the check at that period's decisions and trades
-/// nothing there. Its scores then have no model set and no row.
+/// The long in the second model set has another fingerprint, so it fails its load check.
 #[rstest]
 fn the_binarys_backtest_stops_new_entries_on_a_model_set_failing_a_check_naming_it() {
     let catalog = backtest_catalog();
@@ -775,10 +706,8 @@ fn the_binarys_backtest_stops_new_entries_on_a_model_set_failing_a_check_naming_
     );
 }
 
-/// Runs `subcommand` of the strategy in `config`'s directory with no environment. The run fails.
-///
-/// The empty environment keeps the shell and any `.env` above the crate's root from supplying a
-/// venue credential.
+/// Runs `subcommand` of the strategy in `config`'s directory with no environment, which keeps the
+/// shell and any `.env` above the crate's root from supplying a venue credential. The run fails.
 fn refused(
     subcommand: &str,
     config: &Path,
@@ -804,14 +733,9 @@ fn refused(
     (stdout, stderr)
 }
 
-/// A config is refused at load, naming the key, if it:
-/// - Declares the holdout or its minimums.
-/// - Lacks `min_rows`.
-/// - Sets `min_rows` below one row.
-/// - Leaves no fit slice in the window, once the calibration and the target's limit of 30 minutes
-///   are taken out (46 hours for the sides, 24 for the meta).
-///
-/// `train` refuses it before any replay, so no store is made.
+/// A config is refused at load, naming the key, if it declares the holdout or its minimums, lacks
+/// `min_rows`, sets it below one, or leaves no fit slice in the window once the calibration and the
+/// target's limit are taken out. `train` refuses it before any replay, so no store is made.
 #[rstest]
 #[case::a_holdout(
     replaced("min_rows = 1", "min_rows = 1\n    holdout = \"12h\""),
@@ -877,15 +801,8 @@ fn eur_config() -> String {
     CONFIG.replace(usd, eur)
 }
 
-/// A dataset balance in EUR is refused, because IC's gold has its P&L in USD.
-///
-/// The balance would leave the targets and a live node's payoff features unconverted. Each command
-/// refuses it:
-/// - A backtest refuses it before building any dataset day.
-/// - `train` refuses it before replaying any.
-/// - A live start refuses it before any node, with its staging untouched.
-///
-/// Each error names the balance and both currencies.
+/// A dataset balance in EUR is refused before any dataset day, replay or node, because IC's gold
+/// has its P&L in USD.
 #[rstest]
 #[case::backtest("backtest")]
 #[case::train("train")]
@@ -935,10 +852,7 @@ fn walk_with_eurusd(from: Timestamp, to: Timestamp) -> TempDir {
 }
 
 /// A dataset balance in JPY is refused, because EURUSD, the pair the config converts through, does
-/// not reach USD from JPY.
-///
-/// `live`, `backtest` and `train` each refuse it before any node, through a backtest's balance
-/// check. Each error names the balance, both currencies and the pair as the catalog defines it.
+/// not reach USD from JPY. The error names the pair as the catalog defines it.
 #[rstest]
 #[case::live("live")]
 #[case::backtest("backtest")]
@@ -989,10 +903,7 @@ fn the_train_subcommand_accepts_a_dataset_balance_its_conversions_reach_the_pnl_
     );
 }
 
-/// Returns the arguments of `subcommand` beyond config, catalog and store:
-/// - `backtest`: a window and USD balance.
-/// - `train`: its time.
-/// - `live`: a staging directory under `dir`.
+/// Returns the arguments of `subcommand` beyond config, catalog and store.
 fn usd_args(subcommand: &str, dir: &Path) -> Vec<String> {
     let args: Vec<&str> = match subcommand {
         "backtest" => vec![
@@ -1030,10 +941,8 @@ fn a_missing_catalog_is_refused_with_an_error_not_a_panic(#[case] subcommand: &s
     assert!(stderr.contains(&catalog.display().to_string()), "{stderr}");
 }
 
-/// A live node on a catalog without the traded IC's gold is refused at start.
-///
-/// The refusal comes before any node is built. The error names `--catalog` and the instrument, not
-/// the dataset balance.
+/// The refusal comes before any node is built and names `--catalog` and the instrument, not the
+/// dataset balance.
 #[rstest]
 fn a_live_model_strategy_on_a_catalog_without_its_traded_instrument_is_refused() {
     let dir = tempfile::tempdir().unwrap();
