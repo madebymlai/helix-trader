@@ -1,17 +1,18 @@
-//! A warmup of days on IB, end to end on the Docker paper gateway, with an empty catalog, so IB
-//! answers all of it: the warmup asks in windows under a day, each asked as one request between
-//! its bounds in seconds (see `strategy::warmup`'s `WINDOW`), gets every minute bar IB's history
-//! holds over them, read a page at a time, and builds each hour bar from them once.
+//! Tests a warmup of days on IB, end to end on the Docker paper gateway. The catalog is empty, so
+//! IB answers all of the warmup. The warmup asks in windows under a day. Each window is one request
+//! between its bounds in seconds (see `strategy::warmup`'s `WINDOW`). The test checks that the
+//! warmup gets every minute bar IB's history holds over the windows, read a page at a time, and
+//! builds each hour bar from them once.
 //!
-//! Gated as `ib_gateway.rs`, by `NAUTILUS_IB_RUN=1` in the shell. It places no order. It tells only
-//! within a session of the instrument, SXR8.IBIS or the one `NAUTILUS_IB_INSTRUMENT` names, on a
-//! day with no weekend in the 72 hours:
+//! The test is gated like `ib_gateway.rs`, by `NAUTILUS_IB_RUN=1` in the shell. It places no order.
+//! It tells only when run within a session of the instrument, SXR8.IBIS or the one
+//! `NAUTILUS_IB_INSTRUMENT` names, on a day with no weekend in the 72 hours:
 //!
 //! ```sh
 //! NAUTILUS_IB_RUN=1 cargo test --test live ib_warmup_days:: -- --nocapture
 //! ```
 //!
-//! Client id 46 for the node, 47 for the reference.
+//! Client id 46 is for the node, and 47 for the reference.
 
 use std::{cell::RefCell, collections::BTreeSet, rc::Rc, time::Duration};
 
@@ -57,7 +58,7 @@ struct Record {
     failure: Option<String>,
 }
 
-/// Warms up and subscribes to its bars from where the warmup ends as a strategy does, then stops.
+/// Warms up, then subscribes to its bars from where the warmup ends, as a strategy does, and stops.
 #[derive(Debug)]
 struct Probe {
     core: StrategyCore,

@@ -1,12 +1,16 @@
-//! End to end on OKX's demo trading (EEA region): a live run on the BTC X-Perp checks the real demo
-//! account (the credentials set, net position mode) and is refused for a catalog defining it at a
-//! leverage no account has, a margin of 1 / 1000, naming the account's, before any node is built.
-//! It needs the demo key (`OKX_API_KEY`, `OKX_API_SECRET`, `OKX_API_PASSPHRASE`) and
-//! `OKX_ENVIRONMENT=demo` from the environment or `.env` (any other environment fails the test
-//! before any request); another failing check fails the test with its own message.
+//! Tests end to end on OKX's demo trading (EEA region). A live run on the BTC X-Perp does two
+//! things:
 //!
-//! Gated as `ib_gateway.rs` is, by `NAUTILUS_OKX_RUN=1` in the shell. It only reads the account.
-//! Run it with:
+//! - It checks the real demo account: the credentials are set and the position mode is net.
+//! - It is refused for a catalog that defines the X-Perp at a leverage no account has, a margin of
+//!   1 / 1000. The refusal names the account's leverage, and comes before any node is built.
+//!
+//! The test needs the demo key (`OKX_API_KEY`, `OKX_API_SECRET`, `OKX_API_PASSPHRASE`) and
+//! `OKX_ENVIRONMENT=demo` from the environment or `.env`. Any other environment fails the test
+//! before any request. Another failing check fails the test with its own message.
+//!
+//! The test is gated like `ib_gateway.rs`, by `NAUTILUS_OKX_RUN=1` in the shell. It only reads the
+//! account. Run it with:
 //!
 //! ```sh
 //! NAUTILUS_OKX_RUN=1 cargo test --test live okx_demo:: -- --nocapture
@@ -25,8 +29,10 @@ use nautilus_model::{
 use nautilus_persistence::backend::parquet::catalog::ParquetDataCatalog;
 use rust_decimal::Decimal;
 
-/// Whether the run is opted in, from the shell before `.env` is read, so the file cannot opt in.
-/// An opted-in run claims the process (`claim_process`).
+/// Returns whether the run is opted in.
+///
+/// Reads the opt-in from the shell before `.env` is read, so the file cannot opt in. An opted-in
+/// run claims the process (`claim_process`).
 fn opted_in(test: &str) -> bool {
     let run = std::env::var("NAUTILUS_OKX_RUN").is_ok_and(|value| value == "1");
     if run {
@@ -37,9 +43,10 @@ fn opted_in(test: &str) -> bool {
     run
 }
 
-/// The EMA crossover on the BTC X-Perp the EEA demo lists (the real account's is
-/// BTC-USD_UM_XPERP-310404), on hour bars of its 1-minute candles, without hyphens in its order
-/// ids, which OKX refuses.
+/// The EMA crossover on the BTC X-Perp the EEA demo lists.
+///
+/// The real account's X-Perp is BTC-USD_UM_XPERP-310404. The strategy trades hour bars of its
+/// 1-minute candles, and leaves hyphens out of its order ids, which OKX refuses.
 fn x_perp_ema_cross() -> EmaCrossConfig {
     EmaCrossConfig::load(
         r#"
@@ -79,8 +86,8 @@ async fn an_okx_run_passes_the_account_checks_then_is_refused_at_another_leverag
     let config = x_perp_ema_cross();
     let requirements = config.data_requirements();
 
-    // A catalog defining the X-Perp at a margin of 1 / 1000, above OKX's highest leverage, 125: the
-    // run is refused before any node is built.
+    // A catalog defines the X-Perp at a margin of 1 / 1000, above OKX's highest leverage, 125, so
+    // the run is refused before any node is built.
     let catalog = tempfile::tempdir().unwrap();
     let mut xperp = crypto_future_btcusdt(2, 6, Price::from("0.01"), Quantity::from("0.000001"));
     xperp.id = InstrumentId::from("BTC-USD_UM_XPERP-310328.OKX");
@@ -107,7 +114,7 @@ async fn an_okx_run_passes_the_account_checks_then_is_refused_at_another_leverag
         .unwrap_err()
         .to_string();
 
-    // The refusal names the X-Perp, the catalog's leverage, 1000, and the account's, at most 125
+    // The refusal names the X-Perp, the catalog's leverage (1000) and the account's (at most 125)
     let numbers: Vec<f64> = err
         .split(|c: char| !c.is_ascii_digit() && c != '.')
         .filter_map(|number| number.trim_matches('.').parse().ok())
@@ -121,8 +128,8 @@ async fn an_okx_run_passes_the_account_checks_then_is_refused_at_another_leverag
         "{err}"
     );
 
-    // No node was built: the staging holds only the trader's instance id, kept before the clients
-    // are set up.
+    // No node was built, so the staging holds only the trader's instance id, which is kept before
+    // the clients are set up.
     let staged: Vec<String> = std::fs::read_dir(staging.path())
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())

@@ -1,16 +1,20 @@
-//! The end to end tests on real venues: one test binary, a module per venue run, each gated by its
-//! own variables and returning at once, saying it was skipped, without them. Run one module per
-//! process, by its path:
+//! End to end tests on real venues, in one test binary with a module per venue run. Each module is
+//! gated by its own variables. Without them, its tests return at once and say they were skipped.
+//! Run one module per process, by its path:
 //!
 //! ```sh
 //! NAUTILUS_CTRADER_RUN=pepperstone cargo test --test live ctrader_demo:: -- --nocapture
 //! ```
 //!
-//! Two opted-in modules cannot share a process: a node stops on the SIGINT its test sends to the
-//! whole process, `Live::run` installs its `tracing` subscriber once per process, there is one
-//! node per process (`docs/architecture.md`, "Process constraints"), and modules of one venue
-//! trade the same account. The first module to opt in claims the process (`claim_process`);
-//! another module's test fails before connecting.
+//! Two opted-in modules cannot share a process, for these reasons:
+//!
+//! - A node stops on the SIGINT its test sends to the whole process.
+//! - `Live::run` installs its `tracing` subscriber once per process.
+//! - There is one node per process (`docs/architecture.md`, "Process constraints").
+//! - Modules of one venue trade the same account.
+//!
+//! The first module to opt in claims the process (`claim_process`). Another module's test fails
+//! before connecting.
 //!
 //! `streaming` is hermetic and ungated: its nodes run in child processes, so it claims nothing.
 
@@ -21,7 +25,7 @@ use helix_trader::{live::Recording, venues::LiveVenueArgs};
 use nautilus_common::actor::indicators::ActorIndicator;
 use nautilus_model::data::{Bar, QuoteTick, TradeTick};
 
-/// Now on Nautilus' realtime clock, as the live node reads it.
+/// Returns the current time on Nautilus' realtime clock, as the live node reads it.
 pub(crate) fn now() -> jiff::Timestamp {
     jiff::Timestamp::from(nautilus_core::time::get_atomic_clock_realtime().get_time_ns())
 }
@@ -83,7 +87,7 @@ impl ActorIndicator for FedBars {
 
 static CLAIMED: OnceLock<&'static str> = OnceLock::new();
 
-/// Claims the process for the gated tests of `module`, its `module_path!()`.
+/// Claims the process for the gated tests of `module`, which is its `module_path!()`.
 ///
 /// # Panics
 ///
@@ -97,8 +101,9 @@ fn claim_process(module: &'static str) {
     );
 }
 
-/// The venue settings of `flags`, parsed as the live command parses them: the IB account falls
-/// back on `NAUTILUS_IB_ACCOUNT_ID`.
+/// Returns the venue settings of `flags`, parsed as the live command parses them.
+///
+/// The IB account falls back on `NAUTILUS_IB_ACCOUNT_ID`.
 fn venues(flags: &[&str]) -> LiveVenueArgs {
     let matches = LiveVenueArgs::augment_args(Command::new("live"))
         .try_get_matches_from(["live"].into_iter().chain(flags.iter().copied()))
@@ -106,7 +111,9 @@ fn venues(flags: &[&str]) -> LiveVenueArgs {
     LiveVenueArgs::from_arg_matches(&matches).unwrap()
 }
 
-/// The recording of a venue test's node, staged in `staging` and promoted daily and on its stop.
+/// Returns the recording of a venue test's node.
+///
+/// It is staged in `staging`, and promoted daily and on the node's stop.
 fn recording(staging: &Path) -> Recording {
     Recording {
         staging: staging.to_path_buf(),
