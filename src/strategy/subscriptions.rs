@@ -1,52 +1,59 @@
-//! A strategy's live subscriptions to bars, ticks and custom series, through the plain Nautilus
-//! subscription API, live as in a backtest or a dataset run.
+//! Subscribes a strategy to bars, ticks and custom series through the plain Nautilus subscription
+//! API, in live runs, backtests and dataset runs.
 //!
-//! A model strategy's `ModelHandle` builds and owns a `Subscriptions`, starts it from `on_start`
-//! after the warmup's start (`strategy::warmup::Warmup::start`) and hands it each roll its roller
-//! returns (`rolls::Roller::on_time_event`).
+//! A model strategy's `ModelHandle` builds and owns a `Subscriptions`. It starts it from
+//! `on_start`, after the warmup's start (`strategy::warmup::Warmup::start`). It then hands it each
+//! roll the roller returns (`rolls::Roller::on_time_event`).
 //!
-//! Every subscription carries the param `start_ns` (`subscription_params`): at the start, the time
-//! the warmup's start returns, where a live warmup's requests end; at a roll, the clock's time
-//! then. Without it, the data engine of a node with a catalog starts a subscription to quotes,
-//! trades, external bars or custom data at the catalog's end, and IB sends every bar since as
-//! live. It filters nothing from the live stream.
+//! Every subscription carries the param `start_ns` (`subscription_params`):
+//! - At the start, it is the time the warmup's start returns, where a live warmup's requests end.
+//! - At a roll, it is the clock's time then.
 //!
-//! Nautilus keeps one subscription per bar type and actor (`DataActorCore::subscribe_bars`), so a
-//! bar type given twice is subscribed once, the target's ATR's (`TargetSetter::atr_bar_type`)
-//! among them. Bars are subscribed per venue: Nautilus routes a list of bar types to the client
-//! of their one venue. Bars on a futures root (`GC.GLBX`) in a backtest are Nautilus' continuous
-//! bars (`rolls::ContinuousBars`): one subscription per bar type, with the root's
-//! `continuous_future_*` params, which Nautilus takes per bar type.
+//! Without it, the data engine of a node with a catalog starts a subscription to quotes, trades,
+//! external bars or custom data at the catalog's end, and IB sends every bar since as live. It
+//! filters nothing from the live stream.
 //!
-//! Each tick series is subscribed on the contract standing for its instrument (`rolls::front`).
-//! At a roll its series move from the pre to the post contract, but those another series still
-//! reads on the pre contract (the contract itself, read beside its root) stay subscribed.
+//! Nautilus keeps one subscription per bar type and actor (`DataActorCore::subscribe_bars`). A bar
+//! type given twice is therefore subscribed once, including the target's ATR bar type
+//! (`TargetSetter::atr_bar_type`). Bars are subscribed per venue: Nautilus routes a list of bar
+//! types to the client of their one venue. Bars on a futures root (`GC.GLBX`) in a backtest are
+//! Nautilus' continuous bars (`rolls::ContinuousBars`). Each bar type gets one subscription, with
+//! the root's `continuous_future_*` params, which Nautilus takes per bar type.
+//!
+//! Each tick series is subscribed on the contract standing for its instrument (`rolls::front`). At
+//! a roll, the instrument's series move from the pre to the post contract. A series stays
+//! subscribed on the pre contract if another series still reads it there (the contract itself,
+//! read beside its root).
 //!
 //! A book is subscribed in the format its venue's live data streams (`venues::book_format`):
-//! deltas at the format's book type, asking no depth, so each client streams the whole book it
-//! gives, and depth at the format's levels, as snapshots of price levels (L2_MBP). A replay of
-//! the catalog's book reads neither the book type nor the levels of a subscription that manages
-//! no book. A venue streaming no book (a cTrader broker's) has its deltas subscribed as L2_MBP,
-//! and one streaming no depth (IB) its depth with no levels: a live start refuses such a book
-//! (`venues::streams`), so only a replay subscribes to it.
+//! - Deltas use the format's book type and ask no depth, so each client streams the whole book it
+//!   gives.
+//! - Depth uses the format's levels, as snapshots of price levels (L2_MBP).
+//!
+//! A replay of the catalog's book reads neither the book type nor the levels of a subscription
+//! that manages no book. A venue that streams no book (a cTrader broker's) has its deltas
+//! subscribed as L2_MBP. A venue that streams no depth (IB) has its depth subscribed with no
+//! levels. A live start refuses such a book (`venues::streams`), so only a replay subscribes to it.
 //!
 //! Custom data is subscribed by its data type, each custom series as it is read at the start
-//! (`CustomSeries::at`). In a backtest or a dataset run its subscription names no client, its
-//! engine having none of the series' source: Nautilus subscribes the message bus alone
+//! (`CustomSeries::at`). In a backtest or a dataset run, the subscription names no client, because
+//! its engine has none of the series' source. Nautilus subscribes the message bus alone
 //! (`DataActorCore::subscribe_data`), where the replay's rows arrive. On a live node
-//! (`Subscriptions::live`) it names the data client of its type's row's live data source
-//! (`venues::custom_data_client`), which the node has whether or not an instrument of the run
-//! routes to it (`venues::live_clients`). Nautilus subscribes the message bus and sends that
-//! client a `SubscribeCustomData` of no venue, which its data engine routes by client id alone
-//! (`SubscribeCommand::validate_routing` passes a command of no instrument and no bar type;
-//! `DataEngine::get_client` has no fallback), and caches and publishes each point the client
-//! emits. A series of a type with no row, or a row with no live data source, names none live
-//! either, and a live start refuses it (`venues::streams_custom`).
+//! (`Subscriptions::live`):
+//! - The subscription names the data client of the live data source in the row for its type
+//!   (`venues::custom_data_client`). The node has that client whether or not an instrument of the
+//!   run routes to it (`venues::live_clients`).
+//! - Nautilus subscribes the message bus and sends that client a `SubscribeCustomData` of no
+//!   venue. The data engine routes it by client id alone (`SubscribeCommand::validate_routing`
+//!   passes a command of no instrument and no bar type; `DataEngine::get_client` has no
+//!   fallback). Nautilus caches and publishes each point the client emits.
+//! - A series of a type with no row, or a row with no live data source, names no client live
+//!   either, and a live start refuses it (`venues::streams_custom`).
 //!
 //! A custom series on a root (`GC.GLBX`) is read on the contract standing for it, keyed by the
-//! contract's id, and moves at each roll as the root's tick series do, but for a data type
-//! another series still reads at the roll. Any other custom series, a contract's (`GCZ26.GLBX`)
-//! among them, stands for itself. A strategy's `on_data` gets its rows; it subscribes to none
+//! contract's id. It moves at each roll as the root's tick series do, except for a data type
+//! another series still reads at the roll. Any other custom series, including a contract's
+//! (`GCZ26.GLBX`), stands for itself. A strategy's `on_data` gets its rows but subscribes to none
 //! itself.
 
 use std::{collections::BTreeMap, fmt::Debug};
@@ -67,22 +74,23 @@ use crate::{
     venues,
 };
 
-/// A strategy's subscriptions to its bar types, tick series and custom series (see the module).
+/// Subscriptions for a strategy's bar types, tick series and custom series (see the module).
 ///
-/// It holds the series alone and works the contracts out from the time and the roll, so a
-/// strategy holding it calls it on a clone (`self.subscriptions.clone().start(self, now)`).
+/// It holds the series alone and works out the contracts from the time and the roll, so a
+/// strategy that holds it calls it on a clone (`self.subscriptions.clone().start(self, now)`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Subscriptions {
     bar_types: Vec<BarType>,
     continuous: ContinuousBars,
     ticks: Vec<TickSeries>,
-    /// The custom series, each with the data client its subscription names (none but live).
+    /// The custom series, each with the data client its subscription names. Only live names one.
     custom: Vec<(CustomSeries, Option<ClientId>)>,
 }
 
 impl Subscriptions {
-    /// Creates the subscriptions as a backtest or a dataset run makes them, each custom series
-    /// naming no client.
+    /// Creates the subscriptions for a backtest or a dataset run.
+    ///
+    /// No custom series names a client.
     #[must_use]
     pub fn new(bar_types: Vec<BarType>, ticks: Vec<TickSeries>, custom: Vec<CustomSeries>) -> Self {
         Self {
@@ -93,16 +101,18 @@ impl Subscriptions {
         }
     }
 
-    /// Returns the subscriptions with the bar types on a root subscribed as continuous bars in
-    /// `continuous`, each with its root's params (`backtest::Backtest::continuous_bars`). Live
-    /// refuses bars on a root.
+    /// Returns the subscriptions with the bar types on a root subscribed as continuous bars.
+    ///
+    /// `continuous` gives each root's params (`backtest::Backtest::continuous_bars`). Live refuses
+    /// bars on a root.
     #[must_use]
     pub fn continuous(self, continuous: ContinuousBars) -> Self {
         Self { continuous, ..self }
     }
 
-    /// Returns the subscriptions as a live node makes them, each custom series naming its data
-    /// client (see the module).
+    /// Returns the subscriptions for a live node.
+    ///
+    /// Each custom series names its data client (see the module).
     #[must_use]
     pub fn live(self) -> Self {
         let custom = self
@@ -116,9 +126,11 @@ impl Subscriptions {
         Self { custom, ..self }
     }
 
-    /// Subscribes `actor` to the bars, to each tick series on the contract standing for its
-    /// instrument at `now` (`rolls::front`), and to the custom data read at `now`, all from `now`,
-    /// the time the warmup's start returns (`Warmup::start`).
+    /// Subscribes `actor` to the bars, the tick series and the custom data, all from `now`.
+    ///
+    /// `now` is the time the warmup's start returns (`Warmup::start`). Each tick series is
+    /// subscribed on the contract standing for its instrument at `now` (`rolls::front`). The custom
+    /// data is the data read at `now`.
     pub fn start<A>(&self, actor: &mut A, now: Timestamp)
     where
         A: DataActor + DataActorNative + Debug + 'static,
@@ -133,9 +145,10 @@ impl Subscriptions {
         }
     }
 
-    /// Moves the series of each root `roll` rolls from its pre to its post contract, from now,
-    /// but leaves subscribed those a series still reads on the pre contract at the roll. Handed
-    /// the roll the roller returns (`rolls::Roller::on_time_event`), at the last nanosecond
+    /// Moves the series of each root that `roll` rolls from its pre to its post contract, from now.
+    ///
+    /// A series stays subscribed on the pre contract if another series still reads it there at the
+    /// roll. The roller returns `roll` (`rolls::Roller::on_time_event`), at the last nanosecond
     /// before it.
     pub fn roll<A>(&self, actor: &mut A, roll: &Transition)
     where
@@ -161,9 +174,11 @@ impl Subscriptions {
         }
     }
 
-    /// The data types of the custom series read at `time`, each once with its series' client, of
-    /// the roots `roll` rolls alone if given. A data type two series read, a contract's own and
-    /// its root's, is subscribed once and kept while either still reads it; both name one client.
+    /// Returns the data types of the custom series read at `time`, each once with its client.
+    ///
+    /// If `roll` is given, only the roots it rolls count. A data type that two series read, a
+    /// contract's own and its root's, is subscribed once. It stays subscribed while either series
+    /// still reads it. Both name one client.
     fn custom_at(
         &self,
         time: Timestamp,
@@ -261,7 +276,7 @@ impl Subscriptions {
         }
     }
 
-    /// Unsubscribes the kinds of `instrument_id` on `roll`'s pre contract, but those an
+    /// Unsubscribes the kinds of `instrument_id` from the pre contract of `roll`, except those an
     /// instrument still reads there at the roll.
     fn unsubscribe<A>(&self, actor: &mut A, instrument_id: InstrumentId, roll: &Transition)
     where
@@ -447,8 +462,10 @@ mod tests {
             .collect()
     }
 
-    /// The tick subscriptions of a strategy of `ticks` started at `start` and handed GC's rolls
-    /// up to `end`, each at the last nanosecond before it (`rolls::Roller`).
+    /// Returns the tick subscriptions of a strategy started at `start` with `ticks`.
+    ///
+    /// The strategy is handed GC's rolls up to `end`, each at the last nanosecond before it
+    /// (`rolls::Roller`).
     fn rolled(ticks: Vec<TickSeries>, start: &str, end: &str) -> Vec<Sent> {
         let subscriptions = Subscriptions::new(vec![], ticks, vec![]);
         let (mut probe, clock, commands) = registered(at(start));
@@ -487,8 +504,11 @@ mod tests {
         );
     }
 
-    /// GCZ26 read beside its root GC, which rolls off it into GCG27 on 2026-11-26: the root's
-    /// trades and depth move to GCG27, GCZ26's trades stay subscribed, its depth does not.
+    /// Reads GCZ26 beside its root GC, which rolls off it into GCG27 on 2026-11-26.
+    ///
+    /// - The root's trades and depth move to GCG27.
+    /// - GCZ26's trades stay subscribed, but its depth does not.
+    ///
     /// Nautilus keeps one subscription per topic and actor (`DataActorCore::add_subscription_any`),
     /// so GCZ26's own trades, subscribed after the root's, send none.
     #[rstest]
@@ -551,9 +571,13 @@ mod tests {
         )
     }
 
-    /// A replay subscribes custom series by data type naming no client, whatever their type: LSE's
-    /// 10-year US yields, whose row has a live data client, and the tests' 2-year US yields, of a
-    /// type with no row. The message bus alone, nothing sent to the data engine.
+    /// A replay subscribes custom series by data type and names no client, whatever their type.
+    ///
+    /// The series are:
+    /// - LSE's 10-year US yields, whose row has a live data client.
+    /// - The tests' 2-year US yields, of a type with no row.
+    ///
+    /// Only the message bus is subscribed. Nothing is sent to the data engine.
     #[rstest]
     fn a_replay_subscribes_custom_series_at_the_start_naming_no_client() {
         let us02y = CustomSeries::new("Yield", "US02Y".to_string(), None).unwrap();
@@ -592,8 +616,8 @@ mod tests {
             .collect()
     }
 
-    /// On a live node, LSE's yields name LSE's client, their type's row's live data source, and
-    /// the tests' imbalances, of a type with no row, name none.
+    /// On a live node, LSE's yields name LSE's client, the live data source in the row for their
+    /// type. The tests' imbalances, of a type with no row, name none.
     #[rstest]
     fn a_live_custom_subscription_names_the_live_data_client_of_its_type_s_row() {
         let subscriptions = Subscriptions::new(
@@ -617,8 +641,8 @@ mod tests {
     }
 
     /// On a live node, LSE's yields under the root GC are subscribed on GCZ26's data type, the
-    /// contract standing for GC on 2026-08-10, and moved to GCG27's at the roll on 2026-11-26,
-    /// each naming LSE's client.
+    /// contract standing for GC on 2026-08-10. They move to GCG27's at the roll on 2026-11-26, and
+    /// each subscription names LSE's client.
     #[rstest]
     fn a_live_roll_moves_a_roots_custom_series_naming_the_same_client() {
         let subscriptions = Subscriptions::new(vec![], vec![], vec![lse_yields("GC.GLBX")]).live();
@@ -646,9 +670,11 @@ mod tests {
         CustomSeries::new("Imbalance", identifier.to_string(), None).unwrap()
     }
 
-    /// A strategy reading `custom`, started on 2026-08-10 at 14:30, when GCZ26 stands for GC, then
-    /// handed GC's roll into GCG27 at 00:00 UTC on 2026-11-26: the handlers subscribed to the
-    /// imbalances of each of `identifiers` at the start and after the roll.
+    /// Runs a strategy reading `custom` across GC's roll into GCG27.
+    ///
+    /// The strategy starts on 2026-08-10 at 14:30, when GCZ26 stands for GC. It is then handed the
+    /// roll at 00:00 UTC on 2026-11-26. Returns the handlers subscribed to the imbalances of each
+    /// of `identifiers` at the start and after the roll.
     fn imbalances_across_the_roll(
         custom: Vec<CustomSeries>,
         identifiers: &[&str],
@@ -673,12 +699,15 @@ mod tests {
         (started, counts(), !commands.get_messages().is_empty())
     }
 
-    /// The handlers subscribed to the imbalances of each identifier at the start and after GC's
-    /// roll into GCG27, naming no client either time:
-    /// - On the root GC: GCZ26's data type, the contract standing for GC on 2026-08-10, moved to
-    ///   GCG27's at the roll.
-    /// - GCZ26's own, beside the root's, still read on GCZ26 at the roll: they stay subscribed.
-    /// - A contract's and one of no instrument stand for themselves, and no roll of GC moves them.
+    /// Counts the handlers subscribed to each identifier's imbalances at the start and after GC's
+    /// roll into GCG27. No subscription names a client either time.
+    ///
+    /// - On the root GC: subscribed on GCZ26's data type, the contract standing for GC on
+    ///   2026-08-10, and moved to GCG27's at the roll.
+    /// - GCZ26's own series, read beside the root's, are still read on GCZ26 at the roll, so they
+    ///   stay subscribed.
+    /// - A contract's series and a series with no instrument stand for themselves. No GC roll moves
+    ///   them.
     #[rstest]
     #[case::of_a_root_moved_at_its_roll(
         vec![imbalances("GC.GLBX")],
@@ -728,8 +757,9 @@ mod tests {
             .collect()
     }
 
-    /// A start subscribes from the time it is given, where a live warmup's requests end, not from
-    /// the clock's time a few moments later live.
+    /// A start subscribes from the time it is given, where a live warmup's requests end.
+    ///
+    /// It does not subscribe from the clock's time, which is a few moments later live.
     #[rstest]
     fn a_start_subscribes_from_the_time_it_is_given() {
         use NautilusDataType as D;
@@ -827,15 +857,19 @@ mod tests {
             .collect()
     }
 
-    /// Each book in the format its venue's live data streams: a GLBX contract's, LSE's, deltas as
-    /// orders (L3_MBO) and depth ten levels a side; a CME contract's, IB's, deltas as rows of IB's
-    /// market depth (L2_MBP); an OKX swap's, deltas as price levels (L2_MBP) and depth five levels
-    /// a side. Deltas are of the whole book each client streams, no depth asked; depth is
-    /// snapshots of price levels.
+    /// Subscribes each book in the format its venue's live data streams.
     ///
-    /// A book its venue's live data streams none of, a cTrader broker's deltas or an IB
-    /// instrument's depth, is refused by a live start (`venues::streams`), so only a replay
-    /// subscribes to it, which reads neither the book type nor the levels: deltas as L2_MBP, depth
+    /// - A GLBX contract's book, as LSE streams it: deltas as orders (L3_MBO), depth ten levels a
+    ///   side.
+    /// - A CME contract's book, as IB streams it: deltas as rows of IB's market depth (L2_MBP).
+    /// - An OKX swap's book: deltas as price levels (L2_MBP), depth five levels a side.
+    ///
+    /// Deltas cover the whole book each client streams, with no depth asked. Depth is snapshots of
+    /// price levels.
+    ///
+    /// A live start refuses a book whose venue's live data streams none of it (`venues::streams`):
+    /// a cTrader broker's deltas or an IB instrument's depth. So only a replay subscribes to it. A
+    /// replay reads neither the book type nor the levels, so it gets deltas as L2_MBP and depth
     /// with no levels.
     #[rstest]
     #[case::streamed_by_its_venue(
