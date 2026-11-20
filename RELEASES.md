@@ -66,6 +66,7 @@ Released on TBD (UTC).
 
 ### Internal Improvements
 
+- Changed the code's comments to `docs/documenting-code.md`'s standard and cut their words by about 40%, towards Nautilus' density
 - Added issue templates: bug report, enhancement request and upstream tracking, each with its rules
 - Changed the model feature set to supply its warmup inputs from feature declarations
 - Changed walk-forward scoring to evaluate each side once per row and use the same meta verdict as trading decisions
