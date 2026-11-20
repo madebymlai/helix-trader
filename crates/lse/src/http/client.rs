@@ -1,10 +1,11 @@
-//! The HTTP client of LSE's REST API, on Nautilus' `HttpClient`: every
-//! call a GET with the key in the `X-API-Key` header, kept within the
-//! calls a minute of the key's plan, and a refusal for the moment waited
-//! out, as long as its `Retry-After` says. It calls a market's exports and
-//! the lookups of its catalogue, the reference catalogue and a reference
-//! collection's exports, a macro series' exports, and an instrument's
-//! splits and dividends.
+//! The HTTP client of LSE's REST API, on Nautilus' `HttpClient`.
+//!
+//! Every call is a GET with the key in the `X-API-Key` header, kept within the calls a minute of
+//! the key's plan. A refusal for the moment is waited out, as long as its `Retry-After` says.
+//!
+//! It calls a market's exports and the lookups of its catalogue, the reference catalogue and a
+//! reference collection's exports, a macro series' exports, and an instrument's splits and
+//! dividends.
 
 use std::{
     collections::HashMap,
@@ -34,9 +35,8 @@ use super::{
 };
 use crate::common::credential::LseCredential;
 
-/// The paths of the calls: a market's export, a lookup of its catalogue,
-/// the reference catalogue, a reference collection's export, a macro
-/// series' export and an instrument's factors.
+/// The paths of the calls: a market's export, a lookup of its catalogue, the reference catalogue, a
+/// reference collection's export, a macro series' export and an instrument's factors.
 const EXPORT_PATH: &str = "/v3/export";
 const PAIRS_PATH: &str = "/v3/pairs";
 const REFERENCE_PATH: &str = "/v3/reference";
@@ -45,8 +45,8 @@ const MACRO_EXPORT_PATH: &str = "/v3/macro/export";
 const FACTORS_PATH: &str = "/v3/factors";
 /// The header carrying the key.
 const API_KEY_HEADER: &str = "X-API-Key";
-/// The headers read of LSE's answers: a file's SHA-256 and LSE's id of
-/// its export, and how long to wait before asking again.
+/// The headers read of LSE's answers: a file's SHA-256 and LSE's id of its export, and how long to
+/// wait before asking again.
 const CHECKSUM_HEADER: &str = "x-checksum-sha256";
 const EXPORT_ID_HEADER: &str = "x-export-id";
 const RETRY_AFTER_HEADER: &str = "retry-after";
@@ -61,8 +61,8 @@ const BODY_EXCERPT: usize = 200;
 pub struct LseHttpClient {
     base_url: String,
     client: HttpClient,
-    /// Held over an export: a key has one download open at a time (LSE's
-    /// docs, "One download at a time").
+    /// Held over an export: a key has one download open at a time (LSE's docs, "One download at a
+    /// time").
     downloads: tokio::sync::Mutex<()>,
     retries: RetryManager<LseHttpError>,
 }
@@ -76,10 +76,11 @@ impl Debug for LseHttpClient {
 }
 
 impl LseHttpClient {
-    /// The API at `base_url` on `credential`'s key, one call every
-    /// `60 / calls_per_minute` s at most, so that no minute holds more,
-    /// however the plan's minute is counted. Redirects are refused, so
-    /// that the key goes nowhere else.
+    /// Creates the client of the API at `base_url` on `credential`'s key.
+    ///
+    /// It makes one call every `60 / calls_per_minute` s at most, so that no minute holds more,
+    /// however the plan's minute is counted. Redirects are refused, so that the key goes nowhere
+    /// else.
     ///
     /// # Errors
     ///
@@ -109,7 +110,8 @@ impl LseHttpClient {
             max_retries: 10,
             initial_delay_ms: 1_000,
             max_delay_ms: 60_000,
-            // The client's own timeout bounds each call.
+
+            // The client's own timeout bounds each call
             operation_timeout_ms: None,
             ..RetryConfig::default()
         });
@@ -121,24 +123,24 @@ impl LseHttpClient {
         })
     }
 
-    /// The file of the export `query` selects, LSE's 200 beside its SHA-256,
-    /// or `None` if LSE holds no row of it (see `LseRefusal::is_no_rows`).
-    /// One download at a time: a second export waits for the first. A call
-    /// LSE refuses for the moment, or a file cut short, is asked again after
-    /// the `Retry-After` LSE gave, or a backoff; a whole file whose SHA-256
-    /// is not the one LSE gave fails the export.
+    /// Returns the file of the export `query` selects, LSE's 200 beside its SHA-256, or `None` if
+    /// LSE holds no row of it (see `LseRefusal::is_no_rows`).
+    ///
+    /// It is one download at a time: a second export waits for the first. A call LSE refuses for
+    /// the moment, or a file cut short, is asked again after the `Retry-After` LSE gave, or a
+    /// backoff. A whole file whose SHA-256 is not the one LSE gave fails the export.
     ///
     /// # Errors
     ///
-    /// Returns an error if LSE refuses the export (its code, message and
-    /// required plan in the error), answers as its docs do not say, or
-    /// cannot be reached, after the retries a transient failure gets.
+    /// Returns an error if LSE refuses the export (its code, message and required plan in the
+    /// error), answers as its docs do not say, or cannot be reached, after the retries a transient
+    /// failure gets.
     pub async fn export(&self, query: &ExportQuery) -> Result<Option<Bytes>, LseHttpError> {
         self.download(EXPORT_PATH, query).await
     }
 
-    /// The file of the reference export `query` selects, or `None` if LSE
-    /// holds no row of it, downloaded as `export` downloads one.
+    /// Returns the file of the reference export `query` selects, or `None` if LSE holds no row of
+    /// it, downloaded as `export` downloads one.
     ///
     /// # Errors
     ///
@@ -150,8 +152,8 @@ impl LseHttpClient {
         self.download(REFERENCE_EXPORT_PATH, query).await
     }
 
-    /// The file of the macro export `query` selects, or `None` if LSE holds
-    /// no row of it, downloaded as `export` downloads one.
+    /// Returns the file of the macro export `query` selects, or `None` if LSE holds no row of it,
+    /// downloaded as `export` downloads one.
     ///
     /// # Errors
     ///
@@ -160,38 +162,40 @@ impl LseHttpClient {
         self.download(MACRO_EXPORT_PATH, query).await
     }
 
-    /// LSE's reference collections, as its catalogue lists them
-    /// (`/v3/reference`), each with the column of its rows' time. A call
-    /// LSE refuses for the moment is asked again as `export`'s is.
+    /// Returns LSE's reference collections, as its catalogue lists them (`/v3/reference`), each
+    /// with the column of its rows' time.
+    ///
+    /// A call LSE refuses for the moment is asked again as `export`'s is.
     ///
     /// # Errors
     ///
-    /// Returns an error if LSE refuses the call, answers as its docs do not
-    /// say, or cannot be reached, after the retries a transient failure
-    /// gets.
+    /// Returns an error if LSE refuses the call, answers as its docs do not say, or cannot be
+    /// reached, after the retries a transient failure gets.
     pub async fn reference_collections(&self) -> Result<Vec<ReferenceCollection>, LseHttpError> {
         self.json::<(), ReferenceCatalogue>("reference catalogue", REFERENCE_PATH, None)
             .await
             .map(|catalogue| catalogue.datasets)
     }
 
-    /// The listings LSE's catalogue holds of `query`'s symbol. A call LSE
-    /// refuses for the moment is asked again as `export`'s is.
+    /// Returns the listings LSE's catalogue holds of `query`'s symbol.
+    ///
+    /// A call LSE refuses for the moment is asked again as `export`'s is.
     ///
     /// # Errors
     ///
-    /// Returns an error if LSE refuses the lookup (its code, message and
-    /// required plan in the error), answers as its docs do not say, or
-    /// cannot be reached, after the retries a transient failure gets.
+    /// Returns an error if LSE refuses the lookup (its code, message and required plan in the
+    /// error), answers as its docs do not say, or cannot be reached, after the retries a transient
+    /// failure gets.
     pub async fn pairs(&self, query: &PairsQuery) -> Result<Vec<LsePair>, LseHttpError> {
         self.json::<_, LsePairs>("catalogue", PAIRS_PATH, Some(query))
             .await
             .map(|page| page.pairs)
     }
 
-    /// The splits and dividends of `query`'s instrument, whole, as LSE's
-    /// factors answer them. A call LSE refuses for the moment is asked
-    /// again as `export`'s is.
+    /// Returns the splits and dividends of `query`'s instrument, whole, as LSE's factors answer
+    /// them.
+    ///
+    /// A call LSE refuses for the moment is asked again as `export`'s is.
     ///
     /// # Errors
     ///
@@ -200,8 +204,8 @@ impl LseHttpClient {
         self.json("factors", FACTORS_PATH, Some(query)).await
     }
 
-    /// LSE's JSON answer to a GET of `path` with `query`, `what` it is,
-    /// asked again for a refusal for the moment as an export is.
+    /// Returns LSE's JSON answer to a GET of `path` with `query`, `what` it is, asked again for a
+    /// refusal for the moment as an export is.
     async fn json<Q, T>(
         &self,
         what: &'static str,
@@ -228,8 +232,8 @@ impl LseHttpClient {
             .map_err(|source| LseHttpError::Malformed { what, source })
     }
 
-    /// The file of the export of `path` that `query` selects, or `None`
-    /// (see `export`), one download at a time.
+    /// Returns the file of the export of `path` that `query` selects, or `None` (see `export`), one
+    /// download at a time.
     async fn download<Q>(&self, path: &str, query: &Q) -> Result<Option<Bytes>, LseHttpError>
     where
         Q: Serialize + Display + Sync,
@@ -259,7 +263,8 @@ impl LseHttpClient {
             }
             answer => answer?,
         };
-        // LSE's file comes in a 200 beside its SHA-256 (LSE's docs, "Files").
+
+        // LSE's file comes in a 200 beside its SHA-256 (LSE's docs, "Files")
         let (200, Some(expected)) = (
             response.status.as_u16(),
             response.headers.get(CHECKSUM_HEADER),
@@ -276,13 +281,13 @@ impl LseHttpClient {
         Ok(Some(response.body))
     }
 
-    /// LSE's answer to a GET of `path` with `query`, if it serves it.
+    /// Returns LSE's answer to a GET of `path` with `query`, if it serves it.
     ///
     /// # Errors
     ///
-    /// Returns an error if LSE cannot be reached, or does not serve the
-    /// call: its refusal, with its HTTP status and the `Retry-After` it
-    /// gave, or its answer, if it is not a refusal its docs describe.
+    /// Returns an error if LSE cannot be reached, or does not serve the call: its refusal, with its
+    /// HTTP status and the `Retry-After` it gave, or its answer, if it is not a refusal its docs
+    /// describe.
     async fn get<Q>(&self, path: &str, query: Option<&Q>) -> Result<HttpResponse, LseHttpError>
     where
         Q: Serialize + Sync,
@@ -319,8 +324,8 @@ impl LseHttpClient {
     }
 }
 
-/// `response`, an answer LSE's docs do not describe, as an error: its
-/// status and the start of its body.
+/// Returns `response`, an answer LSE's docs do not describe, as an error: its status and the start
+/// of its body.
 fn unexpected(response: &HttpResponse) -> LseHttpError {
     let body = String::from_utf8_lossy(&response.body);
     LseHttpError::Unexpected {
@@ -329,7 +334,7 @@ fn unexpected(response: &HttpResponse) -> LseHttpError {
     }
 }
 
-/// `bytes` in lower-case hex, as LSE writes a SHA-256.
+/// Returns `bytes` in lower-case hex, as LSE writes a SHA-256.
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }

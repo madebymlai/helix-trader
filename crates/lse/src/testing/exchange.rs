@@ -1,11 +1,10 @@
-//! LSE's exchange streams for the tests, CME Globex's and Nasdaq
-//! TotalView's, of one protocol: their frames, captured with the CME Group
-//! Lite+ key or as LSE's documentation gives them (`test_data/`, see its
-//! `README.md`), and a mock of a stream (`MockExchangeStream`): a WebSocket
-//! server on 127.0.0.1 that takes a connection only with the key of the
-//! stream's plan in its `X-API-Key` header, as LSE does, answers its
-//! subscription with what a script says, and records each subscription and
-//! key it receives.
+//! LSE's exchange streams for the tests, CME Globex's and Nasdaq TotalView's, of one protocol.
+//!
+//! It holds their frames, captured with the CME Group Lite+ key or as LSE's documentation gives
+//! them (`test_data/`, see its `README.md`), and a mock of a stream (`MockExchangeStream`). The
+//! mock is a WebSocket server on 127.0.0.1 that takes a connection only with the key of the
+//! stream's plan in its `X-API-Key` header, as LSE does, answers its subscription with what a
+//! script says, and records each subscription and key it receives.
 
 use std::{
     ffi::c_char,
@@ -28,69 +27,67 @@ use tungstenite::{
 
 use super::{CME_API_KEY, NASDAQ_API_KEY};
 
-/// LSE's CME stream at Level 1 in the `dbn` encoding, captured on 13
-/// November 2026 after CME's Friday close: one connection subscribing GCZ6
-/// and GCG7, its `hello`, then each contract's opening, `snapshot_begin`,
-/// its best bid and offer at the close as a binary frame, and
-/// `snapshot_end`; nothing more came, CME being closed. One frame a line:
-/// a text frame as LSE sent it, a binary frame in hex.
+/// LSE's CME stream at Level 1 in the `dbn` encoding, captured on 13 November 2026 after CME's
+/// Friday close: one connection subscribing GCZ6 and GCG7.
+///
+/// It holds the `hello`, then each contract's opening, `snapshot_begin`, its best bid and offer at
+/// the close as a binary frame, and `snapshot_end`. Nothing more came, CME being closed. One frame
+/// a line: a text frame as LSE sent it, a binary frame in hex.
 pub const CME_GCZ6_GCG7: &str = include_str!("../../test_data/cme_stream_gcz6_gcg7_l1_dbn.txt");
 
-/// GCZ6's opening of `CME_GCZ6_GCG7` asked in the `json` encoding a minute
-/// before: the same record, as JSON.
+/// GCZ6's opening of `CME_GCZ6_GCG7` asked in the `json` encoding a minute before: the same record,
+/// as JSON.
 pub const CME_GCZ6_JSON: &str = include_str!("../../test_data/cme_stream_gcz6_l1_json.txt");
 
-/// The first six messages of a Level 1 subscription to ESZ6 in the `json`
-/// encoding, as LSE's WebSocket documentation gives them ("What you
-/// receive", read 13 November 2026): `hello`, ESZ6's opening with its best
-/// bid and offer, then a change of the best bid and offer and a trade.
+/// The first six messages of a Level 1 subscription to ESZ6 in the `json` encoding, as LSE's
+/// WebSocket documentation gives them ("What you receive", read 13 November 2026): `hello`, ESZ6's
+/// opening with its best bid and offer, then a change of the best bid and offer and a trade.
 pub const CME_ESZ6_DOCUMENTED: &str =
     include_str!("../../test_data/cme_stream_esz6_l1_json_documented.txt");
 
-/// A Level 2 session of GCZ6 in the `json` encoding, built from LSE's
-/// WebSocket documentation ("What you receive", "The record"), helix's key
-/// holding no Level 2: `hello`, GCZ6's opening with its last ten levels a
-/// side, then three changes of its book, the levels after each those of
-/// `GCZ26_BOOK`'s rows.
+/// A Level 2 session of GCZ6 in the `json` encoding, built from LSE's WebSocket documentation
+/// ("What you receive", "The record"), helix's key holding no Level 2.
+///
+/// It holds `hello`, GCZ6's opening with its last ten levels a side, then three changes of its
+/// book, the levels after each those of `GCZ26_BOOK`'s rows.
 pub const CME_GCZ6_L2_DOCUMENTED: &str =
     include_str!("../../test_data/cme_stream_gcz6_l2_json_documented.txt");
 
-/// A Level 3 session of GCZ6 in the `json` encoding, built from LSE's
-/// WebSocket documentation, helix's key holding no Level 3: `hello`,
-/// GCZ6's opening with no book (`snapshot_begin` of no record, then
-/// `snapshot_end`), then five order events, the orders of `GCZ26_ORDERS`,
-/// the last of each exchange message flagged 128.
+/// A Level 3 session of GCZ6 in the `json` encoding, built from LSE's WebSocket documentation,
+/// helix's key holding no Level 3.
+///
+/// It holds `hello`, GCZ6's opening with no book (`snapshot_begin` of no record, then
+/// `snapshot_end`), then five order events, the orders of `GCZ26_ORDERS`, the last of each exchange
+/// message flagged 128.
 pub const CME_GCZ6_L3_DOCUMENTED: &str =
     include_str!("../../test_data/cme_stream_gcz6_l3_json_documented.txt");
 
-/// LSE's close of a Level 2 or Level 3 subscription on a key of a plan
-/// without them, CME Group Lite+'s, captured: its code and reason, as JSON.
+/// LSE's close of a Level 2 or Level 3 subscription on a key of a plan without them, CME Group
+/// Lite+'s, captured: its code and reason, as JSON.
 pub const CME_LEVEL_REQUIRED: &str = include_str!("../../test_data/cme_close_level_required.json");
 
-/// LSE's answer to a stream connection with no CME Group key, HTTP 401, as
-/// its documentation and a capture give it.
+/// LSE's answer to a stream connection with no CME Group key, HTTP 401, as its documentation and a
+/// capture give it.
 pub const CME_KEY_UNKNOWN: &str = include_str!("../../test_data/cme_stream_key_unknown.json");
 
-/// LSE's close of a subscription naming a contract the stream does not
-/// carry, captured: its code and reason, as JSON.
+/// LSE's close of a subscription naming a contract the stream does not carry, captured: its code
+/// and reason, as JSON.
 pub const CME_SYMBOL_UNAVAILABLE: &str =
     include_str!("../../test_data/cme_close_symbol_unavailable.json");
 
-/// ESZ6 of 2026 under the id Databento gives it, the contract of
-/// `CME_ESZ6_DOCUMENTED`.
+/// ESZ6 of 2026 under the id Databento gives it, the contract of `CME_ESZ6_DOCUMENTED`.
 pub const ESZ26: &str = "ESZ26.GLBX";
 
-/// NVDA's sessions of Nasdaq TotalView at Levels 1, 2 and 3 in the `json`
-/// encoding, built from LSE's WebSocket documentation, which says the
-/// Nasdaq stream "sends the same messages for stocks" as the CME stream,
-/// no key of helix's holding a Nasdaq plan (`test_data/README.md`): each as
-/// GCZ6's or ESZ6's session of its level, NVDA's records at a cent. Level
-/// 1: `hello`, NVDA's opening with its best bid and offer, a change of it
-/// and a trade; Level 2: its opening with its last ten levels a side, then
-/// three changes of its book, the levels after each those of
-/// `NVDA_BOOK`'s rows; Level 3: its opening with no book, then five order
-/// events, the orders of `NVDA_ORDERS`, the last of each exchange message
-/// flagged 128.
+/// NVDA's sessions of Nasdaq TotalView at Levels 1, 2 and 3 in the `json` encoding, built from
+/// LSE's WebSocket documentation, which says the Nasdaq stream "sends the same messages for stocks"
+/// as the CME stream, no key of helix's holding a Nasdaq plan (`test_data/README.md`).
+///
+/// Each is as GCZ6's or ESZ6's session of its level, NVDA's records at a cent:
+/// - Level 1: `hello`, NVDA's opening with its best bid and offer, a change of it and a trade.
+/// - Level 2: its opening with its last ten levels a side, then three changes of its book, the
+///   levels after each those of `NVDA_BOOK`'s rows.
+/// - Level 3: its opening with no book, then five order events, the orders of `NVDA_ORDERS`, the
+///   last of each exchange message flagged 128.
 pub const NASDAQ_NVDA_L1_DOCUMENTED: &str =
     include_str!("../../test_data/nasdaq_stream_nvda_l1_json_documented.txt");
 pub const NASDAQ_NVDA_L2_DOCUMENTED: &str =
@@ -98,9 +95,8 @@ pub const NASDAQ_NVDA_L2_DOCUMENTED: &str =
 pub const NASDAQ_NVDA_L3_DOCUMENTED: &str =
     include_str!("../../test_data/nasdaq_stream_nvda_l3_json_documented.txt");
 
-/// LSE's answer to a Nasdaq stream connection with a key of no Nasdaq
-/// plan, HTTP 401, captured with the free key and with the CME Group Lite+
-/// key, which LSE answered alike.
+/// LSE's answer to a Nasdaq stream connection with a key of no Nasdaq plan, HTTP 401, captured with
+/// the free key and with the CME Group Lite+ key, which LSE answered alike.
 pub const NASDAQ_KEY_UNKNOWN: &str = include_str!("../../test_data/nasdaq_stream_key_unknown.json");
 
 /// A frame of the stream.
@@ -110,8 +106,8 @@ pub enum StreamFrame {
     Binary(Vec<u8>),
 }
 
-/// The frames of a captured session, one a line: a JSON text frame, or a
-/// binary frame in hex.
+/// Returns the frames of a captured session, one a line: a JSON text frame, or a binary frame in
+/// hex.
 ///
 /// # Panics
 ///
@@ -136,16 +132,15 @@ pub fn frames(captured: &str) -> Vec<StreamFrame> {
         .collect()
 }
 
-/// The frames of a session LSE gives in the `json` encoding as LSE sends
-/// them in the `dbn` encoding, which its documentation describes: the
-/// `hello` and the snapshot markers as they are, JSON text in both
-/// encodings, the `hello` naming the `dbn` encoding; and each record as its
-/// binary frame (see `dbn_frame`).
+/// Returns the frames of a session LSE gives in the `json` encoding as LSE sends them in the `dbn`
+/// encoding, which its documentation describes.
+///
+/// The `hello` and the snapshot markers are as they are, JSON text in both encodings, the `hello`
+/// naming the `dbn` encoding. Each record is its binary frame (see `dbn_frame`).
 ///
 /// # Panics
 ///
-/// Panics if a message is not JSON, or if `dbn_frame` cannot write a
-/// record.
+/// Panics if a message is not JSON, or if `dbn_frame` cannot write a record.
 #[must_use]
 pub fn dbn_frames(json_encoded: &str) -> Vec<StreamFrame> {
     json_encoded
@@ -167,14 +162,14 @@ pub fn dbn_frames(json_encoded: &str) -> Vec<StreamFrame> {
         .collect()
 }
 
-/// The binary frame LSE sends in the `dbn` encoding for a record `message`
-/// of the `json` encoding (`snapshot_book`, `mbp1`, `mbp10` or `mbo`), as
-/// LSE's documentation describes it: a 24-byte little-endian header,
-/// `L3DB`, version 1, a kind byte, 1 in a snapshot and 2 live, two unused
-/// bytes, the message's sequence in 8 bytes, the contract's number in 4
-/// and a record count in 4, then the record as Databento's, of the type its
-/// `rtype` names: `Mbp1Msg` (1), `Mbp10Msg` (10) or `MboMsg` (160), whose
-/// `channel_id`, which LSE's documentation does not list, is 0.
+/// Returns the binary frame LSE sends in the `dbn` encoding for a record `message` of the `json`
+/// encoding (`snapshot_book`, `mbp1`, `mbp10` or `mbo`), as LSE's documentation describes it.
+///
+/// The frame is a 24-byte little-endian header, `L3DB`, version 1, a kind byte, 1 in a snapshot and
+/// 2 live, two unused bytes, the message's sequence in 8 bytes, the contract's number in 4 and a
+/// record count in 4, then the record as Databento's, of the type its `rtype` names: `Mbp1Msg` (1),
+/// `Mbp10Msg` (10) or `MboMsg` (160), whose `channel_id`, which LSE's documentation does not list,
+/// is 0.
 ///
 /// # Panics
 ///
@@ -275,8 +270,8 @@ fn char_of(value: &Value) -> c_char {
     value.as_str().expect("a character").as_bytes()[0] as c_char
 }
 
-/// The header of a record of `rtype` of type `R`, of `record`'s publisher,
-/// contract and `ts_event`.
+/// Returns the header of a record of `rtype` of type `R`, of `record`'s publisher, contract and
+/// `ts_event`.
 fn header<R: HasRType>(rtype: u8, record: &Value) -> RecordHeader {
     RecordHeader::new::<R>(
         rtype,
@@ -286,7 +281,7 @@ fn header<R: HasRType>(rtype: u8, record: &Value) -> RecordHeader {
     )
 }
 
-/// A level of a record's `levels`.
+/// Returns a level of a record's `levels`.
 fn level(level: &Value) -> BidAskPair {
     BidAskPair {
         bid_px: price(&level["bid_px"]),
@@ -305,20 +300,19 @@ pub enum StreamAction {
     Send(StreamFrame),
     /// Closes the connection with this code and reason.
     Close(u16, String),
-    /// Sends nothing more until the test releases the stream
-    /// (`MockExchangeStream::release`).
+    /// Sends nothing more until the test releases the stream (`MockExchangeStream::release`).
     Hold,
 }
 
 /// Whether the test released the stream, and its signal.
 type Released = Arc<(Mutex<bool>, Condvar)>;
 
-/// The frames a connection received: the connection (0, 1, ... in the
-/// order they came) and the frame.
+/// The frames a connection received: the connection (0, 1, ... in the order they came) and the
+/// frame.
 type Received = Arc<Mutex<Vec<(usize, Value)>>>;
 
-/// The mock stream: its address, the frames it received and the key of
-/// each connection that offered one.
+/// The mock stream: its address, the frames it received and the key of each connection that offered
+/// one.
 #[derive(Debug)]
 pub struct MockExchangeStream {
     url: String,
@@ -328,10 +322,9 @@ pub struct MockExchangeStream {
 }
 
 impl MockExchangeStream {
-    /// LSE's CME stream answering each connection's subscription with
-    /// `script` (see `start`), taking `CME_API_KEY` and refusing any other
-    /// key with LSE's 401 (`CME_KEY_UNKNOWN`), as LSE refuses a key that is
-    /// not a CME Group key.
+    /// Starts LSE's CME stream answering each connection's subscription with `script` (see
+    /// `start`), taking `CME_API_KEY` and refusing any other key with LSE's 401
+    /// (`CME_KEY_UNKNOWN`), as LSE refuses a key that is not a CME Group key.
     ///
     /// # Panics
     ///
@@ -341,10 +334,9 @@ impl MockExchangeStream {
         Self::start(CME_API_KEY, CME_KEY_UNKNOWN, script)
     }
 
-    /// LSE's Nasdaq stream answering each connection's subscription with
-    /// `script` (see `start`), taking `NASDAQ_API_KEY` and refusing any
-    /// other key with LSE's 401 (`NASDAQ_KEY_UNKNOWN`), as LSE refuses a key
-    /// of no Nasdaq plan.
+    /// Starts LSE's Nasdaq stream answering each connection's subscription with `script` (see
+    /// `start`), taking `NASDAQ_API_KEY` and refusing any other key with LSE's 401
+    /// (`NASDAQ_KEY_UNKNOWN`), as LSE refuses a key of no Nasdaq plan.
     ///
     /// # Panics
     ///
@@ -354,10 +346,11 @@ impl MockExchangeStream {
         Self::start(NASDAQ_API_KEY, NASDAQ_KEY_UNKNOWN, script)
     }
 
-    /// Starts a stream answering each connection's subscription with
-    /// `script` of the connection's number and the subscription, each
-    /// connection on its own thread. A connection without `api_key` in its
-    /// `X-API-Key` header is refused with HTTP 401 and `refusal`, LSE's.
+    /// Starts a stream answering each connection's subscription with `script` of the connection's
+    /// number and the subscription, each connection on its own thread.
+    ///
+    /// A connection without `api_key` in its `X-API-Key` header is refused with HTTP 401 and
+    /// `refusal`, LSE's.
     fn start(
         api_key: &'static str,
         refusal: &'static str,
@@ -454,7 +447,8 @@ impl MockExchangeStream {
                                         reason: reason.into(),
                                     }));
                                     let _ = socket.flush();
-                                    // Drains until the client answers the close.
+
+                                    // Drains until the client answers the close
                                     while socket.read().is_ok() {}
                                     return;
                                 }
@@ -482,27 +476,26 @@ impl MockExchangeStream {
         signal.notify_all();
     }
 
-    /// The stream's address, the adapter's address of the exchange's
-    /// stream.
+    /// Returns the stream's address, the adapter's address of the exchange's stream.
     #[must_use]
     pub fn url(&self) -> &str {
         &self.url
     }
 
-    /// The frames received so far, in the order they came.
+    /// Returns the frames received so far, in the order they came.
     #[must_use]
     pub fn received(&self) -> Vec<(usize, Value)> {
         self.received.lock().expect("not poisoned").clone()
     }
 
-    /// The key each connection offered, in the order they came.
+    /// Returns the key each connection offered, in the order they came.
     #[must_use]
     pub fn keys(&self) -> Vec<Option<String>> {
         self.keys.lock().expect("not poisoned").clone()
     }
 
-    /// Waits, up to 10 s, until `condition` holds on the frames received
-    /// (`received`), and returns them.
+    /// Waits, up to 10 s, until `condition` holds on the frames received (`received`), and returns
+    /// them.
     ///
     /// # Panics
     ///
@@ -523,15 +516,14 @@ impl MockExchangeStream {
     }
 }
 
-/// `frames` sent, as a script's answer.
+/// Returns `frames` sent, as a script's answer.
 #[must_use]
 pub fn sent(frames: Vec<StreamFrame>) -> Vec<StreamAction> {
     frames.into_iter().map(StreamAction::Send).collect()
 }
 
-/// `frames` sent, held after the first `opened` until the test releases
-/// the stream, as a script's answer: a connection's opening, then its
-/// live records once the test is ready for them.
+/// Returns `frames` sent, held after the first `opened` until the test releases the stream, as a
+/// script's answer: a connection's opening, then its live records once the test is ready for them.
 #[must_use]
 pub fn held(frames: Vec<StreamFrame>, opened: usize) -> Vec<StreamAction> {
     let mut actions = sent(frames);
@@ -545,9 +537,8 @@ mod tests {
 
     use super::*;
 
-    /// LSE's documentation describes the `dbn` encoding of a record; the
-    /// same opening of GCZ6, captured in both encodings, holds it to the
-    /// byte.
+    /// LSE's documentation describes the `dbn` encoding of a record, and the same opening of GCZ6,
+    /// captured in both encodings, holds it to the byte.
     #[rstest]
     fn a_record_of_the_json_encoding_is_the_binary_frame_lse_sends_in_the_dbn_encoding() {
         let snapshot_book = CME_GCZ6_JSON

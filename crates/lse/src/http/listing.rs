@@ -1,7 +1,8 @@
-//! The listings of CME contracts in LSE's catalogue: a contract is asked of
-//! LSE by the number of its listing, which names it alone, its exchange
-//! name naming a contract every ten years (see `CmeContract`), and streamed
-//! under the listing's symbol, the name LSE's CME stream takes it by.
+//! The listings of CME contracts in LSE's catalogue.
+//!
+//! A contract is asked of LSE by the number of its listing, which names it alone, its exchange name
+//! naming a contract every ten years (see `CmeContract`). It is streamed under the listing's
+//! symbol, the name LSE's CME stream takes it by.
 
 use anyhow::Context;
 use nautilus_core::collections::AtomicMap;
@@ -10,24 +11,23 @@ use nautilus_model::identifiers::InstrumentId;
 use super::{client::LseHttpClient, models::LsePair, query::PairsQuery};
 use crate::common::{consts::CME_MARKET, symbol::CmeContract};
 
-/// The listings of the CME contracts looked up so far: a listing never
-/// changes, so each contract is looked up once.
+/// The listings of the CME contracts looked up so far: a listing never changes, so each contract is
+/// looked up once.
 #[derive(Debug, Default)]
 pub struct CmeListings(AtomicMap<InstrumentId, LsePair>);
 
 impl CmeListings {
-    /// `contract`'s listing: the one found before, or the one LSE's
-    /// catalogue lists under the contract's exchange names, looked up
-    /// through `http` in the order `CmeContract::exchange_names` gives them,
-    /// until one lists it. Its symbol is the name LSE's CME stream takes the
-    /// contract by, the HTTP API's (LSE's WebSocket documentation,
-    /// "Contracts").
+    /// Returns `contract`'s listing: the one found before, or the one LSE's catalogue lists under
+    /// the contract's exchange names.
+    ///
+    /// It looks up through `http` in the order `CmeContract::exchange_names` gives them, until one
+    /// lists it. The listing's symbol is the name LSE's CME stream takes the contract by, the HTTP
+    /// API's (LSE's WebSocket documentation, "Contracts").
     ///
     /// # Errors
     ///
-    /// Returns an error if LSE lists the contract under neither name,
-    /// naming it with the listings LSE has of them, if LSE lists it twice,
-    /// or if a lookup fails (LSE's refusal in the error).
+    /// Returns an error if LSE lists the contract under neither name, naming it with the listings
+    /// LSE has of them, if LSE lists it twice, or if a lookup fails (LSE's refusal in the error).
     pub async fn listing(
         &self,
         http: &LseHttpClient,

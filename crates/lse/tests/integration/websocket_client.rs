@@ -1,6 +1,5 @@
-//! The client of one of LSE's sockets against the mock socket
-//! (`lse::testing::MockLseSocket`): authentication, subscriptions, chains,
-//! refusals, keepalive and reconnects.
+//! The client of one of LSE's sockets against the mock socket (`lse::testing::MockLseSocket`):
+//! authentication, subscriptions, chains, refusals, keepalive and reconnects.
 
 use lse::{
     common::{
@@ -19,8 +18,7 @@ use serde_json::{Value, json};
 
 type Out = tokio::sync::mpsc::UnboundedReceiver<LseWsMessage>;
 
-/// A subscription or an unsubscription of the client: a symbol's or a
-/// chain's.
+/// A subscription or an unsubscription of the client: a symbol's or a chain's.
 type Subscribing = fn(&LseWebSocketClient, &str) -> anyhow::Result<()>;
 
 fn credential() -> LseCredential {
@@ -82,10 +80,10 @@ async fn the_key_answers_the_welcome_and_the_socket_s_list_and_limit_are_kept() 
     assert_eq!(client.max_subscriptions(), Some(16));
 }
 
-/// LSE's refusal of the key: a key it does not know, and a connection
-/// beyond the key's, after which LSE closes the connection with 1008.
-/// Either fails the connect with LSE's code and its message or limit,
-/// without showing the key.
+/// LSE's refusal of the key: a key it does not know, and a connection beyond the key's, after which
+/// LSE closes the connection with 1008.
+///
+/// Either fails the connect with LSE's code and its message or limit, without showing the key.
 #[rstest]
 #[case::a_key_lse_does_not_know(
     vec![send(WS_INVALID_KEY)],
@@ -133,13 +131,12 @@ async fn a_subscription_brings_the_ticks_of_its_symbol() {
     assert_eq!(peer.received(), [(0, auth()), (0, subscribe("GOLD.F"))]);
 }
 
-/// LSE's documented keepalive, which it answers with a pong, is sent
-/// while the connection is open. The test's clock is paused once the key
-/// is authenticated, so that no wait races the authentication, and moved
-/// on 25 s, the interval LSE's Python client keeps, then let run for the
-/// 10 s the peer waits for the ping: a ping reaches the peer within about
-/// 35 s of the connection, which bounds the interval without pinning it at
-/// 25 s.
+/// LSE's documented keepalive, which it answers with a pong, is sent while the connection is open.
+///
+/// The test's clock is paused once the key is authenticated, so that no wait races the
+/// authentication. It is moved on 25 s, the interval LSE's Python client keeps, then let run for
+/// the 10 s the peer waits for the ping: a ping reaches the peer within about 35 s of the
+/// connection, which bounds the interval without pinning it at 25 s.
 #[tokio::test]
 async fn the_keepalive_is_lse_s_ping() {
     let peer = MockLseSocket::start(|_, frame| data_ws_answer(frame));
@@ -174,8 +171,7 @@ async fn a_malformed_frame_loses_none_of_the_frames_after_it() {
     assert_eq!(tick.ts, "2026-11-13T16:44:55.499567+00:00");
 }
 
-/// A symbol's unsubscription, and a chain's, as LSE's documentation
-/// spells them.
+/// A symbol's unsubscription, and a chain's, as LSE's documentation spells them.
 #[rstest]
 #[case::a_symbol_s(
     LseWebSocketClient::subscribe,
@@ -241,8 +237,7 @@ async fn a_chain_subscribes_on_its_first_reference_and_unsubscribes_on_its_last(
     client.disconnect().await;
 }
 
-/// LSE's error names no symbol: it answers the oldest subscription not
-/// answered yet.
+/// LSE's error names no symbol: it answers the oldest subscription not answered yet.
 #[tokio::test]
 async fn lse_s_refusal_of_a_subscription_is_passed_on_with_its_symbol_code_and_message() {
     let peer = MockLseSocket::start(|_, frame| match frame["symbol"].as_str() {
@@ -263,8 +258,8 @@ async fn lse_s_refusal_of_a_subscription_is_passed_on_with_its_symbol_code_and_m
     );
 }
 
-/// LSE's documented chain of AAPL: one subscription, then the ticks of
-/// its contracts, each under its OSI symbol without spaces.
+/// LSE's documented chain of AAPL: one subscription, then the ticks of its contracts, each under
+/// its OSI symbol without spaces.
 #[tokio::test]
 async fn a_chain_s_subscription_brings_the_ticks_of_its_contracts() {
     let peer = MockLseSocket::start(|_, frame| data_ws_answer(frame));
@@ -295,8 +290,8 @@ async fn a_chain_s_subscription_brings_the_ticks_of_its_contracts() {
     );
 }
 
-/// LSE's error names no underlying: it answers the oldest subscription
-/// not answered yet, here the chain's after a symbol's.
+/// LSE's error names no underlying: it answers the oldest subscription not answered yet, here the
+/// chain's after a symbol's.
 #[tokio::test]
 async fn lse_s_refusal_of_a_chain_is_passed_on_with_its_underlying_code_and_message() {
     let peer = MockLseSocket::start(|_, frame| match frame["underlying"].as_str() {
@@ -322,8 +317,8 @@ async fn lse_s_refusal_of_a_chain_is_passed_on_with_its_underlying_code_and_mess
     );
 }
 
-/// Drop the first connection after another acquisition of the refused chain,
-/// and its replacement before acknowledging the chain's final release.
+/// Drop the first connection after another acquisition of the refused chain, and its replacement
+/// before acknowledging the chain's final release.
 #[tokio::test]
 async fn a_refused_chain_is_replayed_only_while_wanted_and_replay_takes_no_reference() {
     let peer =
@@ -385,8 +380,8 @@ async fn a_refused_chain_is_replayed_only_while_wanted_and_replay_takes_no_refer
     client.disconnect().await;
 }
 
-/// The peer drops the first connection after the first tick of
-/// `GOLD.F`, or of AAPL's chain: the new connection subscribes it again.
+/// The peer drops the first connection after the first tick of `GOLD.F`, or of AAPL's chain: the
+/// new connection subscribes it again.
 #[rstest]
 #[case::a_symbol(LseWebSocketClient::subscribe, "GOLD.F", subscribe("GOLD.F"))]
 #[case::a_chain(
