@@ -22,7 +22,7 @@ impl Learner for Baseline {
     }
 }
 
-/// The model and its saved text, JSON named by the adapter, so that no other adapter loads it.
+/// Saved as JSON tagged by the adapter, so that no other adapter loads it.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum Saved {

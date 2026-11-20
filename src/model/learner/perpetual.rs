@@ -11,9 +11,8 @@ use super::{Learner, Predictor, SavedModel, TrainingSet};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, bon::Builder)]
 #[serde(deny_unknown_fields)]
 pub struct PerpetualConfig {
-    /// The memory a fit may take, in GB. Required: unbounded, a fit grows until the machine runs
-    /// out, past 8 GB on a modest set. A fit refuses a limit of zero or less, on which the library
-    /// panics.
+    /// The memory a fit may take, in GB. Required: unbounded, a fit grows past 8 GB on a modest
+    /// set. A fit refuses zero or less, on which the library panics.
     pub memory_limit: f32,
     /// How far boosting goes: a higher budget fits more and finer trees.
     #[serde(default = "default_budget")]
@@ -35,15 +34,12 @@ const fn default_seed() -> u64 {
     1
 }
 
-/// The metadata key under which a saved model keeps the width of its rows, which PerpetualBooster
-/// does not record itself.
+/// The metadata key of a saved model's row width, which PerpetualBooster does not record.
 const WIDTH: &str = "width";
 
 impl PerpetualConfig {
-    /// A booster with these settings, fitting squared loss. It fits on one thread, as LightGBM
-    /// does, so its results do not depend on the machine's cores, and its splits give missing
-    /// values a branch of their own, so a missing feature is learned apart from every value, as in
-    /// LightGBM.
+    /// A booster of squared loss. It fits on one thread, as LightGBM does, so results do not depend
+    /// on the cores, and its splits give missing values a branch of their own.
     fn booster(&self) -> PerpetualBooster {
         PerpetualBooster::default()
             .set_objective(Objective::SquaredLoss)
@@ -88,7 +84,6 @@ impl Learner for PerpetualConfig {
     }
 }
 
-/// A PerpetualBooster of squared loss and the width of its rows.
 struct Perpetual {
     booster: PerpetualBooster,
     width: usize,
@@ -137,8 +132,8 @@ mod tests {
         PerpetualConfig::builder().memory_limit(1.0).build()
     }
 
-    /// 300 rows of two features whose label is 1 exactly where the first feature is missing, and 0
-    /// elsewhere, where the feature runs from 0 to 1, zero included.
+    /// 300 rows of two features, label 1 where the first feature is missing, else 0 with the
+    /// feature from 0 to 1.
     fn missing_is_one() -> TrainingSet {
         let mut features = Vec::new();
         let mut labels = Vec::new();
@@ -155,9 +150,8 @@ mod tests {
         TrainingSet::new(2, features, labels).unwrap()
     }
 
-    /// A model that cannot tell the missing feature from a value predicts the training mean of
-    /// `missing_is_one`'s labels, a third, throughout: learned apart, the missing feature is
-    /// predicted above it, toward its label of 1, and every value below it, toward their 0.
+    /// A model blind to the missing feature predicts the mean label, a third, throughout; learned
+    /// apart, the missing feature is predicted above it and every value below it.
     #[rstest]
     fn a_missing_feature_is_learned_apart_from_every_value() {
         let model = LearnerConfig::Perpetual(config())
@@ -205,7 +199,7 @@ mod tests {
         assert!(err.contains(limit), "{err}");
     }
 
-    // PerpetualBooster draws only on a large set, where it fits each tree on a sample of the rows:
+    // PerpetualBooster draws only on a large set, where each tree fits a sample of the rows:
     // 50,000 rows of 6 features are one.
     #[rstest]
     fn the_seed_reaches_perpetual() {

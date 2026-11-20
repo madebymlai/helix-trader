@@ -1,22 +1,20 @@
-//! The side picked: decisions on expected net R, each decision weighing the costs of its own (Elkan
-//! 2001; Bahnsen et al. 2015).
+//! The side picked: decisions on expected net R, each decision weighing its own costs (Elkan 2001;
+//! Bahnsen et al. 2015).
 //!
-//! A side's expected net R at a decision is its calibrated expected R (`calibration::Expected`),
-//! the realized value its model learned: its net P&L (fees and slippage included) over the unit of
-//! its row, its trade's R at the reference stake. The unit is the worth of the trade's own stop
-//! with exits, or, on a time-only target, which has no stop, the worth of a stop as far as its ATR
-//! at the decision (`targets::SideTarget::unit`). So the costs, in R, scale with each decision's
-//! unit, and a fixed cost weighs more on a small one.
+//! A side's expected net R is its calibrated expected R (`calibration::Expected`): its net P&L
+//! (fees and slippage included) over the unit of its row, the trade's R at the reference stake. The
+//! unit is the worth of the trade's own stop with exits, or, on a time-only target, which has no
+//! stop, of a stop as far as its ATR at the decision (`targets::SideTarget::unit`). So the costs,
+//! in R, scale with each decision's unit, and a fixed cost weighs more on a small one.
 //!
-//! An expected R is an `R`, finite (`deciding::DecidingModels::pick_among`). A side trades if its
-//! expected R is at or above its margin, in R (`ModelConfig::margins`,
+//! An expected R is a finite `R` (`deciding::DecidingModels::pick_among`). A side trades if its
+//! expected R is at or above its margin (`ModelConfig::margins`,
 //! `deciding::DecidingModels::pick_among`); of two, the larger, none at a tie (`pick`).
 
 use crate::strategy::risk::R;
 
-/// The side traded of `sides`, each a side (or what the caller has of it, its expectation say), its
-/// expected R and its margin: of those at or above their margin, the one expected the most; none if
-/// no side clears its margin, or two tie.
+/// The side of `sides`, each a tag with its expected R and margin, that trades: of those at or
+/// above their margin, the one expected the most; none if none clears or two tie.
 #[must_use]
 pub fn pick<T>(sides: impl IntoIterator<Item = (T, R, R)>) -> Option<T> {
     let cleared: Vec<(T, R)> = sides
@@ -44,8 +42,6 @@ mod tests {
     use super::*;
     use crate::model::targets::Side;
 
-    /// Of the sides at or above their margins, the one expected the most trades; none if no side
-    /// clears its margin, or two tie.
     #[rstest]
     #[case::a_side_at_its_margin(vec![(Side::Short, R::new(1.0), R::new(1.0))], Some(Side::Short))]
     #[case::a_side_below_its_margin(vec![(Side::Short, R::new(0.99), R::new(1.0))], None)]
