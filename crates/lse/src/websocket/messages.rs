@@ -18,8 +18,7 @@ pub enum LseWsAction<'a> {
     Subscribe { symbol: &'a str },
     /// No more ticks of a symbol.
     Unsubscribe { symbol: &'a str },
-    /// The ticks of every listed contract of an underlying's options, its chain, from now on: one
-    /// subscription however many contracts.
+    /// Every listed contract of an underlying's options, its chain, as one subscription.
     SubscribeOptions { underlying: &'a str },
     /// No more ticks of an underlying's chain.
     UnsubscribeOptions { underlying: &'a str },
@@ -70,8 +69,8 @@ pub enum LseWsFrame {
 /// What the socket streams to the key it accepted.
 #[derive(Debug, Clone, Deserialize)]
 pub struct LseWsAuthenticated {
-    /// The symbols the socket streams, as it spells them. LSE accepts a subscription to a symbol it
-    /// does not list, and sends nothing.
+    /// The symbols the socket streams. LSE accepts a subscription to an unlisted symbol and sends
+    /// nothing.
     pub symbols: Vec<LseWsListed>,
     /// The symbols one connection of the key may stream at once.
     pub max_subscriptions: Option<usize>,
@@ -83,12 +82,12 @@ pub struct LseWsListed {
     pub symbol: String,
 }
 
-/// A tick: its symbol as the socket spells it, LSE's time of it, its price, the best bid and ask,
-/// and its volume, the size of the trade, 0 on a quote (LSE's WebSocket documentation, "The tick").
+/// A tick: its symbol, LSE's time of it, price, best bid and ask, and volume, the trade's size,
+/// 0 on a quote (LSE's WebSocket documentation, "The tick").
 ///
 /// A series' tick is read as a quote, its price and volume left: a futures tick's price is its bid
-/// (LSE's captures). An option contract's is read as a trade, of its price and volume, the US
-/// options feed carrying trades alone.
+/// (LSE's captures). An option contract's is read as a trade, the US options feed carrying trades
+/// alone.
 #[derive(Debug, Clone, Deserialize)]
 pub struct LseTick {
     pub symbol: String,
@@ -110,7 +109,7 @@ pub struct LseWsRefusal {
 }
 
 impl Display for LseWsRefusal {
-    /// `LIMIT_REACHED: Max 16 symbols on this key.`, then its details, as `(max_connections 1,
+    /// `LIMIT_REACHED: Max 16 symbols on this key.`, then `(max_connections 1,
     /// open_connections 1)`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}: {}", self.code, self.message)?;
@@ -141,7 +140,6 @@ mod tests {
         serde_json::from_str(text).unwrap()
     }
 
-    /// The captured frames, each as its type, their fields beyond those read ignored.
     #[rstest]
     fn every_captured_frame_reads_as_its_type() {
         assert!(matches!(frame(WS_WELCOME), LseWsFrame::Welcome));
@@ -163,9 +161,8 @@ mod tests {
         );
     }
 
-    /// A chain's acknowledgements, as captured, name its underlying. An option's tick, as LSE's
-    /// WebSocket documentation gives it ("The tick"), is a trade, its price and its size, the
-    /// tick's volume.
+    /// A chain's acknowledgements name its underlying. An option's tick is a trade: its price and
+    /// its volume, the size (LSE's WebSocket documentation, "The tick").
     #[rstest]
     fn the_documented_option_frames_read_as_their_types() {
         let LseWsFrame::OptionsSubscribed { underlying } = frame(WS_OPTIONS_SUBSCRIBED_AAPL) else {
@@ -198,8 +195,8 @@ mod tests {
         assert_eq!(authenticated.symbols.len(), 33);
     }
 
-    /// LSE's refusals, captured: a second connection on a key of one, its limit and its count of
-    /// those open in its details, and a key LSE does not know, of no details.
+    /// A second connection on a key of one gives its limit and open count, an unknown key no
+    /// details.
     #[rstest]
     #[case::too_many_connections(
         WS_TOO_MANY_CONNECTIONS,

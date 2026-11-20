@@ -17,10 +17,8 @@ use nautilus_model::{
 use super::messages::LseTick;
 use crate::http::parse::{TradeIds, decimal};
 
-/// Returns `tick` as a quote of `instrument_id`: its bid and ask at `price_precision`, with no
-/// sizes, LSE's socket ticks carrying none, at `size_precision`.
-///
-/// It is stamped at LSE's time of it (`ts_event`) and at `ts_init`.
+/// Returns `tick` as a quote of `instrument_id` at the given precisions, with zero sizes: LSE's
+/// socket ticks carry none.
 ///
 /// # Errors
 ///
@@ -52,11 +50,10 @@ pub fn parse_quote(
     )
 }
 
-/// Returns `tick`, an option contract's, as a trade of `instrument_id`: its price at
-/// `price_precision` and its volume, the trade's size, at `size_precision`.
+/// Returns `tick`, an option contract's, as a trade of `instrument_id`, its volume the size.
 ///
-/// It has no aggressor side, LSE sending none, and the id `ids` gives it, as an export's trade gets
-/// one. It is stamped at LSE's time of it (`ts_event`) and at `ts_init`.
+/// It has no aggressor side, LSE sending none, and gets its id from `ids`, as an export's trade
+/// does.
 ///
 /// # Errors
 ///
@@ -93,7 +90,6 @@ pub fn parse_trade(
     )
 }
 
-/// Returns LSE's time of `tick`.
 fn ts_event(tick: &LseTick) -> anyhow::Result<UnixNanos> {
     let at: Timestamp = tick
         .ts
@@ -129,8 +125,8 @@ mod tests {
         UnixNanos::from(time.parse::<Timestamp>().unwrap())
     }
 
-    /// The first tick captured: GOLD.F at 16:44:55.499567 on 13 November 2026, bid 3888.0, ask
-    /// 3888.2, price 3888.0, volume 1.
+    /// GOLD.F, the first tick captured: 2026-11-13 16:44:55.499567, bid 3888.0, ask 3888.2, price
+    /// 3888.0, volume 1.
     #[rstest]
     fn a_tick_is_a_quote_of_its_bid_and_ask_with_no_sizes_at_lse_s_time() {
         let received = at("2026-11-13T16:44:55.8Z");
@@ -203,7 +199,6 @@ mod tests {
         assert!(err.contains("3888.25"), "{err}");
     }
 
-    /// Returns the `n`th option tick of LSE's documentation's chain of AAPL.
     fn option_tick(n: usize) -> LseTick {
         let text = WS_TICKS_AAPL_OPTIONS.lines().nth(n).unwrap();
         let LseWsFrame::Tick(tick) = serde_json::from_str(text).unwrap() else {
@@ -223,9 +218,8 @@ mod tests {
         )
     }
 
-    /// The first, a trade of AAPL's 355 call of 1 contract at 6.70 at 14:30:00.816861166 on 12
-    /// November 2026, as LSE exported it, which its export's tick slice holds first too: the same
-    /// trade, the same id.
+    /// AAPL's 355 call, 1 contract at 6.70 at 2026-11-12 14:30:00.816861166, as LSE exported it:
+    /// its export's first tick has the same trade and id.
     #[rstest]
     fn an_option_tick_is_a_trade_of_its_price_and_volume_with_no_aggressor_at_lse_s_time() {
         let exported = parse_trade_slice(
@@ -253,8 +247,8 @@ mod tests {
         assert_eq!(exported.ts_event, trade.ts_event);
     }
 
-    /// Two trades alike, of one time, price and size, as OPRA reports a contract's fills of one
-    /// order, keep ids apart, and the same trades get the same ids again.
+    /// Trades alike in time, price and size, as OPRA reports one order's fills, get distinct ids,
+    /// the same each time.
     #[rstest]
     fn trades_alike_get_ids_of_their_own_and_the_same_ones_each_time() {
         let tick = option_tick(0);
