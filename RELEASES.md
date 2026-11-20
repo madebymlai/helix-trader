@@ -83,6 +83,7 @@ Released on TBD (UTC).
 
 ### Documentation Updates
 
+- Added `docs/documenting-code.md`, Nautilus' standard for comments and doc comments adapted to helix
 - Added the Apache-2.0 license, `LICENSE`, as the `license` of every crate
 - Changed `docs/architecture.md` to state the architecture as rules, each naming the module that owns it
 - Changed the live guide to distinguish a catalog interval's end from the time of its last row
