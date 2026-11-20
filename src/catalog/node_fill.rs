@@ -1,32 +1,30 @@
-//! Fills the catalog through a Nautilus node: the sources whose data client
-//! answers a request with a completed `DataResponseEnvelope`, which the
-//! data engine writes back to the catalog (`update_catalog`).
+//! Fills the catalog through a Nautilus node: the sources whose data client answers a request
+//! with a completed `DataResponseEnvelope`, which the data engine writes back to the catalog
+//! (`update_catalog`).
 //!
-//! `missing` turns series slices (`strategy::requirements::SeriesSlice`) into what the
-//! catalog lacks of them, by Nautilus' own count
-//! (`get_missing_intervals_for_request`): per contract its definitions, then
-//! each series' missing windows, the slivers between a live node's promoted
-//! files among them, each asked once and closed by its write-back.
-//! `missing_custom` does the same for custom series over their slices, a
-//! root's contract by contract, keyed by their data type's identifier,
-//! with no definition. A `NodeFill` gathers each
-//! source's data client with its requests and the source's period, and `run`
-//! builds a live node with those clients and the catalog, and an actor asking
-//! for one request at a time, naming the client it was added with, which the
-//! data engine sends it to before any venue route (`DataEngine::get_client`),
-//! with `update_catalog`, each series by Nautilus' time-range pipeline
-//! (`time_range_generator`): the data engine asks for a window of the period
-//! at a time, serves what the catalog holds, asks the client for the rest and
-//! writes each answer back over its window. A custom data request is asked
-//! whole, as the pipeline windows none, and written back over its window, as
-//! custom data under its type and identifier.
-//! The actor waits for Nautilus' answer to each request (`on_data_response`)
-//! with no deadline of its own, as Nautilus' requests have none: each client
-//! the fill asks answers every request, a failed one with the failure in its
-//! response envelope, and one that never answered would hold the run until
-//! it is interrupted. The actor records the first failure (a failed request,
-//! a failure envelope) and stops the node; `run` returns it. See
-//! `README.md`, "Fill paths".
+//! `missing` turns series slices (`strategy::requirements::SeriesSlice`) into what the catalog
+//! lacks of them, by Nautilus' own count (`get_missing_intervals_for_request`): per contract its
+//! definitions, then each series' missing windows, the slivers between a live node's promoted
+//! files among them, each asked once and closed by its write-back. `missing_custom` does the
+//! same for custom series over their slices, a root's contract by contract, keyed by their
+//! data type's identifier, with no definition.
+//!
+//! A `NodeFill` gathers each source's data client with its requests and the source's period.
+//! `run` builds a live node with those clients and the catalog, and an actor asking for one
+//! request at a time with `update_catalog`, naming the client it was added with, which the data
+//! engine sends it to before any venue route (`DataEngine::get_client`). Each series goes by
+//! Nautilus' time-range pipeline (`time_range_generator`): the data engine asks for a window
+//! of the period at a time, serves what the catalog holds, asks the client for the rest and
+//! writes each answer back over its window. A custom data request is asked whole, as the
+//! pipeline windows none, and written back over its window, as custom data under its type and
+//! identifier.
+//!
+//! The actor waits for Nautilus' answer to each request (`on_data_response`) with no deadline
+//! of its own, as Nautilus' requests have none: each client the fill asks answers every
+//! request, a failed one with the failure in its response envelope, and one that never
+//! answered would hold the run until it is interrupted. The actor records the first failure (a
+//! failed request, a failure envelope) and stops the node; `run` returns it. See `README.md`,
+//! "Fill paths".
 
 use std::{cell::RefCell, collections::VecDeque, fmt::Display, path::Path, rc::Rc};
 
@@ -55,8 +53,7 @@ use crate::{
     time_range, venues,
 };
 
-/// What a fill asks a source for: an instrument's definition, or one of
-/// its series.
+/// What a fill asks a source for: an instrument's definition, or one of its series.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FillData {
     /// The instrument, its definition (`request_instrument`).
@@ -130,8 +127,8 @@ impl Display for FillData {
     }
 }
 
-/// A request of a fill: the identified `data` over the closed window
-/// `[from, to]`, as the catalog stores intervals.
+/// A request of a fill: the identified `data` over the closed window `[from, to]`, as the
+/// catalog stores intervals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FillRequest {
     pub data: FillData,
@@ -152,18 +149,16 @@ impl Display for FillRequest {
     }
 }
 
-/// What `catalog` lacks of `slices`, contract by contract in the order they
-/// first come: the contract's definition over the span of what it lacks,
-/// then each of its series' missing windows (Nautilus'
-/// `get_missing_intervals_for_request`), in time order. The slices are
-/// `DataRequirements::slices`, which reads no window of a series twice. A
-/// contract lacking nothing is left out.
+/// What `catalog` lacks of `slices`, contract by contract in the order they first come: the
+/// contract's definition over the span of what it lacks, then each of its series' missing
+/// windows (Nautilus' `get_missing_intervals_for_request`), in time order. The slices are
+/// `DataRequirements::slices`, which reads no window of a series twice. A contract lacking
+/// nothing is left out.
 ///
 /// # Errors
 ///
-/// Returns an error if a series is not the quotes, trades, book depths,
-/// book deltas, bars or funding of its slice's contract, or if the catalog
-/// cannot be read.
+/// Returns an error if a series is not the quotes, trades, book depths, book deltas, bars or
+/// funding of its slice's contract, or if the catalog cannot be read.
 pub fn missing(
     catalog: &ParquetDataCatalog,
     slices: &[SeriesSlice],
@@ -210,10 +205,9 @@ pub fn missing(
         .collect())
 }
 
-/// A request of a fill of a custom series (see
-/// `strategy::requirements::CustomSeries`): the rows of its `data_type`
-/// over the closed window `[from, to]`, as the catalog stores intervals,
-/// stored under its type and identifier.
+/// A request of a fill of a custom series (see `strategy::requirements::CustomSeries`): the
+/// rows of its `data_type` over the closed window `[from, to]`, as the catalog stores
+/// intervals, stored under its type and identifier.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomFillRequest {
     pub data_type: DataType,
@@ -231,12 +225,11 @@ impl Display for CustomFillRequest {
     }
 }
 
-/// What `catalog` lacks of each of `slices`, custom series over the part
-/// of a window each is read in, a root's contract by contract
-/// (`DataRequirements::custom_slices`): its missing windows (Nautilus'
-/// `get_missing_intervals_for_request`, of its type and identifier, a
-/// contract's id on a root), in time order, the slices in the order given.
-/// No definition: a custom series brings no instrument.
+/// What `catalog` lacks of each of `slices`, custom series over the part of a window each is
+/// read in, a root's contract by contract (`DataRequirements::custom_slices`): its missing
+/// windows (Nautilus' `get_missing_intervals_for_request`, of its type and identifier, a
+/// contract's id on a root), in time order, the slices in the order given. No definition: a
+/// custom series brings no instrument.
 ///
 /// # Errors
 ///
@@ -275,25 +268,23 @@ fn at(ns: u64) -> Timestamp {
     Timestamp::from(UnixNanos::from(ns))
 }
 
-/// A source's data client for the node: its factory and config. It takes
-/// no venue route: each request names the client it asks (see
-/// `NodeFill::add`), so two sources of one venue share a node.
+/// A source's data client for the node: its factory and config. It takes no venue route: each
+/// request names the client it asks (see `NodeFill::add`), so two sources of one venue share a
+/// node.
 pub struct NodeClient {
     pub factory: Box<dyn DataClientFactory>,
     pub config: Box<dyn ClientConfig>,
 }
 
-/// The data clients of a fill through the node, and the requests asked of
-/// them, in order.
+/// The data clients of a fill through the node, and the requests asked of them, in order.
 #[derive(Default)]
 pub struct NodeFill {
     clients: Vec<NodeClient>,
     requests: Vec<Asked>,
 }
 
-/// A request of the fill, the client it names, and the period of the
-/// windows the data engine asks it in; a definition and custom data have
-/// none, being asked whole.
+/// A request of the fill, the client it names, and the period of the windows the data engine
+/// asks it in; a definition and custom data have none, being asked whole.
 #[derive(Debug, Clone)]
 struct Asked {
     request: Request,
@@ -301,8 +292,8 @@ struct Asked {
     period: Option<SignedDuration>,
 }
 
-/// What a request of the fill asks: an instrument's definition or one of
-/// its series, or a custom series.
+/// What a request of the fill asks: an instrument's definition or one of its series, or a
+/// custom series.
 #[derive(Debug, Clone)]
 enum Request {
     Series(FillRequest),
@@ -319,19 +310,17 @@ impl Display for Request {
 }
 
 impl NodeFill {
-    /// A fill asking nothing yet.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Adds `requests` (see `missing`), asked of `client`, each series in
-    /// windows of `period(data)`: the most of it one answer holds, and one
-    /// write-back covers. A definition is asked whole. Each request names
-    /// the client by the name the node registers it under, its factory's,
-    /// which Nautilus' factories give the client they create, so the data
-    /// engine sends it there whatever its venue. No request leaves the
-    /// client out of the node, so it never connects.
+    /// Adds `requests` (see `missing`), asked of `client`, each series in windows of
+    /// `period(data)`: the most of it one answer holds, and one write-back covers. A definition is
+    /// asked whole. Each request names the client by the name the node registers it under, its
+    /// factory's, which Nautilus' factories give the client they create, so the data engine sends
+    /// it there whatever its venue. No request leaves the client out of the node, so it never
+    /// connects.
     pub fn add(
         &mut self,
         client: NodeClient,
@@ -341,11 +330,10 @@ impl NodeFill {
         self.add_with_custom(client, requests, &[], period);
     }
 
-    /// Adds `requests` as `add` does, then `custom` (see `missing_custom`),
-    /// of custom series, asked of the same client, each whole:
-    /// Nautilus' time-range pipeline windows no custom data request
-    /// (`data/src/engine/time_range.rs`, `is_time_range_pipeline_variant`).
-    /// No request of either kind leaves the client out of the node.
+    /// Adds `requests` as `add` does, then `custom` (see `missing_custom`), of custom series, asked
+    /// of the same client, each whole: Nautilus' time-range pipeline windows no custom data request
+    /// (`data/src/engine/time_range.rs`, `is_time_range_pipeline_variant`). No request of either
+    /// kind leaves the client out of the node.
     pub fn add_with_custom(
         &mut self,
         client: NodeClient,
@@ -373,8 +361,7 @@ impl NodeFill {
         }));
     }
 
-    /// What a fill was told to ask of instruments, each request with its
-    /// period.
+    /// What a fill was told to ask of instruments, each request with its period.
     #[cfg(test)]
     pub(crate) fn asked(&self) -> Vec<(FillRequest, Option<SignedDuration>)> {
         self.requests
@@ -386,23 +373,24 @@ impl NodeFill {
             .collect()
     }
 
-    /// Fills the catalog in `catalog_dir` through a live node with the
-    /// clients and the catalog, one request at a time, each with
-    /// `update_catalog`, so the data engine writes each answer back over
-    /// its window, and what was written stays if a later window fails.
-    /// The node runs on the clocks `clock` makes, its kernel's and each
-    /// component's (`LiveNodeBuilder::with_clock_factory`), which the data
-    /// engine and the clients read the time from: a fill of history passes
-    /// Nautilus' `LiveClock`.
-    /// Nothing asked builds no node; a node built is disposed whatever
-    /// comes of it (`concepts/architecture.md`, "Processes and threads").
+    /// Fills the catalog in `catalog_dir` through a live node with the clients and the catalog, one
+    /// request at a time, each with `update_catalog`, so the data engine writes each answer back
+    /// over its window, and what was written stays if a later window fails. The node runs on the
+    /// clocks `clock` makes, its kernel's and each component's
+    /// (`LiveNodeBuilder::with_clock_factory`), which the data engine and the clients read the time
+    /// from: a fill of history passes Nautilus' `LiveClock`. Nothing asked builds no node; a node
+    /// built is disposed whatever comes of it (`concepts/architecture.md`, "Processes and
+    /// threads").
     ///
     /// # Errors
     ///
-    /// Returns an error if the node fails to build or run; naming the
-    /// request, if one fails, its client answers with a failure or its
-    /// answer is not written back; or if the node stops before every
-    /// request is answered. What was written before stays.
+    /// Returns an error if:
+    /// - The node fails to build or run.
+    /// - A request fails, its client answers with a failure or its answer is not written back, the
+    ///   error naming the request.
+    /// - The node stops before every request is answered.
+    ///
+    /// What was written before stays.
     pub async fn run(
         self,
         catalog_dir: &Path,
@@ -465,8 +453,8 @@ impl NodeFill {
     }
 }
 
-/// How the actor's requests ended: how many were answered, the first
-/// failure, and whether every request was answered.
+/// How the actor's requests ended: how many were answered, the first failure, and whether
+/// every request was answered.
 #[derive(Debug, Default)]
 struct Outcome {
     answered: usize,
@@ -474,9 +462,8 @@ struct Outcome {
     done: bool,
 }
 
-/// Asks for `requests` one at a time, the next once the one before is
-/// answered, and stops the node after the last answer or the first
-/// failure.
+/// Asks for `requests` one at a time, the next once the one before is answered, and stops the
+/// node after the last answer or the first failure.
 #[derive(Debug)]
 struct FillActor {
     core: DataActorCore,
@@ -505,16 +492,15 @@ impl FillActor {
         }
     }
 
-    /// Sends `asked` to the data engine, naming its client, with
-    /// `update_catalog`, a series in windows of its period, custom data
-    /// whole; depth at the levels of its venue's book
-    /// (`venues::book_format`), the one format of the catalog's series of
-    /// it, which the venue's history serves in that format or not at all.
+    /// Sends `asked` to the data engine, naming its client, with `update_catalog`, a series in
+    /// windows of its period, custom data whole; depth at the levels of its venue's book
+    /// (`venues::book_format`), the one format of the catalog's series of it, which the venue's
+    /// history serves in that format or not at all.
     ///
     /// # Errors
     ///
-    /// Returns an error if Nautilus refuses the request, or naming the
-    /// instrument if it asks the depth of a venue whose book has none.
+    /// Returns an error if Nautilus refuses the request, or, naming the instrument, if it asks the
+    /// depth of a venue whose book has none.
     fn issue(&mut self, asked: Asked) -> anyhow::Result<UUID4> {
         let Asked {
             request,
@@ -617,7 +603,7 @@ impl DataActor for FillActor {
                 .map_or(0, Vec::len),
             _ => 0,
         };
-        // A window of the request, written back; the next one is on its way.
+        // A window of the request, written back; the next one is on its way
         if !response.completed() {
             return Ok(());
         }
@@ -750,8 +736,7 @@ mod tests {
             .unwrap();
     }
 
-    /// Stores GCZ26's 1-minute bars over Wednesday 21 October, a bar
-    /// closing at 10:00.
+    /// Stores GCZ26's 1-minute bars over Wednesday 21 October, a bar closing at 10:00.
     fn store_bars_over_wednesday(catalog: &ParquetDataCatalog) {
         let price = Price::from("4000.0");
         let close = ts("2026-10-21T10:00:00Z");
@@ -775,9 +760,8 @@ mod tests {
             .unwrap();
     }
 
-    /// A series stored over Wednesday, its trades or its bar type's bars:
-    /// a slice from Tuesday lacks Tuesday and what follows Wednesday, the
-    /// definition asked over the whole slice.
+    /// A series stored over Wednesday, its trades or its bar type's bars: a slice from Tuesday
+    /// lacks Tuesday and what follows Wednesday, the definition asked over the whole slice.
     #[rstest]
     #[case::trades(
         store_trades_over_wednesday,
@@ -848,10 +832,9 @@ mod tests {
         assert_eq!(missing(&catalog, &slices).unwrap(), []);
     }
 
-    /// Quote files of `id` in the catalog in `dir` over the intervals of
-    /// `files`, each named as a live node's promotion names it: its
-    /// interval and a replay identity. The files are empty: coverage reads
-    /// their names.
+    /// Quote files of `id` in the catalog in `dir` over the intervals of `files`, each named as a
+    /// live node's promotion names it: its interval and a replay identity. The files are empty:
+    /// coverage reads their names.
     fn promoted_quotes(dir: &Path, id: &str, files: &[(&str, &str)]) {
         let quotes = dir.join("data/quotes").join(id.replace('/', ""));
         std::fs::create_dir_all(&quotes).unwrap();
@@ -862,9 +845,9 @@ mod tests {
         }
     }
 
-    /// The slivers a live node's daily promotions leave between their files
-    /// are what the catalog lacks, each asked with the definition over it.
-    /// A run-start directory an older node left is ignored.
+    /// The slivers a live node's daily promotions leave between their files are what the catalog
+    /// lacks, each asked with the definition over it. A run-start directory an older node left is
+    /// ignored.
     #[rstest]
     fn a_sliver_between_promoted_files_is_asked_with_its_definition() {
         let dir = tempfile::tempdir().unwrap();
@@ -914,9 +897,8 @@ mod tests {
         }
     }
 
-    /// An empty catalog lacks a series over its slice, asked as its kind,
-    /// after the definition over it: bars as their bar type, funding, and
-    /// book deltas as deltas.
+    /// An empty catalog lacks a series over its slice, asked as its kind, after the definition over
+    /// it: bars as their bar type, funding, and book deltas as deltas.
     #[rstest]
     #[case::bars(
         bars_slice(BARS, "2026-10-20T00:00:00Z", "2026-10-21T00:00:00Z"),
@@ -964,8 +946,8 @@ mod tests {
         Params::new([("source".to_string(), json!("bond_yields"))].into())
     }
 
-    /// No definition: a custom series brings no instrument. Asked by its
-    /// data type as Nautilus builds it.
+    /// No definition: a custom series brings no instrument. Asked by its data type as Nautilus
+    /// builds it.
     #[rstest]
     fn a_custom_series_is_lacking_over_its_window_alone() {
         let dir = tempfile::tempdir().unwrap();
@@ -993,10 +975,9 @@ mod tests {
         );
     }
 
-    /// The bond yields under GC's id, a root GC rolls from GCQ26 into GCZ26
-    /// at 00:00 UTC on 29 July 2026 (`rolls/README.md`): each contract's
-    /// series lacks over its slice, asked by its data type, the
-    /// contract's id its identifier, the type and metadata kept.
+    /// The bond yields under GC's id, a root GC rolls from GCQ26 into GCZ26 at 00:00 UTC on 29 July
+    /// 2026 (`rolls/README.md`): each contract's series lacks over its slice, asked by its data
+    /// type, the contract's id its identifier, the type and metadata kept.
     #[rstest]
     fn a_roots_custom_series_is_lacking_contract_by_contract_over_its_slices() {
         let dir = tempfile::tempdir().unwrap();
