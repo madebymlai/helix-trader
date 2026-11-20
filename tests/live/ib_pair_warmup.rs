@@ -1,8 +1,13 @@
-//! A live start on IB of a strategy converting through IDEALPRO's EUR/USD, end to end on the Docker
-//! paper gateway, with an empty catalog, so that IB answers the whole warmup: the pair's 1-minute
-//! BID and ASK bars, which the data requirements carry, are requested as IB serves them (see
-//! `strategy::warmup`), the warmup completes, and Nautilus' rate of EUR in USD through them is in
-//! the cache at its end, as a trade sized at the start reads it.
+//! A live start on IB of a strategy that converts through IDEALPRO's EUR/USD, end to end on the
+//! Docker paper gateway. The catalog is empty, so IB answers the whole warmup.
+//!
+//! The test checks that:
+//!
+//! - The pair's 1-minute BID and ASK bars, which the data requirements carry, are requested as IB
+//!   serves them (see `strategy::warmup`).
+//! - The warmup completes.
+//! - Nautilus' rate of EUR in USD through them is in the cache at its end, as a trade sized at the
+//!   start reads it.
 //!
 //! Gated as `ib_gateway.rs`. It places no order. Its warmup reaches back 72 hours, so that it holds
 //! the pair's last bars on a weekend too:
@@ -152,7 +157,7 @@ async fn a_live_start_warms_up_an_idealpro_pairs_bid_and_ask_bars_and_has_its_ra
         record: Rc::clone(&record),
     };
 
-    // An empty catalog: IB answers the whole warmup
+    // The catalog is empty, so IB answers the whole warmup
     let catalog = tempfile::tempdir().unwrap();
 
     // Outside the catalog, as `Live` requires

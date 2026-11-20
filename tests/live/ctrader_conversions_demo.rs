@@ -1,12 +1,14 @@
-//! End to end on a cTrader broker's demo: a strategy converting through the broker's EUR/USD
-//! (`[trade] conversions`) runs on `Live` reading gold's minute bars, and the node's cache holds
-//! the pair's quotes from the start. The pair is read as quotes alone, the form its venue's history
-//! serves (`venues::rate_series`): the warmup asks their history, the strategy subscribes from its
-//! start (`strategy::subscriptions`), and its rates convert euros into dollars. Needs what
+//! End to end on a cTrader broker's demo, for a strategy that converts through the broker's EUR/USD
+//! (`[trade] conversions`). The strategy runs on `Live`, reading gold's minute bars. The node's
+//! cache holds the pair's quotes from the start.
+//!
+//! The pair is read as quotes alone, the form its venue's history serves (`venues::rate_series`).
+//! The warmup asks for their history, and the strategy subscribes from its start
+//! (`strategy::subscriptions`). Its rates convert euros into dollars. The test needs what
 //! `ctrader_demo.rs` needs, and the forex market open.
 //!
 //! Gated as `ctrader_demo.rs` is. The strategy is a recorder wired as the EMA crossover is, with
-//! the requirements and rates of an EMA config listing the pair; it sends no order. The test
+//! the requirements and rates of an EMA config that lists the pair. It sends no order. The test
 //! deletes the trader's Redis records (`live::redis`) once the node has stopped cleanly. Run it
 //! with:
 //!
@@ -71,7 +73,8 @@ struct Recorder {
 }
 
 nautilus_strategy!(Recorder, {
-    /// The instruments its config claims, which the live node registers as it adds the strategy.
+    /// Returns the instruments its config claims. The live node registers them as it adds the
+    /// strategy.
     fn external_order_instrument_ids(&self) -> Option<Vec<InstrumentId>> {
         self.config().external_order_instrument_ids.clone()
     }
@@ -134,7 +137,7 @@ async fn a_live_run_caches_its_conversion_pairs_quotes_after_its_start() {
     };
     let (gold, eurusd) = (broker.gold(), broker.eurusd());
 
-    // Slow periods the run never warms, so it decides nothing here
+    // The run never warms these slow periods, so it decides nothing here
     let config = EmaCrossConfig::load(&format!(
         r#"
         [data]
@@ -175,7 +178,7 @@ async fn a_live_run_caches_its_conversion_pairs_quotes_after_its_start() {
         record: Rc::clone(&record),
     };
 
-    // An empty catalog: the broker answers the whole warmup
+    // The catalog is empty, so the broker answers the whole warmup
     let catalog = tempfile::tempdir().unwrap();
 
     // Outside the catalog, as `Live` requires
@@ -188,7 +191,7 @@ async fn a_live_run_caches_its_conversion_pairs_quotes_after_its_start() {
         recording: crate::recording(staging.path()),
     };
 
-    // As Ctrl-C would, once the node runs: its signal handler stops it
+    // Interrupts as Ctrl-C would once the node runs, so its signal handler stops it
     let interrupt = get_runtime().spawn(async {
         tokio::time::sleep(LIVE_RUN).await;
         let status = Command::new("kill")
@@ -235,7 +238,7 @@ async fn a_live_run_caches_its_conversion_pairs_quotes_after_its_start() {
     let cached = record.cached.expect("no quote of the pair in the cache");
     assert!(cached.ts_init > started, "{cached:?} before {started}");
 
-    // A rate, so a trade is sized
+    // There is a rate, so a trade is sized
     let converted = record.converted.expect("1,000 EUR not converted into USD");
     assert_eq!(converted.currency, Currency::USD());
     assert!(converted.as_decimal() > rust_decimal::Decimal::ZERO);

@@ -1,6 +1,8 @@
-//! Fixture of the backtest tests: one ETF, SXR8.IBIS in EUR, on 1-minute quotes in a temporary
-//! catalog, and the EMA crossover trading it on hourly MID bars. Quotes come as a wave, trades (a
-//! level per hour bar chosen by the test) and noise (every bar price, for `recorder.rs`).
+//! Fixture for the backtest tests: one ETF, SXR8.IBIS in EUR, with 1-minute quotes in a temporary
+//! catalog. The EMA crossover trades it on hourly MID bars.
+//!
+//! Quotes come as a wave, as trades (a level per hour bar, chosen by the test) or as noise (every
+//! bar price, for `recorder.rs`).
 
 #![allow(dead_code, reason = "each test module uses part of the fixture")]
 
@@ -55,7 +57,7 @@ pub(crate) fn ts(s: &str) -> Timestamp {
     s.parse().unwrap()
 }
 
-/// The clocks of a fill's node at `now` (`NodeFill::run`).
+/// Returns the clocks for a fill's node at `now` (`NodeFill::run`).
 pub(crate) fn clock_at(now: Timestamp) -> impl Fn() -> Rc<RefCell<dyn Clock>> + 'static {
     move || {
         let clock = VirtualClock::new();
@@ -77,8 +79,9 @@ pub(crate) fn half_spread() -> Price {
     Price::from("0.05")
 }
 
-/// Bid and ask are `mid` less and plus the half spread, sizes 1,000,000, stamped 1 ns before the
-/// close.
+/// Returns a quote stamped 1 ns before `close`.
+///
+/// Bid and ask are `mid` less and plus the half spread. Both sizes are 1,000,000.
 pub(crate) fn quote(close: Timestamp, mid: f64) -> QuoteTick {
     let size = Quantity::from(1_000_000);
     let mid = Price::new(mid, 2);
@@ -94,7 +97,7 @@ pub(crate) fn quote(close: Timestamp, mid: f64) -> QuoteTick {
     )
 }
 
-/// One quote per minute closing in `(from, to]`.
+/// Returns one quote per minute closing in `(from, to]`.
 pub(crate) fn minute_quotes(
     from: Timestamp,
     to: Timestamp,
@@ -124,8 +127,9 @@ pub(crate) fn ohlc(bar: &Bar) -> Ohlc {
     (bar.ts_event.into(), bar.open, bar.high, bar.low, bar.close)
 }
 
-/// Hour MID bars of the quotes stamped at or after `from`, each over `(close − 1 h, close]` less
-/// the 1 ns stamp.
+/// Returns hour MID bars of the quotes stamped at or after `from`.
+///
+/// Each bar covers `(close − 1 h, close]`, less the 1 ns stamp.
 pub(crate) fn hour_bars(quotes: &[QuoteTick], from: Timestamp) -> Vec<Ohlc> {
     let mut bars: Vec<Ohlc> = vec![];
     for quote in quotes {
@@ -150,8 +154,10 @@ pub(crate) fn hour_bars(quotes: &[QuoteTick], from: Timestamp) -> Vec<Ohlc> {
     bars
 }
 
-/// Minute `m` (1 to 60) of the hour bar closing at `c` quotes `level(c) + 0.01 m`, or nothing if
-/// `level(c)` is `None`: a bar closes at its level + 0.60.
+/// Returns stepped quotes.
+///
+/// Minute `m` (1 to 60) of the hour bar closing at `c` quotes `level(c) + 0.01 m`. It quotes
+/// nothing if `level(c)` is `None`. A bar closes at its level + 0.60.
 pub(crate) fn stepped_quotes(
     from: Timestamp,
     to: Timestamp,
@@ -190,7 +196,7 @@ pub(crate) fn catalog_of(
     dir
 }
 
-/// Up to the root, then down to `dir`.
+/// Returns the path that goes up to the root, then down to `dir`.
 pub(crate) fn relative(dir: &Path) -> PathBuf {
     let cwd = std::env::current_dir().unwrap();
     let mut relative: PathBuf = std::iter::repeat_n("..", cwd.components().count() - 1).collect();
@@ -198,7 +204,7 @@ pub(crate) fn relative(dir: &Path) -> PathBuf {
     relative
 }
 
-/// Hour MID bars over `[start, end]`, 10,000 EUR to start.
+/// Returns a backtest on hour MID bars over `[start, end]`, starting with 10,000 EUR.
 pub(crate) fn backtest(
     catalog: &Path,
     start: Timestamp,
@@ -220,8 +226,10 @@ pub(crate) fn backtest(
     }
 }
 
-/// Xetra's continuous trading: the hour bars closing 10:00 to 17:00 Frankfurt time (09:00 to 16:00
-/// UTC in January), eight a day.
+/// Returns Xetra's continuous trading.
+///
+/// It covers the hour bars closing 10:00 to 17:00 Frankfurt time (09:00 to 16:00 UTC in January),
+/// eight a day.
 pub(crate) fn session() -> Session {
     Session {
         time_zone: TimeZone::get("Europe/Berlin").unwrap(),
@@ -230,15 +238,20 @@ pub(crate) fn session() -> Session {
     }
 }
 
-/// 0.32% of equity: stops of 50 bps from closes about 600 EUR are 2.97 to 3.10 EUR a share, so
-/// 9,700 to 10,100 EUR buys 10 shares rounded down (32 / 3.10 = 10.3), the size the EMA backtests
-/// are worked out at.
+/// The risk is 0.32% of equity.
+///
+/// Stops of 50 bps from closes about 600 EUR are 2.97 to 3.10 EUR a share. So 9,700 to 10,100 EUR
+/// buys 10 shares, rounded down (32 / 3.10 = 10.3). The EMA backtests are worked out at this size.
 pub(crate) const RISK: &str = "0.32%";
 
 pub(crate) const LIVE_WARMUP: SignedDuration = SignedDuration::from_hours(1);
 
-/// 1-hour MID bars, `fast` against `slow`, risking `RISK` over the stop. Exits: stop loss 50 bps
-/// and take profit 100 bps from the deciding bar's close, rounded to the cent, and a 4-hour hold.
+/// Returns an EMA crossover config on 1-hour MID bars, with `fast` against `slow`.
+///
+/// It risks `RISK` over the stop. Its exits are:
+///
+/// - Stop loss 50 bps and take profit 100 bps from the deciding bar's close, rounded to the cent.
+/// - A 4-hour hold.
 pub(crate) fn ema_config(fast: usize, slow: usize, session: Option<Session>) -> EmaCrossConfig {
     let instrument_id = InstrumentId::from(INSTRUMENT_ID);
     EmaCrossConfig {
@@ -273,9 +286,11 @@ pub(crate) fn ema_cross(fast: usize, slow: usize, session: Option<Session>) -> E
     EmaCross::new(ema_config(fast, slow, session)).unwrap()
 }
 
-/// 1 against 2 bars: the fast EMA is the close, the slow starts as the average of its first two
-/// closes, then moves two thirds to each new close. From two bars on, a close above the slow EMA of
-/// the bars before it is long, at or below short; a side change is a cross.
+/// Returns the EMA cross of 1 against 2 bars.
+///
+/// The fast EMA is the close. The slow EMA starts as the average of its first two closes, then
+/// moves two thirds to each new close. From two bars on, a close above the slow EMA of the bars
+/// before it is long, and a close at or below it is short. A side change is a cross.
 pub(crate) fn shortest_ema_cross() -> EmaCross {
     ema_cross(1, 2, Some(session()))
 }
@@ -284,8 +299,10 @@ pub(crate) fn balance(result: &BacktestResult) -> String {
     result.summary["account.IBIS.balance.EUR.total"].clone()
 }
 
-/// A mid of 600 EUR plus 5 EUR of sine over 30 hours, quoted every minute for 192 hours from Monday
-/// 5 January 2026. The run starts half an hour after the 71st hour.
+/// A wave of quotes every minute for 192 hours from Monday 5 January 2026.
+///
+/// The mid is 600 EUR plus 5 EUR of sine over 30 hours. The run starts half an hour after the 71st
+/// hour.
 pub(crate) mod wave {
     use super::*;
 
@@ -322,10 +339,11 @@ pub(crate) mod wave {
     }
 }
 
-/// 7 January 2026, quoted from 09:00 UTC in steps (a bar closes at its level + 0.60). A run from
-/// 10:00 replays no quote before it, so not the bar closing 10:00 at 800.60: the shortest crossover
-/// warms on 11:00 at 610.60 and 12:00 at 600.60, initialized at 12:00 with slow EMA 605.60, short
-/// (600.60 below it).
+/// Quotes on 7 January 2026 from 09:00 UTC, in steps (a bar closes at its level + 0.60).
+///
+/// A run from 10:00 replays no quote before it, so the bar closing 10:00 at 800.60 is not
+/// replayed. The shortest crossover warms on 11:00 at 610.60 and 12:00 at 600.60. It is
+/// initialized at 12:00 with slow EMA 605.60, short (600.60 is below it).
 ///
 /// From 13:00 the bar closing at 13:00 + i hours is each test's `levels[i]`. From 09:00 the 10:00
 /// bar would count, and the slow EMA would be 705.60 at 11:00 and 635.60 at 12:00.
@@ -336,8 +354,8 @@ pub(crate) mod trades {
         ts(&format!("2026-01-07T{hh_mm}:00Z"))
     }
 
-    /// The close of the 10:00 bar, so that the first bar replayed, closing 11:00, holds its whole
-    /// hour.
+    /// Returns the close of the 10:00 bar. The first bar replayed, closing 11:00, then holds its
+    /// whole hour.
     pub(crate) fn start() -> Timestamp {
         at("10:00")
     }
@@ -374,19 +392,21 @@ pub(crate) mod trades {
         super::backtest(catalog, start, end(levels), commission)
     }
 
-    /// A trade ended by time on the shortest crossover with the code's exits (`ema_config`):
+    /// A trade ended by time on the shortest crossover, with the code's exits (`ema_config`).
     ///
-    /// - 13:00 at 620.60, above 605.60: buy 10 at the ask 620.65, slow EMA to 615.60; stop loss
-    ///   617.50, take profit 626.81 (620.60 less 0.5% and plus 1%, to the cent);
-    /// - 14:00 at 624.60, 15:00 and 16:00 at 624.80, above the slow EMA (615.60, 621.60, 623.73):
-    ///   long, no cross, slow EMA to 624.44. 17:00 and 18:00 are out of the session. Bids from
-    ///   623.96 to 624.85 touch neither exit;
-    /// - 17:00, 4 hours after the fill: sell 10 at the bid, 624.30 + 0.60 − 0.05 = 624.85,
-    ///   cancelling both legs. An hour sooner it sells at 624.75, an hour later at 624.95.
+    /// - At 13:00 the close is 620.60, above 605.60. It buys 10 at the ask 620.65 and moves the
+    ///   slow EMA to 615.60. The stop loss is 617.50 and the take profit 626.81 (620.60 less 0.5%
+    ///   and plus 1%, to the cent).
+    /// - At 14:00 (624.60), 15:00 and 16:00 (624.80) the close is above the slow EMA (615.60,
+    ///   621.60, 623.73). It stays long with no cross, and the slow EMA moves to 624.44. 17:00 and
+    ///   18:00 are out of the session. Bids from 623.96 to 624.85 touch neither exit.
+    /// - At 17:00, 4 hours after the fill, it sells 10 at the bid, 624.30 + 0.60 − 0.05 = 624.85,
+    ///   and cancels both legs. An hour sooner it sells at 624.75, an hour later at 624.95.
     ///
-    /// 10 shares gain 4.20 each: 10042.00 EUR after 4 orders (entry, two legs, close). From 09:00,
-    /// 13:00 to 16:00 are all short (below 635.60, 625.60, 624.93, 624.84): no trade. From 12:30
-    /// the crossover is cold until 14:00, then long: no trade (`backtest_warmup.rs`).
+    /// 10 shares gain 4.20 each, giving 10042.00 EUR after 4 orders (entry, two legs, close). From
+    /// 09:00, 13:00 to 16:00 are all short (below 635.60, 625.60, 624.93, 624.84), so there is no
+    /// trade. From 12:30 the crossover is cold until 14:00, then long, so there is no trade
+    /// (`backtest_warmup.rs`).
     pub(crate) const TIME_EXIT: [f64; 6] = [620.0, 624.0, 624.2, 624.2, 624.3, 624.4];
     pub(crate) const TIME_EXIT_ORDERS: usize = 4;
     pub(crate) const TIME_EXIT_BALANCE: &str = "10042.00 EUR";
@@ -396,8 +416,8 @@ pub(crate) mod trades {
     }
 }
 
-/// A quote a minute on 7 January 2026 from 06:00 to 15:00 UTC, mid 600 plus 0.01 times `37 k mod
-/// 101` for the k-th minute, so that every hour bar has its own open, high, low and close.
+/// A quote a minute on 7 January 2026 from 06:00 to 15:00 UTC. The mid for the k-th minute is 600
+/// plus 0.01 times `37 k mod 101`. So every hour bar has its own open, high, low and close.
 pub(crate) mod noise {
     use super::*;
 
