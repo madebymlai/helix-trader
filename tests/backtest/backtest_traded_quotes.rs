@@ -1,8 +1,7 @@
 //! A strategy whose config reads the instrument it trades only through data that gives Nautilus no
-//! market price for it, its custom data (a custom series under its id, which brings no instrument),
-//! its book deltas or its depth: the data requirements of its config
-//! (`StandardConfig::data_requirements`) still replay the instrument's quotes, so its market order
-//! on IC's gold (`common::ic`) is not denied for want of a price, nor of the instrument, and fills.
+//! market price for it (custom data, which brings no instrument, book deltas, depth): the data
+//! requirements of its config (`StandardConfig::data_requirements`) still replay the instrument's
+//! quotes, so its market order on IC's gold (`common::ic`) is not denied for want of a price.
 
 use std::{cell::RefCell, num::NonZeroUsize, rc::Rc, sync::Arc};
 
@@ -30,7 +29,6 @@ use serde::Deserialize;
 
 use crate::common::{glbx, ic};
 
-/// A part reading every series its config lists, trading one instrument.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Reader {}
@@ -53,7 +51,7 @@ impl Part for Reader {
 
 /// The config trading IC's gold, reading it through `data` alone, keyed by `key`, `instrument_id`
 /// or, of custom data, `identifier`. A custom type loads once registered, as the process registers
-/// those it compiles at its start: `Imbalance` here.
+/// those it compiles at its start.
 fn config(data: &str, key: &str) -> StandardConfig<Reader> {
     nautilus_serialization::ensure_custom_data_registered::<glbx::Imbalance>();
     StandardConfig::load(&format!(
@@ -71,7 +69,6 @@ fn config(data: &str, key: &str) -> StandardConfig<Reader> {
     .unwrap()
 }
 
-/// What of IC's gold the buyer subscribes to.
 #[derive(Debug, Clone, Copy)]
 enum Reads {
     Imbalances,
@@ -79,7 +76,6 @@ enum Reads {
     Depth,
 }
 
-/// Buys 1 oz of IC's gold on the first data of it it gets.
 #[derive(Debug)]
 struct Buyer {
     core: StrategyCore,
@@ -143,12 +139,10 @@ impl DataActor for Buyer {
     }
 }
 
-/// The data type of IC gold's `Imbalance`s, keyed by its id.
 fn imbalance_type() -> DataType {
     DataType::new(glbx::IMBALANCE, None, Some(ic::INSTRUMENT_ID.to_string()))
 }
 
-/// Stores `glbx::imbalances()` as IC gold's, over 08:00 to 12:00.
 fn store_imbalances(catalog: &tempfile::TempDir) {
     nautilus_serialization::ensure_custom_data_registered::<glbx::Imbalance>();
     let data: Vec<CustomData> = glbx::imbalances()
@@ -165,7 +159,6 @@ fn store_imbalances(catalog: &tempfile::TempDir) {
         .unwrap();
 }
 
-/// Stores an event of one bid on IC's gold at 09:20, over 08:00 to 12:00.
 fn store_deltas(catalog: &tempfile::TempDir) {
     let time = ic::at("09:20:00");
     let delta = OrderBookDelta::new(
@@ -187,7 +180,6 @@ fn store_deltas(catalog: &tempfile::TempDir) {
         .unwrap();
 }
 
-/// Stores a snapshot of IC gold's book at 09:20, its best bid 4001.00, over 08:00 to 12:00.
 fn store_depth(catalog: &tempfile::TempDir) {
     let mut depth = stub_depth10();
     let shift = Price::from("4001.00") - depth.bids[0].price;
@@ -207,8 +199,6 @@ fn store_depth(catalog: &tempfile::TempDir) {
         .unwrap();
 }
 
-/// Runs a buyer on the requirements of `config` over IC's backtest window and returns how many
-/// positions it opened.
 fn positions(catalog: &tempfile::TempDir, config: &StandardConfig<Reader>, reads: Reads) -> usize {
     let requirements = config.data_requirements();
     let backtest = Backtest {

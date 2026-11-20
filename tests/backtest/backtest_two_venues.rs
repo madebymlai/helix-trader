@@ -1,7 +1,7 @@
-//! A backtest on two venues: the data of one, CME gold's book on GLBX (`common::glbx`), and the
-//! trades on the other, IC's gold (`common::ic`). A strategy reading gold's book buys 10 oz of
-//! XAUUSD on IC's first hour bar. Each venue is simulated, keeping positions as the real one does
-//! (`venues::oms_type`), with the backtest's balance, and the report shows each venue's account.
+//! A backtest on two venues: CME gold's book on GLBX (`common::glbx`) is the data, IC's gold
+//! (`common::ic`) the trades. A strategy reading gold's book buys 10 oz of XAUUSD on IC's first
+//! hour bar. Each venue is simulated, keeping positions as the real one does (`venues::oms_type`),
+//! with the backtest's balance, and the report shows each venue's account.
 
 use std::{cell::RefCell, num::NonZeroUsize, rc::Rc};
 
@@ -22,14 +22,12 @@ use rstest::rstest;
 
 use crate::common::{glbx, ic};
 
-/// What the strategy got: the times of gold's snapshots, and whether it bought.
 #[derive(Debug, Default)]
 struct Record {
     snapshots: Vec<UnixNanos>,
     bought: bool,
 }
 
-/// Reads gold's book, buys XAUUSD on IC's first hour bar.
 #[derive(Debug)]
 struct BookReader {
     core: StrategyCore,
