@@ -1,16 +1,13 @@
-//! fill-catalog of IB's history, end to end on the Docker paper gateway:
-//! an hour of quotes, which IB's history serves as an instrument's
-//! historical BID_ASK ticks (`venues::serves`) and IB's writer pages back
-//! from the end, 1,000 ticks a request (`ib::page_back`), the catalog
-//! holding every quote of the hour, those IB stamps in one second among
-//! them; and two probes of what IB answers across a gap in trading, which
-//! no offline test can tell: quotes across IDEALPRO's daily break, and
-//! 5-second bars across Xetra's night, each held on both sides of the gap.
+//! fill-catalog of IB's history, end to end on the Docker paper gateway: an hour of quotes, which
+//! IB's history serves as an instrument's historical BID_ASK ticks (`venues::serves`) and IB's
+//! writer pages back from the end, 1,000 ticks a request (`ib::page_back`), the catalog holding
+//! every quote of the hour, those IB stamps in one second among them; and two probes of what IB
+//! answers across a gap in trading, which no offline test can tell: quotes across IDEALPRO's daily
+//! break, and 5-second bars across Xetra's night, each held on both sides of the gap.
 //!
-//! Gated as `ib_gateway.rs`: each test returns at once, saying it was
-//! skipped, unless `NAUTILUS_IB_RUN=1` is set in the shell. They need what
-//! `ib_gateway.rs` needs and place no order. IB holds 5-second bars six
-//! months back, so the bars' probe tells until May 2027:
+//! Gated as `ib_gateway.rs`: each test returns at once, saying it was skipped, unless
+//! `NAUTILUS_IB_RUN=1` is set in the shell. They need what `ib_gateway.rs` needs and place no
+//! order. IB holds 5-second bars six months back, so the bars' probe tells until May 2027:
 //!
 //! ```sh
 //! NAUTILUS_IB_RUN=1 cargo test --test live ib_quote_fill:: -- --nocapture
@@ -39,9 +36,8 @@ const EUR_USD: &str = "EUR/USD.IDEALPRO";
 /// Held by each test while it fills on client id 51.
 static GATEWAY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Whether the run is opted in, from the shell, before `.env` is read, so
-/// that the file cannot opt in. An opted-in run claims the process for this
-/// module (`claim_process`).
+/// Whether the run is opted in, from the shell, before `.env` is read, so that the file cannot opt
+/// in. An opted-in run claims the process for this module (`claim_process`).
 fn opted_in(test: &str) -> bool {
     let run = std::env::var("NAUTILUS_IB_RUN").is_ok_and(|value| value == "1");
     if run {
@@ -66,8 +62,8 @@ fn november(time: &str) -> Timestamp {
     format!("2026-11-{time}Z").parse().unwrap()
 }
 
-/// fill-catalog of `requirements` over `[start, end]` into a catalog of its
-/// own: the catalog, and its directory, kept while it is read.
+/// fill-catalog of `requirements` over `[start, end]` into a catalog of its own: the catalog, and
+/// its directory, kept while it is read.
 async fn filled(
     requirements: &DataRequirements,
     start: Timestamp,
@@ -96,10 +92,9 @@ fn eur_usd_quotes() -> DataRequirements {
     }
 }
 
-/// fill-catalog fills the pair's definition and its quotes over an hour FX
-/// trades through, Thursday 12 November 2026 from 10:00 UTC: every quote
-/// within the hour, of the pair, its bid at or below its ask, the hour
-/// covered.
+/// fill-catalog fills the pair's definition and its quotes over an hour FX trades through, Thursday
+/// 12 November 2026 from 10:00 UTC: every quote within the hour, of the pair, its bid at or below
+/// its ask, the hour covered.
 #[tokio::test(flavor = "multi_thread")]
 async fn fill_catalog_fills_an_hour_of_an_idealpro_pairs_quotes() {
     if !opted_in("fill_catalog_fills_an_hour_of_an_idealpro_pairs_quotes") {
@@ -150,13 +145,11 @@ async fn fill_catalog_fills_an_hour_of_an_idealpro_pairs_quotes() {
     assert_eq!(lacking, [], "{EUR_USD}");
 }
 
-/// IDEALPRO trades Sunday to Friday from 17:15 to 17:00 New York time
-/// (IB's product listings), its daily break 17:00 to 17:15, on Thursday 12
-/// November 2026 22:00 to 22:15 UTC. A fill of EUR/USD's quotes over 21:30
-/// to 22:30 UTC pages back across the break, IB answering no request
-/// across two sessions: a page ending in the break, answered empty, would
-/// end the paging with the quotes after the break alone. The catalog holds
-/// quotes on both sides of it.
+/// IDEALPRO trades Sunday to Friday from 17:15 to 17:00 New York time (IB's product listings), its
+/// daily break 17:00 to 17:15, on Thursday 12 November 2026 22:00 to 22:15 UTC. A fill of EUR/USD's
+/// quotes over 21:30 to 22:30 UTC pages back across the break, IB answering no request across two
+/// sessions: a page ending in the break, answered empty, would end the paging with the quotes after
+/// the break alone. The catalog holds quotes on both sides of it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_quote_fill_across_idealpros_daily_break_holds_quotes_on_both_sides() {
     if !opted_in("a_quote_fill_across_idealpros_daily_break_holds_quotes_on_both_sides") {
@@ -190,12 +183,11 @@ async fn a_quote_fill_across_idealpros_daily_break_holds_quotes_on_both_sides() 
     assert!(after > 0, "no quote after the break");
 }
 
-/// Xetra trades SXR8 09:00 to 17:30 Frankfurt time, 08:00 to 16:30 UTC in
-/// November. A fill of its 5-second LAST bars from Thursday 12 November
-/// 2026 16:00 UTC to Friday 13 November 08:30 UTC walks back across the
-/// night, an hour a request (`ib::request_duration`): a request answered
-/// empty overnight would end the walk with the 13th's bars alone. The
-/// catalog holds the 12th's last half hour and the 13th's first.
+/// Xetra trades SXR8 09:00 to 17:30 Frankfurt time, 08:00 to 16:30 UTC in November. A fill of its
+/// 5-second LAST bars from Thursday 12 November 2026 16:00 UTC to Friday 13 November 08:30 UTC
+/// walks back across the night, an hour a request (`ib::request_duration`): a request answered
+/// empty overnight would end the walk with the 13th's bars alone. The catalog holds the 12th's last
+/// half hour and the 13th's first.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_small_bar_fill_across_a_night_holds_bars_of_both_sessions() {
     if !opted_in("a_small_bar_fill_across_a_night_holds_bars_of_both_sessions") {

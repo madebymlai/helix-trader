@@ -1,18 +1,15 @@
-//! End to end on a cTrader broker's demo: `Live` on XAU/USD checks the
-//! account, builds a node with the broker's clients and a catalog already
-//! holding gold's quotes up to `CATALOG_BEHIND` before now (filled as
-//! fill-catalog fills it), and a recording strategy gets its minute bars
-//! warmed up over two windows from the catalog, then from the broker's data
-//! client up to now, each bar reaching its indicator once, then live quotes and the bars Nautilus builds from them, until SIGINT;
-//! the broker's answer is written back to the catalog, and the live quotes
-//! the node receives are streamed into it. It needs what `ctrader_demo.rs`
-//! needs, and gold's market open.
+//! End to end on a cTrader broker's demo: `Live` on XAU/USD checks the account, builds a node with
+//! the broker's clients and a catalog already holding gold's quotes up to `CATALOG_BEHIND` before
+//! now (filled as fill-catalog fills it), and a recording strategy gets its minute bars warmed up
+//! over two windows from the catalog, then from the broker's data client up to now, each bar
+//! reaching its indicator once, then live quotes and the bars Nautilus builds from them, until
+//! SIGINT; the broker's answer is written back to the catalog, and the live quotes the node
+//! receives are streamed into it. It needs what `ctrader_demo.rs` needs, and gold's market open.
 //!
-//! Gated as `ctrader_demo.rs` is. The strategy sends no order; the broker's
-//! execution client reconciles the account. One node per process, hence its
-//! own module, run alone (`main.rs`). The node keeps its cache in Redis
-//! (`live::redis`) under the test's trader, `HELIXTEST-101`, whose records
-//! the test deletes once the node has stopped cleanly. Run it with:
+//! Gated as `ctrader_demo.rs` is. The strategy sends no order; the broker's execution client
+//! reconciles the account. One node per process, hence its own module, run alone (`main.rs`). The
+//! node keeps its cache in Redis (`live::redis`) under the test's trader, `HELIXTEST-101`, whose
+//! records the test deletes once the node has stopped cleanly. Run it with:
 //!
 //! ```sh
 //! NAUTILUS_CTRADER_RUN=pepperstone cargo test --test live ctrader_live_demo:: -- --nocapture
@@ -50,15 +47,16 @@ const CATALOG_BEHIND: SignedDuration = SignedDuration::from_mins(10);
 #[derive(Debug, Default)]
 struct Record {
     warmup_quotes: Vec<QuoteTick>,
+
     /// Why the warmup failed, if it did.
     warmup_failure: Option<String>,
     bars: Vec<Bar>,
     quotes: Vec<QuoteTick>,
 }
 
-/// Warms up its bars through a `Warmup` and subscribes to them from where
-/// it ends through `Subscriptions`, as a real strategy does, subscribes to
-/// the quotes, and records both. It sends no order.
+/// Warms up its bars through a `Warmup` and subscribes to them from where it ends through
+/// `Subscriptions`, as a real strategy does, subscribes to the quotes, and records both. It sends
+/// no order.
 #[derive(Debug)]
 struct Recorder {
     core: StrategyCore,
@@ -116,7 +114,8 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
     };
     let gold = broker.gold();
     let bar_type = BarType::from(format!("{gold}-1-MINUTE-MID-INTERNAL").as_str());
-    // Over 23 hours: two windows.
+
+    // Over 23 hours: two windows
     let warmup = SignedDuration::from_hours(26);
     let requirements = DataRequirements {
         bar_types: vec![bar_type],
@@ -140,8 +139,9 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
         warmup: Rc::clone(&warming),
         record: Rc::clone(&record),
     };
-    // The catalog: gold and its quotes over [now - warmup, now -
-    // CATALOG_BEHIND], as fill-catalog stores them.
+
+    // The catalog: gold and its quotes over [now - warmup, now - CATALOG_BEHIND], as fill-catalog
+    // stores them.
     let catalog = tempfile::tempdir().unwrap();
     let now = crate::now();
     let catalog_end = now - CATALOG_BEHIND;
@@ -154,7 +154,8 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
     .await
     .unwrap();
     let started = crate::now();
-    // Outside the catalog, as `Live` requires.
+
+    // Outside the catalog, as `Live` requires
     let staging = tempfile::tempdir().unwrap();
     let live = Live {
         trader_id: TraderId::from("HELIXTEST-101"),
@@ -163,7 +164,8 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
         catalog: catalog.path().to_path_buf(),
         recording: crate::recording(staging.path()),
     };
-    // As Ctrl-C would, once the node runs: its signal handler stops it.
+
+    // As Ctrl-C would, once the node runs: its signal handler stops it
     let interrupt = get_runtime().spawn(async {
         tokio::time::sleep(LIVE_RUN).await;
         let status = Command::new("kill")
@@ -175,14 +177,15 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
 
     let ran = Box::pin(tokio::time::timeout(
         LIVE_RUN + Duration::from_secs(60),
-        // The recorder trades nothing: it claims no instrument.
+        // The recorder trades nothing: it claims no instrument
         live.run(&requirements, &warming, recorder, None),
     ))
     .await;
 
     let interrupted = interrupt.is_finished();
     interrupt.abort();
-    // The node's records in Redis, under the test's trader.
+
+    // The node's records in Redis, under the test's trader
     common::cache::delete_trader("HELIXTEST-101").await;
     ran.expect("the node stops within a minute of SIGINT")
         .unwrap();
@@ -208,9 +211,9 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
         quotes.first(),
         quotes.last()
     );
-    // Responses over `[now - warmup, now]`, a window at a time, the
-    // catalog's quotes, then the broker's for the rest, written back to the
-    // catalog.
+
+    // Responses over `[now - warmup, now]`, a window at a time, the catalog's quotes, then the
+    // broker's for the rest, written back to the catalog.
     assert_eq!(record.warmup_failure, None);
     assert!(!warming.is_warming(), "the warmup did not complete");
     assert!(!warmup_quotes.is_empty(), "no warmup quote");
@@ -236,17 +239,19 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
         from_catalog < warmup_quotes.len(),
         "no warmup quote from the broker"
     );
-    // The broker's answer, written back: the catalog's quotes after its own end up
-    // to the warmup's last are the warmup's from it. A check of the
-    // catalog's end alone would pass on the quotes the node streams.
+
+    // The broker's answer, written back: the catalog's quotes after its own end up to the warmup's
+    // last are the warmup's from it. A check of the catalog's end alone would pass on the quotes
+    // the node streams.
     let stored: Vec<QuoteTick> = ParquetDataCatalog::new(catalog.path(), None, None, None, None)
         .query(Some(vec![gold.to_string()]), None, None, None, None, true)
         .unwrap();
     let seen = |q: &QuoteTick| (q.ts_event, q.bid_price, q.ask_price);
     let warmup_last = warmup_quotes.last().unwrap();
     let warmup_end = warmup_last.ts_event;
-    // cTrader's first spot after a subscription resends the latest tick, so
-    // the first live quote can be the warmup's last again.
+
+    // cTrader's first spot after a subscription resends the latest tick, so the first live quote
+    // can be the warmup's last again.
     let repeated = quotes.first().is_some_and(|q| seen(q) == seen(warmup_last));
     println!(
         "the first live quote repeats the warmup's last: {repeated}; \
@@ -266,7 +271,8 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
         .filter(|q| i128::from(q.ts_event.as_u64()) > catalog_end_ns)
         .map(seen)
         .collect();
-    // The repeat, stamped as the warmup's last, is streamed beside it.
+
+    // The repeat, stamped as the warmup's last, is streamed beside it
     if repeated && written_back.len() > from_broker.len() {
         written_back.pop();
     }
@@ -276,7 +282,8 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
     );
     let from_window_start = i128::from(warmup_quotes[0].ts_event.as_u64())
         - started.checked_sub(warmup).unwrap().as_nanosecond();
-    // Within gold's daily close, should the window start in it.
+
+    // Within gold's daily close, should the window start in it
     assert!(
         (0..5_400_000_000_000).contains(&from_window_start),
         "the warmup starts {from_window_start} ns after the run's start - warmup"
@@ -286,8 +293,8 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
             .windows(2)
             .all(|w| w[0].ts_event <= w[1].ts_event)
     );
-    // Warm, up to now, each bar once: the first live bar is the minute after
-    // the last warmup bar.
+
+    // Warm, up to now, each bar once: the first live bar is the minute after the last warmup bar
     assert!(warmup_bars.len() >= 20, "{} warmup bars", warmup_bars.len());
     assert!(
         warmup_bars
@@ -305,7 +312,8 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
         bars.windows(2)
             .all(|w| w[1].ts_event.as_u64() - w[0].ts_event.as_u64() == minute)
     );
-    // Live quotes: at the spot's time, sized as the history's, ordered.
+
+    // Live quotes: at the spot's time, sized as the history's, ordered
     assert!(!quotes.is_empty());
     assert!(quotes.iter().all(|q| q.instrument_id == gold));
     assert!(quotes.iter().all(|q| q.bid_price <= q.ask_price));
@@ -316,13 +324,14 @@ async fn live_gold_quotes_and_bars_built_from_them_follow_a_warmup_up_to_now() {
             .iter()
             .all(|q| q.bid_size == broker.gold_quote_size())
     );
-    // The hand-off: past the one repeat allowed, every live quote is newer
-    // than the warmup's last.
+
+    // The hand-off: past the one repeat allowed, every live quote is newer than the warmup's last
     let new = &quotes[usize::from(repeated)..];
     assert!(new.iter().all(|q| q.ts_event > warmup_end));
-    // Streamed into the catalog: the new live quotes the strategy got, in
-    // order, then those the node received until its clients disconnected
-    // (see `live/README.md`, "Recording into the catalog").
+
+    // Streamed into the catalog: the new live quotes the strategy got, in order, then those the
+    // node received until its clients disconnected (see `live/README.md`, "Recording into the
+    // catalog").
     let streamed: Vec<_> = stored
         .iter()
         .filter(|q| q.ts_event > warmup_end)

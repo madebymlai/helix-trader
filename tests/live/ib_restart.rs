@@ -1,21 +1,18 @@
-//! The live node's cache in Redis across restarts, end to end on the IB
-//! paper account: what comes back from the cache, and what Nautilus'
-//! reconciliation makes of a cache that disagrees with IB. It places
-//! orders, so it runs only with both `NAUTILUS_IB_RUN=1` and
-//! `NAUTILUS_IB_LIVE_ORDERS=1` set in the shell, on a paper account
-//! (`NAUTILUS_IB_ACCOUNT_ID`, `D...`), with Docker for the gateway and
-//! Redis, EXS1.IBIS flat and Xetra open:
+//! The live node's cache in Redis across restarts, end to end on the IB paper account: what comes
+//! back from the cache, and what Nautilus' reconciliation makes of a cache that disagrees with IB.
+//! It places orders, so it runs only with both `NAUTILUS_IB_RUN=1` and `NAUTILUS_IB_LIVE_ORDERS=1`
+//! set in the shell, on a paper account (`NAUTILUS_IB_ACCOUNT_ID`, `D...`), with Docker for the
+//! gateway and Redis, EXS1.IBIS flat and Xetra open:
 //!
 //! ```sh
 //! NAUTILUS_IB_RUN=1 NAUTILUS_IB_LIVE_ORDERS=1 cargo test --test live ib_restart:: -- --test-threads=1 --nocapture
 //! ```
 //!
-//! Each node runs in a child process of this test binary (`phase`, one
-//! node per process) under the test's own trader, so its records in Redis
-//! are apart from `live`'s; the test deletes them at the end. The probe
-//! leaves its `oms_type` unset: on IB it nets. After each test, IB itself
-//! is read: EXS1 flat, no open order. Client ids 44 (nodes) and 45 (the
-//! checks and the order sent behind the node's back).
+//! Each node runs in a child process of this test binary (`phase`, one node per process) under the
+//! test's own trader, so its records in Redis are apart from `live`'s; the test deletes them at the
+//! end. The probe leaves its `oms_type` unset: on IB it nets. After each test, IB itself is read:
+//! EXS1 flat, no open order. Client ids 44 (nodes) and 45 (the checks and the order sent behind the
+//! node's back).
 
 use std::{path::PathBuf, process::Command, time::Duration};
 
@@ -56,25 +53,25 @@ const TRADER: &str = "HELIX_RESTART_TRADER";
 /// What a probe does on its node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Step {
-    /// On a flat instrument, buys 1 share at market, then once it fills 1
-    /// more: two overlapping trades, one netted position of 2. Writes the
-    /// position and its orders to `STATE`.
+    /// On a flat instrument, buys 1 share at market, then once it fills 1 more: two overlapping
+    /// trades, one netted position of 2. Writes the position and its orders to `STATE`.
     Open,
-    /// Checks the position `Open` left came back as it was, from its own
-    /// orders, alone; then closes it.
+
+    /// Checks the position `Open` left came back as it was, from its own orders, alone; then closes
+    /// it.
     Restart,
-    /// On a flat instrument, rests a buy limit about 10% under the bid
-    /// and, once the order is submitted to IB, stops the process as a crash
-    /// would, before IB's answer is processed: the order is in flight in the
-    /// cache. Its price is a whole euro, on Xetra's grid, if `on_grid`, so
-    /// IB takes it; else a whole euro and 0.0001, IB's tick but not
-    /// Xetra's, so IB rejects it (error 110). Writes the order to `STATE`.
+
+    /// On a flat instrument, rests a buy limit about 10% under the bid and, once the order is
+    /// submitted to IB, stops the process as a crash would, before IB's answer is processed: the
+    /// order is in flight in the cache. Its price is a whole euro, on Xetra's grid, if `on_grid`,
+    /// so IB takes it; else a whole euro and 0.0001, IB's tick but not Xetra's, so IB rejects it
+    /// (error 110). Writes the order to `STATE`.
     Crash { on_grid: bool },
-    /// Records what the node starts with, after reconciliation, in
-    /// `STATE`, and stops: no order.
+
+    /// Records what the node starts with, after reconciliation, in `STATE`, and stops: no order.
     Observe,
-    /// Cancels every order of the instrument and closes every position,
-    /// then stops once flat.
+
+    /// Cancels every order of the instrument and closes every position, then stops once flat.
     Flatten,
 }
 
@@ -85,15 +82,16 @@ struct Saved {
     quantity: Option<String>,
     avg_px_open: Option<Decimal>,
     orders: Vec<String>,
-    /// `Observe`: the open positions of the instrument, its open or
-    /// in-flight orders, and the status of each of `orders`.
+
+    /// `Observe`: the open positions of the instrument, its open or in-flight orders, and the
+    /// status of each of `orders`.
     open_positions: usize,
     live_orders: Vec<(String, OrderStatus)>,
     statuses: Vec<(String, Option<OrderStatus>)>,
 }
 
-/// One step, in a child process: a live node with the probe, stopped by
-/// the probe. Runs only when the parent test names a step.
+/// One step, in a child process: a live node with the probe, stopped by the probe. Runs only when
+/// the parent test names a step.
 #[tokio::test(flavor = "multi_thread")]
 async fn phase() {
     let Ok(step) = std::env::var(PHASE) else {
@@ -109,9 +107,11 @@ async fn phase() {
         custom: vec![],
         warmup: SignedDuration::from_mins(10),
     };
-    // An empty catalog of its own: the venue answers the whole warmup.
+
+    // An empty catalog of its own: the venue answers the whole warmup
     let catalog = tempfile::tempdir().unwrap();
-    // Outside the catalog, as `Live` requires.
+
+    // Outside the catalog, as `Live` requires
     let staging = tempfile::tempdir().unwrap();
     let live = Live {
         trader_id: TraderId::from(std::env::var(TRADER).unwrap().as_str()),
@@ -139,8 +139,8 @@ async fn phase() {
     assert!(report.done, "the probe did not finish");
 }
 
-/// A position held over a restart comes back from the cache in Redis as
-/// it was, from the probe's own two orders, and no other position appears.
+/// A position held over a restart comes back from the cache in Redis as it was, from the probe's
+/// own two orders, and no other position appears.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_open_position_comes_back_from_the_cache_after_a_restart() {
     let Some(account) = opted_in() else { return };
@@ -150,8 +150,8 @@ async fn an_open_position_comes_back_from_the_cache_after_a_restart() {
     assert_flat(&account).await;
 }
 
-/// A position closed behind the node's back, while it was down: the cache
-/// still has it open, IB has none.
+/// A position closed behind the node's back, while it was down: the cache still has it open, IB has
+/// none.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_position_closed_while_the_node_was_down() {
     let Some(account) = opted_in() else { return };
@@ -159,8 +159,9 @@ async fn a_position_closed_while_the_node_was_down() {
     run.phase(Step::Open);
     sell_at_market(&account, 2.0).await;
     run.phase(Step::Observe);
-    // Reconciliation takes IB's sell as an external order claimed by the
-    // strategy, and its fill closes the cached position.
+
+    // Reconciliation takes IB's sell as an external order claimed by the strategy, and its fill
+    // closes the cached position.
     let observed = run.saved();
     assert_eq!(observed.open_positions, 0, "{observed:?}");
     assert!(observed.live_orders.is_empty(), "{observed:?}");
@@ -175,7 +176,8 @@ async fn an_order_in_flight_when_the_node_died_that_ib_took() {
     let run = Run::new("HELIXTEST-046");
     run.crash(true);
     run.phase(Step::Observe);
-    // Startup reconciliation finds it in IB's open orders: Accepted.
+
+    // Startup reconciliation finds it in IB's open orders: Accepted
     let observed = run.saved();
     assert_eq!(
         observed.statuses,
@@ -186,19 +188,19 @@ async fn an_order_in_flight_when_the_node_died_that_ib_took() {
     assert_flat(&account).await;
 }
 
-/// An order in flight in the cache when the node died, which IB rejected
-/// meanwhile: IB lists it nowhere, not even among its open orders.
+/// An order in flight in the cache when the node died, which IB rejected meanwhile: IB lists it
+/// nowhere, not even among its open orders.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_order_in_flight_when_the_node_died_that_ib_rejected() {
     let Some(account) = opted_in() else { return };
     let run = Run::new("HELIXTEST-047");
     run.crash(false);
     run.phase(Step::Observe);
-    // Nautilus leaves it Submitted: no report of IB's names it, the
-    // in-flight check covers only the orders sent in the current run, and
-    // the open-order check resolves an order missing at the venue only in
-    // full-history mode (`open_check_open_only = false`), not in Nautilus'
-    // default open-only mode (concepts/execution/reconciliation.md).
+
+    // Nautilus leaves it Submitted: no report of IB's names it, the in-flight check covers only the
+    // orders sent in the current run, and the open-order check resolves an order missing at the
+    // venue only in full-history mode (`open_check_open_only = false`), not in Nautilus' default
+    // open-only mode (concepts/execution/reconciliation.md).
     let observed = run.saved();
     assert_eq!(
         observed.statuses,
@@ -208,9 +210,8 @@ async fn an_order_in_flight_when_the_node_died_that_ib_rejected() {
     assert_flat(&account).await;
 }
 
-/// Whether the test is opted in, from the shell, before `.env` is read;
-/// then the paper account. An opted-in test claims the process for this
-/// module (`claim_process`).
+/// Whether the test is opted in, from the shell, before `.env` is read; then the paper account. An
+/// opted-in test claims the process for this module (`claim_process`).
 fn opted_in() -> Option<IbAccount> {
     let set = |name| std::env::var(name).is_ok_and(|value| value == "1");
     if !(set("NAUTILUS_IB_RUN") && set("NAUTILUS_IB_LIVE_ORDERS")) {
@@ -234,8 +235,8 @@ fn account() -> IbAccount {
     account
 }
 
-/// The steps of one test: a trader of its own and the file its steps
-/// share. Dropping it deletes the trader's records in Redis.
+/// The steps of one test: a trader of its own and the file its steps share. Dropping it deletes the
+/// trader's records in Redis.
 struct Run {
     trader: &'static str,
     state: tempfile::NamedTempFile,
@@ -286,14 +287,14 @@ impl Drop for Run {
     }
 }
 
-/// Sells `quantity` EXS1 at market in `account`, behind the node's back,
-/// and waits for IB to report the position flat.
+/// Sells `quantity` EXS1 at market in `account`, behind the node's back, and waits for IB to report
+/// the position flat.
 async fn sell_at_market(account: &IbAccount, quantity: f64) {
     let client = Client::connect("127.0.0.1:4002", CLIENT_ID + 1)
         .await
         .unwrap();
-    // Routed SMART with Xetra as primary exchange, as Nautilus' adapter
-    // routes it.
+
+    // Routed SMART with Xetra as primary exchange, as Nautilus' adapter routes it
     let contract = Contract::stock(SYMBOL)
         .on_exchange("SMART")
         .primary("IBIS")
@@ -522,8 +523,8 @@ impl Probe {
         Ok(())
     }
 
-    /// `Open`: the first buy on a flat instrument, the second once the
-    /// first filled, then the netted position saved.
+    /// `Open`: the first buy on a flat instrument, the second once the first filled, then the
+    /// netted position saved.
     fn open(&mut self) -> anyhow::Result<()> {
         match self.entries.as_slice() {
             [] => {
@@ -627,8 +628,8 @@ impl Probe {
         self.submit_order(order, None, None, None)
     }
 
-    /// `Observe`: records the instrument's open positions and
-    /// live orders, and the status of the orders the last step left.
+    /// `Observe`: records the instrument's open positions and live orders, and the status of the
+    /// orders the last step left.
     fn observe(&mut self) -> anyhow::Result<()> {
         self.note_state("observed");
         let left: Saved = serde_json::from_str(&std::fs::read_to_string(&self.state)?)?;
@@ -651,8 +652,7 @@ impl Probe {
         self.finish()
     }
 
-    /// `Flatten`: cancels the orders and closes the positions once, then
-    /// stops once flat.
+    /// `Flatten`: cancels the orders and closes the positions once, then stops once flat.
     fn flatten(&mut self) -> anyhow::Result<()> {
         if self.is_flat() {
             self.note_state("flat");
@@ -666,8 +666,9 @@ impl Probe {
         for order in self.live_orders() {
             self.cancel_order(order.client_order_id(), None, None)?;
         }
+
         for position in self.open_positions() {
-            // IB denies reduce-only orders.
+            // IB denies reduce-only orders
             self.close_position(&position, None, None, None, Some(false), None, None)?;
         }
         Ok(())
@@ -682,15 +683,14 @@ fn interrupt() {
 }
 
 nautilus_strategy!(Probe, {
-    /// The instruments its config claims, which the live node registers
-    /// as it adds it.
+    /// The instruments its config claims, which the live node registers as it adds it.
     fn external_order_instrument_ids(&self) -> Option<Vec<InstrumentId>> {
         self.config().external_order_instrument_ids.clone()
     }
 
-    /// In `Crash`, aborts once the order is submitted, after long enough
-    /// for Redis to receive it (its writer runs on another thread) but
-    /// with the node thread held, so IB's acknowledgement is not processed.
+    /// In `Crash`, aborts once the order is submitted, after long enough for Redis to receive it
+    /// (its writer runs on another thread) but with the node thread held, so IB's acknowledgement
+    /// is not processed.
     fn on_order_submitted(&mut self, event: OrderSubmitted) {
         if matches!(self.step, Step::Crash { .. }) {
             std::thread::sleep(Duration::from_millis(500));
@@ -704,7 +704,8 @@ nautilus_strategy!(Probe, {
 impl DataActor for Probe {
     fn on_start(&mut self) -> anyhow::Result<()> {
         self.note_state("start");
-        // Market orders need a quote: the risk engine denies them without.
+
+        // Market orders need a quote: the risk engine denies them without
         self.subscribe_quotes(self.instrument_id, None, None);
         Ok(())
     }

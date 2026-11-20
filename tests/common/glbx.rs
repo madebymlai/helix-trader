@@ -1,11 +1,8 @@
-//! CME gold's book as Databento's MBP-10 fills the catalog with it:
-//! GC.v.0.GLBX, the continuous front contract, a `FuturesContract`, and
-//! depth snapshots of 10 levels a side keyed by its id, its trades, no
-//! quotes. Here a few snapshots and trades on Wednesday 21 October 2026,
-//! the day of `common::ic`; and its book deltas, as Databento's MBO fills
-//! the catalog with them, and custom data under its id, `Imbalance`, a
-//! type of the tests'; and, apart, its quotes, as LSE streams CME Globex's Level
-//! 1, for a run trading it.
+//! CME gold's book as Databento's MBP-10 fills the catalog: GC.v.0.GLBX, the continuous front
+//! contract (a `FuturesContract`), its trades, and depth snapshots of 10 levels a side keyed by its
+//! id, no quotes, on Wednesday 21 October 2026, the day of `common::ic`. Also its book deltas, as
+//! Databento's MBO fills the catalog, custom data under its id (`Imbalance`, a type of the tests')
+//! and, apart, its quotes, as LSE streams CME Globex's Level 1, for a run trading it.
 
 use std::{path::Path, sync::Arc};
 
@@ -29,6 +26,7 @@ use ustr::Ustr;
 use super::ic::at;
 
 pub(crate) const INSTRUMENT_ID: &str = "GC.v.0.GLBX";
+
 /// Bars of gold the catalog holds no source of: left out of a backtest.
 pub(crate) const MINUTE_BARS: &str = "GC.v.0.GLBX-1-MINUTE-MID-INTERNAL";
 
@@ -48,8 +46,8 @@ pub(crate) fn instrument() -> InstrumentAny {
     InstrumentAny::FuturesContract(gold)
 }
 
-/// A snapshot of 10 levels a side at `time`, its best bid `best_bid`, the
-/// levels 1.00 apart, the best ask 1.00 above the best bid.
+/// A snapshot of 10 levels a side at `time`, its best bid `best_bid`, the levels 1.00 apart, the
+/// best ask 1.00 above the best bid.
 pub(crate) fn depth(time: Timestamp, best_bid: &str) -> OrderBookDepth {
     let mut depth = stub_depth10();
     let shift = Price::from(best_bid) - depth.bids[0].price;
@@ -72,8 +70,7 @@ pub(crate) fn depths() -> Vec<OrderBookDepth> {
     ]
 }
 
-/// Writes gold and `depths()` into the catalog in `dir`, the book stored
-/// over 08:00 to 12:00.
+/// Writes gold and `depths()` into the catalog in `dir`, the book stored over 08:00 to 12:00.
 pub(crate) fn store(dir: &Path) {
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     catalog.write_instruments(vec![instrument()]).unwrap();
@@ -87,8 +84,8 @@ pub(crate) fn store(dir: &Path) {
         .unwrap();
 }
 
-/// A quote of the contract at `time`, as LSE streams CME Globex's Level
-/// 1, sized 10,000 contracts a side.
+/// A quote of the contract at `time`, as LSE streams CME Globex's Level 1, sized 10,000 contracts a
+/// side.
 pub(crate) fn quote(time: Timestamp, bid: &str, ask: &str) -> QuoteTick {
     let size = Quantity::from(10_000);
     QuoteTick::new(
@@ -102,8 +99,7 @@ pub(crate) fn quote(time: Timestamp, bid: &str, ask: &str) -> QuoteTick {
     )
 }
 
-/// Writes gold and `quotes` into the catalog in `dir`, stored over `[from,
-/// to]`: no book.
+/// Writes gold and `quotes` into the catalog in `dir`, stored over `[from, to]`: no book.
 pub(crate) fn store_quotes(dir: &Path, quotes: &[QuoteTick], from: Timestamp, to: Timestamp) {
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     catalog.write_instruments(vec![instrument()]).unwrap();
@@ -134,8 +130,7 @@ pub(crate) fn trades() -> Vec<TradeTick> {
     ]
 }
 
-/// Writes `trades()` into the catalog in `dir`, stored over 08:00 to
-/// 12:00.
+/// Writes `trades()` into the catalog in `dir`, stored over 08:00 to 12:00.
 pub(crate) fn store_trades(dir: &Path) {
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     catalog
@@ -148,8 +143,8 @@ pub(crate) fn store_trades(dir: &Path) {
         .unwrap();
 }
 
-/// A bid of one contract at `price`, order `order_id`, added to the book at
-/// `time`; the last delta of its event if `last`.
+/// A bid of one contract at `price`, order `order_id`, added to the book at `time`; the last delta
+/// of its event if `last`.
 pub(crate) fn delta(time: Timestamp, price: &str, order_id: u64, last: bool) -> OrderBookDelta {
     OrderBookDelta::new(
         InstrumentId::from(INSTRUMENT_ID),
@@ -167,8 +162,8 @@ pub(crate) fn delta(time: Timestamp, price: &str, order_id: u64, last: bool) -> 
     )
 }
 
-/// The deltas stored: an event before the backtests' start, then an event
-/// of two deltas and an event of one.
+/// The deltas stored: an event before the backtests' start, then an event of two deltas and an
+/// event of one.
 pub(crate) fn deltas() -> Vec<OrderBookDelta> {
     vec![
         delta(at("08:40:00"), "4010.00", 1, true),
@@ -203,8 +198,8 @@ pub struct Imbalance {
 /// The type name `Imbalance` is stored and published under.
 pub(crate) const IMBALANCE: &str = "Imbalance";
 
-/// The data type of gold's `Imbalance`s, keyed by its id, as Nautilus'
-/// Databento client keys its custom data.
+/// The data type of gold's `Imbalance`s, keyed by its id, as Nautilus' Databento client keys its
+/// custom data.
 pub(crate) fn imbalance_type() -> DataType {
     DataType::new(IMBALANCE, None, Some(INSTRUMENT_ID.to_string()))
 }
@@ -216,15 +211,14 @@ pub(crate) fn imbalances() -> Vec<Imbalance> {
         .to_vec()
 }
 
-/// Writes `imbalances()` into the catalog in `dir`, stored over 08:00 to
-/// 12:00. Registers `Imbalance` with Nautilus first, as any reader of it
-/// must.
+/// Writes `imbalances()` into the catalog in `dir`, stored over 08:00 to 12:00. Registers
+/// `Imbalance` with Nautilus first, as any reader of it must.
 pub(crate) fn store_imbalances(dir: &Path) {
     store_imbalances_as(dir, &imbalance_type());
 }
 
-/// Writes `imbalances()` into the catalog in `dir` as `data_type`, stored
-/// under its identifier over 08:00 to 12:00, as `store_imbalances` does.
+/// Writes `imbalances()` into the catalog in `dir` as `data_type`, stored under its identifier over
+/// 08:00 to 12:00, as `store_imbalances` does.
 pub(crate) fn store_imbalances_as(dir: &Path, data_type: &DataType) {
     nautilus_serialization::ensure_custom_data_registered::<Imbalance>();
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);

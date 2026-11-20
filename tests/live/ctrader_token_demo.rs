@@ -1,16 +1,12 @@
-//! End to end on a cTrader broker's demo, the token pair: a forced
-//! renewal of the access token on a running session, which goes on
-//! receiving quotes and answering requests; then a fresh session
-//! authenticates from the token file without renewing. It ROTATES the
-//! login's real token pair, every broker's, in the token file
-//! (`$XDG_STATE_HOME/ctrader/token.json`, by default
-//! `~/.local/state/ctrader/token.json`): the file keeps the new pair,
-//! `.env`'s is spent. It needs what `ctrader_demo.rs` needs, through the
-//! cTrader adapter's hooks (its `test-support` feature).
+//! End to end on a cTrader broker's demo, the token pair: a forced renewal of the access token on a
+//! running session, which goes on receiving quotes and answering requests; then a fresh session
+//! authenticates from the token file without renewing. It ROTATES the login's real token pair,
+//! every broker's, in the token file (`$XDG_STATE_HOME/ctrader/token.json`, by default
+//! `~/.local/state/ctrader/token.json`): the file keeps the new pair, `.env`'s is spent. It needs
+//! what `ctrader_demo.rs` needs, through the cTrader adapter's hooks (its `test-support` feature).
 //!
-//! Gated as `ctrader_demo.rs` is; demo only, no order. Its own module, run
-//! alone (`main.rs`), so that the other demo tests' sessions do not run on
-//! the pair it rotates. Run it with:
+//! Gated as `ctrader_demo.rs` is; demo only, no order. Its own module, run alone (`main.rs`), so
+//! that the other demo tests' sessions do not run on the pair it rotates. Run it with:
 //!
 //! ```sh
 //! NAUTILUS_CTRADER_RUN=ic cargo test --test live ctrader_token_demo:: -- --nocapture
@@ -24,8 +20,7 @@ use nautilus_common::testing::wait_until_async;
 
 use crate::demo_broker::opted_in;
 
-/// The log records of the cTrader adapter at info and above, which must
-/// hold no token.
+/// The log records of the cTrader adapter at info and above, which must hold no token.
 struct Captured(Mutex<Vec<String>>);
 
 impl log::Log for Captured {
@@ -132,7 +127,7 @@ async fn the_demo_session_renews_its_token_and_keeps_receiving_quotes() {
         "{left:?}"
     );
 
-    // A fresh session, as the next run: from the file, no renewal.
+    // A fresh session, as the next run: from the file, no renewal
     let fresh = CTraderSession::connect(&connection).await.unwrap();
     let account = fresh.check_account().await;
     fresh.disconnect().await;
