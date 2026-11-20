@@ -1,5 +1,5 @@
-//! The LSE keys, sent in the `X-API-Key` header of every call: one for LSE's own markets and one
-//! for each exchange plan's market, each given or read from its variable, and never printed.
+//! The LSE keys, sent in the `X-API-Key` header: one for LSE's own markets, one per exchange plan.
+//! Each is given or read from its variable, and never printed.
 
 use std::fmt::Display;
 
@@ -9,17 +9,15 @@ use super::consts::{LSE_API_KEY, LSE_CME_API_KEY, LSE_NASDAQ_API_KEY};
 
 /// What an LSE key opens.
 ///
-/// An exchange plan issues a key of its own, which authenticates only where its market is carried
-/// (LSE's `/v3/usage`: `product`, `global` for an LSE key, else the exchange), so each market is
-/// asked with its product's key.
+/// An exchange plan's key authenticates only its own market (LSE's `/v3/usage`: `product` is
+/// `global` for an LSE key, else the exchange).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LseProduct {
-    /// LSE's own markets, the derived ones and US options, an included market: the LSE key,
-    /// `LSE_API_KEY`.
+    /// LSE's own markets, including derived ones and US options: `LSE_API_KEY`.
     Global,
-    /// CME Globex (`cme`): a CME Group plan's key, `LSE_CME_API_KEY`.
+    /// CME Globex (`cme`): `LSE_CME_API_KEY`.
     Cme,
-    /// Nasdaq TotalView (`nasdaq`): a Nasdaq plan's key, `LSE_NASDAQ_API_KEY`.
+    /// Nasdaq TotalView (`nasdaq`): `LSE_NASDAQ_API_KEY`.
     Nasdaq,
 }
 
@@ -54,10 +52,9 @@ pub struct LseCredential {
 }
 
 impl LseCredential {
-    /// Returns the key `api_key` of `product` or, if none is given, the one `var` reads from the
-    /// product's variable.
+    /// Returns `api_key`, else the key `var` reads from the product's variable.
     ///
-    /// It returns none if neither holds one, an empty key being none.
+    /// Returns `None` if neither holds a key, an empty key being none.
     pub fn resolve(
         product: LseProduct,
         api_key: Option<SecretString>,
@@ -83,7 +80,6 @@ mod tests {
 
     const KEY: &str = "lse-test-key-0123456789";
 
-    /// An environment where `name` holds `key`.
     fn environment(name: &'static str, key: Option<&str>) -> impl Fn(&str) -> Option<String> {
         move |asked| (asked == name).then(|| key.map(ToString::to_string))?
     }
@@ -119,8 +115,7 @@ mod tests {
         );
     }
 
-    /// A product reads its own variable alone, an empty key being none: an exchange plan's key
-    /// opens its market alone, so the CME key is no LSE key, nor a Nasdaq key.
+    /// A product reads its own variable alone, and an empty key is none.
     #[rstest]
     #[case::cme_key_for_lse(LseProduct::Global, LSE_CME_API_KEY, Some(KEY))]
     #[case::cme_key_for_nasdaq(LseProduct::Nasdaq, LSE_CME_API_KEY, Some(KEY))]

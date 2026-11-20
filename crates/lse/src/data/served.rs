@@ -1,6 +1,6 @@
-//! What the client serves of the past, as a fill or a warmup asks before it requests: the series of
-//! an instrument (`serves`) and its custom data, its rows (`serves_custom`). They are the twins of
-//! what it streams (`streams::streams`, `streams::streams_custom`).
+//! What the client serves of the past, checked before a fill or warmup requests it: an instrument's
+//! series (`serves`) and custom data rows (`serves_custom`). They are the twins of
+//! `streams::streams` and `streams::streams_custom`.
 
 use std::str::FromStr;
 
@@ -23,16 +23,12 @@ use crate::{
 /// identifier (an instrument id, or a bar type for bars).
 ///
 /// It checks what a request checks before LSE is asked:
-/// - The quotes, trades, book depths and book deltas of an instrument of a venue it serves,
-///   `LSEDGE`, `GLBX`, `XNAS` or `OPRA` (`request_quotes`, `request_trades`, `request_book_depth`,
-///   `request_book_deltas`), but the trades of an `LSEDGE` index, which has none, its ticks being
-///   quotes.
-/// - The bars of LSE's candles (`CandleWidth::of`) of an `LSEDGE` series or an `OPRA` contract
-///   (`request_bars`).
+/// - Quotes, trades, book depths and book deltas of an `LSEDGE`, `GLBX`, `XNAS` or `OPRA`
+///   instrument, except the trades of an `LSEDGE` index, whose ticks are quotes.
+/// - Bars, from LSE's candles (`CandleWidth::of`), of an `LSEDGE` series or `OPRA` contract.
 ///
-/// Custom data is its rows, judged apart (`serves_custom`). What LSE refuses once asked is its own
-/// answer, not checked here: the quotes of an `LSEDGE` series but an index's and of an `OPRA`
-/// contract, and the book of either.
+/// Custom data is judged apart (`serves_custom`). What LSE itself refuses is not checked here:
+/// the quotes of an `LSEDGE` index or an `OPRA` contract, and the book of either.
 ///
 /// # Errors
 ///
@@ -79,11 +75,11 @@ pub fn serves(series: &(NautilusDataType, String)) -> anyhow::Result<()> {
     }
 }
 
-/// Checks that the client serves `data_type`, custom data of no instrument, as its custom data
-/// request checks it before LSE is asked (`row_source`).
+/// Checks that the client serves `data_type`, custom data of no instrument, as its request checks
+/// it before LSE is asked (`row_source`).
 ///
-/// It serves LSE's rows of a source and a symbol, under whatever identifier the data type names,
-/// which keys them in a catalog.
+/// It serves LSE's rows of a source and a symbol, under the identifier the data type names, which
+/// keys them in a catalog.
 ///
 /// # Errors
 ///
@@ -93,12 +89,10 @@ pub fn serves_custom(data_type: &DataType) -> anyhow::Result<()> {
     row_source(data_type).map(drop)
 }
 
-/// Returns the rows `data_type` asks for, as the client asks LSE for them: an `LseRow` data type
-/// whose metadata names the `source` and the `symbol`, strings, and no other key (see
-/// `RowSource::of`).
+/// Returns the rows `data_type` asks for: an `LseRow` data type whose metadata names a `source` and
+/// a `symbol` string, and no other key (see `RowSource::of`).
 ///
-/// The identifier is the caller's: the client answers with the data type as asked, so the rows are
-/// stored under it.
+/// The identifier is the caller's: the rows are stored under the data type as asked.
 ///
 /// # Errors
 ///
@@ -142,8 +136,7 @@ mod tests {
 
     use super::*;
 
-    /// The data type of `type_name` and `metadata` under the identifier `RATES`, which no metadata
-    /// derives.
+    /// Under the identifier `RATES`, which no metadata derives.
     fn custom(type_name: &str, metadata: &[(&str, &str)]) -> DataType {
         let metadata = metadata
             .iter()
@@ -152,8 +145,6 @@ mod tests {
         DataType::new(type_name, Some(Params::new(metadata)), Some("RATES".into()))
     }
 
-    /// LSE's rows of a reference collection, of a macro series of releases or of yields, and of an
-    /// instrument's factors, are served under an identifier of the caller's.
     #[rstest]
     #[case::a_collection_s("bond_yields", "US10Y")]
     #[case::the_economic_calendar_s("economic_calendar", "US.Core Inflation Rate YoY")]
@@ -164,7 +155,6 @@ mod tests {
         serves_custom(&custom("LseRow", &[("source", source), ("symbol", symbol)])).unwrap();
     }
 
-    /// Each is refused naming what its client would refuse, before LSE is asked.
     #[rstest]
     #[case::another_type("Imbalance", &[("source", "bond_yields"), ("symbol", "US10Y")], "Imbalance")]
     #[case::no_source("LseRow", &[("symbol", "US10Y")], "source")]
@@ -193,8 +183,7 @@ mod tests {
 
         assert!(err.contains(why), "{err}");
     }
-    /// The client asks LSE for no other data of an instrument, of any of its venues, a contract's
-    /// funding say: each is refused naming the data and the series.
+    /// The client asks LSE for no other data, funding say: each is refused naming data and series.
     #[rstest]
     #[case::of_an_lsedge_series("GOLD-FUTURES.LSEDGE")]
     #[case::of_an_lsedge_index("SPX-INDICES.LSEDGE")]
