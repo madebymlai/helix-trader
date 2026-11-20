@@ -1,6 +1,5 @@
 //! The roll calendar: per product, how its contracts are named, its liquid contract months and the
-//! day and time the front contract rolls (a rule day, less a number of business days), read from
-//! `calendar.toml`, embedded at build time.
+//! day and time the front contract rolls, read from `calendar.toml`, embedded at build time.
 
 use std::sync::LazyLock;
 
@@ -11,18 +10,13 @@ use serde::Deserialize;
 
 const CALENDAR: &str = include_str!("calendar.toml");
 
-/// The embedded calendar, parsed once, on first use: a broken calendar fails every test reading a
-/// product through it.
 static PRODUCTS: LazyLock<Vec<Product>> =
     LazyLock::new(|| parse(CALENDAR).expect("the embedded roll calendar parses"));
 
-/// The product whose root is `root`, if any.
 pub(super) fn product(root: InstrumentId) -> Option<&'static Product> {
     PRODUCTS.iter().find(|product| product.root == root)
 }
 
-/// The root whose front contract `contract` is at some time, if any: that of the product rolling
-/// through it (`Product::rolls_through`).
 pub(super) fn root_of(contract: InstrumentId) -> Option<InstrumentId> {
     PRODUCTS
         .iter()
@@ -61,35 +55,27 @@ fn parse(toml: &str) -> anyhow::Result<Vec<Product>> {
     Ok(products)
 }
 
-/// A rolled futures product.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Product {
-    /// The root id: the product's symbol on the data venue.
     root: InstrumentId,
-    /// The symbol of each contract, on the root's venue.
     contract: ContractTemplate,
-    /// The liquid contract months, those the front contract rolls through.
     months: Vec<MonthCode>,
-    /// The rule day the front contract's roll is counted back from.
     roll: Roll,
-    /// The business days (weekdays) before the rule day the front contract rolls, so that it rolls
-    /// before the volume leaves it.
+    /// The weekdays before the rule day the front rolls, so that it rolls before the volume leaves.
     days_before: u32,
     /// The time of day of the roll, UTC.
     time: civil::Time,
 }
 
-/// The rule day a product's front contract's roll to the next liquid one is counted back from.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum Roll {
-    /// The last weekday of the month before the front contract's delivery month (COMEX metals'
-    /// first notice day, holidays aside).
+    /// The last weekday of the month before the delivery month (COMEX metals' first notice day,
+    /// holidays aside).
     LastBusinessDayBeforeDeliveryMonth,
 }
 
-/// A futures month code, January (F) to December (Z).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 enum MonthCode {
     F,
@@ -107,21 +93,18 @@ enum MonthCode {
 }
 
 impl MonthCode {
-    /// The month, 1 to 12.
     fn month(self) -> i8 {
         self as i8 + 1
     }
 }
 
-/// How a product's contracts are named: literal text and placeholders, `{month}` the month code,
-/// `{y}` the year's last digit, `{yy}` its last two digits and `{yyyy}` the year, so any symbol a
-/// venue uses can be declared (`GC{month}{y}` is `GCZ6`). It names a month and a year, or two
-/// contracts would share a symbol.
+/// A contract's symbol as literal text and placeholders: `{month}` the month code, `{y}` the
+/// year's last digit, `{yy}` its last two, `{yyyy}` the year (`GC{month}{y}` is `GCZ6`). It names a
+/// month and a year, or two contracts would share a symbol.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(try_from = "String")]
 struct ContractTemplate(Vec<Part>);
 
-/// A piece of a contract template.
 #[derive(Debug, Clone)]
 enum Part {
     Text(String),
@@ -171,7 +154,6 @@ impl TryFrom<String> for ContractTemplate {
 }
 
 impl ContractTemplate {
-    /// The symbol of `contract`.
     fn fill(&self, contract: Contract) -> Symbol {
         let symbol: String = self
             .0
@@ -187,9 +169,8 @@ impl ContractTemplate {
         Symbol::new(symbol)
     }
 
-    /// The month code of the contract whose symbol is `symbol`, if the template names one so: its
-    /// text in place and each placeholder filled, the month a letter, the years digits, each as
-    /// wide as `fill` writes it.
+    /// The month code in `symbol`, if the template fills it so: each placeholder as wide as `fill`
+    /// writes it.
     fn month_of<'a>(&self, symbol: &'a str) -> Option<&'a str> {
         let mut month = None;
         let mut rest = symbol;
@@ -217,7 +198,6 @@ impl ContractTemplate {
     }
 }
 
-/// A dated contract of a product: its delivery year and month.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct Contract {
     year: i16,
@@ -226,12 +206,11 @@ pub(super) struct Contract {
 
 impl Product {
     /// The front contract at `time`: the first liquid contract not yet rolled out of, a roll at
-    /// `time` exactly included.
+    /// `time` included.
     pub(super) fn front_at(&self, time: Timestamp) -> Contract {
         let year = time.to_zoned(TimeZone::UTC).year();
 
-        // A contract's roll falls weeks before its delivery, so the front at `time` delivers within
-        // the year after `time`'s.
+        // A roll falls weeks before delivery, so the front is in `time`'s year or the next
         (year..=year + 1)
             .flat_map(|year| {
                 self.months
@@ -242,8 +221,8 @@ impl Product {
             .expect("a product has liquid months")
     }
 
-    /// When the front rolls out of `contract` into the next liquid one: `days_before` business days
-    /// before the rule day, at the product's time.
+    /// When the front rolls out of `contract`: `days_before` business days before the rule day, at
+    /// the product's time.
     pub(super) fn roll_out_of(&self, contract: Contract) -> Timestamp {
         let Roll::LastBusinessDayBeforeDeliveryMonth = self.roll;
         let rule_day = weekday_before(civil::date(contract.year, contract.month.month(), 1));
@@ -254,7 +233,6 @@ impl Product {
             .timestamp()
     }
 
-    /// The liquid contract after `contract`.
     pub(super) fn next(&self, contract: Contract) -> Contract {
         self.months
             .iter()
@@ -269,7 +247,6 @@ impl Product {
             })
     }
 
-    /// The liquid contract before `contract`.
     pub(super) fn previous(&self, contract: Contract) -> Contract {
         self.months
             .iter()
@@ -285,15 +262,13 @@ impl Product {
             })
     }
 
-    /// The instrument id of `contract`: the product's contract template filled for it, on the
-    /// root's venue (`GCZ26.GLBX`).
+    /// The instrument id of `contract` on the root's venue (`GCZ26.GLBX`).
     pub(super) fn instrument_id(&self, contract: Contract) -> InstrumentId {
         InstrumentId::new(self.contract.fill(contract), self.root.venue)
     }
 
-    /// Whether the front rolls through `contract`, of any year: it is on the root's venue, its
-    /// symbol the contract template filled for a liquid month (`GCZ26.GLBX` of GC's, not
-    /// `GCV26.GLBX`).
+    /// Whether the front rolls through `contract`, of any year: on the root's venue, with a liquid
+    /// month (`GCZ26.GLBX` of GC's, not `GCV26.GLBX`).
     fn rolls_through(&self, contract: InstrumentId) -> bool {
         contract.venue == self.root.venue
             && self
@@ -303,7 +278,6 @@ impl Product {
     }
 }
 
-/// The weekday before `date`.
 fn weekday_before(date: civil::Date) -> civil::Date {
     let mut day = date;
     loop {
@@ -358,7 +332,6 @@ mod tests {
         assert!(err.to_string().contains("GC.GLBX"), "{err}");
     }
 
-    /// A calendar of one GC product rolling `days_before`, as written in TOML.
     fn gold_rolling(days_before: &str) -> Product {
         let products = parse(&format!(
             r#"
@@ -379,9 +352,8 @@ mod tests {
         gold.roll_out_of(Contract { year, month })
     }
 
-    /// The last weekday of July 2026 is Friday the 31st. The last weekday of March 2026 is Tuesday
-    /// the 31st; three weekdays before it are Monday the 30th, Friday the 27th and Thursday the
-    /// 26th.
+    /// The last weekday of July 2026 is Fri the 31st. Of March 2026 it is Tue the 31st, and three
+    /// weekdays before it are Mon the 30th, Fri the 27th and Thu the 26th.
     #[rstest]
     #[case::with_no_days_before("0", MonthCode::Q, "2026-07-31T00:00Z")]
     #[case::days_before_counted_in_weekdays_across_a_weekend(
@@ -401,7 +373,6 @@ mod tests {
         );
     }
 
-    /// A calendar of one GC product whose contracts are named by `contract`.
     fn gold_named(contract: &str) -> anyhow::Result<Product> {
         let products = parse(&format!(
             r#"
