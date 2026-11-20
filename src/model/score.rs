@@ -2,11 +2,13 @@
 
 use serde::{Deserialize, Serialize};
 
-/// How a model's expected values meet the values realized, beside a baseline's. Empty for no rows.
+/// How a model's expected values meet the realized values, beside a baseline's.
+///
+/// It is empty for no rows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct ExpectedScore {
     pub rows: usize,
-    /// One less the squared error over the baseline's; none where the baseline's is zero.
+    /// One less the squared error over the baseline's. None where the baseline's is zero.
     pub skill: Option<f64>,
     /// The mean of realized less expected.
     pub mean_error: Option<f64>,
@@ -19,7 +21,7 @@ pub struct ExpectedScore {
 }
 
 impl ExpectedScore {
-    /// The score of `rows`, each (expected, realized, baseline's expected).
+    /// Returns the score of `rows`, each (expected, realized, baseline's expected).
     #[must_use]
     pub fn of(rows: &[(f64, f64, f64)]) -> Self {
         if rows.is_empty() {
