@@ -351,7 +351,6 @@ mod tests {
         serde_json::from_str(body).unwrap()
     }
 
-    /// `BRKD` of `nasdaq`, delisted on 16 April 2026, has no name (captured).
     #[rstest]
     fn a_listing_of_no_name_is_read() {
         let listed: LsePairs = serde_json::from_str(PAIRS_NASDAQ_BRK).unwrap();
@@ -377,7 +376,6 @@ mod tests {
         assert_eq!(refusal(body).is_too_wide(), too_wide);
     }
 
-    /// Captured on 13 November 2026.
     #[rstest]
     fn every_collection_of_lse_s_catalogue_is_classified() {
         let catalogue: ReferenceCatalogue = serde_json::from_str(REFERENCE_CATALOGUE).unwrap();
@@ -393,7 +391,6 @@ mod tests {
         assert_eq!(unclassified, Vec::<&str>::new());
     }
 
-    /// Captured on 13 November 2026.
     #[rstest]
     fn each_collection_s_last_key_is_read_from_lse_s_catalogue() {
         let catalogue: ReferenceCatalogue = serde_json::from_str(REFERENCE_CATALOGUE).unwrap();
@@ -481,8 +478,7 @@ mod tests {
         Stamp::of_collection("insider_trades").unwrap()
     }
 
-    /// An insider trade is known at 22:00 New York time: 02:00 UTC the next day in summer, 03:00 in
-    /// winter.
+    /// An insider trade is known at 22:00 New York time.
     #[rstest]
     #[case::a_date(Stamp::DateEnd, "2026-10-13T00:00:00Z", Some("2026-10-14T00:00:00Z"))]
     #[case::an_interval(
@@ -516,7 +512,6 @@ mod tests {
         );
     }
 
-    /// Filed on 13 October 2026, known at 02:00 UTC on the 14th: a second before, the 12th.
     #[rstest]
     fn an_insider_trade_is_not_known_before_22_00_new_york_time_of_its_filing_s_day() {
         assert_eq!(

@@ -126,8 +126,6 @@ mod tests {
         UnixNanos::from(time.parse::<Timestamp>().unwrap())
     }
 
-    /// GOLD.F is the first tick captured: 2026-11-13 16:44:55.499567, bid 3888.0, ask 3888.2, price
-    /// 3888.0, volume 1.
     #[rstest]
     fn a_tick_is_a_quote_of_its_bid_and_ask_with_no_sizes_at_lse_s_time() {
         let received = at("2026-11-13T16:44:55.8Z");
@@ -155,10 +153,6 @@ mod tests {
         );
     }
 
-    /// Time forms from LSE's documentation:
-    /// - Commodities: with a space.
-    /// - Forex majors: to the nanosecond, in Z.
-    /// - UK stocks: to the second.
     #[rstest]
     #[case("2026-10-23 20:59:56.585500+00:00", "2026-10-23T20:59:56.5855Z")]
     #[case("2026-10-23T20:59:05.029000000Z", "2026-10-23T20:59:05.029Z")]
@@ -181,7 +175,6 @@ mod tests {
         assert_eq!(quote.ts_event, at(utc));
     }
 
-    /// Rounding it would change LSE's price.
     #[rstest]
     fn a_price_finer_than_the_instrument_s_precision_is_refused() {
         let tick = LseTick {
@@ -221,8 +214,6 @@ mod tests {
         )
     }
 
-    /// AAPL's 355 call traded 1 contract at 6.70 at 2026-11-12 14:30:00.816861166, as LSE exported
-    /// it. The first tick of the export has the same trade and id.
     #[rstest]
     fn an_option_tick_is_a_trade_of_its_price_and_volume_with_no_aggressor_at_lse_s_time() {
         let exported = parse_trade_slice(
@@ -251,7 +242,7 @@ mod tests {
     }
 
     /// Trades with the same time, price and size get distinct ids, as OPRA reports one order's
-    /// fills. Each run gives the same ids.
+    /// fills.
     #[rstest]
     fn trades_alike_get_ids_of_their_own_and_the_same_ones_each_time() {
         let tick = option_tick(0);
@@ -267,8 +258,8 @@ mod tests {
         assert_eq!(ids, ids_of());
     }
 
-    /// The volume is the trade's size, and it is 0 on a quote (LSE's WebSocket documentation, "The
-    /// tick"). Nautilus' trade cannot have a size of 0.
+    /// The volume is 0 on a quote (LSE's WebSocket documentation, "The tick"), which Nautilus'
+    /// trade cannot have.
     #[rstest]
     #[case::of_no_volume(None)]
     #[case::of_volume_zero(Some(0.0))]
@@ -285,7 +276,6 @@ mod tests {
         assert!(err.contains("AAPL261120C00355000"), "{err}");
     }
 
-    /// Rounding it would change LSE's price.
     #[rstest]
     fn an_option_price_finer_than_the_contract_s_precision_is_refused() {
         let tick = LseTick {

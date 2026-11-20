@@ -738,7 +738,6 @@ mod tests {
             .unwrap();
     }
 
-    /// A slice from Tuesday of a series stored over Wednesday lacks Tuesday and what follows it.
     #[rstest]
     #[case::trades(
         store_trades_over_wednesday,
@@ -809,7 +808,7 @@ mod tests {
         assert_eq!(missing(&catalog, &slices).unwrap(), []);
     }
 
-    /// Empty quote files named as a live node's promotion names them. Coverage reads their names.
+    /// Empty quote files named as a live node's promotion names them.
     fn promoted_quotes(dir: &Path, id: &str, files: &[(&str, &str)]) {
         let quotes = dir.join("data/quotes").join(id.replace('/', ""));
         std::fs::create_dir_all(&quotes).unwrap();
@@ -820,8 +819,6 @@ mod tests {
         }
     }
 
-    /// The slivers between the daily promoted files of a live node are asked with the definition
-    /// over them. A run-start directory that an older node left is ignored.
     #[rstest]
     fn a_sliver_between_promoted_files_is_asked_with_its_definition() {
         let dir = tempfile::tempdir().unwrap();
@@ -871,7 +868,6 @@ mod tests {
         }
     }
 
-    /// An empty catalog lacks a series over its slice. The series is asked after the definition.
     #[rstest]
     #[case::bars(
         bars_slice(BARS, "2026-10-20T00:00:00Z", "2026-10-21T00:00:00Z"),
@@ -946,10 +942,6 @@ mod tests {
         );
     }
 
-    /// The bond yields under GC's id, which rolls from GCQ26 into GCZ26 at 00:00 UTC on 29 July
-    /// 2026 (`rolls/README.md`).
-    ///
-    /// The series of each contract lacks over its slice, and the contract's id is its identifier.
     #[rstest]
     fn a_roots_custom_series_is_lacking_contract_by_contract_over_its_slices() {
         let dir = tempfile::tempdir().unwrap();

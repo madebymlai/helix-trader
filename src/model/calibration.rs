@@ -176,10 +176,6 @@ mod tests {
             .collect()
     }
 
-    /// The means are 1 and 0.8. The covariance is (-1)(-0.5) + (1)(0.7) = 1.2 over variance 2, so
-    /// beta_C = 0.6 and alpha_C = 0.8 - 0.6 = 0.2. Also beta_D = (0.5 + 0.5 + 2) / (1 + 1 + 4) =
-    /// 0.5. At predictions 1 and 0, C = 0.5 and D = 1, so C' = 0.2 + 0.3 = 0.5, D' = 0.5, and E' is
-    /// 0.75 and 0.25.
     #[rstest]
     fn a_pairs_level_and_side_call_are_fitted_by_least_squares() {
         let rows = pair_rows(
@@ -201,12 +197,6 @@ mod tests {
         near(expected.of(Side::Short), 0.25);
     }
 
-    /// At predictions 1 and 0, C = 0.5, D = 1:
-    ///
-    /// - Level slope 2 clips to 1.5, alpha_C 2 - 1.5 x 1 = 0.5. Side call slope -0.5 clips to
-    ///   nought. C' = 0.5 + 1.5 x 0.5 = 1.25, D' = 0.
-    /// - Level slope -0.5 clips to nought, alpha_C 0.5. Side call (2 + 2 + 8) / 6 = 2 clips to 1.5.
-    ///   C' = 0.5, D' = 1.5: E' 0.5 + 0.75 = 1.25 and 0.5 - 0.75 = -0.25.
     #[rstest]
     #[case::a_level_above_and_a_side_call_below(
         [0.0, 2.0, 4.0],
@@ -241,8 +231,6 @@ mod tests {
         near(expected.of(Side::Short), long_and_short.1);
     }
 
-    /// At 0.5, E' is the level. Fitted: 0.2 + 0.6 x 0.5 = 0.5. Clipped: the slope 2 clips to 1.5,
-    /// so alpha = 2 - 1.5 = 0.5 and E' = 0.5 + 0.75 = 1.25.
     #[rstest]
     #[case::fitted([0.3, 0.6, 1.5], (0.2, 0.6), 0.5)]
     #[case::clipped_and_its_alpha_refitted([0.0, 2.0, 4.0], (0.5, 1.5), 1.25)]
@@ -268,8 +256,6 @@ mod tests {
         near(expected.of(Side::Short), expected_r);
     }
 
-    /// The mean R is 0.5. Least squares through nought would give the side call 0.2 / 0.02, which
-    /// clips to 1.5.
     #[rstest]
     fn predictions_that_never_vary_fit_no_slope() {
         let rows: Vec<Vec<(f64, f64)>> = [(0.5, -0.5), (1.5, 0.5)]
@@ -286,8 +272,6 @@ mod tests {
         near(expected.of(Side::Short), 0.5);
     }
 
-    /// The mean R is (m + 0.4) / 2, where m is the mean of `i % 3`. It is 1 over 24 or 30 rows,
-    /// (12 + 2 x 12) / 37 over 37 rows, and (17 + 2 x 16) / 50 = 0.98 over 50 rows.
     #[rstest]
     #[case::of_24_rows(24, 0.7)]
     #[case::of_30_rows(30, 0.7)]

@@ -522,8 +522,7 @@ mod tests {
 
     use super::*;
 
-    /// LSE's documentation describes the `dbn` encoding of a record, and GCZ6's opening, captured
-    /// in both encodings, matches it to the byte.
+    /// GCZ6's opening, captured in both encodings, matches LSE's `dbn` documentation to the byte.
     #[rstest]
     fn a_record_of_the_json_encoding_is_the_binary_frame_lse_sends_in_the_dbn_encoding() {
         let snapshot_book = CME_GCZ6_JSON

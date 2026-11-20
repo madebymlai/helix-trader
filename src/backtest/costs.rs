@@ -256,7 +256,6 @@ mod tests {
         Commission::Rate(Decimal::new(3, 5))
     }
 
-    /// Charges 0.035 USD an ounce, which is Pepperstone's 3.5 USD a lot of 100 oz.
     fn per_ounce() -> Commission {
         Commission::PerQuantity(Money::from_str_exact("0.035 USD").unwrap())
     }
@@ -269,14 +268,12 @@ mod tests {
 
     #[rstest]
     fn a_commission_rate_costs_its_share_of_the_fills_value_to_the_cent() {
-        // 0.00003 × 1 × 4000.20 = 0.120006, and × 100 = 12.0006
         assert_eq!(cost(rate(), 1), Money::from("0.12 USD"));
         assert_eq!(cost(rate(), 100), Money::from("12.00 USD"));
     }
 
     #[rstest]
     fn a_commission_per_quantity_costs_its_amount_on_each_unit_to_the_cent() {
-        // 0.035 × 100 (Pepperstone's lot) and × 50, and × 1 = 0.035, which rounds to 0.04
         assert_eq!(cost(per_ounce(), 100), Money::from("3.50 USD"));
         assert_eq!(cost(per_ounce(), 50), Money::from("1.75 USD"));
         assert_eq!(cost(per_ounce(), 1), Money::from("0.04 USD"));
@@ -295,7 +292,6 @@ mod tests {
 
     #[rstest]
     fn a_half_cent_of_a_commission_per_quantity_goes_to_the_even_cent() {
-        // 0.035 × 3 = 0.105, × 5 = 0.175, × 7 = 0.245
         assert_eq!(cost(per_ounce(), 3), Money::from("0.10 USD"));
         assert_eq!(cost(per_ounce(), 5), Money::from("0.18 USD"));
         assert_eq!(cost(per_ounce(), 7), Money::from("0.24 USD"));
@@ -318,7 +314,6 @@ mod tests {
         assert_eq!(charged(commission, &order(), oz), cost(commission, oz));
     }
 
-    /// The 100 oz order fills 40 oz, then 60 oz, and the later fill is charged nothing.
     #[rstest]
     fn a_commission_per_order_is_charged_once_nothing_on_later_fills_of_the_order() {
         let order = filled(order(), 40);
@@ -330,7 +325,6 @@ mod tests {
         let mut order = order();
         order.set_liquidity_side(LiquiditySide::Maker);
 
-        // 0.00003 × 100 × 4000.20
         assert_eq!(charged(rate(), &order, 100), Money::from("12.00 USD"));
     }
 
@@ -350,7 +344,6 @@ mod tests {
         assert!(error.contains("-0.00003"), "{error}");
     }
 
-    /// A rate is charged in USD for gold, and in the base currency BTC for an inverse perpetual.
     #[rstest]
     fn a_commission_is_charged_in_its_amounts_currency_or_the_currency_of_the_value() {
         let inverse =

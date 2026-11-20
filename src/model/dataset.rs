@@ -795,7 +795,6 @@ mod tests {
         }
     }
 
-    /// A commission rate of 30 per million, 10 million USD.
     fn venue() -> DatasetVenue {
         DatasetVenue {
             commission: Commission::Rate(Decimal::new(3, 5)),
@@ -1080,9 +1079,6 @@ mod tests {
         );
     }
 
-    /// The time close sent at the 2 hour limit reaches the venue 30 s later. It fills at the next
-    /// settlement point, at most a minute after (the execution engine's purge timer). So the day
-    /// is settled 2 hours, 30 s and a minute after its end.
     #[rstest]
     fn at_a_latency_a_day_is_written_once_replay_has_passed_its_end_its_limit_its_latency_and_a_minute()
      {
@@ -1118,7 +1114,6 @@ mod tests {
         assert!(missing().is_empty(), "{:?}", missing());
     }
 
-    /// The last day is replayed to its end plus 2 hours, 30 s and a minute.
     #[rstest]
     fn at_a_latency_a_build_replays_past_the_last_day_by_its_limit_its_latency_and_a_minute() {
         let dir = tempfile::tempdir().unwrap();
@@ -1198,7 +1193,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dataset = dataset(dir.path(), STRATEGY, 1);
 
-        // A Thursday without decisions, a Friday, a weekend, a Monday
         let rows = [
             row("2026-01-02T09:00:00Z", vec![1.0], "1"),
             row("2026-01-05T09:00:00Z", vec![2.0], "1"),
@@ -1406,12 +1400,10 @@ mod tests {
         assert_ne!(current, at(VERSION + 1));
     }
 
-    /// The identifier of the rows of a fixed strategy, as a literal. It is the id, then the
-    /// fingerprint of its features, hourly decisions, bracket, requirements and venue. A change
-    /// that rekeyed every dataset, leaving rows and trained models behind, fails here. A deliberate
-    /// rekey is a bump of `VERSION` or a new fingerprint input. It updates the literal and the
-    /// pinned directory of the store
-    /// (`store::tests::a_fixed_strategys_model_sets_keep_their_directory`).
+    /// The identifier of a fixed strategy's rows, as a literal. A change that rekeyed every
+    /// dataset, leaving rows and trained models behind, fails here. A deliberate rekey, a bump of
+    /// `VERSION` or a new fingerprint input, updates the literal and the pinned directory of the
+    /// store (`store::tests::a_fixed_strategys_model_sets_keep_their_directory`).
     #[rstest]
     fn a_fixed_strategys_dataset_keeps_its_identifier() {
         let dataset = dataset(Path::new("catalog"), STRATEGY, 1);
@@ -1446,7 +1438,6 @@ mod tests {
         assert_ne!(of(&composite), of(&requirements()));
     }
 
-    /// Another balance gives another fingerprint. Another spelling of one balance does not.
     #[rstest]
     fn another_balance_of_the_dataset_run_is_another_fingerprint() {
         let of = |venue: DatasetVenue| {
@@ -1478,7 +1469,6 @@ mod tests {
         );
     }
 
-    /// A commission reads as its kind and its amount without trailing zeros. No leverage keys it.
     #[rstest]
     #[case::a_rate(
         Commission::Rate(Decimal::new(30, 6)),
@@ -1508,7 +1498,6 @@ mod tests {
         Latency::try_from(SignedDuration::from_millis(millis)).unwrap()
     }
 
-    /// A latency keys the venue only when declared.
     #[rstest]
     #[case::none(None, "commission rate 0.00003, balance 10000000 USD")]
     #[case::of_milliseconds(
@@ -1575,8 +1564,6 @@ mod tests {
         .unwrap()
     }
 
-    /// Declaring pairs, or other pairs, gives another fingerprint. Declaring none keeps the earlier
-    /// one (`a_fixed_strategys_dataset_keeps_its_identifier`).
     #[rstest]
     fn the_conversions_key_the_dataset_only_when_declared() {
         let none = converting(&[]);
@@ -1823,8 +1810,6 @@ mod tests {
         );
     }
 
-    /// The 5th and 6th, settled by the end of the first train, are cached. The unsettled 7th is
-    /// built again.
     #[rstest]
     fn the_days_settled_at_the_end_are_cached_and_the_others_replayed_again() {
         let dir = tempfile::tempdir().unwrap();
@@ -1840,7 +1825,6 @@ mod tests {
             .unwrap();
         let mut replays = vec![];
 
-        // The 2 hour limit settles the 6th by 02:00 of the 7th
         let missing = dataset
             .missing(day("2026-01-05"), day("2026-01-07"))
             .unwrap();

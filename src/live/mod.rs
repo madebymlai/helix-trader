@@ -195,8 +195,6 @@ mod tests {
         }
     }
 
-    /// GC rolls into GCZ26 on 2026-07-29, then into GCG27 on 2026-11-26 (`rolls/README.md`, "GC
-    /// against Databento").
     #[rstest]
     fn a_root_loads_the_contract_in_front_and_the_next() {
         let requirements = DataRequirements {

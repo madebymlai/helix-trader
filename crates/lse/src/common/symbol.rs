@@ -575,7 +575,6 @@ mod tests {
         assert_eq!((series.market(), series.symbol()), (market, symbol));
     }
 
-    /// A lower-case market would make a second id of one series.
     #[rstest]
     #[case::no_hyphen("GOLD.LSEDGE")]
     #[case::empty_symbol("-FUTURES.LSEDGE")]
@@ -589,9 +588,7 @@ mod tests {
         assert!(err.contains(id), "{err}");
     }
 
-    /// These follow LSE's socket documentation ("Symbols on each socket"), as each socket
-    /// acknowledged and ticked them on 13 November 2026. data-ws listed its futures that way once
-    /// authenticated (`test_data/ws_authenticated_futures.json`).
+    /// LSE's socket documentation, "Symbols on each socket".
     #[rstest]
     #[case("GOLD-FUTURES.LSEDGE", "data-ws", "GOLD.F")]
     #[case("US10Y-FUTURES.LSEDGE", "data-ws", "US10Y.F")]
@@ -705,8 +702,6 @@ mod tests {
         assert!(err.contains(id), "{err}");
     }
 
-    /// LSE's ESZ6 names 2016 (4000658762) and 2026 (4000000001). Its NGZ26 is natural gas of 2026
-    /// (4000000128).
     #[rstest]
     #[case::esz6_of_2026("ESZ26.GLBX", PAIRS_ESZ6, 4_000_000_001)]
     #[case::esz6_of_2016("ESZ16.GLBX", PAIRS_ESZ6, 4_000_658_762)]
@@ -719,8 +714,6 @@ mod tests {
         assert_eq!(listed(id, answer), Some(pair_id));
     }
 
-    /// GCZ4 of 2014 is named `GC futures 2014-12`. GCZ4 of 2024 is named by its symbol alone, and
-    /// was delisted on 27 December 2024.
     #[rstest]
     #[case::named_by_its_month("GCZ14.GLBX", 4_000_992_242)]
     #[case::named_by_its_symbol("GCZ24.GLBX", 4_000_402_563)]
@@ -731,7 +724,6 @@ mod tests {
         assert_eq!(listed(id, PAIRS_GCZ4), Some(pair_id));
     }
 
-    /// LSE's catalogue gives some delisted listings no name (captured on `nasdaq`).
     #[rstest]
     fn a_listing_of_no_name_is_found_by_its_delisting() {
         let mut unnamed = pairs(PAIRS_GCZ4);
@@ -742,8 +734,6 @@ mod tests {
         assert_eq!(listing.map(|pair| pair.pair_id), Some(4_000_402_563));
     }
 
-    /// LSE's NGZ6 is 2016 alone, because 2026 is NGZ26. GCZ4 is 2014 and 2024, not 2034. LSE lists
-    /// no ESZ26.
     #[rstest]
     #[case::ngz6_of_2016_alone("NGZ26.GLBX", PAIRS_NGZ6)]
     #[case::gcz4_of_past_decades("GCZ34.GLBX", PAIRS_GCZ4)]
@@ -818,8 +808,8 @@ mod tests {
         assert_eq!(contract.root(), root);
     }
 
-    /// Databento's raw `XNAS.ITCH` symbols are Nasdaq's tickers, with the class after a dot ("CMS
-    /// vs. Nasdaq symbology": `BRK.B`). So is LSE's `nasdaq` catalogue, captured (`answer`).
+    /// Databento's raw `XNAS.ITCH` symbols are Nasdaq's tickers, with the class after a dot
+    /// ("CMS vs. Nasdaq symbology": `BRK.B`).
     #[rstest]
     #[case::common_stock("NVDA.XNAS", "NVDA", PAIRS_NASDAQ_NVDA)]
     #[case::class_b("BRK B.XNAS", "BRK.B", PAIRS_NASDAQ_BRK)]
@@ -842,8 +832,6 @@ mod tests {
         assert_eq!(stock.instrument_id(), InstrumentId::from(id));
     }
 
-    /// A lower-case ticker, which LSE would match, or a class after a dot, which Nautilus'
-    /// Databento client turns into a space, would make a second id of one stock.
     #[rstest]
     #[case::lower_case("nvda.XNAS")]
     #[case::dotted_class("BRK.B.XNAS")]

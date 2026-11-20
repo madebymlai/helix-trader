@@ -190,7 +190,6 @@ mod tests {
 
         assert!(err.contains(why), "{err}");
     }
-    /// The client asks LSE for no other data, funding say. Each is refused, naming data and series.
     #[rstest]
     #[case::of_an_lsedge_series("GOLD-FUTURES.LSEDGE")]
     #[case::of_an_lsedge_index("SPX-INDICES.LSEDGE")]

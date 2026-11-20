@@ -175,8 +175,7 @@ mod tests {
         )
     }
 
-    /// A cadence that is not positive is refused with the decision rule's error, before the ATR
-    /// check.
+    /// Refused with the decision rule's error, before the ATR check.
     #[rstest]
     fn a_decision_cadence_not_positive_is_refused() {
         let config = ModelConfig {
@@ -190,7 +189,6 @@ mod tests {
         assert!(!err.contains("model.target.atr"), "{err}");
     }
 
-    /// An ATR for an instrument the strategy does not read is refused, under the ATR field.
     #[rstest]
     fn a_target_whose_atr_has_no_bars_to_be_built_from_is_refused() {
         let mut config = config();
@@ -202,7 +200,6 @@ mod tests {
         assert!(err.contains("EUR/USD.SIM"), "{err}");
     }
 
-    /// The model store swaps in a model published under the dataset's fingerprint.
     #[rstest]
     fn the_dataset_and_the_model_store_of_a_model_stored_carry_one_fingerprint() {
         let dir = tempfile::tempdir().unwrap();
