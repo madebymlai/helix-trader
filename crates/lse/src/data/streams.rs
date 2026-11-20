@@ -1,29 +1,18 @@
-//! The data client's live data: the sockets of the instruments it streams, and LSE's exchange
-//! streams.
+//! The sockets of the instruments the data client streams, and LSE's exchange streams.
 //!
 //! The sockets carry the quotes of `LSEDGE` series and the trades of `OPRA` contracts. LSE's CME
-//! stream carries the `GLBX` contracts and its Nasdaq stream the `XNAS` stocks, their quotes,
-//! trades, book depth and book deltas (see `exchange`).
+//! stream carries the `GLBX` contracts and its Nasdaq stream the `XNAS` stocks (see `exchange`).
 //!
-//! `open` connects to the socket each instrument streams on (see `LseSymbol::stream` and
-//! `OpraContract::stream`), one connection a socket whatever the key allows. It fails, naming them,
-//! unless the socket lists every series' symbol to the key and allows all its subscriptions on that
-//! connection, as LSE stated when it authenticated the key (`max_subscriptions`). LSE accepts a
-//! subscription to a symbol it does not list and sends nothing, and refuses one beyond its limit
-//! (`LIMIT_REACHED`) only once asked, after the node started.
+//! `open` makes one connection a socket (see `LseSymbol::stream` and `OpraContract::stream`). It
+//! fails unless the socket lists every series' symbol to the key and allows all its subscriptions
+//! (`max_subscriptions`). LSE accepts a subscription to a symbol it does not list and sends
+//! nothing, and refuses one beyond its limit (`LIMIT_REACHED`) only once asked.
 //!
-//! A quotes subscription reads the series' precision from the cache, then subscribes its symbol.
-//! Each tick of it becomes a quote (see `parse_quote`).
-//!
-//! An option contract streams on data-ws in its underlying's chain, every listed contract of the
-//! underlying in one subscription, which LSE refuses for an underlying with no listed options
-//! (`INVALID_UNDERLYING`). A socket lists no contract. A trades subscription of a contract, any
-//! contract of an underlying whose chain the config streams (one of its contracts named), reads the
-//! contract's precision from the cache, then subscribes its underlying's chain if no other contract
-//! of it is subscribed. So a strategy following strikes subscribes contracts the config does not
-//! name with no subscription beyond those `open` checked. Each tick of a contract subscribed
-//! becomes a trade (see `parse_trade`), the chain's others are dropped, and the chain ends with its
-//! last contract's subscription.
+//! An option contract streams on data-ws in its underlying's chain, every listed contract in one
+//! subscription, which LSE refuses for an underlying with no listed options
+//! (`INVALID_UNDERLYING`). A trades subscription of any contract of a chain the config streams
+//! subscribes the chain, so a strategy following strikes needs no subscription beyond those `open`
+//! checked. Ticks of other contracts of the chain are dropped (see `parse_trade`).
 //!
 //! LSE's refusal of a subscription is logged as an error, a reconnect's gap as a warning.
 
@@ -59,7 +48,6 @@ use crate::{
     },
 };
 
-/// An instrument whose ticks are subscribed: its id and precisions.
 #[derive(Debug, Clone, Copy)]
 struct Subscribed {
     instrument_id: InstrumentId,
@@ -67,34 +55,24 @@ struct Subscribed {
     size_precision: u8,
 }
 
-/// The series whose quotes are subscribed, by their socket and their symbol there in capitals, read
-/// on each tick and written on each subscription.
+/// The series whose quotes are subscribed, by socket and capitalized symbol.
 type QuotedBySymbol = Arc<AtomicMap<(LseSocket, String), Subscribed>>;
 
-/// The option contracts whose trades are subscribed, by their name on data-ws in capitals, read on
-/// each tick and written on each subscription.
+/// The option contracts whose trades are subscribed, by capitalized data-ws name.
 type TradedByName = Arc<AtomicMap<String, Subscribed>>;
 
 /// The sockets of the instruments the client streams.
 #[derive(Debug)]
 pub(super) struct LseStreams {
-    /// The LSE key, which the sockets take, none if no instrument is streamed.
     credential: Option<LseCredential>,
-    /// Each series streamed, with its socket and its symbol there.
     streamed: Vec<(InstrumentId, LseSocket, String)>,
-    /// Each option contract the config names, on data-ws in its underlying's chain, whose every
-    /// contract the client streams.
     options: Vec<(InstrumentId, OpraContract)>,
-    /// The sockets of the instruments streamed, in the order first named, each with its address.
     urls: Vec<(LseSocket, String)>,
     sockets: AHashMap<LseSocket, LseWebSocketClient>,
     quoted: QuotedBySymbol,
     traded: TradedByName,
-    /// The tasks turning each socket's ticks into quotes and trades.
     tasks: TaskGroup,
-    /// The `GLBX` contracts, on LSE's CME stream.
     cme: ExchangeStreams,
-    /// The `XNAS` stocks, on LSE's Nasdaq stream.
     nasdaq: ExchangeStreams,
     data_sender: EventSender<DataEvent>,
     clock: &'static AtomicTime,
@@ -103,16 +81,15 @@ pub(super) struct LseStreams {
 impl LseStreams {
     /// Creates the streams of the instruments `config` streams, none open.
     ///
-    /// `LSEDGE` series and `OPRA` contracts are on the key of `credential`, the LSE key. `GLBX`
-    /// contracts are on `cme`, the CME key, looked up in `listings`, and `XNAS` stocks on `nasdaq`,
-    /// the Nasdaq key.
+    /// `LSEDGE` series and `OPRA` contracts use `credential`, `GLBX` contracts `cme` (looked up in
+    /// `listings`), and `XNAS` stocks `nasdaq`.
     ///
     /// # Errors
     ///
     /// Returns an error if:
-    /// - An instrument, which it names, is neither an `LSEDGE` series, an `OPRA` contract, a `GLBX`
-    ///   contract nor an `XNAS` stock, or is a series of a market streamed on no socket here.
-    /// - An instrument is streamed with no key of its product, naming the variable of the key.
+    /// - An instrument is neither an `LSEDGE` series, an `OPRA` contract, a `GLBX` contract nor an
+    ///   `XNAS` stock, or is a series of a market with no socket here.
+    /// - An instrument is streamed with no key of its product.
     pub(super) fn new(
         config: &LseDataClientConfig,
         credential: Option<LseCredential>,
@@ -190,20 +167,14 @@ impl LseStreams {
         })
     }
 
-    /// Connects to the socket of each instrument streamed, and checks that the socket lists every
-    /// series to the key and allows the subscriptions of them all on one connection: a symbol each
-    /// series and a chain each underlying of the contracts.
-    ///
-    /// It starts turning their ticks into quotes and trades, then opens the CME stream of the
-    /// contracts and the Nasdaq stream of the stocks streamed (see `ExchangeStreams::open`). It
-    /// does nothing if none is streamed.
+    /// Connects to each socket streamed, then opens the CME and Nasdaq streams (see
+    /// `ExchangeStreams::open`).
     ///
     /// # Errors
     ///
     /// Returns an error if a connection fails or LSE refuses the key (see
-    /// `LseWebSocketClient::connect`), naming the series a socket does not list, or naming the
-    /// limit if the subscriptions of a socket exceed it, or as `ExchangeStreams::open`. No socket
-    /// is then left open.
+    /// `LseWebSocketClient::connect`), if a socket does not list a series or its subscriptions
+    /// exceed the limit, or as `ExchangeStreams::open`. No socket is then left open.
     pub(super) async fn open(&mut self) -> anyhow::Result<()> {
         if !self.tasks.is_open() {
             self.close().await?;
@@ -281,8 +252,6 @@ impl LseStreams {
         self.spawn_ticks(socket, out)
     }
 
-    /// Turns the ticks `out` passes on into quotes of the series and trades of the option contracts
-    /// subscribed, and logs refusals and gaps.
     fn spawn_ticks(
         &self,
         socket: LseSocket,
@@ -296,7 +265,7 @@ impl LseStreams {
         let cancelled = self.tasks.cancellation_token();
         self.tasks
             .spawn(async move {
-                // The ids of each contract's trades, in the order they come
+                // Each contract's trade ids, in arrival order
                 let mut trade_ids: AHashMap<InstrumentId, TradeIds> = AHashMap::new();
                 loop {
                     let message = tokio::select! {
@@ -331,8 +300,8 @@ impl LseStreams {
                                     );
                                     (of, trade.map(Data::Trade))
                                 } else {
-                                    // Of a subscription just ended, or of a contract of a chain not
-                                    // subscribed.
+                                    // A subscription just ended, or a contract of a chain not
+                                    // subscribed
                                     continue;
                                 };
                             match parsed {
@@ -367,14 +336,10 @@ impl LseStreams {
 
     /// Subscribes to the quotes of `id`, at the precision of its definition in `cache`.
     ///
-    /// A `GLBX` contract's are on the CME stream and an `XNAS` stock's on the Nasdaq stream (see
-    /// `ExchangeStreams::subscribe`), an `LSEDGE` series' on its socket.
-    ///
     /// # Errors
     ///
-    /// Returns an error if `id`, which it names, is not streamed by the client, if its socket is
-    /// not open, or if `cache` has no definition of it: LSE publishes none, and its prices are read
-    /// at the definition's precision.
+    /// Returns an error if `id` is not streamed by the client, if its socket is not open, or if
+    /// `cache` has no definition of it: LSE publishes none.
     pub(super) fn subscribe_quotes(
         &mut self,
         id: InstrumentId,
@@ -398,8 +363,7 @@ impl LseStreams {
     ///
     /// # Errors
     ///
-    /// Returns an error if `id`, which it names, is not streamed by the client, or if its socket is
-    /// not open.
+    /// Returns an error if `id` is not streamed by the client, or if its socket is not open.
     pub(super) fn unsubscribe_quotes(&self, id: InstrumentId) -> anyhow::Result<()> {
         if let Some(exchange) = LseExchange::of_venue(id.venue) {
             return self.exchange(exchange).unsubscribe(id, StreamKind::Quotes);
@@ -411,16 +375,14 @@ impl LseStreams {
 
     /// Subscribes to the trades of `id`, at the precision of its definition in `cache`.
     ///
-    /// A `GLBX` contract's are on the CME stream and an `XNAS` stock's on the Nasdaq stream (see
-    /// `ExchangeStreams::subscribe`). An `OPRA` contract's are on its socket, any contract of an
-    /// underlying whose chain the config streams, subscribing that chain unless a contract of it is
-    /// subscribed already. It does nothing if its trades are subscribed.
+    /// An `OPRA` contract subscribes its underlying's chain unless one of its contracts is
+    /// subscribed. It does nothing if its trades are subscribed.
     ///
     /// # Errors
     ///
-    /// Returns an error if `id`, which it names, is none of those, LSE's sockets streaming a
-    /// series' ticks as quotes, if it is a contract of an underlying whose chain the client does
-    /// not stream, if its socket is not open, or if `cache` has no definition of it.
+    /// Returns an error if `id` is not a `GLBX` contract, an `XNAS` stock or an `OPRA` contract of
+    /// a chain the client streams (LSE's sockets stream a series' ticks as quotes), if its socket
+    /// is not open, or if `cache` has no definition of it.
     pub(super) fn subscribe_trades(
         &mut self,
         id: InstrumentId,
@@ -449,14 +411,13 @@ impl LseStreams {
 
     /// Ends the trades of `id`.
     ///
-    /// A `GLBX` contract's or an `XNAS` stock's are carried on by its exchange's stream. An `OPRA`
-    /// contract's end its underlying's chain with the trades of its last contract subscribed. It
-    /// does nothing if its trades are not subscribed.
+    /// An `OPRA` contract ends its underlying's chain with its last contract subscribed. It does
+    /// nothing if its trades are not subscribed.
     ///
     /// # Errors
     ///
-    /// Returns an error if `id`, which it names, is none of those, if it is a contract of an
-    /// underlying whose chain the client does not stream, or if its socket is not open.
+    /// Returns an error if `id` is not a `GLBX` contract, an `XNAS` stock or an `OPRA` contract of
+    /// a chain the client streams, or if its socket is not open.
     pub(super) fn unsubscribe_trades(&self, id: InstrumentId) -> anyhow::Result<()> {
         if let Some(exchange) = LseExchange::of_venue(id.venue) {
             return self.exchange(exchange).unsubscribe(id, StreamKind::Trades);
@@ -473,14 +434,13 @@ impl LseStreams {
         Ok(())
     }
 
-    /// Subscribes to the book depth of `id`, a `GLBX` contract's or an `XNAS` stock's ten levels a
-    /// side on its exchange's stream at Level 2, at the price precision of its definition in
-    /// `cache` (see `ExchangeStreams::subscribe`).
+    /// Subscribes to the book depth of `id`, ten levels a side at Level 2 (see
+    /// `ExchangeStreams::subscribe`).
     ///
     /// # Errors
     ///
-    /// Returns an error if `id`, which it names, is neither, or if `ExchangeStreams::subscribe`
-    /// fails.
+    /// Returns an error if `id` is neither a `GLBX` contract nor an `XNAS` stock, or if
+    /// `ExchangeStreams::subscribe` fails.
     pub(super) fn subscribe_book_depth(
         &mut self,
         id: InstrumentId,
@@ -491,25 +451,24 @@ impl LseStreams {
             .subscribe(id, StreamKind::Depth, cache)
     }
 
-    /// Ends the book depth of `id`, which its exchange's stream carries on.
+    /// Ends the book depth of `id`.
     ///
     /// # Errors
     ///
-    /// Returns an error if `id`, which it names, is neither a `GLBX` contract nor an `XNAS` stock,
-    /// or is not subscribed.
+    /// Returns an error if `id` is neither a `GLBX` contract nor an `XNAS` stock, or is not
+    /// subscribed.
     pub(super) fn unsubscribe_book_depth(&self, id: InstrumentId) -> anyhow::Result<()> {
         self.exchange(booked(id, &NautilusDataType::OrderBookDepth)?)
             .unsubscribe(id, StreamKind::Depth)
     }
 
-    /// Subscribes to the book deltas of `id`, a `GLBX` contract's or an `XNAS` stock's order events
-    /// on its exchange's stream at Level 3, at the price precision of its definition in `cache`
-    /// (see `ExchangeStreams::subscribe`).
+    /// Subscribes to the book deltas of `id`, order events at Level 3 (see
+    /// `ExchangeStreams::subscribe`).
     ///
     /// # Errors
     ///
-    /// Returns an error if `id`, which it names, is neither, or if `ExchangeStreams::subscribe`
-    /// fails.
+    /// Returns an error if `id` is neither a `GLBX` contract nor an `XNAS` stock, or if
+    /// `ExchangeStreams::subscribe` fails.
     pub(super) fn subscribe_book_deltas(
         &mut self,
         id: InstrumentId,
@@ -520,18 +479,17 @@ impl LseStreams {
             .subscribe(id, StreamKind::Deltas, cache)
     }
 
-    /// Ends the book deltas of `id`, which its exchange's stream carries on.
+    /// Ends the book deltas of `id`.
     ///
     /// # Errors
     ///
-    /// Returns an error if `id`, which it names, is neither a `GLBX` contract nor an `XNAS` stock,
-    /// or is not subscribed.
+    /// Returns an error if `id` is neither a `GLBX` contract nor an `XNAS` stock, or is not
+    /// subscribed.
     pub(super) fn unsubscribe_book_deltas(&self, id: InstrumentId) -> anyhow::Result<()> {
         self.exchange(booked(id, &NautilusDataType::OrderBookDelta)?)
             .unsubscribe(id, StreamKind::Deltas)
     }
 
-    /// Returns the streams of `exchange`'s contracts.
     fn exchange(&self, exchange: LseExchange) -> &ExchangeStreams {
         match exchange {
             LseExchange::Cme => &self.cme,
@@ -546,7 +504,6 @@ impl LseStreams {
         }
     }
 
-    /// Returns the socket of `id` and its symbol there.
     fn streamed_as(&self, id: InstrumentId) -> anyhow::Result<(LseSocket, &str)> {
         match self.streamed.iter().find(|(of, _, _)| *of == id) {
             Some((_, socket, symbol)) => Ok((*socket, symbol)),
@@ -557,9 +514,6 @@ impl LseStreams {
         }
     }
 
-    /// Returns the contract `id` is, an `OPRA` contract of an underlying whose chain the client
-    /// streams: any contract of the root of one its config names, LSE's chain carrying every listed
-    /// contract of its underlying.
     fn contract(&self, id: InstrumentId) -> anyhow::Result<OpraContract> {
         check_stream(&NautilusDataType::TradeTick, id)?;
         let contract = OpraContract::from_instrument_id(id)?;
@@ -575,21 +529,19 @@ impl LseStreams {
         Ok(contract)
     }
 
-    /// Returns the client of `socket`, connected.
     fn socket(&self, socket: LseSocket) -> anyhow::Result<&LseWebSocketClient> {
         self.sockets
             .get(&socket)
             .with_context(|| format!("LSE's {} is not connected", socket.name()))
     }
 
-    /// Begins the shutdown of the tick and record tasks, which `close` finishes.
     pub(super) fn begin_shutdown(&self) {
         self.tasks.begin_shutdown();
         self.cme.begin_shutdown();
         self.nasdaq.begin_shutdown();
     }
 
-    /// Stops the tick and record tasks and disconnects every socket and the exchange streams.
+    /// Stops the tasks and disconnects every socket and exchange stream.
     ///
     /// # Errors
     ///
@@ -614,26 +566,21 @@ impl LseStreams {
 /// Checks that the client streams `series`, a Nautilus data type and its catalog identifier (an
 /// instrument id, or a bar type for bars).
 ///
-/// It streams:
-/// - An `LSEDGE` series' quotes, on its socket.
-/// - An `OPRA` contract's trades, through its underlying's chain.
-/// - A `GLBX` contract's or an `XNAS` stock's quotes, trades, book depth and book deltas, on its
-///   exchange's stream, a rolled root's on its contracts.
+/// It streams an `LSEDGE` series' quotes, an `OPRA` contract's trades, and a `GLBX` contract's or
+/// an `XNAS` stock's quotes, trades, book depth and book deltas, a rolled root's on its contracts.
 ///
-/// A live run checks what it reads before anything connects, rather than have a subscription the
-/// client cannot serve fail, or be logged as not implemented, after the node started.
+/// A live run checks before anything connects, so that no subscription the client cannot serve
+/// fails after the node started. An error names the series and what LSE streams instead.
 ///
 /// # Errors
 ///
 /// Returns an error if:
-/// - The series is bars: LSE streams no candles, so they are built from the instrument's quotes or
-///   trades (`INTERNAL`).
+/// - The series is bars: LSE streams no candles, so they are built from quotes or trades
+///   (`INTERNAL`).
 /// - The series is an `LSEDGE` series' trades: its sockets' ticks are quotes.
 /// - The series is an `OPRA` contract's quotes: LSE's US options feed carries trades alone.
 /// - The series is the book of either.
 /// - The series is any other data, or an instrument of another venue, or has no instrument id.
-///
-/// The error names the series and says what LSE streams instead.
 pub fn streams(series: &(NautilusDataType, String)) -> anyhow::Result<()> {
     let (data, identifier) = series;
     if *data == NautilusDataType::Bar {
@@ -647,15 +594,14 @@ pub fn streams(series: &(NautilusDataType, String)) -> anyhow::Result<()> {
     check_stream(data, id)
 }
 
-/// Checks that the client streams `data_type`, its custom data.
+/// Checks that the client streams `data_type`, custom data.
 ///
-/// It streams none, LSE's rows being history alone, which no socket carries, and it implements no
-/// subscription of custom data, Nautilus' default logging one as not implemented. A live run checks
-/// what it reads before anything connects, as with `streams`.
+/// It streams none: LSE's rows are history alone, and Nautilus' default custom data subscription
+/// would only log it as not implemented.
 ///
 /// # Errors
 ///
-/// Returns an error if called, naming `data_type`, whatever it is.
+/// Returns an error if called, whatever `data_type` is.
 pub fn streams_custom(data_type: &DataType) -> anyhow::Result<()> {
     anyhow::bail!(
         "LSE streams no custom data, {data_type}: its rows are history alone, asked of its HTTP \
@@ -663,12 +609,6 @@ pub fn streams_custom(data_type: &DataType) -> anyhow::Result<()> {
     )
 }
 
-/// Checks that the client streams `data` of `id` (see `streams`), by its venue alone.
-///
-/// # Errors
-///
-/// Returns an error if the client does not stream `data` of `id`, naming it and saying what LSE
-/// streams instead.
 fn check_stream(data: &NautilusDataType, id: InstrumentId) -> anyhow::Result<()> {
     use NautilusDataType as D;
     let venue = id.venue;
@@ -713,27 +653,20 @@ fn check_stream(data: &NautilusDataType, id: InstrumentId) -> anyhow::Result<()>
     }
 }
 
-/// Returns the exchange whose stream carries the book of `id`, its `data`: a `GLBX` contract's or
-/// an `XNAS` stock's, LSE's sockets streaming a series' ticks alone.
+/// Returns the exchange whose stream carries the book of `id`.
 ///
 /// # Errors
 ///
-/// Returns an error if `id`, which it names, is neither (see `check_stream`).
+/// Returns an error if `id` is neither a `GLBX` contract nor an `XNAS` stock (see `check_stream`).
 ///
 /// # Panics
 ///
-/// Panics if `data` is no book (`OrderBookDepth` or `OrderBookDelta`): `check_stream` passes a
-/// series' ticks of `LSEDGE` and `OPRA` too, which no exchange's stream carries.
+/// Panics if `data` is no book (`OrderBookDepth` or `OrderBookDelta`).
 fn booked(id: InstrumentId, data: &NautilusDataType) -> anyhow::Result<LseExchange> {
     check_stream(data, id)?;
     Ok(LseExchange::of_venue(id.venue).expect("LSE streams a book of an exchange's alone"))
 }
 
-/// Returns `id` with the precisions of its definition in `cache`.
-///
-/// # Errors
-///
-/// Returns an error if `precisions` fails.
 fn defined(id: InstrumentId, cache: &CacheView) -> anyhow::Result<Subscribed> {
     let (price_precision, size_precision) = precisions(cache, id)?;
     Ok(Subscribed {
@@ -754,8 +687,6 @@ mod tests {
         (data, identifier.to_string())
     }
 
-    /// An `LSEDGE` series' quotes, an `OPRA` contract's trades, and a `GLBX` contract's or an
-    /// `XNAS` stock's Levels 1 to 3, a rolled root's on its contracts, are streamed.
     #[rstest]
     #[case::a_series_quotes(Data::QuoteTick, "GOLD-FUTURES.LSEDGE")]
     #[case::an_option_s_trades(Data::TradeTick, "AAPL  261120C00355000.OPRA")]
@@ -770,7 +701,6 @@ mod tests {
         streams(&series(data, identifier)).unwrap();
     }
 
-    /// Each is refused naming the series and saying what LSE streams instead.
     #[rstest]
     #[case::a_contract_s_bars(Data::Bar, "GCZ26.GLBX-1-MINUTE-LAST-EXTERNAL", &["INTERNAL"])]
     #[case::a_series_bars(Data::Bar, "GOLD-FUTURES.LSEDGE-1-MINUTE-LAST-EXTERNAL", &["INTERNAL"])]
@@ -801,7 +731,6 @@ mod tests {
         }
     }
 
-    /// LSE's rows are history alone: the client subscribes to none.
     #[rstest]
     fn lse_s_rows_are_refused_naming_them() {
         let metadata = nautilus_core::Params::new(

@@ -1,4 +1,4 @@
-//! The factory the node creates the data client by, from its config (see `config`), named `LSE`.
+//! The factory the node creates the data client by, named `LSE`.
 
 use std::{cell::RefCell, rc::Rc};
 
@@ -18,8 +18,7 @@ use crate::{common::consts::LSE_CLIENT, config::LseDataClientConfig, data::LseDa
 pub struct LseDataClientFactory;
 
 impl LseDataClientFactory {
-    /// Returns the factory, named `LSE`: the node creates the client under that name, its client
-    /// id.
+    /// Returns the factory.
     #[must_use]
     pub fn new() -> Self {
         Self
@@ -27,11 +26,7 @@ impl LseDataClientFactory {
 }
 
 impl DataClientFactory for LseDataClientFactory {
-    /// Creates the client named `name`, on its config's keys and API, each key not given read from
-    /// its variable.
-    ///
-    /// It reads the instruments it converts data of from `cache` and the time a request is asked at
-    /// from `clock`, the node's.
+    /// Creates the client named `name`, reading each key not in `config` from its variable.
     ///
     /// # Errors
     ///
