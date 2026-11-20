@@ -1,5 +1,7 @@
-//! A mock cTrader peer for the tests: a WebSocket server on 127.0.0.1 that records every frame it
-//! receives and answers through a script.
+//! A mock cTrader peer for the tests.
+//!
+//! The peer is a WebSocket server on 127.0.0.1. It records every frame it receives and answers
+//! through a script.
 
 use std::{
     collections::HashSet,
@@ -38,7 +40,7 @@ use super::{
     session::ticks::Tick,
 };
 
-// A made-up broker, so that a real broker's name left in the adapter fails a test
+// A made-up broker, so a real broker's name left in the adapter fails a test
 pub(crate) const VENUE: &str = "ACMEFX";
 pub(crate) const CLIENT: &str = "ACME-CTRADER";
 
@@ -167,7 +169,9 @@ pub(crate) fn spots_answer(request: &ProtoMessage) -> Action {
     reply(request, &answer)
 }
 
-/// Answers with the captured bytes as served, fields the vendored `.proto` lacks included.
+/// Answers with the captured bytes as served.
+///
+/// This includes fields the vendored `.proto` lacks.
 pub(crate) fn replay<M: Payload>(request: &ProtoMessage, payload: &[u8]) -> Action {
     Action::Send(
         ProtoMessage {
@@ -234,9 +238,11 @@ pub(crate) fn accept_auth(request: &ProtoMessage) -> Option<Vec<Action>> {
 
 pub(crate) type Received = Arc<Mutex<Vec<(usize, ProtoMessage)>>>;
 
-/// Starts the peer; `script` answers each frame but heartbeats, which cTrader does not answer.
+/// Starts the peer.
 ///
-/// Each connection is served on its own thread until the test ends: the transport opens a
+/// `script` answers each frame except heartbeats, which cTrader does not answer.
+///
+/// Each connection is served on its own thread until the test ends. The transport opens a
 /// replacement before it drops the connection it replaces.
 pub(crate) fn start(
     script: impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static,
@@ -319,7 +325,9 @@ pub(crate) fn now() -> Timestamp {
     Timestamp::from(get_atomic_clock_realtime().get_time_ns())
 }
 
-/// A credential whose token file, in the directory returned, holds the pair valid for 30 days.
+/// Returns a credential and the directory of its token file.
+///
+/// The file holds a pair valid for 30 days.
 pub(crate) fn credential() -> (CTraderCredential, TempDir) {
     credential_expiring(Some(now() + SignedDuration::from_hours(30 * 24)))
 }
@@ -334,7 +342,9 @@ pub(crate) fn connection() -> (CTraderConnection, TempDir) {
     (connection, tokens)
 }
 
-/// `None`: the expiry is unknown, as when the credential seeded the file.
+/// Returns a credential like `credential`, with the pair expiring at `expires_at`.
+///
+/// `None` means the expiry is unknown, as when the credential seeded the file.
 pub(crate) fn credential_expiring(expires_at: Option<Timestamp>) -> (CTraderCredential, TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let credential = CTraderCredential {
@@ -363,7 +373,7 @@ pub(crate) fn stored_access_token(credential: &CTraderCredential) -> String {
         .to_owned()
 }
 
-/// A synthetic renewal answer whose access token is `renewed_access(1)`.
+/// A synthetic renewal answer with the access token `renewed_access(1)`.
 pub(crate) fn renewal_answer(request: &ProtoMessage) -> Action {
     let renewed = ProtoOaRefreshTokenRes {
         access_token: renewed_access(1),
@@ -382,8 +392,9 @@ pub(crate) fn renewed_access(renewal: usize) -> String {
 // A renewed access token's lifetime, as cTrader's docs give it
 pub(crate) const EXPIRES_IN: i64 = 2_628_000;
 
-/// cTrader's tokens as the docs describe them: one pair at a time, a renewal replacing both and
-/// invalidating the old pair. Shared by the peers on one account.
+/// cTrader's tokens as the docs describe them. The peers on one account share it.
+///
+/// There is one pair at a time. A renewal replaces both tokens and invalidates the old pair.
 #[derive(Debug)]
 pub(crate) struct TokenVenue {
     renewals: usize,
@@ -391,7 +402,7 @@ pub(crate) struct TokenVenue {
     expired: bool,
     peers: usize,
     authenticated: HashSet<(usize, usize)>,
-    /// Told so with their next request.
+    /// These sessions are told so with their next request.
     ended: HashSet<(usize, usize)>,
 }
 
@@ -462,11 +473,12 @@ pub(crate) fn token_invalidated() -> Action {
     Action::Send(frame(&event, None))
 }
 
-/// A peer answering an access token it does not hold with the captured
+/// A peer that answers an access token it does not hold with the captured
 /// `CH_ACCESS_TOKEN_INVALID`.
 ///
-/// A renewal sends the event ending the renewing session, then the new pair. A session whose token
-/// is no longer valid gets the event with its next request, which `other` then answers.
+/// A renewal sends the event that ends the renewing session, then the new pair. A session whose
+/// token is no longer valid gets the event with its next request. `other` then answers that
+/// request.
 pub(crate) fn token_peer(
     venue: SharedVenue,
     mut other: impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static,
@@ -532,8 +544,10 @@ pub(crate) fn token_peer(
     }
 }
 
-/// The newest `page_size` of `ticks` over `[from, to)`, newest first, and whether there are more,
-/// as measured on the demo (see `README.md`, "Tick history").
+/// Returns the newest `page_size` of `ticks` over `[from, to)`, newest first, and whether there
+/// are more.
+///
+/// This is as measured on the demo (see `README.md`, "Tick history").
 pub(crate) fn venue_page(
     ticks: &[Tick],
     from: i64,
@@ -550,7 +564,8 @@ pub(crate) fn venue_page(
     (window.into_iter().take(page_size).collect(), more)
 }
 
-/// The first tick absolute, the others differences from the one before (see `venue_page`).
+/// Answers a tick request with the first tick absolute and the others as differences from the one
+/// before (see `venue_page`).
 pub(crate) fn tick_answer(
     request: &ProtoOaGetTickDataReq,
     bids: &[Tick],

@@ -1,36 +1,44 @@
-//! The handler task: the one owner of the `WebSocketClient`. It authenticates each connection,
+//! The handler task is the one owner of the `WebSocketClient`. It authenticates each connection,
 //! sends the heartbeat, tags requests with a `clientMsgId` and routes each response back to its
-//! caller. It tracks the spot subscriptions in Nautilus' `SubscriptionState` (confirmed or failed
-//! by cTrader's answer) and sends them all again on each new connection.
+//! caller. It tracks the spot subscriptions in Nautilus' `SubscriptionState`, where cTrader's
+//! answer confirms or fails each one, and sends them all again on each new connection.
 //!
-//! It renews the access token (see `token`) at start when due (expiry unknown or within
-//! `RENEW_BEFORE`), on schedule, and when cTrader refuses the token at the account auth. The
-//! renewal goes under the token file's lock: the file first, since another session may have
-//! renewed the pair, else `ProtoOARefreshTokenReq`. Its answer holds the only copy of the new
-//! pair, the old one spent, so it is written to the file before anything else, whatever the
-//! session went through meanwhile (the answer is known by its `clientMsgId` or payload type), and a
-//! disconnect waits for it, up to `AUTH_TIMEOUT`. Then the account is authenticated again on the
-//! open connection.
+//! It renews the access token (see `token`) in three cases:
+//! - At start, when due (expiry unknown or within `RENEW_BEFORE`).
+//! - On schedule.
+//! - When cTrader refuses the token at the account auth.
 //!
-//! When cTrader ends the account session (`ProtoOAAccountsTokenInvalidatedEvent` or
-//! `ProtoOAAccountDisconnectEvent`: the token was renewed by this session or another, or expired),
-//! the account is authenticated again with the file's pair, renewed first if refused. During a
-//! renewal or an auth such an event is the old token's, and ignored. Meanwhile new requests wait
-//! and those in flight keep awaiting their response. The spot subscriptions, which cTrader keeps on
-//! the connection, are not sent again: (un)subscriptions asked meanwhile wait.
+//! The renewal goes under the token file's lock. It reads the file first, since another session
+//! may have renewed the pair. Otherwise it sends `ProtoOARefreshTokenReq`. The answer holds the
+//! only copy of the new pair, and the old one is spent. So the answer is written to the file before
+//! anything else, whatever the session went through meanwhile (the answer is known by its
+//! `clientMsgId` or payload type). A disconnect waits for that write, up to `AUTH_TIMEOUT`. Then
+//! the account is authenticated again on the open connection.
+//!
+//! cTrader ends the account session with `ProtoOAAccountsTokenInvalidatedEvent` or
+//! `ProtoOAAccountDisconnectEvent`. This happens when this session or another renewed the token,
+//! or when it expired. The account is then authenticated again with the file's pair, renewed first
+//! if refused. During a renewal or an auth, such an event belongs to the old token and is ignored.
+//! Meanwhile new requests wait and those in flight keep awaiting their response. cTrader keeps the
+//! spot subscriptions on the connection, so they are not sent again. (Un)subscriptions asked
+//! meanwhile wait.
 //!
 //! Every frame but the heartbeat is bound to the connection the session authenticates on
-//! (`WebSocketClient::send_bytes_on_connection`, the epoch as its `RECONNECTED` carries it): the
-//! transport writes it there or not at all, never on the next connection, which it would reach
-//! before its authentication. A frame refused because that connection is gone or going (refused at
-//! once while the transport reconnects, as Nautilus' OKX handler does) was never sent: a request
-//! or trade request waits for the new session, a spot change waits in the subscription state, and
-//! the auth frames and a renewal wait for the new connection. The heartbeat goes to the current
-//! connection. A frame whose write timed out or failed after it began may have reached cTrader,
-//! and counts as sent.
+//! (`WebSocketClient::send_bytes_on_connection`, with the epoch as its `RECONNECTED` carries it).
+//! The transport writes the frame there or not at all. It never writes it on the next connection,
+//! which the frame would reach before that connection's authentication.
 //!
-//! Trade requests go out under the `clientMsgId` their caller chose, who learns only whether the
-//! frame was sent; their outcome comes as trade events (`TradeEvents`). A trade request still
+//! A frame is refused if that connection is gone or going. It is refused at once while the
+//! transport reconnects, as Nautilus' OKX handler does. Such a frame was never sent:
+//! - A request or trade request waits for the new session.
+//! - A spot change waits in the subscription state.
+//! - The auth frames and a renewal wait for the new connection.
+//!
+//! The heartbeat goes to the current connection. A frame whose write timed out or failed after it
+//! began may have reached cTrader, and counts as sent.
+//!
+//! Trade requests go out under the `clientMsgId` their caller chose. The caller learns only whether
+//! the frame was sent. The outcome comes as trade events (`TradeEvents`). A trade request still
 //! waiting when the session fails or the connection closes was never sent, and says so.
 
 use std::collections::{BTreeMap, HashMap};
@@ -81,11 +89,12 @@ fn playground(names: &CTraderSettingNames) -> String {
 
 pub(super) type Reply = tokio::sync::oneshot::Sender<Result<ProtoMessage, CTraderError>>;
 
-/// `Ok` once a trade request's frame is written or may have been, an error if it never was.
+/// Reports a trade request's send: `Ok` once the frame is written or may have been, an error if it
+/// never was.
 pub(super) type Sent = tokio::sync::oneshot::Sender<Result<(), CTraderError>>;
 
 pub(super) enum HandlerCommand {
-    /// Queued before the command sender is shared, so no request overtakes it.
+    /// Queued before the command sender is shared, so no request can overtake it.
     SetClient(WebSocketClient),
     Request {
         payload_type: u32,
@@ -164,13 +173,14 @@ pub(super) struct CTraderWsHandler {
     credential: CTraderCredential,
     token_file: TokenStore,
     tokens: TokenPair,
-    /// Kept until answered, the connection replaced or closed.
+    /// Kept until it is answered or the connection is replaced or closed.
     renewal: Option<Renewal>,
-    /// Whether the pair was renewed since the session was last ready: a token refused even then is
-    /// not renewed again.
+    /// Whether the pair was renewed since the session was last ready.
+    ///
+    /// A token refused even then is not renewed again.
     renewed: bool,
     wake: Option<Instant>,
-    /// Invalidated on a new account auth on the same connection too, so historical requests take
+    /// Also invalidated on a new account auth on the same connection, so historical requests take
     /// no slots meanwhile.
     auth: AuthTracker,
     cmd_rx: tokio::sync::mpsc::UnboundedReceiver<HandlerCommand>,
@@ -182,12 +192,14 @@ pub(super) struct CTraderWsHandler {
     pending: HashMap<String, Pending>,
     queued: Vec<Queued>,
     subscriptions: SubscriptionState,
-    /// Whether the connection is new and holds no subscriptions: changes go to `subscriptions`
-    /// only, and all are sent once the session is ready. Else changes asked meanwhile wait in
-    /// `spot_changes`, as cTrader keeps a connection's subscriptions across a new account auth,
-    /// answering `ALREADY_SUBSCRIBED` to one sent again (demo, 2026-10-26).
+    /// Whether the connection is new and holds no subscriptions.
+    ///
+    /// If so, changes go to `subscriptions` only, and all are sent once the session is ready.
+    /// Otherwise changes asked meanwhile wait in `spot_changes`. cTrader keeps the subscriptions
+    /// of a connection across a new account auth, and answers `ALREADY_SUBSCRIBED` to one sent
+    /// again (demo, 2026-10-26).
     replay: bool,
-    /// The last (un)subscription of each symbol asked during an account auth: `true` subscribes.
+    /// The last (un)subscription asked for each symbol during an account auth: `true` subscribes.
     spot_changes: BTreeMap<i64, bool>,
 }
 
@@ -283,7 +295,7 @@ impl CTraderWsHandler {
         self.close().await;
     }
 
-    /// A renewal in flight gets until its deadline for its answer, which is saved.
+    /// Waits for a renewal in flight until its deadline, and saves the answer.
     async fn finish_renewal(&mut self) {
         while let Some(deadline) = self.renewal.as_ref().map(|r| r.deadline) {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -325,13 +337,14 @@ impl CTraderWsHandler {
         self.send_on(frame, self.connection).await
     }
 
-    /// Sends one frame on the connection of epoch `connection`, or not at all. No frame content is
-    /// logged: auth frames hold the secret and the token.
+    /// Sends one frame on the connection of epoch `connection`, or not at all.
+    ///
+    /// No frame content is logged, as auth frames hold the secret and the token.
     async fn send_on(&self, frame: Vec<u8>, connection: u64) -> Result<(), SendError> {
         let client = self.client.as_ref().ok_or(SendError::Closed)?;
 
-        // Refused at once rather than held in the transport until a connection is up, which is not
-        // the frame's.
+        // Refused at once, not held in the transport until a connection is up, as that connection
+        // would not be the frame's.
         if client.connection_mode().is_reconnect() {
             return Err(SendError::ConnectionChanged);
         }
@@ -341,8 +354,11 @@ impl CTraderWsHandler {
             .or_else(failed_send)
     }
 
-    /// A `ProtoHeartbeatEvent` every 10 s (help.ctrader.com/open-api, "Establish a connection"),
-    /// skipped while reconnecting as Nautilus skips a pong (`WebSocketClient::send_pong`).
+    /// Sends a `ProtoHeartbeatEvent` every 10 s (help.ctrader.com/open-api, "Establish a
+    /// connection").
+    ///
+    /// It skips the heartbeat while reconnecting, as Nautilus skips a pong
+    /// (`WebSocketClient::send_pong`).
     async fn send_heartbeat(&self) {
         let Some(client) = self.client.as_ref().filter(|c| c.is_active()) else {
             return;
@@ -361,8 +377,8 @@ impl CTraderWsHandler {
     }
 
     async fn authenticate(&mut self) {
-        // A new connection: the last one's renewal is over and it holds no subscription, so the
-        // changes waiting go to the state, all sent once the session is ready.
+        // A new connection ends the last one's renewal and holds no subscription, so the waiting
+        // changes go to the state, and all are sent once the session is ready.
         self.renewed = false;
         self.wake = None;
         self.replay = true;
@@ -397,8 +413,9 @@ impl CTraderWsHandler {
         }
     }
 
-    /// Takes the file's pair if another session renewed it. Keeps the session's pair if the file
-    /// cannot be read.
+    /// Takes the file's pair if another session renewed it.
+    ///
+    /// Keeps the session's pair if the file cannot be read.
     fn adopt_stored(&mut self) -> bool {
         match self.token_file.read() {
             Ok(stored) if !stored.same_access_token(&self.tokens) => {
@@ -460,7 +477,9 @@ impl CTraderWsHandler {
         }
     }
 
-    /// By its `clientMsgId` or, whatever its id, as the renewal's answer message.
+    /// Returns whether `envelope` answers the renewal.
+    ///
+    /// It matches by `clientMsgId` or, whatever the id, by the renewal's answer message type.
     fn answers_renewal(&self, envelope: &ProtoMessage) -> bool {
         self.renewal.as_ref().is_some_and(|renewal| {
             envelope.client_msg_id.as_deref() == Some(renewal.client_msg_id.as_str())
@@ -495,7 +514,7 @@ impl CTraderWsHandler {
                 self.token_file.path().display()
             ),
 
-            // The old pair is spent: this session goes on with the new one, which no later run
+            // The old pair is spent, so this session goes on with the new one, which no later run
             // finds.
             Err(e) => log::error!(
                 "cTrader access token renewed but not saved ({e:#}): this session goes on \
@@ -556,8 +575,8 @@ impl CTraderWsHandler {
         });
         self.auth.succeed();
 
-        // All subscriptions on a new connection, those changed meanwhile after a new account auth
-        // on the same one.
+        // All subscriptions on a new connection, or those changed meanwhile after a new account
+        // auth on the same one.
         let mut subscribe = Vec::new();
         let mut unsubscribe = Vec::new();
         if std::mem::take(&mut self.replay) {
@@ -599,8 +618,10 @@ impl CTraderWsHandler {
         self.session = Session::Failed(reason);
     }
 
-    /// The handler's own spot requests are dropped, the next connection sending them again, and so
-    /// are the trade requests, their outcome unknown until reconciliation.
+    /// Drops the handler's own spot requests and the trade requests.
+    ///
+    /// The next connection sends the spot requests again. The outcome of a trade request is
+    /// unknown until reconciliation.
     fn fail_pending(&mut self, error: &CTraderError) {
         for (_, pending) in self.pending.drain() {
             if let Pending::Caller(reply) = pending {
@@ -621,8 +642,11 @@ impl CTraderWsHandler {
         }
     }
 
-    /// Returns whether it changes the state: a subscription of a symbol not yet wanted, an
-    /// unsubscription of one subscribed or pending.
+    /// Returns whether it changes the state.
+    ///
+    /// A change is:
+    /// - A subscription to a symbol not yet wanted.
+    /// - An unsubscription from a symbol that is subscribed or pending.
     fn mark_spots(&self, symbol_id: i64, subscribe: bool) -> bool {
         let topic = spot_topic(symbol_id);
         if subscribe {
@@ -635,8 +659,8 @@ impl CTraderWsHandler {
         subscribed
     }
 
-    /// One refused because the connection changed stays marked in the state, which the new session
-    /// sends (answers: see `spots_answered`).
+    /// A request refused because the connection changed stays marked in the state. The new session
+    /// sends it (answers: see `spots_answered`).
     async fn send_spots(&mut self, subscribe: bool, symbol_ids: Vec<i64>) {
         let id = self.next_id();
         let account = self.credential.account_id.get();
@@ -869,9 +893,11 @@ impl CTraderWsHandler {
         });
     }
 
-    /// A subscription's answer confirms the symbols it lists in `subscribedSymbolId`, which the
-    /// demo filled with each symbol asked on 14 November 2026. Any other symbol, and a refused
-    /// unsubscription's, is marked failed (kept for the next connection) and logged.
+    /// Handles the answer to a subscription request.
+    ///
+    /// The answer confirms the symbols it lists in `subscribedSymbolId`. The demo filled that list
+    /// with each symbol asked on 14 November 2026. Any other symbol is marked failed (kept for the
+    /// next connection) and logged. So is each symbol of a refused unsubscription.
     fn spots_answered(&self, subscribe: bool, symbol_ids: &[i64], envelope: &ProtoMessage) {
         let outcome = if subscribe {
             open::<ProtoOaSubscribeSpotsRes>(envelope).map(|res| res.subscribed_symbol_id)
@@ -929,8 +955,9 @@ impl CTraderWsHandler {
         self.authenticate_account().await;
     }
 
-    /// Asks the transport to replace the connection (see `reconnected`), or fails the session if
-    /// it takes no reconnect (closing).
+    /// Asks the transport to replace the connection (see `reconnected`).
+    ///
+    /// Fails the session if the transport takes no reconnect (closing).
     fn client_ended(&mut self, name: &str) {
         if self
             .client
@@ -1016,11 +1043,12 @@ fn renewal_failure(error: &CTraderError, names: &CTraderSettingNames) -> String 
     }
 }
 
-/// A frame whose send failed with `e` counts as sent if its write may have begun, its outcome left
-/// to cTrader's answer or reconciliation; else it is unsent.
+/// Counts a frame whose send failed with `e` as sent if its write may have begun.
 ///
-/// A write that timed out (`WriteTimeout`) or failed (`BrokenPipe`) may have begun, and
-/// `BrokenPipe` also stands for the writer gone, which is no proof that the frame was never sent.
+/// cTrader's answer or reconciliation then settles the outcome. Otherwise the frame is unsent.
+///
+/// A write that timed out (`WriteTimeout`) or failed (`BrokenPipe`) may have begun. `BrokenPipe`
+/// also stands for the writer gone, which is no proof that the frame was never sent.
 fn failed_send(e: SendError) -> Result<(), SendError> {
     match e {
         SendError::WriteTimeout | SendError::BrokenPipe(_) => {
@@ -1035,7 +1063,8 @@ fn failed_send(e: SendError) -> Result<(), SendError> {
     }
 }
 
-/// Shows only the code, so nothing cTrader echoes from the request reaches a log.
+/// Describes the failure by its code alone, so nothing cTrader echoes from the request reaches a
+/// log.
 fn auth_failure(stage: &str, error: &CTraderError, names: &CTraderSettingNames) -> String {
     let CTraderError::Venue { code, .. } = error else {
         return format!("the {stage} authentication failed: {error}");

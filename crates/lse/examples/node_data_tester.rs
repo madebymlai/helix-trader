@@ -1,20 +1,22 @@
-//! Nautilus' data tester on LSE: a live node with the LSE data client and `DataTester`, running
-//! the cases of Nautilus' data testing spec (`docs/developer_guide/spec_data_testing.md`) the
-//! adapter supports:
+//! Nautilus' data tester on LSE.
 //!
-//! - TC-D01, the venue's instruments, which the node's catalog answers, LSE publishing no
+//! It runs a live node with the LSE data client and `DataTester`. The node runs the cases of
+//! Nautilus' data testing spec (`docs/developer_guide/spec_data_testing.md`) that the adapter
+//! supports:
+//!
+//! - TC-D01, the venue's instruments. The node's catalog answers it, as LSE publishes no
 //!   definitions.
-//! - TC-D21, historical quotes of `GCZ26.GLBX`, CME Globex's Level 1 (the derived series' fail with
-//!   LSE's refusal, LSE serving their past as timeframes alone).
-//! - TC-D31, historical trades of gold futures and `GCZ26.GLBX` (gold spot's fails with LSE's
-//!   refusal, a commodity having no stored trades).
-//! - TC-D41, historical bars, gold spot's 1-minute candles.
-//! - By a second tester, TC-D20, gold futures' quotes on data-ws, and TC-D70, their subscription
-//!   ended on stop.
-//! - By a third, TC-D20 and TC-D30, `GCZ26.GLBX`'s quotes and trades on LSE's CME stream (its
-//!   opening quote alone while CME is closed), and TC-D70.
+//! - TC-D21, historical quotes of `GCZ26.GLBX`, CME Globex's Level 1. The derived series' quotes
+//!   fail with LSE's refusal, as LSE serves their past as timeframes alone.
+//! - TC-D31, historical trades of gold futures and `GCZ26.GLBX`. Gold spot's trades fail with
+//!   LSE's refusal, as a commodity has no stored trades.
+//! - TC-D41, historical bars: gold spot's 1-minute candles.
+//! - From a second tester, TC-D20 (gold futures' quotes on data-ws) and TC-D70 (their
+//!   subscription ended on stop).
+//! - From a third, TC-D20 and TC-D30 (`GCZ26.GLBX`'s quotes and trades on LSE's CME stream, with
+//!   only its opening quote while CME is closed), and TC-D70.
 //!
-//! Every other subscription case is skipped, the adapter streaming no other kind. The window is a
+//! The adapter streams no other kind, so every other subscription case is skipped. The window is a
 //! past hour, as LSE's history ends at the previous session's close. The node runs until
 //! interrupted (Ctrl+C).
 //!
