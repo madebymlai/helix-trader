@@ -23,8 +23,8 @@ impl Learner for Fake {
     }
 }
 
-/// The model and its saved text, JSON named by the adapter, so that no other adapter loads it.
-/// `mean` is that of the training labels, the prediction where the first feature is missing.
+/// Saved as JSON tagged by the adapter, so that no other adapter loads it. `mean` is the labels'
+/// mean, the prediction where the first feature is missing.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum Saved {
@@ -54,7 +54,7 @@ mod tests {
 
     use crate::model::learner::{LearnerConfig, TrainingSet};
 
-    /// Fitted on labels whose mean is (2.5 - 1.0 + 3.5 + 2.0) / 4 = 1.75.
+    /// The labels' mean is (2.5 - 1.0 + 3.5 + 2.0) / 4 = 1.75.
     fn model() -> crate::model::learner::Model {
         let set = TrainingSet::new(2, vec![0.9; 8], vec![2.5, -1.0, 3.5, 2.0]).unwrap();
         LearnerConfig::Fake {}.fit(&set).unwrap()

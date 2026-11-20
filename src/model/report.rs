@@ -3,18 +3,16 @@
 //! interval. A train's out-of-sample evidence is a backtest's (`walk`).
 //!
 //! A block names the train's time and its outcome, the model set published (its directory) or the
-//! failure and its reason, then the figures the train reached, failing or not (`train::Reached`):
-//! - Its wall time, its CPU time, user and system, and the peak memory of the train process.
-//! - The days of the dataset it read, built by its replay or taken from the cache.
-//! - The rows of the fit and calibration slices of its sides, fitted as of its time, the long's and
-//!   the short's alike, of its out-of-fold pair and of its meta, beside each level's `min_rows`.
+//! failure and its reason, then the figures reached, failing or not (`train::Reached`): the wall
+//! time, CPU time (user and system) and peak memory of the train process, the dataset days read,
+//! built or cached, and the rows of the fit and calibration slices of the sides, the out-of-fold
+//! pair and the meta, beside each level's `min_rows`.
 //!
-//! The process figures are read once at a train's end (`Meter::lap`): the wall time from Nautilus'
-//! real-time clock, the CPU time and the peak memory from `getrusage` of the process
-//! (`RUSAGE_SELF`), which Nautilus does not read, on Unix alone; off Unix they are reported as not
-//! measured. The CPU time and wall time of a block are those since the previous block's end, the
-//! first's since the train process started, so that the blocks of a span add up to the process's.
-//! The peak memory is the process's high-water mark by the block's end, which no block resets.
+//! The process figures are read once at a train's end (`Meter::lap`): wall time from Nautilus'
+//! real-time clock, CPU time and peak memory from `getrusage` (`RUSAGE_SELF`), which Nautilus does
+//! not read, on Unix alone; off Unix they are reported as not measured. A block's CPU and wall
+//! times are those since the previous block's end, the first's since the process started. The peak
+//! memory is the process's high-water mark, which no block resets.
 
 use std::{fmt::Display, time::Duration};
 
@@ -29,9 +27,7 @@ const MIB: f64 = 1024.0 * 1024.0;
 /// The process figures of a train process's trains, one lap per train.
 #[derive(Debug)]
 pub struct Meter {
-    /// When the last lap ended, or the meter started.
     since: UnixNanos,
-    /// The CPU time of the process by then, nought at its start.
     cpu: Cpu,
 }
 
@@ -43,7 +39,6 @@ pub struct Usage {
     process: Option<Process>,
 }
 
-/// The CPU time a process spent, in user and in system mode.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Cpu {
     user: Duration,
@@ -95,8 +90,8 @@ impl Meter {
     }
 }
 
-/// The process's CPU time and peak memory in bytes, from `getrusage` of the process, its resident
-/// set's high-water mark the peak: in KiB on Linux and the BSDs, in bytes on macOS.
+/// The process's CPU time and peak memory in bytes, from `getrusage`, whose `ru_maxrss` is in KiB
+/// on Linux and the BSDs, in bytes on macOS.
 #[cfg(unix)]
 #[allow(unsafe_code)]
 fn resources() -> Option<(Cpu, u64)> {
@@ -124,7 +119,6 @@ fn resources() -> Option<(Cpu, u64)> {
     ))
 }
 
-/// Off Unix, no `getrusage`: none.
 #[cfg(not(unix))]
 fn resources() -> Option<(Cpu, u64)> {
     None
@@ -187,7 +181,6 @@ impl Display for Report<'_> {
     }
 }
 
-/// `duration` in seconds, to the millisecond.
 fn seconds(duration: Duration) -> String {
     format!("{:.3} s", duration.as_secs_f64())
 }
@@ -239,8 +232,6 @@ mod tests {
         .to_string()
     }
 
-    /// A train with a meta that published reports every figure: its model set, its times and
-    /// memory, its days and the rows of its sides, its out-of-fold pair and its meta.
     #[rstest]
     fn a_published_model_set_reports_its_directory_and_every_figure() {
         let trained = Trained {
@@ -272,8 +263,7 @@ mod tests {
         );
     }
 
-    /// A train failing at its out-of-fold pair reports its reason and the figures it reached, no
-    /// row of the sides or the meta, which it never counted.
+    /// Failing at the out-of-fold pair reports its reason and figures reached, no sides or meta.
     #[rstest]
     fn a_failed_train_reports_its_reason_and_the_figures_it_reached() {
         let trained = Trained {
@@ -299,8 +289,7 @@ mod tests {
         );
     }
 
-    /// A model set already published reads no day and counts no row; off Unix, no CPU time or peak
-    /// memory is measured.
+    /// Already published: no day or row read; off Unix, no CPU time or peak memory.
     #[rstest]
     fn a_train_of_a_model_set_already_published_reports_its_times_alone() {
         let trained = Trained::from(Outcome::AlreadyPublished);
