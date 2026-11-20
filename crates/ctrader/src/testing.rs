@@ -38,12 +38,10 @@ use super::{
     session::ticks::Tick,
 };
 
-/// The made-up broker the tests configure: its venue and the name of its clients, so that a
-/// broker's name left in the adapter fails a test.
+// A made-up broker, so that a real broker's name left in the adapter fails a test
 pub(crate) const VENUE: &str = "ACMEFX";
 pub(crate) const CLIENT: &str = "ACME-CTRADER";
 
-/// What the made-up broker's caller calls its settings.
 pub(crate) const NAMES: CTraderSettingNames = CTraderSettingNames {
     environment: "ACME_ENVIRONMENT",
     client_id: "ACME_CLIENT_ID",
@@ -55,12 +53,10 @@ pub(crate) const NAMES: CTraderSettingNames = CTraderSettingNames {
     guide: "the ACME guide",
 };
 
-/// The fake account the tests authenticate: the `ctidTraderAccountId` the captured responses were
-/// scrubbed to.
+// The `ctidTraderAccountId` the captured responses were scrubbed to
 pub(crate) const ACCOUNT_ID: i64 = 1_000_001;
 
-// Responses captured from a broker's cTrader demo, scrubbed: the payloads, as served (see the
-// `.txtpb` beside each in `test_data/`).
+// Responses captured from a broker's cTrader demo and scrubbed (see the `.txtpb` in `test_data/`)
 pub(crate) const APPLICATION_AUTH_RES: &[u8] =
     include_bytes!("../test_data/application_auth_res.bin");
 pub(crate) const APPLICATION_AUTH_REFUSED: &[u8] =
@@ -99,7 +95,7 @@ pub(crate) const RECONCILE_RES_EMPTY: &[u8] =
 pub(crate) const DEAL_LIST_RES_EMPTY: &[u8] =
     include_bytes!("../test_data/deal_list_res_empty.bin");
 
-// Trade events captured on the demo with 1 oz orders of XAUUSD (see each `.txtpb`)
+// Trade events captured on the demo with 1 oz orders of XAUUSD
 pub(crate) const EXECUTION_MARKET_ACCEPTED: &[u8] =
     include_bytes!("../test_data/execution_market_accepted.bin");
 pub(crate) const EXECUTION_MARKET_FILLED: &[u8] =
@@ -151,26 +147,19 @@ pub(crate) const ORDER_ERROR_ORDER_NOT_FOUND: &[u8] =
 pub(crate) const ORDER_ERROR_POSITION_NOT_FOUND: &[u8] =
     include_bytes!("../test_data/order_error_position_not_found.bin");
 
-/// What the peer does after a frame.
 pub(crate) enum Action {
-    /// Sends these bytes as one binary frame.
     Send(Vec<u8>),
-    /// Closes this connection.
     Close,
 }
 
-/// The answer to `request`: `response` under the request's `clientMsgId`.
 pub(crate) fn reply<M: Payload>(request: &ProtoMessage, response: &M) -> Action {
     Action::Send(frame(response, request.client_msg_id.clone()))
 }
 
-/// `message`, an event, under `client_msg_id`.
 pub(crate) fn event<M: Payload>(message: &M, client_msg_id: Option<&str>) -> Action {
     Action::Send(frame(message, client_msg_id.map(str::to_owned)))
 }
 
-/// cTrader's answer to `request`, a spot subscription, as its demo answers one: the captured
-/// answer, listing each symbol asked as subscribed.
 pub(crate) fn spots_answer(request: &ProtoMessage) -> Action {
     let asked = ProtoOaSubscribeSpotsReq::decode(request.payload.as_deref().unwrap()).unwrap();
     let mut answer = ProtoOaSubscribeSpotsRes::decode(SUBSCRIBE_SPOTS_RES).unwrap();
@@ -178,8 +167,7 @@ pub(crate) fn spots_answer(request: &ProtoMessage) -> Action {
     reply(request, &answer)
 }
 
-/// The answer to `request`: the captured `payload`, an `M`, under the request's `clientMsgId`. The
-/// bytes go as captured, fields the vendored `.proto` lacks included.
+/// Answers with the captured bytes as served, fields the vendored `.proto` lacks included.
 pub(crate) fn replay<M: Payload>(request: &ProtoMessage, payload: &[u8]) -> Action {
     Action::Send(
         ProtoMessage {
@@ -191,8 +179,6 @@ pub(crate) fn replay<M: Payload>(request: &ProtoMessage, payload: &[u8]) -> Acti
     )
 }
 
-/// The answer to `request`, a dynamic leverage request: the captured leverage of XAUUSD or EURUSD,
-/// by the `leverageId` their details carry.
 pub(crate) fn dynamic_leverage_answer(request: &ProtoMessage) -> Action {
     let asked =
         ProtoOaGetDynamicLeverageByIdReq::decode(request.payload.as_deref().unwrap()).unwrap();
@@ -204,8 +190,7 @@ pub(crate) fn dynamic_leverage_answer(request: &ProtoMessage) -> Action {
     replay::<ProtoOaGetDynamicLeverageByIdRes>(request, captured)
 }
 
-/// The captured symbol `name` on the made-up venue, from the symbol list, its details and the
-/// assets, at a margin of 5%: XAUUSD or EURUSD as the clients load it.
+/// The captured XAUUSD or EURUSD on the made-up venue, at a margin of 5%.
 pub(crate) fn instrument(name: &str) -> Cfd {
     let light = ProtoOaSymbolsListRes::decode(SYMBOLS_LIST_RES)
         .unwrap()
@@ -231,8 +216,6 @@ pub(crate) fn instrument(name: &str) -> Cfd {
     .unwrap()
 }
 
-/// The captured answers of a cTrader that accepts the application and the account `ACCOUNT_ID`, or
-/// `None` for a frame that is no auth request.
 pub(crate) fn accept_auth(request: &ProtoMessage) -> Option<Vec<Action>> {
     match request.payload_type {
         t if t == ProtoOaApplicationAuthReq::TYPE => {
@@ -249,21 +232,18 @@ pub(crate) fn accept_auth(request: &ProtoMessage) -> Option<Vec<Action>> {
     }
 }
 
-/// The frames the peer received: the connection (0, 1, ...) and the frame.
 pub(crate) type Received = Arc<Mutex<Vec<(usize, ProtoMessage)>>>;
 
-/// Starts the peer; `script` answers each frame received on a connection, heartbeats aside, which
-/// cTrader does not answer. Serves each connection on its own thread, numbered in the order they
-/// come, until the test ends: the transport opens a replacement before it drops the connection it
-/// replaces.
+/// Starts the peer; `script` answers each frame but heartbeats, which cTrader does not answer.
+///
+/// Each connection is served on its own thread until the test ends: the transport opens a
+/// replacement before it drops the connection it replaces.
 pub(crate) fn start(
     script: impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static,
 ) -> (String, Received) {
     start_delayed(|_| Duration::ZERO, script)
 }
 
-/// `start`, each connection's WebSocket handshake answered `handshake` of its number late: the
-/// transport reconnects that long.
 pub(crate) fn start_delayed(
     handshake: impl Fn(usize) -> Duration + Send + Sync + 'static,
     script: impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static,
@@ -315,8 +295,6 @@ pub(crate) fn start_delayed(
     (url, received)
 }
 
-/// Waits, up to 10 s, until `condition` holds on the frames received (Nautilus'
-/// `wait_until_async`); returns the frames received once it does.
 pub(crate) async fn wait_until(
     received: &Received,
     condition: impl Fn(&[(usize, ProtoMessage)]) -> bool,
@@ -334,22 +312,18 @@ pub(crate) async fn wait_until(
     received.lock().unwrap().clone()
 }
 
-/// The made-up token pair that seeds the token file of `credential`.
 pub(crate) const ACCESS_TOKEN: &str = "accessTokenValue";
 pub(crate) const REFRESH_TOKEN: &str = "refreshTokenValue";
 
-/// Now on the wall clock the adapter reads, Nautilus' realtime clock.
 pub(crate) fn now() -> Timestamp {
     Timestamp::from(get_atomic_clock_realtime().get_time_ns())
 }
 
-/// A credential of made-up values, for account `ACCOUNT_ID`, its token file in the directory
-/// returned, holding the pair of `ACCESS_TOKEN` and `REFRESH_TOKEN`, valid for 30 days.
+/// A credential whose token file, in the directory returned, holds the pair valid for 30 days.
 pub(crate) fn credential() -> (CTraderCredential, TempDir) {
     credential_expiring(Some(now() + SignedDuration::from_hours(30 * 24)))
 }
 
-/// A demo connection of the made-up broker, on `VENUE`, with `credential`.
 pub(crate) fn connection() -> (CTraderConnection, TempDir) {
     let (credential, tokens) = credential();
     let connection = CTraderConnection {
@@ -360,8 +334,7 @@ pub(crate) fn connection() -> (CTraderConnection, TempDir) {
     (connection, tokens)
 }
 
-/// As `credential`, the access token expiring at `expires_at` (`None`: unknown, as when the
-/// credential seeded it).
+/// `None`: the expiry is unknown, as when the credential seeded the file.
 pub(crate) fn credential_expiring(expires_at: Option<Timestamp>) -> (CTraderCredential, TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let credential = CTraderCredential {
@@ -380,7 +353,6 @@ pub(crate) fn credential_expiring(expires_at: Option<Timestamp>) -> (CTraderCred
     (credential, dir)
 }
 
-/// The access token the token file of `credential` holds.
 pub(crate) fn stored_access_token(credential: &CTraderCredential) -> String {
     credential
         .tokens()
@@ -391,8 +363,7 @@ pub(crate) fn stored_access_token(credential: &CTraderCredential) -> String {
         .to_owned()
 }
 
-/// cTrader's answer to `request`, a renewal: a new pair whose access token is `renewed_access(1)`
-/// (synthetic, as OpenApiMessages.proto defines it).
+/// A synthetic renewal answer whose access token is `renewed_access(1)`.
 pub(crate) fn renewal_answer(request: &ProtoMessage) -> Action {
     let renewed = ProtoOaRefreshTokenRes {
         access_token: renewed_access(1),
@@ -404,35 +375,29 @@ pub(crate) fn renewal_answer(request: &ProtoMessage) -> Action {
     reply(request, &renewed)
 }
 
-/// The access token renewals hand out: `ACCESS_TOKEN` then `renewedAccess1`, `renewedAccess2`, ...
 pub(crate) fn renewed_access(renewal: usize) -> String {
     format!("renewedAccess{renewal}")
 }
 
-/// How long a renewed access token lasts, as cTrader's docs give it.
+// A renewed access token's lifetime, as cTrader's docs give it
 pub(crate) const EXPIRES_IN: i64 = 2_628_000;
 
-/// cTrader's tokens as the docs describe them: one pair at a time; a renewal with the current
-/// refresh token replaces both, the old pair invalidated. Shared by the peers of sessions on the
-/// same account.
+/// cTrader's tokens as the docs describe them: one pair at a time, a renewal replacing both and
+/// invalidating the old pair. Shared by the peers on one account.
 #[derive(Debug)]
 pub(crate) struct TokenVenue {
     renewals: usize,
     refuse_renewal: bool,
-    /// Whether the access token expired: refused, until renewed.
     expired: bool,
-    /// The peers created on the venue.
     peers: usize,
-    /// The connections (peer, connection) whose account session is authenticated.
     authenticated: HashSet<(usize, usize)>,
-    /// The connections whose account session ended, told so with their next request.
+    /// Told so with their next request.
     ended: HashSet<(usize, usize)>,
 }
 
 pub(crate) type SharedVenue = Arc<Mutex<TokenVenue>>;
 
 impl TokenVenue {
-    /// A venue holding the pair of `credential`.
     pub(crate) fn new() -> SharedVenue {
         Arc::new(Mutex::new(Self {
             renewals: 0,
@@ -444,7 +409,7 @@ impl TokenVenue {
         }))
     }
 
-    /// A venue that refuses every renewal, as for a revoked refresh token.
+    /// Refuses every renewal, as for a revoked refresh token.
     pub(crate) fn refusing() -> SharedVenue {
         let venue = Self::new();
         venue.lock().unwrap().refuse_renewal = true;
@@ -469,20 +434,16 @@ impl TokenVenue {
         }
     }
 
-    /// Ends the account session of every connection, the access token invalidated: it expired, or
-    /// was renewed.
     fn invalidate(&mut self) {
         self.ended.extend(self.authenticated.drain());
     }
 
-    /// The access token expires: the sessions end, and it is refused until renewed.
     pub(crate) fn expire(&mut self) {
         self.expired = true;
         self.invalidate();
     }
 }
 
-/// Synthetic: cTrader's answer to a token it does not hold.
 pub(crate) fn token_refused(request: &ProtoMessage) -> Action {
     let error = ProtoOaErrorRes {
         error_code: "CH_ACCESS_TOKEN_INVALID".to_owned(),
@@ -492,8 +453,6 @@ pub(crate) fn token_refused(request: &ProtoMessage) -> Action {
     reply(request, &error)
 }
 
-/// Synthetic: the event of an account session cTrader ended because its token was refreshed or
-/// expired.
 pub(crate) fn token_invalidated() -> Action {
     let event = ProtoOaAccountsTokenInvalidatedEvent {
         ctid_trader_account_ids: vec![ACCOUNT_ID],
@@ -503,10 +462,11 @@ pub(crate) fn token_invalidated() -> Action {
     Action::Send(frame(&event, None))
 }
 
-/// A peer on `venue`: it answers the auth and the renewals as `venue` does, the account auth with
-/// an access token it does not hold with the captured `CH_ACCESS_TOKEN_INVALID`. A renewal sends
-/// the event ending the renewing session, then the new pair; a session whose token is no longer
-/// valid gets the event with its next request, which `other` then answers, as any other request.
+/// A peer answering an access token it does not hold with the captured
+/// `CH_ACCESS_TOKEN_INVALID`.
+///
+/// A renewal sends the event ending the renewing session, then the new pair. A session whose token
+/// is no longer valid gets the event with its next request, which `other` then answers.
 pub(crate) fn token_peer(
     venue: SharedVenue,
     mut other: impl FnMut(usize, &ProtoMessage) -> Vec<Action> + Send + 'static,
@@ -572,9 +532,8 @@ pub(crate) fn token_peer(
     }
 }
 
-/// cTrader's answer to a tick request over `[from, to)` on a side whose ticks are `ticks`, oldest
-/// first: the newest `page_size` ticks of the window, newest first, and whether the window holds
-/// more (as measured on the demo, see `README.md`, "Tick history").
+/// The newest `page_size` of `ticks` over `[from, to)`, newest first, and whether there are more,
+/// as measured on the demo (see `README.md`, "Tick history").
 pub(crate) fn venue_page(
     ticks: &[Tick],
     from: i64,
@@ -591,9 +550,7 @@ pub(crate) fn venue_page(
     (window.into_iter().take(page_size).collect(), more)
 }
 
-/// cTrader's answer to `request`, a tick request, on a symbol whose BID and ASK ticks are `bids`
-/// and `asks`, oldest first, in pages of `page_size` (see `venue_page`): the first tick absolute,
-/// the others differences from the one before.
+/// The first tick absolute, the others differences from the one before (see `venue_page`).
 pub(crate) fn tick_answer(
     request: &ProtoOaGetTickDataReq,
     bids: &[Tick],
