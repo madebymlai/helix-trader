@@ -1,11 +1,9 @@
 //! The results of a run, as plain text.
 //!
-//! Prints what the Nautilus `BacktestResult` holds: the order and position counts, its statistics
-//! (with the max drawdown, which the run registers with the portfolio: see `node::run`) and the
-//! final balances from its summary. Next to the PnL it prints the costs, which the result does not
-//! hold. They come from the fills (`OrderFilled`, with their commission) of the orders in the
-//! engine's cache, and the quotes they filled on, if the run replayed quotes of their instrument; a
-//! run on bars or trades alone has no spread to measure.
+//! Prints the order and position counts, statistics (with the max drawdown, which `node::run`
+//! registers) and final balances of the Nautilus `BacktestResult`, and the costs, which it does not
+//! hold. They come from the fills (`OrderFilled`) in the engine's cache and the quotes they filled
+//! on; a run on bars or trades alone has no spread to measure.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -33,7 +31,6 @@ pub struct Outcome {
     costs: BTreeMap<String, Costs>,
 }
 
-/// What the fills paid in one currency.
 #[derive(Debug, Default)]
 struct Costs {
     /// The commission of fills of positions settled in this currency, which Nautilus nets into
@@ -41,22 +38,19 @@ struct Costs {
     commission: Decimal,
     /// The commission of fills of positions settled in another currency, which no PnL nets.
     outside_pnl: Decimal,
-    /// Each fill's value at its price less its value at the mid of the quote it filled on, for a
-    /// buy, the reverse for a sell.
+    /// A fill's value at its price less its value at the mid of its quote, for a buy, the reverse
+    /// for a sell.
     spread: Decimal,
-    /// The fills priced in this currency.
     trades: usize,
-    /// Those of an instrument the run replayed no quote of: if any, the spread of the currency is
-    /// not measured.
+    /// Fills of an instrument the run replayed no quote of: if any, the spread is not measured.
     unquoted: usize,
 }
 
 impl Outcome {
     /// `result` and the costs of every fill of the orders in `cache`, each on the quote it filled
-    /// on: the last quote of its instrument stamped at or before the fill in `streams`, the quote
-    /// series the run replayed, each in time order, a later stream's quote winning a tie (see
-    /// `fill_quotes`). A fill of an instrument with no quote in `streams` (a run on bars or trades)
-    /// has no spread.
+    /// on: the last quote of its instrument at or before the fill in `streams`, the quote series
+    /// the run replayed, a later stream's quote winning a tie (see `fill_quotes`). A fill of an
+    /// instrument with no quote in `streams` has no spread.
     ///
     /// # Errors
     ///
@@ -128,10 +122,10 @@ impl Outcome {
     }
 }
 
-/// The quote each of `fills` filled on, the last of its instrument stamped at or before it in
-/// `streams`, a later stream's winning a tie, and the instruments `streams` quote. Each stream, in
-/// time order, is read once alongside each instrument's fills in time order, and dropped before the
-/// next, so a run's whole quote history is never held in memory.
+/// The quote each of `fills` filled on, the last of its instrument at or before it in `streams`, a
+/// later stream's winning a tie, and the instruments `streams` quote. Each stream is read once, in
+/// time order, and dropped before the next, so a run's whole quote history is never held in
+/// memory.
 ///
 /// # Errors
 ///
@@ -202,17 +196,16 @@ where
 /// sorted, so that equal results print equally.
 ///
 /// The costs of each currency: the commission, the spread paid, their sum per trade (a fill), and
-/// the gross PnL, the PnL before both: Nautilus' `PnL (total)` plus the two. That PnL is realized
-/// only, the account's balance change after every fill's commission: of a position still open at
-/// the end, the commission and the gross count the commission it paid to open, which no closed
-/// position's PnL holds, and the gross also holds the spread it paid to open. A currency with a
-/// fill on no quote (a run on bars) prints its spread as not applicable, and its cost per trade and
-/// gross PnL hold the commission alone.
+/// the gross PnL, Nautilus' `PnL (total)` plus the two. That PnL is realized only: of a position
+/// still open at the end, the commission and the gross count the commission paid to open, which no
+/// closed position's PnL holds, and the gross also holds the spread paid to open. A currency with a
+/// fill on no quote prints its spread as not applicable, and its cost per trade and gross PnL hold
+/// the commission alone.
 ///
-/// A commission charged in another currency than its position's settlement currency is in no PnL,
-/// as Nautilus nets a fill's commission into its position's PnL only in that currency
-/// (`model/src/position.rs`, `handle_order_fill`). It is listed apart, as `Commission outside PnL`
-/// in its own currency, and counts toward neither the cost per trade nor the gross PnL.
+/// A commission in another currency than its position's settlement currency is in no PnL, as
+/// Nautilus nets it only in that currency (`model/src/position.rs`, `handle_order_fill`). It is
+/// listed apart as `Commission outside PnL`, and counts toward neither the cost per trade nor the
+/// gross PnL.
 #[must_use]
 pub fn report(outcome: &Outcome) -> String {
     let result = &outcome.result;
@@ -265,7 +258,6 @@ pub fn report(outcome: &Outcome) -> String {
     out
 }
 
-/// Appends `title` and the sorted `stats` under it.
 fn section<'a>(
     out: &mut String,
     title: &str,
@@ -295,7 +287,6 @@ mod tests {
 
     use super::*;
 
-    /// SXR8.IBIS, priced in EUR.
     fn sxr8() -> InstrumentAny {
         let mut equity = equity_aapl();
         equity.id = InstrumentId::from("SXR8.IBIS");
@@ -303,8 +294,7 @@ mod tests {
         InstrumentAny::Equity(equity)
     }
 
-    /// A market order `id` of `instrument`, accepted, then filled on `side` for `qty` at `px` at 2
-    /// ns, charged `commission`.
+    /// Accepted, then filled at 2 ns.
     fn filled(
         id: &str,
         instrument: &InstrumentAny,
@@ -316,7 +306,6 @@ mod tests {
         filled_at(id, instrument, side, qty, px, commission, 2)
     }
 
-    /// The order of `filled`, filled at `ts` ns.
     fn filled_at(
         id: &str,
         instrument: &InstrumentAny,
@@ -397,8 +386,8 @@ mod tests {
         cache.add_instrument(aapl.clone()).unwrap();
 
         // Three fills of 10 SXR8.IBIS in EUR, each 0.10 off the mid of 100.00, 1.00 EUR of spread:
-        // two charged 3 EUR, one 1.25 GBP, which no PnL nets, its position's being in EUR. Two
-        // fills of AAPL.XNAS in USD, of no quote, each charged 0.25 USD.
+        // two charged 3 EUR, one 1.25 GBP, which no PnL nets. Two fills of AAPL.XNAS in USD, of no
+        // quote, each charged 0.25 USD.
         for order in [
             filled("O-1", &sxr8, OrderSide::Buy, 10, "100.10", "3 EUR"),
             filled("O-2", &sxr8, OrderSide::Sell, 10, "99.90", "3 EUR"),
@@ -412,7 +401,6 @@ mod tests {
         Outcome::new(result, &cache, [[Ok(quote)]]).unwrap()
     }
 
-    /// A quote of `instrument` at `bid` and `ask`, stamped `ts` ns.
     fn quote(instrument: &InstrumentAny, bid: &str, ask: &str, ts: u64) -> QuoteTick {
         QuoteTick::new(
             instrument.id(),
@@ -425,7 +413,6 @@ mod tests {
         )
     }
 
-    /// A result of no figures, for the costs alone.
     fn empty_result() -> BacktestResult {
         BacktestResult {
             trader_id: "BACKTESTER-001".to_string(),
