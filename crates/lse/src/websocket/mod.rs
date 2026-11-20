@@ -1,8 +1,12 @@
-//! LSE's sockets: the frames of the protocol four of them share (`messages`), the client of one
-//! socket (`client`), and tick parsing (`parse`).
+//! LSE's sockets.
 //!
-//! The exchange streams (CME Globex, Nasdaq TotalView) speak a protocol of their own (`exchange`).
-//! Both clients reconnect and disconnect alike.
+//! The modules are:
+//! - `messages`: the frames of the protocol that four of the sockets share.
+//! - `client`: the client of one socket.
+//! - `parse`: tick parsing.
+//!
+//! The exchange streams (CME Globex, Nasdaq TotalView) speak their own protocol (`exchange`). Both
+//! clients reconnect and disconnect alike.
 
 pub mod client;
 pub mod exchange;
