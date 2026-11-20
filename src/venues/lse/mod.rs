@@ -1,30 +1,35 @@
-//! LSE history and live data, from the LSE adapter's data client (`lse`).
+//! Serves LSE history and live data through the LSE adapter's data client (`lse`).
 //!
-//! History is filled through the node (see `catalog::NodeFill`), the data engine writing the
-//! client's answers back to the catalog:
-//! - `LSEDGE`, London Strategic Edge's derived series, each an index instrument named after its LSE
-//!   market (`GOLD-FUTURES.LSEDGE`: GOLD in `futures`): trades from tick slices, and bars from
-//!   candles, each stamped at its close.
-//! - `GLBX` contracts, CME Globex's Levels 1 to 3 under Databento's ids (`GCZ26.GLBX`): trades,
-//!   quotes, book depths and book deltas.
-//! - `XNAS` stocks, Nasdaq TotalView's Levels 1 to 3 under Databento's ids (`NVDA.XNAS`): the same.
-//! - `OPRA` contracts, US options under Databento's ids, their OSI symbols
-//!   (`AAPL 261120C00355000.OPRA`): trades and bars, as an `LSEDGE` series'.
+//! The node fills history (see `catalog::NodeFill`). The data engine writes the client's answers
+//! back to the catalog. The venues are:
+//! - `LSEDGE`: London Strategic Edge's derived series. Each is an index instrument named after its
+//!   LSE market (`GOLD-FUTURES.LSEDGE`: GOLD in `futures`). Trades come from tick slices. Bars come
+//!   from candles, each stamped at its close.
+//! - `GLBX`: contracts on CME Globex, Levels 1 to 3 under Databento's ids (`GCZ26.GLBX`), as
+//!   trades, quotes, book depths and book deltas.
+//! - `XNAS`: Nasdaq TotalView stocks, Levels 1 to 3 under Databento's ids (`NVDA.XNAS`), with the
+//!   same data.
+//! - `OPRA`: US options under Databento's ids, which are their OSI symbols
+//!   (`AAPL 261120C00355000.OPRA`), as trades and bars like an `LSEDGE` series.
 //!
-//! Live, the client streams the quotes of `LSEDGE` instruments, the Levels 1 to 3 of `GLBX`
-//! contracts and `XNAS` stocks (quotes, trades, book depths and book deltas), and the trades of
-//! `OPRA` contracts, through one subscription of each underlying's chain, on the live node routed
-//! their venues (`live_clients`). IB's execution client takes the orders of `GLBX`, `XNAS` and
-//! `OPRA`.
+//! Live, the client streams the following, through one subscription for each underlying's chain:
+//! - Quotes for `LSEDGE` instruments.
+//! - Levels 1 to 3 for `GLBX` contracts and `XNAS` stocks (quotes, trades, book depths and book
+//!   deltas).
+//! - Trades for `OPRA` contracts.
 //!
-//! A contract's definition is its row's definitions source's. `LSEDGE`'s is the catalog's alone,
-//! written by hand, LSE publishing none, and the data engine answers a request for it from the
-//! catalog before asking the client. The others are Databento's, asked of Nautilus' Databento
-//! client. The client converts LSE's prices at the definition's precision.
+//! The live node routes the client to those venues (`live_clients`). IB's execution client takes
+//! the orders of `GLBX`, `XNAS` and `OPRA`.
 //!
-//! LSE's reference series (reference collections, macro releases, yields, and an instrument's
-//! splits and dividends) are custom series (`lse::LseRow`), filled by the same client with no
-//! definition, each row stamped when its values are known. See `README.md`.
+//! A contract's definition comes from the definitions source of its row. For `LSEDGE`, the source
+//! is the catalog alone, written by hand, because LSE publishes none. The data engine answers a
+//! request for it from the catalog before asking the client. For the other venues, the source is
+//! Databento, asked through Nautilus' Databento client. The client converts LSE's prices at the
+//! definition's precision.
+//!
+//! LSE's reference series are custom series (`lse::LseRow`): reference collections, macro
+//! releases, yields, and an instrument's splits and dividends. The same client fills them with no
+//! definition. Each row is stamped when its values are known. See `README.md`.
 
 use std::num::NonZeroUsize;
 
@@ -41,30 +46,33 @@ use crate::{
     strategy::requirements::{CustomSlice, SeriesSlice},
 };
 
-// The client asks LSE a UTC day an export whatever the window
+// The client asks LSE for one UTC day per export, whatever the window
 const DAY: SignedDuration = SignedDuration::from_hours(24);
 
-/// LSE's book as the adapter's data client streams and serves it (`venues::book_format`).
+/// The book format the adapter's data client streams and serves (`venues::book_format`).
 ///
-/// Deltas are of an L3_MBO book, orders at Level 3 by id, whatever book type a subscription names
-/// (`subscribe_book_deltas`, `crates/lse/src/data.rs:601-605`, reads none; `request_book_deltas`,
-/// `:781`). Depth snapshots are ten levels a side, Level 2, the one depth the client serves;
-/// another fails naming it (`subscribe_book_depth`, `:556-566`; `request_book_depth`, `:739-746`).
+/// Deltas come from an L3_MBO book, with orders at Level 3 by id. The book type a subscription
+/// names does not matter (`subscribe_book_deltas`, `crates/lse/src/data.rs:601-605`, reads none;
+/// `request_book_deltas`, `:781`). Depth snapshots are ten levels a side, Level 2, the only depth
+/// the client serves. Any other depth fails, naming it (`subscribe_book_depth`, `:556-566`;
+/// `request_book_depth`, `:739-746`).
 pub(super) const BOOK: BookFormat = BookFormat {
     deltas: BookType::L3_MBO,
     depth: NonZeroUsize::new(DEPTH10_LEN),
 };
 
-/// Adds to `node` the fill of what the catalog lacks of `slices` (see `catalog::missing`) and of
-/// `custom`, LSE's row series over their slices (see `catalog::missing_custom`).
+/// Adds to `node` the fill for what the catalog lacks of `slices` (see `catalog::missing`) and of
+/// `custom`, LSE's row series (see `catalog::missing_custom`).
 ///
-/// Each contract's definition comes first, from its row's definitions source. Databento's client,
-/// which `databento` makes only if Databento has one to give, is asked within its dataset's end
-/// (`DatabentoHistory::within_datasets`). LSE's are answered by the data engine from the catalog,
-/// which fails a missing one naming the instrument before LSE is asked. The series and rows follow,
-/// asked of the client `config` configures, its keys read only when the node creates it. The data
-/// engine caches each definition, where the client reads the price precision. A custom series has
-/// no instrument.
+/// Each contract's definition comes first, from the definitions source of its row.
+/// - Databento's client is made by `databento`, and only if Databento has a definition to give. It
+///   is asked up to the end of its dataset (`DatabentoHistory::within_datasets`).
+/// - The data engine answers LSE's definitions from the catalog. If one is missing, it fails,
+///   naming the instrument, before LSE is asked.
+///
+/// The series and rows follow. They are asked of the client that `config` configures, which reads
+/// its keys only when the node creates it. The data engine caches each definition, and the client
+/// reads the price precision from it. A custom series has no instrument.
 ///
 /// # Errors
 ///
@@ -100,7 +108,7 @@ fn period(_data: FillData) -> SignedDuration {
     DAY
 }
 
-// On no venue, so asked only by the requests naming it (see `NodeFill::add`)
+// The client is on no venue, so only requests that name it ask it (see `NodeFill::add`)
 fn node_client(config: LseDataClientConfig) -> NodeClient {
     NodeClient {
         factory: Box::new(LseDataClientFactory::new()),
@@ -108,14 +116,19 @@ fn node_client(config: LseDataClientConfig) -> NodeClient {
     }
 }
 
-/// The live node's clients of `instrument_ids`: the adapter's data client and no execution client,
-/// LSE trading nothing.
+/// Returns the live node's clients for `instrument_ids`.
 ///
-/// The client reads its keys when the node creates it: the LSE key for `LSEDGE` and `OPRA`, the CME
-/// key for `GLBX`, the Nasdaq key for `XNAS`. It is on no venue, so it takes the routes of theirs
-/// (`RoutingConfig::venues`) and is not the default (see `live::node::Clients`). With no
-/// instrument, a run reading only custom LSE rows, it takes no route, the series' subscription
-/// naming it by client id (`venues::custom_data_client`).
+/// This is the adapter's data client and no execution client, because LSE trades nothing.
+///
+/// The client reads its keys when the node creates it:
+/// - The LSE key for `LSEDGE` and `OPRA`.
+/// - The CME key for `GLBX`.
+/// - The Nasdaq key for `XNAS`.
+///
+/// The client is on no venue, so it takes the routes of the instruments' venues
+/// (`RoutingConfig::venues`) and is not the default (see `live::node::Clients`). A run can read
+/// only custom LSE rows and have no instrument. Then the client takes no route, and the series'
+/// subscription names it by client id (`venues::custom_data_client`).
 pub(super) fn live_clients(instrument_ids: &[InstrumentId]) -> Clients {
     let mut venues: Vec<String> = Vec::new();
     for id in instrument_ids {
@@ -454,7 +467,7 @@ mod tests {
         );
     }
 
-    // An index as written by hand, its sizes whole lots
+    // An index written by hand, with whole lots as sizes
     fn index(id: &str, raw: &str, precision: u8) -> InstrumentAny {
         InstrumentAny::IndexInstrument(
             IndexInstrument::builder()
@@ -476,9 +489,10 @@ mod tests {
         format!("2026-11-12T{time}Z").parse().unwrap()
     }
 
-    /// Each derived market's 12 November trade slice, as pyarrow reads it: count, total size, first
-    /// and last times, lowest and highest prices. Futures' are in
-    /// `the_trades_lse_exports_are_written_back_to_the_catalog`.
+    /// The 12 November trade slice of each derived market, as pyarrow reads it.
+    ///
+    /// Each entry holds the count, total size, first and last times, and lowest and highest prices.
+    /// The futures' entries are in `the_trades_lse_exports_are_written_back_to_the_catalog`.
     #[rstest]
     #[case::us_stocks(
         ("AAPL-US_STOCKS.LSEDGE", "us_stocks", "AAPL"), 4, AAPL_TRADES,
@@ -565,9 +579,11 @@ mod tests {
     // Close, then open, high, low and last
     type BarRow = (&'static str, [&'static str; 4]);
 
-    /// A forex pair's and an index's 1-minute candles of 12 November, as pyarrow reads them: five
-    /// bars each, closing over `[10:01, 10:05]` and `[15:01, 15:05]`, stamped a minute after the
-    /// row opens, of no volume. LSE stores no trades of forex, and an index has none.
+    /// The 1-minute candles of a forex pair and an index on 12 November, as pyarrow reads them.
+    ///
+    /// Each has five bars, closing over `[10:01, 10:05]` and `[15:01, 15:05]`. Each bar is stamped
+    /// a minute after its row opens and has no volume. LSE stores no trades for forex, and an index
+    /// has none.
     #[rstest]
     #[case::a_forex_pair(
         "EUR_USD-FOREX.LSEDGE", "forex", "EUR_USD", 5, EUR_USD_MINUTES, ("10:01:00", "10:05:00"),
@@ -649,8 +665,9 @@ mod tests {
         );
     }
 
-    /// The S&P 500's tick slice of 12 November, as pyarrow reads it, over `[15:00:00, 15:00:05)`:
-    /// bid and ask are the value, with no sizes, as data-ws sends an index's ticks.
+    /// The S&P 500's tick slice of 12 November over `[15:00:00, 15:00:05)`, as pyarrow reads it.
+    ///
+    /// Bid and ask are the value, with no sizes, as data-ws sends an index's ticks.
     #[rstest]
     fn an_index_s_quotes_fill_from_its_tick_slice_under_its_lsedge_id() {
         const SPX: &str = "SPX-INDICES.LSEDGE";
@@ -713,7 +730,7 @@ mod tests {
         );
     }
 
-    /// The definition request fails, LSE publishing none, and LSE is never asked.
+    /// The definition request fails because LSE publishes none, and LSE is never asked.
     #[rstest]
     fn a_fill_of_an_lsedge_instrument_with_no_definition_fails_naming_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -731,7 +748,7 @@ mod tests {
         assert_eq!(stored_trades(dir.path()), []);
     }
 
-    // Both in its metadata, under an identifier of the config's, here the symbol
+    // Both are in its metadata, under the config's identifier, here the symbol
     fn lse_rows(source: &str, symbol: &str) -> CustomSeries {
         let metadata = nautilus_core::Params::new(
             [
@@ -747,7 +764,8 @@ mod tests {
         lse_rows("bond_yields", "US10Y")
     }
 
-    // The captured days, the 9th to the 12th of November, known from the 10th's 00:00 to the 13th's
+    // The captured days are the 9th to the 12th of November, known from 00:00 on the 10th to 00:00
+    // on the 13th.
     fn fill_bond_yields(dir: &Path, lse: &MockLse) -> anyhow::Result<()> {
         fill_bond_yields_over(
             dir,
@@ -776,8 +794,10 @@ mod tests {
         format!("2026-11-{time}Z").parse().unwrap()
     }
 
-    /// The captured rows of the 9th, 10th and 12th, as pyarrow reads them, each stamped at its
-    /// date's end, under the symbol or the identifier a config's `[data] series` chose.
+    /// The captured rows of the 9th, 10th and 12th, as pyarrow reads them.
+    ///
+    /// Each row is stamped at the end of its date, under the symbol or the identifier that a
+    /// config's `[data] series` chose.
     #[rstest]
     #[case::under_its_symbol(us10y(), "US10Y")]
     #[case::under_the_identifier_its_config_chose(declared_treasury(), "TREASURY-10Y")]
@@ -866,8 +886,8 @@ mod tests {
         }
     }
 
-    // US10Y's bond yields declared under the identifier `TREASURY-10Y`, not the symbol, loaded
-    // after registering the custom data types, as the process does at its start.
+    // US10Y's bond yields are declared under the identifier `TREASURY-10Y`, not the symbol, and
+    // loaded after the custom data types are registered, as the process does at its start.
     fn declared_treasury() -> CustomSeries {
         crate::venues::register_custom_data();
         let config: StandardConfig<Reader> = StandardConfig::load(
@@ -889,9 +909,10 @@ mod tests {
         series
     }
 
-    /// The captured rows stored, known until the 13th's 00:00, then a window until now whose last
-    /// date LSE has no row of yet (`lse`'s data client: the morning after). It is not recorded as
-    /// stored, so the next run asks again.
+    /// The captured rows are stored, known until 00:00 on the 13th. A window until now follows.
+    ///
+    /// LSE has no row yet for the last date of that window (`lse`'s data client: the morning
+    /// after). The window is not recorded as stored, so the next run asks again.
     #[rstest]
     fn a_window_of_bond_yields_reaching_into_a_day_lse_has_not_loaded_is_asked_again() {
         let dir = tempfile::tempdir().unwrap();
@@ -924,10 +945,12 @@ mod tests {
         );
     }
 
-    /// US10Y's bond yields under GC, which rolls from GCQ26 into GCZ26 at 00:00 UTC on 29 July 2026
-    /// (`rolls/README.md`), filled from the 28th to the 30th: LSE is asked once per contract slice,
-    /// each close known at its date's end. GCQ26's slice, the 28th, holds the 27th's close;
-    /// GCZ26's, the 29th to the 30th, the 28th's and 29th's.
+    /// US10Y's bond yields under GC, filled from the 28th to the 30th.
+    ///
+    /// GC rolls from GCQ26 into GCZ26 at 00:00 UTC on 29 July 2026 (`rolls/README.md`). LSE is
+    /// asked once per contract slice. Each close is known at the end of its date.
+    /// - GCQ26's slice is the 28th and holds the 27th's close.
+    /// - GCZ26's slice is the 29th to the 30th and holds the 28th's and 29th's closes.
     #[rstest]
     fn a_roots_custom_series_fills_contract_by_contract_over_each_slice() {
         let dir = tempfile::tempdir().unwrap();
@@ -1004,15 +1027,16 @@ mod tests {
             .collect()
     }
 
-    /// Each kind of LSE's other sources, under an identifier of spaces and dots, each row at the
-    /// time it is known:
-    /// - US core inflation's releases of March to October 2026, from the economic calendar and the
-    ///   macro series of releases.
-    /// - ZN's Commitments of Traders known in September 2026.
-    /// - AAPL's dividends of 2026 to October, from its factors.
-    /// - US10Y's bond yields of 9, 10 and 12 November, each known at its date's end.
+    /// Each kind of LSE's other sources, under an identifier of spaces and dots.
     ///
-    /// The window is stored whole, days without a row too: a second fill asks LSE nothing.
+    /// Each row is at the time it is known:
+    /// - US core inflation releases of March to October 2026, from the economic calendar and the
+    ///   macro series of releases.
+    /// - ZN Commitments of Traders, known in September 2026.
+    /// - AAPL dividends from 2026 to October, from its factors.
+    /// - US10Y bond yields of 9, 10 and 12 November, each known at the end of its date.
+    ///
+    /// The window is stored whole, including days without a row, so a second fill asks LSE nothing.
     #[rstest]
     #[case::the_economic_calendar(
         lse_rows("economic_calendar", "US.Core Inflation Rate YoY"),
@@ -1089,7 +1113,7 @@ mod tests {
         "2026-10-14T12:30:00Z",
     ];
 
-    /// LSE has not filled the past release of 11 February 2026: the window is not written back.
+    /// LSE has not filled the past release of 11 February 2026, so the window is not written back.
     #[rstest]
     fn a_window_of_releases_lse_has_not_filled_is_asked_again() {
         let dir = tempfile::tempdir().unwrap();
@@ -1112,7 +1136,7 @@ mod tests {
         assert_eq!(lse.calls().len(), 4, "{:?}", lse.calls());
     }
 
-    /// Refused by the client before LSE is asked, naming the releases.
+    /// The client refuses the request before LSE is asked. The refusal names the releases.
     #[rstest]
     fn a_fill_of_macro_observations_fails_naming_the_releases() {
         let dir = tempfile::tempdir().unwrap();
@@ -1130,8 +1154,8 @@ mod tests {
         assert!(lse.calls().is_empty(), "{:?}", lse.calls());
     }
 
-    /// A refusal fails the fill with its code, message and required plan; or its code and the
-    /// request, for a series LSE does not list.
+    /// A refusal fails the fill. The error carries the refusal's code, message and required plan.
+    /// For a series LSE does not list, it carries the code and the request.
     #[rstest]
     #[case::a_plan_required(
         Reply::refusal(403, PLAN_REQUIRED),
@@ -1164,8 +1188,9 @@ mod tests {
         assert_eq!(stored_trades(dir.path()), []);
     }
 
-    /// The 21st is filled and the 22nd refused for a quota, ending the fill with LSE's message. The
-    /// next run asks for the 22nd alone, LSE holding no row of it as on a date with no session.
+    /// The 21st is filled and the 22nd is refused for a quota. The fill ends with LSE's message.
+    /// The next run asks for the 22nd alone, because LSE holds no row for it, as on a date with no
+    /// session.
     #[rstest]
     #[case::of_rows(ROWS_EXHAUSTED)]
     #[case::of_the_allowance(ALLOWANCE_EXHAUSTED)]
@@ -1239,8 +1264,8 @@ mod tests {
         assert!(done.calls().is_empty(), "{:?}", done.calls());
     }
 
-    /// Trades stored until 20 hours ago, then a window until now, reaching into the current UTC
-    /// day, which LSE stores the morning after. The window is not recorded as stored.
+    /// Trades are stored until 20 hours ago. A window until now follows, reaching into the current
+    /// UTC day, which LSE stores the morning after. The window is not recorded as stored.
     #[rstest]
     fn a_window_lse_has_not_loaded_is_left_missing_for_the_next_run() {
         let dir = tempfile::tempdir().unwrap();
@@ -1265,7 +1290,7 @@ mod tests {
             )
             .unwrap();
 
-        // The day before's part, if any, and the current day's
+        // The previous day's part, if any, and the current day's part
         let not_loaded = || vec![Reply::refusal(404, DATA_UNAVAILABLE_TODAY); 2];
         let first = MockLse::start(not_loaded());
 
@@ -1289,10 +1314,12 @@ mod tests {
         );
     }
 
-    /// GCZ6 of 2026's trades and quotes over the captured second. The definition is Databento's.
-    /// For the trades and quotes, LSE's client looks the contract up in LSE's catalogue and asks
-    /// for its listing's rows with the CME key. Neither client claims a venue: each request reaches
-    /// the client it names.
+    /// The trades and quotes of GCZ6 of 2026 over the captured second. The definition is
+    /// Databento's.
+    ///
+    /// For the trades and quotes, LSE's client looks the contract up in LSE's catalogue. It asks
+    /// for the rows of the listing with the CME key. Neither client claims a venue, so each request
+    /// reaches the client it names.
     #[rstest]
     fn a_glbx_fill_takes_its_definition_from_databento_and_its_trades_and_quotes_from_lse() {
         let dir = tempfile::tempdir().unwrap();
@@ -1420,8 +1447,10 @@ mod tests {
     }
 
     /// A window past the end of Databento's `GLBX.MDP3`, captured at 09:31:40.093383 on 13 November
-    /// 2026: the definition is asked from the midnight of the last whole UTC day before that end, a
-    /// day Databento defines every active instrument in, up to it.
+    /// 2026.
+    ///
+    /// The definition is asked up to that end, from midnight of the last whole UTC day before it.
+    /// Databento defines every active instrument on such a day.
     #[rstest]
     fn a_glbx_fill_past_databento_s_dataset_end_asks_its_definition_up_to_that_end() {
         let dir = tempfile::tempdir().unwrap();
@@ -1459,7 +1488,7 @@ mod tests {
             .find(|call| call.param("schema") == Some("definition"))
             .unwrap();
 
-        // In nanoseconds, the end exclusive, as Nautilus' client asks
+        // In nanoseconds, with the end exclusive, as Nautilus' client asks
         let asked = |param: &str| {
             Timestamp::from_nanosecond(definition.param(param).unwrap().parse().unwrap()).unwrap()
         };
@@ -1480,8 +1509,10 @@ mod tests {
         );
     }
 
-    /// GCZ6 of 2026's book depths and deltas over the captured second, as LSE's docs record them
-    /// (the adapter's `test_data/`). Each delta event ends `F_LAST`.
+    /// The book depths and deltas of GCZ6 of 2026 over the captured second, as LSE's docs record
+    /// them (the adapter's `test_data/`).
+    ///
+    /// Each delta event ends `F_LAST`.
     #[rstest]
     fn a_glbx_fill_takes_its_book_depths_and_deltas_from_lse() {
         let dir = tempfile::tempdir().unwrap();
@@ -1545,10 +1576,12 @@ mod tests {
         );
     }
 
-    /// AAPL's 355 call of 20 November 2026 over the captured minutes. The definition is
-    /// Databento's, of `OPRA.PILLAR`. LSE's trades and 1-minute bars are asked by the OSI symbol
-    /// with the LSE key, which opens LSE's US options. The captured minute of trades stands for the
-    /// window's, and the candles of 14:30 to 14:33 for the bars, LSE having none of 14:34.
+    /// The AAPL 355 call of 20 November 2026 over the captured minutes.
+    ///
+    /// The definition is Databento's, from `OPRA.PILLAR`. LSE's trades and 1-minute bars are asked
+    /// by the OSI symbol with the LSE key, which opens LSE's US options. The captured minute of
+    /// trades stands for the whole window. The candles of 14:30 to 14:33 stand for the bars,
+    /// because LSE has none for 14:34.
     #[rstest]
     fn an_opra_fill_takes_its_definition_from_databento_and_its_trades_and_bars_from_lse() {
         let dir = tempfile::tempdir().unwrap();
@@ -1587,8 +1620,8 @@ mod tests {
             panic!("not one option contract");
         };
 
-        // Expiry is 16:00 New York, the close of its day; Databento's record gives no multiplier,
-        // so the standard contract's 100.
+        // Expiry is 16:00 New York, the close of its day, and Databento's record gives no
+        // multiplier, so the multiplier is the standard contract's 100.
         assert_eq!(
             (
                 definition.raw_symbol.as_str(),
@@ -1690,9 +1723,10 @@ mod tests {
         assert_eq!(asked_of_lse, [export("1m"), export("tick")]);
     }
 
-    /// NVDA over the second its documented exports hold. The definition is Databento's, of
-    /// `XNAS.ITCH`. LSE's data is asked by the ticker in `nasdaq` with the Nasdaq key. Each delta
-    /// event ends `F_LAST`.
+    /// NVDA over the second that its documented exports hold.
+    ///
+    /// The definition is Databento's, from `XNAS.ITCH`. LSE's data is asked by the ticker in
+    /// `nasdaq` with the Nasdaq key. Each delta event ends `F_LAST`.
     #[rstest]
     fn an_xnas_fill_takes_its_definition_from_databento_and_its_data_from_lse() {
         let dir = tempfile::tempdir().unwrap();
