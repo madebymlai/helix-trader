@@ -1,32 +1,28 @@
-//! Nautilus' data tester on LSE: a live node with the LSE data client and Nautilus' `DataTester`,
-//! run against LSE itself, for the cases of Nautilus' data testing spec
-//! (`docs/developer_guide/spec_data_testing.md`) the adapter supports.
+//! Nautilus' data tester on LSE: a live node with the LSE data client and `DataTester`, running
+//! the cases of Nautilus' data testing spec (`docs/developer_guide/spec_data_testing.md`) the
+//! adapter supports:
 //!
-//! The cases are:
 //! - TC-D01, the venue's instruments, which the node's catalog answers, LSE publishing no
 //!   definitions.
-//! - TC-D21, historical quotes, of GCZ6 of 2026, `GCZ26.GLBX`, CME Globex's Level 1 (the derived
-//!   series' fail with LSE's refusal, LSE serving their past as timeframes alone).
-//! - TC-D31, historical trades, of gold futures and of GCZ26.GLBX (gold spot's fails with LSE's
-//!   refusal, a commodity, of which LSE stores no trades).
+//! - TC-D21, historical quotes of `GCZ26.GLBX`, CME Globex's Level 1 (the derived series' fail with
+//!   LSE's refusal, LSE serving their past as timeframes alone).
+//! - TC-D31, historical trades of gold futures and `GCZ26.GLBX` (gold spot's fails with LSE's
+//!   refusal, a commodity having no stored trades).
 //! - TC-D41, historical bars, gold spot's 1-minute candles.
-//! - By a second tester, TC-D20, gold futures' quotes, which the client streams on data-ws, and
-//!   TC-D70, their subscription ended on stop.
-//! - By a third, TC-D20 and TC-D30, GCZ26.GLBX's quotes and trades, which the client streams on
-//!   LSE's CME stream (its opening quote alone while CME is closed), and TC-D70.
+//! - By a second tester, TC-D20, gold futures' quotes on data-ws, and TC-D70, their subscription
+//!   ended on stop.
+//! - By a third, TC-D20 and TC-D30, `GCZ26.GLBX`'s quotes and trades on LSE's CME stream (its
+//!   opening quote alone while CME is closed), and TC-D70.
 //!
-//! The adapter streams no other kind, so every other subscription case is skipped.
-//!
-//! LSE publishes no definitions: the tester writes the crate's test definitions into a temporary
-//! catalog the node reads, the two series' as one written by hand would be, GCZ26.GLBX's as
-//! Databento gives it. The window is a past hour, as LSE's history ends at the previous session's
-//! close. Edit the constants below to change them. The node runs until interrupted (Ctrl+C).
+//! Every other subscription case is skipped, the adapter streaming no other kind. The window is a
+//! past hour, as LSE's history ends at the previous session's close. The node runs until
+//! interrupted (Ctrl+C).
 //!
 //! Run with: `cargo run -p lse --features test-support --example lse-data-tester`
 //!
 //! Required credential environment variables, from the environment or `.env`:
 //! - `LSE_API_KEY`, for the derived series
-//! - `LSE_CME_API_KEY`, a CME Group plan's key, for GCZ26.GLBX
+//! - `LSE_CME_API_KEY`, a CME Group plan's key, for `GCZ26.GLBX`.
 
 use lse::{
     LseDataClientConfig, LseDataClientFactory,
@@ -45,7 +41,6 @@ use nautilus_testkit::testers::{DataTester, DataTesterConfig};
 
 const TRADER_ID: &str = "TESTER-001";
 const NODE_NAME: &str = "LSE-TESTER-001";
-/// Gold spot's bars, a series LSE serves only as candles.
 const BAR_TYPE: &str = "XAU/USD-COMMODITIES.LSEDGE-1-MINUTE-LAST-EXTERNAL";
 /// An hour of Thursday 12 November 2026.
 const REQUEST_START: &str = "2026-11-12T10:00:00Z";
@@ -131,7 +126,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// The config of the tester `actor_id`, one of the node's three.
 fn tester(actor_id: &str) -> DataActorConfig {
     DataActorConfig {
         actor_id: Some(ActorId::from(actor_id)),
