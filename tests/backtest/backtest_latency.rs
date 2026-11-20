@@ -1,8 +1,8 @@
-//! IC Markets' gold on its tick quotes (`common::ic`) at a latency of 30 s, Nautilus' static latency
-//! model (`backtest::Latency`). A recorder on the hour MID bars buys on the first bar and closes
-//! on the second. Each command fills on the first quote at or after its arrival, not on the one it
-//! was sent on, nor on the first after it: IC's quotes come at :07.250 and :37.750 each minute, so
-//! a command sent on the hour fills on the quote at :37.750.
+//! IC Markets' gold on its tick quotes (`common::ic`) at a latency of 30 s, Nautilus' static
+//! latency model (`backtest::Latency`). A recorder on the hour MID bars buys on the first bar and
+//! closes on the second. Each command fills on the first quote at or after its arrival, not on the
+//! one it was sent on, nor on the first after it: IC's quotes come at :07.250 and :37.750 each
+//! minute, so a command sent on the hour fills on the quote at :37.750.
 
 use helix_trader::backtest::{Backtest, Latency};
 use jiff::{SignedDuration, Timestamp};
@@ -20,7 +20,7 @@ use crate::common::{
 
 #[rstest]
 fn at_a_latency_a_market_order_fills_on_the_first_quote_after_its_arrival() {
-    // The 10:00:07.250 quote differs from the 10:00:37.750 one (4000.00 / 4000.20), as at 11:00:37.750
+    // The 10:00:07.250 quote differs from the 10:00:37.750 one (4000.00 / 4000.20), as at 11:00
     let quotes = ic::quotes()
         .into_iter()
         .map(|quote| match Timestamp::from(quote.ts_event) {

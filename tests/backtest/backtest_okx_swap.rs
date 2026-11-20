@@ -143,9 +143,9 @@ fn each_hour_bar_of_okx_candles_holds_the_minutes_opening_in_its_hour() {
 
     backtest(dir.path()).run(recorder).unwrap();
 
-    // The run starts at 08:30: the first bar replayed is the minute opening 08:29, so the 09:00 hour
-    // bar holds the minutes from 08:29. 09:00 has the minute opening 08:59, 10:00 has 09:00 to
-    // 09:59, not the one opening at 10:00, and 11:00, built before the run's end, has 10:00 to
+    // The run starts at 08:30: the first bar replayed is the minute opening 08:29, so the 09:00
+    // hour bar holds the minutes from 08:29. 09:00 has the minute opening 08:59, 10:00 has 09:00
+    // to 09:59, not the one opening at 10:00, and 11:00, built before the run's end, has 10:00 to
     // 10:59.
     let replay: Vec<_> = record.borrow().bars.iter().map(ohlc).collect();
     assert_eq!(

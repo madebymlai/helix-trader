@@ -101,11 +101,11 @@ fn units(rows: &[TargetRow]) -> Vec<(UnixNanos, Money, Money)> {
         .collect()
 }
 
-/// The hand-worked bracket's long: 7.5 bps of the 4000.10 mid on both sides, stop 3.00 away (4001.10
-/// and 3.00 after the rise at 11:20). Rows at the reference stake, 4 USD of 10M (`RISK`): one
-/// ounce, R 3 USD. On 25M USD at the config's stake, 10 USD: 10 / 3.00 = 3.33, 3 oz, R 9 USD; at
-/// twice the stake, 20 / 3.00 = 6.67, 6 oz, R 18 USD. P&L before an entry moves the equity by a
-/// few dollars, not the size.
+/// The hand-worked bracket's long: 7.5 bps of the 4000.10 mid on both sides, stop 3.00 away
+/// (4001.10 and 3.00 after the rise at 11:20). Rows at the reference stake, 4 USD of 10M
+/// (`RISK`): one ounce, R 3 USD. On 25M USD at the config's stake, 10 USD: 10 / 3.00 = 3.33, 3 oz,
+/// R 9 USD; at twice the stake, 20 / 3.00 = 6.67, 6 oz, R 18 USD. P&L before an entry moves the
+/// equity by a few dollars, not the size.
 #[rstest]
 fn a_model_strategys_bracket_trade_fills_at_its_stake_of_the_accounts_equity() {
     let config = hand_worked(Side::Long);
