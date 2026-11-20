@@ -1,12 +1,15 @@
-//! Runs the strategy on a Nautilus live node (build step 3: paper, then live), one node per
-//! process. The clients are those of the instruments' and custom series' live data sources, each
-//! also the broker of its instruments (`venues::live_clients`).
+//! Runs the strategy on a Nautilus live node (build step 3: paper, then live). Each process runs
+//! one node.
 //!
-//! The warmup comes from the catalog first, then from the venues, whose certified answers are
-//! written back (see `strategy::warmup`). A futures root's instruments are its contract in front
-//! and the next (see `rolls::Transition::after`); the roller loads each later one before
-//! switching (see `rolls::Roller::live`), so the node rolls without a restart. Bars on a root are
-//! refused.
+//! The clients are the live data sources of the instruments and the custom series. Each client
+//! is also the broker of its instruments (`venues::live_clients`).
+//!
+//! The warmup comes from the catalog first, then from the venues. The venues' certified answers
+//! are written back (see `strategy::warmup`).
+//!
+//! A futures root has two instruments: its front contract and the next one (see
+//! `rolls::Transition::after`). The roller loads each later contract before switching to it (see
+//! `rolls::Roller::live`), so the node rolls without a restart. Bars on a root are refused.
 
 pub mod node;
 mod recording;
@@ -40,26 +43,27 @@ use crate::{
 /// One live run: the strategy trades each instrument on its live broker.
 #[derive(Debug, Clone)]
 pub struct Live {
-    /// The node's trader, whose cache in Redis a restart loads.
+    /// The node's trader. A restart loads the trader's cache from Redis.
     pub trader_id: TraderId,
-    /// The live command's venue flags.
+    /// The venue flags of the live command.
     pub venues: LiveVenueArgs,
     /// The Nautilus logger config.
     pub logging: LoggerConfig,
-    /// The catalog directory, created if missing: serves the warmup, keeps the history venues
-    /// certify complete (see `node::run`) and holds the definitions a venue checks its account
-    /// against.
+    /// The catalog directory, created if missing.
+    ///
+    /// It serves the warmup and keeps the history that venues certify complete (see `node::run`).
+    /// It also holds the definitions that a venue checks its account against.
     pub catalog: PathBuf,
     /// Where the node stages the data it streams.
     pub recording: Recording,
 }
 
 impl Live {
-    /// Sets up the clients of the instruments of `requirements` (see `venues::live_clients`), then
+    /// Sets up the clients for the instruments in `requirements` (see `venues::live_clients`), then
     /// runs `strategy` on a live node until SIGINT or SIGTERM.
     ///
-    /// The node claims external orders for the instruments the strategy trades and no other it
-    /// reads. What the last run left staged is promoted before it runs.
+    /// The node claims external orders for the instruments the strategy trades, and for no other
+    /// instrument it reads. The run first promotes what the last run left staged.
     ///
     /// # Errors
     ///
@@ -108,7 +112,7 @@ impl Live {
             venues::live_clients(requirements, &instrument_ids, &self.venues, &self.catalog)
                 .await?;
         let cache_database = redis::start().await?;
-        // Built first: it promotes what the last run left staged, which the warmup reads
+        // Built first, because it promotes what the last run left staged and the warmup reads that
         let node = node::build(
             self.trader_id,
             instance_id,
@@ -124,9 +128,9 @@ impl Live {
     }
 }
 
-/// The instruments the node loads at `now`, each once, in order.
+/// Returns the instruments the node loads at `now`, each once, in order.
 ///
-/// A root is replaced by the contracts of its next roll (see `rolls::Transition::after`).
+/// Each root is replaced by the contracts of its next roll (see `rolls::Transition::after`).
 ///
 /// # Errors
 ///
@@ -191,8 +195,8 @@ mod tests {
         }
     }
 
-    /// GC rolls into GCZ26 on 2026-07-29 and out of it into GCG27 on 2026-11-26 (`rolls/README.md`,
-    /// "GC against Databento").
+    /// GC rolls into GCZ26 on 2026-07-29, then into GCG27 on 2026-11-26 (`rolls/README.md`, "GC
+    /// against Databento").
     #[rstest]
     fn a_root_loads_the_contract_in_front_and_the_next() {
         let requirements = DataRequirements {

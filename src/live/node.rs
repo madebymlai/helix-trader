@@ -1,10 +1,13 @@
-//! Live node: builds and runs it, naming no broker.
+//! Builds and runs the live node, and names no broker.
 //!
-//! Uses `LiveNodeBuilder::from_config`, since the engine configs are `LiveNodeConfig` fields.
-//! Once built, it promotes what the last run left staged (`promote_staged`), adds the retrain actor
-//! and the strategy, claims the external orders of the instruments the strategy trades, runs until
-//! SIGINT or SIGTERM, and disposes the node, also when a step fails. Follows the IB adapter's
-//! `node_exec_tester` example.
+//! The module uses `LiveNodeBuilder::from_config`, since the engine configs are `LiveNodeConfig`
+//! fields. It follows the IB adapter's `node_exec_tester` example. Once the node is built, the
+//! module:
+//! - Promotes what the last run left staged (`promote_staged`).
+//! - Adds the retrain actor and the strategy.
+//! - Claims the external orders of the instruments the strategy trades.
+//! - Runs until SIGINT or SIGTERM.
+//! - Disposes the node, also when a step fails.
 
 use std::fmt::Debug;
 
@@ -29,14 +32,16 @@ use nautilus_trading::strategy::{Strategy, StrategyNative};
 use super::recording::promote_staged;
 use crate::model::launcher::RetrainActor;
 
-/// One adapter's clients on the node: its data client's factory, config and routing, and its
-/// execution client, if the node trades there.
+/// The clients of one adapter on the node.
 ///
-/// Nautilus' data engine makes the first data client on no venue the default
-/// (`DataEngine::register_client`, crates/data/src/engine/registry.rs:44), in the node builder's
-/// `HashMap` order (crates/live/src/node/builder.rs:94, :642), and refuses another made the
-/// default (`set_default_client`, registry.rs:101). Helix routes every venue a run reads, so
-/// nothing depends on which it makes.
+/// They are the adapter's data client (factory, config and routing) and its execution client, if
+/// the node trades there.
+///
+/// Nautilus' data engine makes the first data client with no venue the default
+/// (`DataEngine::register_client`, crates/data/src/engine/registry.rs:44). It registers clients in
+/// the node builder's `HashMap` order (crates/live/src/node/builder.rs:94, :642). It refuses to
+/// make a second client the default (`set_default_client`, registry.rs:101). Helix routes every
+/// venue a run reads, so nothing depends on which client becomes the default.
 pub struct Clients {
     pub data_factory: Box<dyn DataClientFactory>,
     pub data_config: Box<dyn ClientConfig>,
@@ -44,25 +49,27 @@ pub struct Clients {
     pub exec: Option<ExecClient>,
 }
 
-/// An adapter's execution client on the node: its factory, config and order routing.
+/// The execution client of an adapter on the node: its factory, config and order routing.
 pub struct ExecClient {
     pub factory: Box<dyn ExecutionClientFactory>,
     pub config: Box<dyn ClientConfig>,
     pub routing: RoutingConfig,
 }
 
-/// Builds the live node of `trader_id`, as its `instance_id`, on the clients of each adapter in
+/// Builds the live node of `trader_id`, as `instance_id`, on the clients of each adapter in
 /// `clients`, with `cache` sized for the warmup and `data_engine`.
 ///
 /// Then promotes what the last run of the instance left staged (`promote_staged`), before
-/// anything reads or writes the catalog; a node that cannot promote it is disposed. The cache is
+/// anything reads or writes the catalog. A node that cannot promote it is disposed. The cache is
 /// persisted to `cache_database`, if given (see `redis::start`). `catalog` answers the historical
-/// requests first, then the data clients, whose answers are written back (see `strategy::warmup`).
+/// requests first. Then the data clients answer, and their answers are written back (see
+/// `strategy::warmup`).
 ///
 /// # Errors
 ///
-/// Returns an error if the node fails to build (two clients claiming the same route included),
-/// or what the last run staged cannot be promoted.
+/// Returns an error if:
+/// - The node fails to build, including when two clients claim the same route.
+/// - What the last run staged cannot be promoted.
 #[expect(clippy::too_many_arguments)]
 pub fn build(
     trader_id: TraderId,
@@ -100,7 +107,8 @@ pub fn build(
     }
 }
 
-/// `builder` with the data client and, if any, the execution client of each adapter in `clients`.
+/// Returns `builder` with the data client of each adapter in `clients`, and its execution client if
+/// it has one.
 ///
 /// # Errors
 ///
@@ -129,13 +137,16 @@ pub(crate) fn add_clients(
 }
 
 /// Adds `retraining`, then `strategy`, to `node`, runs it until SIGINT or SIGTERM, then disposes
-/// it, also when any of that fails.
+/// it. The node is disposed also when any of those steps fails.
 ///
 /// # Errors
 ///
-/// Returns an error if the node fails to load its cache, the retrain actor or the strategy
-/// cannot be added, the strategy cannot claim its instruments, or the node fails to start, run
-/// or stop (orders still unresolved after the post-stop delay included).
+/// Returns an error if:
+/// - The node fails to load its cache.
+/// - The retrain actor or the strategy cannot be added.
+/// - The strategy cannot claim its instruments.
+/// - The node fails to start, run or stop, including when orders are still unresolved after the
+///   post-stop delay.
 pub(super) async fn run<S>(
     mut node: LiveNode,
     strategy: S,
@@ -163,8 +174,8 @@ where
     node.add_strategy(strategy)
 }
 
-/// Closed orders, closed positions and account events older than `PURGE_AFTER_MINS`, a week, are
-/// purged from memory every `PURGE_INTERVAL_MINS`; Redis keeps them.
+/// Every `PURGE_INTERVAL_MINS`, closed orders, closed positions and account events older than
+/// `PURGE_AFTER_MINS` (a week) are purged from memory. Redis keeps them.
 const PURGE_INTERVAL_MINS: u32 = 60;
 const PURGE_AFTER_MINS: u32 = 7 * 24 * 60;
 
@@ -227,7 +238,7 @@ mod tests {
             .unwrap()
     }
 
-    /// Claims the external orders of the gold alone, not of the conversion pair.
+    /// Claims the external orders of the gold only, not those of the conversion pair.
     #[tokio::test]
     async fn a_strategy_claims_the_external_orders_of_the_instruments_it_trades_alone() {
         let config = EmaCrossConfig::load(
