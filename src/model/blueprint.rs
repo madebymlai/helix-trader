@@ -1,17 +1,14 @@
 //! A strategy's model blueprint (`ModelBlueprint`): what its config alone determines about its
-//! model, namely Nautilus' strategy id, the shared feature set, its model config and its data
+//! model: Nautilus' strategy id, the shared feature set, its model config and its data
 //! requirements. The decision rule and the target are checked against the requirements as the
 //! blueprint is built, so nothing built of it checks them again.
 //!
 //! Everything of a strategy's model is built of its blueprint, the one caller of the dataset
-//! fingerprint (`dataset::fingerprint`), on the venue of the dataset runs its config declares
-//! (`ModelConfig::dataset`). The dataset, the model store and the schedule are built together
-//! (`Stored`), the fingerprint computed once and keying the dataset and every store, and the
-//! training and the walk-forward are built of them. A dataset alone, for a dataset build, and a
-//! model store alone, for a handle, which has no catalog, are built of the blueprint as well. The
-//! strategy's model handle (`handle::ModelHandle`) is built of it and a mode, and registers the
-//! very feature set the dataset and the stores are fingerprinted from. The paths are not the
-//! blueprint's: a handle has no catalog.
+//! fingerprint (`dataset::fingerprint`). The dataset, the model store and the schedule are built
+//! together (`Stored`) on the one fingerprint, keying the dataset and every store; the training and
+//! the walk-forward are built of them. A dataset alone and a model store alone, for a handle, which
+//! has no catalog, are built of it too. The handle (`handle::ModelHandle`) is built of it and a
+//! mode.
 
 use std::{path::Path, rc::Rc};
 
@@ -28,22 +25,17 @@ use super::{
 };
 use crate::strategy::requirements::DataRequirements;
 
-/// A strategy's model as its config alone determines it, of a valid decision rule and target
-/// (`new`).
+/// A strategy's model as its config alone determines it.
 #[derive(Debug)]
 pub struct ModelBlueprint {
     strategy_id: StrategyId,
-    /// The features its model decides on, shared with the strategy.
     features: Rc<FeatureSet>,
     config: ModelConfig,
     requirements: DataRequirements,
 }
 
-/// A strategy's model stored: its dataset in a catalog and its model store under a models root,
-/// both of the blueprint's one fingerprint, and its schedule.
 #[derive(Debug)]
 pub(super) struct Stored<'a> {
-    /// The blueprint it is the model of.
     pub(super) blueprint: &'a ModelBlueprint,
     pub(super) dataset: Dataset,
     pub(super) models: ModelStore,
@@ -51,8 +43,7 @@ pub(super) struct Stored<'a> {
 }
 
 impl ModelBlueprint {
-    /// The model of `strategy_id`, deciding on `features` as `config` says, for a strategy of
-    /// `requirements`.
+    /// The model of `strategy_id`, deciding on `features` as `config` says.
     ///
     /// # Errors
     ///
@@ -74,8 +65,7 @@ impl ModelBlueprint {
         })
     }
 
-    /// The fingerprint of its dataset runs (`dataset::fingerprint`), on the venue its config
-    /// declares, which keys its dataset and its stores.
+    /// The fingerprint of its dataset runs, which keys its dataset and its stores.
     ///
     /// # Errors
     ///
@@ -109,8 +99,7 @@ impl ModelBlueprint {
         ModelStore::new(models, self, self.fingerprint()?)
     }
 
-    /// The training of its models, on its dataset in the catalog at `catalog` and its models in the
-    /// store under `models`.
+    /// The training of its models.
     ///
     /// # Errors
     ///
@@ -119,8 +108,7 @@ impl ModelBlueprint {
         Ok(Training::new(self.stored(catalog, models)?))
     }
 
-    /// The backtests of its models, on its dataset in the catalog at `catalog` and its models in
-    /// the store under `models`: the check of their start and their scores.
+    /// The backtests of its models: the check of their start and their scores.
     ///
     /// # Errors
     ///
@@ -129,12 +117,6 @@ impl ModelBlueprint {
         Ok(WalkForward::new(self.stored(catalog, models)?))
     }
 
-    /// Its dataset in the catalog at `catalog` and its models under `models`, of the fingerprint
-    /// computed once, and its schedule (`Schedule::of_model`).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if `model_store` would.
     pub(super) fn stored(&self, catalog: &Path, models: &Path) -> anyhow::Result<Stored<'_>> {
         let fingerprint = self.fingerprint()?;
         Ok(Stored {
@@ -149,7 +131,6 @@ impl ModelBlueprint {
         self.strategy_id
     }
 
-    /// The features its model decides on, shared with the strategy.
     pub(super) const fn features(&self) -> &Rc<FeatureSet> {
         &self.features
     }
@@ -184,8 +165,7 @@ mod tests {
         )
     }
 
-    /// A cadence not positive is refused as the blueprint is built, with the decision rule's error,
-    /// before the target's ATR, which has no bars of that cadence.
+    /// A cadence not positive is refused with the decision rule's error, before the target's ATR.
     #[rstest]
     fn a_decision_cadence_not_positive_is_refused() {
         let config = ModelConfig {
@@ -199,8 +179,7 @@ mod tests {
         assert!(!err.contains("model.target.atr"), "{err}");
     }
 
-    /// The target is checked against what the strategy reads: an ATR of an instrument whose prices
-    /// it does not read is refused as the blueprint is built, under the ATR's field.
+    /// An ATR of an instrument the strategy does not read is refused, under the ATR's field.
     #[rstest]
     fn a_target_whose_atr_has_no_bars_to_be_built_from_is_refused() {
         let mut config = config();
@@ -212,8 +191,7 @@ mod tests {
         assert!(err.contains("EUR/USD.SIM"), "{err}");
     }
 
-    /// The dataset and the model store of a model stored carry one fingerprint: a model published
-    /// under the dataset's, as a train publishes it, is the one the model store swaps in.
+    /// A model published under the dataset's fingerprint is the one the model store swaps in.
     #[rstest]
     fn the_dataset_and_the_model_store_of_a_model_stored_carry_one_fingerprint() {
         let dir = tempfile::tempdir().unwrap();

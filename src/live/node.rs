@@ -1,15 +1,10 @@
-//! Live node: builds and runs it.
+//! Live node: builds and runs it, naming no broker.
 //!
-//! Uses `LiveNodeBuilder::from_config` (`nautilus_live`), since the engine configs are
-//! `LiveNodeConfig` fields, with the data and execution clients of each adapter the instruments
-//! need, Nautilus' factories and configs, each with its routing, and the cache persisted to the
-//! cache database its caller gives (`with_cache_database_factory`; `Live`'s is Redis, see
-//! `redis`). Once built, it promotes what the last run left staged (`promote_staged`), adds the
-//! actor of the strategy's retrains, if it is retrained (`add_actor`), then the strategy
-//! (`add_strategy`), claims the external orders of the instruments it trades, calls `run`,
-//! which stops on SIGINT or SIGTERM, and disposes the node, which closes the cache database, as
-//! it does when a step after its build fails. Follows the IB adapter's `node_exec_tester`
-//! example. Never names a broker.
+//! Uses `LiveNodeBuilder::from_config`, since the engine configs are `LiveNodeConfig` fields.
+//! Once built, it promotes what the last run left staged (`promote_staged`), adds the retrain actor
+//! and the strategy, claims the external orders of the instruments the strategy trades, runs until
+//! SIGINT or SIGTERM, and disposes the node, also when a step fails. Follows the IB adapter's
+//! `node_exec_tester` example.
 
 use std::fmt::Debug;
 
@@ -34,16 +29,14 @@ use nautilus_trading::strategy::{Strategy, StrategyNative};
 use super::recording::promote_staged;
 use crate::model::launcher::RetrainActor;
 
-/// One adapter's clients on the node: its data client's factory and config and how Nautilus
-/// routes data to it, and its execution client, if the node trades there.
+/// One adapter's clients on the node: its data client's factory, config and routing, and its
+/// execution client, if the node trades there.
 ///
-/// Data and orders are routed apart: Nautilus' data engine makes the first data client on no
-/// venue it registers the default (`DataEngine::register_client`,
-/// crates/data/src/engine/registry.rs:44), in the node builder's `HashMap` order of them
-/// (crates/live/src/node/builder.rs:94, :642), and then refuses another made the default
-/// (`set_default_client`, registry.rs:101); its execution engine makes none so. Helix makes no
-/// data client the default, routing every venue a run reads instead, so nothing depends on
-/// which Nautilus makes it.
+/// Nautilus' data engine makes the first data client on no venue the default
+/// (`DataEngine::register_client`, crates/data/src/engine/registry.rs:44), in the node builder's
+/// `HashMap` order (crates/live/src/node/builder.rs:94, :642), and refuses another made the
+/// default (`set_default_client`, registry.rs:101). Helix routes every venue a run reads, so
+/// nothing depends on which it makes.
 pub struct Clients {
     pub data_factory: Box<dyn DataClientFactory>,
     pub data_config: Box<dyn ClientConfig>,
@@ -51,8 +44,7 @@ pub struct Clients {
     pub exec: Option<ExecClient>,
 }
 
-/// An adapter's execution client on the node: its factory and config, and how Nautilus routes
-/// orders to it.
+/// An adapter's execution client on the node: its factory, config and order routing.
 pub struct ExecClient {
     pub factory: Box<dyn ExecutionClientFactory>,
     pub config: Box<dyn ClientConfig>,
@@ -60,20 +52,12 @@ pub struct ExecClient {
 }
 
 /// Builds the live node of `trader_id`, as its `instance_id`, on the clients of each adapter in
-/// `clients`, routed as each says, with `cache` configuring the cache (sized for the warmup)
-/// and `data_engine` the data engine (see `warmup::live_data_engine_config`). Then promotes
-/// what the last run of its instance left staged (`promote_staged`), so that the catalog holds
-/// it before anything reads or writes it; a node that cannot promote it is disposed.
+/// `clients`, with `cache` sized for the warmup and `data_engine`.
 ///
-/// The cache is persisted to `cache_database`, if given (`Live`'s Redis, see `redis::start`),
-/// under `trader_id`'s keys: the node loads the orders, positions and accounts of its earlier
-/// runs at start, then reconciles them with the venues, and checks open orders and positions as
-/// it runs. With none, the cache lives in memory.
-///
-/// `catalog` is registered, the directory fill-catalog fills and backtests read: it answers the
-/// historical requests first, the data clients what it lacks, and answers asked to are written
-/// back to it (see `strategy::warmup`). The data the node receives is streamed into it as
-/// `streaming` says (see `Recording`).
+/// Then promotes what the last run of the instance left staged (`promote_staged`), before
+/// anything reads or writes the catalog; a node that cannot promote it is disposed. The cache is
+/// persisted to `cache_database`, if given (see `redis::start`). `catalog` answers the historical
+/// requests first, then the data clients, whose answers are written back (see `strategy::warmup`).
 ///
 /// # Errors
 ///
@@ -116,13 +100,11 @@ pub fn build(
     }
 }
 
-/// `builder` with the data client and, if one, the execution client of each adapter in
-/// `clients`, each routed as its `Clients` says.
+/// `builder` with the data client and, if any, the execution client of each adapter in `clients`.
 ///
 /// # Errors
 ///
-/// Returns an error if two clients take one name (see
-/// `LiveNodeBuilder::add_data_client_with_routing`).
+/// Returns an error if two clients take one name.
 pub(crate) fn add_clients(
     mut builder: LiveNodeBuilder,
     clients: Vec<Clients>,
@@ -146,12 +128,8 @@ pub(crate) fn add_clients(
     Ok(builder)
 }
 
-/// Adds `retraining`, the actor of the retrains of `strategy` if it is retrained, then
-/// `strategy` to `node`, which registers the external order claims of its config
-/// (`external_order_instrument_ids`, the instruments it trades, see `StandardConfig`), and runs
-/// it until SIGINT or SIGTERM, then disposes it, as it does when any of that fails. The other
-/// instruments the node loads, the pairs it converts through and those its features read, are
-/// not claimed: their orders and positions on the account are not the strategy's.
+/// Adds `retraining`, then `strategy`, to `node`, runs it until SIGINT or SIGTERM, then disposes
+/// it, also when any of that fails.
 ///
 /// # Errors
 ///
@@ -170,13 +148,11 @@ where
         Ok(()) => node.run().await,
         Err(e) => Err(e),
     };
-    // As Nautilus documents it: disposing closes the cache database
+    // Disposing closes the cache database
     node.dispose();
     result
 }
 
-/// Adds `retraining`, if any, then `strategy` to `node`, which registers the claims of its
-/// config (see `run`).
 fn add<S>(node: &mut LiveNode, strategy: S, retraining: Option<RetrainActor>) -> anyhow::Result<()>
 where
     S: Strategy + StrategyNative + DataActorNative + Component + Debug + 'static,
@@ -187,16 +163,11 @@ where
     node.add_strategy(strategy)
 }
 
-/// How often Nautilus purges the cache of closed orders, closed positions and account events
-/// older than `PURGE_AFTER_MINS`, a week; never an open order or position. Memory only:
-/// `purge_from_database` stays at Nautilus' default, off, so Redis keeps them.
+/// Closed orders, closed positions and account events older than `PURGE_AFTER_MINS`, a week, are
+/// purged from memory every `PURGE_INTERVAL_MINS`; Redis keeps them.
 const PURGE_INTERVAL_MINS: u32 = 60;
 const PURGE_AFTER_MINS: u32 = 7 * 24 * 60;
 
-/// The config of the live node: `trader_id` and its kept `instance_id`, `logging`, `cache`,
-/// `data_engine`, the one `catalog`, `streaming` into it, and the execution engine's checks of
-/// open orders and positions and its purges (`PURGE_INTERVAL_MINS`). Nautilus' defaults load
-/// the cache from its database (`load_cache`) and reconcile at start-up (`reconciliation`).
 fn config(
     trader_id: TraderId,
     instance_id: UUID4,
@@ -244,7 +215,6 @@ mod tests {
 
     const INSTANCE_ID: &str = "2d89666b-1a1e-4a75-b193-4eb3b454c757";
 
-    /// A live node on no client, Nautilus' defaults otherwise: built, it connects to nothing.
     fn offline_node() -> LiveNode {
         let config = LiveNodeConfig {
             environment: Environment::Live,
@@ -257,9 +227,7 @@ mod tests {
             .unwrap()
     }
 
-    /// The EMA crossover of a config trading IC's gold and converting through IC's EUR/USD,
-    /// which the node loads too: added, it claims the external orders of the gold alone, so that
-    /// an order or a position on the account's EUR/USD is not taken for its own.
+    /// Claims the external orders of the gold alone, not of the conversion pair.
     #[tokio::test]
     async fn a_strategy_claims_the_external_orders_of_the_instruments_it_trades_alone() {
         let config = EmaCrossConfig::load(
