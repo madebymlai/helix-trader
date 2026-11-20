@@ -1,9 +1,11 @@
-//! An OKX swap on 1-minute candles: BTC-USDT-SWAP.OKX, a `CryptoPerpetual` of 0.01 BTC a contract
-//! settled in USDT, with the margins of 1 `fill-catalog` gives it, and minute bars stamped as
-//! `fill-catalog` stores OKX's candles: `ts_event` at the minute's open, `ts_init` at its close. A
-//! recorder on the hour bars Nautilus builds from them (a composite bar type) gets each hour bar
-//! holding the minutes opening in its hour; a run on the candles alone, with no quote, reports no
-//! spread.
+//! An OKX swap on 1-minute candles. The instrument is BTC-USDT-SWAP.OKX, a `CryptoPerpetual` of
+//! 0.01 BTC a contract settled in USDT, with the margins of 1 that `fill-catalog` gives it. The
+//! minute bars are stamped as `fill-catalog` stores OKX's candles: `ts_event` at the minute's open,
+//! `ts_init` at its close.
+//!
+//! Nautilus builds hour bars from the minute bars (a composite bar type). A recorder on them gets
+//! each hour bar holding the minutes opening in its hour. A run on the candles alone, with no
+//! quote, reports no spread.
 
 use std::path::Path;
 
@@ -28,16 +30,16 @@ const INSTRUMENT_ID: &str = "BTC-USDT-SWAP.OKX";
 const MINUTE_BARS: &str = "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL";
 const HOUR_BARS: &str = "BTC-USDT-SWAP.OKX-1-HOUR-LAST-INTERNAL@1-MINUTE-EXTERNAL";
 
-/// How long after its close the node builds an hour bar of minute bars: 5 s, as a live node waits
-/// for the last minute.
+/// The node builds an hour bar of minute bars 5 s after its close, as a live node waits for the
+/// last minute.
 const BUILT_AFTER: SignedDuration = SignedDuration::from_secs(5);
 
 fn at(hh_mm: &str) -> Timestamp {
     ts(&format!("2026-01-07T{hh_mm}:00Z"))
 }
 
-/// BTC-USDT-SWAP as OKX defines it: price tick 0.1, lot 0.01 contracts, 0.01 BTC a contract,
-/// initial and maintenance margins of 1.
+/// Returns BTC-USDT-SWAP as OKX defines it: price tick 0.1, lot 0.01 contracts, 0.01 BTC a
+/// contract, and initial and maintenance margins of 1.
 fn instrument() -> InstrumentAny {
     InstrumentAny::CryptoPerpetual(
         CryptoPerpetual::builder()
@@ -63,10 +65,11 @@ fn instrument() -> InstrumentAny {
     )
 }
 
-/// The minute bar opening at `open`, the k-th minute after 08:00: it opens at 100,000 + k tenths,
-/// its high 2 above, its low 1 below, its close 0.5 above, 500 contracts. The minute opening at
-/// 08:59 has its low 50 lower, the one opening at 10:00 its high 50 higher, so that a minute in
-/// the wrong hour shows.
+/// Returns the minute bar opening at `open`, the k-th minute after 08:00.
+///
+/// It opens at 100,000 + k tenths, with its high 2 above, its low 1 below and its close 0.5 above,
+/// and 500 contracts. The minute opening at 08:59 has a low 50 lower, and the one opening at 10:00
+/// has a high 50 higher, so that a minute in the wrong hour shows.
 fn minute_bar(open: Timestamp) -> Bar {
     let k = open.duration_since(at("08:00")).as_mins();
     let first = 100_000.0 + 0.1 * k as f64;
@@ -95,8 +98,9 @@ fn minute_bars(from: Timestamp, to: Timestamp) -> Vec<Bar> {
     bars
 }
 
-/// The hour bar closing at `close`: the minutes opening in `[close - 1 h, close)`, or from `from`
-/// if later, stamped `BUILT_AFTER` its close.
+/// Returns the hour bar closing at `close`, stamped `BUILT_AFTER` after its close.
+///
+/// It holds the minutes opening in `[close - 1 h, close)`, or from `from` if later.
 fn hour_bar(close: Timestamp, from: Timestamp) -> Ohlc {
     let minutes = minute_bars(from.max(close - SignedDuration::from_hours(1)), close);
     let high = minutes.iter().map(|bar| bar.high).max().unwrap();
@@ -143,9 +147,9 @@ fn each_hour_bar_of_okx_candles_holds_the_minutes_opening_in_its_hour() {
 
     backtest(dir.path()).run(recorder).unwrap();
 
-    // The run starts at 08:30: the first bar replayed is the minute opening 08:29, so the 09:00
-    // hour bar holds the minutes from 08:29. 09:00 has the minute opening 08:59, 10:00 has 09:00
-    // to 09:59, not the one opening at 10:00, and 11:00, built before the run's end, has 10:00 to
+    // The run starts at 08:30 and the first bar replayed is the minute opening 08:29, so the 09:00
+    // hour bar holds the minutes from 08:29, 09:00 has the minute opening 08:59, 10:00 has 09:00 to
+    // 09:59 and not the one opening at 10:00, and 11:00, built before the run's end, has 10:00 to
     // 10:59.
     let replay: Vec<_> = record.borrow().bars.iter().map(ohlc).collect();
     assert_eq!(

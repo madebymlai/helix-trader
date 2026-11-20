@@ -1,13 +1,16 @@
-//! A backtest of a strategy retrained on its schedule (`model::walk`), on a fixture catalog: the
+//! A backtest of a strategy retrained on its schedule (`model::walk`), on a fixture catalog. The
 //! probe of `common::dataset` decides every hour on one feature, missing (NaN) from the first
-//! quote. Before the run, the dataset is built over the span and, at each daily retrain time, a
-//! baseline model set is published as a train would (`common::dataset::baseline_of`), its long
-//! predicting its own R, its calibration unchanged. The walk has no edge for a train to earn on, so
-//! its trains would publish none (`backtest_train` trains on one). In the run, every decision of a
-//! period trades on the model published at its start, and each period's scores are its model's
-//! constant beside its own baseline, the training mean its manifest has. The build and the run are
-//! on the test's one thread, a node after another, each disposed before the next, as the binary's
-//! backtest runs them.
+//! quote.
+//!
+//! Before the run, the dataset is built over the span. At each daily retrain time, a baseline model
+//! set is published as a train would (`common::dataset::baseline_of`), with its long predicting its
+//! own R and its calibration unchanged. The walk has no edge for a train to earn on, so its trains
+//! would publish none (`backtest_train` trains on one).
+//!
+//! In the run, every decision of a period trades on the model published at its start. Each period's
+//! scores are its model's constant beside its own baseline, the training mean its manifest has. The
+//! build and the run share the test's one thread, a node after another, each disposed before the
+//! next, as the binary's backtest runs them.
 
 use std::{path::Path, rc::Rc};
 
@@ -50,8 +53,9 @@ fn config_daily() -> ModelConfig {
     }
 }
 
-/// From 23:00 of 22 October 2026 to 03:00 of the 26th: an hour before the span's days, to the
-/// span's end plus the target's limit.
+/// Builds the catalog from 23:00 of 22 October 2026 to 03:00 of the 26th.
+///
+/// It starts an hour before the span's days and ends at the span's end plus the target's limit.
 fn catalog() -> TempDir {
     walk(
         ic::at("00:00:00") + SignedDuration::from_hours(47),
@@ -59,7 +63,7 @@ fn catalog() -> TempDir {
     )
 }
 
-/// The 23rd to the 25th, retrained at midnight of each.
+/// Covers the 23rd to the 25th, with a retrain at each midnight.
 fn span() -> (Timestamp, Timestamp) {
     let start = ic::at("00:00:00") + SignedDuration::from_hours(48);
     (start, start + SignedDuration::from_hours(72))
@@ -77,9 +81,10 @@ fn walk_forward(catalog: &TempDir, models: &Path) -> WalkForward {
         .unwrap()
 }
 
-/// Builds the dataset over the span on this thread, a node as the binary's backtest builds it, and
-/// publishes at each retrain time a baseline predicting `r(tenths)`, `tenths` 3 at the span's
-/// start, one more each day.
+/// Builds the dataset over the span on this thread, in a node, as the binary's backtest builds it.
+///
+/// It publishes a baseline predicting `r(tenths)` at each retrain time. `tenths` is 3 at the span's
+/// start, and one more each day.
 fn trained(catalog: &TempDir, models: &Path) {
     let (start, end) = span();
     let dataset = blueprint(features(), config_daily())
@@ -145,10 +150,12 @@ fn each_period_trades_on_the_model_trained_at_its_start() {
     assert_eq!(record.trades.len(), 72);
 }
 
-/// Each period's model expects one constant R on every decision, as its baseline, the training
-/// mean its manifest has (`common::dataset::baseline_of`), does: -0.2, -0.1, 0 (`trained`). On the
-/// same rows it errs as the baseline does: skill 0, no slope, and its mean R - E' is the mean R of
-/// the period's longs from the dataset less that constant.
+/// Each period's model expects one constant R on every decision, as its baseline does: -0.2, -0.1,
+/// 0 (`trained`). The baseline is the training mean its manifest has
+/// (`common::dataset::baseline_of`).
+///
+/// On the same rows the model errs as the baseline does: skill 0, no slope. Its mean R - E' is the
+/// mean R of the period's longs from the dataset less that constant.
 #[rstest]
 fn each_period_scores_its_model_beside_that_models_own_baseline() {
     let catalog = catalog();

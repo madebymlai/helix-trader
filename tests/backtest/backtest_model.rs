@@ -1,11 +1,12 @@
-//! A strategy trading on its models (`model::handle`): the probe of `common::dataset` decides every
-//! hour on the last mid of IC's gold, on the models of a store. On baseline long models, each
-//! predicting its own R whatever the row, each decision's level names the model it used: the latest
-//! valid at or before it. A LightGBM model published as a train would, reloaded in the node,
-//! predicts on its probe rows exactly as when fitted; one splitting on the payoff features alone
-//! predicts on every decision as on the dataset's row for it. On the hand-worked quotes
-//! (`backtest_targets`), each trade of a model of either side realizes the P&L its dataset row
-//! recorded for that side.
+//! A strategy trades on its models (`model::handle`). The probe of `common::dataset` decides every
+//! hour on the last mid of IC's gold, using the models of a store. The tests cover three cases:
+//! - On baseline long models, each predicting its own R whatever the row, each decision's level
+//!   names the model it used: the latest valid at or before it.
+//! - A LightGBM model published as a train would, then reloaded in the node, predicts on its probe
+//!   rows exactly as when fitted. One splitting on the payoff features alone predicts on every
+//!   decision as on the dataset's row for it.
+//! - On the hand-worked quotes (`backtest_targets`), each trade of a model of either side realizes
+//!   the P&L its dataset row recorded for that side.
 
 use std::{any::Any, cell::RefCell, path::Path, rc::Rc};
 
@@ -50,9 +51,10 @@ fn publish(models: &Path, config: &ModelConfig, valid_from: Timestamp, model: St
         .unwrap();
 }
 
-/// Decisions on the hour, 10 ms late, from midnight of the 21st to 06:00, of a long-only strategy;
-/// models valid from 02:00 (7 tenths, 0.2R), 04:00 (8), 04:30 (9) and 09:00 (after the run), each
-/// decision's level its model's R. Before 02:00 no model is valid: no trade.
+/// A long-only strategy decides on the hour, 10 ms late, from midnight of the 21st to 06:00.
+///
+/// Models are valid from 02:00 (7 tenths, 0.2R), 04:00 (8), 04:30 (9) and 09:00 (after the run).
+/// Each decision's level is its model's R. Before 02:00 no model is valid, so nothing trades.
 #[rstest]
 fn each_decision_uses_the_latest_model_valid_at_or_before_it() {
     let catalog = walk(
@@ -114,13 +116,14 @@ fn each_decision_uses_the_latest_model_valid_at_or_before_it() {
     );
 }
 
-/// A LightGBM model fitted on the long's rows of the 72 hours before t (16:00 of the 25th) but its
-/// last 12 (enough for its leaves of 20 rows to split), on each long's realized R, published
-/// straight (the walk has no edge for a train to publish), valid from the last 12 hours, whose
-/// decisions' long rows are its probe rows. Each decision's level is its prediction to the bit.
-/// The walk puts the mids on both sides of the fitted split, so the probes fall in different
-/// leaves: the trees reloaded in the node give the bits they gave when fitted, on several
-/// predictions.
+/// A LightGBM model is fitted on each long's realized R, over the long's rows of the 72 hours
+/// before t (16:00 of the 25th) but the last 12 (enough for its leaves of 20 rows to split).
+///
+/// It is published straight, as the walk has no edge for a train to publish. It is valid from the
+/// last 12 hours, whose decisions' long rows are its probe rows. Each decision's level is its
+/// prediction to the bit. The walk puts the mids on both sides of the fitted split, so the probes
+/// fall in different leaves. The trees reloaded in the node give the bits they gave when fitted, on
+/// several predictions.
 #[rstest]
 fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
     let catalog = walk(
@@ -207,11 +210,13 @@ fn a_reloaded_model_predicts_in_the_node_as_its_probes() {
 }
 
 /// A decision reads each side's row as the dataset holds it: the decision's features, then the
-/// side's payoff features. A LightGBM model of the long's rows of the 72 hours before t (16:00 of
-/// the 25th), the mid zeroed so that its trees split on the payoff features alone (whether the take
-/// profit's R is above its median, 1 or 0), is published straight. Over the last 12 hours every
-/// decision with a dataset row has for its level the model's prediction on that row's long, to the
-/// bit, and the predictions are not all one: what they read of the payoff is what the rows hold.
+/// side's payoff features.
+///
+/// A LightGBM model of the long's rows of the 72 hours before t (16:00 of the 25th) is published
+/// straight. Its mid is zeroed, so its trees split on the payoff features alone (whether the take
+/// profit's R is above its median, 1 or 0). Over the last 12 hours, every decision with a dataset
+/// row has for its level the model's prediction on that row's long, to the bit. The predictions are
+/// not all one: what they read of the payoff is what the rows hold.
 #[rstest]
 fn a_decision_reads_each_sides_row_as_its_dataset_row_holds_it() {
     let catalog = walk(
@@ -295,9 +300,9 @@ fn a_decision_reads_each_sides_row_as_its_dataset_row_holds_it() {
     assert!(read.len() > 1, "{read:?}");
 }
 
-/// The hand-worked bracket of `backtest_targets`: 7.5 bps of the decision's mid on both sides, 3.00
-/// USD on the one ounce the reference stake buys (`common::dataset::RISK`), closed after 45
-/// minutes, inside the hourly cadence; trades `side` alone at every decision.
+/// The hand-worked bracket of `backtest_targets`: 7.5 bps of the decision's mid on both sides, and
+/// 3.00 USD on the one ounce the reference stake buys (`common::dataset::RISK`). It closes after 45
+/// minutes, inside the hourly cadence, and trades `side` alone at every decision.
 pub(crate) fn hand_worked(side: Side) -> ModelConfig {
     let traded = Some(R::new(f64::MIN));
     let margins = match side {
@@ -329,8 +334,9 @@ pub(crate) fn hand_worked(side: Side) -> ModelConfig {
     }
 }
 
-/// Observes the bracket commands before the simulated venue fills one leg and cancels the other:
-/// a fill price alone cannot identify a stop.
+/// Observes the bracket commands before the simulated venue fills one leg and cancels the other.
+///
+/// A fill price alone cannot identify a stop.
 #[derive(Default)]
 struct BracketSubmissions(RefCell<Vec<(UnixNanos, Price, Price)>>);
 
@@ -352,10 +358,12 @@ impl BusTap for BracketSubmissions {
     }
 }
 
-/// The quarter hours ending at 10:00 and 10:15 range 2 and 4, returning to 4000.10: their two-bar
-/// simple ATR is 3, though the last minute is flat. The spike after 10:15 settles both sides and
-/// makes the forming bar's range 10, but at 10:16 the distance is still 3 around the new 4010.10
-/// mid. The fall then settles the opposite exits. Each row risks 1 oz x $3.
+/// The quarter hours ending at 10:00 and 10:15 range 2 and 4, and return to 4000.10. Their two-bar
+/// simple ATR is 3, though the last minute is flat.
+///
+/// The spike after 10:15 settles both sides and makes the forming bar's range 10. At 10:16 the
+/// distance is still 3 around the new 4010.10 mid. The fall then settles the opposite exits. Each
+/// row risks 1 oz x $3.
 #[rstest]
 fn minute_decisions_label_and_submit_brackets_on_completed_quarter_hours() {
     let mut config = hand_worked(Side::Long);
@@ -453,11 +461,12 @@ fn minute_decisions_label_and_submit_brackets_on_completed_quarter_hours() {
     );
 }
 
-/// Both minutes buy and sell one ounce in the dataset. The 10:01 long stops at 3998.00; its short
-/// takes profit ten seconds later at 3998.10, completing its row. The rise settles 10:00 second
-/// (long TP at 4003.10, short stopped at 4003.40). Each round trip costs $0.24. In execution the
-/// constant long signal waits for that rise, not the five-minute limit, to be eligible again at
-/// 10:02.
+/// Both minutes buy and sell one ounce in the dataset.
+///
+/// The 10:01 long stops at 3998.00. Its short takes profit ten seconds later at 3998.10, completing
+/// its row. The rise settles 10:00 second (long TP at 4003.10, short stopped at 4003.40). Each
+/// round trip costs $0.24. In execution, the constant long signal waits for that rise, not the
+/// five-minute limit, to be eligible again at 10:02.
 #[rstest]
 fn overlapping_decisions_settle_independently_but_executable_entries_wait_until_flat() {
     let mut config = hand_worked(Side::Long);
@@ -529,11 +538,15 @@ fn overlapping_decisions_settle_independently_but_executable_entries_wait_until_
     assert_eq!(entries, [ns("10:00:00.010"), ns("10:02:00.010")]);
 }
 
-/// Worked by hand on the hand-worked quotes: a dip at 09:20, a spike at 10:45:00.010, a rise from
-/// 11:20. Over 08:30 to 12:30 a model of one side, trading every decision on its bracket, realizes
-/// at 09:00, 10:00 and 11:00 the P&L its dataset row recorded: long -3.64 USD (stop), 2.66 (take
-/// profit), 0.56 (time); short 2.66, -3.64, -1.44. The 12:00 trade is still open at the end, its
-/// row unsettled.
+/// Worked by hand on the hand-worked quotes: a dip at 09:20, a spike at 10:45:00.010, and a rise
+/// from 11:20.
+///
+/// Over 08:30 to 12:30, a model of one side trades every decision on its bracket. At 09:00, 10:00
+/// and 11:00 it realizes the P&L its dataset row recorded:
+/// - Long: -3.64 USD (stop), 2.66 (take profit), 0.56 (time).
+/// - Short: 2.66, -3.64, -1.44.
+///
+/// The 12:00 trade is still open at the end, and its row is unsettled.
 #[rstest]
 fn a_model_strategy_realizes_per_trade_the_pnl_its_dataset_row_recorded() {
     let catalog = ic::catalog_of(hand_worked_quotes(), ic::at("08:00:00"), ic::at("13:00:00"));

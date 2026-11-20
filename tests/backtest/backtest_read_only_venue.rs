@@ -1,8 +1,8 @@
-//! A backtest trading IC's gold (`common::ic`) while reading LSE's gold futures trades,
-//! `GOLD-FUTURES.LSEDGE`, filled into the catalog through fill-catalog's node fill from a mock LSE
-//! peer replaying a captured export (`lse::testing`). No broker trades LSEDGE: its simulated venue
-//! starts with nothing, so the run ends with the balances and return statistics of the same run
-//! without the series.
+//! A backtest trades IC's gold (`common::ic`) while reading LSE's gold futures trades,
+//! `GOLD-FUTURES.LSEDGE`. The trades reach the catalog through fill-catalog's node fill, from a
+//! mock LSE peer replaying a captured export (`lse::testing`). No broker trades LSEDGE: its
+//! simulated venue starts with nothing, so the run ends with the balances and return statistics of
+//! the same run without the series.
 
 use std::{
     cell::RefCell,
@@ -38,7 +38,7 @@ use rstest::rstest;
 
 use crate::common::{self, ic};
 
-/// LSE's gold trades over the captured second, `[10:00:00, 10:00:01)`.
+/// Returns LSE's gold trades over the captured second, `[10:00:00, 10:00:01)`.
 fn gold_trades() -> DataRequirements {
     DataRequirements {
         bar_types: vec![],
@@ -51,9 +51,11 @@ fn gold_trades() -> DataRequirements {
     }
 }
 
-/// Fills the catalog in `dir`, which holds the hand-written `GOLD_FUTURES` definition, with its
-/// trades from the mock LSE peer as fill-catalog does: what the catalog lacks, asked of LSE's
-/// client through the node, five days on.
+/// Fills the catalog in `dir` with the `GOLD_FUTURES` trades from the mock LSE peer, as
+/// fill-catalog does.
+///
+/// The catalog already holds the hand-written `GOLD_FUTURES` definition. The node asks LSE's client
+/// for what the catalog lacks, five days on.
 fn fill_gold(dir: &Path) {
     let catalog = ParquetDataCatalog::new(dir, None, None, None, None);
     catalog.write_instruments(vec![gold_futures()]).unwrap();
@@ -151,7 +153,7 @@ fn run(catalog: &tempfile::TempDir, reads_lse: bool) -> (BacktestResult, usize) 
     .unwrap()
 }
 
-/// Statistics by name, to the bit, so that NaN equals NaN.
+/// Returns statistics by name, to the bit, so that NaN equals NaN.
 fn bits<'a>(stats: impl IntoIterator<Item = (&'a String, &'a f64)>) -> BTreeMap<String, u64> {
     stats
         .into_iter()
