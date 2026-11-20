@@ -1,22 +1,8 @@
 //! A mock Databento historical API.
 //!
-//! An HTTP server on 127.0.0.1 answers the two calls a definitions fill makes with Databento's
-//! captured answer for the call's dataset (`test_data/`), whatever else the call asks. It records
-//! each call.
-//!
-//! - `metadata.get_dataset_range`:
-//!   - `GLBX.MDP3`, captured 2026-11-13, ends 2026-11-13T09:31:29.885311Z.
-//!   - `OPRA.PILLAR`, captured 2026-11-13, ends 2026-11-13T14:30:00Z.
-//!   - `XNAS.ITCH`, captured 2026-11-14, ends 2026-11-13T05:00:00Z.
-//! - `timeseries.get_range` answers with definition records of 12 November 2026
-//!   (`schema=definition`, `stype_in=raw_symbol`). The records are zstd-compressed DBN, as
-//!   Databento's client asks, and each is DBN version 1 as sent:
-//!   - `GLBX.MDP3`: GCZ6 (`symbols=GCZ6`), captured 2026-11-13 for $0.0000008.
-//!   - `OPRA.PILLAR`: AAPL's 355 call of 20 November 2026 (`symbols=AAPL 261120C00355000`),
-//!     captured 2026-11-13 for $0.0000017, the cost `metadata.get_cost` gave before.
-//!   - `XNAS.ITCH`: NVDA's three records (`symbols=NVDA`), captured 2026-11-14 for $0.000016093,
-//!     the cost `metadata.get_cost` gave before. Nautilus' client answers with the last record, in
-//!     round lots of 100.
+//! Answers each call with Databento's captured answer for its dataset (`test_data/`), whatever
+//! else the call asks, and records it. Nautilus' client answers XNAS.ITCH's three definition
+//! records with the last one, in round lots of 100.
 
 use std::{
     io::{BufRead, BufReader, Read, Write},
@@ -26,7 +12,6 @@ use std::{
 
 use nautilus_network::http::Url;
 
-/// Each dataset's range and definition (`GCZ26.GLBX`, `AAPL 261120C00355000.OPRA`, `NVDA.XNAS`).
 const DATASETS: [(&str, &[u8], &[u8]); 3] = [
     (
         "GLBX.MDP3",
@@ -67,7 +52,6 @@ pub(crate) struct MockDatabento {
 }
 
 impl MockDatabento {
-    /// Starts the peer. It answers each call on its own thread.
     pub(crate) fn start() -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("a free port");
         let url = format!("http://{}/", listener.local_addr().expect("an address"));
@@ -83,7 +67,6 @@ impl MockDatabento {
         Self { url, calls }
     }
 
-    /// Returns the base URL of the historical API.
     pub(crate) fn url(&self) -> &str {
         &self.url
     }

@@ -689,14 +689,12 @@ mod tests {
 
     use super::*;
 
-    /// The number of warmups drawn. Each comes from a seed in `0..CASES`, so a failure names its
-    /// seed.
     const CASES: u64 = 10_000;
 
-    /// History is initialized at `0..SPAN` ns. The range is small, so ties are common.
+    /// History is initialized at `0..SPAN` ns, a small range so that ties are common.
     const SPAN: u64 = 12;
 
-    /// Series, `ts_init` and serial. The serial is the unique `ts_event` a tick was drawn with.
+    /// Series, `ts_init` and the unique `ts_event` a tick was drawn with.
     type Key = (Series, UnixNanos, UnixNanos);
 
     fn key(tick: &Tick) -> Key {
@@ -793,12 +791,8 @@ mod tests {
         ]
     }
 
-    /// Draws the events of a request.
-    ///
-    /// History comes in windows, each in time order and no older than the last. Built bars come
-    /// with each initialized no earlier than the data brought before, as Nautilus builds a bar once
-    /// data past its close comes. Unless the group ends first, the end follows. A failed request
-    /// answers only its first windows.
+    /// Built bars are initialized no earlier than the data brought before, as Nautilus builds a
+    /// bar once data past its close comes. A failed request answers only its first windows.
     fn events_of(rng: &mut fastrand::Rng, request: &Request, serial: &mut u64) -> Vec<Event> {
         let mut next = |series: &Series, at: u64| {
             *serial += 1;
@@ -870,12 +864,10 @@ mod tests {
 
     #[derive(Default)]
     struct Tally {
-        /// Ticks taken in the order brought, none past its bound, with their sizes.
         taken: Vec<(Key, usize)>,
         taken_bytes: usize,
         handed: Vec<Key>,
         handed_bytes: usize,
-        /// The number of ticks taken when the merge went past its bound.
         cut: Option<usize>,
     }
 
@@ -885,8 +877,7 @@ mod tests {
         }
     }
 
-    /// Returns whether the warmup for `seed` went past its bound, and whether it handed on ties
-    /// across series.
+    /// Returns whether the warmup went past its bound and whether it handed on ties.
     fn check(seed: u64) -> (bool, bool) {
         let mut rng = fastrand::Rng::with_seed(seed);
         let mut pool = pool();
@@ -1012,10 +1003,6 @@ mod tests {
         (tally.cut.is_some(), tied)
     }
 
-    /// The merge hands on every tick once, in `ts_init` order, whatever the windows, the response
-    /// order and the failed or unended requests. Ties across series go in start order. The merge
-    /// never holds more than its bound. Past the bound, it hands on all and takes no more. Each
-    /// draw is up to four requests, a quarter bounded at a few ticks' worth.
     #[rstest]
     fn prop_the_merge_hands_on_every_tick_once_in_ts_init_and_tie_order_within_its_bound() {
         let (mut cut, mut tied) = (0, 0);

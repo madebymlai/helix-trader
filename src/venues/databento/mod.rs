@@ -226,10 +226,7 @@ mod tests {
         }
     }
 
-    /// GLBX.MDP3's end, as captured on 13 November 2026.
-    ///
-    /// A window that reaches or starts past the end is asked up to it. The ask starts at the
-    /// window's start if the window holds 12 November, else at 12 November's midnight.
+    /// GLBX.MDP3's end is as captured on 13 November 2026.
     #[rstest]
     #[case::before_the_end(
         ("2026-11-12T00:00:00Z", "2026-11-12T23:59:59.999999999Z"),
@@ -262,10 +259,8 @@ mod tests {
         );
     }
 
-    /// The instant 1 ns before GLBX.MDP3's end, as captured on 13 November 2026.
     const UP_TO_END: &str = "2026-11-13T09:31:40.093382999Z";
 
-    /// The ends as `time::OffsetDateTime`'s `Display` writes them, at the locked version.
     #[rstest]
     #[case::of_a_tenth_of_a_second("2023-07-20 0:00:00.0 +00:00:00", "2023-07-20T00:00:00Z")]
     #[case::of_hundredths("2023-07-20 0:00:00.12 +00:00:00", "2023-07-20T00:00:00.12Z")]
@@ -288,7 +283,7 @@ mod tests {
         assert_eq!(end_of("GLBX.MDP3", &range).unwrap(), ts(instant));
     }
 
-    /// GLBX's history comes from LSE. IB defines XCEC's instruments.
+    /// GLBX's history comes from LSE, and IB defines XCEC's instruments.
     #[rstest]
     #[case::a_series_of_glbx(
         FillData::Trades(InstrumentId::from("GCZ26.GLBX")),

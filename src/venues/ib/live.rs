@@ -272,9 +272,7 @@ mod tests {
 
     /// Pins that Nautilus' IB execution client keeps positions netting, whatever its config
     /// (`crates/adapters/interactive_brokers/src/factories.rs:182`).
-    ///
-    /// `Broker::oms_type` copies that setting. A backtest simulates every IB venue with it
-    /// (`venues::oms_type`).
+    /// `Broker::oms_type` copies that setting.
     #[rstest]
     fn drift_the_execution_client_keeps_positions_as_the_broker_answers() {
         let clients = configs(&gateway(), &paper(), &[sxr8()]);

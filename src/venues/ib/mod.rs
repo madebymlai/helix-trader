@@ -1034,12 +1034,6 @@ mod tests {
         Ok(ticks.into_iter().map(|(_, name)| name).collect())
     }
 
-    /// Pages end at 10:00:11, 08, 06 and 01.
-    ///
-    /// - The first holds d of :10 and c2 of :07 (cut, dropped).
-    /// - The second holds c1, c2 of :07 and a2 of :05 (cut, dropped).
-    /// - The third holds a1, a2 of :05 and z of 10:00:00 (cut, dropped).
-    /// - The last holds y, z of 10:00:00 and x of 09:59:59 (outside the window).
     #[tokio::test]
     async fn ticks_are_paged_back_to_the_windows_start_each_once() {
         let mut cursors = Vec::new();
@@ -1114,7 +1108,6 @@ mod tests {
         assert_eq!(cursors, [on_the_10th("10:00:11"), on_the_10th("10:00:09")]);
     }
 
-    /// The paging fails if the second page ends with an error or its request fails.
     #[rstest]
     #[case::ib_ending_a_page_with_an_error(
         Ok(vec![
@@ -1143,8 +1136,6 @@ mod tests {
         assert!(format!("{err:#}").contains(error), "{err:#}");
     }
 
-    /// The first page is full, and its 10:00:08 is cut. The page ending at 10:00:09 is full of
-    /// 10:00:08.
     #[tokio::test]
     async fn a_second_holding_a_full_page_fails_the_paging_naming_it() {
         let mut cursors = Vec::new();
@@ -1321,7 +1312,6 @@ mod tests {
         assert!(err.to_string().contains(identifier), "{err}");
     }
 
-    /// A crypto pair's trade-price bars are IB's AGGTRADES.
     #[rstest]
     #[case::a_crypto_pair_s_trades_bars(
         NautilusDataType::Bar,
@@ -1354,7 +1344,6 @@ mod tests {
         assert!(err.to_string().contains(identifier), "{err}");
     }
 
-    /// IB's step-size table ("Historical Data Limitations").
     #[rstest]
     #[case("1-SECOND", "1800 S")]
     #[case("5-SECOND", "3600 S")]
@@ -1399,7 +1388,6 @@ mod tests {
         pacing
     }
 
-    /// An identical request waits until 15 s after the first, so a request at 10 s waits 5 s.
     #[rstest]
     fn an_identical_small_bar_request_waits_15_seconds_after_the_first() {
         let start = Instant::now();
@@ -1417,7 +1405,6 @@ mod tests {
         );
     }
 
-    /// Five LAST requests come at 0 to 400 ms. A sixth at 500 ms waits until the first is 2 s old.
     #[rstest]
     fn a_sixth_small_bar_request_of_a_series_within_two_seconds_waits() {
         let start = Instant::now();
@@ -1434,8 +1421,6 @@ mod tests {
         assert_eq!(pacing.wait(at_500_ms, &small("BID", 100)), Duration::ZERO);
     }
 
-    /// 60 requests come one every 3 s, from 0 to 177 s. The 61st at 180 s waits until the first is
-    /// 600 s old, which is 420 s.
     #[rstest]
     fn a_61st_small_bar_request_within_ten_minutes_waits() {
         let start = Instant::now();
@@ -1468,7 +1453,6 @@ mod tests {
             .collect()
     }
 
-    /// On 15 November 2026 IB holds 30-second bars from 15 May.
     #[rstest]
     fn small_bars_older_than_six_months_are_refused_naming_the_oldest_ib_holds() {
         let now = at("2026-11-15T12:00:00Z");
@@ -1529,9 +1513,6 @@ mod tests {
             .unwrap();
     }
 
-    /// On 30 November 2026 IB holds small bars from 30 May.
-    /// - Bars stored over 20 May to 20 June resume from 20 June, which is held.
-    /// - Bars stored over 1 April to 1 May resume from 1 May, which is refused.
     #[rstest]
     fn small_bars_stored_are_held_from_where_the_writer_resumes_them() {
         let now = at("2026-11-30T12:00:00Z");
@@ -1564,7 +1545,6 @@ mod tests {
         );
     }
 
-    /// Bars stored to the window's end ask IB nothing (`catalog::resumed`).
     #[rstest]
     fn small_bars_stored_over_the_whole_window_are_held_whenever() {
         let dir = tempfile::tempdir().unwrap();
