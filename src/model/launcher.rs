@@ -652,7 +652,6 @@ mod tests {
         .unwrap()
     }
 
-    /// Calls `daily_on` with a catalog that holds both series well past every retrain of the tests.
     fn daily(dir: &tempfile::TempDir, launcher: Launcher) -> RetrainActor {
         stored(
             dir.path(),
@@ -661,9 +660,6 @@ mod tests {
         daily_on(dir.path(), launcher)
     }
 
-    /// Returns the next time sent to `finished`.
-    ///
-    /// It waits a minute at most, so a train never launched fails.
     fn trained(finished: &Receiver<Timestamp>) -> Timestamp {
         finished
             .recv_timeout(Duration::from_secs(60))
@@ -715,8 +711,6 @@ mod tests {
     }
 
     /// Adds `actor` at `now` as `Trader::add_actor` does, then starts it.
-    ///
-    /// The actor gets a clock of its own, whose default handler hands the actor its time events.
     fn added(mut actor: RetrainActor, now: &str) -> (Ustr, Rc<RefCell<VirtualClock>>) {
         let clock = Rc::new(RefCell::new(VirtualClock::new()));
         clock
@@ -746,15 +740,11 @@ mod tests {
     }
 
     /// Releases the actor `id` as the trader does at dispose.
-    ///
-    /// That ends the wait for a train never launched.
     fn released(id: &Ustr) {
         deregister_component(id);
         deregister_actor(id);
     }
 
-    /// With the model set of midnight stored, nothing trains at start. The clock passing the next
-    /// midnight then launches its train.
     #[rstest]
     fn an_added_retrain_actor_trains_at_the_grid_time_its_clock_fires() {
         let dir = tempfile::tempdir().unwrap();
@@ -768,7 +758,6 @@ mod tests {
         assert_eq!(finished.recv(), Ok(at("2026-10-23T00:00:00Z")));
     }
 
-    /// With no model set for midnight, the node was down then, so the actor trains it at its start.
     #[rstest]
     #[case::of_an_empty_store(&[])]
     #[case::of_a_store_holding_the_day_before(&["2026-10-21T00:00:00Z"])]
@@ -789,8 +778,6 @@ mod tests {
         assert_eq!(finished.recv(), Err(mpsc::RecvError));
     }
 
-    /// AUD/USD is stored to 01:00 on the 23rd, and EUR/USD as `eur`. The retrain due at midnight on
-    /// the 23rd waits, and no re-check up to 00:30 trains it.
     #[rstest]
     #[case::of_a_series_stored_before_it(&[(EUR, "2026-10-22T21:00:00Z")])]
     #[case::of_a_series_not_stored(&[])]
@@ -813,8 +800,6 @@ mod tests {
         assert_eq!(finished.recv(), Err(mpsc::RecvError));
     }
 
-    /// Once `eur` is stored, the re-check at 00:31 trains at midnight, not at the last point of
-    /// either series.
     #[rstest]
     #[case::at_it("2026-10-23T00:00:00Z")]
     #[case::after_it("2026-10-23T00:20:00Z")]
@@ -842,9 +827,6 @@ mod tests {
         assert_eq!(first, at("2026-10-23T00:00:00Z"));
     }
 
-    /// The 23rd's retrain waits, and the 24th's takes its place, so the 23rd's is skipped. With
-    /// EUR/USD stored to 01:00 on the 24th, the re-check at 01:31 trains at midnight on the 24th
-    /// alone.
     #[rstest]
     fn a_retrain_due_while_one_waits_for_its_data_takes_its_place() {
         let dir = tempfile::tempdir().unwrap();
@@ -897,8 +879,7 @@ mod tests {
         assert_eq!(finished.recv(), Err(mpsc::RecvError));
     }
 
-    /// Waits until the train that `actor` runs has finished, with its outcome following the time it
-    /// sent. Panics after a minute.
+    /// Waits until the train that `actor` runs has finished. Panics after a minute.
     fn waited_to_its_end(actor: &RetrainActor) {
         let deadline = Instant::now() + Duration::from_secs(60);
 
@@ -1012,8 +993,6 @@ mod tests {
     }
 
     /// Output lines are logged: standard output as info, standard error as a warning.
-    ///
-    /// The lines are plain and go to no file, as `NAUTILUS_LOG` sets, which the child echoes.
     #[rstest]
     fn the_output_lines_of_a_child_are_logged_through_the_logger() {
         if !log_capture::alone(

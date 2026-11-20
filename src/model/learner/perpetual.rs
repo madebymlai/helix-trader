@@ -137,8 +137,6 @@ mod tests {
         PerpetualConfig::builder().memory_limit(1.0).build()
     }
 
-    /// 300 rows of two features. The label is 1 where the first feature is missing. Otherwise the
-    /// label is 0 and the feature runs from 0 to 1.
     fn missing_is_one() -> TrainingSet {
         let mut features = Vec::new();
         let mut labels = Vec::new();
@@ -156,9 +154,6 @@ mod tests {
     }
 
     /// A model blind to the missing feature predicts the mean label, a third, for every row.
-    ///
-    /// A model that learns the missing feature apart predicts above the mean for it and below the
-    /// mean for every value.
     #[rstest]
     fn a_missing_feature_is_learned_apart_from_every_value() {
         let model = LearnerConfig::Perpetual(config())
@@ -171,7 +166,6 @@ mod tests {
         }
     }
 
-    /// 600 rows of one feature, from 0.0 to 0.9 by 0.1. The label is 2 below 0.5 and -1 from it.
     fn step() -> TrainingSet {
         let features: Vec<f64> = (0..600_u32).map(|i| f64::from(i % 10) / 10.0).collect();
         let labels = features

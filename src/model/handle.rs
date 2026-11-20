@@ -817,7 +817,6 @@ mod tests {
             .register_default_handler(TimeEventCallback::from(|_: TimeEvent| {}));
         let cache = Rc::new(RefCell::new(Cache::default()));
 
-        // AUD/USD quoted at 0.69990/0.70010: a target's exits are set from its mid
         cache
             .borrow_mut()
             .add_instrument(InstrumentAny::CurrencyPair(audusd_sim()))
@@ -875,13 +874,11 @@ mod tests {
         .unwrap()
     }
 
-    /// Returns the level of `decision`, which is the model's R. It names the model, whatever the
-    /// unit.
+    /// Returns the level of `decision`, which is the model's R.
     fn level(decision: Option<Decision>) -> Option<f64> {
         decision.map(|decision| decision.level)
     }
 
-    /// Features given no quote: no trade.
     #[rstest]
     fn cold_features_give_no_trade() {
         let models = tempfile::tempdir().unwrap();
@@ -901,7 +898,6 @@ mod tests {
         assert_eq!(cold.decide(&mut probe).unwrap(), None);
     }
 
-    /// No quote has come since the decision an hour before, so the market is closed.
     #[rstest]
     fn a_stale_decision_gives_no_trade() {
         let models = tempfile::tempdir().unwrap();
@@ -918,8 +914,6 @@ mod tests {
         assert_eq!(handle.decide(&mut probe).unwrap(), None);
     }
 
-    /// No feature reads AUD/USD. Its quote in the cache, made at the decision, makes the decision
-    /// fresh. The long expects 0.3R.
     #[rstest]
     fn a_cadence_on_features_reading_no_data_of_the_traded_instrument_decides_on_its_quotes() {
         let models = tempfile::tempdir().unwrap();
@@ -957,8 +951,6 @@ mod tests {
         assert_eq!(level(handle.decide(&mut probe).unwrap()), Some(r(8)));
     }
 
-    /// A strategy reads AUD/USD as trades alone, and GBP/USD's quotes. It subscribes AUD/USD's
-    /// trades and none of its quotes.
     #[rstest]
     fn the_handle_subscribes_the_series_the_strategy_reads_of_the_traded_instrument() {
         let models = tempfile::tempdir().unwrap();
@@ -1003,8 +995,6 @@ mod tests {
         );
     }
 
-    /// The long's model predicts `long` tenths, and the short's, if any, predicts `short` tenths.
-    /// Both are valid from midnight.
     fn sides_handle(
         probe: &Decider,
         models: &Path,
@@ -1041,8 +1031,6 @@ mod tests {
         ModelHandle::new(&blueprint_of(&features, config, requirements()), mode).unwrap()
     }
 
-    /// A long expecting 0.1R clears its margin of zero. The short is not traded. One side has no
-    /// side call.
     #[rstest]
     fn a_side_expected_to_clear_its_margin_is_a_decision_of_its_expected_r() {
         let models = tempfile::tempdir().unwrap();
@@ -1076,7 +1064,6 @@ mod tests {
 
     const EURUSD: &str = "EUR/USD.SIM";
 
-    /// Returns `config` with a dataset balance of 10M EUR, converted into USD through EUR/USD.
     fn in_euros() -> ModelConfig {
         let mut config = config();
         config.target.conversions = Conversions::new(vec![InstrumentId::from(EURUSD)]);
@@ -1109,7 +1096,6 @@ mod tests {
         }
     }
 
-    /// The balance has a rate into USD. This is the control for the decision with no rate.
     #[rstest]
     fn a_dataset_balance_in_another_currency_with_a_rate_cached_decides() {
         let models = tempfile::tempdir().unwrap();
@@ -1123,7 +1109,6 @@ mod tests {
         assert_eq!(level(decision), Some(r(6)));
     }
 
-    /// No quote of EUR/USD, so no rate into USD and no decision.
     #[rstest]
     fn a_decision_with_no_rate_of_the_dataset_balance_is_not_made() {
         let models = tempfile::tempdir().unwrap();
@@ -1137,8 +1122,7 @@ mod tests {
         assert_eq!(decision, None);
     }
 
-    /// A bracket with a take profit 20 bps and a stop `stop` bps from the price. It trades the
-    /// long from 0.3R.
+    /// A bracket with a take profit 20 bps and a stop `stop` bps from the price.
     fn bracket_config(stop: i64) -> ModelConfig {
         let mut config = config();
         config.target.spec = Target {
@@ -1157,9 +1141,6 @@ mod tests {
         config
     }
 
-    /// Worked by hand. From the mid of 0.70000, the long's take profit is 20 bps above, at
-    /// 0.00140. Its stop is 10 bps below, at 0.00070, which is its one R. The trade closes 2 hours
-    /// later.
     #[rstest]
     fn a_bracket_trade_is_on_the_exits_and_the_limit_its_decision_sets() {
         let models = tempfile::tempdir().unwrap();
@@ -1192,9 +1173,6 @@ mod tests {
         );
     }
 
-    /// Worked by hand. The long of 0.1R falls short of the 0.3R margin. The short of 0.5R clears
-    /// it. From the mid of 0.70000, the short's take profit is 0.00140 below and its stop 0.00070
-    /// above.
     #[rstest]
     fn a_short_trade_is_on_the_exits_its_decision_sets_on_the_short() {
         let models = tempfile::tempdir().unwrap();
@@ -1249,8 +1227,7 @@ mod tests {
         config
     }
 
-    /// IC's gold is quoted at 4000.00/4000.01. The mid, 4000.005, is on a half tick. Each exit of
-    /// `half_tick_config` is on the tick half a cent from it, so the stop is 0.005.
+    /// IC's gold is quoted at 4000.00/4000.01, so its mid is on a half tick.
     fn on_a_half_tick(now: Timestamp) -> (Decider, Rc<RefCell<VirtualClock>>) {
         let (probe, clock) = registered(now);
         let cache = probe.cache_rc();
@@ -1270,7 +1247,6 @@ mod tests {
         (probe, clock)
     }
 
-    /// The long of -0.3R expects a loss whatever its stop is worth, so it clears no margin of zero.
     #[rstest]
     fn a_side_expected_to_lose_on_a_half_tick_stop_does_not_clear_a_margin_of_nought() {
         let models = tempfile::tempdir().unwrap();
@@ -1280,8 +1256,6 @@ mod tests {
         assert_eq!(handle.decide(&mut probe).unwrap(), None);
     }
 
-    /// Worked by hand. The short expects 0.3R and the long -0.3R, so the short trades from a
-    /// margin of zero. Its stop is on the ask.
     #[rstest]
     fn a_side_expected_to_gain_on_a_half_tick_stop_trades_its_stop_in_the_market() {
         let models = tempfile::tempdir().unwrap();
@@ -1318,9 +1292,6 @@ mod tests {
         );
     }
 
-    /// Worked by hand. The target is limit-only, with an ATR of one hourly bar. The ATR is warm on
-    /// a bar from 0.50000 to 0.75000, a true range of 0.25000. The trade is a market entry closed
-    /// an hour later with no exit. Its one R is the ATR.
     #[rstest]
     fn a_time_only_trade_has_no_exits_its_one_r_its_atr_and_closes_at_its_limit() {
         let models = tempfile::tempdir().unwrap();
@@ -1393,9 +1364,7 @@ mod tests {
         )
     }
 
-    /// The ATR of one bar from 0.69950 to 0.70050 is 0.00100. So the unit is 0.5% of 10,000,000 USD
-    /// over it, 50,000,000 AUD/USD. It is capped at AUD/USD's maximum quantity, 1,000,000, so the
-    /// unit is 1,000 USD.
+    /// Returns a bar of ATR 0.00100, which sizes the unit past AUD/USD's maximum quantity.
     fn unit_bar() -> Bar {
         hour_bar(
             "2026-10-22T12:00:00Z",
@@ -1426,11 +1395,9 @@ mod tests {
         .unwrap()
     }
 
-    /// The live cache holds Nautilus' default 10,000 bars, and the warmup of the bars that a handle
-    /// builds or reads, each with one spanning the start. The handle decides every minute, so a
-    /// target's ATR is on 1-minute bars. That is the day's 1,440 of them, not the 25 hourly bars,
-    /// for a time-only target and a bracket's ATR alike. A bracket in basis points has no ATR: 24
-    /// hourly bars.
+    /// The handle decides every minute, so a target's ATR warms on the day's 1,440 minute bars, not
+    /// 25 hourly bars, and fits Nautilus' default cache of 10,000 bars. A bracket in basis points
+    /// has no ATR: 24 hourly bars.
     #[rstest]
     #[case::a_brackets_atr_on_finer_bars(atr_config(), SignedDuration::from_mins(1), 1_441)]
     #[case::no_atr(bracket_config(10), SignedDuration::from_hours(1), 25)]
@@ -1452,8 +1419,6 @@ mod tests {
         assert_eq!(cache.bar_capacity, 10_000 + warmup_bars);
     }
 
-    /// At 12:00, the features are warm from a quote, but the ATR of 2 hourly bars has no bar. There
-    /// is no row and no trade.
     #[rstest]
     fn no_row_is_published_while_the_targets_atr_is_cold() {
         let models = tempfile::tempdir().unwrap();
@@ -1477,9 +1442,6 @@ mod tests {
         assert_eq!(rows.borrow().len(), 0);
     }
 
-    /// Worked by hand. The features read bars alone. At 12:00 the last hourly close is cold. A
-    /// quote handed over leaves it cold. The bar closing at 12:00 warms it, so the long expecting
-    /// 0.3R trades.
     #[rstest]
     fn features_reading_no_ticks_warm_on_the_bars_the_strategy_hands_its_warmup() {
         let models = tempfile::tempdir().unwrap();
@@ -1547,10 +1509,6 @@ mod tests {
         crate::model_data_hooks!(model);
     }
 
-    /// Live on 2026-08-10 at 14:30, the features read AUD/USD's quotes and GCZ26's trades, as an
-    /// average of two. A response with a quote and a response with two trades warm them once the
-    /// group ends. The merge holds each series' latest until then. A live quote at 14:30:01 and
-    /// trade at 14:30:02 then reach them.
     #[rstest]
     fn the_hooks_of_model_data_hooks_hand_the_warmup_a_strategys_ticks() {
         let models = tempfile::tempdir().unwrap();
@@ -1636,9 +1594,6 @@ mod tests {
         );
     }
 
-    /// A feature reads GCZ26's quotes, as an average of two mids. The requirements also hold series
-    /// it does not read, IC's EURUSD and AUD/USD. Their history is handed over and their live
-    /// quotes are held, and the feature stays cold. GCZ26's two quotes then warm it.
     #[rstest]
     fn the_features_read_of_a_warmup_the_quotes_of_the_series_they_read_alone() {
         const GC_2_MIDS: Declared<EmaArgs> = Declared::new("gc_2_mids");
@@ -1721,10 +1676,7 @@ mod tests {
         assert!(features.initialized());
     }
 
-    /// Live on 2026-08-10 at 14:30, a feature counts AUD/USD's imbalances. The catalog's answer of
-    /// two warms it. The last imbalance of the history is sent again live, and a live imbalance
-    /// arrives at 14:30:01. Both are held while the warmup is pending. Once the group ends, the new
-    /// one reaches the feature and the repeated one is dropped.
+    /// The last imbalance of the history, sent again live, is dropped once the group ends.
     #[rstest]
     fn the_hooks_of_model_data_hooks_hand_the_features_a_strategys_custom_data() {
         let models = tempfile::tempdir().unwrap();
@@ -1765,8 +1717,6 @@ mod tests {
         assert_eq!(features.values(), Some(vec![3.0]));
     }
 
-    /// In a backtest, the hourly close of AUD/USD reads the bar closing at 12:00, 0.70000, the way
-    /// the strategy gets it. It reads nothing through Nautilus.
     #[rstest]
     fn the_hooks_of_model_data_hooks_hand_the_features_a_strategys_bars() {
         let models = tempfile::tempdir().unwrap();
@@ -1798,8 +1748,6 @@ mod tests {
         assert_eq!(features.values(), Some(vec![0.7]));
     }
 
-    /// In a backtest, a feature counting GCZ26's snapshots and one counting its batches of deltas
-    /// each read the one update the strategy gets.
     #[rstest]
     fn the_hooks_of_model_data_hooks_hand_the_features_a_strategys_live_book() {
         let models = tempfile::tempdir().unwrap();
@@ -1864,7 +1812,6 @@ mod tests {
 
     const MINUTES: &str = "BTC-USDT-SWAP.OKX-1-MINUTE-LAST-EXTERNAL";
 
-    /// Returns when the cadence first decides, started at 11:30, for a strategy reading `bar_type`.
     fn first_decision(
         mode: fn(PathBuf) -> Mode,
         config: &ModelConfig,
@@ -1897,8 +1844,7 @@ mod tests {
     }
 
     /// A cadence on composite bars waits for them, 5 seconds after the hour, in every mode. The
-    /// delay comes from the bar types, not from retraining. The minute bars they are built from are
-    /// not composite, so no cadence waits for them.
+    /// minute bars they are built from are not composite.
     #[rstest]
     #[case::a_backtest_on_composite_bars(backtest, config(), COMPOSITE, "2026-10-22T12:00:05.010Z")]
     #[case::live_on_composite_bars(live, config(), COMPOSITE, "2026-10-22T12:00:05.010Z")]
@@ -1929,8 +1875,8 @@ mod tests {
         assert_eq!(first_decision(mode, &config, bar_type), at(first));
     }
 
-    /// Returns a config with a take profit and a stop, each 1 ATR of one hourly bar away, that
-    /// trades the long from 0.3R. Also returns the width of that bracket.
+    /// Returns a config with a take profit and a stop 1 ATR of one hourly bar away, and the width
+    /// of that bracket.
     fn width_config() -> (ModelConfig, Rc<BracketWidth>) {
         let mut config = bracket_config(10);
         config.target.spec.bracket = Some(BracketSpec {
@@ -1969,12 +1915,6 @@ mod tests {
         rows
     }
 
-    /// Worked by hand. The features read the mid over the bracket's width, 1 ATR of one hourly bar
-    /// on each side.
-    /// - At 12:00, after a bar from 0.69900 to 0.70100, the ATR is 0.00200. The row reads
-    ///   0.70000 / 0.00200 = 350, and the long's stop is 0.70000 - 0.00200 = 0.69800.
-    /// - At 13:00, after a bar from 0.69800 to 0.70200, the ATR is 0.00400. The row reads 175, and
-    ///   the stop is 0.69600.
     #[rstest]
     fn a_decisions_row_reads_the_width_its_trade_is_set_at() {
         let models = tempfile::tempdir().unwrap();
@@ -2003,7 +1943,6 @@ mod tests {
         let rows = published();
         let trade = |decision: Option<Decision>| decision.map(|decision| decision.trade());
 
-        // A long one ATR from the mid either way, closed 2 hours later
         let long = |atr: i64, take_profit: &str, stop_loss: &str| {
             Trade::new(
                 InstrumentId::from(AUD),
@@ -2045,8 +1984,6 @@ mod tests {
         );
     }
 
-    /// Once started, only the target's bars, AUD/USD's hourly mids, reach the ATR. One bar from
-    /// 0.699 to 0.701 warms an ATR of one bar.
     #[rstest]
     fn a_dataset_runs_targets_run_on_the_atr_of_the_features_width() {
         let (config, width) = width_config();
@@ -2085,8 +2022,6 @@ mod tests {
         handle
     }
 
-    /// Returns `live_handle`, with its warmup not answered yet and `unit_bar` in the cache as
-    /// Nautilus builds a response's bars.
     fn warming_handle(
         probe: &mut Decider,
         models: &Path,
@@ -2129,7 +2064,6 @@ mod tests {
         assert_eq!(level(handle.decide(&mut probe).unwrap()), Some(r(8)));
     }
 
-    /// A warmup reaches the features window by window. There is no decision until it ends.
     #[rstest]
     fn a_live_node_does_not_decide_until_its_warmup_ends() {
         let models = tempfile::tempdir().unwrap();
@@ -2146,8 +2080,6 @@ mod tests {
         assert_eq!(level(handle.decide(&mut probe).unwrap()), Some(r(8)));
     }
 
-    /// A model valid from 23:00 is published while the node runs. The handle decides at 23:30 on
-    /// the model valid from 10:00, and at 01:00 on the new one.
     #[rstest]
     fn a_model_published_while_live_is_used_from_the_next_decision() {
         let models = tempfile::tempdir().unwrap();
@@ -2165,8 +2097,7 @@ mod tests {
         assert_eq!(level(handle.decide(&mut probe).unwrap()), Some(r(9)));
     }
 
-    /// A long model of 0.1R from midnight (0.1 USD, above its margin of zero), with a meta model
-    /// that predicts `r(meta_tenths)` from midnight.
+    /// Returns a long model of 0.1R from midnight, with a meta model predicting `r(meta_tenths)`.
     fn meta_handle(models: &Path, config: &ModelConfig, meta_tenths: usize) -> Rc<ModelHandle> {
         let features = features();
         model_store(models, &features, config)
@@ -2188,8 +2119,6 @@ mod tests {
         .unwrap()
     }
 
-    /// The meta predicting an R of 0.3 expects 0.1 + 0.5 * 0.3 = 0.25R, at or above its margin of
-    /// 0.15R.
     #[rstest]
     fn a_meta_model_from_its_margin_takes_the_trade_of_the_side_picked() {
         let models = tempfile::tempdir().unwrap();
@@ -2235,8 +2164,8 @@ mod tests {
         assert!(err.contains(&file.display().to_string()), "{err}");
     }
 
-    /// Nautilus' sizer reads a trade's P&L as a multiple of a distance in price. An inverse
-    /// instrument's P&L is not one, so a handle trading one refuses to start.
+    /// Nautilus' sizer reads a trade's P&L as a multiple of a distance in price, which an inverse
+    /// instrument's is not.
     #[rstest]
     #[case::deciding(backtest)]
     #[case::a_dataset_run(dataset)]
@@ -2285,7 +2214,6 @@ mod tests {
         }
     }
 
-    /// `eur` is not in `registered`'s cache as an instrument. The features read its quotes.
     fn handle_on_an_instrument_not_in_the_cache(
         models: &Path,
         config: &ModelConfig,
@@ -2302,7 +2230,6 @@ mod tests {
         .unwrap()
     }
 
-    /// The target is set before the models are asked, valid model or not.
     #[rstest]
     fn no_model_valid_with_the_instrument_missing_from_the_cache_is_an_error() {
         let models = tempfile::tempdir().unwrap();
@@ -2317,8 +2244,6 @@ mod tests {
         assert!(format!("{err:#}").contains("EUR/USD.SIM"), "{err:#}");
     }
 
-    /// A time-only target reads the instrument as a bracket does, for its unit and entry cost. If
-    /// the instrument is missing from the cache, it is an error, though the long of 0.8 is valid.
     #[rstest]
     fn a_time_only_target_with_the_instrument_missing_from_the_cache_is_an_error() {
         let models = tempfile::tempdir().unwrap();
@@ -2327,7 +2252,6 @@ mod tests {
         config.target.instrument_id = eur;
         let features = last_mid(eur).build().unwrap();
 
-        // The target's ATR, on the quotes of EUR/USD, keys its store
         blueprint_of(&features, &config, reading_eur(eur))
             .model_store(models.path())
             .unwrap()
@@ -2361,8 +2285,6 @@ mod tests {
         assert!(format!("{err:#}").contains("EUR/USD.SIM"), "{err:#}");
     }
 
-    /// The model valid from 12:00, listed at 11:00, swaps in at 12:00 though the store then fails
-    /// to list.
     #[rstest]
     fn a_failed_listing_keeps_the_previous_list() {
         let models = tempfile::tempdir().unwrap();
@@ -2382,8 +2304,7 @@ mod tests {
         assert_eq!(level(handle.decide(&mut probe).unwrap()), Some(r(8)));
     }
 
-    /// Records the data commands the probe's actor sends from now, in order. Requests come with
-    /// their window and subscriptions with the time their stream starts.
+    /// Records the data commands the probe's actor sends from now, in order.
     fn sent_commands() -> Rc<RefCell<Vec<String>>> {
         let sent = Rc::new(RefCell::new(Vec::new()));
         let record = Rc::clone(&sent);
@@ -2491,9 +2412,7 @@ mod tests {
         )
     }
 
-    /// Nautilus' exponential average of two trades, `[indicators.gc_2_trades]`.
     const GC_2_TRADES: Declared<EmaArgs> = Declared::new("gc_2_trades");
-    /// The `[indicators.hourly_close]` exponential average of one value: the last close of a bar.
     const HOURLY_CLOSE: Declared<EmaArgs> = Declared::new("hourly_close");
 
     fn tables() -> IndicatorsConfig {
@@ -2508,17 +2427,6 @@ mod tests {
 
     /// Live on 2026-08-10 at 14:30, a feature on the trades of the root GC reads GCZ26, the
     /// contract standing for it (GC rolls into GCZ26 on 2026-07-29, `rolls/README.md`).
-    ///
-    /// The start does this:
-    /// - Requests GCZ26's trades over the hour of warmup ending now.
-    /// - Subscribes from now.
-    /// - Loads GCG27, the post contract of the next roll.
-    ///
-    /// The traded AUD/USD's quotes, which no feature reads, are requested over the warmup too, as
-    /// IB serves them (SIM has no row of its own). They are subscribed from now, because
-    /// `bracket_config`'s target has no ATR to warm. The response's two trades initialize the
-    /// features once the group ends. The merge holds them until AUD/USD's pending quotes can bring
-    /// nothing older, so the first decision is warm.
     #[rstest]
     fn a_live_start_warms_a_roots_tick_features_on_its_front_contract() {
         let models = tempfile::tempdir().unwrap();
@@ -2587,9 +2495,6 @@ mod tests {
         assert!(features.initialized());
     }
 
-    /// Returns the data commands sent when the strategy of `features` starts live on 2026-08-10 at
-    /// 14:30 with an hour of warmup. The strategy decides hourly on `bracket_config` and reads
-    /// `bar_types` and `ticks`.
     fn started_live(
         features: &Rc<FeatureSet>,
         bar_types: Vec<BarType>,
@@ -2613,9 +2518,6 @@ mod tests {
         sent.take()
     }
 
-    /// Returns the bar subscriptions the start sends at 12:00 on `config()` for a strategy reading
-    /// `bar_types` and AUD/USD's quotes. Each comes with its bar type and the time its stream
-    /// starts.
     fn bars_subscribed_at_start(mode: &Mode, bar_types: &[&str]) -> Vec<String> {
         let requirements = DataRequirements {
             bar_types: bar_types
@@ -2637,9 +2539,8 @@ mod tests {
             .collect()
     }
 
-    /// The bars of the target's ATR, which no strategy declares, are subscribed from the start in a
-    /// backtest and a dataset run. Live, the warmup builds them, and they are subscribed from where
-    /// it ends, now.
+    /// The bars of the target's ATR are subscribed from the start in a backtest and a dataset run,
+    /// and from where the warmup ends live.
     #[rstest]
     #[case::a_backtest(backtest)]
     #[case::a_dataset_run(dataset)]
@@ -2655,10 +2556,6 @@ mod tests {
         );
     }
 
-    /// Returns the custom data subscriptions the start sends at 12:00 on `config()` for a strategy
-    /// reading AUD/USD's quotes and LSE's daily 10-year US yields. Each comes with its data type,
-    /// client and the time its stream starts. A subscription naming no client sends none, because
-    /// Nautilus subscribes the message bus alone.
     fn custom_subscribed_at_start(mode: &Mode) -> Vec<String> {
         let metadata = nautilus_core::Params::new(
             [
@@ -2685,10 +2582,8 @@ mod tests {
             .collect()
     }
 
-    /// Live, the subscription to a custom series names its data client on the node, LSE's for LSE's
-    /// rows, so that Nautilus sends it from where the warmup ends. A backtest and a dataset run
-    /// name no client, because their engine has none of LSE's. Nautilus subscribes the message bus
-    /// alone, where the replay's rows arrive.
+    /// Live, a custom series' subscription names its data client, so that Nautilus sends it. A
+    /// backtest and a dataset run name none, because their engine has no such client.
     #[rstest]
     #[case::live(
         live,
@@ -2708,7 +2603,6 @@ mod tests {
         assert_eq!(subscribed, commands);
     }
 
-    /// The bars of the target's ATR are subscribed once when the strategy reads them too.
     #[rstest]
     fn the_targets_atr_bars_the_strategy_reads_too_are_subscribed_once() {
         let models = tempfile::tempdir().unwrap();
@@ -2739,9 +2633,8 @@ mod tests {
         }
     }
 
-    /// The quotes of a conversion pair, which no feature reads. The start requests their history
-    /// over the hour of warmup, as IC's history serves them, so that the cache holds a rate when a
-    /// trade is sized at the start. It then subscribes from now.
+    /// The start requests a conversion pair's history over the warmup, so that the cache holds a
+    /// rate when a trade is sized at the start.
     #[rstest]
     fn a_live_start_warms_up_a_conversion_pairs_quotes_then_subscribes_to_them_from_now() {
         let sent = started_live(&features(), vec![], vec![aud_quotes(), eurusd_quotes()]);
@@ -2756,8 +2649,6 @@ mod tests {
         );
     }
 
-    /// Custom data of the traded AUD/USD, which no feature reads, is a series of the requirements.
-    /// The start requests its hour of warmup from the catalog alone.
     #[rstest]
     fn a_live_start_requests_custom_data_of_the_traded_instrument_from_the_catalog() {
         let (_probe, _handle, sent, _models) =
@@ -2772,8 +2663,6 @@ mod tests {
         );
     }
 
-    /// Features on bars built from external minute bars read no tick. The start requests the
-    /// minute bars and the traded AUD/USD's quotes, which IB serves. It requests no trades.
     #[rstest]
     fn a_live_start_of_bar_features_requests_the_minute_bars_and_the_traded_quotes() {
         let hours = BarType::from("AUD/USD.SIM-1-HOUR-MID-INTERNAL@1-MINUTE-EXTERNAL");
@@ -2818,8 +2707,7 @@ mod tests {
         )
     }
 
-    /// A subscription to custom data that names no data client is one to its topic alone. It sends
-    /// no command.
+    /// A subscription to custom data that names no data client sends no command.
     fn imbalance_subscribers(instrument_id: &str) -> usize {
         msgbus::subscriptions_count_any(get_custom_topic(&imbalance_type(instrument_id))).unwrap()
     }
@@ -2842,8 +2730,6 @@ mod tests {
             .unwrap()
     }
 
-    /// Returns the probe, the handle and the data commands the start sent, live on 2026-08-10 at
-    /// 14:30 with an hour of warmup. The warmup is handed its historical custom data.
     fn started_live_reading(
         features: &Rc<FeatureSet>,
         ticks: Vec<TickSeries>,
@@ -2883,10 +2769,8 @@ mod tests {
         )
     }
 
-    /// Live on 2026-08-10 at 14:30, a feature reads AUD/USD's imbalances, a custom series that no
-    /// data client serves. The start requests the hour of warmup, naming the client `CATALOG`, and
-    /// subscribes. Nautilus answers the request from the catalog alone. The answer reaches the
-    /// warmup through `on_historical_data`, and the feature holds the last imbalance.
+    /// Live, a custom series that no data client serves is requested from the client `CATALOG`,
+    /// and Nautilus answers from the catalog alone.
     #[rstest]
     fn a_live_start_warms_a_custom_feature_from_the_catalog() {
         let features = last_imbalance(AUD);
@@ -2914,8 +2798,6 @@ mod tests {
         assert_eq!(features.values(), Some(vec![-0.5]));
     }
 
-    /// The same history warms two features. The counter sees both points, and the raw feature only
-    /// the latest.
     #[rstest]
     fn two_features_share_custom_history_without_losing_or_repeating_a_point() {
         let series = imbalance_series(AUD);
@@ -2937,10 +2819,8 @@ mod tests {
         assert_eq!(features.values(), Some(vec![2.0, -0.5]));
     }
 
-    /// Live on 2026-08-10 at 14:30, a feature on the imbalances under the root GC's id reads
-    /// GCZ26's, the contract standing for it (GC rolls into GCZ26 on 2026-07-29,
-    /// `rolls/README.md`). The start requests and subscribes to GCZ26's, not the root's. It loads
-    /// no contract of GC, because a custom series brings no instrument.
+    /// A feature on the imbalances under the root GC's id reads GCZ26's, the contract standing for
+    /// it (GC rolls into GCZ26 on 2026-07-29, `rolls/README.md`).
     #[rstest]
     fn a_live_start_warms_a_custom_feature_on_a_root_on_its_front_contract() {
         let features = last_imbalance("GC.GLBX");
@@ -2979,10 +2859,8 @@ mod tests {
         assert_eq!(features.values(), Some(vec![0.75]));
     }
 
-    /// In a backtest from 2026-11-25 at 23:00, a raw feature over the custom series of GC's
-    /// imbalances reads GCZ26's. The strategy reads no tick of GC. GC rolls into GCG27 at 00:00 UTC
-    /// on 2026-11-26. The roll's alert moves the subscription and the feature to GCG27's latest
-    /// imbalance in the cache, the one of 23:20, then to later ones.
+    /// GC rolls into GCG27 at 00:00 UTC on 2026-11-26, and the roll's alert moves the feature to
+    /// GCG27's latest imbalance in the cache.
     #[rstest]
     fn a_feature_on_a_roots_custom_series_reads_each_contract_in_turn_from_the_cache() {
         let models = tempfile::tempdir().unwrap();
@@ -3048,8 +2926,6 @@ mod tests {
         DataType::new("Yield", None, Some(symbol.to_string()))
     }
 
-    /// The custom series of the requirements, the 10-year and the 2-year US yields, are subscribed
-    /// on the message bus alone at a backtest's start, so `on_data` gets them.
     #[rstest]
     fn a_backtests_start_subscribes_the_custom_series_of_its_requirements() {
         let models = tempfile::tempdir().unwrap();

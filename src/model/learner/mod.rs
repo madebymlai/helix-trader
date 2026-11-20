@@ -300,9 +300,6 @@ mod tests {
         })
     }
 
-    /// `ROWS` rows of `WIDTH` seeded features. The label is a noisy line on the first two, from
-    /// about -3 to 2.5. The third feature is missing in about a tenth of the rows, which raises the
-    /// label by 1.5.
     fn synthetic() -> TrainingSet {
         let mut uniform = uniform();
         let mut features = Vec::with_capacity(ROWS * WIDTH);
@@ -317,7 +314,6 @@ mod tests {
         TrainingSet::new(WIDTH, features, labels).unwrap()
     }
 
-    /// Rows to predict on. They are training rows and some outside them, with missing features.
     fn probes(set: &TrainingSet) -> Vec<Vec<f64>> {
         let mut rows: Vec<Vec<f64>> = set.rows().take(50).map(<[f64]>::to_vec).collect();
         rows.push(vec![f64::NAN; set.width()]);

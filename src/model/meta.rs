@@ -93,7 +93,6 @@ mod tests {
         }
     }
 
-    /// The side picked, expecting 0.4R from a level of 0.4 and no side call.
     fn picked(side: Side) -> Picked {
         Picked {
             side,
@@ -105,7 +104,6 @@ mod tests {
         }
     }
 
-    /// No side is picked at 05:00. The long at 08:00 carries its 2 USD, the short at 19:00 its 4.
     #[rstest]
     fn the_metas_examples_carry_the_unit_of_their_sides_trade() {
         let rows = [
@@ -127,7 +125,6 @@ mod tests {
         assert_eq!(sides_and_units, [(1.0, 2.0), (-1.0, 4.0)]);
     }
 
-    /// A failing pick fails the examples, so a train never learns from silently skipped rows.
     #[rstest]
     fn a_pick_failing_fails_the_metas_examples() {
         let rows = [row("2026-01-06T08:00:00Z")];
