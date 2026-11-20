@@ -195,17 +195,7 @@ mod tests {
         assert_eq!(MetaMargin(R::new(margin)).takes(R::new(expected_r)), taken);
     }
 
-    /// Taken: two wins of 3 over units of 2 (1.5R each) and a loss of 2 over a unit of 4 (-0.5R).
-    /// The mean is 5/6R, where their money would make 4/3.
-    ///
-    /// Every trade, besides: a win of 0.5 over a unit of 1 (0.5R) and a loss of 2 over a unit of 2
-    /// (-1R). That makes 0.4R and a win rate of 3/5.
-    ///
-    /// At 1.5 times the commission of 0.3, each trade loses 0.15 more.
-    /// - Taken: 0.075R, 0.0375R and 0.075R, so 0.0625R a trade.
-    /// - Every trade: those three, 0.15R and 0.075R, so 0.0825R a trade.
-    ///
-    /// No sign changes, so the win rates stay 2/3 and 3/5.
+    /// The stressed run charges 1.5 times the commission of 0.3, so each trade loses 0.15 more.
     #[rstest]
     fn the_earnings_are_nautilus_expectancy_and_win_rate_of_the_r_of_the_trades_taken_and_of_every_trade()
      {
@@ -233,13 +223,9 @@ mod tests {
         close(earnings.every_stressed.win_rate, 0.6);
     }
 
-    /// Pins that Nautilus' `Expectancy` is `avg_winner * win_rate + avg_loser * loss_rate`.
-    ///
-    /// The rates are among the trades that gained or lost
-    /// (`crates/analysis/src/statistics/expectancy.rs:75-95`). `Trades::of` takes it, and a
-    /// backtest's scores report it (`walk::WalkForward::scores`).
-    ///
-    /// A win of 2, a loss of 1 and a 0 make 0.5, not a third.
+    /// Pins that Nautilus' `Expectancy` is `avg_winner * win_rate + avg_loser * loss_rate`, with
+    /// the rates among the trades that gained or lost
+    /// (`crates/analysis/src/statistics/expectancy.rs:75-95`). `Trades::of` takes it.
     #[rstest]
     fn drift_a_trade_at_nought_weighs_in_no_expectancy() {
         let trades = Trades::of(&[2.0, -1.0, 0.0]);
@@ -247,7 +233,6 @@ mod tests {
         close(trades.expectancy, 0.5);
     }
 
-    /// A win, a loss and a 0 are three trades.
     #[rstest]
     fn a_trade_at_nought_is_counted() {
         let trades = Trades::of(&[2.0, -1.0, 0.0]);
