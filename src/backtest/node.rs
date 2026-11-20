@@ -1,14 +1,16 @@
-//! Backtest run over the catalog.
+//! Runs a backtest over the catalog.
 //!
-//! Builds a Nautilus `BacktestRunConfig`: the venue (`BacktestVenueConfig`), the catalog data
-//! (`BacktestDataConfig`, one per series the run replays) and the engine config. It runs it on a
-//! `BacktestNode`: `build`, the strategy added through `get_engine_mut`, `run`. The engine is kept
-//! after the run, so that the report reads the fills from its cache, then disposed.
+//! This module builds a Nautilus `BacktestRunConfig` from three parts: the venue
+//! (`BacktestVenueConfig`), the catalog data (`BacktestDataConfig`, one per series the run
+//! replays) and the engine config. It runs the config on a `BacktestNode` in three steps: `build`,
+//! add the strategy through `get_engine_mut`, then `run`. The run keeps the engine, so the report
+//! reads the fills from its cache. The run then disposes of the engine.
 //!
-//! `BacktestDataConfig` refuses custom data, so the run reads it from the catalog itself
-//! (`custom_data`) and adds it to the engine before `run` through `add_data`. The engine replays it
-//! in time order with the rest. A streaming run clears the engine's data after each chunk, dropping
-//! what was added before, so a run with custom data loads all its data at once (no `chunk_size`).
+//! `BacktestDataConfig` refuses custom data. So the run reads custom data from the catalog itself
+//! (`custom_data`) and adds it to the engine through `add_data` before `run`. The engine replays
+//! it in time order with the rest. A streaming run clears the engine's data after each chunk,
+//! which drops what was added before. So a run with custom data loads all its data at once, with
+//! no `chunk_size`.
 
 use std::{collections::BTreeSet, fmt::Debug, sync::Arc};
 
@@ -47,58 +49,67 @@ use crate::{
 
 const RUN_ID: &str = "backtest";
 
-/// Data points loaded and replayed at a time (Nautilus' streaming mode): a day of CME gold's book
-/// depth is 7.4 million snapshots, beyond 16 GB loaded at once.
+/// The number of data points loaded and replayed at a time (Nautilus' streaming mode).
+///
+/// A day of CME gold's book depth is 7.4 million snapshots, which is beyond 16 GB loaded at once.
 const CHUNK_SIZE: usize = 100_000;
 
-/// How often a dataset run purges closed orders and positions from the cache, and how long after
-/// closing, in minutes (live keeps a week: `live::node`). Targets are read from events, never from
-/// the cache. Kept, they slow the run more than in proportion to its days: 16 days of quotes every
-/// 5 s and targets every 15 minutes took 70 s against 25 s purged, 2 days 4.2 s against 3.1 s. The
-/// timer also releases every command due at a latency (`Latency::dataset_delay`).
+/// How often a dataset run purges closed orders and positions from the cache, in minutes.
+///
+/// This is also how long after closing they are purged (live keeps them a week: `live::node`). The
+/// run reads targets from events, never from the cache. Closed orders and positions kept in the
+/// cache slow the run more than in proportion to its days. 16 days of quotes every 5 s and targets
+/// every 15 minutes took 70 s against 25 s purged, and 2 days took 4.2 s against 3.1 s. The timer
+/// also releases every command due at a latency (`Latency::dataset_delay`).
 pub(super) const DATASET_PURGE_MINS: u32 = 1;
 
-/// The leverage of a dataset run's accounts: the largest a `Decimal` holds. Under Nautilus' default
-/// margin model, the notional / leverage times the instrument's margin (`LeveragedMarginModel`,
-/// model/src/accounts/margin_model.rs), every order's margin then rounds to nothing, so the risk
-/// engine's `check_margin` (risk/src/engine/mod.rs) denies none, and its other checks stay. A
-/// dataset run opens a long and a short at every decision, which no account trades; the strategy's
-/// backtest and the live venue check that an account can margin a trade. Nautilus has no
-/// margin-free model for a `BacktestVenueConfig` (`MarginModelAny`).
+/// The leverage of a dataset run's accounts, which is the largest value a `Decimal` holds.
+///
+/// Nautilus' default margin model computes an order's margin as the notional divided by the
+/// leverage, times the instrument's margin (`LeveragedMarginModel`,
+/// model/src/accounts/margin_model.rs). At this leverage, every order's margin rounds to nothing.
+/// The risk engine's `check_margin` (risk/src/engine/mod.rs) then denies no order, and its other
+/// checks stay. A dataset run opens a long and a short at every decision, which no account trades.
+/// The strategy's backtest and the live venue check that an account can margin a trade. Nautilus
+/// has no margin-free model for a `BacktestVenueConfig` (`MarginModelAny`).
 const DATASET_LEVERAGE: Decimal = Decimal::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Run {
-    /// Each venue's account unleveraged, its balance moving with the run's P&L.
+    /// Each venue's account is unleveraged, and its balance moves with the run's P&L.
     Backtest,
-    /// A dataset run (`Backtest::run_dataset`): each account frozen at the run's balance and
-    /// margining nothing (`DATASET_LEVERAGE`), closed orders and positions purged every
-    /// `DATASET_PURGE_MINS`, that long after they close.
+    /// A dataset run (`Backtest::run_dataset`).
+    ///
+    /// Each account is frozen at the run's balance and holds no margin (`DATASET_LEVERAGE`). The
+    /// run purges closed orders and positions every `DATASET_PURGE_MINS`, that long after they
+    /// close.
     Dataset,
 }
 
-/// The run config of `backtest`: one simulated venue per venue of the instruments, keeping
-/// positions as `venues::oms_type` specifies, each with the run's balance, or nothing if no broker
-/// trades it or the run reads its pairs alone on it (`Backtest::funds`).
+/// Returns the run config of `backtest`.
+///
+/// The config has one simulated venue per venue of the instruments. Each venue keeps positions as
+/// `venues::oms_type` specifies. Each venue has the run's balance, or nothing if no broker trades
+/// it or the run reads its pairs alone on it (`Backtest::funds`).
 ///
 /// The data is `Backtest::series` over `[start, end]`, the only data replayed. No catalog is
 /// registered in the engine, and the strategy warms up on the replay.
 ///
 /// The data engine builds time bars as late after their close as a live node does
-/// (`warmup::data_engine_config`). The data is streamed `CHUNK_SIZE` points at a time, unless the
-/// run replays a custom series (see `custom_data`), which is loaded at once. Build and run errors
+/// (`warmup::data_engine_config`). The run streams the data `CHUNK_SIZE` points at a time, unless
+/// it replays a custom series (see `custom_data`), which it loads at once. Build and run errors
 /// are raised, not only logged. The engine outlives the run.
 pub(super) fn run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfig> {
     config(backtest, Run::Backtest)
 }
 
-/// The run config of a dataset run of `backtest` (`Run::Dataset`).
+/// Returns the run config of a dataset run of `backtest` (`Run::Dataset`).
 pub(super) fn dataset_run_config(backtest: &Backtest) -> anyhow::Result<BacktestRunConfig> {
     config(backtest, Run::Dataset)
 }
 
 fn config(backtest: &Backtest, run: Run) -> anyhow::Result<BacktestRunConfig> {
-    // Nautilus checks only the engine start against the end, which lets a run starting on its end
+    // Nautilus checks only the engine start against the end, so a run starting on its end gets
     // through.
     let (start, end) = (backtest.start, backtest.end);
     anyhow::ensure!(
@@ -147,26 +158,30 @@ fn config(backtest: &Backtest, run: Run) -> anyhow::Result<BacktestRunConfig> {
         .build()?)
 }
 
-/// The simulated `venue` of `backtest` for `run`: a margin account filling on the top of the book
-/// on Nautilus' default fill model: a market order at the quote, or on bars at the last price, with
-/// no slippage, and a limit order whenever touched; at a latency, at the first settlement point
-/// after its arrival.
+/// Returns the simulated `venue` of `backtest` for `run`.
 ///
-/// The account holds the run's balance if `Backtest::funds`, else nothing. A backtest's has the
-/// balance's currency as its base if its broker's account has one (`venues::has_base_currency`, a
-/// cTrader broker's), so that Nautilus books margins, commissions and P&L in it, as the live
-/// account does. Otherwise it has none, each currency held apart.
+/// The venue is a margin account that fills on the top of the book on Nautilus' default fill
+/// model:
+/// - A market order fills at the quote, or on bars at the last price, with no slippage.
+/// - A limit order fills whenever touched.
+/// - At a latency, an order fills at the first settlement point after its arrival.
 ///
-/// A backtest's account is unleveraged: a position locks its instrument's margin, which holds the
+/// The account holds the run's balance if `Backtest::funds`, else nothing. A backtest's account
+/// has the balance's currency as its base if its broker's account has one
+/// (`venues::has_base_currency`, a cTrader broker's). Nautilus then books margins, commissions and
+/// P&L in that currency, as the live account does. Otherwise the account has no base currency, and
+/// each currency is held apart.
+///
+/// A backtest's account is unleveraged. A position locks its instrument's margin, which holds the
 /// account's (IC's definitions the broker's, OKX's the account's leverage: `venues::okx`; IB's lock
 /// nothing).
 ///
-/// A dataset run's is frozen, Nautilus' `frozen_account`: the simulated exchange adjusts none of
-/// its balances (`adjust_account_balance`, backtest/src/exchange.rs) and the portfolio locks no
-/// margin of an account that does not calculate its state (portfolio/src/portfolio.rs), so trades
-/// that lose leave its balance whole. It has no base currency on any venue: its trades are sized at
-/// a fixed equity (`strategy::orders::Trade::send_at`), so a base would add conversions nothing
-/// reads.
+/// A dataset run's account is frozen (Nautilus' `frozen_account`). The simulated exchange adjusts
+/// none of its balances (`adjust_account_balance`, backtest/src/exchange.rs). The portfolio locks
+/// no margin of an account that does not calculate its state (portfolio/src/portfolio.rs). So
+/// trades that lose leave its balance whole. It has no base currency on any venue. Its trades are
+/// sized at a fixed equity (`strategy::orders::Trade::send_at`), so a base would add conversions
+/// nothing reads.
 fn venue_config(
     backtest: &Backtest,
     venue: Venue,
@@ -197,8 +212,10 @@ fn venue_config(
         .build()?)
 }
 
-/// The `BacktestDataConfig` loading `series` from `catalog` over its slice, both ends included, so
-/// a contract of a root is replayed only while it stands for the root.
+/// Returns the `BacktestDataConfig` that loads `series` from `catalog` over its slice.
+///
+/// Both ends of the slice are included, so a contract of a root is replayed only while it stands
+/// for the root.
 fn data_config(
     catalog: &DataCatalogConfig,
     series: SeriesSlice,
@@ -209,8 +226,9 @@ fn data_config(
         .instrument_id(series.instrument_id())
         .start_time(UnixNanos::from(from))
         .end_time(UnixNanos::from(to))
-        // One stream over the series' files, as the catalog queries: Nautilus' default opens a
-        // prefetching stream per file before the first chunk, tens of GB over months of MBP-10
+        // One stream over the series' files, as the catalog queries, because Nautilus' default
+        // opens a prefetching stream per file before the first chunk, which is tens of GB over
+        // months of MBP-10.
         .optimize_file_loading(true);
     let config = match series {
         CatalogSeries::Bars(bar) => builder
@@ -222,25 +240,28 @@ fn data_config(
     Ok(config?)
 }
 
-/// The custom series of `backtest` (`Backtest::custom`) read from its catalog over its slices of
-/// the run's window, both ends included: the data the node cannot load (see `run_config`). A
-/// root's is read contract by contract (`DataRequirements::custom_slices`).
+/// Returns the custom series of `backtest` (`Backtest::custom`), read from its catalog.
 ///
-/// A slice the catalog holds nothing of is warned of as `BacktestNode` warns of any other series.
+/// The read covers the slices of the run's window, with both ends included. It returns the data
+/// the node cannot load (see `run_config`). The series of a root is read contract by contract
+/// (`DataRequirements::custom_slices`).
+///
+/// A slice in which the catalog holds nothing gets a warning, as `BacktestNode` warns for any
+/// other series.
 ///
 /// Each type must be registered before the run, as Nautilus decodes it by name
-/// (`nautilus_serialization::ensure_custom_data_registered`): helix registers its own as the
+/// (`nautilus_serialization::ensure_custom_data_registered`). helix registers its own types as the
 /// process starts (`venues::register_custom_data`).
 ///
 /// # Errors
 ///
 /// Returns an error if:
 /// - The series cannot be worked out.
-/// - The catalog cannot be read or a stored type is not registered, naming the series.
-/// - A row of a custom series is stored under its identifier as another data type, naming both.
-///   Nautilus publishes each row on its stored data type's topic, so the strategy would get none of
-///   the series, or part of it, and fill-catalog, which reads the catalog by identifier, would find
-///   nothing missing.
+/// - The catalog cannot be read or a stored type is not registered. The error names the series.
+/// - A row of a custom series is stored under its identifier as another data type. The error names
+///   both. Nautilus publishes each row on its stored data type's topic, so the strategy would get
+///   none of the series, or part of it, and fill-catalog, which reads the catalog by identifier,
+///   would find nothing missing.
 pub(super) fn custom_data(backtest: &Backtest) -> anyhow::Result<Vec<Data>> {
     let mut catalog = ParquetDataCatalog::new(&backtest.catalog, None, None, None, None);
     let mut data = Vec::new();
@@ -262,7 +283,7 @@ pub(super) fn custom_data(backtest: &Backtest) -> anyhow::Result<Vec<Data>> {
             .with_context(|| format!("reading the {data_type}"))?;
 
         if read.is_empty() {
-            // As `BacktestNode::run_oneshot` warns
+            // Warns as `BacktestNode::run_oneshot` does
             log::warn!("No data found for config: {data_type:?}");
             continue;
         }
@@ -284,10 +305,12 @@ pub(super) fn custom_data(backtest: &Backtest) -> anyhow::Result<Vec<Data>> {
     Ok(data)
 }
 
-/// Runs `config` with `strategy` on a new `BacktestNode`, `custom` added to its engine, and returns
-/// its result: its return statistics with `MaxDrawdown` (registered with the portfolio before the
-/// run), and the costs of the fills in the engine's cache. Each is on the quotes the run replayed,
-/// read again from the catalog (`replayed_quotes`; the other series are not read).
+/// Runs `config` with `strategy` on a new `BacktestNode` and returns the result.
+///
+/// The node's engine gets `custom` added. The result holds the return statistics with
+/// `MaxDrawdown` (registered with the portfolio before the run), and the costs of the fills in the
+/// engine's cache. The costs are measured on the quotes the run replayed, which the run reads
+/// again from the catalog (`replayed_quotes`; the other series are not read).
 pub(super) fn run<S>(
     config: BacktestRunConfig,
     custom: Vec<Data>,
@@ -311,13 +334,15 @@ where
     })
 }
 
-/// The quotes `data` replays in a run from `start` to `end`, in time order, read a batch at a time
-/// by the query the node streams them by (`BacktestNode::load_data_config` collects it into memory
-/// at once). An error opening the catalog or reading a batch is an item.
+/// Returns the quotes `data` replays in a run from `start` to `end`, in time order.
 ///
-/// Temporary: the query is built here as Nautilus' private `dispatch_batch_query` builds it
-/// (`backtest/src/node.rs`), as no public call streams a data config. Once Nautilus has one, this
-/// is that call and a match on quotes: helix-trader#15.
+/// The query the node streams them by reads them a batch at a time
+/// (`BacktestNode::load_data_config` collects them into memory at once). An error opening the
+/// catalog or reading a batch is an item.
+///
+/// Temporary: no public Nautilus call streams a data config, so this function builds the query as
+/// Nautilus' private `dispatch_batch_query` does (`backtest/src/node.rs`). Once Nautilus has such a
+/// call, this function is that call and a match on quotes: helix-trader#15.
 fn replayed_quotes(
     data: &BacktestDataConfig,
     start: Option<UnixNanos>,
@@ -351,8 +376,9 @@ fn replayed_quotes(
     }))
 }
 
-/// Runs `config` as `run` does, for what the strategy does alone: a dataset run's cache is purged
-/// as it goes, so it has no result to read.
+/// Runs `config` as `run` does, for what the strategy does alone.
+///
+/// A dataset run purges its cache as it goes, so it has no result to read.
 pub(super) fn run_dataset<S>(
     config: BacktestRunConfig,
     custom: Vec<Data>,
@@ -364,10 +390,11 @@ where
     on_node(config, custom, strategy, |node| node.run().map(drop))
 }
 
-/// Runs `run` on a new `BacktestNode` of `config`, then disposes it whatever came of it, as
-/// Nautilus requires before the next node starts on the thread (`concepts/architecture.md`,
-/// "Processes and threads"): a model backtest goes on to further nodes after a failed dataset
-/// run.
+/// Runs `run` on a new `BacktestNode` of `config`, then disposes of the node whatever came of it.
+///
+/// Nautilus requires the disposal before the next node starts on the thread
+/// (`concepts/architecture.md`, "Processes and threads"). A model backtest goes on to further
+/// nodes after a failed dataset run.
 fn on_node<S, T>(
     config: BacktestRunConfig,
     custom: Vec<Data>,
@@ -484,8 +511,8 @@ mod tests {
         assert_eq!(venue.default_leverage(), Some(Decimal::ONE));
     }
 
-    /// A cTrader venue's account has a base currency live, IB's none (`venues::has_base_currency`).
-    /// A dataset run's takes none on any venue.
+    /// A cTrader venue's account has a base currency live, and IB's has none
+    /// (`venues::has_base_currency`). A dataset run's account has none on any venue.
     #[rstest]
     fn a_backtests_venue_has_the_balances_currency_as_its_base_if_its_broker_has_one() {
         let dir = tempfile::tempdir().unwrap();
@@ -517,7 +544,8 @@ mod tests {
         );
     }
 
-    /// Each venue's base latency, then that of a submit, a modify and a cancel, in nanoseconds.
+    /// Returns each venue's base latency, then its submit, modify and cancel latencies, in
+    /// nanoseconds.
     fn latencies(config: &BacktestRunConfig) -> Vec<Option<[u64; 4]>> {
         let command = TradingCommand::CancelAllOrders(CancelAllOrders::new(
             TraderId::from("TESTER-001"),
@@ -548,8 +576,8 @@ mod tests {
             .collect()
     }
 
-    /// 150 ms is a static model of that base latency and no extra, on every venue of either run. No
-    /// latency is Nautilus' default.
+    /// A latency of 150 ms gives a static model with that base latency and no extra, on every venue
+    /// of either run. With no latency, Nautilus' default applies.
     #[rstest]
     #[case::at_150_ms(Some(SignedDuration::from_millis(150)), Some([150_000_000; 4]))]
     #[case::without_a_latency(None, None)]
@@ -575,7 +603,9 @@ mod tests {
     }
 
     /// Pins two matching defaults of Nautilus' `BacktestVenueConfig` builder, which its guides do
-    /// not state: bar execution and the rejection of a stop in the market on
+    /// not state.
+    ///
+    /// The defaults are bar execution and the rejection of a stop in the market, both on
     /// (`crates/backtest/src/config.rs:489-491`, `:468-470`). `venue_config` sets neither, and the
     /// backtest and model guides rely on both.
     #[rstest]
@@ -587,7 +617,7 @@ mod tests {
         assert!(venue.reject_stop_orders());
     }
 
-    /// Nautilus' documented defaults (`docs/concepts/backtesting/bar-execution.md`,
+    /// Pins Nautilus' documented defaults (`docs/concepts/backtesting/bar-execution.md`,
     /// `docs/concepts/options.md`), which `venue_config` keeps.
     #[rstest]
     fn the_venue_replays_bars_in_a_fixed_order_and_consumes_no_liquidity() {
@@ -652,7 +682,7 @@ mod tests {
         );
     }
 
-    /// 5 s after their close, as a live node builds them.
+    /// The run builds the bars 5 s after their close, as a live node does.
     #[rstest]
     fn a_run_on_a_composite_bar_type_builds_its_bars_as_late_as_a_live_node() {
         let dir = tempfile::tempdir().unwrap();
@@ -733,7 +763,7 @@ mod tests {
         assert_eq!(quoted(&config, dir.path()), ["EUNL.IBIS", "SXR8.IBIS"]);
     }
 
-    /// Nautilus' `BacktestNode` warns of a series it reads nothing of and runs on (`run_oneshot`).
+    /// `BacktestNode` warns when it reads nothing from a series, and runs on (`run_oneshot`).
     #[rstest]
     fn an_empty_read_of_a_custom_series_logs_nautilus_no_data_warning_and_reads_on() {
         let name = "an_empty_read_of_a_custom_series_logs_nautilus_no_data_warning_and_reads_on";
@@ -811,7 +841,8 @@ mod tests {
         assert!(err.to_string().contains("no instruments"), "{err}");
     }
 
-    /// GLBX trades through IB, which nets; IC Markets hedges. A dataset needs both separate.
+    /// GLBX trades through IB, which nets, and IC Markets hedges. A dataset needs both kept
+    /// separate.
     #[rstest]
     #[case::trading(run_config, OmsType::Netting, Decimal::ONE)]
     #[case::dataset(dataset_run_config, OmsType::Hedging, Decimal::MAX)]
@@ -851,8 +882,8 @@ mod tests {
         }
     }
 
-    /// IC's gold traded, LSE's read: LSEDGE, which no broker trades, keeps positions as Nautilus'
-    /// venue default in a normal run, and hedges in a dataset run.
+    /// The run trades IC's gold and reads LSE's. LSEDGE, which no broker trades, keeps positions
+    /// as Nautilus' venue default in a normal run, and hedges in a dataset run.
     #[rstest]
     fn a_venue_no_broker_trades_starts_with_nothing_in_the_run_s_currency() {
         let dir = tempfile::tempdir().unwrap();

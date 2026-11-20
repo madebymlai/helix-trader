@@ -1,4 +1,4 @@
-//! Listings of CME contracts in LSE's catalogue, against the mock LSE peer.
+//! Tests the listings of CME contracts in LSE's catalogue against the mock LSE peer.
 
 use std::num::NonZeroU32;
 
@@ -47,7 +47,8 @@ fn looked_up(lse: &MockLse) -> Vec<String> {
         .collect()
 }
 
-/// LSE's GCZ6 of 2026 is its listing 4000000002, looked up under its exchange name once.
+/// LSE's GCZ6 of 2026 is its listing 4000000002. The client looks it up once, under its exchange
+/// name.
 #[tokio::test]
 async fn a_contract_is_looked_up_once() {
     let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6), Reply::json(PAIRS_GCZ6)]);
@@ -68,7 +69,7 @@ async fn a_contract_is_looked_up_once() {
     assert_eq!(looked_up(&lse), ["GCZ6"]);
 }
 
-/// LSE's NGZ6 is the contract of 2016; natural gas names 2026's NGZ26.
+/// LSE's NGZ6 is the 2016 contract, and natural gas names the 2026 contract NGZ26.
 #[tokio::test]
 async fn a_contract_not_listed_under_its_year_s_last_digit_is_looked_up_under_its_two() {
     let lse = MockLse::start(vec![Reply::json(PAIRS_NGZ6), Reply::json(PAIRS_NGZ26)]);
@@ -83,7 +84,8 @@ async fn a_contract_not_listed_under_its_year_s_last_digit_is_looked_up_under_it
     assert_eq!(looked_up(&lse), ["NGZ6", "NGZ26"]);
 }
 
-/// LSE's ESZ6 names the contracts of 2016 and 2026, its ESZ36 nothing (answer captured for ESZ26).
+/// LSE's ESZ6 names the 2016 and 2026 contracts, and its ESZ36 names nothing (the answer was
+/// captured for ESZ26).
 #[tokio::test]
 async fn a_contract_lse_lists_under_neither_name_fails_naming_it_and_what_lse_lists() {
     let lse = MockLse::start(vec![Reply::json(PAIRS_ESZ6), Reply::json(PAIRS_ESZ26)]);

@@ -1,5 +1,7 @@
-//! The data client's exchange data through its factory: `GLBX` contracts and `XNAS` stocks on the
-//! mock CME and Nasdaq streams, at Levels 1 to 3.
+//! Tests the data client's exchange data through its factory.
+//!
+//! The tests cover `GLBX` contracts and `XNAS` stocks on the mock CME and Nasdaq streams, at
+//! Levels 1 to 3.
 
 use std::{
     cell::RefCell,
@@ -184,7 +186,8 @@ fn es_quote(
     ))
 }
 
-/// A quote or a trade stamped as made at nought: the client's clock is no fact of LSE's.
+/// Returns the quote or trade `data` stamped as made at nought. The client's clock is no fact of
+/// LSE's.
 fn made_at_nought(data: Data) -> Data {
     match data {
         Data::Quote(quote) => Data::Quote(QuoteTick {
@@ -199,14 +202,16 @@ fn made_at_nought(data: Data) -> Data {
     }
 }
 
-/// LSE's documented ESZ6 at Level 1 on its CME stream: its opening, bid 7569.75 x 2, ask 7570.00 x
-/// 11, comes with the quotes subscription, then a change of the best bid and offer, then a trade
-/// record's quote and its trade, 1 lot at 7570.00, of no aggressor side, its id the record's
-/// sequence. ESZ6 is looked up in LSE's catalogue with the CME key.
+/// LSE's documented ESZ6 at Level 1 on its CME stream.
 ///
-/// NVDA at Level 1 on LSE's Nasdaq stream, as LSE's documentation records it: its opening, bid
-/// 211.15 x 200, ask 211.17 x 900, then a change of its best bid, and a trade of 100 at 211.17. The
-/// stream takes NVDA by its ticker, LSE's catalogue asked nothing.
+/// The quotes subscription brings the opening first, with bid 7569.75 x 2 and ask 7570.00 x 11. A
+/// change of the best bid and offer follows. Then come a trade record's quote and its trade, 1 lot
+/// at 7570.00, with no aggressor side and the record's sequence as its id. ESZ6 is looked up in
+/// LSE's catalogue with the CME key.
+///
+/// NVDA at Level 1 on LSE's Nasdaq stream, as LSE's documentation records it. The opening has bid
+/// 211.15 x 200 and ask 211.17 x 900. A change of the best bid follows, then a trade of 100 at
+/// 211.17. The stream takes NVDA by its ticker, and LSE's catalogue is asked nothing.
 ///
 /// Each is stamped when LSE received the record (`ts_recv`), as Nautilus' Databento decoder does.
 #[rstest]
@@ -328,9 +333,9 @@ async fn the_records_after_a_gap_come_and_nothing_stands_in_for_those_missed() {
     assert!(events.try_recv().is_err(), "data beside the trade");
 }
 
-/// GCG7 of 2027, GCZ6's next contract, is subscribed later as a roll does: looked up, then carried
-/// from a new connection beside GCZ6, which opens it with its captured bid 3890.0 x 1 and ask
-/// 3932.0 x 1.
+/// GCG7 of 2027, GCZ6's next contract, is subscribed later, as a roll does. The client looks it
+/// up, then carries it from a new connection beside GCZ6. That connection opens it with its
+/// captured bid 3890.0 x 1 and ask 3932.0 x 1.
 #[tokio::test]
 async fn a_contract_subscribed_after_the_start_is_looked_up_and_carried_from_a_new_connection() {
     let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6), Reply::json(PAIRS_GCG7)]);
@@ -387,8 +392,8 @@ async fn a_contract_subscribed_after_the_start_is_looked_up_and_carried_from_a_n
     assert_eq!(looked_up, ["GCZ6", "GCG7"]);
 }
 
-/// GCG7's quotes end, as a roll ends its old contract's: when LSE drops the connection, the next
-/// one subscribes GCZ6 alone, so that GCG7, once expired, does not have the level's whole
+/// GCG7's quotes end, as a roll ends its old contract's. When LSE drops the connection, the next
+/// one subscribes GCZ6 alone, so that GCG7, once expired, does not get the level's whole
 /// subscription refused (`symbol unavailable`, a close with 1008, which is not reconnected).
 #[tokio::test]
 async fn a_contract_whose_data_at_a_level_all_ended_is_left_out_of_its_next_connection() {
@@ -428,8 +433,8 @@ async fn a_contract_whose_data_at_a_level_all_ended_is_left_out_of_its_next_conn
     assert_eq!(subscriptions, [json!(["GCG7", "GCZ6"]), json!(["GCZ6"])]);
 }
 
-/// Level 1 answers with GCZ6's and GCG7's captured openings, its first connection held until the
-/// test releases it and dropped, and Level 2 with GCZ6's documented session.
+/// Level 1 answers with GCZ6's and GCG7's captured openings. Its first connection is held until
+/// the test releases it, then dropped. Level 2 answers with GCZ6's documented session.
 fn level_1_dropped_once() -> MockExchangeStream {
     let mut level_1 = 0;
     MockExchangeStream::cme(move |_, subscription| {
@@ -461,13 +466,13 @@ async fn level_1_subscriptions(stream: &MockExchangeStream, count: usize) -> Vec
     )
 }
 
-/// A config reading a rolled root's depth and the next contract's quotes streams GCZ6 and GCG7,
-/// both named at Level 1 when the client connects. GCZ6's depth, taken at Level 2, ends at the
-/// roll.
+/// A config that reads a rolled root's depth and the next contract's quotes streams GCZ6 and
+/// GCG7. The client names both at Level 1 when it connects. GCZ6's depth, taken at Level 2, ends
+/// at the roll.
 ///
-/// GCZ6 takes no data at Level 1 either, so Level 1's next connection leaves it out: once GCZ6
-/// expired, LSE would refuse a subscription naming it (`symbol unavailable`, 1008, not reconnected)
-/// and stop GCG7's quotes.
+/// GCZ6 takes no data at Level 1 either, so Level 1's next connection leaves it out. Once GCZ6
+/// expired, LSE would refuse a subscription naming it (`symbol unavailable`, 1008, not
+/// reconnected) and stop GCG7's quotes.
 #[tokio::test]
 async fn a_contract_whose_data_ended_at_one_level_is_left_out_of_every_level_it_takes_none_at() {
     let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6), Reply::json(PAIRS_GCG7)]);
@@ -498,7 +503,7 @@ async fn a_contract_whose_data_ended_at_one_level_is_left_out_of_every_level_it_
 }
 
 /// A run started just before a roll names GCZ6 and GCG7 at Level 1 on connect, but subscribes
-/// GCG7's quotes alone: Level 1's next connection names GCG7 alone, so that GCZ6, never taken and
+/// GCG7's quotes alone. Level 1's next connection names GCG7 alone, so that GCZ6, never taken and
 /// once expired, is not refused.
 #[tokio::test]
 async fn a_reconnect_names_only_the_contracts_taken_at_its_level_not_those_streamed_untaken() {
@@ -531,9 +536,9 @@ async fn lse_s_refusal_of_the_subscription_fails_the_connect_with_its_reason() {
     assert!(err.contains("1008 symbol unavailable: NGZ6"), "{err}");
 }
 
-/// ESZ6 of 2016, delisted on 16 December 2016 (`PAIRS_ESZ6`): LSE's CME stream takes a contract by
-/// its listing's symbol, ESZ6, which carries 2026's contract now, so streaming it would pass 2026's
-/// records on as 2016's.
+/// ESZ6 of 2016 was delisted on 16 December 2016 (`PAIRS_ESZ6`). LSE's CME stream takes a contract
+/// by its listing's symbol, ESZ6, which now carries 2026's contract, so streaming it would pass
+/// 2026's records on as 2016's.
 #[tokio::test]
 async fn a_delisted_contract_is_refused_for_streaming_naming_it() {
     let lse = MockLse::start(vec![Reply::json(PAIRS_ESZ6)]);
@@ -606,12 +611,18 @@ fn level(order: &BookOrder, count: u32) -> (Price, Quantity, u32) {
 
 type Level = (Price, Quantity, u32);
 
-/// Level 2 as LSE's documentation records it, of GCZ6 on its CME stream and of NVDA on its Nasdaq
-/// stream: the opening, the last ten levels a side, then the book after each of three changes: the
-/// best bid's size cut, an order joining the best ask, and the ninth ask level removed. Each depth
-/// is stamped when LSE received the record and numbered by its sequence on the stream. Each case
-/// gives the opening's tenth bid and ask, then each depth's sequence, stamp, best bid and ask, and
-/// count of asks.
+/// Level 2 as LSE's documentation records it, for GCZ6 on its CME stream and for NVDA on its
+/// Nasdaq stream.
+///
+/// The data is the opening, which holds the last ten levels a side, then the book after each of
+/// three changes:
+/// - The best bid's size is cut.
+/// - An order joins the best ask.
+/// - The ninth ask level is removed.
+///
+/// Each depth is stamped when LSE received the record and numbered by its sequence on the stream.
+/// Each case gives the opening's tenth bid and ask, then for each depth its sequence, stamp, best
+/// bid, best ask and count of asks.
 #[rstest]
 #[case::a_glbx_contract(
     MockLse::start(vec![Reply::json(PAIRS_GCZ6)]),
@@ -763,14 +774,17 @@ async fn a_level_2_subscription_delivers_the_instrument_s_ten_levels_then_its_de
     );
 }
 
-/// Level 3 as LSE's documentation records it, of GCZ6 on its CME stream and of NVDA on its Nasdaq
-/// stream: no opening book, so the deltas start at the first order event.
+/// Level 3 as LSE's documentation records it, for GCZ6 on its CME stream and for NVDA on its
+/// Nasdaq stream. There is no opening book, so the deltas start at the first order event.
 ///
-/// Each exchange message's events, up to the one LSE flags 128, its last, come as one batch ending
-/// `F_LAST`: a buy and a sell order added at one time, the change of the buy's size, then the
-/// sell's removal, whose message LSE ends with an event of no action, which gives no delta. The two
-/// sessions share their times and sequences. Each case gives the buy's order id, price, size and
-/// changed size, and the sell's order id, price and size.
+/// The events of each exchange message, up to the one LSE flags 128 (its last), come as one batch
+/// ending `F_LAST`. The events are, in order:
+/// - A buy and a sell order are added at one time.
+/// - The buy's size changes.
+/// - The sell is removed. LSE ends its message with an event of no action, which gives no delta.
+///
+/// The two sessions share their times and sequences. Each case gives the buy's order id, price,
+/// size and changed size, and the sell's order id, price and size.
 #[rstest]
 #[case::a_glbx_contract(
     MockLse::start(vec![Reply::json(PAIRS_GCZ6)]),
@@ -903,8 +917,8 @@ async fn a_level_3_subscription_delivers_order_book_deltas_from_the_first_live_r
     );
 }
 
-/// LSE refuses Level 2 to the CME Group Lite+ key, closing the connection with its reason, which
-/// the client logs; a later subscription of the level asks LSE again, on a new connection.
+/// LSE refuses Level 2 to the CME Group Lite+ key and closes the connection with its reason, which
+/// the client logs. A later subscription to the level asks LSE again, on a new connection.
 #[tokio::test]
 async fn a_level_lse_refused_is_asked_again_by_a_later_subscription() {
     let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6)]);
@@ -952,8 +966,8 @@ async fn a_level_lse_refused_is_asked_again_by_a_later_subscription() {
     assert_eq!(levels, [(0, json!(1)), (1, json!(2)), (2, json!(2))]);
 }
 
-/// Nautilus' Databento client serves MBP-10's ten levels alone, and LSE streams ten: another depth
-/// is refused before LSE is asked.
+/// Nautilus' Databento client serves MBP-10's ten levels alone, and LSE streams ten. The client
+/// refuses another depth before LSE is asked.
 #[tokio::test]
 async fn a_depth_of_other_than_ten_levels_is_refused_unasked() {
     let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6)]);
@@ -970,10 +984,10 @@ async fn a_depth_of_other_than_ten_levels_is_refused_unasked() {
     assert_eq!(stream.received().len(), 1);
 }
 
-/// LSE's sockets stream a series' ticks alone, no book: no Level 2 or 3 connection opens. A
-/// connection opens after the call asking it, so GCG7's quotes, asked after the refusals, open a
-/// Level 1 connection naming GCG7 alone, as GCZ6 is taken at no level: what the peer received by
-/// then is GCZ6's Level 1 subscription alone.
+/// LSE's sockets stream a series' ticks alone, with no book, so no Level 2 or 3 connection opens.
+/// A connection opens after the call that asks for it. So GCG7's quotes, asked after the
+/// refusals, open a Level 1 connection naming GCG7 alone, because GCZ6 is taken at no level. What
+/// the peer received by then is GCZ6's Level 1 subscription alone.
 #[tokio::test]
 async fn the_book_of_an_lsedge_series_is_refused_naming_it() {
     let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6), Reply::json(PAIRS_GCG7)]);
@@ -1049,8 +1063,8 @@ fn nvda_quote(
     ))
 }
 
-/// LSE's Nasdaq stream answers a key of no Nasdaq plan, the free key and the CME Group Lite+ key
-/// alike, with HTTP 401 (captured), which fails the connect.
+/// LSE's Nasdaq stream answers a key with no Nasdaq plan with HTTP 401 (captured), which fails the
+/// connect. This holds for the free key and the CME Group Lite+ key alike.
 #[tokio::test]
 async fn lse_s_refusal_of_a_key_of_no_nasdaq_plan_fails_the_connect() {
     let lse = MockLse::start(vec![]);
@@ -1063,9 +1077,9 @@ async fn lse_s_refusal_of_a_key_of_no_nasdaq_plan_fails_the_connect() {
     assert!(stream.received().is_empty(), "{:?}", stream.received());
 }
 
-/// One client streaming a CME contract and a Nasdaq stock, each on its exchange's stream with its
-/// plan's key: the contract is looked up in LSE's catalogue with the CME key, the stock by its
-/// ticker.
+/// One client streams a CME contract and a Nasdaq stock, each on its exchange's stream with its
+/// plan's key. The contract is looked up in LSE's catalogue with the CME key, and the stock is
+/// taken by its ticker.
 #[tokio::test]
 async fn a_glbx_contract_and_an_xnas_stock_stream_each_on_its_exchange_s_stream() {
     let lse = MockLse::start(vec![Reply::json(PAIRS_GCZ6)]);
