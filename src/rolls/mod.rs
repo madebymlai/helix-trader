@@ -200,9 +200,6 @@ mod tests {
         }
     }
 
-    /// The last weekday before each delivery month is Fri Jan 30 (Jan 31 is a Saturday), Tue Mar
-    /// 31, Fri May 29 (May 31 is a Sunday), Fri Jul 31 and Mon Nov 30. Two weekdays before are Wed
-    /// Jan 28, Fri Mar 27, Wed May 27, Wed Jul 29 and Thu Nov 26.
     #[rstest]
     fn gc_rolls_in_2026_two_weekdays_before_the_last_weekday_before_each_delivery_month() {
         let table = TransitionTable::of(gc(), at("2026-01-01T00:00Z"), at("2026-12-31T00:00Z"));
@@ -241,7 +238,6 @@ mod tests {
         );
     }
 
-    /// Rolls GCQ26 to GCZ26 at 2026-07-29T00:00Z.
     #[rstest]
     #[case::before_a_transition_its_pre_contract(before("2026-07-29T00:00Z"), "GCQ26.GLBX")]
     #[case::at_a_transition_its_post_contract(at("2026-07-29T00:00Z"), "GCZ26.GLBX")]
@@ -309,7 +305,6 @@ mod tests {
         assert_eq!(table.contract_at(at("2026-07-29T00:00Z")), id(plain));
     }
 
-    /// GC contracts: `GC{month}{yy}` on GLBX, months G, J, M, Q, Z.
     #[rstest]
     #[case::december_26("GCZ26.GLBX", Some("GC.GLBX"))]
     #[case::february_27("GCG27.GLBX", Some("GC.GLBX"))]
@@ -359,7 +354,6 @@ mod tests {
         at(time) + SignedDuration::from_nanos(1)
     }
 
-    /// Nov 30, 2025 is a Sunday: last weekday Fri Nov 28, roll Wed Nov 26.
     #[rstest]
     #[case::a_time_between_rolls_the_earlier_roll(
         gc(),
@@ -395,7 +389,6 @@ mod tests {
         assert_eq!(Transition::before(id, time), previous);
     }
 
-    /// `before`'s post is the contract standing at the time, and `after` comes after the time.
     #[rstest]
     #[case::the_last_nanosecond_before_the_roll(before("2026-07-29T00:00Z"))]
     #[case::the_roll(at("2026-07-29T00:00Z"))]
@@ -410,9 +403,8 @@ mod tests {
         assert!(previous.time <= time && time < next.time);
     }
 
-    /// Databento's GC.v.0 switches over the stored span, 2026-01-26 to 2026-10-23. Each switch is
-    /// on the day the expiration in the stored daily definitions moves to the next contract, at
-    /// 00:00 UTC. It rolls by the previous day's volume.
+    /// Databento's GC.v.0 switches over the stored span, 2026-01-26 to 2026-10-23, on the day the
+    /// expiration in the stored daily definitions moves to the next contract.
     const DATABENTO_SWITCHES: [(&str, &str, &str); 4] = [
         ("2026-01-30", "GCG26.GLBX", "GCJ26.GLBX"),
         ("2026-03-30", "GCJ26.GLBX", "GCM26.GLBX"),
@@ -433,8 +425,6 @@ mod tests {
             .count()
     }
 
-    /// 2 business days before the rule day puts each Databento switch within 2 + 1 business days
-    /// after the roll.
     #[rstest]
     fn gc_rolls_before_each_databento_switch_on_the_stored_span_within_three_business_days() {
         let table = TransitionTable::of(gc(), at("2026-01-26T00:00Z"), at("2026-10-23T00:00Z"));

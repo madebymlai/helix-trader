@@ -455,8 +455,7 @@ mod tests {
     }
 
     /// The long gains 1 USD if `wins`, else loses 1, and the short does the reverse. Each is net of
-    /// 0.1 USD commission, has a unit of 1 USD and settles an hour later. The payoff features are
-    /// those of a time-only target, which no test reads.
+    /// 0.1 USD commission and has a unit of 1 USD.
     fn row(time: &str, feature: f64, wins: bool) -> TargetRow {
         let ns = UnixNanos::from(at(time));
         let outcome = |pnl: &str| Outcome {
@@ -490,9 +489,7 @@ mod tests {
     }
 
     /// The rows run from the 6th to the 8th. On each, the long's R is 1 or -1 and the short's R is
-    /// the reverse. The 6th before 18:00 has two wins in three, mean R 1/3, then a loss. The 7th
-    /// has one win in three, -1/3, and is scored on the 7th as well. Scored on the 8th, there are
-    /// two wins.
+    /// the reverse.
     fn rows() -> Vec<TargetRow> {
         vec![
             row("2026-01-06T10:00:00Z", 0.5, true),
@@ -591,11 +588,8 @@ mod tests {
         publish_model_set(dir, config, valid_from, sides, None);
     }
 
-    /// The training mean of the side's R on `rows`.
-    ///
-    /// At the 7th, the long has two wins and a loss from the 6th before 18:00, so 1/3. At the 8th,
-    /// it has a win and two losses from the 7th, so -1/3. The short's mean is the reverse. At any
-    /// other time it is nought.
+    /// The training mean of the side's R on `rows` at the 7th and the 8th, nought at any other
+    /// time.
     fn trained_baseline(side: Side, valid_from: Timestamp) -> f64 {
         let long = if valid_from == at("2026-01-07T00:00:00Z") {
             1.0 / 3.0
@@ -622,16 +616,6 @@ mod tests {
         assert!((actual - expected).abs() < 1e-6, "{actual} != {expected}");
     }
 
-    /// The long's, each model beside its own baseline (`trained_baseline`) on the rows it decided,
-    /// both sides' fakes expecting the row's feature `p`. The 7th: `p` 0.8, 0.3, 0.6 against R 1,
-    /// -1, -1. Squared errors 0.04 + 1.69 + 2.56 = 4.29 against baseline 1/3's 4/9 + 16/9 + 16/9 =
-    /// 4, skill 1 - 4.29 / 4. Errors 0.2, -1.3, -1.6, mean -0.9. Deviations from the means 17/30
-    /// and -1/3 of 7, -8, 1 thirtieths against 4/3, -2/3, -2/3, slope (42/90) / (114/900) = 70/19.
-    /// Top decile the row at 0.8, gap 0.2. The 8th: 0.9, 0.2 against two wins. 0.01 + 0.64 = 0.65
-    /// against baseline -1/3's 32/9, skill 1 - 0.65 x 9/32. Mean error 0.45, slope 0 (no spread of
-    /// R), top decile 0.9, gap 0.1. The span: 4.94 against 68/9, mean error -1.8/5, deviations from
-    /// 0.56 and 0.2, slope 0.44 / 0.372. The short wins where the long loses: the 7th's errors
-    /// 1.8, 0.7, 0.4 against baseline -1/3's 4, skill 1 - 3.89 / 4, slope -70/19.
     #[rstest]
     fn each_period_scores_its_model_beside_that_models_own_baseline_on_the_same_rows() {
         let dir = tempfile::tempdir().unwrap();
@@ -692,14 +676,6 @@ mod tests {
         walk.scores(at(span.0), at(span.1)).unwrap()
     }
 
-    /// Each model expects its row's feature in R, unit 1 USD, so a side trades from 0.5. The long,
-    /// the 7th: takes the win at 0.8 and the loss at 0.6, 0 per trade, every trade (with the loss
-    /// at 0.3) -1/3; the 8th: the win at 0.9, every trade (with the win at 0.2) 1; the span: two
-    /// wins and a loss taken, 1/3, of five trades 1/5. The short alone, the reverse: the 7th, a
-    /// loss at 0.8 and a win at 0.6, 0, every trade 1/3; the 8th, the loss at 0.9, every trade
-    /// (with the loss at 0.2) -1; the span, a win and two losses taken, -1/3, of five trades -1/5.
-    /// At 1.5 times the commission of 0.1 each trade makes 0.05 less. Order: the 7th's taken and
-    /// every trade, stressed and not, the 8th's, the span's.
     #[rstest]
     #[case::the_long(
         Side::Long,
@@ -761,8 +737,7 @@ mod tests {
     }
 
     /// Opposed sides. The long is a fake expecting the feature of its row in R. The short is a
-    /// baseline expecting 0.5R whatever the row. Each has the baseline that a train then fits
-    /// (`trained_baseline`).
+    /// baseline expecting 0.5R whatever the row.
     fn publish_opposed(
         dir: &Path,
         config: &ModelConfig,
@@ -796,9 +771,8 @@ mod tests {
         model.model = model.manifest.learner.fit(&set).unwrap().save().unwrap();
     }
 
-    /// Both clear zero. Long expects 0.30R and realizes -1R, and short expects 0.20R and realizes
-    /// +1R. Both errors count. Without a meta, long is offered. A meta expecting 0.10R against
-    /// 0.15R declines it.
+    /// Long expects 0.30R and realizes -1R, and short expects 0.20R and realizes +1R. A meta
+    /// expecting 0.10R against 0.15R declines the long.
     #[rstest]
     #[case::without_meta(false)]
     #[case::declined(true)]
@@ -858,13 +832,7 @@ mod tests {
     }
 
     /// Each side clears its margin of nought on every row, and the side expected more is picked.
-    /// The long expects its feature and the short expects 0.5:
-    ///
-    /// - 04:00 of the 7th, 0.8: the long, a win.
-    /// - 08:00 of the 7th, 0.3: the short, a win.
-    /// - 12:00 of the 7th, 0.6: the long, a loss.
-    /// - 06:00 of the 8th, 0.9: the long, a win.
-    /// - 10:00 of the 8th, 0.2: the short, a loss.
+    /// The long expects its feature and the short expects 0.5.
     fn opposed_scores(dir: &Path) -> Scores {
         let walk = walk(dir);
         build(dir);
@@ -880,10 +848,6 @@ mod tests {
         close(trades.expectancy, expectancy);
     }
 
-    /// On the 7th, the long takes the win at 0.8 and the loss at 0.6, 0 per trade, and the short
-    /// takes the win at 0.3, 1, though each side clears on one more. On the 8th, the long takes the
-    /// win at 0.9 and the short takes the loss at 0.2. Over the span, the long takes two wins and
-    /// a loss, 1/3, and the short takes a win and a loss, 0. That is five trades of five rows.
     #[rstest]
     fn each_trade_counts_for_the_side_picked_alone_where_both_sides_clear() {
         let dir = tempfile::tempdir().unwrap();
@@ -901,8 +865,6 @@ mod tests {
         trades_are(short.earnings.taken, 2, 0.0);
     }
 
-    /// At 1.5 times the commission of 0.1, each trade makes 0.05 less. On the 7th, the long's win
-    /// and loss give -0.05, and the short's win gives 0.95.
     #[rstest]
     fn a_sides_stressed_earnings_count_only_the_trades_picked_for_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -916,9 +878,6 @@ mod tests {
         trades_are(short.earnings.taken_stressed, 2, -0.05);
     }
 
-    /// The long's own trades are a win and two losses on the 7th, -1/3, two wins on the 8th, 1,
-    /// and 1/5 over the span. The short's are the reverse: 1/3, -1 and -1/5. At 1.5 times the
-    /// commission, each trade makes 0.05 less.
     #[rstest]
     fn each_sides_every_trade_stays_its_own_beside_the_trades_picked() {
         let dir = tempfile::tempdir().unwrap();
@@ -936,10 +895,6 @@ mod tests {
         trades_are(short.earnings.every_stressed, 5, -0.25);
     }
 
-    /// On the 7th's rows of `opposed_scores` the long's skill is 1 - 4.29 / 4, and the short's that
-    /// of 0.5 against R of -1, 1 and 1 beside its baseline -1/3: 2.25 + 0.25 + 0.25 against 4, 1 -
-    /// 2.75 / 4, its expectation never varying so no slope. Each on all three rows, though two are
-    /// picked for the long and one for the short.
     #[rstest]
     fn each_sides_score_stays_on_all_its_rows_with_a_model() {
         let dir = tempfile::tempdir().unwrap();
@@ -1041,7 +996,7 @@ mod tests {
     }
 
     /// Opposed sides (`publish_opposed`) and a meta (`meta_model`), valid from the 7th and the 8th.
-    /// The meta takes a trade from an expected 0.3 USD. The sides pick as in `opposed_scores`.
+    /// The meta takes a trade from an expected 0.3 USD.
     fn opposed_meta_scores(dir: &Path) -> Scores {
         opposed_meta_scores_of(dir, &with_meta(), &rows())
     }
@@ -1065,10 +1020,6 @@ mod tests {
             .unwrap()
     }
 
-    /// Units of 2 USD, the sides picking as on 1 USD, the meta expecting `0.1 + 0.5p` R of each
-    /// trade: 0.5, 0.25, 0.4, 0.55, 0.2, twice that in USD. Its margin of 0.3R takes the trades at
-    /// 0.8, 0.6 and 0.9, not 0.3 and 0.2 (0.5 and 0.4 USD). The trades taken earn 1/3 USD a trade,
-    /// as on units of 1 USD, beside every trade's 0.2: over units of 2, 1/6R and 0.1R.
     #[rstest]
     fn the_metas_margin_is_in_r_whatever_the_unit_of_the_side_picked() {
         let dir = tempfile::tempdir().unwrap();
@@ -1090,11 +1041,6 @@ mod tests {
         trades_are(meta.earnings.every, 5, 0.1);
     }
 
-    /// Units of 1 USD, the meta expecting `0.1 + 0.5p` R of the feature `p`: 0.5, 0.25, 0.4 on the
-    /// 7th, 0.55, 0.2 on the 8th, so its margin of 0.3R takes 0.8, 0.6 and 0.9, not 0.3 and 0.2.
-    /// The 7th: a win, the short's win and a loss, 1/3, of which it takes the first and the last,
-    /// 0. The 8th: a win and the short's loss, 0, of which it takes the win, 1. The span: 1/3 of
-    /// three beside 1/5 of five.
     #[rstest]
     fn a_metas_earnings_read_the_trades_of_the_side_picked_from_its_margin() {
         let dir = tempfile::tempdir().unwrap();
@@ -1109,11 +1055,6 @@ mod tests {
         trades_are(meta.earnings.every, 5, 0.2);
     }
 
-    /// The meta's `0.1 + 0.5p` of the five rows against their R 1, 1, -1, 1, -1, beside baseline
-    /// 0.5: errors 0.5, 0.75, -1.4, 0.45, -1.2, squares 4.415 against 5.25, skill 1 - 4.415 /
-    /// 5.25; mean R - E' -0.9 / 5; deviations from the means 0.38 and 0.2 of 0.12, -0.13, 0.02,
-    /// 0.17, -0.18 against 0.8, 0.8, -1.2, 0.8, -1.2, slope 0.32 / 0.093; top decile the row
-    /// expected 0.55, gap 0.45.
     #[rstest]
     fn the_metas_expected_r_is_scored_on_the_trades_of_the_side_picked() {
         let dir = tempfile::tempdir().unwrap();
@@ -1138,8 +1079,7 @@ mod tests {
         trades_are(scores.short.unwrap().earnings.taken, 2, 0.0);
     }
 
-    /// The 8th's long has another fingerprint, which is refused as it loads. The handle decides no
-    /// trade on it, nor on the 7th's, so no row of the 8th is scored. The rows of the 7th are.
+    /// The 8th's long has another fingerprint, which is refused as it loads.
     #[rstest]
     fn rows_of_a_model_set_failing_its_checks_are_not_scored() {
         let dir = tempfile::tempdir().unwrap();
@@ -1173,8 +1113,6 @@ mod tests {
         }
     }
 
-    /// The 7th's meta scores the three rows of the 7th. The 8th's meta scores the two rows that
-    /// the sides of the 8th pick.
     #[rstest]
     fn a_meta_is_scored_beside_its_own_model_sets_sides_alone() {
         let dir = tempfile::tempdir().unwrap();
@@ -1221,8 +1159,6 @@ mod tests {
         trades_are(scores.long.unwrap().periods[1].earnings.taken, 1, 1.0);
     }
 
-    /// The three rows of the 7th were decided with no model, so they have no baseline either.
-    /// Over the span, the baseline has the two rows of the 8th.
     #[rstest]
     fn rows_before_any_model_have_no_score_of_a_model_nor_of_a_baseline() {
         let dir = tempfile::tempdir().unwrap();
@@ -1242,9 +1178,7 @@ mod tests {
     }
 
     /// A model set valid from 12:00 of the 7th, its long's baseline 1/4. The 7th's period uses the
-    /// 7th's long, baseline 1/3, at 04:00 and 08:00, a win and a loss, and this one at 12:00, a
-    /// loss. Squared errors 4.29 against 4/9 + 16/9 + 25/16, skill 1 - 4.29 / (20/9 + 25/16),
-    /// where the 7th's baseline throughout would make 1 - 4.29 / 4.
+    /// 7th's long, baseline 1/3, at 04:00 and 08:00, and this one at 12:00.
     #[rstest]
     fn a_period_scores_each_row_beside_the_baseline_of_the_model_that_decided_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -1473,8 +1407,6 @@ Meta model scores, out of sample, over the span
         }
     }
 
-    /// The first train time is the midnight of the 7th when retrained daily, and the start when
-    /// never retrained. Model sets only after the start leave it untrained too.
     #[rstest]
     #[case::retrained_on_an_empty_store(config(), &[], "2026-01-07T00:00:00Z")]
     #[case::never_retrained_on_an_empty_store(never(), &[], "2026-01-07T12:00:00Z")]
@@ -1505,8 +1437,7 @@ Meta model scores, out of sample, over the span
     }
 
     /// The 6th's model set was published at no retrain time of the span, and it decides until the
-    /// next. This holds retrained or not, and with a meta model too. A retrained backtest's first
-    /// model set, of the 7th, its first retrain time, decides the same way.
+    /// next.
     #[rstest]
     #[case::retrained(config(), &[Published::Sides("2026-01-06T00:00:00Z")])]
     #[case::never_retrained(never(), &[Published::Sides("2026-01-06T00:00:00Z")])]
@@ -1555,9 +1486,6 @@ Meta model scores, out of sample, over the span
         assert_eq!(period.score.rows, 5);
     }
 
-    /// The long's model of the 7th has baseline 1/3 (`trained_baseline`). On the 8th's two wins at
-    /// 0.9 and 0.2, the squares are 0.65 against 8/9, so skill is 1 - 0.65 x 9/8. The 8th's
-    /// baseline, -1/3, would make it 1 - 0.65 x 9/32.
     #[rstest]
     fn a_backtest_never_retrained_scores_a_model_beside_its_own_baseline() {
         let dir = tempfile::tempdir().unwrap();
@@ -1577,8 +1505,6 @@ Meta model scores, out of sample, over the span
         close(period.skill, 1.0 - 0.65 * 9.0 / 8.0);
     }
 
-    /// The 8th's two wins score the 7th's long beside its baseline 1/3, not the -1/3 that a train
-    /// of the 8th would have fitted. Skill is 1 - 0.65 x 9/8.
     #[rstest]
     fn a_retrained_backtest_scores_an_earlier_model_in_use_beside_its_own_baseline() {
         let dir = tempfile::tempdir().unwrap();
