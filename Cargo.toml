@@ -3,6 +3,7 @@ name = "helix-trader"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 description = "A systematic trading system built on NautilusTrader"
 publish = false
 
@@ -18,6 +19,7 @@ default-members = [".", "crates/ctrader", "crates/lse"]
 version = "0.2.0"
 edition = "2024"
 rust-version = "1.100.0"
+license = "Apache-2.0"
 
 # The Nautilus pin, one for the workspace, so that every crate builds
 # against one copy of Nautilus' types; and the versions the crates share.

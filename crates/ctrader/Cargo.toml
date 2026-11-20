@@ -3,6 +3,7 @@ name = "ctrader"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 description = "A NautilusTrader adapter for Spotware's cTrader Open API"
 publish = false
 

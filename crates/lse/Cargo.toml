@@ -3,6 +3,7 @@ name = "lse"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 description = "A NautilusTrader adapter for London Strategic Edge's market data"
 publish = false
 
